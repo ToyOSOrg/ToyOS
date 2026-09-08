@@ -654,6 +654,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // is known field by field. The verdicts are records and a lease's fields;
     // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
     ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
+    // The same client on a wire with no server: it says it has no address and
+    // announces itself anyway. Its cost is netd's own twenty-second lease bound
+    // waited out in real time, so it is `Why::TimerAnchored` and belongs
+    // Nightly; a new name is bootstrapped Fast with the UNMEASURED marker
+    // because only the fast tier can replace one.
+    ("lan_no_lease", Sched::Parallel, Tier::Fast),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -1687,8 +1693,10 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// The cable's own boot: netd in front of the T14's I219, and one job that
-/// holds the machine up long enough for the host to reach it.
-const LANCASE: &[metal::Arm] = &[metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS)];
+/// holds the machine up long enough for the host to reach it. The one arm in
+/// this suite that names a PCI function for the loop to reach the boot over.
+const LANCASE: &[metal::Arm] =
+    &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -13630,6 +13638,7 @@ fn run_machine_test(
             Ok(())
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
+        "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO),
         "https_tls13_e1000e" => common::https::tls13_judge(rust_bins, common::https::E1000E),
         "log_stream" => common::logstream::stream(common::logstream::VIRTIO, c_bins, rust_bins),

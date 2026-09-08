@@ -151,6 +151,8 @@ pub enum Refusal {
     /// The machine could not say what address it holds on the function the
     /// flashed image claims, so the boot could not be reached over the cable.
     Wire { nic: String, why: String },
+    /// This host could not run the probe, which is a fact about the host.
+    Probe { why: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
     /// The machine came back and the boot stick did not: the boot before this
@@ -281,6 +283,12 @@ impl fmt::Display for Refusal {
                 "the machine says nothing usable about PCI function {nic}: {why}. That is the \
                  function the flashed image claims, and its address is the only one a boot of \
                  that image could answer on"
+            ),
+            Self::Probe { why } => write!(
+                f,
+                "this host could not run `ping`: {why}. It is the only question this loop can \
+                 ask a boot while that boot is still up, so a run that cannot ask it \
+                 establishes nothing about the cable"
             ),
             Self::Silent { what, secs } => write!(
                 f,
@@ -510,15 +518,6 @@ struct Target {
     mount: String,
     /// The boot entry's label in the firmware's list.
     label: String,
-    /// The PCI function whose cable this loop reaches the boot over, in the
-    /// spelling `/sys/bus/pci/devices` uses.
-    ///
-    /// **The function and not an interface name.** What the flashed image
-    /// claims is a PCI function, and what answers a ping is whatever address
-    /// the operating system before it held on that same function — so the two
-    /// are tied to one identifier here rather than to a name Ubuntu happens to
-    /// give it.
-    nic: String,
 }
 
 impl Target {
@@ -534,7 +533,6 @@ impl Target {
             log_part: 3,
             mount: "/home/t14/toyos-log".to_string(),
             label: "ToyOS".to_string(),
-            nic: "0000:00:1f.6".to_string(),
         })
     }
 
@@ -977,12 +975,11 @@ fn lid_policy(text: &str) -> Result<(), Refusal> {
 /// What the machine holds on the PCI function the flashed image claims.
 ///
 /// **Read off that function and not off a name.** The address the loop pings
-/// has to be the one a boot of this image could answer on, and the two
-/// operating systems agree about it for exactly one reason: the function's MAC
-/// is the same under both, so a DHCP server ordinarily hands both the same
-/// lease. So the MAC is carried out beside the address and the boot's own
-/// `netd: MAC` record is held to it — a ping answered at an address some other
-/// interface holds is a ping this loop must not report as the boot's.
+/// has to be one a boot of this image could answer on, and the two operating
+/// systems agree about it for exactly one reason: the function's MAC is the
+/// same under both, so a DHCP server ordinarily hands both the same lease. The
+/// MAC is carried out beside the address so the boot's own driver record can be
+/// held to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wire {
     pub iface: String,
@@ -1012,40 +1009,38 @@ fn brief_address(iface: &str, text: &str) -> Result<std::net::Ipv4Addr, String> 
         .map_err(|_| format!("{iface}'s address reads {cidr:?}"))
 }
 
-/// Whether anything answers at the machine's own address while the machine is
-/// between two operating systems, and how far into that window it first did.
-///
-/// **The one thing this loop can ask a boot that is still running.** Everything
-/// else it reads is on the stick, and the stick is read minutes later, from
-/// Ubuntu; a boot's network exists only while the boot does. The probe is the
-/// host's own `ping`, which is an implementation of ICMP this repository did
-/// not write — so what it establishes about the stack under test is
-/// independent of that stack.
-///
-/// It runs on a thread because the loop is inside `ssh` for whole seconds at a
-/// time waiting for the machine to answer again, and a boot that is up for
-/// twenty of them cannot be sampled between those.
-/// The first reply after the silence: how far into the window it came, and
-/// when it came on this host's clock.
-///
-/// **The wall clock is the half that identifies it.** How far into the window a
-/// reply came says nothing about which operating system sent it — measured on
-/// the T14, a reply 57 s in was the machine's wire returning two seconds ahead
-/// of its own `sshd`, on a boot whose claim had been refused and whose netd
-/// never held the card. What settles it is whether the reply falls inside the
-/// span the boot's own records bracket, and only a wall clock can be held
-/// against those.
+/// The first reply after the silence: how far into the window it came, and when
+/// it came on this host's clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reply {
     pub secs: u64,
     /// Seconds since the epoch, UTC, taken when the probe answered. The probe
-    /// waits up to a second for its reply, so this is late by at most that —
-    /// against a bracket tens of seconds wide.
+    /// waits up to a second for its reply, so this is late by at most that.
     pub at: u64,
 }
 
+/// What this host saw across the window in which the machine was running
+/// neither of its operating systems.
+///
+/// **The two ends of the window are the host's own clock, and they are what a
+/// judge holds the boot's records against.** Nothing else this loop reads can
+/// place a host-side observation inside a boot: how far into the window a reply
+/// came says only that it was in the window, which both operating systems are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Watch {
+    pub from: u64,
+    pub to: u64,
+    pub reply: Option<Reply>,
+}
+
+/// The probe, running while the loop is inside `ssh` waiting for the machine.
+///
+/// **The one thing this loop can ask a boot that is still running.** Everything
+/// else it reads is on the stick, and the stick is read minutes later, from
+/// Ubuntu. The probe is the host's own `ping`, an implementation of ICMP this
+/// repository did not write.
 struct Ping {
-    first: std::sync::Arc<std::sync::Mutex<Option<Reply>>>,
+    first: std::sync::Arc<std::sync::Mutex<Result<Option<Reply>, String>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: std::thread::JoinHandle<()>,
 }
@@ -1054,7 +1049,7 @@ impl Ping {
     /// Begin, now: the caller has just watched the machine stop answering
     /// `ssh`, and the window this measures starts there.
     fn start(addr: std::net::Ipv4Addr) -> Self {
-        let first = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let first = std::sync::Arc::new(std::sync::Mutex::new(Ok(None)));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (mine, theirs) = (std::sync::Arc::clone(&first), std::sync::Arc::clone(&stop));
         let thread = std::thread::Builder::new()
@@ -1064,15 +1059,20 @@ impl Ping {
                 let mut quiet_since: Option<std::time::Instant> = None;
                 let silence = std::time::Duration::from_secs(PING_SILENCE_SECS);
                 while !theirs.load(std::sync::atomic::Ordering::SeqCst) {
-                    if ping_once(addr) {
+                    let answered = match ping_once(addr) {
+                        Ok(answered) => answered,
+                        Err(why) => {
+                            *mine.lock().expect("the ping's answer") = Err(why);
+                            return;
+                        }
+                    };
+                    if answered {
                         // A reply before the address has been quiet is the
                         // operating system that is going down, whose `sshd`
                         // stops before its interface does.
                         if quiet_since.is_some_and(|at| at.elapsed() >= silence) {
-                            *mine.lock().expect("the ping's answer") = Some(Reply {
-                                secs: began.elapsed().as_secs(),
-                                at: unix_now(),
-                            });
+                            *mine.lock().expect("the ping's answer") =
+                                Ok(Some(Reply { secs: began.elapsed().as_secs(), at: unix_now() }));
                             return;
                         }
                         quiet_since = None;
@@ -1087,21 +1087,15 @@ impl Ping {
     }
 
     /// Stop probing, and answer what the first reply after the silence was.
-    fn end(self) -> Option<Reply> {
+    fn end(self) -> Result<Option<Reply>, Refusal> {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.thread.join();
-        let answer = *self.first.lock().expect("the ping's answer");
-        answer
+        let answer = self.first.lock().expect("the ping's answer").clone();
+        answer.map_err(|why| Refusal::Probe { why })
     }
 }
 
 /// This host's clock, as seconds since the epoch in UTC.
-///
-/// The T14's own clock is Ubuntu's, set from the network; this host's is NTP's.
-/// The bracket a reply is judged against is tens of seconds wide, which is what
-/// makes holding the one clock against the other admissible at all — and a
-/// machine whose two disagreed by more than that would show it as a reply just
-/// outside the bracket rather than as a mystery.
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1111,10 +1105,14 @@ fn unix_now() -> u64 {
 
 /// One probe, whose whole answer is whether the address replied.
 ///
+/// **A host with no `ping` and a cable with nothing on it are separate
+/// answers.** A spawn that fails is this host's failing, and reporting it as
+/// silence would red the boot for a binary the host does not have.
+///
 /// **`-W` is milliseconds on this host and seconds on Linux**, and the two
 /// spellings are three orders of magnitude apart: a bound written for one is a
 /// probe that hangs for a quarter of an hour on the other.
-fn ping_once(addr: std::net::Ipv4Addr) -> bool {
+fn ping_once(addr: std::net::Ipv4Addr) -> Result<bool, String> {
     let wait = if cfg!(target_os = "macos") {
         PING_WAIT_MS.to_string()
     } else {
@@ -1124,7 +1122,8 @@ fn ping_once(addr: std::net::Ipv4Addr) -> bool {
         .args(["-n", "-c", "1", "-W", &wait, &addr.to_string()])
         .stdin(Stdio::null())
         .output()
-        .is_ok_and(|out| out.status.success())
+        .map(|out| out.status.success())
+        .map_err(|e| e.to_string())
 }
 
 /// The loop, over one target.
@@ -1183,9 +1182,8 @@ impl Driver {
     /// Three reads and not one, so a machine that answers oddly is refused with
     /// the read that was odd. None of them is a root command and none of them
     /// writes.
-    fn wire(&self) -> Result<Wire, Refusal> {
-        let nic = &self.target.nic;
-        let bad = |why: String| Refusal::Wire { nic: nic.clone(), why };
+    fn wire(&self, nic: &str) -> Result<Wire, Refusal> {
+        let bad = |why: String| Refusal::Wire { nic: nic.to_string(), why };
         let at = shell_word(&format!("/sys/bus/pci/devices/{nic}/net"));
         let listing = self
             .ssh("listing the claimed function's interfaces", &format!("ls {at}"))
@@ -1316,17 +1314,22 @@ impl Driver {
     ///
     /// The window between the two is the only span in which the machine is
     /// running the image this loop wrote, and [`Ping`] is what asks the cable
-    /// about it while it lasts.
+    /// about it while it lasts — on the boots that name a function to ask it
+    /// over, and on no other.
     fn ride_the_reboot(
         &self,
         secs: u64,
-        addr: std::net::Ipv4Addr,
-    ) -> Result<(u64, Option<Reply>), Refusal> {
+        addr: Option<std::net::Ipv4Addr>,
+    ) -> Result<(u64, Option<Watch>), Refusal> {
         self.wait(GOING_DOWN_SECS, "go down", false)?;
+        let Some(addr) = addr else {
+            return Ok((self.wait(secs, "come back", true)?, None));
+        };
+        let from = unix_now();
         let ping = Ping::start(addr);
         let back = self.wait(secs, "come back", true);
-        let answered = ping.end();
-        Ok((back?, answered))
+        let reply = ping.end()?;
+        Ok((back?, Some(Watch { from, to: unix_now(), reply })))
     }
 
     /// Wait for the log partition's device node, and say how long it took.
@@ -1490,6 +1493,13 @@ pub struct Args {
     /// `toyos-fat32-check`. The outside judge, and the only reader of that
     /// volume in this tree that is not the family of code that wrote it.
     fat32_check: bool,
+    /// The PCI function this boot's image claims, in `/sys/bus/pci/devices`'s
+    /// spelling, for the boots this loop reaches over the cable.
+    ///
+    /// **A boot names it or the cable is not asked at all.** The reads are
+    /// three `ssh` round trips and the probe is a host binary, and a boot that
+    /// claims no NIC would be refused for a fact none of its judges reads.
+    nic: Option<String>,
 }
 
 impl Args {
@@ -1503,6 +1513,7 @@ impl Args {
             wait_secs: return_secs(),
             readback: None,
             fat32_check: false,
+            nic: None,
         };
         let mut at = 0;
         while at < args.len() {
@@ -1554,6 +1565,11 @@ impl Args {
                     out.about_a_boot.push("--fat32-check");
                     out.fat32_check = true;
                     1
+                }
+                "--nic" => {
+                    out.about_a_boot.push("--nic");
+                    out.nic = Some(value()?);
+                    2
                 }
                 "--wait-secs" => {
                     out.about_a_boot.push("--wait-secs");
@@ -1709,14 +1725,18 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         identity.model
     );
     // Before the flash, because the address a boot of this image could answer
-    // on is one only the operating system that is still up can be asked for —
-    // and a machine that cannot say it is a finding about this host rather than
-    // about the boot.
-    let wire = driver.wire()?;
-    println!(
-        "the claimed function {} is {} at {}, MAC {}",
-        args.target.nic, wire.iface, wire.addr, wire.mac
-    );
+    // on is one only the operating system that is still up can be asked for.
+    let wire = match &args.nic {
+        Some(nic) => {
+            let wire = driver.wire(nic)?;
+            println!(
+                "the claimed function {nic} is {} at {}, MAC {}",
+                wire.iface, wire.addr, wire.mac
+            );
+            Some(wire)
+        }
+        None => None,
+    };
 
     driver.flash(&image)?;
     let entry = driver.boot_entry(&image.esp)?;
@@ -1730,19 +1750,21 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         return Ok(None);
     }
 
-    let (back, pinged) = driver.ride_the_reboot(args.wait_secs, wire.addr)?;
+    let (back, watched) = driver.ride_the_reboot(args.wait_secs, wire.as_ref().map(|w| w.addr))?;
     println!("the machine answered ssh again after {back} s");
-    match pinged {
+    if let (Some(wire), Some(watch)) = (&wire, &watched) {
         // **Something, and which something is not this loop's to say.** The
         // machine's own wire comes back before its `sshd` does, so a reply in
         // this window may be either operating system; the wall clock beside it
         // is what a judge holds against the boot's own records.
-        Some(reply) => println!(
-            "{} answered a ping {} s into the window, after {PING_SILENCE_SECS} s of \
-             silence, at {} UTC seconds",
-            wire.addr, reply.secs, reply.at
-        ),
-        None => println!("nothing answered a ping at {} while the machine was down", wire.addr),
+        match watch.reply {
+            Some(reply) => println!(
+                "{} answered a ping {} s into the window, after {PING_SILENCE_SECS} s of \
+                 silence, at {} UTC seconds",
+                wire.addr, reply.secs, reply.at
+            ),
+            None => println!("nothing answered a ping at {} while the machine was down", wire.addr),
+        }
     }
     // Before the mount, so the stick's own answer is a number rather than
     // the reason a mount failed.
@@ -1770,7 +1792,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
     if let Some(dir) = &args.readback {
-        write_readback(dir, &loader, &log, back, stick, &wire, pinged)?;
+        write_readback(dir, &loader, &log, back, stick, wire.as_ref(), watched)?;
         println!("readback written to {}", dir.display());
     }
     // **Named by evidence, before the boot record is missed.** A boot that
@@ -1892,27 +1914,21 @@ pub const READBACK_VOLUME: &str = "log-partition.img";
 pub const BACK_SECS: &str = "back_secs";
 pub const STICK_SECS_KEY: &str = "stick_secs";
 
-/// The address this loop pinged while the machine was down, the MAC of the
-/// function holding it, and how far into that window the first reply came.
+/// The cable: the address this loop pinged, the MAC of the function holding
+/// it, and the host's own clock at the two ends of the window it asked across.
 ///
-/// **The address and the MAC are written whether or not anything answered, and
-/// the seconds only if something did.** Which address was asked, and on which
-/// function, are facts about the run; whether it replied is the boot's answer,
-/// and an absent key is `no` said where a zero would be a reply in the first
-/// second. The MAC is what a judge holds this boot's own driver record to, so
-/// an answer from a different interface at that address cannot be read as the
-/// boot's.
+/// **All four together or none of them.** They are written only by a boot that
+/// named a function to ask over, and a judge that read three of them would be
+/// placing an observation against a window it could not see.
 pub const PING_ADDR_KEY: &str = "ping_addr";
-pub const PING_SECS_KEY: &str = "ping_secs";
 pub const WIRE_MAC_KEY: &str = "wire_mac";
+pub const WINDOW_FROM_KEY: &str = "window_from";
+pub const WINDOW_TO_KEY: &str = "window_to";
 
-/// When the reply came, in seconds since the epoch on this host's clock.
-///
-/// **The key that says which operating system answered.** Every other number
-/// here is measured from the window's own start, and the window holds both of
-/// the machine's operating systems — the T14 answered 57 s in on a boot whose
-/// claim had been refused, two seconds before its own `sshd` came back. A judge
-/// holds this against the wall clocks the boot's own records carry.
+/// How far into that window the first reply came, and when it came on this
+/// host's clock. **Both or neither**: an absent pair is `no` said where a zero
+/// would be a reply in the first second, and the seconds alone place nothing.
+pub const PING_SECS_KEY: &str = "ping_secs";
 pub const PING_AT_KEY: &str = "ping_at";
 
 /// Every file a readback directory carries, so a run that writes none of them
@@ -1951,8 +1967,8 @@ fn write_readback(
     log: &str,
     back: u64,
     stick: u64,
-    wire: &Wire,
-    pinged: Option<Reply>,
+    wire: Option<&Wire>,
+    watched: Option<Watch>,
 ) -> Result<(), Refusal> {
     let wrote = |path: &Path, text: &str| -> Result<(), Refusal> {
         std::fs::write(path, text)
@@ -1965,13 +1981,15 @@ fn write_readback(
     // The boot's own millisecond count is in the kernel log and read from
     // there; this file carries only what the *host* clock measured, which no
     // log can.
-    let mut boot = format!(
-        "{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n{PING_ADDR_KEY} {}\n{WIRE_MAC_KEY} {}\n",
-        wire.addr, wire.mac
-    );
-    if let Some(reply) = pinged {
-        boot.push_str(&format!("{PING_SECS_KEY} {}\n", reply.secs));
-        boot.push_str(&format!("{PING_AT_KEY} {}\n", reply.at));
+    let mut boot = format!("{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n");
+    if let (Some(wire), Some(watch)) = (wire, watched) {
+        boot.push_str(&format!(
+            "{PING_ADDR_KEY} {}\n{WIRE_MAC_KEY} {}\n{WINDOW_FROM_KEY} {}\n{WINDOW_TO_KEY} {}\n",
+            wire.addr, wire.mac, watch.from, watch.to
+        ));
+        if let Some(reply) = watch.reply {
+            boot.push_str(&format!("{PING_SECS_KEY} {}\n{PING_AT_KEY} {}\n", reply.secs, reply.at));
+        }
     }
     wrote(&dir.join(READBACK_BOOT), &boot)
 }
@@ -2020,27 +2038,61 @@ pub fn stick_secs(text: &str) -> Option<u64> {
     key(text, STICK_SECS_KEY)
 }
 
-/// How far into the window between the two operating systems the machine's own
-/// address first answered a ping, or `None` where nothing did.
-pub fn ping_secs(text: &str) -> Option<u64> {
-    key(text, PING_SECS_KEY)
+/// What one boot's readback says about the cable, or `None` where the loop was
+/// not asked to reach one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cable {
+    pub addr: String,
+    /// The MAC of the function that held that address, as the operating system
+    /// before this boot reported it.
+    pub mac: String,
+    /// The host's own clock at the two ends of the window it asked across.
+    pub window: (u64, u64),
+    pub reply: Option<Reply>,
 }
 
-/// When that reply came, on this host's clock. `None` where nothing answered.
-pub fn ping_at(text: &str) -> Option<u64> {
-    key(text, PING_AT_KEY)
-}
-
-/// The address that was pinged. Absent only from a readback written before this
-/// loop asked.
-pub fn ping_addr(text: &str) -> Option<String> {
-    word(text, PING_ADDR_KEY)
-}
-
-/// The MAC of the function that held the pinged address, as the operating
-/// system before this boot reported it.
-pub fn wire_mac(text: &str) -> Option<String> {
-    word(text, WIRE_MAC_KEY)
+/// The cable a readback carries, **refusing every partial set by name**.
+///
+/// A readback naming a reply and no window, or a window and no address, is one
+/// this loop wrote in a shape no judge can read; answering `None` for it would
+/// report a boot that answered as a boot nothing answered, which is the
+/// opposite of what the run recorded.
+pub fn cable(text: &str) -> Result<Option<Cable>, String> {
+    let addr = word(text, PING_ADDR_KEY);
+    let mac = word(text, WIRE_MAC_KEY);
+    let from = key(text, WINDOW_FROM_KEY);
+    let to = key(text, WINDOW_TO_KEY);
+    let secs = key(text, PING_SECS_KEY);
+    let at = key(text, PING_AT_KEY);
+    let named: Vec<&str> = [
+        (addr.is_some(), PING_ADDR_KEY),
+        (mac.is_some(), WIRE_MAC_KEY),
+        (from.is_some(), WINDOW_FROM_KEY),
+        (to.is_some(), WINDOW_TO_KEY),
+        (secs.is_some(), PING_SECS_KEY),
+        (at.is_some(), PING_AT_KEY),
+    ]
+    .iter()
+    .filter_map(|(has, name)| has.then_some(*name))
+    .collect();
+    if named.is_empty() {
+        return Ok(None);
+    }
+    let (Some(addr), Some(mac), Some(from), Some(to)) = (addr, mac, from, to) else {
+        return Err(format!(
+            "this readback names {named:?} and a cable is {PING_ADDR_KEY}, {WIRE_MAC_KEY},              {WINDOW_FROM_KEY} and {WINDOW_TO_KEY} together"
+        ));
+    };
+    let reply = match (secs, at) {
+        (Some(secs), Some(at)) => Some(Reply { secs, at }),
+        (None, None) => None,
+        _ => {
+            return Err(format!(
+                "this readback names {named:?}: a reply is {PING_SECS_KEY} and {PING_AT_KEY}                  together, and the seconds alone place it in neither operating system"
+            ));
+        }
+    };
+    Ok(Some(Cable { addr, mac, window: (from, to), reply }))
 }
 
 fn word(text: &str, name: &str) -> Option<String> {
@@ -2259,31 +2311,48 @@ mod tests {
     }
 
     /// **A boot the cable did not answer is not a boot that answered in the
-    /// first second.** The address is written whichever way it went, so a
-    /// readback carrying one and no seconds says the window passed in silence,
-    /// and one carrying neither is a run from before this loop asked at all.
+    /// first second, and neither is a boot that was never asked.**
     #[test]
     fn a_ping_nothing_answered_is_written_as_no_answer() {
-        let answered = "back_secs 61\nstick_secs 2\nping_addr 192.168.1.46\n\
-                        wire_mac 8c:8c:aa:bb:cc:dd\nping_secs 17\nping_at 1757347715\n";
-        let silent = "back_secs 46\nstick_secs 2\nping_addr 192.168.1.46\n\
-                      wire_mac 8c:8c:aa:bb:cc:dd\n";
-        assert_eq!(ping_addr(answered).as_deref(), Some("192.168.1.46"));
-        assert_eq!(wire_mac(answered).as_deref(), Some("8c:8c:aa:bb:cc:dd"));
-        assert_eq!(ping_secs(answered), Some(17));
-        assert_eq!(ping_at(answered), Some(1_757_347_715));
-        // A window nothing answered carries neither number: a reply has a time
-        // or it did not happen.
-        assert_eq!(ping_at(silent), None);
-        assert_eq!(ping_addr(silent).as_deref(), Some("192.168.1.46"));
-        assert_eq!(ping_secs(silent), None);
-        assert_eq!(ping_addr("back_secs 46\n"), None);
-        // The two ping keys share a prefix, and neither may be read off the
-        // other's line.
-        assert_eq!(ping_secs("ping_addr 192.168.1.46\n"), None);
-        assert_eq!(ping_at("ping_addr 192.168.1.46\n"), None);
-        assert_eq!(back_secs(answered), Some(61));
-        assert_eq!(stick_secs(answered), Some(2));
+        let asked = "back_secs 61\nstick_secs 2\nping_addr 192.168.1.46\n\
+                     wire_mac 8c:8c:aa:bb:cc:dd\nwindow_from 1757347650\nwindow_to 1757347711\n";
+        let answered = format!("{asked}ping_secs 17\nping_at 1757347715\n");
+        let answered_cable = cable(&answered).expect("a whole cable").expect("a cable");
+        assert_eq!(answered_cable.addr, "192.168.1.46");
+        assert_eq!(answered_cable.mac, "8c:8c:aa:bb:cc:dd");
+        assert_eq!(answered_cable.window, (1_757_347_650, 1_757_347_711));
+        assert_eq!(answered_cable.reply, Some(Reply { secs: 17, at: 1_757_347_715 }));
+        // A window nothing answered carries neither number.
+        let silent = cable(asked).expect("a whole cable").expect("a cable");
+        assert_eq!(silent.reply, None);
+        // A boot that named no function to ask over carries none of it.
+        assert_eq!(cable("back_secs 46\nstick_secs 2\n"), Ok(None));
+        assert_eq!(back_secs(&answered), Some(61));
+        assert_eq!(stick_secs(&answered), Some(2));
+    }
+
+    /// **Every partial set is refused by name**, and the seconds without their
+    /// wall clock are the one that would otherwise read as no answer at all.
+    #[test]
+    fn half_a_cable_is_refused_rather_than_read_as_none() {
+        let whole = "ping_addr 192.168.1.46\nwire_mac 8c:8c:aa:bb:cc:dd\n\
+                     window_from 1757347650\nwindow_to 1757347711\n";
+        // Half a reply. The seconds without their wall clock are the one that
+        // would otherwise read as no answer at all.
+        for text in [format!("{whole}ping_secs 57\n"), format!("{whole}ping_at 1757347715\n")] {
+            let why = cable(&text).expect_err("half a reply is not a reply");
+            assert!(why.contains("place it in neither operating system"), "{why}");
+        }
+        // Half a cable.
+        for text in [
+            "ping_addr 1.2.3.4\nwire_mac aa:bb\nwindow_from 1\n",
+            "ping_addr 1.2.3.4\nwindow_from 1\nwindow_to 2\n",
+            "ping_secs 57\nping_at 1757347715\n",
+            "ping_addr 192.168.1.46\n",
+        ] {
+            let why = cable(text).expect_err("half a cable is not a cable");
+            assert!(why.contains("together"), "{why}");
+        }
     }
 
     /// **The address is the one on the function the image claims, and an

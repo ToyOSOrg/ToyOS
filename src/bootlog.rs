@@ -250,16 +250,65 @@ pub fn record_unix_secs(line: &str) -> Option<u64> {
     u64::try_from(days * 86_400 + hours * 3_600 + minutes * 60 + seconds).ok()
 }
 
-/// The first and last wall clocks in `log`: the span in which this boot was the
-/// machine.
-///
-/// **A boot's own clock cannot say this and a host's cannot either.** The
-/// records are the only place the two meet, which is what makes them the
-/// bracket a host-side observation is judged against.
-pub fn record_unix_span(log: &str) -> Option<(u64, u64)> {
+/// The span this boot's own records bracket: its first wall clock, and the one
+/// on [`REBOOTING`] where the boot got that far.
+fn record_unix_span(log: &str) -> Option<(u64, u64)> {
     let first = log.lines().find_map(record_unix_secs)?;
     let last = log.lines().rev().find_map(record_unix_secs)?;
-    Some((first, last))
+    let ended = log.lines().rfind(|l| l.contains(REBOOTING)).and_then(record_unix_secs);
+    Some((first, ended.unwrap_or(last)))
+}
+
+/// Whether a second on the *host's* clock fell inside the boot this log is of,
+/// at or after the record `after` names.
+///
+/// **The records are the one place a host clock and a boot's clock meet.**
+/// `window` is the host's own clock at the two ends of the span in which the
+/// machine was running neither of its operating systems; this boot's records
+/// have to fall inside it, which bounds the two clocks' disagreement against
+/// the run's own data instead of assuming a bound. How far into that window an
+/// observation came separates nothing: the window holds the operating system
+/// that left and the one that came back as well as this boot.
+pub fn host_second_inside_this_boot(
+    log: &str,
+    window: (u64, u64),
+    after: &str,
+    at: u64,
+) -> Result<(), String> {
+    let (first, ended) = record_unix_span(log).ok_or_else(|| {
+        "this log carries no record with a wall clock on it, so there is nothing to hold the \
+         host's own clock against"
+            .to_string()
+    })?;
+    let (from, to) = window;
+    if first < from || ended > to {
+        return Err(format!(
+            "this boot's own records run {first}..{ended} and the host watched the machine over \
+             {from}..{to}: the two clocks disagree by more than the window is wide, so nothing \
+             the host saw can be placed inside this boot"
+        ));
+    }
+    if at < first || at > ended {
+        return Err(format!(
+            "the host saw it at {at}, outside the {first}..{ended} this boot's own records \
+             bracket: it came {} s {} the boot, so it belongs to the operating system on the \
+             other side of it",
+            if at < first { first - at } else { at - ended },
+            if at < first { "before" } else { "after" },
+        ));
+    }
+    let after_at = log
+        .lines()
+        .find(|l| l.contains(after))
+        .and_then(record_unix_secs)
+        .ok_or_else(|| format!("this boot has no {after:?} record carrying a wall clock"))?;
+    if at < after_at {
+        return Err(format!(
+            "the host saw it at {at}, {} s before this boot's {after:?} record at {after_at}",
+            after_at - at
+        ));
+    }
+    Ok(())
 }
 
 /// When the last record in `log` was written, in milliseconds since boot.
@@ -469,23 +518,67 @@ mod record_time_tests {
         assert_eq!(last_record_millis("nothing\n"), None);
     }
 
-    /// **The wall clock, which is the only field a host clock can be held
-    /// against.** The lines are `logd`'s own, off the T14's run 31: the boot
-    /// started at 16:08:21 UTC and handed the machine back twenty-three seconds
-    /// later, and a ping the host saw at 16:09:18 was therefore the operating
-    /// system after it, however early in the loop's own window it fell.
+    /// One boot's records, verbatim from a stick the T14 wrote
+    /// (`lancase-run31/kernel.log` lines 1, 279 and 379).
+    const BOOT: &str = concat!(
+        "[2026-09-08 16:08:21 0.000 cpu0 boot] panic console: armed 1920x1080 stride=1920 \
+         format=1 at 0x4000000000\n",
+        "[2026-09-08 16:08:22 1.258 cpu0] Boot: complete (1258ms)\n",
+        "[2026-09-08 16:08:44 23.340 cpu1] Rebooting.\n",
+    );
+
+    /// The whole window a host watches the machine over, wider than the boot at
+    /// both ends because firmware runs inside it.
+    fn window() -> (u64, u64) {
+        let (first, ended) = record_unix_span(BOOT).expect("a span");
+        (first - 4, ended + 36)
+    }
+
     #[test]
-    fn a_records_wall_clock_brackets_the_boot() {
-        let log = concat!(
-            "[2026-09-08 16:08:21 0.000 cpu0 boot] boot: memory map\n",
-            "[2026-09-08 16:08:22 1.257 cpu0] Boot: complete (1257ms)\n",
-            "[2026-09-08 16:08:44 22.990 cpu1] Rebooting.\n",
+    fn a_second_inside_the_boot_and_after_the_named_record_is_this_boots() {
+        let (first, ended) = record_unix_span(BOOT).expect("a span");
+        assert_eq!(ended - first, 23);
+        assert_eq!(
+            host_second_inside_this_boot(BOOT, window(), "Boot: complete", first + 2),
+            Ok(())
         );
-        let (first, last) = record_unix_span(log).expect("a span");
-        assert_eq!(last - first, 23);
-        assert_eq!(record_unix_secs("[2026-09-08 16:08:21 0.000 cpu0 boot] x"), Some(first));
-        // 16:09:18, which is 57 s into a window that opened before the boot did.
-        assert!(first + 57 > last, "the reply this judge has to reject is outside the bracket");
+    }
+
+    /// **A reply after the boot handed the machine back is the next operating
+    /// system's, however early in the host's window it fell.** The window opens
+    /// no later than the boot's first record, so a reply 57 s into it came at
+    /// least 34 s after this boot's `Rebooting.`
+    #[test]
+    fn a_second_past_the_reboot_record_is_the_next_operating_systems() {
+        let (first, ended) = record_unix_span(BOOT).expect("a span");
+        let why = host_second_inside_this_boot(BOOT, window(), "Boot: complete", first + 57)
+            .expect_err("57 s past the window's opening is past this boot");
+        assert!(why.contains(&format!("{first}..{ended}")), "{why}");
+        assert!(why.contains("34 s after the boot"), "{why}");
+    }
+
+    #[test]
+    fn a_second_before_the_named_record_is_refused_by_that_record() {
+        let (first, _) = record_unix_span(BOOT).expect("a span");
+        let why = host_second_inside_this_boot(BOOT, window(), "Boot: complete", first)
+            .expect_err("the boot had not completed yet");
+        assert!(why.contains("1 s before"), "{why}");
+        let why = host_second_inside_this_boot(BOOT, window(), "netd: DHCP: lease ", first + 2)
+            .expect_err("this boot took no lease");
+        assert!(why.contains("no \"netd: DHCP: lease \" record"), "{why}");
+    }
+
+    /// **The window is what bounds the two clocks' disagreement.** A boot whose
+    /// records fall outside the span the host watched it over is a boot whose
+    /// clock cannot be held against the host's at all, and the numbers are
+    /// printed rather than the conclusion.
+    #[test]
+    fn records_outside_the_hosts_own_window_place_nothing() {
+        let (first, ended) = record_unix_span(BOOT).expect("a span");
+        let why = host_second_inside_this_boot(BOOT, (first + 5, ended + 36), "Rebooting.", ended)
+            .expect_err("the boot began before the host started watching");
+        assert!(why.contains(&format!("{first}..{ended}")), "{why}");
+        assert!(why.contains("disagree by more than the window"), "{why}");
     }
 
     /// The panel writes no wall clock, and its milliseconds field must not be
@@ -498,5 +591,8 @@ mod record_time_tests {
         assert_eq!(record_unix_secs("[2026-09-08 25:00:00 0.000 cpu0] x"), None);
         assert_eq!(record_unix_secs("[2026-02-31 10:00:00 0.000 cpu0] x"), None);
         assert_eq!(record_unix_span("[1.000 cpu0] first\n"), None);
+        let why = host_second_inside_this_boot("[1.000 cpu0] first\n", (0, 1), "x", 0)
+            .expect_err("a panel log carries no wall clock");
+        assert!(why.contains("no record with a wall clock"), "{why}");
     }
 }

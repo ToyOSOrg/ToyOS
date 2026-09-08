@@ -611,33 +611,24 @@ ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
 
 # --- the cable: the boot that runs netd in front of the T14's own I219 ---
-# The three boot facts below are the machine's own, off boots whose claim the
-# kernel refused — first for want of MSI, then at the 32-bit BAR. They are facts
-# about the boot rather than about the claim, so the readings stand; the two
-# `lan.` rows have none, because netd never came up on either.
-#
-# `ping_secs` has none, and it is no longer the judge. Run 30's window was dark
-# and this file said so: "a reply anywhere in the window is the boot's". Run 31
-# answered at 57 s on a boot whose claim was refused and whose netd never held
-# the card — the machine's own wire came back two seconds ahead of its sshd, and
-# the loop stops probing when sshd answers. One sample was not a judge. What
-# identifies the boot's reply is its wall clock against the boot's own records
-# (`lan::the_boot_answered`); this row prices the cost of a reply and nothing
-# else.
+# The three boot facts below are the machine's own, off the last boot of this
+# config; its claim was refused at the 32-bit BAR, which makes them facts about
+# the boot rather than about the claim. The two `lan.` rows have none: netd
+# never came up on any boot of it.
 
 [[number]]
 name = "boot.lancase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
-measured = 1257
+measured = 1258
 
 [[number]]
 name = "boot.lancase.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
-measured = 61
+measured = 59
 
 [[number]]
 name = "boot.lancase.stick_secs"
@@ -650,7 +641,7 @@ measured = 0
 name = "boot.lancase.ping_secs"
 unit = "s"
 ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, and nothing narrower has been read. It is a cost and not a verdict: run 31 answered at 57 s from the operating system *after* the boot, so no ceiling on this number could have told the two apart, and what does is the wall-clock bracket in `lan::the_boot_answered`. A green reading tightens this to what a boot that answers actually costs"
+ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, which bounds the window a reply can fall in and nothing narrower has been read. It is a cost and not a verdict: the window holds both of this machine's operating systems, so no ceiling on this number separates them, and what does is the wall-clock bracket in bootlog::host_second_inside_this_boot. A green reading tightens this to what a boot that answers actually costs"
 
 [[number]]
 name = "list.lancase.job_ms"

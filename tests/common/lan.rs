@@ -1,17 +1,6 @@
 //! The cable: netd taking this machine's address from the network, and the T14
 //! answering the development host on it.
 //!
-//! **The two arms answer different questions.** Under QEMU the DHCP server is
-//! the user-mode backend's own, an implementation of RFC 2131 this repository
-//! did not write, and what it certifies is the client: the lease it hands out
-//! is known — `10.0.2.15/24`, gateway and server `10.0.2.2`, resolver
-//! `10.0.2.3` — so a client that mis-parses any field is caught by name. On the
-//! T14 the server is the bench's router, the lease is whatever it has for this
-//! MAC, and what is certified is the whole path: the kernel handing netd the
-//! I219's function, the driver bringing its link up, the lease, and the
-//! development host's own `ping` being answered at the leased address while the
-//! machine is running nothing else.
-//!
 //! Every line read here is a record. On the T14 a userland `println!` reaches
 //! `Backend::None`, so what crosses to the stick is the kernel's log — into
 //! which netd's `say!` writes, being a `write` to a console object.
@@ -48,6 +37,10 @@ const SLIRP_DNS: &str = "10.0.2.3";
 /// The card the T14 arm claims, as the kernel and the manifest spell it.
 const ID: &str = "8086:15fc";
 
+/// The PCI function that card is, as `/sys/bus/pci/devices` spells it: the
+/// cable the metal loop reaches this boot over while it runs.
+pub const NIC: &str = "0000:00:1f.6";
+
 /// The records this pair of arms is written against, spelled once.
 ///
 /// They are netd's own `say!` lines, and netd is another crate: what holds the
@@ -57,6 +50,15 @@ const MAC: &str = "netd: MAC ";
 const LEASE: &str = "netd: DHCP: lease ";
 const LINK_UP: &str = "netd: I219: link up at ";
 const READY: &str = "netd: ready, at most ";
+const NO_LEASE: &str = "netd: DHCP: no lease as toyos-t14 in ";
+
+/// netd's own `dhcp::LEASE_BOUND`: how long it waits before saying it has no
+/// address.
+const LEASE_BOUND_SECS: u64 = 20;
+
+/// The host-name option (RFC 2132 §3.14) as it goes out on the wire: the kind,
+/// the length, and the name netd asks its network to record it under.
+const HOST_NAME_OPTION: &[u8] = b"\x0c\x09toyos-t14";
 
 /// One lease, as the record carries it.
 #[derive(Debug, PartialEq, Eq)]
@@ -116,89 +118,19 @@ pub fn link_up_ms(text: &str) -> Result<u64, String> {
         .map_err(|_| format!("{line:?} carries no readable link-up time"))
 }
 
-/// Whether the reply the host saw came from *this boot*, held against the wall
-/// clocks the boot's own records carry.
-///
-/// **How far into the window a reply came is not a judge, and one run proved
-/// it.** Run 30's window was dark and the row's ceiling was written on that one
-/// sample — "a reply anywhere in the window is the boot's". Run 31 answered at
-/// 57 s on a boot whose claim had been refused and whose netd never held the
-/// card: the machine's own wire came back two seconds ahead of its `sshd`, and
-/// the loop stops probing when `sshd` answers, so that reply was inside the
-/// window and inside the ceiling and belonged to the operating system after the
-/// boot.
-///
-/// What separates them is time against the boot's own timeline. `logd` writes a
-/// wall clock on every record, the loop writes one beside the reply, and both
-/// are UTC — the T14's clock is Ubuntu's, set from the network, and the host's
-/// is NTP's. So:
-///
-/// - the reply is inside the span this boot's first and last records bracket,
-///   whose end is the `Rebooting.` record: anything after that is the next
-///   operating system, whatever its timing; and
-/// - it is at or after the lease record, because a machine with no address
-///   answers nothing at that address.
-///
-/// The bracket is tens of seconds wide and the two clocks are within a second
-/// of each other, which is what makes comparing them admissible at all; a
-/// machine whose clocks drifted further would show it here as a near miss.
-fn the_boot_answered(back: &metal::Readback, at: u64) -> Result<(), String> {
-    let kernel = back.kernel();
-    let text = kernel.text();
-    let (first, last) = bootlog::record_unix_span(text).ok_or_else(|| {
-        format!(
-            "{}'s log carries no record with a wall clock on it, so there is nothing to hold \
-             the host's own clock against",
-            back.label
-        )
-    })?;
-    let rebooting = text
-        .lines()
-        .rfind(|l| l.contains(bootlog::REBOOTING))
-        .and_then(bootlog::record_unix_secs)
-        .unwrap_or(last);
-    if at < first || at > rebooting {
-        return Err(format!(
-            "the reply at {at} is outside the span this boot's own records bracket \
-             ({first}..{rebooting}, {} s wide): it came {} s {} the boot, so it is the \
-             operating system on the other side of it and not this one",
-            rebooting.saturating_sub(first),
-            if at < first { first - at } else { at - rebooting },
-            if at < first { "before" } else { "after" },
-        ));
-    }
-    let leased = text
-        .lines()
-        .find(|l| l.contains(LEASE))
-        .and_then(bootlog::record_unix_secs)
-        .ok_or_else(|| format!("{}'s lease record carries no wall clock", back.label))?;
-    if at < leased {
-        return Err(format!(
-            "the reply at {at} came {} s before this boot's lease at {leased}, and a machine \
-             with no address answers nothing at that address",
-            leased - at
-        ));
-    }
-    eprintln!(
-        "  [lan] the reply landed {} s after the lease and {} s before this boot handed the \
-         machine back",
-        at - leased,
-        rebooting.saturating_sub(at),
-    );
-    Ok(())
-}
-
 /// The T14's judge: the claim, the card, the lease, and the host's own ping.
-///
-/// **The ping and the lease are held to each other.** The address the host
-/// pinged is the one this machine's name resolved to before the boot; the
-/// address the boot leased is in its own record; a run where those differ is a
-/// ping answered by something that is not this boot.
 pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     let profile = Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())?;
     let kernel = back.kernel();
     let text = kernel.text();
     let mut bad: Vec<String> = Vec::new();
+    let cable = back.cable.as_ref().ok_or_else(|| {
+        format!(
+            "{}'s readback carries no cable: this boot was driven by a loop that was not asked \
+             to reach it over one, so nothing here is about the network",
+            back.label
+        )
+    })?;
 
     // The kernel's own account of the hand-over, which is where an interrupt
     // mechanism the substrate cannot arm is refused by name. A boot with no
@@ -227,12 +159,12 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     // one, and a MAC does not change with the operating system — so a driver
     // reporting this MAC is the driver holding that address, and a reply from
     // anything else at it is some other interface's.
-    let mac = format!("{MAC}{}", back.wire_mac);
+    let mac = format!("{MAC}{}", cable.mac);
     if !text.contains(&mac) {
         bad.push(format!(
             "no {mac:?} record: the card this boot brought up is not the one that held {} \
              before it",
-            back.ping_addr
+            cable.addr
         ));
     }
 
@@ -255,37 +187,41 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
             if let Err(why) = profile.judge(&format!("lan.{}.lease_ms", back.label), lease.ms) {
                 bad.push(why.to_string());
             }
-            if lease.address != back.ping_addr {
+            if lease.address != cable.addr {
                 bad.push(format!(
-                    "this boot leased {} and the host pinged {}, so whatever answered was not \
-                     this boot",
-                    lease.address, back.ping_addr
+                    "this boot leased {} and the host pinged {}, which the router hands this \
+                     MAC under the operating system before it — so either something else \
+                     answered or that server does not repeat a lease across the two",
+                    lease.address, cable.addr
                 ));
             }
         }
         Err(why) => bad.push(why),
     }
 
-    match (back.ping_secs, back.ping_at) {
-        (Some(secs), Some(at)) => {
+    match cable.reply {
+        Some(reply) => {
             eprintln!(
-                "  [lan] {} answered the host's ping {secs} s into the window",
-                back.ping_addr
+                "  [lan] {} answered the host's ping {} s into the window",
+                cable.addr, reply.secs
             );
-            // The cost of the reply, priced. It is not what says the reply was
-            // this boot's — `the_boot_answered` is — but a boot that answers
-            // far later than the last one is a boot something changed under.
-            if let Err(why) = profile.judge(&format!("boot.{}.ping_secs", back.label), secs) {
+            // The cost of the reply, priced. What says the reply was this
+            // boot's is the wall clock beside it, never how far into the window
+            // it came: the window holds both of this machine's operating
+            // systems.
+            if let Err(why) = profile.judge(&format!("boot.{}.ping_secs", back.label), reply.secs) {
                 bad.push(why.to_string());
             }
-            if let Err(why) = the_boot_answered(back, at) {
+            if let Err(why) =
+                bootlog::host_second_inside_this_boot(text, cable.window, LEASE, reply.at)
+            {
                 bad.push(why);
             }
         }
-        _ => bad.push(format!(
+        None => bad.push(format!(
             "nothing answered a ping at {} while this machine was between its two operating \
              systems",
-            back.ping_addr
+            cable.addr
         )),
     }
 
@@ -315,7 +251,12 @@ pub fn lan_dhcp_lease(
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let case = super::compile::repo_root().join(QEMU_CONFIG);
-    let options = BootOptions { profile: qemu::Profile::E1000e, ..Default::default() };
+    let dump = wire_dump("lease");
+    let options = BootOptions {
+        profile: qemu::Profile::E1000e,
+        wire_dump: Some(dump.clone()),
+        ..Default::default()
+    };
     if !qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")) {
         return Err("this test needs an Intel NIC and the profile has none".to_string());
     }
@@ -349,5 +290,60 @@ pub fn lan_dhcp_lease(
         lease.ms
     );
     log.must_be_clean()?;
+    asked_under_its_own_name(&dump)
+}
+
+/// The client on a wire with nothing at the other end.
+///
+/// **The refusal the lease boot cannot reach.** A machine whose network never
+/// answers still has to announce itself, because every other arm in this suite
+/// waits for that line and connects after it — a netd that stayed silent would
+/// hang each of them instead of refusing their connects one at a time.
+pub fn lan_no_lease(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let case = super::compile::repo_root().join(QEMU_CONFIG);
+    let options =
+        BootOptions { profile: qemu::Profile::E1000eNoServer, ..Default::default() };
+    let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
+    let mut console = guest.boot_log().to_string();
+    // Drained rather than waited on: netd owes its line inside its own bound
+    // and the guest says nothing at all until then, which every wait in this
+    // harness reads as a machine that stopped.
+    console.push_str(&guest.drain_serial(std::time::Duration::from_secs(LEASE_BOUND_SECS + 10)));
+    let log = serial::Serial::named("the lan boot with no server", console.as_str());
+    if let Ok(lease) = lease_in(log.text()) {
+        return Err(format!("a wire with no server leased {lease:?}"));
+    }
+    log.must_say_after(NO_LEASE, READY)?;
+    eprintln!("  [lan] no server answered and netd said so, then served anyway");
+    Ok(())
+}
+
+/// Where this process writes the frames one boot put on its wire.
+fn wire_dump(which: &str) -> std::path::PathBuf {
+    let at = std::env::temp_dir()
+        .join(format!("toyos-lan-{which}-{}.pcap", std::process::id()));
+    let _ = std::fs::remove_file(&at);
+    at
+}
+
+/// **The one place the host-name option can be read.** A server that ignores it
+/// writes nothing about it and answers the same lease either way, so the frames
+/// the client sent are the only evidence that it asked at all.
+fn asked_under_its_own_name(dump: &Path) -> Result<(), String> {
+    let frames = std::fs::read(dump).map_err(|e| format!("{}: {e}", dump.display()))?;
+    let asked = frames.windows(HOST_NAME_OPTION.len()).any(|w| w == HOST_NAME_OPTION);
+    let _ = std::fs::remove_file(dump);
+    if !asked {
+        return Err(format!(
+            "none of the {} bytes this client put on the wire carries the host-name option \
+             {HOST_NAME_OPTION:?}",
+            frames.len()
+        ));
+    }
+    eprintln!("  [lan] the client asked under its own name on the wire");
     Ok(())
 }
