@@ -190,6 +190,31 @@ impl Listener {
         ))
     }
 
+    /// Wait until nothing new has arrived for `still`, answering how many lines
+    /// have.
+    ///
+    /// A liveness guard on a drain no line announces: what it waits for is the
+    /// backlog a released peer takes, and a guest that is merely idle goes quiet
+    /// long before `still`.
+    pub fn wait_until_quiet(&self, still: Duration, by: Duration) -> Result<usize, String> {
+        let began = Instant::now();
+        let mut seen = self.lines().len();
+        let mut since = Instant::now();
+        while began.elapsed() < by {
+            std::thread::sleep(Duration::from_millis(100));
+            let now = self.lines().len();
+            if now != seen {
+                seen = now;
+                since = Instant::now();
+            } else if since.elapsed() >= still {
+                return Ok(seen);
+            }
+        }
+        Err(format!(
+            "the stream was still arriving {by:?} after the peer read again; {seen} line(s) so far"
+        ))
+    }
+
     /// Wait for the connection to close, which is this boot saying it is over.
     pub fn wait_for_end(&self, by: Duration) -> Result<(), String> {
         let began = Instant::now();
@@ -298,21 +323,15 @@ fn refused_in(file: &[String]) -> Result<(u64, usize), String> {
 /// What the listener received is the file's own lines in the file's own order,
 /// with holes where the queue refused one.
 ///
-/// A peer that stalls costs the stream lines; it may not reorder, duplicate or
-/// invent one. The first line that is not a continuation of the file is the
-/// verdict.
-///
-/// **The last line may be a prefix of the file's**, because the connection ends
-/// wherever the writer was when the machine went down, and that can be inside a
-/// line. Nothing before it may be: a short line in the middle is a truncation.
+/// A peer that stalls costs the stream lines; it may not reorder, duplicate,
+/// invent or cut one. **Every received line is a whole record, including the
+/// last** — a line short of the file's is a byte the stream consumed and did
+/// not deliver, which is the failure this comparison exists to catch, and no
+/// position in the stream is a place it may happen.
 fn is_subsequence_of(received: &[String], file: &[String]) -> Result<(), String> {
     let mut at = 0usize;
-    for (i, line) in received.iter().enumerate() {
-        let last = i + 1 == received.len();
-        let found = file[at..]
-            .iter()
-            .position(|theirs| theirs == line || (last && theirs.starts_with(line.as_str())));
-        match found {
+    for line in received {
+        match file[at..].iter().position(|theirs| theirs == line) {
             Some(step) => at += step + 1,
             None => {
                 return Err(format!(
@@ -590,7 +609,8 @@ pub fn unreachable(
 }
 
 /// A boot streaming to a listener that accepts the connection and then stops
-/// reading, offered a storm wider than every buffer under the queue.
+/// reading, offered a storm wider than every buffer under the queue, and read
+/// again before the machine goes down.
 ///
 /// **This is the arm the writer's own backpressure exists for.** The peer's
 /// window closes, netd stops draining the pipe, the writer blocks inside
@@ -599,6 +619,14 @@ pub fn unreachable(
 /// it: the pipe netd reads is 2 MiB (`kernel/src/pipe.rs`'s `PIPE_SIZE`) and
 /// netd's send buffer another 64 KiB, so `log-storm-wide` is what makes one
 /// boot's records exceed them.
+///
+/// **The peer is released while the guest is still running**, and the arm waits
+/// for a record produced after that to arrive. Everything the stall cost is
+/// then in the middle of a stream that goes on past it, so a byte the machine
+/// consumed and did not deliver is a cut record with a whole one behind it —
+/// visible to [`is_subsequence_of`] wherever it happened. Ending the arm at the
+/// stall instead puts every such cut on the last line, where a comparison can
+/// no longer tell a truncation from the connection's own end.
 pub fn stalled_peer(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -631,7 +659,8 @@ pub fn stalled_peer(
 
     // **The guest goes on working**, which is the claim a peer that stopped
     // reading tests and a peer that never answered does not: this one has the
-    // machine's own writer blocked on it.
+    // machine's own writer blocked on it, and the job is also the time `logd`
+    // needs to offer the storm past every buffer under the queue.
     let result = guest.run_test("test_rs_empty_dir_stat", Duration::from_secs(60));
     if result.exit_code != Some(0) {
         return Err(format!(
@@ -639,13 +668,36 @@ pub fn stalled_peer(
             result.exit_code, result.stdout
         ));
     }
+
+    // **Wait until the queue has provably refused something before releasing
+    // the peer.** `logd` rotates every `MAX_LOG_BYTES`, and it offers each line
+    // to the stream as it writes it, so the third rotation is three mebibytes
+    // offered — past everything under the queue, which holds about 2.7 MiB
+    // between the pipe, netd's send buffer and the host's receive window.
+    qemu::await_marker(
+        &mut guest,
+        &mut console,
+        "_0004.log",
+        "the boot's log to pass three mebibytes",
+    )?;
+
+    // The peer reads again, and the machine stays up until the backlog it was
+    // holding has gone past. Everything the stall cost is then in the middle of
+    // the stream rather than at its end.
+    listener.release();
+    listener.wait_until_quiet(Duration::from_secs(2), LAG)?;
+
     writeln!(guest.stdin_mut(), "run shutdown").map_err(|e| format!("write to QEMU stdin: {e}"))?;
     guest.flush_stdin();
     console.push_str(&guest.drain_serial(Duration::from_secs(20)));
     drop(guest);
-    listener.release();
     listener.wait_for_end(LAG)?;
 
+    // **The connection was open and the queue still refused.** The only thing
+    // that can refuse a line while a writer is draining the queue is a writer
+    // that is not draining it, which is one blocked inside `write_all` — the
+    // whole difference between this arm and the one whose address answers
+    // nothing.
     if listener.connections() != 1 {
         return Err(format!(
             "the stream opened {} time(s), so nothing was ever written into it",
@@ -655,14 +707,12 @@ pub fn stalled_peer(
     let file = on_the_volume(&staged)?;
     let (dropped, said_in) = refused_in(&file)?;
 
-    // The writer got as far as writing: a queue that filled because nothing was
-    // ever sent is the arm above this one, not this one.
     let received = listener.lines();
     let bytes: usize = received.iter().map(String::len).sum();
     if bytes <= toyos_logstream::MAX_BACKLOG_BYTES {
         return Err(format!(
-            "the peer stalled after {bytes} byte(s), which the queue alone holds ({}), so the \
-             writer's own backpressure is not what refused these {dropped} line(s)",
+            "the peer received {bytes} byte(s), which the queue alone holds ({}), so nothing \
+             here says a stream went through the writer at all",
             toyos_logstream::MAX_BACKLOG_BYTES
         ));
     }
@@ -678,9 +728,9 @@ pub fn stalled_peer(
         ));
     }
     eprintln!(
-        "  [stream] a peer that stopped reading took {bytes} byte(s) in {} line(s) before the \
-         queue refused {dropped} more, said in {said_in} line(s); /log holds {} line(s) and \
-         every received line in its own order",
+        "  [stream] a peer that stopped reading and then read again took {bytes} byte(s) in {} \
+         whole line(s), each /log's own in /log's own order, and the queue refused {dropped} it \
+         never saw, said in {said_in} line(s); /log holds {} line(s)",
         received.len(),
         file.len()
     );

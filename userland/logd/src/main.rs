@@ -245,18 +245,18 @@ fn main() {
         // is: a `say!` reaches the console and no record, so a stream that
         // failed silently on the one channel that survives the machine would be
         // a failure only somebody watching the wire could see.
+        // **Dropped as the file takes them, one by one**: a refused write
+        // leaves the rest owed rather than losing the line that says what the
+        // stream cost, and leaves none of them to be written a second time.
+        let mut said_through = 0usize;
         for said in &owed {
             if let Err(e) = v.write(format!("{said}\n").as_bytes()) {
                 refused = Some((Step::Append, e.kind(), e.to_string()));
                 break;
             }
+            said_through += 1;
         }
-        // **Cleared once the file has taken them, and not before**: a refused
-        // write leaves the report owed rather than losing the one line that
-        // says what the stream cost.
-        if refused.is_none() {
-            owed.clear();
-        }
+        owed.drain(..said_through);
         let lines: Vec<String> =
             batch.iter().map(|r| format!("{}\n", r.tagged(&stamp(boot_local, r.at_ns)))).collect();
         let mut written = 0usize;
