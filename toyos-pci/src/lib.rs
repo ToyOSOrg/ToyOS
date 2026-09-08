@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bar;
+pub mod bridge;
 pub mod caps;
 pub mod express;
 pub mod msi;

@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use toyos_pci::{bar, caps, msi, msix};
+use toyos_pci::{bar, bridge, caps, msi, msix};
 
 use crate::mm::Mmio;
 use crate::mm::paging::MmioPolicy;
@@ -351,6 +351,25 @@ impl PciDevice {
             cap.write_u32(mask, msi::MASKED);
         }
         cap.write_u16(msi::MESSAGE_CONTROL, msi::Msi::disabled(control));
+    }
+
+    /// Every memory range this function forwards to its secondary bus, below
+    /// 4 GiB. Empty on a function that is not a bridge.
+    ///
+    /// **Read, never probed**: these are the ranges nothing above this bridge
+    /// may hand out, and reading them costs the machine nothing — unlike
+    /// `bar_size`, which takes memory decode off for the length of its probe.
+    pub fn forwarded_below_4g(&self) -> Vec<bridge::Window> {
+        if self.read_config_u8(HEADER_TYPE) & !MULTI_FUNCTION != bridge::HEADER_TYPE_BRIDGE {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        out.extend(bridge::window(self.read_config_u32(bridge::MEMORY_BASE)));
+        out.extend(bridge::prefetch_below_4g(
+            self.read_config_u32(bridge::PREFETCH_BASE),
+            self.read_config_u32(bridge::PREFETCH_BASE_UPPER),
+        ));
+        out
     }
 
     pub fn capabilities(&self) -> CapabilityIter<'_> {
