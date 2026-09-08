@@ -17,5 +17,6 @@ features = [
     "socket-tcp",
     "socket-udp",
     "socket-dns",
+    "socket-dhcpv4",
     "alloc",
 ]
