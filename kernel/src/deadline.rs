@@ -2,11 +2,10 @@
 //! can hold off.
 //!
 //! Every other bound a boot runs under is fed or checked by the thing it
-//! bounds. The firmware's watchdog dies at `ExitBootServices`. The chipset's
-//! TCO has never counted on the owner's T14. The test runner's job bound is a
-//! wall-clock check made *between* jobs, so a spawn that never returns is
-//! outside it. The panic path's bound only exists once something has panicked.
-//! A kernel that stops making progress without panicking is bounded by none of
+//! bounds: the firmware's watchdog dies at `ExitBootServices`, the chipset's TCO
+//! does not count on every PCH, the runner's job bound is a check made *between*
+//! jobs, and the panic path's bound exists only once something has panicked. A
+//! kernel that stops making progress without panicking is bounded by none of
 //! them, and on a machine with no power switch that is a hand on the button.
 //!
 //! So this one is armed off the parameter line and polled from the timer
@@ -18,35 +17,27 @@
 //! # What it does not cover, stated rather than implied
 //!
 //! - **The span before `clock::init`,** which no bound in this file or in
-//!   [`crate::hardlockup`] reaches: the deadline is a TSC value, there is no
-//!   TSC period before then to convert a bound with, and no counter is armed.
-//!   A kernel that dies in early bring-up is still a machine that needs a hand.
-//! - **A machine on which no CPU takes an interrupt at all** — every core
-//!   halted below the interrupt layer, or spinning with `IF` clear at once.
-//!   Nothing polled from a running CPU can cover that. **That half is
-//!   [`crate::hardlockup`]**, sampled by an NMI off a performance counter
-//!   rather than polled. The two are armed off this one parameter and compose
-//!   **by scope and not by machine state**: this bound is the whole machine's,
-//!   and that one is any *single CPU*'s, so a machine where seven cores are
-//!   healthy and one has taken no interrupt for its bound is ended by that one.
-//!   The CPU gets the earlier bound because its record can name where it is
-//!   standing, and a core that has silently stopped taking interrupts is a
-//!   machine nothing else in this tree would ever report. Whichever fires takes
-//!   the machine's one seal through [`claim_the_reset`].
+//!   [`crate::hardlockup`] reaches: no TSC period to convert a bound with, and
+//!   no counter armed. A kernel that dies there still needs a hand.
+//! - **A machine on which no CPU takes an interrupt at all.** Nothing polled
+//!   from a running CPU can cover that; **that half is [`crate::hardlockup`]**,
+//!   sampled by an NMI off a performance counter. The two are armed off this one
+//!   parameter and compose **by scope and not by machine state**: this bound is
+//!   the whole machine's and that one is any *single CPU*'s, so a machine with
+//!   one deaf core is ended by that one, at the earlier bound, with a record
+//!   that can name where the core is standing. Whichever fires takes the
+//!   machine's one seal through [`claim_the_reset`].
 //! - **A panic in progress**, which is not a gap but a stand-down:
 //!   `apic::halt_all_cpus` calls [`stand_down`] before it holds the panel, so a
-//!   panic report is never replaced by an expiry. A panicked kernel is under a
-//!   bound of its own.
+//!   panic report is never replaced by an expiry.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 
 /// Every phase [`boot_phase!`](crate::boot_phase) publishes, in the order a
 /// boot reaches them, so a sealed record can name where the machine stopped.
-///
-/// Index 0 is the state of a machine that has published none. The rest are the
-/// literals `boot_phase!` is called with, and [`index_of`] refuses at compile
-/// time a literal that is not here — a phase the deadline cannot name is a
-/// sealed record that says nothing about where the boot was.
+/// Index 0 is a machine that has published none; the rest are the literals
+/// `boot_phase!` is called with, and [`index_of`] refuses at compile time one
+/// that is not here.
 pub const PHASES: &[&str] = &[
     "before the first boot phase",
     "CPU ready",
@@ -63,34 +54,41 @@ static BOUND_MS: AtomicU64 = AtomicU64::new(0);
 
 /// The `rdtsc` reading the machine is reset at, or 0 while unarmed.
 ///
-/// **A TSC value and not a nanosecond one.** `clock::nanos_since_boot`'s
-/// multiply-and-divide is out of line, and this is read on every timer tick of
-/// every CPU; `src/redlist.rs`'s `dump_nmi_probe` is the instrument that
-/// notices such a call from an interrupt entry.
+/// **A TSC value and not a nanosecond one**, because `clock::nanos_since_boot`'s
+/// multiply-and-divide is out of line and this is read on every timer tick of
+/// every CPU.
 static AT_TSC: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a CPU has taken the expiry. One machine, one seal, one reset.
 static FIRED: AtomicBool = AtomicBool::new(false);
 
 /// Take this machine's one seal-and-reset, or `false` where another CPU already
-/// holds it — in which case the caller must add nothing to the page and go no
-/// further, because the page is being written.
-///
-/// Shared with [`crate::hardlockup`]: the two bounds compose, and a machine that
-/// passes both may still only be sealed once.
+/// holds it — in which case the caller adds nothing to the page and goes no
+/// further, because the page is being written. Shared with
+/// [`crate::hardlockup`]: two bounds compose, one seal.
 pub fn claim_the_reset() -> bool {
     !FIRED.swap(true, Relaxed)
 }
 
 /// Stand this bound down for the rest of the machine's life.
 ///
-/// Called from `apic::halt_all_cpus` — every fatal path's one funnel — beside
-/// [`crate::hardlockup::stand_down`]: from there this machine holds a panic
-/// report for whoever is in front of it under a bound of its own, and an expiry
-/// would seal a `WEDGED` record over the panic's. Disarms rather than latching a
-/// second flag, so [`poll`] stays one relaxed load on the path every CPU takes.
+/// Called from `apic::halt_all_cpus` beside [`crate::hardlockup::stand_down`]:
+/// from there this machine holds a panic report under a bound of its own, and an
+/// expiry would seal a `WEDGED` record over it. Disarms rather than latching a
+/// second flag, so [`poll`] stays one relaxed load.
 pub fn stand_down() {
     AT_TSC.store(0, Relaxed);
+}
+
+/// Whether this boot runs under a bound at all — this one or
+/// [`crate::hardlockup`]'s, since one parameter arms both.
+///
+/// **What the idle path asks before it re-arms a one-shot.** Both bounds rest on
+/// some CPU taking a timer interrupt, and a CPU woken by an IPI and held in Ring
+/// 0 takes none; on a boot that named no bound that re-arm is an x2APIC read and
+/// two writes per wake that buy nothing.
+pub fn armed() -> bool {
+    AT_TSC.load(Relaxed) != 0
 }
 
 /// The last phase [`reached`] was told about, as an index into [`PHASES`].
@@ -187,10 +185,9 @@ pub fn start() {
 /// Whether this machine's bound has passed; the timer interrupt entry's, in
 /// both rings, and nothing else's.
 ///
-/// **One relaxed load in the callee on the unarmed path**, which is every boot
-/// that names no bound; the Ring 0 call site pays a caller-saved prologue on
-/// every tick of every CPU whether or not the bound is armed, and that cost is
-/// the entry's rather than this function's.
+/// **One relaxed load in the callee on the unarmed path.** The Ring 0 call site
+/// pays a caller-saved prologue on every tick of every CPU armed or not, and
+/// that cost is the entry's rather than this function's.
 ///
 /// `extern "sysv64"` because the Ring 0 half of the timer entry calls it from
 /// naked assembly, where the ABI is written out rather than inferred.
@@ -236,25 +233,19 @@ pub const EXPIRED: &str = "the boot deadline expired";
 /// on everything above.
 ///
 /// **Every CPU, and not just this one.** A wedge one core survives is a boot
-/// that finishes, and a control the boot finishes is no control. From here
-/// every CPU that reaches a scheduler pass stops taking them, with preemption
-/// disabled and `IF` set — nothing panics, nothing halts, the LAPIC timers go
-/// on firing, and no userland instruction runs again. That is strictly worse
-/// than a wedge some cores survive, and the deadline has to end it anyway.
-///
-/// **`IF` set is established in [`this_cpu`] and not inherited**, because this
-/// CPU is inside the shutdown syscall and `arch::syscall::gate` masks `IF` for
-/// the whole of one: a wedge that left its own staging CPU deaf is a hard
-/// lockup, which is a different control and one `crate::hardlockup` ends first.
+/// that finishes, and a control the boot finishes is no control. From here every
+/// CPU that reaches a scheduler pass stops taking them, with preemption disabled
+/// and `IF` set — nothing panics, nothing halts, the LAPIC timers go on firing,
+/// and no userland instruction runs again; [`this_cpu`] establishes that state
+/// rather than inheriting it.
 #[cfg(feature = "boot-actuators")]
 pub fn stage_a_wedge() -> ! {
     log!("{WEDGE_STAGED}: every CPU stops taking scheduler passes from here");
     STAGED.store(true, Relaxed);
-    // Kicked, and not left to arrive on their own: a CPU already halted in the
-    // idle path has stopped its own timer, so nothing would bring it to the
-    // pass this wedge is taken at, and a core still asleep is not a core this
-    // control has wedged. The kick is this vector's own IPI, so the CPU it
-    // wakes runs one entry and reaches `wedge_if_staged` from it.
+    // Kicked, and not left to arrive on their own: a CPU halted in the idle path
+    // has stopped its own timer, so nothing would bring it to the pass this
+    // wedge is taken at, and a core still asleep is not a core this control has
+    // wedged.
     let me = crate::arch::percpu::cpu_id();
     for cpu in 0..crate::arch::smp::cpu_count() {
         if cpu != me {
@@ -264,10 +255,9 @@ pub fn stage_a_wedge() -> ! {
     this_cpu()
 }
 
-/// What a staged wedge says before it stops, and the witness a sealed record
-/// carries: a `WEDGED` page whose text does not hold this line is a machine the
-/// deadline ended for some other reason, which is what makes the control a
-/// control. Judged by the harness, so it is a constant (`src/bootlog.rs`).
+/// What a staged wedge says before it stops: a `WEDGED` page whose text does not
+/// hold this line is a machine the deadline ended for some other reason. Judged
+/// by the harness, so it is a constant (`src/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
 
@@ -287,21 +277,15 @@ fn this_cpu() -> ! {
     // Preemption off, `IF` on and a one-shot armed: the shape a device
     // operation on this machine already runs in, so what the deadline has to
     // reach is the Ring 0 half of the timer entry and not the Rust half.
+    //
+    // **All three set, not assumed**, and not an `IrqGuard`: nothing here ever
+    // puts them back. A CPU arriving from `stage_a_wedge` is inside the shutdown
+    // syscall with `IF` masked, and one woken out of the idle halt has its
+    // one-shot stopped however set `IF` is — either leaves a CPU taking no
+    // interrupt at all, which is a hard lockup and not the state this control
+    // claims.
     crate::preempt::disable();
-    // **All three set, not assumed.** A CPU arriving from `wedge_if_staged` has
-    // `IF` on and one arriving from `stage_a_wedge` does not — that one is
-    // inside the shutdown syscall, and `arch::syscall::gate` masks `IF` for the
-    // whole of one. Inheriting it left exactly one CPU per boot taking no
-    // interrupt at all, which is not the state this control claims and *is* the
-    // state `crate::hardlockup` ends a machine for. Not an `IrqGuard`: nothing
-    // here ever puts it back.
     let arrived_awake = crate::arch::cpu::interrupts_enabled();
-    // And `IF` is only half of it: a CPU woken out of the idle halt has its
-    // one-shot stopped and takes no timer interrupt however set `IF` is.
-    // Measured on a loaded host, from QEMU's own account of a wedged guest: one
-    // CPU here with `IF` clear and its timer interrupt stuck in the IRR, the
-    // other with `IF` set over a zero initial count, and between them nothing
-    // reached the poll for the whole of the bound.
     crate::arch::apic::arm_within(toyos_sched::fair::QUANTUM_NS);
     crate::arch::cpu::enable_interrupts();
     log!(
@@ -311,8 +295,7 @@ fn this_cpu() -> ! {
     );
     // The hard-lockup control is this wedge and one CPU more, staged here —
     // where every CPU has already left the scheduler — because the idle loop it
-    // would otherwise be staged from is one of the things this wedge stops. Two
-    // of these CPUs never come back from it.
+    // would otherwise be staged from is one of the things this wedge stops.
     if crate::actuator::hard_lockup_probe() {
         crate::hardlockup::probe::stage();
     }
@@ -321,11 +304,9 @@ fn this_cpu() -> ! {
     }
 }
 
-/// What the CPU that staged the wedge says about the state it arrived in, and
-/// the one line that measures this control's own claim: it comes through the
-/// syscall gate, so `IF` was masked, and a boot on which no CPU says this is a
-/// boot where the wedge never reached the CPU that asked for it. Judged by the
-/// harness, so it is a constant (`src/bootlog.rs`).
+/// What the CPU that staged the wedge says about the state it arrived in: a boot
+/// on which no CPU says this is one the wedge never reached the CPU that asked
+/// for it. Judged by the harness, so it is a constant (`src/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";

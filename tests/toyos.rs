@@ -730,6 +730,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // boots and a bound counted down in the guest, so it is timer-anchored and
     // belongs beside the row above, and Fast for the same bootstrap reason.
     ("hard_lockup_ends_a_deaf_cpu", Sched::Parallel, Tier::Fast),
+    // The control on the same bound standing down: a panic whose panel is still
+    // up when the deadline expires must cross the reset as a panic report and
+    // never as a `WEDGED` page. Two boots and two bounds counted down in the
+    // guest, so it is timer-anchored, and Fast for the same bootstrap reason.
+    ("panic_outlives_the_deadline", Sched::Parallel, Tier::Fast),
     // Four chained boots, one per way this kernel reaches a reset, each
     // anchored to the bound its own first boot counts down; Fast for the same
     // bootstrap reason as the two above.
@@ -9713,6 +9718,9 @@ fn run_machine_test(
         }
         "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
         "blackbox_panic_chain" => power::blackbox_panic_chain(test_config, c_bins, rust_bins),
+        "panic_outlives_the_deadline" => {
+            power::panic_outlives_the_deadline(test_config, c_bins, rust_bins)
+        }
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
         "boot_deadline_ends_a_wedge" => {
             power::boot_deadline_ends_a_wedge(test_config, c_bins, rust_bins)
@@ -15124,14 +15132,25 @@ fn pmm_accounting(log: &str) -> Result<(), String> {
 }
 
 /// Every ACPI table this kernel goes on to decode was reached through a
-/// checksummed RSDP and XSDT and checksummed itself.
+/// checksummed RSDP and XSDT, checksummed itself, and **was decoded**.
 ///
 /// The DMAR is not required: a guest with no `intel-iommu` publishes none, and
 /// this host boots one. What is required is that a table the kernel *does* read
-/// is never one it skipped the validation of, which is what the count says.
+/// is never one it skipped the validation of, and never one it validated and
+/// then did nothing with — a row saying only that four bytes and a length
+/// checksummed is presence and not a decode, so each one is held to a record
+/// carrying a field read out of it.
 fn acpi_table_inventory(log: &str) -> Result<(), String> {
-    const NEEDED: &[&str] = &["APIC", "FACP", "HPET", "MCFG"];
-    for signature in NEEDED {
+    /// Each table's signature and the record that carries a value decoded from
+    /// it. A signature with no such record is a table this kernel validated and
+    /// never read.
+    const NEEDED: &[(&str, &str)] = &[
+        ("APIC", "ACPI: MADT cpus="),
+        ("FACP", "ACPI: reset register "),
+        ("HPET", "clock: HPET at "),
+        ("MCFG", "ACPI: ECAM base address: "),
+    ];
+    for (signature, decoded) in NEEDED {
         if !log.lines().any(|l| l.contains(&format!("ACPI: {signature} at ")) && l.contains("checksummed"))
         {
             return Err(format!(
@@ -15139,6 +15158,18 @@ fn acpi_table_inventory(log: &str) -> Result<(), String> {
                 log.lines().filter(|l| l.starts_with("[") && l.contains("ACPI: ")).collect::<Vec<_>>()
             ));
         }
+        // Never the inventory row itself, which is the presence this exists to
+        // be more than.
+        let decoded_line = log
+            .lines()
+            .find(|l| l.contains(decoded) && !l.contains("checksummed"))
+            .ok_or_else(|| {
+                format!(
+                    "the {signature} checksummed and no record carries {decoded:?}, so nothing \
+                     this boot did rests on anything decoded out of it"
+                )
+            })?;
+        eprintln!("  [acpi] {signature} decoded: {}", decoded_line.trim());
     }
     let validated = number_between(log, "ACPI: ", " of ")
         .map_err(|why| format!("no inventory summary: {why}"))?;

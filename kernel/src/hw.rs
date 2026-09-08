@@ -119,7 +119,12 @@ impl Machine for KernelHw {
         // Arming earlier than the scheduler planned is a spurious pass and
         // never a missed deadline (`toyos_sched::timer::TimerPlan`), and the
         // next pass replaces it either way.
-        apic::arm_within(QUANTUM_NS);
+        //
+        // Asked, because it is only those two that need it: a boot under no
+        // bound pays an x2APIC read and two writes per wake for nothing.
+        if crate::deadline::armed() {
+            apic::arm_within(QUANTUM_NS);
+        }
     }
 }
 

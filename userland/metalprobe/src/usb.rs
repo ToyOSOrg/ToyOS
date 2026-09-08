@@ -4,9 +4,8 @@
 //!
 //! **`/log` is the one writable place on a metal boot.** A flashed image carries
 //! an ESP, a read-only ROOT and the `TOYOS-LOG` volume, so the only durable
-//! bytes a job can lay down are on the FAT32 partition `logd` also writes — and
-//! that partition is the one the driver mounts afterwards, which is what makes
-//! the host's own FAT check possible over the same bytes.
+//! bytes a job can lay down are on the FAT32 partition `logd` also writes —
+//! which is the partition the driver reads back and the host's FAT check judges.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -17,13 +16,11 @@ use crate::{span, Measured, Refusal};
 
 /// The slowest this project will admit its own stack may move bytes to a stick.
 ///
-/// **Not a device figure — the whole path's.** The number that matters here is
-/// what a write costs through this kernel's page cache, `iod`, the FAT32 driver
-/// and the mass-storage transport together, and that is an order of magnitude
-/// under what the device itself can do: the bench measured about 80 KiB/s
-/// end to end, so a floor taken from a USB 2.0 datasheet sizes [`BYTES`] six
-/// times too large and the measurement outruns the share it is derived from.
-/// This is that reading rounded down to a power of two.
+/// **Not a device figure — the whole path's**, and an order of magnitude under
+/// what the device itself can do: what sizes [`BYTES`] is the cost of a write
+/// through this kernel's page cache, `iod`, the FAT32 driver and the
+/// mass-storage transport together, measured end to end at about 80 KiB/s and
+/// rounded down here to a power of two.
 const SLOWEST_KIB_S: u64 = 64;
 
 /// The share of the job list's whole bound one storage measurement may spend,
@@ -116,8 +113,7 @@ pub fn read() -> Measured {
 /// What the close above is given to reach the device before the clock starts.
 ///
 /// **`sync_all` returns when the bytes are durable and not when the cache has
-/// dropped them**, so the page the timed read wants may still be resident;
-/// `iod` drops it on its own pass afterwards. There is no call that waits for
-/// that, so this waits — and it is generous rather than tight, since a wait too
-/// short makes the read a cache hit and reports the page cache as the stick.
+/// dropped them**, and nothing here can wait on `iod`'s own pass; generous
+/// rather than tight, because a wait too short reports the page cache as the
+/// stick.
 const DRAIN: Duration = Duration::from_millis(200);

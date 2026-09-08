@@ -146,6 +146,7 @@ blackbox_early_panic_sealed_muted 3145 shards=12
 blackbox_fault_sealed 6258 shards=12
 blackbox_foreign_record 18446744073709551615 shards=none
 blackbox_panic_chain 11407 shards=12
+panic_outlives_the_deadline 18446744073709551615 shards=none
 blackbox_unclaimed_page 6078 shards=12
 block_duplicate_id 6997 shards=12
 blocked_dump 3400 shards=12

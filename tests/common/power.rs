@@ -871,9 +871,13 @@ pub fn blackbox_done_chain(
 /// runs until somebody presses the power button, which is the two T14 hangs
 /// this exists for.
 ///
-/// The mutation that fails if the implementation is wrong is the arm: drop the
-/// `boot-deadline=` parameter and the same image wedges for ever, which is what
-/// `CHAIN_WAIT` then reports.
+/// **The mutation is the whole mechanism, not the arm.** Dropping the
+/// `boot-deadline=` parameter leaves every line of the implementation standing
+/// and measures only that an unarmed deadline does not fire. What this is a
+/// control for is the mechanism reverted onto the base the green arm was
+/// measured on: `start` arming no deadline, the `call` gone from the Ring 0
+/// timer entry, and the idle-exit re-arm in `hw::idle_wait` gone with it — so
+/// nothing polls, nothing seals and nothing writes the reset register.
 pub fn boot_deadline_ends_a_wedge(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -981,9 +985,10 @@ const WEDGE_DEADLINE: &str = "boot-deadline=15000";
 /// [`toyos_tco::hard_lockup_bound_ms`] later; a page reading
 /// [`bootlog::DEADLINE_EXPIRED`] is this detector failing and the deadline
 /// covering for it, so that line is refused as hard as the right one is
-/// demanded. The mutation that fails if the implementation is wrong is the whole
-/// detector reverted: the same image then ends at the deadline, with a record
-/// naming a bound and no cpu.
+/// demanded. The mutation is the whole detector reverted — `start` arming
+/// nothing, so no counter is programmed and no sample runs — and the boot then
+/// carries no `hard lockup: <ms> ms` at all, which is the first thing asserted
+/// below.
 ///
 /// **QEMU's TCG guest has no performance counter**, so the counter's NMI is one
 /// thing this cannot judge: the actuator has a second CPU send the victim the
@@ -1137,6 +1142,70 @@ pub fn hang_bounded_by_the_stick(
     eprintln!("  [power] one hand per hang: the retry booted nothing and the boot after it booted");
     Ok(())
 }
+/// The bound this stages inside the panic's own hold, in guest milliseconds.
+///
+/// **Between the two, and both are the guest's clock.** `test-late-panic` fires
+/// at the end of the boot and `panic-reboot-fast` holds the panel for
+/// [`PANIC_FAST_SECS`] after it, so a deadline armed here expires while the
+/// panel is up: earlier and it would end the boot before anything panicked,
+/// later and the panic's own reset beats it and the arm proves nothing.
+const PANIC_OUTLIVES_DEADLINE: &str = "boot-deadline=4000";
+
+/// A panic outlives the boot deadline, and the record that crosses the reset is
+/// the panic's.
+///
+/// **The bound stands down for a report and does not seal over it.** Both are
+/// armed on this boot and the deadline's passes while the panel is up, so the
+/// page that crosses the reset says which of the two ended the machine.
+///
+/// **What this cannot judge, stated rather than implied.** Reverting
+/// `deadline::stand_down` alone leaves this green: after `apic::halt_all_cpus`
+/// every CPU is halted or spinning with `IF` clear, so nothing reaches the poll
+/// and an armed deadline cannot expire whether or not it was disarmed. The
+/// window the stand-down closes is the one *before* that — the panicking CPU has
+/// not taken `PAINTING` yet and its siblings are still taking timer interrupts —
+/// and no actuator in this tree aims a boot at it. What is asserted here is the
+/// composed outcome: a panic report crosses the reset with a bound armed and
+/// passed, so a panel that ever re-arms a timer, or a stand-down that is
+/// dropped along with something that wakes one, is caught here.
+///
+/// The witness is the same one `blackbox_panic_chain` reads, so a page carrying
+/// it is the panic's own report and not a state the loader put there;
+/// [`bootlog::DEADLINE_EXPIRED`] is refused as hard as it is demanded.
+pub fn panic_outlives_the_deadline(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let params: &[&str] = &["test-late-panic", "panic-reboot-fast", PANIC_OUTLIVES_DEADLINE];
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, chained(params));
+    let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    first.must_say(&armed_line())?;
+
+    // This capture opens at the first boot's handoff, so it carries that
+    // kernel's own console as well as the pass that reports it.
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    // The control on the control: this boot really did arm the bound, in the
+    // kernel's own words, so a green run is not one where nothing was armed.
+    let armed = second.must_say("boot deadline: 4000 ms")?.to_string();
+    second.must_say(bootlog::PREVIOUS_PANIC)?;
+    // After the harvest line, so this is the sealed page and not the first
+    // boot's console, which this capture also carries.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, BLACKBOX_WITNESS)?;
+    second.must_not_say(&armed_and_nothing_else())?;
+    // The whole verdict: the deadline was armed, its bound passed while the
+    // panel was up, and nothing it writes is on the page or on either channel.
+    says_nothing_of(&second, bootlog::DEADLINE_EXPIRED)?;
+    second.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    second.must_not_say(bootlog::LOADER_LAST_LINE)?;
+    ended_in_a_reset(&mut resets)?;
+    drop(qemu);
+
+    eprintln!("  [power] the panic report crossed the reset with {} armed", armed.trim());
+    Ok(())
+}
+
 /// A record another image left in this memory is cleared and never reported.
 ///
 /// **The defect this is the control for cost a T14 run its first boot.** The
@@ -1749,12 +1818,12 @@ const RESET_PATHS: &[ResetPath] = &[
 /// and a sysfs port power cycle, until it is physically replugged.
 ///
 /// **What this can and cannot judge.** QEMU's emulated stick cannot be wedged,
-/// so what is judged here is the *account*: for each of the three paths, that
-/// the reset reset every connected port, halted and reset every controller and
-/// emptied every disk cache before it wrote the reset register — and that the
-/// boot after it still finds the stick. `metaldevices::Quiesced::complete` is
-/// the same predicate the T14 judge applies to the same line, and reverting the
-/// stop leaves the line absent, which fails every arm here by name.
+/// so what is judged here is the *account*: for each of the four reset paths,
+/// that the reset reset every connected port, halted and reset every controller
+/// and emptied every disk cache before it wrote the reset register — and that
+/// the boot after it still finds the stick. `metaldevices::Quiesced::complete`
+/// is the same predicate the T14 judge applies to the same line, and the whole
+/// stop reverted leaves that line absent: 4 of 4 arms unmet, measured.
 pub fn usb_reset_hands_devices_back(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -1762,7 +1831,7 @@ pub fn usb_reset_hands_devices_back(
 ) -> Result<(), String> {
     let root = super::compile::repo_root();
     // Every arm is run and every finding reported: a mutation that reverts the
-    // stop breaks all three, and stopping at the first would say so about one.
+    // stop breaks all four, and stopping at the first would say so about one.
     let mut bad = Vec::new();
     for path in RESET_PATHS {
         if let Err(why) = one_reset_path(&root.join(path.config), path) {
