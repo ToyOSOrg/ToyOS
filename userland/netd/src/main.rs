@@ -1076,14 +1076,25 @@ impl NetDaemon {
             // forgeable closed flags.
             while socket.can_send() {
                 if let Some(ref pipe) = conn.tx_read {
+                    // **No more is taken out of the pipe than the socket will
+                    // take from us.** `send_slice` answers how many bytes it
+                    // enqueued and takes fewer when the send buffer is short of
+                    // room; bytes read past that are gone, and the peer's stream
+                    // is short in the middle with nothing saying so. The pipe is
+                    // where the rest belongs until there is room.
+                    let room = socket.send_capacity() - socket.send_queue();
                     let mut buf = [0u8; 4096];
-                    match toyos_abi::syscall::read_nonblock(pipe.as_handle(), &mut buf) {
+                    let want = room.min(buf.len());
+                    match toyos_abi::syscall::read_nonblock(pipe.as_handle(), &mut buf[..want]) {
                         Ok(0) => {
                             socket.close();
                             conn.close_tx();
                             break;
                         }
-                        Ok(n) => { let _ = socket.send_slice(&buf[..n]); }
+                        Ok(n) => {
+                            let sent = socket.send_slice(&buf[..n]).unwrap_or(0);
+                            assert_eq!(sent, n, "netd: the send buffer took {sent} of {n} bytes it had room for");
+                        }
                         _ => break,
                     }
                 } else {

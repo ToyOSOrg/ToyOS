@@ -4,32 +4,30 @@ kind: defect
 opened: 2026-09-08
 ---
 
-# netd drops the tail of a client's write when smoltcp will not take all of it
+# netd drops what arrives off the wire when the client's pipe will not take it
 
-`userland/netd/src/main.rs`'s `bridge_piped` moves a client's bytes from the
-kernel pipe into the socket like this:
+`userland/netd/src/main.rs`'s `bridge_piped` moves what the wire delivered into
+the client's rx pipe like this:
 
 ```rust
-Ok(n) => { let _ = socket.send_slice(&buf[..n]); }
+Ok(n) if n > 0 => {
+    let _ = toyos_abi::syscall::write_nonblock(pipe.as_handle(), &buf[..n]);
+}
 ```
 
-`tcp::Socket::send_slice` answers **how many bytes it enqueued**, and it takes
-fewer than it was offered when the send buffer (`TCP_SOCKET_BUFFER`, 64 KiB) has
-less room than that. The return value is discarded, so those bytes are gone: the
-client was never told, the pipe has already given them up, and the stream the
-peer receives is short in the middle with nothing anywhere saying so.
+`write_nonblock` answers **how many bytes it took**, and it takes fewer than it
+was offered when the pipe is short of room. The return value is discarded, so
+those bytes are gone: `recv_slice` has already consumed them from the socket,
+the client is never told, and the stream it reads is short in the middle with
+nothing anywhere saying so. A client slower than the wire is exactly when it
+fires.
 
-The read direction has the same shape one line above — `write_nonblock` into the
-client's rx pipe, return value discarded — so a full pipe silently truncates what
-arrived off the wire too.
+The send direction had the same shape and no longer does: it now takes out of
+the pipe only what the socket has room for, so nothing is consumed from one side
+without landing on the other. The same answer does not fit here yet — it needs
+the pipe's remaining room, which no syscall answers today.
 
-Found while building `logd`'s record stream (`tests/common/logstream.rs`), whose
-whole oracle is that what a listener received is the guest's own log file line
-for line. It did not fire there: `logd` offers at most a batch at a time and the
-64 KiB send buffer was never short of room on the arms that were run
-(`log_stream`, 230 lines; `log_stream_e1000e`, 232). A client that writes in
-larger units than netd's buffer would see it immediately.
-
-The fix is to send what the socket took and keep the rest — the pipe is where
-the rest belongs, and `can_send` is not the same question as "will take all of
-this".
+Reproduced on the send side by `tests/common/logstream.rs`'s
+`log_stream_stalled_peer_wide_storm`: against a peer that had stopped reading,
+a record arrived cut in half with the next record's line beginning inside it.
+That arm is the reproduction to point this half at once the room is askable.
