@@ -8,8 +8,10 @@
 //!
 //! ```text
 //! toyos_ssh keygen  <private> <public>           → ok
-//! toyos_ssh auth    <host> <port> <key>          → authenticated
+//! toyos_ssh auth    <host> <port> <key>          → signed <yes|no>, then
+//!                                                  authenticated
 //!                                                | refused offering <methods>
+//!                                                | asked to sign
 //! toyos_ssh exec    <host> <port> <key> <out> <err> <command…>
 //!                                                → exit <n> | no-exit-status
 //! toyos_ssh feed    <host> <port> <key> <out> <err> <stdin> <command…>
@@ -34,7 +36,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use russh::Signer;
 use russh::client::{self, AuthResult, Handle};
+use russh::keys::agent::AgentIdentity;
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect};
@@ -108,26 +112,70 @@ fn keygen(private: &str, public: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Offer the key and report which way it went. Both answers are `Ok` here:
-/// whether a key *should* have been accepted is the caller's question, and this
-/// program's failures are the ones that stopped it from asking.
+/// A signer that refuses to sign and remembers being asked.
+///
+/// **Being asked is the finding.** `authenticate_publickey` sends the key as a
+/// probe with no signature and signs only under `USERAUTH_PK_OK`, so a guest
+/// that turns an unauthorized key away at the offer never reaches this; a
+/// guest that answers `PK_OK` to a stranger does, and there is nothing to do
+/// with that request but record it.
+struct NeverSigns {
+    asked: bool,
+}
+
+/// The one thing that can go wrong here, and the trait's required conversion.
+enum NoSignature {
+    Asked,
+    Send(russh::SendError),
+}
+
+impl From<russh::SendError> for NoSignature {
+    fn from(e: russh::SendError) -> Self {
+        NoSignature::Send(e)
+    }
+}
+
+impl Signer for NeverSigns {
+    type Error = NoSignature;
+
+    #[allow(clippy::manual_async_fn)]
+    fn auth_sign(
+        &mut self,
+        _key: &AgentIdentity,
+        _hash_alg: Option<HashAlg>,
+        _to_sign: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, Self::Error>> + Send {
+        async move {
+            self.asked = true;
+            Err(NoSignature::Asked)
+        }
+    }
+}
+
+/// Offer the key and report which way it went, and whether the guest asked for
+/// a signature before deciding. Both answers are `Ok` here: whether a key
+/// *should* have been accepted is the caller's question, and this program's
+/// failures are the ones that stopped it from asking.
 async fn auth(host: &str, port: &str, key: &str) -> Result<(), String> {
     let (mut session, key) = start(host, port, key).await?;
+    let mut signer = NeverSigns { asked: false };
     let outcome = session
-        .authenticate_publickey(USER, PrivateKeyWithHashAlg::new(Arc::new(key), None))
-        .await
-        .map_err(|e| format!("offering a key: {e}"))?;
+        .authenticate_publickey_with(USER, key.public_key().clone(), None, &mut signer)
+        .await;
+    println!("signed {}", if signer.asked { "yes" } else { "no" });
     // The methods the server still offers after turning this key away are what
     // says a password could never have been guessed at: a server that answered
     // `password` here would be offering a credential.
     match outcome {
-        AuthResult::Success => println!("authenticated"),
-        AuthResult::Failure { remaining_methods, .. } => {
+        Ok(AuthResult::Success) => println!("authenticated"),
+        Ok(AuthResult::Failure { remaining_methods, .. }) => {
             let mut offered: Vec<String> =
                 remaining_methods.iter().map(String::from).collect();
             offered.sort();
             println!("refused offering {}", offered.join(","));
         }
+        Err(NoSignature::Asked) => println!("asked to sign"),
+        Err(NoSignature::Send(e)) => return Err(format!("offering a key: {e}")),
     }
     let _ = session.disconnect(Disconnect::ByApplication, "", "en").await;
     Ok(())

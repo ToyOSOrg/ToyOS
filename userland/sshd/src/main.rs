@@ -496,16 +496,40 @@ impl russh::server::Handler for SshSession {
         Ok(true)
     }
 
-    /// The one authentication this daemon implements, reached after russh has
-    /// verified the signature. `russh` defaults every other auth callback to
-    /// `Reject`, which is why `auth_password` is simply absent.
+    /// The offer: a probe carrying a public key and no signature, which every
+    /// client sends before it signs.
+    ///
+    /// **Refusing here is what makes this daemon fail closed at the earliest
+    /// point the protocol has.** `russh`'s default answers `USERAUTH_PK_OK` to
+    /// every offer, which tells a stranger its key would be taken and asks it
+    /// to sign; a key no file names is turned away before that.
+    async fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        key: &PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        if is_authorized(key) {
+            return Ok(Auth::Accept);
+        }
+        println!(
+            "sshd: refused {user}: {} is authorized by no file, and was not asked to sign",
+            key.fingerprint(HashAlg::Sha256)
+        );
+        Ok(Auth::reject())
+    }
+
+    /// After russh has verified the signature. Checked again rather than
+    /// trusting the offer above to have filtered: a client is free to sign
+    /// without asking first, and that path must reach the same files.
+    /// `russh` defaults every other auth callback to `Reject`, which is why
+    /// `auth_password` is simply absent.
     async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
         let fingerprint = key.fingerprint(HashAlg::Sha256);
         if is_authorized(key) {
             println!("sshd: {user} authenticated with {fingerprint}");
             return Ok(Auth::Accept);
         }
-        println!("sshd: refused {user}: {fingerprint} is authorized by no file");
+        println!("sshd: refused {user}: {fingerprint} signed, and is authorized by no file");
         Ok(Auth::reject())
     }
 

@@ -213,25 +213,42 @@ pub fn ssh_list(
         .collect())
 }
 
-/// Offer this key and expect the guest to turn it away.
-///
-/// `Ok` is the comma-separated list of methods the guest *still* offers after
-/// the refusal — the answer to "what could a client guess at instead", and the
-/// only place the daemon's `MethodSet` is visible from outside it. An error is
-/// the finding: either the connection did not happen at all — which says
-/// nothing about authentication — or the guest let in a key no file names.
-pub fn ssh_refused(host: &str, port: u16, identity: &Identity) -> Result<String, String> {
+/// What offering an unauthorized key came back with.
+pub struct Refusal {
+    /// Whether the guest answered the offer with `USERAUTH_PK_OK` — asking a
+    /// stranger to sign, rather than refusing at the probe.
+    pub asked_to_sign: bool,
+    /// The comma-separated methods the guest *still* offers after the refusal:
+    /// the answer to "what could a client guess at instead", and the only
+    /// place the daemon's `MethodSet` is visible from outside it.
+    pub methods: String,
+}
+
+/// Offer this key and expect the guest to turn it away. An error is the
+/// finding: either the connection did not happen at all — which says nothing
+/// about authentication — or the guest let in a key no file names.
+pub fn ssh_refused(host: &str, port: u16, identity: &Identity) -> Result<Refusal, String> {
     let port = port.to_string();
     let said = client(&["auth", host, &port, str(&identity.private)])?;
-    match said.trim() {
-        "authenticated" => Err(format!(
-            "{host}:{port} authenticated a key no authorized_keys file on it names"
-        )),
+    let asked_to_sign = match said.lines().find_map(|l| l.strip_prefix("signed ")) {
+        Some("yes") => true,
+        Some("no") => false,
+        other => return Err(format!("the client said {other:?} about signing")),
+    };
+    let last = said.lines().last().unwrap_or("").trim();
+    let methods = match last {
+        "authenticated" => {
+            return Err(format!(
+                "{host}:{port} authenticated a key no authorized_keys file on it names"
+            ));
+        }
+        "asked to sign" => String::new(),
         line => match line.strip_prefix("refused offering ") {
-            Some(methods) => Ok(methods.to_string()),
-            None => Err(format!("the client answered {line:?}")),
+            Some(methods) => methods.to_string(),
+            None => return Err(format!("the client answered {line:?}")),
         },
-    }
+    };
+    Ok(Refusal { asked_to_sign, methods })
 }
 
 /// Run the client and hand back what it said, or the reason it could not say
@@ -514,22 +531,34 @@ pub fn key_auth_gate(guest: &mut super::qemu::QemuInstance) -> Result<(), String
     // The negative arm. A second connection, a well-formed offer, and a key no
     // file on the machine names.
     //
-    // What it still offers after the refusal is the second half: the daemon
-    // narrows russh's `MethodSet` to public keys alone, and a machine that
+    // **It is refused at the probe.** A public-key exchange is an offer with no
+    // signature and then, only under `USERAUTH_PK_OK`, a signature; a machine
+    // that answers `PK_OK` to a stranger has told it the key would be taken and
+    // asked it to prove it holds it. The client here cannot sign, so being
+    // asked at all is the finding.
+    //
+    // What the machine still offers after the refusal is the other half: the
+    // daemon narrows russh's `MethodSet` to public keys alone, and one that
     // offered `password` or `keyboard-interactive` here would be offering a
     // credential to guess at. This is the only place that narrowing is visible
     // from outside the daemon.
-    let offered = ssh_refused(HOST, port, &stranger)?;
-    if offered != "publickey" {
+    let refusal = ssh_refused(HOST, port, &stranger)?;
+    if refusal.asked_to_sign {
+        return Err("the machine asked a key no file names to sign, so it answered PK_OK to a \
+                    stranger's offer instead of refusing it"
+            .to_string());
+    }
+    if refusal.methods != "publickey" {
         return Err(format!(
-            "after refusing a key the machine still offers {offered:?}, not publickey alone"
+            "after refusing a key the machine still offers {:?}, not publickey alone",
+            refusal.methods
         ));
     }
     super::qemu::await_marker(
         guest,
         &mut console,
-        &format!("{} is authorized by no file", stranger.fingerprint()),
-        "sshd to name the key it refused",
+        &format!("{} is authorized by no file, and was not asked to sign", stranger.fingerprint()),
+        "sshd to name the key it refused at the offer",
     )
     .map_err(|e| format!("sshd refused a key without saying which: {e}\n{console}"))?;
 
@@ -549,10 +578,11 @@ pub fn key_auth_gate(guest: &mut super::qemu::QemuInstance) -> Result<(), String
     .map_err(|e| format!("sshd accepted a key without saying which: {e}\n{console}"))?;
 
     eprintln!(
-        "  [sshd] {} accepted and {} refused, each named on the console, and {offered} \
-         the only method left to try",
+        "  [sshd] {} accepted and {} refused at the offer without being asked to sign, each \
+         named on the console, and {} the only method left to try",
         identity.fingerprint(),
-        stranger.fingerprint()
+        stranger.fingerprint(),
+        refusal.methods
     );
     Ok(())
 }

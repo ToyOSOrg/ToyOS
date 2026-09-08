@@ -1,6 +1,3 @@
-# Its own crate and its own lockfile: `russh 0.60` resolves against the
-# RustCrypto release candidates, and the host workspace resolves the stable
-# line, so the two cannot share one resolution.
 [package]
 name = "ssh-client-host"
 version = "0.1.0"
