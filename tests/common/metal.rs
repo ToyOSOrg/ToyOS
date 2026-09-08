@@ -225,6 +225,15 @@ pub struct Readback {
     /// boot in this suite is that boot, so the separation is read rather than
     /// assumed.
     pub ping_secs: Option<u64>,
+    /// When that reply came, on the host's clock, in seconds since the epoch.
+    ///
+    /// **What says which operating system answered.** Run 31 measured a reply
+    /// 57 s into the window on a boot whose claim had been refused and whose
+    /// netd never held the card: the machine's own wire came back two seconds
+    /// ahead of its `sshd`. So the window holds both operating systems, and
+    /// the only thing that separates them is this against the wall clocks the
+    /// boot's own records carry.
+    pub ping_at: Option<u64>,
 }
 
 impl Readback {
@@ -732,6 +741,7 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         ping_addr,
         wire_mac,
         ping_secs: toyos_build::metal::ping_secs(&boot),
+        ping_at: toyos_build::metal::ping_at(&boot),
     })
 }
 

@@ -616,13 +616,14 @@ ceiling_from = "as boot.testcases.stick_secs"
 # about the boot rather than about the claim, so the readings stand; the two
 # `lan.` rows have none, because netd never came up on either.
 #
-# `ping_secs` has none, and its ceiling is what run 30 changed. The control boot
-# pinged 192.168.1.46 once a second for its whole 61-second window and got
-# nothing: the machine's wire answers no earlier than its ssh, and the loop
-# stops pinging when ssh answers. So the number this row will hold is not
-# "earlier than Ubuntu" — it is "at all", because on this machine nothing
-# answers at that address unless the boot brings it up. The ceiling still waits
-# on a green reading to be tightened to.
+# `ping_secs` has none, and it is no longer the judge. Run 30's window was dark
+# and this file said so: "a reply anywhere in the window is the boot's". Run 31
+# answered at 57 s on a boot whose claim was refused and whose netd never held
+# the card — the machine's own wire came back two seconds ahead of its sshd, and
+# the loop stops probing when sshd answers. One sample was not a judge. What
+# identifies the boot's reply is its wall clock against the boot's own records
+# (`lan::the_boot_answered`); this row prices the cost of a reply and nothing
+# else.
 
 [[number]]
 name = "boot.lancase.complete_ms"
@@ -649,7 +650,7 @@ measured = 0
 name = "boot.lancase.ping_secs"
 unit = "s"
 ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs — the window this is measured in is the loop's own wait for the machine to answer ssh again, and nothing narrower has been read yet. Run 30 is the control it rests on: a boot with no network of its own, pinged once a second at 192.168.1.46 for the whole 61-second window, answered nothing at all — so a reply anywhere in the window is the boot's and not the machine's. A green reading is what tightens this to the span a boot is actually up for"
+ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, and nothing narrower has been read. It is a cost and not a verdict: run 31 answered at 57 s from the operating system *after* the boot, so no ceiling on this number could have told the two apart, and what does is the wall-clock bracket in `lan::the_boot_answered`. A green reading tightens this to what a boot that answers actually costs"
 
 [[number]]
 name = "list.lancase.job_ms"

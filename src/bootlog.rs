@@ -226,6 +226,42 @@ pub fn record_millis(line: &str) -> Option<u64> {
     secs.checked_mul(1_000)?.checked_add(millis)
 }
 
+/// The UTC second one record line carries, as seconds since the epoch.
+///
+/// **The only field in a log a host clock can be held against.** Everything
+/// else a record says is measured from this boot's own start, and a host that
+/// wants to know whether something it saw happened *while this boot was up* has
+/// nothing to compare that with. `logd` writes the wall clock; the panel writes
+/// none, and this answers `None` for those lines rather than reading the
+/// milliseconds field as a date.
+pub fn record_unix_secs(line: &str) -> Option<u64> {
+    const EPOCH: &str = "1970-01-01";
+    let mut fields = line.strip_prefix('[')?.split_whitespace();
+    let day = crate::day::Day::parse(fields.next()?)?;
+    let days = crate::day::Day::parse(EPOCH).expect("the epoch is a date").until(day);
+    let (hours, rest) = fields.next()?.split_once(':')?;
+    let (minutes, seconds) = rest.split_once(':')?;
+    let (hours, minutes, seconds): (i64, i64, i64) =
+        (hours.parse().ok()?, minutes.parse().ok()?, seconds.parse().ok()?);
+    // A leap second is the one value past the ordinary range that is a time.
+    if !(0..24).contains(&hours) || !(0..60).contains(&minutes) || !(0..=60).contains(&seconds) {
+        return None;
+    }
+    u64::try_from(days * 86_400 + hours * 3_600 + minutes * 60 + seconds).ok()
+}
+
+/// The first and last wall clocks in `log`: the span in which this boot was the
+/// machine.
+///
+/// **A boot's own clock cannot say this and a host's cannot either.** The
+/// records are the only place the two meet, which is what makes them the
+/// bracket a host-side observation is judged against.
+pub fn record_unix_span(log: &str) -> Option<(u64, u64)> {
+    let first = log.lines().find_map(record_unix_secs)?;
+    let last = log.lines().rev().find_map(record_unix_secs)?;
+    Some((first, last))
+}
+
 /// When the last record in `log` was written, in milliseconds since boot.
 pub fn last_record_millis(log: &str) -> Option<u64> {
     log.lines().rev().find_map(record_millis)
@@ -431,5 +467,36 @@ mod record_time_tests {
         let log = "[1.000 cpu0] first\n[2.500 cpu1] second\nnot a record\n";
         assert_eq!(last_record_millis(log), Some(2_500));
         assert_eq!(last_record_millis("nothing\n"), None);
+    }
+
+    /// **The wall clock, which is the only field a host clock can be held
+    /// against.** The lines are `logd`'s own, off the T14's run 31: the boot
+    /// started at 16:08:21 UTC and handed the machine back twenty-three seconds
+    /// later, and a ping the host saw at 16:09:18 was therefore the operating
+    /// system after it, however early in the loop's own window it fell.
+    #[test]
+    fn a_records_wall_clock_brackets_the_boot() {
+        let log = concat!(
+            "[2026-09-08 16:08:21 0.000 cpu0 boot] boot: memory map\n",
+            "[2026-09-08 16:08:22 1.257 cpu0] Boot: complete (1257ms)\n",
+            "[2026-09-08 16:08:44 22.990 cpu1] Rebooting.\n",
+        );
+        let (first, last) = record_unix_span(log).expect("a span");
+        assert_eq!(last - first, 23);
+        assert_eq!(record_unix_secs("[2026-09-08 16:08:21 0.000 cpu0 boot] x"), Some(first));
+        // 16:09:18, which is 57 s into a window that opened before the boot did.
+        assert!(first + 57 > last, "the reply this judge has to reject is outside the bracket");
+    }
+
+    /// The panel writes no wall clock, and its milliseconds field must not be
+    /// read as one: `[1.000 cpu0]` would otherwise parse `1.000` as a date and
+    /// answer some second in 1970.
+    #[test]
+    fn a_line_with_no_wall_clock_answers_none() {
+        assert_eq!(record_unix_secs("[1.000 cpu0] first"), None);
+        assert_eq!(record_unix_secs("not a record"), None);
+        assert_eq!(record_unix_secs("[2026-09-08 25:00:00 0.000 cpu0] x"), None);
+        assert_eq!(record_unix_secs("[2026-02-31 10:00:00 0.000 cpu0] x"), None);
+        assert_eq!(record_unix_span("[1.000 cpu0] first\n"), None);
     }
 }

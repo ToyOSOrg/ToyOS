@@ -18,6 +18,7 @@
 
 use std::path::Path;
 
+use toyos_build::bootlog;
 use toyos_build::metalprofile::Profile;
 
 use super::metal;
@@ -115,6 +116,78 @@ pub fn link_up_ms(text: &str) -> Result<u64, String> {
         .map_err(|_| format!("{line:?} carries no readable link-up time"))
 }
 
+/// Whether the reply the host saw came from *this boot*, held against the wall
+/// clocks the boot's own records carry.
+///
+/// **How far into the window a reply came is not a judge, and one run proved
+/// it.** Run 30's window was dark and the row's ceiling was written on that one
+/// sample — "a reply anywhere in the window is the boot's". Run 31 answered at
+/// 57 s on a boot whose claim had been refused and whose netd never held the
+/// card: the machine's own wire came back two seconds ahead of its `sshd`, and
+/// the loop stops probing when `sshd` answers, so that reply was inside the
+/// window and inside the ceiling and belonged to the operating system after the
+/// boot.
+///
+/// What separates them is time against the boot's own timeline. `logd` writes a
+/// wall clock on every record, the loop writes one beside the reply, and both
+/// are UTC — the T14's clock is Ubuntu's, set from the network, and the host's
+/// is NTP's. So:
+///
+/// - the reply is inside the span this boot's first and last records bracket,
+///   whose end is the `Rebooting.` record: anything after that is the next
+///   operating system, whatever its timing; and
+/// - it is at or after the lease record, because a machine with no address
+///   answers nothing at that address.
+///
+/// The bracket is tens of seconds wide and the two clocks are within a second
+/// of each other, which is what makes comparing them admissible at all; a
+/// machine whose clocks drifted further would show it here as a near miss.
+fn the_boot_answered(back: &metal::Readback, at: u64) -> Result<(), String> {
+    let kernel = back.kernel();
+    let text = kernel.text();
+    let (first, last) = bootlog::record_unix_span(text).ok_or_else(|| {
+        format!(
+            "{}'s log carries no record with a wall clock on it, so there is nothing to hold \
+             the host's own clock against",
+            back.label
+        )
+    })?;
+    let rebooting = text
+        .lines()
+        .rfind(|l| l.contains(bootlog::REBOOTING))
+        .and_then(bootlog::record_unix_secs)
+        .unwrap_or(last);
+    if at < first || at > rebooting {
+        return Err(format!(
+            "the reply at {at} is outside the span this boot's own records bracket \
+             ({first}..{rebooting}, {} s wide): it came {} s {} the boot, so it is the \
+             operating system on the other side of it and not this one",
+            rebooting.saturating_sub(first),
+            if at < first { first - at } else { at - rebooting },
+            if at < first { "before" } else { "after" },
+        ));
+    }
+    let leased = text
+        .lines()
+        .find(|l| l.contains(LEASE))
+        .and_then(bootlog::record_unix_secs)
+        .ok_or_else(|| format!("{}'s lease record carries no wall clock", back.label))?;
+    if at < leased {
+        return Err(format!(
+            "the reply at {at} came {} s before this boot's lease at {leased}, and a machine \
+             with no address answers nothing at that address",
+            leased - at
+        ));
+    }
+    eprintln!(
+        "  [lan] the reply landed {} s after the lease and {} s before this boot handed the \
+         machine back",
+        at - leased,
+        rebooting.saturating_sub(at),
+    );
+    Ok(())
+}
+
 /// The T14's judge: the claim, the card, the lease, and the host's own ping.
 ///
 /// **The ping and the lease are held to each other.** The address the host
@@ -193,21 +266,23 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         Err(why) => bad.push(why),
     }
 
-    match back.ping_secs {
-        Some(secs) => {
+    match (back.ping_secs, back.ping_at) {
+        (Some(secs), Some(at)) => {
             eprintln!(
                 "  [lan] {} answered the host's ping {secs} s into the window",
                 back.ping_addr
             );
-            // Judged here as well as by the boot loop, because this is the arm
-            // that *claims* the number: a ceiling nobody wrote is what tells
-            // Ubuntu's reply on its way back up from this boot's, and the
-            // profile refuses an unpriced name rather than passing it.
+            // The cost of the reply, priced. It is not what says the reply was
+            // this boot's — `the_boot_answered` is — but a boot that answers
+            // far later than the last one is a boot something changed under.
             if let Err(why) = profile.judge(&format!("boot.{}.ping_secs", back.label), secs) {
                 bad.push(why.to_string());
             }
+            if let Err(why) = the_boot_answered(back, at) {
+                bad.push(why);
+            }
         }
-        None => bad.push(format!(
+        _ => bad.push(format!(
             "nothing answered a ping at {} while this machine was between its two operating \
              systems",
             back.ping_addr

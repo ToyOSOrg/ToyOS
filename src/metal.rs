@@ -1025,8 +1025,27 @@ fn brief_address(iface: &str, text: &str) -> Result<std::net::Ipv4Addr, String> 
 /// It runs on a thread because the loop is inside `ssh` for whole seconds at a
 /// time waiting for the machine to answer again, and a boot that is up for
 /// twenty of them cannot be sampled between those.
+/// The first reply after the silence: how far into the window it came, and
+/// when it came on this host's clock.
+///
+/// **The wall clock is the half that identifies it.** How far into the window a
+/// reply came says nothing about which operating system sent it — measured on
+/// the T14, a reply 57 s in was the machine's wire returning two seconds ahead
+/// of its own `sshd`, on a boot whose claim had been refused and whose netd
+/// never held the card. What settles it is whether the reply falls inside the
+/// span the boot's own records bracket, and only a wall clock can be held
+/// against those.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reply {
+    pub secs: u64,
+    /// Seconds since the epoch, UTC, taken when the probe answered. The probe
+    /// waits up to a second for its reply, so this is late by at most that —
+    /// against a bracket tens of seconds wide.
+    pub at: u64,
+}
+
 struct Ping {
-    first: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+    first: std::sync::Arc<std::sync::Mutex<Option<Reply>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: std::thread::JoinHandle<()>,
 }
@@ -1050,8 +1069,10 @@ impl Ping {
                         // operating system that is going down, whose `sshd`
                         // stops before its interface does.
                         if quiet_since.is_some_and(|at| at.elapsed() >= silence) {
-                            *mine.lock().expect("the ping's answer") =
-                                Some(began.elapsed().as_secs());
+                            *mine.lock().expect("the ping's answer") = Some(Reply {
+                                secs: began.elapsed().as_secs(),
+                                at: unix_now(),
+                            });
                             return;
                         }
                         quiet_since = None;
@@ -1065,13 +1086,27 @@ impl Ping {
         Self { first, stop, thread }
     }
 
-    /// Stop probing, and answer when the first reply after the silence came.
-    fn end(self) -> Option<u64> {
+    /// Stop probing, and answer what the first reply after the silence was.
+    fn end(self) -> Option<Reply> {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.thread.join();
         let answer = *self.first.lock().expect("the ping's answer");
         answer
     }
+}
+
+/// This host's clock, as seconds since the epoch in UTC.
+///
+/// The T14's own clock is Ubuntu's, set from the network; this host's is NTP's.
+/// The bracket a reply is judged against is tens of seconds wide, which is what
+/// makes holding the one clock against the other admissible at all — and a
+/// machine whose two disagreed by more than that would show it as a reply just
+/// outside the bracket rather than as a mystery.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a host clock before 1970 is a host to fix")
+        .as_secs()
 }
 
 /// One probe, whose whole answer is whether the address replied.
@@ -1286,7 +1321,7 @@ impl Driver {
         &self,
         secs: u64,
         addr: std::net::Ipv4Addr,
-    ) -> Result<(u64, Option<u64>), Refusal> {
+    ) -> Result<(u64, Option<Reply>), Refusal> {
         self.wait(GOING_DOWN_SECS, "go down", false)?;
         let ping = Ping::start(addr);
         let back = self.wait(secs, "come back", true);
@@ -1698,10 +1733,14 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let (back, pinged) = driver.ride_the_reboot(args.wait_secs, wire.addr)?;
     println!("the machine answered ssh again after {back} s");
     match pinged {
-        Some(secs) => println!(
-            "{} answered a ping {secs} s into the window, after {PING_SILENCE_SECS} s of \
-             silence — so something on this cable was up while Ubuntu was not",
-            wire.addr
+        // **Something, and which something is not this loop's to say.** The
+        // machine's own wire comes back before its `sshd` does, so a reply in
+        // this window may be either operating system; the wall clock beside it
+        // is what a judge holds against the boot's own records.
+        Some(reply) => println!(
+            "{} answered a ping {} s into the window, after {PING_SILENCE_SECS} s of \
+             silence, at {} UTC seconds",
+            wire.addr, reply.secs, reply.at
         ),
         None => println!("nothing answered a ping at {} while the machine was down", wire.addr),
     }
@@ -1867,6 +1906,15 @@ pub const PING_ADDR_KEY: &str = "ping_addr";
 pub const PING_SECS_KEY: &str = "ping_secs";
 pub const WIRE_MAC_KEY: &str = "wire_mac";
 
+/// When the reply came, in seconds since the epoch on this host's clock.
+///
+/// **The key that says which operating system answered.** Every other number
+/// here is measured from the window's own start, and the window holds both of
+/// the machine's operating systems — the T14 answered 57 s in on a boot whose
+/// claim had been refused, two seconds before its own `sshd` came back. A judge
+/// holds this against the wall clocks the boot's own records carry.
+pub const PING_AT_KEY: &str = "ping_at";
+
 /// Every file a readback directory carries, so a run that writes none of them
 /// leaves none of the last run's behind.
 pub const READBACK_FILES: &[&str] =
@@ -1904,7 +1952,7 @@ fn write_readback(
     back: u64,
     stick: u64,
     wire: &Wire,
-    pinged: Option<u64>,
+    pinged: Option<Reply>,
 ) -> Result<(), Refusal> {
     let wrote = |path: &Path, text: &str| -> Result<(), Refusal> {
         std::fs::write(path, text)
@@ -1921,8 +1969,9 @@ fn write_readback(
         "{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n{PING_ADDR_KEY} {}\n{WIRE_MAC_KEY} {}\n",
         wire.addr, wire.mac
     );
-    if let Some(secs) = pinged {
-        boot.push_str(&format!("{PING_SECS_KEY} {secs}\n"));
+    if let Some(reply) = pinged {
+        boot.push_str(&format!("{PING_SECS_KEY} {}\n", reply.secs));
+        boot.push_str(&format!("{PING_AT_KEY} {}\n", reply.at));
     }
     wrote(&dir.join(READBACK_BOOT), &boot)
 }
@@ -1975,6 +2024,11 @@ pub fn stick_secs(text: &str) -> Option<u64> {
 /// address first answered a ping, or `None` where nothing did.
 pub fn ping_secs(text: &str) -> Option<u64> {
     key(text, PING_SECS_KEY)
+}
+
+/// When that reply came, on this host's clock. `None` where nothing answered.
+pub fn ping_at(text: &str) -> Option<u64> {
+    key(text, PING_AT_KEY)
 }
 
 /// The address that was pinged. Absent only from a readback written before this
@@ -2211,18 +2265,23 @@ mod tests {
     #[test]
     fn a_ping_nothing_answered_is_written_as_no_answer() {
         let answered = "back_secs 61\nstick_secs 2\nping_addr 192.168.1.46\n\
-                        wire_mac 8c:8c:aa:bb:cc:dd\nping_secs 17\n";
+                        wire_mac 8c:8c:aa:bb:cc:dd\nping_secs 17\nping_at 1757347715\n";
         let silent = "back_secs 46\nstick_secs 2\nping_addr 192.168.1.46\n\
                       wire_mac 8c:8c:aa:bb:cc:dd\n";
         assert_eq!(ping_addr(answered).as_deref(), Some("192.168.1.46"));
         assert_eq!(wire_mac(answered).as_deref(), Some("8c:8c:aa:bb:cc:dd"));
         assert_eq!(ping_secs(answered), Some(17));
+        assert_eq!(ping_at(answered), Some(1_757_347_715));
+        // A window nothing answered carries neither number: a reply has a time
+        // or it did not happen.
+        assert_eq!(ping_at(silent), None);
         assert_eq!(ping_addr(silent).as_deref(), Some("192.168.1.46"));
         assert_eq!(ping_secs(silent), None);
         assert_eq!(ping_addr("back_secs 46\n"), None);
         // The two ping keys share a prefix, and neither may be read off the
         // other's line.
         assert_eq!(ping_secs("ping_addr 192.168.1.46\n"), None);
+        assert_eq!(ping_at("ping_addr 192.168.1.46\n"), None);
         assert_eq!(back_secs(answered), Some(61));
         assert_eq!(stick_secs(answered), Some(2));
     }
