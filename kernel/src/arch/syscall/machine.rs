@@ -61,6 +61,7 @@ fn quiesce(last: &str) {
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
     crate::drivers::nvme::log_census();
+    crate::drivers::panic_console::log_census();
     // Above the boot's last word, because these are ordinary records and the
     // volume that carries them is still there: every USB disk's write cache is
     // emptied and waited for before anything is taken down.

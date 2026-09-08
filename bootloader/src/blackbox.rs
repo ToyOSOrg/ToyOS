@@ -29,6 +29,12 @@ pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
 /// The head of every line this module writes about the page itself.
 pub const HEAD: &str = "Black box:";
 
+/// What the console gets in place of the record's tail, with the count of what
+/// it did not get. A reader of the screen is told where the rest is; a reader
+/// of the file has it under this line.
+pub const TAIL_IN_THE_FILE: &str =
+    "Black box: that record's log ring is in loader.log, not on a console the firmware scrolls:";
+
 /// The page, once claimed. `None` is a boot with no black box at all, which is
 /// a machine and not a failure: it boots the kernel and leaves nothing behind.
 #[derive(Clone, Copy)]
@@ -66,9 +72,41 @@ pub fn claim(system_table: &SystemTable<Boot>) -> (Option<Page>, Option<String>)
 /// should hand the machine back to the firmware instead of booting a kernel.
 pub struct Finding {
     pub lines: Vec<String>,
+    /// The record's tail: the log ring the last boot did not drain. It goes to
+    /// `loader.log` and not to the firmware's console — see [`tail`].
+    pub filed: Vec<String>,
     /// True where the chain ends here: the last boot has been accounted for, so
     /// booting the kernel again would start the same loop over.
     pub ends_the_chain: bool,
+}
+
+/// Split a record's text into what a person at the machine reads and what only
+/// the file carries.
+///
+/// **The firmware's text console scrolls by moving the whole frame.** On the
+/// T14's 1080p panel that is about three lines a second, so a hundred and
+/// eighty lines of log ring is a minute of the machine spent redrawing what the
+/// file already holds, at a rate nobody can read — measured as 60-70 s of the
+/// turnaround of every wedge boot on that bench. A line that opens a log record
+/// (`toyos_blackbox::RECORD_OPENS_WITH`, the same declaration the kernel cuts
+/// the page on) is tail; every other line — why the boot ended, what was
+/// dropped, a fault's registers — is the head, and the head is what the screen
+/// gets, with the count of what it does not.
+fn tail(text: &[u8], lines: &mut Vec<String>, filed: &mut Vec<String>) {
+    for line in text.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let written = alloc::format!("| {}", Ascii(line));
+        if line.starts_with(toyos_blackbox::RECORD_OPENS_WITH) {
+            filed.push(written);
+        } else {
+            lines.push(written);
+        }
+    }
+    if !filed.is_empty() {
+        lines.push(alloc::format!("{TAIL_IN_THE_FILE} {} record(s)", filed.len()));
+    }
 }
 
 /// Read the page, clear it, and say what it held.
@@ -115,15 +153,12 @@ pub fn harvest(
         );
     }
     let mut lines = Vec::new();
+    let mut filed = Vec::new();
     lines.push(when(stamp));
     match state {
         State::Panic => {
             lines.push(alloc::format!("{PREVIOUS_PANIC} {} bytes off {PHYS:#x}", text.len()));
-            for line in text.split(|byte| *byte == b'\n') {
-                if !line.is_empty() {
-                    lines.push(alloc::format!("| {}", Ascii(line)));
-                }
-            }
+            tail(text, &mut lines, &mut filed);
         }
         State::Done => {
             lines.push(alloc::format!(
@@ -134,11 +169,7 @@ pub fn harvest(
             // What that boot's shutdown did after its log volume's last durable
             // byte. It reaches no file — the volume is one of the devices being
             // taken down — so this pass is its only reader.
-            for line in text.split(|byte| *byte == b'\n') {
-                if !line.is_empty() {
-                    lines.push(alloc::format!("| {}", Ascii(line)));
-                }
-            }
+            tail(text, &mut lines, &mut filed);
         }
         // The kernel ended itself on a bound of its own: nothing failed an
         // assertion, so the text is why and the tail of a log ring nobody was
@@ -152,11 +183,7 @@ pub fn harvest(
                  chain ends here",
                 state.named()
             ));
-            for line in text.split(|byte| *byte == b'\n') {
-                if !line.is_empty() {
-                    lines.push(alloc::format!("| {}", Ascii(line)));
-                }
-            }
+            tail(text, &mut lines, &mut filed);
         }
         // The one finding an absence makes: the loader armed it, and nothing in
         // that kernel — not even its exception entry — reached the page.
@@ -189,7 +216,7 @@ pub fn harvest(
              the boot after this one will report the crash above a second time"
         ));
     }
-    (Some(Finding { lines, ends_the_chain: true }), None)
+    (Some(Finding { lines, filed, ends_the_chain: true }), None)
 }
 
 /// When the boot this record came from was armed, as the loader stamped it.

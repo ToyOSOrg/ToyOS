@@ -274,6 +274,8 @@ pub fn probe_due() -> bool {
 /// drawing on it — a claimer that returns mid-paint composes over glyphs a damage-tracked client never knows are there.
 pub fn screen_claimed_by_userland() {
     SCREEN_OWNED_BY_USERLAND.store(true, Ordering::SeqCst);
+    // Whatever the claimant composes is not this module's grid.
+    forget_the_glass();
     #[cfg(feature = "boot-actuators")]
     CLAIMED_AT.store(crate::clock::nanos_since_boot().max(1), Ordering::Relaxed);
     // Bounded so a CPU that died mid-paint cannot take the display down with it.
@@ -298,6 +300,9 @@ static RAW_SIZE: AtomicU64 = AtomicU64::new(0);
 
 /// Boot-time and `set_resolution`-window only: publishers never race, so the load-then-store of `SEQ` needs no CAS.
 fn publish(fb: Fb) {
+    // A descriptor nothing has painted through yet, so nothing is known about
+    // what its pixels hold.
+    forget_the_glass();
     let seq = SEQ.load(Ordering::Relaxed);
     SEQ.store(seq.wrapping_add(1), Ordering::Relaxed);
     // The release fence orders the descriptor store between the odd and even markers; a release RMW alone would not.
@@ -432,6 +437,16 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     RAW_PHYS.store(args.gop_framebuffer, Ordering::Relaxed);
     RAW_SIZE.store(args.gop_framebuffer_size, Ordering::Relaxed);
 
+    // **Before the first paint, which is this function's own record.** The
+    // loader hands the scanout over uncacheable, and a whole-screen paint
+    // through those bits is 443 ms on the T14 against about 2 ms through
+    // write-combining; `pat::init` runs before this function so that there is
+    // an entry to point them at.
+    let combining = mm::paging::boot_map_write_combining(
+        args.gop_framebuffer,
+        align_2m(args.gop_framebuffer_size as usize) as u64,
+    );
+
     publish(fb);
     EARLY.store(true, Ordering::Relaxed);
     // **The panel is taken before the memory map is read, and this record is
@@ -442,8 +457,17 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     // twice into a scanout the check may yet call PMM-owned RAM costs nothing:
     // the PMM does not exist until `mm::init`, hundreds of statements later.
     log!(
-        "panic console: armed {}x{} stride={} format={} at {:#x}",
-        fb.width, fb.height, fb.stride_px, fb.format, args.gop_framebuffer
+        "panic console: armed {}x{} stride={} format={} at {:#x}, {}",
+        fb.width,
+        fb.height,
+        fb.stride_px,
+        fb.format,
+        args.gop_framebuffer,
+        if combining {
+            "write-combining"
+        } else {
+            "through the mapping the loader left, which no paint here can make cheap"
+        }
     );
 
     if let Some(uefi_type) =
@@ -556,8 +580,9 @@ fn live_tail() -> View<'static> {
 // INVARIANT: render and everything it calls takes no lock, allocates
 // nothing, uses no `&dyn`/unwrap/expect/[], and only checked/saturating
 // arithmetic. Every framebuffer write is clamped to the published byte
-// count. Stack budget is 256 bytes plus the one wrap array; the double
-// fault path runs on IST1, 16384 bytes, already partly consumed.
+// count. Stack budget is 256 bytes plus the wrap array and one row of cells,
+// 1408 bytes together; the double fault path runs on IST1, 16384 bytes,
+// already partly consumed.
 
 /// What a fatal path paints: the captured report, or the live ring for a
 /// path that reached `halt_all_cpus` without the panic handler. Idempotent
@@ -576,6 +601,10 @@ pub fn render() -> bool {
     if PAINTING.swap(true, Ordering::SeqCst) {
         return false;
     }
+    // The screen is taken back unconditionally here, from a desktop as
+    // readily as from a boot checkpoint, so what is on it is not this
+    // module's to believe.
+    forget_the_glass();
     let text = fatal_text();
     // Before the paint, from the same view the panel gets: a fault inside the
     // painter then costs the screen and not the copy the next boot reads.
@@ -594,12 +623,14 @@ pub fn render() -> bool {
 ///
 /// The live shards and not the capture: what this record is for is the records
 /// that never reached the log file, which are the newest ones.
+/// The census rides the page because a boot a bound ends reaches no log file:
+/// `logd` is one of the things the wedge stopped.
 pub fn seal_wedge(said: core::fmt::Arguments) {
     if PAINTING.swap(true, Ordering::SeqCst) {
-        crate::blackbox::record_wedge(said, &[]);
+        crate::blackbox::record_wedge(format_args!("{said}{Census}\n"), &[]);
         return;
     }
-    crate::blackbox::record_wedge(said, live_tail().text);
+    crate::blackbox::record_wedge(format_args!("{said}{Census}\n"), live_tail().text);
 }
 
 /// Cycle the report across the screen until the machine is switched off, or
@@ -805,6 +836,9 @@ pub fn hold_report() {
         return;
     }
     log!("panic console: the panel was drawn over, putting the report back");
+    // The probes say another writer reached the glass, so every cell of it is
+    // suspect and not only the ones a probe caught.
+    forget_the_glass();
     paint_held_report();
 }
 
@@ -926,14 +960,149 @@ static PROBE_AT: [AtomicU32; PROBES] = [const { AtomicU32::new(0) }; PROBES];
 static PROBE_PX: [AtomicU32; PROBES] = [const { AtomicU32::new(0) }; PROBES];
 static PROBE_N: AtomicUsize = AtomicUsize::new(0);
 
+/// One grid position as the panel left it: the character drawn there and
+/// whether it was drawn in the alert colour.
+///
+/// Zero is ground and no character — an unpainted panel, and what a row is
+/// padded with past the end of its text — so the grid is `.bss` and costs the
+/// kernel image nothing. The character is [`glyph_char`]'s answer and not the
+/// byte that asked for it, so two bytes the font draws alike are one cell.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Cell(u16);
+
+impl Cell {
+    const GROUND: Cell = Cell(0);
+    const ALERT: u16 = 1 << 8;
+
+    fn of(byte: u8, alert: bool) -> Self {
+        Self(glyph_char(byte) as u16 | if alert { Self::ALERT } else { 0 })
+    }
+
+    /// The character on the glass here, or `None` where the cell is ground.
+    fn character(self) -> Option<u8> {
+        let ch = self.0 as u8;
+        (ch != 0).then_some(ch)
+    }
+
+    fn alert(self) -> bool {
+        self.0 & Self::ALERT != 0
+    }
+}
+
+/// The panel as it stands on the glass.
+///
+/// **This is what keeps the panel's cost proportional to what changed.** The
+/// grid is re-rendered out of this copy in RAM, write-only, so a scroll moves
+/// no pixels through the scanout and a cell that did not move is not written
+/// at all — where clearing the whole scanout for every record cost one whole
+/// framebuffer a record, on a mapping whose stores are not combined.
+struct Glass {
+    cells: [Cell; MAX_COLS * MAX_ROWS],
+    /// What those cells were drawn on and in. A paint that changes any of the
+    /// three has a different screen to write and starts from a fill.
+    ground: u32,
+    cols: usize,
+    rows: usize,
+}
+
+impl Glass {
+    const UNPAINTED: Self =
+        Self { cells: [Cell::GROUND; MAX_COLS * MAX_ROWS], ground: 0, cols: 0, rows: 0 };
+
+    fn holds(&self, ground: u32, cols: usize, rows: usize) -> bool {
+        GLASS_KNOWN.load(Ordering::Relaxed)
+            && self.ground == ground
+            && self.cols == cols
+            && self.rows == rows
+    }
+
+    /// Every cell is the ground a fill just painted.
+    fn reset(&mut self, ground: u32, cols: usize, rows: usize) {
+        self.cells.fill(Cell::GROUND);
+        self.ground = ground;
+        self.cols = cols;
+        self.rows = rows;
+        GLASS_KNOWN.store(true, Ordering::Relaxed);
+    }
+
+    /// Row `r`'s first `cols` cells; `MAX_COLS` is the stride whatever the
+    /// panel's width is, so a resolution change moves no cell.
+    fn row(&mut self, r: usize, cols: usize) -> &mut [Cell] {
+        let at = r * MAX_COLS;
+        self.cells.get_mut(at..at + cols).unwrap_or_default()
+    }
+}
+
+struct GlassCell(UnsafeCell<Glass>);
+// SAFETY: written only under `PAINTING`, which every painter takes; `GLASS_KNOWN` is what a non-painter may touch.
+unsafe impl Sync for GlassCell {}
+
+static GLASS: GlassCell = GlassCell(UnsafeCell::new(Glass::UNPAINTED));
+
+/// Whether [`GLASS`] still describes the panel. Cleared by everything that can
+/// leave something on the glass the panel did not put there — a userland
+/// claimant, a new framebuffer descriptor, a fatal report taking the screen
+/// back — because a stale grid is a cell this module would decline to redraw.
+static GLASS_KNOWN: AtomicBool = AtomicBool::new(false);
+
+fn forget_the_glass() {
+    GLASS_KNOWN.store(false, Ordering::Relaxed);
+}
+
+/// What the panel has cost this boot: how often it painted, how many pixels it
+/// put on the glass, and how long it was inside the painter. Counted in ticks
+/// of the cycle counter and converted once at the census, because the first
+/// paints of every boot happen before there is a clock to measure them with.
+static PAINTS: AtomicU64 = AtomicU64::new(0);
+static PIXELS: AtomicU64 = AtomicU64::new(0);
+static TICKS: AtomicU64 = AtomicU64::new(0);
+static TICKS_MAX: AtomicU64 = AtomicU64::new(0);
+
+/// The head `src/bootlog.rs` reads the census by.
+const CENSUS: &str = "panel: paints=";
+
+/// One line, written to the two channels a boot can end on: [`log_census`] for
+/// a boot that hands the machine back, and [`seal_wedge`] for one a bound ends
+/// with no `logd` left to write a file.
+struct Census;
+
+impl core::fmt::Display for Census {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let micros = |ticks| crate::clock::nanos_of_ticks(ticks) / 1_000;
+        write!(
+            f,
+            "{CENSUS}{} px={} us={} max_us={}",
+            PAINTS.load(Ordering::Relaxed),
+            PIXELS.load(Ordering::Relaxed),
+            micros(TICKS.load(Ordering::Relaxed)),
+            micros(TICKS_MAX.load(Ordering::Relaxed)),
+        )
+    }
+}
+
+/// The panel's own row in the shutdown census, beside `irq:` and `nvme:`.
+pub fn log_census() {
+    log!("{Census}");
+}
+
+/// Charge one paint to the census.
+fn spent(began: u64, pixels: u64) {
+    let ticks = crate::arch::cpu::rdtsc().saturating_sub(began);
+    PAINTS.fetch_add(1, Ordering::Relaxed);
+    PIXELS.fetch_add(pixels, Ordering::Relaxed);
+    TICKS.fetch_add(ticks, Ordering::Relaxed);
+    TICKS_MAX.fetch_max(ticks, Ordering::Relaxed);
+}
+
 fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
     let Some(fb) = snapshot() else { return };
     if !mapped(&fb) {
         return;
     }
     let Some((cols, grid_rows)) = geometry(&fb) else { return };
+    let began = crate::arch::cpu::rdtsc();
+    let mut pixels = 0u64;
     let text = view.text;
-    let len = text.len();
     let (total, pages, per) = pagination(text, cols, grid_rows);
     // `Last` is the newest `per` rows, not page `pages - 1`, so both an even
     // and uneven division fill the screen; the footer's page number therefore
@@ -944,37 +1113,68 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
         Page::Nth(n) => (n.saturating_mul(per).min(newest), (n + 1).min(pages)),
     };
 
-    fill_screen(
-        &fb,
-        match fill {
-            Fill::Fatal => rgb(&fb, 0x60, 0x00, 0x00),
-            Fill::Boot => 0,
-        },
-    );
-
-    // The only array in this module; `per <= MAX_ROWS` keeps the slice in bounds.
-    let mut row_start = [Row { at: 0, line: 0 }; MAX_ROWS];
-    let draw = per.min(total - first).min(MAX_ROWS);
-    row_offsets(text, cols, first, &mut row_start[..draw]);
-
+    let ground = match fill {
+        Fill::Fatal => rgb(&fb, 0x60, 0x00, 0x00),
+        Fill::Boot => 0,
+    };
     let white = rgb(&fb, 0xFF, 0xFF, 0xFF);
     let alert = rgb(&fb, 0xFF, 0x50, 0x50);
 
+    // SAFETY: every painter holds `PAINTING` for the whole of its paint, so
+    // this is the only reference to the grid while it exists.
+    let glass = unsafe { &mut *GLASS.0.get() };
+    // The one fill, and only where nothing knows what is on the glass. It is
+    // also what paints the strip below the last row and right of the last
+    // column, which is outside the grid and is written by nothing else.
+    if !glass.holds(ground, cols, grid_rows) {
+        pixels += fill_screen(&fb, ground);
+        glass.reset(ground, cols, grid_rows);
+    }
+
+    // Two arrays, and the module's whole stack budget past its 256 bytes:
+    // `per <= MAX_ROWS` and `cols <= MAX_COLS` keep both slices in bounds.
+    let mut row_start = [Row { at: 0, line: 0 }; MAX_ROWS];
+    let draw = per.min(total - first).min(MAX_ROWS);
+    row_offsets(text, cols, first, &mut row_start[..draw]);
+    let mut want_row = [Cell::GROUND; MAX_COLS];
+
     let mut inked = 0usize;
     let mut probes = 0usize;
-    for (r, row) in row_start[..draw].iter().enumerate() {
-        // Colour comes from the record's `Level`, so it holds for every display row a wrapped line occupies.
-        let color = if view.is_alert(row.line as usize) { alert } else { white };
-        let mut off = row.at as usize;
-        let mut c = 0;
-        while c < cols && off < len {
-            let byte = text[off];
-            if byte == b'\n' {
-                break;
+    for r in 0..grid_rows {
+        let Some(want) = want_row.get_mut(..cols) else { break };
+        // What this row is to show: its display row's text, ground past the
+        // end of that, and the footer on the bottom row of a paged report.
+        want.fill(Cell::GROUND);
+        let text_row = if r < draw { row_start.get(r).copied() } else { None };
+        if let Some(row) = text_row {
+            // Colour comes from the record's `Level`, so it holds for every display row a wrapped line occupies.
+            let alerted = view.is_alert(row.line as usize);
+            let mut off = row.at as usize;
+            for cell in want.iter_mut() {
+                let Some(&byte) = text.get(off) else { break };
+                if byte == b'\n' {
+                    break;
+                }
+                *cell = Cell::of(byte, alerted);
+                off += 1;
             }
-            draw_glyph(&fb, c, r, byte, color);
-            if watch == Watch::Yes {
-                if let Some((bx, by)) = glyph_ink(byte) {
+        }
+        if pages > 1 && r == grid_rows - 1 {
+            footer_cells(shown, pages, want);
+        }
+
+        let glassed = glass.row(r, cols);
+        for (c, (&cell, was)) in want.iter().zip(glassed.iter_mut()).enumerate() {
+            // **The scroll's whole cost is here**: a cell whose byte and
+            // colour did not move is not written, so a repaint pays for what
+            // changed and not for the panel.
+            if cell != *was {
+                let color = if cell.alert() { alert } else { white };
+                pixels += draw_cell(&fb, c, r, cell, ground, color);
+                *was = cell;
+            }
+            if watch == Watch::Yes && text_row.is_some() {
+                if let Some((bx, by)) = cell.character().and_then(glyph_ink) {
                     if inked.is_multiple_of(PROBE_STRIDE) && probes < PROBES - GRID_PROBES {
                         let (x, y) = (c * GLYPH_W + bx, r * GLYPH_H + by);
                         PROBE_AT[probes].store(((y as u32) << 16) | x as u32, Ordering::Relaxed);
@@ -983,19 +1183,14 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
                     inked += 1;
                 }
             }
-            off += 1;
-            c += 1;
         }
-    }
-
-    if pages > 1 {
-        draw_footer(&fb, cols, grid_rows - 1, shown, pages, white);
     }
 
     flush_stores();
     if watch == Watch::Yes {
         sample_probes(&fb, probes);
     }
+    spent(began, pixels);
 }
 
 /// Read back what this paint left at each probe (not assumed), after the
@@ -1034,8 +1229,8 @@ fn flush_stores() {
     unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 
-/// `[page 2/4]` on the bottom row; not decoration — the pager advances on a timer with no key to press.
-fn draw_footer(fb: &Fb, cols: usize, row: usize, page: usize, pages: usize, color: u32) {
+/// `[page 2/4]` into the bottom row's cells; not decoration — the pager advances on a timer with no key to press.
+fn footer_cells(page: usize, pages: usize, row: &mut [Cell]) {
     let mut buf = [0u8; 24];
     let mut n = 0;
     for &b in b"[page " {
@@ -1048,13 +1243,13 @@ fn draw_footer(fb: &Fb, cols: usize, row: usize, page: usize, pages: usize, colo
     n += write_num(&mut buf[n..], pages);
     buf[n] = b']';
     n += 1;
-    for (c, &byte) in buf[..n.min(cols)].iter().enumerate() {
-        draw_glyph(fb, c, row, byte, color);
+    for (cell, &byte) in row.iter_mut().zip(buf[..n].iter()) {
+        *cell = Cell::of(byte, false);
     }
 }
 
 /// Decimal `v` into the front of `out`, returning the bytes written.
-/// `out` is the tail of `draw_footer`'s 24-byte buffer; both page numbers
+/// `out` is the tail of [`footer_cells`]'s 24-byte buffer; both page numbers
 /// are bounded by `SNAPSHOT_CAP`, far under the room that leaves for the `/` and `]` that follow.
 fn write_num(out: &mut [u8], v: usize) -> usize {
     let mut digits = [0u8; 20];
@@ -1095,7 +1290,7 @@ fn rgb(fb: &Fb, r: u32, g: u32, b: u32) -> u32 {
 }
 
 /// What is on the glass at one pixel, or 0 where nothing may be read — the
-/// same clamp [`put_pixel`] applies, so a probe on a position that could not be written is never a false alarm.
+/// same clamp [`row_base`] applies, so a probe on a position that could not be written is never a false alarm.
 fn get_pixel(fb: &Fb, x: usize, y: usize) -> u32 {
     let Some(row) = (y as u64).checked_mul(fb.stride_px as u64) else { return 0 };
     let Some(idx) = row.checked_add(x as u64).and_then(|v| v.checked_mul(4)) else { return 0 };
@@ -1105,17 +1300,6 @@ fn get_pixel(fb: &Fb, x: usize, y: usize) -> u32 {
     // SAFETY: a volatile read of the scanout has no safe spelling; bounded
     // by `idx + 4 <= fb.bytes` above, and `validate` refusing a null/out-of-map base.
     unsafe { core::ptr::read_volatile(fb.ptr.add(idx as usize) as *const u32) }
-}
-
-#[inline]
-fn put_pixel(fb: &Fb, x: usize, y: usize, color: u32) {
-    let Some(row) = (y as u64).checked_mul(fb.stride_px as u64) else { return };
-    let Some(idx) = row.checked_add(x as u64).and_then(|v| v.checked_mul(4)) else { return };
-    if idx.saturating_add(4) > fb.bytes {
-        return;
-    }
-    // SAFETY: bounded exactly as `get_pixel` — same three checks, same validated descriptor.
-    unsafe { core::ptr::write_volatile(fb.ptr.add(idx as usize) as *mut u32, color) };
 }
 
 /// Base pointer for a row, given `len` pixels will be written from it.
@@ -1140,7 +1324,8 @@ pub fn graffiti() {
         return;
     }
     log!("SYS_DEBUG: painting over the screen a userland process owns");
-    fill_screen(&fb, rgb(&fb, 0x00, 0xC0, 0x00));
+    forget_the_glass();
+    let _ = fill_screen(&fb, rgb(&fb, 0x00, 0xC0, 0x00));
     flush_stores();
 }
 
@@ -1148,10 +1333,12 @@ pub fn graffiti() {
 /// ambiguous about which boot it came from. Proves the clamp once per row,
 /// not once per pixel: a boot checkpoint repaints several times over a
 /// multi-megapixel panel.
-fn fill_screen(fb: &Fb, color: u32) {
+fn fill_screen(fb: &Fb, color: u32) -> u64 {
     let width = fb.width as usize;
+    let mut pixels = 0;
     for y in 0..fb.height as usize {
-        let Some(row) = row_base(fb, y, width) else { return };
+        let Some(row) = row_base(fb, y, width) else { return pixels };
+        pixels += width as u64;
         for x in 0..width {
             // SAFETY: `row_base` returns a pointer, not a slice, so this
             // loop pays no per-pixel bound; a volatile store has no safe
@@ -1159,24 +1346,35 @@ fn fill_screen(fb: &Fb, color: u32) {
             unsafe { core::ptr::write_volatile(row.add(x), color) };
         }
     }
+    pixels
 }
 
-/// The 16 rows the font draws a byte with; one mapping, so [`glyph_ink`]
-/// cannot disagree with the draw.
-fn glyph(byte: u8) -> &'static [u8] {
-    let ch = match byte {
+/// The character the font draws for `byte`; a cell holds this rather than the
+/// byte that asked for it, so what the grid says is on the glass is what the
+/// glyph lookup would have drawn there.
+fn glyph_char(byte: u8) -> u8 {
+    match byte {
         b'\t' => b' ',
         0x20..=0x7E => byte,
         _ => b'.',
-    };
-    let base = (ch - 0x20) as usize * GLYPH_H;
-    &FONT[base..base + GLYPH_H]
+    }
 }
 
-/// A pixel of this byte's glyph, in its cell. `None` for a glyph with no
+/// A cell with no ink at all: ground across it. What a character outside the
+/// font would draw, which [`glyph_char`] does not produce.
+const NO_INK: [u8; GLYPH_H] = [0; GLYPH_H];
+
+/// The 16 rows the font draws [`glyph_char`]'s answer with; one mapping, so
+/// [`glyph_ink`] cannot disagree with the draw.
+fn glyph(ch: u8) -> &'static [u8] {
+    let base = ch.saturating_sub(0x20) as usize * GLYPH_H;
+    FONT.get(base..base + GLYPH_H).unwrap_or(&NO_INK)
+}
+
+/// A pixel of this character's glyph, in its cell. `None` for a glyph with no
 /// ink — the only kind a probe must refuse, since a blank cell looks the same whether the report is still there or not.
-fn glyph_ink(byte: u8) -> Option<(usize, usize)> {
-    for (row, &bits) in glyph(byte).iter().enumerate() {
+fn glyph_ink(ch: u8) -> Option<(usize, usize)> {
+    for (row, &bits) in glyph(ch).iter().enumerate() {
         for bit in 0..GLYPH_W {
             if bits & (0x80 >> bit) != 0 {
                 return Some((bit, row));
@@ -1186,17 +1384,23 @@ fn glyph_ink(byte: u8) -> Option<(usize, usize)> {
     None
 }
 
-fn draw_glyph(fb: &Fb, cell_x: usize, cell_y: usize, byte: u8, color: u32) {
+/// One cell's whole 8x16 block, ink and ground together, so a repaint clears
+/// nothing first: the block a cell leaves is exactly the block the next one
+/// writes. Proves the clamp once per glyph row rather than once per pixel.
+fn draw_cell(fb: &Fb, cell_x: usize, cell_y: usize, cell: Cell, ground: u32, ink: u32) -> u64 {
+    let rows = cell.character().map_or(&NO_INK[..], glyph);
     let ox = cell_x * GLYPH_W;
-    let oy = cell_y * GLYPH_H;
-    for (row, &bits) in glyph(byte).iter().enumerate() {
-        if bits == 0 {
-            continue;
-        }
+    let mut pixels = 0;
+    for (row, &bits) in rows.iter().enumerate() {
+        let Some(at) = row_base(fb, cell_y * GLYPH_H + row, ox + GLYPH_W) else { return pixels };
         for bit in 0..GLYPH_W {
-            if bits & (0x80 >> bit) != 0 {
-                put_pixel(fb, ox + bit, oy + row, color);
-            }
+            let color = if bits & (0x80 >> bit) != 0 { ink } else { ground };
+            // SAFETY: `row_base` proved `ox + GLYPH_W` pixels fit from the
+            // row's start, and this writes the last `GLYPH_W` of them. A
+            // volatile store has no safe spelling.
+            unsafe { core::ptr::write_volatile(at.add(ox + bit), color) };
         }
+        pixels += GLYPH_W as u64;
     }
+    pixels
 }

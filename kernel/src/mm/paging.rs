@@ -1061,6 +1061,65 @@ pub fn present_in_current_cr3(addr: u64) -> bool {
     table[((addr >> 12) & 0x1FF) as usize] & PAGE_PRESENT != 0
 }
 
+/// Give every 2 MiB leaf covering `[phys, phys + size)` the write-combining
+/// type, in the page tables this CPU is running under — the loader's, before
+/// this kernel has any of its own.
+///
+/// **The panel's first paint is what this is for.** The loader hands the
+/// scanout over uncacheable, and a whole-screen paint through those bits is two
+/// million stores nothing combines: 443 ms measured on the T14 against about
+/// 2 ms through write-combining. [`map_mmio`] cannot answer before `mm::init`
+/// has built a table to map into, and the panel arms long before that.
+///
+/// Both windows the loader opened onto the scanout are switched, identity and
+/// direct map, because one physical page may not hold two memory types
+/// (SDM Vol. 3A §11.12.4).
+///
+/// `false` is a range this did not switch whole — nothing mapped there, or not
+/// in 2 MiB leaves — and the caller keeps whatever the loader left and says so.
+/// Before `mm::init` only: after it, the kernel's own tables are the ones to
+/// map into and [`map_mmio`] is the way.
+pub fn boot_map_write_combining(phys: u64, size: u64) -> bool {
+    let mut switched = true;
+    for base in [phys, super::PHYS_OFFSET + phys] {
+        let mut at = base & !(PAGE_2M - 1);
+        let end = base.saturating_add(size);
+        while at < end {
+            switched &= write_combine_leaf(at);
+            at += PAGE_2M;
+        }
+    }
+    // What a change to a live page's memory type owes, on the one CPU there is.
+    crate::arch::pat::flush_every_tlb_entry();
+    switched
+}
+
+/// The one 2 MiB leaf holding `addr` in the current tables, given the
+/// write-combining type; `false` where the walk finds no such leaf.
+fn write_combine_leaf(addr: u64) -> bool {
+    // SAFETY: sound as `present_in_current_cr3`'s walk — `Cr3::current()` names
+    // the table this CPU runs under and every step is taken through a
+    // `PAGE_PRESENT` entry. Exclusive because this runs on the BSP before any
+    // AP exists and before `mm::init` publishes a space of its own.
+    let mut table = unsafe { PageTablePage::from_phys_mut(Cr3::current().phys()) };
+    let (pml4, pdpt, pd) = indices(addr);
+    for index in [pml4, pdpt] {
+        let entry = table[index];
+        if entry & PAGE_PRESENT == 0 || entry & PAGE_SIZE_BIT != 0 {
+            return false;
+        }
+        // SAFETY: as above — present and not a leaf, so it names a table.
+        table = unsafe { PageTablePage::from_phys_mut(entry & ADDR_MASK) };
+    }
+    let entry = table[pd];
+    if entry & PAGE_PRESENT == 0 || entry & PAGE_SIZE_BIT == 0 {
+        return false;
+    }
+    table.0[pd] = (entry & !(PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH))
+        | CachePolicy::WriteCombining.pde_bits();
+    true
+}
+
 /// Dump page table entries for an address. Lock-free for crash safety.
 pub fn debug_page_walk(addr: u64) {
     let cr3 = Cr3::current();

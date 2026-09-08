@@ -609,3 +609,119 @@ name = "boot.ccorpus-2.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+
+# --- what the on-screen panel cost each boot ---
+# **The one window a person has into a machine that stopped, priced by its
+# slowest single paint.** The panel writes the cells that moved, and it paints
+# through a write-combining mapping from its first paint on — so what this row
+# bounds is a paint, and a panel that cannot keep pace with the log ring shows
+# stale state during the exact event it exists for. The other three numbers of
+# the census (paints, pixels, and the total time in the painter) are printed
+# beside the boot and are evidence for the next author, not a gate: one number,
+# one ceiling.
+#
+# A boot that hands the machine back carries the census as an ordinary record;
+# a boot a bound ended seals the same line into the black-box page, which is
+# why the two wedge boots have a row at all.
+
+[[number]]
+name = "boot.testcases.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "one frame of the panel this bench has: the T14's scanout takes a whole 1080p redraw at 60 Hz, so 16,667 us is what a paint of every cell may cost and still keep pace with the display. Run 32's after arm measured 2.2 ms a paint over the nine that went through write-combining"
+
+[[number]]
+name = "boot.testcases-mkdir.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.testcases-readdir.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.testcases-watchdog.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.jobcase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.metalcase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.latencycase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.metaldevicecase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.selftests.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.shared.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.shared-2.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.shared-debug.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.ccorpus.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.ccorpus-2.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.foreignrecord.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.deadlinewedge.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us — off the sealed page, because this boot's logd wrote no file"
+
+[[number]]
+name = "boot.hardlockup.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.deadlinewedge.panel_max_us"

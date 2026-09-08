@@ -921,8 +921,13 @@ pub fn boot_deadline_ends_a_wedge(
     // lines come after the harvest line, so this is the page and not the wire.
     second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
     // And the tail of a ring nothing was draining crossed the reset with it,
-    // which is the whole reason the record carries one.
-    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
+    // which is the whole reason the record carries one. **The count on this
+    // channel and the records on the other**: the loader files that tail
+    // rather than scrolling it through the firmware's console, so what is here
+    // is the line saying how many crossed, and `deadline_wedge_chain` — which
+    // reads `loader.log` off the stick — is where they are held to
+    // `WEDGE_STAGED` itself.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::TAIL_IN_THE_FILE)?;
     second.must_not_say(&armed_and_nothing_else())?;
     second.must_say(bootlog::CHAIN_ENDS_LINE)?;
     second.must_not_say(bootlog::LOADER_LAST_LINE)?;
