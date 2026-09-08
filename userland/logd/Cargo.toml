@@ -7,4 +7,5 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
+toyos-logstream = { path = "../../toyos-logstream" }
 toyos-wallclock = { path = "../../toyos-wallclock" }

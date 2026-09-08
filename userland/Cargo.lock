@@ -1801,6 +1801,7 @@ version = "0.1.0"
 dependencies = [
  "toyos 0.6.0",
  "toyos-abi 0.5.0",
+ "toyos-logstream",
  "toyos-wallclock",
 ]
 
@@ -1920,6 +1921,7 @@ dependencies = [
  "smoltcp",
  "toyos 0.6.0",
  "toyos-abi 0.5.0",
+ "toyos-i219",
 ]
 
 [[package]]
@@ -3763,6 +3765,10 @@ name = "toyos-hda"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-i219"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-keymap"
 version = "0.1.0"
 
@@ -3771,6 +3777,13 @@ name = "toyos-keymap"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06db3c1cb438056c9b9a766c8f0dbbfdf3331e723a5bc7f287badc0cfb2f7f78"
+
+[[package]]
+name = "toyos-logstream"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi 0.5.0",
+]
 
 [[package]]
 name = "toyos-manifest"

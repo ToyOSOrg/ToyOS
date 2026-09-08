@@ -6,17 +6,31 @@
 //! FAT volume **from the idle loop**, which is why an idle CPU on this machine
 //! could be found four spinlocks deep inside a USB transfer with a userland
 //! `println!` behind it. The kernel keeps the record ring and the console;
-//! every policy about files — where they go, what they are called, how many
-//! there are, what happens when the stick stops answering — is here.
+//! every policy about where records go — what the files are called, how many
+//! there are, what happens when the stick stops answering, and whether a copy
+//! also leaves the machine over a cable — is here.
+//!
+//! # Two sinks, and only one of them is the sink of record
+//!
+//! The file is. `stream`'s is the other: the same text line, in the same order,
+//! over a TCP connection netd opens to an address the boot parameter line
+//! named. It is best effort in every direction — no address, no netd, no peer,
+//! a peer that stopped taking bytes — and none of those may cost `/log` a
+//! record or delay a write to it. `stream`'s own header is that argument; what
+//! this file owes it is one rule: **a line goes to the volume first and is
+//! offered to the stream after, and the offer cannot fail.**
 //!
 //! # Its whole authority
 //!
 //! One `SysCap` duplicate carrying `Rights::LOG | Rights::WAIT`, which its
-//! manifest row asks for by the name `logread`. With it, it may read every
-//! record every CPU wrote and park on the readiness source when there is
-//! nothing new. It claims no device, opens no compositor connection and can
-//! name no process. Writing files is ambient — a known residual of the
-//! capability endowment, and not this program's to close.
+//! manifest row asks for by the name `logread`, and one `netd` connector, which
+//! the same row asks for by name. With the first it may read every record every
+//! CPU wrote and park on the readiness source when there is nothing new; the
+//! second is the whole of what stands between the address on the parameter line
+//! and a peer, since that address is inherited by every program on the machine
+//! and this is the only one endowed to act on it. It claims no device, opens no
+//! compositor connection and can name no process. Writing files is ambient — a
+//! known residual of the capability endowment, and not this program's to close.
 //!
 //! # What it does not do, and why the port is not here
 //!
@@ -73,6 +87,7 @@
 
 mod policy;
 mod store;
+mod stream;
 mod wall;
 
 use std::time::Instant;
@@ -81,19 +96,14 @@ use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::log::{LogTail, Record};
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
+use toyos_logstream::BATCH;
 use toyos_wallclock::Civil;
 
 use policy::{fate, Fate, Step, LOG_WRITE_BUDGET};
 use store::{Volume, DIR, MAX_LOG_BYTES, ROTATE_FAST_BYTES};
+use stream::Stream;
 use wall::Wall;
 
-/// Records per `SYS_LOG_READ`.
-///
-/// Above `MAX_LOG_SHARDS`, which the call refuses below, and large enough that
-/// an ordinary boot's burst is a handful of syscalls rather than one per line.
-/// A `LogRecord` is a kilobyte, so this is 64 KiB of stack-adjacent buffer held
-/// for the life of the process — allocated once, never grown.
-const BATCH: usize = 64;
 
 
 /// How long a park on the log's readiness source waits before looking again.
@@ -161,6 +171,11 @@ fn main() {
         ),
     }
 
+    // The second sink, opened after the volume and never before it: the file is
+    // the sink of record, so nothing about the stream may stand between this
+    // program and the first line it writes.
+    let stream = Stream::start(std::env::var(toyos_logstream::ENV).ok().as_deref());
+
     let mut tail = LogTail::new();
     let mut buf = vec![Record::EMPTY; BATCH];
     let poller = Poller::new(1);
@@ -174,6 +189,8 @@ fn main() {
     poller.wait(0, 0, |_| {});
 
     let mut lost = 0u64;
+    // What the stream owes this boot's log, carried until the file takes it.
+    let mut owed: Vec<String> = Vec::new();
     // When the current run of consecutive retries began, or `None` when the
     // last batch was answered. `policy::fate` bounds the run and not the round.
     let mut retrying_since: Option<Instant> = None;
@@ -203,7 +220,12 @@ fn main() {
             lost = tail.lost();
         }
 
-        if batch.is_empty() {
+        // Nothing to put a report in, so nothing owes one.
+        if volume.is_none() {
+            owed.clear();
+        }
+
+        if batch.is_empty() && owed.is_empty() {
             // **Nothing new, so park on the readiness source rather than spin.**
             // `SYS_LOG_READ` never blocks by design; this is the other half of
             // that design.
@@ -217,12 +239,43 @@ fn main() {
         let newest = batch.last().map_or(0, |r| r.at_ns);
         let began = Instant::now();
         let mut refused: Option<(Step, std::io::ErrorKind, String)> = None;
-        for record in batch.iter() {
-            let line = format!("{}\n", record.tagged(&stamp(boot_local, record.at_ns)));
-            if let Err(e) = v.write(line.as_bytes()) {
+        // What the stream owed at the end of the last round — a connection it
+        // could not open, or the count of what a peer slower than this machine
+        // cost. It goes in the file, because the file is where this boot's log
+        // is: a `say!` reaches the console and no record, so a stream that
+        // failed silently on the one channel that survives the machine would be
+        // a failure only somebody watching the wire could see.
+        // **Dropped as the file takes them, one by one**: a refused write
+        // leaves the rest owed rather than losing the line that says what the
+        // stream cost, and leaves none of them to be written a second time.
+        let mut said_through = 0usize;
+        for said in &owed {
+            if let Err(e) = v.write(format!("{said}\n").as_bytes()) {
                 refused = Some((Step::Append, e.kind(), e.to_string()));
                 break;
             }
+            said_through += 1;
+        }
+        owed.drain(..said_through);
+        let lines: Vec<String> =
+            batch.iter().map(|r| format!("{}\n", r.tagged(&stamp(boot_local, r.at_ns)))).collect();
+        let mut written = 0usize;
+        if refused.is_none() {
+            for line in &lines {
+                if let Err(e) = v.write(line.as_bytes()) {
+                    refused = Some((Step::Append, e.kind(), e.to_string()));
+                    break;
+                }
+                written += 1;
+            }
+        }
+        // **After the file has them, and it cannot fail.** The queue either
+        // takes a line or counts it as dropped; there is no answer that waits,
+        // so no listener anywhere can slow this loop down. What comes back is
+        // the stream's own line about what it refused, which the next round
+        // writes to the file and never offers back.
+        if let Some(stream) = stream.as_ref() {
+            owed.extend(stream.round(lines[..written].iter().map(String::as_str)));
         }
         if refused.is_none() {
             if let Err(e) = v.sync() {

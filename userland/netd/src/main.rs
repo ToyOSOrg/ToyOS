@@ -29,13 +29,26 @@ macro_rules! say {
     }};
 }
 
+mod device;
+mod i219;
 mod virtio_net;
 
-/// The card this program drives, named by what identifies it rather than by the
-/// slot firmware put it in. `1041` is virtio's transitional device id `1000 +
-/// 1` for a network device (virtio 1.2 §5.1.1); the manifest row spells the
-/// same pair, and the claim arrives under a label composed from it.
-const VIRTIO_NET: PciId = PciId { vendor: 0x1af4, device: 0x1041 };
+/// The cards this program can drive, named by what identifies one rather than
+/// by the slot firmware put it in, and each with the driver that opens it. The
+/// manifest row spells the same pair and the claim arrives under a label
+/// composed from it, so which of these exists is `/system/bin/init`'s answer
+/// and not this program's — at most one is ever endowed, and a machine with
+/// none is a machine netd leaves.
+///
+/// `1af4:1041` is virtio's transitional device id `1000 + 1` for a network
+/// device (virtio 1.2 §5.1.1). `8086:15fc` is the ThinkPad T14's onboard I219
+/// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models, and
+/// one driver takes both because the register file is the same one.
+const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
+    (PciId { vendor: 0x8086, device: 0x15fc }, Card::intel),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, Card::intel),
+    (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
+];
 
 use toyos::endow;
 use toyos::Pipe;
@@ -54,15 +67,88 @@ use std::net::Ipv4Addr;
 
 // --- smoltcp Device wrapper ---
 
+/// The NIC this program drives, whichever one the manifest gave it.
+///
+/// **One enum and not a trait object**: there are two of them, both known at
+/// build time, and what a `dyn` would buy is a vtable on the frame path.
+enum Card {
+    Virtio(VirtioNet),
+    Intel(i219::Nic),
+}
+
+impl Card {
+    /// A device this driver cannot bring up is not a machine without a NIC: the
+    /// claim was minted, so something the device said is not what this driver
+    /// understands, and that is loud.
+    fn undrivable(why: impl std::fmt::Display) -> ! {
+        panic!("netd: the NIC this program was given is not one it can drive — {why}")
+    }
+
+    fn intel(claim: toyos::PciDev) -> Self {
+        match i219::Nic::open(claim) {
+            Ok(nic) => Self::Intel(nic),
+            Err(why) => Self::undrivable(why),
+        }
+    }
+
+    fn virtio(claim: toyos::PciDev) -> Self {
+        match VirtioNet::open(claim) {
+            Ok(nic) => Self::Virtio(nic),
+            Err(why) => Self::undrivable(why),
+        }
+    }
+
+    fn mac(&self) -> [u8; 6] {
+        match self {
+            Self::Virtio(nic) => nic.mac(),
+            Self::Intel(nic) => nic.mac(),
+        }
+    }
+
+    /// The claim, for the poller: readable means an interrupt has landed.
+    fn claim(&self) -> &toyos::PciDev {
+        match self {
+            Self::Virtio(nic) => nic.claim(),
+            Self::Intel(nic) => nic.claim(),
+        }
+    }
+
+    /// **The record has to be taken, not merely noticed.** A claim reads ready
+    /// while it holds an undrained interrupt, so a pass that saw the token and
+    /// left it would find the same one on the next `wait` and every one after
+    /// it. What the message meant is in the rings, which `iface.poll` reads.
+    /// This is also where a driver with a per-pass budget gets it back.
+    ///
+    /// A claim that refuses the read for anything but `WouldBlock` is the
+    /// kernel saying this function is no longer this process's: a fault at the
+    /// unit is the one that happens, and by the time it is answered the
+    /// function's bus mastering is gone. Every frame from here on is one that
+    /// silently never arrives, so this dies where it can be read — once, for
+    /// whichever driver is running.
+    fn begin_pass(&self) {
+        let answered = match self {
+            Self::Virtio(nic) => nic.take_interrupt().map(|_| ()),
+            Self::Intel(nic) => nic.begin_pass(),
+        };
+        if let Err(why) = answered {
+            panic!("netd: this NIC's claim refused an interrupt read: {why:?}");
+        }
+    }
+
+    fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
+        match self {
+            Self::Virtio(nic) => nic.tx(len, fill),
+            Self::Intel(nic) => nic.tx(len, fill),
+        }
+    }
+}
+
 /// The driver, as smoltcp's `Device`.
 ///
-/// A thin adapter now: what used to be here — the DMA region a claim handed
-/// over, the offsets the kernel described it with, and three syscalls per frame
-/// — is `virtio_net`, which is the driver itself. Every token below borrows the
-/// driver rather than a claim handle, because the ring the token gives back to
-/// is this process's own.
+/// A thin adapter: every token below borrows the driver rather than a claim
+/// handle, because the ring the token gives back to is this process's own.
 struct DmaNic {
-    nic: VirtioNet,
+    nic: Card,
 }
 
 impl Device for DmaNic {
@@ -70,11 +156,13 @@ impl Device for DmaNic {
     type TxToken<'a> = DmaTxToken<'a>;
 
     fn receive(&mut self, _timestamp: SmoltcpInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let (buf_idx, frame_len) = self.nic.poll_rx()?;
-        Some((
-            DmaRxToken { buf_idx, frame_len, nic: &self.nic },
-            DmaTxToken { nic: &self.nic },
-        ))
+        let token = match &self.nic {
+            Card::Virtio(nic) => {
+                nic.poll_rx().map(|(index, len)| DmaRxToken::Virtio { nic, index, len })
+            }
+            Card::Intel(nic) => nic.poll_rx().map(|frame| DmaRxToken::Intel { nic, frame }),
+        }?;
+        Some((token, DmaTxToken { nic: &self.nic }))
     }
 
     fn transmit(&mut self, _timestamp: SmoltcpInstant) -> Option<Self::TxToken<'_>> {
@@ -89,10 +177,12 @@ impl Device for DmaNic {
     }
 }
 
-struct DmaRxToken<'a> {
-    buf_idx: usize,
-    frame_len: usize,
-    nic: &'a VirtioNet,
+/// One received frame, holding the driver it came from rather than a tag that
+/// says which — so a frame and a driver that do not go together is not a state
+/// this program can be in.
+enum DmaRxToken<'a> {
+    Virtio { nic: &'a VirtioNet, index: usize, len: usize },
+    Intel { nic: &'a i219::Nic, frame: toyos_i219::Frame },
 }
 
 impl phy::RxToken for DmaRxToken<'_> {
@@ -103,14 +193,23 @@ impl phy::RxToken for DmaRxToken<'_> {
         // The borrow ends with `f`, and the buffer goes back to the device only
         // afterwards: smoltcp's `consume` takes `FnOnce(&[u8])`, so the
         // callback cannot keep the reference past its own return.
-        let result = f(self.nic.rx_frame(self.buf_idx, self.frame_len));
-        self.nic.rx_done(self.buf_idx);
-        result
+        match self {
+            Self::Virtio { nic, index, len } => {
+                let result = f(nic.rx_frame(index, len));
+                nic.rx_done(index);
+                result
+            }
+            Self::Intel { nic, frame } => {
+                let result = f(nic.rx_frame(&frame));
+                nic.rx_done(frame);
+                result
+            }
+        }
     }
 }
 
 struct DmaTxToken<'a> {
-    nic: &'a VirtioNet,
+    nic: &'a Card,
 }
 
 impl phy::TxToken for DmaTxToken<'_> {
@@ -119,8 +218,8 @@ impl phy::TxToken for DmaTxToken<'_> {
         F: FnOnce(&mut [u8]) -> R,
     {
         // Filling and sending are one call, because the buffer belongs to the
-        // head the driver picks: a frame written before a head was taken would
-        // be written into a buffer the device may still be reading.
+        // descriptor the driver picks: a frame written before one was taken
+        // would be written into a buffer the device may still be reading.
         self.nic.tx(len, f)
     }
 }
@@ -977,14 +1076,34 @@ impl NetDaemon {
             // forgeable closed flags.
             while socket.can_send() {
                 if let Some(ref pipe) = conn.tx_read {
+                    // **No more is taken out of the pipe than the socket will
+                    // take from us.** `send_slice` answers how many bytes it
+                    // enqueued and takes fewer when the send buffer is short of
+                    // room; bytes read past that are gone, and the peer's stream
+                    // is short in the middle with nothing saying so. The pipe is
+                    // where the rest belongs until there is room.
                     let mut buf = [0u8; 4096];
-                    match toyos_abi::syscall::read_nonblock(pipe.as_handle(), &mut buf) {
+                    let want = (socket.send_capacity() - socket.send_queue()).min(buf.len());
+                    // A zero-length read answers `Ok(0)`, which the arm below
+                    // reads as the client hanging up; asked for no bytes, this
+                    // loop has nothing to do instead.
+                    if want == 0 {
+                        break;
+                    }
+                    match toyos_abi::syscall::read_nonblock(pipe.as_handle(), &mut buf[..want]) {
                         Ok(0) => {
                             socket.close();
                             conn.close_tx();
                             break;
                         }
-                        Ok(n) => { let _ = socket.send_slice(&buf[..n]); }
+                        Ok(n) => {
+                            // Both refusals are bytes the pipe has already given
+                            // up, so neither may be swallowed here of all places.
+                            let sent = socket.send_slice(&buf[..n]).unwrap_or_else(|e| {
+                                panic!("netd: a socket that could send refused {n} byte(s): {e:?}")
+                            });
+                            assert_eq!(sent, n, "netd: the send buffer took {sent} of {n} byte(s) it had room for");
+                        }
                         _ => break,
                     }
                 } else {
@@ -1172,19 +1291,16 @@ fn main() {
     // before either process does, a client's connection is queued on it whether
     // or not this program ever reaches `accept`, and if netd exits the queued
     // client sees `Gone` rather than silence.
-    let Some(claim) = endow::pci_function::<toyos::PciDev>(VIRTIO_NET) else {
+    let Some((open, claim)) = CARDS
+        .iter()
+        .find_map(|(id, open)| endow::pci_function::<toyos::PciDev>(*id).map(|c| (*open, c)))
+    else {
         say!("netd: no NIC on this machine, exiting");
         return;
     };
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
-    // A device this driver cannot bring up is not a machine without a NIC: the
-    // claim was minted, so something the device said is not what this driver
-    // understands, and that is loud.
-    let nic = match VirtioNet::open(claim) {
-        Ok(nic) => nic,
-        Err(why) => panic!("netd: the NIC this program was given is not one it can drive — {why}"),
-    };
+    let nic = open(claim);
     let mac = nic.mac();
     let mut device = DmaNic { nic };
 
@@ -1237,6 +1353,9 @@ fn main() {
     let mut pending: Vec<PendingConn> = Vec::new();
 
     loop {
+        // Before `iface.poll`, because it is what makes the interrupt taken and
+        // what gives a driver with a per-pass receive budget that budget back.
+        device.nic.begin_pass();
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
         while iface.poll(now, &mut device, &mut socket_set) != PollResult::None {}
 
@@ -1299,15 +1418,6 @@ fn main() {
 
         let mut ready: Vec<u64> = Vec::new();
         poller.wait(1, timeout, |token| ready.push(token));
-
-        // **The record has to be taken, not merely noticed.** A claim reads
-        // ready while it holds an undrained interrupt, so a pass that saw the
-        // token and left it would find the same one on the next `wait` and
-        // every one after it. What the message meant is in the rings, which
-        // `iface.poll` reads at the top of the loop.
-        if ready.contains(&TOKEN_NIC) {
-            device.nic.take_interrupt();
-        }
 
         // A handshake that never completes is why this deadline exists, and the
         // sweep has to happen on a pass that found nothing ready too —

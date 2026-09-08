@@ -915,7 +915,15 @@ pub fn spawn_init() -> Pid {
         }],
         label.as_bytes().to_vec(),
     );
-    match spawn(&[INIT_PATH], PendingHandles::Ready(handles, endowments), String::from("/"), Vec::new()) {
+    // **The only channel a boot parameter has to userland**, and the one thing
+    // the kernel ever puts in an environment: the command line reaches no
+    // process. It is information and not authority — reaching the address needs
+    // a `netd` connector, which one manifest row grants.
+    let env = match crate::params::log_stream() {
+        Some(at) => alloc::format!("{}={at}\0", toyos_logstream::ENV).into_bytes(),
+        None => Vec::new(),
+    };
+    match spawn(&[INIT_PATH], PendingHandles::Ready(handles, endowments), String::from("/"), env) {
         Ok(object) => object.pid(),
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_init: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_init: {e}"),

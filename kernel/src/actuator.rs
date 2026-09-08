@@ -285,6 +285,9 @@ actuators! {
     /// Have every CPU emit patterned log records at once from spawned kernel threads.
     log_storm = "log-storm";
 
+    /// Widen every storm record to nearly a whole record's message, so one boot offers a stalled log stream more than the buffers under it can hold.
+    log_storm_wide = "log-storm-wide";
+
     /// Remove the IF/TF bracket around shard selection through publication — the negative control on the log's interrupt-atomicity claim.
     log_unbracketed_reserve = "log-unbracketed-reserve";
 

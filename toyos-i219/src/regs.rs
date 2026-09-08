@@ -1,0 +1,275 @@
+//! The register file, as the specification defines it.
+//!
+//! Every offset and every bit below is cited to the *Intel 82574 GbE
+//! Controller Family Datasheet*, order number 317694-018, revision 2.7; §10.2's
+//! Table 77 is the register summary the offsets are copied from.
+//!
+//! Nothing here has behaviour, and a number that is not in the datasheet does
+//! not belong in this file.
+
+/// Device Control (§10.2.2.1, `0x00000`).
+pub const CTRL: usize = 0x00000;
+/// Device Status (§10.2.2.2, `0x00008`), read-only.
+pub const STATUS: usize = 0x00008;
+/// Interrupt Cause Read (§10.2.4.1, `0x000C0`), read-to-clear and
+/// write-1-to-clear.
+pub const ICR: usize = 0x000C0;
+/// Interrupt Throttling (§10.2.4.2, `0x000C4`).
+pub const ITR: usize = 0x000C4;
+/// Interrupt Cause Set (§10.2.4.4, `0x000C8`), write-only.
+pub const ICS: usize = 0x000C8;
+/// Interrupt Mask Set/Read (§10.2.4.5, `0x000D0`).
+pub const IMS: usize = 0x000D0;
+/// Interrupt Mask Clear (§10.2.4.6, `0x000D8`), write-only.
+pub const IMC: usize = 0x000D8;
+/// Interrupt Auto Clear (§10.2.4.7, `0x000DC`). §10.2.4.7: "If any bits are set
+/// in EIAC, the ICR register should not be read", and this driver reads it.
+pub const EIAC: usize = 0x000DC;
+/// Interrupt Vector Allocation (§10.2.4.9, `0x000E4`), which "is only valid in
+/// MSI-X mode".
+pub const IVAR: usize = 0x000E4;
+/// Receive Control (§10.2.5.1, `0x00100`).
+pub const RCTL: usize = 0x00100;
+/// Receive descriptor ring, queue 0 (§10.2.5.5-§10.2.5.9).
+pub const RDBAL: usize = 0x02800;
+pub const RDBAH: usize = 0x02804;
+pub const RDLEN: usize = 0x02808;
+pub const RDH: usize = 0x02810;
+pub const RDT: usize = 0x02818;
+/// Rx Interrupt Delay Timer (§10.2.5.10, `0x02820`) and its absolute
+/// counterpart (`0x0282C`).
+pub const RDTR: usize = 0x02820;
+pub const RADV: usize = 0x0282C;
+/// Multicast Table Array, 128 dwords (§10.2.5.21, `0x05200`..`0x053FC`).
+pub const MTA: usize = 0x05200;
+pub const MTA_DWORDS: usize = 128;
+/// Receive Address Low/High, entry 0 (§10.2.5.22, §10.2.5.23) — the station
+/// address, and the one exact-match filter this driver uses.
+pub const RAL0: usize = 0x05400;
+pub const RAH0: usize = 0x05404;
+/// Transmit Control (§10.2.6.1, `0x00400`) and the inter-packet gap
+/// (§10.2.6.2, `0x00410`).
+pub const TCTL: usize = 0x00400;
+pub const TIPG: usize = 0x00410;
+/// Transmit descriptor ring (§10.2.6.4-§10.2.6.8).
+pub const TDBAL: usize = 0x03800;
+pub const TDBAH: usize = 0x03804;
+pub const TDLEN: usize = 0x03808;
+pub const TDH: usize = 0x03810;
+pub const TDT: usize = 0x03818;
+/// Transmit Interrupt Delay Value (`0x03820`), Transmit Descriptor Control
+/// (§10.2.6.10, `0x03828`) and the absolute delay (`0x0382C`).
+pub const TIDV: usize = 0x03820;
+pub const TXDCTL: usize = 0x03828;
+pub const TADV: usize = 0x0382C;
+
+/// The smallest register window this driver can be driven through: above every
+/// offset named here, and the bound the register accessor's contract rests on.
+pub const REGISTER_BYTES: usize = 0x06000;
+
+const _: () = {
+    assert!(MTA + MTA_DWORDS * 4 <= REGISTER_BYTES);
+    assert!(RAH0 < REGISTER_BYTES);
+    assert!(TADV < REGISTER_BYTES);
+};
+
+/// Device Control bits (§10.2.2.1).
+pub mod ctrl {
+    /// Auto-Speed Detection Enable (bit 5). §10.2.2.1: "This bit must be set to
+    /// 0b in the 82574".
+    pub const ASDE: u32 = 1 << 5;
+    /// Set Link Up (bit 6). §10.2.2.1: it "MUST be set to 1b to permit the MAC
+    /// to recognize the link signal from the PHY".
+    pub const SLU: u32 = 1 << 6;
+    /// Invert Loss of Signal (bit 7). §10.2.2.1: "Reserved. Must be set to 0b."
+    pub const ILOS: u32 = 1 << 7;
+    /// Force Speed (bit 11) and Force Duplex (bit 12).
+    pub const FRCSPD: u32 = 1 << 11;
+    pub const FRCDPLX: u32 = 1 << 12;
+    /// Device Reset (bit 26). §10.2.2.1: "writing 1b initiates the reset. This
+    /// bit is self-clearing."
+    pub const RST: u32 = 1 << 26;
+    /// Receive and Transmit Flow Control Enable (bits 27, 28).
+    pub const RFCE: u32 = 1 << 27;
+    pub const TFCE: u32 = 1 << 28;
+    /// VLAN Mode Enable (bit 30). Cleared, so a VLAN tag stays in the frame.
+    pub const VME: u32 = 1 << 30;
+}
+
+/// Device Status bits (§10.2.2.2).
+pub mod status {
+    pub const FD: u32 = 1 << 0;
+    /// Link Up (bit 1), valid only while `CTRL.SLU` is set.
+    pub const LU: u32 = 1 << 1;
+    /// Link speed (bits 7:6): `00b` 10 Mb/s, `01b` 100 Mb/s, `10b` and `11b`
+    /// 1000 Mb/s.
+    pub const SPEED_SHIFT: u32 = 6;
+    pub const SPEED_MASK: u32 = 0b11;
+}
+
+/// Interrupt cause bits, shared by `ICR`, `ICS`, `IMS` and `IMC` (§10.2.4.1).
+pub mod cause {
+    /// Transmit Descriptor Written Back (bit 0).
+    pub const TXDW: u32 = 1 << 0;
+    /// Link Status Change (bit 2) — "set whenever the link status changes
+    /// (either from up to down, or from down to up)".
+    pub const LSC: u32 = 1 << 2;
+    /// Receive Descriptor Minimum Threshold Hit (bit 4).
+    pub const RXDMT0: u32 = 1 << 4;
+    /// Receiver Overrun (bit 6).
+    pub const RXO: u32 = 1 << 6;
+    /// Receiver Timer Interrupt (bit 7): with `RDTR` zero, one per packet.
+    pub const RXT0: u32 = 1 << 7;
+    /// The five causes §10.2.4.9's `IVAR` allocates a vector to, and therefore
+    /// the only ones that reach one. Second names and not separate events:
+    /// §10.2.4.1 gives each of them as a restatement of causes above.
+    pub const RXQ0: u32 = 1 << 20;
+    pub const RXQ1: u32 = 1 << 21;
+    pub const TXQ0: u32 = 1 << 22;
+    pub const TXQ1: u32 = 1 << 23;
+    pub const OTHER: u32 = 1 << 24;
+    /// Interrupt Asserted (bit 31). §10.2.4.1: not writable, and it clears only
+    /// when every cause has.
+    pub const INT_ASSERTED: u32 = 1 << 31;
+
+    /// What §4.6.5 tells a driver to unmask: "Suggested bits include RXT, RXO,
+    /// RXDMT and LSC. There is no reason to enable the transmit interrupts."
+    pub const ENABLED: u32 = RXT0 | RXO | RXDMT0 | LSC;
+
+    /// The same set in MSI-X mode's own names. **A part in that mode raises
+    /// nothing for the four above**: §10.2.4.9 gives a vector to five causes
+    /// and to no others, so a driver that unmasked only [`ENABLED`] would be
+    /// told about nothing at all.
+    pub const ENABLED_MSIX: u32 = RXQ0 | OTHER;
+}
+
+/// Interrupt Vector Allocation fields (§10.2.4.9). Five three-bit vector
+/// indices, each with an enable bit above it.
+pub mod ivar {
+    /// Every cause on vector 0, every entry valid. **Vector 0 because that is
+    /// the only one there is**: the kernel programs one MSI-X table entry for a
+    /// claimed function. All five are written rather than the two this driver
+    /// reads, because §10.2.4.9 says "if invalid values are written to the
+    /// INT_Alloc fields the result is unexpected".
+    pub const ALL_ON_VECTOR_ZERO: u32 = (1 << 3) | (1 << 7) | (1 << 11) | (1 << 15) | (1 << 19);
+}
+
+/// Receive Control bits (§10.2.5.1).
+pub mod rctl {
+    /// Enable (bit 1).
+    pub const EN: u32 = 1 << 1;
+    /// Broadcast Accept Mode (bit 15). Set: ARP and DHCP arrive on it.
+    pub const BAM: u32 = 1 << 15;
+    /// Receive Buffer Size (bits 17:16) with `BSEX` clear: `00b` is 2048 bytes.
+    pub const BSIZE_2048: u32 = 0b00 << 16;
+    /// Strip Ethernet CRC (bit 26). §10.2.5.1: the stripped CRC "is not DMA'd
+    /// to host memory and is not included in the length reported in the
+    /// descriptor".
+    pub const SECRC: u32 = 1 << 26;
+}
+
+/// Transmit Control bits (§10.2.6.1) and the values §4.6.6 suggests.
+pub mod tctl {
+    pub const EN: u32 = 1 << 1;
+    /// Pad Short Packets (bit 3), so the hardware pads a frame under 64 bytes.
+    pub const PSP: u32 = 1 << 3;
+    /// Collision Threshold (bits 11:4). §4.6.6: `CT = 0x0F`.
+    pub const CT_SHIFT: u32 = 4;
+    pub const CT: u32 = 0x0F << CT_SHIFT;
+    /// Collision Distance (bits 21:12). §4.6.6: full duplex is `63`.
+    pub const COLD_SHIFT: u32 = 12;
+    pub const COLD_FULL_DUPLEX: u32 = 0x3F << COLD_SHIFT;
+}
+
+/// The inter-packet gap §4.6.6 names: `IPGT = 8`, `IPGR1 = 2`, `IPGR2 = 10`,
+/// "the minimum legal IPG".
+pub const TIPG_DEFAULT: u32 = 8 | (2 << 10) | (10 << 20);
+
+/// Transmit Descriptor Control bits (§10.2.6.10).
+pub mod txdctl {
+    pub const WTHRESH_SHIFT: u32 = 16;
+    pub const GRAN: u32 = 1 << 24;
+    /// §4.6.6's suggested write-back policy: one descriptor's worth, counted in
+    /// descriptors. Anything larger holds a completion back until the ring
+    /// fills.
+    pub const SUGGESTED: u32 = GRAN | (1 << WTHRESH_SHIFT);
+}
+
+/// Receive Address High bits (§10.2.5.23).
+pub mod rah {
+    /// Address Valid (bit 31). §10.2.5.23: after reset "if the NVM is present,
+    /// the first register (Receive Address Register 0) is loaded from the IA
+    /// field in the NVM [...] and its Address Valid field will be 1b. If no NVM
+    /// is present the Address Valid field for n=0b will be 0b."
+    pub const AV: u32 = 1 << 31;
+}
+
+/// One legacy receive descriptor, sixteen bytes (§7.1.3, Figure 23):
+/// `Buffer Address[63:0]`, then `Length[15:0]`, `Packet Checksum[31:16]`,
+/// `Status[39:32]`, `Errors[47:40]`, `VLAN Tag[63:48]`.
+pub mod rx_desc {
+    pub const BYTES: usize = 16;
+    pub const LENGTH_SHIFT: u32 = 0;
+    pub const LENGTH_MASK: u64 = 0xFFFF;
+    pub const STATUS_SHIFT: u32 = 32;
+    pub const ERRORS_SHIFT: u32 = 40;
+    pub const BYTE_MASK: u64 = 0xFF;
+
+    /// Receive status bits (§7.1.3.3, Figure 24).
+    pub mod status {
+        /// Descriptor Done (bit 0) — "indicates whether hardware is done with
+        /// the descriptor".
+        pub const DD: u8 = 1 << 0;
+        /// End of Packet (bit 1). §7.1.3.3: "If EOP is not set for a
+        /// descriptor, only the Address, Length, and DD bits are valid."
+        pub const EOP: u8 = 1 << 1;
+    }
+
+    /// Receive error bits (§7.1.3.4, Figure 25), valid only with `EOP` and `DD`
+    /// set.
+    pub mod errors {
+        pub const CE: u8 = 1 << 0;
+        pub const SE: u8 = 1 << 1;
+        pub const SEQ: u8 = 1 << 2;
+        pub const CXE: u8 = 1 << 4;
+        pub const TCPE: u8 = 1 << 5;
+        pub const IPE: u8 = 1 << 6;
+        pub const RXE: u8 = 1 << 7;
+        /// The ones that say the frame's own bytes are wrong. The two checksum
+        /// bits are left out: §7.1.3.4 says "if receive checksum offloading is
+        /// disabled [...] the IPE and TCPE bits are 0b", and this driver asks
+        /// for none.
+        pub const FRAME_IS_BAD: u8 = CE | SE | SEQ | CXE | RXE;
+    }
+}
+
+/// One legacy transmit descriptor, sixteen bytes (§7.2.10.1, Figure 31):
+/// `Buffer Address[63:0]`, then `Length[15:0]`, `CSO[23:16]`, `CMD[31:24]`,
+/// `STA[35:32]`, `ExtCMD[39:36]`, `CSS[47:40]`, `VLAN[63:48]`.
+pub mod tx_desc {
+    pub const BYTES: usize = 16;
+    pub const LENGTH_MASK: u64 = 0xFFFF;
+    pub const CMD_SHIFT: u32 = 24;
+    pub const STATUS_SHIFT: u32 = 32;
+    pub const STATUS_MASK: u64 = 0xF;
+
+    /// Command byte fields (§7.2.10.1.4, Table 36).
+    pub mod cmd {
+        /// End of Packet (bit 0).
+        pub const EOP: u8 = 1 << 0;
+        /// Insert FCS (bit 1) — the hardware appends the Ethernet CRC.
+        pub const IFCS: u8 = 1 << 1;
+        /// Report Status (bit 3). §7.2.4.2: a descriptor with `RS` set is
+        /// written back, which is how this driver learns the buffer is free.
+        pub const RS: u8 = 1 << 3;
+        /// Descriptor Extension (bit 5). §7.2.10: "The legacy Tx descriptor is
+        /// defined by setting the DEXT bit in the command field to 0b."
+        pub const DEXT: u8 = 1 << 5;
+
+        /// One whole frame in one descriptor, written back when it is sent.
+        pub const ONE_FRAME: u8 = EOP | IFCS | RS;
+    }
+
+    /// Transmit status bits (§7.2.10.1, Figure 31): `DD` is bit 0 of `STA`.
+    pub const STATUS_DD: u8 = 1 << 0;
+}

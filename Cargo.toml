@@ -30,8 +30,10 @@ members = [
     "toyos-fat32-check",
     "toyos-gpt",
     "toyos-hda",
+    "toyos-i219",
     "toyos-keymap",
     "toyos-ld",
+    "toyos-logstream",
     "toyos-manifest",
     "toyos-mixer",
     "toyos-pci",
@@ -109,6 +111,9 @@ toyos-fat32 = { path = "toyos-fat32" }
 toyos-fat32-check = { path = "toyos-fat32-check" }
 toyos-gpt = { path = "toyos-gpt" }
 toyos-keymap = { path = "toyos-keymap" }
+# The record stream's boot parameter, so the gate that clears a valued
+# parameter by name reads the same constant the kernel and `logd` do.
+toyos-logstream = { path = "toyos-logstream" }
 toyos-manifest = { path = "toyos-manifest" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.

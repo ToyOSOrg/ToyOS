@@ -23,6 +23,8 @@ use toyos::shm::SharedMemory;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::{RegWidth, SyscallError};
 
+use crate::device::{KernelRefused, Latch, Window};
+
 /// PCI's own vendor-specific capability id; virtio's four config windows are
 /// all published under it (§4.1.4).
 const CAP_ID_VENDOR: u8 = 0x09;
@@ -130,73 +132,6 @@ const _: () = {
     assert!(OFF_TX_RINGS + 0x1000 <= OFF_RX_BUFS);
     assert!(NET_HDR_SIZE < RX_BUF_SIZE && NET_HDR_SIZE < TX_BUF_SIZE);
 };
-
-/// A bounds-checked volatile window over memory something other than this
-/// thread also reads or writes — a register aperture, or a ring the device
-/// walks.
-///
-/// Volatile because both race this process: a plain read of a used-ring index
-/// can be hoisted out of the loop that waits on it, and a plain write to a
-/// doorbell can be elided entirely.
-#[derive(Clone, Copy)]
-struct Window {
-    base: *mut u8,
-    len: usize,
-}
-
-impl Window {
-    /// # Safety
-    /// `base` must name at least `len` bytes of a live mapping, for as long as
-    /// this window or any window derived from it is used.
-    unsafe fn new(base: *mut u8, len: usize) -> Self {
-        Self { base, len }
-    }
-
-    fn sub(self, offset: usize, len: usize) -> Self {
-        assert!(
-            offset.checked_add(len).is_some_and(|end| end <= self.len),
-            "netd: a {len}-byte window at {offset:#x} runs past {:#x}",
-            self.len
-        );
-        // SAFETY: the assertion above kept `offset + len` inside `self`, which
-        // its own constructor's contract says is mapped.
-        Self { base: unsafe { self.base.add(offset) }, len }
-    }
-
-    fn at<T>(self, offset: usize) -> *mut T {
-        assert!(
-            offset.checked_add(size_of::<T>()).is_some_and(|end| end <= self.len),
-            "netd: a {}-byte access at {offset:#x} runs past {:#x}",
-            size_of::<T>(),
-            self.len
-        );
-        assert!(
-            (self.base as usize + offset) % align_of::<T>() == 0,
-            "netd: a {}-byte access at {offset:#x} is not aligned for it",
-            size_of::<T>(),
-        );
-        // SAFETY: bounded and aligned by the two assertions above.
-        unsafe { self.base.add(offset) as *mut T }
-    }
-
-    fn read<T: Copy>(self, offset: usize) -> T {
-        // SAFETY: `at` bounded and aligned the pointer; volatile because the
-        // device may write the same bytes concurrently.
-        unsafe { self.at::<T>(offset).read_volatile() }
-    }
-
-    fn write<T: Copy>(self, offset: usize, value: T) {
-        // SAFETY: `at` bounded and aligned the pointer; volatile because the
-        // device may read the same bytes concurrently.
-        unsafe { self.at::<T>(offset).write_volatile(value) }
-    }
-
-    fn zero(self) {
-        // SAFETY: `self.len` bytes from `self.base`, which is the whole of what
-        // this window covers.
-        unsafe { std::ptr::write_bytes(self.base, 0, self.len) }
-    }
-}
 
 /// One split-virtqueue descriptor (§2.7.5).
 #[repr(C)]
@@ -343,9 +278,7 @@ pub enum Refusal {
     ResetUnanswered,
     FeaturesRefused { offered: u64, status: u32 },
     NoVector(&'static str),
-    /// The kernel refused a call this driver cannot work without, and the word
-    /// is the kernel's own.
-    Kernel(&'static str, SyscallError),
+    Kernel(KernelRefused),
     /// The claim answered a configuration read it had to refuse.
     Unbounded(&'static str, u32),
 }
@@ -361,7 +294,7 @@ impl std::fmt::Display for Refusal {
                  DEVICE_STATUS={status:#x} without FEATURES_OK"
             ),
             Self::NoVector(what) => write!(f, "it refused a vector for {what}"),
-            Self::Kernel(call, why) => write!(f, "the kernel refused {call}: {why:?}"),
+            Self::Kernel(why) => write!(f, "{why}"),
             Self::Unbounded(what, at) => write!(
                 f,
                 "the claim answered a {what} at {at:#x}, so it is not a claim on one \
@@ -393,7 +326,7 @@ fn config_space_is_bounded(dev: &PciDev) -> Result<(), Refusal> {
         }
     }
     // And the bound is a bound rather than a wall: the vendor id is still there.
-    dev.config_read(0, RegWidth::U16).map_err(|e| Refusal::Kernel("its vendor id", e))?;
+    dev.config_read(0, RegWidth::U16).map_err(KernelRefused::on("its vendor id")).map_err(Refusal::Kernel)?;
     crate::say!(
         "netd: this claim answers {CONFIG_BYTES} bytes of configuration space and refuses \
          every access outside them"
@@ -425,8 +358,7 @@ pub struct VirtioNet {
     /// no device can reach it: smoltcp's token has to be given somewhere to put
     /// its bytes even when there is no head to send them on.
     dropped: RefCell<Vec<u8>>,
-    /// What `report_refusals` last said, so it says it again only on a change.
-    reported: Cell<(u32, u32)>,
+    reported: Latch<(u32, u32)>,
     mac: [u8; 6],
 }
 
@@ -435,7 +367,7 @@ impl VirtioNet {
     /// feature negotiation, both queues and the vector binding — in the order
     /// virtio 1.2 §3.1.1 fixes.
     pub fn open(dev: PciDev) -> Result<Self, Refusal> {
-        let info = dev.describe().map_err(|e| Refusal::Kernel("the claim's description", e))?;
+        let info = dev.describe().map_err(KernelRefused::on("the claim's description")).map_err(Refusal::Kernel)?;
 
         config_space_is_bounded(&dev)?;
         let caps = Capabilities::walk(&dev);
@@ -461,7 +393,8 @@ impl VirtioNet {
             .ok_or(Refusal::MissingCap("a BAR this claim may map"))?;
         let mapped = dev
             .map_bar(bar as u32, bar_bytes)
-            .map_err(|e| Refusal::Kernel("the register window", e))?;
+            .map_err(KernelRefused::on("the register window"))
+            .map_err(Refusal::Kernel)?;
         // SAFETY: the mapping is `bar_bytes` long and lives as long as
         // `mapped`, which this struct holds for its own life.
         let window = unsafe { Window::new(mapped.as_ptr(), bar_bytes as usize) };
@@ -510,7 +443,10 @@ impl VirtioNet {
             return Err(Refusal::FeaturesRefused { offered: features, status: answered });
         }
 
-        let grant = dev.dma_alloc(GRANT_BYTES).map_err(|e| Refusal::Kernel("a DMA grant", e))?;
+        let grant = dev
+            .dma_alloc(GRANT_BYTES)
+            .map_err(KernelRefused::on("a DMA grant"))
+            .map_err(Refusal::Kernel)?;
         // SAFETY: the grant covers at least `GRANT_BYTES` — the kernel rounds
         // the request up to whole pages, never down — and lives as long as
         // `grant`, which this struct holds.
@@ -590,7 +526,7 @@ impl VirtioNet {
             tx_free: RefCell::new((0..TX_QUEUE_SIZE).rev().collect()),
             tx_dropped: Cell::new(0),
             dropped: RefCell::new(vec![0; TX_BUF_SIZE]),
-            reported: Cell::new((0, 0)),
+            reported: Latch::default(),
             mac,
         };
 
@@ -607,18 +543,12 @@ impl VirtioNet {
 
     /// Say what this driver has refused or dropped, when either count has
     /// moved.
-    ///
-    /// **On change, not per element**: a device flooding the used ring with
-    /// elements this driver will not act on costs one line, not one per
-    /// element — which is the difference between a diagnostic and a way to
-    /// drown the console from the other side of the boundary.
     fn report_refusals(&self) {
         let refused = self.rx.borrow().refused + self.tx.borrow().refused;
         let dropped = self.tx_dropped.get();
-        if (refused, dropped) == self.reported.get() {
+        if self.reported.moved((refused, dropped)).is_none() {
             return;
         }
-        self.reported.set((refused, dropped));
         crate::say!(
             "netd: this NIC has refused {refused} used-ring element(s) — the device named a \
              descriptor this driver never published or claimed more bytes than it was given — \
@@ -630,17 +560,14 @@ impl VirtioNet {
     ///
     /// The count is not acted on — what a message meant is in the rings — but
     /// it has to be consumed, or the poller reports the same interrupt for ever.
-    pub fn take_interrupt(&self) -> u32 {
+    /// `WouldBlock` is the ordinary "nothing since the last read". Any other
+    /// refusal is handed up as the kernel worded it: what it means is
+    /// `Card::begin_pass`'s call, made once for both drivers.
+    pub fn take_interrupt(&self) -> Result<u32, SyscallError> {
         match self.dev.irq() {
-            Ok(record) => record.count,
-            // `WouldBlock` is the ordinary "nothing since the last read".
-            Err(SyscallError::WouldBlock) => 0,
-            // Anything else is the kernel saying this device is no longer
-            // this driver's: a fault at the unit is the one that happens, and
-            // by the time it is answered the function's bus mastering is gone.
-            // There is nothing to degrade to — every frame from here on is one
-            // that silently never arrives — so this dies where it can be read.
-            Err(why) => panic!("netd: this NIC's claim refused an interrupt read: {why:?}"),
+            Ok(record) => Ok(record.count),
+            Err(SyscallError::WouldBlock) => Ok(0),
+            Err(why) => Err(why),
         }
     }
 
@@ -699,7 +626,7 @@ impl VirtioNet {
         // `self`; the device has finished with this buffer — its used-ring
         // element is what said so — and it is not posted again until
         // `rx_done`, which the caller makes after this borrow ends.
-        unsafe { std::slice::from_raw_parts(window.base as *const u8, len) }
+        unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, len) }
     }
 
     /// Fill a transmit buffer with a `len`-byte frame and hand it to the device.
@@ -731,7 +658,7 @@ impl VirtioNet {
         // SAFETY: the window is inside the grant, which lives as long as
         // `self`; the device is not reading it, because this head is out of
         // `tx_free` and its descriptor is published only after `fill` returns.
-        let result = fill(unsafe { std::slice::from_raw_parts_mut(window.base, len) });
+        let result = fill(unsafe { std::slice::from_raw_parts_mut(window.as_ptr(), len) });
         self.tx.borrow_mut().submit(
             head,
             self.dma_device_addr + at as u64,
@@ -810,7 +737,7 @@ impl Cap {
     fn window(&self, bar: Window) -> Result<Window, Refusal> {
         let length = (self.length as usize).max(4);
         match (self.offset as usize).checked_add(length) {
-            Some(end) if end <= bar.len => Ok(bar.sub(self.offset as usize, length)),
+            Some(end) if end <= bar.bytes() => Ok(bar.sub(self.offset as usize, length)),
             _ => Err(Refusal::MissingCap("a capability inside its own BAR")),
         }
     }

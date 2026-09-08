@@ -1131,6 +1131,7 @@ dependencies = [
  "toyos-gpt",
  "toyos-keymap",
  "toyos-ld",
+ "toyos-logstream",
  "toyos-manifest",
  "toyos-sched",
  "toyos-tco",
@@ -1191,6 +1192,10 @@ name = "toyos-hda"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-i219"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-keymap"
 version = "0.1.0"
 
@@ -1202,6 +1207,13 @@ dependencies = [
  "sha2",
  "thiserror",
  "zerocopy",
+]
+
+[[package]]
+name = "toyos-logstream"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
 ]
 
 [[package]]
