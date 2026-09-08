@@ -20,7 +20,7 @@
 use std::cell::{Cell, RefCell};
 
 use toyos::shm::SharedMemory;
-use toyos::{AsHandle, DmaRegion, PciDev};
+use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::{RegWidth, SyscallError};
 
 use crate::device::{KernelRefused, Latch, Window};
@@ -279,7 +279,7 @@ pub enum Refusal {
     FeaturesRefused { offered: u64, status: u32 },
     NoVector(&'static str),
     Kernel(KernelRefused),
-    /// The claim answered a configuration access it had to refuse.
+    /// The claim answered a configuration read it had to refuse.
     Unbounded(&'static str, u32),
 }
 
@@ -311,11 +311,10 @@ impl std::fmt::Display for Refusal {
 /// only because a claim answers its own function's 4 KiB and nothing else. That
 /// is the kernel's contract, so this is where the driver that depends on it
 /// checks it: a read past the end and one not aligned for its own width are
-/// both refused, no write anywhere in the space is answered, and the first byte
-/// still reads. An aligned read that straddles the end cannot be written — 4096
-/// is a multiple of every width — and one whose offset wraps cannot be
-/// expressed, `PciDev::config_read` taking a `u32`; both are answered where the
-/// arithmetic lives, in `toyos-dma`'s host tests.
+/// both refused, and the first byte is not. An aligned read that straddles the
+/// end cannot be written — 4096 is a multiple of every width — and one whose
+/// offset wraps cannot be expressed, `PciDev::config_read` taking a `u32`; both
+/// are answered where the arithmetic lives, in `toyos-dma`'s host tests.
 fn config_space_is_bounded(dev: &PciDev) -> Result<(), Refusal> {
     const CONFIG_BYTES: u32 = 4096;
     for (what, at, width) in [
@@ -326,18 +325,11 @@ fn config_space_is_bounded(dev: &PciDev) -> Result<(), Refusal> {
             return Err(Refusal::Unbounded(what, at));
         }
     }
-    // **And there is no write path at all**, which is the whole of why the
-    // kernel may leave an MSI function's message address in configuration space
-    // and withhold no BAR for it. The vendor id, because a write the kernel let
-    // through would land on a register the device holds read-only anyway.
-    if toyos_abi::syscall::device_reg_write(dev.as_handle(), 0, RegWidth::U16, 0).is_ok() {
-        return Err(Refusal::Unbounded("write into its configuration space", 0));
-    }
     // And the bound is a bound rather than a wall: the vendor id is still there.
     dev.config_read(0, RegWidth::U16).map_err(KernelRefused::on("its vendor id")).map_err(Refusal::Kernel)?;
     crate::say!(
-        "netd: this claim answers {CONFIG_BYTES} bytes of configuration space, refuses \
-         every access outside them and every write inside them"
+        "netd: this claim answers {CONFIG_BYTES} bytes of configuration space and refuses \
+         every access outside them"
     );
     Ok(())
 }

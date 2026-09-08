@@ -3,12 +3,12 @@
 //! The line through the device is **who can name an address**. This module
 //! keeps config space — there is no write path to it from userland — puts the
 //! function in an address space of its own at the unit *before* it enables bus
-//! mastering, programs the interrupt vector into whichever of the function's
-//! two message mechanisms it has, and hands out every device address a
-//! descriptor may carry. Nothing the holder writes into
-//! a descriptor can make the device touch memory the kernel did not grant it:
-//! the domain maps the grants and nothing else, and an address outside them is
-//! refused at the unit and recorded against that claim.
+//! mastering, programs the interrupt vector into whichever of the function's two
+//! message mechanisms it has, and hands out every device address a descriptor
+//! may carry. Nothing the holder writes into a descriptor can make the device
+//! touch memory the kernel did not grant it: the domain maps the grants and
+//! nothing else, and an address outside them is refused at the unit and
+//! recorded against that claim.
 //!
 //! **A window is 2 MiB because that is the only page this kernel maps.** A BAR
 //! a process may see is re-assigned onto a 2 MiB boundary above everything
@@ -35,17 +35,6 @@
 //! advertises one (PCIe §6.6.2), which no device in reach does — so the order
 //! above is the mechanism and the reset is the belt.
 //!
-//! **What is read back, and what is not.** `Owned` is
-//! `pci_function_is_exclusive`, `NoInterrupt` is `virtio_net_no_msix`,
-//! `Untranslated` is `iommu_virtio_platform`'s no-unit arm, the domain is
-//! `userdev_dma_fault`, and `SYS_DEVICE_REG_READ`'s bound is netd's own
-//! `config_space_is_bounded`, which reads the absence of a write path too.
-//! `MsixUnusable`, `Ambiguous`, `KernelDriven`, `Exhausted`, every
-//! window refusal, and every bound `SYS_DEVICE_BAR_MAP` and
-//! `SYS_DEVICE_DMA_ALLOC` check are refused here and read by nothing: a
-//! registration of them waits on a boot config whose own test binary holds a
-//! claimable function, and netd holds this machine's only one.
-//!
 //! Nothing here is specific to what a function *is*.
 
 /// No `crate::` reference, so `kernel-loom` compiles it and models the
@@ -60,7 +49,7 @@ use toyos_abi::boot::MemoryMapEntry;
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
-use toyos_pci::{bar, express, mechanism, msi, msix, Mechanism};
+use toyos_pci::{bar, express, msi, msix};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::PciDevice;
@@ -442,16 +431,12 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
                 func: pci.func,
                 _pad: [0; 5],
             };
-            let armed = match &bound.armed {
-                Armed::Msix(_) => "MSI-X",
-                Armed::Msi => "MSI",
-            };
             *BOUND[slot].lock() = Some(bound);
             IRQ[slot].clear();
             crate::iommu::note_user_owned(pci.bus, pci.dev, pci.func, Some(slot));
             log!(
                 "pcidev: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] handed over on slot {slot}, \
-                 vector {:#x} on {armed}",
+                 vector {:#x}",
                 pci.bus,
                 pci.dev,
                 pci.func,
@@ -503,20 +488,13 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // mechanism can be armed on is one no holder could ever be told anything
     // about, and `virtio_net_no_msix` reads that refusal off the console *and*
     // the absence of any BAR line after it.
-    //
-    // **The choice is what the function publishes, never what an arming
-    // answered**: a function whose MSI-X this kernel could not arm is refused
-    // rather than handed over on MSI, because `place_bars` withholds the table's
-    // BAR only for a function whose table [`msix_bar`] could name.
-    let publishes = |id| pci.capabilities().any(|cap| cap.id() == id);
-    let armed = match mechanism(publishes(msix::CAP_ID), publishes(msi::CAP_ID)) {
-        Some(Mechanism::Msix) => {
-            Armed::Msix(pci.enable_msix(VECTORS[slot]).ok_or(Refusal::MsixUnusable)?)
-        }
-        Some(Mechanism::Msi) => {
-            pci.enable_msi(VECTORS[slot]).then_some(Armed::Msi).ok_or(Refusal::NoInterrupt)?
-        }
-        None => return Err(Refusal::NoInterrupt),
+    let publishes = |cap_id| pci.capabilities().any(|cap| cap.id() == cap_id);
+    let armed = if publishes(msix::CAP_ID) {
+        Armed::Msix(pci.enable_msix(VECTORS[slot]).ok_or(Refusal::MsixUnusable)?)
+    } else if publishes(msi::CAP_ID) {
+        pci.enable_msi(VECTORS[slot]).then_some(Armed::Msi).ok_or(Refusal::NoInterrupt)?
+    } else {
+        return Err(Refusal::NoInterrupt);
     };
 
     // From here a refusal has to undo: a vector is armed, and the arms below
@@ -537,8 +515,6 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             })
         }
         Err(why) => {
-            // A function left enabled at a vector nobody holds delivers into a
-            // slot with no reader.
             match armed {
                 Armed::Msix(_) => pci.disable_msix(),
                 Armed::Msi => pci.disable_msi(),
@@ -775,8 +751,6 @@ pub fn release(slot: usize) {
 
 fn tear_down(slot: usize, bound: Bound) {
     bound.pci.disable_bus_master();
-    // The entry masked where there is a table to mask, the capability off where
-    // there is not.
     match &bound.armed {
         Armed::Msix(entry) => entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED),
         Armed::Msi => bound.pci.disable_msi(),

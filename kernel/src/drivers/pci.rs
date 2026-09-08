@@ -339,10 +339,9 @@ impl PciDevice {
 
     /// Put MSI back off: the counterpart of [`Self::disable_msix`].
     ///
-    /// The enable bit alone, which every function has. The per-vector mask an
-    /// arming cleared stays clear: a function whose Mask bit this set would owe
-    /// a message on the set-to-clear transition a later arming makes of it, with
-    /// its Pending bit set (PCIe §7.7.1.7).
+    /// The per-vector mask an arming cleared stays clear: a function whose Mask
+    /// bit this set would owe a message on the set-to-clear transition a later
+    /// arming makes of it, with its Pending bit set (PCIe §7.7.1.7).
     pub fn disable_msi(&self) {
         let Some(cap) = self.capabilities().find(|c| c.id() == msi::CAP_ID) else { return };
         let control = cap.read_u16(msi::MESSAGE_CONTROL);

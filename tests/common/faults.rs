@@ -285,9 +285,6 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
     // whose holder would never be told anything, and handing it over anyway
     // would be handing out a device that looks alive and never speaks.
     log.must_say("pcidev: PCI 00:03.0 NOT HANDED OVER")?;
-    // Both mechanisms named: this refusal is owed only by a function that
-    // publishes neither, and one naming MSI-X alone would be satisfied by a
-    // machine that armed MSI instead and handed the function over.
     log.must_say("neither its MSI-X nor its MSI could be armed")?;
     log.must_not_say("[1af4:1041] handed over")?;
     // And the refusal is the *whole* of it: no BAR moved for a function nobody

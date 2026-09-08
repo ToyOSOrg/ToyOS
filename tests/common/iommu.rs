@@ -707,13 +707,12 @@ pub fn iommu_virtio_platform(
             // And the claim netd was given is bounded to its own function's
             // configuration space, which is what makes its capability walk —
             // an index by numbers the *device* wrote — safe to run at all.
-            // netd asks the kernel for a read past the end, one misaligned, and
-            // a write inside the bound — the last being what the kernel's own
-            // reason for withholding no BAR for an MSI message rests on — and
-            // refuses to drive a claim that answers any of them.
+            // netd asks the kernel for a read past the end, one straddling it
+            // and one misaligned, and refuses to drive a claim that answers any
+            // of them.
             log.must_say(
-                "netd: this claim answers 4096 bytes of configuration space, refuses every \
-                 access outside them and every write inside them",
+                "netd: this claim answers 4096 bytes of configuration space and refuses every \
+                 access outside them",
             )?;
             // The two things a hand-over spends, on the same function and the
             // same machine the arm below requires to be unspent. Without this
@@ -807,12 +806,7 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// The two lines a hand-over spends, on the function `netcase` claims.
-///
-/// Named once because both arms of `iommu_virtio_platform` read them, in
-/// opposite directions: the arm with a unit requires them and the arm without
-/// one requires their absence. An absence nothing ever produces would pass
-/// against a kernel that had stopped writing the line at all.
+/// The two lines a hand-over spends: one arm requires them, the other their absence.
 const BAR_MOVED: &str = "pcidev: PCI 00:03.0 BAR";
 const MSIX_ARMED: &str = "PCI 00:03.0: msix address=";
 

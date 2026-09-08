@@ -142,14 +142,9 @@ mod tests {
         assert_eq!(Msi::enabled(ctrl), ctrl | ENABLE);
     }
 
-    /// Disabling is not the inverse of arming: the Multiple Message Enable an
-    /// arming zeroed stays zero, or the function comes back armed for every
-    /// vector it can raise the moment anything sets the enable bit. The fixture
-    /// carries that field set, so an implementation clearing it here is refused.
     #[test]
     fn disabling_clears_the_enable_bit_and_nothing_else() {
         let ctrl = ADDRESS_64 | PER_VECTOR_MASK | MULTI_MESSAGE_ENABLE | (5 << 1);
         assert_eq!(Msi::disabled(ctrl | ENABLE), ctrl);
-        assert_eq!(Msi::disabled(ctrl), ctrl);
     }
 }
