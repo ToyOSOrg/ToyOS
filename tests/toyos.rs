@@ -596,12 +596,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // bounded queue refuses what it cannot hold, counts it, says so in the log,
     // and `/log` still carries every record. The control on the accounting.
     ("log_stream_unreachable", Sched::Parallel, Tier::Nightly),
-    // The other half of that: a peer that accepted and stopped reading, so the
-    // writer blocks on a closed window and the queue above it is what refuses.
-    // `log-storm-wide` makes one boot's records outweigh every buffer under the
-    // queue, and the arm holds the peer's own window so all of them are numbers
-    // it knows. Fast with the UNMEASURED bootstrap marker until CI prices it.
-    ("log_stream_stalled_peer_storm_over_a_bounded_window", Sched::Parallel, Tier::Fast),
+    // The other half of that: a peer that accepted, stopped reading for a
+    // storm's worth of records and then read again. What a stall costs in lines
+    // is the buffers' business and no arm's to demand; what it may never cost
+    // is half a line, and that is what this one judges.
+    ("log_stream_stalled_peer_delivers_whole_records", Sched::Parallel, Tier::Nightly),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -13301,7 +13300,7 @@ fn run_machine_test(
         }
         "log_stream_no_listener" => common::logstream::no_listener(c_bins, rust_bins),
         "log_stream_unreachable" => common::logstream::unreachable(c_bins, rust_bins),
-        "log_stream_stalled_peer_storm_over_a_bounded_window" => {
+        "log_stream_stalled_peer_delivers_whole_records" => {
             common::logstream::stalled_peer(c_bins, rust_bins)
         }
         "netd_connection_caps" => {

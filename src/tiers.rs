@@ -1346,6 +1346,22 @@ pub const RELEGATED: &[Relegated] = &[
                  counting still reds; what goes dark is the arm where nothing ever drains. Its \
                  price is the per-arm image build `log_stream` describes.",
     },
+    Relegated {
+        test: "log_stream_stalled_peer_delivers_whole_records",
+        ci_ms: 34_591,
+        why: Why::Cost,
+        guards: "A peer that accepts the stream, stops reading for a storm's worth of records \
+                 and then reads again: every line it receives is a whole record, `/log`'s own, \
+                 in `/log`'s own order. It is the only gate anywhere on netd moving a client's \
+                 bytes without losing the tail of a short send — reverting that hunk reds it on \
+                 a record cut in half with a whole one behind it — and the only place a stalled \
+                 peer's `write_all` blocks under a test at all. What it does not judge, and what \
+                 no arm may: how many lines a stall costs, which is the pipe\'s size, netd\'s and \
+                 whatever QEMU holds between them. What still runs per pull request: nothing on \
+                 the wire; `toyos-logstream`\'s host tests carry the drop accounting and red \
+                 under the drop-count mutation with no guest at all. Its price is the storm and \
+                 the per-arm image build `log_stream` describes.",
+    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own

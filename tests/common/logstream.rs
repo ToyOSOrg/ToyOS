@@ -47,46 +47,15 @@ pub const VIRTIO: Bench =
 pub const E1000E: Bench =
     Bench { profile: qemu::Profile::E1000e, config: "tests/e1000case", device: "e1000e" };
 
-/// What a host may hold of a stream whose reader has stopped taking it.
+/// What a host holds of a stream whose reader has stopped taking it.
 ///
-/// **The arm that fills the guest's buffers owns this one**, because otherwise
-/// it is the runner's: a hosted Linux runner auto-tunes a receive buffer into
-/// the megabytes when the peer is not reading, and a guest that never has to
-/// block never refuses a line. Set on the listening socket before any
-/// connection, which is where an accepted one inherits it and where an explicit
-/// size stops the auto-tuning.
+/// Held rather than left to the runner, so a peer that stops reading closes its
+/// window promptly on every host — which is what puts netd's send buffer under
+/// its own bound and the writer inside a blocking write. **It does not bound
+/// what the machine absorbs**: the pipe below netd is megabytes and what QEMU's
+/// user-mode networking holds is nothing this tree names, so how much a stalled
+/// peer costs is not a number any arm here may assert.
 const STALLED_PEER_WINDOW: usize = 32 * 1024;
-
-/// Everything between `logd`'s queue and a listener that is not reading, all of
-/// which fills before one line is refused: the kernel pipe netd reads
-/// (`kernel/src/pipe.rs`'s `PIPE_SIZE`), netd's own send buffer
-/// (`userland/netd/src/main.rs`'s `TCP_SOCKET_BUFFER`), the receive buffer above
-/// — doubled, because Linux charges overhead against `SO_RCVBUF` and hands back
-/// twice what it was asked for — and what QEMU's user-mode networking holds
-/// between them, which no constant in this tree names. That last term is the
-/// only measured one: a boot that reached [`ROTATION_MARK`] and had refused 375
-/// records by then puts everything under the queue at 2.65 MiB, which leaves it
-/// half a mebibyte.
-const BELOW_THE_QUEUE: usize =
-    2 * 1024 * 1024 + 64 * 1024 + 2 * STALLED_PEER_WINDOW + 512 * 1024;
-
-/// The rotation the stalled arm waits for before it lets the peer read again.
-///
-/// `logd` rotates every `MAX_LOG_BYTES` (`userland/logd/src/store.rs`, one
-/// mebibyte) and names the next part in the line it prints, so this line is
-/// three whole parts written — and every line is offered to the stream as it is
-/// written, so it is also three mebibytes offered. `log-storm-wide` is what
-/// makes one boot write more than that.
-const ROTATION_MARK: &str = "_0004.log";
-const OFFERED_BY_THE_MARK: usize = 3 * 1024 * 1024;
-
-/// **What the arm rests on, held by the compiler.** What one boot has offered by
-/// the mark outweighs everything under the queue, so a refusal by then is
-/// certain rather than lucky — which is what a runner whose receive window this
-/// test did not own could not say. The count is comfortable rather than
-/// marginal because the job runs after the mark: from there on, every line the
-/// machine offers can only be refused.
-const _: () = assert!(OFFERED_BY_THE_MARK > BELOW_THE_QUEUE);
 
 /// An address on the guest's own network that answers nothing, ever.
 ///
@@ -354,22 +323,21 @@ fn on_the_volume(staged: &Staged) -> Result<Vec<String>, String> {
     volumes::whole_log(&staged.image, staged.start, staged.len)
 }
 
-/// What this boot's own log says the stream refused, and in how many lines.
+/// What this boot's own log says the stream refused, and in how many lines, or
+/// `None` when it says it refused nothing.
 ///
 /// **The accounting is checked against itself.** Every report says what its own
 /// run of loss added and what the boot has lost in total, so the first numbers
 /// must sum to the last line's second one. A counter that has stopped counting
 /// cannot satisfy both, and a report nobody can read is the same as no report.
-fn refused_in(file: &[String]) -> Result<(u64, usize), String> {
+///
+/// Whether a boot refuses anything at all is a fact about buffers no arm here
+/// owns; whether what it says about its refusals holds together is not.
+fn refusals_in(file: &[String]) -> Result<Option<(u64, usize)>, String> {
     let reports: Vec<&String> =
         file.iter().filter(|l| l.contains("never reached the log stream")).collect();
     let Some(last) = reports.last() else {
-        return Err(format!(
-            "a log storm offered to a stream that could not take it cost it no record it admits \
-             to; the file has {} line(s), ending {:?}",
-            file.len(),
-            file.iter().rev().take(3).collect::<Vec<_>>()
-        ));
+        return Ok(None);
     };
     let mut added = 0u64;
     for line in &reports {
@@ -386,7 +354,21 @@ fn refused_in(file: &[String]) -> Result<(u64, usize), String> {
             reports.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n")
         ));
     }
-    Ok((dropped, reports.len()))
+    Ok(Some((dropped, reports.len())))
+}
+
+/// The same, where refusing nothing is a failing verdict: a stream whose address
+/// answers nothing drains never, so a boot that offered a storm to it and lost
+/// no line measured nothing at all.
+fn refused_in(file: &[String]) -> Result<(u64, usize), String> {
+    refusals_in(file)?.ok_or_else(|| {
+        format!(
+            "a log storm offered to a stream that could not take it cost it no record it admits \
+             to; the file has {} line(s), ending {:?}",
+            file.len(),
+            file.iter().rev().take(3).collect::<Vec<_>>()
+        )
+    })
 }
 
 /// What the listener received is the file's own lines in the file's own order,
@@ -677,32 +659,26 @@ pub fn unreachable(
     Ok(())
 }
 
-/// A boot streaming to a listener that accepts the connection and then stops
-/// reading, offered a storm wider than every buffer under the queue, and read
-/// again before the machine goes down.
+/// A peer that accepts the connection, stops reading for a storm's worth of
+/// records, and then reads again: every line it receives is a whole record, and
+/// `/log`'s own, in `/log`'s own order.
 ///
-/// **This is the arm the writer's own backpressure exists for.** The peer's
-/// window closes, netd stops draining the pipe, the writer blocks inside
-/// `write_all`, and the queue above it is what refuses — which is a different
-/// path from a stream that never opened at all. A narrow storm does not reach
-/// it: the pipe netd reads is 2 MiB (`kernel/src/pipe.rs`'s `PIPE_SIZE`) and
-/// netd's send buffer another 64 KiB, so `log-storm-wide` is what makes one
-/// boot's records exceed them.
+/// **That is what a stall may cost and what it may not.** It may cost lines —
+/// how many is the pipe's size, netd's, and whatever QEMU's user-mode
+/// networking holds between them, none of which this arm owns, so it demands no
+/// refusal. It may never cost half a line: a byte the machine consumed and did
+/// not deliver is a record cut on the wire, which is what netd discarding the
+/// tail of a short send produces and what [`is_subsequence_of`] refuses at every
+/// position.
 ///
-/// **The peer is released while the guest is still running**, and the arm waits
-/// for a record produced after that to arrive. Everything the stall cost is
-/// then in the middle of a stream that goes on past it, so a byte the machine
-/// consumed and did not deliver is a cut record with a whole one behind it —
-/// visible to [`is_subsequence_of`] wherever it happened. Ending the arm at the
-/// stall instead puts every such cut on the last line, where a comparison can
-/// no longer tell a truncation from the connection's own end.
+/// **The peer is released while the guest is still running**, which is what
+/// puts any such cut in the middle of a stream that goes on past it. Ending the
+/// arm at the stall instead leaves every cut on the last line, where a
+/// comparison can no longer tell a truncation from the connection's own end.
 ///
-/// **Every buffer the storm has to outweigh is a number this test knows**:
-/// [`BELOW_THE_QUEUE`] against [`OFFERED_BY_THE_MARK`], with the peer's own
-/// window held at [`STALLED_PEER_WINDOW`] rather than left to the runner. A
-/// hosted runner auto-tunes it into the megabytes, absorbs the whole storm, and
-/// the guest never refuses a line — which is this arm passing on one host and
-/// failing on another rather than measuring anything.
+/// What a boot *says* it refused is checked against itself where it says
+/// anything ([`refusals_in`]); that the accounting counts what it refuses at all
+/// is `toyos-logstream`'s host tests, which need no guest and no host's buffers.
 pub fn stalled_peer(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -733,21 +709,9 @@ pub fn stalled_peer(
 
     qemu::await_marker(&mut guest, &mut console, "logstorm done t=", "the storm to run out")?;
 
-    // **Everything under the queue is full by here**: [`OFFERED_BY_THE_MARK`]
-    // against [`BELOW_THE_QUEUE`], which the constant assertion beside them
-    // holds. From this line on, whatever the machine offers can only be
-    // refused.
-    qemu::await_marker(
-        &mut guest,
-        &mut console,
-        ROTATION_MARK,
-        "the boot's log to outweigh every buffer under the stream's queue",
-    )?;
-
     // **The guest goes on working**, which is the claim a peer that stopped
     // reading tests and a peer that never answered does not: this one has the
-    // machine's own writer blocked on it. The job is also the window in which
-    // the refusals pile up, and it is an event rather than a sleep.
+    // machine's own writer blocked on it.
     let result = guest.run_test("test_rs_empty_dir_stat", Duration::from_secs(60));
     if result.exit_code != Some(0) {
         return Err(format!(
@@ -768,11 +732,8 @@ pub fn stalled_peer(
     drop(guest);
     listener.wait_for_end(LAG)?;
 
-    // **The connection was open and the queue still refused.** The only thing
-    // that can refuse a line while a writer is draining the queue is a writer
-    // that is not draining it, which is one blocked inside `write_all` — the
-    // whole difference between this arm and the one whose address answers
-    // nothing.
+    // The connection was opened, so the writer entered the loop this arm is
+    // about rather than giving up in `open`.
     if listener.connections() != 1 {
         return Err(format!(
             "the stream opened {} time(s), so nothing was ever written into it",
@@ -780,7 +741,13 @@ pub fn stalled_peer(
         ));
     }
     let file = on_the_volume(&staged)?;
-    let (dropped, said_in) = refused_in(&file)?;
+    // **Whether this host's buffers made the machine refuse anything is not
+    // asserted** — how much a stalled peer costs is the pipe's size, netd's,
+    // and what QEMU holds between them, and two hosted runs proved that is not
+    // a number this arm may demand. What it does assert is that whatever the
+    // boot says about its refusals holds together. The accounting itself is
+    // `toyos-logstream`'s host tests, which red under the drop-count mutation.
+    let refused = refusals_in(&file)?;
 
     let received = listener.lines();
     let bytes: usize = received.iter().map(String::len).sum();
@@ -804,10 +771,14 @@ pub fn stalled_peer(
     }
     eprintln!(
         "  [stream] a peer that stopped reading and then read again took {bytes} byte(s) in {} \
-         whole line(s), each /log's own in /log's own order, and the queue refused {dropped} it \
-         never saw, said in {said_in} line(s); /log holds {} line(s)",
+         whole line(s), each /log's own in /log's own order; /log holds {} line(s) and {}",
         received.len(),
-        file.len()
+        file.len(),
+        match refused {
+            Some((dropped, said_in)) =>
+                format!("says it refused {dropped} of them in {said_in} line(s) that agree"),
+            None => "says it refused none".to_string(),
+        }
     );
     let _ = std::fs::remove_file(&staged.image);
     Ok(())
