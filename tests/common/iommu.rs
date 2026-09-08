@@ -794,11 +794,12 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     log.must_not_say("handed over on slot")?;
     // **And the refusal spent nothing on the way out.** No BAR was moved, so
     // this function's BARs are still where firmware put them, and no vector was
-    // programmed into its MSI-X table — which is what says `bring_up` asks for
-    // the address space *before* it touches the function. `slot_space` put back
-    // below `place_bars` reds here.
+    // programmed into *either* of the two mechanisms `bring_up` may arm — which
+    // is what says it asks for the address space before it touches the function.
+    // `slot_space` put back below `place_bars` reds here.
     log.must_not_say(BAR_MOVED)?;
     log.must_not_say(MSIX_ARMED)?;
+    log.must_not_say(MSI_ARMED)?;
     log.must_say("init: netd: pci:1af4:1041 is on this machine and could not be handed over")?;
     // netd's own exit is not read here: it speaks after the ready marker this
     // capture ends at. It is the same endowment-is-empty path
@@ -814,6 +815,13 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
 /// against a kernel that had stopped writing the line at all.
 const BAR_MOVED: &str = "pcidev: PCI 00:03.0 BAR";
 const MSIX_ARMED: &str = "PCI 00:03.0: msix address=";
+
+/// The other mechanism a hand-over may arm, whose absence the no-unit arm owes
+/// as well. `bring_up` falls back to MSI, so "no MSI-X message was written"
+/// stopped being the whole of "no vector was programmed" the moment it did —
+/// and the two lines differ by one character, which is why each is spelled once
+/// here rather than at its use.
+const MSI_ARMED: &str = "PCI 00:03.0: msi address=";
 
 /// The control that makes the two arms above mean something: a guest that
 /// declines the feature its host offered gets no device, not a bypassing one.
