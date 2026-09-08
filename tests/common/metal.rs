@@ -255,6 +255,13 @@ impl Readback {
     pub fn log_reached_the_stick(&self) -> Result<(), String> {
         let after = self.after_the_reset()?;
         let text = after.text();
+        // A boot its own deadline or the lockup detector ended never reached
+        // `quiesce`, so its log stops early by construction and it seals no
+        // account. Owed by the boots that handed the machine back, and only by
+        // them.
+        if !text.contains(bootlog::HANDED_BACK) {
+            return Ok(());
+        }
         if text.contains(bootlog::LOG_COMPLETE) {
             return Ok(());
         }

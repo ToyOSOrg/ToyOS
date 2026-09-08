@@ -503,8 +503,8 @@ ceiling_from = "as list.testcases.job_ms"
 [[number]]
 name = "list.latencycase.job_ms"
 unit = "ms"
-ceiling = 30000
-ceiling_from = "both members of that list are benches that run for a stated span rather than binaries that exit as soon as they can, and two of them are the whole list; half the bound each is what the boot has to give"
+ceiling = 27000
+ceiling_from = "half of what the members of a list may spend — (toyos_tco::JOB_BOUND_MS - metalprofile::AROUND_THE_LIST_MS) / 2 — because this list is two benches that run for a stated span rather than binaries that exit as soon as they can, and they split the boot between them"
 
 [[number]]
 name = "list.selftests.job_ms"

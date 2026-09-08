@@ -79,6 +79,16 @@ pub const LOG_SHORT: &str = "log: /log holds this boot to";
 /// One record the volume never got, on the black-box page.
 pub const LOG_TAIL: &str = "log-tail: ";
 
+/// What the loader says about a boot that reached its own shutdown, in
+/// `bootloader/src/blackbox.rs`'s `State::Done` arm.
+///
+/// **The only boot that owes a log account.** A boot ended by its own deadline
+/// or by the lockup detector never reaches `quiesce`, so its log stops early by
+/// construction and its record is `Wedged` rather than `Done`; asking such a
+/// boot for [`LOG_COMPLETE`] would red the two registrations whose whole
+/// subject is that it stopped.
+pub const HANDED_BACK: &str = "the last boot read DONE";
+
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
