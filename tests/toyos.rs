@@ -1316,9 +1316,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The cable. Under QEMU this name judges netd's DHCP client against the
         // user-mode backend's server; here it judges the whole path — the
         // kernel handing netd the T14's own I219, the link, a lease from the
-        // bench's router under this machine's name, and the development host's
-        // `ping` answered at the leased address in the window where the machine
-        // is running nothing but this image.
+        // bench's router, and the development host's `ping` answered at the
+        // leased address in the window where the machine is running nothing but
+        // this image.
         "lan_dhcp_lease",
         metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
     ),
