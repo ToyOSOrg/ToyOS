@@ -917,9 +917,8 @@ pub fn spawn_init() -> Pid {
     );
     // **The only channel a boot parameter has to userland**, and the one thing
     // the kernel ever puts in an environment: the command line reaches no
-    // process, and a syscall to hand over one string would be a syscall to hand
-    // over one string. It is information and not authority — every program
-    // inherits it, and only one holding a `netd` connector can act on it.
+    // process. It is information and not authority — reaching the address needs
+    // a `netd` connector, which one manifest row grants.
     let env = match crate::params::log_stream() {
         Some(at) => alloc::format!("{}={at}\0", toyos_logstream::ENV).into_bytes(),
         None => Vec::new(),

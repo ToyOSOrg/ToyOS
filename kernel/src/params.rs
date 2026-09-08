@@ -68,8 +68,7 @@ pub fn claims(token: &str) -> bool {
 }
 
 /// Where this boot streams its records, for the one hop the kernel makes with
-/// it: into `/system/bin/init`'s environment, which every program inherits and
-/// `logd` is the one program endowed to act on.
+/// it: into `/system/bin/init`'s environment.
 ///
 /// A `String` and not a borrow, because the buffer behind it is locked and the
 /// bytes it copied are gone from the parameter line by now. Called once, after
