@@ -183,17 +183,22 @@ pub fn ssh_list(
 
 /// Offer this key and expect the guest to turn it away.
 ///
-/// `Ok(())` means it did. An error is the finding: either the connection did
-/// not happen at all — which says nothing about authentication — or the guest
-/// let in a key no file on it names.
-pub fn ssh_refused(host: &str, port: u16, identity: &Identity) -> Result<(), String> {
+/// `Ok` is the comma-separated list of methods the guest *still* offers after
+/// the refusal — the answer to "what could a client guess at instead", and the
+/// only place the daemon's `MethodSet` is visible from outside it. An error is
+/// the finding: either the connection did not happen at all — which says
+/// nothing about authentication — or the guest let in a key no file names.
+pub fn ssh_refused(host: &str, port: u16, identity: &Identity) -> Result<String, String> {
     let port = port.to_string();
-    match client(&["auth", host, &port, str(&identity.private)])?.trim() {
-        "refused" => Ok(()),
+    let said = client(&["auth", host, &port, str(&identity.private)])?;
+    match said.trim() {
         "authenticated" => Err(format!(
             "{host}:{port} authenticated a key no authorized_keys file on it names"
         )),
-        other => Err(format!("the client answered {other:?}")),
+        line => match line.strip_prefix("refused offering ") {
+            Some(methods) => Ok(methods.to_string()),
+            None => Err(format!("the client answered {line:?}")),
+        },
     }
 }
 
@@ -201,11 +206,13 @@ pub fn ssh_refused(host: &str, port: u16, identity: &Identity) -> Result<(), Str
 /// anything. Its last line is the answer; the ones before it, if any, are a
 /// listing's entries.
 fn client(argv: &[&str]) -> Result<String, String> {
-    let binary = toyos_build::build::ssh_client_host(&compile::repo_root());
-    let out = Command::new(&binary)
+    // Spelled in one expression because `src/sourcegate.rs` reads the argument
+    // text: every host binary this project runs is declared beside the reason,
+    // and a path bound to a name first would reach that scan as nothing.
+    let out = Command::new(toyos_build::build::ssh_client_host(&compile::repo_root()))
         .args(argv)
         .output()
-        .map_err(|e| format!("run {}: {e}", binary.display()))?;
+        .map_err(|e| format!("run the ssh client: {e}"))?;
     let said = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
         return Err(format!(
@@ -438,7 +445,18 @@ pub fn key_auth_gate(guest: &mut super::qemu::QemuInstance) -> Result<(), String
 
     // The negative arm. A second connection, a well-formed offer, and a key no
     // file on the machine names.
-    ssh_refused(HOST, port, &stranger)?;
+    //
+    // What it still offers after the refusal is the second half: the daemon
+    // narrows russh's `MethodSet` to public keys alone, and a machine that
+    // offered `password` or `keyboard-interactive` here would be offering a
+    // credential to guess at. This is the only place that narrowing is visible
+    // from outside the daemon.
+    let offered = ssh_refused(HOST, port, &stranger)?;
+    if offered != "publickey" {
+        return Err(format!(
+            "after refusing a key the machine still offers {offered:?}, not publickey alone"
+        ));
+    }
     super::qemu::await_marker(
         guest,
         &mut console,
@@ -463,7 +481,8 @@ pub fn key_auth_gate(guest: &mut super::qemu::QemuInstance) -> Result<(), String
     .map_err(|e| format!("sshd accepted a key without saying which: {e}\n{console}"))?;
 
     eprintln!(
-        "  [sshd] {} accepted and {} refused, each named on the console",
+        "  [sshd] {} accepted and {} refused, each named on the console, and {offered} \
+         the only method left to try",
         identity.fingerprint(),
         stranger.fingerprint()
     );

@@ -8,7 +8,8 @@
 //!
 //! ```text
 //! toyos_ssh keygen <private> <public>            → ok
-//! toyos_ssh auth   <host> <port> <key>           → authenticated | refused
+//! toyos_ssh auth   <host> <port> <key>           → authenticated
+//!                                                | refused offering <methods>
 //! toyos_ssh exec   <host> <port> <key> <out> <err> <command…>
 //!                                                → exit <n> | no-exit-status
 //! toyos_ssh put    <host> <port> <key> <local> <remote>   → ok <bytes>
@@ -30,7 +31,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use russh::client::{self, Handle};
+use russh::client::{self, AuthResult, Handle};
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect};
@@ -107,7 +108,18 @@ async fn auth(host: &str, port: &str, key: &str) -> Result<(), String> {
         .authenticate_publickey(USER, PrivateKeyWithHashAlg::new(Arc::new(key), None))
         .await
         .map_err(|e| format!("offering a key: {e}"))?;
-    println!("{}", if outcome.success() { "authenticated" } else { "refused" });
+    // The methods the server still offers after turning this key away are what
+    // says a password could never have been guessed at: a server that answered
+    // `password` here would be offering a credential.
+    match outcome {
+        AuthResult::Success => println!("authenticated"),
+        AuthResult::Failure { remaining_methods, .. } => {
+            let mut offered: Vec<String> =
+                remaining_methods.iter().map(String::from).collect();
+            offered.sort();
+            println!("refused offering {}", offered.join(","));
+        }
+    }
     let _ = session.disconnect(Disconnect::ByApplication, "", "en").await;
     Ok(())
 }

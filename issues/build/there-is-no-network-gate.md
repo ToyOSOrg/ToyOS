@@ -49,15 +49,14 @@ Open at the implementation pass: hand-rolled pcap parsing versus a host
 dev-dependency; what counter surface smoltcp already exposes against what netd
 must count.
 
-**sshd joins the gate**, which answers the third question this paragraph used
-to leave open. `issues/isolation/sshd-accept-path-unexercised.md` already
-assigns its client here — "the network gate, which is what puts a client on the
-host" — and a separate track would build the same `hostfwd` plumbing twice.
-Three constraints ride with it. The client is built **from source**, from an
-implementation this project did not write, pinned and declared in `NOTICE`; a
-committed SSH binary would be a fourth standing failure beside the three
-`CLAUDE.md` declares. It shares no protocol code with sshd, because a client
-that reuses sshd's parsing reproduces sshd's bugs and agrees with itself — if
-the two agree it must be because the specification says so. And the oracle is
-the wire capture plus the exit status, over one disposable key driven through
-accept, auth, one command and close.
+**sshd joined the gate, and its half is built.** `tests/ssh-client-host` is the
+client: `russh`'s client half and `russh-sftp`'s, an implementation this project
+did not write, built from source and pinned by that crate's own lockfile. It
+shares no code with the daemon, so where the two agree it is because the draft
+says so; no SSH binary is on the path of any test. `BootOptions::ssh_port` is
+the `hostfwd` plumbing — the one thing that makes slirp two-way — and a
+frame-level analyser reuses it rather than building it again. `sshd_exec`,
+`sshd_files` and `sshd_key_auth` drive one disposable key through accept, auth,
+a command, a file each way and a refusal, judged by the wire and the exit
+status. What is left for this gate is everything above it: the pcap analyser,
+the two tiers, `-netdev socket`, and the idle→packet ceiling.
