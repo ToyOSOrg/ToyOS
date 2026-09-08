@@ -39,6 +39,8 @@ pub mod screen;
 #[allow(dead_code)]
 pub mod serial;
 #[allow(dead_code)]
+pub mod ssh;
+#[allow(dead_code)]
 pub mod stats;
 #[allow(dead_code)]
 pub mod storage;
