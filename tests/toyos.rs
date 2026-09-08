@@ -4095,6 +4095,45 @@ fn check_wrap(dump: &screen::Ppm) -> Result<(), String> {
     Ok(())
 }
 
+/// Every row on the panel is text the log actually carries.
+///
+/// **The check the panel's grid owes.** `panic_console` paints only the cells
+/// whose character or colour moved since the last paint, so a cell it fails to
+/// write is one the *previous* paint left standing — and past the end of a line
+/// that replaced a longer one, that is a string which occurs in no line of the
+/// log. The pager is where a screen of long lines is replaced by one of short
+/// lines, which is why this is asserted on a machine holding one.
+///
+/// The console's own tag comes off first, and every byte outside the font's
+/// range becomes the `.` the panel draws for it (`panic_console::glyph_char`);
+/// nothing else is normalised, so a row that differs from the log in any other
+/// way is a finding.
+fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String> {
+    let said: String = console
+        .replace("[kernel ", "[")
+        .bytes()
+        .map(|byte| match byte {
+            b'\n' => '\n',
+            b'\t' => ' ',
+            0x20..=0x7E => byte as char,
+            _ => '.',
+        })
+        .collect();
+    for row in dump.rows() {
+        let row = row.trim_end();
+        if row.is_empty() || row.starts_with("[page ") || said.contains(row) {
+            continue;
+        }
+        return Err(format!(
+            "the panel row {row:?} is in no line of the log, so a cell the paint that put \
+             this screen up did not write is still standing from the one before \
+             it\ndecoded screen:\n{}",
+            dump.text()
+        ));
+    }
+    Ok(())
+}
+
 /// Run one screen test. `Err` carries the decoded screen, because a failure
 /// here is almost always "the text is not what I expected" and the decoded
 /// grid is the only readable form of that.
@@ -5486,6 +5525,9 @@ fn run_screen_test(
             // snapshot, since a no-op `capture()` leaves `render()` re-reading the ring.
             const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
             let said = qemu.console_stream().since(0);
+            // This machine is halted for good and its console is whole, so
+            // every row on the panel is a row the log can be held to.
+            check_no_stale_cells(&dump, &said)?;
             if !said.contains(AFTER_CAPTURE) {
                 return Err(format!(
                     "{AFTER_CAPTURE:?} never reached the console, so its absence from the \
