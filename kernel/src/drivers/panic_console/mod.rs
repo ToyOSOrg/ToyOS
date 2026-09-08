@@ -437,6 +437,16 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     RAW_PHYS.store(args.gop_framebuffer, Ordering::Relaxed);
     RAW_SIZE.store(args.gop_framebuffer_size, Ordering::Relaxed);
 
+    // **Before the first paint, which is this function's own record.** The
+    // loader hands the scanout over uncacheable, and a whole-screen paint
+    // through those bits is 443 ms on the T14 against about 2 ms through
+    // write-combining; `pat::init` runs before this function so that there is
+    // an entry to point them at.
+    let combining = mm::paging::boot_map_write_combining(
+        args.gop_framebuffer,
+        align_2m(args.gop_framebuffer_size as usize) as u64,
+    );
+
     publish(fb);
     EARLY.store(true, Ordering::Relaxed);
     // **The panel is taken before the memory map is read, and this record is
@@ -447,8 +457,17 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     // twice into a scanout the check may yet call PMM-owned RAM costs nothing:
     // the PMM does not exist until `mm::init`, hundreds of statements later.
     log!(
-        "panic console: armed {}x{} stride={} format={} at {:#x}",
-        fb.width, fb.height, fb.stride_px, fb.format, args.gop_framebuffer
+        "panic console: armed {}x{} stride={} format={} at {:#x}, {}",
+        fb.width,
+        fb.height,
+        fb.stride_px,
+        fb.format,
+        args.gop_framebuffer,
+        if combining {
+            "write-combining"
+        } else {
+            "through the mapping the loader left, which no paint here can make cheap"
+        }
     );
 
     if let Some(uefi_type) =

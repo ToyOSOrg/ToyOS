@@ -251,6 +251,15 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         entry_count,
     );
 
+    // **Two register writes and no memory, before any channel exists**,
+    // because the panel's first paint goes through the memory type they
+    // establish and the loader's mapping of the scanout is uncacheable:
+    // `init_cr0` first, since `pat::init` restores the `CR0` it finds and a
+    // firmware `CD` would ride straight through it. Neither logs, so the
+    // boot's first record is still the panel's own.
+    arch::control_regs::init_cr0(0);
+    pat::init();
+
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
     drivers::panic_console::arm(&kernel_args, maps);
     // Beside it, and out of the raw buffer: a panic between here and
@@ -292,11 +301,8 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         log::halt_before_the_next_repaint();
     }
 
-    // Before pat::init, which restores whatever CR0 it found — a firmware CD would ride straight through otherwise.
-    arch::control_regs::init_cr0(0);
-
-    // Before panic_console::remap and mm::init: they're the first to map a page selecting the entry this writes.
-    pat::init();
+    // The state is established above, before the panel arms; the record is
+    // here, with the boot's other facts, and reads the live register.
     log!("PAT: IA32_PAT={:#018x}, entry {} = {}",
         pat::msr(), pat::WC_ENTRY, pat::entry_name(pat::WC_ENTRY));
 

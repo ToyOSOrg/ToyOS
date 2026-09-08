@@ -94,6 +94,14 @@ unsafe fn flush_tlb(cr4: u64) {
     }
 }
 
+/// Flush every TLB entry on this CPU, global ones included — what a change to
+/// a live page's memory type owes (SDM Vol. 3A §11.12.4), and what
+/// `mm::paging::boot_map_write_combining` makes one for.
+pub fn flush_every_tlb_entry() {
+    // SAFETY: `flush_tlb` is handed this CPU's live `CR4` and restores it verbatim.
+    unsafe { flush_tlb(cpu::read_cr4()) };
+}
+
 /// This CPU's live `IA32_PAT`.
 pub fn msr() -> u64 {
     cpu::rdmsr(IA32_PAT)
