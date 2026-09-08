@@ -1093,6 +1093,13 @@ pub enum Profile {
     /// NIC, and everything else — console, sound, disks — unchanged. The only
     /// machine in reach on which netd's Intel driver runs at all.
     E1000e,
+    /// [`Profile::E1000e`] with its cable plugged into nothing.
+    ///
+    /// The one machine in this suite on which a DHCP client gets no answer:
+    /// the user-mode backend serves a lease whatever else it is told to
+    /// restrict, so no profile that has one can ask what a boot does on a
+    /// network that never replies.
+    E1000eNoServer,
     Gop,
     /// A virtio-gpu function and no VGA: the owner's own desktop, and the one
     /// machine where a mode change can succeed rather than answering
@@ -1480,6 +1487,10 @@ enum Nic {
     /// QEMU's `e1000e`, which is the 82574L at `8086:10d3`: the same register
     /// file the ThinkPad T14's onboard I219 has.
     E1000e,
+    /// The same card on a hub nothing else is plugged into: a link the guest
+    /// brings up and puts frames onto, with no host, router or server at the
+    /// other end.
+    E1000eNoServer,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -1663,6 +1674,7 @@ impl Profile {
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::E1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
+            Self::E1000eNoServer => Shape { nic: Nic::E1000eNoServer, ..Self::Headless.shape() },
             Self::VirtioNetNoMsix => Shape {
                 vga: "none",
                 panel: None,
@@ -2305,6 +2317,10 @@ pub struct BootOptions {
     /// carries no `-netdev` for it to reach, which [`ssh_forward_argv`] is
     /// what a test refuses before it boots.
     pub ssh_port: Option<u16>,
+    /// Write every frame this machine's NIC sends or receives to this file, in
+    /// pcap. **The only way to read what the guest asked for**: a request the
+    /// server ignores reaches no log on either side.
+    pub wire_dump: Option<PathBuf>,
 }
 
 /// Where the guest sees the host under QEMU's user-mode networking, and where
@@ -2387,6 +2403,7 @@ impl Default for BootOptions {
             extra_root_files: Vec::new(),
             log_stream: None,
             ssh_port: None,
+            wire_dump: None,
         }
     }
 }
@@ -4205,6 +4222,16 @@ fn qemu_command(
                 .arg("-device")
                 .arg("e1000e,netdev=net0");
         }
+        Nic::E1000eNoServer => {
+            qemu.arg("-netdev")
+                .arg("hubport,id=net0,hubid=0")
+                .arg("-device")
+                .arg("e1000e,netdev=net0");
+        }
+    }
+    if let Some(at) = &options.wire_dump {
+        qemu.arg("-object")
+            .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
     }
 
     if shape.virtio.present() {

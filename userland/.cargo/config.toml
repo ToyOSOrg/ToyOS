@@ -4,3 +4,11 @@ channel = "toyos"
 [build]
 target = "x86_64-unknown-toyos"
 rustflags = ["-Dwarnings"]
+# smoltcp's build script reads these; its defaults are one-device numbers.
+# `DNS_MAX_SERVER_COUNT` is what the resolver holds, and its default of 1 makes
+# `dns::Socket::update_servers` drop the rest of a lease silently — so netd's
+# own lease record would name resolvers the stack does not have. Three is what
+# `smoltcp::wire::DHCP_MAX_DNS_SERVER_COUNT` lets a lease carry, and
+# `userland/netd/src/dhcp.rs` asserts the two at compile time.
+[env]
+SMOLTCP_DNS_MAX_SERVER_COUNT = "3"

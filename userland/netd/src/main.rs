@@ -30,6 +30,7 @@ macro_rules! say {
 }
 
 mod device;
+mod dhcp;
 mod i219;
 mod virtio_net;
 
@@ -59,9 +60,9 @@ use toyos::net::*;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::{dns, tcp, udp};
+use smoltcp::socket::{dhcpv4, dns, tcp, udp};
 use smoltcp::time::Instant as SmoltcpInstant;
-use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint};
+use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpEndpoint};
 
 use std::net::Ipv4Addr;
 
@@ -1313,29 +1314,18 @@ fn main() {
     let now = SmoltcpInstant::from_millis(0);
     let mut iface = Interface::new(config, &mut device, now);
 
-    iface.update_ip_addrs(|addrs| {
-        addrs.push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24)).ok();
-    });
-    iface.routes_mut()
-        .add_default_ipv4_route(Ipv4Addr::new(10, 0, 2, 2))
-        .ok();
-
     let mut socket_set = SocketSet::new(vec![]);
 
-    let dns_servers = &[IpAddress::v4(10, 0, 2, 3)];
-    let dns_socket = dns::Socket::new(dns_servers, vec![]);
+    // Empty, because the lease names the resolvers and nothing else may: a
+    // server written down here would answer for one network on every other.
+    let dns_socket = dns::Socket::new(&[], vec![]);
     let dns_handle = socket_set.add(dns_socket);
+    let dhcp_handle = socket_set.add(dhcp::socket());
+    let mut dhcp = dhcp::Dhcp::new();
 
     let total_mem = total_memory();
     let max_piped = max_piped_connections(total_mem);
     let mut daemon = NetDaemon::new(dns_handle, max_piped);
-
-    say!(
-        "netd: ready, at most {max_piped} piped connections \
-         ({} MiB each of {} MiB total)",
-        PIPED_CONNECTION_BYTES / (1024 * 1024),
-        total_mem / (1024 * 1024),
-    );
 
     // Sized for the slot ceiling rather than for `max_piped`: the batch
     // between two `wait` calls is the two fixed registrations, one per live piped
@@ -1358,6 +1348,23 @@ fn main() {
         device.nic.begin_pass();
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
         while iface.poll(now, &mut device, &mut socket_set) != PollResult::None {}
+
+        // **After the poll and before anything is served.** The lease is what
+        // gives this machine an address, a route and its resolvers, so a client
+        // answered before it was applied would be answered on a machine that is
+        // on no network.
+        let change = dhcp::Change::of(socket_set.get_mut::<dhcpv4::Socket>(dhcp_handle));
+        if dhcp.pass(change, &mut iface, socket_set.get_mut::<dns::Socket>(dns_handle)) {
+            // Every arm that waits for netd waits for this line, so it is said
+            // once this machine has an address to serve on — or has been told
+            // it will not get one.
+            say!(
+                "netd: ready, at most {max_piped} piped connections \
+                 ({} MiB each of {} MiB total)",
+                PIPED_CONNECTION_BYTES / (1024 * 1024),
+                total_mem / (1024 * 1024),
+            );
+        }
 
         daemon.bridge_piped(&mut socket_set);
 

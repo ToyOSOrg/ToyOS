@@ -12,8 +12,8 @@ use common::qemu::{
     STALLED,
 };
 use common::{
-    audio, compile, devices, faults, hostload, metal, pkg, power, screen, serial, stats, storage,
-    usb,
+    audio, compile, devices, faults, hostload, lan, metal, pkg, power, screen, serial, stats,
+    storage, usb,
 };
 use toyos_build::day::Day;
 use toyos_build::bootlog::{self, boot_millis};
@@ -231,6 +231,11 @@ const RUST_SKIP: &[&str] = &[
     // Needs a NIC in front of netd; only `tests/netcase` has one.
     // `netd_listener_forgery` runs it there.
     "netd_listener_forgery",
+    // It asserts nothing at all: it holds a `tests/lancase` boot open for
+    // twenty seconds so the host can reach this machine over the cable, and
+    // `lan_dhcp_lease`'s metal arm is the only job list that names it. On a
+    // shared boot it would be twenty seconds of nothing.
+    "lan_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -643,6 +648,18 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // is the buffers' business and no arm's to demand; what it may never cost
     // is half a line, and that is what this one judges.
     ("log_stream_stalled_peer_delivers_whole_records", Sched::Parallel, Tier::Nightly),
+    // netd taking this machine's address from the network instead of carrying
+    // one written down. The DHCP server it is judged against is QEMU's own, an
+    // implementation of RFC 2131 this repository did not write, and its lease
+    // is known field by field. The verdicts are records and a lease's fields;
+    // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
+    ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
+    // The same client on a wire with no server: it says it has no address and
+    // announces itself anyway. Its cost is netd's own twenty-second lease bound
+    // waited out in real time, so it is `Why::TimerAnchored` and belongs
+    // Nightly; a new name is bootstrapped Fast with the UNMEASURED marker
+    // because only the fast tier can replace one.
+    ("lan_no_lease", Sched::Parallel, Tier::Fast),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -1295,6 +1312,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         "metal_device_probe",
         metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
     ),
+    (
+        // The cable. Under QEMU this name judges netd's DHCP client against the
+        // user-mode backend's server; here it judges the whole path — the
+        // kernel handing netd the T14's own I219, the link, a lease from the
+        // bench's router, and the development host's `ping` answered at the
+        // leased address in the window where the machine is running nothing but
+        // this image.
+        "lan_dhcp_lease",
+        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
+    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1664,6 +1691,12 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 ];
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
+
+/// The cable's own boot: netd in front of the T14's I219, and one job that
+/// holds the machine up long enough for the host to reach it. The one arm in
+/// this suite that names a PCI function for the loop to reach the boot over.
+const LANCASE: &[metal::Arm] =
+    &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -13604,6 +13637,8 @@ fn run_machine_test(
             );
             Ok(())
         }
+        "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
+        "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO),
         "https_tls13_e1000e" => common::https::tls13_judge(rust_bins, common::https::E1000E),
         "log_stream" => common::logstream::stream(common::logstream::VIRTIO, c_bins, rust_bins),

@@ -609,3 +609,54 @@ name = "boot.ccorpus-2.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+
+# --- the cable: the boot that runs netd in front of the T14's own I219 ---
+# The three boot facts below are the machine's own, off the last boot of this
+# config; its claim was refused at the 32-bit BAR, which makes them facts about
+# the boot rather than about the claim. The two `lan.` rows have none: netd
+# never came up on any boot of it.
+
+[[number]]
+name = "boot.lancase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1258
+
+[[number]]
+name = "boot.lancase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 59
+
+[[number]]
+name = "boot.lancase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.lancase.ping_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, which bounds the window a reply can fall in and nothing narrower has been read. It is a cost and not a verdict: the window holds both of this machine's operating systems, so no ceiling on this number separates them, and what does is the wall-clock bracket in bootlog::host_second_inside_this_boot. A green reading tightens this to what a boot that answers actually costs"
+
+[[number]]
+name = "list.lancase.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "lan_hold's own twenty-second window plus two seconds for the spawn and the exit record around it; the one member of this list is that window and nothing else"
+
+[[number]]
+name = "lan.lancase.link_up_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "lan_hold's twenty-second window: a link that comes up later than that is a link this boot never had, because the machine has already handed itself back"
+
+[[number]]
+name = "lan.lancase.lease_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "as lan.lancase.link_up_ms, and netd's own dhcp::LEASE_BOUND is the same twenty seconds: a boot with no lease by then has already said so in its log"
