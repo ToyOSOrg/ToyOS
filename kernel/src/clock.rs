@@ -181,6 +181,14 @@ pub fn tsc_ticks(nanos: u64) -> u64 {
     ((nanos as u128 * 1_000_000) / period_fs as u128) as u64
 }
 
+/// The span a count of [`tsc_ticks`] stands for, for a caller that measured
+/// before there was a period to measure with and converts once, afterwards.
+/// Zero while the period is unknown, so a span taken on a machine that never
+/// calibrated reads as no time rather than as an invented one.
+pub fn nanos_of_ticks(ticks: u64) -> u64 {
+    ((ticks as u128 * TSC_PERIOD_FS.load(Relaxed) as u128) / 1_000_000) as u64
+}
+
 /// Polls `ready` until it holds or `nanos` pass; `false` is the deadline.
 /// Reads the TSC, not [`nanos_since_boot`], because that clock's out-of-line divide
 /// would appear as `src/redlist.rs`'s `dump_nmi_probe` red under an NMI sample.

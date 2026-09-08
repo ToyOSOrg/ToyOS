@@ -275,6 +275,19 @@ impl Readback {
         toyos_build::metal::deadline_lateness_ms(&self.loader)
     }
 
+    /// What the on-screen panel cost this boot, off the kernel's own census.
+    ///
+    /// **Two channels, because the panel outlives one of them.** A boot that
+    /// hands the machine back writes the census as an ordinary record and
+    /// `logd` files it; a boot a bound ended has no `logd` left, and its
+    /// kernel seals the same line into the black-box page the loader prints
+    /// back after the reset. The page from *this* boot is the one after the
+    /// separator: an earlier chain's report can sit in the pass before it.
+    pub fn panel(&self) -> Option<bootlog::Panel> {
+        bootlog::panel_census(&self.kernel)
+            .or_else(|| bootlog::panel_census(self.loader.split(bootlog::SEPARATOR).nth(1)?))
+    }
+
     /// The same for the other bound: how far past its own bound a hard-lockup
     /// sample was when it found a cpu stuck, or `None` on a boot no cpu locked
     /// up on. Read out of the same channel and for the same reason.
@@ -884,6 +897,15 @@ pub fn run(
                      after that",
                     back.back_secs, back.stick_secs
                 );
+                // Evidence beside the one number that is priced: what the
+                // panel painted and what it wrote, which is what a reader
+                // needs to tell a slower paint from more of them.
+                if let Some(panel) = back.panel() {
+                    eprintln!(
+                        "    the panel painted {} time(s), {} px, {} us in the painter",
+                        panel.paints, panel.pixels, panel.micros
+                    );
+                }
                 // **The profile's row is what a boot owes, and the boot's own
                 // record is what it paid.** The two lateness fields are `None`
                 // on every boot but the one armed to stop itself, and at most
@@ -898,10 +920,11 @@ pub fn run(
                     ("stick_secs", Some(back.stick_secs)),
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
+                    ("panel_max_us", back.panel().map(|panel| panel.max_micros)),
                 ] {
                     let name = format!("boot.{label}.{field}");
                     let priced = profile.row(&name).is_some();
-                    if value.is_none() && !priced && field.ends_with("_lateness_ms") {
+                    if value.is_none() && !priced {
                         continue;
                     }
                     let Some(value) = value else {

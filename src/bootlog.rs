@@ -126,6 +126,40 @@ pub const HUNG_WITHOUT_A_RECORD: &str =
 /// handoff, and a pass with a finding appends under this rather than truncating.
 pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot above left";
 
+/// What the on-screen panel cost the boot, in
+/// `kernel/src/drivers/panic_console/mod.rs`.
+///
+/// **Two channels carry it**, because the panel is the window a boot that ends
+/// in a wedge still has: the shutdown census reaches `logd`'s file, and the
+/// same line is sealed into the black-box page for a boot no `logd` outlived.
+pub const PANEL_CENSUS: &str = "panel: paints=";
+
+/// What one boot's panel census says: how often the panel painted, how many
+/// pixels it put on the glass, how long it spent inside the painter, and the
+/// slowest single paint of the boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Panel {
+    pub paints: u64,
+    pub pixels: u64,
+    pub micros: u64,
+    pub max_micros: u64,
+}
+
+/// The census `log` carries, or `None` for a boot that left neither channel.
+pub fn panel_census(log: &str) -> Option<Panel> {
+    let line = log.lines().rev().find(|line| line.contains(PANEL_CENSUS))?;
+    let field = |name: &str| -> Option<u64> {
+        let (_, rest) = line.split_once(name)?;
+        rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+    };
+    Some(Panel {
+        paints: field("paints=")?,
+        pixels: field("px=")?,
+        micros: field(" us=")?,
+        max_micros: field("max_us=")?,
+    })
+}
+
 /// The kernel's record for a process that ended, in `kernel/src/process.rs`.
 ///
 /// **The one channel a guest binary's verdict crosses on a machine with no
@@ -374,6 +408,10 @@ mod tests {
                 "kernel/src/hardlockup/probe.rs",
                 format!("PROBE_STAGED: &str = \"{LOCKUP_STAGED}\""),
             ),
+            (
+                "kernel/src/drivers/panic_console/mod.rs",
+                format!("CENSUS: &str = \"{PANEL_CENSUS}\""),
+            ),
             ("kernel/src/log/mod.rs", format!("\"{LOG_COMPLETE}")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_SHORT}")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
@@ -424,6 +462,26 @@ mod record_time_tests {
         // first `cpu` would answer with a duration instead of a timestamp.
         assert_eq!(record_millis("no timestamp here, cpu=1ms"), None);
         assert_eq!(record_millis(""), None);
+    }
+
+    /// The two channels the census crosses, read by one reader: `logd`'s file,
+    /// and the black-box page the loader prints back with its own margin and
+    /// with the kernel's dashes flattened to ASCII.
+    #[test]
+    fn the_panel_census_is_read_off_either_channel() {
+        let logd = "[2026-09-08 06:50:53 2.5 cpu0] panel: paints=3 px=6220800 us=1500000 \
+                    max_us=520000\n";
+        let census = Panel { paints: 3, pixels: 6_220_800, micros: 1_500_000, max_micros: 520_000 };
+        assert_eq!(panel_census(logd), Some(census));
+        let sealed = format!(
+            "| the boot deadline expired: a bound of 120000 ms ...\n| panel: paints=3 \
+             px=6220800 us=1500000 max_us=520000\n| [1.2 cpu0] Boot: complete (1199ms)\n"
+        );
+        assert_eq!(panel_census(&sealed), Some(census));
+        // The whole line or none of it: a truncated page must not read as a
+        // cheap panel.
+        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000\n"), None);
+        assert_eq!(panel_census("nothing here\n"), None);
     }
 
     #[test]

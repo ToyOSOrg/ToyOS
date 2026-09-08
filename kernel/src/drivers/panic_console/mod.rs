@@ -594,12 +594,14 @@ pub fn render() -> bool {
 ///
 /// The live shards and not the capture: what this record is for is the records
 /// that never reached the log file, which are the newest ones.
+/// The census rides the page because a boot a bound ends reaches no log file:
+/// `logd` is one of the things the wedge stopped.
 pub fn seal_wedge(said: core::fmt::Arguments) {
     if PAINTING.swap(true, Ordering::SeqCst) {
-        crate::blackbox::record_wedge(said, &[]);
+        crate::blackbox::record_wedge(format_args!("{said}{Census}\n"), &[]);
         return;
     }
-    crate::blackbox::record_wedge(said, live_tail().text);
+    crate::blackbox::record_wedge(format_args!("{said}{Census}\n"), live_tail().text);
 }
 
 /// Cycle the report across the screen until the machine is switched off, or
@@ -926,12 +928,59 @@ static PROBE_AT: [AtomicU32; PROBES] = [const { AtomicU32::new(0) }; PROBES];
 static PROBE_PX: [AtomicU32; PROBES] = [const { AtomicU32::new(0) }; PROBES];
 static PROBE_N: AtomicUsize = AtomicUsize::new(0);
 
+/// What the panel has cost this boot: how often it painted, how many pixels it
+/// put on the glass, and how long it was inside the painter. Counted in ticks
+/// of the cycle counter and converted once at the census, because the first
+/// paints of every boot happen before there is a clock to measure them with.
+static PAINTS: AtomicU64 = AtomicU64::new(0);
+static PIXELS: AtomicU64 = AtomicU64::new(0);
+static TICKS: AtomicU64 = AtomicU64::new(0);
+static TICKS_MAX: AtomicU64 = AtomicU64::new(0);
+
+/// The head `src/bootlog.rs` reads the census by.
+const CENSUS: &str = "panel: paints=";
+
+/// One line, written to the two channels a boot can end on: [`log_census`] for
+/// a boot that hands the machine back, and [`seal_wedge`] for one a bound ends
+/// with no `logd` left to write a file.
+struct Census;
+
+impl core::fmt::Display for Census {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let micros = |ticks| crate::clock::nanos_of_ticks(ticks) / 1_000;
+        write!(
+            f,
+            "{CENSUS}{} px={} us={} max_us={}",
+            PAINTS.load(Ordering::Relaxed),
+            PIXELS.load(Ordering::Relaxed),
+            micros(TICKS.load(Ordering::Relaxed)),
+            micros(TICKS_MAX.load(Ordering::Relaxed)),
+        )
+    }
+}
+
+/// The panel's own row in the shutdown census, beside `irq:` and `nvme:`.
+pub fn log_census() {
+    log!("{Census}");
+}
+
+/// Charge one paint to the census.
+fn spent(began: u64, pixels: u64) {
+    let ticks = crate::arch::cpu::rdtsc().saturating_sub(began);
+    PAINTS.fetch_add(1, Ordering::Relaxed);
+    PIXELS.fetch_add(pixels, Ordering::Relaxed);
+    TICKS.fetch_add(ticks, Ordering::Relaxed);
+    TICKS_MAX.fetch_max(ticks, Ordering::Relaxed);
+}
+
 fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
     let Some(fb) = snapshot() else { return };
     if !mapped(&fb) {
         return;
     }
     let Some((cols, grid_rows)) = geometry(&fb) else { return };
+    let began = crate::arch::cpu::rdtsc();
+    let mut pixels = 0u64;
     let text = view.text;
     let len = text.len();
     let (total, pages, per) = pagination(text, cols, grid_rows);
@@ -944,7 +993,7 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
         Page::Nth(n) => (n.saturating_mul(per).min(newest), (n + 1).min(pages)),
     };
 
-    fill_screen(
+    pixels += fill_screen(
         &fb,
         match fill {
             Fill::Fatal => rgb(&fb, 0x60, 0x00, 0x00),
@@ -972,7 +1021,7 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
             if byte == b'\n' {
                 break;
             }
-            draw_glyph(&fb, c, r, byte, color);
+            pixels += draw_glyph(&fb, c, r, byte, color);
             if watch == Watch::Yes {
                 if let Some((bx, by)) = glyph_ink(byte) {
                     if inked.is_multiple_of(PROBE_STRIDE) && probes < PROBES - GRID_PROBES {
@@ -989,13 +1038,14 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
     }
 
     if pages > 1 {
-        draw_footer(&fb, cols, grid_rows - 1, shown, pages, white);
+        pixels += draw_footer(&fb, cols, grid_rows - 1, shown, pages, white);
     }
 
     flush_stores();
     if watch == Watch::Yes {
         sample_probes(&fb, probes);
     }
+    spent(began, pixels);
 }
 
 /// Read back what this paint left at each probe (not assumed), after the
@@ -1035,7 +1085,14 @@ fn flush_stores() {
 }
 
 /// `[page 2/4]` on the bottom row; not decoration — the pager advances on a timer with no key to press.
-fn draw_footer(fb: &Fb, cols: usize, row: usize, page: usize, pages: usize, color: u32) {
+fn draw_footer(
+    fb: &Fb,
+    cols: usize,
+    row: usize,
+    page: usize,
+    pages: usize,
+    color: u32,
+) -> u64 {
     let mut buf = [0u8; 24];
     let mut n = 0;
     for &b in b"[page " {
@@ -1048,9 +1105,11 @@ fn draw_footer(fb: &Fb, cols: usize, row: usize, page: usize, pages: usize, colo
     n += write_num(&mut buf[n..], pages);
     buf[n] = b']';
     n += 1;
+    let mut pixels = 0;
     for (c, &byte) in buf[..n.min(cols)].iter().enumerate() {
-        draw_glyph(fb, c, row, byte, color);
+        pixels += draw_glyph(fb, c, row, byte, color);
     }
+    pixels
 }
 
 /// Decimal `v` into the front of `out`, returning the bytes written.
@@ -1140,7 +1199,7 @@ pub fn graffiti() {
         return;
     }
     log!("SYS_DEBUG: painting over the screen a userland process owns");
-    fill_screen(&fb, rgb(&fb, 0x00, 0xC0, 0x00));
+    let _ = fill_screen(&fb, rgb(&fb, 0x00, 0xC0, 0x00));
     flush_stores();
 }
 
@@ -1148,10 +1207,12 @@ pub fn graffiti() {
 /// ambiguous about which boot it came from. Proves the clamp once per row,
 /// not once per pixel: a boot checkpoint repaints several times over a
 /// multi-megapixel panel.
-fn fill_screen(fb: &Fb, color: u32) {
+fn fill_screen(fb: &Fb, color: u32) -> u64 {
     let width = fb.width as usize;
+    let mut pixels = 0;
     for y in 0..fb.height as usize {
-        let Some(row) = row_base(fb, y, width) else { return };
+        let Some(row) = row_base(fb, y, width) else { return pixels };
+        pixels += width as u64;
         for x in 0..width {
             // SAFETY: `row_base` returns a pointer, not a slice, so this
             // loop pays no per-pixel bound; a volatile store has no safe
@@ -1159,6 +1220,7 @@ fn fill_screen(fb: &Fb, color: u32) {
             unsafe { core::ptr::write_volatile(row.add(x), color) };
         }
     }
+    pixels
 }
 
 /// The 16 rows the font draws a byte with; one mapping, so [`glyph_ink`]
@@ -1186,9 +1248,10 @@ fn glyph_ink(byte: u8) -> Option<(usize, usize)> {
     None
 }
 
-fn draw_glyph(fb: &Fb, cell_x: usize, cell_y: usize, byte: u8, color: u32) {
+fn draw_glyph(fb: &Fb, cell_x: usize, cell_y: usize, byte: u8, color: u32) -> u64 {
     let ox = cell_x * GLYPH_W;
     let oy = cell_y * GLYPH_H;
+    let mut pixels = 0;
     for (row, &bits) in glyph(byte).iter().enumerate() {
         if bits == 0 {
             continue;
@@ -1196,7 +1259,9 @@ fn draw_glyph(fb: &Fb, cell_x: usize, cell_y: usize, byte: u8, color: u32) {
         for bit in 0..GLYPH_W {
             if bits & (0x80 >> bit) != 0 {
                 put_pixel(fb, ox + bit, oy + row, color);
+                pixels += 1;
             }
         }
     }
+    pixels
 }
