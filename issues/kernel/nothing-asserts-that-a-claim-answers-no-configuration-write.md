@@ -16,9 +16,7 @@ answering `Ok` — hands the holder the ability to aim the device's write at any
 address the LAPIC decodes, and every arm in every tier stays green.
 
 The SDK's `PciDev` offers `config_read` and no write, so a driver cannot express
-the call without reaching past it into `toyos_abi::syscall` — which is why this
-is not answered by a probe in one driver's `open`: netd's virtio-net path is the
-only one that would run it, and that function is armed on MSI-X, never on MSI.
+the call without reaching past it into `toyos_abi::syscall`.
 
 Owned by whoever next adds a boot config with a test binary holding a claimable
 function. Exit condition: a guest arm in which the holder calls

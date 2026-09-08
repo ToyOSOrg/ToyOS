@@ -49,10 +49,10 @@ use toyos_abi::boot::MemoryMapEntry;
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
-use toyos_pci::{bar, express, msi, msix};
+use toyos_pci::{bar, express, msix};
 
 use crate::device::{Claim, ClaimError};
-use crate::drivers::pci::PciDevice;
+use crate::drivers::pci::{PciDevice, Unarmed};
 use crate::inbox::InboxId;
 use crate::iommu::{DeviceSpace, IommuError};
 use crate::mm::paging::{CachePolicy, MmioPolicy};
@@ -120,8 +120,6 @@ struct Grant {
 enum Armed {
     /// This function's one MSI-X table entry, mapped for the kernel alone.
     Msix(Mmio),
-    /// The message is a word of this function's own config space, and nothing
-    /// was mapped for it.
     Msi,
 }
 
@@ -352,8 +350,8 @@ impl core::fmt::Display for Refusal {
             ),
             Self::MsixUnusable => write!(
                 f,
-                "it publishes MSI-X and this kernel could not arm it, so its table is in a BAR \
-                 nothing here can name to withhold, and MSI is not a fallback from that"
+                "it publishes MSI-X and this kernel could not arm it, and MSI is not a fallback \
+                 for a function that has a table"
             ),
             Self::Untranslated(why) => write!(
                 f,
@@ -488,13 +486,13 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // mechanism can be armed on is one no holder could ever be told anything
     // about, and `virtio_net_no_msix` reads that refusal off the console *and*
     // the absence of any BAR line after it.
-    let publishes = |cap_id| pci.capabilities().any(|cap| cap.id() == cap_id);
-    let armed = if publishes(msix::CAP_ID) {
-        Armed::Msix(pci.enable_msix(VECTORS[slot]).ok_or(Refusal::MsixUnusable)?)
-    } else if publishes(msi::CAP_ID) {
-        pci.enable_msi(VECTORS[slot]).then_some(Armed::Msi).ok_or(Refusal::NoInterrupt)?
-    } else {
-        return Err(Refusal::NoInterrupt);
+    let armed = match pci.enable_msix(VECTORS[slot]) {
+        Ok(entry) => Armed::Msix(entry),
+        Err(Unarmed::Unusable) => return Err(Refusal::MsixUnusable),
+        Err(Unarmed::Blocked) => return Err(Refusal::NoInterrupt),
+        Err(Unarmed::Absent) => {
+            pci.enable_msi(VECTORS[slot]).then_some(Armed::Msi).ok_or(Refusal::NoInterrupt)?
+        }
     };
 
     // From here a refusal has to undo: a vector is armed, and the arms below
@@ -574,7 +572,7 @@ fn slot_space(slot: usize) -> Result<DeviceSpace, IommuError> {
 /// has in reach does, so nothing rests on this: what makes a re-claim safe is
 /// that bus mastering starts on the first grant and not at hand-over.
 fn reset(pci: &PciDevice) -> Option<u64> {
-    let cap = pci.capabilities().find(|c| c.id() == express::CAP_ID)?;
+    let cap = pci.capability(express::CAP_ID)?;
     if !express::resets(cap.read_u32(express::DEVICE_CAPABILITIES)) {
         return None;
     }
@@ -606,7 +604,7 @@ fn settle_after_reset(pci: &PciDevice) {
 /// the two live in one BAR on every device in reach, and a device that split
 /// them costs the second BAR too rather than publishing one of them.
 fn msix_bar(pci: &PciDevice) -> Option<u8> {
-    let cap = pci.capabilities().find(|c| c.id() == msix::CAP_ID)?;
+    let cap = pci.capability(msix::CAP_ID)?;
     let control = cap.read_u16(msix::MESSAGE_CONTROL);
     let table = msix::Msix::decode(control, cap.read_u32(msix::TABLE)).ok()?;
     Some(table.bir())
