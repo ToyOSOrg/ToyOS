@@ -1076,14 +1076,34 @@ impl NetDaemon {
             // forgeable closed flags.
             while socket.can_send() {
                 if let Some(ref pipe) = conn.tx_read {
+                    // **No more is taken out of the pipe than the socket will
+                    // take from us.** `send_slice` answers how many bytes it
+                    // enqueued and takes fewer when the send buffer is short of
+                    // room; bytes read past that are gone, and the peer's stream
+                    // is short in the middle with nothing saying so. The pipe is
+                    // where the rest belongs until there is room.
                     let mut buf = [0u8; 4096];
-                    match toyos_abi::syscall::read_nonblock(pipe.as_handle(), &mut buf) {
+                    let want = (socket.send_capacity() - socket.send_queue()).min(buf.len());
+                    // A zero-length read answers `Ok(0)`, which the arm below
+                    // reads as the client hanging up; asked for no bytes, this
+                    // loop has nothing to do instead.
+                    if want == 0 {
+                        break;
+                    }
+                    match toyos_abi::syscall::read_nonblock(pipe.as_handle(), &mut buf[..want]) {
                         Ok(0) => {
                             socket.close();
                             conn.close_tx();
                             break;
                         }
-                        Ok(n) => { let _ = socket.send_slice(&buf[..n]); }
+                        Ok(n) => {
+                            // Both refusals are bytes the pipe has already given
+                            // up, so neither may be swallowed here of all places.
+                            let sent = socket.send_slice(&buf[..n]).unwrap_or_else(|e| {
+                                panic!("netd: a socket that could send refused {n} byte(s): {e:?}")
+                            });
+                            assert_eq!(sent, n, "netd: the send buffer took {sent} of {n} byte(s) it had room for");
+                        }
                         _ => break,
                     }
                 } else {

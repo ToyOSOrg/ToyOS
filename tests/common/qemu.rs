@@ -2251,6 +2251,42 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
+    /// Where this boot's `logd` streams its records, as seen from inside the
+    /// guest — [`GUEST_VIEW_OF_HOST`] and the host port a listener took, or an
+    /// address on the guest's network that answers nothing.
+    ///
+    /// **It is a `kernel_params` entry in every way but its type.** The host
+    /// picks the port, so the parameter cannot be a `&'static str`;
+    /// [`BootOptions::params`] is where the two become one list, and that list
+    /// is what an image is built with and what a staged image is asked to
+    /// match.
+    pub log_stream: Option<(&'static str, u16)>,
+}
+
+/// Where the guest sees the host under QEMU's user-mode networking, and where
+/// the host sees the same servers.
+pub const GUEST_VIEW_OF_HOST: &str = "10.0.2.2";
+
+impl BootOptions {
+    /// The whole parameter line this boot's image is built with: the names in
+    /// [`BootOptions::kernel_params`] and, when this boot streams its records,
+    /// the address it streams them to.
+    ///
+    /// One function, called by the build and by the staged-image check, so a
+    /// parameter that reaches the image and not the check — or the other way
+    /// round — is not expressible.
+    pub fn params(&self) -> Vec<String> {
+        let mut params: Vec<String> = self.kernel_params.iter().map(|p| (*p).to_string()).collect();
+        if let Some(at) = self.log_stream {
+            params.push(log_stream_param(at));
+        }
+        params
+    }
+}
+
+/// `logstream=<host>:<port>`, spelled once.
+pub fn log_stream_param((host, port): (&str, u16)) -> String {
+    format!("{}{host}:{port}", toyos_logstream::PARAM)
 }
 
 /// The in-guest test runner's startup marker.
@@ -2281,6 +2317,7 @@ impl Default for BootOptions {
             usb_images: Vec::new(),
             rtc_base: None,
             extra_root_files: Vec::new(),
+            log_stream: None,
         }
     }
 }
@@ -2420,8 +2457,15 @@ pub fn build_boot_image(
     rust_tests: &[(String, Vec<u8>)],
     kernel_params: &[&str],
 ) -> Vec<u8> {
+    // A parameter carrying a value is one the *shipping* kernel answers to, so
+    // it selects no kernel: an image built for the record stream and nothing
+    // else must be the image a flashed stick would be.
     let kernel: &[&str] =
-        if kernel_params.is_empty() { &[] } else { toyos_build::build::TEST_KERNEL };
+        if kernel_params.iter().all(|p| toyos_build::build::is_valued_param(p)) {
+            &[]
+        } else {
+            toyos_build::build::TEST_KERNEL
+        };
     build_boot_image_with(test_crate, c_tests, rust_tests, &[], kernel, kernel_params, false)
 }
 
@@ -2470,7 +2514,9 @@ fn refuse_a_staged_image_this_boot_did_not_ask_for(image: &Path, options: &BootO
         options.extra_root_files.len(),
         image.display(),
     );
-    if let Some(why) = toyos_build::image::param_conflict(image, options.kernel_params) {
+    let params = options.params();
+    let asked: Vec<&str> = params.iter().map(String::as_str).collect();
+    if let Some(why) = toyos_build::image::param_conflict(image, &asked) {
         panic!(
             "[qemu] {why}. `BootOptions::boot_image` replaces the image this call would have \
              built, so `kernel_params` cannot arm a guest booting one: build the staged image \
@@ -2528,7 +2574,8 @@ fn build_boot_image_with(
         PARAMS.get_or_init(|| toyos_build::build::declared_params(&compile::repo_root()));
     for name in kernel_params {
         assert!(
-            actuators.iter().chain(params).any(|a| a == name),
+            actuators.iter().chain(params).any(|a| a == name)
+                || toyos_build::build::is_valued_param(name),
             "{name:?} is a `kernel_params` and the kernel declares no such actuator or parameter"
         );
     }
@@ -2661,13 +2708,15 @@ impl QemuInstance {
         let boot_image = match &options.boot_image {
             Some(staged) => staged.clone(),
             None => {
+                let params = options.params();
+                let params: Vec<&str> = params.iter().map(String::as_str).collect();
                 let disk = build_boot_image_with(
                     test_crate,
                     c_tests,
                     rust_tests,
                     &options.extra_root_files,
                     &features,
-                    options.kernel_params,
+                    &params,
                     options.debug_wait,
                 );
                 let path = test_dir.join(format!("boot-{seq}.img"));

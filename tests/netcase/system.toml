@@ -12,10 +12,12 @@ start = ["logd", "netd", "test-runner"]
 
 # `every_boot_config_runs_logd` is what refuses a boot config without it: the
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
-# empty. It claims no device and serves no port; its whole authority is
-# `logread`, which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate.
+# empty. It claims no device and serves no port.
 [programs.logd]
 syscap = ["logread"]
+# The record stream's authority: the address on the boot parameter line is
+# information, and this row is the whole of what can act on it.
+receives = ["netd"]
 
 # netd holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.

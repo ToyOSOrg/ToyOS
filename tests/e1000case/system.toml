@@ -13,6 +13,9 @@ start = ["logd", "netd", "test-runner"]
 
 [programs.logd]
 syscap = ["logread"]
+# The record stream's authority: the address on the boot parameter line is
+# information, and this row is the whole of what can act on it.
+receives = ["netd"]
 
 # netd holds the NIC's PCI function and drives it: the descriptor rings, the
 # register window and the interrupt are its own, and the kernel keeps only the

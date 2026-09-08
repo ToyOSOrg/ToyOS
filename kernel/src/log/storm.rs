@@ -10,6 +10,15 @@ const STORM_RECORDS: u64 = 1024;
 // Must exceed one machine word: a single-store payload couldn't reveal a torn write.
 const PAYLOAD: usize = 96;
 
+/// What `log-storm-wide` widens the payload to: a record's whole message less
+/// the `t=`/`i=`/`k=` fields in front of it.
+///
+/// A storm of these is what a guest offers a log stream whose peer has stopped
+/// reading and cannot outrun with narrow records — the buffers between `logd`
+/// and that peer hold megabytes. The reader regenerates a payload from `t=` and
+/// `i=`, so the log gate does not run on a boot carrying this.
+const WIDE_PAYLOAD: usize = 900;
+
 /// Deterministic checksum of `thread` and `index`, embedded in a record's `k=` field.
 pub fn checksum(thread: u64, index: u64) -> u64 {
     (thread.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ index.wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
@@ -25,12 +34,13 @@ pub fn payload_byte(checksum: u64, offset: usize) -> u8 {
 /// The reader regenerates this text independently from `t=`/`i=`, so the format here must stay in sync with it.
 pub fn emit_patterned(thread: u64, index: u64) {
     let checksum = checksum(thread, index);
-    let mut payload = [0u8; PAYLOAD];
-    for (offset, byte) in payload.iter_mut().enumerate() {
+    let width = if crate::actuator::log_storm_wide() { WIDE_PAYLOAD } else { PAYLOAD };
+    let mut payload = [0u8; WIDE_PAYLOAD];
+    for (offset, byte) in payload[..width].iter_mut().enumerate() {
         *byte = payload_byte(checksum, offset);
     }
     // Fallback rather than `expect`: a panic here would halt the machine over the producer's own formatting.
-    let payload = core::str::from_utf8(&payload).unwrap_or("");
+    let payload = core::str::from_utf8(&payload[..width]).unwrap_or("");
     crate::log!("logstorm t={thread} i={index} k={checksum:016x} {payload}");
 }
 
