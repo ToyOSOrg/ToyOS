@@ -4,11 +4,7 @@ kind: finding
 opened: 2026-09-07
 ---
 
-# `latency_wake` reds on the dev host at a rate, and nothing has written that rate down
-
-`cargo run -- --known-red latency_wake` answers `NOT ON THE LIST`, so no
-measurement in `src/redlist.rs` has ever named it — which is not a claim that it
-is green.
+# `latency_wake` reds on the dev host at a rate
 
 Measured on the dev host (14 cores, macOS, TCG), same session, six runs alone,
 three on `metal-suite` + the boot-deadline branch and three on the same tree

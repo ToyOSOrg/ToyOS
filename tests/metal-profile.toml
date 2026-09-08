@@ -127,9 +127,12 @@ measured = 46
 
 # --- what this machine's scheduler costs a waiter, and what one machine-wide
 # --- TLB shootdown costs its initiator
-# Both ceilings come from a constant in this repository rather than from a
-# reading: each is the widest true bound there is, and each is narrowed against
-# `measured` by whoever next has cause to.
+# `latency.p99_us` is bounded by the instrument: past its last bucket the figure
+# is a floor and not a measurement, which is a red whatever the machine did. The
+# two shootdown rows are bounded by the reading, half again — the margin this
+# file uses everywhere a first reading becomes a ceiling — because
+# `arch::tlb::ACK_TIMEOUT` is two million times the reading and a ceiling nothing
+# can reach is a row that cannot red.
 
 [[number]]
 name = "latency.p99_us"
@@ -141,15 +144,15 @@ measured = 16
 [[number]]
 name = "tlb.latencycase.p50_ns"
 unit = "ns"
-ceiling = 5000000000
-ceiling_from = "kernel arch::tlb::ACK_TIMEOUT — a shootdown waiting longer than that panics the machine, so nothing under it is a wait this kernel tolerates"
+ceiling = 3387
+ceiling_from = "2,258 ns measured, and half again — 50 % over one machine's one reading, which is what this file gives every ceiling derived from a first one. `kernel arch::tlb::ACK_TIMEOUT` is 5 s and panics the machine; it bounds the wait and is not a ceiling this row could ever red on"
 measured = 2258
 
 [[number]]
 name = "tlb.latencycase.p99_ns"
 unit = "ns"
-ceiling = 5000000000
-ceiling_from = "kernel arch::tlb::ACK_TIMEOUT — as tlb.latencycase.p50_ns"
+ceiling = 4397
+ceiling_from = "2,931 ns measured, and half again — as tlb.latencycase.p50_ns. The tail and not the median, so what widens it is a shootdown that waited on one slow acknowledger rather than the machine getting slower everywhere"
 measured = 2931
 # --- the device boot, and every span `userland/metalprobe` measures on it ---
 # Each job exits with its span in microseconds and the kernel's `exit:` record
@@ -319,8 +322,7 @@ measured = 0
 name = "boot.metaldevicecase.stick_secs"
 unit = "s"
 ceiling = 5
-ceiling_from = "as boot.jobcase.stick_secs, and this is the boot that reads it hardest: run 18 wedged the stick on exactly this shape and run 20 answered 0 s after 2.4 MiB written, fsynced and read back"
-measured = 0
+ceiling_from = "as boot.jobcase.stick_secs, and this is the boot that reads it hardest: it writes, fsyncs and reads back megabytes before the reset, which is the shape a stop that cut a transfer would leave unenumerable"
 
 [[number]]
 name = "boot.selftests.stick_secs"
@@ -408,8 +410,8 @@ measured = 0
 name = "boot.deadlinewedge.deadline_lateness_ms"
 unit = "ms"
 ceiling = 10000
-ceiling_from = "the poll's own cadence: the deadline is read on every timer interrupt and an idle CPU re-arms its LAPIC one-shot per fire, so the lateness is one timer period. That period has not been measured on this machine, and ten seconds — a twelfth of the bound — is the widest true bound before it has been. 153 ms is what it read"
-measured = 153
+ceiling_from = "the poll's own cadence: the deadline is read on every timer interrupt and an idle CPU re-arms its LAPIC one-shot per fire, so the lateness is one timer period. That period has not been measured on this machine, and ten seconds — a twelfth of the bound — is the widest true bound before it has been"
+measured = 61
 
 # --- the boot one CPU stops answering on ---
 # `hardlockup` is the deaf half of the boot above: the same staged wedge, and
@@ -449,8 +451,8 @@ measured = 0
 name = "boot.hardlockup.lockup_lateness_ms"
 unit = "ms"
 ceiling = 2000
-ceiling_from = "twice the sample period `kernel/src/hardlockup`'s SAMPLE_NS states, 1000 ms: a CPU is found stuck at the first sample after its bound, so one period is the lateness and a second is the widest a delayed one costs. 4 ms is what it read, which is a sample that landed almost on the bound"
-measured = 4
+ceiling_from = "twice the sample period `kernel/src/hardlockup`'s SAMPLE_NS states, 1000 ms: a CPU is found stuck at the first sample after its bound, so one period is the lateness and a second is the widest a delayed one costs"
+measured = 0
 
 # --- what one member of a job list may cost this machine ---
 # **The number the suite sizes its lists by, and judges them against.** The
