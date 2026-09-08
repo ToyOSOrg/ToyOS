@@ -1,16 +1,10 @@
 //! What a test does to a guest over the cable: mint a key, run a program, move
 //! a file, be refused.
 //!
-//! Every call here runs `tests/ssh-client-host`, whose own module header holds
-//! the ruling this obeys — the client shares no code with `userland/sshd`, and
-//! no `ssh` binary is on the path of any test. This file is the wrapper: it
-//! spells the command line, reads the one line the client answers with, and
-//! turns a client failure into an error rather than a verdict.
-//!
-//! **The two are kept apart deliberately.** The client exits `0` when the
-//! exchange happened, whatever the guest said, and `1` when it could not
-//! complete one. A wrapper that read `exit 127` and a `Connection refused` the
-//! same way would report a guest's refusal for a forward that never opened.
+//! Every call here runs `tests/ssh-client-host`, which exits `0` when the
+//! exchange happened — whatever the guest said — and `1` when it could not
+//! complete one. Everything below turns the second into an error and only the
+//! first into a verdict.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,11 +16,8 @@ use super::qemu::SSH_FORWARD_HOST;
 pub const HOST: &str = SSH_FORWARD_HOST;
 
 /// A key pair minted for one test and thrown away with it, as two files in the
-/// lane's scratch directory.
-///
-/// **Nothing in this repository holds a private key.** A committed one would be
-/// a credential with no owner and no expiry, and every test here wants a fresh
-/// one anyway: a stale key that still worked would be the defect.
+/// lane's scratch directory. **Nothing in this repository holds a private
+/// key**: a committed one would be a credential with no owner and no expiry.
 pub struct Identity {
     private: PathBuf,
     line: String,
@@ -35,13 +26,9 @@ pub struct Identity {
 
 impl Identity {
     /// The key called `name` in this lane, minted the first time it is asked
-    /// for and handed back after that.
-    ///
-    /// **Kept rather than re-minted, because a boot several tests share stages
-    /// one of these into its image.** A second mint under the same name would
-    /// hand the later members a key the running guest has never heard of, and
-    /// they would red on an authentication that is working. The lane directory
-    /// is per run, so nothing here outlives the suite that made it.
+    /// for and handed back after that: a boot several tests share stages one
+    /// of these into its image, so a second mint would hand the later members
+    /// a key the running guest has never heard of.
     pub fn mint(name: &str) -> Result<Self, String> {
         let dir = super::lane::dir().join("ssh").join(name);
         std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -107,21 +94,66 @@ pub fn ssh_exec(
     identity: &Identity,
     command: &str,
 ) -> Result<Exec, String> {
-    let dir = identity.private.with_extension(format!("exec-{}", nonce()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let (out, err) = (dir.join("stdout"), dir.join("stderr"));
-    let port = port.to_string();
-    let mut argv = vec![
-        "exec",
+    let (out, err, port) = capture(identity, port)?;
+    let said = client(&["exec", host, &port, str(&identity.private), str(&out), str(&err), command])?;
+    collected(&said, &out, &err)
+}
+
+/// Run `command` with `stdin` on its input, after asking the guest to set an
+/// environment variable. `Ok`'s second half is what it answered that request.
+pub fn ssh_feed(
+    host: &str,
+    port: u16,
+    identity: &Identity,
+    command: &str,
+    stdin: &[u8],
+) -> Result<(Exec, String), String> {
+    let (out, err, port) = capture(identity, port)?;
+    let local = out.with_file_name("stdin");
+    std::fs::write(&local, stdin).map_err(|e| format!("stage {}: {e}", local.display()))?;
+    let said = client(&[
+        "feed",
         host,
         &port,
         str(&identity.private),
         str(&out),
         str(&err),
-    ];
-    argv.push(command);
-    let said = client(&argv)?;
-    let status = match said.trim() {
+        str(&local),
+        command,
+    ])?;
+    let env = said
+        .lines()
+        .find_map(|line| line.strip_prefix("env "))
+        .ok_or_else(|| format!("the client said nothing about the env request: {said:?}"))?
+        .to_string();
+    Ok((collected(&said, &out, &err)?, env))
+}
+
+/// Start `command` on the guest and drop the connection once it is running.
+pub fn ssh_abandon(
+    host: &str,
+    port: u16,
+    identity: &Identity,
+    command: &str,
+) -> Result<(), String> {
+    let port = port.to_string();
+    client(&["abandon", host, &port, str(&identity.private), command])?;
+    Ok(())
+}
+
+/// Where one exchange's two captured streams go, and the port as the argv
+/// wants it.
+fn capture(identity: &Identity, port: u16) -> Result<(PathBuf, PathBuf, String), String> {
+    let dir = identity.private.with_extension(format!("exec-{}", nonce()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    Ok((dir.join("stdout"), dir.join("stderr"), port.to_string()))
+}
+
+/// The client's last line is the program's status; the captures beside it are
+/// the bytes it wrote on each stream.
+fn collected(said: &str, out: &Path, err: &Path) -> Result<Exec, String> {
+    let last = said.lines().last().unwrap_or("").trim();
+    let status = match last {
         "no-exit-status" => None,
         line => match line.strip_prefix("exit ") {
             Some(code) => {
@@ -131,8 +163,8 @@ pub fn ssh_exec(
         },
     };
     Ok(Exec {
-        stdout: std::fs::read(&out).map_err(|e| format!("read the captured stdout: {e}"))?,
-        stderr: std::fs::read(&err).map_err(|e| format!("read the captured stderr: {e}"))?,
+        stdout: std::fs::read(out).map_err(|e| format!("read the captured stdout: {e}"))?,
+        stderr: std::fs::read(err).map_err(|e| format!("read the captured stderr: {e}"))?,
         status,
     })
 }
@@ -252,17 +284,18 @@ const KEYS_ON_ROOT: &str = "etc/ssh_authorized_keys";
 const KEYS_IN_GUEST: &str = "/system/etc/ssh_authorized_keys";
 
 /// The guest test binary run over `exec`. Self-contained — `/tmp` and syscalls,
-/// no capability its spawner has to hand it — which is exactly the shape of the
-/// binaries the metal profile will run this way, and it cleans up after itself
-/// so the boot's later judges see the `/tmp` they would have seen.
+/// no capability its spawner has to hand it — and it cleans up after itself so
+/// the boot's later judges see the `/tmp` they would have seen.
 const GUEST_TEST: &str = "test_rs_empty_dir_stat";
+
+/// A path nothing on the guest has, for the arm that reads a program's stderr.
+const MISSING: &str = "/tmp/no_such_file_for_the_stderr_arm";
 
 /// `tests/sshdcase` with a key in its image and a forward into its port 22.
 ///
-/// **The key is staged rather than installed.** `/home` on this machine may be
+/// **The key is staged rather than installed**: `/home` on this machine may be
 /// a tmpfs, so a key that had to be put there after the boot is a key nobody
-/// could put there; the image file is what makes a freshly flashed machine
-/// reachable at all, and it is what the metal profile will arm.
+/// could put there.
 ///
 /// Panics rather than failing a test on any of the three things below: a
 /// profile with no NIC, an argv with no forward, and a daemon that never opened
@@ -355,9 +388,8 @@ pub fn exec_gate(guest: &mut super::qemu::QemuInstance) -> Result<(), String> {
         ));
     }
 
-    // 4. **The registration the metal profile is waiting for.** A real guest
-    //    test binary, run over the cable, judged by its exit status — which is
-    //    what a bench with no stick has to be able to do.
+    // 4. A real guest test binary, run over the cable and judged by its exit
+    //    status.
     let gate = ssh_exec(HOST, port, &identity, GUEST_TEST)?;
     if gate.status != Some(0) {
         return Err(format!(
@@ -371,9 +403,46 @@ pub fn exec_gate(guest: &mut super::qemu::QemuInstance) -> Result<(), String> {
         return Err(format!("{GUEST_TEST} printed {:?}", gate.stdout_text()));
     }
 
+    // 5. **The two streams are two streams.** A program that writes to both:
+    //    stdout carries the file, stderr the diagnostic, and neither carries
+    //    the other's bytes. Merging stderr into stdout — which is what this
+    //    daemon used to do — is seen here and nowhere else.
+    let both = ssh_exec(HOST, port, &identity, &format!("cat {KEYS_IN_GUEST} {MISSING}"))?;
+    if both.stdout != identity.authorized_line().into_bytes() {
+        return Err(format!("stdout carried {:?}", both.stdout_text()));
+    }
+    if !both.stderr_text().contains(&format!("{MISSING}: file not found")) {
+        return Err(format!("stderr carried {:?}", both.stderr_text()));
+    }
+    if both.status != Some(1) {
+        return Err(format!("a program that wrote to both ended {:?}", both.status));
+    }
+
+    // 6. A program's input is the channel's data, and an `env` request is
+    //    answered rather than left for a client to wait on.
+    let (fed, env) = ssh_feed(HOST, port, &identity, "cat", b"the input arrives\n")?;
+    if fed.stdout != b"the input arrives\n" || fed.status != Some(0) {
+        return Err(format!("`cat` of the channel's input said {:?}", fed.stdout_text()));
+    }
+    if env != "refused" {
+        return Err(format!("the guest answered an env request {env:?}"));
+    }
+
+    // 7. A program that never exits, on a connection that goes away. Nothing
+    //    is left running on the machine, and the daemon names what it ended.
+    let mut console = String::new();
+    ssh_abandon(HOST, port, &identity, "spin")?;
+    super::qemu::await_marker(
+        guest,
+        &mut console,
+        "the connection is gone; ended /system/bin/spin",
+        "sshd to end a program whose connection went",
+    )
+    .map_err(|e| format!("a program outlived the connection that started it: {e}\n{console}"))?;
+
     eprintln!(
-        "  [sshd] echo, a missing program (127), an unquotable line (127) and {GUEST_TEST} (0) \
-         over exec"
+        "  [sshd] echo, a missing program (127), an unquotable line (127), {GUEST_TEST} (0), \
+         the two streams apart, the channel's input read, and a spin ended with its connection"
     );
     Ok(())
 }
@@ -416,9 +485,8 @@ pub fn files_gate(guest: &mut super::qemu::QemuInstance) -> Result<(), String> {
         return Err(format!("the guest lists /tmp as {listing:?}"));
     }
 
-    // 4. A megabyte each way, which is what makes this a transport rather than
-    //    a demonstration: several SFTP requests, several channel windows, and a
-    //    guest that has to keep its place across all of them.
+    // 4. A megabyte each way: several SFTP requests, several channel windows,
+    //    and a guest that has to keep its place across all of them.
     let big = pseudorandom(1 << 20);
     ssh_put(HOST, port, &identity, "/tmp/ssh_big", &big)?;
     let back = ssh_get(HOST, port, &identity, "/tmp/ssh_big")?;

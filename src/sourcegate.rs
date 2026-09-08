@@ -603,13 +603,7 @@ const HOST_SPAWNS: &[Spawn] = &[
     Spawn {
         arg: "toyos_build::build::ssh_client_host(&compile::repo_root())",
         sites: &[("tests/common/ssh.rs", 1)],
-        why: "the harness's SSH client: `russh` and `russh-sftp` from source, built by cargo \
-              like every other crate here. **Not a host `ssh`** — the ruling in \
-              issues/build/there-is-no-network-gate.md is that the client is built from an \
-              implementation this project did not write, and a committed SSH binary would be a \
-              fourth standing failure. It is a binary rather than a module of the harness \
-              because russh 0.60 needs the RustCrypto release candidates the host workspace \
-              does not resolve to",
+        why: "the harness's SSH client, russh and russh-sftp from source and not a host `ssh`",
     },
 ];
 

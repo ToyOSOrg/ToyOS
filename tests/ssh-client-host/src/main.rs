@@ -7,14 +7,17 @@
 //! why. A test that conflated them would read a client bug as a guest verdict.
 //!
 //! ```text
-//! toyos_ssh keygen <private> <public>            → ok
-//! toyos_ssh auth   <host> <port> <key>           → authenticated
+//! toyos_ssh keygen  <private> <public>           → ok
+//! toyos_ssh auth    <host> <port> <key>          → authenticated
 //!                                                | refused offering <methods>
-//! toyos_ssh exec   <host> <port> <key> <out> <err> <command…>
+//! toyos_ssh exec    <host> <port> <key> <out> <err> <command…>
 //!                                                → exit <n> | no-exit-status
-//! toyos_ssh put    <host> <port> <key> <local> <remote>   → ok <bytes>
-//! toyos_ssh get    <host> <port> <key> <remote> <local>   → ok <bytes>
-//! toyos_ssh list   <host> <port> <key> <remote>  → entry <name> <size>…, ok <n>
+//! toyos_ssh feed    <host> <port> <key> <out> <err> <stdin> <command…>
+//!                                                → env <refused|accepted>, exit <n>
+//! toyos_ssh abandon <host> <port> <key> <command…>       → ok <bytes>
+//! toyos_ssh put     <host> <port> <key> <local> <remote> → ok <bytes>
+//! toyos_ssh get     <host> <port> <key> <remote> <local> → ok <bytes>
+//! toyos_ssh list    <host> <port> <key> <remote> → entry <name> <size>…, ok <n>
 //! ```
 //!
 //! A program's stdout and stderr go to files rather than to this process's own,
@@ -72,7 +75,13 @@ async fn run(args: &[String]) -> Result<(), String> {
         ["keygen", private, public] => keygen(private, public),
         ["auth", host, port, key] => auth(host, port, key).await,
         ["exec", host, port, key, out, err, command @ ..] => {
-            exec(host, port, key, out, err, &command.join(" ")).await
+            exec(host, port, key, out, err, &command.join(" "), None).await
+        }
+        ["feed", host, port, key, out, err, stdin, command @ ..] => {
+            exec(host, port, key, out, err, &command.join(" "), Some(stdin)).await
+        }
+        ["abandon", host, port, key, command @ ..] => {
+            abandon(host, port, key, &command.join(" ")).await
         }
         ["put", host, port, key, local, remote] => put(host, port, key, local, remote).await,
         ["get", host, port, key, remote, local] => get(host, port, key, remote, local).await,
@@ -124,6 +133,10 @@ async fn auth(host: &str, port: &str, key: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Run a command and collect what came back on each of the channel's two
+/// streams. With `stdin`, the file's bytes are sent to the program first, and
+/// an environment request is made before the exec so the caller learns what
+/// the guest answers one with.
 async fn exec(
     host: &str,
     port: &str,
@@ -131,15 +144,37 @@ async fn exec(
     out: &str,
     err: &str,
     command: &str,
+    stdin: Option<&str>,
 ) -> Result<(), String> {
     let session = connect(host, port, key).await?;
     let mut channel = session
         .channel_open_session()
         .await
         .map_err(|e| format!("opening a session channel: {e}"))?;
+    let feed = match stdin {
+        Some(path) => Some(std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?),
+        None => None,
+    };
+    if feed.is_some() {
+        channel
+            .set_env(true, "TOYOS_SSH_PROBE", "1")
+            .await
+            .map_err(|e| format!("asking to set an environment variable: {e}"))?;
+        match channel.wait().await {
+            Some(ChannelMsg::Failure) => println!("env refused"),
+            Some(ChannelMsg::Success) => println!("env accepted"),
+            other => return Err(format!("an env request was answered {other:?}")),
+        }
+    }
     channel.exec(true, command).await.map_err(|e| format!("asking for {command:?}: {e}"))?;
-    // Nothing to send: this client is done talking before the program starts,
-    // so a program reading stdin sees an immediate end of it.
+    if let Some(bytes) = feed {
+        channel
+            .data(&bytes[..])
+            .await
+            .map_err(|e| format!("sending the program its input: {e}"))?;
+    }
+    // A program reading stdin sees the end of it here: either right away, or
+    // after the bytes above.
     channel.eof().await.map_err(|e| format!("closing the program's input: {e}"))?;
 
     let (mut stdout, mut stderr, mut status) = (Vec::new(), Vec::new(), None);
@@ -160,6 +195,33 @@ async fn exec(
         None => println!("no-exit-status"),
     }
     let _ = session.disconnect(Disconnect::ByApplication, "", "en").await;
+    Ok(())
+}
+
+/// Start a program, wait for its first output so it is certainly running, and
+/// then drop the connection without reading the rest — what a harness whose
+/// client died looks like from the guest's side.
+async fn abandon(host: &str, port: &str, key: &str, command: &str) -> Result<(), String> {
+    let session = connect(host, port, key).await?;
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("opening a session channel: {e}"))?;
+    channel.exec(true, command).await.map_err(|e| format!("asking for {command:?}: {e}"))?;
+    let mut seen = 0;
+    while let Some(message) = channel.wait().await {
+        if let ChannelMsg::Data { data } = message {
+            seen = data.len();
+            break;
+        }
+    }
+    if seen == 0 {
+        return Err(format!("{command:?} produced nothing, so it may never have run"));
+    }
+    println!("ok {seen}");
+    // Dropped rather than disconnected: the guest is owed no goodbye, and a
+    // client that died would send none.
+    drop(session);
     Ok(())
 }
 

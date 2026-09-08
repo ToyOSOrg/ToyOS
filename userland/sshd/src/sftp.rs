@@ -25,12 +25,8 @@ use std::time::UNIX_EPOCH;
 /// The protocol version this server speaks, and the only one it will speak.
 const VERSION: u32 = 3;
 
-/// The largest request this server will assemble before acting on it.
-///
-/// A `WRITE` carries its payload inline, so this is the write-chunk ceiling as
-/// well: OpenSSH's client uses 32 KiB and russh's default maximum SSH packet is
-/// 32 KiB, so a request over this size is a client that has stopped making
-/// sense rather than one being efficient.
+/// The largest request this server will assemble before acting on it. A
+/// `WRITE` carries its payload inline, so this is the write-chunk ceiling too.
 pub const MAX_PACKET: usize = 256 * 1024;
 
 /// The largest `DATA` reply, whatever a `READ` asks for.
@@ -75,6 +71,12 @@ const FX_FAILURE: u32 = 4;
 const FX_BAD_MESSAGE: u32 = 5;
 const FX_OP_UNSUPPORTED: u32 = 8;
 
+/// The exit status the channel carries when a session ends on a packet this
+/// protocol has no reply for: the draft's own code for it. **Not 127** — that
+/// one says this daemon would not run what was asked, and an SFTP session that
+/// got this far ran.
+pub const EXIT_BAD_MESSAGE: u32 = FX_BAD_MESSAGE;
+
 // `OPEN` flags.
 const OPEN_READ: u32 = 0x0000_0001;
 const OPEN_WRITE: u32 = 0x0000_0002;
@@ -106,13 +108,22 @@ fn request_name(kind: u8) -> &'static str {
     }
 }
 
-/// A condition the session cannot continue past. The caller says it on the
-/// console and closes the channel: a client that sent one of these is not
-/// speaking this protocol, and answering it further would be guessing.
+/// A condition the session cannot continue past: a client that sent one of
+/// these is not speaking this protocol, and answering it further would be
+/// guessing.
 #[derive(Debug)]
 pub struct Fatal(pub String);
 
+impl Fatal {
+    /// Say it on the console and hand back the status the channel closes with.
+    pub fn say(&self, peer: &str) -> u32 {
+        println!("sshd: sftp for {peer}: {}", self.0);
+        EXIT_BAD_MESSAGE
+    }
+}
+
 /// A field this packet does not have, or has and cannot be read.
+#[derive(Debug)]
 struct Malformed(&'static str);
 
 struct Reader<'a> {
@@ -238,7 +249,6 @@ impl Attrs {
     }
 
     /// The `ls -l` line version 3 makes every server produce beside the name.
-    /// No client in this tree reads it; a client that displays a listing does.
     fn longname(&self, name: &str) -> String {
         let kind = if self.dir { 'd' } else { '-' };
         let perms = if self.dir { "rwxr-xr-x" } else { "rw-r--r--" };
@@ -578,8 +588,7 @@ pub fn next_packet(buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, Fatal> {
     Ok(Some(packet))
 }
 
-/// The wire, against the draft this file implements. Host tests — `cargo test
-/// --target "$(rustc -vV | sed -n 's/^host: //p')"` from this directory.
+/// The wire, against the draft this file implements.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,6 +614,50 @@ mod tests {
     fn status_of(reply: &[u8]) -> u32 {
         assert_eq!(kind_of(reply), FXP_STATUS, "not a status reply");
         u32::from_be_bytes([reply[9], reply[10], reply[11], reply[12]])
+    }
+
+    fn handle_of(reply: &[u8]) -> String {
+        assert_eq!(kind_of(reply), FXP_HANDLE, "not a handle reply");
+        let len = u32::from_be_bytes([reply[9], reply[10], reply[11], reply[12]]) as usize;
+        String::from_utf8(reply[13..13 + len].to_vec()).expect("utf-8")
+    }
+
+    /// The names one `NAME` reply carries, decoded the way a client does.
+    fn names_of(reply: &[u8]) -> Vec<String> {
+        assert_eq!(kind_of(reply), FXP_NAME, "not a name reply");
+        let mut r = Reader::new(&reply[5..]);
+        r.u32("the request id").expect("an id");
+        let count = r.u32("the count").expect("a count");
+        (0..count)
+            .map(|_| {
+                let name = r.string("a name").expect("a name").to_string();
+                r.string("a longname").expect("a longname");
+                r.u32("the attribute flags").expect("flags");
+                r.u64("the size").expect("a size");
+                r.u32("the mode").expect("a mode");
+                r.u32("the atime").expect("an atime");
+                r.u32("the mtime").expect("an mtime");
+                name
+            })
+            .collect()
+    }
+
+    /// A directory of this test's own, emptied first so a previous run cannot
+    /// decide what a listing here contains.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("toyos-sftp-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    fn opendir(server: &mut Server, id: u32, dir: &std::path::Path) -> Vec<u8> {
+        server
+            .request(&packet(FXP_OPENDIR, |w| {
+                w.u32(id);
+                w.str(dir.to_str().expect("utf-8"));
+            }))
+            .unwrap_or_else(|e| panic!("{}", e.0))
     }
 
     #[test]
@@ -696,8 +749,7 @@ mod tests {
     /// directory, so the reply encodings are judged by what comes back out.
     #[test]
     fn the_profile_moves_a_file_and_lists_it() {
-        let dir = std::env::temp_dir().join(format!("toyos-sftp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let dir = scratch("profile");
         let path = dir.join("payload");
         let path = path.to_str().expect("utf-8");
 
@@ -712,11 +764,7 @@ mod tests {
                 w.u32(0);
             }))
             .unwrap_or_else(|e| panic!("{}", e.0));
-        assert_eq!(kind_of(&reply), FXP_HANDLE);
-        let handle = {
-            let len = u32::from_be_bytes([reply[9], reply[10], reply[11], reply[12]]) as usize;
-            String::from_utf8(reply[13..13 + len].to_vec()).expect("utf-8")
-        };
+        let handle = handle_of(&reply);
 
         let body = b"the wire is the oracle";
         let reply = server
@@ -758,10 +806,7 @@ mod tests {
                 w.u32(0);
             }))
             .unwrap_or_else(|e| panic!("{}", e.0));
-        let handle = {
-            let len = u32::from_be_bytes([reply[9], reply[10], reply[11], reply[12]]) as usize;
-            String::from_utf8(reply[13..13 + len].to_vec()).expect("utf-8")
-        };
+        let handle = handle_of(&reply);
         let reply = server
             .request(&packet(FXP_READ, |w| {
                 w.u32(6);
@@ -784,17 +829,8 @@ mod tests {
         assert_eq!(status_of(&reply), FX_EOF);
 
         // The listing names it, and runs out.
-        let reply = server
-            .request(&packet(FXP_OPENDIR, |w| {
-                w.u32(8);
-                w.str(dir.to_str().expect("utf-8"));
-            }))
-            .unwrap_or_else(|e| panic!("{}", e.0));
-        assert_eq!(kind_of(&reply), FXP_HANDLE);
-        let dir_handle = {
-            let len = u32::from_be_bytes([reply[9], reply[10], reply[11], reply[12]]) as usize;
-            String::from_utf8(reply[13..13 + len].to_vec()).expect("utf-8")
-        };
+        let reply = opendir(&mut server, 8, &dir);
+        let dir_handle = handle_of(&reply);
         let reply = server
             .request(&packet(FXP_READDIR, |w| {
                 w.u32(9);
@@ -810,6 +846,68 @@ mod tests {
             }))
             .unwrap_or_else(|e| panic!("{}", e.0));
         assert_eq!(status_of(&reply), FX_EOF);
+
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The cursor: a listing longer than one reply is handed over in batches
+    /// that continue where the last left off, and every name arrives once.
+    ///
+    /// A cursor that ran to the end of the listing would lose the tail; one
+    /// that stayed put would hand a client the first batch forever.
+    #[test]
+    fn a_listing_longer_than_one_reply_continues_where_it_left_off() {
+        let dir = scratch("cursor");
+        let want: Vec<String> =
+            (0..NAMES_PER_REPLY + 17).map(|n| format!("entry-{n:04}")).collect();
+        for name in &want {
+            std::fs::write(dir.join(name), b"x").expect("an entry");
+        }
+
+        let mut server = Server::new();
+        init(&mut server);
+        let handle = handle_of(&opendir(&mut server, 1, &dir));
+
+        let read = |server: &mut Server, id: u32| {
+            server
+                .request(&packet(FXP_READDIR, |w| {
+                    w.u32(id);
+                    w.str(&handle);
+                }))
+                .unwrap_or_else(|e| panic!("{}", e.0))
+        };
+
+        let first = names_of(&read(&mut server, 2));
+        assert_eq!(first.len(), NAMES_PER_REPLY, "the first batch is not a whole reply");
+        let second = names_of(&read(&mut server, 3));
+        assert_eq!(second.len(), want.len() - NAMES_PER_REPLY, "the tail is the wrong length");
+        assert_eq!(status_of(&read(&mut server, 4)), FX_EOF, "the listing did not run out");
+
+        let mut got: Vec<String> = first.into_iter().chain(second).collect();
+        got.sort();
+        assert_eq!(got, want, "the two batches are not the directory");
+
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The ceiling on a listing, refused by name rather than read into memory
+    /// on a client's say-so.
+    #[test]
+    fn a_directory_past_the_ceiling_is_refused_by_name() {
+        let dir = scratch("ceiling");
+        for n in 0..=MAX_DIR_ENTRIES {
+            std::fs::write(dir.join(format!("{n}")), b"").expect("an entry");
+        }
+
+        let mut server = Server::new();
+        init(&mut server);
+        let reply = opendir(&mut server, 1, &dir);
+        assert_eq!(status_of(&reply), FX_FAILURE, "an oversized directory opened");
+        let text = String::from_utf8_lossy(&reply).into_owned();
+        assert!(
+            text.contains(&MAX_DIR_ENTRIES.to_string()),
+            "the refusal does not name the ceiling: {text}"
+        );
 
         std::fs::remove_dir_all(&dir).expect("clean up");
     }

@@ -1,26 +1,6 @@
-# The harness's SSH client: the other end of `userland/sshd`, on the host.
-#
-# **It shares no code with the daemon**, which is the whole point — a client
-# that reused the daemon's parsing would reproduce the daemon's bugs and agree
-# with itself, so an agreement would mean nothing. `russh` is the same library
-# the daemon is built on and this is its *client* half; `russh-sftp` is a third
-# party's SFTP client, so the file transfer is judged by somebody else's reading
-# of the draft the daemon implements. No SSH binary is on the path of any test —
-# `issues/build/there-is-no-network-gate.md` is where that ruling lives.
-#
-# **Its own crate and its own lockfile, and that is not tidiness.** `russh 0.60`
-# is written against the release candidates of the RustCrypto `pkcs5`/`pkcs8`
-# line; the stable releases renamed a constructor it calls, and the root
-# workspace — which has no other reason to resolve any of that — picks the
-# stable ones. Twenty-odd `=` pins in the root manifest would be the price of
-# sharing one resolution. `tests/https-fetch-host` is the same shape for the
-# same reason, and `src/build.rs` builds both.
-#
-# The `russh` fork rather than crates.io for one reason: its `rustcrypto`
-# feature is a pure-Rust crypto backend, and the alternatives (`aws-lc-rs`,
-# `ring`) each put a C toolchain on the path of `cargo test`. That fork's one
-# commit is the backend and ToyOS platform support; it touches no protocol code,
-# and `forks.toml` is where it is declared.
+# Its own crate and its own lockfile: `russh 0.60` resolves against the
+# RustCrypto release candidates, and the host workspace resolves the stable
+# line, so the two cannot share one resolution.
 [package]
 name = "ssh-client-host"
 version = "0.1.0"
@@ -34,8 +14,6 @@ path = "src/main.rs"
 [dependencies]
 russh = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos", default-features = false, features = ["rustcrypto"] }
 russh-sftp = "2.4"
-# The disposable key each test mints. Nothing in this repository holds a private
-# key: a committed one would be a credential with no owner and no expiry.
 rand = "0.10"
 tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "fs"] }
 

@@ -19,10 +19,9 @@ client sends on channel A reaches the program running on channel B** — and
 output direction is unaffected: each program's forwarder task owns its own
 channel's write half.
 
-Nothing in the tree does this today. The harness's client
+Nothing in the tree does this today: the harness's client
 (`tests/ssh-client-host`) opens one channel per connection, and OpenSSH's `ssh`
-and `sftp` each open one — measured 2026-09-08, both interoperate with this
-daemon over `hostfwd`. A multiplexed OpenSSH client (`ControlMaster`) is the
+and `sftp` each open one. A multiplexed OpenSSH client (`ControlMaster`) is the
 shape that would reach it, and so is any client that runs a second command on
 one connection.
 

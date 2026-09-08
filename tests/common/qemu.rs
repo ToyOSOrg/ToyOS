@@ -2261,20 +2261,11 @@ pub struct BootOptions {
     /// is what an image is built with and what a staged image is asked to
     /// match.
     pub log_stream: Option<(&'static str, u16)>,
-    /// Forward this host port to the guest's TCP 22, so a client on the host
-    /// can reach the guest's `sshd`.
-    ///
-    /// **slirp is one-way without it.** The guest reaches the host at
-    /// [`GUEST_VIEW_OF_HOST`] by itself, which is what every other network test
-    /// needs; nothing on the host can open a connection *into* the guest unless
-    /// QEMU is told which port to translate. The host picks the number — a free
-    /// one, so parallel boots do not collide — which is why this is not a
-    /// constant.
-    ///
-    /// On a profile with no NIC it would forward nothing at all, so
-    /// [`ssh_forward_argv`] is what a test asserts against the argv it is about
-    /// to boot: a harness field that can be silently inert is this suite's
-    /// worst defect class.
+    /// Forward this host port to the guest's TCP 22. **slirp is one-way
+    /// without it**: nothing on the host can open a connection into the guest
+    /// unless QEMU is told which port to translate. A profile with no NIC
+    /// carries no `-netdev` for it to reach, which [`ssh_forward_argv`] is
+    /// what a test refuses before it boots.
     pub ssh_port: Option<u16>,
 }
 
@@ -2293,13 +2284,11 @@ pub fn ssh_forward_argv(port: u16) -> String {
     format!(",hostfwd=tcp:{SSH_FORWARD_HOST}:{port}-:22")
 }
 
-/// A host port nothing is listening on, taken by binding and letting go.
-///
-/// **The window between the two is real and unavoidable**: QEMU opens the
-/// listener itself and there is no way to hand it one. A boot whose forward
-/// lost that race fails to connect and says so rather than silently reaching
-/// somebody else's socket, because the port is bound on loopback and every
-/// connection through it is authenticated.
+/// A host port nothing is listening on, taken by binding and letting go. The
+/// window between the two is unavoidable — QEMU opens its own listener — and a
+/// boot that loses that race fails to connect rather than reaching another
+/// socket, because the port is on loopback and every connection through it is
+/// authenticated.
 pub fn free_host_port() -> u16 {
     std::net::TcpListener::bind((SSH_FORWARD_HOST, 0))
         .expect("a loopback port for the ssh forward")
@@ -2485,8 +2474,7 @@ pub struct QemuInstance {
     /// wide-SMP guest pays lock-holder preemption a boot never does.
     smp: u32,
     /// The host port [`BootOptions::ssh_port`] forwarded into this guest, kept
-    /// so that a boot several tests share can tell each of them which port it
-    /// took — the boot picks a free one, and no member can pick it again.
+    /// so a boot several tests share can tell each of them which port it took.
     ssh_port: Option<u16>,
 }
 
@@ -3037,12 +3025,9 @@ impl QemuInstance {
         &self.boot_log
     }
 
-    /// The host port this boot forwarded into the guest's TCP 22.
-    ///
-    /// Panics rather than returning an option: a caller asking is one about to
-    /// connect, and a guest booted without the forward has nothing for it to
-    /// connect to — a `None` here would become a connection refused several
-    /// layers away from the option that was not set.
+    /// The host port this boot forwarded into the guest's TCP 22. Panics
+    /// rather than returning an option: a `None` here would become a connection
+    /// refused several layers away from the option that was not set.
     pub fn ssh_port(&self) -> u16 {
         self.ssh_port.expect("this guest was booted without BootOptions { ssh_port }")
     }
@@ -4138,9 +4123,7 @@ fn qemu_command(
     // `iommu_platform` is virtio's own way of asking to be decoded; an e1000e
     // is decoded by the unit whatever it says, so it carries none.
     // The one clause that makes slirp two-way, on whichever card this profile
-    // has. A profile with no NIC carries no `-netdev` at all, so a `ssh_port`
-    // set on one reaches no argument — which is what `ssh_forward_argv` lets a
-    // test refuse before it boots.
+    // has.
     let forward = options.ssh_port.map(ssh_forward_argv).unwrap_or_default();
     match shape.nic {
         Nic::Absent => {}

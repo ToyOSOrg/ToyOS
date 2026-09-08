@@ -49,14 +49,7 @@ Open at the implementation pass: hand-rolled pcap parsing versus a host
 dev-dependency; what counter surface smoltcp already exposes against what netd
 must count.
 
-**sshd joined the gate, and its half is built.** `tests/ssh-client-host` is the
-client: `russh`'s client half and `russh-sftp`'s, an implementation this project
-did not write, built from source and pinned by that crate's own lockfile. It
-shares no code with the daemon, so where the two agree it is because the draft
-says so; no SSH binary is on the path of any test. `BootOptions::ssh_port` is
-the `hostfwd` plumbing — the one thing that makes slirp two-way — and a
-frame-level analyser reuses it rather than building it again. `sshd_exec`,
-`sshd_files` and `sshd_key_auth` drive one disposable key through accept, auth,
-a command, a file each way and a refusal, judged by the wire and the exit
-status. What is left for this gate is everything above it: the pcap analyser,
-the two tiers, `-netdev socket`, and the idle→packet ceiling.
+The ssh half is built: `tests/ssh-client-host` drives a guest over
+`BootOptions::ssh_port`'s `hostfwd`, which a frame-level analyser reuses rather
+than building again. What is left is the pcap analyser, the two tiers,
+`-netdev socket`, and the idle→packet ceiling.

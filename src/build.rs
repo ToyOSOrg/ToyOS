@@ -1708,28 +1708,32 @@ pub fn build_host_judges(root: &Path, quiet: bool) {
     }
 }
 
-const HOST_JUDGES: [(&str, &str); 3] = [
-    ("tests/https-server-host", "https_test_server"),
-    ("tests/https-fetch-host", "https_fetch"),
-    ("tests/ssh-client-host", "toyos_ssh"),
-];
+/// One host judge: where its crate is, and the binary that crate builds. Named
+/// rather than indexed, because a row inserted anywhere but the end would
+/// silently repoint every accessor below.
+type Judge = (&'static str, &'static str);
+
+const HTTPS_SERVER: Judge = ("tests/https-server-host", "https_test_server");
+const HTTPS_FETCH: Judge = ("tests/https-fetch-host", "https_fetch");
+const SSH_CLIENT: Judge = ("tests/ssh-client-host", "toyos_ssh");
+
+const HOST_JUDGES: [Judge; 3] = [HTTPS_SERVER, HTTPS_FETCH, SSH_CLIENT];
 
 pub fn https_test_server(root: &Path) -> PathBuf {
-    host_judge(root, 0)
+    host_judge(root, HTTPS_SERVER)
 }
 
 pub fn https_fetch_host(root: &Path) -> PathBuf {
-    host_judge(root, 1)
+    host_judge(root, HTTPS_FETCH)
 }
 
 /// The harness's SSH client — the only thing in this tree that speaks the
 /// protocol from the other side of `userland/sshd`.
 pub fn ssh_client_host(root: &Path) -> PathBuf {
-    host_judge(root, 2)
+    host_judge(root, SSH_CLIENT)
 }
 
-fn host_judge(root: &Path, which: usize) -> PathBuf {
-    let (dir, bin) = HOST_JUDGES[which];
+fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
     root.join(dir).join("target/release").join(bin)
 }
 

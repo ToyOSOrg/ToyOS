@@ -40,12 +40,13 @@ syscap = ["logread"]
 
 # What `exec` is asked for over the cable. A program with no authority at all:
 # it serves nothing, receives nothing and claims no device, so what an `exec`
-# arm proves is that the daemon ran the named binary and reported how it ended
-# — never that it handed it something.
+# arm proves is that the daemon ran the named binary and reported how it ended.
 [programs.toybox]
 
-# Created on ROOT at build time, so `exec echo …` resolves the way it does on a
-# real machine: a bare name is `/system/bin/<name>`, and `/system/bin/echo` is
-# this symlink. One applet, because one is what the gate asks for.
+# So a bare name resolves the way it does on a real machine: `echo` for a
+# program that says something, `cat` for one that writes to both its streams
+# and one that reads its input, `spin` for one that never ends.
 [symlinks]
 "bin/echo" = "/system/bin/toybox"
+"bin/cat" = "/system/bin/toybox"
+"bin/spin" = "/system/bin/toybox"

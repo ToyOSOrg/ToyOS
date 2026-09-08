@@ -7,10 +7,6 @@
 //! spelled here and its whole grammar is quoting: single quotes, double quotes
 //! and backslash. A pipe, a redirection, a glob, a `$` and a `;` are ordinary
 //! bytes of an argument.
-//!
-//! That is the refusal, not an omission: honouring `|` would need a shell, and
-//! there is one — a client that wants those asks for `shell -c '…'`, whose
-//! quoting this grammar hands to the shell intact.
 
 /// Split an `exec` request line into a program and its arguments.
 ///
@@ -80,7 +76,9 @@ pub fn split(line: &str) -> Result<Vec<String>, String> {
     if started {
         words.push(word);
     }
-    if words.is_empty() {
+    // An empty *first* word is a quoted nothing, not a program: `''` would
+    // otherwise resolve to the program directory and be spawned as it.
+    if words.first().is_none_or(String::is_empty) {
         return Err("no program named".to_string());
     }
     Ok(words)
@@ -105,8 +103,7 @@ pub fn resolve(name: &str) -> Result<String, String> {
     Ok(format!("/system/bin/{name}"))
 }
 
-/// The grammar, against lines a client actually sends. Host tests — `cargo test
-/// --target "$(rustc -vV | sed -n 's/^host: //p')"` from this directory.
+/// The grammar, against lines a client actually sends.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,9 +156,11 @@ mod tests {
         assert_eq!(words("echo \"a\\nb\""), ["echo", "a\\nb"]);
     }
 
+    /// A quoted nothing names no program either: `''` is a word that exists and
+    /// is empty, and resolving it would spawn the program directory itself.
     #[test]
     fn a_line_that_names_nothing_is_refused() {
-        for line in ["", "   ", "\t\n"] {
+        for line in ["", "   ", "\t\n", "''", "\"\"", "  ''  arg", "\"\"''"] {
             assert_eq!(split(line), Err("no program named".to_string()), "{line:?}");
         }
     }

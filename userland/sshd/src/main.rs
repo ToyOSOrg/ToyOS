@@ -1,17 +1,11 @@
 //! The machine's SSH server: a shell, a command, and files both ways.
 //!
-//! **This is the bench's answer path.** The ThinkPad the kernel is certified on
-//! has no channel out but a cable, so the three things a test harness needs of
-//! a machine — run this program, take this file, give me that one — are what
-//! this daemon serves, over one authenticated connection and nothing else.
-//!
-//! Two rules run through every path below. **Nothing waits without a bound**:
-//! a client that stops reading, a program that stops taking its input, a
-//! process that closes its output and does not exit — each has a named ceiling
-//! and a refusal that says which one expired, because the alternative is a
-//! channel that a harness on the other side of a network cannot tell from a
-//! slow one. And **nothing is answered before it is whole**: a partial SFTP
-//! packet is buffered, never acted on.
+//! Two rules run through every path below. **Nothing this daemon starts
+//! outlives the connection that asked for it**: the thread feeding a program
+//! its input, the task carrying its output and the program itself all end when
+//! the session does, so a program that neither writes nor exits is ended by
+//! the same event that ends the client's connection. And **nothing is answered
+//! before it is whole**: a partial SFTP packet is buffered, never acted on.
 
 mod command;
 mod sftp;
@@ -20,77 +14,49 @@ use std::fs;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use russh::keys::ssh_key::authorized_keys::AuthorizedKeys;
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, Msg, Server, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
-/// Where this machine keeps its SSH identity and the keys it trusts.
-///
-/// `/home` is the only mount that is both persistent and writable by userland:
-/// `/boot` is `KernelOnly` because a process that can write it can make the
-/// machine unbootable, `/tmp` is a tmpfs, and `/log` is the diagnostic
-/// partition — it is FAT32 by design so that it can be read on another
-/// machine, which is the last place a private key should be. On a machine
-/// whose disk the kernel would not adopt, `/home` is itself a tmpfs and the
-/// identity lasts one boot; the fingerprint is printed every start so that is
-/// visible rather than silent.
-///
-/// There is no user model and no file permissions, so the host key is readable
-/// by every process on the machine. That is a property of the system, not of
-/// this daemon — see `issues/`.
+/// Where this machine keeps its SSH identity and the keys it trusts. `/home`
+/// is the only mount that is both persistent and writable by userland; where
+/// it is a tmpfs the identity lasts one boot, which the fingerprint printed at
+/// every start is what makes visible.
 const SSH_DIR: &str = "/home/root/.ssh";
 const HOST_KEY: &str = "/home/root/.ssh/host_ed25519";
 
-/// The two files that name who may log in, in the order a person would look.
+/// The two files that name who may log in; a key in either authorizes.
 ///
 /// **The second is why a freshly flashed machine can be reached at all.** A
 /// bench boot mints an identity into a `/home` that may be a tmpfs and starts
 /// with nothing in it, so a key that has to be *installed* before the first
-/// login is a key nobody can install. `/system/etc/ssh_authorized_keys` is put
-/// on the image at build time and is read-only from here; the writable file
-/// under `/home` stays what a person adds a key to afterwards.
-///
-/// Neither file is protected from anything else on the machine — see
-/// `issues/isolation/sshd-authorized-keys-unprotected.md`. Adding the image
-/// file does not widen that: `/system` is the read-only root, so the new one is
-/// the *less* reachable of the two.
+/// login is a key nobody can install. Neither file is protected from anything
+/// else on the machine — see
+/// `issues/isolation/sshd-authorized-keys-unprotected.md`.
 const AUTHORIZED_KEYS: [&str; 2] =
     ["/home/root/.ssh/authorized_keys", "/system/etc/ssh_authorized_keys"];
 
-/// How long a program on a channel may take none of the input a client is
-/// sending before this daemon stops offering it.
+/// How long a program may take none of the input a client is sending before
+/// this daemon stops offering it and the program runs on with a closed stdin.
 ///
-/// The program keeps running with a closed stdin, which is what a program that
-/// stopped reading has already decided it wants; what does not happen is the
-/// session hanging on it.
+/// The only wall clock in this file. It cannot be an event: the handler
+/// offering the bytes is the connection's own task, so a program that reads
+/// nothing while a client keeps sending would wedge that connection with
+/// nothing left able to notice.
 const INPUT_STALL: Duration = Duration::from_secs(30);
-
-/// How long a process that has closed both its output streams may take to
-/// exit before this daemon ends it and says the status is lost.
-///
-/// A process's pipes are closed by its own teardown, so reaching this bound at
-/// all means the child kept running with its output gone: nothing more will
-/// arrive on the channel, and the client is owed an answer.
-const EXIT_WAIT: Duration = Duration::from_secs(10);
-
-/// How long an SFTP session may go without a request.
-const SFTP_IDLE: Duration = Duration::from_secs(300);
-
-/// How long a connection may carry no traffic at all before russh drops it.
-/// Stated rather than inherited, so the bound is one this daemon owns.
-const SESSION_IDLE: Duration = Duration::from_secs(600);
-
-/// This daemon would not run what was asked. It is the shell's own convention
-/// for a command that could not be executed, and the reason is on stderr.
-const EXIT_REFUSED: u32 = 127;
 
 /// The program ran and this daemon cannot say how it ended.
 const EXIT_LOST: u32 = 254;
+
+/// This daemon would not run what was asked. It is the shell's own convention
+/// for a command that could not be executed, and the reason is on stderr; a
+/// program that ran, however it ended, never answers this.
+const EXIT_REFUSED: u32 = 127;
 
 /// The channel's stderr, in the protocol's numbering.
 const EXTENDED_STDERR: u32 = 1;
@@ -202,6 +168,7 @@ impl Server for SshServer {
             peer: peer_addr.map_or_else(|| "an unnamed peer".to_string(), |a| a.to_string()),
             channel: None,
             input: None,
+            alive: watch::channel(()).0,
             is_pty: false,
         }
     }
@@ -215,6 +182,10 @@ struct SshSession {
     /// Where channel data goes: a program's stdin, or the SFTP request stream.
     /// `None` once whatever was reading it is gone.
     input: Option<mpsc::Sender<Vec<u8>>>,
+    /// Held for as long as this connection is. Every task started for it waits
+    /// on a subscription, so dropping this — which is what the end of the
+    /// session does — is what ends them and kills the program they serve.
+    alive: watch::Sender<()>,
     is_pty: bool,
 }
 
@@ -246,8 +217,7 @@ impl SshSession {
     /// `translate_newlines` is the terminal's business, not the protocol's:
     /// there is no PTY layer on this system to turn a program's `\n` into the
     /// `\r\n` a terminal needs, so the one path that has a terminal on the far
-    /// end does it here. Every other path is byte-exact, which is what makes
-    /// running a binary over `exec` mean anything.
+    /// end does it here. Every other path is byte-exact.
     fn run(&mut self, argv: Vec<String>, translate_newlines: bool) {
         let Some(channel) = self.take_channel("program request") else { return };
         let (_, out) = channel.split();
@@ -261,10 +231,8 @@ impl SshSession {
         {
             Ok(child) => child,
             Err(e) => {
-                // The named refusal, on the stream a client reads diagnostics
-                // off and in an exit status it can branch on. A spawn that
-                // failed must never look like a program that ran and said
-                // nothing.
+                // A spawn that failed must never look like a program that ran
+                // and said nothing.
                 let why = format!("sshd: cannot run {}: {e}\r\n", argv[0]);
                 println!("sshd: {}: cannot run {}: {e}", self.peer, argv[0]);
                 tokio::spawn(async move {
@@ -278,7 +246,7 @@ impl SshSession {
         };
 
         // stdin: a thread, because a write to a pipe the child is not reading
-        // blocks, and this runtime has one thread for every session on it.
+        // blocks.
         let mut stdin = child.stdin.take().expect("stdin was piped");
         let (input, mut input_rx) = mpsc::channel::<Vec<u8>>(16);
         self.input = Some(input);
@@ -288,7 +256,6 @@ impl SshSession {
                     break;
                 }
             }
-            // Dropping it closes the pipe, which is the child's EOF.
         });
 
         // stdout and stderr: one thread each onto one queue, so the order the
@@ -300,8 +267,22 @@ impl SshSession {
 
         let name = argv[0].clone();
         let peer = self.peer.clone();
+        let mut gone = self.alive.subscribe();
         tokio::spawn(async move {
-            while let Some((stream, data)) = rx.recv().await {
+            let mut abandoned = false;
+            loop {
+                let (stream, data) = tokio::select! {
+                    got = rx.recv() => match got {
+                        Some(got) => got,
+                        // Both pipes are at EOF, which the child's own
+                        // teardown is what does.
+                        None => break,
+                    },
+                    _ = gone.changed() => {
+                        abandoned = true;
+                        break;
+                    }
+                };
                 let data = if translate_newlines { crlf(&data) } else { data };
                 let sent = match stream {
                     Stream::Out => out.data(&data[..]).await,
@@ -311,7 +292,11 @@ impl SshSession {
                     break;
                 }
             }
-            let status = reap(&mut child, &name, &peer).await;
+            let status = if abandoned {
+                end(&mut child, &name, &peer)
+            } else {
+                reap(&mut child, &name, &peer, &mut gone).await
+            };
             out.exit_status(status).await.ok();
             out.eof().await.ok();
             out.close().await.ok();
@@ -332,28 +317,19 @@ impl SshSession {
             let status = loop {
                 let packet = match sftp::next_packet(&mut buf) {
                     Ok(packet) => packet,
-                    Err(sftp::Fatal(why)) => {
-                        println!("sshd: sftp for {peer}: {why}");
-                        break EXIT_REFUSED;
-                    }
+                    Err(fatal) => break fatal.say(&peer),
                 };
                 let Some(packet) = packet else {
-                    // Nothing whole to act on: wait for more, bounded.
-                    match tokio::time::timeout(SFTP_IDLE, input_rx.recv()).await {
-                        Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
-                        Ok(None) => break 0,
-                        Err(_) => {
-                            println!(
-                                "sshd: sftp for {peer}: no request in {}s, closing",
-                                SFTP_IDLE.as_secs()
-                            );
-                            break EXIT_REFUSED;
-                        }
+                    // Nothing whole to act on. The sender is this session's, so
+                    // the end of the connection is what ends this wait.
+                    match input_rx.recv().await {
+                        Some(chunk) => buf.extend_from_slice(&chunk),
+                        None => break 0,
                     }
                     continue;
                 };
-                // The filesystem work is blocking and this runtime has one
-                // thread; the server goes with it and comes back.
+                // The filesystem work is blocking; the server goes with it
+                // and comes back.
                 let done = tokio::task::spawn_blocking(move || {
                     let reply = server.request(&packet);
                     (server, reply)
@@ -370,10 +346,7 @@ impl SshSession {
                             break 0;
                         }
                     }
-                    Err(sftp::Fatal(why)) => {
-                        println!("sshd: sftp for {peer}: {why}");
-                        break EXIT_REFUSED;
-                    }
+                    Err(fatal) => break fatal.say(&peer),
                 }
             };
             out.exit_status(status).await.ok();
@@ -398,9 +371,35 @@ impl SshSession {
     }
 }
 
+/// What became of a chunk of channel data offered to whatever is reading this
+/// channel's input.
+#[derive(Debug, PartialEq, Eq)]
+enum Offered {
+    Taken,
+    /// Whatever was reading is gone; there is nowhere for the bytes to go.
+    Gone,
+    /// Nothing took them within `bound`, so the input is closed and the
+    /// program runs on without it.
+    Stalled,
+}
+
+/// Hand `chunk` to whatever is reading this channel's input, or say why not.
+///
+/// The queue is bounded, so this waits when a program is not keeping up — and
+/// a program that takes nothing at all must not hold the wait open, because
+/// the caller is the connection's own task and a wait here is that whole
+/// connection.
+async fn offer(input: &mpsc::Sender<Vec<u8>>, chunk: Vec<u8>, bound: Duration) -> Offered {
+    match tokio::time::timeout(bound, input.send(chunk)).await {
+        Ok(Ok(())) => Offered::Taken,
+        Ok(Err(_)) => Offered::Gone,
+        Err(_) => Offered::Stalled,
+    }
+}
+
 /// One of a child's output pipes onto the queue both of them share, on a thread
-/// because the read is blocking and this runtime has one thread. The queue is
-/// what keeps the order the two streams arrived in.
+/// because the read is blocking and this runtime has one thread for every
+/// session on it. The queue keeps the order the two streams arrived in.
 fn pump<R: Read + Send + 'static>(
     mut pipe: R,
     stream: Stream,
@@ -433,15 +432,15 @@ fn crlf(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The child's exit status, or a named refusal in place of one.
+/// The child's exit status, waited for until it exits or the connection that
+/// asked for it goes.
 ///
-/// Reached only after both of the child's output pipes have closed, which its
-/// own teardown is what does — so the loop below almost always ends on its
-/// first question. What it exists for is the child that closed them and kept
-/// running: nothing further can arrive on the channel, so the client is
-/// answered and the process this daemon started is ended.
-async fn reap(child: &mut Child, name: &str, peer: &str) -> u32 {
-    let deadline = Instant::now() + EXIT_WAIT;
+/// Reached after both of the child's output pipes have closed, which its own
+/// teardown is what does — so the loop below almost always ends on its first
+/// question. What it exists for is the child that closed them and kept
+/// running: nothing further can arrive on the channel, and the client is still
+/// there to be answered whenever it does end.
+async fn reap(child: &mut Child, name: &str, peer: &str, gone: &mut watch::Receiver<()>) -> u32 {
     let mut backoff = Duration::from_millis(1);
     loop {
         match child.try_wait() {
@@ -463,17 +462,26 @@ async fn reap(child: &mut Child, name: &str, peer: &str) -> u32 {
                 return EXIT_LOST;
             }
         }
-        if Instant::now() >= deadline {
-            println!(
-                "sshd: {peer}: {name} closed its output and has not exited within {}s; ending it",
-                EXIT_WAIT.as_secs()
-            );
-            let _ = child.kill();
-            return EXIT_LOST;
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = gone.changed() => return end(child, name, peer),
         }
-        tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_millis(25));
     }
+}
+
+/// End a program whose connection is gone. Nothing it writes can reach anyone
+/// and nobody is left to read its status, so it is killed rather than left
+/// running on a machine whose only way to see it is another login.
+///
+/// The line is printed after the wait, so it says the process is *gone* rather
+/// than that a kill was asked for.
+fn end(child: &mut Child, name: &str, peer: &str) -> u32 {
+    match child.kill().and_then(|()| child.wait()) {
+        Ok(_) => println!("sshd: {peer}: the connection is gone; ended {name}"),
+        Err(e) => println!("sshd: {peer}: the connection is gone and {name} would not end: {e}"),
+    }
+    EXIT_LOST
 }
 
 impl russh::server::Handler for SshSession {
@@ -488,31 +496,9 @@ impl russh::server::Handler for SshSession {
         Ok(true)
     }
 
-    /// The offer, before the client has proved it holds the key. Refusing here
-    /// is what stops a client signing for a key that could never be accepted,
-    /// and it is where an unauthorized key gets named — a client that takes
-    /// this answer never reaches `auth_publickey`.
-    ///
-    /// `russh`'s default for this one is `Accept`; every other auth callback it
-    /// defaults to `Reject`, which is why `auth_password` is simply absent.
-    async fn auth_publickey_offered(
-        &mut self,
-        user: &str,
-        key: &PublicKey,
-    ) -> Result<Auth, Self::Error> {
-        if is_authorized(key) {
-            return Ok(Auth::Accept);
-        }
-        println!(
-            "sshd: refused {user}: {} is authorized by no file",
-            key.fingerprint(HashAlg::Sha256)
-        );
-        Ok(Auth::reject())
-    }
-
-    /// After russh has verified the signature. Checked again rather than
-    /// trusting the offer above to have filtered: a client is free to sign
-    /// without asking first, and that path must reach the same files.
+    /// The one authentication this daemon implements, reached after russh has
+    /// verified the signature. `russh` defaults every other auth callback to
+    /// `Reject`, which is why `auth_password` is simply absent.
     async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
         let fingerprint = key.fingerprint(HashAlg::Sha256);
         if is_authorized(key) {
@@ -530,12 +516,10 @@ impl russh::server::Handler for SshSession {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let Some(input) = self.input.as_ref() else { return Ok(()) };
-        match tokio::time::timeout(INPUT_STALL, input.send(data.to_vec())).await {
-            Ok(Ok(())) => {}
-            // Whatever was reading this is gone; there is nowhere for the
-            // client's bytes to go and nothing to say about it.
-            Ok(Err(_)) => self.input = None,
-            Err(_) => {
+        match offer(input, data.to_vec(), INPUT_STALL).await {
+            Offered::Taken => {}
+            Offered::Gone => self.input = None,
+            Offered::Stalled => {
                 println!(
                     "sshd: {}: the program on this channel took none of {} bytes within {}s; \
                      closing its input",
@@ -675,17 +659,10 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
     rt.block_on(async {
-        // Every bind goes through netd, which exits on a machine with no NIC.
-        // sshd has nothing to offer without one, so it says so and leaves
-        // instead of dumping a tokio backtrace across the boot.
-        //
-        // Only for that error, though. `NetdNotFound` — no netd registered the
-        // service name — is the one that means what the message says, and std
-        // maps it to NotConnected. `AddrInUse`, a netd that died mid-request
-        // (`NetError::Io`) and a pipe failure all arrive here too, and on a
-        // laptop with a live link every one of them would have exited 0 with a
-        // line blaming the hardware. Nothing supervises init's children, so
-        // the message is the entire diagnostic.
+        // A machine with no netd has nothing for this daemon to offer, and
+        // `NetdNotFound` is the only error that means that — std maps it to
+        // NotConnected. Every other bind failure panics rather than exiting 0
+        // with a line blaming hardware that is fine.
         let listener = match tokio::net::TcpListener::bind("0.0.0.0:22").await {
             Ok(l) => l,
             Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
@@ -725,7 +702,6 @@ fn main() {
             // guess. `russh`'s default is every method it implements.
             methods: MethodSet::from(&[MethodKind::PublicKey][..]),
             auth_rejection_time: std::time::Duration::from_secs(1),
-            inactivity_timeout: Some(SESSION_IDLE),
             nodelay: true,
             keys: vec![host_key],
             ..Default::default()
@@ -759,10 +735,11 @@ fn main() {
     });
 }
 
-/// Which keys a file authorizes. Host tests — `cargo test --target "$(rustc
-/// -vV | sed -n 's/^host: //p')"` from this directory; `userland/.cargo/config.toml`
-/// cross-compiles to ToyOS otherwise. Real keys, and `ssh-key`'s own parser,
-/// so what is under test is the decision and not a re-encoding of it.
+/// Which keys a file authorizes, and what becomes of a program's input. Host
+/// tests — `cargo test --target "$(rustc -vV | sed -n 's/^host: //p')"` from
+/// this directory; `userland/.cargo/config.toml` cross-compiles to ToyOS
+/// otherwise. Real keys, and `ssh-key`'s own parser, so what is under test is
+/// the decision and not a re-encoding of it.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,12 +827,36 @@ mod tests {
         assert!(authorizes(&text, mine.public_key()));
     }
 
-    /// The image file is read beside the writable one, and neither is
-    /// preferred: a key in either authorizes, which is the whole of what the
-    /// image file adds.
-    #[test]
-    fn the_image_file_is_read_beside_the_home_one() {
-        assert!(AUTHORIZED_KEYS.contains(&"/system/etc/ssh_authorized_keys"));
-        assert!(AUTHORIZED_KEYS.contains(&"/home/root/.ssh/authorized_keys"));
+    /// The bound this daemon spends on a program's input, against a queue
+    /// nothing is draining. Wrapped in a ceiling of its own so that an `offer`
+    /// which lost its bound fails here instead of hanging the suite.
+    #[tokio::test]
+    async fn input_nothing_takes_is_given_up_on() {
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
+        tx.send(b"fills the queue".to_vec()).await.expect("the first chunk fits");
+        let bound = Duration::from_millis(20);
+        let verdict = tokio::time::timeout(Duration::from_secs(5), offer(&tx, vec![0], bound))
+            .await
+            .expect("offer answered within its own bound");
+        assert_eq!(verdict, Offered::Stalled);
+    }
+
+    #[tokio::test]
+    async fn input_a_program_is_reading_is_taken() {
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+        assert_eq!(offer(&tx, b"hello".to_vec(), INPUT_STALL).await, Offered::Taken);
+        assert_eq!(rx.recv().await.as_deref(), Some(&b"hello"[..]));
+    }
+
+    /// A program that has gone is not a stall: there is nowhere for the bytes
+    /// to go, and the client is owed the answer now rather than in 30 seconds.
+    #[tokio::test]
+    async fn input_for_a_program_that_is_gone_is_not_a_stall() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(1);
+        drop(rx);
+        let verdict = tokio::time::timeout(Duration::from_secs(5), offer(&tx, vec![0], INPUT_STALL))
+            .await
+            .expect("offer answered at once");
+        assert_eq!(verdict, Offered::Gone);
     }
 }

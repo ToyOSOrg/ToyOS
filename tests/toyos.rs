@@ -612,17 +612,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
-    // One `SSHD_LOGIN` boot for the three: a guest with a key in its image and
-    // a host port forwarded into its sshd, driven by `tests/ssh-client-host`.
+    // One `SSHD_LOGIN` boot for the three, driven by `tests/ssh-client-host`.
     // Adjacent because `group_of` makes adjacency load-bearing, and one tier
     // because one boot cannot be in two. Every verdict is bytes or an exit
     // status; the client's own ceiling is a liveness guard and no assertion
-    // reads a clock. Carrying `UNMEASURED_MS` until the shards price them.
-    //
-    // The order is the argument that no member reads state another left: the
-    // `exec` binary cleans up its own `/tmp` entries, the file arm writes two
-    // names nothing else looks at, and the auth arm reads only the console
-    // lines its own two connections produce.
+    // reads a clock.
     ("sshd_exec", Sched::Parallel, Tier::Fast),
     ("sshd_files", Sched::Parallel, Tier::Fast),
     ("sshd_key_auth", Sched::Parallel, Tier::Fast),
@@ -5651,9 +5645,10 @@ fn group_of(name: &str) -> Option<&'static str> {
         // member reads only its own window, so the order is the argument that
         // no member reads state another left.
         "locale_detect" | "locale_detect_unrecognized" => Some(LOCALE_WIZARD),
-        // One guest with a key in its image and a forward into its port 22.
-        // None of the three kills it, and the order in `MACHINE_TESTS` is the
-        // argument that none reads what another left.
+        // One guest with a key in its image and a forward into its port 22:
+        // the exec arms clean up after themselves, the file arm writes names
+        // nothing else looks at, and the auth arm reads only its own console
+        // lines.
         "sshd_exec" | "sshd_files" | "sshd_key_auth" => Some(SSHD_LOGIN),
         _ => None,
     }
@@ -9601,8 +9596,8 @@ fn run_machine_test(
             locale_detect_unrecognized(&mut boot.qemu)
         }
         // The three judges of `tests/common/ssh.rs`, on one `tests/sshdcase`
-        // boot. `test_config` is not theirs: the gate names its own config,
-        // because the key it stages and the forward it opens are that config's.
+        // boot. `test_config` is not theirs: the key staged and the forward
+        // opened are that config's.
         "sshd_exec" => {
             let boot = group_boot(held, SSHD_LOGIN, || common::ssh::boot(rust_bins));
             common::ssh::exec_gate(&mut boot.qemu)
