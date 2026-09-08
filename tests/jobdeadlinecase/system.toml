@@ -14,7 +14,7 @@ syscap = ["logread"]
 # job it was watching so the driver can end what it had in flight, and that kill
 # releases the loop `spin` was blocking — so without `userland/test-runner`'s
 # stand-down the loop starts this one, into a shutdown that has already written
-# the boot's last word. Measured on the T14, run 20, at 29 ms after `Rebooting.`.
+# the boot's last word.
 args = ["--bound-ms=3000", "spin", "echo"]
 syscap = ["dup", "power"]
 
