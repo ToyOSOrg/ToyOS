@@ -611,34 +611,41 @@ ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
 
 # --- the cable: the boot that runs netd in front of the T14's own I219 ---
-# Every number here is unread: the ceilings below are the widest true bounds
-# this repository can derive before the machine has answered once, which is what
-# `ceiling_from` says of each. The run that takes the first readings is the run
-# that tightens them.
+# The three boot facts below are the machine's own, off a boot whose claim the
+# kernel refused for want of MSI: they are facts about the boot rather than
+# about the claim, so the readings stand. The two `lan.` rows have none, because
+# that boot's netd never ran. `ping_secs` has none either, and for a different
+# reason: the run that took one pinged the address this machine's *name*
+# resolves to, which here is a Tailscale address only the operating system
+# before the boot holds — the loop reads the claimed function's own address now,
+# and no run has pinged that yet.
 
 [[number]]
 name = "boot.lancase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1223
 
 [[number]]
 name = "boot.lancase.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 65
 
 [[number]]
 name = "boot.lancase.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 [[number]]
 name = "boot.lancase.ping_secs"
 unit = "s"
 ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs — the window this is measured in is the loop's own wait for the machine to answer ssh again, and nothing narrower has been read yet. What it becomes is a ceiling under the reading every boot with no network of its own takes at the same address, which is Ubuntu answering on its way back up: those readings are the separation this number rests on, and until one exists this row bounds the loop rather than the boot"
+ceiling_from = "toyos_build::metal::return_secs — the window this is measured in is the loop's own wait for the machine to answer ssh again, and nothing narrower has been read yet. What it becomes is a ceiling under the reading a boot with no network of its own takes at the same address, which is the operating system before it answering on its way back up. Until one of those exists this row bounds the loop rather than the boot"
 
 [[number]]
 name = "list.lancase.job_ms"

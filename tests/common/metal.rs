@@ -205,8 +205,15 @@ pub struct Readback {
     /// happened to work.
     pub stick_secs: u64,
     /// The address the loop pinged while the machine was between its two
-    /// operating systems.
+    /// operating systems, read off the PCI function the flashed image claims.
     pub ping_addr: String,
+    /// The MAC that function held under the operating system before this boot.
+    ///
+    /// **What ties an answered ping to this boot and not to the machine.** A
+    /// MAC does not change with the operating system, so a boot whose own
+    /// driver reports this one is the boot that holds that address; an answer
+    /// from any other interface at it is somebody else's.
+    pub wire_mac: String,
     /// How far into that window the address first answered, and `None` where
     /// nothing did.
     ///
@@ -713,6 +720,8 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
     // asked, and its absence is a readback from a run that could not.
     let ping_addr = toyos_build::metal::ping_addr(&boot)
         .ok_or_else(|| format!("{label}'s boot file names no `ping_addr`: {boot:?}"))?;
+    let wire_mac = toyos_build::metal::wire_mac(&boot)
+        .ok_or_else(|| format!("{label}'s boot file names no `wire_mac`: {boot:?}"))?;
     Ok(Readback {
         label: label.to_string(),
         boot_ms: bootlog::boot_millis(&kernel),
@@ -721,6 +730,7 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         back_secs,
         stick_secs,
         ping_addr,
+        wire_mac,
         ping_secs: toyos_build::metal::ping_secs(&boot),
     })
 }

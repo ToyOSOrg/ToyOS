@@ -149,6 +149,20 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         }
     }
 
+    // **The MAC is what makes an answered ping this boot's.** The address was
+    // read off the same PCI function under the operating system before this
+    // one, and a MAC does not change with the operating system — so a driver
+    // reporting this MAC is the driver holding that address, and a reply from
+    // anything else at it is some other interface's.
+    let mac = format!("{MAC}{}", back.wire_mac);
+    if !text.contains(&mac) {
+        bad.push(format!(
+            "no {mac:?} record: the card this boot brought up is not the one that held {} \
+             before it",
+            back.ping_addr
+        ));
+    }
+
     match link_up_ms(text) {
         Ok(ms) => {
             eprintln!("  [lan] the link came up {ms} ms after the driver did");

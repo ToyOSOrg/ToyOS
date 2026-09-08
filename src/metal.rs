@@ -148,9 +148,9 @@ pub enum Refusal {
     /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
     Lid { key: &'static str, got: String },
     Remote { what: String, status: String, stderr: String },
-    /// The machine's name answers no IPv4 address on this host, so the boot
-    /// this loop is about to make could not be reached over the cable at all.
-    Unresolved { host: String, why: String },
+    /// The machine could not say what address it holds on the function the
+    /// flashed image claims, so the boot could not be reached over the cable.
+    Wire { nic: String, why: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
     /// The machine came back and the boot stick did not: the boot before this
@@ -276,10 +276,11 @@ impl fmt::Display for Refusal {
             Self::Remote { what, status, stderr } => {
                 write!(f, "{what} on the machine {status}: {stderr}")
             }
-            Self::Unresolved { host, why } => write!(
+            Self::Wire { nic, why } => write!(
                 f,
-                "{host:?} answers no IPv4 address on this host ({why}), so nothing on the cable \
-                 could be asked whether this boot came up"
+                "the machine says nothing usable about PCI function {nic}: {why}. That is the \
+                 function the flashed image claims, and its address is the only one a boot of \
+                 that image could answer on"
             ),
             Self::Silent { what, secs } => write!(
                 f,
@@ -509,6 +510,15 @@ struct Target {
     mount: String,
     /// The boot entry's label in the firmware's list.
     label: String,
+    /// The PCI function whose cable this loop reaches the boot over, in the
+    /// spelling `/sys/bus/pci/devices` uses.
+    ///
+    /// **The function and not an interface name.** What the flashed image
+    /// claims is a PCI function, and what answers a ping is whatever address
+    /// the operating system before it held on that same function — so the two
+    /// are tied to one identifier here rather than to a name Ubuntu happens to
+    /// give it.
+    nic: String,
 }
 
 impl Target {
@@ -524,6 +534,7 @@ impl Target {
             log_part: 3,
             mount: "/home/t14/toyos-log".to_string(),
             label: "ToyOS".to_string(),
+            nic: "0000:00:1f.6".to_string(),
         })
     }
 
@@ -621,28 +632,6 @@ impl Target {
     fn remote(&self, job: Job, fill: Option<&str>) -> Result<String, Refusal> {
         let words: Vec<String> = self.argv(job, fill)?.iter().map(|w| shell_word(w)).collect();
         Ok(format!("sudo -n {}", words.join(" ")))
-    }
-
-    /// The machine's own IPv4 address on this LAN.
-    ///
-    /// **Resolved before the boot, because the boot cannot be asked.** The
-    /// machine's MAC is the same under either operating system, so the lease
-    /// the router hands the flashed image is the one its name already resolves
-    /// to — and the name is resolved through the same router's DNS that issued
-    /// it. The boot's own record of the lease says which address it took, and
-    /// the judge holds the two together; what this gives is an address to ping
-    /// while the boot is up, which is the only window there is.
-    fn address(&self) -> Result<std::net::Ipv4Addr, Refusal> {
-        use std::net::ToSocketAddrs;
-        let unresolved = |why: String| Refusal::Unresolved { host: self.host.clone(), why };
-        (self.host.as_str(), 22u16)
-            .to_socket_addrs()
-            .map_err(|e| unresolved(e.to_string()))?
-            .find_map(|at| match at {
-                std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
-                std::net::SocketAddr::V6(_) => None,
-            })
-            .ok_or_else(|| unresolved("it resolves to IPv6 alone".to_string()))
     }
 
     /// The one read that decides whether anything is written.
@@ -985,6 +974,44 @@ fn lid_policy(text: &str) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// What the machine holds on the PCI function the flashed image claims.
+///
+/// **Read off that function and not off a name.** The address the loop pings
+/// has to be the one a boot of this image could answer on, and the two
+/// operating systems agree about it for exactly one reason: the function's MAC
+/// is the same under both, so a DHCP server ordinarily hands both the same
+/// lease. So the MAC is carried out beside the address and the boot's own
+/// `netd: MAC` record is held to it — a ping answered at an address some other
+/// interface holds is a ping this loop must not report as the boot's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wire {
+    pub iface: String,
+    pub addr: std::net::Ipv4Addr,
+    /// Lower case, colon separated, as `/sys/class/net/<i>/address` writes it.
+    pub mac: String,
+}
+
+/// `ip -4 -brief addr show <iface>`'s one line, as `Wire` needs it.
+///
+/// The brief form is `<name> <state> <cidr>...`, and an interface with no
+/// address has no third field at all — which is the machine saying the cable is
+/// out, and it is refused by name rather than read as some other interface's.
+fn brief_address(iface: &str, text: &str) -> Result<std::net::Ipv4Addr, String> {
+    let line = text
+        .lines()
+        .find(|l| l.split_whitespace().next() == Some(iface))
+        .ok_or_else(|| format!("`ip -4 -brief addr show {iface}` said {text:?}"))?;
+    let cidr = line
+        .split_whitespace()
+        .nth(2)
+        .ok_or_else(|| format!("{iface} holds no IPv4 address: {line:?}"))?;
+    cidr.split('/')
+        .next()
+        .unwrap_or(cidr)
+        .parse()
+        .map_err(|_| format!("{iface}'s address reads {cidr:?}"))
+}
+
 /// Whether anything answers at the machine's own address while the machine is
 /// between two operating systems, and how far into that window it first did.
 ///
@@ -1113,6 +1140,45 @@ impl Driver {
         }
         let out = command.output().map_err(|e| unstarted(what, &e))?;
         answer(what, out).map(Some)
+    }
+
+    /// What this machine holds on the function the flashed image claims: the
+    /// interface Ubuntu gave it, its address, and its MAC.
+    ///
+    /// Three reads and not one, so a machine that answers oddly is refused with
+    /// the read that was odd. None of them is a root command and none of them
+    /// writes.
+    fn wire(&self) -> Result<Wire, Refusal> {
+        let nic = &self.target.nic;
+        let bad = |why: String| Refusal::Wire { nic: nic.clone(), why };
+        let at = shell_word(&format!("/sys/bus/pci/devices/{nic}/net"));
+        let listing = self
+            .ssh("listing the claimed function's interfaces", &format!("ls {at}"))
+            .map_err(|e| bad(e.to_string()))?;
+        let names: Vec<&str> = listing.split_whitespace().collect();
+        // Exactly one, refused rather than resolved to the first: a function
+        // this loop cannot name one interface for is one whose address it would
+        // be guessing at.
+        let [iface] = names[..] else {
+            return Err(bad(format!("it answers {names:?} interface(s), and one is needed")));
+        };
+        let mac = self
+            .ssh(
+                "reading the claimed function's MAC",
+                &format!("cat {}", shell_word(&format!("/sys/class/net/{iface}/address"))),
+            )
+            .map_err(|e| bad(e.to_string()))?;
+        let brief = self
+            .ssh(
+                "reading the claimed function's address",
+                &format!("ip -4 -brief addr show {}", shell_word(iface)),
+            )
+            .map_err(|e| bad(e.to_string()))?;
+        Ok(Wire {
+            iface: iface.to_string(),
+            addr: brief_address(iface, &brief).map_err(bad)?,
+            mac: mac.trim().to_ascii_lowercase(),
+        })
     }
 
     /// The loop refuses to run at all until the rule is on the machine.
@@ -1571,10 +1637,6 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         )));
     };
     let image = admit(asked, &args.target)?;
-    // Before the flash, because a machine whose name answers no address is one
-    // no boot of it could be asked anything over the cable, and that is a
-    // finding about this host rather than about the boot.
-    let address = args.target.address()?;
     // **Before the flash, and before anything can refuse.** Every refusal below
     // returns without reaching `write_readback`, so a directory left holding the
     // last run's files is one a judge reads as this run's — which is how a boot
@@ -1611,6 +1673,15 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         identity.vendor,
         identity.model
     );
+    // Before the flash, because the address a boot of this image could answer
+    // on is one only the operating system that is still up can be asked for —
+    // and a machine that cannot say it is a finding about this host rather than
+    // about the boot.
+    let wire = driver.wire()?;
+    println!(
+        "the claimed function {} is {} at {}, MAC {}",
+        args.target.nic, wire.iface, wire.addr, wire.mac
+    );
 
     driver.flash(&image)?;
     let entry = driver.boot_entry(&image.esp)?;
@@ -1624,14 +1695,15 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         return Ok(None);
     }
 
-    let (back, pinged) = driver.ride_the_reboot(args.wait_secs, address)?;
+    let (back, pinged) = driver.ride_the_reboot(args.wait_secs, wire.addr)?;
     println!("the machine answered ssh again after {back} s");
     match pinged {
         Some(secs) => println!(
-            "{address} answered a ping {secs} s into the window, after {PING_SILENCE_SECS} s of \
-             silence — so something on this cable was up while Ubuntu was not"
+            "{} answered a ping {secs} s into the window, after {PING_SILENCE_SECS} s of \
+             silence — so something on this cable was up while Ubuntu was not",
+            wire.addr
         ),
-        None => println!("nothing answered a ping at {address} while the machine was down"),
+        None => println!("nothing answered a ping at {} while the machine was down", wire.addr),
     }
     // Before the mount, so the stick's own answer is a number rather than
     // the reason a mount failed.
@@ -1659,7 +1731,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
     if let Some(dir) = &args.readback {
-        write_readback(dir, &loader, &log, back, stick, address, pinged)?;
+        write_readback(dir, &loader, &log, back, stick, &wire, pinged)?;
         println!("readback written to {}", dir.display());
     }
     // **Named by evidence, before the boot record is missed.** A boot that
@@ -1781,15 +1853,19 @@ pub const READBACK_VOLUME: &str = "log-partition.img";
 pub const BACK_SECS: &str = "back_secs";
 pub const STICK_SECS_KEY: &str = "stick_secs";
 
-/// The address this loop pinged while the machine was down, and how far into
-/// that window the first reply came.
+/// The address this loop pinged while the machine was down, the MAC of the
+/// function holding it, and how far into that window the first reply came.
 ///
-/// **The address is written whether or not anything answered, and the seconds
-/// only if something did.** Which address was asked is a fact about the run;
-/// whether it replied is the boot's answer, and an absent key is `no` said
-/// where a zero would be a reply in the first second.
+/// **The address and the MAC are written whether or not anything answered, and
+/// the seconds only if something did.** Which address was asked, and on which
+/// function, are facts about the run; whether it replied is the boot's answer,
+/// and an absent key is `no` said where a zero would be a reply in the first
+/// second. The MAC is what a judge holds this boot's own driver record to, so
+/// an answer from a different interface at that address cannot be read as the
+/// boot's.
 pub const PING_ADDR_KEY: &str = "ping_addr";
 pub const PING_SECS_KEY: &str = "ping_secs";
+pub const WIRE_MAC_KEY: &str = "wire_mac";
 
 /// Every file a readback directory carries, so a run that writes none of them
 /// leaves none of the last run's behind.
@@ -1827,7 +1903,7 @@ fn write_readback(
     log: &str,
     back: u64,
     stick: u64,
-    address: std::net::Ipv4Addr,
+    wire: &Wire,
     pinged: Option<u64>,
 ) -> Result<(), Refusal> {
     let wrote = |path: &Path, text: &str| -> Result<(), Refusal> {
@@ -1842,7 +1918,8 @@ fn write_readback(
     // there; this file carries only what the *host* clock measured, which no
     // log can.
     let mut boot = format!(
-        "{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n{PING_ADDR_KEY} {address}\n"
+        "{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n{PING_ADDR_KEY} {}\n{WIRE_MAC_KEY} {}\n",
+        wire.addr, wire.mac
     );
     if let Some(secs) = pinged {
         boot.push_str(&format!("{PING_SECS_KEY} {secs}\n"));
@@ -1903,8 +1980,18 @@ pub fn ping_secs(text: &str) -> Option<u64> {
 /// The address that was pinged. Absent only from a readback written before this
 /// loop asked.
 pub fn ping_addr(text: &str) -> Option<String> {
+    word(text, PING_ADDR_KEY)
+}
+
+/// The MAC of the function that held the pinged address, as the operating
+/// system before this boot reported it.
+pub fn wire_mac(text: &str) -> Option<String> {
+    word(text, WIRE_MAC_KEY)
+}
+
+fn word(text: &str, name: &str) -> Option<String> {
     text.lines()
-        .find_map(|line| line.strip_prefix(PING_ADDR_KEY))
+        .find_map(|line| line.strip_prefix(name))
         .map(|rest| rest.trim().to_string())
         .filter(|got| !got.is_empty())
 }
@@ -2123,18 +2210,46 @@ mod tests {
     /// and one carrying neither is a run from before this loop asked at all.
     #[test]
     fn a_ping_nothing_answered_is_written_as_no_answer() {
-        let answered = "back_secs 61\nstick_secs 2\nping_addr 192.168.1.42\nping_secs 17\n";
-        let silent = "back_secs 46\nstick_secs 2\nping_addr 192.168.1.42\n";
-        assert_eq!(ping_addr(answered).as_deref(), Some("192.168.1.42"));
+        let answered = "back_secs 61\nstick_secs 2\nping_addr 192.168.1.46\n\
+                        wire_mac 8c:8c:aa:bb:cc:dd\nping_secs 17\n";
+        let silent = "back_secs 46\nstick_secs 2\nping_addr 192.168.1.46\n\
+                      wire_mac 8c:8c:aa:bb:cc:dd\n";
+        assert_eq!(ping_addr(answered).as_deref(), Some("192.168.1.46"));
+        assert_eq!(wire_mac(answered).as_deref(), Some("8c:8c:aa:bb:cc:dd"));
         assert_eq!(ping_secs(answered), Some(17));
-        assert_eq!(ping_addr(silent).as_deref(), Some("192.168.1.42"));
+        assert_eq!(ping_addr(silent).as_deref(), Some("192.168.1.46"));
         assert_eq!(ping_secs(silent), None);
         assert_eq!(ping_addr("back_secs 46\n"), None);
-        // The two keys share a prefix, and neither may be read off the other's
-        // line.
-        assert_eq!(ping_secs("ping_addr 192.168.1.42\n"), None);
+        // The two ping keys share a prefix, and neither may be read off the
+        // other's line.
+        assert_eq!(ping_secs("ping_addr 192.168.1.46\n"), None);
         assert_eq!(back_secs(answered), Some(61));
         assert_eq!(stick_secs(answered), Some(2));
+    }
+
+    /// **The address is the one on the function the image claims, and an
+    /// interface with none is refused rather than read as the next one's.**
+    /// `ip -4 -brief` prints the name, the state and then the addresses, and an
+    /// interface whose cable is out prints the first two and stops — which is
+    /// exactly the machine this loop must not go on to flash and then ping.
+    #[test]
+    fn an_interface_with_no_address_is_refused_by_name() {
+        let up = "enp0s31f6       UP             192.168.1.46/24 \n";
+        assert_eq!(brief_address("enp0s31f6", up), Ok("192.168.1.46".parse().unwrap()));
+
+        let down = "enp0s31f6       DOWN \n";
+        assert!(brief_address("enp0s31f6", down).unwrap_err().contains("no IPv4 address"));
+
+        // Another interface's line is not this one's answer, however many are
+        // printed: the T14 holds a Wi-Fi address and a Tailscale one, and a
+        // ping aimed at either is a ping only Ubuntu ever answers.
+        let many = "lo    UNKNOWN   127.0.0.1/8\n\
+                    enp0s31f6   UP   192.168.1.46/24\n\
+                    wlp9s0   UP   192.168.1.244/24\n\
+                    tailscale0   UNKNOWN   100.92.92.12/32\n";
+        assert_eq!(brief_address("enp0s31f6", many), Ok("192.168.1.46".parse().unwrap()));
+        assert_eq!(brief_address("wlp9s0", many), Ok("192.168.1.244".parse().unwrap()));
+        assert!(brief_address("enp0s31f7", many).unwrap_err().contains("ip -4 -brief"));
     }
 
     #[test]
