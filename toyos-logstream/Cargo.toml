@@ -1,18 +1,9 @@
-# A member of the host workspace (root `Cargo.toml`), like toyos-elide and
-# toyos-dma: three binaries name it by path — the kernel, `userland/logd` and
-# the build system — and its tests run on the host.
-#
-# It exists because the record stream's spellings and its one decision are
-# shared by parties that share nothing else. The kernel reads the boot
-# parameter and can neither parse an address nor hold a queue; logd holds the
-# queue and never sees the parameter line; the build system checks the
-# parameter by name and boots no guest at all. A constant in any one of them is
-# a second spelling in the other two, and the drop accounting — the whole of
-# what makes a starved listener honest — would live where only a boot can test
-# it.
-
 [package]
 name = "toyos-logstream"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[dependencies]
+# `MAX_RECORD_MESSAGE`, which the queue's bound is derived from.
+toyos-abi = { path = "../toyos-abi" }

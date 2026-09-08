@@ -96,6 +96,7 @@ use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::log::{LogTail, Record};
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
+use toyos_logstream::BATCH;
 use toyos_wallclock::Civil;
 
 use policy::{fate, Fate, Step, LOG_WRITE_BUDGET};
@@ -103,13 +104,6 @@ use store::{Volume, DIR, MAX_LOG_BYTES, ROTATE_FAST_BYTES};
 use stream::Stream;
 use wall::Wall;
 
-/// Records per `SYS_LOG_READ`.
-///
-/// Above `MAX_LOG_SHARDS`, which the call refuses below, and large enough that
-/// an ordinary boot's burst is a handful of syscalls rather than one per line.
-/// A `LogRecord` is a kilobyte, so this is 64 KiB of stack-adjacent buffer held
-/// for the life of the process — allocated once, never grown.
-const BATCH: usize = 64;
 
 
 /// How long a park on the log's readiness source waits before looking again.
@@ -195,6 +189,8 @@ fn main() {
     poller.wait(0, 0, |_| {});
 
     let mut lost = 0u64;
+    // What the stream owes this boot's log, carried until the file takes it.
+    let mut owed: Vec<String> = Vec::new();
     // When the current run of consecutive retries began, or `None` when the
     // last batch was answered. `policy::fate` bounds the run and not the round.
     let mut retrying_since: Option<Instant> = None;
@@ -224,20 +220,10 @@ fn main() {
             lost = tail.lost();
         }
 
-        // What the stream owes this boot's log — a connection it could not
-        // open, or the count of what a peer slower than this machine cost. It
-        // goes into the file, because the file is where this boot's log is: a
-        // `say!` reaches the console and no record, so a stream that failed
-        // silently on the one channel that survives the machine would be a
-        // failure only somebody watching the wire could see.
-        //
-        // **Asked for only when there is a volume to put it in**, since asking
-        // takes it: a report drawn on a machine with no `/log` would be a line
-        // about lost records that was itself lost.
-        let owed = match (&volume, &stream) {
-            (Some(_), Some(stream)) => stream.owed(),
-            _ => Vec::new(),
-        };
+        // Nothing to put a report in, so nothing owes one.
+        if volume.is_none() {
+            owed.clear();
+        }
 
         if batch.is_empty() && owed.is_empty() {
             // **Nothing new, so park on the readiness source rather than spin.**
@@ -253,21 +239,43 @@ fn main() {
         let newest = batch.last().map_or(0, |r| r.at_ns);
         let began = Instant::now();
         let mut refused: Option<(Step, std::io::ErrorKind, String)> = None;
-        let lines = owed
-            .iter()
-            .map(|said| format!("{said}\n"))
-            .chain(batch.iter().map(|r| format!("{}\n", r.tagged(&stamp(boot_local, r.at_ns)))));
-        for line in lines {
-            if let Err(e) = v.write(line.as_bytes()) {
+        // What the stream owed at the end of the last round — a connection it
+        // could not open, or the count of what a peer slower than this machine
+        // cost. It goes in the file, because the file is where this boot's log
+        // is: a `say!` reaches the console and no record, so a stream that
+        // failed silently on the one channel that survives the machine would be
+        // a failure only somebody watching the wire could see.
+        for said in &owed {
+            if let Err(e) = v.write(format!("{said}\n").as_bytes()) {
                 refused = Some((Step::Append, e.kind(), e.to_string()));
                 break;
             }
-            // **After the file has it, and it cannot fail.** The offer either
-            // queues the line or counts it as dropped; there is no answer that
-            // waits, so no listener anywhere can slow this loop down.
-            if let Some(stream) = stream.as_ref() {
-                stream.offer(&line);
+        }
+        // **Cleared once the file has taken them, and not before**: a refused
+        // write leaves the report owed rather than losing the one line that
+        // says what the stream cost.
+        if refused.is_none() {
+            owed.clear();
+        }
+        let lines: Vec<String> =
+            batch.iter().map(|r| format!("{}\n", r.tagged(&stamp(boot_local, r.at_ns)))).collect();
+        let mut written = 0usize;
+        if refused.is_none() {
+            for line in &lines {
+                if let Err(e) = v.write(line.as_bytes()) {
+                    refused = Some((Step::Append, e.kind(), e.to_string()));
+                    break;
+                }
+                written += 1;
             }
+        }
+        // **After the file has them, and it cannot fail.** The queue either
+        // takes a line or counts it as dropped; there is no answer that waits,
+        // so no listener anywhere can slow this loop down. What comes back is
+        // the stream's own line about what it refused, which the next round
+        // writes to the file and never offers back.
+        if let Some(stream) = stream.as_ref() {
+            owed.extend(stream.round(lines[..written].iter().map(String::as_str)));
         }
         if refused.is_none() {
             if let Err(e) = v.sync() {

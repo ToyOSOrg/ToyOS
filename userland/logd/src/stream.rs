@@ -1,54 +1,29 @@
 //! The second sink: every line the file gets, over a TCP connection netd opens,
 //! the instant the file gets it.
 //!
-//! **The file is the sink of record and this is not.** Nothing here can delay a
-//! write to `/log`, refuse one, or lose a record from one — the whole of what
+//! **The file is the sink of record and this is not.** Nothing here may delay a
+//! write to `/log`, refuse one, or lose a record from one: the whole of what
 //! `logd` offers the stream is a line it has already written, and the offer
-//! cannot fail. What a boot buys with it is a log that arrives *while the
-//! machine is booting*: on the bench's ThinkPad the alternative is a USB stick
-//! and a reboot into another operating system.
+//! cannot fail.
 //!
-//! # Why a thread
-//!
-//! Opening a TCP connection is a request to netd and an answer from it, and the
-//! answer waits on a DHCP lease, a SYN and a peer. Every one of those is time
-//! `logd`'s own loop does not have: the loop's next act is a batch of records
-//! going to a file, and a daemon that stops writing the log because a cable is
-//! out has traded the sink of record for the best-effort one. So the connection
-//! is opened, and every byte written, on a thread of its own; between it and
-//! the loop stands one bounded queue.
-//!
-//! # What a peer that will not take the log costs, and who counts it
-//!
-//! [`toyos_logstream::Backlog`] is that queue. A peer that stops taking bytes
+//! The connection is opened, and every byte written, on a thread of its own,
+//! because opening it waits on a DHCP lease, a SYN and a peer, and `logd`'s own
+//! loop may wait on none of those. Between that thread and the loop stands one
+//! bounded queue ([`toyos_logstream::Backlog`]): a peer that stops taking bytes
 //! closes the TCP window, netd stops draining the pipe, the writer blocks, the
 //! queue fills, and lines are refused — counted, and said out loud in one line
-//! that goes into the file like any other record. A drop nobody counts is the
-//! one failure this design must not have: the file whole, the stream short, and
-//! nothing saying by how much.
+//! that goes into the file and is never offered back to the queue.
 //!
-//! **How much has to stall before that happens is not this queue's size.**
-//! Between it and the peer stand the pipe netd reads (2 MiB, `kernel/src/
-//! pipe.rs`) and netd's own send buffer (64 KiB), and both fill before one line
-//! is refused: measured on the dev host, a `log-storm` at `--smp 8` put 4,213
-//! lines — 674 KiB — through a peer that was reading nothing, without reaching
-//! this queue at all. So the queue is what stands between this program and a
-//! peer that answers *nothing*; the buffers below it absorb one that is merely
-//! behind.
-//!
-//! # What it says when it cannot stream at all
-//!
-//! Once, in the boot's own log, and then never again. A refusal from the peer
-//! is final — netd's own `ERR_CONNECTION_REFUSED` means the peer will keep
-//! refusing — so the attempt stops there. Everything else is this machine not
-//! being ready yet (netd has not claimed the card, the lease has not arrived),
-//! so it is retried until [`OPEN_BOUND`] and then said once.
+//! What it cannot do at all it says once, in the boot's own log. A refusal from
+//! the peer is final — netd's `ERR_CONNECTION_REFUSED` means the peer will keep
+//! refusing — so the attempt stops there; everything else is this machine not
+//! being ready yet, so it is retried until [`OPEN_BOUND`] and then said once.
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use toyos::net::{self, NetError, TcpConnection};
-use toyos_logstream::Backlog;
+use toyos_logstream::{Backlog, Due};
 
 /// What netd is given for one connect.
 ///
@@ -66,10 +41,8 @@ const RETRY_EVERY: Duration = Duration::from_millis(250);
 ///
 /// netd has to claim the function, bring the link up and finish DHCP before the
 /// first SYN can go out, and none of that is bounded by anything `logd` knows.
-/// Measured on the dev host's TCG guest, `netd: ready` lands 0.4 s into the
-/// boot; this is two orders of magnitude above it, so what it actually catches
-/// is a machine that will never have a network — and on that machine the cost
-/// of being wrong is one line in the log, thirty seconds late.
+/// What this catches is a machine that will never have a network, and on that
+/// machine the cost of being wrong is one line in the log, late.
 const OPEN_BOUND: Duration = Duration::from_secs(30);
 
 /// How often a run of drops may put a line in the log.
@@ -78,11 +51,11 @@ const OPEN_BOUND: Duration = Duration::from_secs(30);
 /// cannot open at all refuses every line for the whole boot, and a report per
 /// round of `logd`'s loop would be the log talking about itself instead of about
 /// the machine. Each line carries the boot's running total, so the last one is
-/// the whole answer and the ones before it are when it was still growing.
+/// the whole answer.
 const DROP_REPORT_EVERY: Duration = Duration::from_secs(1);
 
-/// The stream, from `logd`'s side: somewhere to put a line, and somewhere to
-/// read what the stream owes the log.
+/// The stream, from `logd`'s side: somewhere to put the lines the file has
+/// taken, and what the stream owes the log in return.
 pub struct Stream {
     shared: Arc<Shared>,
     /// When a run of drops last put a line in the log.
@@ -91,7 +64,7 @@ pub struct Stream {
 
 struct Shared {
     backlog: Mutex<Backlog>,
-    /// Woken by [`Stream::offer`]; waited on by the writer.
+    /// Woken by [`Stream::round`]; waited on by the writer.
     ready: Condvar,
     /// What the stream could not do, waiting to be written into the log. Said
     /// once per episode and then taken.
@@ -124,7 +97,7 @@ impl Stream {
                     .expect("logd: the log stream's writer could not be started");
             }
             Err(why) => {
-                *shared.trouble.lock().expect("a fresh mutex is not poisoned") = Some(format!(
+                say(&shared, format!(
                     "logd: {}{value} is not an address ({}) - this boot's log is on /log only",
                     toyos_logstream::PARAM,
                     why.as_str()
@@ -134,34 +107,38 @@ impl Stream {
         Some(Self { shared, said_at: Mutex::new(None) })
     }
 
-    /// Offer one line — already written to the file — to the stream.
+    /// Offer the lines the file has just taken, and answer what the stream owes
+    /// this boot's log: a failure it has not reported, or the count of what a
+    /// peer slower than this machine cost.
     ///
-    /// It cannot fail and it cannot wait: the queue either takes the line or
+    /// **The caller writes those lines to the file and does not offer them
+    /// back.** A drop report handed to a queue that is refusing is refused too,
+    /// which owes another report, for the life of the boot;
+    /// `Backlog::round` is where that rule is kept.
+    ///
+    /// It cannot fail and it cannot wait: the queue either takes a line or
     /// counts it. The only lock it touches is one the writer never holds across
     /// a write.
-    pub fn offer(&self, line: &str) {
-        let mut backlog = self.shared.backlog.lock().expect("the log stream's queue is poisoned");
-        backlog.admit(line);
-        drop(backlog);
+    pub fn round<'a>(&self, wrote: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let mut said_at = self.said_at.lock().expect("a mutex is poisoned");
+        let due = match *said_at {
+            Some(at) if at.elapsed() < DROP_REPORT_EVERY => Due::NotYet,
+            _ => Due::Now,
+        };
+        let report = {
+            let mut backlog =
+                self.shared.backlog.lock().expect("the log stream's queue is poisoned");
+            backlog.round(wrote, due)
+        };
         self.shared.ready.notify_one();
-    }
 
-    /// What the stream owes this boot's log: a failure it has not reported, or
-    /// the count of what a listener slower than this machine cost. Empty on an
-    /// ordinary round.
-    pub fn owed(&self) -> Vec<String> {
         let mut owed = Vec::new();
         if let Some(said) = self.shared.trouble.lock().expect("a mutex is poisoned").take() {
             owed.push(said);
         }
-        let mut said_at = self.said_at.lock().expect("a mutex is poisoned");
-        if said_at.is_none_or(|at| at.elapsed() >= DROP_REPORT_EVERY) {
-            if let Some(said) =
-                self.shared.backlog.lock().expect("the log stream's queue is poisoned").report()
-            {
-                *said_at = Some(Instant::now());
-                owed.push(said);
-            }
+        if let Some(said) = report {
+            *said_at = Some(Instant::now());
+            owed.push(said);
         }
         owed
     }
@@ -179,7 +156,7 @@ fn run(shared: &Shared, addr: [u8; 4], port: u16) {
             let mut backlog = shared.backlog.lock().expect("the log stream's queue is poisoned");
             while backlog.is_empty() {
                 // The lock is given up here and taken again with something in
-                // the queue; `offer` never waits behind this thread.
+                // the queue; `round` never waits behind this thread.
                 backlog =
                     shared.ready.wait(backlog).expect("the log stream's queue is poisoned");
             }
@@ -190,9 +167,9 @@ fn run(shared: &Shared, addr: [u8; 4], port: u16) {
             // closed TCP window, which is the listener asking this machine to
             // slow down; waiting here is what turns that into a bounded queue
             // and a counted drop instead of an unbounded one.
-            if !write_all(&conn, line.as_bytes()) {
+            if let Err(why) = write_all(&conn, line.as_bytes()) {
                 say(shared, format!(
-                    "logd: the log stream to {}.{}.{}.{}:{port} closed - this boot's log \
+                    "logd: the log stream to {}.{}.{}.{}:{port} ended ({why}) - this boot's log \
                      continues on /log only",
                     addr[0], addr[1], addr[2], addr[3]
                 ));
@@ -246,20 +223,23 @@ fn open(shared: &Shared, addr: [u8; 4], port: u16) -> Option<TcpConnection> {
 
 /// One `write` is one `SYS_WRITE` and a pipe may take part of a line; a line
 /// that arrived in halves would be two lines on the listener's side.
-fn write_all(conn: &TcpConnection, mut bytes: &[u8]) -> bool {
+///
+/// The error is carried out rather than collapsed: a stream that stopped is one
+/// line in the log, and the reason is the whole of what that line is worth.
+fn write_all(conn: &TcpConnection, mut bytes: &[u8]) -> Result<(), String> {
     while !bytes.is_empty() {
         match conn.tx.write(bytes) {
-            Ok(0) | Err(_) => return false,
+            Ok(0) => return Err("netd took none of it".to_string()),
             Ok(n) => bytes = &bytes[n..],
+            Err(e) => return Err(e.to_string()),
         }
     }
-    true
+    Ok(())
 }
 
-/// Leave one line for the log, without overwriting one nobody has read yet.
+/// Leave one line for the log. The writer says at most one thing in its life —
+/// it either fails to open or fails to write, and returns either way — and a
+/// stream that never started one says its refusal from `start`.
 fn say(shared: &Shared, line: String) {
-    let mut trouble = shared.trouble.lock().expect("a mutex is poisoned");
-    if trouble.is_none() {
-        *trouble = Some(line);
-    }
+    *shared.trouble.lock().expect("a mutex is poisoned") = Some(line);
 }
