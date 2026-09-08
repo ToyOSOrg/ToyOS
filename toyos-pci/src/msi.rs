@@ -79,6 +79,12 @@ impl Msi {
     pub fn enabled(message_control: u16) -> u16 {
         (message_control & !MULTI_MESSAGE_ENABLE) | ENABLE
     }
+
+    /// Message Control with the function delivering nothing, and everything it
+    /// said about itself left alone.
+    pub fn disabled(message_control: u16) -> u16 {
+        message_control & !ENABLE
+    }
 }
 
 #[cfg(test)]
@@ -134,5 +140,11 @@ mod tests {
     fn enabling_keeps_what_the_function_said_about_itself() {
         let ctrl = ADDRESS_64 | PER_VECTOR_MASK | (5 << 1);
         assert_eq!(Msi::enabled(ctrl), ctrl | ENABLE);
+    }
+
+    #[test]
+    fn disabling_clears_the_enable_bit_and_nothing_else() {
+        let ctrl = ADDRESS_64 | PER_VECTOR_MASK | MULTI_MESSAGE_ENABLE | (5 << 1);
+        assert_eq!(Msi::disabled(ctrl | ENABLE), ctrl);
     }
 }

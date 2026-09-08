@@ -3,11 +3,12 @@
 //! The line through the device is **who can name an address**. This module
 //! keeps config space — there is no write path to it from userland — puts the
 //! function in an address space of its own at the unit *before* it enables bus
-//! mastering, programs the interrupt vector into its MSI-X table, and hands out
-//! every device address a descriptor may carry. Nothing the holder writes into
-//! a descriptor can make the device touch memory the kernel did not grant it:
-//! the domain maps the grants and nothing else, and an address outside them is
-//! refused at the unit and recorded against that claim.
+//! mastering, programs the interrupt vector into whichever of the function's two
+//! message mechanisms it has, and hands out every device address a descriptor
+//! may carry. Nothing the holder writes into a descriptor can make the device
+//! touch memory the kernel did not grant it: the domain maps the grants and
+//! nothing else, and an address outside them is refused at the unit and
+//! recorded against that claim.
 //!
 //! **A window is 2 MiB because that is the only page this kernel maps.** A BAR
 //! a process may see is re-assigned onto a 2 MiB boundary above everything
@@ -16,7 +17,10 @@
 //!
 //! **The BAR holding the MSI-X table or PBA is never mapped**: a holder that
 //! could rewrite the table could point the device's message at any address the
-//! LAPIC decodes.
+//! LAPIC decodes. **So a function that publishes MSI-X is armed on MSI-X or
+//! refused**, and MSI is armed only where there is no table in a BAR at all:
+//! its message is a word of config space, which has no write path from
+//! userland.
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding
@@ -30,16 +34,6 @@
 //! registers still say. `release` also asks the function for a reset where it
 //! advertises one (PCIe §6.6.2), which no device in reach does — so the order
 //! above is the mechanism and the reset is the belt.
-//!
-//! **What is read back, and what is not.** `Owned` is
-//! `pci_function_is_exclusive`, `NoMsix` is `virtio_net_no_msix`,
-//! `Untranslated` is `iommu_virtio_platform`'s no-unit arm, the domain is
-//! `userdev_dma_fault`, and `SYS_DEVICE_REG_READ`'s bound is netd's own
-//! `config_space_is_bounded`. `Ambiguous`, `KernelDriven`, `Exhausted`, every
-//! window refusal, and every bound `SYS_DEVICE_BAR_MAP` and
-//! `SYS_DEVICE_DMA_ALLOC` check are refused here and read by nothing: a
-//! registration of them waits on a boot config whose own test binary holds a
-//! claimable function, and netd holds this machine's only one.
 //!
 //! Nothing here is specific to what a function *is*.
 
@@ -58,7 +52,7 @@ use toyos_dma::Register;
 use toyos_pci::{bar, express, msix};
 
 use crate::device::{Claim, ClaimError};
-use crate::drivers::pci::PciDevice;
+use crate::drivers::pci::{PciDevice, Unarmed};
 use crate::inbox::InboxId;
 use crate::iommu::{DeviceSpace, IommuError};
 use crate::mm::paging::{CachePolicy, MmioPolicy};
@@ -121,12 +115,19 @@ struct Grant {
     bytes: u64,
 }
 
+/// How a claimed function was made to speak. Both deliver [`VECTORS`]`[slot]`
+/// into the same [`Interrupt`] and the claim answers the same handle either way.
+enum Armed {
+    /// This function's one MSI-X table entry, mapped for the kernel alone.
+    Msix(Mmio),
+    Msi,
+}
+
 /// What a live slot drives. The ISR never reads this.
 struct Bound {
     pci: PciDevice,
     space: DeviceSpace,
-    /// This function's one MSI-X table entry, mapped for the kernel alone.
-    entry: Mmio,
+    armed: Armed,
     id: PciId,
     /// Where each mappable BAR was put, and how much of it the function
     /// advertises; 0 bytes is a slot with no BAR this claim may map.
@@ -329,7 +330,8 @@ fn window(assigned: u64, ceiling: u64) -> (u64, u64) {
 /// place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Refusal {
-    NoMsix,
+    NoInterrupt,
+    MsixUnusable,
     Untranslated(IommuError),
     NoWindow,
     BarUnsizable(u8),
@@ -341,10 +343,15 @@ enum Refusal {
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NoMsix => write!(
+            Self::NoInterrupt => write!(
                 f,
-                "its MSI-X could not be armed, and a claim with no interrupt is a driver \
-                 that would never be told anything"
+                "neither its MSI-X nor its MSI could be armed, and a claim with no interrupt \
+                 is a driver that would never be told anything"
+            ),
+            Self::MsixUnusable => write!(
+                f,
+                "it publishes MSI-X and this kernel could not arm it, and MSI is not a fallback \
+                 for a function that has a table"
             ),
             Self::Untranslated(why) => write!(
                 f,
@@ -475,11 +482,18 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // Decode must be on for a BAR to answer, and off across each move.
     pci.enable_memory_space();
 
-    // Then the interrupt, still before a window is cut: a function whose MSI-X
-    // cannot be armed is one no holder could ever be told anything about, and
-    // `virtio_net_no_msix` reads that refusal off the console *and* the absence
-    // of any BAR line after it.
-    let entry = pci.enable_msix(VECTORS[slot]).ok_or(Refusal::NoMsix)?;
+    // Then the interrupt, still before a window is cut: a function neither
+    // mechanism can be armed on is one no holder could ever be told anything
+    // about, and `virtio_net_no_msix` reads that refusal off the console *and*
+    // the absence of any BAR line after it.
+    let armed = match pci.enable_msix(VECTORS[slot]) {
+        Ok(entry) => Armed::Msix(entry),
+        Err(Unarmed::Unusable) => return Err(Refusal::MsixUnusable),
+        Err(Unarmed::Blocked) => return Err(Refusal::NoInterrupt),
+        Err(Unarmed::Absent) => {
+            pci.enable_msi(VECTORS[slot]).then_some(Armed::Msi).ok_or(Refusal::NoInterrupt)?
+        }
+    };
 
     // From here a refusal has to undo: a vector is armed, and the arms below
     // move the function's BARs.
@@ -489,7 +503,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             Ok(Bound {
                 pci,
                 space,
-                entry,
+                armed,
                 id,
                 bar_at,
                 bar_bytes,
@@ -499,7 +513,10 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             })
         }
         Err(why) => {
-            pci.disable_msix();
+            match armed {
+                Armed::Msix(_) => pci.disable_msix(),
+                Armed::Msi => pci.disable_msi(),
+            }
             Err(why)
         }
     }
@@ -555,7 +572,7 @@ fn slot_space(slot: usize) -> Result<DeviceSpace, IommuError> {
 /// has in reach does, so nothing rests on this: what makes a re-claim safe is
 /// that bus mastering starts on the first grant and not at hand-over.
 fn reset(pci: &PciDevice) -> Option<u64> {
-    let cap = pci.capabilities().find(|c| c.id() == express::CAP_ID)?;
+    let cap = pci.capability(express::CAP_ID)?;
     if !express::resets(cap.read_u32(express::DEVICE_CAPABILITIES)) {
         return None;
     }
@@ -587,7 +604,7 @@ fn settle_after_reset(pci: &PciDevice) {
 /// the two live in one BAR on every device in reach, and a device that split
 /// them costs the second BAR too rather than publishing one of them.
 fn msix_bar(pci: &PciDevice) -> Option<u8> {
-    let cap = pci.capabilities().find(|c| c.id() == msix::CAP_ID)?;
+    let cap = pci.capability(msix::CAP_ID)?;
     let control = cap.read_u16(msix::MESSAGE_CONTROL);
     let table = msix::Msix::decode(control, cap.read_u32(msix::TABLE)).ok()?;
     Some(table.bir())
@@ -732,7 +749,10 @@ pub fn release(slot: usize) {
 
 fn tear_down(slot: usize, bound: Bound) {
     bound.pci.disable_bus_master();
-    bound.entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED);
+    match &bound.armed {
+        Armed::Msix(entry) => entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED),
+        Armed::Msi => bound.pci.disable_msi(),
+    }
     crate::iommu::note_user_owned(bound.pci.bus, bound.pci.dev, bound.pci.func, None);
     for grant in bound.grants.iter() {
         if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
