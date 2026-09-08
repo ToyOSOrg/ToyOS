@@ -4,15 +4,8 @@
 //! **The file is what the stream is judged against.** `logd` writes a line to
 //! `/log` and then offers the same line to the stream, so a listener that kept
 //! up received that file's own first lines and nothing else ([`is_prefix_of`]).
-//! The listener is a second, independent reading of the same boot: one arrives
-//! over a NIC driver, netd's TCP stack and slirp, the other is read off the FAT
-//! volume behind the guest's back. A driver that truncates, reorders or
-//! duplicates is a disagreement between them rather than a smaller number
-//! nobody reads.
-//!
-//! The listener is `std::net` in this process and not a program of its own.
-//! `tests/https-server-host` is a separate binary because it has to serve TLS
-//! from a minted CA; a listener that appends lines to a file is a thread.
+//! The file is read off the FAT volume behind the guest's back, so the two
+//! readings share nothing but the boot that produced them.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -24,27 +17,17 @@ use std::time::{Duration, Instant};
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::{compile, serial, volumes};
 
-/// How long a boot has to reach the marker the stream is judged on.
-///
-/// A liveness guard and never a verdict: the boot it waits for prints `Boot:
-/// complete` within a second on this host, and what this catches is a guest
-/// that stopped talking altogether.
+/// A liveness guard on a guest that stopped talking, never a verdict.
 const CEILING: Duration = Duration::from_secs(90);
 
-/// How long the listener is given to see one line after the guest's own console
-/// has shown the record that produced it.
-///
-/// The two channels are different: the console is a 16550 the host reads
-/// directly, the stream is a TCP connection through a driver, a stack and
-/// slirp. This is the whole of the lag the second is allowed over the first.
+/// The whole of the lag the stream is allowed over the guest's own console,
+/// which the host reads off a 16550 while the stream crosses a driver, a stack
+/// and slirp.
 const LAG: Duration = Duration::from_secs(20);
 
-/// Which machine the stream is judged on.
-///
-/// **Two of them, and the driver is the difference** — the same reasoning
-/// `common::https` runs on. The stream's whole purpose is a laptop whose NIC is
-/// an Intel I219, and QEMU's `e1000e` is the only machine in reach that runs
-/// netd's Intel driver at all.
+/// Which machine the stream is judged on. **Two of them, and the driver is the
+/// difference** — the bench's NIC is an Intel I219, and QEMU's `e1000e` is the
+/// only machine in reach that runs netd's Intel driver.
 #[derive(Clone, Copy)]
 pub struct Bench {
     pub profile: qemu::Profile,
@@ -65,12 +48,10 @@ pub const E1000E: Bench =
 
 /// An address on the guest's own network that answers nothing, ever.
 ///
-/// QEMU's user-mode networking hosts four addresses in `10.0.2.0/24` — the
-/// gateway, the host, its DNS and the guest — and answers ARP for its own and
-/// for nothing else. So a SYN aimed here never leaves the guest's stack: no
-/// refusal, no reset, no timeout from a peer, just a connection that is being
-/// opened for as long as anyone waits. That is "the cable is out", staged
-/// without a cable.
+/// QEMU's user-mode networking answers ARP for the four addresses it hosts in
+/// `10.0.2.0/24` and for nothing else, so a SYN aimed here never leaves the
+/// guest's stack: no refusal, no reset, no peer. That is "the cable is out",
+/// staged without a cable.
 const UNREACHABLE: &str = "10.0.2.99";
 
 /// The port that address does not answer on either. Any number does; a fixed
@@ -90,15 +71,15 @@ pub struct Listener {
     lines: Arc<Mutex<Vec<String>>>,
     connected: Arc<AtomicUsize>,
     ended: Arc<AtomicBool>,
+    /// Cleared by [`Listener::stalled`]: the thread accepts the connection and
+    /// then reads nothing until [`Listener::release`] sets it.
+    reading: Arc<AtomicBool>,
 }
 
 impl Listener {
-    /// A port nothing is listening on.
-    ///
-    /// **Bound and released rather than picked out of the air**: a number this
-    /// process just held is one the host had free a moment ago. If something
-    /// takes it in the meantime the boot connects and the arm reds — a false
-    /// red, never a false green, because the line it asserts is the *refusal*.
+    /// A port nothing is listening on: bound and released rather than picked
+    /// out of the air. Something taking it in the meantime is a false red and
+    /// never a false green, because the line the arm asserts is the *refusal*.
     pub fn silent_port() -> Result<u16, String> {
         let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .map_err(|e| format!("bind a port to hand back: {e}"))?;
@@ -112,6 +93,25 @@ impl Listener {
 
     /// A listener reading as fast as the boot writes.
     pub fn start(path: &Path) -> Result<Self, String> {
+        Self::bound(path, true)
+    }
+
+    /// A listener that accepts the connection and then reads nothing, so the
+    /// guest's own buffers are what the boot's records pile up in.
+    ///
+    /// It is released and drained at the end, because a peer that never reads
+    /// says nothing about what reached it: what arrived is the evidence the
+    /// writer got as far as writing at all.
+    pub fn stalled(path: &Path) -> Result<Self, String> {
+        Self::bound(path, false)
+    }
+
+    /// Read whatever the peer piled up while this listener was stalled.
+    pub fn release(&self) {
+        self.reading.store(true, Ordering::SeqCst);
+    }
+
+    fn bound(path: &Path, reading: bool) -> Result<Self, String> {
         let socket = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .map_err(|e| format!("bind the log stream's listener: {e}"))?;
         let port = socket
@@ -121,14 +121,23 @@ impl Listener {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let connected = Arc::new(AtomicUsize::new(0));
         let ended = Arc::new(AtomicBool::new(false));
+        let reading = Arc::new(AtomicBool::new(reading));
         let file = std::fs::File::create(path)
             .map_err(|e| format!("create {}: {e}", path.display()))?;
 
-        let theirs = (Arc::clone(&lines), Arc::clone(&connected), Arc::clone(&ended));
+        let theirs = (
+            Arc::clone(&lines),
+            Arc::clone(&connected),
+            Arc::clone(&ended),
+            Arc::clone(&reading),
+        );
         std::thread::spawn(move || {
-            let (lines, connected, ended) = theirs;
+            let (lines, connected, ended, reading) = theirs;
             let Ok((stream, _)) = socket.accept() else { return };
             connected.fetch_add(1, Ordering::SeqCst);
+            while !reading.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
             let mut file = file;
             let mut reader = BufReader::new(stream);
             loop {
@@ -148,7 +157,7 @@ impl Listener {
             ended.store(true, Ordering::SeqCst);
         });
 
-        Ok(Self { port, path: path.to_path_buf(), lines, connected, ended })
+        Ok(Self { port, path: path.to_path_buf(), lines, connected, ended, reading })
     }
 
     pub fn connections(&self) -> usize {
@@ -224,33 +233,103 @@ fn stage(
     Ok(Staged { image, start, len })
 }
 
-/// The `nth` number on a line the guest wrote.
+/// The two numbers a drop report carries: what this run of loss added, and what
+/// the boot has lost in total.
 ///
-/// Untrusted in the sense that matters here: it is what the program under test
-/// chose to print, so a line that does not carry the number is a failing
-/// verdict rather than a zero.
-fn counted(line: &str, nth: usize) -> Result<u64, String> {
-    line.split_whitespace()
-        .filter_map(|word| word.parse::<u64>().ok())
-        .nth(nth)
-        .ok_or_else(|| format!("the drop report has no number {}: {line:?}", nth + 1))
+/// Anchored on the report's own words and not on a position, so a line that
+/// grows a prefix still reads. A line that carries neither is a failing verdict
+/// rather than a zero.
+fn drop_report(line: &str) -> Result<(u64, u64), String> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let after = |word: &str| -> Option<u64> {
+        let at = words.iter().position(|w| *w == word)?;
+        words.get(at + 1)?.parse().ok()
+    };
+    match (after("logd:"), after("and")) {
+        (Some(run), Some(total)) => Ok((run, total)),
+        _ => Err(format!("this line is not a drop report: {line:?}")),
+    }
 }
 
 /// What the guest's own log volume says, read off the device behind the guest's
 /// back — the oracle the stream is compared with.
+///
+/// Every file this boot wrote, because a boot that logs enough to starve a
+/// stream logs enough to rotate, and a rotation is not a hole.
 fn on_the_volume(staged: &Staged) -> Result<Vec<String>, String> {
-    let (_, bytes) = volumes::newest_log(&staged.image, staged.start, staged.len)?;
-    Ok(String::from_utf8_lossy(&bytes).lines().map(|l| format!("{l}\n")).collect())
+    volumes::whole_log(&staged.image, staged.start, staged.len)
+}
+
+/// What this boot's own log says the stream refused, and in how many lines.
+///
+/// **The accounting is checked against itself.** Every report says what its own
+/// run of loss added and what the boot has lost in total, so the first numbers
+/// must sum to the last line's second one. A counter that has stopped counting
+/// cannot satisfy both, and a report nobody can read is the same as no report.
+fn refused_in(file: &[String]) -> Result<(u64, usize), String> {
+    let reports: Vec<&String> =
+        file.iter().filter(|l| l.contains("never reached the log stream")).collect();
+    let Some(last) = reports.last() else {
+        return Err(format!(
+            "a log storm offered to a stream that could not take it cost it no record it admits \
+             to; the file has {} line(s), ending {:?}",
+            file.len(),
+            file.iter().rev().take(3).collect::<Vec<_>>()
+        ));
+    };
+    let mut added = 0u64;
+    for line in &reports {
+        added += drop_report(line)?.0;
+    }
+    let dropped = drop_report(last)?.1;
+    if dropped == 0 {
+        return Err(format!("the stream reported dropping nothing, in {last:?}"));
+    }
+    if added != dropped {
+        return Err(format!(
+            "the drop reports add up to {added} and the last one says {dropped} for the whole \
+             boot, so what is counted is not the drops:\n{}",
+            reports.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n")
+        ));
+    }
+    Ok((dropped, reports.len()))
+}
+
+/// What the listener received is the file's own lines in the file's own order,
+/// with holes where the queue refused one.
+///
+/// A peer that stalls costs the stream lines; it may not reorder, duplicate or
+/// invent one. The first line that is not a continuation of the file is the
+/// verdict.
+///
+/// **The last line may be a prefix of the file's**, because the connection ends
+/// wherever the writer was when the machine went down, and that can be inside a
+/// line. Nothing before it may be: a short line in the middle is a truncation.
+fn is_subsequence_of(received: &[String], file: &[String]) -> Result<(), String> {
+    let mut at = 0usize;
+    for (i, line) in received.iter().enumerate() {
+        let last = i + 1 == received.len();
+        let found = file[at..]
+            .iter()
+            .position(|theirs| theirs == line || (last && theirs.starts_with(line.as_str())));
+        match found {
+            Some(step) => at += step + 1,
+            None => {
+                return Err(format!(
+                    "the stream carries {line:?}, which /log does not carry after its line {at}"
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The listener received the file's own first lines, in the file's own order,
 /// and nothing else.
 ///
-/// The strict reading, for a listener that kept up: `logd` writes a line and
-/// then offers it, so with nothing dropped the two are equal up to wherever the
-/// connection ended. Reported as the first disagreement rather than as a count —
-/// a stream that lost its third line and one that reordered two are different
-/// defects, and a length calls them the same one.
+/// Reported as the first disagreement rather than as a count: a stream that lost
+/// its third line and one that reordered two are different defects, and a length
+/// calls them the same one.
 fn is_prefix_of(received: &[String], file: &[String]) -> Result<(), String> {
     if received.is_empty() {
         return Err("the listener received nothing at all".to_string());
@@ -429,23 +508,16 @@ pub fn no_listener(
 /// nothing: every line offered while the connection is being opened is refused
 /// by the queue, counted, and reported — and `/log` is whole regardless.
 ///
-/// **This is the arm the queue's bound exists for, and staging it took two
-/// tries.** The first stalled a real listener on the host and measured nothing:
-/// a stalled peer's backpressure has to travel through a 2 MiB kernel pipe
-/// (`kernel/src/pipe.rs`'s `PIPE_SIZE`) and netd's own 64 KiB send buffer before
-/// it reaches this queue at all, and a `log-storm` at `--smp 8` produced 4,213
-/// lines — 674 KiB, measured — which every one of those buffers swallowed with
-/// room to spare. A peer that never answers has no such path: nothing drains,
-/// so the queue is the first thing to fill and the only thing that can refuse.
+/// **A peer that never answers is where the queue is the first buffer to
+/// fill**: nothing below it drains, so it is the only thing that can refuse.
 pub fn unreachable(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let bench = VIRTIO;
     // `log-storm` is what makes this machine produce records faster than a
-    // stream that is going nowhere can take them; the arm is baked into the
-    // image, which is what `BootOptions::kernel_params` would otherwise only
-    // have looked like it did.
+    // stream that is going nowhere can take them, and it is baked into the
+    // image rather than passed to a staged one.
     let staged = stage(
         bench,
         "logstream-unreachable",
@@ -487,37 +559,7 @@ pub fn unreachable(
     drop(guest);
 
     let file = on_the_volume(&staged)?;
-    let reports: Vec<&String> =
-        file.iter().filter(|l| l.contains("never reached the log stream")).collect();
-    if reports.is_empty() {
-        return Err(format!(
-            "a log storm offered to a stream that reaches nothing cost it no record it admits \
-             to; the file has {} line(s), ending {:?}",
-            file.len(),
-            file.iter().rev().take(3).collect::<Vec<_>>()
-        ));
-    }
-    // **The accounting is checked against itself.** Every report says what its
-    // own run of loss added and what the boot has lost in total, so the first
-    // numbers must sum to the last line's second one. A counter that has stopped
-    // counting cannot satisfy both, and a report nobody can read is the same as
-    // no report at all.
-    let mut added = 0u64;
-    for line in &reports {
-        added += counted(line, 0)?;
-    }
-    let last = reports.last().expect("a non-empty list has a last");
-    let dropped = counted(last, 1)?;
-    if dropped == 0 {
-        return Err(format!("the stream reported dropping nothing, in {last:?}"));
-    }
-    if added != dropped {
-        return Err(format!(
-            "the drop reports add up to {added} and the last one says {dropped} for the whole \
-             boot, so what is counted is not the drops:\n{}",
-            reports.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n")
-        ));
-    }
+    let (dropped, said_in) = refused_in(&file)?;
 
     // **The file goes on being written on the far side of every drop.** That is
     // what the stream may never cost, and a storm with nowhere to send it is
@@ -541,8 +583,106 @@ pub fn unreachable(
     }
     eprintln!(
         "  [stream] {stormed} storm record(s) in /log and a stream that reached nothing; \
-         {dropped} line(s) refused by the queue and the log says so in {} line(s)",
-        reports.len()
+         {dropped} line(s) refused by the queue and the log says so in {said_in} line(s)"
+    );
+    let _ = std::fs::remove_file(&staged.image);
+    Ok(())
+}
+
+/// A boot streaming to a listener that accepts the connection and then stops
+/// reading, offered a storm wider than every buffer under the queue.
+///
+/// **This is the arm the writer's own backpressure exists for.** The peer's
+/// window closes, netd stops draining the pipe, the writer blocks inside
+/// `write_all`, and the queue above it is what refuses — which is a different
+/// path from a stream that never opened at all. A narrow storm does not reach
+/// it: the pipe netd reads is 2 MiB (`kernel/src/pipe.rs`'s `PIPE_SIZE`) and
+/// netd's send buffer another 64 KiB, so `log-storm-wide` is what makes one
+/// boot's records exceed them.
+pub fn stalled_peer(
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let bench = VIRTIO;
+    let storm: &[&str] = &["log-storm", "log-storm-wide"];
+    let listener = Listener::stalled(&super::lane::dir().join("logstream-stalled.txt"))?;
+    let staged = stage(
+        bench,
+        "logstream-stalled",
+        (qemu::GUEST_VIEW_OF_HOST, listener.port),
+        storm,
+        c_bins,
+        rust_bins,
+    )?;
+
+    let options = BootOptions {
+        profile: bench.profile,
+        boot_image: Some(staged.image.clone()),
+        log_stream: Some((qemu::GUEST_VIEW_OF_HOST, listener.port)),
+        kernel_params: storm,
+        smp: 8,
+        ..Default::default()
+    };
+    let config = compile::repo_root().join(bench.config);
+    let mut guest = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
+    let mut console = guest.boot_log().to_string();
+
+    qemu::await_marker(&mut guest, &mut console, "logstorm done t=", "the storm to run out")?;
+
+    // **The guest goes on working**, which is the claim a peer that stopped
+    // reading tests and a peer that never answered does not: this one has the
+    // machine's own writer blocked on it.
+    let result = guest.run_test("test_rs_empty_dir_stat", Duration::from_secs(60));
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "a boot whose log stream stalled could not run a job: {:?}\n{}",
+            result.exit_code, result.stdout
+        ));
+    }
+    writeln!(guest.stdin_mut(), "run shutdown").map_err(|e| format!("write to QEMU stdin: {e}"))?;
+    guest.flush_stdin();
+    console.push_str(&guest.drain_serial(Duration::from_secs(20)));
+    drop(guest);
+    listener.release();
+    listener.wait_for_end(LAG)?;
+
+    if listener.connections() != 1 {
+        return Err(format!(
+            "the stream opened {} time(s), so nothing was ever written into it",
+            listener.connections()
+        ));
+    }
+    let file = on_the_volume(&staged)?;
+    let (dropped, said_in) = refused_in(&file)?;
+
+    // The writer got as far as writing: a queue that filled because nothing was
+    // ever sent is the arm above this one, not this one.
+    let received = listener.lines();
+    let bytes: usize = received.iter().map(String::len).sum();
+    if bytes <= toyos_logstream::MAX_BACKLOG_BYTES {
+        return Err(format!(
+            "the peer stalled after {bytes} byte(s), which the queue alone holds ({}), so the \
+             writer's own backpressure is not what refused these {dropped} line(s)",
+            toyos_logstream::MAX_BACKLOG_BYTES
+        ));
+    }
+    is_subsequence_of(&received, &file)?;
+
+    let owed = "exit: test_rs_empty_dir_stat ";
+    if !file.iter().any(|l| l.contains(owed)) {
+        return Err(format!(
+            "{owed:?} never reached /log on a boot whose stream stalled; the file has {} line(s), \
+             ending {:?}",
+            file.len(),
+            file.iter().rev().take(3).collect::<Vec<_>>()
+        ));
+    }
+    eprintln!(
+        "  [stream] a peer that stopped reading took {bytes} byte(s) in {} line(s) before the \
+         queue refused {dropped} more, said in {said_in} line(s); /log holds {} line(s) and \
+         every received line in its own order",
+        received.len(),
+        file.len()
     );
     let _ = std::fs::remove_file(&staged.image);
     Ok(())

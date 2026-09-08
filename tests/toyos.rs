@@ -384,12 +384,8 @@ const RUST_SKIP: &[&str] = &[
 /// what the host staged: the shipping build here, `sched_check_build`'s
 /// assert-carrying build there.
 const DRIVEN_AND_SHARED: &[&str] = &[
-    // Its shared run is the empty-directory `fstat` gate it was written to be.
-    // The log-stream tests drive it for something that has nothing to do with
-    // filesystems: it is the cheapest process this tree can start and stop, and
-    // what they assert on is the *kernel's* `exit:` record for it reaching a
-    // host over the wire. Any binary would do, and one that stages nothing is
-    // the one to pick.
+    // The log-stream arms drive it for the kernel's `exit:` record about it,
+    // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",
     // Its shared run is a whole handle-lifecycle gate with its own census;
     // `userdev_dma_fault` drives the same binary for a different reason
@@ -600,6 +596,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // bounded queue refuses what it cannot hold, counts it, says so in the log,
     // and `/log` still carries every record. The control on the accounting.
     ("log_stream_unreachable", Sched::Parallel, Tier::Fast),
+    // The other half of that: a peer that accepted and stopped reading, so the
+    // writer blocks on a closed window and the queue above it is what refuses.
+    // `log-storm-wide` is what makes one boot's records outweigh the 2 MiB pipe
+    // and the 64 KiB send buffer that would otherwise absorb the whole storm.
+    ("log_stream_stalled_peer_wide_storm", Sched::Parallel, Tier::Fast),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -13299,6 +13300,9 @@ fn run_machine_test(
         }
         "log_stream_no_listener" => common::logstream::no_listener(c_bins, rust_bins),
         "log_stream_unreachable" => common::logstream::unreachable(c_bins, rust_bins),
+        "log_stream_stalled_peer_wide_storm" => {
+            common::logstream::stalled_peer(c_bins, rust_bins)
+        }
         "netd_connection_caps" => {
             // The only boot that runs netd at all. Its `main` opens the NIC
             // first and returns on `NotFound`, so metal-sim never reaches a

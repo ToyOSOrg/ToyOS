@@ -657,6 +657,33 @@ pub fn newest_log(image_path: &Path, start: usize, len: usize) -> Result<(String
     Ok((newest.clone(), need(found.pop().flatten(), newest)?))
 }
 
+/// The whole of this boot's log, oldest line first, across every file it was
+/// written to.
+///
+/// A boot long enough to rotate writes `<stem>.log`, then `<stem>_0002.log` and
+/// up, and the names are chosen to sort in the order they were written — so the
+/// boot's log is their concatenation. A reading that took only the newest would
+/// call a rotation a hole.
+pub fn whole_log(image_path: &Path, start: usize, len: usize) -> Result<Vec<String>, String> {
+    let image = std::fs::read(image_path).map_err(|e| format!("read the image: {e}"))?;
+    if start + len > image.len() {
+        return Err(format!("the image shrank to {} bytes", image.len()));
+    }
+    let volume = &image[start..start + len];
+    let mut names = log_names(volume)?;
+    names.sort();
+    if names.is_empty() {
+        return Err("the log volume holds no .log file at all".to_string());
+    }
+    let asked: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut lines = Vec::new();
+    for (name, found) in names.iter().zip(read_files(volume, &asked)?) {
+        let bytes = need(found, name)?;
+        lines.extend(String::from_utf8_lossy(&bytes).lines().map(|l| format!("{l}\n")));
+    }
+    Ok(lines)
+}
+
 /// The loader's own file on the volume, line by line.
 pub fn loader_log_lines(
     image_path: &Path,

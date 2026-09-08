@@ -269,6 +269,7 @@ log_reserve_window_negative 6791 shards=12
 log_stream 18446744073709551615 shards=none
 log_stream_e1000e 18446744073709551615 shards=none
 log_stream_no_listener 18446744073709551615 shards=none
+log_stream_stalled_peer_wide_storm 18446744073709551615 shards=none
 log_stream_unreachable 18446744073709551615 shards=none
 lseek_past_eof 24 shards=12
 machine_reboot 4551 shards=12
