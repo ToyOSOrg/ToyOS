@@ -554,14 +554,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // latency against a programmed timer: soundd's figure is a maximum over a
     // window, taken against a DLL's prediction of a DMA completion and needing
     // a sound card to exist at all, and `toyos-sched`'s bound on the same
-    // quantity runs in a simulator where no IPI is ever delivered
-    //.
+    // quantity runs in a simulator where no IPI is ever delivered.
     //
     // Serial: it is the one registration here whose verdict is a *time*, and a
     // wake latency measured beside eleven other guests is the host's schedule.
-    // Fast with the UNMEASURED bootstrap marker until priced; its classification
-    // once priced is `Why::TimerAnchored`, whatever the number turns out to be.
-    ("latency_wake", Sched::Serial, Tier::Fast),
+    // Nightly for that same reason — `Why::TimerAnchored` in `src/tiers.rs`,
+    // which is what its classification was always going to be.
+    ("latency_wake", Sched::Serial, Tier::Nightly),
     ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Fast),
     ("input_merge", Sched::Parallel, Tier::Fast),
     ("metal_sim_input", Sched::Parallel, Tier::Fast),

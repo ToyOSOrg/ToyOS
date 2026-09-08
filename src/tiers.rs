@@ -301,6 +301,22 @@ pub const RELEGATED: &[Relegated] = &[
                  chipset can reset a guest, never that the feed is what stops it.",
     },
     Relegated {
+        test: "latency_wake",
+        ci_ms: 8_790,
+        why: Why::TimerAnchored,
+        guards: "What a waiter in the real-time band pays to be woken, as a distribution over ten \
+                 thousand programmed wakes — and, beside it, that the figure reaches a machine \
+                 with no serial port at all, through the kernel's own `exit:` record on the log \
+                 volume. Timer-anchored by construction: the verdict *is* a time, measured \
+                 against a timer the guest programmed, so a slower host moves it and not only its \
+                 price. What stops being gated per pull request is the only measurement of that \
+                 quantity this tree has — soundd's figure is a maximum over a window taken \
+                 against a DLL's prediction of a DMA completion and needs a sound card to exist \
+                 at all, and `toyos-sched`'s bound on the same quantity runs in a simulator where \
+                 no IPI is ever delivered. The rate it reds at on the dev host is a separate \
+                 finding and is in `src/redlist.rs`.",
+    },
+    Relegated {
         test: "usb_reset_hands_devices_back",
         ci_ms: 49_057,
         why: Why::TimerAnchored,
