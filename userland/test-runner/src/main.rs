@@ -53,11 +53,9 @@ static JOB: AtomicU32 = AtomicU32::new(0);
 /// **A kill releases the `wait` the loop is inside.** That is what the kill is
 /// for — the driver gets to finish or abandon the transfer it had in flight
 /// before the reset — but the loop then runs on, and the next job it spawns
-/// lands under a shutdown that has already written the boot's last word.
-/// Measured on the T14 (run 20, `tests/metaldevicecase`): `Rebooting.` at
-/// 67.343 s and this process's `spawn: TLS 1 modules` at 67.372 s, 29 ms after
-/// it, which cost the loop its verdict — `Rebooting.` being the log's last line
-/// is what a metal boot is judged on.
+/// lands under a shutdown that has already written the boot's last word. A metal
+/// boot's verdict is that word being the log's last line, so that spawn costs
+/// the boot its verdict.
 static STOPPING: AtomicBool = AtomicBool::new(false);
 
 /// Nothing this process does can reach a log whose last line is already
@@ -309,9 +307,21 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
             drop(child.stdin.take());
             // Published before the wait below blocks this thread: from here the
             // deadline can end this job rather than resetting around it.
-            if let Ok(watch) = toyos_abi::syscall::dup(toyos_abi::RawHandle(child.as_raw_handle()))
-            {
-                JOB.store(watch.0, Ordering::Release);
+            //
+            // **Refused by name rather than left at zero.** A duplicate this
+            // does not get leaves the deadline with nothing to kill, so the job
+            // outlives its bound and the machine is reset around it — and on a
+            // machine with no console nothing anywhere says why. The list ends
+            // here instead, by handing the machine back.
+            match toyos_abi::syscall::dup(toyos_abi::RawHandle(child.as_raw_handle())) {
+                Ok(watch) => JOB.store(watch.0, Ordering::Release),
+                Err(e) => give_the_machine_back(
+                    &format!(
+                        "job {name:?} started and its handle would not duplicate ({e:?}), so the \
+                         deadline has nothing to end it with"
+                    ),
+                    cap,
+                ),
             }
             let outcome = child.wait();
             drop(claim_the_job());

@@ -661,7 +661,7 @@ pub fn internal_disk_boot(
         test_config,
         c_bins,
         rust_bins,
-        BootOptions { boot_image: Some(image.clone()), ..options() },
+        BootOptions { boot_image: Some(qemu::Staged::Written(image.clone())), ..options() },
     );
     let boot = qemu.boot_log().to_string();
     for bad in ["PANIC:", "panicked at"] {

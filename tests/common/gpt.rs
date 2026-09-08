@@ -212,7 +212,12 @@ fn boot(
         &[],
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(boot_image.to_path_buf()),
+            // A copy, and this test is why that choice exists: it boots one
+            // crafted image twice, and the loader counts an image's attempts
+            // into a file on its own log partition before every handoff — so
+            // the second launch of the file itself is a retry and boots no
+            // kernel at all.
+            boot_image: Some(qemu::Staged::Pristine(boot_image.to_path_buf())),
             nvme_image: Some(nvme_image.to_path_buf()),
             ..Default::default()
         },

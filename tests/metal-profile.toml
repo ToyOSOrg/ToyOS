@@ -127,9 +127,9 @@ measured = 46
 
 # --- what this machine's scheduler costs a waiter, and what one machine-wide
 # --- TLB shootdown costs its initiator
-# Both ceilings come from a constant in this repository, because neither number
-# has been taken on the machine yet. Each is the widest true bound there is
-# before a first reading, and each is narrowed against `measured` once one is.
+# Both ceilings come from a constant in this repository rather than from a
+# reading: each is the widest true bound there is, and each is narrowed against
+# `measured` by whoever next has cause to.
 
 [[number]]
 name = "latency.p99_us"
@@ -157,11 +157,10 @@ measured = 2931
 # rather than numbers. A span and not a rate, because a ceiling is what this
 # file can express and a rate would have to be judged from below.
 #
-# Every ceiling here is the same derivation and none has been read on the
-# machine yet: `metalprobe`'s own `SHARE_PERCENT` of `toyos_tco::JOB_BOUND_MS`
-# is what its payload is sized against, and one job may not outlast its share
-# without putting the runner's reset inside a transfer — which is what wedged
-# the bench's stick on run 18. The first T14 reading tightens each of them.
+# Every ceiling here is the same derivation: `metalprobe`'s own `SHARE_PERCENT`
+# of `toyos_tco::JOB_BOUND_MS` is what its payload is sized against, and one job
+# may not outlast its share without putting the runner's reset inside a
+# transfer, which is what leaves a stick the next host cannot enumerate.
 
 [[number]]
 name = "boot.metaldevicecase.complete_ms"
@@ -262,10 +261,10 @@ ceiling_from = "toyos_build::metal::return_secs"
 measured = 95
 
 # --- the boot stick, after the boot ---
-# **The ruling's own row, and the only judge of the device there is.** QEMU
-# cannot wedge a stick; this machine's run 18 did, and the way it showed was the
-# log partition's device node missing after the machine came back. So the loop
-# waits for that node by name and records what it waited, per boot.
+# **The only judge of the device there is.** QEMU cannot wedge a stick, and a
+# wedged one shows as the log partition's device node missing after the machine
+# comes back. So the loop waits for that node by name and records what it
+# waited, per boot.
 
 [[number]]
 name = "boot.testcases.stick_secs"
@@ -463,8 +462,8 @@ measured = 4
 # a list is cut to what its members are priced at, and members slower than their
 # price red by name.
 #
-# Every reading below is run 24's, taken from the interval between successive
-# `spawn: /system/bin/…` records on that boot's own log.
+# Every reading below is the interval between successive `spawn: /system/bin/…`
+# records on that boot's own log.
 
 [[number]]
 name = "list.shared.job_ms"
@@ -503,7 +502,7 @@ ceiling_from = "as list.ccorpus.job_ms — the same corpus, cut in two"
 name = "list.metaldevicecase.job_ms"
 unit = "ms"
 ceiling = 4800
-ceiling_from = "metalprobe's SHARE_PERCENT of toyos_tco::JOB_BOUND_MS, which is what every one of that boot's own span rows is priced at: the list is sized to what its jobs are allowed to cost, and a job that outruns its allowance reds on its own span row. Run 24's usbwrite spent 30.8 s of the bound and left the list unfinished, which is that row's red and not this one's"
+ceiling_from = "metalprobe's SHARE_PERCENT of toyos_tco::JOB_BOUND_MS, which is what every one of that boot's own span rows is priced at: the list is sized to what its jobs are allowed to cost, and a job that outruns its allowance reds on its own span row"
 
 [[number]]
 name = "list.testcases.job_ms"

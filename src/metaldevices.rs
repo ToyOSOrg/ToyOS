@@ -30,6 +30,7 @@ pub enum Refused {
     NoVolume = -4,
     Disagreed = -5,
     NoDuration = -6,
+    IoFailed = -7,
 }
 
 impl Refused {
@@ -40,6 +41,7 @@ impl Refused {
         Self::NoVolume,
         Self::Disagreed,
         Self::NoDuration,
+        Self::IoFailed,
     ];
 
     /// The name the probe spells this refusal with, which is what a reader is
@@ -52,6 +54,7 @@ impl Refused {
             Self::NoVolume => "NoVolume",
             Self::Disagreed => "Disagreed",
             Self::NoDuration => "NoDuration",
+            Self::IoFailed => "IoFailed",
         }
     }
 
@@ -67,9 +70,10 @@ impl fmt::Display for Refused {
             Self::NoCapability => "the job was endowed no device-minting capability",
             Self::NoDevice => "the kernel refused the device claim",
             Self::NoScanout => "the claim described a display this job cannot measure",
-            Self::NoVolume => "a filesystem call the measurement rests on was refused",
+            Self::NoVolume => "the file the measurement needs would not open",
             Self::Disagreed => "what was read back is not what was written",
             Self::NoDuration => "the measurement took no measurable time",
+            Self::IoFailed => "the volume was there and an operation on the open file failed",
         };
         write!(f, "{} ({why})", self.spelling())
     }
@@ -523,8 +527,12 @@ mod tests {
         // A measurement, and a negative that names nothing, are both `None`:
         // the caller says which of the two it is.
         assert_eq!(Refused::of(402_000), None);
-        assert_eq!(Refused::of(-7), None);
+        assert_eq!(Refused::of(-8), None);
         assert!(format!("{}", Refused::Disagreed).contains("read back"));
+        // The two a reader off a stick cannot tell apart without both codes: a
+        // volume that is not there, and one that is and refused.
+        assert_eq!(Refused::of(-4), Some(Refused::NoVolume));
+        assert_eq!(Refused::of(-7), Some(Refused::IoFailed));
     }
 
     /// Nothing links this crate to `userland/metalprobe`: it is built for

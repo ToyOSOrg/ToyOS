@@ -15,12 +15,16 @@ use std::time::{Duration, Instant};
 
 use crate::{span, Measured, Refusal};
 
-/// The slowest a stick this project will admit may move bytes.
+/// The slowest this project will admit its own stack may move bytes to a stick.
 ///
-/// Not a datasheet figure: it is an order of magnitude under any USB 2.0 flash
-/// device, and it exists to bound how long a measurement may take rather than
-/// to describe one.
-const SLOWEST_KIB_S: u64 = 512;
+/// **Not a device figure — the whole path's.** The number that matters here is
+/// what a write costs through this kernel's page cache, `iod`, the FAT32 driver
+/// and the mass-storage transport together, and that is an order of magnitude
+/// under what the device itself can do: the bench measured about 80 KiB/s
+/// end to end, so a floor taken from a USB 2.0 datasheet sizes [`BYTES`] six
+/// times too large and the measurement outruns the share it is derived from.
+/// This is that reading rounded down to a power of two.
+const SLOWEST_KIB_S: u64 = 64;
 
 /// The share of the job list's whole bound one storage measurement may spend,
 /// in percent.
@@ -33,8 +37,8 @@ const SHARE_PERCENT: u64 = 8;
 /// boot), and when it expires the runner reboots: a size that could outlast its
 /// share puts a machine reset in the middle of a transfer, which is what a
 /// mass-storage device does not survive. At [`SLOWEST_KIB_S`] this is
-/// [`SHARE_PERCENT`] of the bound, so the pair is under a sixth of it even on a
-/// device far slower than any this machine will see.
+/// [`SHARE_PERCENT`] of the bound, so the write and the read together are under
+/// a sixth of it at the slowest rate this stack has been measured at.
 const BYTES: usize =
     (SLOWEST_KIB_S * toyos_tco::JOB_BOUND_MS * SHARE_PERCENT / 100 / 1_000 * 1024) as usize;
 
@@ -63,16 +67,19 @@ pub fn write() -> Measured {
     let blob = payload();
     let began = Instant::now();
     {
+        // The open is the volume's answer and every call after it is the
+        // device's, which is the one distinction an exit code off a stick
+        // cannot otherwise carry.
         let mut f = fs::File::create(WRITTEN).map_err(|_| Refusal::NoVolume)?;
         for chunk in blob.chunks(CHUNK) {
-            f.write_all(chunk).map_err(|_| Refusal::NoVolume)?;
+            f.write_all(chunk).map_err(|_| Refusal::IoFailed)?;
         }
-        f.sync_all().map_err(|_| Refusal::NoVolume)?;
+        f.sync_all().map_err(|_| Refusal::IoFailed)?;
     }
     let took = began.elapsed();
     // The volume is 34 MiB and `logd` shares it; a measurement that left its
     // own file behind would shrink what the next boot's log may write.
-    fs::remove_file(WRITTEN).map_err(|_| Refusal::NoVolume)?;
+    fs::remove_file(WRITTEN).map_err(|_| Refusal::IoFailed)?;
     span(took.as_nanos())
 }
 
@@ -87,22 +94,30 @@ pub fn read() -> Measured {
     {
         let mut f = fs::File::create(READ).map_err(|_| Refusal::NoVolume)?;
         for chunk in blob.chunks(CHUNK) {
-            f.write_all(chunk).map_err(|_| Refusal::NoVolume)?;
+            f.write_all(chunk).map_err(|_| Refusal::IoFailed)?;
         }
-        f.sync_all().map_err(|_| Refusal::NoVolume)?;
+        f.sync_all().map_err(|_| Refusal::IoFailed)?;
     }
-    sleep(Duration::from_millis(200));
+    sleep(DRAIN);
 
     let began = Instant::now();
     let mut got = Vec::with_capacity(BYTES);
-    fs::File::open(READ)
-        .and_then(|mut f| f.read_to_end(&mut got))
-        .map_err(|_| Refusal::NoVolume)?;
+    let mut file = fs::File::open(READ).map_err(|_| Refusal::NoVolume)?;
+    file.read_to_end(&mut got).map_err(|_| Refusal::IoFailed)?;
     let took = began.elapsed();
 
-    fs::remove_file(READ).map_err(|_| Refusal::NoVolume)?;
+    fs::remove_file(READ).map_err(|_| Refusal::IoFailed)?;
     if got != blob {
         return Err(Refusal::Disagreed);
     }
     span(took.as_nanos())
 }
+
+/// What the close above is given to reach the device before the clock starts.
+///
+/// **`sync_all` returns when the bytes are durable and not when the cache has
+/// dropped them**, so the page the timed read wants may still be resident;
+/// `iod` drops it on its own pass afterwards. There is no call that waits for
+/// that, so this waits — and it is generous rather than tight, since a wait too
+/// short makes the read a cache hit and reports the page cache as the stick.
+const DRAIN: Duration = Duration::from_millis(200);

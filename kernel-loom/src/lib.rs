@@ -70,8 +70,16 @@ pub mod preempt {
 /// sealed from an NMI can name it. Empty here for the same reason as `tlb`: the
 /// models do not drive that spin, and there is no per-CPU state to write it to.
 pub mod hardlockup {
-    pub fn spinning_on(_lock: u64, _at: &'static core::panic::Location<'static>) {}
-    pub fn spinning_on_nothing() {}
+    /// What the outer spin was waiting for, which the kernel's own version
+    /// restores so a nested acquisition does not clear it.
+    #[derive(Clone, Copy)]
+    pub struct Spinning;
+
+    #[must_use]
+    pub fn spinning_on(_lock: u64, _at: &'static core::panic::Location<'static>) -> Spinning {
+        Spinning
+    }
+    pub fn spinning_on_nothing(_was: Spinning) {}
 }
 
 /// `Lock::lock`'s spin serves TLB shootdowns for a CPU that is not taking

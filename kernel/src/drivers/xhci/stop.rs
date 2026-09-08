@@ -14,11 +14,11 @@
 //! panicked kernel can issue none of them, and a port reset clears strictly
 //! more than they do.
 //!
-//! **And a port reset is not free either.** One device on the owner's bench does
-//! not honour the obligation the class puts on it: cut in a command's data phase
-//! it enumerates and describes itself perfectly afterwards and answers no SCSI
-//! command again until it is physically unplugged, on a laptop whose port power
-//! control does not cut VBUS. So the first thing this path does is wait a
+//! **And a port reset is not free either.** A device need not honour the
+//! obligation the class puts on it: cut in a command's data phase, one may
+//! enumerate and describe itself perfectly afterwards and answer no SCSI command
+//! again until it is physically unplugged, on a laptop whose port power control
+//! does not cut VBUS. So the first thing this path does is wait a
 //! transfer out — [`settle_transfers`], bounded, and it cuts when the bound
 //! passes, because a machine nobody can turn off is worse still.
 //!
@@ -209,11 +209,8 @@ const IN_FLIGHT_NS: u64 = USB_TIMEOUT_NS;
 /// **A port reset in a command's data phase is not free, whatever the class
 /// says.** USB Mass Storage Bulk-Only Transport §5.3.4 makes reset recovery the
 /// device's obligation and the port reset above clears strictly more than it
-/// asks for — and the SanDisk Ultra on the owner's bench does not honour it:
-/// after a cut in the data phase it enumerates at SuperSpeed, answers every
-/// descriptor and string, binds `usb-storage`, and then answers no SCSI command
-/// at all, resetting in a loop until it is physically unplugged. That laptop's
-/// port power control does not cut VBUS, so no software on it can clear one.
+/// asks for; a device that does not honour it is one no software on a laptop
+/// with no VBUS control can clear.
 ///
 /// So the transfer is waited out first, and the wait is bounded and cuts anyway:
 /// a machine nobody can turn off is worse than a device somebody has to replug,

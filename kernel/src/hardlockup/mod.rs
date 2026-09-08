@@ -16,9 +16,7 @@
 //! **Its subject is one CPU and not the machine**, which is the whole
 //! difference: it ends a machine whose other cores are healthy and taking
 //! interrupts, because a core that has taken none for its bound will never run
-//! a thread again and nothing else here would say so. Run 24 on the T14 is the
-//! measurement — seven cores taking interrupts, one deaf inside the shutdown
-//! syscall, and this is what ended it, half a bound before the machine's own.
+//! a thread again and nothing else here would say so.
 //!
 //! **What a sample compares is progress, not liveness.**
 //! `crate::irq_census::taken_here` is every interrupt this CPU has taken except
@@ -50,9 +48,7 @@
 //!   that wakes it.
 //! - **The span before `clock::init`,** which has no TSC period to convert a
 //!   bound with, and before `apic::init`, which has no LVT to arm. The same
-//!   floor `crate::deadline` states, and the same sentinel design in
-//!   `issues/hardware/the-t14-boots-toyos-unattended.md` is what would reach
-//!   below it.
+//!   floor `crate::deadline` states.
 //! - **A CPU with `IF` set that no timer ever interrupts.** Nothing resets it,
 //!   deliberately, and what keeps that from being a hole is
 //!   `hw::KernelHw::idle_wait`: the `stop_timer` that pairs with the halt is
@@ -330,27 +326,46 @@ fn locked_up(me: usize, rip: u64, rsp: u64, now: u64) -> ! {
     crate::drivers::acpi::reset_now()
 }
 
+/// What this CPU was waiting for before a nested acquisition took the slot, so
+/// [`spinning_on_nothing`] puts it back rather than clearing it.
+///
+/// **A contended spin is not the innermost thing this CPU does.**
+/// `sync::Lock::lock` polls TLB shootdowns from inside its own spin, and that
+/// poll takes locks of its own; a nested acquisition that succeeded used to zero
+/// the slot while the outer spin was still waiting, and the record a lockup then
+/// sealed named no lock for the one CPU that was holding one.
+#[derive(Clone, Copy)]
+pub struct Spinning {
+    lock: u64,
+    at: u64,
+}
+
 /// Note that this CPU is inside a contended acquisition, so a record sealed
 /// while it is there can name what it is waiting for.
 ///
 /// Called from `sync::Lock::lock`'s spin — the contended path only, so an
 /// uncontended acquisition costs nothing — and by nothing else.
-pub fn spinning_on(lock: u64, at: &'static core::panic::Location<'static>) {
+#[must_use]
+pub fn spinning_on(lock: u64, at: &'static core::panic::Location<'static>) -> Spinning {
     let me = percpu::cpu_id() as usize;
     if me >= MAX_CPUS {
-        return;
+        return Spinning { lock: 0, at: 0 };
     }
+    let was = Spinning { lock: SPIN_LOCK[me].load(Relaxed), at: SPIN_AT[me].load(Relaxed) };
     SPIN_AT[me].store(at as *const _ as u64, Relaxed);
     // Last, and what the reader tests: a non-zero lock means the site beside it
     // was already stored.
     SPIN_LOCK[me].store(lock, Relaxed);
+    was
 }
 
-/// The acquisition succeeded; this CPU is waiting for nothing.
-pub fn spinning_on_nothing() {
+/// The acquisition succeeded; this CPU is waiting for whatever it was waiting
+/// for before, which is nothing at the outermost spin.
+pub fn spinning_on_nothing(was: Spinning) {
     let me = percpu::cpu_id() as usize;
     if me < MAX_CPUS {
-        SPIN_LOCK[me].store(0, Relaxed);
+        SPIN_AT[me].store(was.at, Relaxed);
+        SPIN_LOCK[me].store(was.lock, Relaxed);
     }
 }
 

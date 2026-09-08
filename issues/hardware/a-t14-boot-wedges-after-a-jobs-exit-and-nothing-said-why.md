@@ -95,6 +95,6 @@ proved the deadline: a boot wedged on purpose ended itself at 120153 ms against
 its 120000 ms bound, sealed a `WEDGED` record, and the machine was back in 231 s
 with no hand. But the sealed tail carried 190 of that boot's 295 records and
 **dropped the newest ten** —
-`issues/diagnostics/the-panels-snapshot-returned-a-middle-window-of-the-ring.md`
+`issues/diagnostics/a-wedged-reports-newest-records-were-cut-by-the-loaders-own-log-file.md`
 — and the newest ten are what this file is waiting for. That is the next thing
 to fix, before the next hung boot spends its one seal on the wrong window.

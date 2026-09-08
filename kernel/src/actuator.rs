@@ -243,10 +243,9 @@ actuators! {
 
     /// Hold the shutdown open for a tenth of a second after the boot's last
     /// word, yielding, so a userland thread still on a run queue gets a pass
-    /// there. **The window the T14 has and QEMU does not**: on hardware
-    /// `quiesce` spends real time between `Rebooting.` and the reset, and run 20
-    /// spent 29 ms of it — enough for the test runner's loop to spawn another
-    /// job into the log after its last line.
+    /// there. **The window hardware has and QEMU does not**: `quiesce` spends
+    /// real time between `Rebooting.` and the reset, which is enough for the
+    /// test runner's loop to spawn another job into the log after its last line.
     quiesce_late_word = "quiesce-late-word";
 
     /// Make the shutdown's bounded acquisitions of the xHCI controller lock

@@ -17,9 +17,10 @@
 //!
 //! # What it does not cover, stated rather than implied
 //!
-//! - **The span before `clock::init`.** The deadline is a TSC value and there
-//!   is no TSC period before then, so a kernel that dies in early bring-up is
-//!   still a machine that needs a hand.
+//! - **The span before `clock::init`,** which no bound in this file or in
+//!   [`crate::hardlockup`] reaches: the deadline is a TSC value, there is no
+//!   TSC period before then to convert a bound with, and no counter is armed.
+//!   A kernel that dies in early bring-up is still a machine that needs a hand.
 //! - **A machine on which no CPU takes an interrupt at all** — every core
 //!   halted below the interrupt layer, or spinning with `IF` clear at once.
 //!   Nothing polled from a running CPU can cover that. **That half is
@@ -27,22 +28,15 @@
 //!   rather than polled. The two are armed off this one parameter and compose
 //!   **by scope and not by machine state**: this bound is the whole machine's,
 //!   and that one is any *single CPU*'s, so a machine where seven cores are
-//!   healthy and one has taken no interrupt for its bound is ended by that one
-//!   — measured on the T14, run 24, where it was. The CPU gets the earlier
-//!   bound because its record can name where it is standing, and a core that
-//!   has silently stopped taking interrupts is a machine nothing else in this
-//!   tree would ever report. Whichever fires takes the machine's one seal
-//!   through [`claim_the_reset`].
-//! - **The span before `clock::init`,** which neither of them reaches: there is
-//!   no TSC period to convert a bound with and no counter armed. That seam has
-//!   a name — the sentinel CPU designed and postponed in
-//!   `issues/hardware/the-t14-boots-toyos-unattended.md`, a CPU outside the
-//!   roster spinning on the TSC — and it is now all that design is left owed.
-//! - **A panic racing the seal.** [`expire`] loses the `PAINTING` latch to a
-//!   CPU already inside the panel's fatal painter, and that CPU's own
-//!   `record_panic` then replaces this record. That is the right outcome and
-//!   not a gap: a panic report says more than a deadline does, and the panic
-//!   path has a bound of its own.
+//!   healthy and one has taken no interrupt for its bound is ended by that one.
+//!   The CPU gets the earlier bound because its record can name where it is
+//!   standing, and a core that has silently stopped taking interrupts is a
+//!   machine nothing else in this tree would ever report. Whichever fires takes
+//!   the machine's one seal through [`claim_the_reset`].
+//! - **A panic in progress**, which is not a gap but a stand-down:
+//!   `apic::halt_all_cpus` calls [`stand_down`] before it holds the panel, so a
+//!   panic report is never replaced by an expiry. A panicked kernel is under a
+//!   bound of its own.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 
@@ -86,6 +80,17 @@ static FIRED: AtomicBool = AtomicBool::new(false);
 /// passes both may still only be sealed once.
 pub fn claim_the_reset() -> bool {
     !FIRED.swap(true, Relaxed)
+}
+
+/// Stand this bound down for the rest of the machine's life.
+///
+/// Called from `apic::halt_all_cpus` — every fatal path's one funnel — beside
+/// [`crate::hardlockup::stand_down`]: from there this machine holds a panic
+/// report for whoever is in front of it under a bound of its own, and an expiry
+/// would seal a `WEDGED` record over the panic's. Disarms rather than latching a
+/// second flag, so [`poll`] stays one relaxed load on the path every CPU takes.
+pub fn stand_down() {
+    AT_TSC.store(0, Relaxed);
 }
 
 /// The last phase [`reached`] was told about, as an index into [`PHASES`].
@@ -182,8 +187,10 @@ pub fn start() {
 /// Whether this machine's bound has passed; the timer interrupt entry's, in
 /// both rings, and nothing else's.
 ///
-/// **One relaxed load on the unarmed path**, which is every boot the owner
-/// flashes: this runs on every tick of every CPU.
+/// **One relaxed load in the callee on the unarmed path**, which is every boot
+/// that names no bound; the Ring 0 call site pays a caller-saved prologue on
+/// every tick of every CPU whether or not the bound is armed, and that cost is
+/// the entry's rather than this function's.
 ///
 /// `extern "sysv64"` because the Ring 0 half of the timer entry calls it from
 /// naked assembly, where the ABI is written out rather than inferred.
@@ -233,14 +240,12 @@ pub const EXPIRED: &str = "the boot deadline expired";
 /// every CPU that reaches a scheduler pass stops taking them, with preemption
 /// disabled and `IF` set — nothing panics, nothing halts, the LAPIC timers go
 /// on firing, and no userland instruction runs again. That is strictly worse
-/// than the T14's own wedge, where seven cores were still healthy, and the
-/// deadline has to end it anyway.
+/// than a wedge some cores survive, and the deadline has to end it anyway.
 ///
 /// **`IF` set is established in [`this_cpu`] and not inherited**, because this
 /// CPU is inside the shutdown syscall and `arch::syscall::gate` masks `IF` for
-/// the whole of one: a wedge that left its own staging CPU deaf would be a
-/// different control than the one this doc describes, and on the T14 it was —
-/// `crate::hardlockup` ended run 24's boot on that CPU at half the bound.
+/// the whole of one: a wedge that left its own staging CPU deaf is a hard
+/// lockup, which is a different control and one `crate::hardlockup` ends first.
 #[cfg(feature = "boot-actuators")]
 pub fn stage_a_wedge() -> ! {
     log!("{WEDGE_STAGED}: every CPU stops taking scheduler passes from here");

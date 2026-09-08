@@ -290,7 +290,7 @@ pub fn esp_filesystem(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..Default::default()
         },
     );
@@ -529,7 +529,7 @@ pub fn kernel_log_file(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..Default::default()
         },
     );
@@ -736,7 +736,7 @@ fn rotation(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..Default::default()
         },
     );
@@ -920,7 +920,7 @@ pub fn writeback_durability(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: PARAMS,
             ..Default::default()
         },
@@ -1209,7 +1209,7 @@ pub fn fat_backing_revoked(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..Default::default()
         },
     );
@@ -1323,7 +1323,7 @@ pub fn fsync_failed_commit(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: PARAMS,
             ..Default::default()
         },
@@ -1405,7 +1405,7 @@ pub fn redirty_mid_flush(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: PARAMS,
             ..Default::default()
         },
@@ -1500,7 +1500,7 @@ pub fn ftruncate_flush_race(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: PARAMS,
             ..Default::default()
         },
@@ -1620,7 +1620,7 @@ pub fn fs_rename_durable(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..Default::default()
         },
     );
@@ -1737,7 +1737,7 @@ pub fn fs_dirs_durable(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..Default::default()
         },
     );
@@ -1872,7 +1872,7 @@ pub fn late_storage_connect(
             // USB devices behind it. A profile with an empty bus would settle on
             // `EMPTY_BUS_NS` and never reach this interleaving.
             profile: qemu::Profile::MetalUsb,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: PARAMS,
             ..Default::default()
         },
@@ -2026,7 +2026,7 @@ pub fn log_backing_read_error(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: PARAMS,
             ..Default::default()
         },
@@ -2163,7 +2163,7 @@ pub fn boot_volume_metadata_error(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: PARAMS,
             ..Default::default()
         },
@@ -2585,7 +2585,7 @@ pub fn log_partition_identity(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..Default::default()
         },
     );
@@ -2736,7 +2736,7 @@ pub fn log_flush_retry(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: &["fsync-budget-spent"],
             ..Default::default()
         },
@@ -2839,7 +2839,7 @@ pub fn log_flush_retry(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: &["fsync-budget-spent", "fsync-deadman-now"],
             ..Default::default()
         },
@@ -2890,7 +2890,7 @@ pub fn log_flush_retry(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: &["usb-transport-break", "usb-reset-break"],
             ..Default::default()
         },
@@ -3153,7 +3153,7 @@ fn boot_expecting_root_refusal(
         rust_bins,
         BootOptions {
             profile,
-            boot_image: Some(image.to_path_buf()),
+            boot_image: Some(qemu::Staged::Written(image.to_path_buf())),
             usb_images,
             ready_marker: "boot: root=",
             ..Default::default()

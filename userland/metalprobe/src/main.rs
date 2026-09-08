@@ -38,12 +38,17 @@ pub enum Refusal {
     NoDevice = -2,
     /// The claim described a display this command cannot measure.
     NoScanout = -3,
-    /// A filesystem call the measurement rests on was refused.
+    /// The volume is not there: the file the measurement needs would not open.
     NoVolume = -4,
     /// What was read back is not what was written.
     Disagreed = -5,
     /// The measurement ran in no time at all, so its rate is not a number.
     NoDuration = -6,
+    /// The volume was there and an operation on the open file failed. **A
+    /// different answer from [`Refusal::NoVolume`]**, because a reader holding
+    /// nothing but an exit code off a stick cannot otherwise tell a device that
+    /// is absent from one that is present and refusing.
+    IoFailed = -7,
 }
 
 impl Refusal {

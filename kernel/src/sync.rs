@@ -122,15 +122,19 @@ impl<T> Lock<T> {
         let my_ticket = self.ticket.fetch_advance(Ordering::Relaxed);
         let mut spins = 0u64;
         let mut next_warn = 50_000_000u64;
+        // What this CPU was waiting for before, put back below: the shootdown
+        // poll inside this spin takes locks of its own, and a nested one that
+        // succeeded would otherwise clear the slot while this spin still waits.
+        let mut was = None;
         while self.now.load(ACQUIRED) != my_ticket {
             // Inside the loop, so an uncontended acquisition writes nothing:
             // what a CPU is waiting for is the one thing a record sealed from
             // that CPU's own NMI cannot read off its registers.
             if spins == 0 {
-                crate::hardlockup::spinning_on(
+                was = Some(crate::hardlockup::spinning_on(
                     self as *const Self as *const () as u64,
                     core::panic::Location::caller(),
-                );
+                ));
             }
             core::hint::spin_loop();
             // Polls TLB shootdowns: this spin runs with `IF` clear, so skipping
@@ -149,8 +153,8 @@ impl<T> Lock<T> {
                     caller, my_ticket.raw(), self.now.load(Ordering::Relaxed).raw());
             }
         }
-        if spins != 0 {
-            crate::hardlockup::spinning_on_nothing();
+        if let Some(was) = was {
+            crate::hardlockup::spinning_on_nothing(was);
         }
         LockGuard { lock: self }
     }

@@ -555,7 +555,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // window, taken against a DLL's prediction of a DMA completion and needing
     // a sound card to exist at all, and `toyos-sched`'s bound on the same
     // quantity runs in a simulator where no IPI is ever delivered
-    // (`issues/diagnostics/no-cyclictest.md`).
+    //.
     //
     // Serial: it is the one registration here whose verdict is a *time*, and a
     // wake latency measured beside eleven other guests is the host's schedule.
@@ -1270,9 +1270,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// every name nobody has looked at. A [`metal::Metal::QemuOnly`] row is the
 /// other answer: a name somebody *has* looked at and ruled out, with the reason.
 ///
-/// Two rows naming the same (boot config, kernel parameters) share one image and
-/// one boot, and their job lists are unioned. A boot is about a minute of the
-/// machine's time, so that grouping is what the suite's cost is.
+/// Two rows naming the same boot share one image and one boot, and their job
+/// lists are unioned. A boot is about a minute of the machine's time, so that
+/// grouping is what the suite's cost is; the boot is *named* by an arm rather
+/// than derived from its config and parameters, because sharing is not always
+/// safe and only the author knows.
 ///
 /// **Every predicate here reads records, never console text.** A userland
 /// `println!` ends at `Backend::None` on a machine with no serial port, so
@@ -1447,11 +1449,10 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     // ---- one image: tests/jobcase ----
     (
-        // **The owner's ruling, on the machine whose stick it cost.** Two boots
-        // it already flashes: the device boot writes and fsyncs megabytes before
-        // its reset — run 18's exact shape — and `jobcase` is the same reset
-        // with nothing moved across the bus. Neither costs the machine a minute
-        // it was not already spending.
+        // Two boots the suite already flashes: the device boot writes and
+        // fsyncs megabytes before its reset, and `jobcase` is the same reset
+        // with nothing moved across the bus. Neither costs the machine a
+        // minute it was not already spending.
         "usb_reset_hands_devices_back",
         metal::Metal::Runs {
             arms: USB_RESET_BOOTS,
@@ -4572,7 +4573,7 @@ fn run_screen_test(
             let options = BootOptions {
                 profile: qemu::Profile::Metal,
                 qmp: true,
-                boot_image: Some(image_path.clone()),
+                boot_image: Some(qemu::Staged::Written(image_path.clone())),
                 ready_marker: "Boot: complete",
                 ..Default::default()
             };
@@ -5865,7 +5866,7 @@ fn run_screen_test(
                 &config,
                 &[],
                 &[],
-                BootOptions { boot_image: Some(image_path.clone()), ..options },
+                BootOptions { boot_image: Some(qemu::Staged::Written(image_path.clone())), ..options },
             );
 
             // The compositor has the screen *before* anything panics. Asserted
@@ -15049,7 +15050,7 @@ fn number_between(log: &str, head: &str, tail: &str) -> Result<u64, String> {
 /// `clock::nanos_since_boot` subtracts a single BSP-sampled origin whatever CPU
 /// reads it, so a CPU whose TSC starts behind that origin saturates to zero and
 /// stamps every record it writes as the oldest thing the machine has
-/// (`issues/kernel/ap-tsc-trail-is-assumed-and-never-checked.md`). The kernel
+///. The kernel
 /// brackets each AP's first `rdtsc` between two of the BSP's, taken either side
 /// of a bring-up that is serialised — so "inside" is what a synchronised
 /// counter gives and nothing else does. **QEMU cannot refute it**: every guest
@@ -15164,9 +15165,10 @@ fn acpi_table_inventory(log: &str) -> Result<(), String> {
 /// host's guest CPU, is one — so the ppm bound is asserted only where a
 /// statement exists.
 fn timer_calibration(log: &str) -> Result<(), String> {
-    /// A crystal-derived TSC and a 50 ms HPET calibration disagree by the
-    /// calibration's own quantisation, not by a part per thousand. Anything
-    /// wider is a machine whose two timebases are not counting the same second.
+    /// One percent, which is the widest two timebases can differ and still be
+    /// counting the same second. A refusal and not a measurement: it catches a
+    /// machine whose HPET and CPUID have stopped agreeing at all, and nothing
+    /// narrower is true of every part this kernel may boot on.
     const CEILING_PPM: u64 = 10_000;
 
     let lapic_hz = number_between(log, "ticks/10ms, so ", "Hz")?;
@@ -15318,7 +15320,7 @@ fn latency_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         case,
         &[],
         &bins,
-        BootOptions { qmp: true, boot_image: Some(image_path.clone()), ..Default::default() },
+        BootOptions { qmp: true, boot_image: Some(qemu::Staged::Written(image_path.clone())), ..Default::default() },
     );
     let mut stop = common::qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
     let reason = stop.reason();

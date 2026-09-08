@@ -228,9 +228,12 @@ fn wait_for_log_file() {
 pub fn halt_all_cpus() -> ! {
     // Before the wait and the panel: from here this machine holds a report for
     // whoever is in front of it, with `IF` clear and under a bound of its own —
-    // which to a hard-lockup sample is indistinguishable from a wedge, and is
-    // the opposite of one.
+    // which to a hard-lockup sample or a deadline poll is indistinguishable from
+    // a wedge, and is the opposite of one. Both bounds, because a `WEDGED`
+    // record either of them sealed would replace the report this path exists to
+    // deliver.
     crate::hardlockup::stand_down();
+    crate::deadline::stand_down();
     wait_for_log_file();
     // Under the same condition as the wait above: before the machine is
     // released no sibling has been sent its `SIPI`, so this addresses CPUs that

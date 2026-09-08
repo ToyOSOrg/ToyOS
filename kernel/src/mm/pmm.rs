@@ -247,11 +247,18 @@ pub(super) fn init(entries: &[MemoryMapEntry], reserved: &[Region]) {
     // The record is written with the lock released: `log!`'s own path may reach
     // the allocator, and the allocator's page comes from this bitmap.
     drop(bm);
+    // **Saturating, because the map this arithmetic is over is firmware's and
+    // firmware is not trusted** (`crate::drivers::acpi`'s rule, and the same
+    // tables). Overlapping usable entries make the accounted total exceed the
+    // firmware's own, and a subtraction that panicked here would take the
+    // machine down before it has a console to say so on. A zero here is a sum
+    // that does not balance, which is what the record claims and what
+    // `pmm_accounting` reads it for.
     crate::log!(
         "pmm: the firmware map calls {firmware_bytes} bytes usable in {usable_entries} entries; \
          managed={managed} withheld={withheld_bytes} unaligned={}, and the three sum to it; \
          frames={frames} reserved_frames={withheld} base={base:#x} span={span}",
-        firmware_bytes - managed - withheld_bytes,
+        firmware_bytes.saturating_sub(managed).saturating_sub(withheld_bytes),
     );
 }
 

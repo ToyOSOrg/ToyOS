@@ -99,7 +99,7 @@ pub fn metal_job_reboot(
         BootOptions {
             profile: qemu::Profile::Metal,
             qmp: true,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..Default::default()
         },
     );
@@ -897,21 +897,18 @@ pub fn boot_deadline_ends_a_wedge(
     if !second.text().contains(bootlog::CHAIN_ENDS_LINE) {
         // One monitor per socket: the reset watcher goes before the question.
         drop(resets);
-        return Err(silent_guest(&mut qemu, second.text()));
+        return Err(silent_guest(&qemu, second.text()));
     }
     // The control on the control, both halves: the machine reached the wedge,
     // and then it did *not* reach the reset it was on its way to. A deadline
     // that fired on a boot merely slower than its bound would satisfy the first
     // and not the second, and `Rebooting.` is quiesce's own last word.
     second.must_say(bootlog::WEDGE_STAGED)?;
-    // **The state the T14 was actually in, staged and judged here.** The CPU
-    // that asks for this wedge is inside the shutdown syscall, where `IF` is
-    // masked for the whole call, so it arrives deaf — and on run 24 that CPU was
-    // ended by the lockup detector at half the deadline's bound, on a machine
-    // whose other seven cores were taking interrupts throughout. This line is
-    // that CPU saying it took them again, which is what makes everything below
-    // an assertion about a wedge rather than about a lockup this guest has no
-    // counter to notice.
+    // The CPU that asks for this wedge is inside the shutdown syscall, where
+    // `IF` is masked for the whole call, so it arrives deaf — and a CPU left
+    // that way is a hard lockup rather than a wedge. This line is that CPU
+    // saying it took interrupts again, which is what makes everything below an
+    // assertion about a wedge.
     second.must_say(bootlog::WEDGE_ARRIVED_DEAF)?;
     second.must_not_say(bootlog::REBOOTING)?;
     second.must_say(bootlog::PREVIOUS_PANIC)?;
@@ -969,10 +966,10 @@ const WEDGE_DEADLINE: &str = "boot-deadline=15000";
 /// One CPU that has stopped taking interrupts ends the machine, from its own
 /// NMI, and the record names where it was standing.
 ///
-/// **The state the boot deadline cannot reach, and the T14 sat in for 420 s.**
-/// Run 22's mkdir image hung with a 120 s deadline armed and the deadline did
-/// not fire: nothing polls it on a machine where no CPU takes an interrupt. The
-/// control stages exactly that — one CPU with `IF` clear, spinning on a ticket
+/// **The state the boot deadline cannot reach.** Nothing polls a deadline on a
+/// machine where no CPU takes an interrupt, so a boot can hang with one armed
+/// and the deadline never fire. The control stages exactly that — one CPU with
+/// `IF` clear, spinning on a ticket
 /// lock another CPU holds and never gives back — and no other bound in this tree
 /// ends it: the chipset's TCO is fed by any CPU, the runner's job bound needs a
 /// scheduler pass, nothing panicked, and the deadline's own poll is still being
@@ -1077,8 +1074,8 @@ const LOCKUP_DEADLINE: &str = "boot-deadline=30000";
 /// and an owner who cuts power get firmware, this loader, the same kernel, the
 /// same hang — for ever. The black box cannot break it: a power cut is exactly
 /// what empties the black box, so the next pass finds nothing to report and arms
-/// a fresh record. Measured on the T14, run 19 boots 2 and 3, where the owner's
-/// only ways out were the firmware's boot menu and pulling the stick.
+/// a fresh record. The only ways out are the firmware's boot menu and pulling
+/// the stick, and neither of those is the loop.
 ///
 /// Three launches of **one image file**, because what carries the count is the
 /// stick and not the memory:
@@ -1098,14 +1095,12 @@ pub fn hang_bounded_by_the_stick(
 ) -> Result<(), String> {
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    // Built to a path of its own and kept: the count this is about lives in the
-    // image file, so all three launches have to be the same one.
-    let image = super::lane::dir().join("hang-bound.img");
-    let bytes = qemu::build_boot_image(case, &[], &[], &[]);
-    std::fs::write(&image, &bytes).map_err(|e| format!("write the boot image: {e}"))?;
     let launch = |marker: &'static str| BootOptions {
         profile: qemu::Profile::Metal,
-        boot_image: Some(image.clone()),
+        // Carried, which is the whole shape of this test: the count it is about
+        // lives in the image file, so all three launches are one file — and the
+        // harness owns it, so nothing here builds an image of its own to keep.
+        boot_image: Some(qemu::Staged::Carried("hang-bound")),
         takes_the_reset: true,
         ready_marker: marker,
         ..Default::default()
@@ -1240,9 +1235,9 @@ pub fn deadline_wedge_chain(
     // the reset it was one statement away from.
     kernel.must_say(bootlog::WEDGE_STAGED)?;
     // And the CPU that asked for it took interrupts again: it comes through the
-    // syscall gate with `IF` masked, and run 24 was ended by the lockup detector
-    // on exactly that CPU while seven others were healthy. On this machine the
-    // assertion has a counter behind it, which is what the guest's has not.
+    // syscall gate with `IF` masked, and one left deaf is what the lockup
+    // detector ends a machine for. On this machine the assertion has a counter
+    // behind it, which is what the guest's has not.
     kernel.must_say(bootlog::WEDGE_ARRIVED_DEAF)?;
     says_nothing_of(kernel, bootlog::REBOOTING)?;
 
@@ -1281,11 +1276,9 @@ pub fn hard_lockup_chain(
 ) -> Result<(), String> {
     // **Nothing this judge reads was written after the wedge.** `logd` stops
     // where the scheduler does, so the stick's kernel log ends at the last
-    // spawn — and run 23's sealed page filled with that boot's *older* records
-    // before it reached the two lines the control writes about itself, so the
-    // tail did not carry them either
-    // (`issues/diagnostics/a-wedged-boots-record-outgrows-both-channels-that-carry-it.md`).
-    // What crosses is the arm line, written at 60 ms, and the record itself.
+    // spawn, and the sealed page can fill with a boot's *older* records before
+    // it reaches the lines the control writes about itself. What crosses is the
+    // arm line and the record itself.
     kernel.must_say("by each cpu's own performance counter")?;
     says_nothing_of(kernel, "CPUID states no architectural performance counter")?;
     says_nothing_of(kernel, bootlog::REBOOTING)?;
@@ -1309,11 +1302,10 @@ pub fn hard_lockup_chain(
     says_nothing_of(after, bootlog::DEADLINE_EXPIRED)?;
     says_nothing_of(after, &armed_and_nothing_else())?;
     // **Not [`bootlog::CHAIN_ENDS_LINE`], which the deadline's arm demands.**
-    // That pass's own last line is written after the record, and on run 23
-    // `loader.log` stopped inside the record at 16,365 bytes — so demanding it
-    // here would judge the loader's file capacity and call it a lockup. The
-    // same issue file above carries it, and the pass having booted no kernel is
-    // what this asserts instead.
+    // That pass's own last line is written after the record, and a `loader.log`
+    // that stopped inside the record never reaches it — so demanding it here
+    // would judge the loader's file capacity and call it a lockup. The pass
+    // having booted no kernel is what this asserts instead.
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
     eprintln!("  [power] {}", said.trim());
     Ok(())
@@ -1717,11 +1709,11 @@ const RESET_PATHS: &[ResetPath] = &[
         flushes: true,
         barrier: TOOK_THE_LOCK,
     },
-    // **Armed, because QEMU has no window and the T14 does.** `quiesce` spends
-    // real time on hardware between the boot's last word and the reset — run 20
-    // spent 29 ms of it, and the runner's loop, released by the deadline's own
-    // kill, spawned another job into that gap. Without the actuator this arm is
-    // green either way and says nothing.
+    // **Armed, because QEMU has no window and hardware does.** `quiesce` spends
+    // real time on hardware between the boot's last word and the reset, and the
+    // runner's loop — released by the deadline's own kill — can spawn another
+    // job into that gap. Without the actuator this arm is green either way and
+    // says nothing.
     ResetPath {
         what: "the runner's job deadline",
         config: "tests/jobdeadlinecase",
@@ -1736,11 +1728,11 @@ const RESET_PATHS: &[ResetPath] = &[
         flushes: false,
         barrier: NO_BARRIER,
     },
-    // **The control on every bound in the shutdown path.** Run 19 of the metal
-    // loop hung three boots between the last job's exit and the reset, with
-    // nothing ending them; this stages the one wait this change owns — the
-    // barrier — never coming free, and requires the machine to hand itself back
-    // anyway, with the account naming what it did without.
+    // **The control on every bound in the shutdown path.** A boot can hang
+    // between the last job's exit and the reset with nothing ending it; this
+    // stages the one wait this change owns — the barrier — never coming free,
+    // and requires the machine to hand itself back anyway, with the account
+    // naming what it did without.
     ResetPath {
         what: "a controller lock that never comes free",
         config: "tests/jobcase",
@@ -1752,11 +1744,9 @@ const RESET_PATHS: &[ResetPath] = &[
 
 /// **No reset this kernel performs leaves a USB device mid-command.**
 ///
-/// The owner's ruling after run 18 of the metal loop, where a ToyOS boot wrote
-/// six megabytes to the boot stick and reset, and the stick answered
-/// `device descriptor read/64, error -71` to Ubuntu through two reboots and a
-/// sysfs port power cycle until it was physically replugged. That failure is the
-/// negative control and is not repeated.
+/// A boot that writes megabytes to the boot stick and resets it out from under
+/// the transfer leaves a device its next host cannot enumerate: through reboots
+/// and a sysfs port power cycle, until it is physically replugged.
 ///
 /// **What this can and cannot judge.** QEMU's emulated stick cannot be wedged,
 /// so what is judged here is the *account*: for each of the three paths, that
@@ -1860,12 +1850,10 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
 /// **`Rebooting.` is the last record, and nothing this boot still holds may
 /// write one after it.**
 ///
-/// Measured on the T14 (run 20, `tests/metaldevicecase`): the runner's deadline
-/// killed the job it was watching, which released the `wait` its own job loop
-/// was inside, and that loop spawned the next job — `spawn: TLS 1 modules` 29 ms
-/// after the kernel's `Rebooting.`. A metal boot's verdict is read off that word
-/// being the log's last line, so the boot passed on the machine and failed on
-/// the loop.
+/// **A metal boot's verdict is read off that word being the log's last line.**
+/// The runner's deadline kills the job it is watching, which releases the `wait`
+/// its own job loop is inside, and that loop can spawn the next job into the
+/// window between the boot's last word and the reset.
 ///
 /// A boot with no such word — a panic — is not asked: it correctly writes none.
 /// The window ends at the next loader pass, because everything that pass prints
@@ -1876,7 +1864,7 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
 /// `wait_for_durable` that gave up says so, and an idle CPU's `sched:` report
 /// can land there — and neither reaches a file: `logd` has been asked to stop by
 /// then, so on a machine with no console they reach nothing at all. A *spawn* is
-/// a process that was still on a run queue, and run 20's did reach the file.
+/// a process that was still on a run queue, and its record does reach the file.
 fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
     let Some(at) = text.rfind(REBOOTING) else { return Ok(()) };
     let after = &text[at + REBOOTING.len()..];
@@ -1893,18 +1881,17 @@ fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
 /// The T14's judge for [`usb_reset_hands_devices_back`].
 ///
 /// **The machine is the judge of the device, and nothing else is.** QEMU cannot
-/// wedge a stick; run 18 of the metal loop did, and what says the boot before
-/// this one left the bench's own device enumerable is the driver's
-/// `boot.<boot>.stick_secs` row — recorded before the mount, so it is a number
-/// and not the reason a mount happened to work. What is left for this to read is
-/// the reset's own account, which on this machine is in `loader.log`'s pass
-/// after the reset rather than in any file the kernel wrote.
+/// wedge a stick, and what says the boot before this one left the bench's own
+/// device enumerable is the driver's `boot.<boot>.stick_secs` row — recorded
+/// before the mount, so it is a number and not the reason a mount happened to
+/// work. What is left for this to read is the reset's own account, which on this
+/// machine is in `loader.log`'s pass after the reset rather than in any file the
+/// kernel wrote.
 ///
 /// Both arms are orderly reboots, so both owe the barrier. The panic path's
 /// account is judged under QEMU only: on this machine a kernel that panics
 /// before `logd` runs writes no log file at all, and one that panics after it
-/// leaves no `Rebooting.` for the loop's own verdict —
-/// `issues/build/the-metal-loop-cannot-judge-a-boot-that-panics.md`.
+/// leaves no `Rebooting.` for the loop's own verdict.
 pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String> {
     let mut bad = Vec::new();
     for back in arms {

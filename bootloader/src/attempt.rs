@@ -7,9 +7,8 @@
 //! this loader, the same kernel, the same hang — for ever. The black box cannot
 //! break it, because a power cut is exactly what empties the black box: the next
 //! pass finds nothing to report, arms a fresh record and boots the same kernel
-//! again. Measured on the T14, run 19 boots 2 and 3, and boot 3's retry did it
-//! twice. The owner's only ways out were the firmware's boot menu and pulling
-//! the stick, and neither of those is the loop.
+//! again. The only ways out of that are the firmware's boot menu and pulling the
+//! stick, and neither of those is the loop.
 //!
 //! What survives a power cut is the stick. So the count is a file on the log
 //! partition, beside `loader.log`: **one flash writes a fresh log partition, so

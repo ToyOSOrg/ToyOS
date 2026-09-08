@@ -60,14 +60,11 @@ const POLL_SECS: u64 = 5;
 
 /// How long the boot stick gets to be there again once Ubuntu is up.
 ///
-/// **The bench's own device is the judge of the ruling that no reset this
-/// project performs may wedge a USB device.** Run 18 left the stick answering
-/// `device descriptor read/64, error -71`, and Ubuntu's whole enumeration —
-/// four addressing attempts and a port power cycle — gave up inside three
-/// seconds of journal time (`usb 3-1: new high-speed USB device number 18` at
-/// 07:33:20 to `unable to enumerate USB device` at 07:33:23). This is ten times
-/// that, so a stick this wait does not find is one the host has already
-/// finished refusing.
+/// **The bench's own device is the one judge there is of whether a reset left a
+/// USB device its next host can enumerate.** Ten times the three seconds
+/// Ubuntu's whole enumeration — four addressing attempts and a port power cycle
+/// — spends before it gives up, so a stick this wait does not find is one the
+/// host has already finished refusing.
 pub const STICK_SECS: u64 = 30;
 
 /// The absolute paths `which` answered on the machine; sudo matches a path and
@@ -1893,12 +1890,10 @@ mod tests {
         }
     }
 
-    /// **The case, off the machine that produced it.** These are the four lines
-    /// `toyos-metal` brought back from run 19's first flash, where a `DONE`
-    /// record another image had left in the same DRAM two hours and three
-    /// Ubuntu boots earlier was read as this boot's predecessor. The driver's
-    /// only word for it was "the log carries no `Boot: complete` record", which
-    /// sends a reader after a kernel that never ran.
+    /// **The case, off the machine that produced it.** A `DONE` record another
+    /// image had left in the same DRAM is read as this boot's predecessor, and
+    /// the driver's only word for it was "the log carries no `Boot: complete`
+    /// record" — which sends a reader after a kernel that never ran.
     #[test]
     fn a_pass_that_reported_and_booted_nothing_is_named_as_that() {
         let stale = "ToyOS Bootloader 1.0\n\
@@ -2201,10 +2196,8 @@ mod tests {
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::PANIC_BOUND_MS));
     }
 
-    /// **The defect: a refusal left the last run's files for the next run's
-    /// judge.** Run 26's `ccorpus` was reported as "90 member(s), 536 ms per
-    /// member" off run 24's boot of a different tip, because every refusal
-    /// before `write_readback` returns without touching the directory.
+    /// **A refusal must leave no file for the next run's judge to read as its
+    /// own**, and every refusal returns before `write_readback`.
     #[test]
     fn a_readback_directory_holds_nothing_the_last_run_left() {
         let dir = std::env::temp_dir().join(format!("toyos-readback-{}", std::process::id()));

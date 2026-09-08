@@ -37,11 +37,10 @@ pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends t
 ///
 /// **The one line that measures that control's own claim.** It arrives through
 /// the shutdown syscall, and `arch::syscall::gate` masks `IF` for the whole of a
-/// syscall — so a wedge that inherited its state left exactly one CPU per boot
-/// taking no interrupt at all, which is not a wedge but a hard lockup. On the
-/// T14, run 24, that is what ended the boot: [`LOCKED_UP`] on the staging CPU,
-/// half a bound before the deadline. A boot on which no CPU says this is a boot
-/// whose wedge never reached the CPU that asked for it.
+/// syscall — so a wedge that inherited its state leaves exactly one CPU per boot
+/// taking no interrupt at all, which is not a wedge but a hard lockup. A boot on
+/// which no CPU says this is a boot whose wedge never reached the CPU that asked
+/// for it.
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
 
@@ -68,9 +67,7 @@ pub const LOCKUP_STAGED: &str = "hard-lockup: staged, and only the lockup detect
 /// everything said after the volume stopped taking bytes — `logd`'s give-up
 /// line, the kernel's own `shutdown: /log did not answer` record, every later
 /// `exit:` — is written where no file can carry it, and on a machine with no
-/// serial port a console is nothing. Measured on the T14, run 24's `shared`:
-/// the file's last record was at 23.3 s of a boot that ran to 60 s, and no
-/// channel said so.
+/// serial port a console is nothing.
 pub const LOG_COMPLETE: &str = "log: /log holds every record this boot committed";
 /// The other half of [`LOG_COMPLETE`]: how far the volume got, and how many
 /// records committed after that reached it. The newest of them follow under

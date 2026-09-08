@@ -1,8 +1,8 @@
 //! What this machine's wake latency is, as a distribution.
 //!
-//! The design is `issues/diagnostics/no-cyclictest.md`'s: enter the real-time
-//! band, arm a timer, sleep, and histogram `actual − programmed` at 1 µs
-//! resolution over enough samples to have percentiles rather than a maximum.
+//! Enter the real-time band, arm a timer, sleep, and histogram
+//! `actual − programmed` at 1 µs resolution over enough samples to have
+//! percentiles rather than a maximum.
 //! Nothing else in the tree measures this — soundd's `max_wake_lat_ns` is a
 //! maximum over a ~2 s window measured against a DLL's prediction of a DMA
 //! completion, so it folds in the device model and needs a sound card, and

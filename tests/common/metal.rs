@@ -128,12 +128,9 @@ fn chunk_name(boot: &str, index: usize) -> String {
 /// Cut every shared boot's list to what the bound and the profile's allowance
 /// leave room for.
 ///
-/// Measured on the T14 (run 24): `shared` spawned 25 of its 72 members in the
-/// 21.1 s before its log stopped and the runner's bound reset the machine at
-/// 60 s, so 47 members were reported as missing records; `ccorpus` finished 118
-/// members in 47.7 s, ten seconds inside the bound and with no margin for a
-/// slower stick. Both are the same defect — a list nothing sized — and this is
-/// where it is sized.
+/// **A list nothing sized loses its tail without saying so.** The runner's
+/// bound ends the whole list rather than the job it is inside, so every member
+/// past the cut is reported as a missing exit record.
 ///
 /// **A chunk carries only the files and links its own members name.** The C
 /// corpus stages a binary and an expectation per case; putting all of both on

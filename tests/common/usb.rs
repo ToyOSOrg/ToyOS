@@ -570,7 +570,7 @@ pub fn usb_disk_index_stable(
         c_bins,
         rust_bins,
         BootOptions {
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..options
         },
     );
@@ -943,7 +943,7 @@ fn optional_flush_keeps_the_log(
         rust_bins,
         BootOptions {
             profile: Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: PARAMS,
             ..Default::default()
         },

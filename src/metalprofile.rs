@@ -29,10 +29,7 @@ pub const PATH: &str = "tests/metal-profile.toml";
 /// the `reboot` job the image derivation appends comes off the other end.
 ///
 /// A tenth of the bound, derived rather than measured, and several times what
-/// either end has ever cost: `boot.*.complete_ms` reads 1,199-1,267 ms on every
-/// T14 boot this suite has taken, the runner itself spawns about 500 ms after
-/// that, and `reboot`'s own job spawned 122 ms before `Rebooting.` on run 24's
-/// `ccorpus`. Nine tenths is what the members may spend.
+/// either end has ever cost. Nine tenths is what the members may spend.
 pub const AROUND_THE_LIST_MS: u64 = toyos_tco::JOB_BOUND_MS / 10;
 
 /// The name under which one boot's per-member allowance is priced.
@@ -293,34 +290,35 @@ mod sizing_tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
     }
 
-    /// **The overrun this rule exists for, in the machine's own numbers.**
-    ///
-    /// Run 24's `shared` boot ran 72 members at a measured 845 ms each. That is
-    /// 60.8 s of members inside a 60 s bound, so the runner reset the machine
-    /// with 47 of them unrun — and each was reported as a missing exit record
-    /// rather than as a list too long for the bound. The committed allowance
-    /// cuts that list where the bound does.
+    /// **The overrun this rule exists for, in the machine's own numbers.** The
+    /// `shared` boot's seventy-two members at their committed 845 ms each are
+    /// 60.8 s inside a 60 s bound, so the runner resets the machine with the
+    /// tail unrun and each of those is reported as a missing exit record rather
+    /// than as a list too long for the bound.
     #[test]
-    fn run_24s_shared_list_does_not_fit_one_boot() {
+    fn the_shared_list_does_not_fit_one_boot() {
         let profile = Profile::load(root()).expect(PATH);
         let per = profile.members_per_boot("shared").expect("shared is priced");
         assert!(
             per < 72,
-            "the allowance leaves room for {per} members and run 24 tried 72 of them in one boot"
+            "the allowance leaves room for {per} members and the list carries 72"
         );
         // Two chunks and not three: a list cut finer costs another minute of
         // the machine for nothing.
         assert_eq!(72_usize.div_ceil(per), 2, "{per} members a boot");
-        let measured = profile.row(&job_ms_row("shared")).and_then(|r| r.measured);
-        assert_eq!(measured, Some(845), "the reading the ceiling is a margin over");
-        assert!(72 * 845 > toyos_tco::JOB_BOUND_MS, "the overrun the rule is derived from");
+        let measured =
+            profile.row(&job_ms_row("shared")).and_then(|r| r.measured).expect("a reading");
+        assert!(
+            72 * measured > toyos_tco::JOB_BOUND_MS,
+            "{measured} ms a member over 72 members fits the bound, so this rule cuts nothing"
+        );
     }
 
-    /// `ccorpus` was *green* at 49.5 s of the 60 s bound, and the same rule
-    /// still cuts it: 82 % of a bound is no margin for a slower stick, and the
-    /// price of being wrong is every member after the cut losing its verdict.
+    /// `ccorpus` fits its bound and the same rule still cuts it: four fifths of
+    /// a bound is no margin for a slower stick, and the price of being wrong is
+    /// every member after the cut losing its verdict.
     #[test]
-    fn run_24s_c_corpus_is_cut_although_it_passed() {
+    fn a_corpus_that_fits_its_bound_is_cut_too() {
         let profile = Profile::load(root()).expect(PATH);
         let per = profile.members_per_boot("ccorpus").expect("ccorpus is priced");
         assert_eq!(118_usize.div_ceil(per), 2, "{per} members a boot");

@@ -184,8 +184,15 @@ pub fn tsc_ticks(nanos: u64) -> u64 {
 /// Polls `ready` until it holds or `nanos` pass; `false` is the deadline.
 /// Reads the TSC, not [`nanos_since_boot`], because that clock's out-of-line divide
 /// would appear as `src/redlist.rs`'s `dump_nmi_probe` red under an NMI sample.
-/// Before [`init`] the TSC period is zero and the wait is unbounded.
+///
+/// **Before [`init`] there is no period to measure a span with, so this asks
+/// `ready` once and answers it.** A wait nothing can bound is the one thing an
+/// unattended machine may not enter: a device denied its recovery window is a
+/// `false` its caller reports, and a spin nothing ends reports nothing at all.
 pub fn settles(nanos: u64, ready: impl Fn() -> bool) -> bool {
+    if !calibrated() {
+        return ready();
+    }
     let until = tsc_deadline(nanos);
     while !ready() {
         if cpu::rdtsc() >= until {
