@@ -2261,11 +2261,41 @@ pub struct BootOptions {
     /// is what an image is built with and what a staged image is asked to
     /// match.
     pub log_stream: Option<(&'static str, u16)>,
+    /// Forward this host port to the guest's TCP 22. **slirp is one-way
+    /// without it**: nothing on the host can open a connection into the guest
+    /// unless QEMU is told which port to translate. A profile with no NIC
+    /// carries no `-netdev` for it to reach, which [`ssh_forward_argv`] is
+    /// what a test refuses before it boots.
+    pub ssh_port: Option<u16>,
 }
 
 /// Where the guest sees the host under QEMU's user-mode networking, and where
 /// the host sees the same servers.
 pub const GUEST_VIEW_OF_HOST: &str = "10.0.2.2";
+
+/// The loopback address the forwarded port is bound on. Loopback and not `*`:
+/// a CI runner is on somebody's network and a test guest's sshd is not a
+/// service anyone else may reach.
+pub const SSH_FORWARD_HOST: &str = "127.0.0.1";
+
+/// The `hostfwd` clause [`BootOptions::ssh_port`] adds to the `-netdev`
+/// argument, spelled once so the boot and the assertion read the same string.
+pub fn ssh_forward_argv(port: u16) -> String {
+    format!(",hostfwd=tcp:{SSH_FORWARD_HOST}:{port}-:22")
+}
+
+/// A host port nothing is listening on, taken by binding and letting go. The
+/// window between the two is unavoidable — QEMU opens its own listener — and a
+/// boot that loses that race fails to connect rather than reaching another
+/// socket, because the port is on loopback and every connection through it is
+/// authenticated.
+pub fn free_host_port() -> u16 {
+    std::net::TcpListener::bind((SSH_FORWARD_HOST, 0))
+        .expect("a loopback port for the ssh forward")
+        .local_addr()
+        .expect("a bound listener has an address")
+        .port()
+}
 
 impl BootOptions {
     /// The whole parameter line this boot's image is built with: the names in
@@ -2318,6 +2348,7 @@ impl Default for BootOptions {
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_stream: None,
+            ssh_port: None,
         }
     }
 }
@@ -2442,6 +2473,9 @@ pub struct QemuInstance {
     /// [`host_scale`] cannot see this: a boot is a mostly-serial workload and a
     /// wide-SMP guest pays lock-holder preemption a boot never does.
     smp: u32,
+    /// The host port [`BootOptions::ssh_port`] forwarded into this guest, kept
+    /// so a boot several tests share can tell each of them which port it took.
+    ssh_port: Option<u16>,
 }
 
 /// The bootable disk image a boot with these arguments would use.
@@ -2989,6 +3023,13 @@ impl QemuInstance {
     /// empty when [`BootOptions::mute`] takes it away.
     pub fn boot_log(&self) -> &str {
         &self.boot_log
+    }
+
+    /// The host port this boot forwarded into the guest's TCP 22. Panics
+    /// rather than returning an option: a `None` here would become a connection
+    /// refused several layers away from the option that was not set.
+    pub fn ssh_port(&self) -> u16 {
+        self.ssh_port.expect("this guest was booted without BootOptions { ssh_port }")
     }
 
     /// Everything the guest put on the 16550 before it switched to the
@@ -4081,20 +4122,26 @@ fn qemu_command(
     // other still creates it after the unit and before everything else.
     // `iommu_platform` is virtio's own way of asking to be decoded; an e1000e
     // is decoded by the unit whatever it says, so it carries none.
+    // The one clause that makes slirp two-way, on whichever card this profile
+    // has.
+    let forward = options.ssh_port.map(ssh_forward_argv).unwrap_or_default();
     match shape.nic {
         Nic::Absent => {}
         Nic::Virtio => {
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+            qemu.arg("-netdev").arg(format!("user,id=net0{forward}")).arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0{platform}"
             ));
         }
         Nic::VirtioWithoutMsix => {
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+            qemu.arg("-netdev").arg(format!("user,id=net0{forward}")).arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0,vectors=0{platform}"
             ));
         }
         Nic::E1000e => {
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg("e1000e,netdev=net0");
+            qemu.arg("-netdev")
+                .arg(format!("user,id=net0{forward}"))
+                .arg("-device")
+                .arg("e1000e,netdev=net0");
         }
     }
 
@@ -4255,6 +4302,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         console,
         i8042_trace: options.kernel_params.contains(&"i8042-trace"),
         smp: options.smp,
+        ssh_port: options.ssh_port,
     }
 }
 

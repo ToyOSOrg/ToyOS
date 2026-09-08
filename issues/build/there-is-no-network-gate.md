@@ -49,15 +49,7 @@ Open at the implementation pass: hand-rolled pcap parsing versus a host
 dev-dependency; what counter surface smoltcp already exposes against what netd
 must count.
 
-**sshd joins the gate**, which answers the third question this paragraph used
-to leave open. `issues/isolation/sshd-accept-path-unexercised.md` already
-assigns its client here — "the network gate, which is what puts a client on the
-host" — and a separate track would build the same `hostfwd` plumbing twice.
-Three constraints ride with it. The client is built **from source**, from an
-implementation this project did not write, pinned and declared in `NOTICE`; a
-committed SSH binary would be a fourth standing failure beside the three
-`CLAUDE.md` declares. It shares no protocol code with sshd, because a client
-that reuses sshd's parsing reproduces sshd's bugs and agrees with itself — if
-the two agree it must be because the specification says so. And the oracle is
-the wire capture plus the exit status, over one disposable key driven through
-accept, auth, one command and close.
+The ssh half is built: `tests/ssh-client-host` drives a guest over
+`BootOptions::ssh_port`'s `hostfwd`, which a frame-level analyser reuses rather
+than building again. What is left is the pcap analyser, the two tiers,
+`-netdev socket`, and the idle→packet ceiling.

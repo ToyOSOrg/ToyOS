@@ -1,0 +1,18 @@
+[package]
+name = "ssh-client-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "toyos_ssh"
+path = "src/main.rs"
+
+[dependencies]
+russh = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos", default-features = false, features = ["rustcrypto"] }
+russh-sftp = "2.4"
+rand = "0.10"
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "fs"] }
+
+[lints.rust]
+warnings = "deny"

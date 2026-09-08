@@ -1681,11 +1681,16 @@ pub fn build_test_image(
     image::create_boot_image(&kernel_bytes, &bl_bytes, &root_bytes, &params)
 }
 
-/// The two host binaries `https_tls13` drives, built here rather than inside the
-/// test: a judge's price is its fetch and not a compile.
-pub fn build_https_hosts(root: &Path, quiet: bool) {
-    let _slot = buildlock::build_slot(root, "the TLS judge's host binaries");
-    for (dir, _) in HTTPS_HOSTS {
+/// The host binaries the network judges drive, built here rather than inside a
+/// test: a judge's price is its exchange and not a compile.
+///
+/// Each of these keeps its own `Cargo.lock` and is excluded from the host
+/// workspace with `tests/`. That is what makes them possible: they exist to be
+/// a *second* implementation, and a second implementation's dependency graph is
+/// not the harness's to resolve.
+pub fn build_host_judges(root: &Path, quiet: bool) {
+    let _slot = buildlock::build_slot(root, "the network judges' host binaries");
+    for (dir, _) in HOST_JUDGES {
         let at = root.join(dir);
         let mut cmd = Command::new("cargo");
         cmd.args(["build", "--release"]);
@@ -1703,21 +1708,32 @@ pub fn build_https_hosts(root: &Path, quiet: bool) {
     }
 }
 
-const HTTPS_HOSTS: [(&str, &str); 2] = [
-    ("tests/https-server-host", "https_test_server"),
-    ("tests/https-fetch-host", "https_fetch"),
-];
+/// One host judge: where its crate is, and the binary that crate builds. Named
+/// rather than indexed, because a row inserted anywhere but the end would
+/// silently repoint every accessor below.
+type Judge = (&'static str, &'static str);
+
+const HTTPS_SERVER: Judge = ("tests/https-server-host", "https_test_server");
+const HTTPS_FETCH: Judge = ("tests/https-fetch-host", "https_fetch");
+const SSH_CLIENT: Judge = ("tests/ssh-client-host", "toyos_ssh");
+
+const HOST_JUDGES: [Judge; 3] = [HTTPS_SERVER, HTTPS_FETCH, SSH_CLIENT];
 
 pub fn https_test_server(root: &Path) -> PathBuf {
-    https_host(root, 0)
+    host_judge(root, HTTPS_SERVER)
 }
 
 pub fn https_fetch_host(root: &Path) -> PathBuf {
-    https_host(root, 1)
+    host_judge(root, HTTPS_FETCH)
 }
 
-fn https_host(root: &Path, which: usize) -> PathBuf {
-    let (dir, bin) = HTTPS_HOSTS[which];
+/// The harness's SSH client — the only thing in this tree that speaks the
+/// protocol from the other side of `userland/sshd`.
+pub fn ssh_client_host(root: &Path) -> PathBuf {
+    host_judge(root, SSH_CLIENT)
+}
+
+fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
     root.join(dir).join("target/release").join(bin)
 }
 

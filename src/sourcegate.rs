@@ -600,6 +600,11 @@ const HOST_SPAWNS: &[Spawn] = &[
         why: "that judge's servers, this repository's Rust built by cargo like every other \
               crate here",
     },
+    Spawn {
+        arg: "toyos_build::build::ssh_client_host(&compile::repo_root())",
+        sites: &[("tests/common/ssh.rs", 1)],
+        why: "the harness's SSH client, russh and russh-sftp from source and not a host `ssh`",
+    },
 ];
 
 /// One package a CI image or workflow installs on a machine this project's

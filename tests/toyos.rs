@@ -612,6 +612,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
+    // One `SSHD_LOGIN` boot for the three, driven by `tests/ssh-client-host`.
+    // Adjacent because `group_of` makes adjacency load-bearing, and one tier
+    // because one boot cannot be in two. Every verdict is bytes or an exit
+    // status; the client's own ceiling is a liveness guard and no assertion
+    // reads a clock.
+    ("sshd_exec", Sched::Parallel, Tier::Fast),
+    ("sshd_files", Sched::Parallel, Tier::Fast),
+    ("sshd_key_auth", Sched::Parallel, Tier::Fast),
     // Serial: it measures netd's 2 s handshake deadline against the host's
     // clock, and counts how many connections survived a 48 ms paced burst
     // before that deadline could expire any of them. Both are wall-clock
@@ -5591,6 +5599,7 @@ type Grouped = Option<Boot>;
 const METAL_SIM_DESKTOP: &str = "metal-sim desktop";
 const I8042_TRACE: &str = "i8042 trace";
 const LOCALE_WIZARD: &str = "locale wizard";
+const SSHD_LOGIN: &str = "sshd login";
 
 /// The line `tests/toyos-rust-tests/src/bin/i8042_keyboard.rs` prints once it
 /// holds the keyboard claim, and the line every injection into that binary is
@@ -5636,6 +5645,11 @@ fn group_of(name: &str) -> Option<&'static str> {
         // member reads only its own window, so the order is the argument that
         // no member reads state another left.
         "locale_detect" | "locale_detect_unrecognized" => Some(LOCALE_WIZARD),
+        // One guest with a key in its image and a forward into its port 22:
+        // the exec arms clean up after themselves, the file arm writes names
+        // nothing else looks at, and the auth arm reads only its own console
+        // lines.
+        "sshd_exec" | "sshd_files" | "sshd_key_auth" => Some(SSHD_LOGIN),
         _ => None,
     }
 }
@@ -9581,6 +9595,21 @@ fn run_machine_test(
             });
             locale_detect_unrecognized(&mut boot.qemu)
         }
+        // The three judges of `tests/common/ssh.rs`, on one `tests/sshdcase`
+        // boot. `test_config` is not theirs: the key staged and the forward
+        // opened are that config's.
+        "sshd_exec" => {
+            let boot = group_boot(held, SSHD_LOGIN, || common::ssh::boot(rust_bins));
+            common::ssh::exec_gate(&mut boot.qemu)
+        }
+        "sshd_files" => {
+            let boot = group_boot(held, SSHD_LOGIN, || common::ssh::boot(rust_bins));
+            common::ssh::files_gate(&mut boot.qemu)
+        }
+        "sshd_key_auth" => {
+            let boot = group_boot(held, SSHD_LOGIN, || common::ssh::boot(rust_bins));
+            common::ssh::key_auth_gate(&mut boot.qemu)
+        }
         "console_locale_detect" => console_locale_detect(),
         "desktop_locale_detect" => desktop_locale_detect(),
         "desktop_typing_damage" => desktop_typing_damage(),
@@ -13263,10 +13292,17 @@ fn run_machine_test(
 
             // Minting proves `/home/root/.ssh` is creatable and writable from
             // userland; the fingerprint proves the key it wrote reads back.
-            const WANT: [&str; 3] = [
+            //
+            // **Both files are named, because either one alone authorizes.**
+            // This boot stages neither, so the daemon has to report both as
+            // unreadable — a check on only the writable one would pass a
+            // machine whose image file was silently never consulted.
+            const WANT: [&str; 5] = [
                 "sshd: minted a new host identity at /home/root/.ssh/host_ed25519",
                 "sshd: host identity SHA256:",
                 "sshd: cannot read /home/root/.ssh/authorized_keys",
+                "sshd: cannot read /system/etc/ssh_authorized_keys",
+                "sshd: no file names a usable key",
             ];
             let stalled =
                 await_guest(&mut qemu, &mut console, "every line sshd owes", |c| {
@@ -13287,7 +13323,7 @@ fn run_machine_test(
                 ));
             }
             eprintln!(
-                "  [sshd] host identity minted under /home, and no authorized_keys file \
+                "  [sshd] host identity minted under /home, and neither authorized_keys file \
                  left it refusing to listen at all"
             );
             Ok(())
@@ -17184,7 +17220,7 @@ fn main() {
     let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
     eprintln!("[toyos] Building Rust tests...");
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
-    toyos_build::build::build_https_hosts(&common::compile::repo_root(), !nocapture && !debug_mode);
+    toyos_build::build::build_host_judges(&common::compile::repo_root(), !nocapture && !debug_mode);
 
     // --list: print test names and exit
     if list_mode {
