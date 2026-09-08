@@ -1295,6 +1295,57 @@ pub const RELEGATED: &[Relegated] = &[
                  is a copy of the boot image: 8,079 ms on the hosted shard, over \
                  `FAST_COMMIT_MS`.",
     },
+    Relegated {
+        test: "log_stream",
+        ci_ms: 24_865,
+        why: Why::Cost,
+        guards: "`logd`'s second sink judged live: a host listener, the address on the boot \
+                 parameter line, and the guest's own `/log` read off the FAT partition behind \
+                 its back as the oracle — every line the listener received equal to the file's, \
+                 in the file's order, with `Boot: complete` and a job's `exit:` record asserted \
+                 to arrive while the machine is still running. Nothing else in the tree asks \
+                 whether a record leaves the machine at all, so the whole of stage 3 goes dark \
+                 per pull request with it. What costs the price is the image: the host picks the \
+                 listener's port and the port is on the parameter line, so every arm builds a \
+                 boot image nothing can memoize — about 20 s of a 25 s run, with no assertion \
+                 behind it. That is what would return this name and its three siblings.",
+    },
+    Relegated {
+        test: "log_stream_e1000e",
+        ci_ms: 25_219,
+        why: Why::Cost,
+        guards: "The same stream over netd's Intel driver rather than virtio, for the reason \
+                 `https_tls13_e1000e` exists: the bench's NIC is an I219 and QEMU's `e1000e` is \
+                 the only machine in reach that runs that driver. What still runs per pull \
+                 request: `https_tls13_e1000e` moves real frames through the same driver, so a \
+                 driver that stopped working reds there; what goes dark is the record stream \
+                 over it. Its price is the per-arm image build `log_stream` describes.",
+    },
+    Relegated {
+        test: "log_stream_no_listener",
+        ci_ms: 25_182,
+        why: Why::Cost,
+        guards: "A boot told to stream to a port nothing answers on: the file carries exactly \
+                 one line saying so, naming the address, and the boot goes on and runs a job. \
+                 The refusal path — `ConnectionRefused` is final, said once, and never again — \
+                 has no other gate; `toyos-logstream`'s host tests cover the parse refusals but \
+                 no host test can reach netd's answer. Its price is the per-arm image build \
+                 `log_stream` describes.",
+    },
+    Relegated {
+        test: "log_stream_unreachable",
+        ci_ms: 25_707,
+        why: Why::Cost,
+        guards: "A `log-storm` offered to a stream whose address answers nothing, which is the \
+                 accounting under a stream that never opened: the bounded queue refuses what it \
+                 cannot hold, every report says what its run of loss added and what the boot has \
+                 lost in total, and the two must agree — and `/log` carries every record \
+                 regardless. What still runs per pull request: \
+                 `log_stream_stalled_peer_storm_over_a_bounded_window` drives the same \
+                 accounting through the writer's own backpressure, so a counter that stopped \
+                 counting still reds; what goes dark is the arm where nothing ever drains. Its \
+                 price is the per-arm image build `log_stream` describes.",
+    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own

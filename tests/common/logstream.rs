@@ -9,6 +9,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,47 @@ pub const VIRTIO: Bench =
 
 pub const E1000E: Bench =
     Bench { profile: qemu::Profile::E1000e, config: "tests/e1000case", device: "e1000e" };
+
+/// What a host may hold of a stream whose reader has stopped taking it.
+///
+/// **The arm that fills the guest's buffers owns this one**, because otherwise
+/// it is the runner's: a hosted Linux runner auto-tunes a receive buffer into
+/// the megabytes when the peer is not reading, and a guest that never has to
+/// block never refuses a line. Set on the listening socket before any
+/// connection, which is where an accepted one inherits it and where an explicit
+/// size stops the auto-tuning.
+const STALLED_PEER_WINDOW: usize = 32 * 1024;
+
+/// Everything between `logd`'s queue and a listener that is not reading, all of
+/// which fills before one line is refused: the kernel pipe netd reads
+/// (`kernel/src/pipe.rs`'s `PIPE_SIZE`), netd's own send buffer
+/// (`userland/netd/src/main.rs`'s `TCP_SOCKET_BUFFER`), the receive buffer above
+/// — doubled, because Linux charges overhead against `SO_RCVBUF` and hands back
+/// twice what it was asked for — and what QEMU's user-mode networking holds
+/// between them, which no constant in this tree names. That last term is the
+/// only measured one: a boot that reached [`ROTATION_MARK`] and had refused 375
+/// records by then puts everything under the queue at 2.65 MiB, which leaves it
+/// half a mebibyte.
+const BELOW_THE_QUEUE: usize =
+    2 * 1024 * 1024 + 64 * 1024 + 2 * STALLED_PEER_WINDOW + 512 * 1024;
+
+/// The rotation the stalled arm waits for before it lets the peer read again.
+///
+/// `logd` rotates every `MAX_LOG_BYTES` (`userland/logd/src/store.rs`, one
+/// mebibyte) and names the next part in the line it prints, so this line is
+/// three whole parts written — and every line is offered to the stream as it is
+/// written, so it is also three mebibytes offered. `log-storm-wide` is what
+/// makes one boot write more than that.
+const ROTATION_MARK: &str = "_0004.log";
+const OFFERED_BY_THE_MARK: usize = 3 * 1024 * 1024;
+
+/// **What the arm rests on, held by the compiler.** What one boot has offered by
+/// the mark outweighs everything under the queue, so a refusal by then is
+/// certain rather than lucky — which is what a runner whose receive window this
+/// test did not own could not say. The count is comfortable rather than
+/// marginal because the job runs after the mark: from there on, every line the
+/// machine offers can only be refused.
+const _: () = assert!(OFFERED_BY_THE_MARK > BELOW_THE_QUEUE);
 
 /// An address on the guest's own network that answers nothing, ever.
 ///
@@ -99,9 +141,9 @@ impl Listener {
     /// A listener that accepts the connection and then reads nothing, so the
     /// guest's own buffers are what the boot's records pile up in.
     ///
-    /// It is released and drained at the end, because a peer that never reads
-    /// says nothing about what reached it: what arrived is the evidence the
-    /// writer got as far as writing at all.
+    /// It is released and drained later, because a peer that never reads says
+    /// nothing about what reached it: what arrived is the evidence the writer
+    /// got as far as writing at all.
     pub fn stalled(path: &Path) -> Result<Self, String> {
         Self::bound(path, false)
     }
@@ -114,6 +156,9 @@ impl Listener {
     fn bound(path: &Path, reading: bool) -> Result<Self, String> {
         let socket = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .map_err(|e| format!("bind the log stream's listener: {e}"))?;
+        if !reading {
+            clamp_receive_buffer(&socket, STALLED_PEER_WINDOW)?;
+        }
         let port = socket
             .local_addr()
             .map_err(|e| format!("ask the listener its port: {e}"))?
@@ -229,6 +274,30 @@ impl Listener {
             self.lines().len()
         ))
     }
+}
+
+/// Hold this socket's receive buffer to `bytes`, so what a peer that stops
+/// reading can absorb is this test's number and not the runner's.
+fn clamp_receive_buffer(socket: &TcpListener, bytes: usize) -> Result<(), String> {
+    let size = bytes as libc::c_int;
+    // SAFETY: `socket` owns the descriptor for the whole call, and the pointer
+    // and length describe the one `c_int` `SO_RCVBUF` is documented to take.
+    let set = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            std::ptr::addr_of!(size).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if set != 0 {
+        return Err(format!(
+            "hold the listener's receive buffer to {bytes} bytes: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 /// One boot's image, built with the stream's address on it, and where its log
@@ -627,6 +696,13 @@ pub fn unreachable(
 /// visible to [`is_subsequence_of`] wherever it happened. Ending the arm at the
 /// stall instead puts every such cut on the last line, where a comparison can
 /// no longer tell a truncation from the connection's own end.
+///
+/// **Every buffer the storm has to outweigh is a number this test knows**:
+/// [`BELOW_THE_QUEUE`] against [`OFFERED_BY_THE_MARK`], with the peer's own
+/// window held at [`STALLED_PEER_WINDOW`] rather than left to the runner. A
+/// hosted runner auto-tunes it into the megabytes, absorbs the whole storm, and
+/// the guest never refuses a line — which is this arm passing on one host and
+/// failing on another rather than measuring anything.
 pub fn stalled_peer(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -657,10 +733,21 @@ pub fn stalled_peer(
 
     qemu::await_marker(&mut guest, &mut console, "logstorm done t=", "the storm to run out")?;
 
+    // **Everything under the queue is full by here**: [`OFFERED_BY_THE_MARK`]
+    // against [`BELOW_THE_QUEUE`], which the constant assertion beside them
+    // holds. From this line on, whatever the machine offers can only be
+    // refused.
+    qemu::await_marker(
+        &mut guest,
+        &mut console,
+        ROTATION_MARK,
+        "the boot's log to outweigh every buffer under the stream's queue",
+    )?;
+
     // **The guest goes on working**, which is the claim a peer that stopped
     // reading tests and a peer that never answered does not: this one has the
-    // machine's own writer blocked on it, and the job is also the time `logd`
-    // needs to offer the storm past every buffer under the queue.
+    // machine's own writer blocked on it. The job is also the window in which
+    // the refusals pile up, and it is an event rather than a sleep.
     let result = guest.run_test("test_rs_empty_dir_stat", Duration::from_secs(60));
     if result.exit_code != Some(0) {
         return Err(format!(
@@ -668,18 +755,6 @@ pub fn stalled_peer(
             result.exit_code, result.stdout
         ));
     }
-
-    // **Wait until the queue has provably refused something before releasing
-    // the peer.** `logd` rotates every `MAX_LOG_BYTES`, and it offers each line
-    // to the stream as it writes it, so the third rotation is three mebibytes
-    // offered — past everything under the queue, which holds about 2.7 MiB
-    // between the pipe, netd's send buffer and the host's receive window.
-    qemu::await_marker(
-        &mut guest,
-        &mut console,
-        "_0004.log",
-        "the boot's log to pass three mebibytes",
-    )?;
 
     // The peer reads again, and the machine stays up until the backlog it was
     // holding has gone past. Everything the stall cost is then in the middle of
