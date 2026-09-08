@@ -326,7 +326,7 @@ impl PciDevice {
         }
         cap.write_u16(msi.data(), data as u16);
         if let Some(mask) = msi.mask() {
-            cap.write_u32(mask, msi::UNMASKED);
+            cap.write_u32(mask, 0);
         }
         cap.write_u16(msi::MESSAGE_CONTROL, msi::Msi::enabled(control));
         self.report_message(
@@ -337,19 +337,15 @@ impl PciDevice {
         true
     }
 
-    /// Put MSI back off: the counterpart of [`Self::disable_msix`], and what a
-    /// claimed MSI function has in place of masking a table entry.
+    /// Put MSI back off: the counterpart of [`Self::disable_msix`].
     ///
-    /// The mask first where the function implements one, because that is the
-    /// per-vector lever and the one MSI-X's own hand-back uses; the enable bit
-    /// after, because every function has that one. A function still delivering
-    /// once its holder is gone writes its message into a slot with no reader.
+    /// The enable bit alone, which every function has. The per-vector mask an
+    /// arming cleared stays clear: a function whose Mask bit this set would owe
+    /// a message on the set-to-clear transition a later arming makes of it, with
+    /// its Pending bit set (PCIe §7.7.1.7).
     pub fn disable_msi(&self) {
         let Some(cap) = self.capabilities().find(|c| c.id() == msi::CAP_ID) else { return };
         let control = cap.read_u16(msi::MESSAGE_CONTROL);
-        if let Some(mask) = msi::Msi::decode(control).mask() {
-            cap.write_u32(mask, msi::MASKED);
-        }
         cap.write_u16(msi::MESSAGE_CONTROL, msi::Msi::disabled(control));
     }
 

@@ -27,3 +27,45 @@ pub mod caps;
 pub mod express;
 pub mod msi;
 pub mod msix;
+
+/// Which of a function's two message capabilities a claim may be armed on.
+///
+/// **A function that publishes MSI-X is armed on MSI-X or on nothing.** Its
+/// table and its PBA live in one of its BARs, and that BAR is withheld from the
+/// holder only where this kernel armed the table itself — so a fall back to MSI
+/// would hand the BAR over with the table still inside it, and a holder that can
+/// write a table entry can point the device's write at any address the LAPIC
+/// decodes. MSI is for a function that publishes no table at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mechanism {
+    Msix,
+    Msi,
+}
+
+/// `None` for a function that publishes neither capability: nothing to arm.
+pub fn mechanism(publishes_msix: bool, publishes_msi: bool) -> Option<Mechanism> {
+    match (publishes_msix, publishes_msi) {
+        (true, _) => Some(Mechanism::Msix),
+        (false, true) => Some(Mechanism::Msi),
+        (false, false) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole of the rule: what a function publishes decides this, and
+    /// whether the arming then succeeded may not enter into it.
+    #[test]
+    fn a_function_that_publishes_msix_is_never_offered_msi() {
+        assert_eq!(mechanism(true, true), Some(Mechanism::Msix));
+        assert_eq!(mechanism(true, false), Some(Mechanism::Msix));
+    }
+
+    #[test]
+    fn msi_is_for_a_function_with_no_table_in_a_bar() {
+        assert_eq!(mechanism(false, true), Some(Mechanism::Msi));
+        assert_eq!(mechanism(false, false), None);
+    }
+}

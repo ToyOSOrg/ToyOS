@@ -17,9 +17,10 @@
 //!
 //! **The BAR holding the MSI-X table or PBA is never mapped**: a holder that
 //! could rewrite the table could point the device's message at any address the
-//! LAPIC decodes. An MSI function's message is in config space instead, which
-//! is read-only from userland, so it needs no BAR withheld — the same rule
-//! reaching a different register file, not a weaker one.
+//! LAPIC decodes. **So a function that publishes MSI-X is armed on MSI-X or
+//! refused**, and MSI is armed only where there is no table in a BAR at all:
+//! its message is a word of config space, which has no write path from
+//! userland.
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding
@@ -38,7 +39,8 @@
 //! `pci_function_is_exclusive`, `NoInterrupt` is `virtio_net_no_msix`,
 //! `Untranslated` is `iommu_virtio_platform`'s no-unit arm, the domain is
 //! `userdev_dma_fault`, and `SYS_DEVICE_REG_READ`'s bound is netd's own
-//! `config_space_is_bounded`. `Ambiguous`, `KernelDriven`, `Exhausted`, every
+//! `config_space_is_bounded`, which reads the absence of a write path too.
+//! `MsixUnusable`, `Ambiguous`, `KernelDriven`, `Exhausted`, every
 //! window refusal, and every bound `SYS_DEVICE_BAR_MAP` and
 //! `SYS_DEVICE_DMA_ALLOC` check are refused here and read by nothing: a
 //! registration of them waits on a boot config whose own test binary holds a
@@ -58,7 +60,7 @@ use toyos_abi::boot::MemoryMapEntry;
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
-use toyos_pci::{bar, express, msix};
+use toyos_pci::{bar, express, mechanism, msi, msix, Mechanism};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::PciDevice;
@@ -124,68 +126,20 @@ struct Grant {
     bytes: u64,
 }
 
-/// How a claimed function was made to speak, and what it takes to silence it.
-///
-/// **The driver above the boundary cannot tell which one it got, and does not
-/// care**: both deliver [`VECTORS`]`[slot]` into the same [`Interrupt`], and the
-/// claim answers the same handle either way. What differs is where the message
-/// lives — an MSI-X table entry in a mapping this kernel keeps for itself, or a
-/// word of config space, which has no write path from userland at all — and so
-/// what a hand-over back has to write to stop it.
+/// How a claimed function was made to speak. Both deliver [`VECTORS`]`[slot]`
+/// into the same [`Interrupt`] and the claim answers the same handle either way.
 enum Armed {
     /// This function's one MSI-X table entry, mapped for the kernel alone.
     Msix(Mmio),
-    /// MSI: the message is in this function's own config space and nothing was
-    /// mapped for it.
+    /// The message is a word of this function's own config space, and nothing
+    /// was mapped for it.
     Msi,
-}
-
-impl Armed {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Msix(_) => "MSI-X",
-            Self::Msi => "MSI",
-        }
-    }
-
-    /// Stop this function delivering, for a holder that is gone.
-    fn silence(&self, pci: &PciDevice) {
-        match self {
-            Self::Msix(entry) => entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED),
-            Self::Msi => pci.disable_msi(),
-        }
-    }
-
-    /// Put the capability itself back off, for a hand-over that armed a vector
-    /// and was then refused: a function left enabled at a vector nobody holds
-    /// delivers into a slot with no reader.
-    fn undo(&self, pci: &PciDevice) {
-        match self {
-            Self::Msix(_) => pci.disable_msix(),
-            Self::Msi => pci.disable_msi(),
-        }
-    }
-}
-
-/// MSI-X first, then MSI, and neither is somewhere a holder can write.
-///
-/// **MSI-X first because it is the one this kernel can mask per vector**, and
-/// because a function that publishes it is one whose table BAR is then kept out
-/// of what the holder maps. MSI is not a lesser mechanism — the device performs
-/// the same write to the same address — and the parts that have only it are not
-/// rare: the ThinkPad's onboard I219 is one, which is where this arm came from.
-fn arm(pci: &PciDevice, vector: u8) -> Option<Armed> {
-    if let Some(entry) = pci.enable_msix(vector) {
-        return Some(Armed::Msix(entry));
-    }
-    pci.enable_msi(vector).then_some(Armed::Msi)
 }
 
 /// What a live slot drives. The ISR never reads this.
 struct Bound {
     pci: PciDevice,
     space: DeviceSpace,
-    /// How this function was made to speak, and what silences it.
     armed: Armed,
     id: PciId,
     /// Where each mappable BAR was put, and how much of it the function
@@ -390,6 +344,7 @@ fn window(assigned: u64, ceiling: u64) -> (u64, u64) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Refusal {
     NoInterrupt,
+    MsixUnusable,
     Untranslated(IommuError),
     NoWindow,
     BarUnsizable(u8),
@@ -405,6 +360,11 @@ impl core::fmt::Display for Refusal {
                 f,
                 "neither its MSI-X nor its MSI could be armed, and a claim with no interrupt \
                  is a driver that would never be told anything"
+            ),
+            Self::MsixUnusable => write!(
+                f,
+                "it publishes MSI-X and this kernel could not arm it, so its table is in a BAR \
+                 nothing here can name to withhold, and MSI is not a fallback from that"
             ),
             Self::Untranslated(why) => write!(
                 f,
@@ -482,11 +442,10 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
                 func: pci.func,
                 _pad: [0; 5],
             };
-            // Read off the hand-over rather than restated: which mechanism a
-            // function was armed on is the first thing a machine that never
-            // heard from its device is asked, and it is not a thing the driver
-            // above the boundary can see.
-            let armed = bound.armed.name();
+            let armed = match &bound.armed {
+                Armed::Msix(_) => "MSI-X",
+                Armed::Msi => "MSI",
+            };
             *BOUND[slot].lock() = Some(bound);
             IRQ[slot].clear();
             crate::iommu::note_user_owned(pci.bus, pci.dev, pci.func, Some(slot));
@@ -544,7 +503,21 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // mechanism can be armed on is one no holder could ever be told anything
     // about, and `virtio_net_no_msix` reads that refusal off the console *and*
     // the absence of any BAR line after it.
-    let armed = arm(&pci, VECTORS[slot]).ok_or(Refusal::NoInterrupt)?;
+    //
+    // **The choice is what the function publishes, never what an arming
+    // answered**: a function whose MSI-X this kernel could not arm is refused
+    // rather than handed over on MSI, because `place_bars` withholds the table's
+    // BAR only for a function whose table [`msix_bar`] could name.
+    let publishes = |id| pci.capabilities().any(|cap| cap.id() == id);
+    let armed = match mechanism(publishes(msix::CAP_ID), publishes(msi::CAP_ID)) {
+        Some(Mechanism::Msix) => {
+            Armed::Msix(pci.enable_msix(VECTORS[slot]).ok_or(Refusal::MsixUnusable)?)
+        }
+        Some(Mechanism::Msi) => {
+            pci.enable_msi(VECTORS[slot]).then_some(Armed::Msi).ok_or(Refusal::NoInterrupt)?
+        }
+        None => return Err(Refusal::NoInterrupt),
+    };
 
     // From here a refusal has to undo: a vector is armed, and the arms below
     // move the function's BARs.
@@ -564,7 +537,12 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             })
         }
         Err(why) => {
-            armed.undo(&pci);
+            // A function left enabled at a vector nobody holds delivers into a
+            // slot with no reader.
+            match armed {
+                Armed::Msix(_) => pci.disable_msix(),
+                Armed::Msi => pci.disable_msi(),
+            }
             Err(why)
         }
     }
@@ -797,7 +775,12 @@ pub fn release(slot: usize) {
 
 fn tear_down(slot: usize, bound: Bound) {
     bound.pci.disable_bus_master();
-    bound.armed.silence(&bound.pci);
+    // The entry masked where there is a table to mask, the capability off where
+    // there is not.
+    match &bound.armed {
+        Armed::Msix(entry) => entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED),
+        Armed::Msi => bound.pci.disable_msi(),
+    }
     crate::iommu::note_user_owned(bound.pci.bus, bound.pci.dev, bound.pci.func, None);
     for grant in bound.grants.iter() {
         if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
