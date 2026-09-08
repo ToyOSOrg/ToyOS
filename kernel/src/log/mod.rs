@@ -47,23 +47,109 @@ const SHUTDOWN_DURABLE: Budget = Budget::of(
     "the shutdown's last lines are on the console only, and it says so",
 );
 
+/// How much of this boot's log the volume had when the machine was given back.
+#[derive(Clone, Copy)]
+pub struct Durability {
+    /// The newest record committed when the wait began.
+    want: u64,
+    /// The newest record the volume was known to hold when it ended.
+    had: u64,
+}
+
 /// Waits, bounded, for `/system/bin/logd` to make committed records durable.
-pub fn wait_for_durable() {
+#[must_use]
+pub fn wait_for_durable() -> Durability {
     // Snapshotted once: a re-read would never be satisfied while still committing.
     let want = read::newest_committed_at_ns();
     let deadline = crate::clock::nanos_since_boot().saturating_add(SHUTDOWN_DURABLE.nanos());
-    while user::durable_ns() < want {
+    loop {
+        let had = user::durable_ns();
+        if had >= want {
+            return Durability { want, had };
+        }
         if crate::clock::nanos_since_boot() >= deadline {
             crate::log!(
                 "shutdown: /log did not answer in {}ms, so this shutdown's last lines are on the \
                  console only",
                 SHUTDOWN_DURABLE.duration().millis()
             );
-            return;
+            return Durability { want, had };
         }
         // Yields, never spins: at `--smp 1` this is the only CPU logd can run on.
         crate::scheduler::yield_now();
     }
+}
+
+/// The newest records the account carries whole. The rest are a count: a page
+/// that spent itself on a log tail has none left for the reset's own account,
+/// which is written under this one.
+const ACCOUNTED_RECORDS: usize = 16;
+
+/// Seal what the log volume did not get onto the black box, which is the one
+/// channel a boot's own tail has left.
+///
+/// **A file cannot report on its tail.** Every line saying `/log` stopped
+/// taking bytes — `logd`'s give-up line, [`wait_for_durable`]'s own record —
+/// is written after the point it stopped taking them, and on a machine with no
+/// serial port a console reaches nothing. So the count, the span and the newest
+/// records the volume never got go on the page the next loader pass prints, and
+/// a boot whose log is complete says that in the same words rather than by
+/// silence.
+///
+/// Called from the quiesce path under [`crate::blackbox::record_done`], where
+/// the page already carries this boot's seal and every lock is still ordinary.
+pub fn account_for_durability(seen: Durability) {
+    struct Count(usize);
+    impl read::RecordSink for Count {
+        fn put(&mut self, _record: &LogRecord) -> bool {
+            self.0 += 1;
+            true
+        }
+    }
+    struct Tail<'a> {
+        out: &'a mut dyn core::fmt::Write,
+        left: usize,
+    }
+    impl read::RecordSink for Tail<'_> {
+        fn put(&mut self, record: &LogRecord) -> bool {
+            // No prefix of its own: the loader that prints this page puts one
+            // on every line it reads back.
+            let _ = writeln!(self.out, "log-tail: {record}");
+            self.left -= 1;
+            self.left > 0
+        }
+    }
+
+    // Nothing committed above what the volume holds is the whole account: the
+    // window below is empty and the count would be zero.
+    if seen.had >= seen.want {
+        crate::blackbox::append(|out| {
+            let _ = writeln!(
+                out,
+                "log: /log holds every record this boot committed, to {} ms",
+                seen.want / 1_000_000
+            );
+        });
+        return;
+    }
+    // Exclusive of `had`: that record is on the volume. Counted in its own pass
+    // because the tail below stops early and a count that stopped with it would
+    // report the bound rather than the shortfall.
+    let from = seen.had.saturating_add(1);
+    let mut count = Count(0);
+    read::snapshot_committed(from, seen.want, &mut count);
+    crate::blackbox::append(|out| {
+        let _ = writeln!(
+            out,
+            "log: /log holds this boot to {} ms and {} record(s) committed after that reached no \
+             volume; the newest {} follow",
+            seen.had / 1_000_000,
+            count.0,
+            count.0.min(ACCOUNTED_RECORDS),
+        );
+        let mut tail = Tail { out, left: ACCOUNTED_RECORDS };
+        read::snapshot_committed(from, seen.want, &mut tail);
+    });
 }
 
 /// Every shard a reader can reach, cpu0 first; `None` is a CPU this machine lacks.

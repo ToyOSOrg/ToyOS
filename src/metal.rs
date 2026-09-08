@@ -712,7 +712,7 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // the boot deadline is still armed behind that. It reaches no device
     // register and writes no firmware state; the kernel implies `WEDGE_ARM`
     // behind it, so the boot cannot end itself before its own bound.
-    ("hard-lockup-probe", Flash::Ok),
+    (LOCKUP_ARM, Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(
@@ -732,6 +732,12 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
 /// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and
 /// [`arms_are_admissible`] refuses an image carrying it with no bound to end it.
 pub const WEDGE_ARM: &str = "wedge-before-reset";
+
+/// The arm that stops one CPU harder — interrupts off, inside a lock — which
+/// only `kernel/src/hardlockup`'s NMI sample reaches. A second name rather than
+/// a second judge: what it owes a readback is exactly what [`WEDGE_ARM`] owes,
+/// and which bound sealed the page is the page's own first line to say.
+pub const LOCKUP_ARM: &str = "hard-lockup-probe";
 
 /// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.
 pub fn flash_ruling(name: &str) -> Option<Flash> {
@@ -1556,12 +1562,14 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         if let Some(said) = reported_and_booted_nothing(&loader, &log) {
             return Err(Refusal::ReportedAndBootedNothing { said });
         }
-        // **An image armed to stop itself is judged by the record its deadline
+        // **An image armed to stop itself is judged by the record its own bound
         // sealed, not by the word a shutdown writes.** Read off what the image
         // is armed with rather than off its label or its readback directory: the
         // arm comes out of the artifact, so no boot can be judged as something
-        // it was not flashed as.
-        if armed.iter().any(|name| name == WEDGE_ARM) {
+        // it was not flashed as. *Which* bound sealed it is the page's to say
+        // and not this list's — the arm says a bound was staged, and two of them
+        // can reach a staged boot.
+        if armed.iter().any(|name| name == WEDGE_ARM || name == LOCKUP_ARM) {
             last = Some(wedged_boot(&loader, &log)?);
             continue;
         }
@@ -1570,33 +1578,45 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     Ok(last)
 }
 
-/// What an image armed with [`WEDGE_ARM`] owes instead of `Rebooting.`, and the
+/// What an image armed to stop itself owes instead of `Rebooting.`, and the
 /// `Boot: complete` it still owes as well.
 ///
 /// **Both halves, because either alone passes for the wrong reason.** A boot
 /// that reached `Rebooting.` was never wedged, and a boot with no sealed record
-/// is one somebody's hand ended — which is the whole thing this arm exists to
+/// is one somebody's hand ended — which is the whole thing these arms exist to
 /// prove cannot happen any more.
+///
+/// **The record's own first line is what says which bound ended the machine**,
+/// and nothing else may: an arm staged for one of them is still a machine the
+/// other can reach first, and the T14 read back a `hard-lockup-probe` boot as a
+/// failure for exactly that reason — this judge knew one line and the page
+/// carried the other.
 fn wedged_boot(loader: &str, log: &str) -> Result<u64, Refusal> {
     if log.contains(bootlog::REBOOTING) {
         return Err(Refusal::Wedge {
             why: "it reached the shutdown's own last word, so nothing about it was wedged",
         });
     }
-    if !loader.contains(bootlog::DEADLINE_EXPIRED) {
+    let Some(said) = sealed_by(loader) else {
         return Err(Refusal::Wedge {
-            why: "the pass after the reset reports no deadline, so what ended this boot was not \
-                  the kernel's own bound",
+            why: "the pass after the reset reports neither of this kernel's bounds, so what \
+                  ended this boot was not one of them",
         });
-    }
+    };
     let ms = bootlog::boot_millis(log).ok_or(Refusal::Wedge {
-        why: "the kernel wrote no `Boot: complete`, so this boot stopped before the phase the \
-              deadline is armed for",
+        why: "the kernel wrote no `Boot: complete`, so this boot stopped before the phase these \
+              bounds are armed for",
     })?;
-    if let Some(said) = loader.lines().find(|l| l.contains(bootlog::DEADLINE_EXPIRED)) {
-        println!("{}", said.trim_start_matches("| ").trim());
-    }
+    println!("{}", said.trim_start_matches("| ").trim());
     Ok(ms)
+}
+
+/// The line the pass after the reset printed about whichever bound sealed the
+/// page, or `None` where it printed neither.
+fn sealed_by(loader: &str) -> Option<&str> {
+    loader
+        .lines()
+        .find(|l| l.contains(bootlog::DEADLINE_EXPIRED) || l.contains(bootlog::LOCKED_UP))
 }
 
 /// The lateness of a deadline that expired, in milliseconds past the bound it
@@ -1611,6 +1631,22 @@ pub fn deadline_lateness_ms(loader: &str) -> Option<u64> {
     let (_, rest) = said.split_once("a bound of ")?;
     let (bound, rest) = rest.split_once(" ms, reached at ")?;
     let (reached, _) = rest.split_once(" ms,")?;
+    reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
+}
+
+/// The same for the other bound: how far past its own bound the hard-lockup
+/// sample was when it found the CPU stuck.
+///
+/// **A number of its own and not [`deadline_lateness_ms`]'s**, because what
+/// bounds it is a different thing: this one lands within one of that detector's
+/// sample periods rather than within one timer period, so a ceiling written for
+/// the poll would say nothing about the counter.
+pub fn lockup_lateness_ms(loader: &str) -> Option<u64> {
+    let said = loader.lines().find(|l| l.contains(bootlog::LOCKED_UP))?;
+    let (_, rest) = said.split_once("has taken no interrupt for ")?;
+    let (reached, rest) = rest.split_once(" ms,")?;
+    let (_, rest) = rest.split_once("Its bound is ")?;
+    let (bound, _) = rest.split_once(" ms")?;
     reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
 }
 
@@ -2368,10 +2404,36 @@ mod tests {
         assert!(why.contains("nothing about it was wedged"), "{why}");
 
         let why = wedged_boot("no record here\n", booted).unwrap_err().to_string();
-        assert!(why.contains("the pass after the reset reports no deadline"), "{why}");
+        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
 
         let why = wedged_boot(&sealed, "nothing at all\n").unwrap_err().to_string();
         assert!(why.contains("no `Boot: complete`"), "{why}");
     }
 
+    /// **The record's own first line is what says which bound ended the boot.**
+    /// Both of them seal `WEDGED` and either can reach a staged machine first,
+    /// so a judge that knew only one read the T14's `hard-lockup-probe` boot —
+    /// which the detector ended exactly as designed — as a failure.
+    #[test]
+    fn either_bounds_record_is_a_wedged_boots_pass() {
+        let booted = "[kernel 1.200 cpu0] Boot: complete (1200ms)\n";
+        let locked = format!(
+            "Previous boot's panic: the last boot read WEDGED\n| {}: cpu7 has taken no interrupt \
+             for 60004 ms, with `IF` clear at every sample in that span. Its bound is 60000 ms.\n\
+             |   rip=0xffff800060a5903f  <kernel::sync::Lock<..>>::lock+0x12f\n",
+            bootlog::LOCKED_UP
+        );
+        assert_eq!(wedged_boot(&locked, booted), Ok(1200));
+        assert_eq!(lockup_lateness_ms(&locked), Some(4));
+        // Each bound's lateness is read off its own record and off no other.
+        assert_eq!(deadline_lateness_ms(&locked), None);
+        let expired = format!(
+            "| {}: a bound of 120000 ms, reached at 120153 ms, with this machine in `complete`.\n",
+            bootlog::DEADLINE_EXPIRED
+        );
+        assert_eq!(lockup_lateness_ms(&expired), None);
+        // A sample that landed before the bound is not a negative lateness.
+        let early = locked.replace("for 60004 ms", "for 59000 ms");
+        assert_eq!(lockup_lateness_ms(&early), None);
+    }
 }

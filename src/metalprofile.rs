@@ -21,6 +21,39 @@ use serde::Deserialize;
 /// Where the committed file lives, relative to the repository root.
 pub const PATH: &str = "tests/metal-profile.toml";
 
+/// What the boot around a job list costs it, in milliseconds.
+///
+/// The runner's bound is measured from boot rather than from its first job
+/// (`userland/test-runner`'s deadline reads `clock_nanos`), so everything
+/// before the list comes off the bound before the members get any of it — and
+/// the `reboot` job the image derivation appends comes off the other end.
+///
+/// A tenth of the bound, derived rather than measured, and several times what
+/// either end has ever cost: `boot.*.complete_ms` reads 1,199-1,267 ms on every
+/// T14 boot this suite has taken, the runner itself spawns about 500 ms after
+/// that, and `reboot`'s own job spawned 122 ms before `Rebooting.` on run 24's
+/// `ccorpus`. Nine tenths is what the members may spend.
+pub const AROUND_THE_LIST_MS: u64 = toyos_tco::JOB_BOUND_MS / 10;
+
+/// The name under which one boot's per-member allowance is priced.
+pub fn job_ms_row(boot: &str) -> String {
+    format!("list.{boot}.job_ms")
+}
+
+/// How many members a job list may carry when one member is allowed `job_ms`.
+///
+/// **The runner's bound ends the whole list and not the job it is inside**,
+/// which is why a suite that runs seventy-two binaries on one boot needs this
+/// step at all: past this count the members never run, and the boot reports
+/// them as missing exit records rather than as a list nobody sized.
+pub fn members_per_boot(job_ms: u64) -> usize {
+    let spendable = toyos_tco::JOB_BOUND_MS.saturating_sub(AROUND_THE_LIST_MS);
+    // A member priced above the whole allowance still gets a boot of its own:
+    // one member per boot is the smallest a list can be cut to, and the boot
+    // then reds on its own measured cost rather than on being unsplittable.
+    usize::try_from(spendable / job_ms.max(1)).unwrap_or(usize::MAX).max(1)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
@@ -120,6 +153,15 @@ impl Profile {
         self.number.iter().find(|row| row.name == name)
     }
 
+    /// How many members `boot`'s job list may carry, from the allowance this
+    /// file prices for it. A boot with no allowance is refused, like any other
+    /// unpriced number: a list nobody has priced cannot be sized to the bound.
+    pub fn members_per_boot(&self, boot: &str) -> Result<usize, Unfit> {
+        let name = job_ms_row(boot);
+        let row = self.row(&name).ok_or(Unfit::Unpriced(name))?;
+        Ok(members_per_boot(row.ceiling))
+    }
+
     /// One reading against its row. A name with no row is refused.
     pub fn judge(&self, name: &str, value: u64) -> Result<(), Unfit> {
         let Some(row) = self.row(name) else { return Err(Unfit::Unpriced(name.to_string())) };
@@ -200,5 +242,69 @@ mod tests {
             ),
             Err(Unfit::Duplicate(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod sizing_tests {
+    use super::*;
+
+    fn root() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// **The overrun this rule exists for, in the machine's own numbers.**
+    ///
+    /// Run 24's `shared` boot ran 72 members at a measured 845 ms each. That is
+    /// 60.8 s of members inside a 60 s bound, so the runner reset the machine
+    /// with 47 of them unrun — and each was reported as a missing exit record
+    /// rather than as a list too long for the bound. The committed allowance
+    /// cuts that list where the bound does.
+    #[test]
+    fn run_24s_shared_list_does_not_fit_one_boot() {
+        let profile = Profile::load(root()).expect(PATH);
+        let per = profile.members_per_boot("shared").expect("shared is priced");
+        assert!(
+            per < 72,
+            "the allowance leaves room for {per} members and run 24 tried 72 of them in one boot"
+        );
+        // Two chunks and not three: a list cut finer costs another minute of
+        // the machine for nothing.
+        assert_eq!(72_usize.div_ceil(per), 2, "{per} members a boot");
+        let measured = profile.row(&job_ms_row("shared")).and_then(|r| r.measured);
+        assert_eq!(measured, Some(845), "the reading the ceiling is a margin over");
+        assert!(72 * 845 > toyos_tco::JOB_BOUND_MS, "the overrun the rule is derived from");
+    }
+
+    /// `ccorpus` was *green* at 49.5 s of the 60 s bound, and the same rule
+    /// still cuts it: 82 % of a bound is no margin for a slower stick, and the
+    /// price of being wrong is every member after the cut losing its verdict.
+    #[test]
+    fn run_24s_c_corpus_is_cut_although_it_passed() {
+        let profile = Profile::load(root()).expect(PATH);
+        let per = profile.members_per_boot("ccorpus").expect("ccorpus is priced");
+        assert_eq!(118_usize.div_ceil(per), 2, "{per} members a boot");
+    }
+
+    /// A member priced above the whole bound still gets a boot, rather than a
+    /// division that yields zero and a list that can hold nothing.
+    #[test]
+    fn a_member_priced_beyond_the_bound_still_gets_a_boot() {
+        assert_eq!(members_per_boot(toyos_tco::JOB_BOUND_MS * 10), 1);
+        let spendable = toyos_tco::JOB_BOUND_MS - AROUND_THE_LIST_MS;
+        assert_eq!(members_per_boot(spendable), 1);
+        assert_eq!(members_per_boot(spendable / 2), 2);
+    }
+
+    /// A boot whose allowance nobody wrote down is refused, not given the
+    /// bound: the whole point of the row is that a list is cut to a number
+    /// somebody committed.
+    #[test]
+    fn a_boot_with_no_allowance_is_refused() {
+        let profile = Profile::parse("").expect("an empty profile parses");
+        assert_eq!(
+            profile.members_per_boot("nobody"),
+            Err(Unfit::Unpriced("list.nobody.job_ms".to_string()))
+        );
     }
 }

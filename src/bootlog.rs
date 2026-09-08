@@ -32,19 +32,62 @@ pub const DEADLINE_EXPIRED: &str = "the boot deadline expired";
 /// a boot merely slower than its bound, which is what makes that control one.
 pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
 
+/// What the CPU that *stages* that wedge says about the state it arrived in,
+/// also in `kernel/src/deadline.rs`.
+///
+/// **The one line that measures that control's own claim.** It arrives through
+/// the shutdown syscall, and `arch::syscall::gate` masks `IF` for the whole of a
+/// syscall — so a wedge that inherited its state left exactly one CPU per boot
+/// taking no interrupt at all, which is not a wedge but a hard lockup. On the
+/// T14, run 24, that is what ended the boot: [`LOCKED_UP`] on the staging CPU,
+/// half a bound before the deadline. A boot on which no CPU says this is a boot
+/// whose wedge never reached the CPU that asked for it.
+pub const WEDGE_ARRIVED_DEAF: &str =
+    "arrived with interrupts off, through the syscall gate, and takes them again here";
+
 /// What one CPU's own NMI writes into the black box when that CPU has taken no
 /// interrupt for its bound, in `kernel/src/hardlockup/mod.rs`.
 ///
 /// The *other* record a machine that stopped can leave, and which of the two it
-/// left is most of the verdict: [`DEADLINE_EXPIRED`] is a machine that still
-/// took interrupts somewhere and stopped making progress, this one names the
-/// cpu that stopped taking them and where it was standing when it did.
+/// left is most of the verdict: [`DEADLINE_EXPIRED`] is a machine that stopped
+/// making progress while some CPU still took interrupts, and this one names a
+/// single cpu that stopped taking them and where it was standing when it did —
+/// whatever the rest of the machine was doing.
 pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 
 /// What the `hard-lockup-probe` actuator says before its cpu stops answering,
 /// in `kernel/src/hardlockup/probe.rs` — the witness in the sealed record's tail
 /// that this machine was ended by the control that was staged on it.
 pub const LOCKUP_STAGED: &str = "hard-lockup: staged, and only the lockup detector ends this cpu";
+
+/// What the kernel seals under its own `DONE` record about the log volume, in
+/// `kernel/src/log/mod.rs`'s `account_for_durability`. The next loader pass
+/// prints it back under [`PREVIOUS_PANIC`].
+///
+/// **The one reader a boot's own tail has.** `logd` writes the file, so
+/// everything said after the volume stopped taking bytes — `logd`'s give-up
+/// line, the kernel's own `shutdown: /log did not answer` record, every later
+/// `exit:` — is written where no file can carry it, and on a machine with no
+/// serial port a console is nothing. Measured on the T14, run 24's `shared`:
+/// the file's last record was at 23.3 s of a boot that ran to 60 s, and no
+/// channel said so.
+pub const LOG_COMPLETE: &str = "log: /log holds every record this boot committed";
+/// The other half of [`LOG_COMPLETE`]: how far the volume got, and how many
+/// records committed after that reached it. The newest of them follow under
+/// [`LOG_TAIL`].
+pub const LOG_SHORT: &str = "log: /log holds this boot to";
+/// One record the volume never got, on the black-box page.
+pub const LOG_TAIL: &str = "log-tail: ";
+
+/// What the loader says about a boot that reached its own shutdown, in
+/// `bootloader/src/blackbox.rs`'s `State::Done` arm.
+///
+/// **The only boot that owes a log account.** A boot ended by its own deadline
+/// or by the lockup detector never reaches `quiesce`, so its log stops early by
+/// construction and its record is `Wedged` rather than `Done`; asking such a
+/// boot for [`LOG_COMPLETE`] would red the two registrations whose whole
+/// subject is that it stopped.
+pub const HANDED_BACK: &str = "the last boot read DONE";
 
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
@@ -169,6 +212,26 @@ impl fmt::Display for Unfit {
             ),
         }
     }
+}
+
+/// The milliseconds since boot one record line carries.
+///
+/// **Found from the CPU it precedes rather than by position**: the field before
+/// it is the writer's tag, and the two writers disagree about it on purpose —
+/// `logd` puts a wall clock there and the panel puts nothing.
+pub fn record_millis(line: &str) -> Option<u64> {
+    let (before, _) = line.split_once(" cpu")?;
+    // The opening bracket, for the writer that puts no tag before the field.
+    let field = before.split_whitespace().next_back()?.trim_start_matches('[');
+    let (secs, millis) = field.split_once('.')?;
+    let secs: u64 = secs.parse().ok()?;
+    let millis: u64 = millis.parse().ok()?;
+    secs.checked_mul(1_000)?.checked_add(millis)
+}
+
+/// When the last record in `log` was written, in milliseconds since boot.
+pub fn last_record_millis(log: &str) -> Option<u64> {
+    log.lines().rev().find_map(record_millis)
 }
 
 /// The boot's own duration, out of `Boot: complete (123ms)`.
@@ -308,11 +371,15 @@ mod tests {
             ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
             ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
+            ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
             (
                 "kernel/src/hardlockup/probe.rs",
                 format!("PROBE_STAGED: &str = \"{LOCKUP_STAGED}\""),
             ),
+            ("kernel/src/log/mod.rs", format!("\"{LOG_COMPLETE}")),
+            ("kernel/src/log/mod.rs", format!("\"{LOG_SHORT}")),
+            ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
         ] {
             let at = root.join(file);
             let source = std::fs::read_to_string(&at).expect("a kernel module");
@@ -335,5 +402,37 @@ mod tests {
         assert_eq!(boot_millis("[kernel 0.084 cpu0] Boot: storage ready (84ms)\n"), None);
         assert_eq!(boot_millis("Boot: complete (later)\n"), None);
         assert_eq!(boot_millis(""), None);
+    }
+}
+
+#[cfg(test)]
+mod record_time_tests {
+    use super::*;
+
+    /// Both writers' shapes: `logd`'s file carries a wall-clock tag before the
+    /// elapsed field and the panel carries none, and the same reader answers
+    /// for both.
+    #[test]
+    fn a_records_elapsed_field_is_read_past_whatever_tag_precedes_it() {
+        assert_eq!(
+            record_millis("[2026-09-07 22:57:46 3.109 cpu1] exit: a pid=7 code=0 cpu=180ms"),
+            Some(3_109)
+        );
+        assert_eq!(record_millis("[3.109 cpu1] exit: a pid=7 code=0"), Some(3_109));
+        assert_eq!(
+            record_millis("[2026-09-07 22:58:03 20.071 cpu2 tid=1] exit: b tid=1 code=0"),
+            Some(20_071)
+        );
+        // The `cpu=180ms` field is a record's *content*: a reader keying on the
+        // first `cpu` would answer with a duration instead of a timestamp.
+        assert_eq!(record_millis("no timestamp here, cpu=1ms"), None);
+        assert_eq!(record_millis(""), None);
+    }
+
+    #[test]
+    fn the_last_record_is_the_last_line_that_carries_a_time() {
+        let log = "[1.000 cpu0] first\n[2.500 cpu1] second\nnot a record\n";
+        assert_eq!(last_record_millis(log), Some(2_500));
+        assert_eq!(last_record_millis("nothing\n"), None);
     }
 }

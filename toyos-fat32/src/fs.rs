@@ -89,6 +89,10 @@ pub struct File {
     /// flush that records it.
     entry_cluster: Option<Cluster>,
     size: u32,
+    /// The size as it currently stands *in the directory entry*. It differs
+    /// from `size` for exactly as long as the chain covers bytes the entry
+    /// does not — the window [`File::needs_reconcile`] names.
+    entry_size: u32,
     /// Last chain position reached, as (index in chain, cluster).
     hint: Option<(u32, Cluster)>,
 }
@@ -113,6 +117,20 @@ impl File {
 
     pub fn is_empty(&self) -> bool {
         self.size == 0
+    }
+
+    /// Whether stopping now would leave the volume holding clusters this
+    /// handle's directory entry does not reach.
+    ///
+    /// A growing write is two writes to the device — the chain first, the
+    /// entry at [`Fat32::flush_meta`] — and everything between them is a
+    /// volume whose entry names fewer bytes than its chain holds: what
+    /// `fsck_msdos` calls "too many clusters allocated", or, before the first
+    /// flush of a new file, a whole chain no entry reaches. This is true for
+    /// exactly that window, and it is what a caller about to stop writing
+    /// asks before [`Fat32::reconcile`].
+    pub fn needs_reconcile(&self) -> bool {
+        self.entry_size != self.size || self.entry_cluster != self.first_cluster
     }
 }
 
@@ -465,6 +483,7 @@ impl<D: BlockAccess> Fat32<D> {
             first_cluster: node.first_cluster,
             entry_cluster: node.first_cluster,
             size: node.raw.size(),
+            entry_size: node.raw.size(),
             hint: None,
         })
     }
@@ -742,7 +761,32 @@ impl<D: BlockAccess> Fat32<D> {
         raw.set_write_time(time);
         self.write_entry_at(f.loc.entry_offset, &raw)?;
         f.entry_cluster = f.first_cluster;
+        f.entry_size = f.size;
         Ok(())
+    }
+
+    /// Leave the volume consistent for a handle that is about to stop being
+    /// written: no cluster past what its size needs, and the entry naming
+    /// both.
+    ///
+    /// **The repair for the window [`File::needs_reconcile`] describes**, and
+    /// the only call in this crate whose subject is the volume rather than the
+    /// file: the chain, the data and the entry are three device writes in that
+    /// order, so a caller that stops after the first two leaves clusters no
+    /// entry reaches. The handle's own size is what is recorded, because those
+    /// bytes are on the device — a shorter entry would be a volume that agrees
+    /// with itself about data it has.
+    ///
+    /// A caller that does not reach this — a reset, a panic — leaves the
+    /// inconsistency, which is the honest limit: FAT has no journal and this
+    /// crate does not pretend to one.
+    pub fn reconcile(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
+        self.live_entry(f)?;
+        // Before the entry: an entry naming a size the chain does not cover is
+        // a reader walking off the end of a chain, which is worse than the
+        // slack this is here to remove.
+        self.shrink_chain(f, f.size as u64)?;
+        self.flush_meta(f, time)
     }
 
     /// The device byte ranges holding a file's data, coalesced.
@@ -811,6 +855,7 @@ impl<D: BlockAccess> Fat32<D> {
             first_cluster: None,
             entry_cluster: None,
             size: 0,
+            entry_size: 0,
             hint: None,
         })
     }

@@ -1715,7 +1715,7 @@ fn shared_metal(
         .partition(|name| ACTUATOR_TESTS.contains(&name.as_str()));
     vec![
         metal::SharedBoot {
-            boot: "shared",
+            boot: "shared".to_string(),
             config: "tests/testcases",
             params: &[],
             features: &[],
@@ -1733,7 +1733,7 @@ fn shared_metal(
         // where every binary could call it would stop being the shipping
         // machine for the other seventy.
         metal::SharedBoot {
-            boot: "shared-debug",
+            boot: "shared-debug".to_string(),
             config: "tests/testcases",
             params: &[],
             features: toyos_build::build::TEST_KERNEL,
@@ -1852,7 +1852,7 @@ fn c_corpus_metal(
         jobs.push(case.clone());
     }
     metal::SharedBoot {
-        boot: "ccorpus",
+        boot: "ccorpus".to_string(),
         config: "tests/testcases",
         params: &[],
         features: &[],
