@@ -840,6 +840,12 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         for line in &finding.lines {
             println!("{line}");
         }
+        // The file and not the console: `blackbox::tail` says what the
+        // firmware's own scroll costs this machine, and every reader of these
+        // lines reads them off the stick.
+        for line in &finding.filed {
+            loaderlog::line(format_args!("{line}"));
+        }
         if finding.ends_the_chain {
             // The last boot is accounted for, so this pass boots no kernel.
             end_this_pass(&system_table, exit_event);

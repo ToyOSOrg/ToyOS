@@ -102,6 +102,17 @@ pub const LOADER_GOP_LINE: &str = "GOP: mode";
 pub const BLACKBOX_HEAD: &str = "Black box:";
 pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
 
+/// What the loader prints in place of a record's tail, with the count of the
+/// records it filed instead.
+///
+/// **The firmware's console is not a channel a log ring may be sent through.**
+/// It scrolls a 1080p panel by moving the whole frame, about three lines a
+/// second on the T14, so the ring tail of a wedged boot cost 60-70 s of every
+/// such boot's turnaround to render what `loader.log` already held. The file
+/// still carries every line; the screen carries this one.
+pub const TAIL_IN_THE_FILE: &str =
+    "Black box: that record's log ring is in loader.log, not on a console the firmware scrolls:";
+
 /// The loader's last line on a pass that read that page and boots no kernel,
 /// which is what tells a chain that ended from one that went round again —
 /// [`LOADER_LAST_LINE`] is the other.
@@ -360,6 +371,7 @@ mod tests {
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_GOP_LINE}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),
+            ("bootloader/src/blackbox.rs", format!("\"{TAIL_IN_THE_FILE}\"")),
         ];
         for (file, rhs) in wanted {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
