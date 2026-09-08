@@ -368,6 +368,91 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry]) {
         machine.wide.0,
         machine.wide.1,
     );
+    let empty = machine.narrow.0 == 0;
+    let taken = machine.decoded.clone();
+    drop(machine);
+    // Only on the machine where it is owed. A boot whose low space has room
+    // says nothing about it, and a survey printed every time would be thirty
+    // lines of a log that has one channel off this bench.
+    if empty {
+        survey_low_space(devices, maps, &taken);
+    }
+}
+
+/// What is left below 4 GiB, said out loud on the machine where nothing is.
+///
+/// **A refusal that says "no room" where the truth is "this module only ever
+/// looks above everything" sends a reader to the wrong place**, and it sent one
+/// there: the ThinkPad's I219 has a 32-bit BAR, [`window`] answered `0x0..0x0`
+/// for the low space, and the refusal read as a full machine. Below 4 GiB there
+/// is nothing above everything — the platform's fixed MMIO is at
+/// [`PLATFORM_MMIO`] — so a 32-bit window is a free run *between* things rather
+/// than a span above them.
+///
+/// This prints the runs, and it accounts for exactly three things and names
+/// them, because what it does not account for is the point: the firmware map,
+/// the BARs this bus has assigned, and every range a bridge forwards to a
+/// secondary bus. **It does not account for the host bridge's own aperture**,
+/// which is what says whether an address below 4 GiB reaches this bus at all,
+/// and which is ACPI's `_CRS` — an AML method this kernel does not run. So a
+/// run below is a candidate for whoever reads the log, never a claim by this
+/// module, and nothing here hands one out.
+fn survey_low_space(devices: &[PciDevice], maps: &[MemoryMapEntry], decoded: &[(u16, u64, u64)]) {
+    let mut taken: Vec<(u64, u64)> = Vec::new();
+    let mut note = |start: u64, end: u64| {
+        let (start, end) = (start.min(PLATFORM_MMIO), end.min(PLATFORM_MMIO));
+        if start < end {
+            taken.push((start, end));
+        }
+    };
+    for entry in maps {
+        note(entry.start, entry.end);
+    }
+    for (_, start, end) in decoded {
+        note(*start, *end);
+    }
+    let mut bridges = 0usize;
+    for device in devices {
+        for forwarded in device.forwarded_below_4g() {
+            bridges += 1;
+            log!(
+                "pcidev: PCI {:02x}:{:02x}.{} forwards {:#x}..{:#x} to its secondary bus",
+                device.bus,
+                device.dev,
+                device.func,
+                forwarded.start,
+                forwarded.end,
+            );
+            note(forwarded.start, forwarded.end);
+        }
+    }
+    taken.sort_unstable();
+    let mut free: Vec<(u64, u64)> = Vec::new();
+    let mut at = 0u64;
+    for (start, end) in taken {
+        if start > at {
+            free.push((at, start));
+        }
+        at = at.max(end);
+    }
+    if at < PLATFORM_MMIO {
+        free.push((at, PLATFORM_MMIO));
+    }
+    free.retain(|(start, end)| end - start >= PAGE_2M);
+    log!(
+        "pcidev: no 32-bit window. Below {PLATFORM_MMIO:#x} the firmware map, this bus's \
+         assigned BARs and {bridges} forwarded bridge window(s) leave {} run(s) of 2 MiB or \
+         more:",
+        free.len(),
+    );
+    for (start, end) in free.iter() {
+        log!("pcidev:   {start:#x}..{end:#x} ({} MiB)", (end - start) / (1024 * 1024));
+    }
+    log!(
+        "pcidev: a run above is a candidate and not a claim — what says whether an address \
+         below 4 GiB reaches this bus at all is the host bridge's own aperture, which is \
+         ACPI's `_CRS`, and this kernel runs no AML"
+    );
 }
 
 /// The span above `assigned` this module may hand out, or an empty one where
@@ -391,7 +476,16 @@ fn window(assigned: u64, ceiling: u64) -> (u64, u64) {
 enum Refusal {
     NoInterrupt,
     Untranslated(IommuError),
-    NoWindow,
+    /// This machine published no window of that width at all. **Not the same
+    /// fact as a window that filled up**, and on the 32-bit side not the same
+    /// fact as a full machine either: `survey_low_space` is what says what is
+    /// actually left below 4 GiB.
+    NoWindow { wide: bool },
+    /// The window exists and every page of it is already cut.
+    WindowFull { wide: bool },
+    /// The function publishes nothing this claim may map — no memory BAR, or
+    /// only the one holding its own MSI-X table.
+    NoMappableBar,
     BarUnsizable(u8),
     BarUnplaceable(u8),
     BarResized(u8),
@@ -411,10 +505,34 @@ impl core::fmt::Display for Refusal {
                 "it would have no address space of its own — {why} — and a process driving \
                  it would be given physical addresses to put in descriptors"
             ),
-            Self::NoWindow => write!(
+            // **Two sentences, because a 32-bit window is a different problem
+            // from a 64-bit one.** Above the highest address firmware described
+            // there is always room in 64 bits and never any in 32: the
+            // platform's fixed MMIO is up there. So the low answer names what
+            // would actually settle it, and the survey beside it in this log
+            // says what the machine has left.
+            Self::NoWindow { wide: true } => write!(
                 f,
-                "this machine has no 2 MiB-aligned address space above what firmware \
+                "this machine has no 2 MiB-aligned 64-bit address space above what firmware \
                  assigned to put a BAR in"
+            ),
+            Self::NoWindow { wide: false } => write!(
+                f,
+                "its BAR is 32-bit and this module has no window below 4 GiB to put one in: \
+                 there is nothing above everything firmware described down there, so a window \
+                 has to be a free run between things — and what says a run is reachable is the \
+                 host bridge's aperture, which is ACPI's `_CRS` and which this kernel does not \
+                 read"
+            ),
+            Self::WindowFull { wide } => write!(
+                f,
+                "the {}-bit window this module cut is full",
+                if *wide { 64 } else { 32 }
+            ),
+            Self::NoMappableBar => write!(
+                f,
+                "it publishes no memory BAR this claim may map, so its holder would have no \
+                 registers to drive it through"
             ),
             Self::BarUnsizable(i) => write!(f, "BAR {i} answers no size to bound a window by"),
             Self::BarUnplaceable(i) => write!(f, "BAR {i} did not take the address it was given"),
@@ -594,8 +712,11 @@ fn place_bars(pci: &PciDevice, table_bar: Option<u8>) -> Result<([u64; BARS], [u
         bar_bytes[index as usize] = size;
         index += step;
     }
+    // Its own refusal and not a window one: nothing about this machine's
+    // address space is wrong, and a reader sent to the window allocator would
+    // find it healthy.
     if bar_bytes.iter().all(|bytes| *bytes == 0) {
-        return Err(Refusal::NoWindow);
+        return Err(Refusal::NoMappableBar);
     }
     Ok((bar_at, bar_bytes))
 }
@@ -714,19 +835,22 @@ fn take_window(pci: &PciDevice, index: u8, wide: bool, span: u64) -> Result<u64,
     if let Some(&(_, _, at, cut)) =
         machine.windows.iter().find(|(w, i, _, _)| *w == who && *i == index)
     {
-        // Refused by its own name and not as `NoWindow`: this machine has the
+        // Refused by its own name and not as a window refusal: this machine has the
         // room, and what changed is the BAR.
         return if cut == span { Ok(at) } else { Err(Refusal::BarResized(index)) };
     }
     let at = {
         let (next, top) = if wide { &mut machine.wide } else { &mut machine.narrow };
+        // Nothing published at all, and a window that filled up, are different
+        // facts: the first is a machine this module never found room on and the
+        // second is one it used up.
         if *next == 0 {
-            return Err(Refusal::NoWindow);
+            return Err(Refusal::NoWindow { wide });
         }
-        let at = next.checked_next_multiple_of(span).ok_or(Refusal::NoWindow)?;
-        let end = at.checked_add(span).ok_or(Refusal::NoWindow)?;
+        let at = next.checked_next_multiple_of(span).ok_or(Refusal::WindowFull { wide })?;
+        let end = at.checked_add(span).ok_or(Refusal::WindowFull { wide })?;
         if end > *top {
-            return Err(Refusal::NoWindow);
+            return Err(Refusal::WindowFull { wide });
         }
         *next = end;
         at
