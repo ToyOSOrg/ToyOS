@@ -24,12 +24,15 @@
 //!   halted below the interrupt layer, or spinning with `IF` clear at once.
 //!   Nothing polled from a running CPU can cover that. **That half is
 //!   [`crate::hardlockup`]**, sampled by an NMI off a performance counter
-//!   rather than polled. The two are armed off this one parameter and compose:
-//!   this bound is a *machine* that has stopped making progress while some CPU
-//!   still takes interrupts, that one is a *CPU* that has stopped taking them,
-//!   and the CPU gets the earlier bound because its record can name where it
-//!   is standing. Whichever fires takes the machine's one seal through
-//!   [`claim_the_reset`].
+//!   rather than polled. The two are armed off this one parameter and compose
+//!   **by scope and not by machine state**: this bound is the whole machine's,
+//!   and that one is any *single CPU*'s, so a machine where seven cores are
+//!   healthy and one has taken no interrupt for its bound is ended by that one
+//!   — measured on the T14, run 24, where it was. The CPU gets the earlier
+//!   bound because its record can name where it is standing, and a core that
+//!   has silently stopped taking interrupts is a machine nothing else in this
+//!   tree would ever report. Whichever fires takes the machine's one seal
+//!   through [`claim_the_reset`].
 //! - **The span before `clock::init`,** which neither of them reaches: there is
 //!   no TSC period to convert a bound with and no counter armed. That seam has
 //!   a name — the sentinel CPU designed and postponed in
@@ -232,6 +235,12 @@ pub const EXPIRED: &str = "the boot deadline expired";
 /// on firing, and no userland instruction runs again. That is strictly worse
 /// than the T14's own wedge, where seven cores were still healthy, and the
 /// deadline has to end it anyway.
+///
+/// **`IF` set is established in [`this_cpu`] and not inherited**, because this
+/// CPU is inside the shutdown syscall and `arch::syscall::gate` masks `IF` for
+/// the whole of one: a wedge that left its own staging CPU deaf would be a
+/// different control than the one this doc describes, and on the T14 it was —
+/// `crate::hardlockup` ended run 24's boot on that CPU at half the bound.
 #[cfg(feature = "boot-actuators")]
 pub fn stage_a_wedge() -> ! {
     log!("{WEDGE_STAGED}: every CPU stops taking scheduler passes from here");
@@ -274,6 +283,20 @@ fn this_cpu() -> ! {
     // already runs in, so what the deadline has to reach is the Ring 0 half of
     // the timer entry and not the Rust half.
     crate::preempt::disable();
+    // **Set, not assumed.** A CPU arriving from `wedge_if_staged` has `IF` on
+    // and one arriving from `stage_a_wedge` does not — that one is inside the
+    // shutdown syscall, and `arch::syscall::gate` masks `IF` for the whole of
+    // one. Inheriting it left exactly one CPU per boot taking no interrupt at
+    // all, which is not the state this control claims and *is* the state
+    // `crate::hardlockup` ends a machine for. Not an `IrqGuard`: nothing here
+    // ever puts it back.
+    let arrived_awake = crate::arch::cpu::interrupts_enabled();
+    crate::arch::cpu::enable_interrupts();
+    log!(
+        "wedge: cpu{} {}",
+        crate::arch::percpu::cpu_id(),
+        if arrived_awake { WEDGE_AWAKE } else { WEDGE_ARRIVED_DEAF },
+    );
     // The hard-lockup control is this wedge and one CPU more, staged here —
     // where every CPU has already left the scheduler — because the idle loop it
     // would otherwise be staged from is one of the things this wedge stops. Two
@@ -285,4 +308,18 @@ fn this_cpu() -> ! {
         core::hint::spin_loop();
     }
 }
+
+/// What the CPU that staged the wedge says about the state it arrived in, and
+/// the one line that measures this control's own claim: it comes through the
+/// syscall gate, so `IF` was masked, and a boot on which no CPU says this is a
+/// boot where the wedge never reached the CPU that asked for it. Judged by the
+/// harness, so it is a constant (`src/bootlog.rs`).
+#[cfg(feature = "boot-actuators")]
+pub const WEDGE_ARRIVED_DEAF: &str =
+    "arrived with interrupts off, through the syscall gate, and takes them again here";
+
+/// What every other CPU says: they arrive from a scheduler pass, which already
+/// had them.
+#[cfg(feature = "boot-actuators")]
+pub const WEDGE_AWAKE: &str = "arrived with interrupts on";
 
