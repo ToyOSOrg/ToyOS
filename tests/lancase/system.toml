@@ -1,0 +1,32 @@
+# The one boot that runs netd in front of the ThinkPad T14's own NIC.
+#
+# The card is the onboard I219 at `00:1f.6`, `8086:15fc`, which is the same
+# register file `tests/e1000case`'s 82574L has — so what this config changes
+# against that one is the pair of identifiers and nothing else. It is a
+# directory of its own for the reason e1000case is: a program that names a card
+# this machine does not have costs an `init:` refusal line on every boot of the
+# config that does, and no machine has both.
+#
+# Nothing here reaches the internal NVMe. There is no `[disks]` row, and the
+# only device any program on this boot claims is the PCI function named below.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+# The record stream's authority: the address on the boot parameter line is
+# information, and this row is the whole of what can act on it.
+receives = ["netd"]
+
+# netd holds the NIC's PCI function and drives it: the descriptor rings, the
+# register window and the interrupt are its own, and the kernel keeps only the
+# claim. Named by vendor and device rather than by slot, so one row finds the
+# card wherever firmware put it.
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:15fc"]
+
+[programs.test-runner]
+receives = ["netd"]
+syscap = ["logread"]

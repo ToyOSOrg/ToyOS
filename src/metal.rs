@@ -58,6 +58,25 @@ pub fn return_secs() -> u64 {
 
 const POLL_SECS: u64 = 5;
 
+/// How often the machine's own address is pinged while it is not answering
+/// `ssh`.
+const PING_EVERY_SECS: u64 = 1;
+
+/// How long one probe waits for its reply.
+const PING_WAIT_MS: u64 = 1_000;
+
+/// How long the address has to answer *nothing* before a reply counts as this
+/// boot's.
+///
+/// **`ssh` stops answering before the network does.** `reboot` takes `sshd`
+/// down first and the interface some seconds later, so the machine that is
+/// already "down" by this loop's reckoning still answers ICMP for a moment —
+/// and a reply counted there would be the operating system that is leaving,
+/// never the one being flashed. What is looked for is a reply *after* the
+/// address went quiet, which is the window in which the only thing that can be
+/// running is the image this loop wrote.
+const PING_SILENCE_SECS: u64 = 5;
+
 /// How long the boot stick gets to be there again once Ubuntu is up.
 ///
 /// **The bench's own device is the one judge there is of whether a reset left a
@@ -129,6 +148,9 @@ pub enum Refusal {
     /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
     Lid { key: &'static str, got: String },
     Remote { what: String, status: String, stderr: String },
+    /// The machine's name answers no IPv4 address on this host, so the boot
+    /// this loop is about to make could not be reached over the cable at all.
+    Unresolved { host: String, why: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
     /// The machine came back and the boot stick did not: the boot before this
@@ -254,6 +276,11 @@ impl fmt::Display for Refusal {
             Self::Remote { what, status, stderr } => {
                 write!(f, "{what} on the machine {status}: {stderr}")
             }
+            Self::Unresolved { host, why } => write!(
+                f,
+                "{host:?} answers no IPv4 address on this host ({why}), so nothing on the cable \
+                 could be asked whether this boot came up"
+            ),
             Self::Silent { what, secs } => write!(
                 f,
                 "the machine did not {what} within {secs} s, which is longer than every watchdog \
@@ -596,6 +623,28 @@ impl Target {
         Ok(format!("sudo -n {}", words.join(" ")))
     }
 
+    /// The machine's own IPv4 address on this LAN.
+    ///
+    /// **Resolved before the boot, because the boot cannot be asked.** The
+    /// machine's MAC is the same under either operating system, so the lease
+    /// the router hands the flashed image is the one its name already resolves
+    /// to — and the name is resolved through the same router's DNS that issued
+    /// it. The boot's own record of the lease says which address it took, and
+    /// the judge holds the two together; what this gives is an address to ping
+    /// while the boot is up, which is the only window there is.
+    fn address(&self) -> Result<std::net::Ipv4Addr, Refusal> {
+        use std::net::ToSocketAddrs;
+        let unresolved = |why: String| Refusal::Unresolved { host: self.host.clone(), why };
+        (self.host.as_str(), 22u16)
+            .to_socket_addrs()
+            .map_err(|e| unresolved(e.to_string()))?
+            .find_map(|at| match at {
+                std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
+                std::net::SocketAddr::V6(_) => None,
+            })
+            .ok_or_else(|| unresolved("it resolves to IPv6 alone".to_string()))
+    }
+
     /// The one read that decides whether anything is written.
     fn identity(&self) -> String {
         let at = self.node.sysfs();
@@ -936,6 +985,86 @@ fn lid_policy(text: &str) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Whether anything answers at the machine's own address while the machine is
+/// between two operating systems, and how far into that window it first did.
+///
+/// **The one thing this loop can ask a boot that is still running.** Everything
+/// else it reads is on the stick, and the stick is read minutes later, from
+/// Ubuntu; a boot's network exists only while the boot does. The probe is the
+/// host's own `ping`, which is an implementation of ICMP this repository did
+/// not write — so what it establishes about the stack under test is
+/// independent of that stack.
+///
+/// It runs on a thread because the loop is inside `ssh` for whole seconds at a
+/// time waiting for the machine to answer again, and a boot that is up for
+/// twenty of them cannot be sampled between those.
+struct Ping {
+    first: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Ping {
+    /// Begin, now: the caller has just watched the machine stop answering
+    /// `ssh`, and the window this measures starts there.
+    fn start(addr: std::net::Ipv4Addr) -> Self {
+        let first = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mine, theirs) = (std::sync::Arc::clone(&first), std::sync::Arc::clone(&stop));
+        let thread = std::thread::Builder::new()
+            .name("metal-ping".into())
+            .spawn(move || {
+                let began = std::time::Instant::now();
+                let mut quiet_since: Option<std::time::Instant> = None;
+                let silence = std::time::Duration::from_secs(PING_SILENCE_SECS);
+                while !theirs.load(std::sync::atomic::Ordering::SeqCst) {
+                    if ping_once(addr) {
+                        // A reply before the address has been quiet is the
+                        // operating system that is going down, whose `sshd`
+                        // stops before its interface does.
+                        if quiet_since.is_some_and(|at| at.elapsed() >= silence) {
+                            *mine.lock().expect("the ping's answer") =
+                                Some(began.elapsed().as_secs());
+                            return;
+                        }
+                        quiet_since = None;
+                    } else if quiet_since.is_none() {
+                        quiet_since = Some(std::time::Instant::now());
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(PING_EVERY_SECS));
+                }
+            })
+            .expect("the metal loop's ping probe could not be started");
+        Self { first, stop, thread }
+    }
+
+    /// Stop probing, and answer when the first reply after the silence came.
+    fn end(self) -> Option<u64> {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.thread.join();
+        let answer = *self.first.lock().expect("the ping's answer");
+        answer
+    }
+}
+
+/// One probe, whose whole answer is whether the address replied.
+///
+/// **`-W` is milliseconds on this host and seconds on Linux**, and the two
+/// spellings are three orders of magnitude apart: a bound written for one is a
+/// probe that hangs for a quarter of an hour on the other.
+fn ping_once(addr: std::net::Ipv4Addr) -> bool {
+    let wait = if cfg!(target_os = "macos") {
+        PING_WAIT_MS.to_string()
+    } else {
+        PING_WAIT_MS.div_ceil(1_000).to_string()
+    };
+    Command::new("ping")
+        .args(["-n", "-c", "1", "-W", &wait, &addr.to_string()])
+        .stdin(Stdio::null())
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
 /// The loop, over one target.
 struct Driver {
     target: Target,
@@ -1083,9 +1212,20 @@ impl Driver {
     /// **`reboot` is `systemctl` and returns before the machine goes down**, so
     /// the machine is watched down before it is watched back up: a probe that
     /// caught dying Ubuntu would read a stick ToyOS had never booted.
-    fn ride_the_reboot(&self, secs: u64) -> Result<u64, Refusal> {
+    ///
+    /// The window between the two is the only span in which the machine is
+    /// running the image this loop wrote, and [`Ping`] is what asks the cable
+    /// about it while it lasts.
+    fn ride_the_reboot(
+        &self,
+        secs: u64,
+        addr: std::net::Ipv4Addr,
+    ) -> Result<(u64, Option<u64>), Refusal> {
         self.wait(GOING_DOWN_SECS, "go down", false)?;
-        self.wait(secs, "come back", true)
+        let ping = Ping::start(addr);
+        let back = self.wait(secs, "come back", true);
+        let answered = ping.end();
+        Ok((back?, answered))
     }
 
     /// Wait for the log partition's device node, and say how long it took.
@@ -1431,6 +1571,10 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         )));
     };
     let image = admit(asked, &args.target)?;
+    // Before the flash, because a machine whose name answers no address is one
+    // no boot of it could be asked anything over the cable, and that is a
+    // finding about this host rather than about the boot.
+    let address = args.target.address()?;
     // **Before the flash, and before anything can refuse.** Every refusal below
     // returns without reaching `write_readback`, so a directory left holding the
     // last run's files is one a judge reads as this run's — which is how a boot
@@ -1480,8 +1624,15 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         return Ok(None);
     }
 
-    let back = driver.ride_the_reboot(args.wait_secs)?;
+    let (back, pinged) = driver.ride_the_reboot(args.wait_secs, address)?;
     println!("the machine answered ssh again after {back} s");
+    match pinged {
+        Some(secs) => println!(
+            "{address} answered a ping {secs} s into the window, after {PING_SILENCE_SECS} s of \
+             silence — so something on this cable was up while Ubuntu was not"
+        ),
+        None => println!("nothing answered a ping at {address} while the machine was down"),
+    }
     // Before the mount, so the stick's own answer is a number rather than
     // the reason a mount failed.
     let stick = driver.wait_for_the_stick()?;
@@ -1508,7 +1659,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
     if let Some(dir) = &args.readback {
-        write_readback(dir, &loader, &log, back, stick)?;
+        write_readback(dir, &loader, &log, back, stick, address, pinged)?;
         println!("readback written to {}", dir.display());
     }
     // **Named by evidence, before the boot record is missed.** A boot that
@@ -1626,9 +1777,19 @@ pub const READBACK_BOOT: &str = "boot.txt";
 /// the outside judge read, so a complaint can be looked at rather than retold.
 pub const READBACK_VOLUME: &str = "log-partition.img";
 
-/// The two keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
+/// The keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
 pub const BACK_SECS: &str = "back_secs";
 pub const STICK_SECS_KEY: &str = "stick_secs";
+
+/// The address this loop pinged while the machine was down, and how far into
+/// that window the first reply came.
+///
+/// **The address is written whether or not anything answered, and the seconds
+/// only if something did.** Which address was asked is a fact about the run;
+/// whether it replied is the boot's answer, and an absent key is `no` said
+/// where a zero would be a reply in the first second.
+pub const PING_ADDR_KEY: &str = "ping_addr";
+pub const PING_SECS_KEY: &str = "ping_secs";
 
 /// Every file a readback directory carries, so a run that writes none of them
 /// leaves none of the last run's behind.
@@ -1666,6 +1827,8 @@ fn write_readback(
     log: &str,
     back: u64,
     stick: u64,
+    address: std::net::Ipv4Addr,
+    pinged: Option<u64>,
 ) -> Result<(), Refusal> {
     let wrote = |path: &Path, text: &str| -> Result<(), Refusal> {
         std::fs::write(path, text)
@@ -1678,7 +1841,13 @@ fn write_readback(
     // The boot's own millisecond count is in the kernel log and read from
     // there; this file carries only what the *host* clock measured, which no
     // log can.
-    wrote(&dir.join(READBACK_BOOT), &format!("{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n"))
+    let mut boot = format!(
+        "{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n{PING_ADDR_KEY} {address}\n"
+    );
+    if let Some(secs) = pinged {
+        boot.push_str(&format!("{PING_SECS_KEY} {secs}\n"));
+    }
+    wrote(&dir.join(READBACK_BOOT), &boot)
 }
 
 /// Whether this boot was a loader pass that reported a record and booted no
@@ -1723,6 +1892,21 @@ pub fn back_secs(text: &str) -> Option<u64> {
 /// kernel performs may leave a USB device its next host cannot enumerate.
 pub fn stick_secs(text: &str) -> Option<u64> {
     key(text, STICK_SECS_KEY)
+}
+
+/// How far into the window between the two operating systems the machine's own
+/// address first answered a ping, or `None` where nothing did.
+pub fn ping_secs(text: &str) -> Option<u64> {
+    key(text, PING_SECS_KEY)
+}
+
+/// The address that was pinged. Absent only from a readback written before this
+/// loop asked.
+pub fn ping_addr(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(PING_ADDR_KEY))
+        .map(|rest| rest.trim().to_string())
+        .filter(|got| !got.is_empty())
 }
 
 fn key(text: &str, name: &str) -> Option<u64> {
@@ -1931,6 +2115,26 @@ mod tests {
         assert_eq!(back_secs("back_secs 47"), Some(47));
         assert_eq!(back_secs(""), None);
         assert_eq!(back_secs("back_secs later\n"), None);
+    }
+
+    /// **A boot the cable did not answer is not a boot that answered in the
+    /// first second.** The address is written whichever way it went, so a
+    /// readback carrying one and no seconds says the window passed in silence,
+    /// and one carrying neither is a run from before this loop asked at all.
+    #[test]
+    fn a_ping_nothing_answered_is_written_as_no_answer() {
+        let answered = "back_secs 61\nstick_secs 2\nping_addr 192.168.1.42\nping_secs 17\n";
+        let silent = "back_secs 46\nstick_secs 2\nping_addr 192.168.1.42\n";
+        assert_eq!(ping_addr(answered).as_deref(), Some("192.168.1.42"));
+        assert_eq!(ping_secs(answered), Some(17));
+        assert_eq!(ping_addr(silent).as_deref(), Some("192.168.1.42"));
+        assert_eq!(ping_secs(silent), None);
+        assert_eq!(ping_addr("back_secs 46\n"), None);
+        // The two keys share a prefix, and neither may be read off the other's
+        // line.
+        assert_eq!(ping_secs("ping_addr 192.168.1.42\n"), None);
+        assert_eq!(back_secs(answered), Some(61));
+        assert_eq!(stick_secs(answered), Some(2));
     }
 
     #[test]

@@ -609,3 +609,51 @@ name = "boot.ccorpus-2.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+
+# --- the cable: the boot that runs netd in front of the T14's own I219 ---
+# Every number here is unread: the ceilings below are the widest true bounds
+# this repository can derive before the machine has answered once, which is what
+# `ceiling_from` says of each. The run that takes the first readings is the run
+# that tightens them.
+
+[[number]]
+name = "boot.lancase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.lancase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.lancase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.lancase.ping_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs — the window this is measured in is the loop's own wait for the machine to answer ssh again, and nothing narrower has been read yet. What it becomes is a ceiling under the reading every boot with no network of its own takes at the same address, which is Ubuntu answering on its way back up: those readings are the separation this number rests on, and until one exists this row bounds the loop rather than the boot"
+
+[[number]]
+name = "list.lancase.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "lan_hold's own twenty-second window plus two seconds for the spawn and the exit record around it; the one member of this list is that window and nothing else"
+
+[[number]]
+name = "lan.lancase.link_up_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "lan_hold's twenty-second window: a link that comes up later than that is a link this boot never had, because the machine has already handed itself back"
+
+[[number]]
+name = "lan.lancase.lease_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "as lan.lancase.link_up_ms, and netd's own dhcp::LEASE_BOUND is the same twenty seconds: a boot with no lease by then has already said so in its log"

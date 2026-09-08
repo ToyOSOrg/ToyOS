@@ -204,6 +204,20 @@ pub struct Readback {
     /// this machine holds, and it is a row rather than the reason a mount
     /// happened to work.
     pub stick_secs: u64,
+    /// The address the loop pinged while the machine was between its two
+    /// operating systems.
+    pub ping_addr: String,
+    /// How far into that window the address first answered, and `None` where
+    /// nothing did.
+    ///
+    /// **A fact about the cable, measured on every boot.** Ubuntu answers at
+    /// this address too, on its way back up, so the number alone says only that
+    /// *something* did. What makes it a verdict is the ceiling
+    /// `tests/metal-profile.toml` prices for the boot that claims it, which is
+    /// far under what a boot with no network of its own measures — every other
+    /// boot in this suite is that boot, so the separation is read rather than
+    /// assumed.
+    pub ping_secs: Option<u64>,
 }
 
 impl Readback {
@@ -695,6 +709,10 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
     let stick_secs = toyos_build::metal::stick_secs(&boot)
         .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
+    // Required, and the seconds beside it are not: the address says the loop
+    // asked, and its absence is a readback from a run that could not.
+    let ping_addr = toyos_build::metal::ping_addr(&boot)
+        .ok_or_else(|| format!("{label}'s boot file names no `ping_addr`: {boot:?}"))?;
     Ok(Readback {
         label: label.to_string(),
         boot_ms: bootlog::boot_millis(&kernel),
@@ -702,6 +720,8 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         kernel,
         back_secs,
         stick_secs,
+        ping_addr,
+        ping_secs: toyos_build::metal::ping_secs(&boot),
     })
 }
 
@@ -898,17 +918,37 @@ pub fn run(
                     ("stick_secs", Some(back.stick_secs)),
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
+                    ("ping_secs", back.ping_secs),
                 ] {
                     let name = format!("boot.{label}.{field}");
                     let priced = profile.row(&name).is_some();
+                    // **The ping is taken on every boot and claimed by one.**
+                    // Ubuntu answers this address on its way back up, so every
+                    // boot with no network of its own produces a reading — and
+                    // those readings are what the priced boot's ceiling is
+                    // derived from, not numbers each of those boots owes a row
+                    // for. A boot that *is* priced still owes its reading, and
+                    // the arm below is where a silent one reds.
+                    if !priced && field == "ping_secs" {
+                        continue;
+                    }
                     if value.is_none() && !priced && field.ends_with("_lateness_ms") {
                         continue;
                     }
                     let Some(value) = value else {
+                        let why = if field == "ping_secs" {
+                            format!(
+                                "nothing answered a ping at {} in the window between the two \
+                                 operating systems, so this boot's own network never came up",
+                                back.ping_addr
+                            )
+                        } else {
+                            "the bound this boot was armed for is not the one that ended it"
+                                .to_string()
+                        };
                         eprintln!(
                             "    FAIL {name}: this boot recorded none, and the profile prices \
-                             it — so the bound this boot was armed for is not the one that \
-                             ended it"
+                             it — {why}"
                         );
                         red = true;
                         continue;
