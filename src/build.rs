@@ -1035,9 +1035,13 @@ pub fn is_valued_param(param: &str) -> bool {
 /// Every prefix `kernel/src/params.rs`'s `claims` matches with `starts_with`,
 /// as the constant paths it names them by.
 ///
+/// The gate's own reading of the kernel, so the two lists of valued parameters
+/// can be asserted equal; nothing in a build needs it.
+///
 /// Anchored on the function and closed on the first line that ends it, so a
 /// reflow still reads and a declaration this cannot find is empty rather than
 /// guessed.
+#[cfg(test)]
 fn prefixes_claimed(text: &str) -> Vec<String> {
     let Some((_, body)) = text.split_once("pub fn claims") else { return Vec::new() };
     let Some((body, _)) = body.split_once("\n}") else { return Vec::new() };
@@ -2041,7 +2045,7 @@ mod tests {
             ("10.0.2.2:65536", toyos_logstream::Malformed::NotAPort),
         ] {
             let asked = format!("{}{bad}", toyos_logstream::PARAM);
-            let refused = flashable_params(root, &[asked.clone()])
+            let refused = flashable_params(root, std::slice::from_ref(&asked))
                 .expect_err(&format!("{asked} passed the gate"));
             assert!(refused.contains(why.as_str()), "{asked} was refused as {refused:?}");
         }
