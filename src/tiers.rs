@@ -244,19 +244,6 @@ pub const RELEGATED: &[Relegated] = &[
                  it — which is the whole reason a person in the room can read the panel.",
     },
     Relegated {
-        test: "boot_deadline_ends_a_wedge",
-        ci_ms: 18_275,
-        why: Why::TimerAnchored,
-        guards: "The one bound in this tree that ends a machine no other bound can reach: a boot \
-                 whose every CPU has stopped taking scheduler passes, with preemption disabled \
-                 and interrupts on, which is the state the T14 hung in twice in four boots. The \
-                 control stages that wedge at the shutdown syscall and the judge watches the \
-                 guest reset itself and the next pass read a `WEDGED` page carrying both the \
-                 bound and the tail of the ring nothing drained. Timer-anchored because the \
-                 verdict is a bound counted down in the guest; without it nothing at all asks \
-                 whether a wedged unattended boot ever ends.",
-    },
-    Relegated {
         test: "blackbox_panic_chain",
         ci_ms: 11_407,
         why: Why::TimerAnchored,
@@ -266,24 +253,6 @@ pub const RELEGATED: &[Relegated] = &[
                  a bound the first boot counted down. What still runs per pull request: \
                  `blackbox_unclaimed_page` and the three seal names, which are lines and page \
                  bytes with no clock in them; the chain across a reset has no other gate.",
-    },
-    Relegated {
-        test: "usb_reset_hands_devices_back",
-        ci_ms: 44_000,
-        why: Why::TimerAnchored,
-        guards: "The owner's ruling after run 18 of the metal loop: no reset this kernel \
-                 performs may leave a USB device in a state its next host cannot enumerate. \
-                 Four chained boots — a job list's `reboot`, the runner's job deadline, the \
-                 panic console's bound, and a controller lock staged never to come free — each \
-                 watched to take its own two resets against the bound the first boot counts \
-                 down, and each judged on the account the reset sealed into the black box. The \
-                 fourth is the control on every bound in that path: a shutdown that cannot take \
-                 its barrier must still reach its reset. Each arm is also read for what must \
-                 *not* be after the boot's last word — T14 run 20 spawned a job 29 ms after \
-                 `Rebooting.`, which is what a metal boot is judged on, and `quiesce-late-word` \
-                 is what gives QEMU the window hardware has. What still runs per pull request: \
-                 nothing else reads that account at all; `metal_device_probe` judges the flush \
-                 that precedes it, and the T14 is the only judge of the device itself.",
     },
     Relegated {
         test: "watchdog_fed",

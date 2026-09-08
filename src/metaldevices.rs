@@ -1,7 +1,6 @@
-//! What a metal boot says about itself, as both profiles read it: the exit
-//! codes `userland/metalprobe` refuses with, the device inventory every boot
-//! owes, the account the shutdown seals into the black box, and the one
-//! arithmetic a bound is judged by.
+//! What a metal boot says about itself: the exit codes `userland/metalprobe`
+//! refuses with, the device inventory every boot owes, and the account the
+//! shutdown seals into the black box.
 //!
 //! **Text in, verdicts out.** Everything here reads the two strings
 //! `src/metal.rs` brings back off the stick — the loader's file and `logd`'s —
@@ -9,68 +8,15 @@
 //! produces them: `userland/metalprobe`'s jobs measure, exit with their spans,
 //! and the kernel's own `exit:` record carries each one off the machine.
 //!
-//! **What a span may be is not here.** Every device number is priced by name in
-//! `tests/metal-profile.toml`, which is one file for the whole suite; what this
-//! holds is the *shape* both ends have to agree about, so a host and a guest
-//! cannot come to different answers about a word. [`Bound`] is the exception
-//! and is here for the same reason: `crate::metalkernel` judges against it too,
-//! and one arithmetic is what stops two profiles meaning different things by a
-//! ceiling.
+//! **What a number may be is not here, and there is one place it is.** Every
+//! measurement the suite takes is priced by name in `tests/metal-profile.toml`
+//! and judged by [`crate::metalprofile`], which refuses a name with no row;
+//! what this holds is the *shape* both ends have to agree about, so a host and
+//! a guest cannot come to different answers about a word.
 
 #![forbid(unsafe_code)]
 
 use std::fmt;
-
-/// How far a measured rate may fall below the number that first stood for it
-/// before the profile calls it a regression.
-///
-/// **Wide, because one boot is one sample.** These are single measurements on
-/// one machine with no distribution behind them; a bound tight enough to catch
-/// a 10% drift would red on the first boot that scheduled its jobs differently.
-/// It narrows when a rate has been measured often enough to have a spread.
-pub const MARGIN_PERCENT: i64 = 40;
-
-/// The floor a first measurement stands for.
-pub fn floor_from(first: i64) -> i64 {
-    first * (100 - MARGIN_PERCENT) / 100
-}
-
-/// What a job's number is held to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bound {
-    /// Never taken on the machine. Reported with the number it measured and
-    /// judged on nothing but the job having produced one at all.
-    Unmeasured,
-    /// A rate, which may not fall below this.
-    AtLeast(i64),
-    /// A latency, a duration or a disagreement, which may not rise above this.
-    AtMost(i64),
-    /// A value the machine has no freedom about, given its mode.
-    Exactly(i64),
-}
-
-impl Bound {
-    /// One number against this bound. **The whole ceiling discipline lives
-    /// here**, so the device profile and the kernel profile cannot come to
-    /// different answers about what a bound means.
-    pub fn check(self, value: i64, unit: &'static str) -> Outcome {
-        match self {
-            Self::Unmeasured => Outcome::Measured { value, unit },
-            Self::AtLeast(floor) if value < floor => {
-                Outcome::Failed(format!("{value} {unit} is under this profile's floor of {floor}"))
-            }
-            Self::AtLeast(floor) => Outcome::Held(format!("{value} {unit} (floor {floor})")),
-            Self::AtMost(ceiling) if value > ceiling => {
-                Outcome::Failed(format!("{value} {unit} is over this profile's ceiling of {ceiling}"))
-            }
-            Self::AtMost(ceiling) => Outcome::Held(format!("{value} {unit} (ceiling {ceiling})")),
-            Self::Exactly(want) if value != want => {
-                Outcome::Failed(format!("{value} {unit} where this profile holds {want}"))
-            }
-            Self::Exactly(want) => Outcome::Held(format!("{want} {unit}")),
-        }
-    }
-}
 
 /// Why a `metalprobe` job has no number, mirroring `Refusal` in
 /// `userland/metalprobe/src/main.rs`. Held to that file by
@@ -322,8 +268,6 @@ pub struct Verdict {
 pub enum Outcome {
     /// The record was where it had to be, or absent where it had to be.
     Held(String),
-    /// A number with no bound yet: this is what the machine answered.
-    Measured { value: i64, unit: &'static str },
     Failed(String),
 }
 
@@ -337,9 +281,6 @@ impl fmt::Display for Verdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.outcome {
             Outcome::Held(what) => write!(f, "  ok    {:<16} {what}", self.about),
-            Outcome::Measured { value, unit } => {
-                write!(f, "  first {:<16} {value} {unit} — unmeasured, this is its number", self.about)
-            }
             Outcome::Failed(why) => write!(f, "  RED   {:<16} {why}", self.about),
         }
     }
@@ -584,19 +525,6 @@ mod tests {
         assert_eq!(Refused::of(402_000), None);
         assert_eq!(Refused::of(-7), None);
         assert!(format!("{}", Refused::Disagreed).contains("read back"));
-    }
-
-    /// The one arithmetic both profiles judge by, in all four of its states.
-    #[test]
-    fn a_bound_is_judged_once_it_is_taken() {
-        assert!(matches!(Bound::Unmeasured.check(7, "us"), Outcome::Measured { value: 7, .. }));
-        assert!(matches!(Bound::AtLeast(20_000).check(30_500, "KiB/s"), Outcome::Held(_)));
-        assert!(Bound::AtLeast(40_000).check(30_500, "KiB/s").is_failure());
-        assert!(matches!(Bound::AtMost(500).check(402, "us"), Outcome::Held(_)));
-        assert!(Bound::AtMost(400).check(402, "us").is_failure());
-        assert!(matches!(Bound::Exactly(9).check(9, "fold"), Outcome::Held(_)));
-        assert!(Bound::Exactly(9).check(8, "fold").is_failure());
-        assert_eq!(floor_from(10_000), 6_000);
     }
 
     /// Nothing links this crate to `userland/metalprobe`: it is built for

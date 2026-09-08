@@ -2,10 +2,16 @@
 # it is a red. `src/metalprofile.rs` is the reader and the grammar; a number the
 # suite measures and this file does not price is refused, not passed.
 #
-# `ceiling_from` says where the ceiling came from. A ceiling derived from a
-# constant is the widest true bound there is before the machine has been read
-# once; `measured` beside it is what a later author tightens it against, and a
-# ceiling that had to be widened to pass is a finding rather than an edit.
+# `ceiling_from` says where the ceiling came from, and a row naming a constant
+# this repository declares is held to that constant's value by
+# `metalprofile::tests::a_ceiling_that_names_a_constant_carries_it`. A ceiling
+# derived from a constant is the widest true bound there is before the machine
+# has been read once, and a ceiling that had to be widened to pass is a finding
+# rather than an edit.
+#
+# `measured` is the reading the T14 gave the boot the row names, off that boot's
+# own readback. It is what a later author tightens a ceiling against and it is
+# never the gate; a row with no `measured` is a boot no run has taken yet.
 #
 # One row per number, named `<what>.<boot>.<field>`. The boot names are the ones
 # `METAL`'s arms give them in `tests/toyos.rs`: one image, one flash, one minute
@@ -21,36 +27,42 @@ name = "boot.testcases.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — the runner's deadline runs from boot, so a later `Boot: complete` is a boot already reset"
+measured = 1199
 
 [[number]]
 name = "boot.testcases-mkdir.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1200
 
 [[number]]
 name = "boot.testcases-readdir.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1256
 
 [[number]]
 name = "boot.testcases-watchdog.complete_ms"
 unit = "ms"
 ceiling = 9600
 ceiling_from = "toyos_tco::BOUND_MS — this image arms the chipset watchdog at the handoff, so the whole boot runs under it"
+measured = 1259
 
 [[number]]
 name = "boot.jobcase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1253
 
 [[number]]
 name = "boot.metalcase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1252
 
 # --- what the machine spent coming back, on the host's clock ---
 # The loop already refuses past this; the row exists so the number is read and
@@ -60,50 +72,58 @@ ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
 [[number]]
 name = "boot.testcases.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs — the longest watchdog a boot runs under plus what coming back costs"
+measured = 48
 
 [[number]]
 name = "boot.testcases-mkdir.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 46
 
 [[number]]
 name = "boot.testcases-readdir.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 49
 
 [[number]]
 name = "boot.testcases-watchdog.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 46
 
 [[number]]
 name = "boot.jobcase.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 44
 
 [[number]]
 name = "boot.metalcase.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 46
 
 [[number]]
 name = "boot.latencycase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1258
 
 [[number]]
 name = "boot.latencycase.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 46
 
 # --- what this machine's scheduler costs a waiter, and what one machine-wide
 # --- TLB shootdown costs its initiator
@@ -116,18 +136,21 @@ name = "latency.p99_us"
 unit = "us"
 ceiling = 4095
 ceiling_from = "cyclictest's histogram is 4096 buckets of 1 us, so a p99 in its last bucket is a floor and not a measurement"
+measured = 16
 
 [[number]]
 name = "tlb.latencycase.p50_ns"
 unit = "ns"
 ceiling = 5000000000
 ceiling_from = "kernel arch::tlb::ACK_TIMEOUT — a shootdown waiting longer than that panics the machine, so nothing under it is a wait this kernel tolerates"
+measured = 2258
 
 [[number]]
 name = "tlb.latencycase.p99_ns"
 unit = "ns"
 ceiling = 5000000000
 ceiling_from = "kernel arch::tlb::ACK_TIMEOUT — as tlb.latencycase.p50_ns"
+measured = 2931
 # --- the device boot, and every span `userland/metalprobe` measures on it ---
 # Each job exits with its span in microseconds and the kernel's `exit:` record
 # carries it; `src/metaldevices.rs` names the negative codes that are refusals
@@ -149,7 +172,7 @@ ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
 [[number]]
 name = "boot.metaldevicecase.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
 
 [[number]]
@@ -189,12 +212,14 @@ name = "boot.selftests.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1267
 
 [[number]]
 name = "boot.selftests.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 44
 
 [[number]]
 name = "boot.shared.complete_ms"
@@ -205,7 +230,7 @@ ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
 [[number]]
 name = "boot.shared.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
 
 [[number]]
@@ -213,24 +238,28 @@ name = "boot.shared-debug.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1210
 
 [[number]]
 name = "boot.shared-debug.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 61
 
 [[number]]
 name = "boot.ccorpus.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1200
 
 [[number]]
 name = "boot.ccorpus.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 95
 
 # --- the boot stick, after the boot ---
 # **The ruling's own row, and the only judge of the device there is.** QEMU
@@ -243,24 +272,28 @@ name = "boot.testcases.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "toyos_build::metal::STICK_SECS — ten times the three seconds Ubuntu's own enumeration spends giving up on a wedged stick (run 18's journal)"
+measured = 0
 
 [[number]]
 name = "boot.testcases-mkdir.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 [[number]]
 name = "boot.testcases-readdir.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 [[number]]
 name = "boot.testcases-watchdog.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 [[number]]
 name = "boot.jobcase.stick_secs"
@@ -274,12 +307,14 @@ name = "boot.metalcase.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 [[number]]
 name = "boot.latencycase.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 [[number]]
 name = "boot.metaldevicecase.stick_secs"
@@ -293,6 +328,7 @@ name = "boot.selftests.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 [[number]]
 name = "boot.shared.stick_secs"
@@ -305,30 +341,35 @@ name = "boot.shared-debug.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 [[number]]
 name = "boot.ccorpus.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 [[number]]
 name = "boot.foreignrecord.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1254
 
 [[number]]
 name = "boot.foreignrecord.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 44
 
 [[number]]
 name = "boot.foreignrecord.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
 
 # --- the boot that stops itself on purpose ---
 # `deadlinewedge` is the only boot here whose verdict is not `Rebooting.`: every
@@ -342,14 +383,14 @@ name = "boot.deadlinewedge.complete_ms"
 unit = "ms"
 ceiling = 120000
 ceiling_from = "toyos_tco::WEDGE_BOUND_MS — on this boot the kernel's own deadline is what runs from boot, so a later `Boot: complete` is a boot the deadline already reset"
-measured = 1198
+measured = 1199
 
 [[number]]
 name = "boot.deadlinewedge.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs — which now derives from WEDGE_BOUND_MS, the longest watchdog a boot runs under, plus what coming back costs"
-measured = 231
+measured = 236
 
 [[number]]
 name = "boot.deadlinewedge.stick_secs"
@@ -384,14 +425,14 @@ name = "boot.hardlockup.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::HARD_LOCKUP_BOUND_MS — half the deadline and the earlier bound, so a later `Boot: complete` is a boot the detector already reset"
-measured = 1200
+measured = 1201
 
 [[number]]
 name = "boot.hardlockup.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs. It is the same wait: this boot ends itself half a bound earlier and then costs the same firmware, loader and Ubuntu as any other"
-measured = 170
+measured = 172
 
 [[number]]
 name = "boot.hardlockup.stick_secs"
@@ -541,7 +582,7 @@ ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
 [[number]]
 name = "boot.shared-2.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
 
 [[number]]
@@ -559,7 +600,7 @@ ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
 [[number]]
 name = "boot.ccorpus-2.back_secs"
 unit = "s"
-ceiling = 360
+ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
 
 [[number]]

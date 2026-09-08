@@ -62,21 +62,6 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
-    /// **How many kernel boots this one flash buys**, each closed by the
-    /// loader's own reporting pass. One, unless a test's subject is what
-    /// survives a reset: boot 1 writes and syncs, the machine goes all the way
-    /// back to firmware, boot 2 reads what is still there. The readback is the
-    /// last boot's, and every boot costs another `return_secs`.
-    ///
-    /// **N boots *without* the reporting pass between them is out of scope, and
-    /// deliberately.** `bootloader/src/blackbox.rs` sets `ends_the_chain`
-    /// unconditionally, and that is the mechanism that stops a machine which
-    /// panics on every boot from looping on a desk with no power switch to stop
-    /// it. Disabling it is a loader policy change with its own argument to
-    /// make, never a field a test declaration may set — and nothing a
-    /// write-sync-readback needs is on the far side of it, because a boot that
-    /// went all the way back to firmware is the *stronger* readback.
-    pub boots: u32,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -90,7 +75,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], boots: 1 }
+    Arm { boot, config, params, jobs, features: &[] }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -442,7 +427,6 @@ struct Batch {
     jobs: Vec<String>,
     files: Vec<(String, Vec<u8>)>,
     links: Vec<(String, String)>,
-    boots: u32,
 }
 
 impl Batch {
@@ -487,7 +471,6 @@ fn batches(
                 jobs: boot.jobs.clone(),
                 files: boot.files.clone(),
                 links: boot.links.clone(),
-                boots: 1,
             },
         );
         if was.is_some() {
@@ -504,7 +487,6 @@ fn batches(
                 jobs: Vec::new(),
                 files: Vec::new(),
                 links: Vec::new(),
-                boots: arm.boots,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
@@ -522,9 +504,6 @@ fn batches(
                     batch.features
                 ));
             }
-            // The most any rider asks for: a boot that answers a two-boot
-            // question also answers every one-boot question on it.
-            batch.boots = batch.boots.max(arm.boots);
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
         }
     }
@@ -686,8 +665,8 @@ fn fingerprint(text: &str) -> u64 {
 
 /// The invocation that turns one image into one readback. Written down in the
 /// staged request and run by [`Mode::Drive`], so the two cannot differ.
-fn invocation(image: &Path, home: &Path, boots: u32) -> Vec<String> {
-    let mut words = vec![
+fn invocation(image: &Path, home: &Path) -> Vec<String> {
+    vec![
         "run".to_string(),
         "--bin".to_string(),
         "toyos-metal".to_string(),
@@ -701,12 +680,7 @@ fn invocation(image: &Path, home: &Path, boots: u32) -> Vec<String> {
         // `/log` has no reader of those bytes that is not the family of code
         // that wrote them.
         "--fat32-check".to_string(),
-    ];
-    if boots > 1 {
-        words.push("--boots".to_string());
-        words.push(boots.to_string());
-    }
-    words
+    ]
 }
 
 fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
@@ -847,7 +821,7 @@ pub fn run(
             request.push_str(&format!(
                 "\n{label}\n  image: {}\n  cargo {}\n",
                 image.display(),
-                invocation(image, &at(dir, label), batches[*label].boots).join(" ")
+                invocation(image, &at(dir, label)).join(" ")
             ));
         }
         let path = dir.join("request.txt");
@@ -867,21 +841,22 @@ pub fn run(
         return Verdict::Staged;
     }
 
+    // **The driver's exit is the boot's verdict, and nothing below reads a file
+    // instead of it.** `toyos-metal` exits 1 for the machine and 2 for the loop,
+    // and a boot it refused wrote no readback of its own — so a directory still
+    // holding files after one is holding somebody else's boot.
+    let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if mode == Mode::Drive {
         for (label, image) in &images {
-            let words = invocation(image, &at(dir, label), batches[*label].boots);
+            let words = invocation(image, &at(dir, label));
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
             match Command::new("cargo").args(&words).current_dir(&root).status() {
                 Ok(status) if status.success() => {}
                 Ok(status) => {
-                    // The driver's own exit codes: 1 is the machine, 2 is the
-                    // loop. Either way the readback below says what came back,
-                    // and a boot with no readback reds every test on it.
-                    eprintln!("[metal] {label}: toyos-metal exited {status}");
+                    refused.insert(label, format!("toyos-metal exited {status}"));
                 }
                 Err(e) => {
-                    eprintln!("[metal] {label}: toyos-metal could not be started: {e}");
-                    return Verdict::Red;
+                    refused.insert(label, format!("toyos-metal could not be started: {e}"));
                 }
             }
         }
@@ -890,7 +865,11 @@ pub fn run(
     // The readbacks, and the boot facts each one carries.
     let mut readbacks: BTreeMap<String, Result<Readback, String>> = BTreeMap::new();
     for label in batches.keys() {
-        readbacks.insert(label.clone(), read_readback(dir, label));
+        let back = match refused.get(label.as_str()) {
+            Some(why) => Err(why.clone()),
+            None => read_readback(dir, label),
+        };
+        readbacks.insert(label.clone(), back);
     }
 
     let mut red = false;
@@ -908,12 +887,14 @@ pub fn run(
                      after that",
                     back.back_secs, back.stick_secs
                 );
-                // The last two are `None` on every boot but the one armed to
-                // stop itself, and at most one of them is ever `Some` — a boot
-                // has one bound that ended it. A `None` field is not recorded
-                // rather than recorded as a zero: an unpriced name is refused,
-                // and a boot that measured nothing may not answer for one that
-                // did.
+                // **The profile's row is what a boot owes, and the boot's own
+                // record is what it paid.** The two lateness fields are `None`
+                // on every boot but the one armed to stop itself, and at most
+                // one is ever `Some` — a boot has one bound that ended it. A
+                // boot the file prices a lateness for and that produced none is
+                // therefore a boot some *other* bound ended, which is exactly
+                // what a run of `deadlinewedge` sealed by the lockup detector
+                // was, and it used to be skipped rather than reported.
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),
@@ -921,15 +902,21 @@ pub fn run(
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
                 ] {
-                    if field.ends_with("_lateness_ms") && value.is_none() {
+                    let name = format!("boot.{label}.{field}");
+                    let priced = profile.row(&name).is_some();
+                    if value.is_none() && !priced && field.ends_with("_lateness_ms") {
                         continue;
                     }
                     let Some(value) = value else {
-                        eprintln!("    FAIL boot.{label}.complete_ms: this boot recorded none");
+                        eprintln!(
+                            "    FAIL {name}: this boot recorded none, and the profile prices \
+                             it — so the bound this boot was armed for is not the one that \
+                             ended it"
+                        );
                         red = true;
                         continue;
                     };
-                    if let Err(why) = profile.judge(&format!("boot.{label}.{field}"), value) {
+                    if let Err(why) = profile.judge(&name, value) {
                         eprintln!("    FAIL {why}");
                         red = true;
                     }

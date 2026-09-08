@@ -3674,6 +3674,40 @@ pub const KNOWN_RED: &[Red] = &[
         source: "issues/build/the-committed-profile-disagrees-with-the-nightly-on-28-names.md",
         measured: "2026-09-07",
     },
+    // The metal branch's own new name, adjudicated here rather than in an issue
+    // file: a name that reds intermittently belongs on this list with its rate
+    // before it joins the per-pull-request tier.
+    Red {
+        test: "latency_wake",
+        instrument: Instrument::DevHostAlone,
+        finding: Finding::fires(1, 6),
+        standing: Standing::Stands,
+        what: "`the p99 landed in the histogram's last bucket, so 4096us is a floor and not a \
+               measurement`. One shape every time: cyclictest's histogram is 4,096 buckets of one \
+               microsecond, the verdict refuses a floor as a measurement, and a TCG guest on this \
+               host reaches that bucket at a rate. **The red is on the base arm** — three runs of \
+               `metal-suite` plus the boot-deadline branch measured 1,606, 1,634 and 1,785 us and \
+               none red, and the three base runs measured 1,456 us, the floor, and 1,428 us — so \
+               nothing about the timer-entry poll is in it",
+        evidence: "six runs alone on the dev host in one session, 2026-09-07, three on each arm",
+        source: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md",
+        measured: "2026-09-07",
+    },
+    Red {
+        test: "latency_wake",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "the same floor under the wide phase — `258 past the 4096us histogram` — and \
+               `ALONE latency_wake: GREEN, and it was alone both times … That is a rate and not a \
+               classification`. A second row and not a correction of the one above: that one is \
+               the rate this name has alone, and this is the one sighting there is of it beside \
+               eleven other guests",
+        evidence: "the whole-branch review's `cargo test` on 7294acef, 2026-09-08: 338 passed, 5 \
+                   failed, 343 total in 1230.2 s, and the harness's own isolated re-run green",
+        source: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md",
+        measured: "2026-09-08",
+    },
 ];
 
 // ---------------------------------------------------------------------------

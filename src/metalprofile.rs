@@ -186,6 +186,46 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
     }
 
+    /// Every constant a `ceiling_from` may name, and what it holds.
+    ///
+    /// **The file says where a ceiling came from, and this is what makes that
+    /// true.** A row naming a constant carried a literal nobody re-derived when
+    /// the constant moved: fifteen rows read 360 against a `return_secs` of 420,
+    /// so a boot back in 361-420 s was inside the driver's own wait and red on a
+    /// ceiling nobody wrote.
+    const NAMED: &[(&str, u64)] = &[
+        ("toyos_build::metal::return_secs", 420),
+        ("toyos_build::metal::STICK_SECS", 30),
+        ("toyos_tco::JOB_BOUND_MS", toyos_tco::JOB_BOUND_MS),
+        ("toyos_tco::BOUND_MS", toyos_tco::BOUND_MS),
+        ("toyos_tco::WEDGE_BOUND_MS", toyos_tco::WEDGE_BOUND_MS),
+        ("toyos_tco::HARD_LOCKUP_BOUND_MS", toyos_tco::HARD_LOCKUP_BOUND_MS),
+    ];
+
+    /// A row whose ceiling *is* a constant this repository declares carries that
+    /// constant's value.
+    #[test]
+    fn a_ceiling_that_names_a_constant_carries_it() {
+        assert_eq!(crate::metal::return_secs(), 420, "the derivation moved");
+        assert_eq!(crate::metal::STICK_SECS, 30);
+        let profile = Profile::load(root()).expect(PATH);
+        let mut checked = 0usize;
+        for row in &profile.number {
+            let Some((named, want)) =
+                NAMED.iter().find(|(named, _)| row.ceiling_from.starts_with(named))
+            else {
+                continue;
+            };
+            checked += 1;
+            assert_eq!(
+                row.ceiling, *want,
+                "{:?} says its ceiling is {named}, and {named} is {want}",
+                row.name
+            );
+        }
+        assert!(checked > 0, "no row names a constant, so this gate holds nothing");
+    }
+
     /// The committed file parses, no name is priced twice, and no row's own
     /// recorded reading is already past the ceiling beside it.
     #[test]

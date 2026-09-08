@@ -720,19 +720,20 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
     // The one bound in this tree that ends a machine nothing else can: a boot
     // whose every CPU has stopped taking scheduler passes, which is what the
-    // T14 hung in twice. Two boots and a 25 s bound counted down in the guest,
-    // so it is priced rather than free, and no host clock is in the verdict.
-    ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
+    // T14 hung in twice. Its verdict is a bound counted down in the guest, so
+    // its tier is `Why::TimerAnchored` — **Fast here only as the bootstrap
+    // `src/tiers.rs` requires**, because a name carrying the UNMEASURED marker
+    // has to be one the fast tier executes before anything can price it.
+    ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Fast),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
     // boots and a bound counted down in the guest, so it is timer-anchored and
-    // belongs beside the row above — **Fast here only as the bootstrap
-    // `src/tiers.rs` requires**, because a name carrying the UNMEASURED marker
-    // has to be one the fast tier executes before anything can price it.
+    // belongs beside the row above, and Fast for the same bootstrap reason.
     ("hard_lockup_ends_a_deaf_cpu", Sched::Parallel, Tier::Fast),
     // Four chained boots, one per way this kernel reaches a reset, each
-    // anchored to the bound its own first boot counts down.
-    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Nightly),
+    // anchored to the bound its own first boot counts down; Fast for the same
+    // bootstrap reason as the two above.
+    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Fast),
     // The control on the chain: a record another image left in the same memory
     // is cleared and its pass boots a kernel, where a real predecessor's ends
     // the chain. One boot, one actuator.
@@ -15290,8 +15291,7 @@ fn latency_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     /// histogram's last bucket is a floor and not a measurement, so what is
     /// asserted here is that the figure is one — TCG under a twelve-wide suite
     /// is no latency instrument, and the number this measures on hardware is
-    /// the T14's, held with a ceiling in `src/metalkernel.rs`. Measured here:
-    /// p99 1672 µs twelve-wide, 1658 µs alone.
+    /// the T14's, priced as `latency.p99_us` in `tests/metal-profile.toml`.
     const HISTOGRAM_US: u64 = 4096;
     const WAIT: Duration = Duration::from_secs(60);
 

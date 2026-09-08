@@ -50,7 +50,7 @@ const WATCHDOG_BOUNDS_MS: &[u64] = &[
 /// **Derived, because a literal is wrong the day any of it moves.** A boot is
 /// only certainly over once the longest of [`WATCHDOG_BOUNDS_MS`] could have
 /// fired; [`RETURN_ALLOWANCE_SECS`] is what coming back costs after that.
-fn return_secs() -> u64 {
+pub fn return_secs() -> u64 {
     let longest =
         WATCHDOG_BOUNDS_MS.iter().copied().max().expect("a metal boot runs under a watchdog");
     longest.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
@@ -68,7 +68,7 @@ const POLL_SECS: u64 = 5;
 /// 07:33:20 to `unable to enumerate USB device` at 07:33:23). This is ten times
 /// that, so a stick this wait does not find is one the host has already
 /// finished refusing.
-const STICK_SECS: u64 = 30;
+pub const STICK_SECS: u64 = 30;
 
 /// The absolute paths `which` answered on the machine; sudo matches a path and
 /// not a name, so nothing here is spelled relatively.
@@ -1252,10 +1252,6 @@ pub struct Args {
     /// `toyos-fat32-check`. The outside judge, and the only reader of that
     /// volume in this tree that is not the family of code that wrote it.
     fat32_check: bool,
-    /// **How many kernel boots this one flash buys**, each closed by the
-    /// loader's own reporting pass. See [`run`] for what the shape is and is
-    /// not.
-    boots: u32,
 }
 
 impl Args {
@@ -1269,7 +1265,6 @@ impl Args {
             wait_secs: return_secs(),
             readback: None,
             fat32_check: false,
-            boots: 1,
         };
         let mut at = 0;
         while at < args.len() {
@@ -1321,16 +1316,6 @@ impl Args {
                     out.about_a_boot.push("--fat32-check");
                     out.fat32_check = true;
                     1
-                }
-                "--boots" => {
-                    out.about_a_boot.push("--boots");
-                    let n = value()?;
-                    out.boots = n
-                        .parse()
-                        .ok()
-                        .filter(|n| *n >= 1)
-                        .ok_or_else(|| Refusal::Usage(format!("--boots: {n:?} is not a count")))?;
-                    2
                 }
                 "--wait-secs" => {
                     out.about_a_boot.push("--wait-secs");
@@ -1429,21 +1414,8 @@ fn stage_and_install(
     Ok(String::new())
 }
 
-/// The whole loop, answering the last boot's own millisecond count. `None` is a
+/// The whole loop, answering this boot's own millisecond count. `None` is a
 /// dry run, which reaches no boot record because it wrote nothing.
-///
-/// **`--boots N` is N kernel boots of one flash, each closed by the loader's own
-/// reporting pass** — and that is the only multi-boot shape there is. The pass
-/// after a reset always ends the chain (`bootloader/src/blackbox.rs` sets
-/// `ends_the_chain` unconditionally), which is what stops a machine that panics
-/// on every boot from looping on the owner's desk for ever; nothing here may
-/// disable it, and a declaration asking for N boots *without* it is asking for a
-/// loader policy change and not for a driver flag. What N buys is the shape a
-/// write-sync-readback needs: boot 1 writes and syncs, the machine goes all the
-/// way back to firmware, boot 2 reads what survived. Each boot costs another
-/// `--bootnext` and another `return_secs`, and the readback is the *last*
-/// boot's — the earlier ones are printed and not kept, because nothing yet
-/// judges them apart.
 pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // **First and last**: the rule is installed and this returns. Nothing below
     // runs, no disk is touched and no machine is rebooted — which is what
@@ -1462,6 +1434,13 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         )));
     };
     let image = admit(asked, &args.target)?;
+    // **Before the flash, and before anything can refuse.** Every refusal below
+    // returns without reaching `write_readback`, so a directory left holding the
+    // last run's files is one a judge reads as this run's — which is how a boot
+    // that never happened came back green.
+    if let Some(dir) = &args.readback {
+        clear_readback(dir)?;
+    }
     println!(
         "image {}: {} bytes, ESP p{} at {}+{}, log p{} at {}+{}",
         image.path.display(),
@@ -1495,87 +1474,73 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     driver.flash(&image)?;
     let entry = driver.boot_entry(&image.esp)?;
 
-    // **One flash, `args.boots` boots.** The stick is written once; each round
-    // below buys one more kernel boot off it, and the last one's readback is
-    // what the judge gets.
-    let mut last = None;
-    for boot in 1..=args.boots {
-        if args.boots > 1 {
-            println!("boot {boot} of {}", args.boots);
-        }
-        driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
-        driver.as_root("rebooting", Job::Reboot, None, None)?;
-        if driver.dry_run {
-            driver.as_root("mounting the log partition", Job::Mount, None, None)?;
-            driver.as_root("unmounting the log partition", Job::Umount, None, None)?;
-            println!("dry run: nothing was written and the machine was not rebooted");
-            return Ok(None);
-        }
-
-        let back = driver.ride_the_reboot(args.wait_secs)?;
-        println!("the machine answered ssh again after {back} s");
-        // Before the mount, so the stick's own answer is a number rather than
-        // the reason a mount failed.
-        let stick = driver.wait_for_the_stick()?;
-        println!("the boot stick enumerated {stick} s after the machine answered");
-        let (loader, log) = driver.read_log()?;
-        print!("{loader}{log}");
-        // The outside judge, and it runs before the verdict: a volume this
-        // cannot read is a finding about what the boot wrote, and the reason to
-        // read the sectors rather than the mount is that a mount has already
-        // had a FAT driver's opinion about them.
-        if args.fat32_check {
-            let bytes = driver.raw_log(image.log.sectors)?;
-            if let Some(dir) = &args.readback {
-                let at = dir.join(READBACK_VOLUME);
-                std::fs::write(&at, &bytes).map_err(|e| Refusal::File {
-                    path: at.display().to_string(),
-                    why: e.to_string(),
-                })?;
-            }
-            let complaints = toyos_fat32_check::check(&bytes);
-            if !complaints.is_empty() {
-                return Err(Refusal::Fat32(toyos_fat32_check::describe(&complaints)));
-            }
-            println!(
-                "toyos-fat32-check: the log partition's {} bytes check out",
-                bytes.len()
-            );
-        }
-        if let Some(dir) = &args.readback {
-            write_readback(dir, &loader, &log, back, stick)?;
-            println!("readback written to {}", dir.display());
-        }
-        // **Named by evidence, before the boot record is missed.** A boot that
-        // never happened and a boot that failed both leave no `Boot: complete`,
-        // and `Unfit::NoBootRecord` says the second where it is often the first.
-        // The loader's own file is what tells them apart: a pass that read the
-        // black box says so and ends the chain, and this is the only way a
-        // machine can come back with a whole `loader.log` and an empty kernel one.
-        // **First, because it is the one refusal that is not a machine needing a
-        // hand.** The loader bounded a hang and gave the machine back; every
-        // other reading of an empty kernel log would send a reader to the wrong
-        // place, and `NoBootRecord` would send them to a kernel that never ran.
-        if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) {
-            return Err(Refusal::HungWithoutARecord);
-        }
-        if let Some(said) = reported_and_booted_nothing(&loader, &log) {
-            return Err(Refusal::ReportedAndBootedNothing { said });
-        }
-        // **An image armed to stop itself is judged by the record its own bound
-        // sealed, not by the word a shutdown writes.** Read off what the image
-        // is armed with rather than off its label or its readback directory: the
-        // arm comes out of the artifact, so no boot can be judged as something
-        // it was not flashed as. *Which* bound sealed it is the page's to say
-        // and not this list's — the arm says a bound was staged, and two of them
-        // can reach a staged boot.
-        if armed.iter().any(|name| name == WEDGE_ARM || name == LOCKUP_ARM) {
-            last = Some(wedged_boot(&loader, &log)?);
-            continue;
-        }
-        last = Some(bootlog::verdict(&log).map_err(Refusal::Log)?);
+    driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
+    driver.as_root("rebooting", Job::Reboot, None, None)?;
+    if driver.dry_run {
+        driver.as_root("mounting the log partition", Job::Mount, None, None)?;
+        driver.as_root("unmounting the log partition", Job::Umount, None, None)?;
+        println!("dry run: nothing was written and the machine was not rebooted");
+        return Ok(None);
     }
-    Ok(last)
+
+    let back = driver.ride_the_reboot(args.wait_secs)?;
+    println!("the machine answered ssh again after {back} s");
+    // Before the mount, so the stick's own answer is a number rather than
+    // the reason a mount failed.
+    let stick = driver.wait_for_the_stick()?;
+    println!("the boot stick enumerated {stick} s after the machine answered");
+    let (loader, log) = driver.read_log()?;
+    print!("{loader}{log}");
+    // The outside judge, and it runs before the verdict: a volume this
+    // cannot read is a finding about what the boot wrote, and the reason to
+    // read the sectors rather than the mount is that a mount has already
+    // had a FAT driver's opinion about them.
+    if args.fat32_check {
+        let bytes = driver.raw_log(image.log.sectors)?;
+        if let Some(dir) = &args.readback {
+            let at = dir.join(READBACK_VOLUME);
+            std::fs::write(&at, &bytes).map_err(|e| Refusal::File {
+                path: at.display().to_string(),
+                why: e.to_string(),
+            })?;
+        }
+        let complaints = toyos_fat32_check::check(&bytes);
+        if !complaints.is_empty() {
+            return Err(Refusal::Fat32(toyos_fat32_check::describe(&complaints)));
+        }
+        println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
+    }
+    if let Some(dir) = &args.readback {
+        write_readback(dir, &loader, &log, back, stick)?;
+        println!("readback written to {}", dir.display());
+    }
+    // **Named by evidence, before the boot record is missed.** A boot that
+    // never happened and a boot that failed both leave no `Boot: complete`,
+    // and `Unfit::NoBootRecord` says the second where it is often the first.
+    // The loader's own file is what tells them apart: a pass that read the
+    // black box says so and ends the chain, and this is the only way a
+    // machine can come back with a whole `loader.log` and an empty kernel one.
+    // **First, because it is the one refusal that is not a machine needing a
+    // hand.** The loader bounded a hang and gave the machine back; every
+    // other reading of an empty kernel log would send a reader to the wrong
+    // place, and `NoBootRecord` would send them to a kernel that never ran.
+    if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) {
+        return Err(Refusal::HungWithoutARecord);
+    }
+    if let Some(said) = reported_and_booted_nothing(&loader, &log) {
+        return Err(Refusal::ReportedAndBootedNothing { said });
+    }
+    // **An image armed to stop itself is judged by the record its own bound
+    // sealed, not by the word a shutdown writes.** Read off what the image
+    // is armed with rather than off its label or its readback directory: the
+    // arm comes out of the artifact, so no boot can be judged as something
+    // it was not flashed as. *Which* bound sealed it is the page's to say
+    // and not this list's — the arm says a bound was staged, and two of them
+    // can reach a staged boot.
+    if armed.iter().any(|name| name == WEDGE_ARM || name == LOCKUP_ARM) {
+        return Ok(Some(wedged_boot(&loader, &log)?));
+    }
+    Ok(Some(bootlog::verdict(&log).map_err(Refusal::Log)?))
 }
 
 /// What an image armed to stop itself owes instead of `Rebooting.`, and the
@@ -1667,6 +1632,36 @@ pub const READBACK_VOLUME: &str = "log-partition.img";
 /// The two keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
 pub const BACK_SECS: &str = "back_secs";
 pub const STICK_SECS_KEY: &str = "stick_secs";
+
+/// Every file a readback directory carries, so a run that writes none of them
+/// leaves none of the last run's behind.
+pub const READBACK_FILES: &[&str] =
+    &[READBACK_LOADER, READBACK_KERNEL, READBACK_BOOT, READBACK_VOLUME];
+
+/// Empty a readback directory, before this run can leave any of it standing.
+///
+/// **A file that is still there after this ran is one this boot wrote.**
+/// [`write_readback`] is reached only after the machine came back and the stick
+/// was read, so every refusal before it — a machine that never returned, a
+/// stick that never enumerated, a volume the outside judge complained about —
+/// used to leave the *previous* run's `kernel.log` in place for a judge that
+/// cannot tell one boot's file from another's.
+pub fn clear_readback(dir: &Path) -> Result<(), Refusal> {
+    for name in READBACK_FILES {
+        let at = dir.join(name);
+        match std::fs::remove_file(&at) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Refusal::File {
+                    path: at.display().to_string(),
+                    why: e.to_string(),
+                })
+            }
+        }
+    }
+    Ok(())
+}
 
 fn write_readback(
     dir: &Path,
@@ -1828,7 +1823,6 @@ mod tests {
             vec!["--image", "target/bootable.img"],
             vec!["--readback", "target/metal/x"],
             vec!["--fat32-check"],
-            vec!["--boots", "2"],
             vec!["--dry-run"],
             vec!["--wait-secs", "60"],
         ] {
@@ -2205,6 +2199,29 @@ mod tests {
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::JOB_BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::PANIC_BOUND_MS));
+    }
+
+    /// **The defect: a refusal left the last run's files for the next run's
+    /// judge.** Run 26's `ccorpus` was reported as "90 member(s), 536 ms per
+    /// member" off run 24's boot of a different tip, because every refusal
+    /// before `write_readback` returns without touching the directory.
+    #[test]
+    fn a_readback_directory_holds_nothing_the_last_run_left() {
+        let dir = std::env::temp_dir().join(format!("toyos-readback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        for name in READBACK_FILES {
+            std::fs::write(dir.join(name), b"the last run").expect("stage a stale file");
+        }
+        // A file no readback names is not this directory's to remove.
+        std::fs::write(dir.join("image.img"), b"the image").expect("stage the image");
+        clear_readback(&dir).expect("clearing a directory of readable files");
+        for name in READBACK_FILES {
+            assert!(!dir.join(name).exists(), "{name} survived the clear");
+        }
+        assert!(dir.join("image.img").exists(), "the image the driver flashes was removed");
+        // Idempotent: a first run has none of them and that is not a refusal.
+        clear_readback(&dir).expect("clearing an empty directory");
+        std::fs::remove_dir_all(&dir).expect("the scratch directory");
     }
 
     #[test]
