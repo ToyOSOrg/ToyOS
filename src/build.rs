@@ -904,20 +904,30 @@ impl Boot {
 /// actuator name is refused here by name rather than reaching
 /// [`build_test_image`]'s assert, which would answer about kernel features.
 ///
-/// **Every valued parameter is cleared here by name**, because a flashed stick
-/// is exactly where one is asked for: `logstream=` is how a boot on the bench's
-/// ThinkPad reaches a listener on the development Mac while it is still
-/// booting, and a gate that knew only [`declared_params`] would make every such
-/// image unflashable.
+/// **Every valued parameter is cleared here by name, and the one this build can
+/// read is parsed here too.** A stick is written, carried to the bench and
+/// booted before anything else looks at what is on it, so an address this gate
+/// passed and the kernel cannot use is discovered by a machine that streams to
+/// nothing — the round trip the record stream exists to remove.
 pub fn flashable_params(root: &Path, asked: &[String]) -> Result<(), String> {
     let own = declared_params(root);
     for name in asked {
+        if let Some(value) = name.strip_prefix(toyos_logstream::PARAM) {
+            toyos_logstream::endpoint(value).map_err(|why| {
+                format!(
+                    "--kernel-param {name} beside --boot-config: {value:?} is not an address \
+                     ({})",
+                    why.as_str()
+                )
+            })?;
+            continue;
+        }
         if !own.contains(name) && !is_valued_param(name) {
             return Err(format!(
                 "--kernel-param {name} beside --boot-config: {name} is not one of the kernel's \
                  boot parameters {own:?} or one carrying a value ({}), and a flashed image \
                  carries no actuator",
-                VALUED_PARAMS.join(", ")
+                valued_params().join(", ")
             ));
         }
     }
@@ -994,26 +1004,49 @@ fn check_params(root: &Path, params: &[String]) {
              Boot parameters carrying a value: {}.",
             declared.join(", "),
             own.join(", "),
-            VALUED_PARAMS.join(", "),
+            valued_params().join(", "),
         );
     }
 }
 
-/// The boot parameters that carry a value after their name.
+/// The boot parameters that carry a value after their name, each beside the
+/// path `kernel/src/params.rs`'s `claims` matches it by.
 ///
-/// **Not read out of `kernel/src/params.rs`, because they are not in `PARAMS`**:
-/// a flag is a name the kernel matches whole, and these are prefixes it matches
-/// with `starts_with` in `params::claims`. Named by the constants the kernel
-/// reads them out of, so there is still one spelling of each in the tree.
-///
-/// `blackbox=` is the loader's, appended to whatever it read off the ESP;
-/// `logstream=` is the owner's, and is the whole of how a boot is told where to
-/// send its log while it is running.
-pub const VALUED_PARAMS: &[&str] = &[toyos_blackbox::PARAM, toyos_logstream::PARAM];
+/// **Not read out of `PARAMS`, because they are not in it**: a flag is a name
+/// the kernel matches whole, and these are prefixes it matches with
+/// `starts_with`. The path is here so the two lists can be checked against each
+/// other — a prefix only one of them knows is an image the other refuses.
+const VALUED_PARAMS: &[(&str, &str)] = &[
+    ("toyos_blackbox::PARAM", toyos_blackbox::PARAM),
+    ("toyos_logstream::PARAM", toyos_logstream::PARAM),
+];
+
+/// The names in [`VALUED_PARAMS`], for a refusal that says what it would have
+/// taken.
+pub fn valued_params() -> Vec<String> {
+    VALUED_PARAMS.iter().map(|(_, name)| (*name).to_string()).collect()
+}
 
 /// Whether `param` is one of [`VALUED_PARAMS`] with its value after it.
 pub fn is_valued_param(param: &str) -> bool {
-    VALUED_PARAMS.iter().any(|prefix| param.starts_with(prefix))
+    VALUED_PARAMS.iter().any(|(_, prefix)| param.starts_with(prefix))
+}
+
+/// Every prefix `kernel/src/params.rs`'s `claims` matches with `starts_with`,
+/// as the constant paths it names them by.
+///
+/// Anchored on the function and closed on the first line that ends it, so a
+/// reflow still reads and a declaration this cannot find is empty rather than
+/// guessed.
+fn prefixes_claimed(text: &str) -> Vec<String> {
+    let Some((_, body)) = text.split_once("pub fn claims") else { return Vec::new() };
+    let Some((body, _)) = body.split_once("\n}") else { return Vec::new() };
+    body.match_indices("starts_with(")
+        .filter_map(|(at, marker)| {
+            let rest = &body[at + marker.len()..];
+            rest.split_once(')').map(|(path, _)| path.trim().to_string())
+        })
+        .collect()
 }
 
 /// The boot parameters the kernel itself answers to, off `kernel/src/params.rs`.
@@ -1961,6 +1994,62 @@ mod tests {
             assert!(harness_kernel_build_is_declared(suite_build, false));
             assert!(!harness_kernel_build_is_declared(suite_build, true));
         }
+    }
+
+    /// **The two lists of valued parameters are one list.** A prefix
+    /// `kernel/src/params.rs`'s `claims` matches and this file does not know is
+    /// a name the pre-flash gate refuses; one this file clears and `claims` does
+    /// not match writes an image `actuator::init` panics on. Both are read from
+    /// the kernel's own source, so neither can be satisfied by editing this
+    /// test.
+    #[test]
+    fn a_valued_parameter_is_one_the_kernel_claims_by_prefix() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = fs::read_to_string(root.join("kernel/src/params.rs")).expect("params.rs");
+        let mut claimed = prefixes_claimed(&text);
+        claimed.sort();
+        let mut declared: Vec<String> =
+            VALUED_PARAMS.iter().map(|(path, _)| (*path).to_string()).collect();
+        declared.sort();
+        assert_eq!(
+            claimed, declared,
+            "`params::claims` matches {claimed:?} by prefix and `VALUED_PARAMS` names {declared:?}"
+        );
+
+        // Anchored on the function and closed on it: a body it cannot find
+        // reads as nothing rather than as the rest of the file.
+        assert!(prefixes_claimed("fn other(t: &str) { t.starts_with(a::B) }").is_empty());
+        assert_eq!(
+            prefixes_claimed("pub fn claims(t: &str) -> bool {\n    t.starts_with( a::B )\n}\n"),
+            vec!["a::B".to_string()]
+        );
+    }
+
+    /// The gate a stick is written behind, on the one valued parameter it can
+    /// read: an address it cannot parse is refused by name here, and not by a
+    /// machine on the bench that streams to nothing.
+    #[test]
+    fn the_pre_flash_gate_parses_the_address_it_clears() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let good = format!("{}10.0.2.2:41337", toyos_logstream::PARAM);
+        assert_eq!(flashable_params(root, &[good]), Ok(()));
+        for (bad, why) in [
+            ("10.0.2.2", toyos_logstream::Malformed::NoPort),
+            ("", toyos_logstream::Malformed::NoPort),
+            ("t14:22", toyos_logstream::Malformed::NotAnAddress),
+            ("10.0.2.2:0", toyos_logstream::Malformed::NotAPort),
+            ("10.0.2.2:65536", toyos_logstream::Malformed::NotAPort),
+        ] {
+            let asked = format!("{}{bad}", toyos_logstream::PARAM);
+            let refused = flashable_params(root, &[asked.clone()])
+                .expect_err(&format!("{asked} passed the gate"));
+            assert!(refused.contains(why.as_str()), "{asked} was refused as {refused:?}");
+        }
+        // The other valued parameter still passes: this gate parses the one it
+        // can read and clears the rest by name.
+        assert_eq!(flashable_params(root, &[format!("{}0x1000", toyos_blackbox::PARAM)]), Ok(()));
+        // And a name that is neither is still refused.
+        assert!(flashable_params(root, &["log-storm".to_string()]).is_err());
     }
 
     #[test]
