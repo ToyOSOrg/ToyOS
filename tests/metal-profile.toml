@@ -611,28 +611,32 @@ ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
 
 # --- the cable: the boot that runs netd in front of the T14's own I219 ---
-# The three boot facts below are the machine's own, off a boot whose claim the
-# kernel refused for want of MSI: they are facts about the boot rather than
-# about the claim, so the readings stand. The two `lan.` rows have none, because
-# that boot's netd never ran. `ping_secs` has none either, and for a different
-# reason: the run that took one pinged the address this machine's *name*
-# resolves to, which here is a Tailscale address only the operating system
-# before the boot holds — the loop reads the claimed function's own address now,
-# and no run has pinged that yet.
+# The three boot facts below are the machine's own, off boots whose claim the
+# kernel refused — first for want of MSI, then at the 32-bit BAR. They are facts
+# about the boot rather than about the claim, so the readings stand; the two
+# `lan.` rows have none, because netd never came up on either.
+#
+# `ping_secs` has none, and its ceiling is what run 30 changed. The control boot
+# pinged 192.168.1.46 once a second for its whole 61-second window and got
+# nothing: the machine's wire answers no earlier than its ssh, and the loop
+# stops pinging when ssh answers. So the number this row will hold is not
+# "earlier than Ubuntu" — it is "at all", because on this machine nothing
+# answers at that address unless the boot brings it up. The ceiling still waits
+# on a green reading to be tightened to.
 
 [[number]]
 name = "boot.lancase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
-measured = 1223
+measured = 1257
 
 [[number]]
 name = "boot.lancase.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
-measured = 65
+measured = 61
 
 [[number]]
 name = "boot.lancase.stick_secs"
@@ -645,7 +649,7 @@ measured = 0
 name = "boot.lancase.ping_secs"
 unit = "s"
 ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs — the window this is measured in is the loop's own wait for the machine to answer ssh again, and nothing narrower has been read yet. What it becomes is a ceiling under the reading a boot with no network of its own takes at the same address, which is the operating system before it answering on its way back up. Until one of those exists this row bounds the loop rather than the boot"
+ceiling_from = "toyos_build::metal::return_secs — the window this is measured in is the loop's own wait for the machine to answer ssh again, and nothing narrower has been read yet. Run 30 is the control it rests on: a boot with no network of its own, pinged once a second at 192.168.1.46 for the whole 61-second window, answered nothing at all — so a reply anywhere in the window is the boot's and not the machine's. A green reading is what tightens this to the span a boot is actually up for"
 
 [[number]]
 name = "list.lancase.job_ms"
