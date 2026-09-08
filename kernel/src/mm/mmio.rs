@@ -37,6 +37,20 @@ impl Mmio {
         self.size
     }
 
+    /// Rebuild a window from an [`addr`](Self::addr) and a [`size`](Self::size)
+    /// taken off a live one.
+    ///
+    /// For the one caller that has to keep the *numbers* and not the object: the
+    /// reset-time xHCI stop reads its controllers out of atomics, because a
+    /// panicked CPU may take no lock.
+    ///
+    /// # Safety
+    /// `addr` and `size` must be one live `Mmio`'s own `addr()` and `size()`,
+    /// over a window mapped for the machine's life.
+    pub unsafe fn from_addr(addr: u64, size: u64) -> Self {
+        Self { base: addr as *mut u8, size }
+    }
+
     pub fn subregion(self, offset: u64, size: u64) -> Mmio {
         assert!(offset + size <= self.size,
             "Mmio subregion OOB: offset={:#x} size={:#x} total={:#x}", offset, size, self.size);

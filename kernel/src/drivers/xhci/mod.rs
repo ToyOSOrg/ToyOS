@@ -1,6 +1,7 @@
 mod device;
 mod hid;
 mod legacy;
+pub mod stop;
 pub mod usbd;
 mod wait;
 
@@ -11,6 +12,7 @@ pub use wait::boot::{init, PORT_POLL, PORT_SETTLE_CEILING};
 pub use wait::msc::{storage_flush, storage_read, storage_write};
 
 use alloc::vec::Vec;
+use core::fmt;
 use core::num::NonZeroU8;
 use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
 use crate::mm::Mmio;
@@ -42,6 +44,15 @@ const OP_DCBAAP:   u64 = 0x30; // 64-bit
 const OP_CONFIG:   u64 = 0x38;
 const OP_PORT_BASE: u64 = 0x400;
 const PORT_REG_SIZE: u64 = 0x10;
+
+/// USBCMD's Run/Stop and Host Controller Reset, and USBSTS's HCHalted and
+/// Controller Not Ready (xHCI 1.2 §5.4.1, §5.4.2). Named once, because the
+/// bring-up and the shutdown drive the same two registers in opposite
+/// directions and a second spelling of either is a second answer.
+const USBCMD_RS: u32 = 1 << 0;
+const USBCMD_HCRST: u32 = 1 << 1;
+const USBSTS_HCH: u32 = 1 << 0;
+const USBSTS_CNR: u32 = 1 << 11;
 
 // Raw bits for the two paths that work on a word, not a decoded register: read_portsc's actuator injections and init_one's pre-controller port power. Every decision on these bits goes through `Portsc`, never the raw consts, outside these two paths.
 const PORTSC_CCS: u32 = 1 << 0;
@@ -1238,9 +1249,7 @@ impl XhciController {
     ///
     /// Ports are read only when something says they might have moved; otherwise this costs one event-ring read.
     fn poll(&mut self) -> Option<u64> {
-        while let Some(event) = self.next_event() {
-            self.dispatch_event(event);
-        }
+        let _ = self.drain_events();
         // After the drain, not inside it: an answer the drain recorded is issued where nobody else waits on this ring.
         self.advance_outstanding();
         self.recover_endpoints();
@@ -1282,17 +1291,181 @@ impl XhciController {
         self.rt_base.write_u32(IR0_IMAN, 3); // clear IP (W1C) + keep IE
     }
 
+    /// Take at most one ring's worth of events off the event ring.
+    ///
+    /// **A bound on a loop whose exit is the controller's.** `next_event`
+    /// answers for as long as the controller keeps producing, so a bare
+    /// `while let` here is a scheduler pass that does not return on a ring
+    /// being refilled — with `XHCI` held and preemption off for all of it.
+    /// One ring is what the ring could hold when the pass began; anything after
+    /// that belongs to the next pass, which the interrupt that recorded it
+    /// brings about.
+    ///
+    /// Answers whether the controller said anything, which is what a caller
+    /// bounding *silence* rather than work re-arms on.
+    fn drain_events(&mut self) -> bool {
+        let mut answered = false;
+        for _ in 0..RING_SIZE {
+            let Some(event) = self.next_event() else { return answered };
+            self.dispatch_event(event);
+            answered = true;
+        }
+        true
+    }
+
     fn ring_doorbell(&self, slot: u8, dci: u8) {
         fence(Ordering::Release);
         self.db_base.write_u32(slot as u64 * 4, dci as u32);
     }
-
 }
 
 /// Every xHCI controller on the machine, in PCI enumeration order.
 ///
 /// A `Vec` and not an `Option`: the target laptop has two, and its own ports hang off the second.
 static XHCI: Lock<Vec<XhciController>> = Lock::new(Vec::new());
+
+/// Empty every USB disk's write cache, on the way to a reset.
+///
+/// **Above the boot's last word**, because these are ordinary records and the
+/// volume that carries them is still there. What comes after — the barrier and
+/// the register stop — is [`seal_shut`] and [`stop::before_reset`], and both run
+/// below that word.
+/// Whether the machine's `index`-th disk has ever answered SYNCHRONIZE CACHE
+/// with INVALID COMMAND OPERATION CODE. `None` for an index naming no disk.
+///
+/// **`Ok(())` from a flush spells two different facts**: a cache emptied, and a
+/// device that had none to empty and said so. A shutdown line that renders both
+/// as `ok` cannot be read on a machine where only the second ever happens, and
+/// on the T14 only the second does.
+fn storage_has_no_cache(index: usize) -> bool {
+    with_disk(index, |ctrl, at| ctrl.msc[at].disk.is_some_and(|d| d.dev.refused_flush()))
+        .unwrap_or(false)
+}
+
+pub fn flush_disks() {
+    // **Bounded before the first flush, because `with_disk` takes the lock
+    // without a bound.** A driver that has stopped answering is one this would
+    // otherwise spin on until the ticket lock's own deadlock panic, and a
+    // shutdown that never reaches its reset is worse than a cache that was not
+    // emptied — the register stop below saves the device either way. Once the
+    // lock has been seen free, every holder after it is a live operation and
+    // `block::OPERATION` is what bounds that.
+    if !lock_settles() {
+        log!(
+            "usb-quiesce: the controller lock was not free within {} ms, so no disk cache was \
+             emptied and the reset stops the controllers regardless",
+            BARRIER.millis()
+        );
+        stop::flushed(0, 0, 0);
+        return;
+    }
+    let (mut disks, mut flushed, mut cacheless) = (0u32, 0u32, 0u32);
+    // Each flush is one block-layer operation and takes the controller lock for
+    // itself, the way every other caller does.
+    for index in 0..storage_count() {
+        let _op = crate::block::begin_operation();
+        let outcome = storage_flush(index);
+        // Read after the flush, because the flush is what sets it on a device
+        // that had not been asked before.
+        let no_cache = outcome.is_ok() && storage_has_no_cache(index);
+        disks += 1;
+        flushed += u32::from(outcome.is_ok());
+        cacheless += u32::from(no_cache);
+        match no_cache {
+            true => log!(
+                "usb-quiesce: disk {index} implements no SYNCHRONIZE CACHE, so it owed none"
+            ),
+            false => log!("usb-quiesce: disk {index} SYNCHRONIZE CACHE {}", Flushed(outcome)),
+        }
+    }
+    // Not logged here: the summary belongs beside what the register stop did,
+    // and that is written into the black box from below the boot's last word.
+    stop::flushed(disks, flushed, cacheless);
+}
+
+/// How long the shutdown waits for the controller lock before going on without
+/// it.
+///
+/// `block::OPERATION` is what bounds the holder — one block-device operation is
+/// refused once it expires, and that is the longest anything holds this lock —
+/// and twice it covers one more waiter already ticketed ahead of this one.
+const BARRIER: crate::time::Duration =
+    crate::time::Duration::from_millis(2 * crate::block::OPERATION.duration().millis());
+
+/// Take the controller lock and never give it back.
+///
+/// **This is the barrier the reset needs.** `with_disk` holds this lock across a
+/// whole transfer, so acquiring it means none is in flight, and never releasing
+/// it means none can start before the machine ends. Preemption stays disabled
+/// with it, which is the same statement about this CPU.
+///
+/// **Bounded, and `false` rather than a wait that does not end.** A lock this
+/// never gets is a driver that has stopped answering, and a shutdown that
+/// waited for one for ever is a machine nobody can turn off — which is worse
+/// than the transfer the barrier exists to end. `stop::before_reset` runs
+/// either way and the account says which of the two it was.
+///
+/// Called from the shutdown path only, and after the log volume's last byte is
+/// durable — before that, `logd` still has that volume to write.
+pub fn seal_shut() {
+    match take_within(BARRIER.nanos()) {
+        Some(guard) => {
+            core::mem::forget(guard);
+            stop::barrier(stop::Barrier::Taken);
+        }
+        None => stop::barrier(stop::Barrier::Refused),
+    }
+}
+
+/// Whether the controller lock was free at any point inside [`BARRIER`], with
+/// nothing kept. The probe [`flush_disks`] makes before it takes the lock the
+/// ordinary way.
+fn lock_settles() -> bool {
+    take_within(BARRIER.nanos()).is_some()
+}
+
+/// `try_lock` until it succeeds or `bound` nanoseconds pass.
+///
+/// **The one bounded acquisition the shutdown makes**, and the one place a lock
+/// that never comes free can be staged. `XHCI.lock()` spins until its own
+/// deadlock panic, and a shutdown path that panicked instead of resetting is a
+/// machine nobody can turn off. Not fair — a competitor taking a ticket wins —
+/// which is why both callers say what they do without it.
+fn take_within(bound: u64) -> Option<crate::sync::LockGuard<'static, Vec<XhciController>>> {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::xhci_lock_wedged() {
+        // The bound is spent, not skipped: what the control is about is that a
+        // shutdown pays it once and then resets anyway.
+        crate::clock::settles(bound, || false);
+        return None;
+    }
+    let until = crate::clock::tsc_deadline(bound);
+    loop {
+        if let Some(guard) = XHCI.try_lock() {
+            return Some(guard);
+        }
+        if crate::arch::cpu::rdtsc() >= until {
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// A flush outcome as one word, so the shutdown line reads the same whichever
+/// way the disk answered.
+struct Flushed(crate::block::BlockResult);
+
+impl fmt::Display for Flushed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Ok(()) => f.write_str("ok"),
+            Err(crate::block::BlockError::BudgetExpired) => {
+                f.write_str("ran out of its operation budget")
+            }
+            Err(crate::block::BlockError::Device) => f.write_str("failed"),
+        }
+    }
+}
 
 /// Process xHCI events if this CPU has an unserviced interrupt record, or a port's state machine is due.
 ///

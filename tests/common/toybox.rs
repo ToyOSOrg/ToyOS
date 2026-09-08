@@ -171,7 +171,7 @@ pub fn cp_volume(
         test_config,
         c_bins,
         rust_bins,
-        BootOptions { boot_image: Some(image_path.clone()), ..Default::default() },
+        BootOptions { boot_image: Some(qemu::Staged::Written(image_path.clone())), ..Default::default() },
     );
     let boot = qemu.boot_log().to_string();
     let boot = serial::Serial::named("boot console", boot.as_str());

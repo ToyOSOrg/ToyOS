@@ -1,0 +1,611 @@
+# Every number the metal suite measures on the T14, with the ceiling past which
+# it is a red. `src/metalprofile.rs` is the reader and the grammar; a number the
+# suite measures and this file does not price is refused, not passed.
+#
+# `ceiling_from` says where the ceiling came from, and a row naming a constant
+# this repository declares is held to that constant's value by
+# `metalprofile::tests::a_ceiling_that_names_a_constant_carries_it`. A ceiling
+# derived from a constant is the widest true bound there is before the machine
+# has been read once, and a ceiling that had to be widened to pass is a finding
+# rather than an edit.
+#
+# `measured` is the reading the T14 gave the boot the row names, off that boot's
+# own readback. It is what a later author tightens a ceiling against and it is
+# never the gate; a row with no `measured` is a boot no run has taken yet.
+#
+# One row per number, named `<what>.<boot>.<field>`. The boot names are the ones
+# `METAL`'s arms give them in `tests/toyos.rs`: one image, one flash, one minute
+# of the machine.
+
+# --- the boot's own duration, out of the kernel's `Boot: complete (Nms)` ---
+# Nothing bounds the span before userland but the test runner's own deadline,
+# which is measured from boot and ends a boot whose job list has not finished:
+# a `Boot: complete` later than that is a boot the runner already reset.
+
+[[number]]
+name = "boot.testcases.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — the runner's deadline runs from boot, so a later `Boot: complete` is a boot already reset"
+measured = 1199
+
+[[number]]
+name = "boot.testcases-mkdir.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1200
+
+[[number]]
+name = "boot.testcases-readdir.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1256
+
+[[number]]
+name = "boot.testcases-watchdog.complete_ms"
+unit = "ms"
+ceiling = 9600
+ceiling_from = "toyos_tco::BOUND_MS — this image arms the chipset watchdog at the handoff, so the whole boot runs under it"
+measured = 1259
+
+[[number]]
+name = "boot.jobcase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1253
+
+[[number]]
+name = "boot.metalcase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1252
+
+# --- what the machine spent coming back, on the host's clock ---
+# The loop already refuses past this; the row exists so the number is read and
+# recorded rather than only bounded, and so a return that doubled is a red
+# before it is a hang.
+
+[[number]]
+name = "boot.testcases.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs — the longest watchdog a boot runs under plus what coming back costs"
+measured = 48
+
+[[number]]
+name = "boot.testcases-mkdir.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 46
+
+[[number]]
+name = "boot.testcases-readdir.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 49
+
+[[number]]
+name = "boot.testcases-watchdog.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 46
+
+[[number]]
+name = "boot.jobcase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 44
+
+[[number]]
+name = "boot.metalcase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 46
+
+[[number]]
+name = "boot.latencycase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1258
+
+[[number]]
+name = "boot.latencycase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 46
+
+# --- what this machine's scheduler costs a waiter, and what one machine-wide
+# --- TLB shootdown costs its initiator
+# `latency.p99_us` is bounded by the instrument: past its last bucket the figure
+# is a floor and not a measurement, which is a red whatever the machine did. The
+# two shootdown rows are bounded by the reading, half again — the margin this
+# file uses everywhere a first reading becomes a ceiling — because
+# `arch::tlb::ACK_TIMEOUT` is two million times the reading and a ceiling nothing
+# can reach is a row that cannot red.
+
+[[number]]
+name = "latency.p99_us"
+unit = "us"
+ceiling = 4095
+ceiling_from = "cyclictest's histogram is 4096 buckets of 1 us, so a p99 in its last bucket is a floor and not a measurement"
+measured = 16
+
+[[number]]
+name = "tlb.latencycase.p50_ns"
+unit = "ns"
+ceiling = 3387
+ceiling_from = "2,258 ns measured, and half again — 50 % over one machine's one reading, which is what this file gives every ceiling derived from a first one. `kernel arch::tlb::ACK_TIMEOUT` is 5 s and panics the machine; it bounds the wait and is not a ceiling this row could ever red on"
+measured = 2258
+
+[[number]]
+name = "tlb.latencycase.p99_ns"
+unit = "ns"
+ceiling = 4397
+ceiling_from = "2,931 ns measured, and half again — as tlb.latencycase.p50_ns. The tail and not the median, so what widens it is a shootdown that waited on one slow acknowledger rather than the machine getting slower everywhere"
+measured = 2931
+# --- the device boot, and every span `userland/metalprobe` measures on it ---
+# Each job exits with its span in microseconds and the kernel's `exit:` record
+# carries it; `src/metaldevices.rs` names the negative codes that are refusals
+# rather than numbers. A span and not a rate, because a ceiling is what this
+# file can express and a rate would have to be judged from below.
+#
+# Every ceiling here is the same derivation: `metalprobe`'s own `SHARE_PERCENT`
+# of `toyos_tco::JOB_BOUND_MS` is what its payload is sized against, and one job
+# may not outlast its share without putting the runner's reset inside a
+# transfer, which is what leaves a stick the next host cannot enumerate.
+
+[[number]]
+name = "boot.metaldevicecase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.metaldevicecase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "usbwrite.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "metalprobe's SHARE_PERCENT of toyos_tco::JOB_BOUND_MS — the share its payload is sized against, and the widest true bound before the machine has answered once"
+
+[[number]]
+name = "usbread.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "as usbwrite.metaldevicecase.span_us"
+
+[[number]]
+name = "fbcheck.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "as usbwrite.metaldevicecase.span_us — one whole-scanout write and one whole-scanout readback"
+
+[[number]]
+name = "fbfill.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "as usbwrite.metaldevicecase.span_us — metalprobe's FILL_PASSES whole-scanout fills"
+
+[[number]]
+name = "fbread.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "as usbwrite.metaldevicecase.span_us — metalprobe's READ_PASSES whole-scanout readbacks, the direction that misses every cache"
+
+# --- the self-test boot, and the shared block's two ---
+
+[[number]]
+name = "boot.selftests.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1267
+
+[[number]]
+name = "boot.selftests.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 44
+
+[[number]]
+name = "boot.shared.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.shared.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.shared-debug.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1210
+
+[[number]]
+name = "boot.shared-debug.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 61
+
+[[number]]
+name = "boot.ccorpus.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1200
+
+[[number]]
+name = "boot.ccorpus.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 95
+
+# --- the boot stick, after the boot ---
+# **The only judge of the device there is.** QEMU cannot wedge a stick, and a
+# wedged one shows as the log partition's device node missing after the machine
+# comes back. So the loop waits for that node by name and records what it
+# waited, per boot.
+
+[[number]]
+name = "boot.testcases.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "toyos_build::metal::STICK_SECS — ten times the three seconds Ubuntu's own enumeration spends giving up on a wedged stick (run 18's journal)"
+measured = 0
+
+[[number]]
+name = "boot.testcases-mkdir.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.testcases-readdir.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.testcases-watchdog.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.jobcase.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "the machine has answered: 0 s on run 20, at the driver's 1 s poll. Five is what one round of Linux's own enumeration retries would cost — run 18's journal spent three seconds on four addressing attempts and a port power cycle before it gave up — so a reading over it is a stick that needed rescuing rather than one that was simply there"
+measured = 0
+
+[[number]]
+name = "boot.metalcase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.latencycase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.metaldevicecase.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.jobcase.stick_secs, and this is the boot that reads it hardest: it writes, fsyncs and reads back megabytes before the reset, which is the shape a stop that cut a transfer would leave unenumerable"
+
+[[number]]
+name = "boot.selftests.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.shared.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.shared-debug.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.ccorpus.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.foreignrecord.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1254
+
+[[number]]
+name = "boot.foreignrecord.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 44
+
+[[number]]
+name = "boot.foreignrecord.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+# --- the boot that stops itself on purpose ---
+# `deadlinewedge` is the only boot here whose verdict is not `Rebooting.`: every
+# CPU stops taking scheduler passes at the shutdown syscall and the kernel's own
+# `boot-deadline` is what ends it. Its three ordinary numbers are priced against
+# that bound rather than against the runner's, because the runner never reaches
+# its own.
+
+[[number]]
+name = "boot.deadlinewedge.complete_ms"
+unit = "ms"
+ceiling = 120000
+ceiling_from = "toyos_tco::WEDGE_BOUND_MS — on this boot the kernel's own deadline is what runs from boot, so a later `Boot: complete` is a boot the deadline already reset"
+measured = 1199
+
+[[number]]
+name = "boot.deadlinewedge.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs — which now derives from WEDGE_BOUND_MS, the longest watchdog a boot runs under, plus what coming back costs"
+measured = 236
+
+[[number]]
+name = "boot.deadlinewedge.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.jobcase.stick_secs. It is the number this boot owes most: the deadline resets a machine whose USB was stopped by registers alone, and a stick the next host cannot enumerate is what `xhci::stop::before_reset` exists to prevent"
+measured = 0
+
+# --- and the one number only this boot measures ---
+# How far past its bound the deadline actually fired. The bound is a parameter;
+# the expiry is what the poll reached on a machine where every CPU was spinning
+# with preemption disabled, so the difference is what that poll costs in the
+# state it exists for.
+
+[[number]]
+name = "boot.deadlinewedge.deadline_lateness_ms"
+unit = "ms"
+ceiling = 10000
+ceiling_from = "the poll's own cadence: the deadline is read on every timer interrupt and an idle CPU re-arms its LAPIC one-shot per fire, so the lateness is one timer period. That period has not been measured on this machine, and ten seconds — a twelfth of the bound — is the widest true bound before it has been"
+measured = 61
+
+# --- the boot one CPU stops answering on ---
+# `hardlockup` is the deaf half of the boot above: the same staged wedge, and
+# then one CPU with `IF` clear spinning on a lock another holds and never gives
+# back. The boot deadline's poll cannot see it — nothing on that CPU runs to
+# poll anything — so what ends this machine is that CPU's own performance-counter
+# NMI, and the page it seals names the CPU rather than only the bound. Priced
+# against the earlier of the two bounds, which is the one this boot runs under.
+
+[[number]]
+name = "boot.hardlockup.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::HARD_LOCKUP_BOUND_MS — half the deadline and the earlier bound, so a later `Boot: complete` is a boot the detector already reset"
+measured = 1201
+
+[[number]]
+name = "boot.hardlockup.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs. It is the same wait: this boot ends itself half a bound earlier and then costs the same firmware, loader and Ubuntu as any other"
+measured = 172
+
+[[number]]
+name = "boot.hardlockup.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.deadlinewedge.stick_secs. The reset is written from inside an NMI on a CPU that holds a lock, and `xhci::stop::before_reset` runs there like anywhere else — a stick the next host cannot enumerate is what that would have cost"
+measured = 0
+
+# --- and the one number only this boot measures ---
+# How far past its bound the counter's sample was when it found the CPU stuck.
+# Not the row above's number: what bounds this one is the detector's own sample
+# period, not the timer's.
+
+[[number]]
+name = "boot.hardlockup.lockup_lateness_ms"
+unit = "ms"
+ceiling = 2000
+ceiling_from = "twice the sample period `kernel/src/hardlockup`'s SAMPLE_NS states, 1000 ms: a CPU is found stuck at the first sample after its bound, so one period is the lateness and a second is the widest a delayed one costs"
+measured = 0
+
+# --- what one member of a job list may cost this machine ---
+# **The number the suite sizes its lists by, and judges them against.** The
+# runner's bound (`toyos_tco::JOB_BOUND_MS`) runs from boot and ends the whole
+# list, not the job it is inside, so a list longer than the bound is a boot
+# whose tail members never run — reported as missing records rather than as a
+# list nobody sized. `tests/common/metal.rs` derives how many members one boot
+# may carry from the ceiling here, and then holds the boot to the same number:
+# a list is cut to what its members are priced at, and members slower than their
+# price red by name.
+#
+# Every reading below is the interval between successive `spawn: /system/bin/…`
+# records on that boot's own log.
+
+[[number]]
+name = "list.shared.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "845 ms measured (25 members spawned between 1.943 s and 23.066 s on run 24's `shared`), and a ceiling above the widest single member on that boot — test_rs_abuse_elf_loader at 1,358 ms — so one heavy member cannot put the mean over it"
+measured = 845
+
+[[number]]
+name = "list.shared-2.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.shared.job_ms — the same list, cut in two"
+
+[[number]]
+name = "list.shared-debug.job_ms"
+unit = "ms"
+ceiling = 2900
+ceiling_from = "1,926 ms measured (8 members between 2.624 s and 18.032 s on run 24's `shared-debug`), and half again: these are the eight binaries that re-execute themselves once per fault, and handle_kill_policy alone spawned 42 children"
+measured = 1926
+
+[[number]]
+name = "list.ccorpus.job_ms"
+unit = "ms"
+ceiling = 600
+ceiling_from = "396 ms measured (118 cases between 2.625 s and the reboot job at 49.366 s on run 24's `ccorpus`), and half again. That boot was green at 49.5 s of a 60 s bound — 82 % of it, with no margin for a slower stick — which is why the same rule cuts a list that passed"
+measured = 396
+
+[[number]]
+name = "list.ccorpus-2.job_ms"
+unit = "ms"
+ceiling = 600
+ceiling_from = "as list.ccorpus.job_ms — the same corpus, cut in two"
+
+[[number]]
+name = "list.metaldevicecase.job_ms"
+unit = "ms"
+ceiling = 4800
+ceiling_from = "metalprobe's SHARE_PERCENT of toyos_tco::JOB_BOUND_MS, which is what every one of that boot's own span rows is priced at: the list is sized to what its jobs are allowed to cost, and a job that outruns its allowance reds on its own span row"
+
+[[number]]
+name = "list.testcases.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.shared.job_ms: the same machine spawning the same kind of binary off the same stick"
+
+[[number]]
+name = "list.testcases-mkdir.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.testcases-readdir.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.testcases-watchdog.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.jobcase.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.metalcase.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.latencycase.job_ms"
+unit = "ms"
+ceiling = 27000
+ceiling_from = "half of what the members of a list may spend — (toyos_tco::JOB_BOUND_MS - metalprofile::AROUND_THE_LIST_MS) / 2 — because this list is two benches that run for a stated span rather than binaries that exit as soon as they can, and they split the boot between them"
+
+[[number]]
+name = "list.selftests.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.foreignrecord.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.deadlinewedge.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms — the list is one job and a wedge, and what ends this boot is the kernel's own deadline rather than the runner's"
+
+[[number]]
+name = "list.hardlockup.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.deadlinewedge.job_ms"
+
+# --- the boots the split above adds ---
+
+[[number]]
+name = "boot.shared-2.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.shared-2.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.shared-2.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.ccorpus-2.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.ccorpus-2.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.ccorpus-2.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"

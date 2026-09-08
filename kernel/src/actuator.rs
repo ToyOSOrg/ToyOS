@@ -34,6 +34,11 @@ macro_rules! actuators {
 }
 
 actuators! {
+    /// Wedge the machine at the shutdown syscall — after the job list has run
+    /// and before anything is torn down — instead of resetting. The negative
+    /// control on `crate::deadline`: nothing else in this kernel ends it.
+    wedge_before_reset = "wedge-before-reset";
+
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
@@ -152,6 +157,14 @@ actuators! {
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
+    /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
+    /// and never gives back: the negative control on `crate::hardlockup`, and a
+    /// machine nothing else in this tree ends. Where CPUID states no
+    /// performance counter it also has one CPU send the victim the NMI the
+    /// counter would have, which is the only way a TCG guest reaches that
+    /// decision; on hardware the counter does it and nothing is sent.
+    hard_lockup_probe = "hard-lockup-probe";
+
     /// Storm the CPU spinning on `syscall` from Ring 3 with NMIs.
     syscall_window_nmi = "syscall-window-nmi";
 
@@ -215,6 +228,10 @@ actuators! {
     /// Time the same read loop on every CPU, either side of the `mov cr0` that enables caching.
     control_regs_bench = "control-regs-bench";
 
+    /// Issue a fixed count of machine-wide TLB shootdowns against every CPU the
+    /// machine brought up, with nothing else running, and report the distribution.
+    tlb_shootdown_bench = "tlb-shootdown-bench";
+
     /// Shrink both disk caches to 64 entries each.
     test_small_caches = "test-small-caches";
 
@@ -224,8 +241,27 @@ actuators! {
     /// Build a hash container before `hasher::seed()`, so the refusal that stops a seedless container from being silent is executed.
     test_hash_before_seed = "test-hash-before-seed";
 
+    /// Hold the shutdown open for a tenth of a second after the boot's last
+    /// word, yielding, so a userland thread still on a run queue gets a pass
+    /// there. **The window hardware has and QEMU does not**: `quiesce` spends
+    /// real time between `Rebooting.` and the reset, which is enough for the
+    /// test runner's loop to spawn another job into the log after its last line.
+    quiesce_late_word = "quiesce-late-word";
+
+    /// Make the shutdown's bounded acquisitions of the xHCI controller lock
+    /// find it busy for their whole bound — the negative control on "no
+    /// shutdown path may fail to reset". A boot armed with it must still hand
+    /// the machine back, with its account saying the barrier was refused.
+    xhci_lock_wedged = "xhci-lock-wedged";
+
     /// Panic once boot phases are done, with no thread current.
     test_late_panic = "test-late-panic";
+
+    /// Seal the black box under an identity that is not this stick's, which is
+    /// what a record another image left in the same memory looks like. The
+    /// loader pass after it must clear the record and boot its kernel, not
+    /// report it and end the chain.
+    blackbox_foreign_identity = "blackbox-foreign-identity";
 
     /// Take a Ring 0 `#UD` once boot phases are done, with no thread current.
     test_kernel_fault = "test-kernel-fault";
@@ -362,6 +398,11 @@ const IMPLIES: &[(&str, &[&str])] = &[
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),
+    // The staged CPU has to still be deaf when its bound passes, and this boot
+    // would otherwise have handed the machine back at the end of its job list —
+    // so the control that ends a machine no other bound ends is staged over the
+    // one that stops this machine ending itself.
+    ("hard-lockup-probe", &["wedge-before-reset"]),
 ];
 
 #[cfg(feature = "boot-actuators")]

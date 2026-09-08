@@ -71,10 +71,17 @@ pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot
 /// `truncate` replaces what the last boot left; a pass that appends has a
 /// *report about* that boot, and the boot's own account has to stay readable
 /// under it. One file for now: per-pass names are their own change.
-pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
-    let bs = system_table.boot_services();
+/// The handle of the filesystem on the partition `guid` names, or why this
+/// machine has none.
+///
+/// **The one lookup.** A second reader of that volume finds it by this rule or
+/// by none, so it cannot end up reading a different partition than the log does.
+pub fn volume_handle(
+    bs: &BootServices,
+    guid: &[u8; 16],
+) -> Result<Handle, alloc::string::String> {
     let Ok(handles) = bs.locate_handle_buffer(SearchType::from_proto::<SimpleFileSystem>()) else {
-        return refused(format_args!("this machine publishes no filesystem at all"));
+        return Err("this machine publishes no filesystem at all".into());
     };
     let mut on_gpt = 0usize;
     let found = handles.iter().find(|handle| match unique_guid(bs, **handle) {
@@ -84,11 +91,39 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
         }
         None => false,
     });
-    let Some(&handle) = found else {
-        return match on_gpt {
-            0 => refused(format_args!("no filesystem here sits on a GPT partition")),
-            n => refused(format_args!("none of this machine's {n} GPT filesystems is {guid:02x?}")),
-        };
+    match found {
+        Some(&handle) => Ok(handle),
+        None => Err(match on_gpt {
+            0 => "no filesystem here sits on a GPT partition".into(),
+            n => alloc::format!("none of this machine's {n} GPT filesystems is {guid:02x?}"),
+        }),
+    }
+}
+
+/// Open the log partition's root, hand it to `visit`, and **release the
+/// protocol when it returns** — which is what makes this usable before [`open`]
+/// takes the same handle exclusively and keeps it for the rest of the pass.
+pub fn with_volume<T>(
+    system_table: &SystemTable<Boot>,
+    guid: &[u8; 16],
+    visit: impl FnOnce(&mut uefi::proto::media::file::Directory) -> T,
+) -> Result<T, alloc::string::String> {
+    let bs = system_table.boot_services();
+    let handle = volume_handle(bs, guid)?;
+    let mut fs = bs
+        .open_protocol_exclusive::<SimpleFileSystem>(handle)
+        .map_err(|e| alloc::format!("the log partition would not open ({e})"))?;
+    let mut root = fs
+        .open_volume()
+        .map_err(|e| alloc::format!("the log partition has no volume ({e})"))?;
+    Ok(visit(&mut root))
+}
+
+pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
+    let bs = system_table.boot_services();
+    let handle = match volume_handle(bs, guid) {
+        Ok(handle) => handle,
+        Err(why) => return refused(format_args!("{why}")),
     };
     let mut fs = match bs.open_protocol_exclusive::<SimpleFileSystem>(handle) {
         Ok(fs) => fs,

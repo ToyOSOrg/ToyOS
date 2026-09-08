@@ -99,7 +99,7 @@ pub fn metal_job_reboot(
         BootOptions {
             profile: qemu::Profile::Metal,
             qmp: true,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             ..Default::default()
         },
     );
@@ -334,30 +334,10 @@ pub fn loader_watchdog_arms(
     let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, armed);
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    let line = boot.must_say(&loader_armed())?.to_string();
-    // The words, not the line: a read-back that printed a register the loader
-    // never wrote would satisfy the line and is the failure worth catching.
-    let read_back = boot.must_say("watchdog: read back TCO_RLD=")?.to_string();
-    let tmr = hex_field(&read_back, "TCO_TMR=")?;
-    if tmr != u64::from(toyos_tco::TIMER) {
-        return Err(format!(
-            "the loader read TCO_TMR={tmr} back from the chipset and wrote {}\n{read_back}",
-            toyos_tco::TIMER
-        ));
-    }
-    // The reset gate is inside this block on the generations the table names, so
-    // a guest whose armed timer could not reset it is one the bound is a lie on.
-    let gates = boot.must_say("so a second expiry can reset this machine")?.to_string();
-    // The words of it, not the line: this is the register block's own account of
-    // whether an expiry reaches the machine, and a guest that has just armed the
-    // timer has not expired once.
-    for (field, want) in [("no_reboot=", 0), ("tco_lock=", 0), ("timeout=", 0)] {
-        let seen = decimal_field(&gates, field)?;
-        if seen != want {
-            return Err(format!("the loader read {field}{seen} back and this guest is {want}\n{gates}"));
-        }
-    }
-    boot.must_say(&armed_on_arrival())?;
+    // One console carries both writers here; on the T14 the loader's lines are
+    // in `loader.log` and the kernel's are records, so the predicate takes them
+    // apart even where they arrive together.
+    watchdog_armed(&boot, &boot)?;
     drop(qemu);
 
     let idle = QemuInstance::boot_with_options(
@@ -368,14 +348,83 @@ pub fn loader_watchdog_arms(
     );
     let quiet = serial::Serial::boot(&idle);
     quiet.must_be_clean()?;
-    quiet.must_not_say(&loader_armed())?;
-    quiet.must_not_say(ARMED_ON_ARRIVAL)?;
-    quiet.must_not_say(UNARMED_ON_ARRIVAL)?;
+    watchdog_quiet(&quiet, &quiet)?;
     drop(idle);
+    Ok(())
+}
+
+/// The armed boot's half: the loader wrote the register block and the kernel
+/// found the timer already running.
+///
+/// **`TCO1_CNT.TCO_LOCK` is not judged.** `toyos_tco`'s own header names it as
+/// the one bit a read-back may not be held to — firmware that set it leaves it
+/// set through every write this tree makes, and what it gates is `SMI_EN.TCO_EN`
+/// rather than the countdown or the reboot. It is reported and passed over.
+pub fn watchdog_armed(
+    loader: &serial::Serial,
+    kernel: &serial::Serial,
+) -> Result<(), String> {
+    let line = loader.must_say(&loader_armed())?.to_string();
+    // The words, not the line: a read-back that printed a register the loader
+    // never wrote would satisfy the line and is the failure worth catching.
+    let read_back = loader.must_say("watchdog: read back TCO_RLD=")?.to_string();
+    let tmr = hex_field(&read_back, "TCO_TMR=")?;
+    if tmr != u64::from(toyos_tco::TIMER) {
+        return Err(format!(
+            "the loader read TCO_TMR={tmr} back from the chipset and wrote {}\n{read_back}",
+            toyos_tco::TIMER
+        ));
+    }
+    // The reset gate is inside this block on the generations the table names, so
+    // a machine whose armed timer could not reset it is one the bound is a lie on.
+    let gates = loader.must_say("so a second expiry can reset this machine")?.to_string();
+    // The words of it, not the line: this is the register block's own account of
+    // whether an expiry reaches the machine, and a machine that has just armed
+    // the timer has not expired once.
+    for (field, want) in [("no_reboot=", 0), ("timeout=", 0)] {
+        let seen = decimal_field(&gates, field)?;
+        if seen != want {
+            return Err(format!(
+                "the loader read {field}{seen} back and this machine is {want}\n{gates}"
+            ));
+        }
+    }
+    kernel.must_say(&armed_on_arrival())?;
 
     eprintln!("  [power] the loader armed it and the kernel found it running: {}", line.trim());
     eprintln!("  [power] {}", gates.trim());
+    eprintln!("  [power] tco_lock={}, which no read-back is judged on", decimal_field(&gates, "tco_lock=")?);
     Ok(())
+}
+
+/// The control: a boot that did not name the parameter arms nothing, and the
+/// kernel says nothing about a timer either way.
+pub fn watchdog_quiet(
+    loader: &serial::Serial,
+    kernel: &serial::Serial,
+) -> Result<(), String> {
+    // The loader's channel said *something*, which is what makes the absence
+    // below mean anything. Asked of the loader's own first line rather than
+    // through `must_not_say`: on the stick `loader.log` is a file of its own and
+    // carries no kernel record for `Serial::alive` to find.
+    loader.must_say(bootlog::LOADER_FIRST_LINE)?;
+    says_nothing_of(loader, &loader_armed())?;
+    kernel.must_not_say(ARMED_ON_ARRIVAL)?;
+    kernel.must_not_say(UNARMED_ON_ARRIVAL)?;
+    Ok(())
+}
+
+/// `must_not_say` on a channel whose liveness the caller has already
+/// established, because `Serial::alive` asks for a kernel record and the
+/// loader's own file on the stick has none.
+pub fn says_nothing_of(channel: &serial::Serial, needle: &str) -> Result<(), String> {
+    match channel.text().lines().find(|l| l.contains(needle)) {
+        Some(line) => Err(format!(
+            "{needle:?} on a channel that should not have it: {line:?}\n{}",
+            channel.text()
+        )),
+        None => Ok(()),
+    }
 }
 
 fn starved() -> BootOptions {
@@ -804,15 +853,543 @@ pub fn blackbox_done_chain(
 
     let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
     second.must_say(&done_line())?;
-    // The distinction the whole state machine exists for: a deliberate stop is
-    // not a panic and not a kernel that vanished.
+    done_chain(&second)?;
+    ended_in_a_reset(&mut resets)?;
+    drop(qemu);
+    Ok(())
+}
+
+/// The boot deadline ends a machine nothing else in this tree can, and the next
+/// pass says what it ended.
+///
+/// **The negative control is most of the test.** `wedge-before-reset` stops
+/// every CPU taking scheduler passes at the shutdown syscall — after the job
+/// list has run, with preemption disabled and `IF` set. No watchdog counts that
+/// state: the chipset's is fed by any CPU and is disarmed one statement later,
+/// the runner's own bound reboots *through* this same syscall, and no panic
+/// path is reached because nothing failed. Without `boot-deadline` that boot
+/// runs until somebody presses the power button, which is the two T14 hangs
+/// this exists for.
+///
+/// **The mutation is the whole mechanism, not the arm.** Dropping the
+/// `boot-deadline=` parameter leaves every line of the implementation standing
+/// and measures only that an unarmed deadline does not fire. What this is a
+/// control for is the mechanism reverted onto the base the green arm was
+/// measured on: `start` arming no deadline, the `call` gone from the Ring 0
+/// timer entry, and the idle-exit re-arm in `hw::idle_wait` gone with it — so
+/// nothing polls, nothing seals and nothing writes the reset register.
+pub fn boot_deadline_ends_a_wedge(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        chained(&["wedge-before-reset", WEDGE_DEADLINE]),
+    );
+    let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    first.must_say(&armed_line())?;
+
+    // One capture from the first boot's handoff to the pass that reports it, so
+    // the wedge's own line and the record read back off the page are both here.
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    if !second.text().contains(bootlog::CHAIN_ENDS_LINE) {
+        // One monitor per socket: the reset watcher goes before the question.
+        drop(resets);
+        return Err(silent_guest(&qemu, second.text()));
+    }
+    // The control on the control, both halves: the machine reached the wedge,
+    // and then it did *not* reach the reset it was on its way to. A deadline
+    // that fired on a boot merely slower than its bound would satisfy the first
+    // and not the second, and `Rebooting.` is quiesce's own last word.
+    second.must_say(bootlog::WEDGE_STAGED)?;
+    // The CPU that asks for this wedge is inside the shutdown syscall, where
+    // `IF` is masked for the whole call, so it arrives deaf — and a CPU left
+    // that way is a hard lockup rather than a wedge. This line is that CPU
+    // saying it took interrupts again, which is what makes everything below an
+    // assertion about a wedge.
+    second.must_say(bootlog::WEDGE_ARRIVED_DEAF)?;
+    second.must_not_say(bootlog::REBOOTING)?;
+    second.must_say(bootlog::PREVIOUS_PANIC)?;
+    // **After the harvest line.** This capture also carries the first boot's own
+    // console, where both of these were written live; only the loader's `| `
+    // lines come after the harvest line, so this is the page and not the wire.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
+    // And the tail of a ring nothing was draining crossed the reset with it,
+    // which is the whole reason the record carries one.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
     second.must_not_say(&armed_and_nothing_else())?;
-    second.must_not_say(BLACKBOX_WITNESS)?;
+    second.must_say(bootlog::CHAIN_ENDS_LINE)?;
     second.must_not_say(bootlog::LOADER_LAST_LINE)?;
     ended_in_a_reset(&mut resets)?;
     drop(qemu);
 
+    eprintln!("  [power] a wedge with every CPU stopped ended itself and said so off the page");
+    Ok(())
+}
+
+/// Where every vCPU stood, asked of QEMU, for a guest that stopped speaking
+/// before its chain closed.
+///
+/// **The guest cannot be asked and the console cannot tell the two apart.** A
+/// machine spinning with `IF` clear and a machine halted with no one-shot armed
+/// are both silent, and only the first is a state `crate::hardlockup` covers;
+/// `info cpus` names the halted CPUs and `info registers -a` carries each
+/// vCPU's `RIP` and `RFLAGS`. Without this a hang here is a mute red that says
+/// nothing about which of the two it was.
+fn silent_guest(qemu: &QemuInstance, tail: &str) -> String {
+    let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
+    let cpus = monitor.human("info cpus");
+    let registers = monitor.human("info registers -a");
+    // Whether a CPU that is running could ever be interrupted by its own timer:
+    // `RFLAGS.IF` is only half of it, and a stopped one-shot reads as a zero
+    // initial count here.
+    let lapics: String = (0..2).map(|id| monitor.human(&format!("info lapic {id}"))).collect();
+    format!(
+        "the guest went silent and never reached {:?}\nQEMU's own account of its vCPUs:\n\
+         {cpus}\n{registers}\n{lapics}\n{tail}",
+        bootlog::CHAIN_ENDS_LINE,
+    )
+}
+
+/// The bound this test arms, as the parameter spells it.
+///
+/// **Short, and short on purpose.** `toyos_tco::WEDGE_BOUND_MS` is the bound a
+/// T14 boot runs under and is derived from the runner's own; what is under test
+/// here is the poll, the seal and the reset, and the bound is the one thing
+/// about the mechanism a boot may legitimately differ on. Wide enough that a
+/// `jobcase` boot reaches its shutdown syscall under TCG first, which
+/// [`bootlog::WEDGE_STAGED`] above is the assertion about.
+const WEDGE_DEADLINE: &str = "boot-deadline=15000";
+
+/// One CPU that has stopped taking interrupts ends the machine, from its own
+/// NMI, and the record names where it was standing.
+///
+/// **The state the boot deadline cannot reach.** Nothing polls a deadline on a
+/// machine where no CPU takes an interrupt, so a boot can hang with one armed
+/// and the deadline never fire. The control stages exactly that — one CPU with
+/// `IF` clear, spinning on a ticket
+/// lock another CPU holds and never gives back — and no other bound in this tree
+/// ends it: the chipset's TCO is fed by any CPU, the runner's job bound needs a
+/// scheduler pass, nothing panicked, and the deadline's own poll is still being
+/// reached by the CPUs that are healthy, which is what keeps this machine
+/// looking alive.
+///
+/// **Two records, and which one the page carries is the verdict.** The deadline
+/// is armed on this boot too and would end the same machine
+/// [`toyos_tco::hard_lockup_bound_ms`] later; a page reading
+/// [`bootlog::DEADLINE_EXPIRED`] is this detector failing and the deadline
+/// covering for it, so that line is refused as hard as the right one is
+/// demanded. The mutation is the whole detector reverted — `start` arming
+/// nothing, so no counter is programmed and no sample runs — and the boot then
+/// carries no `hard lockup: <ms> ms` at all, which is the first thing asserted
+/// below.
+///
+/// **QEMU's TCG guest has no performance counter**, so the counter's NMI is one
+/// thing this cannot judge: the actuator has a second CPU send the victim the
+/// NMI the counter would have, and what is under test here is the handler, the
+/// decision, the record and the reset. `hardlockup_ends_a_deaf_cpu`'s metal arm
+/// is where the counter itself is the sample, and the line this asserts about
+/// CPUID is what tells the two runs apart.
+pub fn hard_lockup_ends_a_deaf_cpu(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    // Both numbers off the one parameter the image is armed with, so the
+    // kernel's derivation and this test's expectation cannot drift apart.
+    let deadline_ms = toyos_tco::deadline_in(LOCKUP_DEADLINE)
+        .and_then(Result::ok)
+        .ok_or_else(|| format!("{LOCKUP_DEADLINE:?} is not a bound the kernel would read"))?;
+    let bound_ms = toyos_tco::hard_lockup_bound_ms(deadline_ms);
+
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        chained(&["hard-lockup-probe", LOCKUP_DEADLINE]),
+    );
+    let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    first.must_say(&armed_line())?;
+
+    // One capture from the first boot's handoff to the pass that reports it, so
+    // the staged cpu's own line and the record read back off the page are both
+    // here.
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    // The arm, in the kernel's own words and with the kernel's own arithmetic.
+    second.must_say(&format!("hard lockup: {bound_ms} ms"))?;
+    // Which sample source this run proves, which is the whole difference
+    // between it and the metal arm: no counter here, so a sibling sends the NMI.
+    second.must_say("CPUID states no counter on cpu")?;
+    // The control on the control: the machine reached the staged lockup, and
+    // then did not reach a reset of its own accord.
+    second.must_say(bootlog::LOCKUP_STAGED)?;
+    second.must_not_say(bootlog::REBOOTING)?;
+
+    second.must_say(bootlog::PREVIOUS_PANIC)?;
+    // **After the harvest line**, so this is the page and not the wire.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?;
+    // The lock the staged cpu was inside, which is the field a machine with
+    // every CPU deaf has nothing else to say, and the site that took it — the
+    // control's own witness, carried by the mechanism rather than by a log line
+    // the sealed page may have no room for.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    second.must_say_after(bootlog::PREVIOUS_PANIC, "taken at src/hardlockup/probe.rs")?;
+    // A line for every cpu, so the holder of what the stuck one wanted is in
+    // the record too. cpu0 is the one this boot is certain of.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, "cpu0 irqs=")?;
+    // The discrimination: the deadline was armed and running on this boot, and
+    // it is not what ended the machine.
+    second.must_not_say(bootlog::DEADLINE_EXPIRED)?;
+    second.must_not_say(&armed_and_nothing_else())?;
+    second.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    second.must_not_say(bootlog::LOADER_LAST_LINE)?;
+    ended_in_a_reset(&mut resets)?;
+    drop(qemu);
+
+    eprintln!(
+        "  [power] one cpu with interrupts off ended the machine {bound_ms} ms in, and the page \
+         named where it was"
+    );
+    Ok(())
+}
+
+/// The bound this control arms, as the parameter spells it.
+///
+/// **Wider than [`WEDGE_DEADLINE`] and for the opposite reason.** The staged cpu
+/// goes deaf once the machine is up, so its bound starts running seconds after
+/// the deadline's does; half of 30 s leaves it reaching its own bound with the
+/// whole of the deadline's second half still ahead, which is what makes a page
+/// reading [`bootlog::LOCKED_UP`] rather than [`bootlog::DEADLINE_EXPIRED`] a
+/// fact about this detector and not a race between two of them.
+const LOCKUP_DEADLINE: &str = "boot-deadline=30000";
+
+/// A boot that hung is bounded by the stick, and the third boot is free again.
+///
+/// **The defect trapped the machine in ToyOS.** `bootnext::point_at_us` aims
+/// `BootNext` at the loader before every kernel handoff, so a kernel that hangs
+/// and an owner who cuts power get firmware, this loader, the same kernel, the
+/// same hang — for ever. The black box cannot break it: a power cut is exactly
+/// what empties the black box, so the next pass finds nothing to report and arms
+/// a fresh record. The only ways out are the firmware's boot menu and pulling
+/// the stick, and neither of those is the loop.
+///
+/// Three launches of **one image file**, because what carries the count is the
+/// stick and not the memory:
+///
+/// 1. killed at the loader's handoff line — the kernel is never given the
+///    machine, which is a boot that was handed it and never reported;
+/// 2. the same image again. QEMU zeroes a machine's RAM between launches, which
+///    is the power cut exactly: the page is empty, the stick says one attempt,
+///    and this pass must boot no kernel, say so, and reset;
+/// 3. **the same image a third time, which must boot.** One hand per hang and
+///    never two: a bound that left the count standing would refuse this image
+///    for ever, which is the trap again with a different door.
+pub fn hang_bounded_by_the_stick(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let launch = |marker: &'static str| BootOptions {
+        profile: qemu::Profile::Metal,
+        // Carried, which is the whole shape of this test: the count it is about
+        // lives in the image file, so all three launches are one file — and the
+        // harness owns it, so nothing here builds an image of its own to keep.
+        boot_image: Some(qemu::Staged::Carried("hang-bound")),
+        takes_the_reset: true,
+        ready_marker: marker,
+        ..Default::default()
+    };
+
+    // 1. The hang: killed where the loader has counted this attempt and is about
+    //    to hand over, so the kernel gets the machine and reports nothing.
+    let first = QemuInstance::boot_with_options(case, &[], &[], launch(bootlog::LOADER_LAST_LINE));
+    let counted = serial::Serial::boot(&first);
+    counted.must_say("Boot attempts: this image has had the machine 0 time(s)")?;
+    drop(first);
+
+    // 2. The bound. Nothing about this machine has changed but its memory, which
+    //    is what a power cut changes.
+    let second =
+        QemuInstance::boot_with_options(case, &[], &[], launch(bootlog::CHAIN_ENDS_LINE));
+    let bounded = serial::Serial::boot(&second);
+    bounded.must_say("Boot attempts: this image has had the machine 1 time(s)")?;
+    bounded.must_say(bootlog::HUNG_WITHOUT_A_RECORD)?;
+    // It booted no kernel: the handoff line is what a pass that did writes.
+    says_nothing_of(&bounded, bootlog::LOADER_LAST_LINE)?;
+    bounded.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    drop(second);
+
+    // 3. Free again, and this is the half that makes it a bound rather than a
+    //    refusal: the count was cleared when the machine was handed back.
+    let third = QemuInstance::boot_with_options(case, &[], &[], launch(bootlog::LOADER_LAST_LINE));
+    let again = serial::Serial::boot(&third);
+    again.must_say("Boot attempts: this image has had the machine 0 time(s)")?;
+    says_nothing_of(&again, bootlog::HUNG_WITHOUT_A_RECORD)?;
+    again.must_say(bootlog::LOADER_LAST_LINE)?;
+    drop(third);
+
+    eprintln!("  [power] one hand per hang: the retry booted nothing and the boot after it booted");
+    Ok(())
+}
+/// The bound this stages inside the panic's own hold, in guest milliseconds.
+///
+/// **Between the two, and both are the guest's clock.** `test-late-panic` fires
+/// at the end of the boot and `panic-reboot-fast` holds the panel for
+/// [`PANIC_FAST_SECS`] after it, so a deadline armed here expires while the
+/// panel is up: earlier and it would end the boot before anything panicked,
+/// later and the panic's own reset beats it and the arm proves nothing.
+const PANIC_OUTLIVES_DEADLINE: &str = "boot-deadline=4000";
+
+/// A panic outlives the boot deadline, and the record that crosses the reset is
+/// the panic's.
+///
+/// **The bound stands down for a report and does not seal over it.** Both are
+/// armed on this boot and the deadline's passes while the panel is up, so the
+/// page that crosses the reset says which of the two ended the machine.
+///
+/// **What this cannot judge, stated rather than implied.** Reverting
+/// `deadline::stand_down` alone leaves this green: after `apic::halt_all_cpus`
+/// every CPU is halted or spinning with `IF` clear, so nothing reaches the poll
+/// and an armed deadline cannot expire whether or not it was disarmed. The
+/// window the stand-down closes is the one *before* that — the panicking CPU has
+/// not taken `PAINTING` yet and its siblings are still taking timer interrupts —
+/// and no actuator in this tree aims a boot at it. What is asserted here is the
+/// composed outcome: a panic report crosses the reset with a bound armed and
+/// passed, so a panel that ever re-arms a timer, or a stand-down that is
+/// dropped along with something that wakes one, is caught here.
+///
+/// The witness is the same one `blackbox_panic_chain` reads, so a page carrying
+/// it is the panic's own report and not a state the loader put there;
+/// [`bootlog::DEADLINE_EXPIRED`] is refused as hard as it is demanded.
+pub fn panic_outlives_the_deadline(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let params: &[&str] = &["test-late-panic", "panic-reboot-fast", PANIC_OUTLIVES_DEADLINE];
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, chained(params));
+    let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    first.must_say(&armed_line())?;
+
+    // This capture opens at the first boot's handoff, so it carries that
+    // kernel's own console as well as the pass that reports it.
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    // The control on the control: this boot really did arm the bound, in the
+    // kernel's own words, so a green run is not one where nothing was armed.
+    let armed = second.must_say("boot deadline: 4000 ms")?.to_string();
+    second.must_say(bootlog::PREVIOUS_PANIC)?;
+    // After the harvest line, so this is the sealed page and not the first
+    // boot's console, which this capture also carries.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, BLACKBOX_WITNESS)?;
+    second.must_not_say(&armed_and_nothing_else())?;
+    // The whole verdict: the deadline was armed, its bound passed while the
+    // panel was up, and nothing it writes is on the page or on either channel.
+    says_nothing_of(&second, bootlog::DEADLINE_EXPIRED)?;
+    second.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    second.must_not_say(bootlog::LOADER_LAST_LINE)?;
+    ended_in_a_reset(&mut resets)?;
+    drop(qemu);
+
+    eprintln!("  [power] the panic report crossed the reset with {} armed", armed.trim());
+    Ok(())
+}
+
+/// A record another image left in this memory is cleared and never reported.
+///
+/// **The defect this is the control for cost a T14 run its first boot.** The
+/// black-box page is DRAM at a fixed address and nothing between two operating
+/// systems clears it: a `DONE` record from a boot two hours and three Ubuntu
+/// boots earlier was still there, and the loader — booting a different image off
+/// a freshly flashed stick — read it, took itself for that record's reporting
+/// pass, wrote `loader.log` and reset. The machine came back in 24 s with an
+/// empty kernel log. No stamp could have caught it: the record was written
+/// *before* that boot, which is exactly what a real predecessor's is.
+///
+/// **One QEMU and three loader passes**, because the page is memory: a second
+/// launch is a machine with zeroed RAM and no record to find at all. Two images
+/// therefore cannot be booted over one page here, and the actuator stages the
+/// same input instead — the shutdown seals under an identity one bit away from
+/// this stick's, which is what a foreign record looks like to the pass that
+/// finds it. **One bit, because the check is an equality and a plausible
+/// near-miss is the input worth staging.**
+///
+/// The third pass is what makes the clear an assertion rather than a claim: a
+/// record that survived it would be reported to the boot after, for ever.
+///
+/// **The second pass also hands the machine back, and that is right.** A record
+/// this stick did not write means the last boot of *this* image was handed the
+/// machine and reported nothing, which is what `attempt`'s bound is for; the two
+/// mechanisms agree here and `hang_bounded_by_the_stick` owns the second.
+pub fn blackbox_foreign_record(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu =
+        QemuInstance::boot_with_options(case, &[], &[], chained(&["blackbox-foreign-identity"]));
+    serial::Serial::boot(&qemu).must_say(&armed_line())?;
+
+    // The pass that finds it: it must name it and clear it, and it must never
+    // report it as this stick's predecessor — which is the whole defect.
+    let found = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    let said = found.must_say("record another image left in this memory")?.to_string();
+    for word in [State::Done.named(), "cleared and this pass boots its kernel"] {
+        if !said.contains(word) {
+            return Err(format!("the pass reported a foreign record without {word:?}: {said}"));
+        }
+    }
+    says_nothing_of(&found, bootlog::PREVIOUS_PANIC)?;
+    says_nothing_of(&found, "the last boot read")?;
+
+    // The clear stuck: nothing about a record reaches the pass after it, and
+    // that pass boots a kernel — so neither the page nor the attempt count is
+    // left holding this machine.
+    let after = after_the_reset(&mut qemu, bootlog::LOADER_LAST_LINE);
+    says_nothing_of(&after, "record another image left in this memory")?;
+    says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
+    says_nothing_of(&after, bootlog::HUNG_WITHOUT_A_RECORD)?;
+    after.must_say(bootlog::LOADER_LAST_LINE)?;
+    drop(qemu);
+
+    eprintln!("  [power] {}", said.trim());
+    eprintln!("  [power] and the pass after it found nothing, so the clear reached the page");
+    Ok(())
+}
+/// The loader pass after a deliberate reboot: it read DONE, said so, and ended
+/// the chain rather than booting another kernel.
+///
+/// On the T14 this pass is already what every metal boot does — the loader
+/// points `BootNext` at itself before each handoff and a pass with a finding
+/// appends to the same `loader.log` — so the argument is that file's tail.
+pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
+    after.must_say(&done_line())?;
+    // The distinction the whole state machine exists for: a deliberate stop is
+    // not a panic and not a kernel that vanished.
+    says_nothing_of(after, &armed_and_nothing_else())?;
+    says_nothing_of(after, BLACKBOX_WITNESS)?;
+    // The chain ends rather than going round: a pass that booted a kernel would
+    // have said so, and this one must not have.
+    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
+    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     eprintln!("  [power] a deliberate reboot sealed DONE and the chain ended in a reset");
+    Ok(())
+}
+
+/// The metal half of [`boot_deadline_ends_a_wedge`]: a T14 boot that wedged on
+/// purpose ended itself, and the pass after the reset read why off the page.
+///
+/// **The only evidence a wedge can leave on this machine.** `logd` writes the
+/// kernel log to the stick, and a wedged boot's `logd` never runs again — so
+/// everything after the wedge exists only in the record ring, and the black box
+/// is the one channel that carries a copy of it across the reset.
+pub fn deadline_wedge_chain(
+    kernel: &serial::Serial,
+    after: &serial::Serial,
+) -> Result<(), String> {
+    // The control: the machine reached the staged wedge, and then never reached
+    // the reset it was one statement away from.
+    kernel.must_say(bootlog::WEDGE_STAGED)?;
+    // And the CPU that asked for it took interrupts again: it comes through the
+    // syscall gate with `IF` masked, and one left deaf is what the lockup
+    // detector ends a machine for. On this machine the assertion has a counter
+    // behind it, which is what the guest's has not.
+    kernel.must_say(bootlog::WEDGE_ARRIVED_DEAF)?;
+    says_nothing_of(kernel, bootlog::REBOOTING)?;
+
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?.to_string();
+    // The tail crossed with it, which is what makes the record an instrument
+    // and not just a verdict.
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
+    // **The two bounds composing, on the one machine that has both.** This
+    // wedge spins with `IF` set, so every CPU still takes its timer interrupt
+    // and every CPU's performance counter still samples it — and the
+    // hard-lockup detector, whose bound is the earlier of the two, must find
+    // nothing. A page reading it here would mean this machine resets a boot
+    // that was merely stopped, which on the T14 is a reset loop.
+    says_nothing_of(after, bootlog::LOCKED_UP)?;
+    says_nothing_of(after, &armed_and_nothing_else())?;
+    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
+    eprintln!("  [power] {}", said.trim());
+    Ok(())
+}
+
+/// The metal half of [`hard_lockup_ends_a_deaf_cpu`], and **the arm that proves
+/// the counter**: on this machine CPUID states an architectural PMU, so the
+/// staged CPU's own performance-counter NMI is what samples it and nothing is
+/// sent to it. QEMU's TCG guest can prove the handler and the record; only
+/// hardware can prove the thing that delivers them.
+///
+/// The state under it is the one measured on this machine and on no other: run
+/// 22's boot hung after its job list with a 120 s deadline armed, sat past
+/// 420 s, and left the stick with no kernel log at all — the deadline never
+/// fired, because nothing was taking the interrupt that polls it.
+pub fn hard_lockup_chain(
+    kernel: &serial::Serial,
+    after: &serial::Serial,
+) -> Result<(), String> {
+    // **Nothing this judge reads was written after the wedge.** `logd` stops
+    // where the scheduler does, so the stick's kernel log ends at the last
+    // spawn, and the sealed page can fill with a boot's *older* records before
+    // it reaches the lines the control writes about itself. What crosses is the
+    // arm line and the record itself.
+    kernel.must_say("by each cpu's own performance counter")?;
+    says_nothing_of(kernel, "CPUID states no architectural performance counter")?;
+    says_nothing_of(kernel, bootlog::REBOOTING)?;
+
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?.to_string();
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    // The staged control's own witness, carried by the mechanism rather than by
+    // a log line that may not survive: the lock the stuck cpu is inside was
+    // taken at the control's own source line, which no other boot can say.
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "taken at src/hardlockup/probe.rs")?;
+    // **cpu0's line is what proves the counter rather than a sender.** Nothing
+    // sends cpu0 an NMI on this boot — the control's sender is skipped where the
+    // cpus have counters — so a sample recorded against cpu0 came from cpu0's
+    // own overflow, and a sample against every cpu is the arm working on all of
+    // them.
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "cpu0 irqs=")?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "cpu7 irqs=")?;
+    // The deadline was armed on this boot too, at twice this bound, and is not
+    // what ended the machine.
+    says_nothing_of(after, bootlog::DEADLINE_EXPIRED)?;
+    says_nothing_of(after, &armed_and_nothing_else())?;
+    // **Not [`bootlog::CHAIN_ENDS_LINE`], which the deadline's arm demands.**
+    // That pass's own last line is written after the record, and a `loader.log`
+    // that stopped inside the record never reaches it — so demanding it here
+    // would judge the loader's file capacity and call it a lockup. The pass
+    // having booted no kernel is what this asserts instead.
+    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
+    eprintln!("  [power] {}", said.trim());
+    Ok(())
+}
+
+/// The kernel decoded a reset register out of this machine's FADT and wrote it.
+///
+/// **The port is the machine's, not q35's.** What a boot on real hardware can
+/// be held to is that the decode happened and named a register the kernel
+/// writes — `ACPI: no reset register this kernel writes` is the other branch and
+/// is a machine that cannot return itself to firmware at all.
+pub fn reset_register_decoded(kernel: &serial::Serial) -> Result<(), String> {
+    says_nothing_of(kernel, "ACPI: no reset register this kernel writes")?;
+    let line = kernel.must_say("ACPI: reset register ")?;
+    eprintln!("  [power] {}", line.trim());
     Ok(())
 }
 
@@ -836,12 +1413,25 @@ pub fn blackbox_unclaimed_page(
     );
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    // The loader claimed one on this guest, so what is judged here is the
+    // One console carries both writers here; on the T14 the loader's two lines
+    // are in `loader.log` and the kernel's are records on the stick.
+    blackbox_unclaimed(&boot, &boot)?;
+    drop(qemu);
+    Ok(())
+}
+
+/// The loader named a page, the kernel took *that* page, and it took it before
+/// the console existed.
+pub fn blackbox_unclaimed(
+    loader: &serial::Serial,
+    kernel: &serial::Serial,
+) -> Result<(), String> {
+    // The loader claimed one on this machine, so what is judged here is the
     // *kernel's* reading of its own parameter line: the address it was given is
     // the address the loader printed, and nothing else in the line is a page.
-    let claimed = boot.must_say(&armed_line())?.to_string();
-    boot.must_say(&kernel_took_it())?;
-    boot.must_say(&format!("blackbox={PHYS:#x}"))?;
+    let claimed = loader.must_say(&armed_line())?.to_string();
+    loader.must_say(&format!("blackbox={PHYS:#x}"))?;
+    kernel.must_say(&kernel_took_it())?;
     // **Before `serial::init`, and that ordering is the assertion.** The page
     // used to be taken after the console, the parameter line's UTF-8 check and
     // `params::init`, and the owner's laptop panicked before all three: it
@@ -849,8 +1439,7 @@ pub fn blackbox_unclaimed_page(
     // `ARMED`. No staged panic can land in that window — arming one needs the
     // line parsed first — so what is judged is where the kernel says it took
     // the page, which moves the moment the reading moves.
-    boot.must_say_after(&kernel_took_it(), SERIAL_IS_UP)?;
-    drop(qemu);
+    kernel.must_say_after(&kernel_took_it(), SERIAL_IS_UP)?;
 
     eprintln!("  [power] the loader named the page and the kernel took it: {}", claimed.trim());
     Ok(())
@@ -969,7 +1558,7 @@ pub fn blackbox_fault_sealed(
     let page = qemu.guest_memory(PHYS, toyos_blackbox::BYTES)?;
     let page: &[u8; toyos_blackbox::BYTES] =
         page.as_slice().try_into().map_err(|_| "pmemsave returned the wrong length".to_string())?;
-    let Some((state, _, text)) = toyos_blackbox::recover(page) else {
+    let Some((state, _, _, text)) = toyos_blackbox::recover(page) else {
         return Err(format!("the page at {PHYS:#x} carries nothing: {:02x?}", &page[..32]))
     };
     if state != State::Fault {
@@ -1123,8 +1712,8 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
             .try_into()
             .map_err(|_| "pmemsave returned the wrong length".to_string())?;
         match toyos_blackbox::recover(page) {
-            Some((State::Panic, _, text)) => return Ok((State::Panic, text.to_vec())),
-            Some((state, _, text)) => last = Some((state, text.to_vec())),
+            Some((State::Panic, _, _, text)) => return Ok((State::Panic, text.to_vec())),
+            Some((state, _, _, text)) => last = Some((state, text.to_vec())),
             None => {}
         }
         if std::time::Instant::now() >= deadline {
@@ -1138,4 +1727,266 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// The kernel record that says this boot's controller found the boot stick.
+///
+/// **The re-enumeration, taken off the boot after the reset.** Under QEMU it is
+/// weak on purpose: an emulated stick cannot be wedged, so this arm judges that
+/// the account is produced and that the machine still comes up on the same
+/// device. The T14 is the judge of the device itself, and `tests/metal-profile`
+/// carries its row.
+const STICK_ENUMERATED: &str = "usb-storage: 1 device(s)";
+
+/// Every way this kernel resets a machine, and the account each one leaves.
+///
+/// `acpi::reboot` and `acpi::shutdown` are the two resets this kernel performs,
+/// and three different things reach them: a job list's last `reboot`, the test
+/// runner's own job deadline, and the panic console's bound. Each arm is a
+/// chained boot, so the pass after the reset can be read.
+/// One way this kernel reaches a reset, and what its account must then say.
+struct ResetPath {
+    what: &'static str,
+    config: &'static str,
+    params: &'static [&'static str],
+    /// Whether that path reaches the shutdown's disk flush: a panic does not,
+    /// and a wedged controller lock refuses it, so `0/0` is the right answer
+    /// for both rather than a miss.
+    flushes: bool,
+    /// The clause `kernel/src/drivers/xhci/stop.rs` writes for this path's own
+    /// answer to "could a transfer still have been in flight".
+    barrier: &'static str,
+}
+
+/// What every path's account has to say about the transfers this kernel had
+/// rung before it touched the first register.
+///
+/// **On every path and not on one**, since the device a cut costs is the same
+/// device whichever bound reached the reset. Reverting `settle_transfers` makes
+/// the sentence absent and fails all four arms by name.
+const SETTLED_TRANSFERS: &str = "bulk transfer";
+
+const TOOK_THE_LOCK: &str = "the controller lock was held from before the log volume's";
+const NO_BARRIER: &str = "no barrier was taken, so this reset is not the shutdown's";
+const LOCK_REFUSED: &str = "the controller lock was not free inside its bound";
+
+const RESET_PATHS: &[ResetPath] = &[
+    ResetPath {
+        what: "the orderly reboot",
+        config: "tests/metaldevicecase",
+        params: &[],
+        flushes: true,
+        barrier: TOOK_THE_LOCK,
+    },
+    // **Armed, because QEMU has no window and hardware does.** `quiesce` spends
+    // real time on hardware between the boot's last word and the reset, and the
+    // runner's loop — released by the deadline's own kill — can spawn another
+    // job into that gap. Without the actuator this arm is green either way and
+    // says nothing.
+    ResetPath {
+        what: "the runner's job deadline",
+        config: "tests/jobdeadlinecase",
+        params: &["quiesce-late-word"],
+        flushes: true,
+        barrier: TOOK_THE_LOCK,
+    },
+    ResetPath {
+        what: "the panic console's bound",
+        config: "tests/testcases",
+        params: &["test-late-panic", "panic-reboot-fast"],
+        flushes: false,
+        barrier: NO_BARRIER,
+    },
+    // **The control on every bound in the shutdown path.** A boot can hang
+    // between the last job's exit and the reset with nothing ending it; this
+    // stages the one wait this change owns — the barrier — never coming free,
+    // and requires the machine to hand itself back anyway, with the account
+    // naming what it did without.
+    ResetPath {
+        what: "a controller lock that never comes free",
+        config: "tests/jobcase",
+        params: &["xhci-lock-wedged"],
+        flushes: false,
+        barrier: LOCK_REFUSED,
+    },
+];
+
+/// **No reset this kernel performs leaves a USB device mid-command.**
+///
+/// A boot that writes megabytes to the boot stick and resets it out from under
+/// the transfer leaves a device its next host cannot enumerate: through reboots
+/// and a sysfs port power cycle, until it is physically replugged.
+///
+/// **What this can and cannot judge.** QEMU's emulated stick cannot be wedged,
+/// so what is judged here is the *account*: for each of the four reset paths,
+/// that the reset reset every connected port, halted and reset every controller
+/// and emptied every disk cache before it wrote the reset register — and that
+/// the boot after it still finds the stick. `metaldevices::Quiesced::complete`
+/// is the same predicate the T14 judge applies to the same line, and the whole
+/// stop reverted leaves that line absent: 4 of 4 arms unmet, measured.
+pub fn usb_reset_hands_devices_back(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let root = super::compile::repo_root();
+    // Every arm is run and every finding reported: a mutation that reverts the
+    // stop breaks all four, and stopping at the first would say so about one.
+    let mut bad = Vec::new();
+    for path in RESET_PATHS {
+        if let Err(why) = one_reset_path(&root.join(path.config), path) {
+            bad.push(why);
+        }
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!("{} of {} reset path(s) unmet:\n  {}", bad.len(), RESET_PATHS.len(), bad.join("\n  ")))
+}
+
+/// One chained boot: reach the reset, read the account the pass after it prints,
+/// and see the machine come back on the same stick.
+fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
+    let (path, flushes) = (arm.what, arm.flushes);
+    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], chained(arm.params));
+    let _ = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+
+    let after = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    let head = toyos_build::metaldevices::QUIESCE_HEAD;
+    let account = toyos_build::metaldevices::quiesced(after.text()).ok_or_else(|| {
+        let said: Vec<&str> = after.text().lines().filter(|l| l.contains(head)).collect();
+        match said.is_empty() {
+            true => format!(
+                "{path}: the pass after the reset carries no {head:?} line at all, so nothing \
+                 stopped this machine's USB before it reset"
+            ),
+            false => format!(
+                "{path}: the pass after the reset carries no readable {head:?} summary — what \
+                 it did carry is {said:?}"
+            ),
+        }
+    })?;
+    if !account.complete() {
+        return Err(format!("{path}: the reset did not hand every device back: {account:?}"));
+    }
+    // The flush is the half a panic cannot reach, and a zero there on a path
+    // that does reach it would be a boot with no USB disk at all — under which
+    // the port-reset count above would be about nothing.
+    if flushes && account.disks == 0 {
+        return Err(format!(
+            "{path}: this boot emptied no disk cache, so it had no USB disk and the account \
+             above is about a machine this ruling is not about: {account:?}"
+        ));
+    }
+    if !flushes && account.disks != 0 {
+        return Err(format!(
+            "{path}: a panic never reaches the shutdown's flush, so this account was not \
+             written by the path it claims: {account:?}"
+        ));
+    }
+    // Which of the three answers this path has to the one question no register
+    // can be read for: whether a transfer could still have been in flight.
+    if !after.text().contains(arm.barrier) {
+        return Err(format!(
+            "{path}: the account does not say {:?}, so the barrier this path owes was not the \
+             one it took",
+            arm.barrier
+        ));
+    }
+    // And the wait that has to happen before the first register on every path:
+    // a stop that cut a transfer without waiting it out is what leaves a device
+    // its next host cannot enumerate.
+    if !after.text().contains(SETTLED_TRANSFERS) {
+        return Err(format!(
+            "{path}: the account says nothing about a {SETTLED_TRANSFERS}, so this stop reached \
+             a controller's registers without waiting out what this kernel had rung"
+        ));
+    }
+    nothing_after_the_last_word(after.text()).map_err(|why| format!("{path}: {why}"))?;
+    ended_in_a_reset(&mut resets).map_err(|why| format!("{path}: {why}"))?;
+
+    // And the machine comes back on the same device. The pass after the chain's
+    // end boots a kernel again, and that kernel's own controller is what says
+    // whether the stick answered.
+    let again = after_the_reset(&mut qemu, STICK_ENUMERATED);
+    again.must_say(STICK_ENUMERATED).map_err(|why| format!("{path}: {why}"))?;
+    drop(qemu);
+    eprintln!("  [power] {path}: {account:?}, and the stick enumerated again");
+    Ok(())
+}
+
+/// **`Rebooting.` is the last record, and nothing this boot still holds may
+/// write one after it.**
+///
+/// **A metal boot's verdict is read off that word being the log's last line.**
+/// The runner's deadline kills the job it is watching, which releases the `wait`
+/// its own job loop is inside, and that loop can spawn the next job into the
+/// window between the boot's last word and the reset.
+///
+/// A boot with no such word — a panic — is not asked: it correctly writes none.
+/// The window ends at the next loader pass, because everything that pass prints
+/// is after the reset by construction.
+///
+/// **A spawn record and not every record**, because those are the two different
+/// claims. `quiesce` writes after its own last word by construction — a
+/// `wait_for_durable` that gave up says so, and an idle CPU's `sched:` report
+/// can land there — and neither reaches a file: `logd` has been asked to stop by
+/// then, so on a machine with no console they reach nothing at all. A *spawn* is
+/// a process that was still on a run queue, and its record does reach the file.
+fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
+    let Some(at) = text.rfind(REBOOTING) else { return Ok(()) };
+    let after = &text[at + REBOOTING.len()..];
+    let window = after.split(bootlog::LOADER_FIRST_LINE).next().unwrap_or(after);
+    match window.lines().find(|line| line.contains(bootlog::SPAWN)) {
+        None => Ok(()),
+        Some(line) => Err(format!(
+            "a process started after {REBOOTING:?}, which is the boot's own last word and what a \
+             metal boot is judged on: {line:?}"
+        )),
+    }
+}
+
+/// The T14's judge for [`usb_reset_hands_devices_back`].
+///
+/// **The machine is the judge of the device, and nothing else is.** QEMU cannot
+/// wedge a stick, and what says the boot before this one left the bench's own
+/// device enumerable is the driver's `boot.<boot>.stick_secs` row — recorded
+/// before the mount, so it is a number and not the reason a mount happened to
+/// work. What is left for this to read is the reset's own account, which on this
+/// machine is in `loader.log`'s pass after the reset rather than in any file the
+/// kernel wrote.
+///
+/// Both arms are orderly reboots, so both owe the barrier. The panic path's
+/// account is judged under QEMU only: on this machine a kernel that panics
+/// before `logd` runs writes no log file at all, and one that panics after it
+/// leaves no `Rebooting.` for the loop's own verdict.
+pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String> {
+    let mut bad = Vec::new();
+    for back in arms {
+        let text = back.loader();
+        let head = toyos_build::metaldevices::QUIESCE_HEAD;
+        let Some(account) = toyos_build::metaldevices::quiesced(text.text()) else {
+            bad.push(format!(
+                "{}: loader.log carries no readable {head:?} summary, so nothing stopped this \
+                 machine's USB before it reset",
+                back.label
+            ));
+            continue;
+        };
+        if !account.complete() {
+            bad.push(format!("{}: {account:?}", back.label));
+        }
+        if !text.text().contains(TOOK_THE_LOCK) {
+            bad.push(format!(
+                "{}: this is an orderly reboot and its account does not say {TOOK_THE_LOCK:?}",
+                back.label
+            ));
+        }
+        eprintln!("  [power] {}: {account:?}", back.label);
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
 }

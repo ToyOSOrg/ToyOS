@@ -45,6 +45,13 @@ pub(super) fn sys_log_read(
 }
 
 fn quiesce(last: &str) {
+    // Before the watchdog is disarmed and before a byte is synced: what the
+    // control stages is a boot that ran its job list and then stopped, which is
+    // the shape the T14 hangs in.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::wedge_before_reset() {
+        crate::deadline::stage_a_wedge();
+    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::drivers::watchdog::disarm();
     log!("Syncing filesystems...");
@@ -53,15 +60,43 @@ fn quiesce(last: &str) {
     crate::vfs::lock().sync_all();
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
+    crate::drivers::nvme::log_census();
+    // Above the boot's last word, because these are ordinary records and the
+    // volume that carries them is still there: every USB disk's write cache is
+    // emptied and waited for before anything is taken down.
+    crate::drivers::xhci::flush_disks();
     log!("{last}");
+    // Widens the window every shutdown has here, and nothing else: see the
+    // actuator's own declaration.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::quiesce_late_word() {
+        let until = crate::clock::nanos_since_boot().saturating_add(100_000_000);
+        while crate::clock::nanos_since_boot() < until {
+            crate::scheduler::yield_now();
+        }
+    }
     // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
-    crate::log::wait_for_durable();
+    let durability = crate::log::wait_for_durable();
     crate::log::console::drain_inline();
-    // Last, and after the log is durable: the next boot's loader reads this
-    // page to learn how the last one ended, and a machine that was asked to
-    // stop is the one answer that is not a death. Without it the loader would
-    // find the loader's own `ARMED` and report a kernel that vanished.
+    // After the log is durable: the next boot's loader reads this page to learn
+    // how the last one ended, and a machine that was asked to stop is the one
+    // answer that is not a death. Without it the loader would find the loader's
+    // own `ARMED` and report a kernel that vanished. The reset's own account is
+    // appended under it.
     crate::blackbox::record_done();
+    // Under that seal, because it extends it: how much of this boot's log the
+    // volume got, and the newest of what it did not. A file cannot report on
+    // its own tail, and on a machine with no serial port this is the only
+    // reader left for the lines written past the point `/log` stopped taking
+    // them.
+    crate::log::account_for_durability(durability);
+    // **The barrier, and last of all.** Below the log volume's last durable
+    // byte, because before it `logd` still has that volume to write and this
+    // takes the controller away from it; and after everything else here,
+    // because nothing may run between it and the register stop
+    // `acpi::reboot`/`acpi::shutdown` do — which every reset this kernel
+    // performs goes through. It is bounded, and the reset follows either way.
+    crate::drivers::xhci::seal_shut();
 }
 
 /// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Does not return.

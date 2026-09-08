@@ -19,10 +19,84 @@ What is left to build:
 
 - **The chipset watchdog is armed and does not count**, so nothing this tree
   arms can end a wedged boot; a panicking kernel ends one by its own bound
-  instead, and a kernel that wedges without panicking still ends nothing.
+  instead, and a kernel that wedges without panicking after `clock::init` is now
+  ended by `kernel/src/deadline.rs` (below) — before it, still nothing.
   `issues/hardware/an-armed-tco-has-never-reset-the-t14.md` carries the
   registers and the datasheet. **Exit**: a T14 boot that resets itself on an
   armed TCO.
+
+  **The software answer was designed and is not built, and the first reason is
+  a number this loop does not have yet.** The design evaluated was a sentinel:
+  an AP started early becomes a CPU spinning on the TSC, the BSP publishes each
+  boot phase it reaches, and a phase missed within a bound seals a record into
+  the black box and writes the FADT reset register. Four findings, taken by
+  reading the code:
+
+  1. **The bound cannot be derived.** It has to be wider than the slowest
+     healthy phase on this machine and narrower than a wait for a hand, and
+     nothing in this tree has measured a T14 phase duration. A bound guessed
+     wrong resets a healthy laptop in a loop, which is worse than the present
+     state. This loop's boot-fact run is what publishes those numbers, so the
+     design is sequenced behind it rather than blocked on a ruling.
+  2. **A sentinel is a CPU outside the roster, and the roster is modelled.**
+     `Roster::begin_attempt`/`commit` hands out dense ids that `boot_aps` fills
+     in attempt order, `smp_failed_ap_leaves_no_hole` is the gate that exists
+     because a hole in them is a defect, and `kernel-loom/tests/smp_bringup.rs`
+     is what decides whether a second committer is sound. A CPU taking an id
+     before `boot_aps` runs is a change to that protocol and needs the model
+     extended first.
+  3. **It cannot start before the machine has a clock without a second
+     bring-up path.** `boot_aps`' SDM §8.4.4.1 delays and its 100 ms start
+     budget are spun on `clock::nanos_since_boot`, which answers zero until
+     `clock::init` — so an AP started before that never leaves the delay.
+     `clock::cpuid_tsc_hz` exists for the panic path's version of this problem
+     and would serve, at the cost of a second decider for how long an
+     INIT-SIPI wait is.
+  4. **The reset it would take is not lock-free.** `acpi::reboot` opens with
+     `serial::flush_final`, and a `BackendGuard` masks interrupts for its whole
+     life — so a BSP wedged inside one holds the lock a sentinel would spin on,
+     on exactly the boots the sentinel exists for. A `reset_now` that writes the
+     decoded port and nothing else is small and separable from the rest.
+
+  What no design of this shape can cover is the span before `apic::init`: no AP
+  can be started before the BSP's own LAPIC is enabled, and `acpi::init_reset`
+  — which decodes the register any of this would write — runs inside it. That
+  floor is inherent rather than an argument against the design.
+
+  **The half of it that does not need an AP is built** (`kernel/src/deadline.rs`):
+  a bound armed off the parameter line as `boot-deadline=<ms>` and polled from
+  the timer interrupt entry, in both rings, on every CPU — two atomics and a
+  `rdtsc`, no lock, no allocation. On expiry it seals a `WEDGED` record naming
+  the bound, the uptime, the boot phase and **the tail of the log ring** into
+  the black box, and writes the reset register. That closes findings 1 and 4
+  for everything after `clock::init`: the bound is derived rather than guessed
+  (`toyos_tco::WEDGE_BOUND_MS`, twice the runner's own, so a job the runner is
+  about to end is not a wedge), and `acpi::reset_now` is the lock-free write
+  finding 4 asked for — `reboot` now goes through it, so there is one writer of
+  that port. It ends a wedge whose every CPU has stopped taking scheduler
+  passes: measured on QEMU as `boot_deadline_ends_a_wedge`, 18 s with the arm
+  against a machine that never came back without it, twice at 66 s.
+
+  **The second of the two seams that were left is closed, and not by a
+  sentinel.** A machine on which no CPU takes an interrupt is now
+  `kernel/src/hardlockup`: the local APIC's performance-counter LVT in NMI
+  delivery mode, armed on every CPU whose CPUID states an architectural PMU,
+  sampling that CPU's own interrupt count about once a second and sealing a
+  record — the CPU, its `rip` and `rsp` off the NMI frame, the lock it is
+  spinning on, a line for every CPU — from the stuck CPU's own NMI, then
+  `reset_now`. Its bound is half the deadline's and off the same parameter
+  (`toyos_tco::hard_lockup_bound_ms`), so the two compose rather than race. That
+  is the state run 22 sat in past 420 s with the deadline armed and unfired, and
+  it wanted a *sample* rather than a poll — no CPU outside the roster would have
+  helped, since a sentinel spinning on the TSC still has to be given a CPU that
+  runs, and the CPUs that were running were the deaf ones.
+
+  **What is left for a sentinel is finding 3's span alone**: before
+  `clock::init` there is no TSC period to convert either bound with, and before
+  `apic::init` there is no LVT to arm — so a kernel that dies in early bring-up
+  still needs a hand, and only a CPU started that early reaches it. Finding 2
+  (the roster is modelled and a CPU taking an id outside it is a protocol
+  change) stands unchanged and is what that would cost.
 - **An AP loads its IDT before its control registers**, so a fault in that span
   triple-faults the machine —
   `issues/kernel/an-ap-loads-the-idt-before-its-control-registers.md`, whose

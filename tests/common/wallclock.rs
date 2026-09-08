@@ -158,7 +158,7 @@ fn boot_and_read(
         rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
             kernel_params: params,
             rtc_base: Some(RTC_BASE),
             ..Default::default()

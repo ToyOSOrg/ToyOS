@@ -2158,6 +2158,43 @@ impl Profile {
 /// off a boot, not read off a default.
 pub const DEFAULT_PANEL: (u32, u32) = (1280, 800);
 
+/// The image a boot is handed instead of the one it would build, and what
+/// becomes of what the guest writes to it.
+///
+/// **A guest writes to its own boot disk, and one of these has to be chosen.**
+/// The loader counts this image's attempts into a file on the log partition
+/// before every handoff (`bootloader/src/attempt.rs`), so a second launch of one
+/// file is a *retry* and boots no kernel at all: `boot_partition_identity`
+/// booted one crafted image twice and its second boot never reached a kernel.
+/// There is no default, because the author is the only one who knows whether the
+/// bytes the guest leaves behind are the verdict or the contamination.
+pub enum Staged {
+    /// **Boot this file under a throwaway overlay; what the guest writes dies
+    /// with the guest.** The named file is never written, so a test may boot it
+    /// as many times as it likes and each boot starts where the one before it
+    /// did.
+    Pristine(PathBuf),
+    /// **Boot this file itself, because what the guest wrote to it is what the
+    /// test reads back.** One boot per file: nothing here clears what the last
+    /// one left, which is the point.
+    Written(PathBuf),
+    /// **One file across several boots of one test, built by the harness under
+    /// this name in this lane.** For the test whose subject *is* what one image
+    /// carries from a boot to the next; the first boot naming it builds it with
+    /// this call's own options and every later one boots what that left.
+    Carried(&'static str),
+}
+
+impl Staged {
+    /// The file a test staged, or `None` for one the harness builds itself.
+    fn authored(&self) -> Option<&Path> {
+        match self {
+            Self::Pristine(path) | Self::Written(path) => Some(path),
+            Self::Carried(_) => None,
+        }
+    }
+}
+
 pub struct BootOptions {
     pub gdb_stub: bool,
     pub debug_wait: bool,
@@ -2214,7 +2251,8 @@ pub struct BootOptions {
     /// and none of them can observe what it does with one it is not. This is
     /// how a test hands the guest somebody else's disk.
     pub nvme_image: Option<PathBuf>,
-    /// Boot this disk image instead of the one this call would build.
+    /// Boot this disk image instead of the one this call would build, and say
+    /// what becomes of what the guest writes to it — see [`Staged`].
     ///
     /// The built image is written fresh every boot and its GPT gets a fresh
     /// random partition GUID with it, so a test that has to know what is on
@@ -2226,7 +2264,7 @@ pub struct BootOptions {
     /// builds nothing when one is set, and every field that would have decided
     /// what went into that image has to agree with what is already in this one
     /// — [`refuse_a_staged_image_this_boot_did_not_ask_for`].
-    pub boot_image: Option<PathBuf>,
+    pub boot_image: Option<Staged>,
     /// Back the profile's data disks with these files instead of blank ones,
     /// in the order the profile declares them. The USB gate stages a file
     /// *before* the boot -- the bytes the guest is meant to find are written
@@ -2714,7 +2752,7 @@ impl QemuInstance {
         rust_tests: &[(String, Vec<u8>)],
         options: BootOptions,
     ) -> Self {
-        if let Some(staged) = &options.boot_image {
+        if let Some(staged) = options.boot_image.as_ref().and_then(Staged::authored) {
             refuse_a_staged_image_this_boot_did_not_ask_for(staged, &options);
         }
         let mut features: Vec<&str> = kernel_of(&options);
@@ -2739,26 +2777,41 @@ impl QemuInstance {
         // kernel build the run then reported as one it had made — see
         // [`refuse_a_staged_image_this_boot_did_not_ask_for`] for what that
         // report was worth.
-        let boot_image = match &options.boot_image {
-            Some(staged) => staged.clone(),
+        //
+        // The second half of each arm is what this guest may delete when it
+        // goes: a file the test staged is often read back after the guest is
+        // gone, and a carried one belongs to the boots after this.
+        let build_here = || {
+            let params = options.params();
+            let params: Vec<&str> = params.iter().map(String::as_str).collect();
+            build_boot_image_with(
+                test_crate,
+                c_tests,
+                rust_tests,
+                &options.extra_root_files,
+                &features,
+                &params,
+                options.debug_wait,
+            )
+        };
+        let (boot_image, own_boot_image) = match &options.boot_image {
+            // Both boot the file the test staged; what tells them apart is the
+            // `snapshot=on` `qemu_command` puts on the drive for a `Pristine`
+            // one, which is where that guest's writes go and die.
+            Some(Staged::Written(staged) | Staged::Pristine(staged)) => (staged.clone(), None),
+            Some(Staged::Carried(name)) => {
+                let path = test_dir.join(format!("carried-{name}.img"));
+                if !path.exists() {
+                    fs::write(&path, build_here()).expect("Failed to write test boot image");
+                }
+                (path, None)
+            }
             None => {
-                let params = options.params();
-                let params: Vec<&str> = params.iter().map(String::as_str).collect();
-                let disk = build_boot_image_with(
-                    test_crate,
-                    c_tests,
-                    rust_tests,
-                    &options.extra_root_files,
-                    &features,
-                    &params,
-                    options.debug_wait,
-                );
                 let path = test_dir.join(format!("boot-{seq}.img"));
-                fs::write(&path, &disk).expect("Failed to write test boot image");
-                path
+                fs::write(&path, build_here()).expect("Failed to write test boot image");
+                (path.clone(), Some(path))
             }
         };
-        let own_boot_image = options.boot_image.is_none().then(|| boot_image.clone());
 
         // Named by size, so two profiles that disagree about the device do
         // not hand each other a filesystem formatted for the wrong one. Reused
@@ -3947,8 +4000,17 @@ fn qemu_command(
         ))
         .arg("-drive")
         .arg(format!(
-            "if=none,id=stick,format=raw,file={}",
-            boot_image.display()
+            "if=none,id=stick,format=raw,file={}{}",
+            boot_image.display(),
+            // **What a `Staged::Pristine` boot is made of.** QEMU keeps this
+            // drive's writes in a temporary file and drops it when the guest
+            // exits, so the staged image is never written and the boot after it
+            // starts where this one did. A copy of the image would do the same
+            // and costs 180 MB of disk per boot; this costs nothing.
+            match &options.boot_image {
+                Some(Staged::Pristine(_)) => ",snapshot=on",
+                _ => "",
+            }
         ));
     assert!(
         !shape.xhci.is_empty() || (shape.usb.is_empty() && shape.usb_disks.is_empty()),

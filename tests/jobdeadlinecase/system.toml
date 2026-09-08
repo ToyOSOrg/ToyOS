@@ -10,7 +10,12 @@ start = ["logd", "test-runner"]
 syscap = ["logread"]
 
 [programs.test-runner]
-args = ["--bound-ms=3000", "spin"]
+# **`echo` is the job the deadline must never reach.** The deadline kills the
+# job it was watching so the driver can end what it had in flight, and that kill
+# releases the loop `spin` was blocking — so without `userland/test-runner`'s
+# stand-down the loop starts this one, into a shutdown that has already written
+# the boot's last word.
+args = ["--bound-ms=3000", "spin", "echo"]
 syscap = ["dup", "power"]
 
 [programs.toybox]
@@ -18,3 +23,4 @@ syscap = ["dup", "power"]
 [symlinks]
 "bin/reboot" = "/system/bin/toybox"
 "bin/spin" = "/system/bin/toybox"
+"bin/echo" = "/system/bin/toybox"

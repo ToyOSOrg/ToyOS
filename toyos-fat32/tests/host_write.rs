@@ -602,3 +602,94 @@ fn same_entry_is_case_insensitive_identity() {
     assert!(!fs.same_entry("Report.TXT", "Other.bin").expect("distinct entries"));
     assert!(!fs.same_entry("Report.TXT", "absent.bin").expect("destination absent"));
 }
+
+/// What the checker says about the volume as it stands on disk right now.
+///
+/// The image is read through its own path rather than through the mounted
+/// device the driver holds: the driver writes with `pwrite` and the checker
+/// judges bytes, so what it sees is what a stick pulled out at this instant
+/// would carry.
+fn complaints(image: &Image) -> Vec<String> {
+    let bytes = fs::read(&image.path).expect("read the volume back");
+    toyos_fat32_check::check(&bytes).iter().map(|c| format!("{c}")).collect()
+}
+
+/// One 512-byte cluster per sector, which is what the T14's log partition has
+/// and what makes "the chain holds three more clusters than the size needs" a
+/// three-cluster append rather than a 12 KiB one.
+fn small_cluster_image(name: &str) -> Image {
+    Image::new(name, 64 * 1024 * 1024, 1)
+}
+
+/// **The shape the bench's own stick came back with**: `DIR_FileSize` needing
+/// N clusters and the chain holding N+3, because the flush that would have
+/// recorded them did not run.
+///
+/// Both halves are the test. The first is the negative control — the window is
+/// real, and the checker names it — and it reds if the window ever closes for
+/// some other reason, which would leave the second half certifying nothing. The
+/// second is [`Fat32::reconcile`] closing it.
+#[test]
+fn a_chain_that_outran_its_entry_is_reconciled() {
+    let image = small_cluster_image("reconcile-size");
+    let mut fs = Fat32::mount(image.device()).expect("mount");
+    let mut f = fs.create("BOOT.LOG", stamp()).expect("create");
+
+    let recorded = pattern(345 * 512 - 100, 3);
+    fs.write(&mut f, 0, &recorded).expect("write");
+    fs.flush_meta(&mut f, stamp()).expect("flush_meta");
+    fs.sync().expect("sync");
+    assert!(!f.needs_reconcile(), "a flushed handle has nothing to reconcile");
+    assert!(complaints(&image).is_empty(), "the flushed volume is clean");
+
+    // Three clusters more, and no flush behind them: the window a machine that
+    // stops here leaves open.
+    let more = pattern(3 * 512, 5);
+    fs.write(&mut f, recorded.len() as u64, &more).expect("append");
+    fs.sync().expect("sync");
+    assert!(f.needs_reconcile(), "the chain now covers bytes the entry does not");
+    let said = complaints(&image);
+    assert!(
+        said.iter().any(|c| c.contains("DIR_FileSize") && c.contains("the chain holds")),
+        "the checker did not name the size-against-chain shape: {said:?}"
+    );
+
+    fs.reconcile(&mut f, stamp()).expect("reconcile");
+    fs.sync().expect("sync");
+    assert!(!f.needs_reconcile());
+    drop(fs);
+    image.fsck();
+    image.with_mount(|mount| {
+        let got = fs::read(mount.join("BOOT.LOG")).expect("read");
+        assert_eq!(got.len(), recorded.len() + more.len());
+        assert_eq!(&got[..recorded.len()], &recorded[..]);
+        assert_eq!(&got[recorded.len()..], &more[..]);
+    });
+}
+
+/// The same window's other end, and the shape the device boot left: a file
+/// whose *whole* chain is unreachable because its entry never got a first
+/// cluster.
+#[test]
+fn a_chain_no_entry_reaches_is_reconciled() {
+    let image = small_cluster_image("reconcile-orphan");
+    let mut fs = Fat32::mount(image.device()).expect("mount");
+    let mut f = fs.create("STICK.BIN", stamp()).expect("create");
+
+    let data = pattern(4088 * 512, 11);
+    fs.write(&mut f, 0, &data).expect("write");
+    fs.sync().expect("sync");
+    let said = complaints(&image);
+    assert!(
+        said.iter().any(|c| c.contains("no directory entry reaches them")),
+        "the checker did not name the orphaned-chain shape: {said:?}"
+    );
+
+    fs.reconcile(&mut f, stamp()).expect("reconcile");
+    fs.sync().expect("sync");
+    drop(fs);
+    image.fsck();
+    image.with_mount(|mount| {
+        assert_eq!(fs::read(mount.join("STICK.BIN")).expect("read"), data);
+    });
+}

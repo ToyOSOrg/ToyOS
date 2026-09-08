@@ -74,6 +74,12 @@ pub fn stop_bus_mastering(config: Mmio) {
     config.write_u16(COMMAND, cmd & !BUS_MASTER);
 }
 
+/// One function's ECAM window: PCIe extended config space, PCI 3.0 §7.2.2.
+///
+/// Declared once because two readers deal in it — `PciDevice::new` carves it and
+/// the reset-time xHCI stop rebuilds one from a bare address.
+pub const CONFIG_BYTES: u64 = 4096;
+
 /// PCI device identified by ECAM base + Bus/Device/Function.
 #[derive(Clone, Copy)]
 pub struct PciDevice {
@@ -88,7 +94,7 @@ impl PciDevice {
         let offset = ((bus as u64) << 20)
             | ((dev as u64) << 15)
             | ((func as u64) << 12);
-        Self { mmio: ecam.subregion(offset, 4096), bus, dev, func }
+        Self { mmio: ecam.subregion(offset, CONFIG_BYTES), bus, dev, func }
     }
 
     /// A function over a caller-owned config-space window, for the cap self-test to drive the real walk over lists no hardware in reach produces.
@@ -403,10 +409,60 @@ pub fn enumerate(ecam: &crate::mm::Mmio) -> Vec<PciDevice> {
 
 fn print_device(pci: &PciDevice) {
     log!(
-        "  PCI {:02x}:{:02x}.{} [{:02x}{:02x}] vendor={:04x} device={:04x} prog_if={:02x}",
+        "  PCI {:02x}:{:02x}.{} [{:02x}{:02x}] vendor={:04x} device={:04x} prog_if={:02x} bars=[{}]",
         pci.bus, pci.dev, pci.func,
         pci.read_config_u8(CLASS), pci.read_config_u8(SUBCLASS),
         pci.vendor_id(), pci.device_id(),
-        pci.read_config_u8(PROG_IF)
+        pci.read_config_u8(PROG_IF),
+        assigned_bars(pci),
     );
+}
+
+/// The Memory Space windows firmware assigned this function, as `bar<n>=<addr>`
+/// in slot order; an unassigned register contributes nothing.
+///
+/// **Read, never probed.** [`PciDevice::bar_size`]'s write-ones dance turns
+/// memory decode off for the duration, and an inventory that only describes a
+/// function must not disturb one. The slot count comes from the header type
+/// because a Type 1 header's registers past BAR 1 are the bridge's bus numbers,
+/// not BARs.
+fn assigned_bars(pci: &PciDevice) -> alloc::string::String {
+    use core::fmt::Write;
+
+    let slots: u8 = match pci.read_config_u8(HEADER_TYPE) & !MULTI_FUNCTION {
+        0 => bar::MAX_INDEX + 1,
+        1 => 2,
+        _ => return alloc::string::String::from("header type this kernel does not decode"),
+    };
+    let mut out = alloc::string::String::new();
+    let mut index = 0;
+    while index < slots {
+        let slot = index;
+        let low = pci.read_config_u32(bar::BASE + slot as u64 * 4);
+        let named = match bar::decode(slot, low) {
+            Ok(bar::Width::Narrow(memory)) => Ok(memory.address()),
+            Ok(bar::Width::Wide(wide)) => {
+                let high = pci.read_config_u32(bar::BASE + (slot as u64 + 1) * 4);
+                // The pair is one BAR; its high half is not a slot of its own.
+                index += 1;
+                wide.with_high(high).map(|memory| memory.address())
+            }
+            Err(why) => Err(why),
+        };
+        index += 1;
+        // An unassigned register is the ordinary case and says nothing; the
+        // other refusals are a device describing a space this kernel has not.
+        if named == Err(bar::Unusable::Unassigned) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        // Infallible: writing into a `String` fails only where the formatter does, and none of these do.
+        let _ = match named {
+            Ok(address) => write!(out, "bar{slot}={address:#x}"),
+            Err(why) => write!(out, "bar{slot}=none({why})"),
+        };
+    }
+    out
 }

@@ -11,7 +11,10 @@ use common::qemu::{
     self, await_guest, await_marker, await_marker_new, BootOptions, QemuInstance, TestResult,
     STALLED,
 };
-use common::{audio, compile, faults, hostload, pkg, power, screen, serial, stats, storage, usb};
+use common::{
+    audio, compile, devices, faults, hostload, metal, pkg, power, screen, serial, stats, storage,
+    usb,
+};
 use toyos_build::day::Day;
 use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::testargs::Shard;
@@ -108,7 +111,7 @@ impl HostSlots {
     }
 }
 
-/// Which tier the shared boot's 153 binaries are in.
+/// Which tier the shared boot's discovered members are in.
 ///
 /// [`Tier::Fast`] because every member in the effective CI profile is at or
 /// under `toyos_build::tiers::FAST_COMMIT_MS`. [`check_no_collisions`] refuses
@@ -132,10 +135,12 @@ const SHARED_TIER: Tier = Tier::Fast;
 /// `wait_for_ready`'s boot timeout has done since the phase existed, so the
 /// number each author reasoned about is still the number for one guest.
 ///
-/// What that leaves is a block of 153 tests on one boot costing about thirteen
-/// seconds between them, which is far too little to be worth a tail slot of its
-/// own: alone it is thirteen seconds nothing overlaps, and in the phase it is
-/// one task among sixty.
+/// What that leaves is one boot's worth of tests costing about thirteen seconds
+/// between them, which is far too little to be worth a tail slot of its own:
+/// alone it is thirteen seconds nothing overlaps, and in the phase it is one
+/// task among sixty. The count is deliberately not written here — discovery is
+/// what decides it and a comment restating it is wrong the next time somebody
+/// adds a file.
 const SHARED_BLOCK: Sched = Sched::Parallel;
 
 /// The shared-boot binaries that call `SYS_DEBUG`, and so cannot run on the
@@ -190,10 +195,18 @@ const MAX_SHARED_REBOOTS: usize = 3;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // **Its exit code is a measurement, not a verdict**, and the shared block
+    // judges every member on `exit=0` alone — so it would red on every boot
+    // that measured anything. It also needs the real-time band, which only
+    // `tests/latencycase` endows. `latency_wake` runs it there.
+    "cyclictest",
     // Its verdict is a property of the *console capture*, which only a boot of
     // its own can hold: in the shared boot every other binary's output is in the
     // same stream. `console_line_atomicity` runs it.
     "console_line_atomicity",
+    // The C corpus's comparator: a helper reached through one symlink per case,
+    // never a test of its own. `shared_metal` stages every name on this list.
+    "ccheck",
     "segfault_child",
     "disk_backtrace_child",
     "fault_gate_child",
@@ -519,6 +532,35 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("irq_census_conservation", Sched::Parallel, Tier::Fast),
     ("control_regs", Sched::Parallel, Tier::Fast),
     ("control_regs_negative", Sched::Parallel, Tier::Fast),
+    // The boot facts the metal suite reads off a machine's own records: every
+    // CPU the firmware named came up and none of their timestamp counters
+    // trails the BSP's; the physical memory manager's accounting against the
+    // firmware map balances to the byte; every ACPI table this kernel goes on
+    // to decode checksummed; the TSC the whole machine is timed by agrees with
+    // the frequency the part itself states; the PCI inventory's function count
+    // matches its rows; and one machine-wide TLB shootdown's cost is a
+    // distribution rather than one boot's average. Every verdict is arithmetic
+    // over records, with no clock in the judging, so all six are Parallel.
+    ("smp_roster_and_tsc_trail", Sched::Parallel, Tier::Fast),
+    ("pmm_accounting", Sched::Parallel, Tier::Fast),
+    ("acpi_table_inventory", Sched::Parallel, Tier::Fast),
+    ("timer_calibration", Sched::Parallel, Tier::Fast),
+    ("pci_inventory", Sched::Parallel, Tier::Fast),
+    ("tlb_shootdown_cost", Sched::Parallel, Tier::Fast),
+    // What a waiter in the real-time band pays to be woken, as a distribution
+    // over ten thousand programmed wakes — and, beside it, that the number
+    // reaches a machine with no serial port at all, through the kernel's own
+    // `exit:` record on the log volume. Nothing else in the tree measures wake
+    // latency against a programmed timer: soundd's figure is a maximum over a
+    // window, taken against a DLL's prediction of a DMA completion and needing
+    // a sound card to exist at all, and `toyos-sched`'s bound on the same
+    // quantity runs in a simulator where no IPI is ever delivered.
+    //
+    // Serial: it is the one registration here whose verdict is a *time*, and a
+    // wake latency measured beside eleven other guests is the host's schedule.
+    // Nightly for that same reason — `Why::TimerAnchored` in `src/tiers.rs`,
+    // which is what its classification was always going to be.
+    ("latency_wake", Sched::Serial, Tier::Nightly),
     ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Fast),
     ("input_merge", Sched::Parallel, Tier::Fast),
     ("metal_sim_input", Sched::Parallel, Tier::Fast),
@@ -655,6 +697,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("machine_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
+    // Its own boot, and the one whose numbers are the T14's: what it judges
+    // here is the plumbing, since every span on an emulated device is a fact
+    // about TCG. Registered UNMEASURED, so the run that prices it is the one
+    // that decides its tier.
+    ("metal_device_probe", Sched::Parallel, Tier::Fast),
     // Its verdict waits out a staged window.
     ("job_deadline_reboots", Sched::Parallel, Tier::Fast),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
@@ -678,6 +725,29 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the bound the first boot counts down.
     ("blackbox_panic_chain", Sched::Parallel, Tier::Nightly),
     ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
+    // The one bound in this tree that ends a machine nothing else can: a boot
+    // whose every CPU has stopped taking scheduler passes. Its verdict is a
+    // bound counted down in the guest, so `src/tiers.rs` carries it
+    // `Why::TimerAnchored` and says what leaves the per-PR tier with it.
+    ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
+    // The other half of that same parameter, and the state its poll cannot
+    // reach: one CPU with interrupts off, which no running CPU can see. Two
+    // bounds counted down in the guest, so it belongs beside the row above.
+    ("hard_lockup_ends_a_deaf_cpu", Sched::Parallel, Tier::Nightly),
+    // The control on both of those bounds standing down: a panic whose panel is
+    // still up when the deadline expires must cross the reset as a panic report
+    // and never as a `WEDGED` page.
+    ("panic_outlives_the_deadline", Sched::Parallel, Tier::Nightly),
+    // Four chained boots, one per way this kernel reaches a reset, each
+    // anchored to the bound its own first boot counts down.
+    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Nightly),
+    // The control on the chain: a record another image left in the same memory
+    // is cleared and its pass boots a kernel, where a real predecessor's ends
+    // the chain. One boot, one actuator.
+    ("blackbox_foreign_record", Sched::Parallel, Tier::Fast),
+    // Three launches of one image file, and the third is the one that makes it
+    // a bound: a hang costs the machine one boot and never traps it.
+    ("hang_bounded_by_the_stick", Sched::Parallel, Tier::Fast),
     // Its own boot, and every verdict is a line: no host clock in any of it.
     ("blackbox_unclaimed_page", Sched::Parallel, Tier::Fast),
     // The seal read off the page's own bytes by QEMU, after a panic earlier than
@@ -1198,6 +1268,664 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // so where its verdict is read.
     ("nightly_tier_is_announced", Sched::Parallel, Tier::Fast),
 ];
+
+/// **The metal profile**: which registrations run on the ThinkPad T14, what
+/// boots each one needs, and how each is judged off the log the stick came back
+/// with.
+///
+/// A separate table, so a QEMU-only test simply has no row — the answer for
+/// every name nobody has looked at. A [`metal::Metal::QemuOnly`] row is the
+/// other answer: a name somebody *has* looked at and ruled out, with the reason.
+///
+/// Two rows naming the same boot share one image and one boot, and their job
+/// lists are unioned. A boot is about a minute of the machine's time, so that
+/// grouping is what the suite's cost is; the boot is *named* by an arm rather
+/// than derived from its config and parameters, because sharing is not always
+/// safe and only the author knows.
+///
+/// **Every predicate here reads records, never console text.** A userland
+/// `println!` ends at `Backend::None` on a machine with no serial port, so
+/// `===TEST_END <name> exit=N===` does not exist on the T14: a job's verdict
+/// crosses as the kernel's own `exit: <name> pid=N code=N cpu=Nms`.
+const METAL: &[(&str, metal::Metal)] = &[
+    (
+        // The device list: the T14's own xHCI, stick, i8042, HDA, framebuffer
+        // and NVMe, asserted from the records the shipping kernel writes, with
+        // every span `metalprobe` measured priced in `tests/metal-profile.toml`.
+        "metal_device_probe",
+        metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
+    ),
+    // ---- one image: tests/testcases, no parameters, one job list ----
+    (
+        "blackbox_unclaimed_page",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| power::blackbox_unclaimed(&b[0].loader(), &b[0].kernel()) },
+    ),
+    (
+        // The machine's own CPU count, off the SMP bring-up records — a source
+        // independent of the `control_regs:` lines it is then held to. The QEMU
+        // registration says four because the harness staged four; here the
+        // laptop says how many it has.
+        "control_regs",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| control_regs(b[0].kernel().text(), b[0].cpus()?),
+        },
+    ),
+    (
+        "ioapic_topology",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| ioapic_topology(b[0].kernel().text()) },
+    ),
+    (
+        "klogd_hosted",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| klogd_hosted(&b[0].kernel()) },
+    ),
+    (
+        // The stimulus a host types at a console in QEMU is this boot's own job
+        // list on the T14: every job that runs and exits is a process exit, and
+        // the census is printed at each one.
+        "irq_census_conservation",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| irq_census(b[0].kernel().text()),
+        },
+    ),
+    (
+        // `log-close` is a runner builtin and prints its `survived=` evidence to
+        // a console nothing is on. What crosses is the child it spawns only
+        // after the poll survived the close — and the boot reaching its last job
+        // at all, which a builtin returning non-zero prevents.
+        "log_poll_outlives_a_close",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| log_close_survived(b[0]) },
+    ),
+    (
+        "mkdir_cap",
+        metal::Metal::Runs {
+            arms: TESTCASES_MKDIR,
+            judge: |b| b[0].job_passed("test_rs_mkdir_cap"),
+        },
+    ),
+    (
+        "readdir_bound",
+        metal::Metal::Runs {
+            arms: TESTCASES_READDIR,
+            judge: |b| b[0].job_passed("test_rs_readdir_bound"),
+        },
+    ),
+    (
+        "short_sleep_livelock",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            // A livelocked CPU produces no exit record at all, which is the
+            // whole verdict: the defect this is aimed at was caught twice by NMI
+            // on this very machine.
+            judge: |b| b[0].job_passed("test_rs_abuse_short_sleep"),
+        },
+    ),
+    (
+        // The shipped tone client plays to completion and exits 0. Its QEMU
+        // registration calls the sink a null one; on the T14 whether soundd
+        // binds the laptop's own HDA controller is unmeasured, so what this
+        // asserts here is the weaker and truer thing — the client came back.
+        "null_sink_shipped_client",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| b[0].job_passed("test_rs_null_sink_client_exits"),
+        },
+    ),
+    // ---- one image: tests/testcases armed with the chipset watchdog ----
+    (
+        // Two boots, and they cannot merge: the control is the same image
+        // *without* the parameter, which is the boot every row above rides —
+        // so this costs one image and not two, and its control is a machine
+        // several other verdicts were already taken from.
+        "loader_watchdog_arms",
+        metal::Metal::Runs {
+            arms: &[
+                metal::once("testcases-watchdog", "tests/testcases", &["watchdog"], &[]),
+                // The batch's job list is the union of its riders'; this arm
+                // needs none of its own.
+                metal::once("testcases", "tests/testcases", &[], &[]),
+            ],
+            judge: |b| {
+                power::watchdog_armed(&b[0].loader(), &b[0].kernel())?;
+                power::watchdog_quiet(&b[1].loader(), &b[1].kernel())
+            },
+        },
+    ),
+    // ---- the boot facts, riding the same tests/testcases image ----
+    //
+    // **Six names and no extra minute of the machine.** Every needle below is a
+    // record the *shipping* kernel writes on any boot it takes, so each rides
+    // whatever image is already going on the stick; the two rows after them are
+    // the two things this suite measures rather than reads, and those cost a
+    // boot.
+    (
+        "smp_roster_and_tsc_trail",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| smp_roster_and_tsc_trail(b[0].kernel().text(), b[0].cpus()?),
+        },
+    ),
+    (
+        "pmm_accounting",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| pmm_accounting(b[0].kernel().text()) },
+    ),
+    (
+        "acpi_table_inventory",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| acpi_table_inventory(b[0].kernel().text()),
+        },
+    ),
+    (
+        "timer_calibration",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| timer_calibration(b[0].kernel().text()) },
+    ),
+    (
+        "pci_inventory",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| pci_inventory(b[0].kernel().text()) },
+    ),
+    // ---- one image: tests/latencycase armed with the shootdown bench ----
+    (
+        "tlb_shootdown_cost",
+        metal::Metal::Runs {
+            arms: LATENCYCASE,
+            // The machine's own CPU count, off the bring-up records rather than
+            // off a number the harness staged: the QEMU registration says eight
+            // because it asked for eight, and here the laptop says how many it
+            // has.
+            judge: |b| {
+                let (p50, p99) = tlb_shootdown_cost(b[0].kernel().text(), b[0].cpus()?)?;
+                b[0].number("tlb.latencycase.p50_ns", p50)?;
+                b[0].number("tlb.latencycase.p99_ns", p99)
+            },
+        },
+    ),
+    (
+        // The console half of the QEMU registration does not exist here, so
+        // what is judged is the half that does: the exit record carries the
+        // p99, and the stress suite beside it carries a verdict.
+        "latency_wake",
+        metal::Metal::Runs {
+            arms: LATENCYCASE,
+            judge: |b| {
+                b[0].job_passed("test_rs_sched_stress")?;
+                wake_latency_recorded(b[0])
+            },
+        },
+    ),
+    // ---- one image: tests/jobcase ----
+    (
+        // Two boots the suite already flashes: the device boot writes and
+        // fsyncs megabytes before its reset, and `jobcase` is the same reset
+        // with nothing moved across the bus. Neither costs the machine a
+        // minute it was not already spending.
+        "usb_reset_hands_devices_back",
+        metal::Metal::Runs {
+            arms: USB_RESET_BOOTS,
+            judge: power::usb_reset_on_metal,
+        },
+    ),
+    (
+        // Already precisely this boot: `args = ["reboot"]`. On the T14 the
+        // chain is what every metal boot does — the loader points `BootNext` at
+        // itself before each handoff, so the pass that reads the page appends
+        // its report to the same `loader.log` the driver hands back.
+        "blackbox_done_chain",
+        metal::Metal::Runs { arms: JOBCASE, judge: |b| power::done_chain(&b[0].after_the_reset()?) },
+    ),
+    (
+        // Its own boot, and it must not share one: it is the only arm in this
+        // profile that deliberately leaves the machine unable to end its own
+        // boot, and what it judges is that the machine ended it anyway.
+        "boot_deadline_ends_a_wedge",
+        metal::Metal::Runs {
+            arms: &[metal::once("deadlinewedge", "tests/jobcase", &["wedge-before-reset"], &[])],
+            judge: |b| power::deadline_wedge_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+        },
+    ),
+    (
+        // Its own boot, and the one arm in this profile the machine itself is
+        // the instrument for: QEMU's TCG guest has no performance counter, so
+        // only here is the NMI that samples a deaf CPU the counter's own. It
+        // ends the machine at half the metal bound, with the whole second half
+        // of the deadline still to run, so which record the page carries says
+        // which of the two bounds ended it.
+        "hard_lockup_ends_a_deaf_cpu",
+        metal::Metal::Runs {
+            arms: &[metal::once("hardlockup", "tests/jobcase", &["hard-lockup-probe"], &[])],
+            judge: |b| power::hard_lockup_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+        },
+    ),
+    (
+        // Its own boot, and it must not share one: it deliberately leaves the
+        // page holding a record no stick owns, and a boot that then read it as
+        // a predecessor's is exactly what the arm above judges.
+        // Its own boot: it deliberately leaves the page holding a record no
+        // stick owns, and a boot that then read it as a predecessor's is the
+        // defect. The T14 runs the same three passes QEMU does — the loader
+        // points `BootNext` at itself, so they are one flash.
+        "blackbox_foreign_record",
+        metal::Metal::Runs {
+            arms: &[metal::once(
+                "foreignrecord",
+                "tests/jobcase",
+                &["blackbox-foreign-identity"],
+                &[],
+            )],
+            judge: |b| {
+                let after = b[0].after_the_reset()?;
+                let said = after.must_say("record another image left in this memory")?.to_string();
+                // Named and cleared, and never reported as this stick's own.
+                power::says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
+                power::says_nothing_of(&after, "the last boot read")?;
+                eprintln!("  [power] {}", said.trim());
+                Ok(())
+            },
+        },
+    ),
+    (
+        // The machine came back to `sshd`, which is what tells a reset from the
+        // S5 power-off the QEMU stop reason exists to catch — the driver
+        // established it before this judge ran. What is left is the kernel's own
+        // decode, and `0xcf9 <- 0x0f` is q35's register rather than this one's.
+        "machine_reboot",
+        metal::Metal::Runs {
+            arms: JOBCASE,
+            judge: |b| {
+                power::reset_register_decoded(&b[0].kernel())?;
+                b[0].kernel().must_say(bootlog::REBOOTING).map(|_| ())
+            },
+        },
+    ),
+    // ---- one image: tests/metalcase ----
+    (
+        "metal_sim_scanout_wc",
+        metal::Metal::Runs { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
+    ),
+    // ---- one image, eleven actuators, ten tests ----
+    // The cheapest cluster there is: every one of these arms a check that runs
+    // at init, logs its verdict and does nothing else, so they cost one flash
+    // between them. **Nothing had to be promoted into `kernel/src/params.rs`**
+    // — the metal profile flashes test images (the track's ruling), so an
+    // actuator is armed the way the QEMU registration arms it and the
+    // pre-flash gate is what says the machine survives each one.
+    (
+        "pci_capability_walk",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| pci_cap_selftest(b[0].kernel().text()) },
+    ),
+    (
+        "process_reopen_selftest",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| process_reopen(b[0].kernel().text()) },
+    ),
+    (
+        // **Two of its three probes pass here and the third cannot run.**
+        // Measured on a metal-shaped guest: the two `revoke-selftest` probes
+        // both PASS, and `pc-unbind-selftest` prints `FAIL (this boot has no
+        // metadata page cache)` — the slot it needs is one the virtio machine's
+        // NVMe home has and the T14's USB-only volumes do not. Judging the two
+        // that do run would be a different test under the same name, so the
+        // whole registration stays where it can answer for all three.
+        "read_fault_selftests",
+        metal::Metal::QemuOnly(
+            "`pc-unbind-selftest` reports `FAIL (this boot has no metadata page cache)` on a \
+             machine whose volumes are all on the boot stick; the two `revoke-selftest` probes \
+             beside it pass, and splitting them into a name of their own is what would put that \
+             half on the machine",
+        ),
+    ),
+    (
+        "leak_rollback_selftest",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| leak_rollback(b[0].kernel().text()) },
+    ),
+    (
+        "lapic_spurious_vector",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
+    ),
+    (
+        // The T14's own controller publishes a real capability list, which is
+        // the half of this QEMU cannot give: q35's nec-usb-xhci has no USB
+        // Legacy Support capability in it at all.
+        "xhci_xecp_walk",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| xhci_xecp(b[0].kernel().text()) },
+    ),
+    (
+        // Same: the crafted nine are the point, and beside them the parser
+        // binds a boot stick off a descriptor a real controller delivered.
+        "xhci_descriptor_walk",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| xhci_descriptors(b[0].kernel().text()) },
+    ),
+    (
+        // No drain on this side: the whole boot's records are on the stick, so
+        // the probe's line is either in them or it never ran.
+        "sysret_ss_reload",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
+    ),
+    (
+        "input_merge",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| input_merge_ok(b[0].kernel().text()) },
+    ),
+    (
+        "operation_nesting",
+        metal::Metal::Runs {
+            arms: SELFTESTS,
+            judge: |b| operation_nesting_log(b[0].kernel().text()),
+        },
+    ),
+    // ---- named, looked at, and not run there ----
+    (
+        "metal_sim_null_audio",
+        metal::Metal::QemuOnly(
+            "its subject is soundd's null sink, and whether the T14's own HDA controller binds \
+             is unmeasured; both halves of the verdict — soundd's counters and a host-timed \
+             drain — are console text and a host clock, neither of which the stick carries",
+        ),
+    ),
+];
+
+/// The boot most of the first tranche rides: the plain `tests/testcases` shape
+/// with a job list that ends it.
+///
+/// Order matters. `log-close` is last because it is a *builtin*: its exit code
+/// reaches no kernel record, so the runner ends the boot on a non-zero one and
+/// every later job's record would then be missing for the wrong reason. The
+/// last job before it is [`LOG_CLOSE_MARKER`]'s subject.
+const TESTCASES: &[metal::Arm] = &[metal::once(
+    "testcases",
+    "tests/testcases",
+    &[],
+    &["test_rs_abuse_short_sleep", "test_rs_null_sink_client_exits", "log-close"],
+)];
+
+/// **Two boots of one config, because these two cannot share one.** Each fills
+/// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
+/// and `readdir_bound`'s own `create_dir("/tmp/empty")` is then refused with
+/// `OutOfMemory` and it panics — measured on the first staged image, and the
+/// reason each has a boot of its own in QEMU too.
+const TESTCASES_MKDIR: &[metal::Arm] =
+    &[metal::once("testcases-mkdir", "tests/testcases", &[], &["test_rs_mkdir_cap"])];
+
+const TESTCASES_READDIR: &[metal::Arm] =
+    &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
+
+const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
+
+/// The two boots the reset ruling is judged on, and both are boots this suite
+/// already flashes: the device boot for a reset with megabytes behind it, and
+/// `jobcase` for one with nothing.
+const USB_RESET_BOOTS: &[metal::Arm] = &[
+    metal::once(
+        devices::BOOT,
+        devices::CONFIG,
+        &[],
+        devices::JOBS,
+    ),
+    metal::once("jobcase", "tests/jobcase", &[], &[]),
+];
+
+const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
+
+/// One boot for every in-kernel self-test that logs its verdict at init and
+/// does nothing else.
+///
+/// **Eleven actuators in one image.** They cost the machine one flash between
+/// them because none of them changes what the machine *is*: each stages inputs
+/// the hardware cannot produce — a crafted capability list, a malformed
+/// descriptor, a vector nothing claims — runs a check over them and prints a
+/// count. The three that do change the machine are not here:
+/// `no-ap-control-regs` leaves an AP without them, `smp-skip-ap` leaves one
+/// out and `test-tiny-va` shrinks the address space, and each would be
+/// answering for the boot every other row on it read.
+const SELFTESTS: &[metal::Arm] = &[metal::once(
+    "selftests",
+    "tests/testcases",
+    &[
+        "pci-cap-selftest",
+        "process-reopen-selftest",
+        // `revoked-backing-selftest` and `pc-unbind-selftest` are deliberately
+        // absent: `read_fault_selftests` is the only rider they had and it is
+        // declared QEMU-only above, so arming them here would put a `FAIL` line
+        // on the stick that no verdict claims.
+        "leak-rollback-selftest",
+        "lapic-spurious-selftest",
+        "unclaimed-vector-selftest",
+        "xhci-xecp-selftest",
+        "xhci-descriptor-selftest",
+        "sysret-ss-probe",
+        "test-input-merge",
+        "sched-operation-nesting",
+    ],
+    &[],
+)];
+
+/// The device boot: the whole `metalprobe` job list on the T14's own devices.
+/// Its own image, because every job in it either claims the display or moves
+/// megabytes across the boot stick, and neither shares well.
+const METALDEVICECASE: &[metal::Arm] = &[metal::once(
+    devices::BOOT,
+    devices::CONFIG,
+    &[],
+    // The same list the committed config carries, so the image the driver
+    // flashes and the one the QEMU arm boots run the same jobs in the same
+    // order — `devices::the_config_runs_exactly_these_jobs` is what holds the
+    // two together.
+    devices::JOBS,
+)];
+
+/// The shared block's Rust binaries that do **not** go on the T14, and what
+/// each one's boot said when it was tried there.
+///
+/// Every row is a measurement, not an inheritance: the whole discovered set was
+/// staged onto one metal-shaped image and booted, and these are the names whose
+/// exit record was not `code=0`. A name here with a reason that has stopped
+/// being true is a name that should come off — the boot is the judge, and it is
+/// cheap to re-run.
+///
+/// The eight `SYS_DEBUG` binaries are not here: they ride
+/// [`SHARED_METAL_DEBUG`], which is the same boot on the kernel that carries
+/// the syscall they call. The track's ruling is that the metal profile flashes
+/// test images, so that kernel may go on the stick.
+const METAL_SKIP: &[(&str, &str)] = &[];
+
+/// The boot the shared block's Rust binaries ride on the T14.
+///
+/// **`Profile::Headless`'s virtio machine is not what the T14 is**, so the
+/// audit's list of names "bound to the virtio machine" is a hypothesis about
+/// this boot rather than a fact about it. It is settled by booting them: what
+/// [`METAL_SKIP`] holds is what the machine refused, and nothing is excluded for
+/// a shape it was never tried on.
+fn shared_metal(
+    rust_bins: &[(String, Vec<u8>)],
+    keep: impl Fn(&str) -> bool,
+) -> Vec<metal::SharedBoot> {
+    let skipped: BTreeSet<&str> = METAL_SKIP.iter().map(|(name, _)| *name).collect();
+    let discovered = discover_rust_tests(rust_bins);
+    for (name, _) in METAL_SKIP {
+        assert!(
+            discovered.iter().any(|d| d == name),
+            "METAL_SKIP names {name:?}, which the shared block does not discover; a row for a \
+             binary that is gone excludes nothing and hides that it is gone"
+        );
+    }
+    let (debug, shipping): (Vec<String>, Vec<String>) = discovered
+        .into_iter()
+        .filter(|name| !skipped.contains(name.as_str()))
+        .partition(|name| ACTUATOR_TESTS.contains(&name.as_str()));
+    vec![
+        metal::SharedBoot {
+            boot: "shared".to_string(),
+            config: "tests/testcases",
+            params: &[],
+            features: &[],
+            jobs: shipping
+                .iter()
+                .filter(|n| keep(n))
+                .map(|n| format!("test_rs_{n}"))
+                .collect(),
+            files: Vec::new(),
+            links: Vec::new(),
+        },
+        // The same list's other half, on the kernel that carries `SYS_DEBUG`.
+        // A second boot rather than a second image for the whole set: what
+        // these need is a syscall number the rest must not have, and a boot
+        // where every binary could call it would stop being the shipping
+        // machine for the other seventy.
+        metal::SharedBoot {
+            boot: "shared-debug".to_string(),
+            config: "tests/testcases",
+            params: &[],
+            features: toyos_build::build::TEST_KERNEL,
+            jobs: debug.iter().filter(|n| keep(n)).map(|n| format!("test_rs_{n}")).collect(),
+            files: Vec::new(),
+            links: Vec::new(),
+        },
+    ]
+}
+
+/// **One boot for both measurements this suite takes rather than reads.**
+/// `tests/latencycase` is the only config that endows the real-time band, and
+/// the TLB bench is a boot parameter rather than a job — so arming this image
+/// with it costs the machine nothing and saves a whole minute. The bench runs
+/// on the BSP between the roster's release and the idle loop, before either job
+/// starts, so what it spends is boot time and not latency.
+const LATENCYCASE: &[metal::Arm] = &[metal::once(
+    "latencycase",
+    "tests/latencycase",
+    &["tlb-shootdown-bench"],
+    &["test_rs_cyclictest", "test_rs_sched_stress"],
+)];
+
+
+/// The C corpus on the T14: one boot, one job per case, each judged in the
+/// guest.
+///
+/// **Every case in the corpus `return 0`s unconditionally**, so a bare
+/// exit-code verdict would be vacuous — the comparison is the whole point. It
+/// happens in `ccheck`, which runs the case with its stdout on a pipe, compares
+/// the bytes with the committed `.expect` staged beside it, and exits with the
+/// verdict. What crosses is that exit code, as the kernel's own record.
+///
+/// **One binary, one symlink per case.** `ccheck` reads `argv[0]` to know which
+/// case it is, so the kernel records each run under the case's own name and a
+/// host reading the stick can say which of a hundred and nineteen failed. A
+/// job list of a hundred and nineteen `ccheck`s would leave one name and a
+/// hundred and nineteen records told apart only by position.
+///
+/// It is also a *stronger* comparison than the host's. `check_c_result` reads a
+/// console every process on the machine shares and has to take the other
+/// writers' lines out before comparing; this reads one pipe only the case can
+/// write to, so there is nothing to filter and no line that can be attributed
+/// to the wrong writer.
+///
+/// The C cases that do **not** go on the T14, and what each one's boot said.
+///
+/// Measured, like `METAL_SKIP`: the whole corpus was staged onto one
+/// metal-shaped image and booted, and this is what the guest comparator could
+/// not answer for.
+const C_METAL_SKIP: &[(&str, &str)] = &[(
+    "90_stdio_buffering",
+    "its expectation carries a `stderr line`, and the guest comparator reads one pipe. The \
+     host compares a console both streams land on in real time; two pipes here would carry \
+     the same bytes in an order nothing preserves, so this case stays where the console is",
+)];
+
+/// **One comparison rule, in two places that cannot share code.**
+///
+/// The host's is `tests/common/console.rs`'s `verdict` and the guest's is
+/// `tests/toyos-rust-tests/src/bin/ccheck.rs`'s; a guest binary cannot link the
+/// harness, so the rule is written twice and held together here by reading both
+/// sources. It is `trim_end` on both sides today, and the day one of them stops
+/// being that this reds and names the other.
+fn the_two_comparisons_use_one_rule() -> Result<(), String> {
+    let root = compile::repo_root();
+    let pair = [
+        ("tests/common/console.rs", "mine.trim_end() != expected.trim_end()"),
+        ("tests/toyos-rust-tests/src/bin/ccheck.rs", "fn trim_end(bytes: &[u8]) -> &[u8] {"),
+    ];
+    for (file, rule) in pair {
+        let at = root.join(file);
+        let source = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        if !source.contains(rule) {
+            return Err(format!(
+                "{} no longer spells {rule:?}. The C corpus is compared on the host and again \
+                 in the guest, and the two rules have to be the same one or a case passes on \
+                 one machine and reds on the other",
+                at.display()
+            ));
+        }
+    }
+    Ok(())
+}
+fn c_corpus_metal(
+    c_bins: &[(String, Vec<u8>)],
+    keep: impl Fn(&str) -> bool,
+) -> metal::SharedBoot {
+    let dir = compile::testcases_dir();
+    let mut jobs = Vec::new();
+    let mut files = Vec::new();
+    let mut links = Vec::new();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for (case, data) in c_bins {
+        if !keep(case) || C_METAL_SKIP.iter().any(|(name, _)| name == case) {
+            continue;
+        }
+        let expect = dir.join(format!("{case}.expect"));
+        // A case with no committed expectation is one nothing could judge, and
+        // shipping it would be a job that passes by comparing nothing.
+        let Ok(expected) = fs::read(&expect) else { continue };
+        // **The kernel truncates a process name**, so two cases whose names
+        // agree that far would land under one record. Refused rather than
+        // reported, because the second one's verdict would be read as the
+        // first's.
+        let recorded = bootlog::recorded_name(case);
+        if let Some(other) = seen.insert(recorded.clone(), case.clone()) {
+            panic!(
+                "the C cases {other:?} and {case:?} are both recorded as {recorded:?}, so one \
+                 boot's log cannot tell their verdicts apart"
+            );
+        }
+        files.push((format!("expect/{case}"), expected));
+        files.push((format!("bin/test_c_{case}"), data.clone()));
+        links.push((format!("bin/{case}"), format!("/system/bin/{CCHECK}")));
+        jobs.push(case.clone());
+    }
+    metal::SharedBoot {
+        boot: "ccorpus".to_string(),
+        config: "tests/testcases",
+        params: &[],
+        features: &[],
+        jobs,
+        files,
+        links,
+    }
+}
+
+/// The comparator's own staged name. It is a `RUST_SKIP` helper, so discovery
+/// never makes a job of it and [`shared_metal`] stages it as one.
+const CCHECK: &str = "test_rs_ccheck";
+/// The job `log-close` runs after, and so the anchor its evidence is read from.
+const LOG_CLOSE_MARKER: &str = "test_rs_null_sink_client_exits";
+
+/// `log-close`'s verdict, as it crosses on a machine with no console.
+///
+/// The builtin's own `survived=` line reaches nothing, and a builtin leaves the
+/// kernel no exit record of its own. What it does leave is a child's:
+/// `still_armed` spawns `/system/bin/echo` **only** after the poll outlived the
+/// close. So the positive half is that record arriving after the job before it —
+/// `echo` is a common enough name that a whole-log scan would be answered by
+/// somebody else's — and the negative half is the boot reaching its `reboot`
+/// job at all, which a builtin returning non-zero prevents.
+fn log_close_survived(back: &metal::Readback) -> Result<(), String> {
+    let previous = format!("{}{} pid=", bootlog::EXIT, bootlog::recorded_name(LOG_CLOSE_MARKER));
+    let child = format!("{}echo pid=", bootlog::EXIT);
+    back.kernel().must_say_after(&previous, &child).map_err(|why| {
+        format!(
+            "{why}\n`log-close` reaches `still_armed` — the one thing that spawns `echo` there — \
+             only if the poll outlived the close"
+        )
+    })?;
+    back.kernel().must_say(bootlog::REBOOTING).map(|_| ())
+}
 
 /// What makes an entry stale, which is the whole safety argument for having a
 /// declaration at all: **an entry must not be able to outlive its defect
@@ -3852,7 +4580,7 @@ fn run_screen_test(
             let options = BootOptions {
                 profile: qemu::Profile::Metal,
                 qmp: true,
-                boot_image: Some(image_path.clone()),
+                boot_image: Some(qemu::Staged::Written(image_path.clone())),
                 ready_marker: "Boot: complete",
                 ..Default::default()
             };
@@ -5145,7 +5873,7 @@ fn run_screen_test(
                 &config,
                 &[],
                 &[],
-                BootOptions { boot_image: Some(image_path.clone()), ..options },
+                BootOptions { boot_image: Some(qemu::Staged::Written(image_path.clone())), ..options },
             );
 
             // The compositor has the screen *before* anything panics. Asserted
@@ -5987,7 +6715,18 @@ fn metal_sim_scanout_wc(boot: &mut Boot) -> Result<(), String> {
     let _ = await_guest(&mut boot.qemu, &mut boot.console, "the three memory-type lines", |c| {
         [PAT, SCANOUT, MAPPED].iter().all(|w| c.contains(w))
     });
-    let console = &boot.console;
+    scanout_wc(&boot.console)
+}
+
+/// The scanout's memory type, out of the three records that decide it.
+///
+/// Text in, a verdict out: `PAT:`, `GOP: scanout memory type` and `shm: …
+/// mapped WriteCombining into pid` are all kernel records, so the T14's
+/// readback and a QEMU console are judged by this one predicate.
+fn scanout_wc(console: &str) -> Result<(), String> {
+    const PAT: &str = "PAT: IA32_PAT=";
+    const SCANOUT: &str = "GOP: scanout memory type ";
+    const MAPPED: &str = "mapped WriteCombining into pid ";
 
     let Some(pat) = console.lines().find(|l| l.contains(PAT)) else {
         return Err(format!("no boot programmed IA32_PAT:\n{console}"));
@@ -8976,6 +9715,7 @@ fn run_machine_test(
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
         "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
+        "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
         "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
@@ -8986,7 +9726,25 @@ fn run_machine_test(
         }
         "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
         "blackbox_panic_chain" => power::blackbox_panic_chain(test_config, c_bins, rust_bins),
+        "panic_outlives_the_deadline" => {
+            power::panic_outlives_the_deadline(test_config, c_bins, rust_bins)
+        }
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
+        "boot_deadline_ends_a_wedge" => {
+            power::boot_deadline_ends_a_wedge(test_config, c_bins, rust_bins)
+        }
+        "hard_lockup_ends_a_deaf_cpu" => {
+            power::hard_lockup_ends_a_deaf_cpu(test_config, c_bins, rust_bins)
+        }
+        "usb_reset_hands_devices_back" => {
+            power::usb_reset_hands_devices_back(test_config, c_bins, rust_bins)
+        }
+        "blackbox_foreign_record" => {
+            power::blackbox_foreign_record(test_config, c_bins, rust_bins)
+        }
+        "hang_bounded_by_the_stick" => {
+            power::hang_bounded_by_the_stick(test_config, c_bins, rust_bins)
+        }
         "blackbox_unclaimed_page" => {
             power::blackbox_unclaimed_page(test_config, c_bins, rust_bins)
         }
@@ -9030,23 +9788,13 @@ fn run_machine_test(
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             // A liveness ceiling, not a pace: a loaded shard once took past a
             // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
+            // The T14's readback needs no drain at all — the whole boot's records
+            // are on the stick — so the wait is here and the predicate is shared.
             let log = qemu.boot_log().to_string()
                 + &qemu.drain_until(Duration::from_secs(10), |l| {
                     l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
                 });
-            if log.contains("sysret-ss: NOT reloaded") {
-                return Err(format!(
-                    "the switch did not reload SS — a sysretq here would hand userland an \
-                     unusable one:\n{log}"
-                ));
-            }
-            if !log.contains("sysret-ss: reloaded") {
-                return Err(format!(
-                    "the SS-reload probe never reported — iod may not have run it:\n{log}"
-                ));
-            }
-            eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
-            Ok(())
+            sysret_ss(&log)
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
@@ -10815,32 +11563,7 @@ fn run_machine_test(
                 rust_bins,
                 BootOptions::default(),
             );
-            let boot = serial::Serial::boot(&qemu);
-            boot.must_be_clean()?;
-            let line = boot.must_say("kthread: klogd")?;
-            if !line.contains("halts the machine") {
-                return Err(format!("klogd is hosted but claims the wrong panic row: {line:?}"));
-            }
-            eprintln!("  [klogd] {}", line.trim());
-
-            // **The other two threads, and the opposite row.** `usbd` owns
-            // the xHCI port machine and `iod` the write-back queue, so a
-            // stuck USB enumeration cannot stop the log. Their panics are
-            // *recoverable* and `klogd`'s deliberately is not — a killed
-            // drainer is the one loss nothing left alive can report — and
-            // this is the one boot in the suite where all three rows are on
-            // the wire together.
-            for name in ["usbd", "iod"] {
-                let line = boot.must_say(&format!("kthread: {name}"))?;
-                if !line.contains("kills the thread") {
-                    return Err(format!(
-                        "{name} is hosted but claims the wrong panic row: {line:?}"
-                    ));
-                }
-                eprintln!("  [kthread] {}", line.trim());
-            }
-
-            Ok(())
+            klogd_hosted(&serial::Serial::boot(&qemu))
         }
         "klogd_panic_halts" => {
             // **A kernel thread's panic is not recoverable by accident.**
@@ -11574,7 +12297,6 @@ fn run_machine_test(
             Ok(())
         }
         "irq_census_conservation" => {
-            use common::irqcensus::{Census, DEVICE_SOURCES};
             // Four CPUs, because both halves of this test are vacuous on one.
             // The census has to be able to *say* an AP took an interrupt before
             // "every device interrupt is cpu0's" means anything.
@@ -11588,259 +12310,20 @@ fn run_machine_test(
             // is what gives the issuer-side check below a non-zero subject.
             let first = qemu.run_test("echo one", Duration::from_secs(30));
             let second = qemu.run_test("test_rs_std_mmap", Duration::from_secs(30));
-            let capture = format!(
+            irq_census(&format!(
                 "{boot}\n{}\n{}\n{}\n{}",
                 first.before, first.serial, second.before, second.serial
-            );
-
-            // Every line, in order, so a later census can be compared with an
-            // earlier one on the same CPU.
-            let mut lines: Vec<Census> = Vec::new();
-            for line in capture.lines() {
-                match Census::parse(line) {
-                    None => continue,
-                    Some(Ok(census)) => lines.push(census),
-                    Some(Err(why)) => return Err(format!("{why}\nline: {line}")),
-                }
-            }
-            if lines.is_empty() {
-                return Err(format!(
-                    "no `irq: cpu` census in the capture — a process exited and the kernel \
-                     said nothing:\n{capture}"
-                ));
-            }
-
-            // 1. The law. `total` is counted by its own increment beside each
-            //    source's, never derived from them, so this is a real
-            //    conservation statement: a source whose increment went missing
-            //    leaves the total ahead of the sum.
-            for census in &lines {
-                if census.total != census.sum_of_sources() {
-                    return Err(format!(
-                        "cpu{} counted {} interrupt(s) and attributed {} to sources — a source \
-                         is not being counted: {census:?}",
-                        census.cpu,
-                        census.total,
-                        census.sum_of_sources(),
-                    ));
-                }
-            }
-
-            // 2. Monotonic: a counter that went backwards is a torn read or a
-            //    word two CPUs are writing, which is what the no-`lock` argument
-            //    in `kernel/src/irq_census.rs` rests on being impossible.
-            let mut newest: std::collections::BTreeMap<u32, Census> = std::collections::BTreeMap::new();
-            for census in &lines {
-                if let Some(prev) = newest.get(&census.cpu) {
-                    if census.total < prev.total {
-                        return Err(format!(
-                            "cpu{}'s census went backwards, {} then {}: {prev:?} then {census:?}",
-                            census.cpu, prev.total, census.total,
-                        ));
-                    }
-                }
-                newest.insert(census.cpu, census.clone());
-            }
-
-            // 3. The machine is real: the boot CPU took interrupts, and so did
-            //    at least one AP — otherwise (4) says nothing.
-            let cpu0 = newest
-                .get(&0)
-                .ok_or_else(|| format!("no cpu0 in the census: {newest:?}"))?;
-            if cpu0.total == 0 {
-                return Err(format!("cpu0 took no interrupts at all: {cpu0:?}"));
-            }
-            let aps: Vec<&Census> = newest.values().filter(|c| c.cpu != 0).collect();
-            if aps.len() < 3 {
-                return Err(format!(
-                    "a 4-CPU machine reported {} AP(s); the census cannot see them all: {newest:?}",
-                    aps.len()
-                ));
-            }
-            if !aps.iter().any(|c| c.total > 0) {
-                return Err(format!("no AP took a single interrupt: {newest:?}"));
-            }
-
-            // 4. **The present-state fact this whole track is about.** Every
-            //    message-signalled interrupt is addressed to physical
-            //    destination 0 (`drivers::pci`'s `MSG_ADDR`) and the one I/O
-            //    APIC pin goes to the BSP, so no AP may have a device count at
-            //    all. This is what reds the day a placement policy lands, and
-            //    that red is the improvement.
-            let mut delivered = 0;
-            for name in DEVICE_SOURCES {
-                delivered += cpu0.source(name);
-                for ap in &aps {
-                    if ap.source(name) != 0 {
-                        return Err(format!(
-                            "cpu{} took {} `{name}` interrupt(s); every device vector is \
-                             addressed to physical destination 0, so this machine's delivery \
-                             policy has changed: {ap:?}",
-                            ap.cpu,
-                            ap.source(name),
-                        ));
-                    }
-                }
-            }
-            if delivered == 0 {
-                return Err(format!(
-                    "not one device interrupt on the whole machine, so \"they are all on \
-                     cpu0\" is vacuous: {newest:?}"
-                ));
-            }
-
-            let share = cpu0.total as f64
-                / newest.values().map(|c| c.total).sum::<u64>() as f64
-                * 100.0;
-            eprintln!(
-                "  [irq] {} cpu(s), {} interrupt(s), {delivered} of them device deliveries — \
-                 all on cpu0, which took {share:.1}% of everything",
-                newest.len(),
-                newest.values().map(|c| c.total).sum::<u64>(),
-            );
-
-            // 5. The issuer side: every `tlb` delivery a CPU's census carries
-            //    must be within the issues the `tlb:` line counted — an excess
-            //    is a path shooting down uncounted. The lower bound is not
-            //    asserted: an issued IPI can be pending on an IF-clear target.
-            let mut issued: Vec<u64> = Vec::new();
-            for line in capture.lines() {
-                let Some(rest) = line.split("tlb: shootdowns=").nth(1) else { continue };
-                let n: u64 = rest
-                    .split_whitespace()
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .ok_or_else(|| format!("unreadable issuer census: {line}"))?;
-                issued.push(n);
-                eprintln!("  [tlb] {}", line.trim());
-            }
-            let Some(&last_issued) = issued.last() else {
-                return Err(format!(
-                    "no `tlb: shootdowns=` census in the capture — two process exits on a \
-                     4-CPU guest and the issuer side said nothing:\n{capture}"
-                ));
-            };
-            if issued.windows(2).any(|w| w[1] < w[0]) {
-                return Err(format!("the issuer census went backwards: {issued:?}"));
-            }
-            for census in newest.values() {
-                if census.source("tlb") > last_issued {
-                    return Err(format!(
-                        "cpu{} took {} tlb IPI(s) against {last_issued} counted issue(s) — \
-                         some path shoots down without being counted: {census:?}",
-                        census.cpu,
-                        census.source("tlb"),
-                    ));
-                }
-            }
-            eprintln!(
-                "  [tlb] {last_issued} shootdown(s) issued, deliveries per CPU {:?} — every \
-                 delivery accounted for",
-                newest.values().map(|c| c.source("tlb")).collect::<Vec<_>>(),
-            );
-            Ok(())
+            ))
         }
         "ioapic_topology" => {
             // Everything the I/O APIC driver says happens in Phase 2, long
             // before the virtio-console exists, so the 16550 file is where a
-            // host reads it. On the T14 the same lines land on the screen at
-            // the next boot checkpoint; this is the QEMU-side equivalent.
+            // host reads it. On the T14 the same lines are kernel records and
+            // reach the stick, which is what lets one predicate judge both.
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
             // The ready marker only proves the guest booted; the lines under
             // test were written before that, so nothing else to wait for.
-            let log = qemu.boot_log().to_string();
-            let units: Vec<&str> = log
-                .lines()
-                .filter_map(|l| l.split("ioapic: id=").nth(1))
-                .collect();
-            if units.is_empty() {
-                return Err(format!("no `ioapic: id=` line in the boot log:\n{log}"));
-            }
-            // A window the machine does not decode answers 0xFFFFFFFF to
-            // everything, which is a *valid-looking* unit: 256 entries, all
-            // read back masked, `route` succeeds into nothing. The driver
-            // drops such a unit, so its absence from the log is the assertion.
-            if let Some(ignored) = log.lines().find(|l| l.contains("ioapic: id=") && l.contains("IGNORED")) {
-                return Err(format!("an I/O APIC failed its plausibility gate: {ignored}"));
-            }
-            let mut covered: Vec<(u32, u32)> = Vec::new();
-            for unit in &units {
-                // `<id> at <addr> ver=<v> gsi <lo>..<hi> masked <n>/<total>`
-                let ver = unit
-                    .split_once(" ver=0x")
-                    .and_then(|(_, rest)| rest.split_whitespace().next())
-                    .and_then(|v| u32::from_str_radix(v, 16).ok())
-                    .ok_or_else(|| format!("no version in {unit:?}"))?;
-                // Both halves of the entry count come from this register, so a
-                // version that is not a chip's makes the count meaningless.
-                if ver == 0x00 || ver == 0xFF {
-                    return Err(format!("I/O APIC version {ver:#04x} is a floating bus: {unit:?}"));
-                }
-                let (range, masked) = unit
-                    .split_once(" gsi ")
-                    .and_then(|(_, rest)| rest.split_once(" masked "))
-                    .ok_or_else(|| format!("unreadable I/O APIC line: {unit:?}"))?;
-                let (lo, hi) = range
-                    .split_once("..")
-                    .ok_or_else(|| format!("no GSI range in {unit:?}"))?;
-                let lo: u32 = lo.trim().parse().map_err(|_| format!("bad GSI base in {unit:?}"))?;
-                let hi: u32 = hi.trim().parse().map_err(|_| format!("bad GSI top in {unit:?}"))?;
-                let (n, total) = masked
-                    .trim()
-                    .split_once('/')
-                    .ok_or_else(|| format!("no mask count in {unit:?}"))?;
-                let n: u32 = n.parse().map_err(|_| format!("bad mask count in {unit:?}"))?;
-                let total: u32 = total
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .parse()
-                    .map_err(|_| format!("bad entry count in {unit:?}"))?;
-                // `hi` is printed as `lo + total - 1`, so comparing them is a
-                // tautology. What is checkable is the bound the driver refuses
-                // past — a floating bus reports 256 here.
-                if hi < lo || !(1..=240).contains(&total) {
-                    return Err(format!(
-                        "I/O APIC claims gsi {lo}..{hi}, {total} entries — not a redirection table: {unit:?}"
-                    ));
-                }
-                covered.push((lo, hi));
-                // The whole reason this driver runs before the first sti: an
-                // entry firmware left armed at a vector with no gate is a #GP
-                // that kills the boot.
-                if n != total {
-                    return Err(format!(
-                        "{n} of {total} redirection entries masked — {} left armed: {unit:?}",
-                        total - n
-                    ));
-                }
-            }
-            // Independent of any number the log derived from another: the two
-            // pins the i8042 needs have to fall inside some unit's range, or
-            // `route` returns `NoUnit` and there is no PS/2 input at all.
-            for gsi in [1u32, 12] {
-                if !covered.iter().any(|&(lo, hi)| (lo..=hi).contains(&gsi)) {
-                    return Err(format!(
-                        "no I/O APIC covers GSI {gsi}; units cover {covered:?}"
-                    ));
-                }
-            }
-            // IRQ 1 and IRQ 12 must be uncovered by the override table, or
-            // the i8042 driver's identity assumption is wrong on this machine.
-            let Some(isos) = log
-                .lines()
-                .find_map(|l| l.split("ioapic: iso bus:irq->gsi [").nth(1))
-                .and_then(|r| r.split(']').next())
-            else {
-                return Err(format!("no `ioapic: iso` line in the boot log:\n{log}"));
-            };
-            // q35 always overrides at least IRQ 0, so an empty table means the
-            // parse found nothing rather than that the machine has nothing.
-            if isos.is_empty() {
-                return Err(format!("the override table is empty; q35 always has IRQ 0:\n{log}"));
-            }
-            eprintln!("  [ioapic] {} unit(s), overrides {isos}", units.len());
-            Ok(())
+            ioapic_topology(qemu.boot_log())
         }
         "control_regs" => {
             const CPUS: u32 = 4;
@@ -11853,6 +12336,48 @@ fn run_machine_test(
             control_regs(qemu.boot_log(), CPUS)
         }
         "control_regs_negative" => control_regs_negative(test_config, c_bins, rust_bins),
+        "smp_roster_and_tsc_trail" => {
+            // Eight, which is the T14's own count and this suite's ceiling.
+            const CPUS: u32 = 8;
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { smp: CPUS, ..Default::default() },
+            );
+            smp_roster_and_tsc_trail(qemu.boot_log(), CPUS)
+        }
+        "pmm_accounting" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            pmm_accounting(qemu.boot_log())
+        }
+        "acpi_table_inventory" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            acpi_table_inventory(qemu.boot_log())
+        }
+        "timer_calibration" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            timer_calibration(qemu.boot_log())
+        }
+        "pci_inventory" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            pci_inventory(qemu.boot_log())
+        }
+        "tlb_shootdown_cost" => {
+            const CPUS: u32 = 8;
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    smp: CPUS,
+                    kernel_params: &["tlb-shootdown-bench"],
+                    ..Default::default()
+                },
+            );
+            tlb_shootdown_cost(qemu.boot_log(), CPUS).map(|_| ())
+        }
+        "latency_wake" => latency_wake(rust_bins),
         "smp_failed_ap_leaves_no_hole" => {
             smp_failed_ap_leaves_no_hole(test_config, c_bins, rust_bins)
         }
@@ -11869,11 +12394,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log();
-            if !log.contains("input-merge: ok") {
-                return Err(format!("the input core check never reported:\n{log}"));
-            }
-            Ok(())
+            input_merge_ok(qemu.boot_log())
         }
         "i8042_health_cadence" => {
             // The T14 lost keyboard, TrackPoint and touchpad — all three behind
@@ -12132,111 +12653,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-
-            /// One `key=value` off a gate line, as a number.
-            fn number(line: &str, key: &str) -> Result<u64, String> {
-                line.split_whitespace()
-                    .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
-                    .ok_or_else(|| format!("no numeric {key} in {line:?}"))
-            }
-            /// One `key=value` off a gate line, as a flag.
-            fn flag(line: &str, key: &str) -> Result<bool, String> {
-                line.split_whitespace()
-                    .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
-                    .ok_or_else(|| format!("no boolean {key} in {line:?}"))
-            }
-
-            // Both homes. A task's word is on its `TaskHandle` and a context
-            // with no task uses one slot per CPU, and the two are reached by
-            // different arms of `operation_slot` — so a gate that ran in one
-            // place would leave the other arm unexecuted by any test at all.
-            for site in ["boot", "iod"] {
-                let say = |what: &str| -> Result<String, String> {
-                    let needle = format!("sched-op: {site} {what}");
-                    log.lines()
-                        .find(|line| line.contains(&needle))
-                        .map(str::to_string)
-                        .ok_or_else(|| format!("no {needle:?} line on this boot:\n{log}"))
-                };
-
-                let outside = say("outside")?;
-                if flag(&outside, "established")? {
-                    return Err(format!(
-                        "{site}: an operation was already established before the gate began, \
-                         so nothing below is about the nesting it made: {outside}"
-                    ));
-                }
-
-                // Every level: what it asked for, and what the depth below it
-                // recovered. The bound is the running minimum — an inner
-                // establishment takes the earlier of its own deadline and its
-                // parent's, and only that.
-                let mut asked = Vec::new();
-                let mut narrowest = u64::MAX;
-                for level in 1..=3 {
-                    let line = say(&format!("begin level={level}"))?;
-                    let want = number(&line, "asked")?;
-                    let saw = number(&line, "observed")?;
-                    narrowest = narrowest.min(want);
-                    if saw != narrowest {
-                        return Err(format!(
-                            "{site}: level {level} asked for {want} ns and the depth inside it \
-                             recovered {saw} ns, against the {narrowest} ns that is the \
-                             earliest of it and every level above it. An establishment that \
-                             observes more than its parent allowed is a caller buying itself \
-                             device time by nesting: {line}"
-                        ));
-                    }
-                    asked.push(want);
-                }
-                // The widening attempt has to have been a real one, or the line
-                // above is satisfied by a scenario in which nothing was asked.
-                if asked[2] <= asked[1] {
-                    return Err(format!(
-                        "{site}: level 3 asked for {} ns inside a level 2 of {} ns, so the \
-                         gate never attempted to widen and the narrowing it reports is vacuous",
-                        asked[2], asked[1],
-                    ));
-                }
-
-                // And the restore: each drop puts back what that establishment
-                // displaced rather than clearing the slot, so the operation
-                // above it survives the one below ending.
-                for (level, restored) in [(3, asked[1].min(asked[0])), (2, asked[0])] {
-                    let line = say(&format!("end level={level}"))?;
-                    let saw = number(&line, "observed")?;
-                    if saw != restored {
-                        return Err(format!(
-                            "{site}: with level {level} dropped the depth recovered {saw} ns \
-                             and the frame above it established {restored} ns — a guard that \
-                             restores something else has ended an operation its caller is \
-                             still inside: {line}"
-                        ));
-                    }
-                    if !flag(&line, "established")? {
-                        return Err(format!(
-                            "{site}: dropping level {level} left no operation established at \
-                             all, and its caller is still inside one: {line}"
-                        ));
-                    }
-                }
-
-                let last = say("end level=1")?;
-                if flag(&last, "established")? {
-                    return Err(format!(
-                        "{site}: the outermost guard dropped and an operation is still \
-                         established — the slot was restored rather than cleared, so the next \
-                         depth to ask would be answered a deadline nobody set: {last}"
-                    ));
-                }
-                eprintln!(
-                    "  [operation] {site}: {} ns narrowed to {} ns, a {} ns request changed \
-                     nothing, and both drops restored",
-                    asked[0], asked[1], asked[2],
-                );
-            }
-            Ok(())
+            operation_nesting_log(qemu.boot_log())
         }
         "leak_rollback_selftest" => {
             // Two "acquire before a fallible step" controls run in the kernel at
@@ -12251,17 +12668,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            for probe in ["leak-selftest: device-mint", "leak-selftest: fat-reopen"] {
-                let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-                    return Err(format!("{probe} never ran:\n{log}"));
-                };
-                if !verdict.contains("PASS") {
-                    return Err(format!("{}\n{log}", verdict.trim()));
-                }
-                eprintln!("  [leak] {}", verdict.trim());
-            }
-            Ok(())
+            leak_rollback(qemu.boot_log())
         }
         "process_reopen_selftest" => {
             // The kernel reopens init by pid after the only handle to it has gone; on
@@ -12276,15 +12683,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            let Some(verdict) = log.lines().find(|l| l.contains("process-reopen:")) else {
-                return Err(format!("the reopen control never ran:\n{log}"));
-            };
-            if !verdict.contains("PASS") {
-                return Err(format!("{}\n{log}", verdict.trim()));
-            }
-            eprintln!("  [process] {}", verdict.trim());
-            Ok(())
+            process_reopen(qemu.boot_log())
         }
         "driver_wait_refused" => {
             // The actuators blind CSTS.RDY and DEVICE_STATUS, staging a
@@ -12333,21 +12732,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            for probe in [
-                "revoke-selftest: /tmp/revoke_probe",
-                "revoke-selftest: /home/revoke_probe",
-                "pc-unbind-selftest:",
-            ] {
-                let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-                    return Err(format!("{probe} never ran:\n{log}"));
-                };
-                if !verdict.contains("PASS") {
-                    return Err(format!("{}\n{log}", verdict.trim()));
-                }
-                eprintln!("  [read-fault] {}", verdict.trim());
-            }
-            Ok(())
+            read_fault_probes(qemu.boot_log())
         }
         "lapic_spurious_vector" => {
             // `apic::enable_x2apic` writes 0xFF into the SVR, a vector the IDT
@@ -12365,35 +12750,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            for kind in ["spurious", "unclaimed"] {
-                if let Some(bad) =
-                    log.lines().find(|l| l.contains(&format!("{kind} selftest FAILED")))
-                {
-                    return Err(format!("{bad}\n{log}"));
-                }
-                let Some(verdict) =
-                    log.lines().find(|l| l.contains(&format!("{kind} selftest")))
-                else {
-                    return Err(format!("the {kind} vector was never raised:\n{log}"));
-                };
-                // `3/3`, not the absence of a FAILED line: a self-test that never
-                // ran satisfies that absence just as well.
-                if !verdict.contains("3/3") {
-                    return Err(format!("the self-test did not reach its verdict: {verdict}"));
-                }
-                // The two numbers are the interrupt census's own column — the
-                // handler may not log, so that column is the only report a
-                // delivery has — and both are asserted: nothing raised this
-                // vector before the staged one, and exactly one arrived.
-                if !verdict.contains("(0 -> 1)") {
-                    return Err(format!(
-                        "the census did not count exactly the staged delivery: {verdict}"
-                    ));
-                }
-                eprintln!("  [lapic] {}", verdict.trim());
-            }
-            Ok(())
+            lapic_vectors(qemu.boot_log())
         }
         "virtio_used_ring" => {
             // Both fields of a virtqueue used-ring element are written by the
@@ -12454,28 +12811,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            if let Some(bad) = log.lines().find(|l| l.contains("pci cap selftest FAILED")) {
-                return Err(format!("{bad}\n{log}"));
-            }
-            let Some(verdict) = log.lines().find(|l| l.contains("pci cap selftest")) else {
-                return Err(format!("the walk's self-test never ran:\n{log}"));
-            };
-            // `14/14`, not the absence of a FAILED line, which zero cases satisfy too.
-            if !verdict.contains("14/14") {
-                return Err(format!("not every crafted capability layout was answered: {verdict}"));
-            }
-            // Once for the machine: it reads no real device.
-            let ran = log.matches("pci cap selftest").count();
-            if ran != 1 {
-                return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
-            }
-            // And the ordinary walk beside it: QEMU's real functions were enumerated.
-            if !log.contains("PCI: Enumeration complete") {
-                return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
-            }
-            eprintln!("  [pci] {}", verdict.trim());
-            Ok(())
+            pci_cap_selftest(qemu.boot_log())
         }
         "shipped_config_boots" => {
             // The config the project ships, booted rather than read: `cargo
@@ -12606,31 +12942,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            if let Some(bad) = log.lines().find(|l| l.contains("descriptor selftest FAILED")) {
-                return Err(format!("{bad}\n{log}"));
-            }
-            let Some(verdict) = log.lines().find(|l| l.contains("descriptor selftest")) else {
-                return Err(format!("the parser's self-test never ran:\n{log}"));
-            };
-            // `9/9`, not "no failures": a self-test that ran zero cases would
-            // satisfy the absence of a FAILED line.
-            if !verdict.contains("9/9") {
-                return Err(format!("not every descriptor was parsed as required: {verdict}"));
-            }
-            // Once for the machine. It reads no register, so a per-controller
-            // run would be two verdicts about the same nine byte arrays.
-            let ran = log.matches("descriptor selftest").count();
-            if ran != 1 {
-                return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
-            }
-            // And the ordinary boot beside it: the same parser bound the boot
-            // stick off a descriptor a real controller delivered.
-            if !log.contains("usb-storage: 1 device(s)") {
-                return Err(format!("the boot stick did not bind on this boot\n{log}"));
-            }
-            eprintln!("  [xhci] {}", verdict.trim());
-            Ok(())
+            xhci_descriptors(qemu.boot_log())
         }
         "xhci_xecp_walk" => {
             // The xHCI extended-capability list is firmware's, and firmware is
@@ -12652,43 +12964,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            if let Some(bad) = log.lines().find(|l| l.contains("xecp selftest FAILED")) {
-                return Err(format!("{bad}\n{log}"));
-            }
-            let Some(verdict) = log.lines().find(|l| l.contains("xecp selftest")) else {
-                return Err(format!("the walk's self-test never ran:\n{log}"));
-            };
-            // `8/8`, not "no failures": a self-test that ran zero cases would
-            // satisfy the absence of a FAILED line.
-            if !verdict.contains("8/8") {
-                return Err(format!("not every malformed list was refused: {verdict}"));
-            }
-            // And the walk on the controller QEMU does provide.
-            let Some(real) = log
-                .lines()
-                .find(|l| l.contains("USB Legacy Support") || l.contains("ownership"))
-            else {
-                return Err(format!("no line about the handoff at all:\n{log}"));
-            };
-            // The handoff must precede the reset — a reset that already
-            // happened is what the whole capability exists to avoid.
-            let reset = log
-                .find("xHCI: controller reset")
-                .ok_or_else(|| format!("the controller was never reset:\n{log}"))?;
-            let handoff = log.find(real).expect("just found");
-            if handoff > reset {
-                return Err(format!(
-                    "the ownership handoff runs after HCRST, which is no handoff at all:\n{log}"
-                ));
-            }
-            // A controller that still enumerates its bus afterwards.
-            if !log.contains("xHCI: controller started") {
-                return Err(format!("the controller did not come up:\n{log}"));
-            }
-            eprintln!("  [xhci] {}", verdict.trim());
-            eprintln!("  [xhci] {}", real.trim());
-            Ok(())
+            xhci_xecp(qemu.boot_log())
         }
         "i8042_budget_expiry" => {
             // The arithmetic defect this feature stages: stage budgets summing
@@ -14053,6 +14329,625 @@ fn parse_xhci_binds(log: &str) -> Vec<XhciBind> {
 /// Both halves, because the kernel writes both registers whole: every bit named
 /// below must hold its named value, **and a bit named nowhere below may not be
 /// set at all**. Silence about a bit is a hole rather than a permission.
+/// The interrupt census adds up, is monotonic, and every device delivery is
+/// still cpu0's.
+///
+/// Text in, a verdict out. Every line it reads is a kernel record, so the
+/// T14's readback and a QEMU capture are judged by this one predicate — and
+/// on the T14 the *stimulus* is the boot's own job list rather than two
+/// commands typed at a console.
+fn irq_census(capture: &str) -> Result<(), String> {
+    use common::irqcensus::{Census, DEVICE_SOURCES};
+    // Every line, in order, so a later census can be compared with an
+    // earlier one on the same CPU.
+    let mut lines: Vec<Census> = Vec::new();
+    for line in capture.lines() {
+        match Census::parse(line) {
+            None => continue,
+            Some(Ok(census)) => lines.push(census),
+            Some(Err(why)) => return Err(format!("{why}\nline: {line}")),
+        }
+    }
+    if lines.is_empty() {
+        return Err(format!(
+            "no `irq: cpu` census in the capture — a process exited and the kernel \
+             said nothing:\n{capture}"
+        ));
+    }
+
+    // 1. The law. `total` is counted by its own increment beside each
+    //    source's, never derived from them, so this is a real
+    //    conservation statement: a source whose increment went missing
+    //    leaves the total ahead of the sum.
+    for census in &lines {
+        if census.total != census.sum_of_sources() {
+            return Err(format!(
+                "cpu{} counted {} interrupt(s) and attributed {} to sources — a source \
+                 is not being counted: {census:?}",
+                census.cpu,
+                census.total,
+                census.sum_of_sources(),
+            ));
+        }
+    }
+
+    // 2. Monotonic: a counter that went backwards is a torn read or a
+    //    word two CPUs are writing, which is what the no-`lock` argument
+    //    in `kernel/src/irq_census.rs` rests on being impossible.
+    let mut newest: std::collections::BTreeMap<u32, Census> = std::collections::BTreeMap::new();
+    for census in &lines {
+        if let Some(prev) = newest.get(&census.cpu) {
+            if census.total < prev.total {
+                return Err(format!(
+                    "cpu{}'s census went backwards, {} then {}: {prev:?} then {census:?}",
+                    census.cpu, prev.total, census.total,
+                ));
+            }
+        }
+        newest.insert(census.cpu, census.clone());
+    }
+
+    // 3. The machine is real: the boot CPU took interrupts, and so did
+    //    at least one AP — otherwise (4) says nothing.
+    let cpu0 = newest
+        .get(&0)
+        .ok_or_else(|| format!("no cpu0 in the census: {newest:?}"))?;
+    if cpu0.total == 0 {
+        return Err(format!("cpu0 took no interrupts at all: {cpu0:?}"));
+    }
+    let aps: Vec<&Census> = newest.values().filter(|c| c.cpu != 0).collect();
+    if aps.len() < 3 {
+        return Err(format!(
+            "a 4-CPU machine reported {} AP(s); the census cannot see them all: {newest:?}",
+            aps.len()
+        ));
+    }
+    if !aps.iter().any(|c| c.total > 0) {
+        return Err(format!("no AP took a single interrupt: {newest:?}"));
+    }
+
+    // 4. **The present-state fact this whole track is about.** Every
+    //    message-signalled interrupt is addressed to physical
+    //    destination 0 (`drivers::pci`'s `MSG_ADDR`) and the one I/O
+    //    APIC pin goes to the BSP, so no AP may have a device count at
+    //    all. This is what reds the day a placement policy lands, and
+    //    that red is the improvement.
+    let mut delivered = 0;
+    for name in DEVICE_SOURCES {
+        delivered += cpu0.source(name);
+        for ap in &aps {
+            if ap.source(name) != 0 {
+                return Err(format!(
+                    "cpu{} took {} `{name}` interrupt(s); every device vector is \
+                     addressed to physical destination 0, so this machine's delivery \
+                     policy has changed: {ap:?}",
+                    ap.cpu,
+                    ap.source(name),
+                ));
+            }
+        }
+    }
+    if delivered == 0 {
+        return Err(format!(
+            "not one device interrupt on the whole machine, so \"they are all on \
+             cpu0\" is vacuous: {newest:?}"
+        ));
+    }
+
+    let share = cpu0.total as f64
+        / newest.values().map(|c| c.total).sum::<u64>() as f64
+        * 100.0;
+    eprintln!(
+        "  [irq] {} cpu(s), {} interrupt(s), {delivered} of them device deliveries — \
+         all on cpu0, which took {share:.1}% of everything",
+        newest.len(),
+        newest.values().map(|c| c.total).sum::<u64>(),
+    );
+
+    // 5. The issuer side: every `tlb` delivery a CPU's census carries
+    //    must be within the issues the `tlb:` line counted — an excess
+    //    is a path shooting down uncounted. The lower bound is not
+    //    asserted: an issued IPI can be pending on an IF-clear target.
+    let mut issued: Vec<u64> = Vec::new();
+    for line in capture.lines() {
+        let Some(rest) = line.split("tlb: shootdowns=").nth(1) else { continue };
+        let n: u64 = rest
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("unreadable issuer census: {line}"))?;
+        issued.push(n);
+        eprintln!("  [tlb] {}", line.trim());
+    }
+    let Some(&last_issued) = issued.last() else {
+        return Err(format!(
+            "no `tlb: shootdowns=` census in the capture — two process exits on a \
+             4-CPU guest and the issuer side said nothing:\n{capture}"
+        ));
+    };
+    if issued.windows(2).any(|w| w[1] < w[0]) {
+        return Err(format!("the issuer census went backwards: {issued:?}"));
+    }
+    for census in newest.values() {
+        if census.source("tlb") > last_issued {
+            return Err(format!(
+                "cpu{} took {} tlb IPI(s) against {last_issued} counted issue(s) — \
+                 some path shoots down without being counted: {census:?}",
+                census.cpu,
+                census.source("tlb"),
+            ));
+        }
+    }
+    eprintln!(
+        "  [tlb] {last_issued} shootdown(s) issued, deliveries per CPU {:?} — every \
+         delivery accounted for",
+        newest.values().map(|c| c.source("tlb")).collect::<Vec<_>>(),
+    );
+    Ok(())
+}
+
+/// Fourteen crafted PCI capability layouts, answered at init.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn pci_cap_selftest(log: &str) -> Result<(), String> {
+        if let Some(bad) = log.lines().find(|l| l.contains("pci cap selftest FAILED")) {
+            return Err(format!("{bad}\n{log}"));
+        }
+        let Some(verdict) = log.lines().find(|l| l.contains("pci cap selftest")) else {
+            return Err(format!("the walk's self-test never ran:\n{log}"));
+        };
+        // `14/14`, not the absence of a FAILED line, which zero cases satisfy too.
+        if !verdict.contains("14/14") {
+            return Err(format!("not every crafted capability layout was answered: {verdict}"));
+        }
+        // Once for the machine: it reads no real device.
+        let ran = log.matches("pci cap selftest").count();
+        if ran != 1 {
+            return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
+        }
+        // And the ordinary walk beside it: QEMU's real functions were enumerated.
+        if !log.contains("PCI: Enumeration complete") {
+            return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
+        }
+        eprintln!("  [pci] {}", verdict.trim());
+        Ok(())
+}
+
+/// The kernel reopens init by pid after the last handle to it has gone.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn process_reopen(log: &str) -> Result<(), String> {
+        let Some(verdict) = log.lines().find(|l| l.contains("process-reopen:")) else {
+            return Err(format!("the reopen control never ran:\n{log}"));
+        };
+        if !verdict.contains("PASS") {
+            return Err(format!("{}\n{log}", verdict.trim()));
+        }
+        eprintln!("  [process] {}", verdict.trim());
+        Ok(())
+}
+
+/// A backing read after deletion is refused on both writable mounts, and a page-cache slot whose fill the device refused is unbound.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn read_fault_probes(log: &str) -> Result<(), String> {
+        for probe in [
+            "revoke-selftest: /tmp/revoke_probe",
+            "revoke-selftest: /home/revoke_probe",
+            "pc-unbind-selftest:",
+        ] {
+            let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+                return Err(format!("{probe} never ran:\n{log}"));
+            };
+            if !verdict.contains("PASS") {
+                return Err(format!("{}\n{log}", verdict.trim()));
+            }
+            eprintln!("  [read-fault] {}", verdict.trim());
+        }
+        Ok(())
+}
+
+/// Two "acquire before a fallible step" controls: each count returned to its baseline after a refused call.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn leak_rollback(log: &str) -> Result<(), String> {
+        for probe in ["leak-selftest: device-mint", "leak-selftest: fat-reopen"] {
+            let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+                return Err(format!("{probe} never ran:\n{log}"));
+            };
+            if !verdict.contains("PASS") {
+                return Err(format!("{}\n{log}", verdict.trim()));
+            }
+            eprintln!("  [leak] {}", verdict.trim());
+        }
+        Ok(())
+}
+
+/// The spurious vector and an unclaimed one are both gated rather than escalated to #DF.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn lapic_vectors(log: &str) -> Result<(), String> {
+        for kind in ["spurious", "unclaimed"] {
+            if let Some(bad) =
+                log.lines().find(|l| l.contains(&format!("{kind} selftest FAILED")))
+            {
+                return Err(format!("{bad}\n{log}"));
+            }
+            let Some(verdict) =
+                log.lines().find(|l| l.contains(&format!("{kind} selftest")))
+            else {
+                return Err(format!("the {kind} vector was never raised:\n{log}"));
+            };
+            // `3/3`, not the absence of a FAILED line: a self-test that never
+            // ran satisfies that absence just as well.
+            if !verdict.contains("3/3") {
+                return Err(format!("the self-test did not reach its verdict: {verdict}"));
+            }
+            // The two numbers are the interrupt census's own column — the
+            // handler may not log, so that column is the only report a
+            // delivery has — and both are asserted: nothing raised this
+            // vector before the staged one, and exactly one arrived.
+            if !verdict.contains("(0 -> 1)") {
+                return Err(format!(
+                    "the census did not count exactly the staged delivery: {verdict}"
+                ));
+            }
+            eprintln!("  [lapic] {}", verdict.trim());
+        }
+        Ok(())
+}
+
+/// Nine crafted USB configuration descriptors, parsed at init.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn xhci_descriptors(log: &str) -> Result<(), String> {
+        if let Some(bad) = log.lines().find(|l| l.contains("descriptor selftest FAILED")) {
+            return Err(format!("{bad}\n{log}"));
+        }
+        let Some(verdict) = log.lines().find(|l| l.contains("descriptor selftest")) else {
+            return Err(format!("the parser's self-test never ran:\n{log}"));
+        };
+        // `9/9`, not "no failures": a self-test that ran zero cases would
+        // satisfy the absence of a FAILED line.
+        if !verdict.contains("9/9") {
+            return Err(format!("not every descriptor was parsed as required: {verdict}"));
+        }
+        // Once for the machine. It reads no register, so a per-controller
+        // run would be two verdicts about the same nine byte arrays.
+        let ran = log.matches("descriptor selftest").count();
+        if ran != 1 {
+            return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
+        }
+        // And the ordinary boot beside it: the same parser bound the boot
+        // stick off a descriptor a real controller delivered.
+        if !log.contains("usb-storage: 1 device(s)") {
+            return Err(format!("the boot stick did not bind on this boot\n{log}"));
+        }
+        eprintln!("  [xhci] {}", verdict.trim());
+        Ok(())
+}
+
+/// Eight malformed extended-capability lists refused, and the handoff on the real controller.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn xhci_xecp(log: &str) -> Result<(), String> {
+        if let Some(bad) = log.lines().find(|l| l.contains("xecp selftest FAILED")) {
+            return Err(format!("{bad}\n{log}"));
+        }
+        let Some(verdict) = log.lines().find(|l| l.contains("xecp selftest")) else {
+            return Err(format!("the walk's self-test never ran:\n{log}"));
+        };
+        // `8/8`, not "no failures": a self-test that ran zero cases would
+        // satisfy the absence of a FAILED line.
+        if !verdict.contains("8/8") {
+            return Err(format!("not every malformed list was refused: {verdict}"));
+        }
+        // And the walk on the controller QEMU does provide.
+        let Some(real) = log
+            .lines()
+            .find(|l| l.contains("USB Legacy Support") || l.contains("ownership"))
+        else {
+            return Err(format!("no line about the handoff at all:\n{log}"));
+        };
+        // The handoff must precede the reset — a reset that already
+        // happened is what the whole capability exists to avoid.
+        let reset = log
+            .find("xHCI: controller reset")
+            .ok_or_else(|| format!("the controller was never reset:\n{log}"))?;
+        let handoff = log.find(real).expect("just found");
+        if handoff > reset {
+            return Err(format!(
+                "the ownership handoff runs after HCRST, which is no handoff at all:\n{log}"
+            ));
+        }
+        // A controller that still enumerates its bus afterwards.
+        if !log.contains("xHCI: controller started") {
+            return Err(format!("the controller did not come up:\n{log}"));
+        }
+        eprintln!("  [xhci] {}", verdict.trim());
+        eprintln!("  [xhci] {}", real.trim());
+        Ok(())
+}
+
+/// The context switch reloads SS from null before a `sysretq` can see it.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn sysret_ss(log: &str) -> Result<(), String> {
+        if log.contains("sysret-ss: NOT reloaded") {
+            return Err(format!(
+                "the switch did not reload SS — a sysretq here would hand userland an \
+                 unusable one:\n{log}"
+            ));
+        }
+        if !log.contains("sysret-ss: reloaded") {
+            return Err(format!(
+                "the SS-reload probe never reported — iod may not have run it:\n{log}"
+            ));
+        }
+        eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
+        Ok(())
+}
+
+/// The input core merged what it was handed.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn input_merge_ok(log: &str) -> Result<(), String> {
+        if !log.contains("input-merge: ok") {
+            return Err(format!("the input core check never reported:\n{log}"));
+        }
+        Ok(())
+}
+
+/// An inner `scheduler::Operation` may only narrow, and its drop restores what it displaced.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn operation_nesting_log(log: &str) -> Result<(), String> {
+
+        /// One `key=value` off a gate line, as a number.
+        fn number(line: &str, key: &str) -> Result<u64, String> {
+            line.split_whitespace()
+                .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+                .ok_or_else(|| format!("no numeric {key} in {line:?}"))
+        }
+        /// One `key=value` off a gate line, as a flag.
+        fn flag(line: &str, key: &str) -> Result<bool, String> {
+            line.split_whitespace()
+                .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+                .ok_or_else(|| format!("no boolean {key} in {line:?}"))
+        }
+
+        // Both homes. A task's word is on its `TaskHandle` and a context
+        // with no task uses one slot per CPU, and the two are reached by
+        // different arms of `operation_slot` — so a gate that ran in one
+        // place would leave the other arm unexecuted by any test at all.
+        for site in ["boot", "iod"] {
+            let say = |what: &str| -> Result<String, String> {
+                let needle = format!("sched-op: {site} {what}");
+                log.lines()
+                    .find(|line| line.contains(&needle))
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("no {needle:?} line on this boot:\n{log}"))
+            };
+
+            let outside = say("outside")?;
+            if flag(&outside, "established")? {
+                return Err(format!(
+                    "{site}: an operation was already established before the gate began, \
+                     so nothing below is about the nesting it made: {outside}"
+                ));
+            }
+
+            // Every level: what it asked for, and what the depth below it
+            // recovered. The bound is the running minimum — an inner
+            // establishment takes the earlier of its own deadline and its
+            // parent's, and only that.
+            let mut asked = Vec::new();
+            let mut narrowest = u64::MAX;
+            for level in 1..=3 {
+                let line = say(&format!("begin level={level}"))?;
+                let want = number(&line, "asked")?;
+                let saw = number(&line, "observed")?;
+                narrowest = narrowest.min(want);
+                if saw != narrowest {
+                    return Err(format!(
+                        "{site}: level {level} asked for {want} ns and the depth inside it \
+                         recovered {saw} ns, against the {narrowest} ns that is the \
+                         earliest of it and every level above it. An establishment that \
+                         observes more than its parent allowed is a caller buying itself \
+                         device time by nesting: {line}"
+                    ));
+                }
+                asked.push(want);
+            }
+            // The widening attempt has to have been a real one, or the line
+            // above is satisfied by a scenario in which nothing was asked.
+            if asked[2] <= asked[1] {
+                return Err(format!(
+                    "{site}: level 3 asked for {} ns inside a level 2 of {} ns, so the \
+                     gate never attempted to widen and the narrowing it reports is vacuous",
+                    asked[2], asked[1],
+                ));
+            }
+
+            // And the restore: each drop puts back what that establishment
+            // displaced rather than clearing the slot, so the operation
+            // above it survives the one below ending.
+            for (level, restored) in [(3, asked[1].min(asked[0])), (2, asked[0])] {
+                let line = say(&format!("end level={level}"))?;
+                let saw = number(&line, "observed")?;
+                if saw != restored {
+                    return Err(format!(
+                        "{site}: with level {level} dropped the depth recovered {saw} ns \
+                         and the frame above it established {restored} ns — a guard that \
+                         restores something else has ended an operation its caller is \
+                         still inside: {line}"
+                    ));
+                }
+                if !flag(&line, "established")? {
+                    return Err(format!(
+                        "{site}: dropping level {level} left no operation established at \
+                         all, and its caller is still inside one: {line}"
+                    ));
+                }
+            }
+
+            let last = say("end level=1")?;
+            if flag(&last, "established")? {
+                return Err(format!(
+                    "{site}: the outermost guard dropped and an operation is still \
+                     established — the slot was restored rather than cleared, so the next \
+                     depth to ask would be answered a deadline nobody set: {last}"
+                ));
+            }
+            eprintln!(
+                "  [operation] {site}: {} ns narrowed to {} ns, a {} ns request changed \
+                 nothing, and both drops restored",
+                asked[0], asked[1], asked[2],
+            );
+        }
+        Ok(())
+}
+
+/// The machine's three kernel threads are hosted, and each claims the panic row
+/// its own loss demands.
+///
+/// Text in, a verdict out: all three lines are `log!` records, so the T14's
+/// readback and a QEMU boot log are judged by this one predicate.
+fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
+    boot.must_be_clean()?;
+    let line = boot.must_say("kthread: klogd")?;
+    if !line.contains("halts the machine") {
+        return Err(format!("klogd is hosted but claims the wrong panic row: {line:?}"));
+    }
+    eprintln!("  [klogd] {}", line.trim());
+
+    // **The other two threads, and the opposite row.** `usbd` owns the xHCI
+    // port machine and `iod` the write-back queue, so a stuck USB enumeration
+    // cannot stop the log. Their panics are *recoverable* and `klogd`'s
+    // deliberately is not — a killed drainer is the one loss nothing left alive
+    // can report — and this is the one boot in the suite where all three rows
+    // are on the wire together.
+    for name in ["usbd", "iod"] {
+        let line = boot.must_say(&format!("kthread: {name}"))?;
+        if !line.contains("kills the thread") {
+            return Err(format!("{name} is hosted but claims the wrong panic row: {line:?}"));
+        }
+        eprintln!("  [kthread] {}", line.trim());
+    }
+    Ok(())
+}
+
+/// Every I/O APIC this machine has, and whether its redirection table is a
+/// chip's rather than a floating bus's.
+///
+/// Text in, a verdict out: the driver runs in Phase 2 and every line it
+/// writes is a kernel record, so the T14's readback and a QEMU boot log are
+/// judged by this one predicate.
+fn ioapic_topology(log: &str) -> Result<(), String> {
+    let units: Vec<&str> = log
+        .lines()
+        .filter_map(|l| l.split("ioapic: id=").nth(1))
+        .collect();
+    if units.is_empty() {
+        return Err(format!("no `ioapic: id=` line in the boot log:\n{log}"));
+    }
+    // A window the machine does not decode answers 0xFFFFFFFF to
+    // everything, which is a *valid-looking* unit: 256 entries, all
+    // read back masked, `route` succeeds into nothing. The driver
+    // drops such a unit, so its absence from the log is the assertion.
+    if let Some(ignored) = log.lines().find(|l| l.contains("ioapic: id=") && l.contains("IGNORED")) {
+        return Err(format!("an I/O APIC failed its plausibility gate: {ignored}"));
+    }
+    let mut covered: Vec<(u32, u32)> = Vec::new();
+    for unit in &units {
+        // `<id> at <addr> ver=<v> gsi <lo>..<hi> masked <n>/<total>`
+        let ver = unit
+            .split_once(" ver=0x")
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .and_then(|v| u32::from_str_radix(v, 16).ok())
+            .ok_or_else(|| format!("no version in {unit:?}"))?;
+        // Both halves of the entry count come from this register, so a
+        // version that is not a chip's makes the count meaningless.
+        if ver == 0x00 || ver == 0xFF {
+            return Err(format!("I/O APIC version {ver:#04x} is a floating bus: {unit:?}"));
+        }
+        let (range, masked) = unit
+            .split_once(" gsi ")
+            .and_then(|(_, rest)| rest.split_once(" masked "))
+            .ok_or_else(|| format!("unreadable I/O APIC line: {unit:?}"))?;
+        let (lo, hi) = range
+            .split_once("..")
+            .ok_or_else(|| format!("no GSI range in {unit:?}"))?;
+        let lo: u32 = lo.trim().parse().map_err(|_| format!("bad GSI base in {unit:?}"))?;
+        let hi: u32 = hi.trim().parse().map_err(|_| format!("bad GSI top in {unit:?}"))?;
+        let (n, total) = masked
+            .trim()
+            .split_once('/')
+            .ok_or_else(|| format!("no mask count in {unit:?}"))?;
+        let n: u32 = n.parse().map_err(|_| format!("bad mask count in {unit:?}"))?;
+        let total: u32 = total
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .parse()
+            .map_err(|_| format!("bad entry count in {unit:?}"))?;
+        // `hi` is printed as `lo + total - 1`, so comparing them is a
+        // tautology. What is checkable is the bound the driver refuses
+        // past — a floating bus reports 256 here.
+        if hi < lo || !(1..=240).contains(&total) {
+            return Err(format!(
+                "I/O APIC claims gsi {lo}..{hi}, {total} entries — not a redirection table: {unit:?}"
+            ));
+        }
+        covered.push((lo, hi));
+        // The whole reason this driver runs before the first sti: an
+        // entry firmware left armed at a vector with no gate is a #GP
+        // that kills the boot.
+        if n != total {
+            return Err(format!(
+                "{n} of {total} redirection entries masked — {} left armed: {unit:?}",
+                total - n
+            ));
+        }
+    }
+    // Independent of any number the log derived from another: the two
+    // pins the i8042 needs have to fall inside some unit's range, or
+    // `route` returns `NoUnit` and there is no PS/2 input at all.
+    for gsi in [1u32, 12] {
+        if !covered.iter().any(|&(lo, hi)| (lo..=hi).contains(&gsi)) {
+            return Err(format!(
+                "no I/O APIC covers GSI {gsi}; units cover {covered:?}"
+            ));
+        }
+    }
+    // IRQ 1 and IRQ 12 must be uncovered by the override table, or
+    // the i8042 driver's identity assumption is wrong on this machine.
+    let Some(isos) = log
+        .lines()
+        .find_map(|l| l.split("ioapic: iso bus:irq->gsi [").nth(1))
+        .and_then(|r| r.split(']').next())
+    else {
+        return Err(format!("no `ioapic: iso` line in the boot log:\n{log}"));
+    };
+    // Every firmware this kernel boots on overrides at least IRQ 0, so an empty
+    // table is the parse finding nothing rather than the machine having nothing.
+    if isos.is_empty() {
+        return Err(format!("the interrupt-source-override table is empty:\n{log}"));
+    }
+    eprintln!("  [ioapic] {} unit(s), overrides {isos}", units.len());
+    Ok(())
+}
+
 fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     /// `(bit, name, must_be_set)`. Every bit `CR0` defines, so a value with any
     /// other bit set is reserved state the kernel put there.
@@ -14161,6 +15056,405 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
 
     eprintln!("  [control_regs] {cpus} CPUs, cr0={cr0:#010x} cr4={cr4:#010x}");
     Ok(())
+}
+
+/// The word between `head` and `tail` on the first line of `log` carrying
+/// **both**, which is how every judge below reads a field out of a record.
+///
+/// Both, not just the head: a boot log has many lines that begin a field name
+/// and do not carry the field, and a reader that took the first of those would
+/// answer about the wrong record rather than say it found none.
+fn field_between<'a>(log: &'a str, head: &str, tail: &str) -> Result<&'a str, String> {
+    log.lines()
+        .find_map(|line| {
+            let (_, rest) = line.split_once(head)?;
+            let (found, _) = rest.split_once(tail)?;
+            Some(found)
+        })
+        .ok_or_else(|| format!("no record carrying {head:?} and then {tail:?}"))
+}
+
+/// The same, parsed.
+fn number_between(log: &str, head: &str, tail: &str) -> Result<u64, String> {
+    let word = field_between(log, head, tail)?;
+    word.trim().parse().map_err(|_| format!("{head:?} is followed by {word:?}, not a number"))
+}
+
+/// Every CPU the firmware named is scheduling, every one of them holds the
+/// control-register declaration, and none of their timestamp counters trails
+/// the BSP's.
+///
+/// **The third is the one nothing in this tree ever asked.**
+/// `clock::nanos_since_boot` subtracts a single BSP-sampled origin whatever CPU
+/// reads it, so a CPU whose TSC starts behind that origin saturates to zero and
+/// stamps every record it writes as the oldest thing the machine has
+///. The kernel
+/// brackets each AP's first `rdtsc` between two of the BSP's, taken either side
+/// of a bring-up that is serialised — so "inside" is what a synchronised
+/// counter gives and nothing else does. **QEMU cannot refute it**: every guest
+/// TSC is synthesised from one host clock, which is exactly why the assertion
+/// is here to be run on metal.
+fn smp_roster_and_tsc_trail(log: &str, cpus: u32) -> Result<(), String> {
+    let online = number_between(log, "SMP: ", " of ")?;
+    let named = number_between(log, " of ", " MADT cpus online")?;
+    if online != u64::from(cpus) || named != u64::from(cpus) {
+        return Err(format!(
+            "the machine was given {cpus} CPUs, its MADT named {named} and {online} came up"
+        ));
+    }
+    let bracketed = number_between(log, "MADT cpus online, ", " of ")?;
+    let aps = u64::from(cpus) - 1;
+    if bracketed != aps {
+        let outside: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains(" the BSP's ") && !l.contains("inside"))
+            .collect();
+        return Err(format!(
+            "{bracketed} of {aps} APs read a TSC inside the BSP's bracket; the rest: {outside:#?}"
+        ));
+    }
+    let checked = number_between(log, "control_regs: ", " of ")?;
+    if checked != u64::from(cpus) {
+        return Err(format!("{checked} of {cpus} CPUs were checked against the declaration"));
+    }
+    let widest = log
+        .lines()
+        .filter_map(|l| l.split(" (").nth(1)?.split(" cycles wide)").next()?.parse::<u64>().ok())
+        .max()
+        .unwrap_or_default();
+    eprintln!(
+        "  [smp] {online} CPUs online, {bracketed} AP TSCs inside a BSP bracket at most \
+         {widest} cycles wide"
+    );
+    Ok(())
+}
+
+/// The physical memory manager's accounting against the firmware map, to the
+/// byte.
+///
+/// Every byte UEFI called usable becomes exactly one of three things: a whole
+/// 2 MiB frame the bitmap manages, a frame withheld because a reserved region
+/// touches it, or a fragment lost to an entry that does not begin and end on a
+/// 2 MiB boundary. The kernel prints all four numbers; this re-adds them, so
+/// the sum is checked against the firmware's total and not against itself.
+fn pmm_accounting(log: &str) -> Result<(), String> {
+    let firmware = number_between(log, "the firmware map calls ", " bytes usable")?;
+    let managed = number_between(log, " managed=", " ")?;
+    let withheld = number_between(log, " withheld=", " ")?;
+    let lost = number_between(log, " unaligned=", ",")?;
+    if managed + withheld + lost != firmware {
+        return Err(format!(
+            "the firmware map calls {firmware} bytes usable and the PMM accounts for \
+             {managed} + {withheld} + {lost} = {}",
+            managed + withheld + lost
+        ));
+    }
+    if managed == 0 {
+        return Err("the PMM manages no memory at all".to_string());
+    }
+    eprintln!(
+        "  [pmm] {} MiB managed, {withheld} B withheld, {lost} B lost to alignment, of \
+         {} MiB the firmware called usable",
+        managed / (1024 * 1024),
+        firmware / (1024 * 1024),
+    );
+    Ok(())
+}
+
+/// Every ACPI table this kernel goes on to decode was reached through a
+/// checksummed RSDP and XSDT, checksummed itself, and **was decoded**.
+///
+/// The DMAR is not required: a guest with no `intel-iommu` publishes none, and
+/// this host boots one. What is required is that a table the kernel *does* read
+/// is never one it skipped the validation of, and never one it validated and
+/// then did nothing with — a row saying only that four bytes and a length
+/// checksummed is presence and not a decode, so each one is held to a record
+/// carrying a field read out of it.
+fn acpi_table_inventory(log: &str) -> Result<(), String> {
+    /// Each table's signature and the record that carries a value decoded from
+    /// it. A signature with no such record is a table this kernel validated and
+    /// never read.
+    const NEEDED: &[(&str, &str)] = &[
+        ("APIC", "ACPI: MADT cpus="),
+        ("FACP", "ACPI: reset register "),
+        ("HPET", "clock: HPET at "),
+        ("MCFG", "ACPI: ECAM base address: "),
+    ];
+    for (signature, decoded) in NEEDED {
+        if !log.lines().any(|l| l.contains(&format!("ACPI: {signature} at ")) && l.contains("checksummed"))
+        {
+            return Err(format!(
+                "no checksummed {signature} in the boot log; the inventory said: {:#?}",
+                log.lines().filter(|l| l.starts_with("[") && l.contains("ACPI: ")).collect::<Vec<_>>()
+            ));
+        }
+        // Never the inventory row itself, which is the presence this exists to
+        // be more than.
+        let decoded_line = log
+            .lines()
+            .find(|l| l.contains(decoded) && !l.contains("checksummed"))
+            .ok_or_else(|| {
+                format!(
+                    "the {signature} checksummed and no record carries {decoded:?}, so nothing \
+                     this boot did rests on anything decoded out of it"
+                )
+            })?;
+        eprintln!("  [acpi] {signature} decoded: {}", decoded_line.trim());
+    }
+    let validated = number_between(log, "ACPI: ", " of ")
+        .map_err(|why| format!("no inventory summary: {why}"))?;
+    if validated < NEEDED.len() as u64 {
+        return Err(format!("{validated} tables checksummed and this kernel decodes {NEEDED:?}"));
+    }
+    let rows: Vec<&str> = log
+        .lines()
+        .filter_map(|l| l.split("ACPI: ").nth(1))
+        .filter(|l| l.contains("checksummed"))
+        .collect();
+    eprintln!("  [acpi] {validated} tables checksummed: {rows:#?}");
+    Ok(())
+}
+
+/// The TSC the whole machine is timed by, against the frequency the part itself
+/// states.
+///
+/// **The one cross-source check a boot has.** Everything else the kernel times
+/// is derived from the HPET calibration, so it can only agree with itself;
+/// CPUID leaf 15H's crystal ratio and leaf 16H's base frequency are the CPU's
+/// own statement, arrived at by neither the HPET nor the counting loop. A part
+/// that states neither is a fact about the part, not a failure — `qemu64`, this
+/// host's guest CPU, is one — so the ppm bound is asserted only where a
+/// statement exists.
+fn timer_calibration(log: &str) -> Result<(), String> {
+    /// One percent, which is the widest two timebases can differ and still be
+    /// counting the same second. A refusal and not a measurement: it catches a
+    /// machine whose HPET and CPUID have stopped agreeing at all, and nothing
+    /// narrower is true of every part this kernel may boot on.
+    const CEILING_PPM: u64 = 10_000;
+
+    let lapic_hz = number_between(log, "ticks/10ms, so ", "Hz")?;
+    if lapic_hz == 0 {
+        return Err("the LAPIC timer calibrated to no frequency at all".to_string());
+    }
+    let measured = number_between(log, "clock: TSC measured ", "Hz against the HPET")?;
+    if measured == 0 {
+        return Err("the TSC calibrated to no frequency at all".to_string());
+    }
+    let Ok(stated) = number_between(log, "CPUID states ", "Hz,") else {
+        let why = log
+            .lines()
+            .find(|l| l.contains("CPUID leaves 15H and 16H"))
+            .ok_or("neither a stated frequency nor the record saying there is none")?;
+        eprintln!("  [timer] TSC {measured}Hz, LAPIC {lapic_hz}Hz — {}", why.trim());
+        return Ok(());
+    };
+    let ppm = number_between(log, "Hz, ", "ppm apart")?;
+    if ppm > CEILING_PPM {
+        return Err(format!(
+            "the TSC measures {measured}Hz against the HPET and CPUID states {stated}Hz — \
+             {ppm}ppm apart, over the {CEILING_PPM}ppm this bound allows"
+        ));
+    }
+    eprintln!(
+        "  [timer] TSC {measured}Hz measured, {stated}Hz stated, {ppm}ppm apart; LAPIC {lapic_hz}Hz"
+    );
+    Ok(())
+}
+
+/// Every PCI function the kernel enumerated is in the log with its identity and
+/// the memory windows firmware assigned it, and the count it announced is the
+/// number of rows it wrote.
+///
+/// The rows are what a metal profile pins a machine's inventory against; what
+/// is checkable without one is that the two halves agree, which is what fails
+/// when enumeration stops early or a row goes unwritten.
+fn pci_inventory(log: &str) -> Result<(), String> {
+    let announced = number_between(log, "PCI: Enumeration complete, ", " functions")?;
+    let rows: Vec<&str> = log.lines().filter_map(|l| l.split("  PCI ").nth(1)).collect();
+    if rows.len() as u64 != announced {
+        return Err(format!(
+            "the kernel announced {announced} functions and wrote {} rows",
+            rows.len()
+        ));
+    }
+    if announced == 0 {
+        return Err("the kernel enumerated no PCI function at all".to_string());
+    }
+    let mut with_windows = 0;
+    for row in &rows {
+        // Identity and window list on one line, so an inventory is one row per
+        // function rather than a join the reader has to make.
+        if !row.contains("vendor=") || !row.contains("device=") || !row.contains(" bars=[") {
+            return Err(format!("a PCI row is not an inventory row: {row:?}"));
+        }
+        if !row.contains(" bars=[]") {
+            with_windows += 1;
+        }
+    }
+    eprintln!("  [pci] {announced} functions, {with_windows} of them with assigned windows");
+    Ok(())
+}
+
+/// What one machine-wide TLB shootdown costs its initiator, as a distribution
+/// over a fixed count against every CPU the machine brought up.
+///
+/// The `tlb:` census is a sum and a maximum over whatever the boot happened to
+/// unmap, so its average moves with the workload and its tail is one sample.
+/// This is the same path measured under a stated stimulus, which is what makes
+/// two boots comparable. **The number itself is a metal number**: this host's
+/// guests are TCG, which prices an IPI and an uncontended atomic unlike
+/// hardware, so what is asserted here is the shape — sorted, non-zero, and the
+/// CPUs it was measured across.
+fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(u64, u64), String> {
+    // Scoped to the bench's own line: the `tlb:` census carries a `max=` too,
+    // in microseconds, and a reader over the whole log would take whichever
+    // came first.
+    let line = log
+        .lines()
+        .find(|l| l.contains("tlb: bench "))
+        .ok_or("no `tlb: bench` record — the actuator armed nothing")?;
+    // The round count is the kernel's constant and is read off the line rather
+    // than restated: a bench that shrank would otherwise pass unremarked.
+    let rounds = number_between(line, "tlb: bench ", " shootdowns")?;
+    let across = number_between(line, " shootdowns across ", " cpus")?;
+    if across != u64::from(cpus) {
+        return Err(format!("the bench ran across {across} CPUs and the machine was given {cpus}"));
+    }
+    let read = |head: &str| number_between(line, head, "ns");
+    let (min, p50, p90, p99, max) =
+        (read("min=")?, read("p50=")?, read("p90=")?, read("p99=")?, read("max=")?);
+    if min == 0 {
+        return Err("the fastest of 256 machine-wide shootdowns took no time at all".to_string());
+    }
+    if !(min <= p50 && p50 <= p90 && p90 <= p99 && p99 <= max) {
+        return Err(format!(
+            "the distribution is not sorted: min={min} p50={p50} p90={p90} p99={p99} max={max}"
+        ));
+    }
+    eprintln!(
+        "  [tlb] {rounds} shootdowns across {across} CPUs: min={min}ns p50={p50}ns p90={p90}ns \
+         p99={p99}ns max={max}ns"
+    );
+    // The two the metal profile prices; the rest are the shape's own evidence.
+    Ok((p50, p99))
+}
+
+/// What a waiter in the real-time band pays to be woken, and — the half this
+/// suite exists for — that the number reaches a machine with no console.
+///
+/// `tests/latencycase` is a job-list boot: no host types at it, the runner runs
+/// `cyclictest` and then the scheduler stress suite, and the last job hands the
+/// machine back to firmware. That is the T14's own shape, so both channels are
+/// read here: the console, which the T14 does not have, and the kernel's
+/// `exit: <name> pid=N code=N` record on the log volume, which is the only word
+/// a program gets off that machine. **They must carry the same number**, or the
+/// metal readback is reporting something the guest did not measure.
+fn latency_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    /// **Derived from the instrument, not from this host.** A p99 at the
+    /// histogram's last bucket is a floor and not a measurement, so what is
+    /// asserted here is that the figure is one — TCG under a twelve-wide suite
+    /// is no latency instrument, and the number this measures on hardware is
+    /// the T14's, priced as `latency.p99_us` in `tests/metal-profile.toml`.
+    const HISTOGRAM_US: u64 = 4096;
+    const WAIT: Duration = Duration::from_secs(60);
+
+    let config = compile::repo_root().join("tests/latencycase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    // The two the config's job list names, and not the whole set: latencycase's
+    // ROOT is `logd`, the runner and `toybox`, and every unnamed binary staged
+    // beside them is image the boot pays to write.
+    const JOBS: &[&str] = &["cyclictest", "sched_stress"];
+    let bins: Vec<(String, Vec<u8>)> =
+        rust_bins.iter().filter(|(name, _)| JOBS.contains(&name.as_str())).cloned().collect();
+    if bins.len() != JOBS.len() {
+        return Err(format!("the suite built {} of {JOBS:?}", bins.len()));
+    }
+
+    // Built here and written out, because the boot deletes the image it built
+    // and the log volume is read after the guest is gone.
+    let image_path = common::lane::dir().join("latencycase-boot.img");
+    let image = common::qemu::build_boot_image(case, &[], &bins, &[]);
+    fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = common::volumes::log_extent(&image, &image_path)?;
+
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &bins,
+        BootOptions { qmp: true, boot_image: Some(qemu::Staged::Written(image_path.clone())), ..Default::default() },
+    );
+    let mut stop = common::qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let reason = stop.reason();
+    let console = qemu.drain_serial(WAIT);
+    drop(qemu);
+
+    if reason.as_deref() != Some("guest-reset") {
+        return Err(format!(
+            "the job list did not hand the machine back to firmware ({reason:?})\n{console}"
+        ));
+    }
+
+    // The console's copy: the marker the runner writes around every job.
+    let distribution = console
+        .lines()
+        .find(|l| l.contains("cyclictest: "))
+        .ok_or("cyclictest printed no distribution")?;
+    let printed: i64 = field_between(&console, "===TEST_END test_rs_cyclictest exit=", "===")?
+        .parse()
+        .map_err(|_| format!("cyclictest's exit marker carries no number:\n{console}"))?;
+    if printed < 0 {
+        return Err(format!("cyclictest refused rather than measuring: {distribution}"));
+    }
+    if !console.contains("===TEST_END test_rs_sched_stress exit=0===") {
+        return Err(format!("the scheduler stress suite did not pass:\n{console}"));
+    }
+
+    // The volume's copy, which is the whole of what a machine with no serial
+    // port gives back.
+    let (name, log) = common::volumes::newest_log(&image_path, start, len)?;
+    let text = String::from_utf8_lossy(&log);
+    let record = text
+        .lines()
+        .find(|l| l.contains("exit: test_rs_cyclictest pid="))
+        .ok_or_else(|| format!("{name} carries no `exit: test_rs_cyclictest` record\n{text}"))?;
+    let recorded: i64 = field_between(record, " code=", " ")?
+        .parse()
+        .map_err(|_| format!("the exit record carries no number: {record}"))?;
+    if recorded != printed {
+        return Err(format!(
+            "the console says cyclictest exited {printed} and {name}'s kernel record says \
+             {recorded} — the metal channel and the QEMU one disagree"
+        ));
+    }
+    bootlog::verdict(&text).map_err(|unfit| format!("{name}: {unfit}\n{text}"))?;
+
+    if printed as u64 >= HISTOGRAM_US {
+        return Err(format!(
+            "the p99 landed in the histogram's last bucket, so {printed}us is a floor and not a \
+             measurement: {distribution}"
+        ));
+    }
+    eprintln!("  [latency] {}", distribution.trim());
+    eprintln!("  [latency] p99 {printed}us, off the stick's own `exit: cyclictest` record too");
+    Ok(())
+}
+
+/// [`latency_wake`]'s half that exists on a machine with no console: the p99,
+/// off the kernel's own exit record, against the ceiling the metal profile
+/// holds.
+///
+/// A negative code is `cyclictest`'s refusal and not a fast machine — the sign
+/// is the whole of what separates the two, and that contract is in the binary's
+/// own module header.
+fn wake_latency_recorded(boot: &metal::Readback) -> Result<(), String> {
+    let code = boot.exit_code("test_rs_cyclictest")?;
+    if code < 0 {
+        return Err(format!(
+            "cyclictest exited {code}, which is a refusal and not a measurement: -1 is no \
+             capability endowed, -2 is the real-time band refused"
+        ));
+    }
+    boot.number("latency.p99_us", u64::try_from(code).expect("a non-negative code"))
 }
 
 /// [`control_regs`] against machines this host cannot boot, with no guest.
@@ -16945,7 +18239,49 @@ fn assert_fast_profile_label(
 /// A group whose members drifted apart still passes — each one boots its own
 /// machine and reads its own console — so nothing downstream would notice, and
 /// a group split across the two phases could not share a guest at all.
+/// Every metal row names a registered test, once, and every boot it asks for is
+/// a committed config.
+///
+/// **A row for a name nothing registers is a metal test with no QEMU one**, and
+/// its verdict would be reported under a name no other tier can answer for.
+fn check_metal_registration() {
+    if let Err(why) = the_two_comparisons_use_one_rule() {
+        panic!("{why}");
+    }
+    for (case, _) in C_METAL_SKIP {
+        let at = compile::testcases_dir().join(format!("{case}.c"));
+        assert!(
+            at.is_file(),
+            "C_METAL_SKIP names {case:?}, which the corpus does not hold; a row for a case \
+             that is gone excludes nothing and hides that it is gone"
+        );
+    }
+    devices::the_config_runs_exactly_these_jobs();
+    let registered: BTreeSet<&str> = MACHINE_TESTS
+        .iter()
+        .chain(SCREEN_TESTS)
+        .map(|(n, _, _)| *n)
+        .chain(AUDIO_TESTS.iter().map(|(n, _)| *n))
+        .collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for (name, decl) in METAL {
+        assert!(
+            registered.contains(name),
+            "METAL rules on {name:?}, which no registration names; a metal-only test needs a \
+             registration of its own first"
+        );
+        assert!(seen.insert(name), "{name} has two metal declarations");
+        let metal::Metal::Runs { arms, .. } = decl else { continue };
+        assert!(!arms.is_empty(), "{name}'s metal declaration asks for no boot at all");
+        for arm in *arms {
+            let at = compile::repo_root().join(arm.config).join("system.toml");
+            assert!(at.is_file(), "{name} boots {}, which holds no system.toml", arm.config);
+        }
+    }
+}
+
 fn check_registration() {
+    check_metal_registration();
     let mut profile = BTreeMap::new();
     read_durations(&committed_durations_path(), &mut profile);
     let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
@@ -17095,6 +18431,21 @@ fn main() {
     // reason: an env var is invisible in the command line and easy to leave set,
     // and the whole point of the split is that a run says what it ran.
     let nightly = args.iter().any(|a| a == "--nightly");
+    // The metal profile, and where its images and readbacks live. Naming the
+    // directory means the machine is not touched — see `common::metal::Mode`.
+    let metal_mode = args.iter().any(|a| a == "--metal");
+    let mut metal_readback: Option<&str> = None;
+    for (i, a) in args.iter().enumerate() {
+        metal_readback = if let Some(v) = a.strip_prefix("--metal-readback=") {
+            Some(v)
+        } else if a == "--metal-readback" {
+            Some(args.get(i + 1).map(String::as_str).unwrap_or_else(|| {
+                panic!("--metal-readback needs a directory, e.g. --metal-readback target/metal")
+            }))
+        } else {
+            continue;
+        };
+    }
     if args.iter().any(|a| a == "--slow-usb") {
         SLOW_USB.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -17205,6 +18556,63 @@ fn main() {
 
     if nocapture || debug_mode {
         common::qemu::VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // **The metal profile, before the C corpus.** It boots the T14 and not a
+    // guest, so none of the C compile, the HTTPS judge's hosts or the tier
+    // arithmetic below is any of its business; running it here is what keeps a
+    // `--metal` invocation costing a kernel and a userland and nothing else.
+    if metal_mode {
+        let dir = metal_readback
+            .map_or_else(|| compile::repo_root().join("target/metal"), std::path::PathBuf::from);
+        let mode = if metal_readback.is_some() { metal::Mode::Offline } else { metal::Mode::Drive };
+        let rust_tests_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
+        eprintln!("[toyos] Building Rust tests...");
+        let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
+        // The C corpus is compiled here rather than below, because the metal
+        // branch returns before the ordinary suite's own compile — and a boot
+        // that carries the corpus needs the binaries beside their expectations.
+        let c_names = discover_c_tests();
+        eprintln!("[toyos] Compiling {} C tests for the corpus boot...", c_names.len());
+        let c_bins = compile_c_tests(&c_names);
+        let selected: Vec<(&str, &'static metal::Metal)> = METAL
+            .iter()
+            .filter(|(name, _)| filter.is_none_or(|f| name.contains(f)))
+            .map(|(name, decl)| (*name, decl))
+            .collect();
+        // The shared boots carry names no registration holds, so an empty
+        // selection is only a dead filter when they are empty too — which
+        // `metal::run` says for itself.
+        if selected.is_empty() && filter.is_some() {
+            eprintln!(
+                "[toyos] no metal registration matches filter {filter:?}; the shared boots' \
+                 members are not filtered by name"
+            );
+        }
+        // Three statuses for the three things this can establish, as the
+        // ordinary suite has: green, red, and "measured nothing" — a run that
+        // staged images and never reached the machine has no claim to make.
+        std::process::exit(
+            match metal::run(
+                mode,
+                &dir,
+                &selected,
+&{
+                    let keep = |n: &str| filter.is_none_or(|f| n.contains(f));
+                    let mut boots = shared_metal(&rust_bins, keep);
+                    boots.push(c_corpus_metal(&c_bins, keep));
+                    boots
+                },
+                &rust_bins,
+                RUST_SKIP,
+                !nocapture && !debug_mode,
+            ) {
+                metal::Verdict::Green => 0,
+                metal::Verdict::Red => 1,
+                metal::Verdict::Staged => 2,
+            },
+        );
     }
 
     let c_names = discover_c_tests();

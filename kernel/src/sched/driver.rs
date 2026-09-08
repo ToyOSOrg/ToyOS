@@ -495,6 +495,8 @@ pub fn pass(dispose: Dispose) {
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("a scheduler pass");
     crate::preempt::disable();
+    #[cfg(feature = "boot-actuators")]
+    crate::deadline::wedge_if_staged();
     // Must clear before it drains, so a wake from this pass's own drain survives into the next poll.
     crate::preempt::clear_need_resched();
     drain_irqs();

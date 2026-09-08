@@ -238,14 +238,29 @@ impl XhciController {
     /// Run whatever is outstanding to its end, waiting for each answer; the
     /// boot scan only, before `init` publishes the controller for anything else to poll.
     fn settle_outstanding(&mut self) {
+        // **Bounded on silence and not on work.** Neither loop's exit is this
+        // driver's — `busy` clears when the controller answers and `broke_with`
+        // when a recovery takes — so a controller that answers neither is a boot
+        // scan that never returns, before there is a scheduler to preempt it. A
+        // scan that is still being answered is not stuck, though, and a bound on
+        // its *total* time is one a crowded bus reaches honestly: this one is
+        // re-armed by every event the controller produces.
+        let mut quiet_until = deadline();
         // Also loops on `broke_with`: a halted endpoint raises no further
         // interrupt, so a first-transfer failure would otherwise go
         // unrecovered for the rest of boot.
         while self.outstanding.busy() || self.devices.iter().any(|d| d.broke_with.is_some()) {
+            if crate::clock::nanos_since_boot() >= quiet_until {
+                log!("xHCI: the boot scan heard nothing for {} ms with work still outstanding; \
+                     the rest of this boot goes on without it", USB_TIMEOUT_NS / 1_000_000);
+                return;
+            }
             self.recover_endpoints();
             while self.outstanding.busy() {
-                while let Some(event) = self.next_event() {
-                    self.dispatch_event(event);
+                if self.drain_events() {
+                    quiet_until = deadline();
+                } else if crate::clock::nanos_since_boot() >= quiet_until {
+                    break;
                 }
                 self.advance_outstanding();
                 core::hint::spin_loop();
@@ -260,10 +275,14 @@ impl XhciController {
     fn wait_command(&mut self, trb: u64) -> Option<(u32, u32)> {
         let deadline = deadline();
         loop {
+            // **Every iteration, not only an empty ring.** A ring that keeps
+            // producing events this wait is not waiting for made the bound
+            // unreachable, and the caller holds `XHCI` and a block operation
+            // with preemption off for the whole of it.
+            if crate::clock::nanos_since_boot() >= deadline {
+                return None;
+            }
             let Some(event) = self.next_event() else {
-                if crate::clock::nanos_since_boot() >= deadline {
-                    return None;
-                }
                 core::hint::spin_loop();
                 continue;
             };
@@ -310,10 +329,11 @@ impl XhciController {
         let deadline = deadline();
         let port = self.port_of_slot(slot);
         loop {
+            // **Every iteration, not only an empty ring**; see `wait_command`.
+            if crate::clock::nanos_since_boot() >= deadline {
+                return Err(Quiet::Elapsed);
+            }
             let Some(event) = self.next_event() else {
-                if crate::clock::nanos_since_boot() >= deadline {
-                    return Err(Quiet::Elapsed);
-                }
                 // An unplugged device is not a slow one; the timeout budget is
                 // for a port that might still answer.
                 if port.is_some_and(|p| !self.read_portsc(p).connected()) {

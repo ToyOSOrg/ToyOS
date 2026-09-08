@@ -58,6 +58,68 @@ struct IdentifyNamespace {
     lba_formats: [u32; 64], // offset 128: LBA format descriptors (4 bytes each)
 }
 
+/// Every command this driver has issued, by queue and opcode.
+///
+/// **The one machine-checked statement that a boot wrote no disk it was not
+/// asked to write.** The metal bench's own Ubuntu install is on the internal
+/// NVMe, and the whole safety argument for booting ToyOS on that machine is
+/// that nothing here ever issues it a write. A count logged at
+/// `SYS_SHUTDOWN`/`SYS_REBOOT` is what turns that argument into a record the
+/// boot leaves behind on the log volume, where a reader who was not there can
+/// check it.
+///
+/// Module-level rather than per controller: the counts answer a question about
+/// the machine, and a second controller's writes would be no less a write.
+mod census {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// Which queue a command went down, since the opcode numbers overlap: 0x01
+    /// is Create I/O Submission Queue on the admin queue and Write on the I/O
+    /// one.
+    #[derive(Clone, Copy)]
+    pub(super) enum Queue {
+        Admin,
+        Io,
+    }
+
+    static IDENTIFY: AtomicU64 = AtomicU64::new(0);
+    static ADMIN_OTHER: AtomicU64 = AtomicU64::new(0);
+    static READ: AtomicU64 = AtomicU64::new(0);
+    static WRITE: AtomicU64 = AtomicU64::new(0);
+    static IO_OTHER: AtomicU64 = AtomicU64::new(0);
+
+    /// Counted at submission and not at completion: a write the controller
+    /// never answered still reached the disk.
+    pub(super) fn issued(queue: Queue, cdw0: u32) {
+        let opcode = (cdw0 & 0xff) as u8;
+        let counter = match (queue, opcode) {
+            (Queue::Admin, super::ADMIN_IDENTIFY) => &IDENTIFY,
+            (Queue::Admin, _) => &ADMIN_OTHER,
+            (Queue::Io, super::IO_READ) => &READ,
+            (Queue::Io, super::IO_WRITE) => &WRITE,
+            (Queue::Io, _) => &IO_OTHER,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn line() -> (u64, u64, u64, u64, u64) {
+        let read = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        (read(&IDENTIFY), read(&ADMIN_OTHER), read(&READ), read(&WRITE), read(&IO_OTHER))
+    }
+}
+
+/// The boot's whole NVMe command census, as one record.
+///
+/// Called from `quiesce`, so the count is the boot's total and no process runs
+/// after it to add to one.
+pub fn log_census() {
+    let (identify, admin_other, read, write, io_other) = census::line();
+    log!(
+        "nvme: commands identify={identify} admin-other={admin_other} read={read} \
+         write={write} io-other={io_other}"
+    );
+}
+
 const ADMIN_CREATE_IO_SQ: u8 = 0x01;
 const ADMIN_CREATE_IO_CQ: u8 = 0x05;
 const ADMIN_IDENTIFY: u8 = 0x06;
@@ -308,6 +370,7 @@ impl NvmeController {
     /// between: admin commands run only at bring-up and inside [`Self::reset`]
     /// itself, where a reset escalation would recurse into its own failure.
     fn admin_command(&mut self, cmd: SqEntry) -> Result<u16, Unanswered> {
+        census::issued(census::Queue::Admin, cmd.cdw0);
         let out = self.admin.submit_and_wait(&self.bar, cmd);
         if matches!(out, Err(Unanswered::Silent)) && !self.failed {
             self.failed = true;
@@ -321,6 +384,7 @@ impl NvmeController {
     /// An I/O command, with silence escalated: one controller reset, one
     /// post-reset chance, then the disk declared failed.
     fn io_command(&mut self, cmd: SqEntry) -> Result<u16, Unanswered> {
+        census::issued(census::Queue::Io, cmd.cdw0);
         let out = self.io.submit_and_wait(&self.bar, cmd);
         match &out {
             Ok(_) => self.fresh_reset = false,

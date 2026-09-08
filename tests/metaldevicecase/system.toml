@@ -1,0 +1,51 @@
+# The device suite's boot: one job per number the T14 is asked for, and then
+# the machine back to firmware.
+#
+# The shape is `tests/jobcase`'s — a job list is the only way a boot ends on a
+# machine whose console reaches nobody — with `metalprobe` behind it. Each job
+# exits with its measurement as its exit code, and the kernel's own
+# `exit: <name> pid=N code=N cpu=Nms` record is what carries it off the stick.
+#
+# No compositor: the framebuffer jobs claim the display themselves, and a claim
+# is minted for one holder. soundd *is* here, and claims the HDA controller
+# without a client: on this machine the controller is real, and its codec walk
+# and output-path choice are the only exercise of `toyos-hda` that hardware can
+# give.
+[boot]
+start = ["logd", "soundd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.soundd]
+serves = ["soundd"]
+devices = ["hda-audio"]
+syscap = ["rt"]
+
+# `device` because every framebuffer job mints its own claim and no manifest row
+# can name what a spawned job holds; `dup` because the capability is handed down
+# to each job in turn; `power` because the last job hands the machine back.
+#
+# **The order is by where the bound's expiry may land.** One bound covers the
+# whole list (`toyos_tco::JOB_BOUND_MS`, measured from boot) and its expiry is a
+# machine reset, so the question is not which job would be lost but which job
+# the reset would land inside. A reset inside a transfer is what a mass-storage
+# device does not survive, so the two that move bytes across one run first,
+# where the bound has its whole span left, and the three whose span is a memory
+# copy run after them.
+[programs.test-runner]
+args = ["usbwrite", "usbread", "fbcheck", "fbfill", "fbread", "reboot"]
+receives = ["soundd"]
+syscap = ["device", "dup", "power"]
+
+[programs.metalprobe]
+
+[programs.toybox]
+
+[symlinks]
+"bin/fbcheck" = "/system/bin/metalprobe"
+"bin/fbfill" = "/system/bin/metalprobe"
+"bin/fbread" = "/system/bin/metalprobe"
+"bin/usbwrite" = "/system/bin/metalprobe"
+"bin/usbread" = "/system/bin/metalprobe"
+"bin/reboot" = "/system/bin/toybox"

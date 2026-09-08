@@ -584,6 +584,24 @@ pub fn render() -> bool {
     true
 }
 
+/// Seal the tail of the live log into the black box, for the boot deadline.
+///
+/// Takes [`PAINTING`] and never gives it back — the caller's next statement
+/// writes the reset register, so there is no later painter to give it to — and
+/// **gives up the records rather than waiting** where another CPU holds it: a
+/// wedge is not a state to spin in, and why the machine ended is worth more
+/// than the tail it ended with.
+///
+/// The live shards and not the capture: what this record is for is the records
+/// that never reached the log file, which are the newest ones.
+pub fn seal_wedge(said: core::fmt::Arguments) {
+    if PAINTING.swap(true, Ordering::SeqCst) {
+        crate::blackbox::record_wedge(said, &[]);
+        return;
+    }
+    crate::blackbox::record_wedge(said, live_tail().text);
+}
+
 /// Cycle the report across the screen until the machine is switched off, or
 /// until `bound` returns it to firmware. Reached only from `halt_all_cpus`,
 /// after `panic_flush`, on the CPU whose [`render`] took `PAINTING`; the

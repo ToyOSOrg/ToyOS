@@ -3,13 +3,14 @@ mod log_close;
 mod log_gate;
 
 use std::io::{self, BufRead, Write};
-use std::os::toyos::process::CommandExt;
+use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::process::Process;
 use toyos::syscap::SysCap;
 
 /// Tests that run **inside** this process rather than in a binary it spawns.
@@ -35,6 +36,49 @@ const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
 /// the loop, read by the deadline watching it.
 static RUNNING: Mutex<String> = Mutex::new(String::new());
 static FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// A second handle to the job now running, for the deadline to end it with, or
+/// zero between jobs.
+///
+/// **Taken out with a swap, by whichever of the two gets there first**, so the
+/// handle has exactly one owner and the loop closing it cannot leave the
+/// deadline killing whatever the slot was handed to next. A duplicate and not
+/// the `Child`'s own handle, because a `Child` has one owner and the loop is
+/// blocked inside its `wait`.
+static JOB: AtomicU32 = AtomicU32::new(0);
+
+/// Set by the deadline before it kills the job it was watching, so the loop
+/// that kill releases does not start another one.
+///
+/// **A kill releases the `wait` the loop is inside.** That is what the kill is
+/// for — the driver gets to finish or abandon the transfer it had in flight
+/// before the reset — but the loop then runs on, and the next job it spawns
+/// lands under a shutdown that has already written the boot's last word. A metal
+/// boot's verdict is that word being the log's last line, so that spawn costs
+/// the boot its verdict.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Nothing this process does can reach a log whose last line is already
+/// written, so the loop stops where it is.
+///
+/// **Parks rather than exits**: the runner is what `init` waits on, so an exit
+/// here would end the boot underneath the shutdown that is running on the other
+/// thread. A reboot that is refused ends this process from that thread instead.
+fn stand_down() -> ! {
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Take the running job, if it is still this thread's to take.
+fn claim_the_job() -> Option<Process> {
+    match JOB.swap(0, Ordering::AcqRel) {
+        0 => None,
+        // SAFETY: the swap is what makes this the only holder of the duplicate
+        // `run_one` made; nothing else answers for it after this.
+        raw => Some(unsafe { Process::from_raw(toyos::RawHandle(raw)) }),
+    }
+}
 
 fn main() {
     // **The test estate's authority, and the one place least authority is not
@@ -64,12 +108,28 @@ fn main() {
         for job in &jobs {
             // Fatal by name: nobody is reading this console, so a job that did not run must end the boot.
             if job.split_whitespace().count() != 1 {
-                fatal(&format!("job {job:?} is not one binary name"));
+                give_the_machine_back(&format!("job {job:?} is not one binary name"), cap.as_ref());
             }
             *RUNNING.lock().expect("the deadline thread does not panic holding this") =
                 job.clone();
-            if !run_one(job, &[], cap.as_ref()) {
-                fatal(&format!("job {job:?} did not run"));
+            match run_one(job, &[], cap.as_ref()) {
+                Ran::No => {
+                    give_the_machine_back(&format!("job {job:?} did not run"), cap.as_ref())
+                }
+                // **A builtin's exit code reaches no kernel record.** A spawned
+                // job's does — `process::exit_process` logs one — so a host
+                // reading a stick can judge it; a builtin runs inside this
+                // process and its code is console text, which on a machine with
+                // no serial port is nothing at all. So a failing builtin ends
+                // the boot: the missing `Rebooting.` is the only channel it has.
+                Ran::Builtin(code) if code != 0 => give_the_machine_back(
+                    &format!("the builtin {job:?} exited {code}"),
+                    cap.as_ref(),
+                ),
+                Ran::Builtin(_) | Ran::Spawned => {}
+            }
+            if STOPPING.load(Ordering::Acquire) {
+                stand_down();
             }
         }
         FINISHED.store(true, Ordering::Release);
@@ -118,8 +178,44 @@ fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
              ({bound_ms} ms)"
         );
         let _ = io::stdout().flush();
+        // **The job goes before the reboot.** `SYS_REBOOT` syncs the machine
+        // and then resets it, and a job still running is a process that can
+        // start a device transfer after that sync. Killing it and waiting for
+        // it to be gone leaves the driver to finish or abandon what it had in
+        // flight; the kernel's own stop then covers what the kill left.
+        // Before the kill, because the kill is what releases the loop.
+        STOPPING.store(true, Ordering::Release);
+        if let Some(job) = claim_the_job() {
+            let _ = job.kill();
+            let _ = job.wait();
+        }
         fatal(&format!("the reboot was refused: {:?}", power.reboot()));
     });
+}
+
+/// End a job list that cannot go on, **by returning the machine to firmware**.
+///
+/// Exiting is not enough and that was a real defect: a boot whose list stopped
+/// early never reached its `reboot` job, and nothing else ended it — the
+/// deadline thread dies with this process, so the machine sat idle. Measured on
+/// a metal-shaped guest: `test_rs_std_tls` failed to spawn at 17 s and the guest
+/// was still up, saying nothing, at 291 s. On a machine with no console that is
+/// the loop waiting out `return_secs` and then refusing, with no line anywhere
+/// saying which job it was.
+///
+/// A reset the firmware sees is the one channel a job list has left. What went
+/// wrong is on the console for a QEMU run, and on the stick it is the *absence*
+/// of the boot's own last records — which is why the boot ends here rather than
+/// hanging: an absence at a known point is a verdict, and a hang is not.
+fn give_the_machine_back(why: &str, cap: Option<&SysCap>) -> ! {
+    println!("test-runner: {why}");
+    let _ = io::stdout().flush();
+    if let Some(power) = cap.and_then(|cap| cap.duplicate().ok()) {
+        let refused = power.reboot();
+        println!("test-runner: the reboot was refused: {refused:?}");
+        let _ = io::stdout().flush();
+    }
+    std::process::exit(1);
 }
 
 /// Say why, on a console that may have nobody on it, and end this process —
@@ -154,8 +250,18 @@ fn command(line: &str, cap: Option<&SysCap>) {
     run_one(name, &args, cap);
 }
 
-/// Run `/system/bin/<name>` or that name's builtin, between the host's markers; `false` is a job that never started.
-fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> bool {
+/// What became of one job. The two ways it can have run are told apart because
+/// only one of them leaves the kernel a record: a spawned binary's exit is
+/// `exit: <name> pid=… code=…`, and a builtin's is a line on this console.
+enum Ran {
+    /// It never started.
+    No,
+    Spawned,
+    Builtin(i32),
+}
+
+/// Run `/system/bin/<name>` or that name's builtin, between the host's markers.
+fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
     let path = format!("/system/bin/{name}");
 
     println!("===TEST_START {name}===");
@@ -165,7 +271,7 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> bool {
         let code = builtin(cap);
         println!("===TEST_END {name} exit={code}===");
         let _ = io::stdout().flush();
-        return true;
+        return Ran::Builtin(code);
     }
 
     // Piped stdin so the child does not consume the serial commands.
@@ -193,27 +299,47 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> bool {
         Some(Err(e)) => {
             println!("===TEST_END {name} error=the capability would not duplicate: {e:?}===");
             let _ = io::stdout().flush();
-            return false;
+            return Ran::No;
         }
     }
     let ran = match command.spawn() {
         Ok(mut child) => {
             drop(child.stdin.take());
-            match child.wait() {
+            // Published before the wait below blocks this thread: from here the
+            // deadline can end this job rather than resetting around it.
+            //
+            // **Refused by name rather than left at zero.** A duplicate this
+            // does not get leaves the deadline with nothing to kill, so the job
+            // outlives its bound and the machine is reset around it — and on a
+            // machine with no console nothing anywhere says why. The list ends
+            // here instead, by handing the machine back.
+            match toyos_abi::syscall::dup(toyos_abi::RawHandle(child.as_raw_handle())) {
+                Ok(watch) => JOB.store(watch.0, Ordering::Release),
+                Err(e) => give_the_machine_back(
+                    &format!(
+                        "job {name:?} started and its handle would not duplicate ({e:?}), so the \
+                         deadline has nothing to end it with"
+                    ),
+                    cap,
+                ),
+            }
+            let outcome = child.wait();
+            drop(claim_the_job());
+            match outcome {
                 Ok(status) => {
                     let code = status.code().unwrap_or(-1);
                     println!("===TEST_END {name} exit={code}===");
-                    true
+                    Ran::Spawned
                 }
                 Err(e) => {
                     println!("===TEST_END {name} error={e}===");
-                    false
+                    Ran::No
                 }
             }
         }
         Err(e) => {
             println!("===TEST_END {name} error={e}===");
-            false
+            Ran::No
         }
     };
     let _ = io::stdout().flush();

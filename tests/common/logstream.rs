@@ -440,7 +440,7 @@ pub fn stream(
 
     let options = BootOptions {
         profile: bench.profile,
-        boot_image: Some(staged.image.clone()),
+        boot_image: Some(qemu::Staged::Written(staged.image.clone())),
         log_stream: Some((qemu::GUEST_VIEW_OF_HOST, listener.port)),
         ..Default::default()
     };
@@ -527,7 +527,7 @@ pub fn no_listener(
 
     let options = BootOptions {
         profile: bench.profile,
-        boot_image: Some(staged.image.clone()),
+        boot_image: Some(qemu::Staged::Written(staged.image.clone())),
         log_stream: Some((qemu::GUEST_VIEW_OF_HOST, port)),
         ..Default::default()
     };
@@ -599,7 +599,7 @@ pub fn unreachable(
 
     let options = BootOptions {
         profile: bench.profile,
-        boot_image: Some(staged.image.clone()),
+        boot_image: Some(qemu::Staged::Written(staged.image.clone())),
         log_stream: Some((UNREACHABLE, UNREACHABLE_PORT)),
         kernel_params: &["log-storm"],
         smp: 8,
@@ -697,7 +697,7 @@ pub fn stalled_peer(
 
     let options = BootOptions {
         profile: bench.profile,
-        boot_image: Some(staged.image.clone()),
+        boot_image: Some(qemu::Staged::Written(staged.image.clone())),
         log_stream: Some((qemu::GUEST_VIEW_OF_HOST, listener.port)),
         kernel_params: storm,
         smp: 8,

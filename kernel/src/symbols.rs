@@ -170,6 +170,24 @@ pub fn resolve_kernel_return(return_addr: u64) -> Option<u64> {
     log_kernel(return_addr, |table| table.resolve_return(return_addr))
 }
 
+/// The kernel symbol `addr` falls inside, and how far in, without saying a word.
+///
+/// [`resolve_kernel`] writes its answer as a log record, which is the one thing
+/// an NMI handler may not do: the interrupted context may be mid-publish of its
+/// own. This is the same lookup with the record left to the caller, and it is
+/// what the hard-lockup report writes into the black box.
+pub fn kernel_symbol(addr: u64) -> Option<(&'static str, u64)> {
+    let ptr = KERNEL_SYMS.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the same as `log_kernel`'s — `KERNEL_SYMS` is written once, from
+    // a `Box::into_raw` that is never reclaimed, so a non-null pointer names a
+    // `SymbolTable` that lives as long as the machine does.
+    let table: &'static SymbolTable = unsafe { &*ptr };
+    table.resolve(addr)
+}
+
 fn log_kernel(addr: u64, lookup: impl FnOnce(&SymbolTable) -> Option<(&str, u64)>) -> Option<u64> {
     let ptr = KERNEL_SYMS.load(Ordering::Acquire);
     if ptr.is_null() {

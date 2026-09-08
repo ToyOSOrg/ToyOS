@@ -255,6 +255,43 @@ pub const RELEGATED: &[Relegated] = &[
                  bytes with no clock in them; the chain across a reset has no other gate.",
     },
     Relegated {
+        test: "boot_deadline_ends_a_wedge",
+        ci_ms: 19_295,
+        why: Why::TimerAnchored,
+        guards: "The one bound in this tree that ends a machine no other bound can reach: a boot \
+                 whose every CPU has stopped taking scheduler passes, with preemption disabled \
+                 and interrupts on. The control stages that wedge at the shutdown syscall and \
+                 the judge watches the guest reset itself and the next pass read a `WEDGED` page \
+                 carrying both the bound and the tail of the ring nothing drained. \
+                 Timer-anchored because the verdict is a bound counted down in the guest. What \
+                 still runs per pull request: nothing asks whether a wedged unattended boot ever \
+                 ends — `panic_outlives_the_deadline` is relegated beside it and the metal arm \
+                 is the machine's own.",
+    },
+    Relegated {
+        test: "hard_lockup_ends_a_deaf_cpu",
+        ci_ms: 20_277,
+        why: Why::TimerAnchored,
+        guards: "The other half of that parameter, and the state its poll cannot reach: one CPU \
+                 with interrupts off, which no running CPU can see and which the deadline's poll \
+                 is still being reached by the healthy cores through. The record names the cpu, \
+                 its `rip`, and the lock it is spinning on. Timer-anchored: two bounds counted \
+                 down in the guest, and which of them sealed the page is the verdict. What still \
+                 runs per pull request: nothing — a core that silently stops taking interrupts \
+                 is reported by no other name in this tree.",
+    },
+    Relegated {
+        test: "panic_outlives_the_deadline",
+        ci_ms: 9_437,
+        why: Why::TimerAnchored,
+        guards: "The control on both bounds standing down: a panic whose panel is still up when \
+                 the deadline's bound passes must cross the reset as a panic report and never as \
+                 a `WEDGED` page. Timer-anchored, and priced without margin besides — two bounds \
+                 counted down in the guest, one inside the other. What still runs per pull \
+                 request: the seal names read a page a panic wrote, and none of them asks what \
+                 happens when a second bound is armed over it.",
+    },
+    Relegated {
         test: "watchdog_fed",
         ci_ms: 23_405,
         why: Why::TimerAnchored,
@@ -262,6 +299,36 @@ pub const RELEGATED: &[Relegated] = &[
                  several bounds and still answer, so its verdict is that nothing happened for a \
                  fixed span of real time. Without it a green `watchdog_resets` says only that a \
                  chipset can reset a guest, never that the feed is what stops it.",
+    },
+    Relegated {
+        test: "latency_wake",
+        ci_ms: 8_790,
+        why: Why::TimerAnchored,
+        guards: "What a waiter in the real-time band pays to be woken, as a distribution over ten \
+                 thousand programmed wakes — and, beside it, that the figure reaches a machine \
+                 with no serial port at all, through the kernel's own `exit:` record on the log \
+                 volume. Timer-anchored by construction: the verdict *is* a time, measured \
+                 against a timer the guest programmed, so a slower host moves it and not only its \
+                 price. What stops being gated per pull request is the only measurement of that \
+                 quantity this tree has — soundd's figure is a maximum over a window taken \
+                 against a DLL's prediction of a DMA completion and needs a sound card to exist \
+                 at all, and `toyos-sched`'s bound on the same quantity runs in a simulator where \
+                 no IPI is ever delivered. The rate it reds at on the dev host is a separate \
+                 finding and is in `src/redlist.rs`.",
+    },
+    Relegated {
+        test: "usb_reset_hands_devices_back",
+        ci_ms: 49_057,
+        why: Why::TimerAnchored,
+        guards: "No reset this kernel performs may leave a USB device in a state its next host \
+                 cannot enumerate. Four chained boots — a job list's `reboot`, the runner's job \
+                 deadline, the panic console's bound, and a controller lock staged never to come \
+                 free — each watched to take its own two resets against the bound the first boot \
+                 counts down, and each judged on the account the reset sealed into the black box. \
+                 The fourth is the control on every bound in that path: a shutdown that cannot \
+                 take its barrier must still reach its reset. What still runs per pull request: \
+                 nothing reads that account at all; `metal_device_probe` judges the flush that \
+                 precedes it, and the T14 is the only judge of the device itself.",
     },
     Relegated {
         test: "dump_nmi_probe",

@@ -61,3 +61,17 @@ rate rather than a `Seen`, or the arm is fixed at its owner so the name is green
 at whatever rate a session can measure. `ALONE: GREEN` is not available as the
 answer here: two of the three alone re-runs in the A/B above were red, one of
 them on a different assertion than the wide run.
+
+**A third way, measured 2026-09-07 on the same host while gating the metal-suite
+driver work.** Beside the two assertions above it also reds as a boot that never
+came up at all:
+
+```
+log_flush_retry: [qemu] Boot timed out waiting for ===READY===; the console carried:
+```
+
+Three points, each run alone: `main` 71ed50cf red, `metal-suite` 7f16914d red,
+`metal-suite` f63bce1d red — so it predates that branch and the USB-shutdown
+change on it. That the same name now reds in three different places, one of them
+before userland, is against reading any of them as the arm's own staged refusal
+arriving early.

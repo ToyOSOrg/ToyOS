@@ -20,6 +20,7 @@ use super::super::{CAP_RTSOFF, HCC_PPC, XHCI_VECTOR};
 use super::super::{IR0_ERDP, IR0_ERSTBA, IR0_ERSTSZ, IR0_IMAN, IR0_IMOD};
 use super::super::{OFF_CMD_RING, OFF_DCBAA, OFF_ERST, OFF_EVT_RING};
 use super::super::{OP_CONFIG, OP_CRCR, OP_DCBAAP, OP_PAGESIZE, OP_PORT_BASE, OP_USBCMD, OP_USBSTS};
+use super::super::{USBCMD_HCRST, USBCMD_RS, USBSTS_CNR, USBSTS_HCH};
 use super::super::{PORTSC_PP, PORT_REG_SIZE, PORT_WORK_AT, XHCI};
 use super::super::{controller_answers, PORT_DEBOUNCE_NS};
 use super::settles;
@@ -149,6 +150,19 @@ pub fn init(devices: &[PciDevice]) {
     // Hot-plug can put either input class on any bound controller.
     crate::keyboard::declare_source();
     crate::mouse::declare_source();
+    // Before the lock takes them: from here every reset this kernel performs
+    // stops these controllers, and it reads them out of `stop`'s atomics rather
+    // than out of `XHCI`, because a panicked CPU may take no lock.
+    for ctrl in &controllers {
+        super::super::stop::publish(
+            ctrl.op_base,
+            ctrl.pci.config_window(),
+            ctrl.pci.bus,
+            ctrl.pci.dev,
+            ctrl.pci.func,
+            ctrl.max_ports,
+        );
+    }
     *XHCI.lock() = controllers;
 }
 
@@ -199,7 +213,17 @@ fn read_protocols(
 }
 
 fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
-    log!("xHCI: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
+    // The silicon beside the slot: a machine with two controllers is two
+    // different parts as often as it is one twice, and the slot alone does not
+    // say which.
+    log!(
+        "xHCI: found at PCI {:02x}:{:02x}.{} {:04x}:{:04x}",
+        pci_dev.bus,
+        pci_dev.dev,
+        pci_dev.func,
+        pci_dev.vendor_id(),
+        pci_dev.device_id()
+    );
 
     // xHCI 1.2 §5.2.1 puts the capability registers in BAR 0; a controller
     // that doesn't is one this driver cannot address.
@@ -289,21 +313,21 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
     let protocols = read_protocols(&bar, bar_size, hccparams1, max_ports, pci_dev);
 
     let usbcmd = op_base.read_u32(OP_USBCMD);
-    if usbcmd & 1 != 0 {
-        op_base.write_u32(OP_USBCMD, usbcmd & !1);
+    if usbcmd & USBCMD_RS != 0 {
+        op_base.write_u32(OP_USBCMD, usbcmd & !USBCMD_RS);
     }
     let deadline_ms = USB_TIMEOUT_NS / 1_000_000;
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & 1 != 0) {
+    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & USBSTS_HCH != 0) {
         refuse(format_args!("it never halted, within {deadline_ms} ms of being asked to"));
         return None;
     }
 
-    op_base.write_u32(OP_USBCMD, 1 << 1);
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBCMD) & (1 << 1) == 0) {
+    op_base.write_u32(OP_USBCMD, USBCMD_HCRST);
+    if !settles(|| controller_answers() && op_base.read_u32(OP_USBCMD) & USBCMD_HCRST == 0) {
         refuse(format_args!("it held HCRST for {deadline_ms} ms"));
         return None;
     }
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & (1 << 11) == 0) {
+    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & USBSTS_CNR == 0) {
         refuse(format_args!("it stayed Controller Not Ready for {deadline_ms} ms after its reset"));
         return None;
     }

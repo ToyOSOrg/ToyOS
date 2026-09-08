@@ -121,6 +121,70 @@ pub const JOB_BOUND_MS: u64 = 60_000;
 /// this project's bound for every watchdog.
 pub const PANIC_BOUND_MS: u64 = 60_000;
 
+/// The bound the *kernel* gives a whole boot, in milliseconds, before it seals
+/// a record and writes the reset register itself.
+///
+/// **Twice [`JOB_BOUND_MS`], and derived from it rather than chosen.** A job the
+/// runner is still inside is not a wedge: the runner's own bound ends it and the
+/// boot goes on, so a kernel bound at or under that number resets a machine
+/// whose test was about to be reported. Twice it is wider than the runner's
+/// bound plus the boot around it — the slowest healthy T14 boot measured is
+/// 6.242 s of kernel time — and narrower than a wait for a hand.
+pub const WEDGE_BOUND_MS: u64 = JOB_BOUND_MS * 2;
+
+/// The kernel's bound has to outlast the one that ends a single job, or a slow
+/// test is a reset where it should have been a verdict.
+const _: () = assert!(WEDGE_BOUND_MS > JOB_BOUND_MS);
+
+/// The bound one *CPU* gets to take no interrupt at all while it is burning
+/// cycles, in milliseconds, before that CPU ends the machine from its own NMI.
+///
+/// **Half the bound this boot gave itself, and derived rather than chosen.**
+/// [`WEDGE_BOUND_MS`] is twice [`JOB_BOUND_MS`] because a job the runner is
+/// still inside is not a wedge; that argument does not apply here, since a CPU
+/// that takes no interrupt runs no job — no scheduler pass reaches it. So the
+/// stronger evidence gets the earlier bound: a machine that has hard-locked one
+/// core is named as that, with the core's own instruction pointer in the record,
+/// rather than reported half a bound later as a boot that merely stopped.
+///
+/// Nothing in this kernel legitimately holds `IF` clear for this long. The one
+/// path that comes close is the panicked kernel's panel, whose own bound is
+/// [`PANIC_BOUND_MS`] — and that path stands the detector down rather than
+/// racing it, because a machine holding a report for a reader is not wedged.
+pub const fn hard_lockup_bound_ms(deadline_ms: u64) -> u64 {
+    deadline_ms / 2
+}
+
+/// [`hard_lockup_bound_ms`] of the bound a metal image carries, which is the one
+/// a T14 boot runs under.
+pub const HARD_LOCKUP_BOUND_MS: u64 = hard_lockup_bound_ms(WEDGE_BOUND_MS);
+
+/// The detector has to fire before the deadline it is derived from, or a
+/// hard-locked machine is reported as an ordinary wedge and the CPU is unnamed.
+const _: () = assert!(HARD_LOCKUP_BOUND_MS < WEDGE_BOUND_MS);
+
+/// The boot parameter that arms [`WEDGE_BOUND_MS`], with the bound in
+/// milliseconds after it. A value and not a flag, because the bound is the one
+/// thing about this mechanism a boot can legitimately differ on — a negative
+/// control wants a short one, and a boot the loop waits longer for wants its
+/// own.
+pub const DEADLINE_PARAM: &str = "boot-deadline=";
+
+/// The bound `cmdline` arms, or `None` where it names none.
+///
+/// A token whose value does not read as a decimal number of milliseconds is
+/// `Some(Err(…))` and not `None`: an image armed with a bound nothing can parse
+/// is a boot with no deadline at all, and that has to be refused by name rather
+/// than booted as if it were unarmed.
+pub fn deadline_in(cmdline: &str) -> Option<Result<u64, &str>> {
+    cmdline
+        .split(',')
+        .find_map(|token| token.strip_prefix(DEADLINE_PARAM))
+        .map(|value| value.parse::<u64>().map_err(|_| value).and_then(|ms| {
+            if ms == 0 { Err(value) } else { Ok(ms) }
+        }))
+}
+
 /// [`BOUND_MS`]'s timer, which is neither a value this tree can fail to have
 /// nor one the hardware would ignore.
 pub const TIMER: u16 = match timer_for(BOUND_MS) {
@@ -208,5 +272,37 @@ impl Chipset {
             return Err(NoPort::Base(base_reg));
         }
         Ok(base as u16 + self.base_offset)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The parameter carries a value, so the three answers are different
+    /// answers: no deadline, a deadline, and an image armed with a word that is
+    /// not one.
+    #[test]
+    fn a_bound_is_read_a_malformed_one_is_not_silence() {
+        assert_eq!(deadline_in("root=abc,blackbox=0x8000000"), None);
+        assert_eq!(deadline_in("boot-deadline=120000"), Some(Ok(120_000)));
+        assert_eq!(deadline_in("watchdog,boot-deadline=1,early-panel"), Some(Ok(1)));
+        assert_eq!(deadline_in("boot-deadline=soon"), Some(Err("soon")));
+        assert_eq!(deadline_in("boot-deadline="), Some(Err("")));
+        // Zero is a bound that has already passed, which would reset the
+        // machine on the first tick of the first CPU — refused, not honoured.
+        assert_eq!(deadline_in("boot-deadline=0"), Some(Err("0")));
+    }
+
+    /// One parameter, two bounds: a boot that shortens its deadline shortens
+    /// what one deaf CPU gets with it, so a negative control does not have to
+    /// arm two numbers that could disagree.
+    #[test]
+    fn the_lockup_bound_follows_the_deadline_the_boot_named() {
+        assert_eq!(hard_lockup_bound_ms(WEDGE_BOUND_MS), 60_000);
+        assert_eq!(hard_lockup_bound_ms(20_000), 10_000);
+        // A bound of one millisecond leaves none: the detector arms nothing
+        // rather than firing on the first sample, which the kernel checks.
+        assert_eq!(hard_lockup_bound_ms(1), 0);
     }
 }

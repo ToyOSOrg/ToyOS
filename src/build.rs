@@ -1018,6 +1018,7 @@ fn check_params(root: &Path, params: &[String]) {
 /// other — a prefix only one of them knows is an image the other refuses.
 const VALUED_PARAMS: &[(&str, &str)] = &[
     ("toyos_blackbox::PARAM", toyos_blackbox::PARAM),
+    ("toyos_tco::DEADLINE_PARAM", toyos_tco::DEADLINE_PARAM),
     ("toyos_logstream::PARAM", toyos_logstream::PARAM),
 ];
 
@@ -2606,8 +2607,10 @@ mod tests {
         "tests/e1000case/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
+        "tests/latencycase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/metalcase/system.toml",
+        "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",
         "tests/pkgcase/system.toml",
         "tests/sshdcase/system.toml",

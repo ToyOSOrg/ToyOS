@@ -110,6 +110,16 @@ impl Portsc {
         self.0 & CSC != 0
     }
 
+    /// Whether reset signalling is still on the wire.
+    ///
+    /// **PR is RW1S and the xHC is what clears it** (§4.19.5), so a port reading
+    /// it set has not finished the reset software asked for — which is the only
+    /// way to tell a controller that drove one from a controller that took the
+    /// write and did nothing.
+    pub const fn in_reset(self) -> bool {
+        self.0 & PR != 0
+    }
+
     /// Whether a reset of either kind has finished. A warm reset sets WRC and a
     /// conformant controller sets PRC with it; one flag is enough to act on and
     /// both are cleared together.
@@ -219,6 +229,18 @@ impl Write {
         Self(self.0 | PP)
     }
 
+    /// Take the port's power away.
+    ///
+    /// **The one thing software can do that a device sees as a power cycle.**
+    /// A platform reset leaves VBUS up, so a device whose own firmware has
+    /// wedged comes back wedged; dropping PP on a controller with Port Power
+    /// Control is what makes the next boot's device a fresh one. On a
+    /// controller without it the write is a no-op and the read-back is what
+    /// says so.
+    pub const fn unpowered(self) -> Self {
+        Self(self.0 & !PP)
+    }
+
     pub const fn raw(self) -> u32 {
         self.0
     }
@@ -287,6 +309,24 @@ mod tests {
 
     /// A neutral write reproduces the read-only and read-write-same halves and
     /// nothing else, for every word.
+    /// The two directions of the one bit a shutdown needs and a bring-up
+    /// needs the other way, each moving PP and nothing else.
+    #[test]
+    fn powering_a_port_down_moves_that_bit_and_no_other() {
+        let read = Portsc::from_raw(PP | PLS | CCS | PED | CSC);
+        let up = read.neutral().powered().raw();
+        let down = read.neutral().unpowered().raw();
+        assert_eq!(up & PP, PP);
+        assert_eq!(down & PP, 0);
+        // Everything else the write carries is the same word either way, so
+        // neither direction disables the port or acknowledges a change.
+        assert_eq!(up & !PP, down & !PP);
+        assert_eq!(down & (PED | CSC | PR | WPR), 0);
+        // A port that was already down stays down, and one already up is
+        // moved: the operation is the state, not a toggle.
+        assert_eq!(Portsc::from_raw(0).neutral().unpowered().raw() & PP, 0);
+    }
+
     #[test]
     fn neutral_keeps_exactly_the_bits_that_are_safe_to_write_back() {
         for raw in [0, u32::MAX, 0x5555_5555, 0xAAAA_AAAA, CCS | PED | PR | PRC] {

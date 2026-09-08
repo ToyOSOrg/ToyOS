@@ -61,8 +61,27 @@ pub const PARAM: &str = "blackbox=";
 /// `PANC`, big-endian ASCII, so a hexdump of the page reads.
 const MAGIC: u32 = 0x5041_4E43;
 
-/// Magic, state, length, checksum, and the stamp.
-const HEADER: usize = 24;
+/// Magic, state, length, checksum, the stamp and the identity.
+const HEADER: usize = 40;
+
+/// What a record says it belongs to: the log partition's GPT signature, which
+/// `src/image.rs` mints fresh for every image it builds.
+///
+/// **A record outlives more than the boot that wrote it.** The page is DRAM at
+/// a fixed address and nothing between two operating systems clears it: on the
+/// T14 a `DONE` record survived two hours of Ubuntu, and the next ToyOS pass —
+/// off a *different* stick — read it, took itself for that record's reporting
+/// pass and booted no kernel at all. The stamp cannot tell the two apart,
+/// because the question is not *when* a record was written but *what wrote it*.
+/// This is that answer, and it is the one thing about the page a stale record
+/// cannot fake: it is on the stick the loader is booting from and nowhere else.
+pub type Identity = [u8; 16];
+
+/// The identity of a page nothing armed, which is no stick's.
+pub const NO_IDENTITY: Identity = [0u8; 16];
+
+/// Where the identity sits in the header, after the stamp.
+const IDENTITY_AT: usize = 24;
 
 /// The cache line every writer of this page writes it back in.
 ///
@@ -97,6 +116,11 @@ pub enum State {
     /// not said it yet, and a handler that dies before its own report is the
     /// case this state exists for.
     Fault = 4,
+    /// The boot deadline expired and returned the machine to firmware. Distinct
+    /// from [`State::Panic`] because nothing failed an assertion: the machine
+    /// was still executing and had stopped making progress, so the text is the
+    /// boot phase it was in and the tail of a log ring nobody was draining.
+    Wedged = 5,
 }
 
 impl State {
@@ -110,6 +134,7 @@ impl State {
             2 => Some(Self::Panic),
             3 => Some(Self::Done),
             4 => Some(Self::Fault),
+            5 => Some(Self::Wedged),
             // Not a state this tree writes: the page holds something else, or
             // something else holds the page.
             _ => None,
@@ -123,6 +148,7 @@ impl State {
             Self::Armed => "ARMED",
             Self::Panic => "PANIC",
             Self::Done => "DONE",
+            Self::Wedged => "WEDGED",
             Self::Fault => "FAULT",
         }
     }
@@ -137,10 +163,16 @@ impl State {
 /// nothing-may-panic region, so nothing here indexes or unwraps: a bounds check
 /// that could panic would take the machine down inside the report about why it
 /// went down.
-pub fn seal(page: &mut [u8; BYTES], state: State, stamp: u64, text: &[u8]) -> usize {
+pub fn seal(
+    page: &mut [u8; BYTES],
+    state: State,
+    stamp: u64,
+    identity: Identity,
+    text: &[u8],
+) -> usize {
     let mut report = Report::new(page);
     report.tail(text, RECORD_OPENS_WITH);
-    report.seal(state, stamp)
+    report.seal(state, stamp, identity)
 }
 
 /// What the first line of one of this kernel's log records begins with, and so
@@ -148,15 +180,53 @@ pub fn seal(page: &mut [u8; BYTES], state: State, stamp: u64, text: &[u8]) -> us
 /// one and the loader that prints it read the same shape.
 pub const RECORD_OPENS_WITH: &[u8] = b"[";
 
+/// What [`Report::tail`] writes above the records it kept when it could not
+/// keep them all, with the count of the ones it dropped after it.
+///
+/// **The count is of records and the number is last**, so a reader matches the
+/// words and reads the number, and neither a plural nor a width has to agree
+/// with anything. One declaration: the kernel writes it, the loader prints it
+/// back, and the harness judges it.
+pub const DROPPED_OPENS_WITH: &str = "older records dropped to fit this page: ";
+
+/// Room [`Report::tail`] takes out of the records to pay for that line.
+///
+/// The widest the line can be: every digit a `u64` can have, which is more than
+/// a page of records can ever hold. Reserved as a constant rather than measured
+/// against the true count, because the count depends on the cut and the cut
+/// would then depend on the count — and a few unused bytes of a page are worth
+/// less than a fixed point nobody can check.
+pub const DROPPED_LINE_BYTES: usize = DROPPED_OPENS_WITH.len() + 20 + 1;
+
+/// How many records begin in `bytes`, by the same rule [`Report::tail`] cuts on.
+fn records_in(bytes: &[u8], opens_a_record: &[u8]) -> u64 {
+    let mut count = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let Some(rest) = bytes.get(at..) else { return count };
+        if rest.starts_with(opens_a_record) && (at == 0 || bytes.get(at - 1) == Some(&b'\n')) {
+            count += 1;
+        }
+        match rest.iter().position(|byte| *byte == b'\n') {
+            Some(next) => at += next + 1,
+            None => return count,
+        }
+    }
+    count
+}
+
 /// Close the envelope over `len` bytes already in the page's text area.
-fn seal_len(page: &mut [u8; BYTES], state: State, stamp: u64, len: usize) {
+fn seal_len(page: &mut [u8; BYTES], state: State, stamp: u64, identity: Identity, len: usize) {
     let text: [u8; 0] = [];
     let kept = page.get(HEADER..HEADER.saturating_add(len)).unwrap_or(&text);
-    let sum = checksum(state, stamp, kept);
+    let sum = checksum(state, stamp, identity, kept);
     put(page, 0, MAGIC);
     put(page, 4, state.code());
     put(page, 8, len as u32);
     put64(page, 16, stamp);
+    if let Some(slot) = page.get_mut(IDENTITY_AT..IDENTITY_AT + identity.len()) {
+        slot.copy_from_slice(&identity);
+    }
     // Written last, so a machine that stopped mid-copy leaves a header the
     // checksum then refuses, rather than a report with a hole in it.
     put(page, 12, sum);
@@ -177,6 +247,18 @@ pub struct Report<'a> {
 impl<'a> Report<'a> {
     pub fn new(page: &'a mut [u8; BYTES]) -> Self {
         Self { page, at: 0 }
+    }
+
+    /// Carry on writing a report already sealed into this page, `kept` bytes long.
+    ///
+    /// **For what a boot learns after it has already said how it ended.** The
+    /// reset that follows a panic or a deliberate shutdown has an account of its
+    /// own — what it did to the machine's devices — and it is made where nothing
+    /// written reaches a file, so it goes *under* the report already here rather
+    /// than over it. `kept` is [`recover`]'s own answer for this page; a longer
+    /// one is cut to what the text area holds, so nothing here indexes past it.
+    pub fn reopened(page: &'a mut [u8; BYTES], kept: usize) -> Self {
+        Self { page, at: kept.min(TEXT_BYTES) }
     }
 
     /// Append, dropping whatever does not fit. Nothing here indexes or unwraps:
@@ -200,19 +282,35 @@ impl<'a> Report<'a> {
     /// knowledge, not this crate's, so nothing here holds a second opinion about
     /// the log's shape. A record that renders as several lines is entered at its
     /// first, because that is the only line that carries what it is.
+    ///
+    /// **A cut says how much it cut**, on [`DROPPED_OPENS_WITH`]'s line above
+    /// what it kept: a report that ends where the page ran out and says nothing
+    /// is one a reader takes for the whole log, and the only reader is a next
+    /// boot with no other account of the last one. [`DROPPED_LINE_BYTES`] of the
+    /// room comes off the records to pay for it, so saying it can never be what
+    /// runs the page over.
     pub fn tail(&mut self, records: &[u8], opens_a_record: &[u8]) {
         let room = TEXT_BYTES.saturating_sub(self.at);
         if records.len() <= room {
             return self.write(records);
         }
-        let mut at = records.len() - room;
+        let budget = room.saturating_sub(DROPPED_LINE_BYTES);
+        let mut at = records.len().saturating_sub(budget);
         // Forward to the first record that begins at or after the cut.
         loop {
             let Some(rest) = records.get(at..) else { return };
             if rest.starts_with(opens_a_record)
                 && (at == 0 || records.get(at - 1) == Some(&b'\n'))
             {
-                return self.write(rest);
+                let dropped = records_in(records.get(..at).unwrap_or(&[]), opens_a_record);
+                // The note before the records, so the first thing under the head
+                // is what is missing from under it.
+                let _ = core::fmt::Write::write_fmt(
+                    self,
+                    format_args!("{DROPPED_OPENS_WITH}{dropped}\n"),
+                );
+                self.write(rest);
+                return;
             }
             match rest.iter().position(|byte| *byte == b'\n') {
                 Some(next) => at += next + 1,
@@ -224,9 +322,9 @@ impl<'a> Report<'a> {
     }
 
     /// Close the envelope over what was written.
-    pub fn seal(self, state: State, stamp: u64) -> usize {
+    pub fn seal(self, state: State, stamp: u64, identity: Identity) -> usize {
         let at = self.at;
-        seal_len(self.page, state, stamp, at);
+        seal_len(self.page, state, stamp, identity, at);
         at
     }
 }
@@ -252,6 +350,20 @@ pub fn stamp_of(page: &[u8; BYTES]) -> u64 {
     u64::from_le_bytes(out)
 }
 
+/// The identity a page carries, read without checking anything.
+///
+/// **Carried forward and not trusted**, exactly as the stamp is: the kernel's
+/// seals run where nothing may be verified, so they read this, write it back,
+/// and let the checksum they then write cover it. A page nothing armed hands
+/// back [`NO_IDENTITY`], which is what an unknown one is.
+pub fn identity_of(page: &[u8; BYTES]) -> Identity {
+    let mut out = NO_IDENTITY;
+    if let Some(slot) = page.get(IDENTITY_AT..IDENTITY_AT + out.len()) {
+        out.copy_from_slice(slot);
+    }
+    out
+}
+
 fn put(page: &mut [u8; BYTES], at: usize, value: u32) {
     if let Some(slot) = page.get_mut(at..at + 4) {
         slot.copy_from_slice(&value.to_le_bytes());
@@ -266,16 +378,17 @@ fn put64(page: &mut [u8; BYTES], at: usize, value: u64) {
 
 /// What a previous boot sealed into `page`, or `None` for a page that carries
 /// nothing this tree wrote — never written, cleared, reused, or corrupted.
-pub fn recover(page: &[u8; BYTES]) -> Option<(State, u64, &[u8])> {
+pub fn recover(page: &[u8; BYTES]) -> Option<(State, u64, Identity, &[u8])> {
     if u32::from_le_bytes(head(page, 0)) != MAGIC {
         return None;
     }
     let state = State::of(u32::from_le_bytes(head(page, 4)))?;
     let len = u32::from_le_bytes(head(page, 8)) as usize;
     let stamp = stamp_of(page);
+    let identity = identity_of(page);
     let text = page.get(HEADER..HEADER.checked_add(len)?)?;
-    (checksum(state, stamp, text) == u32::from_le_bytes(head(page, 12)))
-        .then_some((state, stamp, text))
+    (checksum(state, stamp, identity, text) == u32::from_le_bytes(head(page, 12)))
+        .then_some((state, stamp, identity, text))
 }
 
 /// Take the magic off, so the same report is not harvested by a third boot.
@@ -298,14 +411,15 @@ fn head(page: &[u8; BYTES], at: usize) -> [u8; 4] {
 ///
 /// The state is folded in so one sealed page cannot be re-read as another
 /// state, the length so a report truncated to a prefix of itself does not keep
-/// checking out — a torn write is exactly that shape — and the stamp so a
-/// record carried forward from an older boot cannot be re-dated.
-fn checksum(state: State, stamp: u64, text: &[u8]) -> u32 {
+/// checking out — a torn write is exactly that shape — the stamp so a record
+/// carried forward from an older boot cannot be re-dated, and the identity so
+/// one cannot be re-attributed to a stick that did not write it.
+fn checksum(state: State, stamp: u64, identity: Identity, text: &[u8]) -> u32 {
     const OFFSET_BASIS: u32 = 0x811c_9dc5;
     const PRIME: u32 = 0x0100_0193;
     let mut hash = OFFSET_BASIS;
     let head = [state.code().to_le_bytes(), (text.len() as u32).to_le_bytes()];
-    for byte in head.iter().flatten().chain(&stamp.to_le_bytes()).chain(text) {
+    for byte in head.iter().flatten().chain(&stamp.to_le_bytes()).chain(&identity).chain(text) {
         hash ^= u32::from(*byte);
         hash = hash.wrapping_mul(PRIME);
     }
@@ -448,8 +562,11 @@ mod tests {
 
     /// A stamp the tests can tell from zero, which is what an unarmed page has.
     const STAMP: u64 = 1_757_000_000;
+    /// One image's log-partition signature, which is what a record belongs to.
+    const STICK: Identity = [0xa5; 16];
 
-    const STATES: [State; 4] = [State::Armed, State::Panic, State::Done, State::Fault];
+    const STATES: [State; 5] =
+        [State::Armed, State::Panic, State::Done, State::Fault, State::Wedged];
 
     fn blank() -> [u8; BYTES] {
         [0u8; BYTES]
@@ -459,8 +576,8 @@ mod tests {
     fn a_sealed_page_comes_back_as_what_went_in() {
         for state in STATES {
             let mut page = blank();
-            assert_eq!(seal(&mut page, state, STAMP, b"PANIC: nobody was there"), 23);
-            assert_eq!(recover(&page), Some((state, STAMP, &b"PANIC: nobody was there"[..])));
+            assert_eq!(seal(&mut page, state, STAMP, STICK, b"PANIC: nobody was there"), 23);
+            assert_eq!(recover(&page), Some(((state), STAMP, STICK, &b"PANIC: nobody was there"[..])));
         }
     }
 
@@ -480,7 +597,7 @@ mod tests {
     #[test]
     fn a_cleared_page_is_not_harvested_twice() {
         let mut page = blank();
-        seal(&mut page, State::Panic, STAMP, b"the first boot's panic");
+        seal(&mut page, State::Panic, STAMP, STICK, b"the first boot's panic");
         assert!(recover(&page).is_some());
         clear(&mut page);
         assert_eq!(recover(&page), None);
@@ -493,7 +610,7 @@ mod tests {
     fn no_state_can_be_read_as_another() {
         for state in STATES {
             let mut page = blank();
-            seal(&mut page, state, STAMP, b"whatever the last boot said");
+            seal(&mut page, state, STAMP, STICK, b"whatever the last boot said");
             for other in STATES.into_iter().filter(|s| *s != state) {
                 let mut forged = page;
                 forged[4..8].copy_from_slice(&other.code().to_le_bytes());
@@ -509,13 +626,13 @@ mod tests {
     fn one_flipped_bit_anywhere_refuses_the_whole_page() {
         let text = b"PANIC: kernel/src/main.rs:1:1: this machine is on fire";
         let mut sealed = blank();
-        seal(&mut sealed, State::Panic, STAMP, text);
+        seal(&mut sealed, State::Panic, STAMP, STICK, text);
         for at in 0..HEADER + text.len() {
             let mut page = sealed;
             page[at] ^= 0x40;
             assert_ne!(
                 recover(&page),
-                Some((State::Panic, STAMP, &text[..])),
+                Some(((State::Panic), STAMP, STICK, &text[..])),
                 "byte {at} was allowed to change"
             );
         }
@@ -548,16 +665,90 @@ mod tests {
         }
         records.push_str("[9.9999 cpu0] the last one\n");
         let mut page = blank();
-        seal(&mut page, State::Panic, STAMP, records.as_bytes());
-        let (_, _, back) = recover(&page).expect("a cut report is still sealed");
+        seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
+        let (_, _, _, back) = recover(&page).expect("a cut report is still sealed");
         let back = std::str::from_utf8(back).expect("records are text");
         assert!(back.len() <= TEXT_BYTES);
         assert!(back.ends_with("[9.9999 cpu0] the last one\n"));
+        let kept = kept_records(back);
         // The first line kept is a whole one, which is the assertion.
-        assert!(back.starts_with('['), "the report begins mid-record: {:?}", &back[..40]);
+        assert!(kept.starts_with('['), "the report begins mid-record: {:?}", &kept[..40]);
         // Every kept line here is a whole record, so the cut is a record's edge.
-        assert!(back.lines().all(|l| l.starts_with('[')));
-        assert!(records.ends_with(back));
+        assert!(kept.lines().all(|l| l.starts_with('[')));
+        assert!(records.ends_with(kept));
+    }
+
+    /// The records under the drop line, for a test that is about the cut and
+    /// not about the line above it.
+    fn kept_records(back: &str) -> &str {
+        let (said, kept) = back.split_once('\n').expect("a cut report says what it cut");
+        assert!(said.starts_with(DROPPED_OPENS_WITH), "a cut report said {said:?}");
+        kept
+    }
+
+    /// **A cut states what it cut, and the number is exact.** A report that
+    /// ends where the page ran out and says nothing is one the next boot — the
+    /// only reader there is — takes for the whole log.
+    #[test]
+    fn a_cut_report_says_how_many_records_it_dropped() {
+        let mut records = std::string::String::new();
+        let mut n = 0usize;
+        while records.len() < TEXT_BYTES * 3 {
+            records.push_str(&format!("[0.{n:04} cpu0] a record of some width or other\n"));
+            n += 1;
+        }
+        let mut page = blank();
+        seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
+        let (_, _, _, back) = recover(&page).expect("a cut report is still sealed");
+        let back = std::str::from_utf8(back).expect("records are text");
+        let (said, kept) = back.split_once('\n').expect("a cut report says what it cut");
+        let dropped: usize = said
+            .strip_prefix(DROPPED_OPENS_WITH)
+            .expect("a cut report opens with the drop line")
+            .parse()
+            .expect("the drop line ends in a count");
+        // Exact, not a bound: dropped plus kept is every record that went in.
+        assert_eq!(dropped + kept.lines().count(), n);
+        // The newest survived, which is the half of the cut that matters.
+        assert!(kept.ends_with(&format!("[0.{:04} cpu0] a record of some width or other\n", n - 1)));
+        // What was kept is a suffix, so what was dropped is the oldest and never
+        // a window out of the middle — and the count names exactly those.
+        assert!(records.ends_with(kept));
+        assert_eq!(dropped, records[..records.len() - kept.len()].lines().count());
+    }
+
+    /// A report that fits says nothing about a cut, because there was none.
+    #[test]
+    fn a_report_that_fits_carries_no_drop_line() {
+        let records = "[0.0000 cpu0] one record\n[0.0001 cpu0] another\n";
+        let mut page = blank();
+        seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
+        let (_, _, _, back) = recover(&page).expect("a whole report is sealed");
+        assert_eq!(back, records.as_bytes());
+    }
+
+    /// **The drop line comes out of the records' room and never out of the
+    /// page.** The negative control on the reservation: a report whose records
+    /// end exactly at the page's capacity still fits after the line is added.
+    #[test]
+    fn saying_what_was_dropped_never_runs_the_page_over() {
+        // Widths around the boundary: one of them lands the cut where the line
+        // would not fit if it were not paid for first.
+        for width in 20..120usize {
+            let mut records = std::string::String::new();
+            let mut n = 0usize;
+            while records.len() < TEXT_BYTES + width * 4 {
+                records.push_str(&format!("[{n:04}] {}\n", "x".repeat(width)));
+                n += 1;
+            }
+            let mut page = blank();
+            let len = seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
+            assert!(len <= TEXT_BYTES, "a {width}-byte record ran the page to {len}");
+            let (_, _, _, back) = recover(&page).expect("a cut report is still sealed");
+            let back = std::str::from_utf8(back).expect("records are text");
+            let kept = kept_records(back);
+            assert!(records.ends_with(kept), "the cut at width {width} is not a suffix");
+        }
     }
 
     /// A head goes in before the tail and survives it: the crash's own message
@@ -573,9 +764,9 @@ mod tests {
         let mut report = Report::new(&mut page);
         report.write(HEAD.as_bytes());
         report.tail(records.as_bytes(), RECORD_OPENS_WITH);
-        let len = report.seal(State::Panic, STAMP);
+        let len = report.seal(State::Panic, STAMP, STICK);
         assert!(len <= TEXT_BYTES);
-        let (_, _, back) = recover(&page).expect("a composed report is sealed");
+        let (_, _, _, back) = recover(&page).expect("a composed report is sealed");
         let back = std::str::from_utf8(back).expect("records are text");
         assert!(back.starts_with(HEAD), "the head is not first: {:?}", &back[..60]);
         assert!(back.ends_with("[0.0000 cpu0] a record\n"));
@@ -588,8 +779,8 @@ mod tests {
     fn a_window_with_no_boundary_keeps_none_of_it() {
         let records = vec![b'.'; TEXT_BYTES + 100];
         let mut page = blank();
-        assert_eq!(seal(&mut page, State::Panic, STAMP, &records), 0);
-        assert_eq!(recover(&page), Some((State::Panic, STAMP, &[][..])));
+        assert_eq!(seal(&mut page, State::Panic, STAMP, STICK, &records), 0);
+        assert_eq!(recover(&page), Some(((State::Panic), STAMP, STICK, &[][..])));
     }
 
     /// **A record that renders as several lines is entered at its first.** The
@@ -604,11 +795,12 @@ mod tests {
             records.push_str("the message, on a line of its own\n");
         }
         let mut page = blank();
-        seal(&mut page, State::Panic, STAMP, records.as_bytes());
-        let (_, _, back) = recover(&page).expect("a cut report is still sealed");
+        seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
+        let (_, _, _, back) = recover(&page).expect("a cut report is still sealed");
         let back = std::str::from_utf8(back).expect("records are text");
-        assert!(back.starts_with("[0.0000 cpu0] EARLY PANIC"), "{:?}", &back[..40]);
-        assert!(records.ends_with(back));
+        let kept = kept_records(back);
+        assert!(kept.starts_with("[0.0000 cpu0] EARLY PANIC"), "{:?}", &kept[..40]);
+        assert!(records.ends_with(kept));
     }
 
 
@@ -616,8 +808,8 @@ mod tests {
     #[test]
     fn an_armed_page_with_nothing_in_it_is_still_a_state() {
         let mut page = blank();
-        assert_eq!(seal(&mut page, State::Armed, STAMP, b""), 0);
-        assert_eq!(recover(&page), Some((State::Armed, STAMP, &b""[..])));
+        assert_eq!(seal(&mut page, State::Armed, STAMP, STICK, b""), 0);
+        assert_eq!(recover(&page), Some(((State::Armed), STAMP, STICK, &b""[..])));
     }
 
     /// The loader writes the address with `{:#x}` and the kernel reads it back
@@ -662,7 +854,7 @@ mod tests {
             assert_eq!(State::of(state.code()), Some(*state));
         }
         assert_eq!(State::of(0), None);
-        assert_eq!(State::of(5), None);
+        assert_eq!(State::of(STATES.len() as u32 + 1), None);
     }
 }
 
@@ -672,6 +864,8 @@ mod fault_tests {
     use super::*;
 
     const STAMP: u64 = 1_757_000_001;
+    /// One image's log-partition signature, which is what a record belongs to.
+    const STICK: Identity = [0xa5; 16];
 
     fn sample() -> Fault {
         let mut registers = [0u64; REGISTERS.len()];
@@ -705,8 +899,8 @@ mod fault_tests {
     fn a_fault_survives_the_page_it_is_sealed_into() {
         let fault = sample();
         let mut page = [0u8; BYTES];
-        assert_eq!(seal(&mut page, State::Fault, STAMP, &fault.to_bytes()), Fault::BYTES);
-        let (state, _, text) = recover(&page).expect("a sealed fault");
+        assert_eq!(seal(&mut page, State::Fault, STAMP, STICK, &fault.to_bytes()), Fault::BYTES);
+        let (state, _, _, text) = recover(&page).expect("a sealed fault");
         assert_eq!(state, State::Fault);
         assert_eq!(Fault::from_bytes(text), Some(fault));
     }
@@ -729,13 +923,43 @@ mod stamp_tests {
     extern crate std;
     use super::*;
 
+    /// One image's log-partition signature, which is what a record belongs to.
+    const STICK: Identity = [0xa5; 16];
+    /// **The defect this exists for, in the small.** A page is DRAM at a fixed
+    /// address and nothing between two operating systems clears it: on the T14
+    /// a `DONE` record survived two hours of Ubuntu and the next pass, off a
+    /// different stick, believed it. The stamp cannot tell those apart — it is
+    /// a *later* date, not an older one — so the record says what wrote it, and
+    /// a reader that is not that writer gets no record at all.
+    #[test]
+    fn a_record_belongs_to_the_stick_that_wrote_it() {
+        const OTHER: Identity = [0x5a; 16];
+        let mut page = [0u8; BYTES];
+        seal(&mut page, State::Done, 1_757_000_000, STICK, b"the last boot handed it back");
+        let (state, _, identity, text) = recover(&page).expect("a sealed record");
+        assert_eq!(state, State::Done);
+        // The reader compares; the crate only carries. What it must never do is
+        // hand back a record with somebody else's identity as though it were
+        // this reader's, which is what makes the comparison possible at all.
+        assert_eq!(identity, STICK);
+        assert_ne!(identity, OTHER);
+        assert_eq!(text, b"the last boot handed it back");
+
+        // And the identity is inside the checksum, so a record cannot be
+        // re-attributed to the stick reading it.
+        if let Some(slot) = page.get_mut(IDENTITY_AT..IDENTITY_AT + OTHER.len()) {
+            slot.copy_from_slice(&OTHER);
+        }
+        assert_eq!(recover(&page), None);
+    }
+
     /// **The stamp is inside the checksum**, so a record carried forward from an
     /// older boot cannot be re-dated into this one's -- which is the whole of
     /// what makes a stale report visible as stale rather than believed.
     #[test]
     fn a_records_date_cannot_be_changed_under_it() {
         let mut page = [0u8; BYTES];
-        seal(&mut page, State::Panic, 1_757_000_000, b"a report from an older boot");
+        seal(&mut page, State::Panic, 1_757_000_000, STICK, b"a report from an older boot");
         assert_eq!(stamp_of(&page), 1_757_000_000);
         put64(&mut page, 16, 1_757_009_999);
         assert_eq!(recover(&page), None);
@@ -749,7 +973,7 @@ mod stamp_tests {
         assert_eq!(stamp_of(&page), 0);
         let mut page = page;
         let stamp = stamp_of(&page);
-        seal(&mut page, State::Fault, stamp, &Fault::default().to_bytes());
-        assert_eq!(recover(&page).map(|(s, at, _)| (s, at)), Some((State::Fault, 0)));
+        seal(&mut page, State::Fault, stamp, STICK, &Fault::default().to_bytes());
+        assert_eq!(recover(&page).map(|(s, at, _, _)| (s, at)), Some((State::Fault, 0)));
     }
 }

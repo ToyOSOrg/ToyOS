@@ -1,9 +1,10 @@
 use core::arch::global_asm;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use alloc::alloc::{alloc_zeroed, Layout};
 
+use crate::arch::cpu;
 use crate::arch::{apic, percpu, syscall};
 use crate::clock;
 use crate::drivers::acpi::MadtInfo;
@@ -21,6 +22,16 @@ const DATA_OFFSET: usize = 0xF00;
 static AP_STARTED: AtomicU32 = AtomicU32::new(0);
 
 static ROSTER: Roster = Roster::new();
+
+/// The `rdtsc` the AP being started read on its first instruction in Rust.
+///
+/// **The whole of the TSC-trail measurement.** `clock::nanos_since_boot`
+/// subtracts one BSP-sampled `TSC_BOOT` whatever CPU asks, so a CPU whose TSC
+/// reads below the BSP's has no honest answer to give; the reading is bracketed
+/// by two BSP samples taken either side of this AP's whole bring-up, which is
+/// serialised, so a synchronised TSC lands inside the bracket by construction
+/// and a skewed one is outside it by at least the skew.
+static AP_TSC: AtomicU64 = AtomicU64::new(0);
 
 const _: () = assert!(crate::smp_roster::MAX_CPUS == crate::scheduler::MAX_CPUS);
 
@@ -200,6 +211,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     data.cr3 = boot_cr3;
     let target = crate::DirectMap::from_phys(TRAMPOLINE_PAGE + DATA_OFFSET as u64).as_mut_ptr::<TrampolineData>();
 
+    let mut bracketed = 0u32;
     for &ap_id in &madt.apic_ids {
         if ap_id == bsp_id { continue; }
 
@@ -224,6 +236,10 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         unsafe { core::ptr::write_unaligned(target, data); }
 
         AP_STARTED.store(0, Ordering::Release);
+        AP_TSC.store(0, Ordering::Release);
+        // The bracket's lower edge: taken after the previous AP committed and
+        // before this one is sent anything, so nothing this AP does precedes it.
+        let bracket_lo = cpu::rdtsc();
 
         // Both delays are spent, not waited on: nothing is polled across either.
         const AFTER_INIT: Delay =
@@ -256,6 +272,10 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
 
         // Commit only on this attempt's own token, so `0..cpu_count()` stays dense.
         if AP_STARTED.load(Ordering::Acquire) == attempt.token() {
+            let bracket_hi = cpu::rdtsc();
+            if tsc_inside(attempt.id(), bracket_lo, bracket_hi) {
+                bracketed += 1;
+            }
             ROSTER.commit(attempt, ap_id);
             log!("SMP: AP cpu{} lapic={} online", attempt.id(), ap_id);
         } else {
@@ -264,6 +284,43 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
             break;
         }
     }
+    let online = cpu_count();
+    log!(
+        "SMP: {online} of {} MADT cpus online, {bracketed} of {} APs inside the BSP's TSC bracket",
+        madt.apic_ids.len(),
+        online.saturating_sub(1),
+    );
+    crate::arch::control_regs::report(online);
+}
+
+/// Whether the AP just started read a TSC between the two the BSP took either
+/// side of its bring-up, and the record of where it read.
+///
+/// Cycles, not nanoseconds: the AP's own conversion is what is under test, and
+/// the reading is a raw `rdtsc` taken before this CPU has run `clock`'s
+/// arithmetic at all.
+fn tsc_inside(cpu_id: u32, lo: u64, hi: u64) -> bool {
+    let sample = AP_TSC.load(Ordering::Acquire);
+    let span = hi.wrapping_sub(lo);
+    if sample >= lo && sample <= hi {
+        log!("SMP: cpu{cpu_id} tsc={sample} inside the BSP's {lo}..{hi} ({span} cycles wide)");
+        return true;
+    }
+    // Spelled whole in each arm rather than with the verb as a field: the host
+    // profile holds these two words against this file's source, and a literal
+    // assembled at run time is one no reader of the source can find.
+    if sample < lo {
+        log!(
+            "SMP: cpu{cpu_id} tsc={sample} trails the BSP's {lo}..{hi} by {} cycles",
+            lo - sample
+        );
+    } else {
+        log!(
+            "SMP: cpu{cpu_id} tsc={sample} leads the BSP's {lo}..{hi} by {} cycles",
+            sample - hi
+        );
+    }
+    false
 }
 
 /// The actuator staging a non-last AP that never starts; `false` without `boot-actuators`.
@@ -272,6 +329,10 @@ fn skip_startup(id: u32) -> bool {
 }
 
 extern "C" fn ap_entry() -> ! {
+    // First, so the reading is this CPU's TSC and not a measure of what runs
+    // after it; `rdtsc` needs nothing this AP has not got out of the trampoline.
+    AP_TSC.store(cpu::rdtsc(), Ordering::Release);
+
     // Must run before `pat::init`, which restores the CR0 this call sets.
     crate::arch::control_regs::init_cr0(percpu::cpu_id());
 
@@ -304,6 +365,11 @@ extern "C" fn ap_entry() -> ! {
     // A parked AP could not take a shootdown IPI, so this flush stands in for the ones missed while spinning.
     // Must run before touching anything not self-mapped: the acquire on `released` makes the BSP's mappings visible, and this flush discards what the spin cached over them.
     crate::arch::tlb::join();
+
+    // Once this CPU is committed and about to run something: the counter and
+    // the LVT are per logical CPU, so a CPU nobody arms here is one the
+    // hard-lockup bound does not cover.
+    crate::hardlockup::arm_this_cpu();
 
     log!("CPU {me}: joining scheduler");
     process::ap_idle();

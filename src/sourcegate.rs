@@ -125,6 +125,11 @@ const BANS: &[Ban] = &[
             // leaked the same pages by never being cleared, where nothing said
             // so at all.
             ("kernel/src/mm/dma.rs", 1),
+            // `xhci::seal_shut`, and here the forget *is* the barrier: the
+            // shutdown takes the controller lock so no transfer is in flight
+            // and never gives it back so none can start, which is what the
+            // reset that follows stands on.
+            ("kernel/src/drivers/xhci/mod.rs", 1),
             // Both in `cpu.rs`'s test module, and both are the drop bomb
             // rather than a leak: `Task`'s "the only legal death is
             // `DeadTask::finalize`" is a scheduler invariant, so a test that
@@ -211,6 +216,9 @@ const BANS: &[Ban] = &[
             ("kernel/src/iommu/vtd/mod.rs", 1),
             // The export itself, and the one place the literal lives.
             ("kernel/src/mm/mod.rs", 1),
+            // One PCIe function's extended config space, by PCI 3.0 §7.2.2 and
+            // not by this kernel.
+            ("kernel/src/drivers/pci.rs", 1),
             // A PCI function's own configuration space is 4 KiB by PCIe
             // §7.2.2, not by this kernel's page size; the two agreeing here is
             // a coincidence and a claim's bound may not move with the page.
@@ -395,6 +403,14 @@ fn kernel_lines() -> Vec<(String, usize, String)> {
 
 /// The three log macros and the function they all expand to.
 const LOG_PRODUCERS: &[&str] = &["log!(", "alert!(", "boot_phase!(", "log::emit("];
+
+/// Every file whose whole contents run inside an NMI, and so may write no log
+/// record: the handler, and the hard-lockup detector it samples through. The
+/// detector's own control is not here — it stages from ordinary context, in
+/// `kernel/src/hardlockup/probe.rs`, which is why it is a file of its own — and
+/// neither is the line the arm writes, which its caller writes for it.
+const NMI_SILENT: &[&str] =
+    &["kernel/src/arch/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
 
 /// Every `enable_bus_master(` site `kernel/src` holds, by file and count.
 /// Arming DMA comes after a site's refusals — virtio parses its capability
@@ -1448,22 +1464,24 @@ mod tests {
     #[test]
     fn nmi_does_not_log() {
         let lines = kernel_lines();
-        assert!(
-            lines.iter().any(|(file, _, _)| file == "kernel/src/arch/idt/nmi.rs"),
-            "the NMI handler moved: this gate is scanning a file that is not there"
-        );
+        for file in NMI_SILENT {
+            assert!(
+                lines.iter().any(|(at, _, _)| at == file),
+                "{file} moved: this gate is scanning a file that is not there"
+            );
+        }
 
         let silent: Vec<_> = lines
             .iter()
             .filter(|(file, _, line)| {
-                file == "kernel/src/arch/idt/nmi.rs"
+                NMI_SILENT.contains(&file.as_str())
                     && LOG_PRODUCERS.iter().any(|p| code_only(line).contains(p))
             })
             .map(|(file, n, line)| format!("{file}:{n}: {}", line.trim()))
             .collect();
         assert!(
             silent.is_empty(),
-            "the NMI handler logs, and it reenters its own CPU's shard to do it:\n{}",
+            "an NMI-reached file logs, and it reenters its own CPU's shard to do it:\n{}",
             silent.join("\n")
         );
 

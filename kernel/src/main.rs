@@ -28,6 +28,8 @@ mod log;
 mod actuator;
 mod params;
 mod blackbox;
+mod deadline;
+mod hardlockup;
 mod mm;
 mod panic;
 mod panic_reboot;
@@ -280,6 +282,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // Both readings of it here: the parameter is in no reserved region, so
     // `mm::init` may hand that memory out and neither may hold a borrow.
     params::init(cmdline);
+    deadline::claim(cmdline);
     actuator::init(cmdline);
     rootfs::init(cmdline);
 
@@ -369,6 +372,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     mm::init(maps, &reserved);
     drivers::panic_console::remap();
 
+    // Before the first table is decoded for its contents: what a machine owner
+    // reads off a refusal below is which tables the firmware published at all.
+    acpi::inventory(kernel_args.rsdp_addr);
+
     // `init_bsp` loads the IDT partway through, as early as this CPU's `gs:`
     // allows: a fault in any later phase then diagnoses instead of stopping in
     // a handler the firmware left behind.
@@ -402,6 +409,9 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     clock::init_wall(century_reg, kernel_args.rtc_utc_offset());
     trace::enable();
     apic::init_timer();
+    // After both halves of what it needs: a TSC period to convert its bound
+    // with, and a timer whose every tick polls it.
+    deadline::start();
 
     boot_phase!("CPU ready", 0);
 
@@ -656,6 +666,15 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     iod::start();
 
     smp::set_ready();
+
+    // After the release, because a shootdown waits on CPUs that are not
+    // answering until it; before the idle loop, because nothing else may be
+    // running while the distribution is measured.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::tlb_shootdown_bench() {
+        arch::tlb::bench();
+    }
+
     crate::scheduler::enter_idle_loop();
 }
 
