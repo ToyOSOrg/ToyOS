@@ -16,6 +16,7 @@
 
 mod fadt;
 mod madt;
+mod resource;
 
 pub use fadt::{
     century_of, dsdt_address, iapc_boot_arch, reset_register, rtc_century, Century, Reset,
@@ -24,6 +25,7 @@ pub use fadt::{
 pub use madt::{
     madt_entries, IoApicEntry, MadtEntries, MadtEntry, MadtHalt, SourceOverride, MADT_ENTRIES,
 };
+pub use resource::{list_len, memory_windows, ResourceError, MAX_LIST_BYTES};
 
 /// Physical memory, as this decoder reads it.
 ///

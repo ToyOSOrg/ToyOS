@@ -4,8 +4,9 @@
 mod common;
 
 use common::Machine;
+use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
-    century_of, dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries,
+    century_of, list_len, memory_windows, dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries,
     reset_register, rtc_century, Century, IoApicEntry, MadtEntry, Reset, SourceOverride,
     TableError, FADT_PM1A_CNT_BLK, MADT_ENTRIES,
 };
@@ -135,4 +136,55 @@ fn the_xsdt_walk_reaches_every_entry() {
         assert_eq!(table.base(), at);
     }
     assert_eq!(find_table(m, RSDP, b"SSDT", 36).err(), Some(TableError::Absent));
+}
+
+/// Where the two firmwares' descriptor lists are put for the walk below. The
+/// address is arbitrary — nothing in a list points at itself — but the reader is
+/// bounded by the region, so a walk reading one byte past the End Tag panics
+/// rather than answering.
+const ROOT_BRIDGE: u64 = 0x7f00_0000;
+const OVMF_BRIDGE: &[u8] = include_bytes!("../fixtures/ovmf-pure-efi/root-bridge-0.bin");
+const T14_BRIDGE: &[u8] = include_bytes!("../fixtures/thinkpad-t14/root-bridge-0.bin");
+
+fn bridge_windows(bytes: &'static [u8]) -> Vec<RootBridgeWindow> {
+    let regions: &[(u64, &[u8])] = &[(ROOT_BRIDGE, bytes)];
+    let m = Machine { regions };
+    let mut out = [RootBridgeWindow::default(); 8];
+    let count = memory_windows(m, ROOT_BRIDGE, &mut out).expect("bytes a firmware answered with");
+    assert_eq!(list_len(m, ROOT_BRIDGE), bytes.len());
+    out[..count].to_vec()
+}
+
+/// `pcidev: firmware root bridge windows: mem 0xc0000000..0xc0100000,
+/// mem 0x800000000..0x800100000`, out of the bytes the loader logged on the boot
+/// that printed it.
+///
+/// The I/O and bus ranges in the same list are what make this more than a
+/// count: a decoder that took every descriptor would answer four windows here.
+#[test]
+fn the_windows_a_boot_printed_are_what_that_firmwares_own_bytes_say() {
+    assert_eq!(
+        bridge_windows(OVMF_BRIDGE),
+        [
+            RootBridgeWindow { base: 0xc000_0000, length: 0x0010_0000 },
+            RootBridgeWindow { base: 0x8_0000_0000, length: 0x0010_0000 },
+        ]
+    );
+}
+
+/// The same decode against a second firmware, whose list is the same four
+/// descriptors carrying entirely different numbers — and whose low window is
+/// the one a 32-bit BAR on that machine has to land inside.
+///
+/// The two together are what say the decoder reads fields rather than offsets
+/// that happen to hold the right values on one machine.
+#[test]
+fn a_second_firmwares_bytes_decode_to_that_machines_own_windows() {
+    assert_eq!(
+        bridge_windows(T14_BRIDGE),
+        [
+            RootBridgeWindow { base: 0xa200_0000, length: 0x1b00_0000 },
+            RootBridgeWindow { base: 0x40_0000_0000, length: 0x20_3dc0_0000 },
+        ]
+    );
 }

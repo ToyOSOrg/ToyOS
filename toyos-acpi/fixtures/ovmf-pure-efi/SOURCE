@@ -1,0 +1,28 @@
+The ACPI resource descriptors `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration`
+answered with on the one root bridge of a QEMU 11.1.0 q35 guest, under the OVMF
+this repository boots every guest with — `ovmf/OVMF_CODE-pure-efi.fd`, sha256
+9de33971d47958f42af86584b502f83256120b2482e4f7ed14db32fd68e92922, which `NOTICE`
+also names.
+
+  root-bridge-0.bin   186 bytes, off the `Root bridge: 0 (segment 0) 186 bytes:`
+                      line the bootloader writes to the 16550 before the kernel
+                      handoff, on a `Profile::Headless` boot of `tests/netcase`.
+
+The bootloader printed the bytes; nothing decoded them on the way. How far to
+print is `toyos_acpi::list_len`'s walk of the descriptor headers, and what says
+that walk was right is the file itself: the four descriptors' own declared
+lengths tile it exactly and the last two bytes are the End Tag, neither of which
+a short or a long read would leave.
+
+What the same boot's kernel then printed out of these bytes, which
+`tests/fixtures.rs` holds them to:
+
+  pcidev: firmware root bridge windows: mem 0xc0000000..0xc0100000, mem 0x800000000..0x800100000
+  pcidev: all 9 assigned memory BAR(s) are inside them
+
+Both memory ranges are narrower than what that machine decodes: q35 routes
+everything above its RAM to PCI (QEMU 11.1.0 `info mtree` shows `pci` covering
+the whole address space at priority -1, under 2 GiB of `ram-below-4g`), and the
+firmware answered with the megabyte its own allocation for the bus came to. The
+protocol's contract is the root bridge's *current* settings, so an answer is
+always inside the platform's aperture and may be far inside it.

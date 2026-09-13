@@ -1,0 +1,28 @@
+The ACPI resource descriptors `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration`
+answered with on the one root bridge of the ThinkPad T14 this repository is
+tested on, off that machine's own firmware.
+
+  root-bridge-0.bin   186 bytes, off the `Root bridge: 0 (segment 0) 186 bytes:`
+                      line in the `loader.log` the stick came back with from
+                      metal run 33 (`tests/metalcase`).
+
+As with `../ovmf-pure-efi/SOURCE`: the bootloader printed the bytes and nothing
+decoded them on the way, and what says the length was right is the file itself —
+four descriptors whose own declared lengths tile it exactly, then the End Tag.
+Each of the four also carries two accounts of its own extent, and all four agree
+(`min + len - 1 == max`).
+
+**This firmware answers the hull it has allocated, not the aperture the platform
+gave it.** The same machine's `_CRS`, as Linux reports it (`journalctl -k -b 0`,
+`pci_bus 0000:00: root bus resource ...`):
+
+  window        _CRS                         Configuration()
+  memory, low   0xa0800000-0xbfffffff        0xa2000000-0xbcffffff
+  memory, high  0x4000000000-0x7fffffffff    0x4000000000-0x603dbfffff
+  I/O           0x0000-0x0cf7, 0x0d00-0xffff 0x3000-0x3fff
+  bus           00-79                        00-79
+
+The protocol's contract is the root bridge's *current* settings (UEFI 2.10
+§14.2), so an answer is always inside the platform's aperture and may be far
+inside it. That is the direction that is safe: a BAR placed inside this range is
+inside a range the bridge decodes, on a machine where nothing else says so.

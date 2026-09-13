@@ -19,7 +19,7 @@ use uefi::{
     table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
     Event,
 };
-use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
 
 /// Every line this loader prints: the firmware's console, and the file on the
@@ -35,6 +35,7 @@ mod attempt;
 mod blackbox;
 mod bootnext;
 mod loaderlog;
+mod rootbridge;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
@@ -550,10 +551,10 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
     pml4 as u64
 }
 
-// Nine arguments because this is the handoff and they are what firmware leaves:
-// every one is moved into `KernelArgs` below and nothing else calls it.
+// Every argument is something firmware leaves behind: each is moved into
+// `KernelArgs` below and nothing else calls this.
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, root_bridge_windows: [RootBridgeWindow; MAX_ROOT_BRIDGE_WINDOWS], root_bridge_window_count: u64, system_table: SystemTable<Boot>) -> ! {
     // Pre-allocated before exiting boot services, and flat: `alloc_page` splits
     // it into 512-entry pages.
     let pt_layout = Layout::from_size_align(MAX_PAGES * 4096, 4096).unwrap();
@@ -693,6 +694,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         rtc_utc_offset_known: rtc_utc_offset.is_some() as u32,
         cmdline_addr: cmdline.as_ptr() as u64,
         cmdline_len: cmdline.len() as u64,
+        root_bridge_window_count,
+        root_bridge_windows,
     };
 
     kernel_args.boot_pml4_addr = pml4_phys;
@@ -899,9 +902,13 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Query UEFI GOP before exiting boot services
     let gop = query_gop(&system_table);
 
-    // Last of the firmware questions and for the same reason as the GOP: both
-    // answers die with Boot Services.
     let rtc_offset = rtc_utc_offset(&system_table);
+
+    // Last of the firmware questions and for the same reason as the GOP: every
+    // one of these answers dies with Boot Services.
+    let mut root_bridge_windows = [RootBridgeWindow::default(); MAX_ROOT_BRIDGE_WINDOWS];
+    let root_bridge_window_count =
+        rootbridge::windows(&system_table, &mut root_bridge_windows) as u64;
 
     // The page says a kernel is running, and `BootNext` says this loader gets the
     // machine again however that kernel ends.
@@ -914,5 +921,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, root_bridge_windows, root_bridge_window_count, system_table);
 }

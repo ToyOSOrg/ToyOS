@@ -47,11 +47,13 @@
 /// interleaving no guest test lands on.
 mod record;
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::fmt::Write;
 
 use record::Interrupt;
-use toyos_abi::boot::MemoryMapEntry;
+use toyos_abi::boot::{MemoryMapEntry, RootBridgeWindow};
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
@@ -257,7 +259,7 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 /// alike. A floor derived from BARs alone would put a holder's 2 MiB window on
 /// whatever firmware had put there instead, and the only thing that would catch
 /// it is [`Refusal::Dead`], which cannot tell unrouted space from RAM.
-pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry]) {
+pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
     let mut narrow_end = 0u64;
     let mut wide_end = 0u64;
     let mut decoded = Vec::new();
@@ -308,6 +310,53 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry]) {
         machine.wide.0,
         machine.wide.1,
     );
+    account_for(firmware, &machine.decoded);
+}
+
+/// Say what firmware answered about where its root bridges decode memory, and
+/// whether that answer accounts for the BARs the same firmware assigned.
+///
+/// **The check is what says the protocol told the truth.** Every BAR here was
+/// placed by the firmware that named these windows, so one outside all of them
+/// means the answer does not describe this machine — and an address outside
+/// every window is unrouted, which reads all-ones exactly as an absent device
+/// does.
+fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
+    if firmware.is_empty() {
+        log!(
+            "pcidev: firmware named no root bridge memory window, so nothing says which \
+             addresses below 4 GiB reach this bus at all"
+        );
+        return;
+    }
+    let mut said = String::new();
+    for window in firmware {
+        if !said.is_empty() {
+            said.push_str(", ");
+        }
+        let _ = write!(said, "mem {:#x}..{:#x}", window.base, window.end());
+    }
+    log!("pcidev: firmware root bridge windows: {said}");
+
+    let mut outside = 0;
+    for (who, base, end) in decoded {
+        if firmware.iter().any(|window| window.holds(*base, *end)) {
+            continue;
+        }
+        outside += 1;
+        log!(
+            "pcidev: requester {who:#06x}'s {base:#x}..{end:#x} is inside no window firmware named"
+        );
+    }
+    if outside == 0 {
+        log!("pcidev: all {} assigned memory BAR(s) are inside them", decoded.len());
+    } else {
+        log!(
+            "pcidev: {outside} of {} assigned memory BAR(s) are outside them, so what firmware \
+             answered does not describe this machine",
+            decoded.len()
+        );
+    }
 }
 
 /// The span above `assigned` this module may hand out, or an empty one where
