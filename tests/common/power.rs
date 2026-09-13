@@ -1289,6 +1289,85 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     Ok(())
 }
 
+/// A machine stopped between a Bulk-Only command's CBW and its data phase ends
+/// itself, and the reset that ends it drives that command to its CSW.
+///
+/// **What an emulator can prove here and what it cannot.** QEMU's mass-storage
+/// device answers a command whichever way it is left, so nothing here can show a
+/// device surviving — the T14's own stick is the only instrument for that, and
+/// `boot.usbwedge.stick_secs` is where it says so. What this arm judges is the
+/// mechanism: the machine really stopped with the device holding a CBW, and the
+/// reset path queued the data and read the status instead of resetting the port
+/// under it. [`Profile::Metal`](qemu::Profile::Metal) carries the boot stick on
+/// its xHCI, which is why the wedge has a device to be inside at all.
+pub fn usb_reset_finishes_an_open_command(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        chained(&["usb-wedge-mid-write", WEDGE_DEADLINE]),
+    );
+    let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    first.must_say(&armed_line())?;
+
+    // One capture from the first boot's handoff to the pass that reports it, so
+    // the wedge's own lines and the account read back off the page are both in
+    // it — which is why the judge below is handed it as both halves.
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    if !second.text().contains(bootlog::CHAIN_ENDS_LINE) {
+        // One monitor per socket: the reset watcher goes before the question.
+        drop(resets);
+        return Err(silent_guest(&qemu, second.text()));
+    }
+    usb_wedge_chain(&second, &second)?;
+    ended_in_a_reset(&mut resets)?;
+    drop(qemu);
+
+    eprintln!(
+        "  [power] a machine stopped between a CBW and its data phase reset itself, and the \
+         reset drove the command to its CSW"
+    );
+    Ok(())
+}
+
+/// The metal half of `usb_reset_finishes_an_open_command`: a T14 boot stopped
+/// with the boot stick holding a WRITE(10)'s CBW and nothing queued for its data
+/// phase, ended by the deadline, with the stick still there afterwards.
+///
+/// **Read against `src/metal.rs`'s own refusals and not alone.** The loop waits
+/// for the log partition by name before any judge runs, so a boot whose reset
+/// left the device wedged never reaches here — it is `Refusal::Stick`, and
+/// `stick_secs` is the number that says so. What is left for this judge is the
+/// two halves a readback can still carry: that the machine really did stop
+/// inside a command, and that the reset drove that command to its CSW rather
+/// than cutting it.
+pub fn usb_wedge_chain(kernel: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
+    // The control: the machine reached the staged write and stopped inside it.
+    // Without the second line the boot would wedge anyway — at the shutdown,
+    // holding nothing — and read back like the arm that proves the point.
+    kernel.must_say(bootlog::USB_WEDGE_STAGED)?;
+    says_nothing_of(kernel, bootlog::USB_WEDGE_MISSED)?;
+    kernel.must_say(bootlog::WEDGE_STAGED)?;
+    says_nothing_of(kernel, REBOOTING)?;
+
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
+    // What the reset did to the device it found inside a command, and the line
+    // it writes when it could not.
+    let said = after.must_say(toyos_build::metaldevices::QUIESCE_CSW)?.to_string();
+    says_nothing_of(after, toyos_build::metaldevices::QUIESCE_CUT)?;
+    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    eprintln!("  [power] {}", said.trim());
+    Ok(())
+}
+
 /// The metal half of [`boot_deadline_ends_a_wedge`]: a T14 boot that wedged on
 /// purpose ended itself, and the pass after the reset read why off the page.
 ///

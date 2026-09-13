@@ -730,6 +730,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // bound counted down in the guest, so `src/tiers.rs` carries it
     // `Why::TimerAnchored` and says what leaves the per-PR tier with it.
     ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
+    // The same bound ending the same machine with a device in its hands: the
+    // boot stick between a WRITE(10)'s CBW and its data phase. It belongs
+    // beside the row above and will be relegated there once the shards have
+    // priced it; carrying `UNMEASURED_MS` buys that one run.
+    ("usb_reset_finishes_an_open_command", Sched::Parallel, Tier::Fast),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
     // bounds counted down in the guest, so it belongs beside the row above.
@@ -1482,6 +1487,20 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs {
             arms: &[metal::once("deadlinewedge", "tests/jobcase", &["wedge-before-reset"], &[])],
             judge: |b| power::deadline_wedge_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+        },
+    ),
+    (
+        // Its own boot, and the row above's with a device in its hands: the
+        // same deadline ends the same machine, and this one is holding the boot
+        // stick between a WRITE(10)'s CBW and its data phase — the shape every
+        // boot this bench has lost a stick to. The stick coming back at all is
+        // `boot.usbwedge.stick_secs`, refused by the loop before this judge
+        // runs; what this judges is that the machine really stopped inside a
+        // command and that the reset drove it to its CSW instead of cutting it.
+        "usb_reset_finishes_an_open_command",
+        metal::Metal::Runs {
+            arms: &[metal::once("usbwedge", "tests/jobcase", &["usb-wedge-mid-write"], &[])],
+            judge: |b| power::usb_wedge_chain(&b[0].kernel(), &b[0].after_the_reset()?),
         },
     ),
     (
@@ -9732,6 +9751,9 @@ fn run_machine_test(
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
         "boot_deadline_ends_a_wedge" => {
             power::boot_deadline_ends_a_wedge(test_config, c_bins, rust_bins)
+        }
+        "usb_reset_finishes_an_open_command" => {
+            power::usb_reset_finishes_an_open_command(test_config, c_bins, rust_bins)
         }
         "hard_lockup_ends_a_deaf_cpu" => {
             power::hard_lockup_ends_a_deaf_cpu(test_config, c_bins, rust_bins)

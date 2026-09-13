@@ -146,10 +146,10 @@ pub const NVME_NO_WRITES: &[&str] = &["write=0", "io-other=0"];
 pub const LOADER_RECORDS: &[Record] = &[
     Record { about: "chain", needle: "the last boot read DONE", presence: Says },
     Record { about: "usb-quiesce", needle: QUIESCE_HEAD, presence: Says },
-    // What the stop did about transfers still outstanding when it ran. On this
-    // machine that is the difference between a stick the next boot reads and one
-    // somebody has to walk over and replug.
-    Record { about: "usb-inflight", needle: "bulk transfer", presence: Says },
+    // What the stop did about the command a device was inside when it ran. On
+    // this machine that is the difference between a stick the next boot reads
+    // and one somebody has to walk over and replug.
+    Record { about: "usb-open-command", needle: QUIESCE_COMMAND, presence: Says },
     // A kernel that died on the way to the reset seals ARMED, not DONE.
     Record { about: "no-death", needle: "died without reaching", presence: NeverSays },
 ];
@@ -157,6 +157,19 @@ pub const LOADER_RECORDS: &[Record] = &[
 /// The head of the reset's own account, as `kernel/src/drivers/xhci/stop.rs`
 /// spells it.
 pub const QUIESCE_HEAD: &str = "usb-quiesce:";
+
+/// What the stop calls the thing it settles before it touches a port. Every
+/// reset says this once, whether a device was inside one or not.
+pub const QUIESCE_COMMAND: &str = "Bulk-Only command";
+
+/// What the stop says when a device it finished a command for has answered —
+/// the one line that distinguishes a reset that drove a half-run command to its
+/// CSW from one that cut it.
+pub const QUIESCE_CSW: &str = "the device answered with a CSW of status";
+
+/// What the stop says when it could not: the device is one whose next host may
+/// not be able to enumerate it.
+pub const QUIESCE_CUT: &str = "so this reset cuts the command";
 
 /// What the shutdown did, out of its summary line.
 ///
@@ -405,7 +418,7 @@ mod tests {
         "ToyOS Bootloader 1.0\n\
          Black box: the last boot read DONE, so it handed the machine back on purpose and this \
          chain ends here\n\
-         | usb-quiesce: no bulk transfer was outstanding, so this reset cuts none\n\
+         | usb-quiesce: no Bulk-Only command was open, so this reset cuts none\n\
          | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
          | usb-quiesce: 2/2 disk cache(s) flushed, 1 with no cache to flush, \
          5/5 connected port(s) reset, 2/2 controller(s) halted, 2 reset, \
@@ -500,17 +513,17 @@ mod tests {
             .join("\n");
         assert_eq!(
             about(unmet(&no_quiesce, &a_good_boot())),
-            ["usb-quiesce", "usb-inflight", "usb-quiesce"]
+            ["usb-quiesce", "usb-open-command", "usb-quiesce"]
         );
-        // A stop that touched the registers without waiting out what it had
-        // rung: every other line of the account is unchanged, and this is the
-        // one that says whether a device was cut mid-command.
+        // A stop that touched the registers without settling the command a
+        // device was inside: every other line of the account is unchanged, and
+        // this is the one that says whether a device was cut mid-command.
         let cut = a_good_loader()
             .lines()
-            .filter(|l| !l.contains("bulk transfer"))
+            .filter(|l| !l.contains(QUIESCE_COMMAND))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(about(unmet(&cut, &a_good_boot())), ["usb-inflight"]);
+        assert_eq!(about(unmet(&cut, &a_good_boot())), ["usb-open-command"]);
         let left = a_good_loader().replace("2/2 disk", "1/2 disk");
         assert_eq!(about(unmet(&left, &a_good_boot())), ["usb-quiesce"]);
         let died = a_good_loader().replace(
@@ -555,5 +568,18 @@ mod tests {
             .filter(|line| line.contains(" = -"))
             .count();
         assert_eq!(arms, Refused::ALL.len(), "{} declares {arms} refusals", path.display());
+    }
+
+    /// **The lines this crate judges a reset by are the kernel's own**, and
+    /// nothing links the two: a reword at the site that did not come here would
+    /// leave every metal readback passing on a predicate that matches nothing.
+    #[test]
+    fn the_kernel_writes_the_quiesce_lines_the_host_reads() {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("kernel/src/drivers/xhci/stop.rs");
+        let source = std::fs::read_to_string(&at).expect("the reset path");
+        for needle in [QUIESCE_HEAD, QUIESCE_COMMAND, QUIESCE_CSW, QUIESCE_CUT] {
+            assert!(source.contains(needle), "{} does not write {needle:?}", at.display());
+        }
     }
 }

@@ -243,3 +243,35 @@ fn check(index: usize, disk: &Handle) {
         usb_storage::healthy(index)
     );
 }
+
+/// Leave this machine wedged inside one Bulk-Only command: the device holding a
+/// WRITE(10)'s CBW with nothing queued for its data phase, every CPU spinning
+/// with interrupts on, and only the boot deadline left to end it.
+///
+/// **The stimulus for the one state no ordinary boot reaches.** A shutdown
+/// reaches its sync with nothing dirty on most boots, so the write the wedge is
+/// taken inside is issued here rather than waited for.
+///
+/// **The block is read first and written back byte for byte.** The write is
+/// then idempotent however much of it the reset completes, which is what lets a
+/// control that deliberately cuts a write run against the machine's own boot
+/// stick; block 0 is the disk's, outside every partition a boot mounts, and
+/// nothing else in this kernel writes it.
+#[cfg(feature = "boot-actuators")]
+pub fn wedge_inside_a_write() {
+    let Some((disk, _)) = usb_storage::handle(0) else {
+        log!("usb-wedge: no USB disk on this machine, so there is no command to wedge inside");
+        return;
+    };
+    let mut block = vec![0u8; BLOCK];
+    if disk.lock().read_blocks(0, 1, &mut block).is_err() {
+        log!("usb-wedge: disk 0 would not give up block 0, so no write can be staged from it");
+        return;
+    }
+    log!("usb-wedge: rewriting disk 0 block 0 with the {BLOCK} B just read from it, and \
+         stopping every CPU between its CBW and its data phase");
+    crate::drivers::xhci::arm_mid_write_wedge();
+    let _ = disk.lock().write_blocks(0, 1, &block);
+    log!("usb-wedge: the write completed, so no CPU was stopped inside it and this boot ends \
+         itself the ordinary way");
+}

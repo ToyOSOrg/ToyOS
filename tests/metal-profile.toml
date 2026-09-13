@@ -454,6 +454,31 @@ ceiling = 2000
 ceiling_from = "twice the sample period `kernel/src/hardlockup`'s SAMPLE_NS states, 1000 ms: a CPU is found stuck at the first sample after its bound, so one period is the lateness and a second is the widest a delayed one costs"
 measured = 0
 
+# --- the boot that stops itself with the stick in its hands ---
+# `usbwedge` is `deadlinewedge` with a device inside a command: the boot stick
+# holds a WRITE(10)'s CBW and nothing has been queued for its data phase when
+# the deadline resets the machine. Priced against the same bound, and owing one
+# number the other two do not — `stick_secs`, which on this arm is the ruling
+# itself. No reading on any row: the machine has not run this boot.
+
+[[number]]
+name = "boot.usbwedge.complete_ms"
+unit = "ms"
+ceiling = 120000
+ceiling_from = "as boot.deadlinewedge.complete_ms, toyos_tco::WEDGE_BOUND_MS — the same bound ends this machine and the runner never reaches its own"
+
+[[number]]
+name = "boot.usbwedge.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs — the same wait: this boot ends itself at the same bound and then costs the same firmware, loader and Ubuntu as any other"
+
+[[number]]
+name = "boot.usbwedge.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.deadlinewedge.stick_secs. On this arm it is not one number among several but the ruling itself: the machine is reset with the stick between a CBW and its CSW, and a stick the next host cannot enumerate is what `xhci::stop::settle_commands` exists to prevent"
+
 # --- what one member of a job list may cost this machine ---
 # **The number the suite sizes its lists by, and judges them against.** The
 # runner's bound (`toyos_tco::JOB_BOUND_MS`) runs from boot and ends the whole

@@ -52,6 +52,14 @@ fn quiesce(last: &str) {
     if crate::actuator::wedge_before_reset() {
         crate::deadline::stage_a_wedge();
     }
+    // The same shape with a device left inside a Bulk-Only command, which is
+    // what a boot that hangs during stick I/O leaves behind and what the reset's
+    // own account is then judged on. Here too, so the wedge is a boot that ran
+    // its job list: the deliberate write it is taken inside is the actuator's.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_wedge_mid_write() {
+        crate::usb_gate::wedge_inside_a_write();
+    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::drivers::watchdog::disarm();
     log!("Syncing filesystems...");
