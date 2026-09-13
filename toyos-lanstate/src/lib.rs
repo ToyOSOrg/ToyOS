@@ -50,9 +50,8 @@ impl State {
         out
     }
 
-    /// The answer as the job reads it. **A frame of any other length is not an
-    /// answer at all**, refused where the length is read rather than here: this
-    /// takes the bytes as a whole answer and so cannot fail.
+    /// The answer as the job reads it. A frame of any other length is refused
+    /// where the length is read, so this takes a whole answer and cannot fail.
     pub fn decode(bytes: &[u8; ANSWER_LEN]) -> Self {
         let mut mac = [0u8; 6];
         mac.copy_from_slice(&bytes[..6]);

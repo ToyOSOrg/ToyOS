@@ -316,9 +316,8 @@ mod tests {
     }
 
     /// Every number `toyos::net` puts in an IPC header: every variant of its
-    /// `#[repr(u32)]` enums. A line this scan cannot read is an error and never
-    /// a skip, because a word it walked past is one the collision claim above
-    /// was never made against.
+    /// `#[repr(u32)]` enums. A line this scan cannot read is an error and not a
+    /// skip — a word walked past is one the claim above was never made against.
     fn sdk_words(source: &str) -> Result<Vec<u32>, String> {
         let mut words = Vec::new();
         for tail in source.split("#[repr(u32)]").skip(1) {
@@ -336,8 +335,7 @@ mod tests {
     }
 
     /// One variant's discriminant, in every notation Rust spells an integer
-    /// literal in, or `None` where it is not an explicit literal: an implicit
-    /// discriminant and a path are neither.
+    /// literal in; `None` for an implicit discriminant, a path or an expression.
     fn variant(line: &str) -> Option<u32> {
         let value = line.strip_suffix(',')?.split_once(" = ")?.1.trim().replace('_', "");
         let (radix, rest) = match value.get(..2) {
