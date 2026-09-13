@@ -1362,7 +1362,7 @@ fn glyph_char(byte: u8) -> u8 {
 
 /// A cell with no ink at all: ground across it. What a character outside the
 /// font would draw, which [`glyph_char`] does not produce.
-const NO_INK: [u8; GLYPH_H] = [0; GLYPH_H];
+static NO_INK: [u8; GLYPH_H] = [0; GLYPH_H];
 
 /// The 16 rows the font draws [`glyph_char`]'s answer with; one mapping, so
 /// [`glyph_ink`] cannot disagree with the draw.
