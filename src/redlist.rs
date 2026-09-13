@@ -2654,9 +2654,14 @@ pub const KNOWN_RED: &[Red] = &[
                cannot tell a slow host from a broken measurement. **Not about the diff it \
                was found on**, two issue files and a tests/CLAUDE.md bullet (PR #150)",
         evidence: "PR #150 run 32334225614, job 96320634405 (`guest (5)`), 2026-08-20; the \
-                   dev-host sighting the same night is in the source issue",
+                   dev-host sighting the same night is in the source issue. Seen again on a \
+                   doc-only branch: PR #451 run 34761663167, job 103735485106 (`guest (10)`), \
+                   2026-09-13 — `munmap returned in 19584ns with the last CPU answering \
+                   20000000ns late`, ALONE: GREEN in the same job; CI has one guest per \
+                   machine, so this one is not the load class and is filed as a kernel \
+                   defect at issues/kernel/a-shootdown-red-on-ci-is-not-a-slow-host.md",
         source: "issues/build/parallel-tests-red-under-other-suites.md",
-        measured: "2026-08-20",
+        measured: "2026-09-13",
     },
     // ---------------------------------------------------------------------
     // `wt/toyos-purecrates`, dev host, 2026-08-18: three full `cargo test` runs
@@ -3541,9 +3546,16 @@ pub const KNOWN_RED: &[Red] = &[
                KVM, native x86-64 sample never showed; alone: 2517 passes, p50 < 131072 ns, \
                31 over, a different assertion, so the divergence is itself the finding",
         evidence: "`ci` run 33973213660, `guest (8)`, 2026-09-05, on pkg-install-file a691b3cf, \
-                   a branch that touches no scheduler code; the shard's other 21 names passed",
+                   a branch that touches no scheduler code; the shard's other 21 names passed. \
+                   Seen again: `ci` run 34768854940, `guest (11)`, 2026-09-13, the merge queue's \
+                   run for PR #448 (host-bridge-abi, no scheduler code): `cpu0: 3919 passes, p50 < \
+                   131072 ns, p90 < 262144 ns, p99 < 262144 ns, max 2487630 ns, 51 over the 200000 \
+                   ns budget`, ALONE: GREEN in the same job; the red dequeued the pull request. Two \
+                   crossings in eight days on a population the sample said had none is the sample \
+                   that moved, filed at \
+                   issues/build/the-pass-cost-gates-ci-sample-is-eight-days-stale-twice.md",
         source: "tests/toyos.rs",
-        measured: "2026-09-05",
+        measured: "2026-09-13",
     },
     Red {
         test: "leak_rollback_selftest",
