@@ -1837,13 +1837,17 @@ struct ResetPath {
     barrier: &'static str,
 }
 
-/// What every path's account has to say about the transfers this kernel had
-/// rung before it touched the first register.
+/// What every path's account has to say about the command a device was inside
+/// before it touched the first register.
 ///
 /// **On every path and not on one**, since the device a cut costs is the same
-/// device whichever bound reached the reset. Reverting `settle_transfers` makes
+/// device whichever bound reached the reset. Reverting `settle_commands` makes
 /// the sentence absent and fails all four arms by name.
-const SETTLED_TRANSFERS: &str = "bulk transfer";
+///
+/// Taken from the one declaration rather than spelled again here: a second
+/// spelling is a predicate that goes on passing after the kernel stops writing
+/// the line, which is exactly what it did.
+use toyos_build::metaldevices::QUIESCE_COMMAND as SETTLED_COMMANDS;
 
 const TOOK_THE_LOCK: &str = "the controller lock was held from before the log volume's";
 const NO_BARRIER: &str = "no barrier was taken, so this reset is not the shutdown's";
@@ -1973,13 +1977,13 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
             arm.barrier
         ));
     }
-    // And the wait that has to happen before the first register on every path:
-    // a stop that cut a transfer without waiting it out is what leaves a device
-    // its next host cannot enumerate.
-    if !after.text().contains(SETTLED_TRANSFERS) {
+    // And the settle that has to happen before the first register on every
+    // path: a stop that cut a command between its CBW and its CSW is what
+    // leaves a device its next host cannot enumerate.
+    if !after.text().contains(SETTLED_COMMANDS) {
         return Err(format!(
-            "{path}: the account says nothing about a {SETTLED_TRANSFERS}, so this stop reached \
-             a controller's registers without waiting out what this kernel had rung"
+            "{path}: the account says nothing about a {SETTLED_COMMANDS}, so this stop reached \
+             a controller's registers without settling the command a device was inside"
         ));
     }
     nothing_after_the_last_word(after.text()).map_err(|why| format!("{path}: {why}"))?;
