@@ -112,8 +112,7 @@ pub struct KernelArgs {
     pub root_bridge_windows: [RootBridgeWindow; MAX_ROOT_BRIDGE_WINDOWS],
 }
 
-/// The most windows the loader will carry: four memory windows on each of
-/// sixteen root bridges.
+/// The most windows the loader will carry.
 pub const MAX_ROOT_BRIDGE_WINDOWS: usize = 64;
 
 /// One memory window a root bridge decodes.
