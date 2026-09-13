@@ -1,9 +1,5 @@
 //! The cable: netd taking this machine's address from the network, and the T14
 //! answering the development host on it.
-//!
-//! Every line read here is a record. On the T14 a userland `println!` reaches
-//! `Backend::None`, so what crosses to the stick is the kernel's log — into
-//! which netd's `say!` writes, being a `write` to a console object.
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -23,6 +19,16 @@ use super::serial;
 /// boot is under.
 pub const CONFIG: &str = "tests/lancase";
 pub const BOOT: &str = "lancase";
+
+/// The same boot with netd's `--provoke-message` armed: the arm that says
+/// whether a message the card raises reaches a CPU at all, which no reading of
+/// the shipping boot separates from a card that raised none.
+pub const ICS_CONFIG: &str = "tests/lanicscase";
+pub const ICS_BOOT: &str = "lanicscase";
+
+/// The kernel's own record that a claim's vector took a message, which is what
+/// the armed boot is for.
+const FIRST_MESSAGE: &str = "took its first message";
 
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
@@ -45,6 +51,24 @@ const ID: &str = "8086:15fc";
 /// The PCI function that card is, as `/sys/bus/pci/devices` spells it: the
 /// cable the metal loop reaches this boot over while it runs.
 pub const NIC: &str = "0000:00:1f.6";
+
+/// The armed boot's judge: netd asked the part for a message, so the kernel's
+/// own record of the claim taking one says whether delivery works — whatever
+/// the PHY did about a link.
+pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let kernel = back.kernel();
+    let text = kernel.text();
+    match text.lines().find(|l| l.contains(FIRST_MESSAGE)) {
+        Some(line) => {
+            eprintln!("  [lan] {}", line.trim());
+            Ok(())
+        }
+        None => Err(format!(
+            "netd wrote one cause to ICS on this boot and no `{FIRST_MESSAGE}` record \
+             followed, so nothing this function raises reaches a CPU"
+        )),
+    }
+}
 
 /// The T14's judge: the claim, the card, the lease, and the host's own ping.
 pub fn on_metal(back: &metal::Readback) -> Result<(), String> {

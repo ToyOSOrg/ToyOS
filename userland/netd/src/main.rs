@@ -47,10 +47,21 @@ mod virtio_net;
 /// driver takes both because the register file is the same one, and each row
 /// names which part it is because below that file they are not.
 const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, Card::i219),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, Card::e82574),
+    (PciId { vendor: 0x8086, device: 0x15fc }, |c| Card::intel(c, toyos_i219::Part::I219)),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, |c| Card::intel(c, toyos_i219::Part::E82574)),
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
+
+/// The actuator that makes the card raise one interrupt on purpose, so a boot
+/// whose only reading of the interrupt path is a count of messages can tell a
+/// part nothing made speak from a message that reached no CPU.
+///
+/// **Nothing a shipped machine runs arms it**: the argument comes from the
+/// `[programs.netd] args` row of a boot config, and the one config that carries
+/// it is `tests/lanicscase`. A boot that always raised a message would make the
+/// kernel's first-message record read the same on a working card and a dead
+/// one.
+const PROVOKE_MESSAGE: &str = "--provoke-message";
 
 use toyos::endow;
 use toyos::Pipe;
@@ -86,23 +97,11 @@ impl Card {
         panic!("netd: the NIC this program was given is not one it can drive — {why}")
     }
 
-    /// **Which part, from the row the claim was minted for.** One driver, two
-    /// pieces of silicon: the register file is the same one and what is below
-    /// it is not, so the answer comes from the table above and never from a
-    /// register.
     fn intel(claim: toyos::PciDev, part: toyos_i219::Part) -> Self {
         match i219::Nic::open(claim, part) {
             Ok(nic) => Self::Intel(nic),
             Err(why) => Self::undrivable(why),
         }
-    }
-
-    fn i219(claim: toyos::PciDev) -> Self {
-        Self::intel(claim, toyos_i219::Part::I219)
-    }
-
-    fn e82574(claim: toyos::PciDev) -> Self {
-        Self::intel(claim, toyos_i219::Part::E82574)
     }
 
     fn virtio(claim: toyos::PciDev) -> Self {
@@ -124,6 +123,16 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.claim(),
             Self::Intel(nic) => nic.claim(),
+        }
+    }
+
+    /// [`PROVOKE_MESSAGE`], carried to the driver that has one.
+    fn provoke_message(&self) {
+        match self {
+            Self::Virtio(_) => {
+                say!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio")
+            }
+            Self::Intel(nic) => nic.provoke_message(),
         }
     }
 
@@ -1315,6 +1324,10 @@ fn main() {
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
     let nic = open(claim);
+    if std::env::args().any(|arg| arg == PROVOKE_MESSAGE) {
+        say!("netd: {PROVOKE_MESSAGE}: the next message this claim takes is one netd asked for");
+        nic.provoke_message();
+    }
     let mac = nic.mac();
     let mut device = DmaNic { nic };
 

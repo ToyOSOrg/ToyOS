@@ -159,9 +159,6 @@ pub mod extcnf {
     /// MDIO SW Ownership (bit 5) — the software request, and the only one of
     /// the three this driver may write.
     pub const MDIO_SW_OWNERSHIP: u32 = 1 << 5;
-    /// MDIO HW Ownership (bit 6), read-only: the part's own request, which
-    /// §4.5.2 says it makes "while loading the extended configuration area".
-    pub const MDIO_HW_OWNERSHIP: u32 = 1 << 6;
     /// MDIO MNG Ownership (bit 7), read-only: the manageability request, which
     /// on a part whose PHY the Management Engine shares is the one that holds.
     pub const MDIO_MNG_OWNERSHIP: u32 = 1 << 7;

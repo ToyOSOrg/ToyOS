@@ -23,12 +23,6 @@
 //!   Management Engine, and `STATUS.LU` is the MAC's own report of the same
 //!   link: §4.6.3.2 says it "Reflects link indication (LINK) from the PHY
 //!   qualified with CTRL.SLU". A second reader of one fact is what disagrees.
-//!
-//! # Every wait here is bounded and none of them is the datasheet's
-//!
-//! Neither document gives a time for the ownership handshake or for an MDI
-//! transaction, so both deadlines below are this driver's own and each is far
-//! past what the hardware can take.
 
 use crate::regs::{self, extcnf, mdic};
 use crate::{Clock, Registers};
@@ -48,6 +42,14 @@ const OWNERSHIP_DEADLINE_NANOS: u64 = 20_000_000;
 /// a management clock of a few megahertz, so a millisecond is two orders past
 /// it.
 const MDI_DEADLINE_NANOS: u64 = 1_000_000;
+
+/// §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
+/// attempting to access MDIO registers."
+///
+/// Measured from the MAC reset this driver issued, because the LAN Connected
+/// Device is what that reset reaches and nothing in either document lets a
+/// driver observe whether it did.
+pub(crate) const LCD_RESET_DELAY_NANOS: u64 = 10_000_000;
 
 /// §9.3: the I219's registers "are spread over two PHY addresses 01, 02, where
 /// general registers are located under PHY address 01 and the PHY specific
@@ -105,9 +107,17 @@ pub mod control {
     pub const AUTONEG_ENABLE: u16 = 1 << 12;
     /// Loopback (bit 14), the "master enable for digital and analog loopback".
     pub const LOOPBACK: u16 = 1 << 14;
-    /// Reset (bit 15). Named so the mask below can clear it and for no other
-    /// reason: this driver never writes it.
+    /// Reset (bit 15). §9.5.2.1: "Writing a 1b to this bit causes immediate PHY
+    /// reset."
     pub const RESET: u16 = 1 << 15;
+
+    /// §9.5.2.1's own defaults for every field a write of this register may not
+    /// change, and §9.1's rule that they must be carried: Speed Selection (MSB,
+    /// bit 6) and Duplex Mode (bit 8) come up 1b, Collision Test (bit 7) and
+    /// Speed Select (LSB, bit 13) come up 0b, and bits 5:0 are "Reserved.
+    /// Always set to 0x0".
+    pub const CARRIED_MASK: u16 = 0x21FF;
+    pub const CARRIED_DEFAULT: u16 = (1 << 6) | (1 << 8);
 }
 
 /// Status register bits (§9.5.2.2).
@@ -139,10 +149,6 @@ pub mod advertise {
 pub mod control_1000t {
     /// Advertise 1000BASE-T Full-Duplex Capability (bit 9).
     pub const FULL: u16 = 1 << 9;
-    /// Advertise 1000BASE-T Half-Duplex Capability (bit 8). §9.5.2.10 says of
-    /// it: "1000BASE-T half-duplex not supported." Named so it can be asserted
-    /// clear and never set.
-    pub const HALF: u16 = 1 << 8;
 }
 
 /// Custom Mode Control bits (§9.5.3.1).
@@ -151,6 +157,12 @@ pub mod custom_mode {
     /// access", and §9.2 says access "should be done only when bit 10 in page
     /// 769 register 16 is set".
     pub const REDUCED_MDIO_FREQUENCY: u16 = 1 << 10;
+
+    /// §9.5.3.1's defaults for the two reserved fields either side of it —
+    /// 0x180 at bits 9:0 and 0x04 at bits 15:11 — which §9.1 says a write must
+    /// carry.
+    pub const CARRIED_MASK: u16 = !REDUCED_MDIO_FREQUENCY;
+    pub const CARRIED_DEFAULT: u16 = 0x2180;
 }
 
 /// §9.5.2.3's default for PHY Identifier 1: "the PHY identifier composed of bits
@@ -178,10 +190,11 @@ pub enum PhyRefusal {
     /// §9.5.2.3's identifier is not Intel's at either of §9.3's two PHY
     /// addresses, so nothing this driver knows the register map of answered.
     Identity { specific: u32, general: u32 },
-    /// The part does not have the PHY this file is about. §3.2.1 puts the
-    /// 82574's own PHY on the controller's die, reached over an interface this
-    /// register map does not describe.
-    NotOnThisPart,
+    /// The part's PHY is not the one §9 describes. §10.2.2.7 addresses the
+    /// 82574's own as "1 = Gigabit PHY. 2 = PCIe PHY" and it has neither §9.3's
+    /// page register nor §9.5.3's paged registers, so this sequence would be
+    /// aimed at registers that are not there.
+    NotThisRegisterMap,
 }
 
 impl core::fmt::Display for PhyRefusal {
@@ -208,9 +221,11 @@ impl core::fmt::Display for PhyRefusal {
                  {general:#010x} at {GENERAL:02}, and Intel's own OUI makes its high word \
                  {IDENTIFIER_HIGH_INTEL:#06x} wherever the PHY is"
             ),
-            Self::NotOnThisPart => {
-                write!(f, "this part's PHY is on the controller's own die and not behind MDIC")
-            }
+            Self::NotThisRegisterMap => write!(
+                f,
+                "this part's PHY answers MDIC under the 82574's own addressing and not the \
+                 I219 register map this bring-up is written from"
+            ),
         }
     }
 }
@@ -225,6 +240,12 @@ pub struct Phy {
     /// own name for itself, which is what a reader identifies the silicon by.
     pub id: u32,
     /// §9.5.2.2's Link Status, read after the latch was cleared.
+    ///
+    /// **This is the instant the restart happened at, not a settled link.**
+    /// §9.5.2.1's restart of auto-negotiation is microseconds old when this is
+    /// read and no 1000BASE-T negotiation completes in one, so both this and
+    /// [`Self::negotiated`] are ordinarily false on a cable that comes up. The
+    /// settled link is `STATUS.LU`, which the passes after the bring-up read.
     pub up: bool,
     /// §9.5.2.2's Auto-Negotiation Complete.
     pub negotiated: bool,
@@ -248,10 +269,16 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// respective bit [...] The requesting agent is granted access when the
     /// same bit is read as 1b (such as, access is not granted as long as the
     /// bit is 0b)."
+    ///
+    /// So the request is written once and then polled: a second write is a
+    /// second request to an arbiter that already holds this one.
     fn claim(regs: &'a R, clock: &'a C) -> Result<Self, PhyRefusal> {
         let started = clock.nanos();
+        // A read-modify-write: every other field of this register is the
+        // Management Engine's or the part's own configuration.
+        let held = regs.read(regs::EXTCNF_CTRL);
+        regs.write(regs::EXTCNF_CTRL, held | extcnf::MDIO_SW_OWNERSHIP);
         loop {
-            regs.write(regs::EXTCNF_CTRL, extcnf::MDIO_SW_OWNERSHIP);
             let held = regs.read(regs::EXTCNF_CTRL);
             if held & extcnf::MDIO_SW_OWNERSHIP != 0 {
                 return Ok(Self { regs, clock });
@@ -261,7 +288,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
                 // The request itself is withdrawn, or §4.5.2's "at most only
                 // one bit is 1b" would be a bit this driver left standing for a
                 // grant it is no longer waiting on.
-                regs.write(regs::EXTCNF_CTRL, 0);
+                regs.write(regs::EXTCNF_CTRL, held & !extcnf::MDIO_SW_OWNERSHIP);
                 return Err(PhyRefusal::OwnershipBusy { held_by: held, after_nanos: waited });
             }
         }
@@ -272,8 +299,9 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// §10.2.2.7 gives the same shape to a read and a write: the command word
     /// carries `Ready` clear — "it should be reset to 0b by software at the
     /// same time the command is written" — and the part sets it "at the end of
-    /// the MDI transaction". The `Error` bit is read on both, because a part
-    /// that could not complete one has nothing to say about the other.
+    /// the MDI transaction". `Error` is read first, because a transaction the
+    /// part could not complete still ends and still sets `Ready` over a data
+    /// field that is not what the PHY said.
     fn transact(&self, phy: u8, reg: u8, op: u32, data: u16) -> Result<u16, PhyRefusal> {
         let command = (data as u32 & mdic::DATA_MASK)
             | ((reg as u32 & mdic::ADDRESS_MASK) << mdic::REGADD_SHIFT)
@@ -326,10 +354,8 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// **The document does not settle this and the part does.** §9.3's prose
     /// says registers 0 to 15 at PHY address 01 "are identical in all the pages
     /// and are the IEEE defined registers"; Table 9-1 places Control, Status
-    /// and the identifier at PHY address 02. The identifier is the register the
-    /// part names itself in, so it is asked rather than the ambiguity guessed
-    /// at — and an address nothing drives cannot answer Intel's OUI whatever is
-    /// on the bus.
+    /// and the identifier at PHY address 02. Table 9-1's address is asked first
+    /// because a table of exact placements is the more specific statement.
     fn identify(&self) -> Result<(u8, u32), PhyRefusal> {
         let mut answered = [0u32; 2];
         for (at, addr) in [SPECIFIC, GENERAL].into_iter().enumerate() {
@@ -346,12 +372,16 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
 
 impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
     fn drop(&mut self) {
-        self.regs.write(regs::EXTCNF_CTRL, 0);
+        let held = self.regs.read(regs::EXTCNF_CTRL);
+        self.regs.write(regs::EXTCNF_CTRL, held & !extcnf::MDIO_SW_OWNERSHIP);
     }
 }
 
 /// Take the MDIO interface, make the PHY able to bring a link up, and give the
 /// interface back.
+///
+/// `reset_at` is when `CTRL.RST` was written, which §9.2's delay below is
+/// measured from.
 ///
 /// The order is the two documents': the frequency §9.2 requires before any
 /// other access, the identifier that says which address the accesses reach the
@@ -364,7 +394,13 @@ impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
 pub(crate) fn bring_up<R: Registers, C: Clock>(
     regs: &R,
     clock: &C,
+    reset_at: u64,
 ) -> Result<Phy, PhyRefusal> {
+    // §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
+    // attempting to access MDIO registers." A wait and not a poll: the document
+    // offers nothing to read that shortens it.
+    while clock.nanos().saturating_sub(reset_at) < LCD_RESET_DELAY_NANOS {}
+
     let mdi = Owned::claim(regs, clock)?;
 
     // §9.2: "Access using MDIO should be done only when bit 10 in page 769
@@ -380,8 +416,9 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
     mdi.write(addr, reg::ADVERTISE, advertise::WANTED)?;
     mdi.write(addr, reg::CONTROL_1000T, control_1000t::FULL)?;
 
-    // A read-modify-write, because every bit of §9.5.2.1 this driver does not
-    // name is the PHY's own configuration and clearing one is configuring it.
+    // A read-modify-write, because §9.1 says "other fields in the same 16-bit
+    // register must be loaded with their default values" and what is in them is
+    // the configuration the integrated LAN controller left.
     let control = mdi.read(addr, reg::CONTROL)?;
     let wanted = (control
         & !(control::POWER_DOWN | control::ISOLATE | control::LOOPBACK | control::RESET))

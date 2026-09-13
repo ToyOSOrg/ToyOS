@@ -495,20 +495,21 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // to 1b" — a driver that wrote a value it composed itself would clear
         // them.
         let held = regs.read(regs::CTRL);
-        // Read before the write and not after it, because what the two bounds
-        // below are measured from is the reset itself.
-        let started = clock.nanos();
+        // Read before the write and not after it, because the reset itself is
+        // what every bound below is measured from — §10.2.2.1's two and §9.2's
+        // delay before the first MDIO access.
+        let reset_at = clock.nanos();
         regs.write(regs::CTRL, held | ctrl::RST);
         // The settle is a wait and not a poll: §10.2.2.1 owes the microsecond
         // to "attempting to check to see if the bit has cleared or attempting
         // to access (read or write) any other device register" alike, so there
         // is nothing this driver may read to shorten it.
-        while clock.nanos().saturating_sub(started) < RESET_SETTLE_NANOS {}
+        while clock.nanos().saturating_sub(reset_at) < RESET_SETTLE_NANOS {}
         loop {
             if regs.read(regs::CTRL) & ctrl::RST == 0 {
                 break;
             }
-            let waited = clock.nanos().saturating_sub(started);
+            let waited = clock.nanos().saturating_sub(reset_at);
             if waited >= RESET_DEADLINE_NANOS {
                 return Err(Refusal::ResetUnfinished { after_nanos: waited });
             }
@@ -542,13 +543,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
 
         // §4.6.3.1: "Refer to the PHY documentation for the initialization and
         // link setup steps. The device driver uses the MDIC register to
-        // initialize the PHY and setup the link." On a part whose PHY is on the
-        // controller's own die there is no such documentation to refer to and
-        // no PHY behind `MDIC` to reach, so the work is refused by name rather
-        // than aimed at whatever `0x00020` is there.
+        // initialize the PHY and setup the link." The PHY documentation this
+        // driver has is the I219's, and §10.2.2.7 addresses the 82574's own PHY
+        // under a scheme of its own — so the sequence is refused by name on the
+        // part it was not written from.
         let phy = match part {
-            Part::I219 => phy::bring_up(&regs, &clock),
-            Part::E82574 => Err(phy::PhyRefusal::NotOnThisPart),
+            Part::I219 => phy::bring_up(&regs, &clock, reset_at),
+            Part::E82574 => Err(phy::PhyRefusal::NotThisRegisterMap),
         };
 
         // §10.2.2.1: `SLU` is what lets the MAC see the PHY's link at all;
@@ -633,19 +634,24 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // is a ring to answer it with.
         nic.regs.write(regs::IMS, cause::ENABLED | cause::ENABLED_MSIX);
 
-        // §10.2.4.4: `ICS` sets a cause as if the event had happened, so the
-        // message that follows this write is one this driver asked for.
-        //
-        // **A count of no messages is two facts** — a part nothing made speak,
-        // and a message that reached no CPU — and on a machine whose only
-        // reading of either is that count, nothing else separates them. `LSC`
-        // is the cause written because acting on it is re-reading `STATUS`,
-        // which the next pass does anyway.
-        nic.regs.write(regs::ICS, cause::LSC);
-
         nic.opened_at = nic.clock.nanos();
         nic.refresh_link();
         Ok(nic)
+    }
+
+    /// Raise one enabled cause on purpose, so the next message the claim takes
+    /// is one this driver asked for.
+    ///
+    /// **Nothing on a shipping path calls this.** §10.2.4.4's `ICS` sets a
+    /// cause as if the event had happened, which is what separates a part
+    /// nothing made speak from a message that reached no CPU on a machine whose
+    /// only reading of either is a count of messages. A driver that did it
+    /// every boot would make that count say the same thing on a working card
+    /// and on a dead one, so the caller arms it and [`Self::open`] does not.
+    /// `LSC` is the cause, because acting on it is re-reading `STATUS`, which
+    /// the next pass does anyway.
+    pub fn provoke_message(&self) {
+        self.regs.write(regs::ICS, cause::LSC);
     }
 
     /// A register wrote what it was told, so a window that is not this register

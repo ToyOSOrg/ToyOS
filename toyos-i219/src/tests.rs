@@ -987,42 +987,31 @@ fn a_seeded_workload_loses_nothing_and_invents_nothing() {
         assert_eq!(counters.split, 0, "{}", nic.because("a frame was split"));
     }
 }
-
 // --- the PHY behind MDIC ---
 
 /// **The test the branch exists for.** With a partner on the wire and the PHY
-/// where a part whose Management Engine drives it leaves one — powered down and
-/// isolated — the bring-up has to satisfy every clause of §9 the stub holds it
-/// to before the model raises a link at all.
+/// where a part whose Management Engine drives it leaves one — powered down,
+/// isolated and advertising what §6.1.5's battery saver left — the bring-up has
+/// to satisfy every clause of §9 the stub holds it to before the model raises a
+/// link at all.
 ///
-/// A bring-up missing one register write fails here rather than elsewhere, and
-/// the stub names the clause it left out: `phy_unconfigured` is the whole list
-/// and this asserts it is empty.
+/// **The bring-up's own reading of §9.5.2.2 is a link that is not up yet**, and
+/// that is the machine: §9.5.2.1's restart is microseconds old when the driver
+/// reads the status register, and a 1000BASE-T negotiation takes seconds. The
+/// settled link is `STATUS.LU`, which the passes after `open` read.
 #[test]
 fn the_phy_is_brought_up_and_the_mac_sees_the_link_it_raises() {
     let nic = Nic::i219(31);
     // The wire before the driver, so the only thing between a partner and a
     // link is what `open` does to the PHY.
     nic.set_link(true);
-    let driver = open(&nic);
+    let mut driver = open(&nic);
 
     assert_eq!(
-        nic.phy_unconfigured(),
-        None,
-        "{}",
-        nic.because("the bring-up left the PHY unable to raise a link")
-    );
-    assert_eq!(
         driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1, up: true, negotiated: true }),
+        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1, up: false, negotiated: false }),
         "{}",
         nic.because("the PHY did not answer §9.5.2.2 and §9.5.2.3 as its own document says")
-    );
-    assert_eq!(
-        driver.link(),
-        Link { up: true, speed_mbps: 1000, full_duplex: true },
-        "{}",
-        nic.because("§4.6.3.2's STATUS.LU did not follow the link the PHY raised")
     );
     assert!(driver.brought_up().master_quiet, "{}", nic.because("§3.1.3.10 never went quiet"));
     // §4.5.2: "Once the access completes, the controlling agent must write a 0b
@@ -1032,6 +1021,49 @@ fn the_phy_is_brought_up_and_the_mac_sees_the_link_it_raises() {
         0,
         "{}",
         nic.because("the MDIO interface was left held after the bring-up")
+    );
+    assert_eq!(
+        nic.phy_unconfigured(),
+        Some("the restart of auto-negotiation has not resolved yet"),
+        "{}",
+        nic.because("the bring-up left a clause of §9 other than the negotiation outstanding")
+    );
+
+    nic.negotiation_settles();
+    assert_eq!(
+        nic.phy_unconfigured(),
+        None,
+        "{}",
+        nic.because("the bring-up left the PHY unable to raise a link")
+    );
+    one_pass(&mut driver);
+    assert_eq!(
+        driver.link(),
+        Link { up: true, speed_mbps: 1000, full_duplex: true },
+        "{}",
+        nic.because("§4.6.3.2's STATUS.LU did not follow the link the PHY raised")
+    );
+}
+
+/// **What §9.5.2.5's advertisement is for.** Against a partner with no
+/// 1000BASE-T ability, the speed the link resolves to is the best the two have
+/// in common below a gigabit — so a bring-up that left the advertisement at
+/// what §6.1.5's battery saver put there negotiates 10 Mb/s on a cable that
+/// carries 100.
+#[test]
+fn the_advertised_abilities_are_what_the_link_resolves_to() {
+    let nic = Nic::i219(42);
+    nic.partner_without_gigabit();
+    nic.set_link(true);
+    let mut driver = open(&nic);
+
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert_eq!(
+        driver.link(),
+        Link { up: true, speed_mbps: 100, full_duplex: true },
+        "{}",
+        nic.because("the link resolved to something other than the best common ability")
     );
 }
 
@@ -1079,10 +1111,11 @@ fn an_interface_the_engine_never_gives_up_is_refused_by_name() {
         nic.because("the refusal does not carry which agent held the interface")
     );
     // The request is withdrawn, or §4.5.2's "at most only one bit is 1b" is a
-    // bit left standing for a grant nobody is waiting on any more.
+    // bit left standing for a grant nobody is waiting on any more. What is
+    // still set is the engine's own bit, which is read-only to this driver.
     assert_eq!(
         nic.peek(regs::EXTCNF_CTRL),
-        0,
+        extcnf::MDIO_MNG_OWNERSHIP,
         "{}",
         nic.because("a request nobody is waiting on was left in EXTCNF_CTRL")
     );
@@ -1112,8 +1145,9 @@ fn an_mdi_transaction_that_never_reports_ready_is_refused_by_name() {
     );
 }
 
-/// §10.2.2.7's `Error` is set "when it fails to complete an MDI read", so what
-/// is in the data field then is not what the PHY said.
+/// §10.2.2.7's `Error` is set "when it fails to complete an MDI read", and
+/// `Ready` comes back with it because the transaction ended — so a driver that
+/// read `Ready` first would believe a data field the PHY never drove.
 #[test]
 fn an_mdi_read_the_part_could_not_complete_is_refused_by_name() {
     let nic = Nic::i219(35);
@@ -1140,14 +1174,16 @@ fn the_phy_is_found_at_whichever_address_answers_its_identifier() {
     let nic = Nic::i219(41);
     nic.phy_is_deaf_at(toyos_phy::SPECIFIC);
     nic.set_link(true);
-    let driver = open(&nic);
+    let mut driver = open(&nic);
 
     assert_eq!(
         driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::GENERAL, id: 0x0154_00a1, up: true, negotiated: true }),
+        Ok(Phy { addr: toyos_phy::GENERAL, id: 0x0154_00a1, up: false, negotiated: false }),
         "{}",
         nic.because("the bring-up did not look past the address Table 9-1 names")
     );
+    nic.negotiation_settles();
+    one_pass(&mut driver);
     assert!(driver.link().up, "{}", nic.because("STATUS.LU did not follow the PHY's link"));
 }
 
@@ -1175,14 +1211,15 @@ fn a_phy_that_is_not_the_one_this_map_describes_is_refused_by_its_identifier() {
     );
 }
 
-/// §3.2.1 puts the 82574's PHY on the controller's own die, so there is nothing
-/// behind `MDIC` for this register map to reach. The stub asserts on any access
-/// to it, which is what keeps the QEMU arm's part out of the path above.
+/// §10.2.2.7 addresses the 82574's own PHY as "1 = Gigabit PHY. 2 = PCIe PHY"
+/// and it has neither §9.3's page register nor §9.5.3's paged registers, so the
+/// I219's sequence is refused on it by name. The stub asserts on any access to
+/// `MDIC` there, which is what keeps the QEMU arm's part out of the path above.
 #[test]
-fn the_82574_is_never_asked_for_a_phy_behind_mdic() {
+fn the_82574s_own_phy_register_map_is_refused_by_name() {
     let nic = Nic::new(37);
     let driver = open(&nic);
-    assert_eq!(driver.brought_up().phy, Err(PhyRefusal::NotOnThisPart));
+    assert_eq!(driver.brought_up().phy, Err(PhyRefusal::NotThisRegisterMap));
 }
 
 /// §3.1.3.10 says a driver "might time out if the PCIe Master Enable Status bit
@@ -1194,25 +1231,76 @@ fn a_master_that_never_goes_quiet_does_not_stop_the_bring_up() {
     let nic = Nic::i219(38);
     nic.master_never_quiesces();
     nic.set_link(true);
-    let driver = open(&nic);
+    let mut driver = open(&nic);
 
     assert!(
         !driver.brought_up().master_quiet,
         "{}",
         nic.because("the quiesce was reported finished on a part that never finished it")
     );
+    nic.negotiation_settles();
+    one_pass(&mut driver);
     assert!(driver.link().up, "{}", nic.because("the bring-up did not go on to a link"));
+}
+
+/// **Every latitude §9, §4.5.2, §10.2.2.7 and §3.1.3.10 give the hardware,
+/// taken the other way.** A part that grants the MDIO interface on the first
+/// read, reports `Ready` on the first read, comes up out of power-down and
+/// still advertises §9.5.2.5's own default is as admissible as the one every
+/// other test here runs against, and the same bring-up has to work on it.
+#[test]
+fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way() {
+    let nic = Nic::with(
+        43,
+        Part::I219,
+        Permits {
+            master_takes_time_to_quiesce: false,
+            firmware_takes_the_mdio_interface: false,
+            mdi_takes_several_reads: false,
+            phy_starts_powered_down: false,
+            phy_advertises_what_the_last_agent_left: false,
+            ..Permits::default()
+        },
+    );
+    nic.set_link(true);
+    let mut driver = open(&nic);
+
+    assert_eq!(
+        driver.brought_up().phy,
+        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1, up: false, negotiated: false }),
+        "{}",
+        nic.because("the bring-up did not reach the PHY on a part that made it easy")
+    );
+    assert!(driver.brought_up().master_quiet, "{}", nic.because("§3.1.3.10 never went quiet"));
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert_eq!(
+        driver.link(),
+        Link { up: true, speed_mbps: 1000, full_duplex: true },
+        "{}",
+        nic.because("§4.6.3.2's STATUS.LU did not follow the link the PHY raised")
+    );
 }
 
 /// **A count of no messages is two facts**, and on a machine whose only reading
 /// of the interrupt path is that count nothing else separates a part that spoke
 /// to nobody from a part nothing made speak. §10.2.4.4's `ICS` "sets" a cause,
-/// so the first message a claim takes is one the driver asked for — on either
-/// part, with no link and no frame behind it.
+/// so a caller that has armed [`I219::provoke_message`] takes a message it
+/// asked for — and a bring-up that has not raises none on a part with no link
+/// and no frame behind it.
 #[test]
-fn the_first_message_is_raised_on_purpose() {
+fn a_message_is_raised_only_when_the_caller_asks_for_one() {
     for nic in [Nic::new(39), Nic::i219(40)] {
         let mut driver = open(&nic);
+        let quiet = one_pass(&mut driver);
+        assert_eq!(
+            quiet.messages,
+            0,
+            "{}",
+            nic.because("a bring-up nobody armed raised a message of its own")
+        );
+
+        driver.provoke_message();
         let pass = one_pass(&mut driver);
         assert!(
             pass.messages > 0,

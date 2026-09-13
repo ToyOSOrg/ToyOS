@@ -144,10 +144,6 @@ pub struct Nic {
 
 impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
-    ///
-    /// **`part` comes from the manifest row the claim was minted for**, not
-    /// from anything read out of the function: below the register file the two
-    /// parts differ, and the driver decides nothing about which it is on.
     pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
         let dev = Rc::new(dev);
         let info = dev
@@ -195,8 +191,7 @@ impl Nic {
         .map_err(Opening::Driver)?;
         let mac = driver.mac();
         // The bring-up's own reading, said once: a boot whose link never comes
-        // up has nothing else to say why, and every arm of it is a refusal by
-        // name rather than a number to interpret.
+        // up has nothing else to say why.
         let brought_up = driver.brought_up();
         crate::say!(
             "netd: I219: {}, and the PHY {}",
@@ -206,13 +201,16 @@ impl Nic {
                 "the function was still mastering when it was reset"
             },
             match brought_up.phy {
+                // The link and the negotiation are read microseconds after the
+                // restart that began them, so what they say is the instant and
+                // not the outcome; `link up` below is the settled reading.
                 Ok(phy) => format!(
-                    "answers at PHY address {:02} as {:#010x}, its link is {} and \
-                     auto-negotiation {}",
+                    "answers at PHY address {:02} as {:#010x}, and at the restart its link was \
+                     {} with auto-negotiation {}",
                     phy.addr,
                     phy.id,
                     if phy.up { "up" } else { "down" },
-                    if phy.negotiated { "is complete" } else { "has not finished" },
+                    if phy.negotiated { "complete" } else { "unfinished" },
                 ),
                 Err(why) => format!("was not brought up: {why}"),
             },
@@ -234,6 +232,11 @@ impl Nic {
     /// The claim, for the poller: readable means an interrupt has landed.
     pub fn claim(&self) -> &PciDev {
         &self.claim
+    }
+
+    /// `crate::PROVOKE_MESSAGE`: raise one enabled cause on purpose.
+    pub fn provoke_message(&self) {
+        self.driver.borrow().provoke_message();
     }
 
     /// Take the interrupt, acknowledge its causes and refresh the link.

@@ -13,14 +13,14 @@
 //! seed reproduces the run exactly.
 //!
 //! **Two parts, one model.** [`Nic::new`] is the 82574 the QEMU arm runs
-//! against, whose PHY §3.2.1 puts on the controller's own die and which this
-//! file therefore does not model at all: an `MDIC` access to it is an assertion
-//! by name. [`Nic::i219`] is the ThinkPad's part, and behind its `MDIC` is the
-//! PHY the *Intel Ethernet Connection I219 Datasheet* (612523, rev 2.02)
-//! describes — cited `§9.x` here, where the MAC's own clauses are `§10.x`,
-//! `§4.x` and `§3.x`.
+//! against; §10.2.2.7 addresses its PHY as "1 = Gigabit PHY. 2 = PCIe PHY" and
+//! none of that register set is modelled here, so an `MDIC` access to it is an
+//! assertion by name. [`Nic::i219`] is the ThinkPad's part, and behind its
+//! `MDIC` is the PHY the *Intel Ethernet Connection I219 Datasheet* (612523,
+//! rev 2.02) describes — cited `§9.x` here, where the MAC's own clauses are
+//! `§10.x`, `§4.x` and `§3.x`.
 //!
-//! What is deliberately *not* modelled: the 82574's own MDIO registers, the
+//! What is deliberately *not* modelled: the 82574's own PHY registers, the
 //! NVM's access protocol, checksum offload, VLAN insertion, RSS and the second
 //! queue, flow control, and every statistic counter. The driver reaches none of
 //! them.
@@ -94,6 +94,13 @@ pub struct Permits {
     /// PHY another agent drives, and nothing resets them when a claim on the
     /// function is minted.
     pub phy_starts_powered_down: bool,
+    /// §5.2: "the integrated LAN controller configures the LCD registers", and
+    /// §6.1.5's Auto-Connect Battery Saver has the last driver "negotiate to
+    /// the lowest connection speed supported by the link partner (usually
+    /// 10 Mb/s) when the power cable is unplugged" — so §9.5.2.5's advertisement
+    /// out of a claim is what the agent before this one left in it, not the
+    /// power-on default.
+    pub phy_advertises_what_the_last_agent_left: bool,
 }
 
 impl Default for Permits {
@@ -108,6 +115,7 @@ impl Default for Permits {
             firmware_takes_the_mdio_interface: true,
             mdi_takes_several_reads: true,
             phy_starts_powered_down: true,
+            phy_advertises_what_the_last_agent_left: true,
         }
     }
 }
@@ -115,9 +123,17 @@ impl Default for Permits {
 /// How many `STATUS` reads §3.1.3.10's master enable stays set for.
 const MASTER_QUIESCE_READS: u32 = 3;
 
-/// How many requests §4.5.2's manageability agent wins before it lets the
-/// software request through.
+/// How many reads of `EXTCNF_CTRL` §4.5.2's manageability agent holds the
+/// interface across before the software request registered under it is granted.
 const MDIO_FIRMWARE_REQUESTS: u32 = 2;
+
+/// §9.5.2.5's whole default: Selector Field `00001b` and the four 10/100
+/// abilities at bits 8:5, every other field `0b`.
+const ADVERTISE_DEFAULT: u16 = 0x01E1;
+
+/// §6.1.5's battery saver left the link at "the lowest connection speed
+/// supported by the link partner": §9.5.2.5's selector and 10BASE-T alone.
+const ADVERTISE_AFTER_BATTERY_SAVER: u16 = 0x0061;
 
 /// How many `MDIC` reads a transaction takes before §10.2.2.7's `Ready` is set.
 const MDI_READS: u32 = 2;
@@ -148,10 +164,20 @@ struct PhyModel {
     /// as away once more after it came back.
     link_seen_down: bool,
     up: bool,
+    /// Whether a restart of auto-negotiation is still running. §9.5.2.2's
+    /// Auto-Negotiation Complete is clear and no link is reported while it is,
+    /// and on 1000BASE-T that interval is seconds — far past anything a
+    /// bring-up reads inside itself. [`Nic::negotiation_settles`] is the wire
+    /// event that ends it.
+    negotiating: bool,
     /// Reads of `MDIC` left before the transaction in flight reports `Ready`.
     mdi_reads: u32,
-    /// Requests left before §4.5.2's arbitration grants the software one, and
-    /// whether it ever does.
+    /// Whether §4.5.2's software request is registered — "a request for
+    /// ownership is registered by writing a 1b into the respective bit", which
+    /// stands until the agent writes a 0b back whether or not it was granted.
+    sw_requested: bool,
+    /// Reads of `EXTCNF_CTRL` left before §4.5.2's arbitration grants the
+    /// registered software request, and whether it ever does.
     firmware_requests: u32,
     mdio_sticks: bool,
     /// A PHY address nothing drives, whose reads answer ones. Not an injected
@@ -182,16 +208,21 @@ impl PhyModel {
         // §9.5.2.3 and §9.5.2.4: Intel's OUI, model 0xA, revision 0x1.
         file[reg::IDENTIFIER_HIGH as usize] = phy::IDENTIFIER_HIGH_INTEL;
         file[reg::IDENTIFIER_LOW as usize] = 0x00A1;
-        // §9.5.2.5: the selector and the four 10/100 abilities.
-        file[reg::ADVERTISE as usize] = advertise::WANTED;
+        file[reg::ADVERTISE as usize] = if permits.phy_advertises_what_the_last_agent_left {
+            ADVERTISE_AFTER_BATTERY_SAVER
+        } else {
+            ADVERTISE_DEFAULT
+        };
         Self {
             page: None,
-            custom_mode: 0x2180,
+            custom_mode: custom_mode::CARRIED_DEFAULT,
             file,
             negotiated_over: None,
             link_seen_down: true,
             up: false,
+            negotiating: false,
             mdi_reads: 0,
+            sw_requested: false,
             firmware_requests: if permits.firmware_takes_the_mdio_interface {
                 MDIO_FIRMWARE_REQUESTS
             } else {
@@ -220,8 +251,12 @@ struct Model {
     master_reads: u32,
     master_sticks: bool,
     /// The modelled clock when `CTRL.RST` was last written, so §10.2.2.1's
-    /// settling time can be held to.
+    /// settling time and §9.2's delay before an MDIO access can be held to.
     reset_at: u64,
+    /// Whether the partner on the wire advertises 1000BASE-T full duplex. A
+    /// link partner that does not is what makes §9.5.2.5's own advertisement
+    /// decide the speed at all.
+    partner_gigabit: bool,
     file: Vec<u32>,
     memory: Vec<u8>,
     nanos: u64,
@@ -302,6 +337,7 @@ impl Model {
             master_reads: 0,
             master_sticks: false,
             reset_at: 0,
+            partner_gigabit: true,
             permits,
             file: vec![0; regs::REGISTER_BYTES / 4],
             memory: vec![0; crate::GRANT_BYTES as usize],
@@ -383,10 +419,48 @@ impl Model {
             Part::E82574 => self.link_up,
         };
         if link && self.get(regs::CTRL) & ctrl::SLU != 0 {
-            value |= status::LU | status::FD;
-            value |= (self.speed_code & status::SPEED_MASK) << status::SPEED_SHIFT;
+            let (speed_code, full_duplex) = match self.part {
+                Part::I219 => self.resolution().expect("a link the PHY raised has a resolution"),
+                Part::E82574 => (self.speed_code, true),
+            };
+            value |= status::LU;
+            if full_duplex {
+                value |= status::FD;
+            }
+            value |= (speed_code & status::SPEED_MASK) << status::SPEED_SHIFT;
         }
         self.set(regs::STATUS, value);
+    }
+
+    /// What §9.5.2.5's and §9.5.2.10's advertisement, taken against the
+    /// partner's, resolves to: `STATUS.SPEED`'s encoding and whether the
+    /// resolution is full duplex. `None` is no ability in common, which is a
+    /// cable that carries no link.
+    ///
+    /// The highest common ability wins, which is what auto-negotiation is; the
+    /// 1000BASE-T ability is its own register because §9.5.2.10 puts it there.
+    fn resolution(&self) -> Option<(u32, bool)> {
+        let (mine, mine_1000t) = self.phy.negotiated_over?;
+        if mine & advertise::SELECTOR_802_3 == 0 {
+            return None;
+        }
+        let partner = ADVERTISE_DEFAULT;
+        let partner_1000t = if self.partner_gigabit { control_1000t::FULL } else { 0 };
+        if mine_1000t & partner_1000t & control_1000t::FULL != 0 {
+            return Some((0b10, true));
+        }
+        let common = mine & partner;
+        for (ability, speed, full) in [
+            (advertise::FULL_100, 0b01, true),
+            (advertise::HALF_100, 0b01, false),
+            (advertise::FULL_10, 0b00, true),
+            (advertise::HALF_10, 0b00, false),
+        ] {
+            if common & ability != 0 {
+                return Some((speed, full));
+            }
+        }
+        None
     }
 
     /// §9 clause by clause: the first thing the PHY needs and has not been
@@ -410,16 +484,19 @@ impl Model {
         }
         let abilities =
             (self.phy.file[reg::ADVERTISE as usize], self.phy.file[reg::CONTROL_1000T as usize]);
-        if abilities.1 & control_1000t::FULL == 0 {
-            return Some("§9.5.2.10's 1000BASE-T full-duplex ability was never advertised");
-        }
-        if abilities.0 & advertise::SELECTOR_802_3 == 0 {
-            return Some("§9.5.2.5's selector field does not say IEEE 802.3 CSMA/CD");
-        }
         if self.phy.negotiated_over != Some(abilities) {
             return Some(
                 "§9.5.2.1's Restart Auto-Negotiation was never written after the abilities \
                  last changed, so what is on the wire is not what the registers hold",
+            );
+        }
+        if self.phy.negotiating {
+            return Some("the restart of auto-negotiation has not resolved yet");
+        }
+        if self.resolution().is_none() {
+            return Some(
+                "§9.5.2.5's and §9.5.2.10's advertisement has no ability in common with the \
+                 partner on the wire",
             );
         }
         None
@@ -489,7 +566,7 @@ impl Model {
                 self.get(regs::STATUS)
             }
             regs::MDIC => {
-                self.only_the_pch_part("MDIC");
+                self.not_modelled_on_the_82574("MDIC");
                 if self.phy.mdi_reads > 0 {
                     self.phy.mdi_reads -= 1;
                     // §10.2.2.7: `Ready` is set "at the end of the MDI
@@ -500,7 +577,14 @@ impl Model {
                 self.mdi_answer
             }
             regs::EXTCNF_CTRL => {
-                self.only_the_pch_part("EXTCNF_CTRL");
+                self.not_modelled_on_the_82574("EXTCNF_CTRL");
+                // §4.5.2's arbitration runs on its own: the request registered
+                // by one write is granted when the agent ahead of it lets go,
+                // and the requester learns that by reading the bit back.
+                if self.phy.firmware_requests > 0 {
+                    self.phy.firmware_requests -= 1;
+                }
+                self.refresh_ownership();
                 self.get(regs::EXTCNF_CTRL)
             }
             regs::ICR => {
@@ -589,21 +673,14 @@ impl Model {
                 self.set(regs::ICR, left);
             }
             // §4.5.2: "A request for ownership is registered by writing a 1b
-            // into the respective bit [...] The requesting agent is granted
-            // access when the same bit is read as 1b", the priority order being
-            // "manageability, software and then hardware". Bits 6 and 7 are
-            // read-only (§10.2.2.15), so a request is answered and never
-            // stored.
+            // into the respective bit", and it stands until the agent writes a
+            // 0b back — so one write registers it and the reads after it are
+            // how the agent learns it was granted. Bits 6 and 7 are read-only
+            // (§10.2.2.15), so nothing a driver writes reaches them.
             regs::EXTCNF_CTRL => {
-                self.only_the_pch_part("EXTCNF_CTRL");
-                if value & extcnf::MDIO_SW_OWNERSHIP == 0 {
-                    self.set(regs::EXTCNF_CTRL, 0);
-                } else if self.phy.mdio_sticks || self.phy.firmware_requests > 0 {
-                    self.phy.firmware_requests = self.phy.firmware_requests.saturating_sub(1);
-                    self.set(regs::EXTCNF_CTRL, extcnf::MDIO_MNG_OWNERSHIP);
-                } else {
-                    self.set(regs::EXTCNF_CTRL, extcnf::MDIO_SW_OWNERSHIP);
-                }
+                self.not_modelled_on_the_82574("EXTCNF_CTRL");
+                self.phy.sw_requested = value & extcnf::MDIO_SW_OWNERSHIP != 0;
+                self.refresh_ownership();
             }
             regs::MDIC => self.mdi(value),
             // §10.2.2.2: read-only.
@@ -624,23 +701,46 @@ impl Model {
         }
     }
 
-    /// A register only the PCH part has behind it. §3.2.1 puts the 82574's PHY
-    /// on the controller's own die, and this file models none of the interface
-    /// to it — so a driver that reached one here would be driving whatever is
-    /// at that offset on a part it was told is not this one.
-    fn only_the_pch_part(&self, named: &str) {
+    /// §4.5.2's arbitration, answered into the register the requester reads it
+    /// out of: "the priority order is manageability, software and then
+    /// hardware", and "at any given time at most only one bit is 1b".
+    fn refresh_ownership(&mut self) {
+        let held = if self.phy.mdio_sticks || self.phy.firmware_requests > 0 {
+            extcnf::MDIO_MNG_OWNERSHIP
+        } else if self.phy.sw_requested {
+            extcnf::MDIO_SW_OWNERSHIP
+        } else {
+            0
+        };
+        self.set(regs::EXTCNF_CTRL, held);
+    }
+
+    /// A register this file models only behind the PCH part. §10.2.2.7
+    /// addresses the 82574's own PHY as "1 = Gigabit PHY. 2 = PCIe PHY" and
+    /// none of that register set is here, so a driver that reached one on that
+    /// part would be driving a map this model does not have.
+    fn not_modelled_on_the_82574(&self, named: &str) {
         assert_eq!(
             self.part,
             Part::I219,
-            "seed {}: the driver reached {named} on the 82574, whose PHY §3.2.1 puts on the \
-             controller's own die",
+            "seed {}: the driver reached {named} on the 82574, whose PHY this model does not \
+             implement",
             self.seed
         );
     }
 
     /// One MDI transaction, as §10.2.2.7 defines its two sequences.
     fn mdi(&mut self, command: u32) {
-        self.only_the_pch_part("MDIC");
+        self.not_modelled_on_the_82574("MDIC");
+        // §9.2: "After LCD reset to the I219 a delay of 10 ms is required
+        // before attempting to access MDIO registers."
+        assert!(
+            self.nanos.saturating_sub(self.reset_at) >= crate::phy::LCD_RESET_DELAY_NANOS,
+            "seed {}: the driver started an MDI transaction {} ns after it reset the part, and \
+             §9.2 requires 10 ms",
+            self.seed,
+            self.nanos.saturating_sub(self.reset_at)
+        );
         assert!(
             command & mdic::READY == 0,
             "seed {}: the driver wrote an MDI command with the Ready bit already set, and \
@@ -688,8 +788,11 @@ impl Model {
             0
         };
         if !write && self.phy.failing == Some((addr, reg)) {
-            // §10.2.2.7's `Error`: a read the part "fails to complete".
-            self.mdi_answer = command | mdic::ERROR;
+            // §10.2.2.7's `Error`: a read the part "fails to complete". `Ready`
+            // is set with it, because the same section sets that bit "at the
+            // end of the MDI transaction" and a failed read is one that ended —
+            // so what stands in the data field is not what the PHY said.
+            self.mdi_answer = command | mdic::ERROR | mdic::READY;
             return;
         }
         let answered = if self.phy.deaf == Some(addr) {
@@ -753,6 +856,21 @@ impl Model {
         }
     }
 
+    /// §9.1: "Other fields in the same 16-bit register must be loaded with
+    /// their default values." So a write that changed a field it is not about
+    /// is a driver composing a register it should have read first, and the
+    /// defaults it had to carry are §9.5.2's and §9.5.3's own tables.
+    fn carried(&self, named: &str, data: u16, mask: u16, default: u16) {
+        assert_eq!(
+            data & mask,
+            default,
+            "seed {}: the driver wrote {data:#06x} to {named}, whose other fields §9.1 says \
+             \"must be loaded with their default values\" — {:#06x} under the mask {mask:#06x}",
+            self.seed,
+            default
+        );
+    }
+
     fn phy_write(&mut self, addr: u8, reg: u8, data: u16) {
         match self.phy_at(addr, reg) {
             // §9.3: "only the 11 MSBs of register 31 are used for defining the
@@ -760,10 +878,24 @@ impl Model {
             // ignored."
             PhyPlace::Page => self.phy.page = Some(data >> phy::PAGE_SHIFT),
             PhyPlace::CustomMode => {
+                self.carried(
+                    "§9.5.3.1's Custom Mode Control",
+                    data,
+                    custom_mode::CARRIED_MASK,
+                    custom_mode::CARRIED_DEFAULT,
+                );
                 self.phy.custom_mode = data;
                 self.refresh_phy_link();
             }
             PhyPlace::Ieee(r) => {
+                if r == reg::CONTROL {
+                    self.carried(
+                        "§9.5.2.1's Control register",
+                        data,
+                        control::CARRIED_MASK,
+                        control::CARRIED_DEFAULT,
+                    );
+                }
                 let abilities = |model: &PhyModel| {
                     (
                         model.file[reg::ADVERTISE as usize],
@@ -777,9 +909,11 @@ impl Model {
                     // completion, is followed by a restart of
                     // auto-negotiation."
                     self.phy.negotiated_over = Some(abilities(&self.phy));
+                    self.phy.negotiating = true;
                 }
                 if r == reg::CONTROL && data & control::RESTART_AUTONEG != 0 {
                     self.phy.negotiated_over = Some(abilities(&self.phy));
+                    self.phy.negotiating = true;
                     // §9.5.2.1: the bit is `RW/SC`.
                     self.phy.file[reg::CONTROL as usize] &= !control::RESTART_AUTONEG;
                 }
@@ -1059,13 +1193,13 @@ impl Model {
 pub struct Nic(Rc<RefCell<Model>>);
 
 impl Nic {
-    /// The 82574 — the part QEMU's `e1000e` models and the one with no PHY
-    /// behind `MDIC`.
+    /// The 82574 — the part QEMU's `e1000e` models, whose own PHY register map
+    /// this file does not have.
     pub fn new(seed: u64) -> Self {
         Self::with(seed, Part::E82574, Permits::default())
     }
 
-    /// The ThinkPad's `8086:15fc`, whose PHY is behind `MDIC`.
+    /// The ThinkPad's `8086:15fc`, whose PHY is the one §9 describes.
     pub fn i219(seed: u64) -> Self {
         Self::with(seed, Part::I219, Permits::default())
     }
@@ -1121,6 +1255,23 @@ impl Nic {
     /// that section under which the registers are at the other one.
     pub fn phy_is_deaf_at(&self, addr: u8) {
         self.0.borrow_mut().phy.deaf = Some(addr);
+    }
+
+    /// The restart of auto-negotiation resolves. **A wire event and not a
+    /// register**: §9.5.2.1's restart takes a 1000BASE-T link seconds, so the
+    /// bring-up that wrote it reads §9.5.2.2 long before this, and nothing the
+    /// driver does shortens it.
+    pub fn negotiation_settles(&self) {
+        let mut model = self.0.borrow_mut();
+        model.phy.negotiating = false;
+        model.refresh_phy_link();
+    }
+
+    /// The partner on the wire advertises no 1000BASE-T ability, so what the
+    /// link resolves to is what §9.5.2.5's own advertisement offers below a
+    /// gigabit.
+    pub fn partner_without_gigabit(&self) {
+        self.0.borrow_mut().partner_gigabit = false;
     }
 
     /// The four the driver takes.
