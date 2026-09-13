@@ -24,6 +24,7 @@
 
 pub mod aperture;
 pub mod bar;
+pub mod bridge;
 pub mod caps;
 pub mod express;
 pub mod msi;
