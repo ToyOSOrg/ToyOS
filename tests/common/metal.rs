@@ -62,13 +62,10 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
-    /// The PCI function this boot's image claims, where the loop is to reach
-    /// the boot over its cable while it runs.
-    ///
-    /// **`None` on every boot that does not ask.** Reading it costs three `ssh`
-    /// round trips before the flash and the probe costs a host binary, and a
-    /// boot whose judges read no cable would be refused for a fact none of them
-    /// looks at.
+    /// The PCI function this boot's image claims, where the loop reaches the
+    /// boot over its cable while it runs. **`None` on every boot that does not
+    /// ask**: a boot whose judges read no cable would be refused for a fact
+    /// none of them looks at.
     pub nic: Option<&'static str>,
 }
 
