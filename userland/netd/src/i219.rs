@@ -201,17 +201,9 @@ impl Nic {
                 "the function was still mastering when it was reset"
             },
             match brought_up.phy {
-                // The link and the negotiation are read microseconds after the
-                // restart that began them, so what they say is the instant and
-                // not the outcome; `link up` below is the settled reading.
-                Ok(phy) => format!(
-                    "answers at PHY address {:02} as {:#010x}, and at the restart its link was \
-                     {} with auto-negotiation {}",
-                    phy.addr,
-                    phy.id,
-                    if phy.up { "up" } else { "down" },
-                    if phy.negotiated { "complete" } else { "unfinished" },
-                ),
+                Ok(phy) => {
+                    format!("answers at PHY address {:02} as {:#010x}", phy.addr, phy.id)
+                }
                 Err(why) => format!("was not brought up: {why}"),
             },
         );

@@ -20,9 +20,7 @@ use super::serial;
 pub const CONFIG: &str = "tests/lancase";
 pub const BOOT: &str = "lancase";
 
-/// The same boot with netd's `--provoke-message` armed: the arm that says
-/// whether a message the card raises reaches a CPU at all, which no reading of
-/// the shipping boot separates from a card that raised none.
+/// The same boot with netd's `--provoke-message` armed.
 pub const ICS_CONFIG: &str = "tests/lanicscase";
 pub const ICS_BOOT: &str = "lanicscase";
 
@@ -57,21 +55,17 @@ pub const NIC: &str = "0000:00:1f.6";
 /// the PHY did about a link.
 pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
     let kernel = back.kernel();
-    let text = kernel.text();
-    match text.lines().find(|l| l.contains(FIRST_MESSAGE)) {
-        Some(line) => {
-            eprintln!("  [lan] {}", line.trim());
-            Ok(())
-        }
-        None => Err(format!(
-            "netd wrote one cause to ICS on this boot and no `{FIRST_MESSAGE}` record \
-             followed, so nothing this function raises reaches a CPU"
-        )),
-    }
+    eprintln!("  [lan] {}", kernel.must_say(FIRST_MESSAGE)?.trim());
+    Ok(())
 }
 
-/// The T14's judge: the claim, the card, the lease, and the host's own ping.
-pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
+/// The T14's judge: the claim, the card, the lease, the host's own ping — and
+/// the armed boot beside them.
+///
+/// **Both boots are judged and neither verdict hides the other**: the delivery
+/// reading is the one that still means something on a machine whose link never
+/// came up, which is the state the shipping boot fails in.
+pub fn on_metal(back: &metal::Readback, provoked: &metal::Readback) -> Result<(), String> {
     let profile = Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())?;
     let kernel = back.kernel();
     let text = kernel.text();
@@ -167,6 +161,10 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     }
 
     if let Err(why) = back.job_passed(JOBS[0]) {
+        bad.push(why);
+    }
+
+    if let Err(why) = provoked_on_metal(provoked) {
         bad.push(why);
     }
 

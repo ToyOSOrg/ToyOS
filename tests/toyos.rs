@@ -1321,10 +1321,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         "lan_dhcp_lease",
-        metal::Metal::Runs {
-            arms: LANCASE,
-            judge: |b| lan::on_metal(b[0]).and(lan::provoked_on_metal(b[1])),
-        },
+        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0], b[1]) },
     ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
@@ -1700,10 +1697,8 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 /// holds the machine up long enough for the host to reach it. The only arms in
 /// this suite that name a PCI function for the loop to reach the boot over.
 ///
-/// **The second is the first with netd's delivery actuator armed.** A count of
-/// no messages is two facts — a part nothing made speak and a message that
-/// reached no CPU — so one boot asks the part for a message and the other does
-/// not, and the pair separates them.
+/// **The second is the first with netd's delivery actuator armed**, and it is a
+/// boot only for as long as the first records no message of its own.
 const LANCASE: &[metal::Arm] = &[
     metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) },
     metal::Arm {

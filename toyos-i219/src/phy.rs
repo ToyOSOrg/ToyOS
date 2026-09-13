@@ -9,20 +9,6 @@
 //! both are needed at once: "Refer to the PHY documentation for the
 //! initialization and link setup steps. The device driver uses the MDIC
 //! register to initialize the PHY and setup the link."
-//!
-//! # What this driver does not do to the PHY
-//!
-//! - **No PHY reset.** §5.2 of the I219's document gives software one — bit 15
-//!   of MDIO register 0 — and then says "the integrated LAN controller
-//!   configures the LCD registers" afterwards. This driver is not that
-//!   controller, so a reset here hands the PHY to a configuration pass nobody
-//!   in this process makes. §9.5.2.1's restart of auto-negotiation is the
-//!   documented way to make the PHY acquire link again without discarding what
-//!   configured it.
-//! - **No periodic read.** The ownership this file takes is shared with the
-//!   Management Engine, and `STATUS.LU` is the MAC's own report of the same
-//!   link: §4.6.3.2 says it "Reflects link indication (LINK) from the PHY
-//!   qualified with CTRL.SLU". A second reader of one fact is what disagrees.
 
 use crate::regs::{self, extcnf, mdic};
 use crate::{Clock, Registers};
@@ -38,9 +24,9 @@ const OWNERSHIP_DEADLINE_NANOS: u64 = 20_000_000;
 
 /// How long [`Owned::transact`] waits for §10.2.2.7's `Ready` bit.
 ///
-/// **A driver-chosen bound, not a datasheet one**: one MDIO frame is 64 bits on
-/// a management clock of a few megahertz, so a millisecond is two orders past
-/// it.
+/// **A driver-chosen bound, not a datasheet one**: §10.2.2.7 gives the
+/// transaction no time at all, so a part that never ends one says so instead of
+/// holding up the boot.
 const MDI_DEADLINE_NANOS: u64 = 1_000_000;
 
 /// §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
@@ -63,8 +49,6 @@ pub const SPECIFIC: u8 = 2;
 pub mod reg {
     /// Control (§9.5.2.1), PHY address 02, any page.
     pub const CONTROL: u8 = 0;
-    /// Status (§9.5.2.2), PHY address 02, any page.
-    pub const STATUS: u8 = 1;
     /// PHY Identifier 1 and 2 (§9.5.2.3, §9.5.2.4), PHY address 02, any page.
     pub const IDENTIFIER_HIGH: u8 = 2;
     pub const IDENTIFIER_LOW: u8 = 3;
@@ -120,16 +104,6 @@ pub mod control {
     pub const CARRIED_DEFAULT: u16 = (1 << 6) | (1 << 8);
 }
 
-/// Status register bits (§9.5.2.2).
-pub mod status {
-    /// Link Status (bit 2), latched low. §9.5.2.2: "Once cleared, due to link
-    /// failure, this bit remains cleared until register 1 is read via the
-    /// management interface."
-    pub const LINK: u16 = 1 << 2;
-    /// Auto-Negotiation Complete (bit 5).
-    pub const AUTONEG_COMPLETE: u16 = 1 << 5;
-}
-
 /// Auto-Negotiation Advertisement bits (§9.5.2.5).
 pub mod advertise {
     /// Selector Field (bits 4:0). §9.5.2.5: "00001b = IEEE 802.3 CSMA/CD."
@@ -143,6 +117,12 @@ pub mod advertise {
     /// control: this driver negotiates none, and `CTRL.RFCE` and `CTRL.TFCE`
     /// are what §4.6.3.2 would have it set from the resolution if it did.
     pub const WANTED: u16 = SELECTOR_802_3 | HALF_10 | FULL_10 | HALF_100 | FULL_100;
+
+    /// §9.5.2.5's whole default is `0x01E1` — the selector and the four
+    /// abilities at bits 8:0 and nothing above them — so every field this
+    /// driver does not compose is `0b`, which §9.1 says a write must carry.
+    pub const CARRIED_MASK: u16 = !0x01FF;
+    pub const CARRIED_DEFAULT: u16 = 0;
 }
 
 /// 1000BASE-T Control bits (§9.5.2.10).
@@ -239,16 +219,6 @@ pub struct Phy {
     /// §9.5.2.3 and §9.5.2.4's two registers, the high one first — the part's
     /// own name for itself, which is what a reader identifies the silicon by.
     pub id: u32,
-    /// §9.5.2.2's Link Status, read after the latch was cleared.
-    ///
-    /// **This is the instant the restart happened at, not a settled link.**
-    /// §9.5.2.1's restart of auto-negotiation is microseconds old when this is
-    /// read and no 1000BASE-T negotiation completes in one, so both this and
-    /// [`Self::negotiated`] are ordinarily false on a cable that comes up. The
-    /// settled link is `STATUS.LU`, which the passes after the bring-up read.
-    pub up: bool,
-    /// §9.5.2.2's Auto-Negotiation Complete.
-    pub negotiated: bool,
 }
 
 /// The MDIO interface, held under §4.5.2's software ownership for as long as
@@ -269,15 +239,12 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// respective bit [...] The requesting agent is granted access when the
     /// same bit is read as 1b (such as, access is not granted as long as the
     /// bit is 0b)."
-    ///
-    /// So the request is written once and then polled: a second write is a
-    /// second request to an arbiter that already holds this one.
     fn claim(regs: &'a R, clock: &'a C) -> Result<Self, PhyRefusal> {
         let started = clock.nanos();
-        // A read-modify-write: every other field of this register is the
-        // Management Engine's or the part's own configuration.
-        let held = regs.read(regs::EXTCNF_CTRL);
-        regs.write(regs::EXTCNF_CTRL, held | extcnf::MDIO_SW_OWNERSHIP);
+        // Not a read-modify-write: §10.2.2.15 gives this register's other two
+        // ownership bits to the other agents read-only and every field outside
+        // the three an initial value of 0x0, so there is nothing here to carry.
+        regs.write(regs::EXTCNF_CTRL, extcnf::MDIO_SW_OWNERSHIP);
         loop {
             let held = regs.read(regs::EXTCNF_CTRL);
             if held & extcnf::MDIO_SW_OWNERSHIP != 0 {
@@ -288,7 +255,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
                 // The request itself is withdrawn, or §4.5.2's "at most only
                 // one bit is 1b" would be a bit this driver left standing for a
                 // grant it is no longer waiting on.
-                regs.write(regs::EXTCNF_CTRL, held & !extcnf::MDIO_SW_OWNERSHIP);
+                regs.write(regs::EXTCNF_CTRL, 0);
                 return Err(PhyRefusal::OwnershipBusy { held_by: held, after_nanos: waited });
             }
         }
@@ -339,23 +306,14 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         self.write(GENERAL, reg::PAGE_SELECT, page << PAGE_SHIFT)
     }
 
-    /// §9.5.2.2's Link Status is latched low, so the register is read twice and
-    /// the second read is the one believed: the first clears a latch that may
-    /// be standing from a failure already over.
-    fn link(&self, addr: u8) -> Result<(bool, bool), PhyRefusal> {
-        let _ = self.read(addr, reg::STATUS)?;
-        let now = self.read(addr, reg::STATUS)?;
-        Ok((now & status::LINK != 0, now & status::AUTONEG_COMPLETE != 0))
-    }
-
     /// Which of §9.3's two addresses the PHY answers §9.5.2.3 at, and what it
     /// answered.
     ///
     /// **The document does not settle this and the part does.** §9.3's prose
     /// says registers 0 to 15 at PHY address 01 "are identical in all the pages
-    /// and are the IEEE defined registers"; Table 9-1 places Control, Status
-    /// and the identifier at PHY address 02. Table 9-1's address is asked first
-    /// because a table of exact placements is the more specific statement.
+    /// and are the IEEE defined registers"; Table 9-1 places Control and the
+    /// identifier at PHY address 02. Table 9-1's address is asked first because
+    /// a table of exact placements is the more specific statement.
     fn identify(&self) -> Result<(u8, u32), PhyRefusal> {
         let mut answered = [0u32; 2];
         for (at, addr) in [SPECIFIC, GENERAL].into_iter().enumerate() {
@@ -372,8 +330,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
 
 impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
     fn drop(&mut self) {
-        let held = self.regs.read(regs::EXTCNF_CTRL);
-        self.regs.write(regs::EXTCNF_CTRL, held & !extcnf::MDIO_SW_OWNERSHIP);
+        self.regs.write(regs::EXTCNF_CTRL, 0);
     }
 }
 
@@ -382,15 +339,6 @@ impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
 ///
 /// `reset_at` is when `CTRL.RST` was written, which §9.2's delay below is
 /// measured from.
-///
-/// The order is the two documents': the frequency §9.2 requires before any
-/// other access, the identifier that says which address the accesses reach the
-/// PHY at, what auto-negotiation is to ask for, and last the control register
-/// powers the PHY up and restarts the negotiation over it. §9.5.2.5 is why the
-/// advertisement comes first — "any write to the Auto-Negotiation Advertisement
-/// register, prior to auto-negotiation completion, is followed by a restart of
-/// auto-negotiation" — so a driver that wrote it after the restart would have
-/// restarted twice and negotiated over the first set of abilities.
 pub(crate) fn bring_up<R: Registers, C: Clock>(
     regs: &R,
     clock: &C,
@@ -413,6 +361,10 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
 
     let (addr, id) = mdi.identify()?;
 
+    // §9.5.2.5: "any write to the Auto-Negotiation Advertisement register,
+    // prior to auto-negotiation completion, is followed by a restart of
+    // auto-negotiation" — so both abilities are written before the restart
+    // below, or the negotiation would run over the abilities they replaced.
     mdi.write(addr, reg::ADVERTISE, advertise::WANTED)?;
     mdi.write(addr, reg::CONTROL_1000T, control_1000t::FULL)?;
 
@@ -426,6 +378,5 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
         | control::RESTART_AUTONEG;
     mdi.write(addr, reg::CONTROL, wanted)?;
 
-    let (up, negotiated) = mdi.link(addr)?;
-    Ok(Phy { addr, id, up, negotiated })
+    Ok(Phy { addr, id })
 }

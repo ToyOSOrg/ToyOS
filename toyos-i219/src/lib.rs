@@ -1,18 +1,16 @@
 //! The Intel I219's driver — every decision it makes, and none of the
 //! instructions that carry them out.
 //!
-//! The part is the T14's onboard `8086:15fc` at `00:1f.6`. Its register file is
-//! the one the *Intel 82574 GbE Controller Family Datasheet* (317694-018, rev
-//! 2.7) defines, which QEMU's `e1000e` model — `8086:10d3`, the 82574L itself —
-//! implements too; that is why one driver drives both, and why every `§` in
-//! this file and in [`regs`] is a section of that document.
+//! The part is the T14's onboard `8086:15fc` at `00:1f.6`, or the `8086:10d3`
+//! that QEMU's `e1000e` models. Every `§` in this file and in [`regs`] is a
+//! section of the *Intel 82574 GbE Controller Family Datasheet* (317694-018,
+//! rev 2.7).
 //!
 //! **Below the register file the two parts are not one.** §3.2.1 puts the
 //! 82574's PHY on the controller's own die; the T14's is a MAC in the PCH whose
 //! PHY is separate silicon the Management Engine shares, reached over `MDIC`
-//! under §4.5.2's ownership arbitration and described by a document of its own.
-//! [`Part`] is which one this claim is, and [`phy`] is everything that follows
-//! from it.
+//! under §4.5.2's ownership arbitration. [`Part`] is which one this claim is,
+//! and [`phy`] is everything that follows from it.
 //!
 //! # The boundary
 //!
@@ -385,8 +383,7 @@ const RESET_SETTLE_NANOS: u64 = 1_000;
 /// the PCIe Master Enable Status bit is not cleared within a given time".
 const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
 
-/// Which part the claim is on, because the two this driver drives are the same
-/// register file over different silicon.
+/// Which part the claim is on.
 ///
 /// **The parent's answer and never a probe**: `/system/bin/init` moved a claim
 /// on a declared vendor and device into this process, and a driver that read
@@ -639,17 +636,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         Ok(nic)
     }
 
-    /// Raise one enabled cause on purpose, so the next message the claim takes
-    /// is one this driver asked for.
+    /// Raise one enabled cause on purpose (§10.2.4.4), so the next message the
+    /// claim takes is one this driver asked for.
     ///
-    /// **Nothing on a shipping path calls this.** §10.2.4.4's `ICS` sets a
-    /// cause as if the event had happened, which is what separates a part
-    /// nothing made speak from a message that reached no CPU on a machine whose
-    /// only reading of either is a count of messages. A driver that did it
-    /// every boot would make that count say the same thing on a working card
-    /// and on a dead one, so the caller arms it and [`Self::open`] does not.
-    /// `LSC` is the cause, because acting on it is re-reading `STATUS`, which
-    /// the next pass does anyway.
+    /// **Nothing on a shipping path calls this**: the caller arms it and
+    /// [`Self::open`] does not. `LSC` is the cause, because acting on it is
+    /// re-reading `STATUS`, which the next pass does anyway.
     pub fn provoke_message(&self) {
         self.regs.write(regs::ICS, cause::LSC);
     }

@@ -31,7 +31,7 @@ use std::rc::Rc;
 use std::vec::Vec;
 use std::{format, vec};
 
-use crate::phy::{advertise, control, control_1000t, custom_mode, reg, status as phy_status};
+use crate::phy::{advertise, control, control_1000t, custom_mode, reg};
 use crate::regs::{self, cause, ctrl, extcnf, mdic, rah, rctl, rx_desc, status, tctl, tx_desc};
 use crate::{phy, Clock, DmaBuffers, Interrupts, Part, Registers};
 
@@ -160,9 +160,6 @@ struct PhyModel {
     /// last restarted — and therefore what is on the wire, since §9.5.2.5 says
     /// the advertisement "is not updated following auto-negotiation".
     negotiated_over: Option<(u16, u16)>,
-    /// §9.5.2.2's Link Status is latched low, so a link that went away is read
-    /// as away once more after it came back.
-    link_seen_down: bool,
     up: bool,
     /// Whether a restart of auto-negotiation is still running. §9.5.2.2's
     /// Auto-Negotiation Complete is clear and no link is reported while it is,
@@ -202,9 +199,6 @@ impl PhyModel {
         if permits.phy_starts_powered_down {
             file[reg::CONTROL as usize] |= control::POWER_DOWN | control::ISOLATE;
         }
-        // §9.5.2.2: Extended Capability, Auto-Negotiation Ability, MF Preamble
-        // Suppression, Extended Status and the four 10/100 abilities.
-        file[reg::STATUS as usize] = 0x7949;
         // §9.5.2.3 and §9.5.2.4: Intel's OUI, model 0xA, revision 0x1.
         file[reg::IDENTIFIER_HIGH as usize] = phy::IDENTIFIER_HIGH_INTEL;
         file[reg::IDENTIFIER_LOW as usize] = 0x00A1;
@@ -218,7 +212,6 @@ impl PhyModel {
             custom_mode: custom_mode::CARRIED_DEFAULT,
             file,
             negotiated_over: None,
-            link_seen_down: true,
             up: false,
             negotiating: false,
             mdi_reads: 0,
@@ -253,10 +246,11 @@ struct Model {
     /// The modelled clock when `CTRL.RST` was last written, so §10.2.2.1's
     /// settling time and §9.2's delay before an MDIO access can be held to.
     reset_at: u64,
-    /// Whether the partner on the wire advertises 1000BASE-T full duplex. A
-    /// link partner that does not is what makes §9.5.2.5's own advertisement
-    /// decide the speed at all.
-    partner_gigabit: bool,
+    /// What the partner on the wire advertises: §9.5.2.5's register and
+    /// §9.5.2.10's, the same pair this part offers. A partner that offers less
+    /// than everything is what makes this driver's own advertisement decide
+    /// the speed at all.
+    partner: (u16, u16),
     file: Vec<u32>,
     memory: Vec<u8>,
     nanos: u64,
@@ -337,7 +331,7 @@ impl Model {
             master_reads: 0,
             master_sticks: false,
             reset_at: 0,
-            partner_gigabit: true,
+            partner: (ADVERTISE_DEFAULT, control_1000t::FULL),
             permits,
             file: vec![0; regs::REGISTER_BYTES / 4],
             memory: vec![0; crate::GRANT_BYTES as usize],
@@ -444,8 +438,7 @@ impl Model {
         if mine & advertise::SELECTOR_802_3 == 0 {
             return None;
         }
-        let partner = ADVERTISE_DEFAULT;
-        let partner_1000t = if self.partner_gigabit { control_1000t::FULL } else { 0 };
+        let (partner, partner_1000t) = self.partner;
         if mine_1000t & partner_1000t & control_1000t::FULL != 0 {
             return Some((0b10, true));
         }
@@ -507,11 +500,6 @@ impl Model {
         let up = self.link_up && self.phy_unconfigured().is_none();
         if up == self.phy.up {
             return;
-        }
-        if !up {
-            // §9.5.2.2: the Link Status bit "remains cleared until register 1
-            // is read via the management interface".
-            self.phy.link_seen_down = true;
         }
         self.phy.up = up;
         self.refresh_status();
@@ -844,18 +832,6 @@ impl Model {
         match self.phy_at(addr, reg) {
             PhyPlace::Page => self.phy.page.unwrap_or(0) << phy::PAGE_SHIFT,
             PhyPlace::CustomMode => self.phy.custom_mode,
-            PhyPlace::Ieee(r) if r == reg::STATUS => {
-                // §9.5.2.2: Link Status is latched low and "remains cleared
-                // until register 1 is read via the management interface", so
-                // this read is what clears the latch and the next one is what
-                // can see a link that came back.
-                let mut value = self.phy.file[reg::STATUS as usize];
-                if self.phy.up && !self.phy.link_seen_down {
-                    value |= phy_status::LINK | phy_status::AUTONEG_COMPLETE;
-                }
-                self.phy.link_seen_down = !self.phy.up;
-                value
-            }
             PhyPlace::Ieee(r) => self.phy.file[r as usize],
         }
     }
@@ -898,6 +874,26 @@ impl Model {
                         data,
                         control::CARRIED_MASK,
                         control::CARRIED_DEFAULT,
+                    );
+                }
+                if r == reg::ADVERTISE {
+                    self.carried(
+                        "§9.5.2.5's Auto-Negotiation Advertisement",
+                        data,
+                        advertise::CARRIED_MASK,
+                        advertise::CARRIED_DEFAULT,
+                    );
+                }
+                if r == reg::CONTROL_1000T {
+                    // §9.5.2.10's other fields are the ones this model holds:
+                    // its table's defaults where nothing has written them, and
+                    // whatever the agent before this driver left where it has.
+                    let held = self.phy.file[reg::CONTROL_1000T as usize];
+                    self.carried(
+                        "§9.5.2.10's 1000BASE-T Control",
+                        data,
+                        !control_1000t::FULL,
+                        held & !control_1000t::FULL,
                     );
                 }
                 let abilities = |model: &PhyModel| {
@@ -1271,11 +1267,10 @@ impl Nic {
         model.refresh_phy_link();
     }
 
-    /// The partner on the wire advertises no 1000BASE-T ability, so what the
-    /// link resolves to is what §9.5.2.5's own advertisement offers below a
-    /// gigabit.
-    pub fn partner_without_gigabit(&self) {
-        self.0.borrow_mut().partner_gigabit = false;
+    /// What the partner on the wire offers — §9.5.2.5's advertisement and
+    /// §9.5.2.10's — which is the other half of every resolution.
+    pub fn partner_advertises(&self, abilities: u16, gigabit: u16) {
+        self.0.borrow_mut().partner = (abilities, gigabit);
     }
 
     /// The four the driver takes.

@@ -52,15 +52,11 @@ const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
 
-/// The actuator that makes the card raise one interrupt on purpose, so a boot
-/// whose only reading of the interrupt path is a count of messages can tell a
-/// part nothing made speak from a message that reached no CPU.
+/// The actuator that makes the card raise one interrupt on purpose.
 ///
 /// **Nothing a shipped machine runs arms it**: the argument comes from the
 /// `[programs.netd] args` row of a boot config, and the one config that carries
-/// it is `tests/lanicscase`. A boot that always raised a message would make the
-/// kernel's first-message record read the same on a working card and a dead
-/// one.
+/// it is `tests/lanicscase`.
 const PROVOKE_MESSAGE: &str = "--provoke-message";
 
 use toyos::endow;
@@ -129,8 +125,11 @@ impl Card {
     /// [`PROVOKE_MESSAGE`], carried to the driver that has one.
     fn provoke_message(&self) {
         match self {
+            // A config that armed the actuator on a card with no `ICS` asked
+            // this boot a question it cannot answer, and a green boot that
+            // answered none of it is worse than no boot.
             Self::Virtio(_) => {
-                say!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio")
+                panic!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio")
             }
             Self::Intel(nic) => nic.provoke_message(),
         }
@@ -1325,7 +1324,6 @@ fn main() {
         .expect("the manifest declares this program serves `netd`");
     let nic = open(claim);
     if std::env::args().any(|arg| arg == PROVOKE_MESSAGE) {
-        say!("netd: {PROVOKE_MESSAGE}: the next message this claim takes is one netd asked for");
         nic.provoke_message();
     }
     let mac = nic.mac();

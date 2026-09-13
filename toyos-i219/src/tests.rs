@@ -994,11 +994,6 @@ fn a_seeded_workload_loses_nothing_and_invents_nothing() {
 /// isolated and advertising what §6.1.5's battery saver left — the bring-up has
 /// to satisfy every clause of §9 the stub holds it to before the model raises a
 /// link at all.
-///
-/// **The bring-up's own reading of §9.5.2.2 is a link that is not up yet**, and
-/// that is the machine: §9.5.2.1's restart is microseconds old when the driver
-/// reads the status register, and a 1000BASE-T negotiation takes seconds. The
-/// settled link is `STATUS.LU`, which the passes after `open` read.
 #[test]
 fn the_phy_is_brought_up_and_the_mac_sees_the_link_it_raises() {
     let nic = Nic::i219(31);
@@ -1009,9 +1004,9 @@ fn the_phy_is_brought_up_and_the_mac_sees_the_link_it_raises() {
 
     assert_eq!(
         driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1, up: false, negotiated: false }),
+        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
         "{}",
-        nic.because("the PHY did not answer §9.5.2.2 and §9.5.2.3 as its own document says")
+        nic.because("the PHY did not answer §9.5.2.3 as its own document says")
     );
     assert!(driver.brought_up().master_quiet, "{}", nic.because("§3.1.3.10 never went quiet"));
     // §4.5.2: "Once the access completes, the controlling agent must write a 0b
@@ -1045,26 +1040,48 @@ fn the_phy_is_brought_up_and_the_mac_sees_the_link_it_raises() {
     );
 }
 
-/// **What §9.5.2.5's advertisement is for.** Against a partner with no
-/// 1000BASE-T ability, the speed the link resolves to is the best the two have
-/// in common below a gigabit — so a bring-up that left the advertisement at
-/// what §6.1.5's battery saver put there negotiates 10 Mb/s on a cable that
-/// carries 100.
+/// **What §9.5.2.5's advertisement is for, ability by ability.** The link
+/// resolves to the best the two ends have in common, so every ability
+/// [`toyos_phy::advertise::WANTED`] offers is the whole of what a partner
+/// offering only that one can reach — and a partner offering nothing this part
+/// advertises gets no link at all.
 #[test]
 fn the_advertised_abilities_are_what_the_link_resolves_to() {
-    let nic = Nic::i219(42);
-    nic.partner_without_gigabit();
-    nic.set_link(true);
-    let mut driver = open(&nic);
+    use toyos_phy::advertise::{FULL_10, FULL_100, HALF_10, HALF_100, SELECTOR_802_3};
+    let only = |ability| SELECTOR_802_3 | ability;
+    for (seed, partner, resolved) in [
+        (42, only(HALF_10), Some((10, false))),
+        (43, only(FULL_10), Some((10, true))),
+        (44, only(HALF_100), Some((100, false))),
+        (45, only(FULL_100), Some((100, true))),
+        // §9.5.2.5's Selector Field alone: a partner with no ability at bits
+        // 8:5 has nothing in common with this one, which is a cable that
+        // carries no link.
+        (46, SELECTOR_802_3, None),
+    ] {
+        let nic = Nic::i219(seed);
+        // No 1000BASE-T on the partner's side, or §9.5.2.10's ability would
+        // decide every row alike.
+        nic.partner_advertises(partner, 0);
+        nic.set_link(true);
+        let mut driver = open(&nic);
 
-    nic.negotiation_settles();
-    one_pass(&mut driver);
-    assert_eq!(
-        driver.link(),
-        Link { up: true, speed_mbps: 100, full_duplex: true },
-        "{}",
-        nic.because("the link resolved to something other than the best common ability")
-    );
+        nic.negotiation_settles();
+        one_pass(&mut driver);
+        let wanted = match resolved {
+            Some((speed_mbps, full_duplex)) => Link { up: true, speed_mbps, full_duplex },
+            None => Link::default(),
+        };
+        assert_eq!(
+            driver.link(),
+            wanted,
+            "{}",
+            nic.because(&format!(
+                "against a partner advertising {partner:#06x} the link resolved to something \
+                 other than the best ability the two have in common"
+            ))
+        );
+    }
 }
 
 /// The premise of the test above: this model really does refuse a link to a PHY
@@ -1178,7 +1195,7 @@ fn the_phy_is_found_at_whichever_address_answers_its_identifier() {
 
     assert_eq!(
         driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::GENERAL, id: 0x0154_00a1, up: false, negotiated: false }),
+        Ok(Phy { addr: toyos_phy::GENERAL, id: 0x0154_00a1 }),
         "{}",
         nic.because("the bring-up did not look past the address Table 9-1 names")
     );
@@ -1251,7 +1268,7 @@ fn a_master_that_never_goes_quiet_does_not_stop_the_bring_up() {
 #[test]
 fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way() {
     let nic = Nic::with(
-        43,
+        47,
         Part::I219,
         Permits {
             master_takes_time_to_quiesce: false,
@@ -1267,7 +1284,7 @@ fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way
 
     assert_eq!(
         driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1, up: false, negotiated: false }),
+        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
         "{}",
         nic.because("the bring-up did not reach the PHY on a part that made it easy")
     );
@@ -1282,12 +1299,9 @@ fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way
     );
 }
 
-/// **A count of no messages is two facts**, and on a machine whose only reading
-/// of the interrupt path is that count nothing else separates a part that spoke
-/// to nobody from a part nothing made speak. §10.2.4.4's `ICS` "sets" a cause,
-/// so a caller that has armed [`I219::provoke_message`] takes a message it
-/// asked for — and a bring-up that has not raises none on a part with no link
-/// and no frame behind it.
+/// §10.2.4.4's `ICS` "sets" a cause, so a caller that has armed
+/// [`I219::provoke_message`] takes a message it asked for — and a bring-up
+/// that has not raises none on a part with no link and no frame behind it.
 #[test]
 fn a_message_is_raised_only_when_the_caller_asks_for_one() {
     for nic in [Nic::new(39), Nic::i219(40)] {
