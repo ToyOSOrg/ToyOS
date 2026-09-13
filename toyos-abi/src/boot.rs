@@ -100,6 +100,56 @@ pub struct KernelArgs {
     /// left to protect.
     pub cmdline_addr: u64,
     pub cmdline_len: u64,
+    /// How many of [`Self::root_bridge_windows`] firmware named. Zero is a
+    /// machine whose firmware was not asked or would not answer, and the kernel
+    /// then knows of no address below 4 GiB that reaches the bus at all.
+    pub root_bridge_window_count: u64,
+    /// The memory windows the platform's root bridges decode, as the addresses
+    /// a CPU issues.
+    ///
+    /// **An address outside every one of these is not free space, it is
+    /// unrouted**: a read of it answers all-ones, which is what an absent
+    /// device answers too. So this is what a BAR the kernel re-places has to
+    /// land inside, and there is no deriving it from the memory map — the map
+    /// says what firmware *used*, not what the bridge would decode.
+    ///
+    /// Carried inline rather than as an address and a length, unlike
+    /// [`Self::memory_map_addr`]: this is read long after `mm::init` has handed
+    /// the loader's pool memory out.
+    pub root_bridge_windows: [RootBridgeWindow; MAX_ROOT_BRIDGE_WINDOWS],
+}
+
+/// The most windows the loader will carry: four memory windows on each of
+/// sixteen root bridges. The most any machine this project has read names is
+/// three on its one bridge — the ThinkPad T14's `_CRS` names the legacy hole,
+/// the low window and the high one — and firmware naming more than this is
+/// refused in the loader by name, the kernel handed none rather than a list
+/// with entries dropped out of it.
+pub const MAX_ROOT_BRIDGE_WINDOWS: usize = 64;
+
+/// One memory window a root bridge decodes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RootBridgeWindow {
+    pub base: u64,
+    pub length: u64,
+}
+
+impl RootBridgeWindow {
+    /// The first address past the window, saturating: a firmware-named length
+    /// is untrusted input and an extent that would wrap is one this cannot
+    /// contain anything past.
+    pub fn end(&self) -> u64 {
+        self.base.saturating_add(self.length)
+    }
+
+    /// Whether the whole of `base .. end` is inside this window.
+    ///
+    /// The whole extent and not the base: a BAR that starts inside a window and
+    /// runs past it decodes addresses the bridge does not.
+    pub fn holds(&self, base: u64, end: u64) -> bool {
+        base >= self.base && end <= self.end() && base <= end
+    }
 }
 
 /// The token naming the filesystem the kernel mounts as root.
@@ -130,6 +180,16 @@ impl KernelArgs {
     pub fn rtc_utc_offset(&self) -> Option<i32> {
         (self.rtc_utc_offset_known != 0).then_some(self.rtc_utc_offset_minutes)
     }
+
+    /// The windows firmware named, and none of the array behind them.
+    ///
+    /// A count past the array panics rather than clamping: the loader is the
+    /// only writer and it refuses firmware naming more than the array holds, so
+    /// a larger count is this project disagreeing with itself about a layout
+    /// both halves compile from this file.
+    pub fn root_bridge_windows(&self) -> &[RootBridgeWindow] {
+        &self.root_bridge_windows[..self.root_bridge_window_count as usize]
+    }
 }
 
 /// The kernel's `_start` reads three of these fields out of `rdi` by hardcoded
@@ -156,8 +216,12 @@ const _: () = {
     assert!(offset_of!(KernelArgs, rtc_utc_offset_known) == 168);
     assert!(offset_of!(KernelArgs, cmdline_addr) == 176);
     assert!(offset_of!(KernelArgs, cmdline_len) == 184);
-    assert!(size_of::<KernelArgs>() == 192);
+    assert!(offset_of!(KernelArgs, root_bridge_window_count) == 192);
+    assert!(offset_of!(KernelArgs, root_bridge_windows) == 200);
+    assert!(size_of::<KernelArgs>() == 1224);
     assert!(align_of::<KernelArgs>() == 8);
+    assert!(size_of::<RootBridgeWindow>() == 16);
+    assert!(align_of::<RootBridgeWindow>() == 8);
 };
 
 #[repr(C)]
@@ -191,5 +255,27 @@ mod tests {
         assert!(actuators("usb-flush-fails").eq(["usb-flush-fails"]));
         assert_eq!(root_uuid(""), None);
         assert_eq!(actuators("").count(), 0);
+    }
+
+    #[test]
+    fn a_window_holds_an_extent_and_not_merely_its_first_address() {
+        let window = RootBridgeWindow { base: 0xa080_0000, length: 0x1f80_0000 };
+        assert_eq!(window.end(), 0xc000_0000);
+
+        assert!(window.holds(0xbcf0_0000, 0xbcf2_0000));
+        assert!(!window.holds(0x9920_0000, 0x9920_1000));
+        // The last byte in, and the first byte out.
+        assert!(window.holds(0xbfff_f000, 0xc000_0000));
+        assert!(!window.holds(0xbfff_f000, 0xc000_0001));
+        assert!(!window.holds(0xa07f_ffff, 0xa080_0001));
+        // A base inside and an extent that is not: what a predicate over the
+        // base alone would call held.
+        assert!(!window.holds(0xbfff_0000, 0xd000_0000));
+
+        // A length that would run off the end of the address space contains
+        // nothing past it, and an extent that wraps is held by nothing.
+        let whole = RootBridgeWindow { base: 1, length: u64::MAX };
+        assert_eq!(whole.end(), u64::MAX);
+        assert!(!whole.holds(2, 1));
     }
 }

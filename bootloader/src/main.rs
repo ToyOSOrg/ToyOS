@@ -19,7 +19,7 @@ use uefi::{
     table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
     Event,
 };
-use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
 
 /// Every line this loader prints: the firmware's console, and the file on the
@@ -59,6 +59,11 @@ const MAX_ESP_FILE: u64 = 1024 * 1024 * 1024;
 /// Each allocation splits at most one free region in two, so four would do;
 /// this is beyond any plausible firmware and costs 1.5 KiB.
 const MAP_MARGIN: usize = 64;
+
+/// How much of the handoff frame the check below bounds. `KernelArgs` is the
+/// largest thing in it and the locals around it are scalars, so this is room
+/// for the frame whichever order a compiler lays it out in.
+const HANDOFF_FRAME_BYTES: u64 = 8192;
 
 fn alloc_kernel_memory(size: usize) -> vec::Vec<u8> {
     const KERNEL_ALIGN: usize = 2 * 1024 * 1024; // 2MB
@@ -618,6 +623,24 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         }
     }
 
+    // The third pointer the kernel reads before `mm::init`, and the one nothing
+    // stated until `KernelArgs` grew past a kilobyte: the struct is built in
+    // this frame and handed over by reference, and the kernel reads it through
+    // the same boot map. Checked here and not where it is built, because it is
+    // built after the exit, where neither a print nor a panic survives.
+    let frame = &pt_layout as *const Layout as u64;
+    let frame_inside =
+        frame.checked_add(HANDOFF_FRAME_BYTES).is_some_and(|end| end <= BOOT_MAP_BYTES);
+    println!(
+        "Handoff frame: {frame:#x}+{HANDOFF_FRAME_BYTES:#x} {} the {BOOT_MAP_BYTES:#x}-byte boot map",
+        if frame_inside { "is inside" } else { "DOES NOT FIT" },
+    );
+    assert!(
+        frame_inside,
+        "the boot map cannot hold the frame the kernel is handed its arguments from, so the \
+         kernel would read none of them"
+    );
+
     // Last, and after every line above: a console write, a FAT write and a
     // handle drop can each add a descriptor, and the margin below is fixed.
     loaderlog::close();
@@ -693,6 +716,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         rtc_utc_offset_known: rtc_utc_offset.is_some() as u32,
         cmdline_addr: cmdline.as_ptr() as u64,
         cmdline_len: cmdline.len() as u64,
+        root_bridge_window_count: 0,
+        root_bridge_windows: [RootBridgeWindow::default(); MAX_ROOT_BRIDGE_WINDOWS],
     };
 
     kernel_args.boot_pml4_addr = pml4_phys;
