@@ -168,10 +168,13 @@ pub fn metal_job_reboot(
 /// was busy an instant earlier. Three things are judged, and the stop reverted
 /// fails each on its own:
 ///
+/// * **nothing at all follows `Rebooting.` on the console** — which is a judge
+///   and not a formality because each writer prints every pass, so six threads
+///   with the shutdown's staged hundred milliseconds still to run put lines
+///   under the last word on a machine that was not stopped;
 /// * the kernel's `stop:` record says every userland thread it had to stop was;
 /// * **zero block-device operations were open when the stop ended** — a count
-///   the block layer keeps, not one the stop derives, so the two can disagree;
-/// * nothing at all follows `Rebooting.` on the console.
+///   the block layer keeps, not one the stop derives, so the two can disagree.
 ///
 /// `quiesce-late-word` is armed for the reason `usb_reset_hands_devices_back`'s
 /// deadline arm arms it: QEMU has no window between the boot's last word and
