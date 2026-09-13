@@ -11,14 +11,11 @@ is on a cable on the same LAN as the development Mac and its NIC is the onboard
 Intel I219 at `00:1f.6`, `8086:15fc`, which the kernel enumerates and nothing
 claims. The track is to make that cable the answer path.
 
-Built and green under QEMU: the substrate (`kernel/src/pcidev/mod.rs`), the
-I219 driver (`toyos-i219/`, `userland/netd/src/i219.rs`), netd's address from
-DHCP (`userland/netd/src/dhcp.rs`), the record stream (`toyos-logstream/`,
-`userland/logd/src/stream.rs`) and sshd's exec, transfer and key auth. What is
-left is the laptop — the claim on its own card (`tests/lancase`), the stream and
-the ssh from the Mac over the cable (`tests/ssh-client-host`), and a netboot
-spike that takes the stick out of the boot path — and all of it waits on
-`issues/kernel/a-32-bit-bar-needs-the-host-bridges-aperture.md`.
+Built and green under QEMU: the substrate (`kernel/src/pcidev/mod.rs`), the I219
+driver (`toyos-i219/`), netd's address from DHCP, the record stream
+(`toyos-logstream/`) and sshd's exec, transfer and key auth. What is left is the
+laptop — its own card (`tests/lancase`), the stream and the ssh from the Mac, and
+a netboot spike — on `issues/kernel/a-32-bit-bar-needs-the-host-bridges-aperture.md`.
 
 Constraints a reader would otherwise pay to re-derive:
 
@@ -35,19 +32,15 @@ Constraints a reader would otherwise pay to re-derive:
 - **ssh is the bench's transport and a real feature**: sshd is built on russh
   and the harness's client is russh too. No host ssh binary, no fork.
 - **Addressing is DHCP with a hostname**, and netd sends `toyos-t14` as the
-  host-name option — but **the name resolves to nothing on this LAN**, measured:
-  the T14's DHCP-served resolvers are the ISP's, and on the development Mac
-  `t14` resolves to the Tailscale address `100.92.92.12`, which only Ubuntu ever
-  holds. The address is read off the claimed PCI function instead
-  (`Driver::wire`): `enp0s31f6` at `192.168.1.46/24`, the Mac on `192.168.1.47`.
-  Wi-Fi is out — the AX210 needs a firmware image.
+  host-name option — but **the name resolves to nothing on this LAN**, measured,
+  so the metal loop reads the address off the claimed function (`Driver::wire`)
+  instead. Wi-Fi is out — the AX210 needs a firmware image.
 - **The I219 is an MSI part**, measured: `/proc/interrupts` names its interrupt
   `IR-PCI-MSI-0000:00:1f.6` and `msi_irqs/162` reads `mode=msi`.
-- The I219 has a **32-bit BAR** (`bar0=0xbcf00000`): `pcidev`'s window allocator
-  places a BAR above everything firmware described, and below 4 GiB there is no
-  above — the platform's fixed MMIO is at `0xFEC00000`. Leaving the BAR where it
-  sits is not a way out either: the internal NVMe's `0xbce00000` is in the same
-  2 MiB page, which is the only page size this kernel maps.
+- The I219 has a **32-bit BAR** (`bar0=0xbcf00000`) and `pcidev` places a BAR
+  above everything firmware described, of which below 4 GiB there is none;
+  leaving it where it sits shares a 2 MiB page with the internal NVMe's
+  `0xbce00000`, which is the only page size this kernel maps.
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
   ground reddened every netd registration at once. So a re-claim is made safe by

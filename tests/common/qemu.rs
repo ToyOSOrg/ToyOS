@@ -4223,6 +4223,12 @@ fn qemu_command(
                 .arg("e1000e,netdev=net0");
         }
         Nic::E1000eNoServer => {
+            // The hub is not slirp and takes no `hostfwd`, so a boot asking for
+            // one here is refused rather than booted without a forward.
+            assert!(
+                options.ssh_port.is_none(),
+                "this profile's cable is plugged into nothing, so no host port reaches the guest"
+            );
             qemu.arg("-netdev")
                 .arg("hubport,id=net0,hubid=0")
                 .arg("-device")
@@ -4230,6 +4236,10 @@ fn qemu_command(
         }
     }
     if let Some(at) = &options.wire_dump {
+        assert!(
+            !matches!(shape.nic, Nic::Absent),
+            "this profile carries no NIC, so there is no `net0` to dump frames off"
+        );
         qemu.arg("-object")
             .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
     }

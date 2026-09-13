@@ -655,10 +655,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
     ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
-    // announces itself anyway. Its cost is netd's own twenty-second lease bound
-    // waited out in real time, so it is `Why::TimerAnchored` and belongs
-    // Nightly; a new name is bootstrapped Fast with the UNMEASURED marker
-    // because only the fast tier can replace one.
+    // announces itself anyway. Fast with the UNMEASURED marker, which only the
+    // fast tier carries; its verdict is timer-anchored, and
+    // `issues/build/a-timer-anchored-names-tier-is-decided-by-its-price.md`
+    // holds the relegation it owes.
     ("lan_no_lease", Sched::Parallel, Tier::Fast),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
@@ -1313,12 +1313,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
     ),
     (
-        // The cable. Under QEMU this name judges netd's DHCP client against the
-        // user-mode backend's server; here it judges the whole path — the
-        // kernel handing netd the T14's own I219, the link, a lease from the
-        // bench's router, and the development host's `ping` answered at the
-        // leased address in the window where the machine is running nothing but
-        // this image.
         "lan_dhcp_lease",
         metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
     ),
