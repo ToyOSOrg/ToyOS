@@ -15,7 +15,11 @@ true, and so nothing reaches:
   failure and `tear_down`), or `Armed::Msi`'s teardown, which turns the
   capability off where there is no table entry to mask;
 - `Refusal::MsixUnusable` and `Unarmed::Blocked`, owed only by a function that
-  publishes MSI-X this kernel cannot arm and by a unit that refuses the message.
+  publishes MSI-X this kernel cannot arm and by a unit that refuses the message;
+- `Refusal::CapsTruncated` and `NoCapability::Truncated`, owed by a function
+  whose capability list ends at a link the spec forbids. The walk's half of that
+  decision is host-tested in `toyos-pci/src/caps.rs`; the kernel's refusal arm
+  is reached by nothing.
 
 The two pre-existing MSI armings in this kernel — xHCI's and HDA's
 `arm_interrupt` — never disarm, so MSI teardown is exercised nowhere in the tree
