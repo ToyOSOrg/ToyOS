@@ -144,7 +144,11 @@ pub struct Nic {
 
 impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
-    pub fn open(dev: PciDev) -> Result<Self, Opening> {
+    ///
+    /// **`part` comes from the manifest row the claim was minted for**, not
+    /// from anything read out of the function: below the register file the two
+    /// parts differ, and the driver decides nothing about which it is on.
+    pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
         let dev = Rc::new(dev);
         let info = dev
             .describe()
@@ -182,6 +186,7 @@ impl Nic {
         // SAFETY: the same mapping, and `mapped` is moved into the `Bar` below.
         let registers = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
         let driver = toyos_i219::I219::open(
+            part,
             Bar { window: registers, _mapped: mapped },
             Monotonic,
             Grant { window: grant, device_base, _region: region },
@@ -189,6 +194,27 @@ impl Nic {
         )
         .map_err(Opening::Driver)?;
         let mac = driver.mac();
+        // The bring-up's own reading, said once: a boot whose link never comes
+        // up has nothing else to say why, and every arm of it is a refusal by
+        // name rather than a number to interpret.
+        let brought_up = driver.brought_up();
+        crate::say!(
+            "netd: I219: {}, and the PHY {}",
+            if brought_up.master_quiet {
+                "the function stopped mastering before it was reset"
+            } else {
+                "the function was still mastering when it was reset"
+            },
+            match brought_up.phy {
+                Ok(phy) => format!(
+                    "identifies as {:#010x}, its link is {} and auto-negotiation {}",
+                    phy.id,
+                    if phy.up { "up" } else { "down" },
+                    if phy.negotiated { "is complete" } else { "has not finished" },
+                ),
+                Err(why) => format!("was not brought up: {why}"),
+            },
+        );
         Ok(Self {
             driver: RefCell::new(driver),
             claim: dev,

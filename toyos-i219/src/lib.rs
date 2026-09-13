@@ -4,10 +4,15 @@
 //! The part is the T14's onboard `8086:15fc` at `00:1f.6`. Its register file is
 //! the one the *Intel 82574 GbE Controller Family Datasheet* (317694-018, rev
 //! 2.7) defines, which QEMU's `e1000e` model — `8086:10d3`, the 82574L itself —
-//! implements too; that is why one driver drives both, and why the datasheet
-//! this file cites throughout is the 82574's rather than the I219's own, which
-//! describes the part and not the register set. Every `§` below is a section of
-//! it.
+//! implements too; that is why one driver drives both, and why every `§` in
+//! this file and in [`regs`] is a section of that document.
+//!
+//! **Below the register file the two parts are not one.** §3.2.1 puts the
+//! 82574's PHY on the controller's own die; the T14's is a MAC in the PCH whose
+//! PHY is separate silicon the Management Engine shares, reached over `MDIC`
+//! under §4.5.2's ownership arbitration and described by a document of its own.
+//! [`Part`] is which one this claim is, and [`phy`] is everything that follows
+//! from it.
 //!
 //! # The boundary
 //!
@@ -64,6 +69,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod phy;
 pub mod regs;
 
 #[cfg(test)]
@@ -365,6 +371,47 @@ impl Counters {
 /// register file it is not refuses rather than spinning for the boot.
 const RESET_DEADLINE_NANOS: u64 = 100_000_000;
 
+/// How long [`I219::open`] leaves `CTRL.RST` alone after writing it.
+///
+/// §10.2.2.1: "designers must wait approximately 1 µs after resetting before
+/// attempting to check to see if the bit has cleared or attempting to access
+/// (read or write) any other device register."
+const RESET_SETTLE_NANOS: u64 = 1_000;
+
+/// How long [`I219::open`] waits for §3.1.3.10's master quiesce.
+///
+/// **A driver-chosen bound, not a datasheet one**: §3.1.3.10 describes the
+/// handshake and says only that "the software device driver might time out if
+/// the PCIe Master Enable Status bit is not cleared within a given time".
+const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
+
+/// Which part the claim is on, because the two this driver drives are the same
+/// register file over different silicon.
+///
+/// **The parent's answer and never a probe**: `/system/bin/init` moved a claim
+/// on a declared vendor and device into this process, and a driver that read
+/// the register file to work out which part it was on would be guessing at the
+/// registers it does not yet trust.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Part {
+    /// The 82574, whose PHY §3.2.1 puts on the controller's own die.
+    E82574,
+    /// The ThinkPad T14's `8086:15fc`: a MAC in the PCH whose PHY is the
+    /// separate silicon the *Intel Ethernet Connection I219 Datasheet*
+    /// describes and the Management Engine shares.
+    I219,
+}
+
+/// What [`I219::open`] found on the way up, for the one line a caller prints
+/// about a function that raised no link.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BringUp {
+    /// Whether §3.1.3.10's master quiesce finished before the reset was issued.
+    pub master_quiet: bool,
+    /// What the PHY answered, or why it was not reached.
+    pub phy: Result<phy::Phy, phy::PhyRefusal>,
+}
+
 /// The function, brought up and driving.
 pub struct I219<R, C, D, I> {
     regs: R,
@@ -372,6 +419,7 @@ pub struct I219<R, C, D, I> {
     dma: D,
     irq: I,
     mac: [u8; 6],
+    brought_up: BringUp,
     link: Link,
     /// When [`Self::open`] returned, and when the link first came up — the two
     /// the caller subtracts to get a link-up time.
@@ -393,10 +441,15 @@ pub struct I219<R, C, D, I> {
 
 impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// Bring the function up in the order §4.6 fixes: reset with every
-    /// interrupt masked, the station address, the multicast table, the link,
-    /// both rings, then the transmitter, then the receiver, then the interrupt
-    /// mask.
-    pub fn open(regs: R, clock: C, dma: D, irq: I) -> Result<Self, Refusal> {
+    /// interrupt masked, the station address, the multicast table, the PHY, the
+    /// link, both rings, then the transmitter, then the receiver, then the
+    /// interrupt mask.
+    ///
+    /// **The PHY is between the multicast table and `CTRL.SLU`**, because
+    /// §4.6.3.2 makes `STATUS.LU` the MAC's report of a link "from the PHY
+    /// qualified with CTRL.SLU": a driver that let the MAC look before the PHY
+    /// was configured would read the answer to the wrong question.
+    pub fn open(part: Part, regs: R, clock: C, dma: D, irq: I) -> Result<Self, Refusal> {
         if regs.bytes() < regs::REGISTER_BYTES {
             return Err(Refusal::Window { given: regs.bytes(), needed: regs::REGISTER_BYTES });
         }
@@ -417,13 +470,40 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         regs.write(regs::IMC, u32::MAX);
         let _ = regs.read(regs::ICR);
 
+        // §10.2.2.1: "Before issuing this reset, software has to insure that Tx
+        // and Rx processes are stopped by following the procedure described in
+        // Section 3.1.3.10" — §3.1.3.10's master disable, which is how a
+        // function firmware left driving stops reaching memory before its rings
+        // are rebuilt under it. The expiry is not a refusal because the same
+        // section sanctions it: "the software device driver might time out if
+        // the PCIe Master Enable Status bit is not cleared within a given
+        // time", and the reset clears the bit either way.
+        let held = regs.read(regs::CTRL);
+        regs.write(regs::CTRL, held | ctrl::GIO_MASTER_DISABLE);
+        let started = clock.nanos();
+        let master_quiet = loop {
+            if regs.read(regs::STATUS) & status::GIO_MASTER_ENABLE == 0 {
+                break true;
+            }
+            if clock.nanos().saturating_sub(started) >= MASTER_QUIESCE_DEADLINE_NANOS {
+                break false;
+            }
+        };
+
         // §10.2.2.1: a read-modify-write, because two of this register's
         // reserved bits are documented as "Set to 1b" and one as "must be set
         // to 1b" — a driver that wrote a value it composed itself would clear
         // them.
         let held = regs.read(regs::CTRL);
-        regs.write(regs::CTRL, held | ctrl::RST);
+        // Read before the write and not after it, because what the two bounds
+        // below are measured from is the reset itself.
         let started = clock.nanos();
+        regs.write(regs::CTRL, held | ctrl::RST);
+        // The settle is a wait and not a poll: §10.2.2.1 owes the microsecond
+        // to "attempting to check to see if the bit has cleared or attempting
+        // to access (read or write) any other device register" alike, so there
+        // is nothing this driver may read to shorten it.
+        while clock.nanos().saturating_sub(started) < RESET_SETTLE_NANOS {}
         loop {
             if regs.read(regs::CTRL) & ctrl::RST == 0 {
                 break;
@@ -460,6 +540,17 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             regs.write(regs::MTA + entry * 4, 0);
         }
 
+        // §4.6.3.1: "Refer to the PHY documentation for the initialization and
+        // link setup steps. The device driver uses the MDIC register to
+        // initialize the PHY and setup the link." On a part whose PHY is on the
+        // controller's own die there is no such documentation to refer to and
+        // no PHY behind `MDIC` to reach, so the work is refused by name rather
+        // than aimed at whatever `0x00020` is there.
+        let phy = match part {
+            Part::I219 => phy::bring_up(&regs, &clock),
+            Part::E82574 => Err(phy::PhyRefusal::NotOnThisPart),
+        };
+
         // §10.2.2.1: `SLU` is what lets the MAC see the PHY's link at all;
         // `ASDE` must be zero on this family; forcing speed or duplex would
         // override what auto-negotiation resolved; and this driver negotiates
@@ -482,6 +573,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             dma,
             irq,
             mac,
+            brought_up: BringUp { master_quiet, phy },
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,
@@ -531,6 +623,16 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // §4.6.5: and only now the mask, so no cause can arrive before there
         // is a ring to answer it with.
         nic.regs.write(regs::IMS, cause::ENABLED | cause::ENABLED_MSIX);
+
+        // §10.2.4.4: `ICS` sets a cause as if the event had happened, so the
+        // message that follows this write is one this driver asked for.
+        //
+        // **A count of no messages is two facts** — a part nothing made speak,
+        // and a message that reached no CPU — and on a machine whose only
+        // reading of either is that count, nothing else separates them. `LSC`
+        // is the cause written because acting on it is re-reading `STATUS`,
+        // which the next pass does anyway.
+        nic.regs.write(regs::ICS, cause::LSC);
 
         nic.opened_at = nic.clock.nanos();
         nic.refresh_link();
@@ -601,6 +703,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
 
     pub fn link(&self) -> Link {
         self.link
+    }
+
+    /// What the bring-up found, which is the whole of what a boot that raised
+    /// no link has to say about why.
+    pub fn brought_up(&self) -> BringUp {
+        self.brought_up
     }
 
     pub fn counters(&self) -> Counters {

@@ -43,11 +43,12 @@ mod virtio_net;
 ///
 /// `1af4:1041` is virtio's transitional device id `1000 + 1` for a network
 /// device (virtio 1.2 §5.1.1). `8086:15fc` is the ThinkPad T14's onboard I219
-/// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models, and
-/// one driver takes both because the register file is the same one.
+/// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models. One
+/// driver takes both because the register file is the same one, and each row
+/// names which part it is because below that file they are not.
 const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, Card::intel),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, Card::intel),
+    (PciId { vendor: 0x8086, device: 0x15fc }, Card::i219),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, Card::e82574),
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
 
@@ -85,11 +86,23 @@ impl Card {
         panic!("netd: the NIC this program was given is not one it can drive — {why}")
     }
 
-    fn intel(claim: toyos::PciDev) -> Self {
-        match i219::Nic::open(claim) {
+    /// **Which part, from the row the claim was minted for.** One driver, two
+    /// pieces of silicon: the register file is the same one and what is below
+    /// it is not, so the answer comes from the table above and never from a
+    /// register.
+    fn intel(claim: toyos::PciDev, part: toyos_i219::Part) -> Self {
+        match i219::Nic::open(claim, part) {
             Ok(nic) => Self::Intel(nic),
             Err(why) => Self::undrivable(why),
         }
+    }
+
+    fn i219(claim: toyos::PciDev) -> Self {
+        Self::intel(claim, toyos_i219::Part::I219)
+    }
+
+    fn e82574(claim: toyos::PciDev) -> Self {
+        Self::intel(claim, toyos_i219::Part::E82574)
     }
 
     fn virtio(claim: toyos::PciDev) -> Self {
