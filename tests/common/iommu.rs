@@ -806,12 +806,7 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// The two lines a hand-over spends, on the function `netcase` claims.
-///
-/// Named once because both arms of `iommu_virtio_platform` read them, in
-/// opposite directions: the arm with a unit requires them and the arm without
-/// one requires their absence. An absence nothing ever produces would pass
-/// against a kernel that had stopped writing the line at all.
+/// The two lines a hand-over spends: one arm requires them, the other their absence.
 const BAR_MOVED: &str = "pcidev: PCI 00:03.0 BAR";
 const MSIX_ARMED: &str = "PCI 00:03.0: msix address=";
 
