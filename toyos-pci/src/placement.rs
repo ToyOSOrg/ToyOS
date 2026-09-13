@@ -7,11 +7,6 @@
 //! all; what says that is
 //! [`toyos_abi::boot::KernelArgs::root_bridge_windows`], and an address inside
 //! none of those windows is never offered.
-//!
-//! **Selecting an address and taking it out of the runs is one operation.**
-//! [`reserve`] is the only way to be offered one, and it holds the runs by
-//! `&mut`, so a second caller cannot be handed an address the first is still
-//! probing.
 
 use toyos_abi::boot::RootBridgeWindow;
 
@@ -55,7 +50,8 @@ fn offered(run: &Window, windows: &[RootBridgeWindow], span: u64) -> Option<(u64
 }
 
 /// The next address `runs` offers for a `span`-byte window, taken out of `runs`
-/// in the same call so nothing is offered it twice.
+/// in the same call — by `&mut`, so a second caller cannot be handed an address
+/// the first is still probing.
 ///
 /// **Only an address inside a window firmware declared is ever answered**: a
 /// run holding none is passed over untouched, and so is the part of a run below

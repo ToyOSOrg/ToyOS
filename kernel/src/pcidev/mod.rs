@@ -737,12 +737,8 @@ fn place_bars(
         let size = pci.bar_size(index).map_err(|_| Refusal::BarUnsizable(index))?;
         let at = match place_bar(pci, id, index, size) {
             Ok(at) => at,
-            // **A BAR this kernel could settle nothing against costs the
-            // function its window and not its hand-over.** The three below are
-            // statements about what can be proven — no address firmware
-            // assigned, one this kernel may not read, or a window whose every
-            // dword reads the same — and a function whose registers answer
-            // through another BAR is still a function a process can drive.
+            // Each of these says only that nothing could settle this BAR, which
+            // is that window's loss and not the function's.
             Err(why @ (Refusal::BarUnassigned(_)
             | Refusal::BarUnrouted(_)
             | Refusal::BarReferenceEmpty(_))) => {
@@ -852,10 +848,9 @@ fn probe_dword(at: u64, span: u64, offset: u64) -> u32 {
 ///
 /// Memory decode is off across every write, so nothing can read through a BAR
 /// that is half-programmed, and the address is read back off the register
-/// rather than assumed. A candidate the machine refuses costs the function
-/// nothing: the register goes back to the value firmware left in it and the
-/// address back to its run, so a refusal ends with the function and the machine
-/// exactly as they began.
+/// rather than assumed. A candidate the machine refuses leaves the register
+/// holding what firmware left in it, and a walk that ends in a refusal gives
+/// every address it took back to the run it came out of.
 fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64) -> Result<u64, Refusal> {
     let offset = bar::BASE + index as u64 * 4;
     let low = pci.read_config_u32(offset);
@@ -941,9 +936,6 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64) -> Result<u64, Re
             return Ok(at);
         }
 
-        // Undone whole, before the next candidate is asked about: the register
-        // holds what firmware left in it and decode is back on, which is the
-        // state every other refusal here leaves the function in.
         restore();
         log!(
             "pcidev: {who} BAR {index} left {at:#x}: with the BAR moved onto it and decode on it \
