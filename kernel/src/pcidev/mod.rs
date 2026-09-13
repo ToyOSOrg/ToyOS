@@ -13,23 +13,26 @@
 //! **A window is 2 MiB because that is the only page this kernel maps**, so a
 //! BAR a process may see is re-assigned onto a 2 MiB boundary of its own.
 //!
-//! **The machine proves the address, and firmware's answer only orders the
-//! candidates.** Every source in reach says what it *found* something at — the
-//! firmware memory map, this bus's assigned BARs, the ranges its bridges
-//! forward, and the windows firmware answered for its root bridges — and none
-//! of them says an address reaches this bus. So [`place_bar`] asks the machine
-//! about one candidate at a time, and the reference it settles each one against
-//! is **the function's own answer where firmware put it**: a dword read through
-//! the BAR before it is moved. The candidate must answer something no function
-//! claims before the move ([`claims_nothing`]), and must answer the function's
-//! own dword after it. A candidate that fails the first is skipped by name, a
-//! placement that fails the second is undone, and a function no candidate
-//! carried is refused rather than handed over.
+//! **An address is read only where firmware declared the platform decodes it.**
+//! A load at an address no bridge forwards does not answer all-ones on real
+//! hardware: it does not complete, and the CPU cannot be interrupted out of it
+//! — a ThinkPad T14 read `0xd0000000` once and was gone for the 420 s the metal
+//! loop waits, through its lockup detector and its boot deadline alike. So the
+//! condition is checked before any read and never by one:
+//! [`toyos_abi::boot::KernelArgs::root_bridge_windows`] carries what each root
+//! bridge is set to forward *and* what DXE's Global Coherency Domain says the
+//! platform declared as memory-mapped and nothing owns, and a candidate inside
+//! none of them is left alone by name.
 //!
-//! **The reference is the function's and not a constant**, because the constant
-//! is not one: a PCIe root complex answers all-ones where nothing claims an
-//! address and QEMU's q35 answers `0x00000000`, so a kernel holding either
-//! number would refuse every placement on the other machine.
+//! **Inside one, the function itself is the proof.** [`place_bar`] reads one
+//! dword through the BAR where firmware put it, moves the BAR onto the
+//! candidate, and reads the same dword there: the function answering its own
+//! value is what says it decodes the new address. A placement that does not is
+//! undone — the register back to what firmware left in it — and the next
+//! candidate tried; a function no candidate carried is refused rather than
+//! handed over. The reference is the function's and not a constant because the
+//! constant is not one: a PCIe root complex answers all-ones where nothing
+//! claims an address and QEMU's q35 answers `0x00000000`.
 //! [`alone_in_its_page`] is the assertion that it worked, never the other way
 //! round.
 //!
@@ -472,8 +475,10 @@ enum Refusal {
     /// every address and decoded none**, which is [`Refusal::NoPlacement`]: the
     /// first is a machine with no room and the second one with no route.
     NoRun { wide: bool },
-    /// Every address this machine was asked about was refused by the machine:
-    /// something already decoded it, or nothing decoded the BAR moved onto it.
+    /// Every address inside a window firmware declared was tried and the
+    /// function answered at none of them. **Zero is its own case**: a machine
+    /// whose free runs all lie outside every declared window offered nothing to
+    /// try, and nothing was read.
     NoPlacement { wide: bool, asked: usize },
     /// The function publishes nothing this claim may map — no memory BAR, or
     /// only the one holding its own MSI-X table.
@@ -524,11 +529,15 @@ impl core::fmt::Display for Refusal {
                 "its BAR is 32-bit and the firmware map, this bus's assigned BARs and its \
                  bridges' forwarded ranges leave no run below 4 GiB wide enough to offer it"
             ),
+            Self::NoPlacement { wide: _, asked: 0 } => write!(
+                f,
+                "no free run of this machine's address space lies inside a window its firmware \
+                 declared, and an address outside every one of them is not read"
+            ),
             Self::NoPlacement { wide, asked } => write!(
                 f,
-                "this machine was asked about {asked} {}-bit address(es) and decoded none of \
-                 them: each answered something with nothing placed there, or did not answer what \
-                 the function does once its BAR was",
+                "its BAR was moved onto {asked} {}-bit address(es) inside the windows firmware \
+                 declared and the function answered at none of them",
                 if *wide { 64 } else { 32 }
             ),
             Self::NoMappableBar => write!(
@@ -799,26 +808,16 @@ fn first_dword(at: u64, span: u64) -> u32 {
     crate::mm::paging::map_mmio(at, span, MmioPolicy::Uncacheable).read_u32(0)
 }
 
-/// Whether `dword` is an answer a machine gives where no function claims the
-/// address.
-///
-/// **All-ones is the specified one**: a memory read no function claims ends in
-/// an Unsupported Request, and the root complex returns all-ones to the
-/// requester (PCIe base spec §2.3.2). **All-zeros is what an emulator answers**,
-/// and it had to be measured rather than assumed: QEMU 11.1.0's q35 under this
-/// repository's OVMF reads `0x00000000` at `0x800200000` with nothing placed
-/// there, on a headless boot of `tests/netcase`.
-///
-/// Both are values a live register may hold too, so this filters a candidate
-/// and proves nothing about one. What proves one is [`place_bar`]'s second
-/// probe, where the function has to answer through the BAR what it already
-/// answers where firmware put it.
-fn claims_nothing(dword: u32) -> bool {
-    dword == u32::MAX || dword == 0
-}
-
-/// Move BAR `index` onto a 2 MiB boundary this machine proves it decodes, and
+/// Move BAR `index` onto a 2 MiB boundary inside a window firmware named, and
 /// answer where.
+///
+/// **Only an address inside one is ever read.** A load at an address no bridge
+/// forwards does not answer all-ones on real hardware — it does not complete,
+/// and the CPU cannot be interrupted out of it: the ThinkPad T14 issued one at
+/// `0xd0000000` and was gone for the 420 s the metal loop waits, through its
+/// lockup detector and its boot deadline alike. So what firmware declared is the
+/// *necessary* condition, checked before any read, and the one probe below runs
+/// inside it.
 ///
 /// Memory decode is off across every write, so nothing can read through a BAR
 /// that is half-programmed, and the address is read back off the register
@@ -857,17 +856,19 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
     let who = alloc::format!("PCI {:02x}:{:02x}.{}", pci.bus, pci.dev, pci.func);
     let mut asked = 0usize;
     for candidate in ordered(&runs, &windows, span) {
-        asked += 1;
         let at = candidate.at;
-        let before = first_dword(at, span);
-        if !claims_nothing(before) {
+        // **Not probed, because it may not be.** A candidate outside every
+        // window firmware declared is left alone entirely: nothing reads it,
+        // nothing is placed at it, and the next candidate is tried.
+        let Some(window) = candidate.inside else {
             log!(
-                "pcidev: {who} BAR {index} skipped {at:#x}: it answers {before:#010x} with \
-                 nothing of this function placed there, so something already claims it"
+                "pcidev: {who} BAR {index} left {at:#x} alone: it is inside no window firmware \
+                 declared, and a load at an address no bridge forwards does not come back"
             );
             refused(at, span);
             continue;
-        }
+        };
+        asked += 1;
         let placed =
             bar::placement(index, low, at, size).map_err(|_| Refusal::BarUnplaceable(index))?;
         pci.set_memory_decode(false);
@@ -887,19 +888,14 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
         // which is the whole proof.** A constant for "nothing claims this" would
         // have to be the same on every machine and is not — QEMU's is
         // `0x00000000` and a PCIe root complex's is all-ones — and the device's
-        // own answer needs no such constant: an address nothing routes gives the
-        // machine's answer rather than the function's, whichever that is.
+        // own answer needs no such constant.
         if after == signature {
             alone_in_its_page(pci, index, at, span);
             cut(pci, index, at, span);
             log!(
-                "pcidev: {who} BAR {index} ({size:#x} bytes) placed at {at:#x} — {}; it answered \
-                 {before:#010x} with nothing placed there and {after:#010x} with the BAR on it, \
-                 which is what this function answers at {was:#x}",
-                match candidate.inside {
-                    Some(base) => alloc::format!("inside firmware's mem {base:#x}"),
-                    None => "inside no window firmware named".into(),
-                },
+                "pcidev: {who} BAR {index} ({size:#x} bytes) placed at {at:#x} — inside \
+                 firmware's mem {window:#x}; it answers {after:#010x} there, which is what this \
+                 function answers at {was:#x}"
             );
             return Ok(at);
         }
@@ -920,16 +916,25 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
         );
         refused(at, span);
     }
-    Err(if asked == 0 { Refusal::NoRun { wide } } else { Refusal::NoPlacement { wide, asked } })
+    // A machine with no run at all and one whose every run is outside the
+    // declared windows are different facts, and the second is the one a reader
+    // would otherwise go looking for a device fault over.
+    Err(if runs.is_empty() {
+        Refusal::NoRun { wide }
+    } else {
+        Refusal::NoPlacement { wide, asked }
+    })
 }
 
-/// The candidates, in the order this kernel asks the machine about them.
+/// The candidates, in the order this kernel offers them.
 ///
-/// **The actuator is the negative control on the order itself**: a search by
-/// size is the rule this design refuses, and on the ThinkPad T14 it takes the
-/// 736 MiB run at `0xd0000000`, which is outside that machine's `_CRS` and
-/// reads all-ones. An arm that orders by size has to be undone by the machine
-/// and the next candidate taken, or the two probes prove nothing.
+/// **The actuator is the negative control on the rule itself**: a search by
+/// size is what this design refuses, and on the ThinkPad T14 it reaches first
+/// for the 736 MiB run at `0xd0000000` — which is inside no window that
+/// machine's firmware declared, and which the loop lost the machine to for
+/// 420 s the one time a kernel read it. An armed boot has to leave that
+/// candidate alone by name and hand the function over anyway, or "inside a
+/// window firmware declared" is not doing the work.
 fn ordered(
     runs: &[placement::Run],
     windows: &[RootBridgeWindow],
@@ -941,10 +946,11 @@ fn ordered(
     let mut by_size = runs.to_vec();
     by_size.sort_unstable_by_key(|run| core::cmp::Reverse(run.end - run.start));
     log!("pcidev: the candidates are ordered largest run first, which is an armed boot");
-    // No window list, so every candidate falls in the second pass and the sort
-    // above is the whole order: what firmware answered decides nothing here,
-    // which is the rule being controlled for.
-    placement::candidates(&by_size, &[], span).collect()
+    // **Each run's standing against the windows is still asked for**, because
+    // it is what says an address may be read at all — the order is the only
+    // thing this arm changes, and a control that also removed the condition
+    // would be the boot that lost the machine rather than a control.
+    by_size.iter().filter_map(|run| placement::offered(run, windows, span)).collect()
 }
 
 /// Where this BAR was already put, if a claim before this one put it there.
@@ -1256,9 +1262,20 @@ pub fn isr(slot: usize) {
 /// this kernel: a wake takes the inbox lock and an ISR may not.
 pub fn drain_pending() {
     for (slot, irq) in IRQ.iter().enumerate() {
-        if irq.take_pending() {
-            crate::inbox::Source::PciFunction(slot as u8).wake();
+        if !irq.take_pending() {
+            continue;
         }
+        // **The one record that tells a silent device from an undelivered
+        // message.** The end-of-boot census counts what arrived and a count of
+        // zero is both facts at once; this is said when the first one lands,
+        // and its absence is then the other fact.
+        if irq.take_unannounced() {
+            log!(
+                "pcidev: slot {slot} took its first message on vector {:#x}",
+                VECTORS[slot]
+            );
+        }
+        crate::inbox::Source::PciFunction(slot as u8).wake();
     }
 }
 

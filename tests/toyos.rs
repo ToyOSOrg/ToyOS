@@ -13782,13 +13782,14 @@ fn run_machine_test(
             Ok(())
         }
         "bar_placement_is_proven" => {
-            // **The machine is what says an address decodes, and this is the
-            // reading that says the kernel asked it.** The same netcase boot,
-            // because the NIC it hands netd is the only function in QEMU whose
-            // BAR this kernel moves — what is asserted is not where the BAR
-            // went but that the two probes ran and answered: all-ones at the
-            // address before anything of that function was placed there, and
-            // something that is not all-ones through the BAR afterwards.
+            // **Firmware says where a BAR may go and the function says whether
+            // it went there, and this is the reading that says both ran.** The
+            // same netcase boot, because the NIC it hands netd is the only
+            // function in QEMU whose BAR this kernel moves. What is asserted is
+            // not where the BAR went: that the loader handed the kernel free
+            // memory-mapped space at all, that the address chosen is inside one
+            // of those windows *and* inside a run the same boot printed, and
+            // that the function answers its own dword there.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
             let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
             if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
@@ -13800,6 +13801,25 @@ fn run_machine_test(
                 await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
             console.push_str(&qemu.drain_serial(Duration::from_millis(500)));
             let log = serial::Serial::named("boot console", console.as_str());
+
+            // **The windows the kernel was handed**, read off its own record —
+            // the loader's own dump of the Global Coherency Domain goes to the
+            // UEFI console and `loader.log`, neither of which this boot's
+            // capture carries, so what is judged here is what crossed.
+            let named = log.must_say("pcidev: firmware root bridge windows: ")?;
+            let windows: Vec<(u64, u64)> = named
+                .rsplit_once("windows: ")
+                .map(|(_, rest)| rest)
+                .unwrap_or_default()
+                .split(", ")
+                .filter_map(|w| {
+                    let (base, end) = w.trim().strip_prefix("mem ")?.split_once("..")?;
+                    Some((
+                        u64::from_str_radix(base.trim_start_matches("0x"), 16).ok()?,
+                        u64::from_str_radix(end.trim().trim_start_matches("0x"), 16).ok()?,
+                    ))
+                })
+                .collect();
 
             // The runs the kernel offered that BAR, off the same boot.
             let runs: Vec<(u64, u64)> = log
@@ -13836,28 +13856,29 @@ fn run_machine_test(
                 ));
             };
             eprintln!("  [netcase] {record}");
-            // **Both probes, read as numbers.** A `contains` over the sentence
-            // would pass on a record that named the same dword twice, which is
-            // a placement onto an address nothing routes.
-            let dword = |marker: &str| -> Option<u32> {
+            let number = |marker: &str| -> Option<u64> {
                 let (_, rest) = record.split_once(marker)?;
-                u32::from_str_radix(rest.split(' ').next()?, 16).ok()
+                u64::from_str_radix(rest.split([' ', ';', ',']).next()?, 16).ok()
             };
-            let before = dword("it answered 0x")
-                .ok_or_else(|| format!("{record:?} does not say what the address answered"))?;
-            let after = dword(" and 0x")
-                .ok_or_else(|| format!("{record:?} does not say what the BAR answered"))?;
-            if !(before == 0 || before == u32::MAX) {
+            // **Read as numbers, not matched as a sentence.** A `contains` over
+            // the clause would pass on a record whose address is outside the
+            // window it claims, which is exactly the placement that hangs.
+            let at = number(" placed at 0x")
+                .ok_or_else(|| format!("{record:?} names no address"))?;
+            let window = number("inside firmware's mem 0x")
+                .ok_or_else(|| format!("{record:?} names no window the address is inside"))?;
+            let after = number("it answers 0x")
+                .ok_or_else(|| format!("{record:?} does not say what the BAR answered"))?
+                as u32;
+            let was = number("this function answers at 0x")
+                .ok_or_else(|| format!("{record:?} does not say where the function was"))?;
+            if !windows.iter().any(|(base, end)| *base == window && at >= *base && at < *end) {
                 return Err(format!(
-                    "{record:?} placed a BAR where something answered {before:#010x}"
+                    "the BAR went to {at:#x} and the record calls that inside the window at \
+                     {window:#x}; the windows this boot's firmware declared are {windows:x?}"
                 ));
             }
             // And the address came out of a run this boot itself printed.
-            let at = record
-                .split_once(" placed at 0x")
-                .and_then(|(_, rest)| rest.split(' ').next())
-                .and_then(|word| u64::from_str_radix(word, 16).ok())
-                .ok_or_else(|| format!("{record:?} names no address"))?;
             if !runs.iter().any(|(start, end)| at >= *start && at < *end) {
                 return Err(format!(
                     "the BAR went to {at:#x} and the runs this boot offered are {runs:x?}"
@@ -13866,12 +13887,24 @@ fn run_machine_test(
             // And the placement is what the hand-over rests on: the same boot
             // must have handed the function over, or the record above is about
             // a BAR that moved for nothing.
-            log.must_say("[1af4:1041] handed over on slot")?;
+            let over = log.must_say("[1af4:1041] handed over on slot")?;
+            // **And the function spoke through the BAR that moved.** A register
+            // read answering the right dword says the address decodes; a message
+            // arriving says the whole hand-over works, and it is the one reading
+            // that tells a device nothing made speak from a message that never
+            // reached a CPU — which is what an end-of-boot count of zero leaves
+            // ambiguous.
+            let slot = over
+                .split_once("handed over on slot ")
+                .and_then(|(_, rest)| rest.split(',').next())
+                .ok_or_else(|| format!("unparseable hand-over record: {over:?}"))?;
+            let spoke = log.must_say(&format!("pcidev: slot {slot} took its first message"))?;
             log.must_be_clean()?;
             eprintln!(
-                "  [netcase] {at:#x} answered {before:#010x} with nothing there and \
-                 {after:#010x} with the BAR on it, inside a run this boot printed"
+                "  [netcase] {at:#x} is inside firmware's {window:#x} and inside a run this boot \
+                 printed, and the function answers {after:#010x} there as it does at {was:#x}"
             );
+            eprintln!("  [netcase] {}", spoke.trim());
             Ok(())
         }
         "netd_listener_forgery" => {
