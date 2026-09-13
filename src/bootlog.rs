@@ -542,20 +542,20 @@ mod record_time_tests {
         assert!(why.contains(&format!("closer than {MARGIN} s before")), "{why}");
     }
 
-    /// **A true reply lands a second or two past the lease and is never
-    /// refused**: this machine's address exists from that record onward and the
-    /// probe asks every second, so the lower edge may never be spent inwards.
+    /// **A true reply lands a second or two past the hand-over and is never
+    /// refused**: the driver this machine answers through is spawned after that
+    /// record, and the probe asks every second, so the lower edge may never be
+    /// spent inwards.
     #[test]
-    fn a_reply_a_second_after_the_lease_record_is_this_boots() {
-        let leased = BOOT.replace(
+    fn a_reply_a_second_after_the_hand_over_record_is_this_boots() {
+        let handed = BOOT.replace(
             "Boot: complete (1258ms)",
-            "netd: DHCP: lease 192.168.1.46/24 from 192.168.1.1, gateway 192.168.1.1, dns \
-             [192.168.1.1], 412 ms after netd came up",
+            "pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28",
         );
-        let lease_at = first() + 1;
-        for at in [lease_at, lease_at + 1, lease_at + 2] {
-            let verdict = host_second_inside_this_boot(&leased, 0, crate::lan::LEASE, at);
-            assert_eq!(verdict, Ok(()), "{} s after the lease", at - lease_at);
+        let handed_at = first() + 1;
+        for at in [handed_at, handed_at + 1, handed_at + 2] {
+            let verdict = host_second_inside_this_boot(&handed, 0, "handed over on slot", at);
+            assert_eq!(verdict, Ok(()), "{} s after the hand-over", at - handed_at);
         }
     }
 

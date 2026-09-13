@@ -344,10 +344,6 @@ mod sizing_tests {
         let hold = toyos_tco::LEASE_BOUND_MS;
         let job = profile.row(&job_ms_row("lancase")).expect("lancase's own allowance");
         assert!(job.ceiling > hold, "{} against a {hold} ms hold", job.ceiling);
-        for name in ["lan.lancase.link_up_ms", "lan.lancase.lease_ms"] {
-            let row = profile.row(name).unwrap_or_else(|| panic!("{name} is priced"));
-            assert_eq!(row.ceiling, hold, "{name}");
-        }
     }
 
     /// A boot whose allowance nobody wrote down is refused, not given the

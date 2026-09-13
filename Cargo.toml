@@ -32,6 +32,7 @@ members = [
     "toyos-hda",
     "toyos-i219",
     "toyos-keymap",
+    "toyos-lanstate",
     "toyos-ld",
     "toyos-logstream",
     "toyos-manifest",
@@ -111,6 +112,10 @@ toyos-fat32 = { path = "toyos-fat32" }
 toyos-fat32-check = { path = "toyos-fat32-check" }
 toyos-gpt = { path = "toyos-gpt" }
 toyos-keymap = { path = "toyos-keymap" }
+# The word netd answers about the network it is on, and the grammar of the exit
+# code a boot with no console reports it through: `src/lan.rs` judges that code
+# and the guest job that asks netd writes it.
+toyos-lanstate = { path = "toyos-lanstate" }
 # The record stream's boot parameter, so the gate that clears a valued
 # parameter by name reads the same constant the kernel and `logd` do.
 toyos-logstream = { path = "toyos-logstream" }

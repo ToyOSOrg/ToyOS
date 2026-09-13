@@ -4,10 +4,27 @@
 //! **Text and frames in, verdicts out.** Nothing here touches a machine: the
 //! QEMU arm and the T14 arm in `tests/common/lan.rs` read their answers through
 //! this, so a guest and a laptop cannot be judged by different grammars.
+//!
+//! **The two arms do not read the same channel.** A `netd:` record exists on a
+//! guest, whose console is a serial port the harness holds the other end of;
+//! on the T14 there is no serial port, a userland write ends at
+//! `Backend::None`, and no `netd:` line has ever reached the stick. So the
+//! records below are the QEMU arm's, and the T14 arm's answers are the
+//! kernel's own records and `toyos_lanstate`'s exit code.
 
 #![forbid(unsafe_code)]
 
 use std::net::Ipv4Addr;
+
+/// The PCI function the T14's card is, as `/sys/bus/pci/devices` spells it:
+/// the cable the metal loop reaches a boot over while it runs.
+pub const NIC: &str = "0000:00:1f.6";
+
+/// The same function as the kernel's records spell it: `/sys` names the PCI
+/// segment first and the kernel's records name the bus.
+pub fn kernel_function(sysfs: &str) -> &str {
+    sysfs.split_once(':').map_or(sysfs, |(_, function)| function)
+}
 
 /// The records both arms are written against, spelled once.
 pub const MAC: &str = "netd: MAC ";
@@ -100,6 +117,49 @@ pub fn link_up_ms(text: &str) -> Result<u64, String> {
         .map_err(|_| format!("{line:?} carries no readable link-up time"))
 }
 
+/// What the job that asked netd left in its `exit:` record, judged against the
+/// cable the metal loop reached this boot over.
+///
+/// `Ok(())` is netd holding the address that answered the host's ping, on the
+/// card whose MAC that host read off the wire — the two halves of the cable,
+/// agreed to from inside the machine. Everything else is one finding, and the
+/// three kinds are separate on purpose: a machine that took no lease, a machine
+/// that took another network's, and a job that never got to ask are different
+/// defects and a T14 boot says nothing else about which.
+pub fn job_said(code: i32, addr: Ipv4Addr, mac: &str) -> Result<(), String> {
+    let bytes = mac_bytes(mac)
+        .ok_or_else(|| format!("this readback's wire MAC reads {mac:?}, which is no MAC"))?;
+    match toyos_lanstate::said(code) {
+        toyos_lanstate::Said::Fingerprint(got) => {
+            let want = toyos_lanstate::fingerprint(bytes, addr);
+            if got == want {
+                return Ok(());
+            }
+            Err(format!(
+                "the job that asked netd exited {got} and {addr} on {mac} folds to {want}: the \
+                 address netd held and the card it drove are not the pair this cable carried"
+            ))
+        }
+        toyos_lanstate::Said::Refused(refusal) => {
+            Err(format!("the job that asked netd exited {code}: {}", refusal.why()))
+        }
+        toyos_lanstate::Said::Foreign(code) => Err(format!(
+            "the job that asked netd exited {code}, which is no word of its grammar: it died \
+             before it could ask"
+        )),
+    }
+}
+
+/// `/sys/class/net/<i>/address`'s six bytes, as the metal loop passes them on.
+fn mac_bytes(text: &str) -> Option<[u8; 6]> {
+    let mut bytes = [0u8; 6];
+    let mut fields = text.split(':');
+    for byte in bytes.iter_mut() {
+        *byte = u8::from_str_radix(fields.next()?, 16).ok()?;
+    }
+    fields.next().is_none().then_some(bytes)
+}
+
 /// **The one place the host-name option can be read.** A server that ignores it
 /// answers the same lease either way, so the frames the client sent are the only
 /// evidence that it asked at all — and `filter-dump` records both directions, so
@@ -183,6 +243,78 @@ mod tests {
             crate::bootlog::declares(&source, &format!("b\"{HOSTNAME}\"")),
             "netd declares no constant equal to b\"{HOSTNAME}\""
         );
+    }
+
+    /// **A word two crates send down one connection may be one word only.**
+    /// `toyos_lanstate::ASK` is netd's and is declared outside the SDK that
+    /// owns every other, so nothing but this holds the two apart: a collision
+    /// would make netd answer a `MsgType` with its own state and a client read
+    /// that state as the answer it asked for.
+    #[test]
+    fn the_state_word_is_no_message_the_sdk_sends() {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toyos/src/net.rs");
+        let source = std::fs::read_to_string(&at)
+            .unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+        let words = sdk_words(&source);
+        // The scan before the claim: a parser that found nothing would pass
+        // this test on any word at all.
+        for (name, word) in [("TcpClose", 4), ("TcpAcceptPiped", 22), ("Error", 129)] {
+            assert!(words.contains(&word), "the scan missed `{name} = {word}`: {words:?}");
+        }
+        assert!(
+            !words.contains(&toyos_lanstate::ASK),
+            "netd's state word {} is also one of the SDK's: {words:?}",
+            toyos_lanstate::ASK
+        );
+    }
+
+    /// Every number `toyos::net` puts in an IPC header, out of the SDK's own
+    /// source: the discriminants of its two `#[repr(u32)]` enums.
+    fn sdk_words(source: &str) -> Vec<u32> {
+        source
+            .lines()
+            .filter_map(|line| line.trim_end().strip_suffix(',')?.split_once(" = "))
+            .filter_map(|(_, value)| value.trim().parse().ok())
+            .collect()
+    }
+
+    /// The whole grammar as `on_metal` reads it, against the pair a readback
+    /// carries: the fold agreeing, the fold not agreeing, every refusal, and a
+    /// code the job never wrote.
+    #[test]
+    fn one_exit_code_is_read_against_the_cable_the_loop_reached() {
+        let addr = Ipv4Addr::new(192, 168, 1, 42);
+        let mac = "54:bf:64:2f:0a:1c";
+        let bytes = mac_bytes(mac).expect("a MAC");
+        assert_eq!(job_said(toyos_lanstate::fingerprint(bytes, addr), addr, mac), Ok(()));
+        // The same boot, the card that held the address before it swapped.
+        let other = mac_bytes("54:bf:64:2f:0a:1d").expect("a MAC");
+        let why = job_said(toyos_lanstate::fingerprint(other, addr), addr, mac)
+            .expect_err("another card's fold is not this one's");
+        assert!(why.contains("not the pair this cable carried"), "{why}");
+        let why = job_said(toyos_lanstate::Refusal::NoLease.code(), addr, mac)
+            .expect_err("a machine with no address");
+        assert!(why.contains("no address"), "{why}");
+        let why = job_said(0, addr, mac).expect_err("a job that exited before it asked");
+        assert!(why.contains("no word of its grammar"), "{why}");
+        // The MAC the loop read, refused where it is not one rather than folded
+        // into a mismatch that names the card.
+        let why = job_said(0, addr, "enp0s31f6").expect_err("an interface name is not a MAC");
+        assert!(why.contains("which is no MAC"), "{why}");
+        for not_a_mac in ["54:bf:64:2f:0a", "54:bf:64:2f:0a:1c:ff", "54:bf:64:2f:0a:zz", ""] {
+            assert_eq!(mac_bytes(not_a_mac), None, "{not_a_mac:?}");
+        }
+    }
+
+    /// The judge's hand-over needle is built out of [`NIC`], so the function the
+    /// loop reached the boot over and the function the kernel handed to netd are
+    /// one fact rather than two spellings that could drift apart.
+    #[test]
+    fn the_function_the_loop_reaches_is_the_one_the_kernel_records() {
+        assert_eq!(kernel_function(NIC), "00:1f.6");
+        // The segment and nothing else: a needle short of the bus would find
+        // the hand-over record of whatever function shared its device number.
+        assert_eq!(format!("0000:{}", kernel_function(NIC)), NIC);
     }
 
     #[test]

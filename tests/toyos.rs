@@ -236,6 +236,10 @@ const RUST_SKIP: &[&str] = &[
     // `lan_dhcp_lease`'s metal arm is the only job list that names it. On a
     // shared boot it would be twenty seconds of nothing.
     "lan_hold",
+    // Needs netd with a NIC in front of it and a `netd` connector in its own
+    // namespace, which only `tests/e1000case` and `tests/lancase` give a job.
+    // `lan_dhcp_lease` runs it on the first and its metal arm on the second.
+    "lan_state",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -1686,11 +1690,14 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
-/// The cable's own boot: netd in front of the T14's I219, and one job that
-/// holds the machine up long enough for the host to reach it. The one arm in
-/// this suite that names a PCI function for the loop to reach the boot over.
-const LANCASE: &[metal::Arm] =
-    &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
+/// The cable's own boot: netd in front of the T14's I219, one job that holds
+/// the machine up long enough for the host to reach it and one that asks netd
+/// what network it is on. The one arm in this suite that names a PCI function
+/// for the loop to reach the boot over.
+const LANCASE: &[metal::Arm] = &[metal::Arm {
+    nic: Some(toyos_build::lan::NIC),
+    ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS)
+}];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.

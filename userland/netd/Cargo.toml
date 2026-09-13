@@ -8,6 +8,7 @@ toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 toyos-i219 = { path = "../../toyos-i219" }
 toyos-tco = { path = "../../toyos-tco" }
+toyos-lanstate = { path = "../../toyos-lanstate" }
 
 [dependencies.smoltcp]
 version = "0.12"

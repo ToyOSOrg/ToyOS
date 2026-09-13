@@ -611,6 +611,11 @@ ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
 
 # --- the cable: the boot that runs netd in front of the T14's own I219 ---
+# netd's own spans are not among them. It writes `netd: I219: link up at ` and
+# `netd: DHCP: lease ` to a console whose backend on this machine is `None`, so
+# no such line has ever reached the stick; what that boot reports about its
+# network is the exit code of the job that asked netd, which is a fold and not a
+# number this file can price.
 
 [[number]]
 name = "boot.lancase.complete_ms"
@@ -644,15 +649,3 @@ name = "list.lancase.job_ms"
 unit = "ms"
 ceiling = 22000
 ceiling_from = "toyos_tco::LEASE_BOUND_MS, which is lan_hold's whole sleep, plus two seconds for the spawn and the exit record around it"
-
-[[number]]
-name = "lan.lancase.link_up_ms"
-unit = "ms"
-ceiling = 20000
-ceiling_from = "toyos_tco::LEASE_BOUND_MS: a link that comes up later than lan_hold sleeps is a link this boot never had, because the machine has already handed itself back"
-
-[[number]]
-name = "lan.lancase.lease_ms"
-unit = "ms"
-ceiling = 20000
-ceiling_from = "as lan.lancase.link_up_ms, which is netd's own dhcp::LEASE_BOUND: a boot with no lease by then has already said so in its log"

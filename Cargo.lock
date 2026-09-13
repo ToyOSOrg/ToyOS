@@ -1130,6 +1130,7 @@ dependencies = [
  "toyos-fat32-check",
  "toyos-gpt",
  "toyos-keymap",
+ "toyos-lanstate",
  "toyos-ld",
  "toyos-logstream",
  "toyos-manifest",
@@ -1197,6 +1198,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-keymap"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-lanstate"
 version = "0.1.0"
 
 [[package]]
