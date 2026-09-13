@@ -44,8 +44,8 @@ mod virtio_net;
 /// `1af4:1041` is virtio's transitional device id `1000 + 1` for a network
 /// device (virtio 1.2 §5.1.1). `8086:15fc` is the ThinkPad T14's onboard I219
 /// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models. One
-/// driver takes both because the register file is the same one, and each row
-/// names which part it is because below that file they are not.
+/// driver takes both, and each row names which part it is because below the
+/// register file they are not one.
 const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
     (PciId { vendor: 0x8086, device: 0x15fc }, |c| Card::intel(c, toyos_i219::Part::I219)),
     (PciId { vendor: 0x8086, device: 0x10d3 }, |c| Card::intel(c, toyos_i219::Part::E82574)),
