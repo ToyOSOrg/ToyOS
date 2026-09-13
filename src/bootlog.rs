@@ -268,22 +268,19 @@ pub fn declares(source: &str, rhs: &str) -> bool {
     joined.lines().any(|line| line.trim_end().ends_with(&tail))
 }
 
-/// This instrument's own error, which is what each edge below is set by.
-///
-/// **A judge reading whole seconds does not get to decide at one.** `skew` is a
-/// difference of two floored clocks across a round trip its reader holds to a
-/// second, which is three of these; the second the host read and the second the
-/// record carries are floored too, which is the fourth; and the fifth is what
-/// makes a refusal a distance rather than a coin.
-pub const MARGIN: u64 = 5;
+/// The longest round trip a skew may be read across — `src/metal.rs`'s
+/// `clock_skew` refuses past it — so a floored difference taken across one
+/// estimates the true offset to within `SKEW_ROUND_TRIP_SECS + 1`.
+pub const SKEW_ROUND_TRIP_SECS: u64 = 1;
+
+/// What a host second placed against these records can be wrong by: that
+/// estimate's `+ 1`, one for a probe that waits a second for its reply, one for
+/// the two floored seconds compared, and one so a refusal is a distance.
+pub const MARGIN: u64 = SKEW_ROUND_TRIP_SECS + 4;
 
 /// Whether a second on the *host's* clock fell inside the boot this log is of:
 /// no more than [`MARGIN`] before the record `after` names, and no less than
 /// [`MARGIN`] before the reset.
-///
-/// **Each edge is set by the distance to the nearest wrong answer on that
-/// side**, which is why the margin is spent outwards at one and inwards at the
-/// other.
 ///
 /// **The records are the one place a host clock and a boot's clock meet.**
 /// `skew` is this machine's clock minus the host's as the caller measured the
@@ -528,19 +525,19 @@ mod record_time_tests {
         record_unix_secs(BOOT.lines().next().expect("a record")).expect("a wall clock")
     }
 
-    /// **Both edges, and the second outside each.** The anchor record is at
-    /// `first + 1` and the reset at `first + 23`, so the span this boot owns
-    /// runs from [`MARGIN`] before the one to `MARGIN` before the other.
+    /// **Both edges, at the seconds they fall on.** Spending [`MARGIN`]
+    /// symbolically on both sides of both comparisons would hold for every
+    /// value of it, so the seconds below are written out.
     #[test]
-    fn each_edge_is_the_margin_from_the_record_that_sets_it() {
+    fn each_edge_is_five_seconds_from_the_record_that_sets_it() {
         let first = first();
-        for at in [first + 1 - MARGIN, first + 23 - MARGIN] {
+        for at in [first - 4, first + 18] {
             assert_eq!(host_second_inside_this_boot(BOOT, 0, "Boot: complete", at), Ok(()), "{at}");
         }
-        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first - MARGIN)
+        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first - 5)
             .expect_err("a second further back than the error the margin is");
         assert!(why.contains("belongs to the operating system that left"), "{why}");
-        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first + 24 - MARGIN)
+        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first + 19)
             .expect_err("a second short of the margin before the reset");
         assert!(why.contains(&format!("closer than {MARGIN} s before")), "{why}");
     }
@@ -562,11 +559,8 @@ mod record_time_tests {
         }
     }
 
-    /// **The one reply this judge exists to refuse.** The loop wrote it 57 s
-    /// into a window opening no earlier than its own run, whose first line is
-    /// 33 s before this boot's first record; it is anchored here on the earliest
-    /// record the boot carries, which is the most favourable anchor there is,
-    /// and no skew the measurement can be wrong by brings it inside.
+    /// **The one reply this judge exists to refuse**, anchored on the earliest
+    /// record this boot carries, which is the most favourable anchor there is.
     #[test]
     fn that_reply_is_refused_at_every_skew_the_measurement_can_be_wrong_by() {
         let earliest_window = first() - 33;

@@ -997,15 +997,14 @@ fn brief_address(iface: &str, text: &str) -> Result<std::net::Ipv4Addr, String> 
 /// This machine's clock minus this host's, from `date -u +%s` and the host's own
 /// reading at each end of that round trip.
 ///
-/// **A whole second either side and a round trip in between**, which is where
-/// [`crate::bootlog::MARGIN`]'s first three seconds come from; a round trip
-/// longer than that, or a host clock that stepped backwards inside it, is
-/// refused rather than spent.
+/// A round trip longer than [`bootlog::SKEW_ROUND_TRIP_SECS`] — the bound
+/// [`bootlog::MARGIN`] is built on — or a host clock that stepped backwards
+/// inside one, is refused rather than spent.
 fn clock_skew(before: u64, said: &str, after: u64) -> Result<i64, String> {
     let took = after.checked_sub(before).ok_or_else(|| {
         format!("this host's clock read {before} before the machine's and {after} after it")
     })?;
-    if took > 1 {
+    if took > bootlog::SKEW_ROUND_TRIP_SECS {
         return Err(format!(
             "this host's clock read {before} before the machine's and {after} after it, and a \
              skew read across {took} s is worth less than the judge it feeds"
@@ -1087,11 +1086,22 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// One probe, whose whole answer is whether the address replied.
+/// What one `ping` exit means.
 ///
-/// **A host with no `ping` and a cable with nothing on it are separate
-/// answers.** A spawn that fails is this host's failing, and reporting it as
-/// silence would red the boot for a binary the host does not have.
+/// **A probe this host refused and a cable with nothing on it are separate
+/// answers.** `ping(8)` exits 0 on a response and 2 on a transmission that got
+/// none; reading any other status as silence would red the boot for a probe
+/// that never ran.
+fn ping_said(code: Option<i32>, stderr: &str) -> Result<bool, String> {
+    match code {
+        Some(0) => Ok(true),
+        Some(2) => Ok(false),
+        Some(code) => Err(format!("`ping` exited {code} and said {:?}", stderr.trim())),
+        None => Err(format!("`ping` was killed and said {:?}", stderr.trim())),
+    }
+}
+
+/// One probe, whose whole answer is whether the address replied.
 fn ping_once(addr: std::net::Ipv4Addr) -> Result<bool, String> {
     // `-W` is milliseconds to macOS's `ping` and seconds to every other's, so a
     // host this argument has not been read against is refused by name rather
@@ -1102,12 +1112,12 @@ fn ping_once(addr: std::net::Ipv4Addr) -> Result<bool, String> {
             std::env::consts::OS
         ));
     }
-    Command::new("ping")
+    let out = Command::new("ping")
         .args(["-n", "-c", "1", "-W", &PING_WAIT_MS.to_string(), &addr.to_string()])
         .stdin(Stdio::null())
         .output()
-        .map(|out| out.status.success())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    ping_said(out.status.code(), &String::from_utf8_lossy(&out.stderr))
 }
 
 /// The loop, over one target.
@@ -2075,10 +2085,7 @@ pub fn cable(text: &str) -> Result<Option<Cable>, String> {
 }
 
 fn word(text: &str, name: &str) -> Option<String> {
-    text.lines()
-        .find_map(|line| line.strip_prefix(name))
-        .map(|rest| rest.trim().to_string())
-        .filter(|got| !got.is_empty())
+    key::<String>(text, name).filter(|got| !got.is_empty())
 }
 
 fn key<T: std::str::FromStr>(text: &str, name: &str) -> Option<T> {
@@ -2337,9 +2344,6 @@ mod tests {
 
     /// **The address is the one on the function the image claims, and an
     /// interface with none is refused rather than read as the next one's.**
-    /// `ip -4 -brief` prints the name, the state and then the addresses, and an
-    /// interface whose cable is out prints the first two and stops — which is
-    /// exactly the machine this loop must not go on to flash and then ping.
     #[test]
     fn an_interface_with_no_address_is_refused_by_name() {
         let up = "enp0s31f6       UP             192.168.1.46/24 \n";
@@ -2359,25 +2363,36 @@ mod tests {
         assert!(brief_address("enp0s31f7", many).unwrap_err().contains("ip -4 -brief"));
     }
 
-    /// **A host clock that stepped backwards across the round trip is the
-    /// condition this guard exists for**, and it is a refusal by name and not
-    /// the subtraction overflow it would otherwise be.
+    /// **A host clock that stepped backwards across the round trip** is a
+    /// refusal by name and not the subtraction overflow it would otherwise be.
     #[test]
     fn a_skew_read_across_a_clock_this_host_moved_is_refused() {
+        const TRIP: u64 = bootlog::SKEW_ROUND_TRIP_SECS;
         assert_eq!(clock_skew(1_757_347_700, "1757347703\n", 1_757_347_700), Ok(3));
-        assert_eq!(clock_skew(1_757_347_700, "1757347698", 1_757_347_701), Ok(-2));
+        assert_eq!(clock_skew(1_757_347_700, "1757347698", 1_757_347_700 + TRIP), Ok(-2));
 
         let why = clock_skew(1_757_347_701, "1757347700", 1_757_347_700)
             .expect_err("the second read is before the first");
         assert!(why.contains("1757347701 before"), "{why}");
-        let why = clock_skew(1_757_347_700, "1757347700", 1_757_347_705)
-            .expect_err("five seconds is no round trip to spend a judge on");
-        assert!(why.contains("across 5 s"), "{why}");
+        let why = clock_skew(1_757_347_700, "1757347700", 1_757_347_701 + TRIP)
+            .expect_err("a trip one second longer than the bound the margin is built on");
+        assert!(why.contains(&format!("across {} s", TRIP + 1)), "{why}");
         let why = clock_skew(1_757_347_700, "Tue Sep  9 10:00:00 UTC 2026", 1_757_347_700)
             .expect_err("a date is not a count of seconds");
         assert!(why.contains("`date -u +%s` said"), "{why}");
         // A machine answering a second no host second can be subtracted from.
         assert!(clock_skew(1_757_347_700, &i64::MIN.to_string(), 1_757_347_700).is_err());
+    }
+
+    /// **A `ping` that refused its arguments is not a dark window**, and
+    /// reading one as the other makes a broken probe red the boot.
+    #[test]
+    fn a_ping_this_host_refused_is_told_from_one_nothing_answered() {
+        assert_eq!(ping_said(Some(0), ""), Ok(true));
+        assert_eq!(ping_said(Some(2), ""), Ok(false));
+        let why = ping_said(Some(64), "ping: invalid option -- Z\n").expect_err("a usage error");
+        assert!(why.contains("exited 64") && why.contains("invalid option"), "{why}");
+        assert!(ping_said(None, "").unwrap_err().contains("killed"));
     }
 
     #[test]

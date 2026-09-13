@@ -10,8 +10,7 @@ use std::path::Path;
 
 use toyos_build::bootlog;
 use toyos_build::lan::{
-    asked_under_its_own_name, lease_in, link_up_ms, Lease, HOSTNAME, LEASE, LINK_UP, MAC, NO_LEASE,
-    READY,
+    asked_under_its_own_name, lease_in, link_up_ms, Lease, HOSTNAME, LEASE, MAC, NO_LEASE, READY,
 };
 use toyos_build::metalprofile::Profile;
 
@@ -31,13 +30,6 @@ pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 /// backend, which is the same driver the T14 arm runs and the only DHCP server
 /// this host can put in front of it.
 const QEMU_CONFIG: &str = "tests/e1000case";
-
-/// What QEMU's user-mode backend leases, and what it says about the network it
-/// leases on. Its own defaults, not this repository's: they are the oracle.
-const SLIRP_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
-const SLIRP_PREFIX: u8 = 24;
-const SLIRP_ROUTER: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
-const SLIRP_DNS: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 3);
 
 /// The card the T14 arm claims, as the kernel and the manifest spell it.
 const ID: &str = "8086:15fc";
@@ -74,7 +66,8 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         }),
     }
 
-    for owed in [MAC, LINK_UP, READY] {
+    // Not the link record: `link_up_ms` below already refuses its absence.
+    for owed in [MAC, READY] {
         if !text.contains(owed) {
             bad.push(format!("no {owed:?} record"));
         }
@@ -102,7 +95,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     match lease_in(text) {
         Ok(lease) => {
             eprintln!(
-                "  [lan] leased {}/{} from {} in {} ms, gateway {}, dns {:?}",
+                "  [lan] leased {}/{} from {} in {} ms, gateway {:?}, dns {:?}",
                 lease.address, lease.prefix, lease.server, lease.ms, lease.gateway, lease.dns
             );
             if let Err(why) = profile.judge(&format!("lan.{}.lease_ms", back.label), lease.ms) {
@@ -165,7 +158,9 @@ pub fn lan_dhcp_lease(
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let case = super::compile::repo_root().join(QEMU_CONFIG);
-    let dump = wire_dump();
+    // Where this process writes the frames the boot puts on its wire.
+    let dump = std::env::temp_dir().join(format!("toyos-lan-{}.pcap", std::process::id()));
+    let _ = std::fs::remove_file(&dump);
     let options = BootOptions {
         profile: qemu::Profile::E1000e,
         wire_dump: Some(dump.clone()),
@@ -186,12 +181,13 @@ pub fn lan_dhcp_lease(
     let log = serial::Serial::named("the lan boot", console.as_str());
 
     let lease = lease_in(log.text())?;
+    // QEMU's user-mode backend's own defaults, not this repository's: the oracle.
     let want = Lease {
-        address: SLIRP_ADDRESS,
-        prefix: SLIRP_PREFIX,
-        server: SLIRP_ROUTER,
-        gateway: SLIRP_ROUTER,
-        dns: vec![SLIRP_DNS],
+        address: Ipv4Addr::new(10, 0, 2, 15),
+        prefix: 24,
+        server: Ipv4Addr::new(10, 0, 2, 2),
+        gateway: Some(Ipv4Addr::new(10, 0, 2, 2)),
+        dns: vec![Ipv4Addr::new(10, 0, 2, 3)],
         ms: lease.ms,
     };
     if lease != want {
@@ -201,7 +197,6 @@ pub fn lan_dhcp_lease(
     }
     // The order, and not merely the presence of both.
     log.must_say_after(LEASE, READY)?;
-    log.must_say(LINK_UP)?;
     let ms = link_up_ms(log.text())?;
     eprintln!(
         "  [lan] the emulated link came up in {ms} ms and the lease landed {} ms after netd \
@@ -241,11 +236,4 @@ pub fn lan_no_lease(
     log.must_say_after(&format!("{NO_LEASE}{HOSTNAME} in "), READY)?;
     eprintln!("  [lan] no server answered and netd said so, then served anyway");
     Ok(())
-}
-
-/// Where this process writes the frames one boot put on its wire.
-fn wire_dump() -> std::path::PathBuf {
-    let at = std::env::temp_dir().join(format!("toyos-lan-{}.pcap", std::process::id()));
-    let _ = std::fs::remove_file(&at);
-    at
 }

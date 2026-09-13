@@ -12,12 +12,12 @@ use std::net::Ipv4Addr;
 /// The records both arms are written against, spelled once.
 pub const MAC: &str = "netd: MAC ";
 pub const LEASE: &str = "netd: DHCP: lease ";
-pub const LINK_UP: &str = "netd: I219: link up at ";
+const LINK_UP: &str = "netd: I219: link up at ";
 pub const READY: &str = "netd: ready, at most ";
 pub const NO_LEASE: &str = "netd: DHCP: no lease as ";
 
 /// The name this machine asks its network to record for it, held to netd's own
-/// `dhcp::HOSTNAME` by [`tests::netd_declares_the_name_this_module_spells`].
+/// `dhcp::HOSTNAME` by [`tests::netd_writes_the_records_this_module_reads`].
 pub const HOSTNAME: &str = "toyos-t14";
 
 /// RFC 2132 §3.14: the kind, the length, and the name.
@@ -33,7 +33,8 @@ pub struct Lease {
     pub address: Ipv4Addr,
     pub prefix: u8,
     pub server: Ipv4Addr,
-    pub gateway: Ipv4Addr,
+    /// `None` where the server sent no router option: netd writes `gateway none`.
+    pub gateway: Option<Ipv4Addr>,
     pub dns: Vec<Ipv4Addr>,
     /// Milliseconds between netd starting and the lease landing.
     pub ms: u64,
@@ -59,6 +60,10 @@ pub fn lease_in(text: &str) -> Result<Lease, String> {
     };
     let cidr = after(LEASE, " from ")?;
     let (host, prefix) = cidr.split_once('/').ok_or_else(|| unreadable("an address/prefix"))?;
+    let gateway = match after(", gateway ", ",")?.as_str() {
+        "none" => None,
+        got => Some(address("the gateway's address", got.to_string())?),
+    };
     let mut dns = Vec::new();
     for server in after(", dns [", "]")?.split_whitespace() {
         dns.push(address("a resolver", server.to_string())?);
@@ -67,7 +72,7 @@ pub fn lease_in(text: &str) -> Result<Lease, String> {
         address: address("this machine's address", host.to_string())?,
         prefix: prefix.parse().map_err(|_| unreadable("a prefix length"))?,
         server: address("the server's address", after(" from ", ",")?)?,
-        gateway: address("the gateway's address", after(", gateway ", ",")?)?,
+        gateway,
         dns,
         ms: after("], ", " ms after netd came up")?
             .parse()
@@ -138,22 +143,33 @@ mod tests {
                           10.0.2.2, gateway 10.0.2.2, dns [10.0.2.3 10.0.2.4], 412 ms after netd \
                           came up";
 
-    /// Nothing links the two crates: netd is a `no_std`-shaped userland binary
-    /// and this is the build system, so the name both ends spell is held to
-    /// netd's own declaration by reading its source.
+    /// netd's own source, with rustfmt's continuations inside a wrapped literal
+    /// closed up, so a head reads across one.
+    fn netd_source() -> String {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src");
+        let read = |name: &str| {
+            let at = root.join(name);
+            std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()))
+        };
+        let whole = ["main.rs", "i219.rs", "dhcp.rs"].map(read).join("\n");
+        whole.split("\\\n").map(str::trim_start).collect()
+    }
+
+    /// Nothing links the two crates, so every record this module and `on_metal`
+    /// rest on is held to netd's own source: a reworded one reds by its name
+    /// rather than as an absence.
     #[test]
-    fn netd_declares_the_name_this_module_spells() {
-        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src/dhcp.rs");
-        let source = std::fs::read_to_string(&at).expect("netd's dhcp module");
+    fn netd_writes_the_records_this_module_reads() {
+        let source = netd_source();
+        for head in [MAC, LEASE, LINK_UP, READY, NO_LEASE] {
+            assert!(source.contains(&format!("\"{head}")), "netd opens no record with {head:?}");
+        }
         assert!(
             crate::bootlog::declares(&source, &format!("b\"{HOSTNAME}\"")),
-            "{} declares no constant equal to b\"{HOSTNAME}\"",
-            at.display()
+            "netd declares no constant equal to b\"{HOSTNAME}\""
         );
     }
 
-    /// **Every field the lease decided, typed**, so a record that grew a field
-    /// still reads and one that lost a field is refused by the field's name.
     #[test]
     fn a_lease_record_is_read_field_by_field() {
         assert_eq!(
@@ -162,7 +178,7 @@ mod tests {
                 address: Ipv4Addr::new(10, 0, 2, 15),
                 prefix: 24,
                 server: Ipv4Addr::new(10, 0, 2, 2),
-                gateway: Ipv4Addr::new(10, 0, 2, 2),
+                gateway: Some(Ipv4Addr::new(10, 0, 2, 2)),
                 dns: vec![Ipv4Addr::new(10, 0, 2, 3), Ipv4Addr::new(10, 0, 2, 4)],
                 ms: 412,
             })
@@ -171,6 +187,9 @@ mod tests {
         // a missing field.
         let none = LEASED.replace("10.0.2.3 10.0.2.4", "");
         assert!(lease_in(&none).expect("a lease").dns.is_empty());
+        // A server that sent no router option leases too, and netd says so.
+        let routerless = LEASED.replace("gateway 10.0.2.2", "gateway none");
+        assert_eq!(lease_in(&routerless).expect("a lease").gateway, None);
     }
 
     #[test]
@@ -218,8 +237,6 @@ mod tests {
         out
     }
 
-    /// One frame: an ethertype, an IPv4 protocol, the two UDP ports, and a
-    /// payload.
     fn frame(ethertype: [u8; 2], protocol: u8, src: u16, dst: u16, payload: &[u8]) -> Vec<u8> {
         let mut frame = vec![0u8; 14 + 20 + 8];
         frame[12..14].copy_from_slice(&ethertype);
