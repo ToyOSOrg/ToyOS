@@ -97,11 +97,6 @@ actuators! {
     /// Ask the NVMe disk for a block with the caller's operation budget already spent.
     nvme_spent_budget = "nvme-spent-budget";
 
-    /// Offer a claimed function's BAR the largest free run first — the ordering
-    /// rule `kernel/src/pcidev` refuses, and the one that reaches a run no
-    /// declared window holds. The order is the only thing it changes.
-    bar_placement_by_size = "bar-placement-by-size";
-
     /// Refuse the first two FAT-1 mirror writes of a write-back drain flush; two, not one, because the retry ladder parks only at attempt 2.
     fat_mirror_write_refuse = "fat-mirror-write-refuse";
 

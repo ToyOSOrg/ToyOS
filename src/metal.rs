@@ -709,14 +709,6 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     ("unclaimed-vector-selftest", Flash::Ok),
     ("xhci-xecp-selftest", Flash::Ok),
     ("xhci-descriptor-selftest", Flash::Ok),
-    // **The negative control on where a claimed function's BAR goes.** It
-    // changes the order the kernel offers that BAR addresses in — largest free
-    // run first — and changes nothing else: each address's standing against the
-    // memory firmware declared still comes from `placement::reserve`, so an
-    // armed boot names a run no declared window holds and reads nothing there,
-    // exactly as an unarmed one would. It reaches only the function
-    // `system.toml` already hands to a process.
-    ("bar-placement-by-size", Flash::Ok),
     // Two probes rather than staged inputs, and both are reads: the SS-reload
     // one runs inside `iod`'s own context switch, and the input-core one merges
     // events it made up itself.

@@ -13795,9 +13795,9 @@ fn run_machine_test(
             // function in QEMU whose BAR this kernel moves. What is asserted is
             // not where the BAR went: that the address chosen is inside a window
             // the kernel was handed, inside a run the same boot printed and
-            // inside a range QEMU itself routes to PCI, and that the dword the
-            // function answers there is its own and is a value an unanswered
-            // read could not have produced.
+            // where the emulator maps that function's own registers, and that
+            // the dword the function answers there is its own and is a value an
+            // unanswered read could not have produced.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
             let options = BootOptions {
                 profile: qemu::Profile::Headless,
@@ -13812,15 +13812,10 @@ fn run_machine_test(
             let _ =
                 await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
             console.push_str(&qemu.drain_serial(Duration::from_millis(500)));
-            // **QEMU's own account of where that address goes**, taken from the
-            // emulator and not from anything the guest printed.
             let mtree = qemu::QmpMonitor::open(qemu.qmp_socket()).human("info mtree");
             let log = serial::Serial::named("boot console", console.as_str());
 
-            // The memory the kernel was handed, read off its own record — the
-            // loader's own dump of the Global Coherency Domain goes to the UEFI
-            // console and `loader.log`, neither of which this boot's capture
-            // carries, so what is judged here is what crossed.
+            // The memory the kernel was handed, read off its own record.
             let named = log.must_say("pcidev: firmware declared root bridge memory: ")?;
             let windows: Vec<(u64, u64)> = named
                 .rsplit_once("memory: ")
@@ -13933,11 +13928,9 @@ fn run_machine_test(
                     "the BAR went to {at:#x} and the runs this boot offered are {runs:x?}"
                 ));
             }
-            // **And the emulator says the same address, which nothing in the
-            // guest told it.** `info mtree` is QEMU's own routing table, and the
-            // region it maps this function's common configuration structure at
-            // is where that structure is — so the kernel's printed address is
-            // checked against it rather than believed.
+            // **And the emulator answers for the same address**: the kernel's
+            // printed one is checked against where QEMU maps that function's
+            // common configuration rather than believed.
             // One address, however many address spaces it appears in: QEMU
             // prints the region once per space that reaches it.
             let mut mapped: Vec<u64> = mtree
