@@ -481,6 +481,9 @@ enum Refusal {
     BarUnsizable(u8),
     BarUnplaceable(u8),
     BarResized(u8),
+    /// Firmware assigned this BAR no address, so the function answers nowhere
+    /// and there is nothing to hold a candidate's answer against.
+    BarUnassigned(u8),
 }
 
 impl core::fmt::Display for Refusal {
@@ -539,6 +542,11 @@ impl core::fmt::Display for Refusal {
                 f,
                 "BAR {i} answers a different size than the window it already holds was cut for, \
                  so the function changed under this kernel"
+            ),
+            Self::BarUnassigned(i) => write!(
+                f,
+                "firmware assigned BAR {i} no address, so this function answers nowhere and \
+                 nothing says what it would answer through a BAR moved anywhere else"
             ),
         }
     }
@@ -831,7 +839,14 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
     // reference every candidate is settled against, and it has to be taken
     // here: from the first write below the BAR is somewhere this kernel chose
     // and the device's own address is gone.
+    //
+    // A BAR firmware assigned no address has no such reference, and reading one
+    // at zero would take low RAM for the function's answer — so it is refused
+    // by name rather than settled against a number that is nothing's.
     let was = pci.memory_bar(index).map_err(|_| Refusal::BarUnplaceable(index))?.address();
+    if was == 0 {
+        return Err(Refusal::BarUnassigned(index));
+    }
     let signature = first_dword(was, size);
 
     let (runs, windows) = {
