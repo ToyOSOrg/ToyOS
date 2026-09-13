@@ -2654,9 +2654,14 @@ pub const KNOWN_RED: &[Red] = &[
                cannot tell a slow host from a broken measurement. **Not about the diff it \
                was found on**, two issue files and a tests/CLAUDE.md bullet (PR #150)",
         evidence: "PR #150 run 32334225614, job 96320634405 (`guest (5)`), 2026-08-20; the \
-                   dev-host sighting the same night is in the source issue",
+                   dev-host sighting the same night is in the source issue. Seen again on a \
+                   doc-only branch: PR #451 run 34761663167, job 103735485106 (`guest (10)`), \
+                   2026-09-13 — `munmap returned in 19584ns with the last CPU answering \
+                   20000000ns late`, ALONE: GREEN in the same job; CI has one guest per \
+                   machine, so this one is not the load class and is filed as a kernel \
+                   defect at issues/kernel/a-shootdown-red-on-ci-is-not-a-slow-host.md",
         source: "issues/build/parallel-tests-red-under-other-suites.md",
-        measured: "2026-08-20",
+        measured: "2026-09-13",
     },
     // ---------------------------------------------------------------------
     // `wt/toyos-purecrates`, dev host, 2026-08-18: three full `cargo test` runs
