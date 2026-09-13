@@ -5,9 +5,14 @@
 //! `Backend::None`, so what crosses to the stick is the kernel's log — into
 //! which netd's `say!` writes, being a `write` to a console object.
 
+use std::net::Ipv4Addr;
 use std::path::Path;
 
 use toyos_build::bootlog;
+use toyos_build::lan::{
+    asked_under_its_own_name, lease_in, link_up_ms, Lease, HOSTNAME, LEASE, LINK_UP, MAC, NO_LEASE,
+    READY,
+};
 use toyos_build::metalprofile::Profile;
 
 use super::metal;
@@ -29,10 +34,10 @@ const QEMU_CONFIG: &str = "tests/e1000case";
 
 /// What QEMU's user-mode backend leases, and what it says about the network it
 /// leases on. Its own defaults, not this repository's: they are the oracle.
-const SLIRP_ADDRESS: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 2, 15);
+const SLIRP_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
 const SLIRP_PREFIX: u8 = 24;
-const SLIRP_ROUTER: &str = "10.0.2.2";
-const SLIRP_DNS: &str = "10.0.2.3";
+const SLIRP_ROUTER: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+const SLIRP_DNS: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 3);
 
 /// The card the T14 arm claims, as the kernel and the manifest spell it.
 const ID: &str = "8086:15fc";
@@ -40,93 +45,6 @@ const ID: &str = "8086:15fc";
 /// The PCI function that card is, as `/sys/bus/pci/devices` spells it: the
 /// cable the metal loop reaches this boot over while it runs.
 pub const NIC: &str = "0000:00:1f.6";
-
-/// The records this pair of arms is written against, spelled once.
-const MAC: &str = "netd: MAC ";
-const LEASE: &str = "netd: DHCP: lease ";
-const LINK_UP: &str = "netd: I219: link up at ";
-const READY: &str = "netd: ready, at most ";
-const NO_LEASE: &str = "netd: DHCP: no lease as ";
-
-/// The name this machine asks its network to record for it — netd's own
-/// `dhcp::HOSTNAME`, which [`netd_spells_this_name`] holds this to, and which
-/// the record above and the option below are both built from.
-const HOSTNAME: &str = "toyos-t14";
-
-/// RFC 2132 §3.14: the kind, the length, and the name.
-fn host_name_option() -> Vec<u8> {
-    let mut option = vec![12, HOSTNAME.len() as u8];
-    option.extend_from_slice(HOSTNAME.as_bytes());
-    option
-}
-
-fn netd_spells_this_name() -> Result<(), String> {
-    let at = super::compile::repo_root().join("userland/netd/src/dhcp.rs");
-    let source = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-    let declared = format!("const HOSTNAME: &[u8] = b\"{HOSTNAME}\";");
-    if source.contains(&declared) {
-        return Ok(());
-    }
-    Err(format!("{} declares no `{declared}`", at.display()))
-}
-
-/// One lease, as the record carries it.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Lease {
-    pub address: std::net::Ipv4Addr,
-    pub prefix: u8,
-    pub server: String,
-    pub gateway: String,
-    pub dns: Vec<String>,
-    /// Milliseconds between netd starting and the lease landing.
-    pub ms: u64,
-}
-
-/// The lease record, read out of a boot's log.
-///
-/// Anchored on the record's own words rather than on positions, so a line that
-/// grows a field still reads and one that loses a field is refused by name.
-pub fn lease_in(text: &str) -> Result<Lease, String> {
-    let line = text
-        .lines()
-        .find(|l| l.contains(LEASE))
-        .ok_or_else(|| format!("no {LEASE:?} record: this boot took no address from its network"))?;
-    let unreadable = |what: &str| format!("{line:?} carries no {what}");
-    let after = |head: &str, tail: &str| -> Result<String, String> {
-        let (_, rest) = line.split_once(head).ok_or_else(|| unreadable(head))?;
-        let (got, _) = rest.split_once(tail).ok_or_else(|| unreadable(tail))?;
-        Ok(got.to_string())
-    };
-    let cidr = after(LEASE, " from ")?;
-    let (address, prefix) = cidr.split_once('/').ok_or_else(|| unreadable("an address/prefix"))?;
-    let dns = after(", dns [", "]")?;
-    Ok(Lease {
-        address: address.parse().map_err(|_| unreadable("an IPv4 address"))?,
-        prefix: prefix.parse().map_err(|_| unreadable("a prefix length"))?,
-        server: after(" from ", ",")?,
-        gateway: after(", gateway ", ",")?,
-        dns: dns.split_whitespace().map(str::to_string).collect(),
-        ms: after("], ", " ms after netd came up")?
-            .parse()
-            .map_err(|_| unreadable("a millisecond count"))?,
-    })
-}
-
-/// How long after the driver came up the link did, out of the driver's own
-/// record.
-pub fn link_up_ms(text: &str) -> Result<u64, String> {
-    let line = text.lines().find(|l| l.contains(LINK_UP)).ok_or_else(|| {
-        format!("no {LINK_UP:?} record: this boot's card never reported a link")
-    })?;
-    let (_, rest) = line.split_once(", ").ok_or_else(|| {
-        format!("{line:?} says nothing about when the link came up, so the card was already up")
-    })?;
-    rest.split_once(" ms after the driver came up")
-        .ok_or_else(|| format!("{line:?} carries no link-up time"))?
-        .0
-        .parse()
-        .map_err(|_| format!("{line:?} carries no readable link-up time"))
-}
 
 /// The T14's judge: the claim, the card, the lease, and the host's own ping.
 pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
@@ -246,7 +164,6 @@ pub fn lan_dhcp_lease(
     _c_bins: &[(String, Vec<u8>)],
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    netd_spells_this_name()?;
     let case = super::compile::repo_root().join(QEMU_CONFIG);
     let dump = wire_dump();
     let options = BootOptions {
@@ -272,9 +189,9 @@ pub fn lan_dhcp_lease(
     let want = Lease {
         address: SLIRP_ADDRESS,
         prefix: SLIRP_PREFIX,
-        server: SLIRP_ROUTER.to_string(),
-        gateway: SLIRP_ROUTER.to_string(),
-        dns: vec![SLIRP_DNS.to_string()],
+        server: SLIRP_ROUTER,
+        gateway: SLIRP_ROUTER,
+        dns: vec![SLIRP_DNS],
         ms: lease.ms,
     };
     if lease != want {
@@ -292,7 +209,9 @@ pub fn lan_dhcp_lease(
         lease.ms
     );
     log.must_be_clean()?;
-    asked_under_its_own_name(&frames)
+    asked_under_its_own_name(&frames)?;
+    eprintln!("  [lan] the client asked under its own name on the wire");
+    Ok(())
 }
 
 /// The client on a wire with nothing at the other end.
@@ -305,7 +224,6 @@ pub fn lan_no_lease(
     _c_bins: &[(String, Vec<u8>)],
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    netd_spells_this_name()?;
     let case = super::compile::repo_root().join(QEMU_CONFIG);
     let options = BootOptions { profile: qemu::Profile::E1000eNoServer, ..Default::default() };
     let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
@@ -330,44 +248,4 @@ fn wire_dump() -> std::path::PathBuf {
     let at = std::env::temp_dir().join(format!("toyos-lan-{}.pcap", std::process::id()));
     let _ = std::fs::remove_file(&at);
     at
-}
-
-/// **The one place the host-name option can be read.** A server that ignores it
-/// answers the same lease either way, so the frames the client sent are the only
-/// evidence that it asked at all — and `filter-dump` records both directions, so
-/// a frame counts only where it is IPv4 over UDP leaving the client's own port.
-fn asked_under_its_own_name(pcap: &[u8]) -> Result<(), String> {
-    const LITTLE_ENDIAN_PCAP: [u8; 4] = [0xd4, 0xc3, 0xb2, 0xa1];
-    const GLOBAL_HEADER: usize = 24;
-    const RECORD_HEADER: usize = 16;
-    /// Ethernet, an IPv4 header carrying no options, and UDP.
-    const HEADERS: usize = 14 + 20 + 8;
-    if pcap.get(..LITTLE_ENDIAN_PCAP.len()) != Some(&LITTLE_ENDIAN_PCAP[..]) {
-        return Err("this file does not open with a little-endian pcap header".to_string());
-    }
-    let option = host_name_option();
-    let (mut at, mut sent, mut asked) = (GLOBAL_HEADER, 0usize, false);
-    while let Some(header) = pcap.get(at..at + RECORD_HEADER) {
-        let len = u32::from_le_bytes(header[8..12].try_into().expect("four bytes")) as usize;
-        let frame = pcap.get(at + RECORD_HEADER..at + RECORD_HEADER + len).ok_or_else(|| {
-            format!("this pcap's record at byte {at} names {len} bytes the file has not")
-        })?;
-        at += RECORD_HEADER + len;
-        if frame.len() > HEADERS
-            && frame[12..14] == [0x08, 0x00]
-            && frame[23] == 17
-            && frame[34..36] == [0, 68]
-        {
-            sent += 1;
-            asked |= frame.windows(option.len()).any(|w| w == option);
-        }
-    }
-    if !asked {
-        return Err(format!(
-            "none of the {sent} frame(s) this client sent a DHCP server carries the host-name \
-             option {option:?}"
-        ));
-    }
-    eprintln!("  [lan] the client asked under its own name on the wire");
-    Ok(())
 }

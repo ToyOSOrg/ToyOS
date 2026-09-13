@@ -18,6 +18,7 @@ pub mod image;
 /// but its own tests.
 #[cfg(test)]
 pub mod kernelkeys;
+pub mod lan;
 pub mod libc;
 pub mod mergehealth;
 pub mod metal;

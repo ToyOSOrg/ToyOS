@@ -6,8 +6,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 /// **netd's own lease bound**, so this boot cannot hand the machine back before
-/// netd has settled whether it has an address. `tests/metal-profile.toml`'s
-/// `lancase` rows are priced against the same constant.
+/// netd has settled whether it has an address.
 const HOLD: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS);
 
 fn main() {

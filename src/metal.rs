@@ -60,7 +60,6 @@ const POLL_SECS: u64 = 5;
 
 const PING_EVERY_SECS: u64 = 1;
 
-/// Milliseconds, which is what `-W` means to the macOS `ping` this loop runs.
 const PING_WAIT_MS: u64 = 1_000;
 
 /// How long the address has to answer *nothing* before a reply counts as this
@@ -995,6 +994,30 @@ fn brief_address(iface: &str, text: &str) -> Result<std::net::Ipv4Addr, String> 
         .map_err(|_| format!("{iface}'s address reads {cidr:?}"))
 }
 
+/// This machine's clock minus this host's, from `date -u +%s` and the host's own
+/// reading at each end of that round trip.
+///
+/// **A whole second either side and a round trip in between**, which is where
+/// [`crate::bootlog::MARGIN`]'s first three seconds come from; a round trip
+/// longer than that, or a host clock that stepped backwards inside it, is
+/// refused rather than spent.
+fn clock_skew(before: u64, said: &str, after: u64) -> Result<i64, String> {
+    let took = after.checked_sub(before).ok_or_else(|| {
+        format!("this host's clock read {before} before the machine's and {after} after it")
+    })?;
+    if took > 1 {
+        return Err(format!(
+            "this host's clock read {before} before the machine's and {after} after it, and a \
+             skew read across {took} s is worth less than the judge it feeds"
+        ));
+    }
+    let machine: i64 = said.trim().parse().map_err(|_| format!("`date -u +%s` said {said:?}"))?;
+    i64::try_from(before)
+        .ok()
+        .and_then(|before| machine.checked_sub(before))
+        .ok_or_else(|| format!("`date -u +%s` said {said:?} against a host second of {before}"))
+}
+
 /// The first reply after the silence: how far into the window it came, and when
 /// it came on this host's clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1070,6 +1093,15 @@ fn unix_now() -> u64 {
 /// answers.** A spawn that fails is this host's failing, and reporting it as
 /// silence would red the boot for a binary the host does not have.
 fn ping_once(addr: std::net::Ipv4Addr) -> Result<bool, String> {
+    // `-W` is milliseconds to macOS's `ping` and seconds to every other's, so a
+    // host this argument has not been read against is refused by name rather
+    // than waiting a thousand seconds a probe.
+    if !cfg!(target_os = "macos") {
+        return Err(format!(
+            "`ping -W {PING_WAIT_MS}` means milliseconds on macOS and seconds on {}",
+            std::env::consts::OS
+        ));
+    }
     Command::new("ping")
         .args(["-n", "-c", "1", "-W", &PING_WAIT_MS.to_string(), &addr.to_string()])
         .stdin(Stdio::null())
@@ -1157,28 +1189,17 @@ impl Driver {
                 &format!("ip -4 -brief addr show {}", shell_word(iface)),
             )
             .map_err(|e| bad(e.to_string()))?;
-        // **The host's own clock at both ends of the read**, so what bounds the
-        // two clocks' disagreement is this round trip and not the width of some
-        // window. Read under Ubuntu and spent on ToyOS's records because both
-        // operating systems keep this machine's one RTC.
+        // The host's own clock at both ends of the read, so what the answer is
+        // worth is this round trip and not the width of some window.
         let before = unix_now();
         let said = self
             .ssh("reading the machine's own clock", "date -u +%s")
             .map_err(|e| bad(e.to_string()))?;
-        let after = unix_now();
-        if after - before > 1 {
-            return Err(bad(format!(
-                "this host's clock read {before} before that and {after} after it, so the two \
-                 clocks cannot be held to a second"
-            )));
-        }
-        let machine: i64 =
-            said.trim().parse().map_err(|_| bad(format!("`date -u +%s` said {said:?}")))?;
         Ok(Wire {
             iface: iface.to_string(),
             addr: brief_address(iface, &brief).map_err(bad)?,
             mac: mac.trim().to_ascii_lowercase(),
-            skew: machine - before as i64,
+            skew: clock_skew(before, &said, unix_now()).map_err(bad)?,
         })
     }
 
@@ -2336,6 +2357,27 @@ mod tests {
         assert_eq!(brief_address("enp0s31f6", many), Ok("192.168.1.46".parse().unwrap()));
         assert_eq!(brief_address("wlp9s0", many), Ok("192.168.1.244".parse().unwrap()));
         assert!(brief_address("enp0s31f7", many).unwrap_err().contains("ip -4 -brief"));
+    }
+
+    /// **A host clock that stepped backwards across the round trip is the
+    /// condition this guard exists for**, and it is a refusal by name and not
+    /// the subtraction overflow it would otherwise be.
+    #[test]
+    fn a_skew_read_across_a_clock_this_host_moved_is_refused() {
+        assert_eq!(clock_skew(1_757_347_700, "1757347703\n", 1_757_347_700), Ok(3));
+        assert_eq!(clock_skew(1_757_347_700, "1757347698", 1_757_347_701), Ok(-2));
+
+        let why = clock_skew(1_757_347_701, "1757347700", 1_757_347_700)
+            .expect_err("the second read is before the first");
+        assert!(why.contains("1757347701 before"), "{why}");
+        let why = clock_skew(1_757_347_700, "1757347700", 1_757_347_705)
+            .expect_err("five seconds is no round trip to spend a judge on");
+        assert!(why.contains("across 5 s"), "{why}");
+        let why = clock_skew(1_757_347_700, "Tue Sep  9 10:00:00 UTC 2026", 1_757_347_700)
+            .expect_err("a date is not a count of seconds");
+        assert!(why.contains("`date -u +%s` said"), "{why}");
+        // A machine answering a second no host second can be subtracted from.
+        assert!(clock_skew(1_757_347_700, &i64::MIN.to_string(), 1_757_347_700).is_err());
     }
 
     #[test]

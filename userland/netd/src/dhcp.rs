@@ -128,7 +128,7 @@ impl Dhcp {
                 }
             };
             self.leased = lease.is_some();
-            self.write(lease, &dns, iface, resolver);
+            Self::write(lease, &dns, iface, resolver);
         }
         if self.settled {
             return false;
@@ -155,7 +155,6 @@ impl Dhcp {
     /// change**, so a route left standing over an address that is gone cannot
     /// be arranged without breaking the path every boot takes to its lease.
     fn write(
-        &self,
         lease: Option<(Ipv4Cidr, Option<Ipv4Address>)>,
         dns: &[Ipv4Address],
         iface: &mut Interface,

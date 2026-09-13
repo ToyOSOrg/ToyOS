@@ -638,7 +638,6 @@ name = "boot.lancase.ping_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, which bounds the window a reply can fall in"
-measured = 57
 
 [[number]]
 name = "list.lancase.job_ms"

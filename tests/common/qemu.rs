@@ -2314,8 +2314,7 @@ pub struct BootOptions {
     /// Forward this host port to the guest's TCP 22. **slirp is one-way
     /// without it**: nothing on the host can open a connection into the guest
     /// unless QEMU is told which port to translate. A profile with no NIC
-    /// carries no `-netdev` for it to reach, which [`ssh_forward_argv`] is
-    /// what a test refuses before it boots.
+    /// carries no `-netdev` for it to reach.
     pub ssh_port: Option<u16>,
     /// Write every frame this machine's NIC sends or receives to this file, in
     /// pcap. **The only way to read what the guest asked for**: a request the
