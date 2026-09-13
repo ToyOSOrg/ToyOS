@@ -30,13 +30,20 @@ const MSG_ADDR: u32 = 0xFEE0_0000;
 // The same CPU, named as a destination rather than encoded in an address, for the unit to put in an entry.
 const MSG_DEST: u32 = 0;
 
-/// Why [`PciDevice::enable_msix`] armed nothing. Named rather than collapsed
-/// into one `None` because a caller choosing a mechanism answers each
-/// differently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unarmed {
-    /// This function publishes no MSI-X capability.
+/// Why a walk of a function's capability list answered no capability.
+pub enum NoCapability {
+    /// The walk reached the list's terminator and nothing on it carried the id.
     Absent,
+    /// The walk ended at a link the spec forbids, so whether the function
+    /// publishes the capability past it was never read.
+    Truncated,
+}
+
+/// Why [`PciDevice::enable_msix`] armed nothing.
+pub enum Unarmed {
+    /// No MSI-X capability came off the walk, which is a table this function
+    /// does not have only where the walk reached the list's terminator.
+    NoTable(NoCapability),
     /// It publishes one whose table this kernel could not reach.
     Unusable,
     /// The unit refuses this function's message, and MSI would carry the same one.
@@ -239,7 +246,7 @@ impl PciDevice {
     /// write to it, and a claimant that could reach it could aim the device's
     /// message at any address the LAPIC decodes.
     pub fn enable_msix(&self, vector: u8) -> Result<Mmio, Unarmed> {
-        let cap = self.capability(msix::CAP_ID).ok_or(Unarmed::Absent)?;
+        let cap = self.capability(msix::CAP_ID).map_err(Unarmed::NoTable)?;
         let control = cap.read_u16(msix::MESSAGE_CONTROL);
         let table = match msix::Msix::decode(control, cap.read_u32(msix::TABLE)) {
             Ok(table) => table,
@@ -290,7 +297,7 @@ impl PciDevice {
     /// refused: a function left enabled at a vector nobody holds delivers into
     /// a slot with no reader.
     pub fn disable_msix(&self) {
-        let Some(cap) = self.capability(msix::CAP_ID) else { return };
+        let Ok(cap) = self.capability(msix::CAP_ID) else { return };
         let control = cap.read_u16(msix::MESSAGE_CONTROL);
         cap.write_u16(msix::MESSAGE_CONTROL, msix::Msix::disabled(control));
     }
@@ -322,7 +329,7 @@ impl PciDevice {
 
     /// Point this function's single MSI message at `vector` and enable it.
     pub fn enable_msi(&self, vector: u8) -> bool {
-        let Some(cap) = self.capability(msi::CAP_ID) else {
+        let Ok(cap) = self.capability(msi::CAP_ID) else {
             return false;
         };
 
@@ -355,15 +362,20 @@ impl PciDevice {
     /// bit this set would owe a message on the set-to-clear transition a later
     /// arming makes of it, with its Pending bit set (PCIe §7.7.1.7).
     pub fn disable_msi(&self) {
-        let Some(cap) = self.capability(msi::CAP_ID) else { return };
+        let Ok(cap) = self.capability(msi::CAP_ID) else { return };
         let control = cap.read_u16(msi::MESSAGE_CONTROL);
         cap.write_u16(msi::MESSAGE_CONTROL, msi::Msi::disabled(control));
     }
 
-    /// The capability this function publishes under `id`, or `None` where it
-    /// publishes none. Every reader that asks a function what it has asks here.
-    pub fn capability(&self, id: u8) -> Option<Capability<'_>> {
-        self.capabilities().find(|cap| cap.id() == id)
+    /// Every reader that asks a function what it has asks here, so no reader
+    /// can mistake a list that ended early for one that named nothing.
+    pub fn capability(&self, id: u8) -> Result<Capability<'_>, NoCapability> {
+        let mut walk = self.capabilities();
+        match walk.find(|cap| cap.id() == id) {
+            Some(cap) => Ok(cap),
+            None if walk.walk.truncated() => Err(NoCapability::Truncated),
+            None => Err(NoCapability::Absent),
+        }
     }
 
     pub fn capabilities(&self) -> CapabilityIter<'_> {

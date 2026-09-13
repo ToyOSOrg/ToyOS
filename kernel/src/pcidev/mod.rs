@@ -17,10 +17,13 @@
 //!
 //! **The BAR holding the MSI-X table or PBA is never mapped**: a holder that
 //! could rewrite the table could point the device's message at any address the
-//! LAPIC decodes. **So a function that publishes MSI-X is armed on MSI-X or
-//! refused**, and MSI is armed only where there is no table in a BAR at all:
-//! its message is a word of config space, which has no write path from
-//! userland.
+//! LAPIC decodes. **So a function is armed on MSI only where a walk that
+//! reached its capability list's terminator found no MSI-X**: its message is
+//! then a word of config space, which has no write path from userland, and it
+//! has no table in a BAR for [`msix_bar`] to keep back. A list that ends at a
+//! link the spec forbids says nothing about what it publishes past that link,
+//! so it is refused by name rather than armed on the mechanism the walk
+//! happened to reach.
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding
@@ -52,7 +55,7 @@ use toyos_dma::Register;
 use toyos_pci::{bar, express, msix};
 
 use crate::device::{Claim, ClaimError};
-use crate::drivers::pci::{PciDevice, Unarmed};
+use crate::drivers::pci::{NoCapability, PciDevice, Unarmed};
 use crate::inbox::InboxId;
 use crate::iommu::{DeviceSpace, IommuError};
 use crate::mm::paging::{CachePolicy, MmioPolicy};
@@ -332,6 +335,7 @@ fn window(assigned: u64, ceiling: u64) -> (u64, u64) {
 enum Refusal {
     NoInterrupt,
     MsixUnusable,
+    CapsTruncated,
     Untranslated(IommuError),
     NoWindow,
     BarUnsizable(u8),
@@ -352,6 +356,11 @@ impl core::fmt::Display for Refusal {
                 f,
                 "it publishes MSI-X and this kernel could not arm it, and MSI is not a fallback \
                  for a function that has a table"
+            ),
+            Self::CapsTruncated => write!(
+                f,
+                "its capability list ends at a link the PCI spec forbids, so whether it holds \
+                 an MSI-X table in a BAR was never read, and MSI is not armed on a guess"
             ),
             Self::Untranslated(why) => write!(
                 f,
@@ -484,13 +493,13 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
 
     // Then the interrupt, still before a window is cut: a function neither
     // mechanism can be armed on is one no holder could ever be told anything
-    // about, and `virtio_net_no_msix` reads that refusal off the console *and*
-    // the absence of any BAR line after it.
+    // about.
     let armed = match pci.enable_msix(VECTORS[slot]) {
         Ok(entry) => Armed::Msix(entry),
         Err(Unarmed::Unusable) => return Err(Refusal::MsixUnusable),
         Err(Unarmed::Blocked) => return Err(Refusal::NoInterrupt),
-        Err(Unarmed::Absent) => {
+        Err(Unarmed::NoTable(NoCapability::Truncated)) => return Err(Refusal::CapsTruncated),
+        Err(Unarmed::NoTable(NoCapability::Absent)) => {
             pci.enable_msi(VECTORS[slot]).then_some(Armed::Msi).ok_or(Refusal::NoInterrupt)?
         }
     };
@@ -572,7 +581,7 @@ fn slot_space(slot: usize) -> Result<DeviceSpace, IommuError> {
 /// has in reach does, so nothing rests on this: what makes a re-claim safe is
 /// that bus mastering starts on the first grant and not at hand-over.
 fn reset(pci: &PciDevice) -> Option<u64> {
-    let cap = pci.capability(express::CAP_ID)?;
+    let cap = pci.capability(express::CAP_ID).ok()?;
     if !express::resets(cap.read_u32(express::DEVICE_CAPABILITIES)) {
         return None;
     }
@@ -604,7 +613,7 @@ fn settle_after_reset(pci: &PciDevice) {
 /// the two live in one BAR on every device in reach, and a device that split
 /// them costs the second BAR too rather than publishing one of them.
 fn msix_bar(pci: &PciDevice) -> Option<u8> {
-    let cap = pci.capability(msix::CAP_ID)?;
+    let cap = pci.capability(msix::CAP_ID).ok()?;
     let control = cap.read_u16(msix::MESSAGE_CONTROL);
     let table = msix::Msix::decode(control, cap.read_u32(msix::TABLE)).ok()?;
     Some(table.bir())

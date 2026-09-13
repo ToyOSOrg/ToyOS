@@ -150,9 +150,6 @@ impl Nic {
             .describe()
             .map_err(KernelRefused::on("the claim's description"))
             .map_err(Opening::Kernel)?;
-        // The register file is in BAR 0 on every part of this family; the
-        // lowest BAR the claim will map is taken rather than assumed, because
-        // the kernel reports 0 bytes for one it keeps — the MSI-X table's.
         let (bar, bytes) = info
             .bar_bytes
             .iter()
