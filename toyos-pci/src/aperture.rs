@@ -27,7 +27,7 @@ pub fn decode(windows: &[RootBridgeWindow], base: u64, end: u64) -> Decode {
     if base >= end {
         return Decode::Empty;
     }
-    match windows.iter().find(|window| window.holds(base, end)) {
+    match windows.iter().find(|window| window.holds(base, end - base)) {
         Some(window) => Decode::Inside(window.base),
         None => Decode::Unrouted,
     }
