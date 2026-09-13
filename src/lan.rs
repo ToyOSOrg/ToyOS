@@ -234,18 +234,13 @@ mod tests {
         frame([0x08, 0x00], 17, 68, 67, payload)
     }
 
-    #[test]
-    fn a_frame_carrying_the_option_out_of_the_clients_own_port_is_the_evidence() {
-        let asked = pcap(&[from_client(&host_name_option())]);
-        assert_eq!(asked_under_its_own_name(&asked), Ok(()));
-    }
-
     /// **The server's own echo of the option is not the client asking.** A walk
-    /// keyed on the destination port would count the frame below and report the
+    /// keyed on the destination port would count the echo below and report the
     /// question as asked when nothing asked it.
     #[test]
     fn only_the_direction_leaving_the_client_counts() {
         let option = host_name_option();
+        assert_eq!(asked_under_its_own_name(&pcap(&[from_client(&option)])), Ok(()));
         let echoed = frame([0x08, 0x00], 17, 67, 68, &option);
         let why = asked_under_its_own_name(&pcap(std::slice::from_ref(&echoed)))
             .expect_err("a server's reply is not this client asking");
