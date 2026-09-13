@@ -15,7 +15,7 @@ Built and green under QEMU: the substrate (`kernel/src/pcidev/mod.rs`), the I219
 driver (`toyos-i219/`), netd's address from DHCP, the record stream
 (`toyos-logstream/`) and sshd's exec, transfer and key auth. What is left is the
 laptop — its own card (`tests/lancase`), the stream and the ssh from the Mac, and
-a netboot spike — on `issues/kernel/a-32-bit-bar-needs-the-host-bridges-aperture.md`.
+a netboot spike.
 
 Constraints a reader would otherwise pay to re-derive:
 
@@ -37,10 +37,13 @@ Constraints a reader would otherwise pay to re-derive:
   instead. Wi-Fi is out — the AX210 needs a firmware image.
 - **The I219 is an MSI part**, measured: `/proc/interrupts` names its interrupt
   `IR-PCI-MSI-0000:00:1f.6` and `msi_irqs/162` reads `mode=msi`.
-- The I219 has a **32-bit BAR** (`bar0=0xbcf00000`) and `pcidev` places a BAR
-  above everything firmware described, of which below 4 GiB there is none;
-  leaving it where it sits shares a 2 MiB page with the internal NVMe's
-  `0xbce00000`, which is the only page size this kernel maps.
+- The I219 has a **32-bit BAR** (`bar0=0xbcf00000`) and it has to move: where
+  firmware put it, it shares a 2 MiB page with the internal NVMe's
+  `0xbce00000`, and 2 MiB is the only page size this kernel maps. Below 4 GiB
+  there is no address above everything firmware described, so `pcidev` offers
+  that BAR the free runs *between* what the firmware map, this bus's assigned
+  BARs and its bridges' forwarded ranges describe, and the machine's own answer
+  at each address is what settles it.
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
   ground reddened every netd registration at once. So a re-claim is made safe by

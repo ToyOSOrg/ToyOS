@@ -668,6 +668,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
     ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
+    // The same boot again, read for what the kernel asked the machine before it
+    // moved that function's BAR. Its own boot rather than a second assertion in
+    // the row above, because that one's subject is exclusivity and a test that
+    // reds tells a reader which of the two it is about. Console lines only, no
+    // clock; Fast with the UNMEASURED bootstrap marker until priced.
+    ("bar_placement_is_proven", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
@@ -13767,6 +13773,99 @@ fn run_machine_test(
             log.must_say("netd: ready, at most ")?;
             log.must_be_clean()?;
             eprintln!("  [netcase] one PCI function, two claimants, one holder");
+            Ok(())
+        }
+        "bar_placement_is_proven" => {
+            // **The machine is what says an address decodes, and this is the
+            // reading that says the kernel asked it.** The same netcase boot,
+            // because the NIC it hands netd is the only function in QEMU whose
+            // BAR this kernel moves — what is asserted is not where the BAR
+            // went but that the two probes ran and answered: all-ones at the
+            // address before anything of that function was placed there, and
+            // something that is not all-ones through the BAR afterwards.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+            let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
+            if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+                return Err("this test needs a NIC and the profile has none".to_string());
+            }
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+            let mut console = qemu.boot_log().to_string();
+            let _ =
+                await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
+            console.push_str(&qemu.drain_serial(Duration::from_millis(500)));
+            let log = serial::Serial::named("boot console", console.as_str());
+
+            // The runs the kernel offered that BAR, off the same boot.
+            let runs: Vec<(u64, u64)> = log
+                .text()
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("pcidev:   0x"))
+                .filter_map(|rest| {
+                    let (start, rest) = rest.split_once("..0x")?;
+                    let end = rest.split_whitespace().next()?;
+                    Some((u64::from_str_radix(start, 16).ok()?, u64::from_str_radix(end, 16).ok()?))
+                })
+                .collect();
+            if runs.is_empty() {
+                return Err(format!(
+                    "this boot listed no run for a BAR to be offered, so nothing here is about \
+                     a placement:\n{}",
+                    log.text()
+                ));
+            }
+
+            // Exactly one placement record for the NIC, and every fact in it.
+            let placed: Vec<&str> = log
+                .text()
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("pcidev: PCI 00:03.0 BAR") && l.contains(" placed at "))
+                .collect();
+            let [record] = placed[..] else {
+                return Err(format!(
+                    "the NIC's BAR was placed {} time(s) and this test is about the one \
+                     placement the boot makes:\n{}",
+                    placed.len(),
+                    log.text()
+                ));
+            };
+            eprintln!("  [netcase] {record}");
+            // **Both probes, read as numbers.** A `contains` over the sentence
+            // would pass on a record that named the same dword twice, which is
+            // a placement onto an address nothing routes.
+            let dword = |marker: &str| -> Option<u32> {
+                let (_, rest) = record.split_once(marker)?;
+                u32::from_str_radix(rest.split(' ').next()?, 16).ok()
+            };
+            let before = dword("it answered 0x")
+                .ok_or_else(|| format!("{record:?} does not say what the address answered"))?;
+            let after = dword(" and 0x")
+                .ok_or_else(|| format!("{record:?} does not say what the BAR answered"))?;
+            if !(before == 0 || before == u32::MAX) {
+                return Err(format!(
+                    "{record:?} placed a BAR where something answered {before:#010x}"
+                ));
+            }
+            // And the address came out of a run this boot itself printed.
+            let at = record
+                .split_once(" placed at 0x")
+                .and_then(|(_, rest)| rest.split(' ').next())
+                .and_then(|word| u64::from_str_radix(word, 16).ok())
+                .ok_or_else(|| format!("{record:?} names no address"))?;
+            if !runs.iter().any(|(start, end)| at >= *start && at < *end) {
+                return Err(format!(
+                    "the BAR went to {at:#x} and the runs this boot offered are {runs:x?}"
+                ));
+            }
+            // And the placement is what the hand-over rests on: the same boot
+            // must have handed the function over, or the record above is about
+            // a BAR that moved for nothing.
+            log.must_say("[1af4:1041] handed over on slot")?;
+            log.must_be_clean()?;
+            eprintln!(
+                "  [netcase] {at:#x} answered {before:#010x} with nothing there and \
+                 {after:#010x} with the BAR on it, inside a run this boot printed"
+            );
             Ok(())
         }
         "netd_listener_forgery" => {
