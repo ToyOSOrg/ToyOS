@@ -29,6 +29,17 @@ use toyos_build::metalprofile::{job_ms_row, Profile, AROUND_THE_LIST_MS};
 
 use super::serial::Serial;
 
+/// The fields only the boots that took that path produce: the two bounds'
+/// lateness, and the stop's two numbers. Absent **and** unpriced is a boot that
+/// did not take the path and owes nothing; absent and priced is a boot armed
+/// for one path that ended on another, which is a red the pricing loop names.
+const PATH_TAKEN: &[&str] = &[
+    "deadline_lateness_ms",
+    "lockup_lateness_ms",
+    "park_ms",
+    "park_open_operations",
+];
+
 /// One boot a metal test needs.
 pub struct Arm {
     /// **The boot this test rides, named.** Two arms naming one boot share an
@@ -280,6 +291,22 @@ impl Readback {
     /// up on. Read out of the same channel and for the same reason.
     pub fn lockup_lateness_ms(&self) -> Option<u64> {
         toyos_build::metal::lockup_lateness_ms(&self.loader)
+    }
+
+    /// How long this boot spent stopping userland before it synced anything,
+    /// out of its own kernel log. `None` on a boot that reset without going
+    /// through `quiesce` — `deadlinewedge` and `hardlockup` are the two, and
+    /// the profile prices this for neither.
+    pub fn park_ms(&self) -> Option<u64> {
+        toyos_build::metal::park_ms(&self.kernel)
+    }
+
+    /// Block-device operations still open where that stop ended, from the same
+    /// record and `None` for the same boots. **Not a duration**, and priced
+    /// beside one only because it is the same record: it is the block layer's
+    /// own count, so it is what the stop can be wrong against.
+    pub fn park_open_operations(&self) -> Option<u64> {
+        toyos_build::metal::park_open_operations(&self.kernel)
     }
 
     /// The loader pass **after** the kernel's reset, which is where a chain
@@ -891,17 +918,22 @@ pub fn run(
                 // boot the file prices a lateness for and that produced none is
                 // therefore a boot some *other* bound ended, which is exactly
                 // what a run of `deadlinewedge` sealed by the lockup detector
-                // was, and it used to be skipped rather than reported.
+                // was, and it used to be skipped rather than reported. The
+                // stop's two numbers are absent on the same boots and priced
+                // by the same rule, from the other side: those two reset
+                // without going through `quiesce`, so they stop nothing.
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),
                     ("stick_secs", Some(back.stick_secs)),
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
+                    ("park_ms", back.park_ms()),
+                    ("park_open_operations", back.park_open_operations()),
                 ] {
                     let name = format!("boot.{label}.{field}");
                     let priced = profile.row(&name).is_some();
-                    if value.is_none() && !priced && field.ends_with("_lateness_ms") {
+                    if value.is_none() && !priced && PATH_TAKEN.contains(&field) {
                         continue;
                     }
                     let Some(value) = value else {

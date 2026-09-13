@@ -609,3 +609,193 @@ name = "boot.ccorpus-2.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+
+# --- what stopping this machine's userland costs, and the one number that can
+# --- disagree with the stop about whether it worked
+# `quiesce` stops every userland thread before it syncs anything, so that
+# `Rebooting.` is the boot's last record by construction. `park_ms` is what that
+# took; `park_open_operations` is what the block layer still had open where it
+# ended, which the stop does not produce and so can contradict.
+#
+# `deadlinewedge` and `hardlockup` are absent on purpose: those two reset
+# without going through `quiesce`, so they stop nothing and write no record.
+
+[[number]]
+name = "boot.testcases.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "kernel `quiesce::PARK` — one scheduler quantum (toyos_sched::fair::QUANTUM_NS, 10 ms) for a thread in Ring 3 to reach the return-to-userland boundary, plus one `block::OPERATION` (2 s) for the longest a thread can be inside a syscall without parking. The two things a thread that must stop can be doing, and the widest true bound before the machine has answered once"
+
+[[number]]
+name = "boot.testcases.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "the stop's own claim, judged by the block layer instead of by the stop: a machine whose userland is stopped is inside no block-device operation, so any number but zero is a sync claiming something about a machine that was still writing"
+
+[[number]]
+name = "boot.testcases-mkdir.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.testcases-mkdir.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.testcases-readdir.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.testcases-readdir.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.testcases-watchdog.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.testcases-watchdog.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.jobcase.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.jobcase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.metalcase.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms. **The boot this row exists for**: this config starts sshd, sshd spins in Ring 3 retrying a netd that has no NIC on this machine, and its own `exit:` record landing after `Rebooting.` is the defect the stop closes"
+
+[[number]]
+name = "boot.metalcase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.latencycase.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.latencycase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.metaldevicecase.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms. The boot that reads it hardest: megabytes written and fsynced before the reset, so a thread inside a block-layer operation when the stop is raised is the ordinary case here rather than the unlucky one"
+
+[[number]]
+name = "boot.metaldevicecase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.selftests.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.selftests.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.shared.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.shared.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.shared-2.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.shared-2.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.shared-debug.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.shared-debug.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.ccorpus.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.ccorpus.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.ccorpus-2.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.ccorpus-2.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.foreignrecord.park_ms"
+unit = "ms"
+ceiling = 2010
+ceiling_from = "as boot.testcases.park_ms"
+
+[[number]]
+name = "boot.foreignrecord.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"

@@ -78,11 +78,42 @@ pub(crate) fn between_attempts(attempt: u32) {
     );
 }
 
+/// How many block-device operations are open right now, across every CPU.
+///
+/// **The shutdown's own oracle, and the one number in this module that is not
+/// about time.** `quiesce` stops userland and then claims every filesystem is
+/// synced; this is what was still inside the block layer when it made that
+/// claim — zero if the machine had really stopped, and not if it had not.
+static OPEN_OPERATIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn open_operations() -> u32 {
+    OPEN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// One open block-device operation: the deadline an [`Operation`] declares,
+/// and this layer's count of how many there are.
+#[must_use = "the operation lasts exactly as long as this guard"]
+pub struct OpenOperation {
+    /// Held for its drop and read by nothing: it is what bounds the operation.
+    _deadline: Operation,
+}
+
+impl Drop for OpenOperation {
+    fn drop(&mut self) {
+        OPEN_OPERATIONS.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Declares the running context inside one block-device operation, bounded by `OPERATION`, until the guard drops.
 // An absolute deadline, not a relative duration: it crosses into a driver that loops, and re-basing per command would bound each command instead of the whole operation.
 #[must_use = "the operation lasts exactly as long as this guard"]
-pub fn begin_operation() -> Operation {
-    Operation::begin(Deadline::at(crate::clock::now() + OPERATION.duration()))
+pub fn begin_operation() -> OpenOperation {
+    OPEN_OPERATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    OpenOperation {
+        _deadline: Operation::begin(Deadline::at(
+            crate::clock::now() + OPERATION.duration(),
+        )),
+    }
 }
 
 /// Why an operation on this trait did not complete.

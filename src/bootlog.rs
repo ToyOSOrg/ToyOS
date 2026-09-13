@@ -14,6 +14,12 @@ use std::fmt;
 /// in `kernel/src/arch/syscall/machine.rs`'s `quiesce`.
 pub const REBOOTING: &str = "Rebooting.";
 
+/// What the kernel writes about stopping userland, before it syncs anything —
+/// `kernel/src/quiesce.rs` produces it and `toyos-quiesce` renders it. It is
+/// what makes [`REBOOTING`] last by construction rather than by luck, and the
+/// numbers in it are what this crate reads back off the stick.
+pub const MACHINE_STOPPED: &str = "stop: ";
+
 /// What `userland/test-runner` says when its job list runs past
 /// `toyos_tco::JOB_BOUND_MS`, with the job it was inside as the next word.
 /// **Console only**: a userland write reaches the serial backend and never a

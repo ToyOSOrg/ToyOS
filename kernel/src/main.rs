@@ -29,6 +29,7 @@ mod actuator;
 mod params;
 mod blackbox;
 mod deadline;
+mod quiesce;
 mod hardlockup;
 mod mm;
 mod panic;

@@ -242,10 +242,12 @@ actuators! {
     test_hash_before_seed = "test-hash-before-seed";
 
     /// Hold the shutdown open for a tenth of a second after the boot's last
-    /// word, yielding, so a userland thread still on a run queue gets a pass
-    /// there. **The window hardware has and QEMU does not**: `quiesce` spends
-    /// real time between `Rebooting.` and the reset, which is enough for the
-    /// test runner's loop to spawn another job into the log after its last line.
+    /// word, yielding. **The window hardware has and QEMU does not**: `quiesce`
+    /// spends real time between `Rebooting.` and the reset, and this buys a
+    /// guest the same span to be wrong in. Nothing in userland may take it —
+    /// `quiesce::stop` ran before the sync — so a boot that still writes a
+    /// record into this window is one the stop did not stop;
+    /// `quiesce_stops_the_machine_before_the_last_word` is what asks.
     quiesce_late_word = "quiesce-late-word";
 
     /// Make the shutdown's bounded acquisitions of the xHCI controller lock

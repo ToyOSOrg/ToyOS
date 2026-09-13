@@ -163,7 +163,26 @@ const GEN_MASK: u64 = (1 << GEN_BITS) - 1;
 const KILL: u64 = 1 << 62;
 /// Sticky: exactly one retirer may post the retire node.
 const RETIRE_QUEUED: u64 = 1 << 63;
-const STICKY: u64 = KILL | RETIRE_QUEUED;
+/// Sticky: the task has reached a point it may never run past again. Every
+/// route that would make it runnable puts it in its CPU's stopped band
+/// instead, and no pick serves that band — so it executes no further
+/// instruction in either ring, and nothing clears this.
+///
+/// **The opposite of [`KILL`] and not a variant of it.** A killed task is
+/// dispatched *sooner* so it can unwind and release what a retirer waits on;
+/// a stopped one is never dispatched at all, because the machine is going away
+/// and what it would do on the way out is the thing being prevented. Where a
+/// task carries both, this one decides.
+const STOP: u64 = 1 << 61;
+const STICKY: u64 = KILL | RETIRE_QUEUED | STOP;
+
+/// A sticky bit landing on a packed field would make `retarget` rewrite the
+/// discriminant, the home CPU or the commit generation, and nothing at runtime
+/// would say so. Compile-time, because there is no legal value to refuse.
+const _: () = assert!(
+    STICKY & (DISC_MASK | (CPU_MASK << CPU_SHIFT) | (GEN_MASK << GEN_SHIFT)) == 0,
+    "a sticky bit overlaps a packed field of the task's state word",
+);
 
 const D_RUNNING: u64 = 0;
 const D_READY: u64 = 1;
@@ -328,6 +347,43 @@ impl<M> TaskShared<M> {
         self.state.load(Ordering::Acquire) & RETIRE_QUEUED != 0
     }
 
+    pub fn stop_pending(&self) -> bool {
+        self.state.load(Ordering::Acquire) & STOP != 0
+    }
+
+    /// Stop a task that is parked, and answer whether it now carries [`STOP`].
+    ///
+    /// **One CAS, because the read and the mark may not come apart.** A task
+    /// that is running may hold a kernel lock, so marking it where it stands
+    /// would band it holding that lock; a running task reaches this bit at its
+    /// own safe point instead, through `SchedPass::dispose_stop`. `false` here
+    /// therefore means "not parked, and not this caller's to stop" — including
+    /// the task a waker claimed between the read and the exchange, which is on
+    /// its way to a CPU that will dispatch it to that safe point.
+    ///
+    /// Idempotent: a task already carrying the bit answers `true` without
+    /// writing.
+    pub fn stop_if_blocked(&self) -> bool {
+        let mut cur = self.state.load(Ordering::Acquire);
+        loop {
+            if cur & STOP != 0 {
+                return true;
+            }
+            if !matches!(unpack(cur), TaskState::Blocked(_)) {
+                return false;
+            }
+            match self.state.compare_exchange_weak(
+                cur,
+                cur | STOP,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(now) => cur = now,
+            }
+        }
+    }
+
     /// Move the word from `from` to `to`, preserving the sticky bits.
     /// `false` means the word was no longer `from` — the caller lost a race
     /// and must re-read.
@@ -462,6 +518,14 @@ impl<M> TaskShared<M> {
     /// path, which abandons the task instead of retiring it.
     pub fn mark_kill(&self) {
         self.state.fetch_or(KILL, Ordering::AcqRel);
+    }
+
+    /// Sticky [`STOP`] on a task that is *running on the calling CPU* and has
+    /// reached its safe point; `SchedPass::dispose_stop` is the only caller,
+    /// which is what makes the unconditional `fetch_or` sound where
+    /// [`Self::stop_if_blocked`]'s CAS is not.
+    pub(crate) fn mark_stop(&self) {
+        self.state.fetch_or(STOP, Ordering::AcqRel);
     }
 }
 

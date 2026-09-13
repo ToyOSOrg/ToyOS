@@ -461,6 +461,9 @@ pub enum Dispose {
     None,
     Yield,
     Exit,
+    /// The machine is stopping and this task is standing at the one boundary
+    /// it may never cross again. Does not come back.
+    Stop,
 }
 
 /// The environment every pass runs against.
@@ -519,6 +522,7 @@ pub fn pass(dispose: Dispose) {
             Dispose::None => pass.dispose_none(),
             Dispose::Yield => pass.dispose_yield(),
             Dispose::Exit => pass.dispose_exit(),
+            Dispose::Stop => pass.dispose_stop(),
         };
         disposed.finish()
     });

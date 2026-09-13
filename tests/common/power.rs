@@ -161,6 +161,105 @@ pub fn metal_job_reboot(
     Ok(())
 }
 
+/// **`Rebooting.` is the last record, and it is last by construction.**
+///
+/// The guest writes and fsyncs from six threads and then asks for the reset
+/// from a seventh, so every claim `quiesce` makes is made over a machine that
+/// was busy an instant earlier. Three things are judged, and the stop reverted
+/// fails each on its own:
+///
+/// * the kernel's `stop:` record says every userland thread it had to stop was;
+/// * **zero block-device operations were open when the stop ended** — a count
+///   the block layer keeps, not one the stop derives, so the two can disagree;
+/// * nothing at all follows `Rebooting.` on the console.
+///
+/// `quiesce-late-word` is armed for the reason `usb_reset_hands_devices_back`'s
+/// deadline arm arms it: QEMU has no window between the boot's last word and
+/// the reset and hardware does, so without it the third judge is green whether
+/// or not anything was stopped.
+pub fn quiesce_stops_the_machine(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/quiescecase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+
+    // The one binary this config's job list names: every other one staged
+    // beside it is image the boot pays to write and never reads.
+    const JOB: &str = "quiesce_writers";
+    let bins: Vec<(String, Vec<u8>)> =
+        rust_bins.iter().filter(|(name, _)| name == JOB).cloned().collect();
+    if bins.len() != 1 {
+        return Err(format!("the suite built {} copies of {JOB:?}", bins.len()));
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            qmp: true,
+            kernel_params: &["quiesce-late-word"],
+            ..Default::default()
+        },
+    );
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let booted = qemu.boot_log().to_string();
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let reason = stop.reason();
+    let tail = qemu.drain_serial(WAIT);
+    let whole = format!("{booted}{tail}");
+
+    serial::Serial::named("quiesce drain", tail.as_str()).must_be_clean()?;
+    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
+
+    // **First, because it is the defect and the other two are the mechanism.**
+    // The whole change reverted reds here, on the record a writer thread put
+    // under the boot's own last word.
+    let after: Vec<&str> = whole
+        .lines()
+        .skip_while(|line| !line.contains(REBOOTING))
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if !after.is_empty() {
+        return Err(format!(
+            "{} line(s) reached the console after the boot's last word:\n  {}",
+            after.len(),
+            after.join("\n  "),
+        ));
+    }
+
+    let record = whole
+        .lines()
+        .find(|line| line.contains(STOP_RECORD))
+        .ok_or_else(|| format!("the kernel wrote no {STOP_RECORD:?} record\n{whole}"))?;
+    if !record.contains(NOTHING_OPEN) {
+        return Err(format!(
+            "the block layer still had operations open where the stop ended, so the machine was \
+             not stopped before the sync claimed it was:\n  {record}"
+        ));
+    }
+    if record.contains(LEFT_RUNNING) {
+        return Err(format!(
+            "the stop gave up on threads that never reached a safe point:\n  {record}"
+        ));
+    }
+
+    eprintln!("  [power] the machine stopped before it claimed anything: {}", record.trim());
+    Ok(())
+}
+
+/// The kernel's stop record, and the two things read out of it.
+/// `kernel/src/quiesce.rs` writes it and `toyos-quiesce` renders it; nothing
+/// links those crates to this one, which is why these are constants here.
+const STOP_RECORD: &str = "stop: ";
+const NOTHING_OPEN: &str = "0 block operation(s) still open";
+const LEFT_RUNNING: &str = "this reset lands wherever";
+
 /// A job list that never finishes ends the boot anyway, on the runner's own
 /// deadline: the kernel is alive and its scheduler passes keep feeding the
 /// chipset, so no watchdog is what fires here.

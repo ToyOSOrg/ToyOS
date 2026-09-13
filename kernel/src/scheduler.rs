@@ -377,6 +377,21 @@ pub fn exit_if_killed() {
     unreachable!("exit_if_killed: returned from the exit pass");
 }
 
+/// Stop the running thread where it stands, for the life of this machine.
+///
+/// Called from the same boundary [`exit_if_killed`] is, at the same baseline,
+/// and it rests on the same fact about that boundary: a thread standing there
+/// holds no kernel lock, has nothing in the block layer and nothing in flight
+/// on any controller — it is between two userland instructions. The one it
+/// never takes is what stops it entering the kernel again, and every record
+/// this kernel writes with a userland author is written from inside a syscall.
+#[track_caller]
+pub fn stop_current() -> ! {
+    assert_baseline(BASELINE_IRQ_EXIT);
+    driver::pass(Dispose::Stop);
+    unreachable!("stop_current: a stopped task was dispatched again");
+}
+
 #[track_caller]
 pub fn exit_current(code: i32) -> ! {
     assert_baseline(BASELINE_TRAP);

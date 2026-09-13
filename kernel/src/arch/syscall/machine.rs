@@ -54,13 +54,25 @@ fn quiesce(last: &str) {
     }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::drivers::watchdog::disarm();
+    // **Before the sync, because the sync is a claim about a machine.** A
+    // process that issues a `write` after `sync_all` returns has dirty pages
+    // nothing will flush, and one that enters a syscall after the boot's last
+    // word puts its own record under that word. The carve-out is the process
+    // the log's durability is owed to: it has to keep running until
+    // `wait_for_durable` below returns, and it is stopped straight after.
+    let stopped = crate::quiesce::stop(toyos_quiesce::Stage::ExceptLog {
+        keep: crate::log::user::durable_pid(),
+    });
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
     crate::writeback::drain_all();
     crate::vfs::lock().sync_all();
-    // The final census: no process runs after this to report another.
+    // The final census: no process runs after this to report another — which
+    // is now a fact the stop established rather than a hope, and `stopped` is
+    // what says so.
     crate::irq_census::log_census();
     crate::drivers::nvme::log_census();
+    log!("{stopped}");
     // Above the boot's last word, because these are ordinary records and the
     // volume that carries them is still there: every USB disk's write cache is
     // emptied and waited for before anything is taken down.
@@ -77,6 +89,10 @@ fn quiesce(last: &str) {
     }
     // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
     let durability = crate::log::wait_for_durable();
+    // The carve-out's reason is spent: the last word is on the volume, so the
+    // one process still running stops here. Nothing it could write from now on
+    // would reach a file anyway, and everything below takes its device away.
+    let _ = crate::quiesce::stop(toyos_quiesce::Stage::All);
     crate::log::console::drain_inline();
     // After the log is durable: the next boot's loader reads this page to learn
     // how the last one ended, and a machine that was asked to stop is the one
