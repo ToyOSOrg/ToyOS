@@ -100,9 +100,9 @@ measured = 46
 [[number]]
 name = "boot.jobcase.back_secs"
 unit = "s"
-ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs"
-measured = 44
+ceiling = 74
+ceiling_from = "the widest turnaround this bench has given a boot with nothing to report — 49 s, over readings of 37, 40, 44 and 49 — and half again. The driver's own `toyos_build::metal::return_secs` is 420 s and bounds a hang; what this bounds is the machine coming back, which is the number a loader that prints more than it should moves"
+measured = 40
 
 [[number]]
 name = "boot.metalcase.back_secs"
@@ -389,9 +389,9 @@ measured = 1199
 [[number]]
 name = "boot.deadlinewedge.back_secs"
 unit = "s"
-ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs — which now derives from WEDGE_BOUND_MS, the longest watchdog a boot runs under, plus what coming back costs"
-measured = 236
+ceiling = 194
+ceiling_from = "the bound this boot spends before it ends itself plus what any boot costs to come back: 120 s of `toyos_tco::WEDGE_BOUND_MS` and the 74 s boot.jobcase.back_secs prices. The reading is 42 s of turnaround over the bound, which is jobcase's own"
+measured = 162
 
 [[number]]
 name = "boot.deadlinewedge.stick_secs"
@@ -431,9 +431,9 @@ measured = 1201
 [[number]]
 name = "boot.hardlockup.back_secs"
 unit = "s"
-ceiling = 420
-ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs. It is the same wait: this boot ends itself half a bound earlier and then costs the same firmware, loader and Ubuntu as any other"
-measured = 172
+ceiling = 134
+ceiling_from = "as boot.deadlinewedge.back_secs, at the earlier bound: 60 s of `toyos_tco::HARD_LOCKUP_BOUND_MS` and the same 74 s. This boot ends itself half a bound earlier and then costs the same firmware, loader and Ubuntu as any other"
+measured = 102
 
 [[number]]
 name = "boot.hardlockup.stick_secs"
@@ -628,7 +628,7 @@ ceiling_from = "as boot.testcases.stick_secs"
 name = "boot.testcases.panel_max_us"
 unit = "us"
 ceiling = 16667
-ceiling_from = "one frame of the panel this bench has: the T14's scanout takes a whole 1080p redraw at 60 Hz, so 16,667 us is what a paint of every cell may cost and still keep pace with the display. Run 32's after arm measured 2.2 ms a paint over the nine that went through write-combining"
+ceiling_from = "one frame of the panel this bench has: the T14's scanout takes a whole 1080p redraw at 60 Hz, so 16,667 us is what a paint of every cell may cost and still keep pace with the display. The readings below are the boot's one whole-screen fill; the nine damage paints under it are about 1.6 ms each"
 
 [[number]]
 name = "boot.testcases-mkdir.panel_max_us"
@@ -653,6 +653,7 @@ name = "boot.jobcase.panel_max_us"
 unit = "us"
 ceiling = 16667
 ceiling_from = "as boot.testcases.panel_max_us"
+measured = 3327
 
 [[number]]
 name = "boot.metalcase.panel_max_us"
@@ -719,9 +720,12 @@ name = "boot.deadlinewedge.panel_max_us"
 unit = "us"
 ceiling = 16667
 ceiling_from = "as boot.testcases.panel_max_us — off the sealed page, because this boot's logd wrote no file"
+measured = 3913
 
 [[number]]
 name = "boot.hardlockup.panel_max_us"
 unit = "us"
 ceiling = 16667
 ceiling_from = "as boot.deadlinewedge.panel_max_us"
+measured = 3811
+

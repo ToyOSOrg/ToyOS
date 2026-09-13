@@ -84,10 +84,10 @@ pub struct Finding {
 /// the file carries.
 ///
 /// **The firmware's text console scrolls by moving the whole frame.** On the
-/// T14's 1080p panel that is about three lines a second, so a hundred and
-/// eighty lines of log ring is a minute of the machine spent redrawing what the
-/// file already holds, at a rate nobody can read — measured as 60-70 s of the
-/// turnaround of every wedge boot on that bench. A line that opens a log record
+/// T14's 1080p panel that is about three lines a second, and this pass prints
+/// under the firmware's own watchdog — so what goes to the console is bounded
+/// by what the console can render before that watchdog ends the pass, and a
+/// report is not bounded by anything. A line that opens a log record
 /// (`toyos_blackbox::RECORD_OPENS_WITH`, the same declaration the kernel cuts
 /// the page on) is tail; every other line — why the boot ended, what was
 /// dropped, a fault's registers — is the head, and the head is what the screen
