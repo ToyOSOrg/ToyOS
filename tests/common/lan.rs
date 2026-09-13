@@ -67,19 +67,22 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     }
 
     // Not the link record: `link_up_ms` below already refuses its absence.
-    for owed in [MAC, READY] {
-        if !text.contains(owed) {
-            bad.push(format!("no {owed:?} record"));
-        }
+    if !text.contains(READY) {
+        bad.push(format!("no {READY:?} record"));
     }
 
+    // One fact, one finding: a boot that named no card at all is not a boot
+    // that named a different one.
     let mac = format!("{MAC}{}", cable.mac);
     if !text.contains(&mac) {
-        bad.push(format!(
-            "no {mac:?} record: the card this boot brought up is not the one that held {} \
-             before it",
-            cable.addr
-        ));
+        bad.push(match text.lines().find(|l| l.contains(MAC)) {
+            Some(line) => format!(
+                "{}: the card this boot brought up is not the one that held {} before it",
+                line.trim(),
+                cable.addr
+            ),
+            None => format!("no {MAC:?} record"),
+        });
     }
 
     match link_up_ms(text) {
@@ -158,7 +161,6 @@ pub fn lan_dhcp_lease(
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let case = super::compile::repo_root().join(QEMU_CONFIG);
-    // Where this process writes the frames the boot puts on its wire.
     let dump = std::env::temp_dir().join(format!("toyos-lan-{}.pcap", std::process::id()));
     let _ = std::fs::remove_file(&dump);
     let options = BootOptions {

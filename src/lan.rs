@@ -16,6 +16,10 @@ const LINK_UP: &str = "netd: I219: link up at ";
 pub const READY: &str = "netd: ready, at most ";
 pub const NO_LEASE: &str = "netd: DHCP: no lease as ";
 
+/// What netd writes where a server sent no router option, held to netd's own
+/// source by [`tests::netd_writes_the_records_this_module_reads`].
+const NO_GATEWAY: &str = "none";
+
 /// The name this machine asks its network to record for it, held to netd's own
 /// `dhcp::HOSTNAME` by [`tests::netd_writes_the_records_this_module_reads`].
 pub const HOSTNAME: &str = "toyos-t14";
@@ -61,7 +65,7 @@ pub fn lease_in(text: &str) -> Result<Lease, String> {
     let cidr = after(LEASE, " from ")?;
     let (host, prefix) = cidr.split_once('/').ok_or_else(|| unreadable("an address/prefix"))?;
     let gateway = match after(", gateway ", ",")?.as_str() {
-        "none" => None,
+        NO_GATEWAY => None,
         got => Some(address("the gateway's address", got.to_string())?),
     };
     let mut dns = Vec::new();
@@ -143,16 +147,18 @@ mod tests {
                           10.0.2.2, gateway 10.0.2.2, dns [10.0.2.3 10.0.2.4], 412 ms after netd \
                           came up";
 
-    /// netd's own source, with rustfmt's continuations inside a wrapped literal
-    /// closed up, so a head reads across one.
-    fn netd_source() -> String {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src");
-        let read = |name: &str| {
-            let at = root.join(name);
-            std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()))
-        };
-        let whole = ["main.rs", "i219.rs", "dhcp.rs"].map(read).join("\n");
-        whole.split("\\\n").map(str::trim_start).collect()
+    fn dewrapped(source: &str) -> String {
+        source.split("\\\n").map(str::trim_start).collect()
+    }
+
+    /// **Held here and not by netd's source**: no netd literal wraps at a head
+    /// today, so a scan over the file as written is green either way.
+    #[test]
+    fn a_head_rustfmt_split_across_two_lines_reads_as_one() {
+        let wrapped = "    crate::say!(\"netd: I219: link up \\\n                 at {} Mb/s\");";
+        let head = format!("\"{LINK_UP}");
+        assert!(!wrapped.contains(&head), "this fixture carries no wrap to close up");
+        assert!(dewrapped(wrapped).contains(&head), "the wrap still swallows {head:?}");
     }
 
     /// Nothing links the two crates, so every record this module and `on_metal`
@@ -160,10 +166,19 @@ mod tests {
     /// rather than as an absence.
     #[test]
     fn netd_writes_the_records_this_module_reads() {
-        let source = netd_source();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src");
+        let read = |name: &str| {
+            let at = root.join(name);
+            std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()))
+        };
+        let source = dewrapped(&["main.rs", "i219.rs", "dhcp.rs"].map(read).join("\n"));
         for head in [MAC, LEASE, LINK_UP, READY, NO_LEASE] {
             assert!(source.contains(&format!("\"{head}")), "netd opens no record with {head:?}");
         }
+        assert!(
+            source.contains(&format!("\"{NO_GATEWAY}\"")),
+            "netd writes no {NO_GATEWAY:?} where a server sent no router option"
+        );
         assert!(
             crate::bootlog::declares(&source, &format!("b\"{HOSTNAME}\"")),
             "netd declares no constant equal to b\"{HOSTNAME}\""
