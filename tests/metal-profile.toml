@@ -609,3 +609,50 @@ name = "boot.ccorpus-2.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+
+# --- the cable: the boot that runs netd in front of the T14's own I219 ---
+
+[[number]]
+name = "boot.lancase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1258
+
+[[number]]
+name = "boot.lancase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 59
+
+[[number]]
+name = "boot.lancase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+[[number]]
+name = "boot.lancase.ping_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, which bounds the window a reply can fall in"
+
+[[number]]
+name = "list.lancase.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "toyos_tco::LEASE_BOUND_MS, which is lan_hold's whole sleep, plus two seconds for the spawn and the exit record around it"
+
+[[number]]
+name = "lan.lancase.link_up_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "toyos_tco::LEASE_BOUND_MS: a link that comes up later than lan_hold sleeps is a link this boot never had, because the machine has already handed itself back"
+
+[[number]]
+name = "lan.lancase.lease_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "as lan.lancase.link_up_ms, which is netd's own dhcp::LEASE_BOUND: a boot with no lease by then has already said so in its log"
