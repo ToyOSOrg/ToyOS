@@ -80,6 +80,20 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
+    // Before every other check, every dispatch, and every lock: nothing below
+    // this may consume a `--` word `flags::check` has not already declared.
+    match toyos_build::flags::check(&args) {
+        toyos_build::flags::Outcome::Proceed => {}
+        toyos_build::flags::Outcome::Help(message) => {
+            println!("{message}");
+            return;
+        }
+        toyos_build::flags::Outcome::Refuse(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    }
+
     // The landing protocol, and the command it replaced — **before
     // `check_prerequisites`**, because none of these builds anything and the
     // runner that runs `--abi-split-check` has no QEMU on it. They are git, a
