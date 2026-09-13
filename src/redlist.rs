@@ -3546,9 +3546,16 @@ pub const KNOWN_RED: &[Red] = &[
                KVM, native x86-64 sample never showed; alone: 2517 passes, p50 < 131072 ns, \
                31 over, a different assertion, so the divergence is itself the finding",
         evidence: "`ci` run 33973213660, `guest (8)`, 2026-09-05, on pkg-install-file a691b3cf, \
-                   a branch that touches no scheduler code; the shard's other 21 names passed",
+                   a branch that touches no scheduler code; the shard's other 21 names passed. \
+                   Seen again: `ci` run 34768854940, `guest (11)`, 2026-09-13, the merge queue's \
+                   run for PR #448 (host-bridge-abi, no scheduler code): `cpu0: 3919 passes, p50 < \
+                   131072 ns, p90 < 262144 ns, p99 < 262144 ns, max 2487630 ns, 51 over the 200000 \
+                   ns budget`, ALONE: GREEN in the same job; the red dequeued the pull request. Two \
+                   crossings in eight days on a population the sample said had none is the sample \
+                   that moved, filed at \
+                   issues/build/the-pass-cost-gates-ci-sample-is-eight-days-stale-twice.md",
         source: "tests/toyos.rs",
-        measured: "2026-09-05",
+        measured: "2026-09-13",
     },
     Red {
         test: "leak_rollback_selftest",
