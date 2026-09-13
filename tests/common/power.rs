@@ -1289,33 +1289,65 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// A machine stopped between a Bulk-Only command's CBW and its data phase ends
-/// itself, and the reset that ends it drives that command to its CSW.
+/// The three phases a Bulk-Only command can be open at, each its own boot,
+/// spelled as the actuator that stages it and the phase the account then names.
+///
+/// **All three and not one.** The device sees a different thing at each — a CBW
+/// with no data coming, a data phase on the ring that was never rung for, and
+/// data it has taken with nothing reading its status — and a reset that
+/// finishes one of them is not one that finishes the others.
+const WEDGE_PHASES: &[(&str, &str)] = &[
+    ("usb-wedge-data-owed", "data (unqueued)"),
+    ("usb-wedge-in-data", "data"),
+    ("usb-wedge-before-status", "status (unqueued)"),
+];
+
+/// A machine stopped inside a Bulk-Only command ends itself, and the reset that
+/// ends it drives that command to its CSW — at every phase it can be stopped in.
 ///
 /// **What an emulator can prove here and what it cannot.** QEMU's mass-storage
 /// device answers a command whichever way it is left, so nothing here can show a
 /// device surviving — the T14's own stick is the only instrument for that, and
-/// `boot.usbwedge.stick_secs` is where it says so. What this arm judges is the
-/// mechanism: the machine really stopped with the device holding a CBW, and the
-/// reset path queued the data and read the status instead of resetting the port
-/// under it. [`Profile::Metal`](qemu::Profile::Metal) carries the boot stick on
-/// its xHCI, which is why the wedge has a device to be inside at all.
+/// `boot.usbwedge-*.stick_secs` is where it says so. What this arm judges is the
+/// mechanism: the machine really stopped inside a command, and the reset path
+/// queued what the device was owed and read the status instead of resetting the
+/// port under it. [`Profile::Metal`](qemu::Profile::Metal) carries the boot
+/// stick on its xHCI, which is why the wedge has a device to be inside at all.
 pub fn usb_reset_finishes_an_open_command(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
+    // Every phase is run and every finding reported: a mutation that reverts the
+    // finish breaks all three, and stopping at the first would say so about one.
+    let mut bad = Vec::new();
+    for (arm, phase) in WEDGE_PHASES {
+        if let Err(why) = one_wedge_phase(arm, phase) {
+            bad.push(why);
+        }
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!("{} of {} phase(s) unmet:\n  {}", bad.len(), WEDGE_PHASES.len(), bad.join("\n  ")))
+}
+
+/// One boot: stop inside a command at `arm`'s phase, and read what the reset
+/// did off the page the pass after it prints.
+fn one_wedge_phase(arm: &'static str, phase: &str) -> Result<(), String> {
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    let mut qemu = QemuInstance::boot_with_options(
-        case,
-        &[],
-        &[],
-        chained(&["usb-wedge-mid-write", WEDGE_DEADLINE]),
-    );
+    // `chained` takes the arms as one static list, so the pair is spelled here
+    // rather than built: a boot may carry exactly one of these.
+    let params: &'static [&'static str] = match arm {
+        "usb-wedge-data-owed" => &["usb-wedge-data-owed", WEDGE_DEADLINE],
+        "usb-wedge-in-data" => &["usb-wedge-in-data", WEDGE_DEADLINE],
+        _ => &["usb-wedge-before-status", WEDGE_DEADLINE],
+    };
+    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], chained(params));
     let first = serial::Serial::boot(&qemu);
     let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
-    first.must_say(&armed_line())?;
+    first.must_say(&armed_line()).map_err(|why| format!("{arm}: {why}"))?;
 
     // One capture from the first boot's handoff to the pass that reports it, so
     // the wedge's own lines and the account read back off the page are both in
@@ -1324,16 +1356,20 @@ pub fn usb_reset_finishes_an_open_command(
     if !second.text().contains(bootlog::CHAIN_ENDS_LINE) {
         // One monitor per socket: the reset watcher goes before the question.
         drop(resets);
-        return Err(silent_guest(&qemu, second.text()));
+        return Err(format!("{arm}: {}", silent_guest(&qemu, second.text())));
     }
-    usb_wedge_chain(&second, &second)?;
-    ended_in_a_reset(&mut resets)?;
+    usb_wedge_chain(&second, &second).map_err(|why| format!("{arm}: {why}"))?;
+    // And the phase the account names is the one this boot was staged for: an
+    // arm that wedged somewhere else would still have been finished, and would
+    // say so about a phase nobody asked about.
+    let named = format!("command was open in its {phase} phase");
+    if !second.text().contains(&named) {
+        return Err(format!("{arm}: the account does not say {named:?}"));
+    }
+    ended_in_a_reset(&mut resets).map_err(|why| format!("{arm}: {why}"))?;
     drop(qemu);
 
-    eprintln!(
-        "  [power] a machine stopped between a CBW and its data phase reset itself, and the \
-         reset drove the command to its CSW"
-    );
+    eprintln!("  [power] {arm}: stopped in its {phase} phase, and the reset read the CSW");
     Ok(())
 }
 

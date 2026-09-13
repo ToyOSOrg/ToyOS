@@ -97,6 +97,26 @@ pub const CACHE_LINE: usize = 64;
 /// the tail of a panel is the crash and the head is how the boot went.
 pub const TEXT_BYTES: usize = BYTES - HEADER;
 
+/// Room no report may spend, kept for the account [`Report::reopened`] writes
+/// under it.
+///
+/// **Two writers, one page, and the second runs after the first has filled it.**
+/// A report ends with [`Report::tail`], which takes every byte left; the reset
+/// that follows then has an account of its own — what it did to the machine's
+/// devices — and `reopened` on a full page writes it into no bytes at all and
+/// says nothing about having done so. That account is the only evidence there
+/// is about the reset, and a boot whose log ring overflowed the page is exactly
+/// the boot whose reset is worth reading about, so the reserve comes off the
+/// records rather than off the account.
+///
+/// An eighth of the page. The widest account the kernel's stop can write is one
+/// barrier line, two about the command a device was inside, five for each
+/// controller the reset can stop, and one summary.
+pub const ACCOUNT_BYTES: usize = 2048;
+
+/// What a report's own head and tail may spend: [`TEXT_BYTES`] less the reserve.
+pub const REPORT_BYTES: usize = TEXT_BYTES - ACCOUNT_BYTES;
+
 /// What the last boot got as far as saying.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
@@ -242,11 +262,15 @@ fn seal_len(page: &mut [u8; BYTES], state: State, stamp: u64, identity: Identity
 pub struct Report<'a> {
     page: &'a mut [u8; BYTES],
     at: usize,
+    /// What this writer may fill to. [`REPORT_BYTES`] for a report, the whole
+    /// of [`TEXT_BYTES`] for the account that reopens one — the reserve exists
+    /// for the second and is spent by nobody else.
+    limit: usize,
 }
 
 impl<'a> Report<'a> {
     pub fn new(page: &'a mut [u8; BYTES]) -> Self {
-        Self { page, at: 0 }
+        Self { page, at: 0, limit: REPORT_BYTES }
     }
 
     /// Carry on writing a report already sealed into this page, `kept` bytes long.
@@ -258,13 +282,13 @@ impl<'a> Report<'a> {
     /// than over it. `kept` is [`recover`]'s own answer for this page; a longer
     /// one is cut to what the text area holds, so nothing here indexes past it.
     pub fn reopened(page: &'a mut [u8; BYTES], kept: usize) -> Self {
-        Self { page, at: kept.min(TEXT_BYTES) }
+        Self { page, at: kept.min(TEXT_BYTES), limit: TEXT_BYTES }
     }
 
     /// Append, dropping whatever does not fit. Nothing here indexes or unwraps:
     /// the caller may not panic.
     pub fn write(&mut self, bytes: &[u8]) {
-        let room = TEXT_BYTES.saturating_sub(self.at);
+        let room = self.limit.saturating_sub(self.at);
         let take = bytes.get(..room.min(bytes.len())).unwrap_or(&[]);
         let from = HEADER.saturating_add(self.at);
         if let Some(slot) = self.page.get_mut(from..from.saturating_add(take.len())) {
@@ -290,7 +314,7 @@ impl<'a> Report<'a> {
     /// room comes off the records to pay for it, so saying it can never be what
     /// runs the page over.
     pub fn tail(&mut self, records: &[u8], opens_a_record: &[u8]) {
-        let room = TEXT_BYTES.saturating_sub(self.at);
+        let room = self.limit.saturating_sub(self.at);
         if records.len() <= room {
             return self.write(records);
         }
@@ -749,6 +773,42 @@ mod tests {
             let kept = kept_records(back);
             assert!(records.ends_with(kept), "the cut at width {width} is not a suffix");
         }
+    }
+
+    /// **The account gets its room whatever the report did with the page.**
+    /// A report that filled every byte left `reopened` nothing, and `reopened`
+    /// writes into no bytes without saying so — which on the machine meant a
+    /// reset's whole account of what it did to the devices simply was not there,
+    /// on exactly the boots that overflow the page.
+    #[test]
+    fn a_report_that_fills_the_page_still_leaves_the_account_its_room() {
+        let mut records = std::string::String::new();
+        let mut n = 0usize;
+        while records.len() < TEXT_BYTES * 2 {
+            records.push_str(&format!("[{n:04}] {}\n", "x".repeat(60)));
+            n += 1;
+        }
+        let mut page = blank();
+        let filled = seal(&mut page, State::Wedged, STAMP, STICK, records.as_bytes());
+        assert!(
+            filled <= REPORT_BYTES,
+            "a report ran to {filled}, past the {REPORT_BYTES} it may spend"
+        );
+
+        // And the account then fits under it, whole.
+        let account = "a".repeat(ACCOUNT_BYTES);
+        let (_, _, _, text) = recover(&page).expect("a sealed report");
+        let kept = text.len();
+        let mut report = Report::reopened(&mut page, kept);
+        report.write(account.as_bytes());
+        let len = report.seal(State::Wedged, STAMP, STICK);
+        assert_eq!(len, kept + ACCOUNT_BYTES, "the account was cut");
+        let (state, _, _, text) = recover(&page).expect("the reopened report is still sealed");
+        assert_eq!(state, State::Wedged, "reopening changed what ended the boot");
+        assert!(
+            std::str::from_utf8(text).expect("text").ends_with(&account),
+            "the account is not the last thing on the page"
+        );
     }
 
     /// A head goes in before the tail and survives it: the crash's own message

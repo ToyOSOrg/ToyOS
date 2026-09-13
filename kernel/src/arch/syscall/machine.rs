@@ -55,10 +55,26 @@ fn quiesce(last: &str) {
     // The same shape with a device left inside a Bulk-Only command, which is
     // what a boot that hangs during stick I/O leaves behind and what the reset's
     // own account is then judged on. Here too, so the wedge is a boot that ran
-    // its job list: the deliberate write it is taken inside is the actuator's.
+    // its job list: the traffic and the command it is taken inside are the
+    // actuator's. Which phase is the whole measurement, so each is its own arm
+    // and an image carrying two is refused rather than measuring neither.
     #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_wedge_mid_write() {
-        crate::usb_gate::wedge_inside_a_write();
+    {
+        use toyos_xhci::bot::Phase;
+        let arms = [
+            (crate::actuator::usb_wedge_data_owed(), Phase::DataOwed),
+            (crate::actuator::usb_wedge_in_data(), Phase::Data),
+            (crate::actuator::usb_wedge_before_status(), Phase::StatusOwed),
+        ];
+        let mut armed = arms.iter().filter(|(on, _)| *on).map(|(_, phase)| *phase);
+        if let Some(phase) = armed.next() {
+            assert!(
+                armed.next().is_none(),
+                "two USB wedge phases are armed on one boot, and the phase a device is stopped \
+                 in is the whole measurement"
+            );
+            crate::usb_gate::wedge_inside_a_write(phase);
+        }
     }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::drivers::watchdog::disarm();

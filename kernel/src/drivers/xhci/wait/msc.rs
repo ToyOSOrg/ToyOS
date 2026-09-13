@@ -197,33 +197,50 @@ mod transport_break {
     }
 }
 
-/// Stop every CPU inside one WRITE(10), between the CBW the device has taken
-/// and the data phase nothing has queued for it.
+/// Stop every CPU inside one WRITE(10), at whichever of its three phases was
+/// staged.
 ///
 /// **The state a boot that hangs during stick I/O leaves the device in**, and
 /// the one thing no ordinary boot reaches: a machine wedged here is ended by
 /// the boot deadline alone, and what the reset then does to a device holding
 /// half a command is what `stop::settle_commands` exists to decide.
 ///
+/// **Which phase is the whole question, so the caller names one.** The device
+/// sees three different things — a CBW with no data coming, a data phase queued
+/// and not rung for, and data it has taken with nothing asking for its CSW —
+/// and only the machine can say which of them it does not come back from.
+///
 /// Staged rather than waited for, because a shutdown reaches its sync with
 /// nothing dirty on most boots: the write this is taken inside is one
 /// `usb_gate::wedge_inside_a_write` issues for it.
 #[cfg(feature = "boot-actuators")]
 pub(in crate::drivers::xhci) mod mid_write {
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicU8, Ordering};
 
-    static STAGED: AtomicBool = AtomicBool::new(false);
+    use toyos_xhci::bot::Phase;
+
+    /// [`Phase::code`] of the phase to stop at, or `Phase::Closed`'s — which no
+    /// call site passes — for a boot that staged none.
+    static AT: AtomicU8 = AtomicU8::new(0);
 
     /// Called immediately before the write this wedge is taken inside.
-    pub fn arm() {
-        STAGED.store(true, Ordering::Relaxed);
+    pub fn arm(at: Phase) {
+        AT.store(at.code(), Ordering::Relaxed);
     }
 
-    /// Called where the device holds the CBW and this kernel has queued nothing
-    /// for its data phase. Spent on the first WRITE(10) after the arming, so a
-    /// second write — there is none — could not take a second wedge.
-    pub fn wedge_if_staged() {
-        if STAGED.swap(false, Ordering::Relaxed) {
+    /// Called at each of the three phases, each passing its own.
+    ///
+    /// Compare-and-take, not a test and a clear: every command walks all three
+    /// call sites, so a phase that takes the staging away from the phase it was
+    /// staged for is a boot that wedges nowhere.
+    pub fn wedge_if_staged(here: Phase) {
+        let taken = AT.compare_exchange(
+            here.code(),
+            Phase::Closed.code(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        if taken.is_ok() {
             crate::deadline::stage_a_wedge()
         }
     }
@@ -759,7 +776,7 @@ impl XhciController {
             #[cfg(feature = "boot-actuators")]
             if cdb.first() == Some(&0x2A) {
                 transport_break::arm();
-                mid_write::wedge_if_staged();
+                mid_write::wedge_if_staged(Phase::DataOwed);
             }
             #[cfg(feature = "boot-actuators")]
             let held = short_read::hold(
@@ -792,6 +809,10 @@ impl XhciController {
         // The second gap: the data phase is done, or there was none, and the
         // device is holding a CSW nothing has asked for.
         open.at(Phase::StatusOwed, &dev.in_ring, &dev.out_ring);
+        #[cfg(feature = "boot-actuators")]
+        if data_len > 0 && cdb.first() == Some(&0x2A) {
+            mid_write::wedge_if_staged(Phase::StatusOwed);
+        }
         let csw_phys = dma.device_addr() + (dev.block + MSC_CSW) as u64;
         super::super::zero_dma(dma, dev.block + MSC_CSW, CSW_LEN as usize);
         let mut got = self.framed_phase(dev, true, csw_phys, CSW_LEN, Phase::Status, &open);
@@ -862,6 +883,13 @@ impl XhciController {
         // Before the doorbell, so no transfer is visible to the controller
         // without a reset being able to see the ring it went on.
         open.at(phase, &dev.in_ring, &dev.out_ring);
+        // Between the publish and the doorbell: the one window in which a TRB
+        // is on a ring the controller was never told about, which is the state
+        // `bot::Owed::ring_data` exists for.
+        #[cfg(feature = "boot-actuators")]
+        if phase == Phase::Data && !in_dir {
+            mid_write::wedge_if_staged(Phase::Data);
+        }
         self.ring_doorbell(slot, dci);
         #[cfg(feature = "boot-actuators")]
         if transport_break::take() {

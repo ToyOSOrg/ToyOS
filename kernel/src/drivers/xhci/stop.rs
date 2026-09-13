@@ -409,12 +409,14 @@ const BOT_NS: u64 = USB_TIMEOUT_NS;
 fn finish(inside: Inside, said: &mut dyn fmt::Write) {
     let Some(owed) = bot::owed(inside.phase, inside.data_len) else { return };
     let (mut in_ring, mut out_ring) = (inside.in_ring, inside.out_ring);
-    if owed.data {
+    if owed.ring_data {
         let (dci, ring) = match inside.data_in {
             true => (inside.in_dci, &mut in_ring),
             false => (inside.out_dci, &mut out_ring),
         };
-        ring.enqueue(super::normal_trb(inside.data, inside.data_len));
+        if owed.data {
+            ring.enqueue(super::normal_trb(inside.data, inside.data_len));
+        }
         inside.ring_doorbell(dci);
     }
     if owed.status {

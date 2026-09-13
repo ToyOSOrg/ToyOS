@@ -454,30 +454,68 @@ ceiling = 2000
 ceiling_from = "twice the sample period `kernel/src/hardlockup`'s SAMPLE_NS states, 1000 ms: a CPU is found stuck at the first sample after its bound, so one period is the lateness and a second is the widest a delayed one costs"
 measured = 0
 
-# --- the boot that stops itself with the stick in its hands ---
-# `usbwedge` is `deadlinewedge` with a device inside a command: the boot stick
-# holds a WRITE(10)'s CBW and nothing has been queued for its data phase when
-# the deadline resets the machine. Priced against the same bound, and owing one
-# number the other two do not — `stick_secs`, which on this arm is the ruling
-# itself. No reading on any row: the machine has not run this boot.
+# --- the three boots that stop themselves with the stick in their hands ---
+# Each is `deadlinewedge` with a device inside a command and 4 MiB of writes
+# behind it, and the deadline resets the machine. They differ only in the phase
+# the stick is left at — data owed, data queued and not rung for, status unread
+# — because which of the three a device does not come back from is what only
+# this laptop can say. Priced against the same bound as `deadlinewedge`, each
+# owing one number the others do not: `stick_secs`, which on these arms is the
+# ruling itself. No reading on any row: the machine has not run these boots.
 
 [[number]]
-name = "boot.usbwedge.complete_ms"
+name = "boot.usbwedge-data-owed.complete_ms"
 unit = "ms"
 ceiling = 120000
 ceiling_from = "as boot.deadlinewedge.complete_ms, toyos_tco::WEDGE_BOUND_MS — the same bound ends this machine and the runner never reaches its own"
 
 [[number]]
-name = "boot.usbwedge.back_secs"
+name = "boot.usbwedge-data-owed.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs — the same wait: this boot ends itself at the same bound and then costs the same firmware, loader and Ubuntu as any other"
 
 [[number]]
-name = "boot.usbwedge.stick_secs"
+name = "boot.usbwedge-data-owed.stick_secs"
 unit = "s"
 ceiling = 5
-ceiling_from = "as boot.deadlinewedge.stick_secs. On this arm it is not one number among several but the ruling itself: the machine is reset with the stick between a CBW and its CSW, and a stick the next host cannot enumerate is what `xhci::stop::settle_commands` exists to prevent"
+ceiling_from = "as boot.deadlinewedge.stick_secs. On these arms it is not one number among several but the ruling itself: the machine is reset with the stick inside a command, and a stick the next host cannot enumerate is what `xhci::stop::settle_commands` exists to prevent"
+
+[[number]]
+name = "boot.usbwedge-in-data.complete_ms"
+unit = "ms"
+ceiling = 120000
+ceiling_from = "as boot.usbwedge-data-owed.complete_ms"
+
+[[number]]
+name = "boot.usbwedge-in-data.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.usbwedge-data-owed.back_secs"
+
+[[number]]
+name = "boot.usbwedge-in-data.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.usbwedge-data-owed.stick_secs, for the phase whose data phase is on the ring and has never been rung for"
+
+[[number]]
+name = "boot.usbwedge-before-status.complete_ms"
+unit = "ms"
+ceiling = 120000
+ceiling_from = "as boot.usbwedge-data-owed.complete_ms"
+
+[[number]]
+name = "boot.usbwedge-before-status.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.usbwedge-data-owed.back_secs"
+
+[[number]]
+name = "boot.usbwedge-before-status.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.usbwedge-data-owed.stick_secs, for the phase whose data the device has taken with nothing reading its status"
 
 # --- what one member of a job list may cost this machine ---
 # **The number the suite sizes its lists by, and judges them against.** The
@@ -598,10 +636,22 @@ ceiling = 1400
 ceiling_from = "as list.deadlinewedge.job_ms"
 
 [[number]]
-name = "list.usbwedge.job_ms"
+name = "list.usbwedge-data-owed.job_ms"
 unit = "ms"
 ceiling = 1400
 ceiling_from = "as list.deadlinewedge.job_ms — the same list and the same wedge, taken one write later"
+
+[[number]]
+name = "list.usbwedge-in-data.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.usbwedge-data-owed.job_ms"
+
+[[number]]
+name = "list.usbwedge-before-status.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.usbwedge-data-owed.job_ms"
 
 # --- the boots the split above adds ---
 

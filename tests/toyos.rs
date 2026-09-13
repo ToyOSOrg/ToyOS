@@ -1490,17 +1490,34 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // Its own boot, and the row above's with a device in its hands: the
-        // same deadline ends the same machine, and this one is holding the boot
-        // stick between a WRITE(10)'s CBW and its data phase — the shape every
-        // boot this bench has lost a stick to. The stick coming back at all is
-        // `boot.usbwedge.stick_secs`, refused by the loop before this judge
-        // runs; what this judges is that the machine really stopped inside a
-        // command and that the reset drove it to its CSW instead of cutting it.
+        // Three boots of its own, and the row above's with a device in its
+        // hands: the same deadline ends the same machine, and each of these is
+        // holding the boot stick at a different phase of a WRITE(10) with 4 MiB
+        // of writes behind it — which is the shape every boot this bench has
+        // lost a stick to. **Which phase is the measurement**, so they cannot
+        // share a boot: a boot carries one arm and the kernel refuses a second.
+        // The stick coming back at all is `boot.usbwedge-*.stick_secs`, refused
+        // by the loop before this judge runs; what this judges is that the
+        // machine really stopped inside a command and that the reset drove that
+        // command to its CSW instead of cutting it.
         "usb_reset_finishes_an_open_command",
         metal::Metal::Runs {
-            arms: &[metal::once("usbwedge", "tests/jobcase", &["usb-wedge-mid-write"], &[])],
-            judge: |b| power::usb_wedge_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+            arms: &[
+                metal::once("usbwedge-data-owed", "tests/jobcase", &["usb-wedge-data-owed"], &[]),
+                metal::once("usbwedge-in-data", "tests/jobcase", &["usb-wedge-in-data"], &[]),
+                metal::once(
+                    "usbwedge-before-status",
+                    "tests/jobcase",
+                    &["usb-wedge-before-status"],
+                    &[],
+                ),
+            ],
+            judge: |b| {
+                for arm in b {
+                    power::usb_wedge_chain(&arm.kernel(), &arm.after_the_reset()?)?;
+                }
+                Ok(())
+            },
         },
     ),
     (

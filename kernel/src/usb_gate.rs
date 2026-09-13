@@ -244,34 +244,73 @@ fn check(index: usize, disk: &Handle) {
     );
 }
 
-/// Leave this machine wedged inside one Bulk-Only command: the device holding a
-/// WRITE(10)'s CBW with nothing queued for its data phase, every CPU spinning
-/// with interrupts on, and only the boot deadline left to end it.
-///
-/// **The stimulus for the one state no ordinary boot reaches.** A shutdown
-/// reaches its sync with nothing dirty on most boots, so the write the wedge is
-/// taken inside is issued here rather than waited for.
-///
-/// **The block is read first and written back byte for byte.** The write is
-/// then idempotent however much of it the reset completes, which is what lets a
-/// control that deliberately cuts a write run against the machine's own boot
-/// stick; block 0 is the disk's, outside every partition a boot mounts, and
-/// nothing else in this kernel writes it.
+/// Blocks per read-and-write-back pair — eight of this driver's largest SCSI
+/// command, so each pair is several commands and not one.
 #[cfg(feature = "boot-actuators")]
-pub fn wedge_inside_a_write() {
+const WEDGE_CHUNK: u32 = 64;
+
+/// Pairs before the wedge. Sixteen of them is 4 MiB moved to the device
+/// immediately before it is stopped, which is what the boots that lost this
+/// stick were doing and what one 4 KiB write is not.
+#[cfg(feature = "boot-actuators")]
+const WEDGE_CHUNKS: u32 = 16;
+
+/// Leave this machine wedged inside one Bulk-Only command, at the phase `at`
+/// names, with megabytes of writes behind it.
+///
+/// **The stimulus for a state no ordinary boot reaches.** A shutdown reaches
+/// its sync with nothing dirty on most boots, so the traffic and the command
+/// the wedge is taken inside are both issued here rather than waited for.
+///
+/// **Every block is read first and written back byte for byte.** The writes are
+/// then idempotent however much of them either reset completes, which is what
+/// lets a control that deliberately cuts one run against the machine's own boot
+/// stick.
+///
+/// They go at the disk's own end and not at a fixed offset: the bench's stick is
+/// thirty gigabytes and the image flashed onto it is eighty megabytes, so a
+/// fixed offset is either inside a partition this kernel mounts or past the end
+/// of the smaller disks the same actuator boots on.
+#[cfg(feature = "boot-actuators")]
+pub fn wedge_inside_a_write(at: toyos_xhci::bot::Phase) {
     let Some((disk, _)) = usb_storage::handle(0) else {
         log!("usb-wedge: no USB disk on this machine, so there is no command to wedge inside");
         return;
     };
-    let mut block = vec![0u8; BLOCK];
-    if disk.lock().read_blocks(0, 1, &mut block).is_err() {
-        log!("usb-wedge: disk 0 would not give up block 0, so no write can be staged from it");
+    let span = u64::from(WEDGE_CHUNK) * u64::from(WEDGE_CHUNKS);
+    let Some(first) = disk.block_count().checked_sub(span) else {
+        log!("usb-wedge: disk 0 holds {} blocks, fewer than the {span} this wedge writes",
+            disk.block_count());
         return;
+    };
+    let mut buf = vec![0u8; WEDGE_CHUNK as usize * BLOCK];
+    // The last pair carries the wedge, so every pair before it is traffic the
+    // device has already taken — the condition the boots that lost this stick
+    // were in, and the one variable a single small write cannot stage.
+    for chunk in 0..WEDGE_CHUNKS {
+        let block = first + u64::from(chunk) * u64::from(WEDGE_CHUNK);
+        if disk.lock().read_blocks(block, WEDGE_CHUNK, &mut buf).is_err() {
+            log!("usb-wedge: disk 0 would not give up block {block}, so no write is staged from it");
+            return;
+        }
+        if chunk + 1 == WEDGE_CHUNKS {
+            log!("{USB_WEDGE_STAGED} {at} phase, after {} KiB rewritten with the bytes just read \
+                 from it", u64::from(WEDGE_CHUNK) * u64::from(chunk) * BLOCK as u64 / 1024);
+            crate::drivers::xhci::arm_mid_write_wedge(at);
+        }
+        if disk.lock().write_blocks(block, WEDGE_CHUNK, &buf).is_err() {
+            log!("usb-wedge: disk 0 refused the write at block {block}");
+            return;
+        }
     }
-    log!("usb-wedge: rewriting disk 0 block 0 with the {BLOCK} B just read from it, and \
-         stopping every CPU between its CBW and its data phase");
-    crate::drivers::xhci::arm_mid_write_wedge();
-    let _ = disk.lock().write_blocks(0, 1, &block);
-    log!("usb-wedge: the write completed, so no CPU was stopped inside it and this boot ends \
-         itself the ordinary way");
+    log!("{USB_WEDGE_MISSED} — every write completed, so no CPU was stopped inside one and this \
+         boot ends itself the ordinary way");
 }
+
+/// What the wedge says before the write it is taken inside, and what it says if
+/// that write ran to completion instead. Judged by the harness, so both are
+/// constants (`src/bootlog.rs`).
+#[cfg(feature = "boot-actuators")]
+pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
+#[cfg(feature = "boot-actuators")]
+pub const USB_WEDGE_MISSED: &str = "usb-wedge: the write completed";

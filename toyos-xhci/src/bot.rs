@@ -101,14 +101,25 @@ impl core::fmt::Display for Phase {
 
 /// What a reset must put on the wire before it takes a port down.
 ///
-/// Both fields are about transfers the *host* has not queued. A transfer
-/// already queued is the controller's to finish and re-queueing it would move
-/// the same bytes twice — which for an out data phase is a second write of the
-/// block, so the distinction is not a nicety.
+/// [`Self::data`] and [`Self::status`] are about transfers the *host* has not
+/// queued. A transfer already queued is the controller's to finish and
+/// re-queueing it would move the same bytes twice — which for an out data phase
+/// is a second write of the block, so the distinction is not a nicety.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Owed {
     /// The data phase the CBW promised has not been queued.
     pub data: bool,
+    /// The data endpoint's doorbell must be rung.
+    ///
+    /// **Queued is not running.** The driver publishes its phase between the
+    /// enqueue and the doorbell, so that a reset can see the ring a transfer
+    /// went on — which means a machine stopped in that window leaves a TRB the
+    /// controller was never told about, and a reset that re-rang only the status
+    /// endpoint would wait out a data phase nothing is moving. A doorbell for a
+    /// transfer already running is a hint the controller may ignore (xHCI 1.2
+    /// §4.7), so this is rung whenever the data phase is still the device's to
+    /// receive — queued by the driver, or by [`Self::data`] just now.
+    pub ring_data: bool,
     /// The CSW's transfer has not been queued. Until the device has sent one it
     /// takes no further command (BOT §5.3), so this is what a reset owes even
     /// where the data moved.
@@ -124,8 +135,11 @@ pub fn owed(phase: Phase, data_len: u32) -> Option<Owed> {
     if !phase.open() {
         return None;
     }
+    let has_data = data_len > 0;
     Some(Owed {
-        data: data_len > 0 && matches!(phase, Phase::Command | Phase::DataOwed),
+        data: has_data && matches!(phase, Phase::Command | Phase::DataOwed),
+        ring_data: has_data
+            && matches!(phase, Phase::Command | Phase::DataOwed | Phase::Data),
         status: phase != Phase::Status,
     })
 }
@@ -198,9 +212,28 @@ mod tests {
     }
 
     #[test]
+    fn a_data_phase_the_device_is_still_owed_is_always_rung_for() {
+        // Queued is not running: the phase is published between the enqueue and
+        // the doorbell, so `Data` can mean a TRB the controller never saw.
+        for phase in [Phase::Command, Phase::DataOwed, Phase::Data] {
+            assert!(
+                owed(phase, 4096).expect("open").ring_data,
+                "{phase:?} left a data phase nothing would move"
+            );
+        }
+        // And past it the device has the bytes; a doorbell there would be for a
+        // transfer that is over.
+        for phase in [Phase::StatusOwed, Phase::Status] {
+            assert!(!owed(phase, 4096).expect("open").ring_data, "{phase:?} rang for moved data");
+        }
+    }
+
+    #[test]
     fn a_command_with_no_data_phase_owes_none() {
         for phase in EVERY.iter().copied().filter(|p| p.open()) {
-            assert!(!owed(phase, 0).expect("open").data, "{phase:?} owed data it never promised");
+            let owed = owed(phase, 0).expect("open");
+            assert!(!owed.data, "{phase:?} owed data it never promised");
+            assert!(!owed.ring_data, "{phase:?} rang for a data phase it never promised");
         }
     }
 
@@ -209,7 +242,7 @@ mod tests {
         for phase in [Phase::Command, Phase::DataOwed] {
             assert_eq!(
                 owed(phase, 4096).expect("open"),
-                Owed { data: true, status: true },
+                Owed { data: true, ring_data: true, status: true },
                 "{phase:?}"
             );
         }

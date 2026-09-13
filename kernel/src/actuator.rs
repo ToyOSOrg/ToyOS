@@ -125,12 +125,23 @@ actuators! {
     usb_reset_break = "usb-reset-break";
 
     /// Stop every CPU inside one WRITE(10) at the shutdown syscall — after the
-    /// job list, with the device holding the CBW and nothing queued for its
-    /// data phase — so only `crate::deadline` ends this machine and what it
-    /// ends is a device inside a Bulk-Only command. The write is a byte-for-byte
-    /// rewrite of the block it first read, so the medium is what it was either
-    /// way.
-    usb_wedge_mid_write = "usb-wedge-mid-write";
+    /// job list and after 4 MiB of writes the device has already taken — with
+    /// the device holding the CBW and nothing queued for its data phase. Only
+    /// `crate::deadline` ends the machine, and what it ends is a device inside
+    /// a Bulk-Only command. Every block is a byte-for-byte rewrite of what was
+    /// just read from it, past the end of the image, so the medium is what it
+    /// was either way.
+    usb_wedge_data_owed = "usb-wedge-data-owed";
+
+    /// The same, stopped one step later: the data phase's TRB is on the ring
+    /// and its doorbell has not been rung, so the device is owed bytes the
+    /// controller was never told to send.
+    usb_wedge_in_data = "usb-wedge-in-data";
+
+    /// The same, stopped after the data phase completed and before anything has
+    /// asked for the CSW: the device holds the bytes and has a status to send
+    /// that nothing is reading.
+    usb_wedge_before_status = "usb-wedge-before-status";
 
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";

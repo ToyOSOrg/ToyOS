@@ -44,16 +44,17 @@ pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends t
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
 
-/// What the `usb-wedge-mid-write` actuator says before it issues the write it
-/// stops the machine inside, in `kernel/src/usb_gate.rs`.
+/// What the USB wedge arms say before the write they stop the machine inside,
+/// in `kernel/src/usb_gate.rs`; the phase and the traffic behind it follow on
+/// the same line.
 ///
 /// The witness that the boot the deadline then ended was one holding a device
-/// inside a Bulk-Only command, which is the whole of what that control stages —
+/// inside a Bulk-Only command, which is the whole of what those controls stage —
 /// a wedge taken anywhere else is `WEDGE_STAGED`'s boot with a longer log.
-pub const USB_WEDGE_STAGED: &str = "usb-wedge: rewriting disk 0 block 0";
+pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
 
-/// What the same actuator says if that write ran to completion, which means no
-/// CPU was stopped inside it.
+/// What the same arms say if every write ran to completion, which means no CPU
+/// was stopped inside one.
 ///
 /// **A control that stages nothing passes for the wrong reason**: without this
 /// line the boot would still wedge — at the shutdown, with no device inside
@@ -385,8 +386,8 @@ mod tests {
             ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
             ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
-            ("kernel/src/usb_gate.rs", format!("\"{USB_WEDGE_STAGED}")),
-            ("kernel/src/usb_gate.rs", format!("\"{USB_WEDGE_MISSED}")),
+            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_STAGED: &str = \"{USB_WEDGE_STAGED}\"")),
+            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_MISSED: &str = \"{USB_WEDGE_MISSED}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
             (
                 "kernel/src/hardlockup/probe.rs",
