@@ -14,6 +14,10 @@
 //! firmware described; [`place_bar`] is the mechanism and [`alone_in_its_page`]
 //! is the assertion that it worked, never the other way round.
 //!
+//! **That boundary is outside the windows firmware named its root bridges
+//! decode**, so nothing says a BAR placed there reaches the bus at all;
+//! [`account_for`] records that on every boot and refuses nothing on it.
+//!
 //! **The BAR holding the MSI-X table or PBA is never mapped**: a holder that
 //! could rewrite the table could point the device's message at any address the
 //! LAPIC decodes.
@@ -259,9 +263,7 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 /// **Both floors are above everything firmware described**, which is every BAR
 /// it assigned *and* every entry of the memory map it handed the loader — RAM,
 /// its own runtime services, the ACPI regions and the fixed platform apertures
-/// alike. A floor derived from BARs alone would put a holder's 2 MiB window on
-/// whatever firmware had put there instead, and the only thing that would catch
-/// it is [`Refusal::Dead`], which cannot tell unrouted space from RAM.
+/// alike.
 pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
     let mut narrow_end = 0u64;
     let mut wide_end = 0u64;
@@ -326,13 +328,7 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootB
 /// **A BAR firmware itself assigned outside every window it named is named and
 /// nothing more.** What the protocol answers is a bridge's *current* settings,
 /// and a fixed function whose BAR its bridge does not forward is a machine this
-/// is true of rather than firmware contradicting itself: the ThinkPad T14's SPI
-/// controller decodes `0xfe010000`, which that machine's own `_CRS` puts inside
-/// no root bus resource either.
-///
-/// **The windows this module hands out are the ones this has to account for.**
-/// They are derived from what firmware *used*, so nothing but this says whether
-/// an address in one reaches the bus at all.
+/// is true of rather than firmware contradicting itself.
 fn account_for(firmware: &[RootBridgeWindow], machine: &Machine) {
     if firmware.is_empty() {
         log!(
