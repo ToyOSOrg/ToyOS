@@ -13758,8 +13758,9 @@ fn run_machine_test(
 
             // Exactly one hand-over of that function. Two would be the defect
             // itself, and zero a boot that says nothing about exclusivity.
+            let handed = format!("[1af4:1041] {}", bootlog::HANDED_OVER);
             let handovers =
-                log.text().lines().filter(|l| l.contains("[1af4:1041] handed over on slot")).count();
+                log.text().lines().filter(|l| l.contains(&handed)).count();
             if handovers != 1 {
                 return Err(format!(
                     "the NIC's function was handed over {handovers} times, and a second holder \

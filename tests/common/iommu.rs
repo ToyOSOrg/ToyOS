@@ -789,9 +789,9 @@ pub fn iommu_virtio_platform(
 /// and netd exits rather than driving anything — and the machine finishes
 /// booting, which is the half a refusal that panicked would fail.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
-    log.must_say("NOT HANDED OVER")?;
+    log.must_say(toyos_build::bootlog::NOT_HANDED_OVER)?;
     log.must_say("it would have no address space of its own")?;
-    log.must_not_say("handed over on slot")?;
+    log.must_not_say(toyos_build::bootlog::HANDED_OVER)?;
     // **And the refusal spent nothing on the way out.** No BAR was moved, so
     // this function's BARs are still where firmware put them, and no vector was
     // programmed into *either* of the two mechanisms `bring_up` may arm — which

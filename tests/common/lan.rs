@@ -1,21 +1,18 @@
 //! The cable: netd taking this machine's address from the network, and the T14
 //! answering the development host on it.
 //!
-//! **The two arms read different channels.** A guest's console is a serial port
-//! this process holds the other end of, so the QEMU arm reads netd's own
-//! records. The T14 has no serial port: a userland write ends at
-//! `Backend::None`, no `netd:` line has ever reached the stick, and the T14 arm
-//! reads what the kernel records — the hand-over, the interrupt census and the
-//! `exit:` code the job that asked netd left — beside what the loop measured
-//! off the cable itself.
+//! **Every verdict here is `toyos_build::lan`'s.** This module boots the
+//! machines and hands that one what they left: the QEMU arm netd's own records,
+//! the T14 arm the kernel's records and the `exit:` code of the job that asked
+//! netd, beside what the loop measured off the cable itself.
 
 use std::net::Ipv4Addr;
 use std::path::Path;
 
 use toyos_build::bootlog;
 use toyos_build::lan::{
-    asked_under_its_own_name, job_said, kernel_function, lease_in, link_up_ms, Lease, HOSTNAME,
-    LEASE, MAC, NIC, NO_LEASE, READY,
+    asked_under_its_own_name, handed_over, interrupts_into_the_driver, job_said, lease_in, Lease,
+    HOSTNAME, LEASE, MAC, NO_LEASE, READY,
 };
 use toyos_build::metalprofile::Profile;
 
@@ -39,9 +36,6 @@ pub const JOBS: &[&str] = &["test_rs_lan_hold", "test_rs_lan_state"];
 /// this host can put in front of it.
 const QEMU_CONFIG: &str = "tests/e1000case";
 
-/// The card the T14 arm claims, as the kernel and the manifest spell it.
-const ID: &str = "8086:15fc";
-
 /// The census source a NIC a *process* drives raises its interrupts under.
 const USERDEV: &str = "userdev";
 
@@ -64,26 +58,20 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         )
     })?;
 
-    // The function the loop reached this boot over is named in the needle, so
-    // the card the host read its MAC off and the card the kernel gave netd are
-    // one record rather than two checks. A boot with no hand-over line carries
-    // the kernel's refusal instead, and quoting that is the whole diagnosis.
-    let handed = format!("PCI {} [{ID}] handed over on slot", kernel_function(NIC));
-    let handover = text.lines().find(|l| l.contains(&handed));
-    match handover {
-        Some(line) => eprintln!("  [lan] {}", line.trim()),
-        None => bad.push(match text.lines().find(|l| l.contains("NOT HANDED OVER")) {
-            Some(line) => format!("the kernel refused this function: {}", line.trim()),
-            None => format!(
-                "no `{handed}` record and no refusal either: nothing on this machine claimed \
-                 {ID}, so `tests/lancase` was flashed onto a machine that has no such card"
-            ),
-        }),
-    }
+    let handover = match handed_over(text) {
+        Ok(line) => {
+            eprintln!("  [lan] {line}");
+            Some(line)
+        }
+        Err(why) => {
+            bad.push(why);
+            None
+        }
+    };
 
     // What netd held, folded through the one word a machine with no console
-    // has. `Ok` is the address that answered the ping on the card the host read
-    // off the wire, so the address check the log used to carry is inside it.
+    // has: the address that answered the ping, on the card the host read off
+    // the wire.
     let leased = match back.exit_code(JOBS[1]).and_then(|code| {
         job_said(code, cable.addr, &cable.mac).map(|()| code)
     }) {
@@ -97,18 +85,9 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         }
     };
 
-    // **A lease with no interrupt is a contradiction.** DHCP is a round trip on
-    // the wire and this kernel delivers a user-driven NIC's vector to the
-    // process that claimed it, so a boot that leased and counted none did not
-    // lease — it read somebody else's answer, or this census is not of this
-    // card.
+    // Asked only after a lease: a boot with neither is consistent.
     if leased {
-        match userdev_raised(text) {
-            Ok(0) => bad.push(format!(
-                "netd answered with a lease and every `irq:` line of this boot reads \
-                 {USERDEV}=0: the card raised no interrupt, so nothing it received reached the \
-                 driver"
-            )),
+        match census(text).and_then(|census| interrupts_into_the_driver(&census)) {
             Ok(raised) => eprintln!("  [lan] the card raised {raised} interrupt(s) into netd"),
             Err(why) => bad.push(why),
         }
@@ -129,9 +108,9 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
             // fact, one finding — a boot with no hand-over record has already
             // said so above, and a bracket it cannot compute is that absence
             // again rather than something else about the reply.
-            if handover.is_some() {
+            if let Some(line) = handover {
                 if let Err(why) =
-                    bootlog::host_second_inside_this_boot(text, cable.skew, &handed, reply.at)
+                    bootlog::host_second_inside_this_boot(text, cable.skew, line, reply.at)
                 {
                     bad.push(why);
                 }
@@ -154,29 +133,18 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
 }
 
-/// Interrupts this boot delivered to a process that drives a device, summed
-/// over the machine.
-///
-/// The counters are cumulative, so a CPU's last census is its whole boot; a
-/// boot that printed none is refused rather than summed to zero, which would
-/// read as the card being silent when it is the kernel that said nothing.
-fn userdev_raised(text: &str) -> Result<u64, String> {
-    let mut last: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
+/// Every `irq:` line this boot wrote, as the CPU it is of and that CPU's
+/// [`USERDEV`] count, in the order the log carries them.
+fn census(text: &str) -> Result<Vec<(u32, u64)>, String> {
+    let mut out = Vec::new();
     for line in text.lines() {
         match Census::parse(line) {
             None => continue,
-            Some(Ok(census)) => {
-                last.insert(census.cpu, census.source(USERDEV));
-            }
+            Some(Ok(census)) => out.push((census.cpu, census.source(USERDEV))),
             Some(Err(why)) => return Err(format!("{why}\nline: {line}")),
         }
     }
-    if last.is_empty() {
-        return Err("no `irq: cpu` census in this boot's log, so nothing here says whether the \
-                    card raised an interrupt"
-            .to_string());
-    }
-    Ok(last.values().sum())
+    Ok(out)
 }
 
 /// The QEMU arm: the client, against a DHCP server this repository did not
@@ -208,11 +176,7 @@ pub fn lan_dhcp_lease(
     if !qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")) {
         return Err("this test needs an Intel NIC and the profile has none".to_string());
     }
-    let asker: Vec<(String, Vec<u8>)> =
-        rust_bins.iter().filter(|(name, _)| name == ASKER).cloned().collect();
-    if asker.is_empty() {
-        return Err(format!("{ASKER} was not built"));
-    }
+    let asker = staged(rust_bins)?;
     let mut guest = QemuInstance::boot_with_options(&case, &[], &asker, options);
     let mut console = guest.boot_log().to_string();
     qemu::await_marker(&mut guest, &mut console, READY, "netd to take an address")?;
@@ -235,7 +199,6 @@ pub fn lan_dhcp_lease(
         server: Ipv4Addr::new(10, 0, 2, 2),
         gateway: Some(Ipv4Addr::new(10, 0, 2, 2)),
         dns: vec![Ipv4Addr::new(10, 0, 2, 3)],
-        ms: lease.ms,
     };
     if lease != want {
         return Err(format!(
@@ -244,12 +207,6 @@ pub fn lan_dhcp_lease(
     }
     // The order, and not merely the presence of both.
     log.must_say_after(LEASE, READY)?;
-    let ms = link_up_ms(log.text())?;
-    eprintln!(
-        "  [lan] the emulated link came up in {ms} ms and the lease landed {} ms after netd \
-         started",
-        lease.ms
-    );
     // What the job that asks netd exits with, against the two records netd
     // wrote about the same two facts. **Nothing in the guest computes both
     // sides**: netd answered the job out of its interface and wrote these lines
@@ -272,19 +229,32 @@ pub fn lan_dhcp_lease(
     Ok(())
 }
 
+/// The binary behind [`JOBS`]`[1]`, out of what the build staged.
+fn staged(rust_bins: &[(String, Vec<u8>)]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let asker: Vec<(String, Vec<u8>)> =
+        rust_bins.iter().filter(|(name, _)| name == ASKER).cloned().collect();
+    if asker.is_empty() {
+        return Err(format!("{ASKER} was not built"));
+    }
+    Ok(asker)
+}
+
 /// The client on a wire with nothing at the other end.
 ///
 /// **The refusal the lease boot cannot reach.** A machine whose network never
 /// answers still has to announce itself, or every arm that waits for that line
-/// hangs instead of having its connects refused one at a time.
+/// hangs instead of having its connects refused one at a time — and it is the
+/// one boot in this tree that produces the refusal the metal judge reads off an
+/// exit code, so the job that asks netd runs here too.
 pub fn lan_no_lease(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let case = super::compile::repo_root().join(QEMU_CONFIG);
     let options = BootOptions { profile: qemu::Profile::E1000eNoServer, ..Default::default() };
-    let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
+    let asker = staged(rust_bins)?;
+    let mut guest = QemuInstance::boot_with_options(&case, &[], &asker, options);
     let mut console = guest.boot_log().to_string();
     // Drained rather than waited on: netd owes its line inside its own bound
     // and the guest says nothing at all until then, which every wait in this
@@ -292,11 +262,25 @@ pub fn lan_no_lease(
     console.push_str(
         &guest.drain_serial(std::time::Duration::from_millis(toyos_tco::LEASE_BOUND_MS + 10_000)),
     );
+    let asked = guest.run_test(JOBS[1], std::time::Duration::from_secs(30));
+    console.push_str(&asked.before);
+    console.push_str(&asked.serial);
     let log = serial::Serial::named("the lan boot with no server", console.as_str());
     if let Ok(lease) = lease_in(log.text()) {
         return Err(format!("a wire with no server leased {lease:?}"));
     }
     log.must_say_after(&format!("{NO_LEASE}{HOSTNAME} in "), READY)?;
-    eprintln!("  [lan] no server answered and netd said so, then served anyway");
+    let code = asked
+        .exit_code
+        .ok_or_else(|| format!("{ASKER} left no exit code: {:?}\n{}", asked.error, asked.stdout))?;
+    let said = toyos_lanstate::said(code);
+    if said != toyos_lanstate::Said::Refused(toyos_lanstate::Refusal::NoLease) {
+        return Err(format!(
+            "netd drove a card on a wire with no server and {ASKER} exited {code} ({said:?}), \
+             which is not the refusal such a machine owes\n{}",
+            asked.stdout
+        ));
+    }
+    eprintln!("  [lan] no server answered, netd said so and served anyway, and {ASKER} said it");
     Ok(())
 }

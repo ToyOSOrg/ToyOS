@@ -7,8 +7,7 @@
 //! `i32`. An address and a MAC are eighty bits and the record carries
 //! thirty-two, so what crosses is a fold of the pair: the judge already holds
 //! what the pair must be — it pinged the address and read the MAC off the wire
-//! — and recomputes the same fold. A fingerprint is what a channel narrower
-//! than its answer leaves.
+//! — and recomputes the same fold.
 //!
 //! Three crates read this file and none of them shares another's: netd answers
 //! [`ASK`], the job that asked turns the answer into an exit code, and the
@@ -45,7 +44,7 @@ pub struct State {
 impl State {
     /// The answer as netd writes it. An absent address is four zero bytes,
     /// which no lease is: RFC 1122 §3.2.1.3 gives 0.0.0.0 to a host that does
-    /// not yet know its own address, and a server never assigns it.
+    /// not yet know its own address.
     pub fn encode(&self) -> [u8; ANSWER_LEN] {
         let mut out = [0u8; ANSWER_LEN];
         out[..6].copy_from_slice(&self.mac);
@@ -59,12 +58,10 @@ impl State {
     /// grammar wrote.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let bytes: [u8; ANSWER_LEN] = bytes.try_into().ok()?;
-        let (mac, octets) = bytes.split_at(6);
-        let address = Ipv4Addr::from([octets[0], octets[1], octets[2], octets[3]]);
-        Some(Self {
-            mac: mac.try_into().ok()?,
-            address: (!address.is_unspecified()).then_some(address),
-        })
+        let mut mac = [0u8; 6];
+        mac.copy_from_slice(&bytes[..6]);
+        let address = Ipv4Addr::from([bytes[6], bytes[7], bytes[8], bytes[9]]);
+        Some(Self { mac, address: (!address.is_unspecified()).then_some(address) })
     }
 
     /// The code a job that got this answer exits with.
@@ -78,8 +75,10 @@ impl State {
 
 /// Why a job has no state to report, as the negative exit codes the host reads.
 ///
-/// **Negative, and never zero**, as `metalprobe`'s refusals are: a refusal may
-/// not share the space with an answer.
+/// **This grammar reads `lan_state`'s exit code and no other**, as
+/// `toyos_build::metaldevices::Refused` reads `metalprobe`'s: the same negative
+/// numbers name different refusals in the two, and which one an `exit:` record
+/// belongs to is the binary that wrote it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// This program's namespace holds no netd, or netd has gone.
@@ -123,10 +122,6 @@ pub const FIRST_FINGERPRINT: i32 = 1 << 30;
 
 /// The pair folded into the thirty bits left over [`FIRST_FINGERPRINT`], FNV-1a
 /// (Fowler–Noll–Vo, 32 bit) over the MAC and then the address.
-///
-/// A fold and not the value: two eighty-bit answers cannot both be carried by a
-/// thirty-two-bit channel, so what the judge can ask is agreement with the pair
-/// it already holds. Two different pairs fold together with probability 2^-30.
 pub fn fingerprint(mac: [u8; 6], address: Ipv4Addr) -> i32 {
     const OFFSET_BASIS: u32 = 0x811c_9dc5;
     const PRIME: u32 = 0x0100_0193;
@@ -233,5 +228,15 @@ mod tests {
             assert_ne!(*other, whole);
             assert_eq!(said(*other), Said::Fingerprint(*other), "{other}");
         }
+        // The order of the pair, and not only its content: a fold that merely
+        // mixed the bytes together folds every permutation of one pair to one
+        // code, and two cards that swapped a byte would agree.
+        let mut swapped = MAC;
+        swapped.swap(0, 1);
+        assert_ne!(fingerprint(swapped, ADDR), whole);
+        // The whole width of the band, and not the low byte of it: a fold that
+        // never carried out of one byte answers with 256 codes, and the
+        // collision the judge rests on would be 2^-8.
+        assert!(moved.iter().any(|got| got >> 8 != whole >> 8), "{moved:?}");
     }
 }

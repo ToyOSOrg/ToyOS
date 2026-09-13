@@ -516,14 +516,10 @@ struct NetDaemon {
     pending_piped_connects: Vec<PendingPipedConnect>,
     udp_pipes: HashMap<u32, UdpPipes>,
     max_piped_connections: usize,
-    /// The card's own, as the driver read it out of the register file: the six
-    /// bytes `netd: MAC` announces, kept because a boot with no console has
-    /// only [`toyos_lanstate::ASK`] to report them through.
-    mac: [u8; 6],
 }
 
 impl NetDaemon {
-    fn new(dns_handle: SocketHandle, max_piped_connections: usize, mac: [u8; 6]) -> Self {
+    fn new(dns_handle: SocketHandle, max_piped_connections: usize) -> Self {
         Self {
             sockets: HashMap::new(),
             next_id: 1,
@@ -536,7 +532,6 @@ impl NetDaemon {
             pending_piped_connects: Vec::new(),
             udp_pipes: HashMap::new(),
             max_piped_connections,
-            mac,
         }
     }
 
@@ -596,10 +591,8 @@ impl NetDaemon {
             // A word of netd's own that the SDK does not send: the one channel
             // a machine with no console has for saying what network it is on.
             None if req.msg_type == toyos_lanstate::ASK => {
-                let state = toyos_lanstate::State {
-                    mac: self.mac,
-                    address: iface.ipv4_addr(),
-                };
+                let HardwareAddress::Ethernet(mac) = iface.hardware_addr();
+                let state = toyos_lanstate::State { mac: mac.0, address: iface.ipv4_addr() };
                 req.client.result_bytes(&state.encode());
             }
             None => {
@@ -1339,7 +1332,7 @@ fn main() {
 
     let total_mem = total_memory();
     let max_piped = max_piped_connections(total_mem);
-    let mut daemon = NetDaemon::new(dns_handle, max_piped, mac);
+    let mut daemon = NetDaemon::new(dns_handle, max_piped);
 
     // Sized for the slot ceiling rather than for `max_piped`: the batch
     // between two `wait` calls is the two fixed registrations, one per live piped

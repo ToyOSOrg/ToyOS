@@ -1,10 +1,5 @@
-//! Ask netd what network this machine is on, and exit with the answer.
-//!
-//! **The exit code is the whole report.** On the ThinkPad T14 there is no
-//! serial port and a userland write ends at `Backend::None`, so nothing this
-//! program prints reaches the harness; the kernel's `exit: <name> pid=N code=N`
-//! record is the one word that crosses, and `toyos_lanstate` is the grammar the
-//! host reads it back with.
+//! Ask netd what network this machine is on, and exit with the answer, which
+//! `toyos_lanstate` is the grammar of.
 
 use toyos::endow;
 use toyos::net::RespType;
@@ -21,7 +16,9 @@ fn main() {
 fn asked() -> Result<State, Refusal> {
     let netd = endow::service("netd").map_err(|_| Refusal::NoNetd)?;
     netd.signal(ASK).map_err(|_| Refusal::NoNetd)?;
-    let header = netd.recv_header().map_err(|_| Refusal::NoNetd)?;
+    // netd took the question and did not answer it, which is not the same as
+    // there being no netd to ask.
+    let header = netd.recv_header().map_err(|_| Refusal::Unanswered)?;
     if header.msg_type != RespType::Result as u32 {
         return Err(Refusal::Unanswered);
     }

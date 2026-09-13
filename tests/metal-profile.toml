@@ -611,11 +611,6 @@ ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
 
 # --- the cable: the boot that runs netd in front of the T14's own I219 ---
-# netd's own spans are not among them. It writes `netd: I219: link up at ` and
-# `netd: DHCP: lease ` to a console whose backend on this machine is `None`, so
-# no such line has ever reached the stick; what that boot reports about its
-# network is the exit code of the job that asked netd, which is a fold and not a
-# number this file can price.
 
 [[number]]
 name = "boot.lancase.complete_ms"

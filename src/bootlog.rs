@@ -143,6 +143,15 @@ pub const SPAWN: &str = "spawn: ";
 /// trailing ` online` as a separate word: the same head carries the failure.
 pub const AP_BRINGUP: &str = "SMP: AP cpu";
 
+/// The kernel's record for a PCI function it gave to a driver above the
+/// boundary, in `kernel/src/pcidev/mod.rs`. A reader names the function ahead of
+/// it: the head alone finds whichever card this boot handed over.
+pub const HANDED_OVER: &str = "handed over on slot";
+
+/// The record the same site writes where a function could not be given away,
+/// with the reason after an em dash.
+pub const NOT_HANDED_OVER: &str = "NOT HANDED OVER";
+
 /// `kernel/src/process.rs`'s `THREAD_NAME_LEN`, one byte of which is the
 /// terminator `make_name` leaves.
 const NAME_LEN: usize = 28;
@@ -550,11 +559,11 @@ mod record_time_tests {
     fn a_reply_a_second_after_the_hand_over_record_is_this_boots() {
         let handed = BOOT.replace(
             "Boot: complete (1258ms)",
-            "pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28",
+            &format!("pcidev: PCI 00:1f.6 [8086:15fc] {HANDED_OVER} 0, vector 0x28"),
         );
         let handed_at = first() + 1;
         for at in [handed_at, handed_at + 1, handed_at + 2] {
-            let verdict = host_second_inside_this_boot(&handed, 0, "handed over on slot", at);
+            let verdict = host_second_inside_this_boot(&handed, 0, HANDED_OVER, at);
             assert_eq!(verdict, Ok(()), "{} s after the hand-over", at - handed_at);
         }
     }

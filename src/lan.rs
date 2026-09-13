@@ -5,20 +5,23 @@
 //! QEMU arm and the T14 arm in `tests/common/lan.rs` read their answers through
 //! this, so a guest and a laptop cannot be judged by different grammars.
 //!
-//! **The two arms do not read the same channel.** A `netd:` record exists on a
-//! guest, whose console is a serial port the harness holds the other end of;
-//! on the T14 there is no serial port, a userland write ends at
-//! `Backend::None`, and no `netd:` line has ever reached the stick. So the
-//! records below are the QEMU arm's, and the T14 arm's answers are the
-//! kernel's own records and `toyos_lanstate`'s exit code.
+//! The `netd:` records below are the QEMU arm's; the T14 arm reads the kernel's
+//! own records and `toyos_lanstate`'s exit code.
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
+
+use crate::bootlog;
 
 /// The PCI function the T14's card is, as `/sys/bus/pci/devices` spells it:
 /// the cable the metal loop reaches a boot over while it runs.
 pub const NIC: &str = "0000:00:1f.6";
+
+/// The card on that function, as the kernel's records and `tests/lancase`'s
+/// `devices` row spell it.
+const ID: &str = "8086:15fc";
 
 /// The same function as the kernel's records spell it: `/sys` names the PCI
 /// segment first and the kernel's records name the bus.
@@ -29,7 +32,6 @@ pub fn kernel_function(sysfs: &str) -> &str {
 /// The records both arms are written against, spelled once.
 pub const MAC: &str = "netd: MAC ";
 pub const LEASE: &str = "netd: DHCP: lease ";
-const LINK_UP: &str = "netd: I219: link up at ";
 pub const READY: &str = "netd: ready, at most ";
 pub const NO_LEASE: &str = "netd: DHCP: no lease as ";
 
@@ -57,8 +59,6 @@ pub struct Lease {
     /// `None` where the server sent no router option: netd writes `gateway none`.
     pub gateway: Option<Ipv4Addr>,
     pub dns: Vec<Ipv4Addr>,
-    /// Milliseconds between netd starting and the lease landing.
-    pub ms: u64,
 }
 
 /// The lease record, read out of a boot's log.
@@ -95,26 +95,57 @@ pub fn lease_in(text: &str) -> Result<Lease, String> {
         server: address("the server's address", after(" from ", ",")?)?,
         gateway,
         dns,
-        ms: after("], ", " ms after netd came up")?
-            .parse()
-            .map_err(|_| unreadable("a millisecond count"))?,
     })
 }
 
-/// How long after the driver came up the link did, out of the driver's own
-/// record.
-pub fn link_up_ms(text: &str) -> Result<u64, String> {
-    let line = text.lines().find(|l| l.contains(LINK_UP)).ok_or_else(|| {
-        format!("no {LINK_UP:?} record: this boot's card never reported a link")
-    })?;
-    let (_, rest) = line.split_once(", ").ok_or_else(|| {
-        format!("{line:?} says nothing about when the link came up, so the card was already up")
-    })?;
-    rest.split_once(" ms after the driver came up")
-        .ok_or_else(|| format!("{line:?} carries no link-up time"))?
-        .0
-        .parse()
-        .map_err(|_| format!("{line:?} carries no readable link-up time"))
+/// The record the kernel wrote as it gave this boot's NIC to a driver, or why
+/// there is none.
+///
+/// **The needle is built out of [`NIC`]**, so the card the host read its MAC off
+/// and the card the kernel gave away are one record rather than two checks that
+/// could drift apart. A refusal is quoted only where it is this function's:
+/// another function's is one fact with the wrong diagnosis attached to it.
+pub fn handed_over(text: &str) -> Result<&str, String> {
+    let function = kernel_function(NIC);
+    let handed = format!("PCI {function} [{ID}] {}", bootlog::HANDED_OVER);
+    if let Some(line) = text.lines().find(|l| l.contains(&handed)) {
+        return Ok(line.trim());
+    }
+    let refused = format!("PCI {function} {}", bootlog::NOT_HANDED_OVER);
+    match text.lines().find(|l| l.contains(&refused)) {
+        Some(line) => Err(format!("the kernel refused {NIC}: {}", line.trim())),
+        None => Err(format!(
+            "no `{handed}` record and no refusal either: nothing on this machine claimed {ID}, \
+             so `tests/lancase` was flashed onto a machine that has no such card"
+        )),
+    }
+}
+
+/// What the card raised into the process driving it, out of each CPU's census
+/// of the source a user-driven device's vector is counted under.
+///
+/// **A lease with no interrupt is a contradiction**: DHCP is a round trip on the
+/// wire and this kernel delivers a user-driven NIC's vector to the process that
+/// claimed it, so a boot that leased and counted none did not lease — it read
+/// somebody else's answer, or the census is not of this card. The counters are
+/// cumulative, so a CPU's last census is its whole boot; a boot that printed
+/// none at all is a different finding and says so rather than summing to zero.
+pub fn interrupts_into_the_driver(census: &[(u32, u64)]) -> Result<u64, String> {
+    if census.is_empty() {
+        return Err("no `irq: cpu` census in this boot's log, so nothing here says whether the \
+                    card raised an interrupt"
+            .to_string());
+    }
+    let mut last: BTreeMap<u32, u64> = BTreeMap::new();
+    for (cpu, raised) in census {
+        last.insert(*cpu, *raised);
+    }
+    match last.values().sum::<u64>() {
+        0 => Err("every `irq:` census of this boot counts none for the card netd drives: it \
+                  raised no interrupt, so nothing it received reached the driver"
+            .to_string()),
+        raised => Ok(raised),
+    }
 }
 
 /// What the job that asked netd left in its `exit:` record, judged against the
@@ -215,8 +246,8 @@ mod tests {
     /// today, so a scan over the file as written is green either way.
     #[test]
     fn a_head_rustfmt_split_across_two_lines_reads_as_one() {
-        let wrapped = "    crate::say!(\"netd: I219: link up \\\n                 at {} Mb/s\");";
-        let head = format!("\"{LINK_UP}");
+        let wrapped = "    crate::say!(\"netd: DHCP: \\\n                 lease {}/{} from {}\");";
+        let head = format!("\"{LEASE}");
         assert!(!wrapped.contains(&head), "this fixture carries no wrap to close up");
         assert!(dewrapped(wrapped).contains(&head), "the wrap still swallows {head:?}");
     }
@@ -232,7 +263,7 @@ mod tests {
             std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()))
         };
         let source = dewrapped(&["main.rs", "i219.rs", "dhcp.rs"].map(read).join("\n"));
-        for head in [MAC, LEASE, LINK_UP, READY, NO_LEASE] {
+        for head in [MAC, LEASE, READY, NO_LEASE] {
             assert!(source.contains(&format!("\"{head}")), "netd opens no record with {head:?}");
         }
         assert!(
@@ -261,6 +292,15 @@ mod tests {
         for (name, word) in [("TcpClose", 4), ("TcpAcceptPiped", 22), ("Error", 129)] {
             assert!(words.contains(&word), "the scan missed `{name} = {word}`: {words:?}");
         }
+        // And every notation a discriminant may be written in, `ASK`'s own
+        // among them: a scan blind to one would call a collision spelled that
+        // way absent.
+        let ask = toyos_lanstate::ASK;
+        for spelling in
+            [format!("{ask}"), format!("{ask:#x}"), "4_997_454".to_string(), "0x4c_41_4e".into()]
+        {
+            assert_eq!(sdk_words(&format!("    Ask = {spelling},\n")), [ask], "{spelling}");
+        }
         assert!(
             !words.contains(&toyos_lanstate::ASK),
             "netd's state word {} is also one of the SDK's: {words:?}",
@@ -274,8 +314,19 @@ mod tests {
         source
             .lines()
             .filter_map(|line| line.trim_end().strip_suffix(',')?.split_once(" = "))
-            .filter_map(|(_, value)| value.trim().parse().ok())
+            .filter_map(|(_, value)| discriminant(value.trim()))
             .collect()
+    }
+
+    /// One discriminant in any notation Rust spells one in: decimal or hex,
+    /// with or without the digit separators [`toyos_lanstate::ASK`] itself is
+    /// written with.
+    fn discriminant(value: &str) -> Option<u32> {
+        let value = value.replace('_', "");
+        match value.strip_prefix("0x") {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => value.parse().ok(),
+        }
     }
 
     /// The whole grammar as `on_metal` reads it, against the pair a readback
@@ -317,6 +368,51 @@ mod tests {
         assert_eq!(format!("0000:{}", kernel_function(NIC)), NIC);
     }
 
+    /// The kernel's own record, as `kernel/src/pcidev/mod.rs` writes it.
+    fn handover_line(function: &str) -> String {
+        format!(
+            "[2026-09-13 14:27:17 1.450 cpu0] pcidev: PCI {function} [{ID}] {} 0, vector 0x28 \
+             on MSI",
+            bootlog::HANDED_OVER
+        )
+    }
+
+    #[test]
+    fn the_hand_over_this_boot_owes_is_read_of_this_function_alone() {
+        let line = handover_line(kernel_function(NIC));
+        assert_eq!(handed_over(&format!("boot\n{line}\nmore\n")), Ok(line.as_str()));
+        // Another function's hand-over is not this one's.
+        let elsewhere = handover_line("00:1f.3");
+        let why = handed_over(&elsewhere).expect_err("a different function");
+        assert!(why.contains("has no such card"), "{why}");
+        // This function's refusal is quoted as the diagnosis…
+        let refused = format!(
+            "[x] pcidev: PCI {} {} — it would have no address space of its own",
+            kernel_function(NIC),
+            bootlog::NOT_HANDED_OVER
+        );
+        let why = handed_over(&refused).expect_err("a function the kernel would not give away");
+        assert!(why.contains("no address space of its own"), "{why}");
+        // …and another function's is not, because quoting it would put the
+        // wrong diagnosis on the one fact this boot has.
+        let others = format!("[x] pcidev: PCI 00:1f.3 {} — x", bootlog::NOT_HANDED_OVER);
+        let why = handed_over(&others).expect_err("another function's refusal");
+        assert!(why.contains("has no such card"), "{why}");
+        assert!(handed_over("").is_err());
+    }
+
+    /// The counters are cumulative, so the last census a CPU wrote is its whole
+    /// boot, and the two absences are told apart: a machine that said nothing
+    /// and a card that raised nothing are different findings.
+    #[test]
+    fn a_lease_with_no_interrupt_and_a_boot_with_no_census_are_different_findings() {
+        assert_eq!(interrupts_into_the_driver(&[(0, 1), (0, 7), (1, 2)]), Ok(9));
+        let why = interrupts_into_the_driver(&[]).expect_err("a boot that printed no census");
+        assert!(why.contains("nothing here says whether"), "{why}");
+        let why = interrupts_into_the_driver(&[(0, 0), (1, 0)]).expect_err("a silent card");
+        assert!(why.contains("raised no interrupt"), "{why}");
+    }
+
     #[test]
     fn a_lease_record_is_read_field_by_field() {
         assert_eq!(
@@ -327,7 +423,6 @@ mod tests {
                 server: Ipv4Addr::new(10, 0, 2, 2),
                 gateway: Some(Ipv4Addr::new(10, 0, 2, 2)),
                 dns: vec![Ipv4Addr::new(10, 0, 2, 3), Ipv4Addr::new(10, 0, 2, 4)],
-                ms: 412,
             })
         );
         // A lease with no resolvers at all is a lease, and an empty list is not
@@ -357,17 +452,6 @@ mod tests {
         let why = lease_in(&LEASED.replace("dns [10.0.2.3", "dns [fe80::1"))
             .expect_err("an IPv6 resolver is not one this record can carry");
         assert!(why.contains("a resolver"), "{why}");
-        let why = lease_in(&LEASED.replace("412 ms", "later ms")).expect_err("no milliseconds");
-        assert!(why.contains("a millisecond count"), "{why}");
-    }
-
-    #[test]
-    fn a_link_that_was_already_up_is_told_from_one_that_came_up() {
-        let came_up = format!("[x] {LINK_UP}1000 Mb/s, 2400 ms after the driver came up");
-        assert_eq!(link_up_ms(&came_up), Ok(2_400));
-        assert!(link_up_ms("nothing\n").unwrap_err().contains("never reported a link"));
-        let why = link_up_ms(&format!("[x] {LINK_UP}1000 Mb/s")).expect_err("no comma");
-        assert!(why.contains("already up"), "{why}");
     }
 
     /// One pcap record per frame, with the timestamps a reader here never looks

@@ -18,7 +18,5 @@ serves = ["netd"]
 devices = ["pci:8086:15fc"]
 
 [programs.test-runner]
-# The job that asks netd what network this machine is on connects through the
-# namespace it inherits from this program.
 receives = ["netd"]
 syscap = ["logread"]
