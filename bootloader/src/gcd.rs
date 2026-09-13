@@ -173,8 +173,6 @@ pub fn free_mmio(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow])
             continue;
         }
         let Some(slot) = out.get_mut(added) else {
-            // Refused by name and the rest dropped: the kernel is handed what
-            // this loader could carry, and a reader is told there was more.
             println!("{HEAD} more free mmio ranges than the {} the kernel is handed", out.len());
             break;
         };
