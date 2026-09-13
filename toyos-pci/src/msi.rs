@@ -79,7 +79,27 @@ impl Msi {
     pub fn enabled(message_control: u16) -> u16 {
         (message_control & !MULTI_MESSAGE_ENABLE) | ENABLE
     }
+
+    /// Message Control with the function delivering nothing, and everything it
+    /// said about itself left alone.
+    ///
+    /// **The counterpart of a hand-over.** A function whose holder is gone has
+    /// to stop writing its message somewhere, and MSI-X's per-entry mask lives
+    /// in a table that does not exist here: this bit is what stands in for it,
+    /// because a capability's per-vector mask is optional and [`Msi::mask`] is
+    /// `None` on every function that does not implement one.
+    pub fn disabled(message_control: u16) -> u16 {
+        message_control & !ENABLE
+    }
 }
+
+/// The Mask Bits value that masks the one vector [`Msi::enabled`] leaves a
+/// function armed for, and the one that unmasks it.
+///
+/// Bit *n* is vector *n* (PCIe §7.7.1.7), and Multiple Message Enable is zero
+/// after `enabled`, so the armed vector is always index 0.
+pub const MASKED: u32 = 1 << 0;
+pub const UNMASKED: u32 = 0;
 
 #[cfg(test)]
 mod tests {
@@ -134,5 +154,28 @@ mod tests {
     fn enabling_keeps_what_the_function_said_about_itself() {
         let ctrl = ADDRESS_64 | PER_VECTOR_MASK | (5 << 1);
         assert_eq!(Msi::enabled(ctrl), ctrl | ENABLE);
+    }
+
+    /// **Disabling is not the inverse of enabling, and must not be.** What a
+    /// hand-over back owes is that the function stops delivering; what it does
+    /// not owe is the Multiple Message Enable field an arming zeroed, and a
+    /// `disabled` that restored it would leave a function armed for as many
+    /// vectors as it can raise the moment anything set the enable bit again.
+    #[test]
+    fn disabling_clears_the_enable_bit_and_nothing_else() {
+        let ctrl = ADDRESS_64 | PER_VECTOR_MASK | (5 << 1);
+        assert_eq!(Msi::disabled(ctrl | ENABLE), ctrl);
+        assert_eq!(Msi::disabled(ctrl), ctrl);
+        // Round trip, on the field that moves: arming zeroes Multiple Message
+        // Enable and disarming leaves it zeroed.
+        assert_eq!(Msi::disabled(Msi::enabled(ctrl | MULTI_MESSAGE_ENABLE)), ctrl);
+    }
+
+    /// The armed vector is index 0, so the mask that silences it is bit 0.
+    #[test]
+    fn the_mask_names_the_one_vector_that_was_armed() {
+        assert_eq!(MASKED, 1);
+        assert_eq!(UNMASKED, 0);
+        assert_eq!(Msi::enabled(MULTI_MESSAGE_ENABLE) & MULTI_MESSAGE_ENABLE, 0);
     }
 }

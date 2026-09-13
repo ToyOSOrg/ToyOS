@@ -1,0 +1,22 @@
+# The one boot that runs netd in front of the ThinkPad T14's own NIC.
+#
+# A directory of its own for the reason `tests/e1000case` is one: a program that
+# names a card the machine does not have costs an `init:` refusal line on every
+# boot of the config that does, and no machine has both.
+#
+# Nothing here reaches the internal NVMe. There is no `[disks]` row, and the
+# only device any program on this boot claims is the PCI function named below.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:15fc"]
+
+[programs.test-runner]
+receives = ["netd"]
+syscap = ["logread"]

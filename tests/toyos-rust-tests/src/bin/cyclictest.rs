@@ -16,17 +16,11 @@
 //! it is.
 //!
 //! **Boundary contract: this program's exit code is its p99, in microseconds.**
-//! On the machine this instrument exists for there is no serial port, a
-//! userland `println!` reaches `Backend::None` and is dropped, and the only
-//! word a program gets onto the log partition is the kernel's own
-//! `exit: <name> pid=N code=N cpu=Nms` record, which carries the whole `i32`.
-//! So the headline number leaves through the exit code: a non-negative code is
-//! a measured p99 in microseconds, bounded above by [`BUCKETS`] because a p99
-//! at the histogram's last bucket is a floor rather than a measurement; a
+//! A non-negative code is a measured p99, bounded above by [`BUCKETS`] because
+//! a p99 at the histogram's last bucket is a floor rather than a measurement; a
 //! negative one is a [`Refusal`] and no number in that run means anything.
-//! `userland/metalprobe` spells the same contract for the device suite, and the
-//! sign is what separates the two halves of it there as here. Every percentile
-//! is on stdout as well, for the host that has a console to read it on.
+//! Every percentile is on stdout as well, for the host that has a console to
+//! read it on.
 
 use std::process::exit;
 

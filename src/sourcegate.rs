@@ -560,6 +560,15 @@ const HOST_SPAWNS: &[Spawn] = &[
               when it is asked for",
     },
     Spawn {
+        arg: "\"ping\"",
+        sites: &[],
+        why: "the host's own ICMP client, in `src/metal.rs` alone: the one question this \
+              repository can ask a metal boot while that boot is still up, and an \
+              implementation of ICMP nobody here wrote, which is what makes it an oracle for \
+              the stack under test. Outside the bar and declared by nothing else: no build, \
+              boot or gate reaches it, and the metal loop runs only when it is asked for",
+    },
+    Spawn {
         arg: "\"/sbin/newfs_msdos\"",
         sites: &[],
         why: "a macOS binary, and one of the standing failures CLAUDE.md declares. It \

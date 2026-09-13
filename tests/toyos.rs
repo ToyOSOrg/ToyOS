@@ -12,8 +12,8 @@ use common::qemu::{
     STALLED,
 };
 use common::{
-    audio, compile, devices, faults, hostload, metal, pkg, power, screen, serial, stats, storage,
-    usb,
+    audio, compile, devices, faults, hostload, lan, metal, pkg, power, screen, serial, stats,
+    storage, usb,
 };
 use toyos_build::day::Day;
 use toyos_build::bootlog::{self, boot_millis};
@@ -231,6 +231,15 @@ const RUST_SKIP: &[&str] = &[
     // Needs a NIC in front of netd; only `tests/netcase` has one.
     // `netd_listener_forgery` runs it there.
     "netd_listener_forgery",
+    // It asserts nothing at all: it holds a `tests/lancase` boot open for
+    // twenty seconds so the host can reach this machine over the cable, and
+    // `lan_dhcp_lease`'s metal arm is the only job list that names it. On a
+    // shared boot it would be twenty seconds of nothing.
+    "lan_hold",
+    // Needs netd with a NIC in front of it and a `netd` connector in its own
+    // namespace, which only `tests/e1000case` and `tests/lancase` give a job.
+    // `lan_dhcp_lease` runs it on the first and its metal arm on the second.
+    "lan_state",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -643,6 +652,18 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // is the buffers' business and no arm's to demand; what it may never cost
     // is half a line, and that is what this one judges.
     ("log_stream_stalled_peer_delivers_whole_records", Sched::Parallel, Tier::Nightly),
+    // netd taking this machine's address from the network instead of carrying
+    // one written down. The DHCP server it is judged against is QEMU's own, an
+    // implementation of RFC 2131 this repository did not write, and its lease
+    // is known field by field. The verdicts are records and a lease's fields;
+    // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
+    ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
+    // The same client on a wire with no server: it says it has no address and
+    // announces itself anyway. Fast with the UNMEASURED marker, which only the
+    // fast tier carries; its verdict is timer-anchored, and
+    // `issues/build/a-timer-anchored-names-tier-is-decided-by-its-price.md`
+    // holds the relegation it owes.
+    ("lan_no_lease", Sched::Parallel, Tier::Fast),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -1283,10 +1304,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
 ///
-/// **Every predicate here reads records, never console text.** A userland
-/// `println!` ends at `Backend::None` on a machine with no serial port, so
-/// `===TEST_END <name> exit=N===` does not exist on the T14: a job's verdict
-/// crosses as the kernel's own `exit: <name> pid=N code=N cpu=Nms`.
+/// **Every predicate here reads records, never console text.**
 const METAL: &[(&str, metal::Metal)] = &[
     (
         // The device list: the T14's own xHCI, stick, i8042, HDA, framebuffer
@@ -1294,6 +1312,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         // every span `metalprobe` measured priced in `tests/metal-profile.toml`.
         "metal_device_probe",
         metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
+    ),
+    (
+        "lan_dhcp_lease",
+        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
     ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
@@ -1664,6 +1686,15 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 ];
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
+
+/// The cable's own boot: netd in front of the T14's I219, one job that holds
+/// the machine up long enough for the host to reach it and one that asks netd
+/// what network it is on. The one arm in this suite that names a PCI function
+/// for the loop to reach the boot over.
+const LANCASE: &[metal::Arm] = &[metal::Arm {
+    nic: Some(toyos_build::lan::NIC),
+    ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS)
+}];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -13604,6 +13635,8 @@ fn run_machine_test(
             );
             Ok(())
         }
+        "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
+        "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO),
         "https_tls13_e1000e" => common::https::tls13_judge(rust_bins, common::https::E1000E),
         "log_stream" => common::logstream::stream(common::logstream::VIRTIO, c_bins, rust_bins),
@@ -13722,8 +13755,9 @@ fn run_machine_test(
 
             // Exactly one hand-over of that function. Two would be the defect
             // itself, and zero a boot that says nothing about exclusivity.
+            let handed = format!("[1af4:1041] {}", bootlog::HANDED_OVER);
             let handovers =
-                log.text().lines().filter(|l| l.contains("[1af4:1041] handed over on slot")).count();
+                log.text().lines().filter(|l| l.contains(&handed)).count();
             if handovers != 1 {
                 return Err(format!(
                     "the NIC's function was handed over {handovers} times, and a second holder \

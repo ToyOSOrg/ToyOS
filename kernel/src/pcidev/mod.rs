@@ -3,8 +3,9 @@
 //! The line through the device is **who can name an address**. This module
 //! keeps config space — there is no write path to it from userland — puts the
 //! function in an address space of its own at the unit *before* it enables bus
-//! mastering, programs the interrupt vector into its MSI-X table, and hands out
-//! every device address a descriptor may carry. Nothing the holder writes into
+//! mastering, programs the interrupt vector into whichever of the function's
+//! two message mechanisms it has, and hands out every device address a
+//! descriptor may carry. Nothing the holder writes into
 //! a descriptor can make the device touch memory the kernel did not grant it:
 //! the domain maps the grants and nothing else, and an address outside them is
 //! refused at the unit and recorded against that claim.
@@ -16,7 +17,9 @@
 //!
 //! **The BAR holding the MSI-X table or PBA is never mapped**: a holder that
 //! could rewrite the table could point the device's message at any address the
-//! LAPIC decodes.
+//! LAPIC decodes. An MSI function's message is in config space instead, which
+//! is read-only from userland, so it needs no BAR withheld — the same rule
+//! reaching a different register file, not a weaker one.
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding
@@ -32,7 +35,7 @@
 //! above is the mechanism and the reset is the belt.
 //!
 //! **What is read back, and what is not.** `Owned` is
-//! `pci_function_is_exclusive`, `NoMsix` is `virtio_net_no_msix`,
+//! `pci_function_is_exclusive`, `NoInterrupt` is `virtio_net_no_msix`,
 //! `Untranslated` is `iommu_virtio_platform`'s no-unit arm, the domain is
 //! `userdev_dma_fault`, and `SYS_DEVICE_REG_READ`'s bound is netd's own
 //! `config_space_is_bounded`. `Ambiguous`, `KernelDriven`, `Exhausted`, every
@@ -121,12 +124,69 @@ struct Grant {
     bytes: u64,
 }
 
+/// How a claimed function was made to speak, and what it takes to silence it.
+///
+/// **The driver above the boundary cannot tell which one it got, and does not
+/// care**: both deliver [`VECTORS`]`[slot]` into the same [`Interrupt`], and the
+/// claim answers the same handle either way. What differs is where the message
+/// lives — an MSI-X table entry in a mapping this kernel keeps for itself, or a
+/// word of config space, which has no write path from userland at all — and so
+/// what a hand-over back has to write to stop it.
+enum Armed {
+    /// This function's one MSI-X table entry, mapped for the kernel alone.
+    Msix(Mmio),
+    /// MSI: the message is in this function's own config space and nothing was
+    /// mapped for it.
+    Msi,
+}
+
+impl Armed {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Msix(_) => "MSI-X",
+            Self::Msi => "MSI",
+        }
+    }
+
+    /// Stop this function delivering, for a holder that is gone.
+    fn silence(&self, pci: &PciDevice) {
+        match self {
+            Self::Msix(entry) => entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED),
+            Self::Msi => pci.disable_msi(),
+        }
+    }
+
+    /// Put the capability itself back off, for a hand-over that armed a vector
+    /// and was then refused: a function left enabled at a vector nobody holds
+    /// delivers into a slot with no reader.
+    fn undo(&self, pci: &PciDevice) {
+        match self {
+            Self::Msix(_) => pci.disable_msix(),
+            Self::Msi => pci.disable_msi(),
+        }
+    }
+}
+
+/// MSI-X first, then MSI, and neither is somewhere a holder can write.
+///
+/// **MSI-X first because it is the one this kernel can mask per vector**, and
+/// because a function that publishes it is one whose table BAR is then kept out
+/// of what the holder maps. MSI is not a lesser mechanism — the device performs
+/// the same write to the same address — and the parts that have only it are not
+/// rare: the ThinkPad's onboard I219 is one, which is where this arm came from.
+fn arm(pci: &PciDevice, vector: u8) -> Option<Armed> {
+    if let Some(entry) = pci.enable_msix(vector) {
+        return Some(Armed::Msix(entry));
+    }
+    pci.enable_msi(vector).then_some(Armed::Msi)
+}
+
 /// What a live slot drives. The ISR never reads this.
 struct Bound {
     pci: PciDevice,
     space: DeviceSpace,
-    /// This function's one MSI-X table entry, mapped for the kernel alone.
-    entry: Mmio,
+    /// How this function was made to speak, and what silences it.
+    armed: Armed,
     id: PciId,
     /// Where each mappable BAR was put, and how much of it the function
     /// advertises; 0 bytes is a slot with no BAR this claim may map.
@@ -308,6 +368,91 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry]) {
         machine.wide.0,
         machine.wide.1,
     );
+    let empty = machine.narrow.0 == 0;
+    let taken = machine.decoded.clone();
+    drop(machine);
+    // Only on the machine where it is owed. A boot whose low space has room
+    // says nothing about it, and a survey printed every time would be thirty
+    // lines of a log that has one channel off this bench.
+    if empty {
+        survey_low_space(devices, maps, &taken);
+    }
+}
+
+/// What is left below 4 GiB, said out loud on the machine where nothing is.
+///
+/// **A refusal that says "no room" where the truth is "this module only ever
+/// looks above everything" sends a reader to the wrong place**, and it sent one
+/// there: the ThinkPad's I219 has a 32-bit BAR, [`window`] answered `0x0..0x0`
+/// for the low space, and the refusal read as a full machine. Below 4 GiB there
+/// is nothing above everything — the platform's fixed MMIO is at
+/// [`PLATFORM_MMIO`] — so a 32-bit window is a free run *between* things rather
+/// than a span above them.
+///
+/// This prints the runs, and it accounts for exactly three things and names
+/// them, because what it does not account for is the point: the firmware map,
+/// the BARs this bus has assigned, and every range a bridge forwards to a
+/// secondary bus. **It does not account for the host bridge's own aperture**,
+/// which is what says whether an address below 4 GiB reaches this bus at all,
+/// and which is ACPI's `_CRS` — an AML method this kernel does not run. So a
+/// run below is a candidate for whoever reads the log, never a claim by this
+/// module, and nothing here hands one out.
+fn survey_low_space(devices: &[PciDevice], maps: &[MemoryMapEntry], decoded: &[(u16, u64, u64)]) {
+    let mut taken: Vec<(u64, u64)> = Vec::new();
+    let mut note = |start: u64, end: u64| {
+        let (start, end) = (start.min(PLATFORM_MMIO), end.min(PLATFORM_MMIO));
+        if start < end {
+            taken.push((start, end));
+        }
+    };
+    for entry in maps {
+        note(entry.start, entry.end);
+    }
+    for (_, start, end) in decoded {
+        note(*start, *end);
+    }
+    let mut bridges = 0usize;
+    for device in devices {
+        for forwarded in device.forwarded_below_4g() {
+            bridges += 1;
+            log!(
+                "pcidev: PCI {:02x}:{:02x}.{} forwards {:#x}..{:#x} to its secondary bus",
+                device.bus,
+                device.dev,
+                device.func,
+                forwarded.start,
+                forwarded.end,
+            );
+            note(forwarded.start, forwarded.end);
+        }
+    }
+    taken.sort_unstable();
+    let mut free: Vec<(u64, u64)> = Vec::new();
+    let mut at = 0u64;
+    for (start, end) in taken {
+        if start > at {
+            free.push((at, start));
+        }
+        at = at.max(end);
+    }
+    if at < PLATFORM_MMIO {
+        free.push((at, PLATFORM_MMIO));
+    }
+    free.retain(|(start, end)| end - start >= PAGE_2M);
+    log!(
+        "pcidev: no 32-bit window. Below {PLATFORM_MMIO:#x} the firmware map, this bus's \
+         assigned BARs and {bridges} forwarded bridge window(s) leave {} run(s) of 2 MiB or \
+         more:",
+        free.len(),
+    );
+    for (start, end) in free.iter() {
+        log!("pcidev:   {start:#x}..{end:#x} ({} MiB)", (end - start) / (1024 * 1024));
+    }
+    log!(
+        "pcidev: a run above is a candidate and not a claim — what says whether an address \
+         below 4 GiB reaches this bus at all is the host bridge's own aperture, which is \
+         ACPI's `_CRS`, and this kernel runs no AML"
+    );
 }
 
 /// The span above `assigned` this module may hand out, or an empty one where
@@ -329,9 +474,18 @@ fn window(assigned: u64, ceiling: u64) -> (u64, u64) {
 /// place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Refusal {
-    NoMsix,
+    NoInterrupt,
     Untranslated(IommuError),
-    NoWindow,
+    /// This machine published no window of that width at all. **Not the same
+    /// fact as a window that filled up**, and on the 32-bit side not the same
+    /// fact as a full machine either: `survey_low_space` is what says what is
+    /// actually left below 4 GiB.
+    NoWindow { wide: bool },
+    /// The window exists and every page of it is already cut.
+    WindowFull { wide: bool },
+    /// The function publishes nothing this claim may map — no memory BAR, or
+    /// only the one holding its own MSI-X table.
+    NoMappableBar,
     BarUnsizable(u8),
     BarUnplaceable(u8),
     BarResized(u8),
@@ -341,20 +495,44 @@ enum Refusal {
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NoMsix => write!(
+            Self::NoInterrupt => write!(
                 f,
-                "its MSI-X could not be armed, and a claim with no interrupt is a driver \
-                 that would never be told anything"
+                "neither its MSI-X nor its MSI could be armed, and a claim with no interrupt \
+                 is a driver that would never be told anything"
             ),
             Self::Untranslated(why) => write!(
                 f,
                 "it would have no address space of its own — {why} — and a process driving \
                  it would be given physical addresses to put in descriptors"
             ),
-            Self::NoWindow => write!(
+            // **Two sentences, because a 32-bit window is a different problem
+            // from a 64-bit one.** Above the highest address firmware described
+            // there is always room in 64 bits and never any in 32: the
+            // platform's fixed MMIO is up there. So the low answer names what
+            // would actually settle it, and the survey beside it in this log
+            // says what the machine has left.
+            Self::NoWindow { wide: true } => write!(
                 f,
-                "this machine has no 2 MiB-aligned address space above what firmware \
+                "this machine has no 2 MiB-aligned 64-bit address space above what firmware \
                  assigned to put a BAR in"
+            ),
+            Self::NoWindow { wide: false } => write!(
+                f,
+                "its BAR is 32-bit and this module has no window below 4 GiB to put one in: \
+                 there is nothing above everything firmware described down there, so a window \
+                 has to be a free run between things — and what says a run is reachable is the \
+                 host bridge's aperture, which is ACPI's `_CRS` and which this kernel does not \
+                 read"
+            ),
+            Self::WindowFull { wide } => write!(
+                f,
+                "the {}-bit window this module cut is full",
+                if *wide { 64 } else { 32 }
+            ),
+            Self::NoMappableBar => write!(
+                f,
+                "it publishes no memory BAR this claim may map, so its holder would have no \
+                 registers to drive it through"
             ),
             Self::BarUnsizable(i) => write!(f, "BAR {i} answers no size to bound a window by"),
             Self::BarUnplaceable(i) => write!(f, "BAR {i} did not take the address it was given"),
@@ -422,12 +600,17 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
                 func: pci.func,
                 _pad: [0; 5],
             };
+            // Read off the hand-over rather than restated: which mechanism a
+            // function was armed on is the first thing a machine that never
+            // heard from its device is asked, and it is not a thing the driver
+            // above the boundary can see.
+            let armed = bound.armed.name();
             *BOUND[slot].lock() = Some(bound);
             IRQ[slot].clear();
             crate::iommu::note_user_owned(pci.bus, pci.dev, pci.func, Some(slot));
             log!(
                 "pcidev: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] handed over on slot {slot}, \
-                 vector {:#x}",
+                 vector {:#x} on {armed}",
                 pci.bus,
                 pci.dev,
                 pci.func,
@@ -475,11 +658,11 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // Decode must be on for a BAR to answer, and off across each move.
     pci.enable_memory_space();
 
-    // Then the interrupt, still before a window is cut: a function whose MSI-X
-    // cannot be armed is one no holder could ever be told anything about, and
-    // `virtio_net_no_msix` reads that refusal off the console *and* the absence
-    // of any BAR line after it.
-    let entry = pci.enable_msix(VECTORS[slot]).ok_or(Refusal::NoMsix)?;
+    // Then the interrupt, still before a window is cut: a function neither
+    // mechanism can be armed on is one no holder could ever be told anything
+    // about, and `virtio_net_no_msix` reads that refusal off the console *and*
+    // the absence of any BAR line after it.
+    let armed = arm(&pci, VECTORS[slot]).ok_or(Refusal::NoInterrupt)?;
 
     // From here a refusal has to undo: a vector is armed, and the arms below
     // move the function's BARs.
@@ -489,7 +672,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             Ok(Bound {
                 pci,
                 space,
-                entry,
+                armed,
                 id,
                 bar_at,
                 bar_bytes,
@@ -499,7 +682,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             })
         }
         Err(why) => {
-            pci.disable_msix();
+            armed.undo(&pci);
             Err(why)
         }
     }
@@ -529,8 +712,11 @@ fn place_bars(pci: &PciDevice, table_bar: Option<u8>) -> Result<([u64; BARS], [u
         bar_bytes[index as usize] = size;
         index += step;
     }
+    // Its own refusal and not a window one: nothing about this machine's
+    // address space is wrong, and a reader sent to the window allocator would
+    // find it healthy.
     if bar_bytes.iter().all(|bytes| *bytes == 0) {
-        return Err(Refusal::NoWindow);
+        return Err(Refusal::NoMappableBar);
     }
     Ok((bar_at, bar_bytes))
 }
@@ -649,19 +835,22 @@ fn take_window(pci: &PciDevice, index: u8, wide: bool, span: u64) -> Result<u64,
     if let Some(&(_, _, at, cut)) =
         machine.windows.iter().find(|(w, i, _, _)| *w == who && *i == index)
     {
-        // Refused by its own name and not as `NoWindow`: this machine has the
+        // Refused by its own name and not as a window refusal: this machine has the
         // room, and what changed is the BAR.
         return if cut == span { Ok(at) } else { Err(Refusal::BarResized(index)) };
     }
     let at = {
         let (next, top) = if wide { &mut machine.wide } else { &mut machine.narrow };
+        // Nothing published at all, and a window that filled up, are different
+        // facts: the first is a machine this module never found room on and the
+        // second is one it used up.
         if *next == 0 {
-            return Err(Refusal::NoWindow);
+            return Err(Refusal::NoWindow { wide });
         }
-        let at = next.checked_next_multiple_of(span).ok_or(Refusal::NoWindow)?;
-        let end = at.checked_add(span).ok_or(Refusal::NoWindow)?;
+        let at = next.checked_next_multiple_of(span).ok_or(Refusal::WindowFull { wide })?;
+        let end = at.checked_add(span).ok_or(Refusal::WindowFull { wide })?;
         if end > *top {
-            return Err(Refusal::NoWindow);
+            return Err(Refusal::WindowFull { wide });
         }
         *next = end;
         at
@@ -732,7 +921,7 @@ pub fn release(slot: usize) {
 
 fn tear_down(slot: usize, bound: Bound) {
     bound.pci.disable_bus_master();
-    bound.entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED);
+    bound.armed.silence(&bound.pci);
     crate::iommu::note_user_owned(bound.pci.bus, bound.pci.dev, bound.pci.func, None);
     for grant in bound.grants.iter() {
         if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {

@@ -23,16 +23,20 @@ use std::sync::Mutex;
 /// a source added on one side and not the other is a red rather than a silently
 /// dropped column.
 pub const SOURCES: [&str; 11] = [
-    "timer", "xhci", "userdev", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious",
+    "timer", "xhci", USERDEV, "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious",
     "unclaimed",
 ];
+
+/// The source a NIC a *process* drives raises its interrupts under, spelled
+/// once: [`Census::source`] answers only for a name [`SOURCES`] holds.
+pub const USERDEV: &str = "userdev";
 
 /// The sources whose delivery CPU is chosen by the interrupt controller rather
 /// than by the CPU that took the work — every device vector, in other words.
 /// `MSG_ADDR` names physical destination 0 and the one I/O APIC pin this kernel
 /// routes goes to the BSP, so today every one of these is cpu0's alone. The day
 /// that stops being true is the day the track's change lands.
-pub const DEVICE_SOURCES: [&str; 6] = ["xhci", "userdev", "sound", "i8042", "dmafault", "hda"];
+pub const DEVICE_SOURCES: [&str; 6] = ["xhci", USERDEV, "sound", "i8042", "dmafault", "hda"];
 
 /// One CPU's counters out of one `irq:` line.
 #[derive(Clone, Debug, PartialEq, Eq)]

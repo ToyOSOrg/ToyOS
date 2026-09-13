@@ -334,6 +334,18 @@ mod sizing_tests {
         assert_eq!(members_per_boot(spendable / 2), 2);
     }
 
+    /// **`lan_hold` sleeps a bound this file prices.** The guest binary holds
+    /// the machine up for `toyos_tco::LEASE_BOUND_MS`, and the boot's own job
+    /// allowance has to outlast it or the runner's deadline cuts the window the
+    /// host reaches that machine across.
+    #[test]
+    fn the_window_lan_hold_sleeps_is_the_window_this_file_prices() {
+        let profile = Profile::load(root()).expect(PATH);
+        let hold = toyos_tco::LEASE_BOUND_MS;
+        let job = profile.row(&job_ms_row("lancase")).expect("lancase's own allowance");
+        assert!(job.ceiling > hold, "{} against a {hold} ms hold", job.ceiling);
+    }
+
     /// A boot whose allowance nobody wrote down is refused, not given the
     /// bound: the whole point of the row is that a list is cut to a number
     /// somebody committed.
