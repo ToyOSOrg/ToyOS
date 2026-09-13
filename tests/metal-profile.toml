@@ -597,6 +597,12 @@ unit = "ms"
 ceiling = 1400
 ceiling_from = "as list.deadlinewedge.job_ms"
 
+[[number]]
+name = "list.usbwedge.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.deadlinewedge.job_ms — the same list and the same wedge, taken one write later"
+
 # --- the boots the split above adds ---
 
 [[number]]
