@@ -1355,9 +1355,6 @@ fn main() {
         // on no network.
         let change = dhcp::Change::of(socket_set.get_mut::<dhcpv4::Socket>(dhcp_handle));
         if dhcp.pass(change, &mut iface, socket_set.get_mut::<dns::Socket>(dns_handle)) {
-            // Every arm that waits for netd waits for this line, so it is said
-            // once this machine has an address to serve on — or has been told
-            // it will not get one.
             say!(
                 "netd: ready, at most {max_piped} piped connections \
                  ({} MiB each of {} MiB total)",

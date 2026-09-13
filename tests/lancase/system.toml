@@ -12,7 +12,6 @@ start = ["logd", "netd", "test-runner"]
 
 [programs.logd]
 syscap = ["logread"]
-receives = ["netd"]
 
 # netd holds the NIC's PCI function and drives it: the descriptor rings, the
 # register window and the interrupt are its own, and the kernel keeps only the
@@ -23,5 +22,4 @@ serves = ["netd"]
 devices = ["pci:8086:15fc"]
 
 [programs.test-runner]
-receives = ["netd"]
 syscap = ["logread"]

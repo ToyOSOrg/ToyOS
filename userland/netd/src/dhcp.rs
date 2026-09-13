@@ -1,10 +1,5 @@
 //! This machine's address, taken from the network rather than written down.
 //!
-//! **There is no static configuration to fall back to.** A machine's address
-//! belongs to the network it is plugged into, and both networks this program
-//! has ever run on — QEMU's user-mode backend and the bench's router — serve
-//! DHCP.
-//!
 //! What the lease decides is the whole of the interface: the address and its
 //! prefix, the default route, and the resolvers the DNS socket queries. All
 //! three are written together on every lease and cleared together when one is
@@ -26,10 +21,8 @@ use smoltcp::wire::{
 
 /// **The resolver holds every server a lease can carry.**
 /// `dns::Socket::update_servers` truncates to `DNS_MAX_SERVER_COUNT` without
-/// saying so, and smoltcp's default for it is one — so a lease offering three
-/// would leave this machine's own record naming two resolvers it does not have.
-/// The count is raised in `userland/.cargo/config.toml`, and this is what makes
-/// a build that lowers it again fail to compile.
+/// saying so and smoltcp's default is one, so this crate asks for
+/// `dns-max-server-count-3`; a build that drops it does not compile.
 const _: () = assert!(DNS_MAX_SERVER_COUNT >= DHCP_MAX_DNS_SERVER_COUNT);
 
 /// RFC 2132 §3.14.
@@ -45,12 +38,10 @@ static OUTGOING: [DhcpOption<'static>; 1] =
 
 /// How long this machine waits for its first lease before saying it has none.
 ///
-/// It bounds the *report*, never the client: the socket goes on retrying for
-/// the life of the boot, and a lease that lands after this is applied like any
-/// other. What the bound buys is a line in the log on a machine whose network
-/// never answers, instead of a boot that is silent about the one thing wrong
-/// with it.
-const LEASE_BOUND: Duration = Duration::from_secs(20);
+/// It bounds the *report*, never the client: the socket retries for the life of
+/// the boot and a lease that lands later is applied like any other. What it buys
+/// is a line in the log on a machine whose network never answers.
+const LEASE_BOUND: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS);
 
 /// The DHCP client socket this machine runs, asking for a lease under
 /// [`HOSTNAME`].
@@ -60,11 +51,9 @@ pub fn socket() -> dhcpv4::Socket<'static> {
     socket
 }
 
-/// What the client decided, owned.
-///
-/// **Taken out of the socket before anything is applied**, because the resolver
-/// this lease writes lives in the same `SocketSet` as the client: an event
-/// still borrowing the client is an event nothing can be done about.
+/// What the client decided, owned: the resolver this lease writes lives in the
+/// same `SocketSet` as the client, so an event still borrowing the client is an
+/// event nothing can be done about.
 pub enum Change {
     Leased { address: Ipv4Cidr, router: Option<Ipv4Address>, server: Ipv4Address, dns: Vec<Ipv4Address> },
     Lost,
@@ -109,36 +98,37 @@ impl Dhcp {
         iface: &mut Interface,
         resolver: &mut dns::Socket,
     ) -> bool {
-        match change {
-            Some(Change::Leased { address, router, server, dns }) => {
-                self.write(Some((address, router)), &dns, iface, resolver);
-                // **One record carrying every field the lease decided.** A boot
-                // read off a stick or a stream has this line and nothing else
-                // to say what this machine's network was.
-                crate::say!(
-                    "netd: DHCP: lease {}/{} from {server}, gateway {}, dns [{}], {} ms after \
-                     netd came up",
-                    address.address(),
-                    address.prefix_len(),
-                    match router {
-                        Some(router) => router.to_string(),
-                        None => "none".to_string(),
-                    },
-                    dns.iter().map(ToString::to_string).collect::<Vec<_>>().join(" "),
-                    self.began.elapsed().as_millis(),
-                );
-                self.leased = true;
-            }
-            Some(Change::Lost) => {
+        if let Some(change) = change {
+            let (lease, dns) = match change {
+                Change::Leased { address, router, server, dns } => {
+                    // **One record carrying every field the lease decided.** A
+                    // boot read off a stick or a stream has this line and
+                    // nothing else to say what this machine's network was.
+                    crate::say!(
+                        "netd: DHCP: lease {}/{} from {server}, gateway {}, dns [{}], {} ms after \
+                         netd came up",
+                        address.address(),
+                        address.prefix_len(),
+                        match router {
+                            Some(router) => router.to_string(),
+                            None => "none".to_string(),
+                        },
+                        dns.iter().map(ToString::to_string).collect::<Vec<_>>().join(" "),
+                        self.began.elapsed().as_millis(),
+                    );
+                    (Some((address, router)), dns)
+                }
                 // Only worth a line where there was something to lose: the
                 // client reports this on its way to a first lease too.
-                if self.leased {
-                    crate::say!("netd: DHCP: the lease is gone; this machine has no address");
+                Change::Lost => {
+                    if self.leased {
+                        crate::say!("netd: DHCP: the lease is gone; this machine has no address");
+                    }
+                    (None, Vec::new())
                 }
-                self.write(None, &[], iface, resolver);
-                self.leased = false;
-            }
-            None => {}
+            };
+            self.leased = lease.is_some();
+            self.write(lease, &dns, iface, resolver);
         }
         if self.settled {
             return false;
@@ -161,12 +151,9 @@ impl Dhcp {
     }
 
     /// The address, the default route and the resolvers, written together;
-    /// `None` writes the absence of all three.
-    ///
-    /// **One writer for both**, so the path that drops a lease is the path that
-    /// takes one: a clearing function of its own would be reached only by a
-    /// network that took an address away, which nothing in this tree can
-    /// arrange.
+    /// `None` writes the absence of all three. **One writer, reached by every
+    /// change**, so a route left standing over an address that is gone cannot
+    /// be arranged without breaking the path every boot takes to its lease.
     fn write(
         &self,
         lease: Option<(Ipv4Cidr, Option<Ipv4Address>)>,
