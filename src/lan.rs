@@ -323,10 +323,8 @@ mod tests {
         for tail in source.split("#[repr(u32)]").skip(1) {
             let open = tail.split_once('{').ok_or("a `#[repr(u32)]` item with no body")?.1;
             let body = open.split_once('}').ok_or("a `#[repr(u32)]` item never closed")?.0;
-            for line in body.lines().map(str::trim) {
-                if line.is_empty() || line.starts_with(['/', '#']) {
-                    continue;
-                }
+            let lines = body.lines().map(str::trim);
+            for line in lines.filter(|l| !l.is_empty() && !l.starts_with(['/', '#'])) {
                 let refused = || format!("{line:?} is no discriminant this scan reads");
                 words.push(variant(line).ok_or_else(refused)?);
             }
