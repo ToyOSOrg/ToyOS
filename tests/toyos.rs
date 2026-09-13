@@ -13803,7 +13803,7 @@ fn run_machine_test(
             let runs: Vec<(u64, u64)> = log
                 .text()
                 .lines()
-                .filter_map(|line| line.trim().strip_prefix("pcidev:   0x"))
+                .filter_map(|line| line.split_once("pcidev:   0x").map(|(_, rest)| rest))
                 .filter_map(|rest| {
                     let (start, rest) = rest.split_once("..0x")?;
                     let end = rest.split_whitespace().next()?;
@@ -13823,7 +13823,7 @@ fn run_machine_test(
                 .text()
                 .lines()
                 .map(str::trim)
-                .filter(|l| l.starts_with("pcidev: PCI 00:03.0 BAR") && l.contains(" placed at "))
+                .filter(|l| l.contains("pcidev: PCI 00:03.0 BAR") && l.contains(" placed at "))
                 .collect();
             let [record] = placed[..] else {
                 return Err(format!(
