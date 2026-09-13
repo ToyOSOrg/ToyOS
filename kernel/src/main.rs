@@ -424,7 +424,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // Before any driver `init`: this sizes every BAR on the machine, and the
     // spec's probe takes memory decode off the function it is sizing for the
     // length of it. Nothing has bound yet, so nothing is mid-transfer.
-    pcidev::publish(&pci_devices, maps);
+    pcidev::publish(&pci_devices, maps, kernel_args.root_bridge_windows());
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
         drivers::virtio::cap_selftest();

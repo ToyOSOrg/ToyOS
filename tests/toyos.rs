@@ -13736,8 +13736,12 @@ fn run_machine_test(
             log.must_say("init: test-runner: pci:1af4:1041 is already claimed")?;
             // netd is the one that got it, not merely the one that ran.
             log.must_say("netd: ready, at most ")?;
+            aperture_account(&log)?;
             log.must_be_clean()?;
-            eprintln!("  [netcase] one PCI function, two claimants, one holder");
+            eprintln!(
+                "  [netcase] one PCI function, two claimants, one holder; and every \
+                 assigned BAR inside the aperture firmware named"
+            );
             Ok(())
         }
         "netd_listener_forgery" => {
@@ -15792,6 +15796,79 @@ struct XhciLayout {
     scratchpad: usize,
     blocks: usize,
     stride: usize,
+}
+
+/// The kernel's account of the machine's aperture, held against addresses this
+/// harness read off the same boot without it: the `bars=` of the ECAM walk, and
+/// the windows `publish` said it cut.
+///
+/// Asking firmware where its root bridges decode, decoding what it answers and
+/// carrying the answer across `KernelArgs` all fail into the one missing record.
+fn aperture_account(log: &serial::Serial) -> Result<(), String> {
+    fn hex(s: &str) -> Result<u64, String> {
+        u64::from_str_radix(s.trim().trim_start_matches("0x"), 16)
+            .map_err(|e| format!("{s:?} is not an address: {e}"))
+    }
+
+    let named = log.must_say("pcidev: firmware root bridge windows: ")?;
+    let windows = named
+        .rsplit_once("windows: ")
+        .ok_or_else(|| format!("unparseable aperture record: {named:?}"))?
+        .1
+        .split(", ")
+        .map(|w| {
+            let (base, end) = w
+                .trim()
+                .strip_prefix("mem ")
+                .and_then(|r| r.split_once(".."))
+                .ok_or_else(|| format!("unparseable window {w:?} on {named:?}"))?;
+            Ok((hex(base)?, hex(end)?))
+        })
+        .collect::<Result<Vec<(u64, u64)>, String>>()?;
+
+    // Every memory BAR firmware itself assigned, off the enumeration rather
+    // than off the record being judged. A BAR outside every named window is a
+    // fact about the machine and the kernel has to name it — one line each,
+    // and none for a machine where there are none.
+    let outside: Vec<String> = log
+        .text()
+        .lines()
+        .filter_map(|l| Some((l, l.split("bars=[").nth(1)?.split_once(']')?.0)))
+        .flat_map(|(l, bars)| bars.split_whitespace().map(move |b| (l, b)))
+        .filter_map(|(l, bar)| Some((l, hex(bar.split_once('=')?.1).ok()?)))
+        .filter(|(_, at)| !windows.iter().any(|(base, end)| at >= base && at < end))
+        .map(|(l, at)| format!("{at:#x} on {}", l.trim()))
+        .collect();
+    let said: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| l.contains("is inside no window firmware named, so its bridge does not forward"))
+        .collect();
+    if said.len() != outside.len() {
+        return Err(format!(
+            "the enumeration puts {} assigned memory BAR(s) outside {named:?} and the kernel \
+             named {}:\nthe harness: {outside:#?}\nthe kernel: {said:#?}",
+            outside.len(),
+            said.len(),
+        ));
+    }
+
+    // And the two windows `publish` cut are accounted for by the addresses of
+    // the line that cut them, so an account of some other span is not one this
+    // takes for theirs.
+    let cut = log.must_say("functions; a 32-bit window comes from ")?;
+    let (narrow, wide) = cut
+        .rsplit_once("comes from ")
+        .and_then(|(_, r)| r.split_once(", a 64-bit one from "))
+        .ok_or_else(|| format!("unparseable window record: {cut:?}"))?;
+    for (width, span) in [("32-bit", narrow), ("64-bit", wide)] {
+        // A machine with no window of that width has no address to account for.
+        if span.trim() == "0x0..0x0" {
+            continue;
+        }
+        log.must_say(&format!("pcidev: the {width} window {} is inside ", span.trim()))?;
+    }
+    Ok(())
 }
 
 /// One PCI function as both readers name it: bus, device, function, vendor,
