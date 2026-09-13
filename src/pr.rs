@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::buildlock;
+use crate::flags;
 
 /// The trailer that declares a sysroot change which genuinely cannot be landed
 /// on its own — an ABI item the branch renames or removes, whose old form the
@@ -52,9 +53,6 @@ const ABI_INSEPARABLE: &str = "Abi-Inseparable:";
 /// The trailer read as git parses trailers, not as text anywhere in a message.
 const ABI_TRAILER_FORMAT: &str = "trailers:key=Abi-Inseparable";
 
-/// The flag that says the caller will re-run the gates on the merged shape.
-pub(crate) const ACCEPTS_MERGE: &str = "--gates-after-merge";
-
 /// What `--pr` says last, and exits non-zero on, when it merged `origin/main`
 /// in: every gate the agent ran before this ran on a tree that no longer
 /// exists. The push succeeded — the exit is the re-run owed, and a
@@ -67,7 +65,7 @@ const MERGED_SHAPE: &str = "[pr] pushed; origin/main was merged in, so this exit
 /// Whether this run owes a re-run: it merged, and nothing on the command line
 /// says the caller will gate the shape the merge made.
 fn owes_a_rerun(merged: bool, args: &[String]) -> bool {
-    merged && !args.iter().any(|a| a == ACCEPTS_MERGE)
+    merged && !flags::CARGO_RUN.present(args, &flags::GATES_AFTER_MERGE)
 }
 
 pub fn dispatch_pr(root: &Path, args: &[String]) {
@@ -97,12 +95,7 @@ pub fn dispatch_sync(root: &Path) {
 /// `--base <ref>` exists because CI has no local `main`: a pull-request
 /// checkout of the head branch knows `origin/main` and nothing else.
 pub fn dispatch_abi_check(root: &Path, args: &[String]) {
-    let base = args
-        .iter()
-        .position(|a| a == "--base")
-        .map_or("origin/main", |pos| {
-            args.get(pos + 1).map_or("origin/main", String::as_str)
-        });
+    let base = flags::CARGO_RUN.value(args, &flags::BASE).unwrap_or("origin/main");
     report(abi_lands_alone(root, base).map(|()| {
         format!("[abi] this branch's commits against {base} do not mix the shared sysroot's \
                  sources with work that depends on them.")
@@ -935,9 +928,10 @@ pub(crate) mod tests {
     #[test]
     fn a_pr_that_merged_says_the_gates_ran_on_another_shape() {
         assert!(MERGED_SHAPE.contains("re-run cargo test --lib, --clippy and --build-only"));
-        assert!(MERGED_SHAPE.contains(ACCEPTS_MERGE));
+        assert!(MERGED_SHAPE.contains(flags::GATES_AFTER_MERGE.name));
         assert!(owes_a_rerun(true, &["--pr".to_string()]));
-        assert!(!owes_a_rerun(true, &["--pr".to_string(), ACCEPTS_MERGE.to_string()]));
+        let accepts = flags::GATES_AFTER_MERGE.name.to_string();
+        assert!(!owes_a_rerun(true, &["--pr".to_string(), accepts]));
         assert!(!owes_a_rerun(false, &["--pr".to_string()]));
 
         let (_origin, wt) = repo("merged-notice");

@@ -1,17 +1,16 @@
-//! The flag table a command line is checked against, and the `cargo run --`
-//! vocabulary itself; `src/testargs.rs` declares the harness's argv against the
-//! same [`Flag`].
+//! The vocabulary of `cargo run --`, and the one walk every command line in
+//! this crate is read with; `src/testargs.rs` declares the harness's argv
+//! against the same [`Flag`].
 //!
 //! [`check`] runs before `main` builds, locks or launches anything, and an
 //! argument that is neither a declared flag nor a declared flag's value is
-//! refused by name — so a typo of any shape boots no guest.
+//! refused by name. Every reader takes the [`Flag`] itself and not its
+//! spelling, so a flag no declaration carries cannot be read off a command line
+//! at all, and one deleted from a declaration stops compiling at every site
+//! that read it.
 
-use crate::durations::TIER_BASE_FLAG;
-use crate::pr::ACCEPTS_MERGE;
-
-/// One flag a command line accepts: its name, and what comes after it.
-pub(crate) struct Flag {
-    pub(crate) name: &'static str,
+pub struct Flag {
+    pub name: &'static str,
     pub(crate) value: Value,
 }
 
@@ -21,59 +20,73 @@ pub(crate) enum Value {
     /// Nothing; the next word is the next argument.
     None,
     /// The next word, whatever it looks like: `--kernel-param --help` arms the
-    /// actuator named `--help`. A flag left without one is refused where its
-    /// value is read, by name.
+    /// actuator named `--help`. A line that ends without one is refused.
     Next,
+    /// The next word unless that word is itself a flag: `--known-red` alone
+    /// answers about every row, and `--known-red <test>` about one.
+    Optional,
     /// Every word after it — the flag names a subcommand that owns the rest of
     /// the line, as `--worktree add <path>` does.
     Rest,
 }
 
-pub(crate) const fn flag(name: &'static str, value: Value) -> Flag {
-    Flag { name, value }
-}
+/// One command line's whole vocabulary, and the only way to read one.
+pub struct Vocabulary(pub(crate) &'static [&'static Flag]);
 
-/// Every flag `cargo run --` accepts; `main.rs` and `build.rs`'s `plan_for`
-/// read them out of the same argument vector.
-const FLAGS: &[Flag] = &[
-    flag("--help", Value::None),
-    flag("--land", Value::None),
-    flag("--pr", Value::None),
-    flag(ACCEPTS_MERGE, Value::None),
-    flag("--sync", Value::None),
-    flag("--abi-split-check", Value::None),
-    flag("--sdk-version-check", Value::None),
-    flag("--base", Value::Next),
-    flag("--sdk-versions", Value::None),
-    flag("--merge-durations", Value::Next),
-    flag(TIER_BASE_FLAG, Value::Next),
-    flag("--clippy", Value::None),
-    flag("--known-red", Value::Next),
-    flag("--merge-health", Value::None),
-    flag("--since", Value::Next),
-    flag("--days", Value::Next),
-    flag("--abi-callers", Value::Next),
-    flag("--debug", Value::None),
-    flag("--build-only", Value::None),
-    flag("--dump-audio", Value::None),
-    flag("--rebuild-toolchain", Value::None),
-    flag("--claim-sysroot", Value::None),
-    flag("--host-builds", Value::Next),
-    flag("--smp", Value::Next),
-    flag("--gop", Value::None),
-    flag("--metal-sim", Value::None),
-    flag("--mute", Value::None),
-    flag("--kernel-param", Value::Next),
-    flag("--kernel-feature", Value::Next),
-    flag("--diag-boot", Value::None),
-    flag("--console-boot", Value::None),
-    flag("--boot-config", Value::Next),
-    flag("--regen-font", Value::None),
-    flag("--regen-wallpaper", Value::None),
-    flag("--regen-soundfont", Value::Next),
-    flag("--worktree", Value::Rest),
-    flag("--check-forks", Value::None),
-];
+/// The declaration: one line per flag, expanding to the constant every reader
+/// names it by and to the table [`check`] holds a command line against, so the
+/// two cannot disagree.
+macro_rules! declare_flags {
+    ($tvis:vis $table:ident = { $($(#[$about:meta])* $vis:vis $konst:ident = $name:literal, $value:ident;)* }) => {
+        $($(#[$about])* $vis const $konst: $crate::flags::Flag = $crate::flags::Flag {
+            name: $name,
+            value: $crate::flags::Value::$value,
+        };)*
+        $tvis const $table: $crate::flags::Vocabulary =
+            $crate::flags::Vocabulary(&[$(&$konst),*]);
+    };
+}
+pub(crate) use declare_flags;
+
+declare_flags!(pub CARGO_RUN = {
+    pub HELP = "--help", None;
+    pub LAND = "--land", None;
+    pub PR = "--pr", None;
+    pub GATES_AFTER_MERGE = "--gates-after-merge", None;
+    pub SYNC = "--sync", None;
+    pub ABI_SPLIT_CHECK = "--abi-split-check", None;
+    pub SDK_VERSION_CHECK = "--sdk-version-check", None;
+    pub BASE = "--base", Next;
+    pub SDK_VERSIONS = "--sdk-versions", None;
+    pub MERGE_DURATIONS = "--merge-durations", Next;
+    pub TIER_BASE = "--tier-base", Next;
+    pub CLIPPY = "--clippy", None;
+    pub KNOWN_RED = "--known-red", Optional;
+    pub MERGE_HEALTH = "--merge-health", None;
+    pub SINCE = "--since", Next;
+    pub DAYS = "--days", Next;
+    pub ABI_CALLERS = "--abi-callers", Next;
+    pub DEBUG = "--debug", None;
+    pub BUILD_ONLY = "--build-only", None;
+    pub DUMP_AUDIO = "--dump-audio", None;
+    pub REBUILD_TOOLCHAIN = "--rebuild-toolchain", None;
+    pub CLAIM_SYSROOT = "--claim-sysroot", None;
+    pub HOST_BUILDS = "--host-builds", Next;
+    pub SMP = "--smp", Next;
+    pub GOP = "--gop", None;
+    pub METAL_SIM = "--metal-sim", None;
+    pub MUTE = "--mute", None;
+    pub KERNEL_PARAM = "--kernel-param", Next;
+    pub KERNEL_FEATURE = "--kernel-feature", Next;
+    pub DIAG_BOOT = "--diag-boot", None;
+    pub CONSOLE_BOOT = "--console-boot", None;
+    pub BOOT_CONFIG = "--boot-config", Next;
+    pub REGEN_FONT = "--regen-font", None;
+    pub REGEN_WALLPAPER = "--regen-wallpaper", None;
+    pub REGEN_SOUNDFONT = "--regen-soundfont", Next;
+    pub WORKTREE = "--worktree", Rest;
+    pub CHECK_FORKS = "--check-forks", None;
+});
 
 /// What became of a command line, checked before anything else in `main` runs.
 pub enum Outcome {
@@ -86,57 +99,187 @@ pub enum Outcome {
 }
 
 /// Pure over `args` (as `std::env::args().collect()` produces them, `argv[0]`
-/// included) and the declaration, so the refusal is a value a test can assert
-/// on rather than something only a human running the binary ever sees.
-///
-/// The list is read positionally, flag then value, because a declared flag's
-/// value is that flag's and is never a flag itself.
+/// included) and the declaration.
 pub fn check(args: &[String]) -> Outcome {
-    let mut rest = args.iter().skip(1);
-    while let Some(arg) = rest.next() {
-        if arg == "--help" {
-            return Outcome::Help(accepted());
+    let line = CARGO_RUN.walk(args.get(1..).unwrap_or_default());
+    if let Some(word) = line.unknown {
+        return Outcome::Refuse(unknown(word));
+    }
+    for seen in &line.seen {
+        if let Given::Inline(_) = seen.given {
+            return Outcome::Refuse(inline(seen.word, seen.flag));
         }
-        let Some(flag) = FLAGS.iter().find(|f| f.name == arg) else {
-            return Outcome::Refuse(refusal(arg));
-        };
-        match flag.value {
-            Value::None => {}
-            Value::Next => {
-                rest.next();
-            }
-            Value::Rest => return Outcome::Proceed,
+        if matches!(seen.given, Given::Nothing) && seen.flag.value == Value::Next {
+            return Outcome::Refuse(format!(
+                "Error: {0} was given no value: {0} <value>.",
+                seen.flag.name
+            ));
         }
+    }
+    if let Some(word) = line.positionals.first() {
+        return Outcome::Refuse(unknown(word));
+    }
+    if line.seen.iter().any(|seen| seen.flag.name == HELP.name) {
+        return Outcome::Help(format!("cargo run -- accepts:\n{}", CARGO_RUN.usage()));
     }
     Outcome::Proceed
 }
 
-fn refusal(arg: &str) -> String {
-    // Every value here is a separate word, so an inline spelling would be
-    // dropped in silence by the dispatch below rather than read.
-    if let Some((name, _)) = arg.split_once('=') {
-        if FLAGS.iter().any(|f| f.name == name) {
-            return format!("Error: {arg:?}: {name} takes its value as the next word, {name} <value>.");
+fn unknown(word: &str) -> String {
+    format!("Error: unknown argument {word:?}.\ncargo run -- accepts:\n{}", CARGO_RUN.usage())
+}
+
+/// A value written onto the flag would be dropped in silence by a reader that
+/// takes the next word, so each kind of flag is refused with the shape it does
+/// accept.
+fn inline(word: &str, flag: &Flag) -> String {
+    let shape = match flag.value {
+        Value::None => format!("{} takes no value", flag.name),
+        Value::Next | Value::Optional => {
+            format!("{0} takes its value as the next word, {0} <value>", flag.name)
+        }
+        Value::Rest => {
+            format!("{0} takes its subcommand as the next word, {0} <subcommand>", flag.name)
+        }
+    };
+    format!("Error: {word:?}: {shape}.")
+}
+
+/// What a command line wrote after a flag.
+#[derive(Clone, Copy)]
+pub(crate) enum Given<'a> {
+    Nothing,
+    /// The next word: `--smp 4`.
+    Next(&'a str),
+    /// Written onto the flag itself: `--smp=4`.
+    Inline(&'a str),
+    /// Every word after a [`Value::Rest`] flag.
+    Rest(&'a [String]),
+}
+
+impl<'a> Given<'a> {
+    fn value(self) -> Option<&'a str> {
+        match self {
+            Given::Next(value) | Given::Inline(value) => Some(value),
+            Given::Nothing | Given::Rest(_) => None,
         }
     }
-    format!("Error: unknown argument {arg:?}.\n{}", accepted())
 }
 
-fn accepted() -> String {
-    format!("cargo run -- accepts:\n{}", usage(FLAGS))
+pub(crate) struct Seen<'a> {
+    pub(crate) flag: &'static Flag,
+    /// The word as it was typed, which is what a refusal names.
+    pub(crate) word: &'a str,
+    pub(crate) given: Given<'a>,
 }
 
-/// A declared vocabulary as a list to print, one flag a line.
-pub(crate) fn usage(flags: &[Flag]) -> String {
-    flags
-        .iter()
-        .map(|f| match f.value {
-            Value::None => format!("  {}", f.name),
-            Value::Next => format!("  {} <value>", f.name),
-            Value::Rest => format!("  {} <subcommand>", f.name),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// One walk of a command line against one vocabulary.
+pub(crate) struct Walk<'a> {
+    pub(crate) seen: Vec<Seen<'a>>,
+    /// Words that are nobody's value.
+    pub(crate) positionals: Vec<&'a str>,
+    /// The first word the declaration does not account for; the walk stops
+    /// there, because what follows it belongs to a flag nobody declared.
+    pub(crate) unknown: Option<&'a str>,
+}
+
+impl Vocabulary {
+    /// Flag then value, because a declared flag's value is that flag's and is
+    /// never a flag itself.
+    pub(crate) fn walk<'a>(&self, args: &'a [String]) -> Walk<'a> {
+        let (mut seen, mut positionals) = (Vec::new(), Vec::new());
+        let mut at = 0;
+        while at < args.len() {
+            let word = args[at].as_str();
+            at += 1;
+            let (name, inline) = match word.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (word, None),
+            };
+            let Some(flag) = self.0.iter().copied().find(|f| f.name == name) else {
+                if word.starts_with('-') {
+                    return Walk { seen, positionals, unknown: Some(word) };
+                }
+                positionals.push(word);
+                continue;
+            };
+            let given = match (inline, flag.value) {
+                (Some(value), _) => Given::Inline(value),
+                (None, Value::None) => Given::Nothing,
+                (None, Value::Next) => take(args, &mut at),
+                (None, Value::Optional) => match args.get(at) {
+                    Some(next) if next.starts_with('-') => Given::Nothing,
+                    _ => take(args, &mut at),
+                },
+                (None, Value::Rest) => {
+                    let rest = &args[at..];
+                    at = args.len();
+                    Given::Rest(rest)
+                }
+            };
+            seen.push(Seen { flag, word, given });
+        }
+        Walk { seen, positionals, unknown: None }
+    }
+
+    /// Whether the line names `want`.
+    pub fn present(&self, args: &[String], want: &Flag) -> bool {
+        self.walk(args).seen.iter().any(|seen| seen.flag.name == want.name)
+    }
+
+    /// Every value a repeatable `<flag> <value>` carried, in the order given.
+    pub fn values<'a>(&self, args: &'a [String], want: &Flag) -> Vec<&'a str> {
+        self.walk(args)
+            .seen
+            .iter()
+            .filter(|seen| seen.flag.name == want.name)
+            .filter_map(|seen| seen.given.value())
+            .collect()
+    }
+
+    /// The one value `want` carried; a second use is refused rather than
+    /// resolved.
+    pub fn value<'a>(&self, args: &'a [String], want: &Flag) -> Option<&'a str> {
+        let found = self.values(args, want);
+        assert!(found.len() < 2, "{} takes one value; this asks for {found:?}", want.name);
+        found.first().copied()
+    }
+
+    /// The words a [`Value::Rest`] flag owns.
+    pub fn rest<'a>(&self, args: &'a [String], want: &Flag) -> &'a [String] {
+        self.walk(args)
+            .seen
+            .iter()
+            .find_map(|seen| match seen.given {
+                Given::Rest(rest) if seen.flag.name == want.name => Some(rest),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// The declaration as a list to print, one flag a line.
+    pub(crate) fn usage(&self) -> String {
+        self.0
+            .iter()
+            .map(|f| match f.value {
+                Value::None => format!("  {}", f.name),
+                Value::Next => format!("  {} <value>", f.name),
+                Value::Optional => format!("  {} [<value>]", f.name),
+                Value::Rest => format!("  {} <subcommand>", f.name),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn take<'a>(args: &'a [String], at: &mut usize) -> Given<'a> {
+    match args.get(*at) {
+        Some(value) => {
+            *at += 1;
+            Given::Next(value)
+        }
+        None => Given::Nothing,
+    }
 }
 
 #[cfg(test)]
@@ -149,14 +292,21 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 
-    fn checked(words: &[&str]) -> Outcome {
-        let args: Vec<String> =
-            std::iter::once("toyos-build").chain(words.iter().copied()).map(String::from).collect();
-        check(&args)
+    fn argv(words: &[&str]) -> Vec<String> {
+        std::iter::once("toyos-build").chain(words.iter().copied()).map(String::from).collect()
     }
 
-    /// A mistyped flag of any shape, and a word that is nobody's value: each
-    /// would otherwise have built everything and put a guest on the screen.
+    fn checked(words: &[&str]) -> Outcome {
+        check(&argv(words))
+    }
+
+    fn refusal(words: &[&str]) -> String {
+        match checked(words) {
+            Outcome::Refuse(message) => message,
+            _ => panic!("{words:?} must be refused"),
+        }
+    }
+
     #[test]
     fn an_argument_the_declaration_does_not_expect_is_refused_by_name() {
         for words in [
@@ -164,31 +314,58 @@ mod tests {
             vec!["-build-only"],
             vec!["-h"],
             vec!["buildonly"],
-            vec!["--smp=4"],
             vec!["--build-only", "target/bootable.img"],
         ] {
             let bad = words.last().expect("a command line to refuse");
-            match checked(&words) {
-                Outcome::Refuse(message) => {
-                    assert!(message.contains(bad), "{words:?}: {message}");
-                }
-                _ => panic!("{words:?} must be refused"),
-            }
+            let message = refusal(&words);
+            assert!(message.contains(bad), "{words:?}: {message}");
         }
     }
 
-    /// The value of a flag that takes one is that flag's, whatever it spells.
+    /// A value written onto the flag is read by nothing, so the refusal says
+    /// what that flag does take.
+    #[test]
+    fn an_inline_value_is_refused_with_the_shape_the_flag_accepts() {
+        let debug = refusal(&["--debug=1"]);
+        assert!(debug.contains("--debug takes no value"), "{debug}");
+        let smp = refusal(&["--smp=4"]);
+        assert!(smp.contains("--smp takes its value as the next word, --smp <value>"), "{smp}");
+        let worktree = refusal(&["--worktree=add"]);
+        assert!(worktree.contains("--worktree <subcommand>"), "{worktree}");
+    }
+
+    /// A missing value reached the dispatch as a panic, after the prerequisites
+    /// and a `set_current_dir`.
+    #[test]
+    fn a_flag_left_without_its_value_is_refused() {
+        for words in [vec!["--smp"], vec!["--boot-config"], vec!["--kernel-param"]] {
+            let message = refusal(&words);
+            assert!(message.contains(words[0]), "{words:?}: {message}");
+        }
+        assert!(matches!(checked(&["--known-red"]), Outcome::Proceed), "--known-red answers alone");
+        assert!(matches!(checked(&["--known-red", "audio_tone"]), Outcome::Proceed));
+        assert!(refusal(&["--known-red", "--frobnicate"]).contains("--frobnicate"));
+    }
+
+    /// The value of a flag that takes one is that flag's, whatever it spells —
+    /// for the checker and for every reader of the same line.
     #[test]
     fn a_declared_flags_value_is_never_read_as_a_flag() {
         for words in [
             vec!["--kernel-param", "--help"],
             vec!["--boot-config", "--help"],
-            vec!["--known-red", "--frobnicate"],
             vec!["--worktree", "add", "--help"],
             vec!["--boot-config", "diag", "--build-only"],
         ] {
             assert!(matches!(checked(&words), Outcome::Proceed), "{words:?} must proceed");
         }
+        let line = argv(&["--kernel-param", "--help"]);
+        assert_eq!(CARGO_RUN.values(&line, &KERNEL_PARAM), ["--help"]);
+        assert!(!CARGO_RUN.present(&line, &HELP), "the actuator's name is not the flag");
+        let worktree = argv(&["--worktree", "add", "/tmp/wt"]);
+        assert_eq!(CARGO_RUN.rest(&worktree, &WORKTREE), ["add", "/tmp/wt"]);
+        assert_eq!(CARGO_RUN.value(&argv(&["--boot-config", "diag"]), &BOOT_CONFIG), Some("diag"));
+        assert_eq!(CARGO_RUN.value(&argv(&["--build-only"]), &BOOT_CONFIG), None);
     }
 
     #[test]
@@ -196,71 +373,11 @@ mod tests {
         let Outcome::Help(message) = checked(&["--help"]) else {
             panic!("--help must be accepted");
         };
-        for flag in FLAGS {
+        for flag in CARGO_RUN.0 {
             assert!(message.contains(flag.name), "{} is missing from --help: {message}", flag.name);
         }
     }
 
-    /// One command line per declared flag, held equal to [`FLAGS`] in both
-    /// directions: a flag deleted from the declaration reds here instead of
-    /// making a working command exit 2, and one added reds until it is
-    /// exercised.
-    const EXAMPLES: &[&[&str]] = &[
-        &["--help"],
-        &["--land"],
-        &["--pr"],
-        &["--gates-after-merge"],
-        &["--sync"],
-        &["--abi-split-check"],
-        &["--sdk-version-check"],
-        &["--base", "origin/main"],
-        &["--sdk-versions"],
-        &["--merge-durations", "/tmp/durations"],
-        &["--tier-base", "e3b0c442"],
-        &["--clippy"],
-        &["--known-red", "audio_tone"],
-        &["--merge-health"],
-        &["--since", "2026-09-01T00:00:00Z"],
-        &["--days", "7"],
-        &["--abi-callers", "stack_info"],
-        &["--debug"],
-        &["--build-only"],
-        &["--dump-audio"],
-        &["--rebuild-toolchain"],
-        &["--claim-sysroot"],
-        &["--host-builds", "0"],
-        &["--smp", "1"],
-        &["--gop"],
-        &["--metal-sim"],
-        &["--mute"],
-        &["--kernel-param", "control-regs-bench"],
-        &["--kernel-feature", "boot-actuators"],
-        &["--diag-boot"],
-        &["--console-boot"],
-        &["--boot-config", "diag"],
-        &["--regen-font"],
-        &["--regen-wallpaper"],
-        &["--regen-soundfont", "bank.sf2"],
-        &["--worktree", "add", "/tmp/wt"],
-        &["--check-forks"],
-    ];
-
-    #[test]
-    fn every_declared_flag_is_exercised_by_a_command_line() {
-        let declared: BTreeSet<&str> = FLAGS.iter().map(|f| f.name).collect();
-        let exercised: BTreeSet<&str> =
-            EXAMPLES.iter().map(|words| *words.first().expect("a flag to exercise")).collect();
-        assert_eq!(declared, exercised, "the declaration and the command lines that exercise it");
-        for words in EXAMPLES {
-            assert!(
-                matches!(checked(words), Outcome::Proceed | Outcome::Help(_)),
-                "{words:?} must be accepted"
-            );
-        }
-    }
-
-    /// Every file a `cargo run --` command line is written in and this
-    /// repository runs. Documentation carries no gates here.
     fn scanned_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         files_with(&root.join(".github/workflows"), "yml", &mut files);
@@ -272,9 +389,7 @@ mod tests {
     }
 
     fn files_with(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
-        for entry in
-            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-        {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
             let path = entry.expect("readable dir entry").path();
             if path.is_dir() {
                 files_with(&path, extension, out);
@@ -288,42 +403,16 @@ mod tests {
         std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{}: {e}", file.display()))
     }
 
-    /// A flag this tree's own workflows, sources and scripts pass that [`FLAGS`]
-    /// does not declare would refuse a run nothing is watching.
+    /// A flag this tree's own workflows, sources and scripts pass that the
+    /// declaration lacks would refuse a run nothing is watching.
     #[test]
     fn every_flag_the_tree_passes_to_cargo_run_is_declared() {
-        let declared: BTreeSet<&str> = FLAGS.iter().map(|f| f.name).collect();
+        let declared: BTreeSet<&str> = CARGO_RUN.0.iter().map(|f| f.name).collect();
         for file in scanned_files(&repo_root()) {
             for flag in flags_passed_to_cargo_run(&read(&file)) {
                 assert!(
                     declared.contains(flag.as_str()),
                     "{} passes {flag} to `cargo run --`, and src/flags.rs does not declare it",
-                    file.display()
-                );
-            }
-        }
-    }
-
-    /// A `--` word a source compares an argument against is a flag that source
-    /// consumes, and one the declaration lacks is refused before ever reaching
-    /// it.
-    #[test]
-    fn every_flag_a_source_compares_an_argument_against_is_declared() {
-        let root = repo_root();
-        let build: BTreeSet<&str> = FLAGS.iter().map(|f| f.name).collect();
-        let harness: BTreeSet<&str> =
-            crate::testargs::FLAGS.iter().map(|f| f.name).collect();
-        for file in scanned_files(&root).iter().filter(|f| f.extension().is_some_and(|e| e == "rs"))
-        {
-            // `tests/` and `src/testargs.rs` read the harness's argv, and
-            // `testargs::FLAGS` is that vocabulary.
-            let harness_side =
-                file.starts_with(root.join("tests")) || file.ends_with("testargs.rs");
-            let declared = if harness_side { &harness } else { &build };
-            for flag in compared_flags(&read(file)) {
-                assert!(
-                    declared.contains(flag.as_str()),
-                    "{} reads {flag} off a command line its vocabulary does not declare",
                     file.display()
                 );
             }
@@ -384,44 +473,24 @@ mod tests {
     fn leading_flag(word: &str) -> Option<String> {
         let start = word.find(|c: char| c.is_ascii_alphanumeric() || c == '-')?;
         let rest = &word[start..];
-        let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).unwrap_or(rest.len());
+        let end =
+            rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).unwrap_or(rest.len());
         let token = &rest[..end];
         (token.starts_with("--") && token.len() > 2).then(|| token.to_string())
     }
 
-    /// Every `--` word a source compares an argument against.
-    fn compared_flags(text: &str) -> BTreeSet<String> {
-        let mut found = BTreeSet::new();
-        for (at, needle) in text.match_indices("== \"") {
-            let rest = &text[at + needle.len()..];
-            let Some(end) = rest.find('"') else { continue };
-            let word = &rest[..end];
-            if word.starts_with("--") {
-                found.insert(word.to_string());
-            }
-        }
-        found
-    }
-
-    /// Teeth for the two scans above: without them a walk that quietly found
-    /// nothing would hold the declaration against nothing at all.
     #[test]
     fn the_scan_reads_a_flag_through_a_variable_and_out_of_punctuation() {
         let text = "\
             base_arg=\"--tier-base $TIER_BASE\"\n\
             ARGS=$ARGS --build-only\n\
-            run: cargo run -- --diag-boot $base_arg $ARGS `--clippy`\n\
-            let debug = args.iter().any(|a| a == \"--debug\");\n";
+            run: cargo run -- --diag-boot $base_arg $ARGS `--clippy`\n";
         assert_eq!(
             flags_passed_to_cargo_run(text),
             ["--build-only", "--clippy", "--diag-boot", "--tier-base"]
                 .map(String::from)
                 .into_iter()
                 .collect::<BTreeSet<String>>()
-        );
-        assert_eq!(
-            compared_flags(text),
-            ["--debug"].map(String::from).into_iter().collect::<BTreeSet<String>>()
         );
     }
 }

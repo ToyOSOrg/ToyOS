@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::flags;
 use crate::toolchain;
 
 /// What a worktree's crate target directories reach: 4.1 GiB after
@@ -29,7 +30,7 @@ use crate::toolchain;
 const NEEDED_BYTES: u64 = 25 * 1024 * 1024 * 1024;
 
 pub fn dispatch(root: &Path, args: &[String]) {
-    let mut rest = args.iter().skip_while(|a| *a != "--worktree").skip(1);
+    let mut rest = flags::CARGO_RUN.rest(args, &flags::WORKTREE).iter();
     let verb = rest.next().map(String::as_str);
     let operand = rest.next().cloned();
     match verb {

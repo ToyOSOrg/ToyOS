@@ -17,7 +17,7 @@ use common::{
 };
 use toyos_build::day::Day;
 use toyos_build::bootlog::{self, boot_millis};
-use toyos_build::testargs::Shard;
+use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::tiers::{self, Tier};
 
 struct TestDef {
@@ -18425,72 +18425,45 @@ fn main() {
         }
     };
 
-    let debug_mode = args.iter().any(|a| a == "--debug");
-    let list_mode = args.iter().any(|a| a == "--list");
+    let debug_mode = SUITE.present(&args, &testargs::DEBUG);
+    let list_mode = SUITE.present(&args, &testargs::LIST);
     // The nightly tier, on. A flag and not an env var for `--audio-gate`'s
     // reason: an env var is invisible in the command line and easy to leave set,
     // and the whole point of the split is that a run says what it ran.
-    let nightly = args.iter().any(|a| a == "--nightly");
+    let nightly = SUITE.present(&args, &testargs::NIGHTLY);
     // The metal profile, and where its images and readbacks live. Naming the
     // directory means the machine is not touched — see `common::metal::Mode`.
-    let metal_mode = args.iter().any(|a| a == "--metal");
-    let mut metal_readback: Option<&str> = None;
-    for (i, a) in args.iter().enumerate() {
-        metal_readback = if let Some(v) = a.strip_prefix("--metal-readback=") {
-            Some(v)
-        } else if a == "--metal-readback" {
-            Some(args.get(i + 1).map(String::as_str).unwrap_or_else(|| {
-                panic!("--metal-readback needs a directory, e.g. --metal-readback target/metal")
-            }))
-        } else {
-            continue;
-        };
-    }
-    if args.iter().any(|a| a == "--slow-usb") {
+    let metal_mode = SUITE.present(&args, &testargs::METAL);
+    let metal_readback = SUITE.value(&args, &testargs::METAL_READBACK);
+    if SUITE.present(&args, &testargs::SLOW_USB) {
         SLOW_USB.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let nocapture = args.iter().any(|a| a == "--nocapture" || a == "--show-output");
+    let nocapture =
+        SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
 
     // Thorough tier. A flag rather than an env var or a test name: an env var
     // is invisible in the command line and easy to leave set, and a test name
     // would drag ~17 minutes into every plain `cargo test`.
-    let mut audio_gate: Option<u32> = None;
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--audio-gate=") {
-            v
-        } else if a == "--audio-gate" {
-            args.get(i + 1).map(|s| s.as_str()).unwrap_or_else(|| {
-                panic!("--audio-gate needs an iteration count, e.g. --audio-gate 30")
-            })
-        } else {
-            continue;
-        };
-        let n: u32 = n
-            .parse()
-            .unwrap_or_else(|_| panic!("--audio-gate: {n:?} is not an iteration count"));
-        assert!(n >= 2, "--audio-gate needs at least 2 iterations to compare anything");
-        audio_gate = Some(n);
-    }
+    let audio_gate: Option<u32> = SUITE.value(&args, &testargs::AUDIO_GATE).map(|n| {
+        let iterations: u32 =
+            n.parse().unwrap_or_else(|_| panic!("--audio-gate: {n:?} is not an iteration count"));
+        assert!(iterations >= 2, "--audio-gate needs at least 2 iterations to compare anything");
+        iterations
+    });
 
     // How many guests the parallel phase runs at once. The serial tail and gate
     // A ignore it — that is what they are.
-    let mut width = DEFAULT_WIDTH;
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--jobs=") {
-            v
-        } else if a == "--jobs" || a == "-j" {
-            args.get(i + 1)
-                .map(|s| s.as_str())
-                .unwrap_or_else(|| panic!("--jobs needs a width, e.g. --jobs 4"))
-        } else {
-            continue;
-        };
-        width = n.parse().unwrap_or_else(|_| panic!("--jobs: {n:?} is not a width"));
-        assert!(width >= 1, "--jobs needs at least one worker");
-    }
+    let width = SUITE
+        .value(&args, &testargs::JOBS)
+        .or_else(|| SUITE.value(&args, &testargs::JOBS_SHORT))
+        .map_or(DEFAULT_WIDTH, |n| {
+            let width: usize = n.parse().unwrap_or_else(|_| panic!("--jobs: {n:?} is not a width"));
+            assert!(width >= 1, "--jobs needs at least one worker");
+            width
+        });
 
     // Which slice of the suite this machine runs. Absent is the whole of it.
-    let shard = match toyos_build::testargs::parse_shard(&args) {
+    let shard = match testargs::parse_shard(&args) {
         Ok(shard) => shard,
         Err(refusal) => {
             eprintln!("[toyos] {refusal}");
@@ -18501,35 +18474,16 @@ fn main() {
     // How many guests may be up on the *host* at once, across every worktree.
     // `--jobs` is this run's demand; this is what the machine will supply, and
     // zero turns it off.
-    let mut host_budget = toyos_build::buildlock::HOST_GUESTS;
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--host-slots=") {
-            v
-        } else if a == "--host-slots" {
-            args.get(i + 1).map(|s| s.as_str()).unwrap_or_else(|| {
-                panic!("--host-slots needs a budget, e.g. --host-slots 12 (0 turns it off)")
-            })
-        } else {
-            continue;
-        };
-        host_budget =
-            n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget"));
-    }
+    let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or(
+        toyos_build::buildlock::HOST_GUESTS,
+        |n| n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget")),
+    );
 
     // And how many of this host's *compiles* may run at once, across every
     // worktree. A worker holds a guest slot from the moment it takes a task and
     // spends the first part of it building a kernel variant, so twelve workers
     // are twelve concurrent `cargo build`s and no guest at all.
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--host-builds=") {
-            v
-        } else if a == "--host-builds" {
-            args.get(i + 1).map(|s| s.as_str()).unwrap_or_else(|| {
-                panic!("--host-builds needs a budget, e.g. --host-builds 4 (0 turns it off)")
-            })
-        } else {
-            continue;
-        };
+    if let Some(n) = SUITE.value(&args, &testargs::HOST_BUILDS) {
         toyos_build::buildlock::set_host_builds(
             n.parse().unwrap_or_else(|_| panic!("--host-builds: {n:?} is not a budget")),
         );

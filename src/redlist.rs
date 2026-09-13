@@ -60,6 +60,7 @@
 //! [`Ci`]: Instrument::Ci
 
 use crate::day::Day;
+use crate::flags;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -3728,13 +3729,9 @@ pub const KNOWN_RED: &[Red] = &[
 
 /// `cargo run -- --known-red [<test>]`.
 pub fn dispatch(root: &Path, args: &[String]) {
-    let asked = args
-        .iter()
-        .position(|a| a == "--known-red")
-        .and_then(|at| args.get(at + 1))
-        .filter(|a| !a.starts_with("--"));
+    let asked = flags::CARGO_RUN.value(args, &flags::KNOWN_RED);
     let registry = Registry::read(root);
-    print!("{}", answer(KNOWN_RED, &registry, Day::today(), asked.map(String::as_str)));
+    print!("{}", answer(KNOWN_RED, &registry, Day::today(), asked));
 }
 
 /// The whole answer, as text, so that the shape of it is a value a test can

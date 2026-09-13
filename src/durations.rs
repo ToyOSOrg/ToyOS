@@ -76,6 +76,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::flags;
+
 /// The file name a sharded run leaves its own measurement in.
 const SHARD_PREFIX: &str = "test-durations.shard-";
 
@@ -88,17 +90,6 @@ const SHARD_PREFIX: &str = "test-durations.shard-";
 /// the two spellings together so the wording cannot move out from under the
 /// workflow in silence.
 pub const TIER_DISAGREEMENT: &str = "the merged CI profile and tier declaration disagree";
-
-/// The flag a run measuring one change passes to say what it changed *from*.
-///
-/// A `const` for the same reason [`TIER_DISAGREEMENT`] is one: the value comes
-/// out of `.github/workflows/ci.yml`'s event context — `merge_group.base_sha`
-/// or `pull_request.base.sha` — and `src/ci.rs` holds the spelling in the
-/// workflow against the spelling here. Drop the flag from the workflow and
-/// every run silently becomes the nightly, reding compositions on names nobody
-/// in them touched; misspell it and nothing at all changes, which is the same
-/// failure with no line to read.
-pub const TIER_BASE_FLAG: &str = "--tier-base";
 
 /// Which names this run renders the tier's *price* verdict for.
 ///
@@ -121,10 +112,7 @@ pub enum Enforced {
 impl Enforced {
     /// What this run passed, read from the command line.
     pub fn from_args(root: &Path, args: &[String]) -> Enforced {
-        let Some(pos) = args.iter().position(|a| a == TIER_BASE_FLAG) else {
-            return Enforced::Everything;
-        };
-        match args.get(pos + 1).map(String::as_str) {
+        match flags::CARGO_RUN.value(args, &flags::TIER_BASE) {
             None | Some("") => Enforced::Everything,
             Some(base) => {
                 Enforced::Touched { base: base.to_string(), names: touched_names(root, base) }
@@ -170,12 +158,9 @@ impl Enforced {
 /// level down in a directory per shard; the walk is recursive for that reason
 /// and for no other.
 pub fn dispatch(root: &Path, args: &[String]) {
-    let Some(pos) = args.iter().position(|a| a == "--merge-durations") else {
-        unreachable!("dispatched on the flag being there")
-    };
-    let dir = args.get(pos + 1).unwrap_or_else(|| {
-        panic!("--merge-durations needs the directory the shard files are in")
-    });
+    let dir = flags::CARGO_RUN
+        .value(args, &flags::MERGE_DURATIONS)
+        .unwrap_or_else(|| unreachable!("dispatched on the flag, whose value `check` required"));
     let dir = Path::new(dir);
     let enforced = Enforced::from_args(root, args);
 
@@ -434,13 +419,14 @@ fn git_reading_base(root: &Path, args: &[&str]) -> String {
         .unwrap_or_else(|e| panic!("running git {}: {e}", args.join(" ")));
     assert!(
         out.status.success(),
-        "git {} failed ({}): {}. {TIER_BASE_FLAG} names the commit this change \
+        "git {} failed ({}): {}. {} names the commit this change \
          is measured against, so it must be in this clone — a depth-1 checkout does not have \
          it, and `fetch-depth: 0` is what puts it there. Refusing rather than guessing which \
          names this change touched",
         args.join(" "),
         out.status,
         String::from_utf8_lossy(&out.stderr).trim(),
+        flags::TIER_BASE.name,
     );
     String::from_utf8(out.stdout)
         .unwrap_or_else(|e| panic!("git {} did not answer UTF-8: {e}", args.join(" ")))
@@ -1165,8 +1151,8 @@ mod tests {
             Enforced::from_args(&root(), &args).renders("any_name_at_all")
         };
         assert!(renders(&["--merge-durations", "/tmp/durations"]));
-        assert!(renders(&["--merge-durations", "/tmp/durations", TIER_BASE_FLAG]));
-        assert!(renders(&["--merge-durations", "/tmp/durations", TIER_BASE_FLAG, ""]));
+        assert!(renders(&["--merge-durations", "/tmp/durations", flags::TIER_BASE.name]));
+        assert!(renders(&["--merge-durations", "/tmp/durations", flags::TIER_BASE.name, ""]));
     }
 
     #[test]
@@ -1277,7 +1263,8 @@ mod tests {
         )
         .unwrap();
 
-        let args: Vec<String> = vec!["--merge-durations".into(), "d".into(), TIER_BASE_FLAG.into(), base];
+        let args: Vec<String> =
+            vec!["--merge-durations".into(), "d".into(), flags::TIER_BASE.name.into(), base];
         let enforced = Enforced::from_args(&dir, &args);
         assert!(enforced.renders("retiered"));
         assert!(!enforced.renders("kept"));
@@ -1346,7 +1333,7 @@ mod tests {
         );
 
         let args: Vec<String> =
-            vec!["--merge-durations".into(), "d".into(), TIER_BASE_FLAG.into(), base];
+            vec!["--merge-durations".into(), "d".into(), flags::TIER_BASE.name.into(), base];
         let enforced = Enforced::from_args(&dir, &args);
         assert!(enforced.renders("netd_gone_mid_bind"));
         assert!(!enforced.renders("kept"));
