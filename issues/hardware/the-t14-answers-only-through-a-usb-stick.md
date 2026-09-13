@@ -39,11 +39,7 @@ Constraints a reader would otherwise pay to re-derive:
   `IR-PCI-MSI-0000:00:1f.6` and `msi_irqs/162` reads `mode=msi`.
 - The I219 has a **32-bit BAR** (`bar0=0xbcf00000`) and it has to move: where
   firmware put it, it shares a 2 MiB page with the internal NVMe's
-  `0xbce00000`, and 2 MiB is the only page size this kernel maps. Below 4 GiB
-  there is no address above everything firmware described, so `pcidev` offers
-  that BAR the free runs *between* what the firmware map, this bus's assigned
-  BARs and its bridges' forwarded ranges describe, and the machine's own answer
-  at each address is what settles it.
+  `0xbce00000`, and 2 MiB is the only page size this kernel maps.
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
   ground reddened every netd registration at once. So a re-claim is made safe by

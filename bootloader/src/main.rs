@@ -578,13 +578,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // The last of the firmware questions, and asked here for the same reason
     // the GOP's was asked before this: the protocol dies with boot services.
     //
-    // **Two readers of one array, and the second is the one a placement rests
-    // on.** `Configuration()` answers what each bridge is set to forward today,
-    // which a BAR firmware assigned may lie outside; DXE's Global Coherency
-    // Domain answers what the platform *declared* and what nothing owns, which
-    // is where a BAR may go. Both are memory the root bridges decode, which is
-    // what this array carries, and the kernel needs no way to tell them apart:
-    // it asks whether an address is inside one of them and nothing else.
+    // Both readers answer memory the root bridges decode, which is what this
+    // array carries and the only thing the kernel asks of it.
     let mut root_bridge_windows = [RootBridgeWindow::default(); MAX_ROOT_BRIDGE_WINDOWS];
     let named = rootbridge::windows(&system_table, &mut root_bridge_windows);
     let free = gcd::free_mmio(&system_table, &mut root_bridge_windows[named..]);
