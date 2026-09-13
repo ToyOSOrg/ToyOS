@@ -554,10 +554,19 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // §10.2.2.1: `SLU` is what lets the MAC see the PHY's link at all;
         // `ASDE` must be zero on this family; forcing speed or duplex would
         // override what auto-negotiation resolved; and this driver negotiates
-        // no flow control and strips no VLAN tag.
+        // no flow control and strips no VLAN tag. §3.1.3.10's master disable
+        // goes with them and is not preserved: a part that came out of the
+        // reset still blocking master requests would fetch no descriptor and
+        // write back no frame, and nothing else in this bring-up would say so.
         let held = regs.read(regs::CTRL);
         let wanted = (held
-            & !(ctrl::ASDE | ctrl::ILOS | ctrl::FRCSPD | ctrl::FRCDPLX | ctrl::RFCE | ctrl::TFCE
+            & !(ctrl::GIO_MASTER_DISABLE
+                | ctrl::ASDE
+                | ctrl::ILOS
+                | ctrl::FRCSPD
+                | ctrl::FRCDPLX
+                | ctrl::RFCE
+                | ctrl::TFCE
                 | ctrl::VME))
             | ctrl::SLU;
         regs.write(regs::CTRL, wanted);

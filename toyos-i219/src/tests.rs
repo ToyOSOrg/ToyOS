@@ -73,6 +73,9 @@ fn bring_up_programs_what_the_initialization_sections_name() {
         (ctrl::FRCSPD, "FRCSPD"),
         (ctrl::FRCDPLX, "FRCDPLX"),
         (ctrl::RST, "RST"),
+        // §3.1.3.10: left set, the function issues no master request at all,
+        // so its rings are descriptors nothing fetches.
+        (ctrl::GIO_MASTER_DISABLE, "GIO_MASTER_DISABLE"),
     ] {
         assert!(control & bit == 0, "{}", nic.because(&format!("CTRL.{name} was left set")));
     }
