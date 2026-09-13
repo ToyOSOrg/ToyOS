@@ -1,39 +1,30 @@
-//! Where a BAR may be put, and in what order the machine is asked about each
-//! address.
+//! Where a BAR may be put, and which address the caller is handed next.
 //!
-//! A [`Run`] is address space the caller found nothing to decode in. That is a
-//! statement about what the caller could *read* — a firmware memory map, the
-//! BARs a bus has assigned, the ranges its bridges forward — and none of those
-//! says whether an address reaches the bus at all. What says that is the host
-//! bridge's aperture, which is ACPI's `_CRS`, and the nearest thing in reach is
-//! the current settings firmware answered for its root bridges
-//! ([`toyos_abi::boot::KernelArgs::root_bridge_windows`]).
+//! A run is address space the caller found nothing to decode in — a
+//! [`bridge::Window`], the same pair of addresses that crate already declares.
+//! That the caller found nothing there is a statement about what it could
+//! *read*, and none of its sources says whether an address reaches the bus at
+//! all; what says that is
+//! [`toyos_abi::boot::KernelArgs::root_bridge_windows`], and an address inside
+//! none of those windows is never touched.
 //!
-//! **Those settings order the candidates and decide none of them.** A run
-//! inside one is a run some bridge is forwarding today; a run outside it is not
-//! thereby unreachable, because the answer describes what firmware *used* and
-//! not what the platform decodes — QEMU's q35 routes everything above RAM to
-//! PCI while its firmware answers one megabyte. So this yields every candidate,
-//! firmware's own first, and the caller settles each one against the machine.
+//! **Selecting an address and taking it out of the runs is one operation.**
+//! [`reserve`] is the only way to be offered one, and it holds the runs by
+//! `&mut`, so a second caller cannot be handed an address the first is still
+//! probing.
 
 use toyos_abi::boot::RootBridgeWindow;
 
 use crate::aperture::{self, Decode};
-
-/// A run of address space the caller found nothing to decode in, `start..end`,
-/// `end` exclusive.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Run {
-    pub start: u64,
-    pub end: u64,
-}
+use crate::bridge::Window;
 
 /// One address a `span`-byte window could take.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Candidate {
     pub at: u64,
     /// The base of the root bridge window holding the whole span, where one
-    /// does. `None` is not "nothing decodes it": it is "nothing says".
+    /// does. `None` is not "nothing decodes it": it is "nothing says", and the
+    /// caller names such an address rather than reading it.
     pub inside: Option<u64>,
 }
 
@@ -43,11 +34,7 @@ pub struct Candidate {
 /// Aligned to the span and not merely to a page: a BAR's low address bits are
 /// hardwired to zero, so a window wider than one page has to start on its own
 /// size or the function decodes somewhere else (PCIe base spec §7.5.1.2.1).
-///
-/// Public because a caller that orders the runs itself still needs each one's
-/// standing against the windows, and re-deriving it would be a second reader of
-/// the condition that decides whether an address may be touched at all.
-pub fn offered(run: &Run, windows: &[RootBridgeWindow], span: u64) -> Option<Candidate> {
+fn offered(run: &Window, windows: &[RootBridgeWindow], span: u64) -> Option<Candidate> {
     let at = run.start.checked_next_multiple_of(span)?;
     let end = at.checked_add(span)?;
     if end > run.end {
@@ -60,50 +47,27 @@ pub fn offered(run: &Run, windows: &[RootBridgeWindow], span: u64) -> Option<Can
     Some(Candidate { at, inside })
 }
 
-/// Every address `runs` offers for a `span`-byte window: the ones a window
-/// firmware named holds first, then the rest, each set in `runs` order.
+/// The next address `runs` offers for a `span`-byte window, taken out of `runs`
+/// in the same call so nothing is offered it twice.
 ///
-/// One candidate per run, because a run that has been taken from is a shorter
-/// run — the caller cuts what it placed and asks again.
-pub fn candidates<'a>(
-    runs: &'a [Run],
-    windows: &'a [RootBridgeWindow],
+/// A run that answered is shortened to what lies above the reservation; the
+/// piece below it is shorter than the span that was asked for. A run whose
+/// address no window firmware declared holds is emptied instead of shortened:
+/// the windows do not change, so nothing there can ever be read.
+pub fn reserve(
+    runs: &mut [Window],
+    windows: &[RootBridgeWindow],
     span: u64,
-) -> Candidates<'a> {
-    Candidates { runs, windows, span, at: 0, rest: false }
-}
-
-/// [`candidates`]'s iterator: two passes over the runs, holding no allocation
-/// because this crate has none to hold.
-pub struct Candidates<'a> {
-    runs: &'a [Run],
-    windows: &'a [RootBridgeWindow],
-    span: u64,
-    at: usize,
-    /// False while the runs firmware's own answer holds are being yielded.
-    rest: bool,
-}
-
-impl Iterator for Candidates<'_> {
-    type Item = Candidate;
-
-    fn next(&mut self) -> Option<Candidate> {
-        loop {
-            let Some(run) = self.runs.get(self.at) else {
-                if self.rest {
-                    return None;
-                }
-                self.rest = true;
-                self.at = 0;
-                continue;
-            };
-            self.at += 1;
-            let Some(candidate) = offered(run, self.windows, self.span) else { continue };
-            if candidate.inside.is_some() != self.rest {
-                return Some(candidate);
-            }
-        }
+) -> Option<Candidate> {
+    for run in runs.iter_mut() {
+        let Some(candidate) = offered(run, windows, span) else { continue };
+        run.start = match candidate.inside {
+            Some(_) => candidate.at + span,
+            None => run.end,
+        };
+        return Some(candidate);
     }
+    None
 }
 
 #[cfg(test)]
@@ -113,13 +77,13 @@ mod tests {
     /// The ThinkPad T14's six free runs of 2 MiB or more below `0xfec00000`,
     /// as `pcidev`'s survey printed them, and the two windows its firmware
     /// answered for its one root bridge.
-    const T14_RUNS: [Run; 6] = [
-        Run { start: 0x9920_0000, end: 0x99a0_0000 },
-        Run { start: 0xa080_0000, end: 0xa200_0000 },
-        Run { start: 0xae20_0000, end: 0xb000_0000 },
-        Run { start: 0xbcf2_0000, end: 0xc000_0000 },
-        Run { start: 0xd000_0000, end: 0xfe01_0000 },
-        Run { start: 0xfe01_1000, end: 0xfec0_0000 },
+    const T14_RUNS: [Window; 6] = [
+        Window { start: 0x9920_0000, end: 0x99a0_0000 },
+        Window { start: 0xa080_0000, end: 0xa200_0000 },
+        Window { start: 0xae20_0000, end: 0xb000_0000 },
+        Window { start: 0xbcf2_0000, end: 0xc000_0000 },
+        Window { start: 0xd000_0000, end: 0xfe01_0000 },
+        Window { start: 0xfe01_1000, end: 0xfec0_0000 },
     ];
     const T14_WINDOWS: [RootBridgeWindow; 2] = [
         RootBridgeWindow { base: 0xa200_0000, length: 0x1b00_0000 },
@@ -128,111 +92,116 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
-    fn addresses(runs: &[Run], windows: &[RootBridgeWindow], span: u64) -> std::vec::Vec<u64> {
-        candidates(runs, windows, span).map(|c| c.at).collect()
+    /// Every address `runs` hands out before it is empty, in order.
+    fn drain(runs: &mut [Window], windows: &[RootBridgeWindow], span: u64) -> std::vec::Vec<Candidate> {
+        let mut out = std::vec::Vec::new();
+        while let Some(candidate) = reserve(runs, windows, span) {
+            out.push(candidate);
+        }
+        out
     }
 
-    /// **Firmware's answer orders them, and the order is the whole claim.** One
-    /// of that machine's six runs lies inside the window its firmware named,
-    /// and it comes first; the 736 MiB run at `0xd0000000` — the one a search
-    /// by size would have taken, and the one that reads all-ones on the
-    /// machine — comes fourth of the five that follow.
+    /// Exactly one of the T14's six runs offers an address inside the window
+    /// its firmware named, and the 736 MiB run at `0xd0000000` is not it.
     #[test]
-    fn the_runs_firmware_named_come_first_and_the_rest_follow_by_address() {
-        assert_eq!(
-            addresses(&T14_RUNS, &T14_WINDOWS, 2 * MIB),
-            [0xae20_0000, 0x9920_0000, 0xa080_0000, 0xbd00_0000, 0xd000_0000, 0xfe20_0000],
-        );
-        // And exactly one of them is inside, named by the window's base.
-        let inside: std::vec::Vec<_> = candidates(&T14_RUNS, &T14_WINDOWS, 2 * MIB)
-            .filter_map(|c| c.inside.map(|base| (c.at, base)))
-            .collect();
-        assert_eq!(inside, [(0xae20_0000, 0xa200_0000)]);
+    fn one_of_the_t14s_runs_is_inside_the_window_its_firmware_named() {
+        let mut runs = T14_RUNS;
+        let got = drain(&mut runs, &T14_WINDOWS, 2 * MIB);
+        let inside: std::vec::Vec<_> =
+            got.iter().filter_map(|c| c.inside.map(|base| (c.at, base))).collect();
+        assert_eq!(inside[0], (0xae20_0000, 0xa200_0000));
+        assert!(inside.iter().all(|(at, base)| *base == 0xa200_0000
+            && (0xae20_0000..0xb000_0000).contains(at)));
+        assert!(got.iter().any(|c| c.at == 0xd000_0000 && c.inside.is_none()));
+    }
+
+    /// A reserved address is never offered again, and the walk ends.
+    #[test]
+    fn a_reserved_address_is_never_offered_twice() {
+        let mut runs = T14_RUNS;
+        let got = drain(&mut runs, &T14_WINDOWS, 2 * MIB);
+        let mut seen: std::vec::Vec<u64> = got.iter().map(|c| c.at).collect();
+        let count = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), count);
+        // The one run inside a window is 30 MiB, so it alone answers fifteen
+        // times; the five outside answer once each and are then empty.
+        assert_eq!(got.iter().filter(|c| c.inside.is_some()).count(), 15);
+        assert_eq!(got.iter().filter(|c| c.inside.is_none()).count(), 5);
+    }
+
+    /// **The order a caller puts the runs in cannot reach an address the
+    /// windows do not hold.** Largest run first is the rule this module
+    /// refuses, and on the T14 it reaches the 736 MiB run at `0xd0000000`
+    /// first — which still comes back named and never inside.
+    #[test]
+    fn largest_run_first_still_offers_no_address_outside_a_window() {
+        let mut runs = T14_RUNS;
+        runs.sort_unstable_by_key(|run| core::cmp::Reverse(run.end - run.start));
+        let got = drain(&mut runs, &T14_WINDOWS, 2 * MIB);
+        assert_eq!(got[0], Candidate { at: 0xd000_0000, inside: None });
+        let inside: std::vec::Vec<_> =
+            got.iter().filter_map(|c| c.inside.map(|base| (c.at, base))).collect();
+        assert_eq!(inside[0], (0xae20_0000, 0xa200_0000));
+        assert!(inside.iter().all(|(at, _)| (0xae20_0000..0xb000_0000).contains(at)));
     }
 
     /// A run is offered at its first `span`-aligned address, not at its start.
     ///
-    /// `0xbcf20000..0xc0000000` is 49 MiB of free space whose first 2 MiB page
-    /// is `0xbd000000` — one byte past the end of the window firmware named, so
-    /// the alignment is also what moves that run out of the first pass.
+    /// `0xbcf20000..0xc0000000`'s first 2 MiB page is `0xbd000000`, one byte
+    /// past the end of the window firmware named.
     #[test]
     fn a_run_is_offered_aligned_to_the_span_and_not_at_its_start() {
-        let run = [Run { start: 0xbcf2_0000, end: 0xc000_0000 }];
-        assert_eq!(addresses(&run, &T14_WINDOWS, 2 * MIB), [0xbd00_0000]);
-        assert_eq!(addresses(&run, &T14_WINDOWS, 16 * MIB), [0xbd00_0000]);
+        let mut run = [Window { start: 0xbcf2_0000, end: 0xc000_0000 }];
+        assert_eq!(reserve(&mut run, &T14_WINDOWS, 2 * MIB).unwrap().at, 0xbd00_0000);
         // 64 MiB does not fit between 0xbd000000 and 0xc0000000, and a
         // candidate that ignored the alignment would say it does.
-        assert_eq!(addresses(&run, &T14_WINDOWS, 64 * MIB), []);
+        let mut run = [Window { start: 0xbcf2_0000, end: 0xc000_0000 }];
+        assert_eq!(reserve(&mut run, &T14_WINDOWS, 64 * MIB), None);
         // The whole of the span has to be inside the run, not merely its base.
-        assert_eq!(addresses(&[Run { start: 0, end: 2 * MIB }], &[], 2 * MIB), [0]);
-        assert_eq!(addresses(&[Run { start: 0, end: 2 * MIB - 1 }], &[], 2 * MIB), []);
+        assert!(reserve(&mut [Window { start: 0, end: 2 * MIB }], &[], 2 * MIB).is_some());
+        assert_eq!(reserve(&mut [Window { start: 0, end: 2 * MIB - 1 }], &[], 2 * MIB), None);
     }
 
-    /// The whole span has to be inside a firmware window for the window to
-    /// order it. A span that starts inside and runs past is in the second pass,
-    /// where the machine is still asked about it.
+    /// The whole span has to be inside a firmware window, not merely its base.
     #[test]
     fn a_span_that_runs_past_a_window_is_not_inside_it() {
-        // 0xbc000000 is inside 0xa2000000..0xbd000000; 0xbc000000 + 32 MiB is
-        // not, so this run's candidate falls to the second pass.
-        let run = [Run { start: 0xbc00_0000, end: 0xc000_0000 }];
-        let got: std::vec::Vec<_> = candidates(&run, &T14_WINDOWS, 32 * MIB).collect();
-        assert_eq!(got, [Candidate { at: 0xbc00_0000, inside: None }]);
-        // The same run at 2 MiB is wholly inside and comes back named.
-        let got: std::vec::Vec<_> = candidates(&run, &T14_WINDOWS, 2 * MIB).collect();
-        assert_eq!(got, [Candidate { at: 0xbc00_0000, inside: Some(0xa200_0000) }]);
+        let mut run = [Window { start: 0xbc00_0000, end: 0xc000_0000 }];
+        assert_eq!(
+            reserve(&mut run, &T14_WINDOWS, 32 * MIB),
+            Some(Candidate { at: 0xbc00_0000, inside: None })
+        );
+        let mut run = [Window { start: 0xbc00_0000, end: 0xc000_0000 }];
+        assert_eq!(
+            reserve(&mut run, &T14_WINDOWS, 2 * MIB),
+            Some(Candidate { at: 0xbc00_0000, inside: Some(0xa200_0000) })
+        );
     }
 
-    /// **A candidate no window holds comes back saying so, and is not dropped.**
-    /// What a caller does with `inside: None` is the caller's — the kernel does
-    /// not touch such an address at all — but a crate that answered nothing for
-    /// it would leave that caller unable to say which runs it declined and why.
+    /// A machine whose firmware named nothing offers addresses no window holds,
+    /// and they are answered rather than dropped: the caller names what it left
+    /// alone.
     #[test]
     fn a_candidate_no_window_holds_is_answered_and_not_dropped() {
-        let windows = [
-            RootBridgeWindow { base: 0xc000_0000, length: 0x10_0000 },
-            RootBridgeWindow { base: 0x8_0000_0000, length: 0x10_0000 },
-        ];
-        let runs = [Run { start: 0xc020_0000, end: 0xfec0_0000 }];
-        let got: std::vec::Vec<_> = candidates(&runs, &windows, 2 * MIB).collect();
-        assert_eq!(got, [Candidate { at: 0xc020_0000, inside: None }]);
-        // And a machine whose firmware named nothing at all is the same case,
-        // not an empty one.
-        let got: std::vec::Vec<_> = candidates(&runs, &[], 2 * MIB).collect();
-        assert_eq!(got, [Candidate { at: 0xc020_0000, inside: None }]);
+        let mut runs = [Window { start: 0xc020_0000, end: 0xfec0_0000 }];
+        assert_eq!(
+            reserve(&mut runs, &[], 2 * MIB),
+            Some(Candidate { at: 0xc020_0000, inside: None })
+        );
+        assert_eq!(reserve(&mut runs, &[], 2 * MIB), None);
     }
 
     /// No run, no span, and a span no run can hold: each answers nothing rather
     /// than an address nothing checked.
     #[test]
     fn nothing_is_offered_where_nothing_fits() {
-        assert_eq!(addresses(&[], &T14_WINDOWS, 2 * MIB), []);
-        assert_eq!(addresses(&T14_RUNS, &T14_WINDOWS, 0), []);
-        assert_eq!(addresses(&T14_RUNS, &T14_WINDOWS, 1 << 31), []);
+        let mut runs = T14_RUNS;
+        assert_eq!(reserve(&mut [], &T14_WINDOWS, 2 * MIB), None);
+        assert_eq!(reserve(&mut runs, &T14_WINDOWS, 0), None);
+        assert_eq!(reserve(&mut runs, &T14_WINDOWS, 1 << 31), None);
         // A run at the very top: the aligned address fits and the span does not.
-        let run = [Run { start: u64::MAX - 2 * MIB, end: u64::MAX }];
-        assert_eq!(addresses(&run, &[], 2 * MIB), []);
-    }
-
-    /// **A caller that orders the runs itself gets the same standing.** The
-    /// order is the only thing such a caller may change: whether an address is
-    /// inside a window firmware declared is what says it may be touched at all,
-    /// and a second derivation of it is a second thing to get wrong.
-    #[test]
-    fn a_run_taken_on_its_own_stands_where_the_walk_would_put_it() {
-        for run in T14_RUNS.iter() {
-            let alone = offered(run, &T14_WINDOWS, 2 * MIB).expect("each run holds 2 MiB");
-            let walked = candidates(core::slice::from_ref(run), &T14_WINDOWS, 2 * MIB)
-                .next()
-                .expect("the walk offers it too");
-            assert_eq!(alone, walked);
-        }
-        // The 736 MiB run at 0xd0000000 — the one a search by size reaches for,
-        // and the one the ThinkPad T14 was lost to for 420 s when a kernel read
-        // it — is inside no window that machine declared.
-        assert_eq!(
-            offered(&Run { start: 0xd000_0000, end: 0xfe01_0000 }, &T14_WINDOWS, 2 * MIB),
-            Some(Candidate { at: 0xd000_0000, inside: None }),
-        );
+        let mut run = [Window { start: u64::MAX - 2 * MIB, end: u64::MAX }];
+        assert_eq!(reserve(&mut run, &[], 2 * MIB), None);
     }
 }

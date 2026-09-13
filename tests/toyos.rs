@@ -671,8 +671,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The same boot again, read for what the kernel asked the machine before it
     // moved that function's BAR. Its own boot rather than a second assertion in
     // the row above, because that one's subject is exclusivity and a test that
-    // reds tells a reader which of the two it is about. Console lines only, no
-    // clock; Fast with the UNMEASURED bootstrap marker until priced.
+    // reds tells a reader which of the two it is about. It waits out a drain for
+    // the message record, so its price carries a fixed span of host wall clock;
+    // Fast with the UNMEASURED bootstrap marker until priced.
     ("bar_placement_is_proven", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
@@ -13784,12 +13785,17 @@ fn run_machine_test(
             // it went there, and this is the reading that says both ran.** The
             // same netcase boot, because the NIC it hands netd is the only
             // function in QEMU whose BAR this kernel moves. What is asserted is
-            // not where the BAR went: that the loader handed the kernel free
-            // memory-mapped space at all, that the address chosen is inside one
-            // of those windows *and* inside a run the same boot printed, and
-            // that the function answers its own dword there.
+            // not where the BAR went: that the address chosen is inside a window
+            // the kernel was handed, inside a run the same boot printed and
+            // inside a range QEMU itself routes to PCI, and that the dword the
+            // function answers there is its own and is a value an unanswered
+            // read could not have produced.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
-            let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
+            let options = BootOptions {
+                profile: qemu::Profile::Headless,
+                qmp: true,
+                ..Default::default()
+            };
             if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
                 return Err("this test needs a NIC and the profile has none".to_string());
             }
@@ -13798,15 +13804,18 @@ fn run_machine_test(
             let _ =
                 await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
             console.push_str(&qemu.drain_serial(Duration::from_millis(500)));
+            // **QEMU's own account of where that address goes**, taken from the
+            // emulator and not from anything the guest printed.
+            let mtree = qemu::QmpMonitor::open(qemu.qmp_socket()).human("info mtree");
             let log = serial::Serial::named("boot console", console.as_str());
 
-            // **The windows the kernel was handed**, read off its own record —
-            // the loader's own dump of the Global Coherency Domain goes to the
-            // UEFI console and `loader.log`, neither of which this boot's
-            // capture carries, so what is judged here is what crossed.
-            let named = log.must_say("pcidev: firmware root bridge windows: ")?;
+            // The memory the kernel was handed, read off its own record — the
+            // loader's own dump of the Global Coherency Domain goes to the UEFI
+            // console and `loader.log`, neither of which this boot's capture
+            // carries, so what is judged here is what crossed.
+            let named = log.must_say("pcidev: firmware declared root bridge memory: ")?;
             let windows: Vec<(u64, u64)> = named
-                .rsplit_once("windows: ")
+                .rsplit_once("memory: ")
                 .map(|(_, rest)| rest)
                 .unwrap_or_default()
                 .split(", ")
@@ -13865,11 +13874,45 @@ fn run_machine_test(
                 .ok_or_else(|| format!("{record:?} names no address"))?;
             let window = number("inside firmware's mem 0x")
                 .ok_or_else(|| format!("{record:?} names no window the address is inside"))?;
-            let after = number("it answers 0x")
+            let reference = number("; its +0x")
+                .ok_or_else(|| format!("{record:?} names no dword it read"))?;
+            let after = number("dword answers 0x")
                 .ok_or_else(|| format!("{record:?} does not say what the BAR answered"))?
                 as u32;
-            let was = number("this function answers at 0x")
+            let signature = number("and answered 0x")
+                .ok_or_else(|| format!("{record:?} does not say what the function answered"))?
+                as u32;
+            let was = number(" from 0x")
                 .ok_or_else(|| format!("{record:?} does not say where the function was"))?;
+            // **The dword read is the one this function publishes a value at.**
+            // A modern virtio function opens its common configuration with a
+            // selector that reads zero (virtio 1.2 §4.1.4.3), so reading the
+            // BAR's first dword would settle every address against `0`.
+            if reference != 4 {
+                return Err(format!(
+                    "the kernel settled this placement on the +{reference:#x} dword; the dword a \
+                     modern virtio function answers a value of its own at is +0x4"
+                ));
+            }
+            // **Neither value may be one an unanswered read produces.** q35
+            // answers `0x00000000` where nothing claims an address and a root
+            // complex answers all-ones, so a proof resting on either of them is
+            // `0 == 0`.
+            for (what, value) in [("where firmware put it", signature), ("at the new address", after)]
+            {
+                if value == 0 || value == u32::MAX {
+                    return Err(format!(
+                        "the function answered {value:#010x} {what}, which is what a read nobody \
+                         answered comes back as, so this record settles nothing:\n{record}"
+                    ));
+                }
+            }
+            if after != signature {
+                return Err(format!(
+                    "the record calls {at:#x} placed and the function answers {after:#010x} there \
+                     against {signature:#010x} at {was:#x}:\n{record}"
+                ));
+            }
             if !windows.iter().any(|(base, end)| *base == window && at >= *base && at < *end) {
                 return Err(format!(
                     "the BAR went to {at:#x} and the record calls that inside the window at \
@@ -13880,6 +13923,36 @@ fn run_machine_test(
             if !runs.iter().any(|(start, end)| at >= *start && at < *end) {
                 return Err(format!(
                     "the BAR went to {at:#x} and the runs this boot offered are {runs:x?}"
+                ));
+            }
+            // **And the emulator says the same address, which nothing in the
+            // guest told it.** `info mtree` is QEMU's own routing table, and the
+            // region it maps this function's common configuration structure at
+            // is where that structure is — so the kernel's printed address is
+            // checked against it rather than believed.
+            // One address, however many address spaces it appears in: QEMU
+            // prints the region once per space that reaches it.
+            let mut mapped: Vec<u64> = mtree
+                .lines()
+                .filter(|line| line.contains("virtio-pci-common-virtio-net"))
+                .filter_map(|line| {
+                    let (start, _) = line.trim().split_once('-')?;
+                    u64::from_str_radix(start, 16).ok()
+                })
+                .collect();
+            mapped.sort_unstable();
+            mapped.dedup();
+            let [common] = mapped[..] else {
+                return Err(format!(
+                    "`info mtree` maps this function's common configuration {} time(s), so this \
+                     boot has no account of its own routing to check the kernel against:\n{mtree}",
+                    mapped.len()
+                ));
+            };
+            if common != at {
+                return Err(format!(
+                    "the kernel says the BAR went to {at:#x} and QEMU maps that function's \
+                     registers at {common:#x}:\n{mtree}"
                 ));
             }
             // And the placement is what the hand-over rests on: the same boot
@@ -13899,8 +13972,9 @@ fn run_machine_test(
             let spoke = log.must_say(&format!("pcidev: slot {slot} took its first message"))?;
             log.must_be_clean()?;
             eprintln!(
-                "  [netcase] {at:#x} is inside firmware's {window:#x} and inside a run this boot \
-                 printed, and the function answers {after:#010x} there as it does at {was:#x}"
+                "  [netcase] {at:#x} is inside firmware's {window:#x}, inside a run this boot \
+                 printed and where QEMU itself maps that function's registers, and its \
+                 +{reference:#x} dword answers {after:#010x} there as it does at {was:#x}"
             );
             eprintln!("  [netcase] {}", spoke.trim());
             Ok(())
@@ -15971,9 +16045,9 @@ fn aperture_account(log: &serial::Serial) -> Result<(), String> {
             .map_err(|e| format!("{s:?} is not an address: {e}"))
     }
 
-    let named = log.must_say("pcidev: firmware root bridge windows: ")?;
+    let named = log.must_say("pcidev: firmware declared root bridge memory: ")?;
     let windows = named
-        .rsplit_once("windows: ")
+        .rsplit_once("memory: ")
         .ok_or_else(|| format!("unparseable aperture record: {named:?}"))?
         .1
         .split(", ")
@@ -16003,7 +16077,7 @@ fn aperture_account(log: &serial::Serial) -> Result<(), String> {
     let said: Vec<&str> = log
         .text()
         .lines()
-        .filter(|l| l.contains("is inside no window firmware named, so its bridge does not forward"))
+        .filter(|l| l.contains("is inside none of it, so this kernel has no declaration"))
         .collect();
     if said.len() != outside.len() {
         return Err(format!(
@@ -16028,7 +16102,7 @@ fn aperture_account(log: &serial::Serial) -> Result<(), String> {
         )?;
         let account = match windows.iter().find(|(base, end)| at >= *base && at < *end) {
             Some((base, _)) => format!("inside firmware's mem {base:#x}"),
-            None => "inside no window firmware named".to_string(),
+            None => "inside no window firmware declared".to_string(),
         };
         if !line.contains(&account) {
             return Err(format!(

@@ -22,8 +22,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-/// The tests collect what an iterator yields, and a fixed-size buffer to do it
-/// in would be the assertion's own arithmetic repeated in every case.
+/// The tests collect what a walk answers, and a fixed-size buffer to do it in
+/// would be the assertion's own arithmetic repeated in every case.
 #[cfg(test)]
 extern crate std;
 
@@ -35,3 +35,4 @@ pub mod express;
 pub mod msi;
 pub mod msix;
 pub mod placement;
+pub mod probe;

@@ -13,16 +13,14 @@
 //! **A window is 2 MiB because that is the only page this kernel maps**, so a
 //! BAR a process may see is re-assigned onto a 2 MiB boundary of its own.
 //!
-//! **An address is read only where firmware declared the platform decodes it.**
-//! A load at an address no bridge forwards does not answer all-ones on real
-//! hardware: it does not complete, and the CPU cannot be interrupted out of it
-//! — a ThinkPad T14 read `0xd0000000` once and was gone for the 420 s the metal
-//! loop waits, through its lockup detector and its boot deadline alike. So the
-//! condition is checked before any read and never by one:
-//! [`toyos_abi::boot::KernelArgs::root_bridge_windows`] carries what each root
-//! bridge is set to forward *and* what DXE's Global Coherency Domain says the
-//! platform declared as memory-mapped and nothing owns, and a candidate inside
-//! none of them is left alone by name.
+//! **Nothing here reads an address this kernel cannot name as routed**, because
+//! a load no bridge forwards does not answer all-ones on real hardware: it does
+//! not complete, and the CPU cannot be interrupted out of it. There are two such
+//! names and no third — an address inside a window
+//! [`toyos_abi::boot::KernelArgs::root_bridge_windows`] carries, and the address
+//! firmware itself assigned a BAR and left the function decoding, which is
+//! firmware saying it routed it. A candidate inside neither is left alone by
+//! name.
 //!
 //! **Inside one, the function itself is the proof.** [`place_bar`] reads one
 //! dword through the BAR where firmware put it, moves the BAR onto the
@@ -32,7 +30,8 @@
 //! candidate tried; a function no candidate carried is refused rather than
 //! handed over. The reference is the function's and not a constant because the
 //! constant is not one: a PCIe root complex answers all-ones where nothing
-//! claims an address and QEMU's q35 answers `0x00000000`.
+//! claims an address and QEMU's q35 answers `0x00000000` — which is also why a
+//! reference dword that is either of those settles nothing and is refused.
 //! [`alone_in_its_page`] is the assertion that it worked, never the other way
 //! round.
 //!
@@ -75,7 +74,8 @@ use toyos_abi::boot::{MemoryMapEntry, RootBridgeWindow};
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
-use toyos_pci::{aperture, bar, express, msix, placement};
+use toyos_pci::bridge::Window;
+use toyos_pci::{aperture, bar, express, msix, placement, probe};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{NoCapability, PciDevice, Unarmed};
@@ -195,20 +195,20 @@ struct Machine {
     /// Where this module may ask the machine about an address: runs below
     /// 4 GiB for a 32-bit BAR, and above everything firmware assigned for a
     /// 64-bit one. Separate because a 32-bit BAR cannot hold an address a
-    /// 64-bit one can, and each shortens as a window is cut out of it.
+    /// 64-bit one can, and each shortens as [`placement::reserve`] hands an
+    /// address out of it.
     ///
-    /// **A run is where the machine is asked, never where a BAR is put.** What
-    /// the firmware map, this bus's assigned BARs and its bridges' forwarded
-    /// ranges leave over is the address space nothing *said* it decodes, which
-    /// is not the same claim as reaching the bus — [`place_bar`]'s two probes
-    /// are what make it one.
-    low: Vec<placement::Run>,
-    high: Vec<placement::Run>,
-    /// The memory windows firmware answered that its root bridges decode.
+    /// **A run is where the machine may be asked, never where a BAR is put.**
+    /// What the firmware map, this bus's assigned BARs and its bridges'
+    /// forwarded ranges leave over is address space nothing *said* it decodes,
+    /// which is not the same claim as reaching the bus.
+    low: Vec<Window>,
+    high: Vec<Window>,
+    /// The memory the root bridges decode, as firmware declared it.
     ///
-    /// They order the candidates and decide none of them: the answer is a
-    /// bridge's current settings, so a run outside it may still be decoded and
-    /// a machine whose firmware named nothing is not one where nothing is.
+    /// **The necessary condition for any read this module issues**, so an
+    /// address inside none of them is never touched; a machine whose firmware
+    /// declared nothing is one where nothing may be.
     firmware: Vec<RootBridgeWindow>,
     /// Windows this module has cut, as `(requester, BAR index, at, span)`.
     ///
@@ -327,11 +327,11 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootB
     let low = free_runs_below_4g(devices, maps, &decoded);
     let high = match window(wide_end, u64::MAX) {
         (0, _) => Vec::new(),
-        (start, end) => alloc::vec![placement::Run { start, end }],
+        (start, end) => alloc::vec![Window { start, end }],
     };
     log!(
         "pcidev: {} functions; {} run(s) of {} MiB or more below {PLATFORM_MMIO:#x} and {} above \
-         everything firmware described, to ask this machine about",
+         everything firmware described",
         devices.len(),
         low.len(),
         PAGE_2M / MIB,
@@ -348,22 +348,16 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootB
     machine.high = high;
 }
 
-/// Say where firmware answered that its root bridges decode memory, and where
-/// the address space this kernel would put a BAR in stands against that answer.
+/// Say what memory firmware declared the root bridges decode, and which
+/// assigned BAR lies inside none of it.
 ///
-/// **A BAR firmware itself assigned outside every window it named is named and
-/// nothing more.** What the protocol answers is a bridge's *current* settings,
-/// and a fixed function whose BAR its bridge does not forward is a machine this
-/// is true of rather than firmware contradicting itself.
-///
-/// **What this answers about is what each placement is measured against.**
-/// Every candidate carries its standing against these windows into its own
-/// record, so this says the answer once and counts nothing from it.
+/// **What this answers about is the necessary condition every read below is
+/// checked against**, so it says the answer once and counts nothing from it.
 fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
     if firmware.is_empty() {
         log!(
-            "pcidev: firmware named no root bridge memory window, so nothing orders the \
-             addresses this machine is asked about"
+            "pcidev: firmware declared no root bridge memory, so no address on this machine may \
+             be read"
         );
         return;
     }
@@ -374,13 +368,13 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
         }
         let _ = write!(said, "mem {:#x}..{:#x}", window.base, window.end());
     }
-    log!("pcidev: firmware root bridge windows: {said}");
+    log!("pcidev: firmware declared root bridge memory: {said}");
 
     for (who, base, end) in decoded {
         if aperture::decode(firmware, *base, *end) == aperture::Decode::Unrouted {
             log!(
-                "pcidev: requester {who:#06x}'s {base:#x}..{end:#x} is inside no window firmware \
-                 named, so its bridge does not forward it"
+                "pcidev: requester {who:#06x}'s {base:#x}..{end:#x} is inside none of it, so this \
+                 kernel has no declaration to read it by"
             );
         }
     }
@@ -396,15 +390,13 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
 ///
 /// It accounts for exactly three things and each is *read*: the firmware memory
 /// map, the BARs this bus has assigned, and every range a bridge forwards to a
-/// secondary bus. What it cannot account for is the host bridge's own aperture,
-/// which is ACPI's `_CRS` and an AML method this kernel does not run — so a run
-/// here is where [`place_bar`] *asks*, and the machine's own answer is what
-/// turns one into a placement.
+/// secondary bus. None of the three says an address reaches the bus, which is
+/// why a run here is only where [`place_bar`] *may* ask.
 fn free_runs_below_4g(
     devices: &[PciDevice],
     maps: &[MemoryMapEntry],
     decoded: &[(u16, u64, u64)],
-) -> Vec<placement::Run> {
+) -> Vec<Window> {
     let mut taken: Vec<(u64, u64)> = Vec::new();
     let mut note = |start: u64, end: u64| {
         let (start, end) = (start.min(PLATFORM_MMIO), end.min(PLATFORM_MMIO));
@@ -432,16 +424,16 @@ fn free_runs_below_4g(
         }
     }
     taken.sort_unstable();
-    let mut free: Vec<placement::Run> = Vec::new();
+    let mut free: Vec<Window> = Vec::new();
     let mut at = 0u64;
     for (start, end) in taken {
         if start > at {
-            free.push(placement::Run { start: at, end: start });
+            free.push(Window { start: at, end: start });
         }
         at = at.max(end);
     }
     if at < PLATFORM_MMIO {
-        free.push(placement::Run { start: at, end: PLATFORM_MMIO });
+        free.push(Window { start: at, end: PLATFORM_MMIO });
     }
     free.retain(|run| run.end - run.start >= PAGE_2M);
     free
@@ -489,6 +481,12 @@ enum Refusal {
     /// Firmware assigned this BAR no address, so the function answers nowhere
     /// and there is nothing to hold a candidate's answer against.
     BarUnassigned(u8),
+    /// This kernel can name the address firmware assigned this BAR as neither
+    /// inside a declared window nor decoding, so it may not read it.
+    BarUnrouted(u8),
+    /// The dword this function answers where firmware put it is one of the two
+    /// a read nobody answered comes back as, so it settles no candidate.
+    BarReferenceEmpty(u8),
 }
 
 impl core::fmt::Display for Refusal {
@@ -556,6 +554,16 @@ impl core::fmt::Display for Refusal {
                 f,
                 "firmware assigned BAR {i} no address, so this function answers nowhere and \
                  nothing says what it would answer through a BAR moved anywhere else"
+            ),
+            Self::BarUnrouted(i) => write!(
+                f,
+                "BAR {i} holds an address inside no window firmware declared, on a function \
+                 firmware left not decoding memory, so nothing says a read of it would come back"
+            ),
+            Self::BarReferenceEmpty(i) => write!(
+                f,
+                "BAR {i} answers all-zeroes or all-ones where firmware put it, which is what a \
+                 read nobody answers comes back as, so it settles no candidate"
             ),
         }
     }
@@ -662,6 +670,10 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.
     let table_bar = msix_bar(&pci);
+    // **Read before this kernel changes it.** Firmware leaving a function
+    // decoding memory is firmware saying it routed the addresses in its BARs,
+    // and that is one of the two things [`place_bar`] may name an address by.
+    let firmware_decoding = pci.decodes_memory();
     // Decode must be on for a BAR to answer, and off across each move.
     pci.enable_memory_space();
 
@@ -680,7 +692,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
 
     // From here a refusal has to undo: a vector is armed, and the arms below
     // move the function's BARs.
-    match place_bars(&pci, table_bar) {
+    match place_bars(&pci, id, table_bar, firmware_decoding) {
         Ok((bar_at, bar_bytes)) => {
             space.attach(pci.bus, pci.dev, pci.func);
             Ok(Bound {
@@ -711,7 +723,12 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
 /// that BAR's for the life of the boot ([`Machine::windows`]), so a later claim
 /// on the same function takes the same one back rather than putting a second
 /// function on top of it.
-fn place_bars(pci: &PciDevice, table_bar: Option<u8>) -> Result<([u64; BARS], [u64; BARS]), Refusal> {
+fn place_bars(
+    pci: &PciDevice,
+    id: PciId,
+    table_bar: Option<u8>,
+    firmware_decoding: bool,
+) -> Result<([u64; BARS], [u64; BARS]), Refusal> {
     let mut bar_at = [0u64; BARS];
     let mut bar_bytes = [0u64; BARS];
     let slots = pci.bar_slots();
@@ -725,7 +742,7 @@ fn place_bars(pci: &PciDevice, table_bar: Option<u8>) -> Result<([u64; BARS], [u
             continue;
         }
         let size = pci.bar_size(index).map_err(|_| Refusal::BarUnsizable(index))?;
-        let at = place_bar(pci, index, size)?;
+        let at = place_bar(pci, id, index, size, firmware_decoding)?;
         bar_at[index as usize] = at;
         bar_bytes[index as usize] = size;
         index += step;
@@ -797,34 +814,40 @@ fn msix_bar(pci: &PciDevice) -> Option<u8> {
     Some(table.bir())
 }
 
-/// What this machine answers at the first dword of `at`.
+/// What this machine answers at `at + offset`.
 ///
 /// **One dword and no more.** This is a read of a register file this kernel
 /// does not know: a device's first page holds read-to-clear causes and
 /// pop-on-read queues, and a sweep of it would drive whatever is there. So the
-/// probe touches the one dword a BAR's base names, and the same one before the
-/// BAR is moved onto the address and after.
-fn first_dword(at: u64, span: u64) -> u32 {
-    crate::mm::paging::map_mmio(at, span, MmioPolicy::Uncacheable).read_u32(0)
+/// probe touches the one dword [`probe::reference`] names, and the same one
+/// before the BAR is moved onto the address and after.
+///
+/// **Every caller has named `at` routed first.** A load no bridge forwards does
+/// not come back on real hardware.
+fn probe_dword(at: u64, span: u64, offset: u64) -> u32 {
+    crate::mm::paging::map_mmio(at, span, MmioPolicy::Uncacheable).read_u32(offset)
 }
 
-/// Move BAR `index` onto a 2 MiB boundary inside a window firmware named, and
-/// answer where.
+/// Move BAR `index` onto a 2 MiB boundary inside a window firmware declared,
+/// and answer where.
 ///
-/// **Only an address inside one is ever read.** A load at an address no bridge
-/// forwards does not answer all-ones on real hardware — it does not complete,
-/// and the CPU cannot be interrupted out of it: the ThinkPad T14 issued one at
-/// `0xd0000000` and was gone for the 420 s the metal loop waits, through its
-/// lockup detector and its boot deadline alike. So what firmware declared is the
-/// *necessary* condition, checked before any read, and the one probe below runs
-/// inside it.
+/// **Only an address this kernel can name as routed is ever read**, because a
+/// load no bridge forwards does not come back on real hardware. The name is a
+/// declared window, or — for the address firmware itself put in the BAR —
+/// firmware having left the function decoding memory.
 ///
 /// Memory decode is off across every write, so nothing can read through a BAR
 /// that is half-programmed, and the address is read back off the register
 /// rather than assumed. A candidate the machine refuses costs the function
 /// nothing: the register goes back to the value firmware left in it before the
 /// next one is tried, so a refusal ends with the function exactly as it began.
-fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
+fn place_bar(
+    pci: &PciDevice,
+    id: PciId,
+    index: u8,
+    size: u64,
+    firmware_decoding: bool,
+) -> Result<u64, Refusal> {
     let offset = bar::BASE + index as u64 * 4;
     let low = pci.read_config_u32(offset);
     let wide = matches!(bar::decode(index, low), Ok(bar::Width::Wide(_)));
@@ -833,7 +856,16 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
     if let Some(at) = cut_already(pci, index, span)? {
         return Ok(at);
     }
+    let restore = || {
+        pci.set_memory_decode(false);
+        pci.write_config_u32(offset, low);
+        if wide {
+            pci.write_config_u32(offset + 4, high);
+        }
+        pci.set_memory_decode(true);
+    };
 
+    let windows = MACHINE.lock().firmware.clone();
     // **What this function answers, read where firmware put it.** It is the
     // reference every candidate is settled against, and it has to be taken
     // here: from the first write below the BAR is somewhere this kernel chose
@@ -846,16 +878,29 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
     if was == 0 {
         return Err(Refusal::BarUnassigned(index));
     }
-    let signature = first_dword(was, size);
+    // Named before it is read, like every other address here: inside a window
+    // firmware declared, or a BAR firmware assigned and left decoding.
+    let declared =
+        matches!(aperture::decode(&windows, was, was.saturating_add(size)), aperture::Decode::Inside(_));
+    if !declared && !firmware_decoding {
+        return Err(Refusal::BarUnrouted(index));
+    }
+    let reference = probe::reference(id);
+    let signature = probe_dword(was, size, reference);
+    // All-zeroes and all-ones are what a read nobody answered comes back as, so
+    // a function answering either settles no candidate.
+    if probe::degenerate(signature) {
+        return Err(Refusal::BarReferenceEmpty(index));
+    }
 
-    let (runs, windows) = {
-        let machine = MACHINE.lock();
-        let runs = if wide { machine.high.clone() } else { machine.low.clone() };
-        (runs, machine.firmware.clone())
-    };
     let who = alloc::format!("PCI {:02x}:{:02x}.{}", pci.bus, pci.dev, pci.func);
+    if crate::actuator::bar_placement_by_size() {
+        log!("pcidev: {who} BAR {index} is offered the largest run first, which is an armed boot");
+    }
     let mut asked = 0usize;
-    for candidate in ordered(&runs, &windows, span) {
+    let mut offers = 0usize;
+    while let Some(candidate) = reserve_candidate(wide, &windows, span) {
+        offers += 1;
         let at = candidate.at;
         // **Not probed, because it may not be.** A candidate outside every
         // window firmware declared is left alone entirely: nothing reads it,
@@ -865,7 +910,6 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
                 "pcidev: {who} BAR {index} left {at:#x} alone: it is inside no window firmware \
                  declared, and a load at an address no bridge forwards does not come back"
             );
-            refused(at, span);
             continue;
         };
         asked += 1;
@@ -880,9 +924,10 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
         // Read back off the register rather than assumed: a function that did
         // not take the address decodes somewhere else and says nothing about it.
         if !matches!(pci.memory_bar(index), Ok(memory) if memory.address() == at) {
+            restore();
             return Err(Refusal::BarUnplaceable(index));
         }
-        let after = first_dword(at, span);
+        let after = probe_dword(at, span, reference);
 
         // **The function answers at the new address what it answers at its own,
         // which is the whole proof.** A constant for "nothing claims this" would
@@ -894,8 +939,8 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
             cut(pci, index, at, span);
             log!(
                 "pcidev: {who} BAR {index} ({size:#x} bytes) placed at {at:#x} — inside \
-                 firmware's mem {window:#x}; it answers {after:#010x} there, which is what this \
-                 function answers at {was:#x}"
+                 firmware's mem {window:#x}; its +{reference:#x} dword answers {after:#010x} \
+                 there, and answered {signature:#010x} from {was:#x}, where firmware put it"
             );
             return Ok(at);
         }
@@ -903,54 +948,42 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
         // Undone whole, before the next candidate is asked about: the register
         // holds what firmware left in it and decode is back on, which is the
         // state every other refusal here leaves the function in.
-        pci.set_memory_decode(false);
-        pci.write_config_u32(offset, low);
-        if placed.high.is_some() {
-            pci.write_config_u32(offset + 4, high);
-        }
-        pci.set_memory_decode(true);
+        restore();
         log!(
             "pcidev: {who} BAR {index} left {at:#x}: with the BAR moved onto it and decode on it \
              answers {after:#010x}, and this function answers {signature:#010x} at {was:#x}, so \
              nothing routes it"
         );
-        refused(at, span);
     }
     // A machine with no run at all and one whose every run is outside the
     // declared windows are different facts, and the second is the one a reader
     // would otherwise go looking for a device fault over.
-    Err(if runs.is_empty() {
+    Err(if offers == 0 {
         Refusal::NoRun { wide }
     } else {
         Refusal::NoPlacement { wide, asked }
     })
 }
 
-/// The candidates, in the order this kernel offers them.
+/// The next address this machine offers a `span`-byte window, taken out of the
+/// runs in the same critical section it is chosen in.
 ///
-/// **The actuator is the negative control on the rule itself**: a search by
-/// size is what this design refuses, and on the ThinkPad T14 it reaches first
-/// for the 736 MiB run at `0xd0000000` — which is inside no window that
-/// machine's firmware declared, and which the loop lost the machine to for
-/// 420 s the one time a kernel read it. An armed boot has to leave that
-/// candidate alone by name and hand the function over anyway, or "inside a
-/// window firmware declared" is not doing the work.
-fn ordered(
-    runs: &[placement::Run],
-    windows: &[RootBridgeWindow],
-    span: u64,
-) -> Vec<placement::Candidate> {
-    if !crate::actuator::bar_placement_by_size() {
-        return placement::candidates(runs, windows, span).collect();
+/// **Choosing and taking are one**, because two claims arriving together must
+/// not be offered one address: the loser would either trip
+/// [`alone_in_its_page`] or land on top of the winner. The probe that follows
+/// runs outside the lock and against a reservation no other claim can take.
+///
+/// **The actuator changes the order and nothing else.** A search by size is the
+/// rule this design refuses; each run's standing against the declared windows
+/// still comes from [`placement::reserve`], so an armed boot reaches a run no
+/// window holds, names it, and reads nothing there.
+fn reserve_candidate(wide: bool, windows: &[RootBridgeWindow], span: u64) -> Option<placement::Candidate> {
+    let mut machine = MACHINE.lock();
+    let runs = if wide { &mut machine.high } else { &mut machine.low };
+    if crate::actuator::bar_placement_by_size() {
+        runs.sort_unstable_by_key(|run| core::cmp::Reverse(run.end - run.start));
     }
-    let mut by_size = runs.to_vec();
-    by_size.sort_unstable_by_key(|run| core::cmp::Reverse(run.end - run.start));
-    log!("pcidev: the candidates are ordered largest run first, which is an armed boot");
-    // **Each run's standing against the windows is still asked for**, because
-    // it is what says an address may be read at all — the order is the only
-    // thing this arm changes, and a control that also removed the condition
-    // would be the boot that lost the machine rather than a control.
-    by_size.iter().filter_map(|run| placement::offered(run, windows, span)).collect()
+    placement::reserve(runs, windows, span)
 }
 
 /// Where this BAR was already put, if a claim before this one put it there.
@@ -974,43 +1007,12 @@ fn cut_already(pci: &PciDevice, index: u8, span: u64) -> Result<Option<u64>, Ref
     }
 }
 
-/// Take `at .. at + span` out of the runs this module may still offer, and
-/// record it as this BAR's for the life of the boot.
+/// Record `at .. at + span` as this BAR's for the life of the boot.
+///
+/// The address is already out of the runs: [`reserve_candidate`] took it there, which is
+/// what keeps a second claim from being offered it.
 fn cut(pci: &PciDevice, index: u8, at: u64, span: u64) {
-    let mut machine = MACHINE.lock();
-    machine.windows.push((requester(pci), index, at, span));
-    take_out(&mut machine.low, at, span);
-    take_out(&mut machine.high, at, span);
-}
-
-/// Take an address this machine refused out of the runs, so nothing is offered
-/// it twice. It belongs to no BAR: what is known about it is only that it is
-/// not free.
-fn refused(at: u64, span: u64) {
-    let mut machine = MACHINE.lock();
-    take_out(&mut machine.low, at, span);
-    take_out(&mut machine.high, at, span);
-}
-
-/// Remove `at .. at + span` from `runs`, keeping whatever is left on each side
-/// of it that could still hold a window.
-fn take_out(runs: &mut Vec<placement::Run>, at: u64, span: u64) {
-    let mut rest = Vec::new();
-    for run in runs.iter() {
-        if at >= run.end || at + span <= run.start {
-            rest.push(*run);
-            continue;
-        }
-        for piece in [
-            placement::Run { start: run.start, end: at.min(run.end) },
-            placement::Run { start: (at + span).max(run.start), end: run.end },
-        ] {
-            if piece.end.saturating_sub(piece.start) >= PAGE_2M {
-                rest.push(piece);
-            }
-        }
-    }
-    *runs = rest;
+    MACHINE.lock().windows.push((requester(pci), index, at, span));
 }
 
 /// Nothing else on this machine decodes inside the page that is about to be
@@ -1019,10 +1021,7 @@ fn take_out(runs: &mut Vec<placement::Run>, at: u64, span: u64) {
 /// The assertion that [`place_bar`] worked, never the mechanism. Two things
 /// this module says are outside a window: what firmware assigned to some other
 /// function, and the windows this module has itself cut — an overlap between
-/// them is one process given another's registers. The third thing a window used
-/// to be asserted above, everything the UEFI map described, is now the
-/// machine's own answer: the address read all-ones before anything was put
-/// there, and RAM does not.
+/// them is one process given another's registers.
 fn alone_in_its_page(claimed: &PciDevice, index: u8, at: u64, span: u64) {
     let machine = MACHINE.lock();
     let mine = requester(claimed);
