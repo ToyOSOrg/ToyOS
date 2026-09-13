@@ -224,6 +224,15 @@ impl PciDevice {
         self.set_memory_decode(true);
     }
 
+    /// Whether this function decodes its memory BARs right now.
+    ///
+    /// **Read before this kernel enables it, it is firmware's own statement
+    /// that it routed the addresses in those BARs**: firmware does not leave a
+    /// function answering at an address its bridges do not forward.
+    pub fn decodes_memory(&self) -> bool {
+        self.mmio.read_u16(COMMAND) & MEMORY_SPACE != 0
+    }
+
     /// `COMMAND` bit 1, PCI 3.0 §6.2.2. Off across a BAR write, so nothing can
     /// read through a register that is half-programmed.
     pub fn set_memory_decode(&self, on: bool) {

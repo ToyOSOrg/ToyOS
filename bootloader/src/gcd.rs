@@ -1,12 +1,8 @@
 //! Which memory-mapped address space this platform declared, and which of it
 //! nothing owns.
 //!
-//! **The firmware's account is read; the address space is never probed.** A
-//! load at an address no bridge forwards does not answer all-ones on this
-//! hardware — it does not complete, and the CPU cannot be interrupted out of
-//! it: a ThinkPad T14 issued one at `0xd0000000` and was gone for the 420 s the
-//! metal loop waits, through the lockup detector and the boot deadline alike.
-//! So nothing here or in the kernel reads an address whose routing is unknown.
+//! **The firmware's account is read; the address space is never probed**,
+//! because a load no bridge forwards does not come back on this hardware.
 //!
 //! The Global Coherency Domain is DXE's own map of the physical address space
 //! (PI 1.8 Vol. 2 §7.2). EDK2's `PciHostBridgeDxe` adds each root bridge's
@@ -130,10 +126,6 @@ const GRANULE: u64 = 2 * 1024 * 1024;
 
 /// Append every memory-mapped range this platform declared and nothing owns to
 /// `out`, and answer how many were added.
-///
-/// Every descriptor is logged, owned or not, because that log is the only
-/// account of this machine's address space that leaves it — and the one a
-/// reading of the kernel's choice is checked against.
 pub fn free_mmio(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -> usize {
     let Some(entry) =
         system_table.config_table().iter().find(|e| e.guid == DXE_SERVICES_TABLE_GUID)

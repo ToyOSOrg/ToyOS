@@ -711,11 +711,11 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     ("xhci-descriptor-selftest", Flash::Ok),
     // **The negative control on where a claimed function's BAR goes.** It
     // changes the order the kernel offers that BAR addresses in — largest free
-    // run first, with what firmware answered about its root bridges ignored —
-    // and changes nothing else: the same two probes decide each address, so one
-    // the machine does not decode is undone and the next is tried, and a boot
-    // left with none refuses the hand-over the way an unarmed one would. It
-    // reaches only the function `system.toml` already hands to a process.
+    // run first — and changes nothing else: each address's standing against the
+    // memory firmware declared still comes from `placement::reserve`, so an
+    // armed boot names a run no declared window holds and reads nothing there,
+    // exactly as an unarmed one would. It reaches only the function
+    // `system.toml` already hands to a process.
     ("bar-placement-by-size", Flash::Ok),
     // Two probes rather than staged inputs, and both are reads: the SS-reload
     // one runs inside `iod`'s own context switch, and the input-core one merges
