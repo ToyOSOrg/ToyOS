@@ -1695,8 +1695,10 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 /// The cable's own boot: netd in front of the T14's I219, and one job that
 /// holds the machine up long enough for the host to reach it. The one arm in
 /// this suite that names a PCI function for the loop to reach the boot over.
-const LANCASE: &[metal::Arm] =
-    &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
+const LANCASE: &[metal::Arm] = &[metal::Arm {
+    nic: Some(lan::NIC),
+    ..metal::once(lan::BOOT, lan::CONFIG, &["bar-placement-by-size"], lan::JOBS)
+}];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
