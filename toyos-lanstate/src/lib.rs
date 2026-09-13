@@ -1,13 +1,9 @@
 //! What netd holds of the network it is on, and the one word a boot with no
 //! console has to say it with.
 //!
-//! **The channel is a process's exit code.** On a machine with no serial port a
-//! userland write ends at `Backend::None`, so a job's whole verdict crosses as
-//! the kernel's `exit: <name> pid=N code=N` record, which carries the full
-//! `i32`. An address and a MAC are eighty bits and the record carries
-//! thirty-two, so what crosses is a fold of the pair: the judge already holds
-//! what the pair must be — it pinged the address and read the MAC off the wire
-//! — and recomputes the same fold.
+//! **The channel is a process's exit code**, thirty-two bits against the
+//! pair's eighty, so what crosses is a fold of the pair: the judge already
+//! holds what the pair must be and recomputes the same fold.
 //!
 //! Three crates read this file and none of them shares another's: netd answers
 //! [`ASK`], the job that asked turns the answer into an exit code, and the
@@ -234,9 +230,7 @@ mod tests {
         let mut swapped = MAC;
         swapped.swap(0, 1);
         assert_ne!(fingerprint(swapped, ADDR), whole);
-        // The whole width of the band, and not the low byte of it: a fold that
-        // never carried out of one byte answers with 256 codes, and the
-        // collision the judge rests on would be 2^-8.
+        // The whole width of the band, and not the low byte of it.
         assert!(moved.iter().any(|got| got >> 8 != whole >> 8), "{moved:?}");
     }
 }

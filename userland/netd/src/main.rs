@@ -588,8 +588,6 @@ impl NetDaemon {
             Some(MsgType::TcpConnectPiped) => self.handle_tcp_connect_piped(req, socket_set, iface),
             Some(MsgType::TcpBindPiped) => self.handle_tcp_bind_piped(&req, socket_set),
             Some(MsgType::TcpAcceptPiped) => self.handle_tcp_accept_piped(&req, socket_set),
-            // A word of netd's own that the SDK does not send: the one channel
-            // a machine with no console has for saying what network it is on.
             None if req.msg_type == toyos_lanstate::ASK => {
                 let HardwareAddress::Ethernet(mac) = iface.hardware_addr();
                 let state = toyos_lanstate::State { mac: mac.0, address: iface.ipv4_addr() };

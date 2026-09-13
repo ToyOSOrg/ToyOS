@@ -445,9 +445,6 @@ mod tests {
         assert_eq!(split_listing("boot.log\n"), (None, Vec::new()));
     }
 
-    /// The two kernel spellings a metal readback is judged on, and the length
-    /// it truncates a name to — held to the kernel's own source, because
-    /// nothing links this crate to it either.
     #[test]
     fn the_kernel_writes_the_records_the_host_reads() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -466,6 +463,8 @@ mod tests {
             ("kernel/src/log/mod.rs", format!("\"{LOG_COMPLETE}")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_SHORT}")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
+            ("kernel/src/pcidev/mod.rs", format!("{HANDED_OVER} {{slot}}")),
+            ("kernel/src/pcidev/mod.rs", format!("{NOT_HANDED_OVER} —")),
         ] {
             let at = root.join(file);
             let source = std::fs::read_to_string(&at).expect("a kernel module");
@@ -557,10 +556,7 @@ mod record_time_tests {
     /// spent inwards.
     #[test]
     fn a_reply_a_second_after_the_hand_over_record_is_this_boots() {
-        let handed = BOOT.replace(
-            "Boot: complete (1258ms)",
-            &format!("pcidev: PCI 00:1f.6 [8086:15fc] {HANDED_OVER} 0, vector 0x28"),
-        );
+        let handed = BOOT.replace("Boot: complete (1258ms)", &format!("pcidev: {HANDED_OVER} 0"));
         let handed_at = first() + 1;
         for at in [handed_at, handed_at + 1, handed_at + 2] {
             let verdict = host_second_inside_this_boot(&handed, 0, HANDED_OVER, at);

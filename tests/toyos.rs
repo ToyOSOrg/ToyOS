@@ -1304,10 +1304,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
 ///
-/// **Every predicate here reads records, never console text.** A userland
-/// `println!` ends at `Backend::None` on a machine with no serial port, so
-/// `===TEST_END <name> exit=N===` does not exist on the T14: a job's verdict
-/// crosses as the kernel's own `exit: <name> pid=N code=N cpu=Nms`.
+/// **Every predicate here reads records, never console text.**
 const METAL: &[(&str, metal::Metal)] = &[
     (
         // The device list: the T14's own xHCI, stick, i8042, HDA, framebuffer

@@ -13,11 +13,8 @@
 //! something an arm names rather than something derived, because sharing is not
 //! always safe and only the author knows.
 //!
-//! **What reaches the stick is not what reaches a QEMU console.** A userland
-//! `println!` ends at `Backend::None` on a machine with no serial port, so
-//! `===TEST_END <name> exit=N===` does not exist here: a job's verdict crosses
-//! as the kernel's own `exit: <name> pid=N code=N cpu=Nms` record. Every
-//! predicate below reads records, never console text.
+//! **Every predicate below reads records, never console text**: there is no
+//! `===TEST_END <name> exit=N===` on the stick.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

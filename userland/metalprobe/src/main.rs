@@ -2,14 +2,9 @@
 //! number, invoked by the name it is symlinked under the way `toybox` is.
 //!
 //! **The exit code is the measurement, because on the T14 nothing else
-//! crosses.** A userland `println!` ends at `Backend::None` on a machine with
-//! no serial port, and there is no `SYS_LOG_WRITE`; the one word of a process
-//! that reaches the stick is the kernel's own record at its exit,
-//! `exit: <name> pid=N code=<code> cpu=Nms` (`kernel/src/process.rs`). That
-//! record carries the full `i32` the process exited with, so a command here
-//! exits with its measured value in the unit its own module declares, and the
-//! process name in the record is the symlink it was invoked under. The host
-//! reads both out of the log the stick came back with.
+//! crosses.** A command here exits with its measured value in the unit its own
+//! module declares, and the process name in the record is the symlink it was
+//! invoked under.
 //!
 //! **Every command's number is a span in microseconds**, and never a rate. The
 //! profile that prices them (`tests/metal-profile.toml`) holds a ceiling per

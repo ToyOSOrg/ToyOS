@@ -19,8 +19,7 @@ use crate::bootlog;
 /// the cable the metal loop reaches a boot over while it runs.
 pub const NIC: &str = "0000:00:1f.6";
 
-/// The card on that function, as the kernel's records and `tests/lancase`'s
-/// `devices` row spell it.
+/// The card on that function, as the kernel's records spell it.
 const ID: &str = "8086:15fc";
 
 /// The same function as the kernel's records spell it: `/sys` names the PCI
@@ -292,13 +291,17 @@ mod tests {
         for (name, word) in [("TcpClose", 4), ("TcpAcceptPiped", 22), ("Error", 129)] {
             assert!(words.contains(&word), "the scan missed `{name} = {word}`: {words:?}");
         }
-        // And every notation a discriminant may be written in, `ASK`'s own
-        // among them: a scan blind to one would call a collision spelled that
-        // way absent.
         let ask = toyos_lanstate::ASK;
-        for spelling in
-            [format!("{ask}"), format!("{ask:#x}"), "4_997_454".to_string(), "0x4c_41_4e".into()]
-        {
+        for spelling in [
+            format!("{ask}"),
+            format!("{ask:#x}"),
+            format!("{ask:#o}"),
+            format!("{ask:#b}"),
+            "4_997_454".to_string(),
+            "0x4c_41_4e".to_string(),
+            "4997454u32".to_string(),
+            "0x4c414e_u32".to_string(),
+        ] {
             assert_eq!(sdk_words(&format!("    Ask = {spelling},\n")), [ask], "{spelling}");
         }
         assert!(
@@ -318,15 +321,22 @@ mod tests {
             .collect()
     }
 
-    /// One discriminant in any notation Rust spells one in: decimal or hex,
-    /// with or without the digit separators [`toyos_lanstate::ASK`] itself is
-    /// written with.
+    /// One discriminant, in every notation Rust spells an integer literal in.
     fn discriminant(value: &str) -> Option<u32> {
         let value = value.replace('_', "");
-        match value.strip_prefix("0x") {
-            Some(hex) => u32::from_str_radix(hex, 16).ok(),
-            None => value.parse().ok(),
-        }
+        let (radix, rest) = match value.get(..2) {
+            Some("0b") => (2, &value[2..]),
+            Some("0o") => (8, &value[2..]),
+            Some("0x") => (16, &value[2..]),
+            _ => (10, &value[..]),
+        };
+        let end = rest.find(|c: char| !c.is_digit(radix)).unwrap_or(rest.len());
+        let (digits, suffix) = rest.split_at(end);
+        const SUFFIXES: [&str; 13] = [
+            "", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128",
+            "isize",
+        ];
+        SUFFIXES.contains(&suffix).then(|| u32::from_str_radix(digits, radix).ok())?
     }
 
     /// The whole grammar as `on_metal` reads it, against the pair a readback
@@ -401,9 +411,6 @@ mod tests {
         assert!(handed_over("").is_err());
     }
 
-    /// The counters are cumulative, so the last census a CPU wrote is its whole
-    /// boot, and the two absences are told apart: a machine that said nothing
-    /// and a card that raised nothing are different findings.
     #[test]
     fn a_lease_with_no_interrupt_and_a_boot_with_no_census_are_different_findings() {
         assert_eq!(interrupts_into_the_driver(&[(0, 1), (0, 7), (1, 2)]), Ok(9));

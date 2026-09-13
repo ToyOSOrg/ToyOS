@@ -16,7 +16,7 @@ use toyos_build::lan::{
 };
 use toyos_build::metalprofile::Profile;
 
-use super::irqcensus::Census;
+use super::irqcensus::{Census, USERDEV};
 use super::metal;
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
@@ -35,9 +35,6 @@ pub const JOBS: &[&str] = &["test_rs_lan_hold", "test_rs_lan_state"];
 /// backend, which is the same driver the T14 arm runs and the only DHCP server
 /// this host can put in front of it.
 const QEMU_CONFIG: &str = "tests/e1000case";
-
-/// The census source a NIC a *process* drives raises its interrupts under.
-const USERDEV: &str = "userdev";
 
 /// The binary behind [`JOBS`]`[1]`, as the build stages it: the runner spawns
 /// it under the `test_rs_` prefix and `rust_bins` carries it under its own.
@@ -69,9 +66,6 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         }
     };
 
-    // What netd held, folded through the one word a machine with no console
-    // has: the address that answered the ping, on the card the host read off
-    // the wire.
     let leased = match back.exit_code(JOBS[1]).and_then(|code| {
         job_said(code, cable.addr, &cable.mac).map(|()| code)
     }) {

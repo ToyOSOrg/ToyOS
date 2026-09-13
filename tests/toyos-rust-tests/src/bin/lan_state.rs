@@ -22,6 +22,11 @@ fn asked() -> Result<State, Refusal> {
     if header.msg_type != RespType::Result as u32 {
         return Err(Refusal::Unanswered);
     }
+    // `recv_bytes` truncates a longer frame to the buffer and skips the rest, so
+    // bytes this grammar did not write would decode as an answer it did.
+    if header.len() as usize != ANSWER_LEN {
+        return Err(Refusal::Malformed);
+    }
     let mut answer = [0u8; ANSWER_LEN];
     let got = netd.recv_bytes(&header, &mut answer).map_err(|_| Refusal::Unanswered)?;
     State::decode(&answer[..got]).ok_or(Refusal::Malformed)
