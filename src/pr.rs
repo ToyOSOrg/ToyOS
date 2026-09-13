@@ -53,7 +53,7 @@ const ABI_INSEPARABLE: &str = "Abi-Inseparable:";
 const ABI_TRAILER_FORMAT: &str = "trailers:key=Abi-Inseparable";
 
 /// The flag that says the caller will re-run the gates on the merged shape.
-const ACCEPTS_MERGE: &str = "--gates-after-merge";
+pub(crate) const ACCEPTS_MERGE: &str = "--gates-after-merge";
 
 /// What `--pr` says last, and exits non-zero on, when it merged `origin/main`
 /// in: every gate the agent ran before this ran on a tree that no longer

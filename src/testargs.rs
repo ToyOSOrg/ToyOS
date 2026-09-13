@@ -12,6 +12,7 @@
 //! this table is refused the first time anyone types it — the drift that is
 //! loud rather than the one that narrows a gate.
 
+use crate::flags::{flag, usage, Flag, Value};
 use std::time::Duration;
 
 /// One machine's slice of the suite.
@@ -161,34 +162,18 @@ pub fn validate_ordinary_shard(
     ))
 }
 
-/// Whether a flag is followed by a separate word, which is then not the filter.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Value {
-    None,
-    Required,
-}
-
-pub struct Flag {
-    pub name: &'static str,
-    pub value: Value,
-}
-
-const fn flag(name: &'static str, value: Value) -> Flag {
-    Flag { name, value }
-}
-
 /// Every flag `tests/toyos.rs` reads, and nothing else.
-pub const FLAGS: &[Flag] = &[
+pub(crate) const FLAGS: &[Flag] = &[
     flag("--debug", Value::None),
     flag("--list", Value::None),
     flag("--nocapture", Value::None),
     flag("--show-output", Value::None),
-    flag("--audio-gate", Value::Required),
-    flag("--jobs", Value::Required),
-    flag("-j", Value::Required),
-    flag("--host-slots", Value::Required),
-    flag("--host-builds", Value::Required),
-    flag("--shard", Value::Required),
+    flag("--audio-gate", Value::Next),
+    flag("--jobs", Value::Next),
+    flag("-j", Value::Next),
+    flag("--host-slots", Value::Next),
+    flag("--host-builds", Value::Next),
+    flag("--shard", Value::Next),
     flag("--slow-usb", Value::None),
     flag("--nightly", Value::None),
     // The metal profile: the registrations that run on the T14, batched into
@@ -197,19 +182,8 @@ pub const FLAGS: &[Flag] = &[
     // Where those images and their readbacks live. **Naming it means the
     // machine is not touched**: the run builds the images and writes down what
     // to run on them, or judges readbacks a driver already left there.
-    flag("--metal-readback", Value::Required),
+    flag("--metal-readback", Value::Next),
 ];
-
-fn accepted() -> String {
-    FLAGS
-        .iter()
-        .map(|f| match f.value {
-            Value::None => f.name.to_string(),
-            Value::Required => format!("{} <value>", f.name),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
 
 /// Validate the harness's argv and return the run's filter.
 ///
@@ -242,15 +216,17 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
             return Err(format!(
                 "{arg}: the suite has no such flag, and an unknown flag's value becomes the \
                  run's filter — so this would have measured whatever one test it named.\n\
-                 Flags it has: {}.",
-                accepted()
+                 Flags it has:\n{}",
+                usage(FLAGS)
             ));
         };
         if inline && f.value == Value::None {
-            return Err(format!("{arg}: {name} takes no value.\nFlags it has: {}.", accepted()));
+            return Err(format!("{arg}: {name} takes no value.\nFlags it has:\n{}", usage(FLAGS)));
         }
-        if !inline && f.value == Value::Required {
-            i += 1;
+        match f.value {
+            Value::Next if !inline => i += 1,
+            Value::None | Value::Next => {}
+            Value::Rest => break,
         }
     }
     let has = |want: &str| {

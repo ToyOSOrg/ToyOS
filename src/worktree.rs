@@ -346,9 +346,15 @@ fn ok(dir: &Path, args: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    /// `--worktree` owns the rest of the command line, so this refusal is the
+    /// only one between `--worktree add --help` and a worktree named `--help`.
     #[test]
     fn a_flag_is_refused_as_a_worktree_path_by_name() {
         let args = ["toyos-build", "--worktree", "add", "--help"].map(String::from);
+        assert!(
+            matches!(crate::flags::check(&args), crate::flags::Outcome::Proceed),
+            "the command line has to reach this dispatch"
+        );
         let panic = std::panic::catch_unwind(|| dispatch(Path::new("/not-used"), &args))
             .expect_err("a flag is not a worktree path");
         let message = panic.downcast::<String>().expect("the refusal is formatted");

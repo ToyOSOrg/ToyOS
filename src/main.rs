@@ -80,8 +80,6 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    // Before every other check, every dispatch, and every lock: nothing below
-    // this may consume a `--` word `flags::check` has not already declared.
     match toyos_build::flags::check(&args) {
         toyos_build::flags::Outcome::Proceed => {}
         toyos_build::flags::Outcome::Help(message) => {
