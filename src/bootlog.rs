@@ -268,7 +268,7 @@ pub fn declares(source: &str, rhs: &str) -> bool {
     joined.lines().any(|line| line.trim_end().ends_with(&tail))
 }
 
-/// The daylight a host second needs on either side before it is this boot's.
+/// This instrument's own error, which is what each edge below is set by.
 ///
 /// **A judge reading whole seconds does not get to decide at one.** `skew` is a
 /// difference of two floored clocks across a round trip its reader holds to a
@@ -277,8 +277,13 @@ pub fn declares(source: &str, rhs: &str) -> bool {
 /// makes a refusal a distance rather than a coin.
 pub const MARGIN: u64 = 5;
 
-/// Whether a second on the *host's* clock fell inside the boot this log is of,
-/// clear of [`MARGIN`] on both the record `after` names and the reset.
+/// Whether a second on the *host's* clock fell inside the boot this log is of:
+/// no more than [`MARGIN`] before the record `after` names, and no less than
+/// [`MARGIN`] before the reset.
+///
+/// **Each edge is set by the distance to the nearest wrong answer on that
+/// side**, which is why the margin is spent outwards at one and inwards at the
+/// other.
 ///
 /// **The records are the one place a host clock and a boot's clock meet.**
 /// `skew` is this machine's clock minus the host's as the caller measured the
@@ -304,14 +309,18 @@ pub fn host_second_inside_this_boot(
         at.checked_add_signed(skew)
             .ok_or_else(|| format!("a host second of {at} and a skew of {skew} is no second"))?,
     );
-    if at - began < i128::from(MARGIN) {
+    // Spent outwards here, because the only wrong answer on this side is the
+    // operating system that left, a whole POST away.
+    if began - at > i128::from(MARGIN) {
         return Err(format!(
-            "the host saw it at {at} on this machine's clock and this boot's {after:?} record is \
-             at {began}, {} s apart: nothing closer than {MARGIN} s past that record is this \
-             boot's, because these clocks are whole seconds",
-            at - began
+            "the host saw it at {at} on this machine's clock, {} s before this boot's {after:?} \
+             record at {began}: further back than this instrument's {MARGIN} s of error, so it \
+             belongs to the operating system that left",
+            began - at
         ));
     }
+    // Spent inwards here, because the wrong answer on this side is the operating
+    // system that came back, one second away.
     if ended - at < i128::from(MARGIN) {
         return Err(format!(
             "the host saw it at {at} on this machine's clock and this boot's {REBOOTING:?} record \
@@ -519,20 +528,38 @@ mod record_time_tests {
         record_unix_secs(BOOT.lines().next().expect("a record")).expect("a wall clock")
     }
 
-    /// **[`MARGIN`] decides both edges**, and one second short of either is
-    /// refused rather than read as inside.
+    /// **Both edges, and the second outside each.** The anchor record is at
+    /// `first + 1` and the reset at `first + 23`, so the span this boot owns
+    /// runs from [`MARGIN`] before the one to `MARGIN` before the other.
     #[test]
-    fn a_second_clear_of_this_boots_records_by_the_margin_is_this_boots() {
+    fn each_edge_is_the_margin_from_the_record_that_sets_it() {
         let first = first();
-        for at in [first + MARGIN + 1, first + 23 - MARGIN] {
+        for at in [first + 1 - MARGIN, first + 23 - MARGIN] {
             assert_eq!(host_second_inside_this_boot(BOOT, 0, "Boot: complete", at), Ok(()), "{at}");
         }
-        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first + MARGIN)
-            .expect_err("a second short of the margin past the record it is anchored on");
-        assert!(why.contains(&format!("closer than {MARGIN} s past")), "{why}");
+        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first - MARGIN)
+            .expect_err("a second further back than the error the margin is");
+        assert!(why.contains("belongs to the operating system that left"), "{why}");
         let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first + 24 - MARGIN)
             .expect_err("a second short of the margin before the reset");
         assert!(why.contains(&format!("closer than {MARGIN} s before")), "{why}");
+    }
+
+    /// **A true reply lands a second or two past the lease and is never
+    /// refused**: this machine's address exists from that record onward and the
+    /// probe asks every second, so the lower edge may never be spent inwards.
+    #[test]
+    fn a_reply_a_second_after_the_lease_record_is_this_boots() {
+        let leased = BOOT.replace(
+            "Boot: complete (1258ms)",
+            "netd: DHCP: lease 192.168.1.46/24 from 192.168.1.1, gateway 192.168.1.1, dns \
+             [192.168.1.1], 412 ms after netd came up",
+        );
+        let lease_at = first() + 1;
+        for at in [lease_at, lease_at + 1, lease_at + 2] {
+            let verdict = host_second_inside_this_boot(&leased, 0, crate::lan::LEASE, at);
+            assert_eq!(verdict, Ok(()), "{} s after the lease", at - lease_at);
+        }
     }
 
     /// **The one reply this judge exists to refuse.** The loop wrote it 57 s
@@ -577,7 +604,7 @@ mod record_time_tests {
         assert_eq!(host_second_inside_this_boot(BOOT, 30, "Boot: complete", first - 20), Ok(()));
         let why = host_second_inside_this_boot(BOOT, -30, "Boot: complete", first + 10)
             .expect_err("thirty seconds the other way is before this boot began");
-        assert!(why.contains(&format!("closer than {MARGIN} s past")), "{why}");
+        assert!(why.contains("belongs to the operating system that left"), "{why}");
     }
 
     /// The panel writes no wall clock, and its milliseconds field must not be
