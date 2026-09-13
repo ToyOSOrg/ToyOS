@@ -13885,12 +13885,24 @@ fn run_machine_test(
             // And the placement is what the hand-over rests on: the same boot
             // must have handed the function over, or the record above is about
             // a BAR that moved for nothing.
-            log.must_say("[1af4:1041] handed over on slot")?;
+            let over = log.must_say("[1af4:1041] handed over on slot")?;
+            // **And the function spoke through the BAR that moved.** A register
+            // read answering the right dword says the address decodes; a message
+            // arriving says the whole hand-over works, and it is the one reading
+            // that tells a device nothing made speak from a message that never
+            // reached a CPU — which is what an end-of-boot count of zero leaves
+            // ambiguous.
+            let slot = over
+                .split_once("handed over on slot ")
+                .and_then(|(_, rest)| rest.split(',').next())
+                .ok_or_else(|| format!("unparseable hand-over record: {over:?}"))?;
+            let spoke = log.must_say(&format!("pcidev: slot {slot} took its first message"))?;
             log.must_be_clean()?;
             eprintln!(
                 "  [netcase] {at:#x} is inside firmware's {window:#x} and inside a run this boot \
                  printed, and the function answers {after:#010x} there as it does at {was:#x}"
             );
+            eprintln!("  [netcase] {}", spoke.trim());
             Ok(())
         }
         "netd_listener_forgery" => {

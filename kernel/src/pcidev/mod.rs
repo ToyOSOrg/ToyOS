@@ -1262,9 +1262,20 @@ pub fn isr(slot: usize) {
 /// this kernel: a wake takes the inbox lock and an ISR may not.
 pub fn drain_pending() {
     for (slot, irq) in IRQ.iter().enumerate() {
-        if irq.take_pending() {
-            crate::inbox::Source::PciFunction(slot as u8).wake();
+        if !irq.take_pending() {
+            continue;
         }
+        // **The one record that tells a silent device from an undelivered
+        // message.** The end-of-boot census counts what arrived and a count of
+        // zero is both facts at once; this is said when the first one lands,
+        // and its absence is then the other fact.
+        if irq.take_unannounced() {
+            log!(
+                "pcidev: slot {slot} took its first message on vector {:#x}",
+                VECTORS[slot]
+            );
+        }
+        crate::inbox::Source::PciFunction(slot as u8).wake();
     }
 }
 
