@@ -37,14 +37,27 @@ pub struct Candidate {
     pub inside: Option<u64>,
 }
 
-/// The first `span`-byte window `run` can hold, aligned to `span`.
+/// The one address `run` offers for a `span`-byte window, and where it stands
+/// against `windows`.
 ///
 /// Aligned to the span and not merely to a page: a BAR's low address bits are
 /// hardwired to zero, so a window wider than one page has to start on its own
 /// size or the function decodes somewhere else (PCIe base spec §7.5.1.2.1).
-fn fitted(run: &Run, span: u64) -> Option<u64> {
+///
+/// Public because a caller that orders the runs itself still needs each one's
+/// standing against the windows, and re-deriving it would be a second reader of
+/// the condition that decides whether an address may be touched at all.
+pub fn offered(run: &Run, windows: &[RootBridgeWindow], span: u64) -> Option<Candidate> {
     let at = run.start.checked_next_multiple_of(span)?;
-    (at.checked_add(span)? <= run.end).then_some(at)
+    let end = at.checked_add(span)?;
+    if end > run.end {
+        return None;
+    }
+    let inside = match aperture::decode(windows, at, end) {
+        Decode::Inside(base) => Some(base),
+        Decode::Empty | Decode::Unrouted => None,
+    };
+    Some(Candidate { at, inside })
 }
 
 /// Every address `runs` offers for a `span`-byte window: the ones a window
@@ -85,13 +98,9 @@ impl Iterator for Candidates<'_> {
                 continue;
             };
             self.at += 1;
-            let Some(at) = fitted(run, self.span) else { continue };
-            let inside = match aperture::decode(self.windows, at, at + self.span) {
-                Decode::Inside(base) => Some(base),
-                Decode::Empty | Decode::Unrouted => None,
-            };
-            if inside.is_some() != self.rest {
-                return Some(Candidate { at, inside });
+            let Some(candidate) = offered(run, self.windows, self.span) else { continue };
+            if candidate.inside.is_some() != self.rest {
+                return Some(candidate);
             }
         }
     }
@@ -174,11 +183,12 @@ mod tests {
         assert_eq!(got, [Candidate { at: 0xbc00_0000, inside: Some(0xa200_0000) }]);
     }
 
-    /// QEMU's q35 under this repository's OVMF: the firmware answer is one
-    /// megabyte, so no run is inside it and every candidate is in the second
-    /// pass — which is the machine this ordering may not strand.
+    /// **A candidate no window holds comes back saying so, and is not dropped.**
+    /// What a caller does with `inside: None` is the caller's — the kernel does
+    /// not touch such an address at all — but a crate that answered nothing for
+    /// it would leave that caller unable to say which runs it declined and why.
     #[test]
-    fn a_machine_whose_answer_holds_no_run_still_offers_every_run() {
+    fn a_candidate_no_window_holds_is_answered_and_not_dropped() {
         let windows = [
             RootBridgeWindow { base: 0xc000_0000, length: 0x10_0000 },
             RootBridgeWindow { base: 0x8_0000_0000, length: 0x10_0000 },
@@ -202,5 +212,27 @@ mod tests {
         // A run at the very top: the aligned address fits and the span does not.
         let run = [Run { start: u64::MAX - 2 * MIB, end: u64::MAX }];
         assert_eq!(addresses(&run, &[], 2 * MIB), []);
+    }
+
+    /// **A caller that orders the runs itself gets the same standing.** The
+    /// order is the only thing such a caller may change: whether an address is
+    /// inside a window firmware declared is what says it may be touched at all,
+    /// and a second derivation of it is a second thing to get wrong.
+    #[test]
+    fn a_run_taken_on_its_own_stands_where_the_walk_would_put_it() {
+        for run in T14_RUNS.iter() {
+            let alone = offered(run, &T14_WINDOWS, 2 * MIB).expect("each run holds 2 MiB");
+            let walked = candidates(core::slice::from_ref(run), &T14_WINDOWS, 2 * MIB)
+                .next()
+                .expect("the walk offers it too");
+            assert_eq!(alone, walked);
+        }
+        // The 736 MiB run at 0xd0000000 — the one a search by size reaches for,
+        // and the one the ThinkPad T14 was lost to for 420 s when a kernel read
+        // it — is inside no window that machine declared.
+        assert_eq!(
+            offered(&Run { start: 0xd000_0000, end: 0xfe01_0000 }, &T14_WINDOWS, 2 * MIB),
+            Some(Candidate { at: 0xd000_0000, inside: None }),
+        );
     }
 }
