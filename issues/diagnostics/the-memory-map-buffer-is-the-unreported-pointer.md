@@ -30,4 +30,5 @@ whose FAT write goes to a file the host owns; the T14's goes to a real USB
 stick, and no boot has asked the same question there.
 
 Closed by the same reading on the T14, after which the sizing and the
-allocation move above the three lines and the third `report_reach` joins them.
+allocation move above the three lines and the memory map's `report_reach`
+(`bootloader/src/main.rs`) joins the ones already there.
