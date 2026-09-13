@@ -570,9 +570,13 @@ impl Model {
                 if self.phy.mdi_reads > 0 {
                     self.phy.mdi_reads -= 1;
                     // §10.2.2.7: `Ready` is set "at the end of the MDI
-                    // transaction", so until then the register reads the
-                    // command the driver put in it.
-                    return self.mdi_answer & !mdic::READY & !mdic::DATA_MASK;
+                    // transaction" and `Error` "when it fails to complete an
+                    // MDI read", so until the transaction ends the register
+                    // carries neither and reads the command the driver put in.
+                    return self.mdi_answer
+                        & !mdic::READY
+                        & !mdic::ERROR
+                        & !mdic::DATA_MASK;
                 }
                 self.mdi_answer
             }
