@@ -39,7 +39,10 @@
 //! window refusal, and every bound `SYS_DEVICE_BAR_MAP` and
 //! `SYS_DEVICE_DMA_ALLOC` check are refused here and read by nothing: a
 //! registration of them waits on a boot config whose own test binary holds a
-//! claimable function, and netd holds this machine's only one.
+//! claimable function, and netd holds this machine's only one. [`account_for`]'s
+//! records are read by nothing here either: what they are about is the machine's
+//! own firmware, so the judge is a boot of the machine and `toyos_pci::aperture`
+//! is where the decision behind them is exercised.
 //!
 //! Nothing here is specific to what a function *is*.
 
@@ -47,15 +50,17 @@
 /// interleaving no guest test lands on.
 mod record;
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::fmt::Write;
 
 use record::Interrupt;
-use toyos_abi::boot::MemoryMapEntry;
+use toyos_abi::boot::{MemoryMapEntry, RootBridgeWindow};
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
-use toyos_pci::{bar, express, msix};
+use toyos_pci::{aperture, bar, express, msix};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::PciDevice;
@@ -257,7 +262,7 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 /// alike. A floor derived from BARs alone would put a holder's 2 MiB window on
 /// whatever firmware had put there instead, and the only thing that would catch
 /// it is [`Refusal::Dead`], which cannot tell unrouted space from RAM.
-pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry]) {
+pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
     let mut narrow_end = 0u64;
     let mut wide_end = 0u64;
     let mut decoded = Vec::new();
@@ -271,8 +276,12 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry]) {
         }
     }
     for device in devices {
+        // Bounded by the header's own declaration: a bridge has two BAR slots
+        // and four registers past them that are not BARs, and `bar_size` below
+        // write-ones-probes whatever it is given.
+        let slots = device.bar_slots();
         let mut index = 0u8;
-        while index <= bar::MAX_INDEX {
+        while index < slots {
             let low = device.read_config_u32(bar::BASE + index as u64 * 4);
             let wide = matches!(bar::decode(index, low), Ok(bar::Width::Wide(_)));
             if let Ok(memory) = device.memory_bar(index) {
@@ -308,6 +317,63 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry]) {
         machine.wide.0,
         machine.wide.1,
     );
+    account_for(firmware, &machine);
+}
+
+/// Say where firmware answered that its root bridges decode memory, and where
+/// the address space this kernel would put a BAR in stands against that answer.
+///
+/// **A BAR firmware itself assigned outside every window it named is named and
+/// nothing more.** What the protocol answers is a bridge's *current* settings,
+/// and a fixed function whose BAR its bridge does not forward is a machine this
+/// is true of rather than firmware contradicting itself: the ThinkPad T14's SPI
+/// controller decodes `0xfe010000`, which that machine's own `_CRS` puts inside
+/// no root bus resource either.
+///
+/// **The windows this module hands out are the ones this has to account for.**
+/// They are derived from what firmware *used*, so nothing but this says whether
+/// an address in one reaches the bus at all.
+fn account_for(firmware: &[RootBridgeWindow], machine: &Machine) {
+    if firmware.is_empty() {
+        log!(
+            "pcidev: firmware named no root bridge memory window, so nothing says which \
+             addresses reach this bus at all"
+        );
+        return;
+    }
+    let mut said = String::new();
+    for window in firmware {
+        if !said.is_empty() {
+            said.push_str(", ");
+        }
+        let _ = write!(said, "mem {:#x}..{:#x}", window.base, window.end());
+    }
+    log!("pcidev: firmware root bridge windows: {said}");
+
+    for (who, base, end) in &machine.decoded {
+        if aperture::decode(firmware, *base, *end) == aperture::Decode::Unrouted {
+            log!(
+                "pcidev: requester {who:#06x}'s {base:#x}..{end:#x} is inside no window firmware \
+                 named, so its bridge does not forward it"
+            );
+        }
+    }
+
+    for (width, (base, top)) in [("32-bit", machine.narrow), ("64-bit", machine.wide)] {
+        match aperture::decode(firmware, base, top) {
+            // This machine has no window of that width, which the record above
+            // already said.
+            aperture::Decode::Empty => {}
+            aperture::Decode::Inside(window) => log!(
+                "pcidev: the {width} window {base:#x}..{top:#x} is inside firmware's \
+                 mem {window:#x}"
+            ),
+            aperture::Decode::Unrouted => log!(
+                "pcidev: the {width} window {base:#x}..{top:#x} is inside no window firmware \
+                 named, so nothing says a BAR placed there reaches the bus"
+            ),
+        }
+    }
 }
 
 /// The span above `assigned` this module may hand out, or an empty one where
@@ -514,8 +580,9 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
 fn place_bars(pci: &PciDevice, table_bar: Option<u8>) -> Result<([u64; BARS], [u64; BARS]), Refusal> {
     let mut bar_at = [0u64; BARS];
     let mut bar_bytes = [0u64; BARS];
+    let slots = pci.bar_slots();
     let mut index = 0u8;
-    while index <= bar::MAX_INDEX {
+    while index < slots {
         let low = pci.read_config_u32(bar::BASE + index as u64 * 4);
         let wide = matches!(bar::decode(index, low), Ok(bar::Width::Wide(_)));
         let step = if wide { 2 } else { 1 };

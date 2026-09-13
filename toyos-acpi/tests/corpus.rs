@@ -3,16 +3,17 @@
 //! Every case here is an input the decoder must **refuse by name** — or, where
 //! an 8-bit sum genuinely cannot tell, accept and say so. The claim being held
 //! is the crate's own: no panic on any input path, no walk that does not
-//! terminate, and one [`TableError`] per reason so the caller's log line names
+//! terminate, and one named refusal per reason so the caller's log line says
 //! what was wrong rather than "malformed".
 
 mod common;
 
 use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
+use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
-    dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, reset_register,
-    rtc_century, Century, MadtEntry, MadtHalt, Phys, Reset, Table, TableError, MADT_ENTRIES,
-    MAX_TABLE_LEN,
+    dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, memory_windows,
+    reset_register, rtc_century, Century, MadtEntry, MadtHalt, Phys, Reset, Table, TableError,
+    MADT_ENTRIES, MAX_LIST_BYTES, MAX_TABLE_LEN,
 };
 
 const RSDP_AT: u64 = 0x1_0000;
@@ -525,4 +526,59 @@ fn reset_fields_are_read_only_from_a_revision_that_defines_them() {
     let mut short = facp(3, SUP, io, 0x0f);
     declare_len(&mut short, 128);
     assert_eq!(reset_of(&short), Reset::Absent);
+}
+
+/// Where the two firmwares' descriptor lists sit for the sweep below.
+const ROOT_BRIDGE_AT: u64 = 0x4_0000;
+const ROOT_BRIDGES: &[(&str, &[u8])] = &[
+    ("ovmf", include_bytes!("../fixtures/ovmf-pure-efi/root-bridge-0.bin")),
+    ("thinkpad-t14", include_bytes!("../fixtures/thinkpad-t14/root-bridge-0.bin")),
+];
+
+/// **No panic and no unbounded walk, over every byte of both firmwares' real
+/// descriptor lists.** Each byte takes each of its 255 other values in turn and
+/// the whole list is decoded over it.
+///
+/// A resource list carries no checksum, unlike the tables above, so a single
+/// byte reaches the decode directly — there is no resealed arm here because
+/// there is nothing to reseal. What a mutation reaches is every field the
+/// walk reads: the tag and the two length bytes that decide how far a step
+/// goes, the resource type, the general flags, and the three accounts of an
+/// extent that have to agree.
+///
+/// The bound is the assertion as much as the absence of a panic: a walk that
+/// stopped advancing would report more bytes than the list may be, and every
+/// answer is either windows inside the caller's room or a named refusal.
+#[test]
+fn no_single_byte_mutation_of_a_firmwares_descriptor_list_panics_or_runs_away() {
+    let mut mutations = 0u64;
+    let mut refused = 0u64;
+    for (which, original) in ROOT_BRIDGES {
+        for offset in 0..original.len() {
+            for value in 0..=255u8 {
+                if original[offset] == value {
+                    continue;
+                }
+                let mut mutated = original.to_vec();
+                mutated[offset] = value;
+                let regions: &[(u64, &[u8])] = &[(ROOT_BRIDGE_AT, &mutated)];
+                let mut out = [RootBridgeWindow::default(); 8];
+                let walk = memory_windows(Machine { regions }, ROOT_BRIDGE_AT, &mut out);
+                assert!(
+                    walk.bytes <= MAX_LIST_BYTES,
+                    "{which} byte {offset} as {value:#04x}: the walk reported {} bytes",
+                    walk.bytes
+                );
+                match walk.windows {
+                    Ok(count) => assert!(count <= out.len()),
+                    Err(_) => refused += 1,
+                }
+                mutations += 1;
+            }
+        }
+    }
+    // Both arms are reached: a sweep that only ever refused, or only ever
+    // decoded, would be measuring one path.
+    assert_eq!(mutations, 2 * 186 * 255);
+    assert!(refused > 0 && refused < mutations, "{refused} of {mutations} refused");
 }

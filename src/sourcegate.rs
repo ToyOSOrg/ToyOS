@@ -890,6 +890,22 @@ const COMMITTED_FILES: &[(&str, &str, &str)] = &[
         "701b192931e243a094a83f59f9b82d28204f1b3a0d11ac4d813e7769966427df",
         "ours: QEMU's own XSDT, captured by the commit that added toyos-acpi",
     ),
+    // What each of two firmwares answered when the bootloader asked where its
+    // PCI root bridges decode memory, off the `Root bridge:` line each boot
+    // wrote. Firmware output like the tables above, not third-party source;
+    // `toyos-acpi/tests/fixtures.rs` decodes each against the windows that
+    // machine's own kernel printed, and each directory's `SOURCE` says which
+    // boot it came off.
+    (
+        "toyos-acpi/fixtures/ovmf-pure-efi/root-bridge-0.bin",
+        "eb00e68be746a09ac7f0ce1ca492ce8c858e3af1152112b49ffb4708883acbfb",
+        "ours: OVMF's answer on a q35 guest, read off that boot's own loader log",
+    ),
+    (
+        "toyos-acpi/fixtures/thinkpad-t14/root-bridge-0.bin",
+        "a734078ed9ca3971ce804fd9ecc97b7794f816058f9ae17e47e0d2bcb63af0f3",
+        "ours: the T14's answer, read off that boot's own loader log on the stick",
+    ),
     // A bcachefs volume upstream's own tools wrote, gzipped. The bytes inside
     // it are this repository's test material; `NOTICE` carries the raw digest,
     // the commands, and the fsck that called it clean.

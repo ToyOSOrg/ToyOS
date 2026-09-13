@@ -1,0 +1,13 @@
+The ACPI resource descriptors `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration`
+answered with on the one root bridge of a QEMU 11.1.0 q35 guest, under the OVMF
+this repository boots every guest with — `ovmf/OVMF_CODE-pure-efi.fd`, sha256
+9de33971d47958f42af86584b502f83256120b2482e4f7ed14db32fd68e92922, which `NOTICE`
+also names.
+
+  root-bridge-0.bin   186 bytes, off the `Root bridge: 0 (segment 0) 186 bytes:`
+                      line the bootloader writes to the 16550 before the kernel
+                      handoff, on a `Profile::Headless` boot of `tests/netcase`.
+
+The bootloader printed the bytes and nothing decoded them on the way. What says
+the length was right is the file itself: four descriptors whose own declared
+lengths tile it exactly, then the End Tag.
