@@ -19,7 +19,7 @@ use uefi::{
     table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
     Event,
 };
-use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
 
 /// Every line this loader prints: the firmware's console, and the file on the
@@ -550,6 +550,25 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
     pml4 as u64
 }
 
+/// Say whether `at .. at + len` is inside the boot map, and refuse the boot
+/// where it is not: a pointer the kernel dereferences before `mm::init` and
+/// cannot reach loses every parameter of this boot, not one.
+///
+/// Before `ExitBootServices` only — past it neither the print nor the panic
+/// survives — and said before it is asserted, because `assert!` panics through
+/// uefi-services, whose handler reaches the console and not `loader.log`.
+fn report_reach(what: &str, at: u64, len: u64) {
+    let inside = at.checked_add(len).is_some_and(|end| end <= BOOT_MAP_BYTES);
+    println!(
+        "{what}: {at:#x}+{len:#x} {} the {BOOT_MAP_BYTES:#x}-byte boot map",
+        if inside { "is inside" } else { "DOES NOT FIT" },
+    );
+    assert!(
+        inside,
+        "{what} at {at:#x}+{len:#x} is outside the boot map, so the kernel would read none of it"
+    );
+}
+
 // Nine arguments because this is the handoff and they are what firmware leaves:
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
@@ -586,37 +605,65 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let pml4_phys = unsafe { build_boot_page_tables(pt_mem, &plan) };
     println!("Boot map: PML4 {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
 
-    // Said before it is asserted: `assert!` panics through uefi-services, whose handler prints to the console alone.
     let kernel_phys = kernel.memory.as_ptr() as u64;
-    let kernel_fits =
-        kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES);
-    println!(
-        "Kernel image: {kernel_phys:#x}+{:#x} {} the {BOOT_MAP_BYTES:#x}-byte boot map",
-        kernel.memory.len(),
-        if kernel_fits { "is inside" } else { "DOES NOT FIT" },
-    );
-    assert!(kernel_fits, "the kernel image does not fit the boot map");
+    report_reach("Kernel image", kernel_phys, kernel.memory.len() as u64);
 
-    // A refusal, like the scanout's: a buffer the kernel cannot read before
-    // `mm::init` is not one parameter lost, it is every one of them — the
-    // watchdog, the black box's address, the root — with the boot going on as
-    // though none had been asked for. An empty cmdline's pointer names nothing
-    // and is not reported as reachable.
-    let parameters = (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64));
-    match parameters {
+    // An empty cmdline's pointer names nothing and is not reported as reachable.
+    match (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64)) {
         None => println!("Parameter buffer: none"),
-        Some((at, len)) => {
-            let inside = at.checked_add(len).is_some_and(|end| end <= BOOT_MAP_BYTES);
-            assert!(
-                inside,
-                "the boot map cannot hold the parameter buffer: {at:#x}+{len:#x} is outside its \
-                 {BOOT_MAP_BYTES:#x} bytes, so the kernel would read none of this boot's parameters"
-            );
-            println!(
-                "Parameter buffer: {at:#x}+{len:#x} is inside the {BOOT_MAP_BYTES:#x}-byte boot map"
-            );
-        }
+        Some((at, len)) => report_reach("Parameter buffer", at, len),
     }
+
+    let (gop_framebuffer, gop_framebuffer_size, gop_width, gop_height, gop_stride, gop_pixel_format) =
+        match &gop {
+            Some(g) => (g.framebuffer, g.framebuffer_size, g.width, g.height, g.stride, g.pixel_format),
+            None => (0, 0, 0, 0, 0, 0),
+        };
+
+    let (boot_partition_guid, boot_partition_start_lba, boot_partition_blocks, boot_partition_present) =
+        match &boot_part {
+            Some(p) => (p.guid, p.start_lba, p.blocks, 1),
+            None => ([0u8; 16], 0, 0, 0),
+        };
+
+    // Built before the exit so the address the kernel is handed is one this
+    // loader can still print and refuse on.
+    let mut kernel_args = KernelArgs {
+        // Filled below: the map is taken after the exit, and sized from a
+        // measurement that has to follow the last line printed here.
+        memory_map_addr: 0,
+        memory_map_size: 0,
+        kernel_memory_addr: kernel_phys,
+        kernel_memory_size: kernel.memory.len() as u64,
+        kernel_stack_addr: kernel.stack_offset as u64,
+        kernel_stack_size: kernel.stack_size as u64,
+        rsdp_addr,
+        kernel_elf_addr: kernel_elf_bytes.as_ptr() as u64,
+        kernel_elf_size: kernel_elf_bytes.len() as u64,
+        gop_framebuffer,
+        gop_framebuffer_size,
+        gop_width,
+        gop_height,
+        gop_stride,
+        gop_pixel_format,
+        boot_pml4_addr: pml4_phys,
+        boot_partition_start_lba,
+        boot_partition_blocks,
+        boot_partition_guid,
+        boot_partition_present,
+        log_partition_guid,
+        rtc_utc_offset_minutes: rtc_utc_offset.unwrap_or(0),
+        rtc_utc_offset_known: rtc_utc_offset.is_some() as u32,
+        cmdline_addr: cmdline.as_ptr() as u64,
+        cmdline_len: cmdline.len() as u64,
+        root_bridge_window_count: 0,
+        root_bridge_windows: [RootBridgeWindow::default(); MAX_ROOT_BRIDGE_WINDOWS],
+    };
+    report_reach(
+        "Kernel arguments",
+        &kernel_args as *const KernelArgs as u64,
+        mem::size_of::<KernelArgs>() as u64,
+    );
 
     // Last, and after every line above: a console write, a FAT write and a
     // handle drop can each add a descriptor, and the margin below is fixed.
@@ -653,49 +700,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         });
     });
 
-    let (gop_framebuffer, gop_framebuffer_size, gop_width, gop_height, gop_stride, gop_pixel_format) =
-        match &gop {
-            Some(g) => (g.framebuffer, g.framebuffer_size, g.width, g.height, g.stride, g.pixel_format),
-            None => (0, 0, 0, 0, 0, 0),
-        };
-
-    let (boot_partition_guid, boot_partition_start_lba, boot_partition_blocks, boot_partition_present) =
-        match &boot_part {
-            Some(p) => (p.guid, p.start_lba, p.blocks, 1),
-            None => ([0u8; 16], 0, 0, 0),
-        };
-
-    // KernelArgs: all addresses are PHYSICAL (kernel translates to virtual)
-    let kernel_phys = kernel.memory.as_ptr() as u64;
-    let mut kernel_args = KernelArgs {
-        memory_map_addr: memory_map.as_ptr() as u64,
-        memory_map_size: memory_map.len() as u64 * mem::size_of::<MemoryMapEntry>() as u64,
-        kernel_memory_addr: kernel_phys,
-        kernel_memory_size: kernel.memory.len() as u64,
-        kernel_stack_addr: kernel.stack_offset as u64,
-        kernel_stack_size: kernel.stack_size as u64,
-        rsdp_addr,
-        kernel_elf_addr: kernel_elf_bytes.as_ptr() as u64,
-        kernel_elf_size: kernel_elf_bytes.len() as u64,
-        gop_framebuffer,
-        gop_framebuffer_size,
-        gop_width,
-        gop_height,
-        gop_stride,
-        gop_pixel_format,
-        boot_pml4_addr: 0, // set below after page tables are built
-        boot_partition_start_lba,
-        boot_partition_blocks,
-        boot_partition_guid,
-        boot_partition_present,
-        log_partition_guid,
-        rtc_utc_offset_minutes: rtc_utc_offset.unwrap_or(0),
-        rtc_utc_offset_known: rtc_utc_offset.is_some() as u32,
-        cmdline_addr: cmdline.as_ptr() as u64,
-        cmdline_len: cmdline.len() as u64,
-    };
-
-    kernel_args.boot_pml4_addr = pml4_phys;
+    kernel_args.memory_map_addr = memory_map.as_ptr() as u64;
+    kernel_args.memory_map_size =
+        memory_map.len() as u64 * mem::size_of::<MemoryMapEntry>() as u64;
 
     // Switch to new page tables. SAFETY: `pml4_phys` is the table built above,
     // identity-mapping low memory (so the code and stack this instruction

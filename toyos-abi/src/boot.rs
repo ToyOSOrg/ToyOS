@@ -16,8 +16,7 @@ pub struct KernelArgs {
     pub gop_height: u32,
     pub gop_stride: u32,
     pub gop_pixel_format: u32,
-    /// Physical address of the bootloader's page table (has both identity map and high-half).
-    /// Used by the SMP trampoline for AP boot transition.
+    /// Maps the low physical memory both at identity and at the high half.
     pub boot_pml4_addr: u64,
     /// First logical block of the partition the firmware loaded this image
     /// from, in that device's own block size.
@@ -100,6 +99,50 @@ pub struct KernelArgs {
     /// left to protect.
     pub cmdline_addr: u64,
     pub cmdline_len: u64,
+    /// How many of [`Self::root_bridge_windows`] firmware named.
+    pub root_bridge_window_count: u64,
+    /// The memory windows the platform's root bridges decode, as the addresses
+    /// a CPU issues.
+    ///
+    /// **An address outside every one of these is not free space, it is
+    /// unrouted**: a read of it answers all-ones, which is what an absent
+    /// device answers too. So this is what a BAR the kernel re-places has to
+    /// land inside, and there is no deriving it from the memory map — the map
+    /// says what firmware *used*, not what the bridge would decode.
+    pub root_bridge_windows: [RootBridgeWindow; MAX_ROOT_BRIDGE_WINDOWS],
+}
+
+/// The most windows the loader will carry.
+pub const MAX_ROOT_BRIDGE_WINDOWS: usize = 64;
+
+/// One memory window a root bridge decodes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RootBridgeWindow {
+    pub base: u64,
+    pub length: u64,
+}
+
+impl RootBridgeWindow {
+    /// The first address past the window, saturating: a firmware-named length
+    /// is untrusted input and an extent that would wrap is one this cannot
+    /// contain anything past.
+    pub fn end(&self) -> u64 {
+        self.base.saturating_add(self.length)
+    }
+
+    /// Whether every address of the `length` bytes at `base` is one this window
+    /// decodes.
+    ///
+    /// The whole extent and not its first address: a BAR that starts inside a
+    /// window and runs past it decodes addresses the bridge does not. An extent
+    /// of no length carries no address for a window to decode and is inside
+    /// none of them.
+    pub fn holds(&self, base: u64, length: u64) -> bool {
+        length != 0
+            && base >= self.base
+            && base.checked_add(length).is_some_and(|end| end <= self.end())
+    }
 }
 
 /// The token naming the filesystem the kernel mounts as root.
@@ -130,6 +173,13 @@ impl KernelArgs {
     pub fn rtc_utc_offset(&self) -> Option<i32> {
         (self.rtc_utc_offset_known != 0).then_some(self.rtc_utc_offset_minutes)
     }
+
+    /// The windows firmware named, and none of the array behind them. The
+    /// loader is the only writer of the count, so one past the array panics
+    /// here rather than clamping.
+    pub fn root_bridge_windows(&self) -> &[RootBridgeWindow] {
+        &self.root_bridge_windows[..self.root_bridge_window_count as usize]
+    }
 }
 
 /// The kernel's `_start` reads three of these fields out of `rdi` by hardcoded
@@ -156,8 +206,12 @@ const _: () = {
     assert!(offset_of!(KernelArgs, rtc_utc_offset_known) == 168);
     assert!(offset_of!(KernelArgs, cmdline_addr) == 176);
     assert!(offset_of!(KernelArgs, cmdline_len) == 184);
-    assert!(size_of::<KernelArgs>() == 192);
+    assert!(offset_of!(KernelArgs, root_bridge_window_count) == 192);
+    assert!(offset_of!(KernelArgs, root_bridge_windows) == 200);
+    assert!(size_of::<KernelArgs>() == 1224);
     assert!(align_of::<KernelArgs>() == 8);
+    assert!(size_of::<RootBridgeWindow>() == 16);
+    assert!(align_of::<RootBridgeWindow>() == 8);
 };
 
 #[repr(C)]
@@ -191,5 +245,80 @@ mod tests {
         assert!(actuators("usb-flush-fails").eq(["usb-flush-fails"]));
         assert_eq!(root_uuid(""), None);
         assert_eq!(actuators("").count(), 0);
+    }
+
+    #[test]
+    fn a_window_holds_an_extent_and_not_merely_its_first_address() {
+        let window = RootBridgeWindow { base: 0xa080_0000, length: 0x1f80_0000 };
+        assert_eq!(window.end(), 0xc000_0000);
+
+        assert!(window.holds(0xbcf0_0000, 0x2_0000));
+        assert!(window.holds(0xa080_0000, 0x2_0000));
+        assert!(window.holds(0xa080_0000, 0x1f80_0000));
+        assert!(window.holds(0xbfff_f000, 0x1000));
+        assert!(!window.holds(0xa07f_f000, 0x2_0000));
+        assert!(!window.holds(0x9920_0000, 0x1000));
+        assert!(!window.holds(0xbfff_f000, 0x1001));
+        assert!(!window.holds(0xbfff_0000, 0x1001_0000));
+        assert!(!window.holds(0xc000_0000, 0));
+        assert!(!window.holds(0xa080_0000, 0));
+
+        let whole = RootBridgeWindow { base: 1, length: u64::MAX };
+        assert_eq!(whole.end(), u64::MAX);
+        assert!(!whole.holds(2, u64::MAX));
+    }
+
+    const ZEROED: KernelArgs = KernelArgs {
+        memory_map_addr: 0,
+        memory_map_size: 0,
+        kernel_memory_addr: 0,
+        kernel_memory_size: 0,
+        kernel_stack_addr: 0,
+        kernel_stack_size: 0,
+        rsdp_addr: 0,
+        kernel_elf_addr: 0,
+        kernel_elf_size: 0,
+        gop_framebuffer: 0,
+        gop_framebuffer_size: 0,
+        gop_width: 0,
+        gop_height: 0,
+        gop_stride: 0,
+        gop_pixel_format: 0,
+        boot_pml4_addr: 0,
+        boot_partition_start_lba: 0,
+        boot_partition_blocks: 0,
+        boot_partition_guid: [0; 16],
+        boot_partition_present: 0,
+        log_partition_guid: [0; 16],
+        rtc_utc_offset_minutes: 0,
+        rtc_utc_offset_known: 0,
+        cmdline_addr: 0,
+        cmdline_len: 0,
+        root_bridge_window_count: 0,
+        root_bridge_windows: [RootBridgeWindow { base: 0, length: 0 };
+            MAX_ROOT_BRIDGE_WINDOWS],
+    };
+
+    #[test]
+    fn the_kernel_is_handed_the_windows_firmware_named_and_none_of_the_array_behind_them() {
+        assert!(ZEROED.root_bridge_windows().is_empty());
+
+        let low = RootBridgeWindow { base: 0xa080_0000, length: 0x1f80_0000 };
+        let high = RootBridgeWindow { base: 0x40_0000_0000, length: 0x20_0000_0000 };
+        let behind = RootBridgeWindow { base: 0xdead_0000, length: 0x1000 };
+        let mut args = KernelArgs { root_bridge_window_count: 2, ..ZEROED };
+        args.root_bridge_windows[0] = low;
+        args.root_bridge_windows[1] = high;
+        args.root_bridge_windows[2] = behind;
+
+        assert_eq!(args.root_bridge_windows(), &[low, high][..]);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn a_count_past_the_array_is_refused_rather_than_clamped() {
+        let args =
+            KernelArgs { root_bridge_window_count: MAX_ROOT_BRIDGE_WINDOWS as u64 + 1, ..ZEROED };
+        let _windows = args.root_bridge_windows();
     }
 }
