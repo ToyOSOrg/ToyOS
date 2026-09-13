@@ -285,45 +285,61 @@ mod tests {
         let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toyos/src/net.rs");
         let source = std::fs::read_to_string(&at)
             .unwrap_or_else(|e| panic!("{}: {e}", at.display()));
-        let words = sdk_words(&source);
+        let words = sdk_words(&source).expect("every variant of the SDK's two enums");
         // The scan before the claim: a parser that found nothing would pass
         // this test on any word at all.
         for (name, word) in [("TcpClose", 4), ("TcpAcceptPiped", 22), ("Error", 129)] {
             assert!(words.contains(&word), "the scan missed `{name} = {word}`: {words:?}");
         }
         let ask = toyos_lanstate::ASK;
+        let (decimal, hex) = (format!("{ask}"), format!("{ask:#x}"));
         for spelling in [
-            format!("{ask}"),
-            format!("{ask:#x}"),
+            decimal.clone(),
+            hex.clone(),
             format!("{ask:#o}"),
             format!("{ask:#b}"),
-            "4_997_454".to_string(),
-            "0x4c_41_4e".to_string(),
-            "4997454u32".to_string(),
-            "0x4c414e_u32".to_string(),
+            format!("{}_{}", &decimal[..1], &decimal[1..]),
+            format!("{}_{}", &hex[..3], &hex[3..]),
+            format!("{decimal}u32"),
+            format!("{hex}_u32"),
         ] {
-            assert_eq!(sdk_words(&format!("    Ask = {spelling},\n")), [ask], "{spelling}");
+            let one = format!("#[repr(u32)] enum E {{ A = {spelling}, }}");
+            assert_eq!(sdk_words(&one).expect("one variant"), [ask], "{spelling}");
+        }
+        for unread in ["#[repr(u32)] enum E { A, }", "#[repr(u32)] enum E { A = ASK, }"] {
+            assert!(sdk_words(unread).is_err(), "{unread}");
         }
         assert!(
-            !words.contains(&toyos_lanstate::ASK),
-            "netd's state word {} is also one of the SDK's: {words:?}",
-            toyos_lanstate::ASK
+            !words.contains(&ask),
+            "netd's state word {ask} is also one of the SDK's: {words:?}"
         );
     }
 
-    /// Every number `toyos::net` puts in an IPC header, out of the SDK's own
-    /// source: the discriminants of its two `#[repr(u32)]` enums.
-    fn sdk_words(source: &str) -> Vec<u32> {
-        source
-            .lines()
-            .filter_map(|line| line.trim_end().strip_suffix(',')?.split_once(" = "))
-            .filter_map(|(_, value)| discriminant(value.trim()))
-            .collect()
+    /// Every number `toyos::net` puts in an IPC header: every variant of its
+    /// `#[repr(u32)]` enums. A line this scan cannot read is an error and never
+    /// a skip, because a word it walked past is one the collision claim above
+    /// was never made against.
+    fn sdk_words(source: &str) -> Result<Vec<u32>, String> {
+        let mut words = Vec::new();
+        for tail in source.split("#[repr(u32)]").skip(1) {
+            let open = tail.split_once('{').ok_or("a `#[repr(u32)]` item with no body")?.1;
+            let body = open.split_once('}').ok_or("a `#[repr(u32)]` item never closed")?.0;
+            for line in body.lines().map(str::trim) {
+                if line.is_empty() || line.starts_with(['/', '#']) {
+                    continue;
+                }
+                let refused = || format!("{line:?} is no discriminant this scan reads");
+                words.push(variant(line).ok_or_else(refused)?);
+            }
+        }
+        Ok(words)
     }
 
-    /// One discriminant, in every notation Rust spells an integer literal in.
-    fn discriminant(value: &str) -> Option<u32> {
-        let value = value.replace('_', "");
+    /// One variant's discriminant, in every notation Rust spells an integer
+    /// literal in, or `None` where it is not an explicit literal: an implicit
+    /// discriminant and a path are neither.
+    fn variant(line: &str) -> Option<u32> {
+        let value = line.strip_suffix(',')?.split_once(" = ")?.1.trim().replace('_', "");
         let (radix, rest) = match value.get(..2) {
             Some("0b") => (2, &value[2..]),
             Some("0o") => (8, &value[2..]),

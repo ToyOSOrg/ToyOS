@@ -28,6 +28,6 @@ fn asked() -> Result<State, Refusal> {
         return Err(Refusal::Malformed);
     }
     let mut answer = [0u8; ANSWER_LEN];
-    let got = netd.recv_bytes(&header, &mut answer).map_err(|_| Refusal::Unanswered)?;
-    State::decode(&answer[..got]).ok_or(Refusal::Malformed)
+    netd.recv_bytes(&header, &mut answer).map_err(|_| Refusal::Unanswered)?;
+    Ok(State::decode(&answer))
 }

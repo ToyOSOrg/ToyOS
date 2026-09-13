@@ -50,14 +50,14 @@ impl State {
         out
     }
 
-    /// The answer as the job reads it, or `None` where those are not bytes this
-    /// grammar wrote.
-    pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let bytes: [u8; ANSWER_LEN] = bytes.try_into().ok()?;
+    /// The answer as the job reads it. **A frame of any other length is not an
+    /// answer at all**, refused where the length is read rather than here: this
+    /// takes the bytes as a whole answer and so cannot fail.
+    pub fn decode(bytes: &[u8; ANSWER_LEN]) -> Self {
         let mut mac = [0u8; 6];
         mac.copy_from_slice(&bytes[..6]);
         let address = Ipv4Addr::from([bytes[6], bytes[7], bytes[8], bytes[9]]);
-        Some(Self { mac, address: (!address.is_unspecified()).then_some(address) })
+        Self { mac, address: (!address.is_unspecified()).then_some(address) }
     }
 
     /// The code a job that got this answer exits with.
@@ -162,21 +162,11 @@ mod tests {
     fn an_answer_survives_the_wire_whether_or_not_it_carries_a_lease() {
         for address in [Some(ADDR), None] {
             let state = State { mac: MAC, address };
-            assert_eq!(State::decode(&state.encode()), Some(state));
+            assert_eq!(State::decode(&state.encode()), state);
         }
         // The absence is four zero bytes and not a shorter answer: a reader
         // that trusted the length would take a truncated frame for a lease.
         assert_eq!(State { mac: MAC, address: None }.encode()[6..], [0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn bytes_this_grammar_did_not_write_are_no_answer() {
-        let whole = State { mac: MAC, address: Some(ADDR) }.encode();
-        assert_eq!(State::decode(&whole[..ANSWER_LEN - 1]), None);
-        let mut longer = std::vec::Vec::from(whole);
-        longer.push(0);
-        assert_eq!(State::decode(&longer), None);
-        assert_eq!(State::decode(&[]), None);
     }
 
     /// **The band is what tells a verdict from an accident.** Every code a
