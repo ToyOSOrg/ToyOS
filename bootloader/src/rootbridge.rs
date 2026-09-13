@@ -24,14 +24,9 @@ use uefi::prelude::*;
 use uefi::proto::unsafe_protocol;
 use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
 
-/// The head of every line this file writes, so a reader of `loader.log` can
-/// find the machine's aperture by one word.
 const HEAD: &str = "Root bridge:";
 
-/// UEFI 2.10 §14.2.2, in the spec's own field order. Every entry but
-/// `configuration` is a function pointer this loader never calls, named so that
-/// the one it does call is at the offset the spec puts it at; the assertion
-/// below is what holds that claim.
+/// UEFI 2.10 §14.2.2, in the spec's own field order.
 #[repr(C)]
 #[unsafe_protocol("2f707ebb-4a1a-11d4-9a38-0090273fc14d")]
 struct PciRootBridgeIo {
@@ -76,7 +71,7 @@ struct List {
 impl Phys for List {
     fn readable(self, phys: u64, len: usize) -> bool {
         let Some(ceiling) = self.at.checked_add(MAX_LIST_BYTES as u64) else { return false };
-        self.at != 0 && phys >= self.at && phys.checked_add(len as u64).is_some_and(|e| e <= ceiling)
+        phys >= self.at && phys.checked_add(len as u64).is_some_and(|e| e <= ceiling)
     }
 
     fn byte(self, phys: u64) -> u8 {
@@ -88,9 +83,6 @@ impl Phys for List {
 
 /// Every memory window this machine's root bridges decode, written into `out`;
 /// the count, or zero on a machine that would not say.
-///
-/// Zero is the kernel knowing of no address that reaches the bus, which is what
-/// it then refuses on. It is never a guess.
 pub fn windows(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -> usize {
     let bs = system_table.boot_services();
     let handles = match bs.find_handles::<PciRootBridgeIo>() {
@@ -142,10 +134,6 @@ pub fn windows(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -
         let list = List { at: resources as u64 };
         let walk = memory_windows(list, list.at, &mut out[found..]);
 
-        // The raw bytes, before anything is decoded: they are the evidence for
-        // every window the kernel prints and the fixture the decoder's own
-        // tests read.
-        //
         // `readable` again here rather than resting on the walk's: `Phys`'s
         // contract is that a byte is asked for only where a `readable` in the
         // same reach accepted it, and a reader that argues its bound across two

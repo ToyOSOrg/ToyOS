@@ -35,8 +35,11 @@ const QWORD_TRANSLATION: usize = 30;
 const QWORD_LENGTH: usize = 38;
 const QWORD_BYTES: usize = QWORD_LENGTH + 8;
 
-/// ACPI 6.5 Table 6.44: what a resource type byte names.
+/// ACPI 6.5 Table 6.44: what a resource type byte names. Every other value is
+/// reserved or vendor-defined.
 const TYPE_MEMORY: u8 = 0;
+const TYPE_IO: u8 = 1;
+const TYPE_BUS: u8 = 2;
 /// ACPI 6.5 Table 6.43, bit 0 of the General Flags: set where the device
 /// consumes the range itself rather than forwarding it downstream.
 const CONSUMER: u8 = 1;
@@ -52,6 +55,10 @@ pub enum ResourceError {
     /// than stepped over: a window silently dropped is an aperture the kernel
     /// would then place a BAR outside of.
     UnknownTag { tag: u8 },
+    /// An address space descriptor naming a resource type this decoder does
+    /// not implement. Refused for [`Self::UnknownTag`]'s reason: a range whose
+    /// kind is unread may be memory.
+    UnknownResourceType { kind: u8 },
     /// An address space descriptor whose whole length cannot hold the fields
     /// its own tag defines.
     Short { tag: u8, whole: usize, needed: usize },
@@ -63,9 +70,7 @@ pub enum ResourceError {
     /// machine nothing here has read.
     Translated { min: u64, offset: u64 },
     /// A memory range the bridge consumes rather than forwards — its own
-    /// registers, not a range anything behind it decodes. Refused rather than
-    /// skipped: both firmwares in reach mark every range they answer with as
-    /// forwarded, so one that is not is a bridge this decoder has not read.
+    /// registers, not a range anything behind it decodes.
     Consumed { min: u64 },
     /// More memory windows than the caller has room for.
     TooMany { room: usize },
@@ -77,6 +82,9 @@ impl core::fmt::Display for ResourceError {
             Self::Unreadable { at, len } => write!(f, "{len} bytes at {at:#x} are unreadable"),
             Self::Unterminated => write!(f, "no End Tag inside {MAX_LIST_BYTES} bytes"),
             Self::UnknownTag { tag } => write!(f, "descriptor tag {tag:#04x} is not decoded here"),
+            Self::UnknownResourceType { kind } => {
+                write!(f, "resource type {kind:#04x} is not decoded here")
+            }
             Self::Short { tag, whole, needed } => {
                 write!(f, "descriptor tag {tag:#04x} is {whole} bytes, and its fields need {needed}")
             }
@@ -183,7 +191,12 @@ pub fn memory_windows<P: Phys>(phys: P, at: u64, out: &mut [RootBridgeWindow]) -
             let why = ResourceError::Short { tag: item.tag, whole: item.len, needed: QWORD_BYTES };
             return Walk { bytes: through, windows: Err(why) };
         }
-        if phys.byte(head + RESOURCE_TYPE as u64) == TYPE_MEMORY {
+        let kind = phys.byte(head + RESOURCE_TYPE as u64);
+        if !matches!(kind, TYPE_MEMORY | TYPE_IO | TYPE_BUS) {
+            let why = ResourceError::UnknownResourceType { kind };
+            return Walk { bytes: through, windows: Err(why) };
+        }
+        if kind == TYPE_MEMORY {
             let min = u64le(phys, head, QWORD_MINIMUM);
             let max = u64le(phys, head, QWORD_MAXIMUM);
             let length = u64le(phys, head, QWORD_LENGTH);

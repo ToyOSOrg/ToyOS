@@ -351,9 +351,7 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootB
 /// **A BAR firmware itself assigned outside every window it named is named and
 /// nothing more.** What the protocol answers is a bridge's *current* settings,
 /// and a fixed function whose BAR its bridge does not forward is a machine this
-/// is true of rather than firmware contradicting itself: the ThinkPad T14's SPI
-/// controller decodes `0xfe010000`, which that machine's own `_CRS` puts inside
-/// no root bus resource either.
+/// is true of rather than firmware contradicting itself.
 ///
 /// **What this answers about is what each placement is measured against.**
 /// Every candidate carries its standing against these windows into its own

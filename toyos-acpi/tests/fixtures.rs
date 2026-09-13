@@ -138,10 +138,6 @@ fn the_xsdt_walk_reaches_every_entry() {
     assert_eq!(find_table(m, RSDP, b"SSDT", 36).err(), Some(TableError::Absent));
 }
 
-/// Where the two firmwares' descriptor lists are put for the walk below. The
-/// address is arbitrary — nothing in a list points at itself — but the reader is
-/// bounded by the region, so a walk reading one byte past the End Tag panics
-/// rather than answering.
 const ROOT_BRIDGE: u64 = 0x7f00_0000;
 const OVMF_BRIDGE: &[u8] = include_bytes!("../fixtures/ovmf-pure-efi/root-bridge-0.bin");
 const T14_BRIDGE: &[u8] = include_bytes!("../fixtures/thinkpad-t14/root-bridge-0.bin");
@@ -157,10 +153,6 @@ fn bridge_windows(bytes: &'static [u8]) -> Vec<RootBridgeWindow> {
     out[..count].to_vec()
 }
 
-/// `pcidev: firmware root bridge windows: mem 0xc0000000..0xc0100000,
-/// mem 0x800000000..0x800100000`, out of the bytes the loader logged on the boot
-/// that printed it.
-///
 /// The I/O and bus ranges in the same list are what make this more than a
 /// count: a decoder that took every descriptor would answer four windows here.
 #[test]
@@ -175,11 +167,9 @@ fn the_windows_a_boot_printed_are_what_that_firmwares_own_bytes_say() {
 }
 
 /// The same decode against a second firmware, whose list is the same four
-/// descriptors carrying entirely different numbers — and whose low window is
-/// the one a 32-bit BAR on that machine has to land inside.
-///
-/// The two together are what say the decoder reads fields rather than offsets
-/// that happen to hold the right values on one machine.
+/// descriptors carrying entirely different numbers. The two together are what
+/// say the decoder reads fields rather than offsets that happen to hold the
+/// right values on one machine.
 #[test]
 fn a_second_firmwares_bytes_decode_to_that_machines_own_windows() {
     assert_eq!(

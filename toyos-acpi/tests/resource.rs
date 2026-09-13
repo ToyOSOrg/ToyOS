@@ -136,9 +136,7 @@ fn a_translated_window_is_refused_rather_than_taken_at_its_minimum() {
 }
 
 /// A range the bridge consumes is not one anything behind it decodes, and a BAR
-/// moved into one would be moved onto the bridge's own registers. Both
-/// firmwares this project can read mark every range they answer with as
-/// forwarded, so a consumed one is a bridge this decoder has not read.
+/// moved into one would be moved onto the bridge's own registers.
 ///
 /// The other three bits of the same byte say how the range is decoded and
 /// whether its ends are fixed, and none of them changes what the range is.
@@ -170,6 +168,17 @@ fn a_descriptor_this_decoder_does_not_read_is_refused_by_its_tag() {
         let mut d = vec![tag, 0x17, 0x00];
         d.resize(3 + 0x17, 0);
         assert_eq!(windows(&list(&[d]), 8), Err(ResourceError::UnknownTag { tag }));
+    }
+}
+
+/// And the resource type inside a descriptor this decoder does read: reserved
+/// or vendor-defined, and refused for the tag's reason — a range whose kind is
+/// unread may be memory.
+#[test]
+fn a_resource_type_this_decoder_does_not_read_is_refused_by_its_kind() {
+    for kind in [3u8, 191, 192, 255] {
+        let bytes = list(&[qword(kind, 0xa080_0000, 0x1000, 0)]);
+        assert_eq!(windows(&bytes, 8), Err(ResourceError::UnknownResourceType { kind }));
     }
 }
 

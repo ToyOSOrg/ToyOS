@@ -13771,8 +13771,12 @@ fn run_machine_test(
             log.must_say("init: test-runner: pci:1af4:1041 is already claimed")?;
             // netd is the one that got it, not merely the one that ran.
             log.must_say("netd: ready, at most ")?;
+            aperture_account(&log)?;
             log.must_be_clean()?;
-            eprintln!("  [netcase] one PCI function, two claimants, one holder");
+            eprintln!(
+                "  [netcase] one PCI function, two claimants, one holder; and every \
+                 assigned BAR inside the aperture firmware named"
+            );
             Ok(())
         }
         "bar_placement_is_proven" => {
@@ -15920,6 +15924,96 @@ struct XhciLayout {
     scratchpad: usize,
     blocks: usize,
     stride: usize,
+}
+
+/// The kernel's account of the machine's aperture, held against addresses this
+/// harness read off the same boot without it: the `bars=` of the ECAM walk, and
+/// the windows `publish` said it cut.
+///
+/// Asking firmware where its root bridges decode, decoding what it answers and
+/// carrying the answer across `KernelArgs` all fail into the one missing record.
+fn aperture_account(log: &serial::Serial) -> Result<(), String> {
+    fn hex(s: &str) -> Result<u64, String> {
+        u64::from_str_radix(s.trim().trim_start_matches("0x"), 16)
+            .map_err(|e| format!("{s:?} is not an address: {e}"))
+    }
+
+    let named = log.must_say("pcidev: firmware root bridge windows: ")?;
+    let windows = named
+        .rsplit_once("windows: ")
+        .ok_or_else(|| format!("unparseable aperture record: {named:?}"))?
+        .1
+        .split(", ")
+        .map(|w| {
+            let (base, end) = w
+                .trim()
+                .strip_prefix("mem ")
+                .and_then(|r| r.split_once(".."))
+                .ok_or_else(|| format!("unparseable window {w:?} on {named:?}"))?;
+            Ok((hex(base)?, hex(end)?))
+        })
+        .collect::<Result<Vec<(u64, u64)>, String>>()?;
+
+    // Every memory BAR firmware itself assigned, off the enumeration rather
+    // than off the record being judged. A BAR outside every named window is a
+    // fact about the machine and the kernel has to name it — one line each,
+    // and none for a machine where there are none.
+    let outside: Vec<String> = log
+        .text()
+        .lines()
+        .filter_map(|l| Some((l, l.split("bars=[").nth(1)?.split_once(']')?.0)))
+        .flat_map(|(l, bars)| bars.split_whitespace().map(move |b| (l, b)))
+        .filter_map(|(l, bar)| Some((l, hex(bar.split_once('=')?.1).ok()?)))
+        .filter(|(_, at)| !windows.iter().any(|(base, end)| at >= base && at < end))
+        .map(|(l, at)| format!("{at:#x} on {}", l.trim()))
+        .collect();
+    let said: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| l.contains("is inside no window firmware named, so its bridge does not forward"))
+        .collect();
+    if said.len() != outside.len() {
+        return Err(format!(
+            "the enumeration puts {} assigned memory BAR(s) outside {named:?} and the kernel \
+             named {}:\nthe harness: {outside:#?}\nthe kernel: {said:#?}",
+            outside.len(),
+            said.len(),
+        ));
+    }
+
+    // And every address this kernel put a BAR at carries its own standing
+    // against those windows, recomputed here from the record's address rather
+    // than read off the clause beside it. A placement accounted from an empty
+    // window list says "inside no window firmware named" about an address that
+    // is inside one, and that is what this refuses.
+    let mut placements = 0usize;
+    for line in log.text().lines().filter(|l| l.contains(" placed at 0x")) {
+        let at = hex(
+            line.split_once(" placed at 0x")
+                .and_then(|(_, r)| r.split(' ').next())
+                .ok_or_else(|| format!("unparseable placement record: {line:?}"))?,
+        )?;
+        let account = match windows.iter().find(|(base, end)| at >= *base && at < *end) {
+            Some((base, _)) => format!("inside firmware's mem {base:#x}"),
+            None => "inside no window firmware named".to_string(),
+        };
+        if !line.contains(&account) {
+            return Err(format!(
+                "{at:#x} is {account} by {named:?}, and the kernel's own record of putting a BAR \
+                 there says otherwise:\n{}",
+                line.trim()
+            ));
+        }
+        placements += 1;
+    }
+    if placements == 0 {
+        return Err(format!(
+            "this boot put no BAR anywhere, so nothing on it accounts for an address against \
+             {named:?}:\n{}",
+            log.text()
+        ));
+    }
+    Ok(())
 }
 
 /// One PCI function as both readers name it: bus, device, function, vendor,

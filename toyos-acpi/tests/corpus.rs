@@ -13,7 +13,7 @@ use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
     dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, memory_windows,
     reset_register, rtc_century, Century, MadtEntry, MadtHalt, Phys, Reset, Table, TableError,
-    MADT_ENTRIES, MAX_LIST_BYTES, MAX_TABLE_LEN,
+    MADT_ENTRIES, MAX_TABLE_LEN,
 };
 
 const RSDP_AT: u64 = 0x1_0000;
@@ -537,18 +537,8 @@ const ROOT_BRIDGES: &[(&str, &[u8])] = &[
 
 /// **No panic and no unbounded walk, over every byte of both firmwares' real
 /// descriptor lists.** Each byte takes each of its 255 other values in turn and
-/// the whole list is decoded over it.
-///
-/// A resource list carries no checksum, unlike the tables above, so a single
-/// byte reaches the decode directly — there is no resealed arm here because
-/// there is nothing to reseal. What a mutation reaches is every field the
-/// walk reads: the tag and the two length bytes that decide how far a step
-/// goes, the resource type, the general flags, and the three accounts of an
-/// extent that have to agree.
-///
-/// The bound is the assertion as much as the absence of a panic: a walk that
-/// stopped advancing would report more bytes than the list may be, and every
-/// answer is either windows inside the caller's room or a named refusal.
+/// the whole list is decoded over it. A resource list carries no checksum,
+/// unlike the tables above, so a single byte reaches the decode directly.
 #[test]
 fn no_single_byte_mutation_of_a_firmwares_descriptor_list_panics_or_runs_away() {
     let mut mutations = 0u64;
@@ -564,13 +554,19 @@ fn no_single_byte_mutation_of_a_firmwares_descriptor_list_panics_or_runs_away() 
                 let regions: &[(u64, &[u8])] = &[(ROOT_BRIDGE_AT, &mutated)];
                 let mut out = [RootBridgeWindow::default(); 8];
                 let walk = memory_windows(Machine { regions }, ROOT_BRIDGE_AT, &mut out);
+                // The list is the whole of what can be read, so a walk reporting
+                // more bytes than it holds is one that stopped advancing or
+                // stepped past a descriptor it had not read.
                 assert!(
-                    walk.bytes <= MAX_LIST_BYTES,
+                    walk.bytes <= original.len(),
                     "{which} byte {offset} as {value:#04x}: the walk reported {} bytes",
                     walk.bytes
                 );
                 match walk.windows {
-                    Ok(count) => assert!(count <= out.len()),
+                    Ok(count) => assert!(
+                        out[..count].iter().all(|w| w.length != 0),
+                        "{which} byte {offset} as {value:#04x}: a window of no length was carried"
+                    ),
                     Err(_) => refused += 1,
                 }
                 mutations += 1;
