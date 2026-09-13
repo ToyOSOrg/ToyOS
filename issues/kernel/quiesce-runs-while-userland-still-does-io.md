@@ -34,6 +34,27 @@ The bound over the runner's whole job list is one more way in: when
 running — so the reset that ends an overrunning boot lands wherever that job
 happens to be, by construction.
 
+It is a standing reproduction, not an occasional shape. Every T14 boot of
+`tests/metalcase` ends the same way, because that config starts `sshd`, which
+spends a second retrying a `netd` connection that never comes and is still
+spinning when the `reboot` job asks for the reset:
+
+```
+[12:55:16 6.929 cpu4] Rebooting.
+[12:55:17 7.035 cpu1] syscalls: pid=8 total=17 syscall_wall=0ms ...
+[12:55:17 7.035 cpu1] exit: sshd pid=8 code=0 cpu=2325ms
+```
+
+The gap between the boot's last word and that `exit:` record is 130 ms, 265 ms
+and 106 ms on the three readbacks taken so far. On the one quoted, `sshd` burned
+2,325 ms of CPU across the 2,326 ms between its spawn at 4.709 and its exit — so
+it was running in Ring 3 on cpu1 the whole time and never blocked, and one CPU
+kept dispatching userland across the boot's last word. `bootlog::verdict` is
+`EXIT=1` for each of them while every one of them came back with `stick_secs 0`,
+and `tests/metal-profile.toml` prices no number that would notice: the two
+judges read the same file and disagree, which is this defect showing rather than
+either judge being wrong.
+
 ## The hardware evidence, and the decision it forces
 
 T14 run 20 (2026-09-07, branch tip `f46f91eb`) booted `tests/metaldevicecase`
