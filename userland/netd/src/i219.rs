@@ -207,7 +207,9 @@ impl Nic {
             },
             match brought_up.phy {
                 Ok(phy) => format!(
-                    "identifies as {:#010x}, its link is {} and auto-negotiation {}",
+                    "answers at PHY address {:02} as {:#010x}, its link is {} and \
+                     auto-negotiation {}",
+                    phy.addr,
                     phy.id,
                     if phy.up { "up" } else { "down" },
                     if phy.negotiated { "is complete" } else { "has not finished" },
