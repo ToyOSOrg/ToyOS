@@ -885,15 +885,11 @@ impl Model {
                     );
                 }
                 if r == reg::CONTROL_1000T {
-                    // §9.5.2.10's other fields are the ones this model holds:
-                    // its table's defaults where nothing has written them, and
-                    // whatever the agent before this driver left where it has.
-                    let held = self.phy.file[reg::CONTROL_1000T as usize];
                     self.carried(
                         "§9.5.2.10's 1000BASE-T Control",
                         data,
-                        !control_1000t::FULL,
-                        held & !control_1000t::FULL,
+                        control_1000t::CARRIED_MASK,
+                        control_1000t::CARRIED_DEFAULT,
                     );
                 }
                 let abilities = |model: &PhyModel| {

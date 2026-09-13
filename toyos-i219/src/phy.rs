@@ -129,6 +129,14 @@ pub mod advertise {
 pub mod control_1000t {
     /// Advertise 1000BASE-T Full-Duplex Capability (bit 9).
     pub const FULL: u16 = 1 << 9;
+
+    /// §9.5.2.10's table gives every other field of this register a default of
+    /// `0b` — bits 7:0 "Reserved. Set these bits to 0x00", Advertise
+    /// 1000BASE-T Half-Duplex (which the same note says this PHY does not
+    /// support), Port Type, both Master/Slave fields and Test Mode — and §9.1
+    /// says a write carries them.
+    pub const CARRIED_MASK: u16 = !FULL;
+    pub const CARRIED_DEFAULT: u16 = 0;
 }
 
 /// Custom Mode Control bits (§9.5.3.1).
