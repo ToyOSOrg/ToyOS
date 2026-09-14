@@ -123,6 +123,10 @@ pub fn record_done() {
 /// regardless: a boot whose loader claimed no page, and a page holding a
 /// [`State::Fault`], whose text is a fixed-layout register dump and not text —
 /// a crash is worth more than the account of the reset that followed it.
+///
+/// The account is taken a line at a time and sealed as each one closes
+/// ([`toyos_blackbox::Account`]), because its lines are separated by bounded
+/// waits on devices that may not answer.
 pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
     let mut appended = false;
     // **The envelope is the one already on the page**, state, stamp and
@@ -137,9 +141,15 @@ pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
             Some((State::Armed | State::Fault, ..)) | None => None,
         };
         let Some((state, stamp, identity, at)) = opened else { return };
-        let mut report = toyos_blackbox::Report::reopened(page, at);
-        account(&mut report);
-        report.seal(state, stamp, identity);
+        let page_at = PAGE.load(Relaxed);
+        let mut lines = toyos_blackbox::Account::new(
+            toyos_blackbox::Report::reopened(page, at),
+            state,
+            stamp,
+            identity,
+            || flush(page_at),
+        );
+        account(&mut lines);
         appended = true;
     });
     appended

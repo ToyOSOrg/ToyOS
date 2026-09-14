@@ -1543,3 +1543,9 @@ pub fn arm_short_read() {
     msc::short_read::arm();
 }
 
+/// Stop this machine inside the next WRITE(10), at `at`. See [`msc::mid_write`].
+#[cfg(feature = "boot-actuators")]
+pub fn arm_mid_write_wedge(at: toyos_xhci::bot::Phase) {
+    msc::mid_write::arm(at);
+}
+

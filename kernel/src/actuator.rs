@@ -124,6 +124,27 @@ actuators! {
     /// Skip the waits of the next Reset Recovery's control transfers, once.
     usb_reset_break = "usb-reset-break";
 
+    /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
+    /// device holding the CBW and nothing queued for its data phase, so the
+    /// bound that ends the machine ends a device inside a Bulk-Only command.
+    /// See `usb_gate::wedge_inside_a_write`; judged by
+    /// `usb_reset_records_the_phase_it_cut`.
+    usb_wedge_data_owed = "usb-wedge-data-owed";
+
+    /// The same, stopped one step later: the data phase's TRB is on the ring
+    /// and its doorbell has not been rung.
+    usb_wedge_in_data = "usb-wedge-in-data";
+
+    /// The same, stopped after the data phase completed and before anything has
+    /// asked for the CSW.
+    usb_wedge_before_status = "usb-wedge-before-status";
+
+    /// Sweep the boot stick from the shutdown syscall so the reset lands on a
+    /// controller that is moving bytes rather than on a bus idle since the
+    /// wedge. See `usb_gate::sweep_under_load`; judged by
+    /// `usb_reset_records_the_phase_it_cut`.
+    usb_reset_under_load = "usb-reset-under-load";
+
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
