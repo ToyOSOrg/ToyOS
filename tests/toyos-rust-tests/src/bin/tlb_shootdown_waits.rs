@@ -132,9 +132,9 @@ fn main() {
             break;
         }
         println!(
-            "trial {trial}: munmap returned in {elapsed}ns — a target that was initiating a \
-             shootdown of its own answers through a serve that does not delay, so this trial \
-             judges nothing and is re-run"
+            "trial {trial}: munmap returned in {elapsed}ns, which is no verdict on its own — \
+             only every trial returning fast is one, and the kernel's `tlb: acks held back` \
+             line says whether a delay reached this shootdown's targets"
         );
     }
     assert!(
