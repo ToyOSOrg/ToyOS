@@ -1694,10 +1694,9 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// The cable's own boot: netd in front of the T14's I219, and one job that
-/// holds the machine up long enough for the host to reach it. The first is the
-/// only arm in this suite that names a PCI function for the loop to reach the
-/// boot over; the second is the same boot with netd's delivery actuator armed,
-/// and its verdict is read out of the kernel's log alone.
+/// holds the machine up long enough for the host to reach it. The second arm is
+/// the same boot with netd's delivery actuator armed, and its verdict is read
+/// out of the kernel's log alone.
 const LANCASE: &[metal::Arm] = &[
     metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) },
     metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS),

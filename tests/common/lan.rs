@@ -225,9 +225,6 @@ pub fn lan_dhcp_lease(
             "the client read this lease as {lease:?} and the backend serves {want:?}"
         ));
     }
-    // The part split, end to end: this backend is the 82574, whose own PHY the
-    // I219's §9 sequence is not written from, so the driver refuses that
-    // sequence by name here and the link below is the MAC's own.
     log.must_say(PHY_NOT_THIS_MAP)?;
     // The order, and not merely the presence of both.
     log.must_say_after(LEASE, READY)?;

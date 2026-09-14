@@ -2776,18 +2776,36 @@ mod tests {
         assert!(one_claimant_per_device(&bad, None).is_err());
     }
 
-    /// netd's delivery actuator (`PROVOKE_MESSAGE` in `userland/netd/src/main.rs`)
-    /// writes §10.2.4.4's `ICS`, which is the Intel driver's register and not
-    /// virtio's — so a boot config that arms it on any other card is a boot that
-    /// panics instead of answering the question it was flashed for.
+    /// netd's delivery actuator, spelled here and held to netd's own
+    /// declaration by [`netd_declares_the_flag_this_gate_spells`].
+    const PROVOKE_MESSAGE: &str = "--provoke-message";
+
+    /// Nothing links the two crates: netd is a userland binary and this is the
+    /// build system, so the flag both ends spell is held to netd's own
+    /// declaration by reading its source.
+    #[test]
+    fn netd_declares_the_flag_this_gate_spells() {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src/main.rs");
+        let source = std::fs::read_to_string(&at).expect("netd's main module");
+        assert!(
+            crate::bootlog::declares(&source, &format!("\"{PROVOKE_MESSAGE}\"")),
+            "{} declares no constant equal to \"{PROVOKE_MESSAGE}\"",
+            at.display()
+        );
+    }
+
+    /// netd's delivery actuator writes §10.2.4.4's `ICS`, which is the Intel
+    /// driver's register and not virtio's — so a boot config that arms it on any
+    /// other card is a boot that panics instead of answering the question it was
+    /// flashed for.
     fn an_armed_actuator_claims_an_intel_function(cfg: &SystemConfig) -> Result<(), String> {
         for (name, prog) in &cfg.programs {
-            if !prog.args.iter().any(|arg| arg == "--provoke-message") {
+            if !prog.args.iter().any(|arg| arg == PROVOKE_MESSAGE) {
                 continue;
             }
             if !prog.devices.iter().any(|d| d.starts_with("pci:8086:")) {
                 return Err(format!(
-                    "`{name}` is armed with `--provoke-message` and claims {:?}, none of which \
+                    "`{name}` is armed with `{PROVOKE_MESSAGE}` and claims {:?}, none of which \
                      is a card with an `ICS` register",
                     prog.devices
                 ));
@@ -2798,14 +2816,24 @@ mod tests {
 
     #[test]
     fn every_armed_delivery_actuator_claims_a_card_that_has_one() {
+        let mut armed = 0;
         for cfg in ALL_CONFIGS {
-            an_armed_actuator_claims_an_intel_function(&load(cfg))
+            let config = load(cfg);
+            armed += config
+                .programs
+                .values()
+                .filter(|p| p.args.iter().any(|arg| arg == PROVOKE_MESSAGE))
+                .count();
+            an_armed_actuator_claims_an_intel_function(&config)
                 .unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let bad: SystemConfig = toml::from_str(
+        // A walk that reached no armed program passes on having found nothing,
+        // which is the one way this gate can rot while every config still loads.
+        assert!(armed > 0, "no shipped boot config arms `{PROVOKE_MESSAGE}` at all");
+        let bad: SystemConfig = toml::from_str(&format!(
             "init = []\n[programs.netd]\ndevices = [\"pci:1af4:1041\"]\n\
-             args = [\"--provoke-message\"]\n",
-        )
+             args = [\"{PROVOKE_MESSAGE}\"]\n"
+        ))
         .unwrap();
         assert!(an_armed_actuator_claims_an_intel_function(&bad).is_err());
     }

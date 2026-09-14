@@ -45,13 +45,17 @@ pub const DEVICE_BASE: u64 = 0x0000_0001_0000_0000;
 /// from the `IA` field after a reset).
 pub const NVM_MAC: [u8; 6] = [0x54, 0xbf, 0x64, 0x11, 0x22, 0x33];
 
-/// Nanoseconds the modelled clock moves on each read. A driver's deadline has
+/// Nanoseconds the modelled clock moves on each access. A driver's deadline has
 /// to be reachable, and a clock that stood still would hang the test rather
-/// than fail it — but it stays **shorter than the shortest bound any driver
-/// here measures** (§10.2.2.1's microsecond settle), or one read of it would
-/// satisfy that bound and a wait and no wait at all would be the same thing to
-/// this model.
+/// than fail it.
 const CLOCK_STEP_NANOS: u64 = 100;
+
+const _: () = {
+    // A tick as long as the shortest bound a driver here measures makes one
+    // access satisfy that bound, so a wait and no wait at all would be the same
+    // thing to this model.
+    assert!(CLOCK_STEP_NANOS < crate::RESET_SETTLE_NANOS);
+};
 
 /// How many reads of `CTRL` the reset stays asserted for (§10.2.2.1: the bit is
 /// self-clearing, and the datasheet gives no time).
@@ -133,6 +137,21 @@ impl Default for Permits {
     }
 }
 
+impl Permits {
+    /// The same latitudes with the PHY's four taken away: those four are only
+    /// what the agent before this driver left in the register file, and
+    /// §9.5.2.1's reset is the event that takes them away.
+    fn after_a_phy_reset(&self) -> Self {
+        Self {
+            phy_starts_powered_down: false,
+            phy_starts_in_loopback_or_resetting: false,
+            phy_starts_with_autonegotiation_disabled: false,
+            phy_advertises_what_the_last_agent_left: false,
+            ..*self
+        }
+    }
+}
+
 /// §9.3: registers 0 to 15 "are identical in all the pages and are the IEEE
 /// defined registers", and everything above them is the vendor's and therefore
 /// the page's. An access to one of those without a page selected first reaches
@@ -146,10 +165,8 @@ struct Carried {
     default: u16,
 }
 
-/// §9.1's tables, register by register. **They are the model's and not the
-/// driver's**: §9.1 says "other fields in the same 16-bit register must be
-/// loaded with their default values", and it is this file that holds a write to
-/// that and `lib.rs` that is held.
+/// §9.1's tables, register by register: "other fields in the same 16-bit
+/// register must be loaded with their default values".
 mod carried {
     use super::Carried;
     use crate::phy::{control_1000t, custom_mode};
@@ -660,6 +677,9 @@ impl Model {
     }
 
     fn write(&mut self, reg: usize, value: u32) {
+        // A write over the bus takes as long as a read of it, and a bound
+        // measured from one is short by that much if the write is free.
+        self.nanos += CLOCK_STEP_NANOS;
         assert!(
             reg.is_multiple_of(4) && reg + 4 <= regs::REGISTER_BYTES,
             "seed {}: a {reg:#x} register write is outside the file",
@@ -940,11 +960,12 @@ impl Model {
                 }
                 if r == reg::CONTROL && data & control::RESET != 0 {
                     // §9.5.2.1: "Writing a 1b to this bit causes immediate PHY
-                    // reset", which takes every register below back to the
-                    // default §9.5 prints for it.
-                    let power_on = PhyModel::new(&self.permits);
-                    self.phy.file = power_on.file;
-                    self.phy.custom_mode = power_on.custom_mode;
+                    // reset", so every register below goes back to the default
+                    // §9.5 prints for it — and to the default, not to the
+                    // inherited state [`Permits`]'s four PHY latitudes are.
+                    let defaults = PhyModel::new(&self.permits.after_a_phy_reset());
+                    self.phy.file = defaults.file;
+                    self.phy.custom_mode = defaults.custom_mode;
                     self.phy.negotiated_over = None;
                     self.phy.negotiating = false;
                     self.refresh_phy_link();
@@ -1309,6 +1330,21 @@ impl Nic {
     /// that section under which the registers are at the other one.
     pub fn phy_is_deaf_at(&self, addr: u8) {
         self.0.borrow_mut().phy.deaf = Some(addr);
+    }
+
+    /// §9.5.2.1's Reset, written to the Control register by an agent that is not
+    /// this driver — the same write this model takes from a driver that carried
+    /// the bit into a register it composed.
+    pub fn phy_is_reset(&self) {
+        let mut model = self.0.borrow_mut();
+        let data = carried::CONTROL.default | control::RESET;
+        model.phy_write(phy::SPECIFIC, reg::CONTROL, data);
+    }
+
+    /// One PHY register, read without any of its side effects — for an
+    /// assertion about what §9.5's tables leave in it.
+    pub fn phy_peek(&self, addr: u8, register: u8) -> u16 {
+        self.0.borrow_mut().phy_read(addr, register)
     }
 
     /// The restart of auto-negotiation resolves. **A wire event and not a

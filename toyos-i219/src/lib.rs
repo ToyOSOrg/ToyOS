@@ -493,10 +493,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // them.
         let held = regs.read(regs::CTRL);
         regs.write(regs::CTRL, held | ctrl::RST);
-        // Read after the write, because the write is the event §10.2.2.1's two
-        // bounds and §9.2's delay before the first MDIO access are measured
-        // from; a clock read before it dates them from an earlier instant and
-        // every one of them expires early.
+        // The write is the event §10.2.2.1's two bounds and §9.2's delay before
+        // the first MDIO access are measured from.
         let reset_at = clock.nanos();
         // The settle is a wait and not a poll: §10.2.2.1 owes the microsecond
         // to "attempting to check to see if the bit has cleared or attempting

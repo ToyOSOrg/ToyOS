@@ -1217,6 +1217,46 @@ fn a_phy_left_in_loopback_or_configured_by_hand_raises_no_link() {
     }
 }
 
+/// §9.5.2.1: "Writing a 1b to this bit causes immediate PHY reset", and what
+/// the register file comes back as is §9.5's own defaults — not the state the
+/// agent before this driver left, which is what a claim inherits and what a
+/// reset is the end of.
+#[test]
+fn a_phy_reset_restores_the_defaults_and_not_the_state_the_claim_inherited() {
+    let nic = Nic::i219(50);
+    nic.set_link(true);
+    let mut driver = open(&nic);
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert!(driver.link().up, "{}", nic.because("the bring-up raised no link to take away"));
+
+    nic.phy_is_reset();
+
+    assert_eq!(
+        nic.phy_unconfigured(),
+        Some("§9.2's bit 10 of page 769 register 16 was never set"),
+        "{}",
+        nic.because("the reset left the driver's §9 sequence standing")
+    );
+    // §9.5.2.1's table: Speed Selection (MSB, bit 6), Duplex Mode (bit 8) and
+    // Auto-Negotiation Enable (bit 12) come up 1b, and Power Down, Isolate,
+    // Loopback and Reset itself are not among them.
+    assert_eq!(
+        nic.phy_peek(toyos_phy::SPECIFIC, toyos_phy::reg::CONTROL),
+        (1 << 6) | (1 << 8) | (1 << 12),
+        "{}",
+        nic.because("§9.5.2.1's register 0 did not come back to its own default")
+    );
+    // §9.5.2.5's whole default is 0x01E1 — neither the 0x0061 §6.1.5's battery
+    // saver leaves behind nor the advertisement this driver wrote over it.
+    assert_eq!(
+        nic.phy_peek(toyos_phy::SPECIFIC, toyos_phy::reg::ADVERTISE),
+        0x01E1,
+        "{}",
+        nic.because("§9.5.2.5's advertisement did not come back to its own default")
+    );
+}
+
 /// §9.3 and Table 9-1 place §9.5.2's registers at different PHY addresses, so
 /// which one a part answers at is asked and not assumed: with nothing driving
 /// the address the table names, the identifier is what finds the other one and
