@@ -890,9 +890,6 @@ impl XhciController {
         // Before the doorbell, so no transfer is visible to the controller
         // without a reset being able to see the ring it went on.
         open.at(phase, &dev.in_ring, &dev.out_ring);
-        // Between the publish and the doorbell: the one window in which a TRB
-        // is on a ring the controller was never told about, which is the state
-        // `bot::Owed::ring_data` exists for.
         #[cfg(feature = "boot-actuators")]
         if phase == Phase::Data && !in_dir {
             mid_write::wedge_if_staged(Phase::Data);

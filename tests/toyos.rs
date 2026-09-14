@@ -736,7 +736,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Nightly row with no CI evidence and refuses the one-run marker on a
     // Nightly row alike, so a new name is bootstrapped Fast and re-tiered on
     // the measurement that run produces.
-    ("usb_reset_finishes_an_open_command", Sched::Parallel, Tier::Fast),
+    ("usb_reset_records_the_phase_it_cut", Sched::Parallel, Tier::Fast),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
     // bounds counted down in the guest, so it belongs beside the row above.
@@ -1492,12 +1492,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // **One boot, and it is the owner's ruling as a standing check**: a
-        // machine writing to the stick continuously, reset out from under itself
-        // by the deadline with the controller mid-transfer, and the stick
-        // enumerable on the next host afterwards. `boot.usbload.stick_secs` is
-        // that, refused by the loop before this judge runs.
-        "usb_reset_finishes_an_open_command",
+        // One boot: a machine writing to the stick continuously, reset out from
+        // under itself by the deadline with the controller mid-transfer, and
+        // the stick enumerable on the next host afterwards.
+        // `boot.usbload.stick_secs` is that, refused by the loop before this
+        // judge runs.
+        "usb_reset_records_the_phase_it_cut",
         metal::Metal::Runs {
             arms: &[metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[])],
             judge: |b| power::usb_load_chain(&b[0].kernel(), &b[0].after_the_reset()?),
@@ -9752,8 +9752,8 @@ fn run_machine_test(
         "boot_deadline_ends_a_wedge" => {
             power::boot_deadline_ends_a_wedge(test_config, c_bins, rust_bins)
         }
-        "usb_reset_finishes_an_open_command" => {
-            power::usb_reset_finishes_an_open_command(test_config, c_bins, rust_bins)
+        "usb_reset_records_the_phase_it_cut" => {
+            power::usb_reset_records_the_phase_it_cut(test_config, c_bins, rust_bins)
         }
         "hard_lockup_ends_a_deaf_cpu" => {
             power::hard_lockup_ends_a_deaf_cpu(test_config, c_bins, rust_bins)

@@ -1,10 +1,10 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-09-14
 ---
 
-# Six cut commands, and the bench's stick survived every one
+# A cut Bulk-Only command does not brick the bench's stick
 
 The T14 has lost its boot stick to three boots: runs 25 and 26 (`ccorpus`,
 sustained multi-megabyte writes to `/log`) and run 33 (`metalcase`, the USB
@@ -16,10 +16,9 @@ and neither sysfs port-power nor Linux's own device resets reach it.
 
 The reading taken from that was that the reset cut a Bulk-Only Transport command
 mid-phase — a device that has taken a CBW and is waiting for its data or its CSW
-(BOT 1.0 §5.1, §6.7.2–3) is one a port reset leaves stranded. **Six boots
-measured that reading directly and it did not hold**, which is why the reset
-path records the phase a device was left in and does not try to finish the
-command.
+(BOT 1.0 §5.1, §6.7.2–3) is one a port reset leaves stranded. **Every boot that
+measured that reading directly refuted it**, which is why the reset path records
+the phase a device was left in and does not try to finish the command.
 
 ## What was measured
 
@@ -63,7 +62,7 @@ three kills share the *hang*, not the reset: what a hang leaves the controller
 and the device in — a storm of transfers with no CPU draining events, an
 endpoint the driver abandoned and never recovered, a device mid-program with its
 firmware in a state no host can name — is the unknown, and none of it is
-reachable through the five states above.
+reachable through a deliberate wedge at all.
 
 **And it is unknowable through the stick**, because the stick is the channel and
 the stick is what dies. Evidence about a hang of this kind has to leave the
@@ -75,8 +74,8 @@ driver's.
 That cutting a command is harmless in general. BOT §5.3.4 makes reset recovery
 the device's obligation and a port reset clears strictly more than it asks for;
 a device that does not honour it is one no software on a laptop without VBUS
-control can clear. This bench's device honours it in all five states above. A
-different device, or this one in a state no wedge reaches, may not.
+control can clear. This bench's device honours it in every state the table above
+records. A different device, or this one in a state no wedge reaches, may not.
 
 ## The present state, in the run's own words
 

@@ -458,9 +458,8 @@ measured = 0
 # `usbload` stops no CPU. It sweeps the last eighth of the stick once, reading
 # each run and writing it back, until the deadline takes the machine out from
 # under it — so the reset lands on a controller that is moving bytes rather than
-# on one idle for two minutes. It is the owner's ruling as a standing check: a
-# production operating system does not brick a USB device, and `stick_secs` is
-# the bench's own answer about its own stick.
+# on one idle for two minutes. `stick_secs` is the bench's own answer about its
+# own stick.
 
 [[number]]
 name = "boot.usbload.complete_ms"
@@ -480,7 +479,7 @@ measured = 219
 name = "boot.usbload.stick_secs"
 unit = "s"
 ceiling = 5
-ceiling_from = "as boot.deadlinewedge.stick_secs. On this arm it is the ruling itself: the reset is written while the controller is mid-transfer, and a stick the next host cannot enumerate is what the owner said a production operating system must not leave behind"
+ceiling_from = "as boot.deadlinewedge.stick_secs. On this arm the reset is written while the controller is mid-transfer, which is the state a stick the next host cannot enumerate would be left by"
 measured = 0
 
 [[number]]

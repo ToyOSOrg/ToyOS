@@ -321,20 +321,9 @@ pub const USB_WEDGE_TWO_PHASES: &str =
 #[cfg(feature = "boot-actuators")]
 const SWEEP_FLOOR: u64 = 262_144;
 
-/// Stream writes to the stick until something else ends the machine.
-///
-/// **The state the three phase arms could not reach.** A wedge stops every CPU
-/// and then waits its bound out, which leaves the controller free to finish
-/// what was queued and the bus idle long before the reset arrives. This one
-/// never stops writing, so the reset lands on a controller that is moving bytes
-/// and a device that is programming flash.
-///
-/// **The CPU keeps taking interrupts.** Preemption off, `IF` on and the
-/// one-shot armed — `deadline::this_cpu`'s own three statements — because the
-/// bound that has to end this machine is the boot deadline, polled from the
-/// timer entry, and a CPU that took no interrupt at all is a hard lockup
-/// (`toyos_tco::hard_lockup_bound_ms`) ended half a bound earlier by a
-/// different mechanism under this arm's name.
+/// Stream writes to the stick until something else ends the machine, so the
+/// reset lands on a controller that is moving bytes and a device that is
+/// programming flash.
 ///
 /// **The last eighth once and never twice.** Every run is read first and
 /// written back byte for byte, so the medium is what it was however much of a
@@ -342,8 +331,6 @@ const SWEEP_FLOOR: u64 = 262_144;
 /// rather than wrapping, so no block on the owner's stick is programmed twice
 /// in a boot. A sweep that reaches the end says so by name, because a bus that
 /// went idle before the reset is the idle case again under this arm's name.
-///
-/// Returns only where it could not start.
 #[cfg(feature = "boot-actuators")]
 pub fn sweep_under_load() {
     let Some((disk, _)) = usb_storage::handle(0) else {
@@ -359,9 +346,7 @@ pub fn sweep_under_load() {
     let first = blocks - blocks / 8;
     log!("{LOAD_RUNNING} from block {first} to {blocks}, rewriting each run with the bytes \
          just read from it, until this machine is reset out from under it");
-    crate::preempt::disable();
-    crate::arch::apic::arm_within(toyos_sched::fair::QUANTUM_NS);
-    crate::arch::cpu::enable_interrupts();
+    let _interruptible = Interruptible::taken();
     let mut buf = vec![0u8; WEDGE_CHUNK as usize * BLOCK];
     let mut at = first;
     while at + u64::from(WEDGE_CHUNK) <= blocks {
@@ -374,6 +359,50 @@ pub fn sweep_under_load() {
         at += u64::from(WEDGE_CHUNK);
     }
     log!("{LOAD_SWEPT} at block {at}, so the bus is idle for the rest of this boot");
+}
+
+/// The CPU state the sweep runs in, established here and put back on every path
+/// out of it.
+///
+/// **Preemption off, `IF` on and the one-shot armed** — `deadline::this_cpu`'s
+/// own three statements — because the bound that has to end this machine is the
+/// boot deadline, polled from the timer entry, and a CPU that takes no
+/// interrupt at all is a hard lockup (`toyos_tco::hard_lockup_bound_ms`) ended
+/// half a bound earlier by a different mechanism under this arm's name.
+///
+/// **Restored, because this one returns.** `deadline::this_cpu` is `-> !` and
+/// puts none of them back; the sweep's caller goes on to drain write-back, sync
+/// every filesystem, flush every disk and wait for the log to be durable, and
+/// none of that may run under a preempt count or an `IF` this left behind.
+#[cfg(feature = "boot-actuators")]
+struct Interruptible {
+    interrupts_were_on: bool,
+}
+
+#[cfg(feature = "boot-actuators")]
+impl Interruptible {
+    fn taken() -> Self {
+        // Read before the `sti` below, which is the one thing here that is a
+        // fact about the caller rather than about this function.
+        let interrupts_were_on = crate::arch::cpu::interrupts_enabled();
+        crate::preempt::disable();
+        crate::arch::apic::arm_within(toyos_sched::fair::QUANTUM_NS);
+        crate::arch::cpu::enable_interrupts();
+        Self { interrupts_were_on }
+    }
+}
+
+#[cfg(feature = "boot-actuators")]
+impl Drop for Interruptible {
+    fn drop(&mut self) {
+        if !self.interrupts_were_on {
+            crate::arch::cpu::disable_interrupts();
+        }
+        // Not `preempt::enable`: the request stays set and the caller's own
+        // next preemption point serves it, rather than a scheduler pass taken
+        // from inside the shutdown syscall.
+        crate::preempt::enable_no_resched();
+    }
 }
 
 /// What the load says when it starts, when it cannot, when the disk stopped

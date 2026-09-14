@@ -20,7 +20,9 @@
 //! device was left in and what the controller was doing. Finishing it would
 //! mean writing a TRB onto a ring rebuilt from published numbers, which on
 //! every path but the panic one a live driver may still be enqueuing on — for
-//! an out data phase, a second write of the block.
+//! an out data phase, a second write of the block. What a cut command then
+//! costs is a question about the device and not about this path:
+//! `issues/kernel/a-cut-bulk-only-command-does-not-brick-the-benchs-stick.md`.
 //!
 //! **Registers and DMA and nothing else, because the panic path calls this.**
 //! The controllers are published into [`POINTS`] at bring-up rather than read
@@ -34,14 +36,14 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use toyos_xhci::bot::Phase;
-use toyos_xhci::Portsc;
+use toyos_xhci::{EndpointState, NotOnTheRing, Portsc, Ring};
 
 use crate::log;
 use crate::mm::{Dma, Mmio};
 
 use super::{OP_PORT_BASE, OP_USBCMD, OP_USBSTS, PORTSC_PP, PORT_REG_SIZE, USB_TIMEOUT_NS};
 use super::{USBCMD_HCRST, USBCMD_RS, USBSTS_CNR, USBSTS_HCH};
-use super::{TrbRing, MSC_IN_RING, MSC_OUT_RING, MSC_STRIDE, PAGE};
+use super::{TrbRing, MSC_IN_RING, MSC_OUT_RING};
 
 /// Controllers this path has room for.
 ///
@@ -177,22 +179,22 @@ struct Open {
     /// [`Phase::code`], and the release store that publishes every field
     /// beside it: a reader that sees an open phase sees the rest.
     phase: AtomicU8,
-    /// The device's block in its controller's DMA pool, as one
-    /// [`Dma::addr`]/[`Dma::device_addr`] pair. Both bulk rings live at fixed
-    /// offsets inside it.
-    block: AtomicU64,
+    /// The device's block in its controller's DMA pool, as the address that
+    /// controller was programmed with. Both bulk rings live at fixed offsets
+    /// inside it.
     block_device: AtomicU64,
     /// `slot << 16 | in_dci << 8 | out_dci`.
     endpoints: AtomicU32,
     /// Which way the data phase moves, which is the ring it goes on.
     data_in: AtomicBool,
-    /// Each bulk ring's next enqueue point as `tail | cycle << 8`, the in ring
-    /// in the low half and the out ring in the high one.
+    /// Each bulk ring's next enqueue point, the in ring in the low half and
+    /// the out ring in the high one.
     rings: AtomicU32,
-    /// The device's own context block, as a second [`Dma`] pair, and the width
-    /// of one context in it. **What the controller says**, against what the
-    /// driver queued: the endpoint state and the dequeue pointer it has reached
-    /// are the only account of what a reset found the hardware doing.
+    /// The device's own context block, as one
+    /// [`Dma::addr`]/[`Dma::device_addr`] pair, and the width of one context in
+    /// it. **What the controller says**, against what the driver queued: the
+    /// endpoint state and the dequeue pointer it has reached are the only
+    /// account of what a reset found the hardware doing.
     ctx: AtomicU64,
     ctx_device: AtomicU64,
     ctx_size: AtomicU32,
@@ -200,7 +202,6 @@ struct Open {
 
 static OPEN: Open = Open {
     phase: AtomicU8::new(0),
-    block: AtomicU64::new(0),
     block_device: AtomicU64::new(0),
     endpoints: AtomicU32::new(0),
     data_in: AtomicBool::new(false),
@@ -247,7 +248,6 @@ impl OpenCommand {
              `with_disk` holds the controller lock across a whole round trip, so this is a \
              driver bug and the device the record does not name is one a reset would cut"
         );
-        OPEN.block.store(on.block.addr(), Ordering::Relaxed);
         OPEN.block_device.store(on.block.device_addr(), Ordering::Relaxed);
         OPEN.endpoints.store(
             (u32::from(on.slot) << 16) | (u32::from(on.in_dci) << 8) | u32::from(on.out_dci),
@@ -269,7 +269,7 @@ impl OpenCommand {
     /// where the ring it went on now is.
     pub(in crate::drivers::xhci) fn at(&self, phase: Phase, in_ring: &TrbRing, out_ring: &TrbRing) {
         OPEN.rings.store(
-            u32::from(point(in_ring)) | (u32::from(point(out_ring)) << 16),
+            u32::from(in_ring.tail) | (u32::from(out_ring.tail) << 16),
             Ordering::Relaxed,
         );
         // Last, and the release: a reader that sees this phase sees the stores
@@ -284,15 +284,6 @@ impl Drop for OpenCommand {
     }
 }
 
-/// One ring's next enqueue point, packed as `tail | cycle << 8`.
-///
-/// A byte of tail is the whole of it: [`super::TrbRing::enqueue`] wraps at
-/// [`super::RING_SIZE`] minus its link TRB, so the tail never reaches 255.
-fn point(ring: &TrbRing) -> u16 {
-    debug_assert!(ring.tail < u8::MAX as u16);
-    ring.tail | (u16::from(ring.cycle) << 8)
-}
-
 /// The open command, as the views and numbers the account reads, or `None`
 /// where no device is inside one.
 fn inside() -> Option<Inside> {
@@ -300,19 +291,11 @@ fn inside() -> Option<Inside> {
     if !phase.open() {
         return None;
     }
-    // SAFETY: the two are one live `Dma<'static>`'s own `addr()` and
-    // `device_addr()`, stored by `begin` over a block of the pool the xHCI
-    // bring-up leaked for the machine's life; `MSC_STRIDE` is that block's size.
-    let block = unsafe {
-        Dma::from_addr(
-            OPEN.block.load(Ordering::Relaxed),
-            OPEN.block_device.load(Ordering::Relaxed),
-            MSC_STRIDE,
-        )
-    };
     let ctx_size = OPEN.ctx_size.load(Ordering::Relaxed) as usize;
-    // SAFETY: as `block` above, over the device context block `prepare` placed
-    // in the same pool; a device context is 32 contexts of `ctx_size`.
+    // SAFETY: the two are one live `Dma<'static>`'s own `addr()` and
+    // `device_addr()`, stored by `begin` over the device context block
+    // `prepare` placed in the pool the xHCI bring-up leaked for the machine's
+    // life; a device context is 32 contexts of `ctx_size`.
     let ctx = unsafe {
         Dma::from_addr(
             OPEN.ctx.load(Ordering::Relaxed),
@@ -330,20 +313,10 @@ fn inside() -> Option<Inside> {
         in_dci: (endpoints >> 8) as u8,
         out_dci: endpoints as u8,
         data_in: OPEN.data_in.load(Ordering::Relaxed),
-        in_ring: ring(block, MSC_IN_RING, rings as u16),
-        out_ring: ring(block, MSC_OUT_RING, (rings >> 16) as u16),
+        block_device: OPEN.block_device.load(Ordering::Relaxed),
+        in_tail: rings as u16,
+        out_tail: (rings >> 16) as u16,
     })
-}
-
-/// A bulk ring as the driver's own [`super::TrbRing`] left it, rebuilt from the
-/// point it published over the page it has always been on.
-fn ring(block: Dma<'static>, at: usize, point: u16) -> TrbRing {
-    TrbRing {
-        buf: block.subview(at, PAGE),
-        base_phys: block.device_addr() + at as u64,
-        tail: point & 0xFF,
-        cycle: point & 0x100 != 0,
-    }
 }
 
 /// A device inside a command, as this path has to see it.
@@ -354,8 +327,11 @@ struct Inside {
     in_dci: u8,
     out_dci: u8,
     data_in: bool,
-    in_ring: TrbRing,
-    out_ring: TrbRing,
+    /// The device's block, from which both bulk rings are a fixed offset, and
+    /// where the driver's next enqueue on each of them goes.
+    block_device: u64,
+    in_tail: u16,
+    out_tail: u16,
     /// The device's own context block and the width of one context in it —
     /// read for the account and never acted on.
     ctx: Dma<'static>,
@@ -364,34 +340,33 @@ struct Inside {
 
 impl Inside {
     /// Which endpoint the data phase is on, and the ring it went on.
-    fn data_endpoint(self) -> (u8, TrbRing) {
-        match self.data_in {
-            true => (self.in_dci, self.in_ring),
-            false => (self.out_dci, self.out_ring),
-        }
+    fn data_endpoint(self) -> (u8, Ring) {
+        let (dci, at, tail) = match self.data_in {
+            true => (self.in_dci, MSC_IN_RING, self.in_tail),
+            false => (self.out_dci, MSC_OUT_RING, self.out_tail),
+        };
+        let base = self.block_device + at as u64;
+        (dci, Ring { base, trbs: super::RING_SIZE as u16, tail })
     }
 
     /// What the *controller* says about the data endpoint: the state it has it
-    /// in, and how many TRBs it has not reached on the ring the driver queued.
+    /// in, and how many TRBs it has not reached on the ring the driver queued —
+    /// or, where its dequeue pointer is no position on that ring at all, which
+    /// of the ways it is not one.
     ///
     /// **The one thing in this account that is not the driver's own claim.** A
     /// reset that finds a Running endpoint with TRBs still ahead of its dequeue
     /// pointer landed on a controller that was moving bytes; one that finds it
     /// Running and caught up landed on an idle bus. Those are two different
     /// resets and the device only survives one of them.
-    fn controller_state(self) -> (toyos_xhci::EndpointState, u16) {
+    fn controller_state(self) -> (EndpointState, Result<u16, NotOnTheRing>) {
         let (dci, ring) = self.data_endpoint();
         let at = usize::from(dci) * self.ctx_size;
         // Volatile through `Dma`: the controller writes both of these by DMA.
-        let state = toyos_xhci::EndpointState::decode(self.ctx.read::<u32>(at));
+        let state = EndpointState::decode(self.ctx.read::<u32>(at));
         let lo = u64::from(self.ctx.read::<u32>(at + 8));
         let hi = u64::from(self.ctx.read::<u32>(at + 12));
-        let dequeue = ((hi << 32) | lo) & !0xF;
-        // Ring positions, not addresses: the difference wraps with the ring.
-        let reached = dequeue.wrapping_sub(ring.base_phys) / 16;
-        let queued = u64::from(ring.tail);
-        let pending = queued.wrapping_sub(reached) % super::RING_SIZE as u64;
-        (state, pending as u16)
+        (state, ring.pending((hi << 32) | lo))
     }
 }
 
@@ -447,12 +422,20 @@ fn settle_commands(said: &mut dyn fmt::Write) {
     );
     // What the hardware was doing, as against what the driver had queued. A
     // reset that finds TRBs still ahead of the controller landed on a bus that
-    // was moving bytes, and that is the state this account exists to name.
-    let _ = writeln!(
-        said,
-        "usb-quiesce: the controller had that device's data endpoint {state} with {pending} \
-         TRB(s) it had not reached on the ring",
-    );
+    // was moving bytes, and that is the state this account exists to name — so
+    // a dequeue pointer that is no position on the ring is said as that, never
+    // wrapped into a count a reader would take for the hardware's own word.
+    let _ = match pending {
+        Ok(pending) => writeln!(
+            said,
+            "usb-quiesce: the controller had that device's data endpoint {state} with {pending} \
+             TRB(s) it had not reached on the ring",
+        ),
+        Err(why) => writeln!(
+            said,
+            "usb-quiesce: the controller had that device's data endpoint {state} and {why}",
+        ),
+    };
 }
 
 /// Entered once for the machine's life.

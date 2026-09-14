@@ -77,7 +77,7 @@ fn quiesce(last: &str) {
     }
     // The same machine ended by the same bound, with the bus busy rather than
     // idle: this one never stops writing, so the reset lands on a controller
-    // that is moving bytes. It returns only where it could not start.
+    // that is moving bytes.
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::usb_reset_under_load() {
         crate::usb_gate::sweep_under_load();

@@ -128,7 +128,7 @@ actuators! {
     /// device holding the CBW and nothing queued for its data phase, so the
     /// bound that ends the machine ends a device inside a Bulk-Only command.
     /// See `usb_gate::wedge_inside_a_write`; judged by
-    /// `usb_reset_finishes_an_open_command`.
+    /// `usb_reset_records_the_phase_it_cut`.
     usb_wedge_data_owed = "usb-wedge-data-owed";
 
     /// The same, stopped one step later: the data phase's TRB is on the ring
@@ -142,7 +142,7 @@ actuators! {
     /// Sweep the boot stick from the shutdown syscall so the reset lands on a
     /// controller that is moving bytes rather than on a bus idle since the
     /// wedge. See `usb_gate::sweep_under_load`; judged by
-    /// `usb_reset_finishes_an_open_command`.
+    /// `usb_reset_records_the_phase_it_cut`.
     usb_reset_under_load = "usb-reset-under-load";
 
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.

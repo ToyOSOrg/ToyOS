@@ -124,11 +124,9 @@ pub fn record_done() {
 /// [`State::Fault`], whose text is a fixed-layout register dump and not text —
 /// a crash is worth more than the account of the reset that followed it.
 ///
-/// **Every line is sealed and written back as it is made.** The one caller is
-/// the reset path, whose lines are separated by bounded waits on devices that
-/// may not answer; a machine ended inside one of those waits used to leave the
-/// bytes already written covered by no length and no checksum, so the next boot
-/// read the report, none of the account, and nothing that said so.
+/// The account is taken a line at a time and sealed as each one closes
+/// ([`toyos_blackbox::Account`]), because its lines are separated by bounded
+/// waits on devices that may not answer.
 pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
     let mut appended = false;
     // **The envelope is the one already on the page**, state, stamp and
@@ -143,36 +141,18 @@ pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
             Some((State::Armed | State::Fault, ..)) | None => None,
         };
         let Some((state, stamp, identity, at)) = opened else { return };
-        let mut line = Committed {
-            report: toyos_blackbox::Report::reopened(page, at),
-            at: PAGE.load(Relaxed),
+        let page_at = PAGE.load(Relaxed);
+        let mut lines = toyos_blackbox::Account::new(
+            toyos_blackbox::Report::reopened(page, at),
             state,
             stamp,
             identity,
-        };
-        account(&mut line);
+            || flush(page_at),
+        );
+        account(&mut lines);
         appended = true;
     });
     appended
-}
-
-/// A writer that closes the envelope over every line it takes, and writes the
-/// page out of the caches before the next one is asked for.
-struct Committed<'a> {
-    report: toyos_blackbox::Report<'a>,
-    at: u64,
-    state: State,
-    stamp: u64,
-    identity: toyos_blackbox::Identity,
-}
-
-impl core::fmt::Write for Committed<'_> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.report.write(s.as_bytes());
-        self.report.commit(self.state, self.stamp, self.identity);
-        flush(self.at);
-        Ok(())
-    }
 }
 
 /// Seal why the boot deadline ended this machine, and the tail of the log ring

@@ -49,8 +49,9 @@ theirs. It is not room: measured off those pages the report ran to 13,773 and
 before `Report::seal` rewrote the length and the checksum that cover them, so
 the next boot read a valid page with none of it — and `append` returned `true`.
 Every line of the account is a bounded wait on a device away from the next.
-`Report::commit` and `blackbox::append`'s per-line seal-and-flush are that fix:
-a page now says how far the reset got. `toyos_blackbox::ACCOUNT_BYTES` is the
+`toyos_blackbox::Account` — a writer that seals and writes the page back as each
+line closes, and covers no line it was cut off inside — is that fix: a page now
+says how far the reset got. `toyos_blackbox::ACCOUNT_BYTES` is the
 other half — the reserve that stops a report's tail from spending the room the
 account needs, which is what dropped it on `deadlinewedge` and `hardlockup`.
 

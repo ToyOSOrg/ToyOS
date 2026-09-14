@@ -371,6 +371,62 @@ impl core::fmt::Write for Report<'_> {
     }
 }
 
+/// A writer that closes the envelope over every whole **line** it takes.
+///
+/// **Per line and not per fragment.** One `writeln!` reaches a writer as
+/// several [`core::fmt::Write::write_str`] calls — the pieces around each
+/// argument — so a writer that committed on every one of them would cover a
+/// torn line with a valid checksum, and the next boot would read half a
+/// sentence as a complete account. Nothing is covered until the newline that
+/// ends it arrives; bytes written past the last one are on the page, outside
+/// the length, and invisible to [`recover`].
+///
+/// **For a writer that may not reach its own last statement**: the account
+/// under a sealed report is made from the reset path, whose every line is a
+/// bounded wait on a device away from the next, and a machine that ends inside
+/// one of those waits leaves the record saying how far it got.
+///
+/// `wrote_back` runs after each commit, because a page sealed into write-back
+/// memory and then reset over never reached DRAM ([`CACHE_LINE`]); the
+/// instruction that writes it back is the caller's, since this crate forbids
+/// unsafe code.
+pub struct Account<'a, F: FnMut()> {
+    report: Report<'a>,
+    state: State,
+    stamp: u64,
+    identity: Identity,
+    wrote_back: F,
+}
+
+impl<'a, F: FnMut()> Account<'a, F> {
+    /// Write under the report `report` was reopened on, keeping its envelope:
+    /// this extends a record rather than writing one, so the state, the stamp
+    /// and the identity are the ones already on the page.
+    pub fn new(
+        report: Report<'a>,
+        state: State,
+        stamp: u64,
+        identity: Identity,
+        wrote_back: F,
+    ) -> Self {
+        Self { report, state, stamp, identity, wrote_back }
+    }
+}
+
+impl<F: FnMut()> core::fmt::Write for Account<'_, F> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        if s.is_empty() {
+            return Ok(());
+        }
+        self.report.write(s.as_bytes());
+        if s.ends_with('\n') {
+            self.report.commit(self.state, self.stamp, self.identity);
+            (self.wrote_back)();
+        }
+        Ok(())
+    }
+}
+
 /// The stamp a page carries, read without checking anything.
 ///
 /// **Carried forward and not trusted**: the kernel's seals happen where nothing
@@ -591,6 +647,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use core::fmt::Write;
     use std::{format, vec};
 
     use super::*;
@@ -788,15 +845,11 @@ mod tests {
 
     /// **The account gets its room whatever the report did with the page.**
     /// A report that filled every byte left `reopened` nothing, and `reopened`
-    /// writes into no bytes without saying so — which on the machine meant a
-    /// reset's whole account of what it did to the devices simply was not there,
-    /// on exactly the boots that overflow the page.
+    /// writes into no bytes without saying so.
     #[test]
     fn a_report_that_fills_the_page_still_leaves_the_account_its_room() {
-        // The account this test holds the page to is the widest the kernel's
-        // reset writes, measured off a T14 readback and rounded up — a size of
-        // its own, never `ACCOUNT_BYTES`, or the reserve would be asserting
-        // against itself and a reserve of nothing would pass.
+        // A size of its own and never `ACCOUNT_BYTES`, or the reserve would be
+        // asserting against itself and a reserve of nothing would pass.
         const WIDEST_ACCOUNT: usize = 1024;
         let mut records = std::string::String::new();
         let mut n = 0usize;
@@ -828,30 +881,79 @@ mod tests {
     }
 
     /// **An account the machine ends in the middle of is readable to where it
-    /// got.** Every line of it is a bounded wait on a device away from the next,
-    /// and the reset follows either way; a writer that only closed its envelope
-    /// at the end left the next boot the report and nothing about the reset,
-    /// with nothing saying so.
+    /// got, and never past it.** Every line of it is a bounded wait on a device
+    /// away from the next, and the reset follows either way.
+    ///
+    /// The two mutations this is the control on: committing on every fragment
+    /// instead of every line seals the torn last line, and committing on
+    /// neither leaves the whole account covered by nothing.
     #[test]
-    fn an_account_cut_off_mid_write_is_still_readable_to_where_it_got() {
+    fn an_account_cut_off_mid_line_is_readable_to_the_last_whole_line() {
         let mut page = blank();
         let kept = seal(&mut page, State::Wedged, STAMP, STICK, b"[0000] why\n");
+        let mut wrote_back = 0usize;
         {
-            let mut report = Report::reopened(&mut page, kept);
-            for line in ["first\n", "second\n"] {
-                report.write(line.as_bytes());
-                report.commit(State::Wedged, STAMP, STICK);
-            }
-            // The machine ends here: the third line is written, and `seal` —
-            // which is what would cover it — is never reached.
-            report.write(b"third\n");
+            let mut account = Account::new(
+                Report::reopened(&mut page, kept),
+                State::Wedged,
+                STAMP,
+                STICK,
+                || wrote_back += 1,
+            );
+            // Three fragments and one newline: the pieces either side of the
+            // argument, then the argument itself.
+            let ports = 5;
+            writeln!(account, "usb-quiesce: {ports} port(s) reset")
+                .expect("a writer that cannot fail");
+            // The machine ends here, between two fragments of one line: what is
+            // written reaches the page and the newline that would cover it
+            // never arrives.
+            let bus = "00:14.0";
+            write!(account, "usb-quiesce: xHCI {bus} halted=")
+                .expect("a writer that cannot fail");
         }
 
         let (state, _, _, text) = recover(&page).expect("a page committed line by line");
-        assert_eq!(state, State::Wedged);
+        assert_eq!(state, State::Wedged, "extending the record changed what ended the boot");
         let text = std::str::from_utf8(text).expect("text");
-        assert!(text.ends_with("first\nsecond\n"), "{text:?}");
-        assert!(!text.contains("third"), "an uncommitted line was readable: {text:?}");
+        assert!(text.ends_with("usb-quiesce: 5 port(s) reset\n"), "{text:?}");
+        assert!(
+            !text.contains("halted="),
+            "a line the machine was cut off inside sealed as a complete account: {text:?}"
+        );
+        // One line, one seal — not one per fragment, which is the whole of what
+        // separates a record that says how far the reset got from one that
+        // certifies half a sentence.
+        assert_eq!(wrote_back, 1);
+    }
+
+    /// The other half: a line finished later is sealed then, so an account that
+    /// runs to its end is whole on the page.
+    #[test]
+    fn every_line_is_covered_once_its_last_fragment_arrives() {
+        let mut page = blank();
+        let kept = seal(&mut page, State::Wedged, STAMP, STICK, b"[0000] why\n");
+        let mut wrote_back = 0usize;
+        {
+            let mut account = Account::new(
+                Report::reopened(&mut page, kept),
+                State::Wedged,
+                STAMP,
+                STICK,
+                || wrote_back += 1,
+            );
+            for port in 0..3 {
+                writeln!(account, "usb-quiesce: port {port} reset")
+                    .expect("a writer that cannot fail");
+            }
+        }
+
+        let (_, _, _, text) = recover(&page).expect("a sealed account");
+        let text = std::str::from_utf8(text).expect("text");
+        for port in 0..3 {
+            assert!(text.contains(&format!("usb-quiesce: port {port} reset\n")), "{text:?}");
+        }
+        assert_eq!(wrote_back, 3);
     }
 
     /// A head goes in before the tail and survives it: the crash's own message

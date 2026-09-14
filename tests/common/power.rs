@@ -1318,7 +1318,7 @@ const WEDGE_PHASES: &[(&[&str], &str)] = &[
 /// account names which one — the only evidence a reset leaves about what it
 /// found. [`Profile::Metal`](qemu::Profile::Metal) carries the boot stick on
 /// its xHCI, which is why the wedge has a device to be inside at all.
-pub fn usb_reset_finishes_an_open_command(
+pub fn usb_reset_records_the_phase_it_cut(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     _rust_bins: &[(String, Vec<u8>)],
@@ -1433,16 +1433,16 @@ pub fn usb_load_chain(kernel: &serial::Serial, after: &serial::Serial) -> Result
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
     // A page that names the other bound is this arm measuring a hard lockup.
     says_nothing_of(after, bootlog::LOCKED_UP)?;
-    // **The account reaching the page is itself under test**: it is made line by
-    // line from the reset path, under the reserve `toyos_blackbox::ACCOUNT_BYTES`
-    // keeps for it, and no wedge boot this bench took before carried one.
+    // **The account reaching the page is itself under test**: it is made a line
+    // at a time from the reset path, under the reserve
+    // `toyos_blackbox::ACCOUNT_BYTES` keeps for it.
     after.must_say(toyos_build::metaldevices::QUIESCE_HEAD)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
-    // **Reported and not judged.** Which state the reset found the controller in
-    // is the open question this bench has five clean answers to and no theory
-    // for; a predicate over it would be the suite deciding it. A reset that
-    // found no command open writes no such line, and that is a fact about the
-    // boot rather than a failure of it.
+    // **Reported and not judged.** Which state the reset found the controller
+    // in is the open question this arm gathers answers to; a predicate over it
+    // would be the suite deciding it. A reset that found no command open writes
+    // no such line, and that is a fact about the boot rather than a failure of
+    // it.
     let endpoint = toyos_build::metaldevices::QUIESCE_ENDPOINT;
     match after.text().lines().find(|line| line.contains(endpoint)) {
         Some(said) => eprintln!("  [power] {}", said.trim()),
