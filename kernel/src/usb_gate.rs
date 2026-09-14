@@ -249,9 +249,8 @@ fn check(index: usize, disk: &Handle) {
 #[cfg(feature = "boot-actuators")]
 const WEDGE_CHUNK: u32 = 64;
 
-/// Pairs before the wedge. Sixteen of them is 4 MiB moved to the device
-/// immediately before it is stopped, which is what the boots that lost this
-/// stick were doing and what one 4 KiB write is not.
+/// Pairs before the wedge: 4 MiB the device has taken immediately before it is
+/// stopped, so the wedge is not the first thing this command's device saw.
 #[cfg(feature = "boot-actuators")]
 const WEDGE_CHUNKS: u32 = 16;
 
@@ -262,15 +261,10 @@ const WEDGE_CHUNKS: u32 = 16;
 /// its sync with nothing dirty on most boots, so the traffic and the command
 /// the wedge is taken inside are both issued here rather than waited for.
 ///
-/// **Every block is read first and written back byte for byte.** The writes are
-/// then idempotent however much of them either reset completes, which is what
-/// lets a control that deliberately cuts one run against the machine's own boot
-/// stick.
-///
-/// They go at the disk's own end and not at a fixed offset: the bench's stick is
-/// thirty gigabytes and the image flashed onto it is eighty megabytes, so a
-/// fixed offset is either inside a partition this kernel mounts or past the end
-/// of the smaller disks the same actuator boots on.
+/// **Every block is read first and written back byte for byte**, so the medium
+/// is what it was however much of a write either reset completes; and at the
+/// disk's own end, because a fixed offset is inside a partition this kernel
+/// mounts on the smaller disks the same actuator boots on.
 #[cfg(feature = "boot-actuators")]
 pub fn wedge_inside_a_write(at: toyos_xhci::bot::Phase) {
     let Some((disk, _)) = usb_storage::handle(0) else {
@@ -285,8 +279,7 @@ pub fn wedge_inside_a_write(at: toyos_xhci::bot::Phase) {
     };
     let mut buf = vec![0u8; WEDGE_CHUNK as usize * BLOCK];
     // The last pair carries the wedge, so every pair before it is traffic the
-    // device has already taken — the condition the boots that lost this stick
-    // were in, and the one variable a single small write cannot stage.
+    // device has already taken.
     for chunk in 0..WEDGE_CHUNKS {
         let block = first + u64::from(chunk) * u64::from(WEDGE_CHUNK);
         if disk.lock().read_blocks(block, WEDGE_CHUNK, &mut buf).is_err() {
@@ -307,42 +300,50 @@ pub fn wedge_inside_a_write(at: toyos_xhci::bot::Phase) {
          boot ends itself the ordinary way");
 }
 
-/// What the wedge says before the write it is taken inside, and what it says if
-/// that write ran to completion instead. Judged by the harness, so both are
-/// constants (`src/bootlog.rs`).
+/// What the wedge says before the write it is taken inside, what it says if
+/// that write ran to completion instead, and what it says about an image that
+/// named two phases. Judged by the harness, so all three are constants
+/// (`src/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
 #[cfg(feature = "boot-actuators")]
 pub const USB_WEDGE_MISSED: &str = "usb-wedge: the write completed";
+#[cfg(feature = "boot-actuators")]
+pub const USB_WEDGE_TWO_PHASES: &str =
+    "usb-wedge: refused, because the phase a device is stopped in is the whole measurement";
 
 /// The smallest disk this load will sweep: a gibibyte in 4 KiB blocks.
 ///
-/// **A refusal and not a smaller sweep.** The point of the sweep is that no
-/// block is written twice in one boot, which is what keeps two minutes of
-/// continuous writes off the bench stick's endurance; a disk with no room for
-/// that is one this control cannot be staged on, and saying so is the answer.
+/// **A refusal and not a smaller sweep.** The sweep takes the last eighth of
+/// the disk, which on anything smaller is inside a partition this kernel
+/// mounts; a disk with no room for it is one this control cannot be staged on,
+/// and saying so is the answer.
 #[cfg(feature = "boot-actuators")]
 const SWEEP_FLOOR: u64 = 262_144;
 
 /// Stream writes to the stick until something else ends the machine.
 ///
-/// **The state the three phase arms could not reach.** A wedge that stops every
-/// CPU and then waits out the boot deadline leaves the *controller* free: a TRB
-/// with its doorbell rung completes in microseconds, one never rung never
-/// starts, and two minutes later there is nothing in flight for the reset to
-/// cut. All three phases came back with the stick alive. What the boots that
-/// did lose it were doing is this — writing continuously, so the reset lands on
-/// a controller that is moving bytes and a device that is programming flash.
+/// **The state the three phase arms could not reach.** A wedge stops every CPU
+/// and then waits its bound out, which leaves the controller free to finish
+/// what was queued and the bus idle long before the reset arrives. This one
+/// never stops writing, so the reset lands on a controller that is moving bytes
+/// and a device that is programming flash.
 ///
-/// Returns only where it could not start, or where the disk stopped answering:
-/// that boot then reboots the ordinary way and the judge reds by name. When it
-/// does run it never returns, because the reset that ends this machine is the
-/// measurement and a loop that stopped first would hand the device the idle
-/// milliseconds the whole control exists to deny it.
+/// **The CPU keeps taking interrupts.** Preemption off, `IF` on and the
+/// one-shot armed — `deadline::this_cpu`'s own three statements — because the
+/// bound that has to end this machine is the boot deadline, polled from the
+/// timer entry, and a CPU that took no interrupt at all is a hard lockup
+/// (`toyos_tco::hard_lockup_bound_ms`) ended half a bound earlier by a
+/// different mechanism under this arm's name.
 ///
-/// **A sweep and not a rewrite.** It walks the last eighth of the disk once,
-/// reading each run and writing it back byte for byte, so the medium is what it
-/// was and no block is programmed twice in a boot.
+/// **The last eighth once and never twice.** Every run is read first and
+/// written back byte for byte, so the medium is what it was however much of a
+/// run either reset completes; and the sweep stops at the end of that span
+/// rather than wrapping, so no block on the owner's stick is programmed twice
+/// in a boot. A sweep that reaches the end says so by name, because a bus that
+/// went idle before the reset is the idle case again under this arm's name.
+///
+/// Returns only where it could not start.
 #[cfg(feature = "boot-actuators")]
 pub fn sweep_under_load() {
     let Some((disk, _)) = usb_storage::handle(0) else {
@@ -358,12 +359,12 @@ pub fn sweep_under_load() {
     let first = blocks - blocks / 8;
     log!("{LOAD_RUNNING} from block {first} to {blocks}, rewriting each run with the bytes \
          just read from it, until this machine is reset out from under it");
+    crate::preempt::disable();
+    crate::arch::apic::arm_within(toyos_sched::fair::QUANTUM_NS);
+    crate::arch::cpu::enable_interrupts();
     let mut buf = vec![0u8; WEDGE_CHUNK as usize * BLOCK];
     let mut at = first;
-    loop {
-        if at + u64::from(WEDGE_CHUNK) > blocks {
-            at = first;
-        }
+    while at + u64::from(WEDGE_CHUNK) <= blocks {
         if disk.lock().read_blocks(at, WEDGE_CHUNK, &mut buf).is_err()
             || disk.lock().write_blocks(at, WEDGE_CHUNK, &buf).is_err()
         {
@@ -372,14 +373,17 @@ pub fn sweep_under_load() {
         }
         at += u64::from(WEDGE_CHUNK);
     }
+    log!("{LOAD_SWEPT} at block {at}, so the bus is idle for the rest of this boot");
 }
 
-/// What the load says when it starts, when it cannot, and when the disk stopped
-/// answering it. Judged by the harness, so all three are constants
-/// (`src/bootlog.rs`).
+/// What the load says when it starts, when it cannot, when the disk stopped
+/// answering it, and when it reached the end of its one pass. Judged by the
+/// harness, so all four are constants (`src/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const LOAD_RUNNING: &str = "usb-load: sweeping disk 0";
 #[cfg(feature = "boot-actuators")]
 pub const LOAD_REFUSED: &str = "usb-load: refused";
 #[cfg(feature = "boot-actuators")]
 pub const LOAD_STOPPED: &str = "usb-load: the disk stopped answering";
+#[cfg(feature = "boot-actuators")]
+pub const LOAD_SWEPT: &str = "usb-load: the sweep reached the end of the disk";

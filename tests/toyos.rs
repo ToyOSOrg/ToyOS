@@ -730,10 +730,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // bound counted down in the guest, so `src/tiers.rs` carries it
     // `Why::TimerAnchored` and says what leaves the per-PR tier with it.
     ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
-    // The same bound ending the same machine with a device in its hands: the
-    // boot stick between a WRITE(10)'s CBW and its data phase. It belongs
-    // beside the row above and will be relegated there once the shards have
-    // priced it; carrying `UNMEASURED_MS` buys that one run.
+    // The same bound ending the same machine with a device in its hands. It
+    // belongs beside the row above, and the tree refuses to be told so before
+    // CI has priced it: `src/tiers.rs`'s `validate_ci_profile` refuses a
+    // Nightly row with no CI evidence and refuses the one-run marker on a
+    // Nightly row alike, so a new name is bootstrapped Fast and re-tiered on
+    // the measurement that run produces.
     ("usb_reset_finishes_an_open_command", Sched::Parallel, Tier::Fast),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
@@ -1495,12 +1497,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         // by the deadline with the controller mid-transfer, and the stick
         // enumerable on the next host afterwards. `boot.usbload.stick_secs` is
         // that, refused by the loop before this judge runs.
-        //
-        // Four phases of a Bulk-Only command were measured here too and every
-        // one of them left the stick alive, so they are not re-run: the answer
-        // is in `issues/kernel/four-phases-of-a-cut-command-and-the-stick-survived-all-four.md`
-        // and the QEMU registration still walks all three. This is the arm that
-        // would notice the day a reset does brick the bench's own device.
         "usb_reset_finishes_an_open_command",
         metal::Metal::Runs {
             arms: &[metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[])],

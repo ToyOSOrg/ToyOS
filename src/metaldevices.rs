@@ -162,14 +162,9 @@ pub const QUIESCE_HEAD: &str = "usb-quiesce:";
 /// reset says this once, whether a device was inside one or not.
 pub const QUIESCE_COMMAND: &str = "Bulk-Only command";
 
-/// What the stop says when a device it finished a command for has answered —
-/// the one line that distinguishes a reset that drove a half-run command to its
-/// CSW from one that cut it.
-pub const QUIESCE_CSW: &str = "the device answered with a CSW of status";
-
-/// What the stop says when it could not: the device is one whose next host may
-/// not be able to enumerate it.
-pub const QUIESCE_CUT: &str = "so this reset cuts the command";
+/// What the stop says about the endpoint the controller had when it ran — the
+/// one line in the account that is the hardware's word and not the driver's.
+pub const QUIESCE_ENDPOINT: &str = "the controller had that device's data endpoint";
 
 /// What the shutdown did, out of its summary line.
 ///
@@ -578,8 +573,33 @@ mod tests {
         let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("kernel/src/drivers/xhci/stop.rs");
         let source = std::fs::read_to_string(&at).expect("the reset path");
-        for needle in [QUIESCE_HEAD, QUIESCE_COMMAND, QUIESCE_CSW, QUIESCE_CUT] {
-            assert!(source.contains(needle), "{} does not write {needle:?}", at.display());
+        let written = code_of(&source);
+        for needle in [QUIESCE_HEAD, QUIESCE_COMMAND, QUIESCE_ENDPOINT] {
+            assert!(written.contains(needle), "{} does not write {needle:?}", at.display());
         }
+    }
+
+    /// A line the kernel only *talks* about is not a line the kernel writes:
+    /// every needle above appears in that file's own prose as well, so a scan
+    /// over the raw source passes on a kernel that emits none of them.
+    #[test]
+    fn a_needle_that_only_appears_in_a_comment_is_not_found() {
+        assert_eq!(code_of("    //! a Bulk-Only command was open\n"), "");
+        assert_eq!(code_of("    /// no Bulk-Only command was open\n"), "");
+        assert_eq!(code_of("    // no Bulk-Only command was open\n"), "");
+        assert!(code_of("    writeln!(said, \"no Bulk-Only command was open\");\n")
+            .contains(QUIESCE_COMMAND));
+    }
+
+    /// `source` with its whole-line comments taken out, which is every form
+    /// this tree's prose takes: a doc comment, a module header, a note above a
+    /// statement. A trailing comment after code is left, and cannot carry one
+    /// of these needles without the code above it on the same line.
+    fn code_of(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

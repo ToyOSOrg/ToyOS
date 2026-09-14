@@ -11,37 +11,29 @@
 //! state (USB 2.0 §7.1.7.5) and with it abandons whatever command it was
 //! inside.
 //!
-//! **And a port reset is not free either.** A device need not honour the
-//! obligation the class puts on it: cut between its CBW and its CSW, one may
-//! enumerate and describe itself perfectly afterwards and answer no SCSI command
-//! again until it is physically unplugged, on a laptop whose port power control
-//! does not cut VBUS.
-//!
-//! **So the command is finished before the port is touched.** Bulk-Only
-//! Transport §5.1 makes a command three transfers and §6.7.2/§6.7.3 leave a
-//! device waiting for whichever has not arrived; the class's own way out is
-//! §5.3.4's Reset Recovery, a class request and two CLEAR_FEATURE(HALT)s, all
-//! three of them control transfers a wedged kernel cannot issue. What it can do
-//! is send the data the CBW promised and read the CSW — [`settle_commands`],
-//! bounded, and it cuts when the bound passes, because a machine nobody can
-//! turn off is worse still.
+//! **And a port reset is not free either.** Bulk-Only Transport §5.1 makes a
+//! command three transfers and §6.7.2/§6.7.3 leave a device waiting for
+//! whichever has not arrived; §5.3.4 makes recovering from that the device's
+//! obligation, through a class request and two CLEAR_FEATURE(HALT)s that a
+//! wedged kernel cannot issue. **So this path does not finish the command**: it
+//! gives the driver a bound to close it, and then records which phase the
+//! device was left in and what the controller was doing. Finishing it would
+//! mean writing a TRB onto a ring rebuilt from published numbers, which on
+//! every path but the panic one a live driver may still be enqueuing on — for
+//! an out data phase, a second write of the block.
 //!
 //! **Registers and DMA and nothing else, because the panic path calls this.**
 //! The controllers are published into [`POINTS`] at bring-up rather than read
 //! out of `XHCI`, and the command that is open is published into [`OPEN`] the
 //! same way: a panicked CPU may take no lock and allocate nothing, and the CPU
 //! it panicked on may be the one holding that lock. Nothing here reads the
-//! event ring, which is the one structure that CPU is still the consumer of —
-//! the device's own CSW, written into memory this kernel owns, is what says the
-//! command completed. The orderly path takes the lock first
-//! ([`super::seal_shut`]) so that nothing is open when this runs; the panic path
-//! has `halt_all_cpus`'s NMI instead, which stops every other CPU where it stood
-//! — possibly mid-command, which is the device this path exists to rescue.
+//! event ring either, which is the one structure that CPU is still the
+//! consumer of.
 
 use core::fmt;
-use core::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
-use toyos_xhci::bot::{self, Phase};
+use toyos_xhci::bot::Phase;
 use toyos_xhci::Portsc;
 
 use crate::log;
@@ -49,8 +41,7 @@ use crate::mm::{Dma, Mmio};
 
 use super::{OP_PORT_BASE, OP_USBCMD, OP_USBSTS, PORTSC_PP, PORT_REG_SIZE, USB_TIMEOUT_NS};
 use super::{USBCMD_HCRST, USBCMD_RS, USBSTS_CNR, USBSTS_HCH};
-use super::{TrbRing, MSC_CSW, MSC_IN_RING, MSC_OUT_RING, MSC_STRIDE, PAGE};
-use super::wait::msc::{CSW_LEN, CSW_SIGNATURE};
+use super::{TrbRing, MSC_IN_RING, MSC_OUT_RING, MSC_STRIDE, PAGE};
 
 /// Controllers this path has room for.
 ///
@@ -187,20 +178,13 @@ struct Open {
     /// beside it: a reader that sees an open phase sees the rest.
     phase: AtomicU8,
     /// The device's block in its controller's DMA pool, as one
-    /// [`Dma::addr`]/[`Dma::device_addr`] pair. Both bulk rings, the CSW and
-    /// the data buffer live at fixed offsets inside it.
+    /// [`Dma::addr`]/[`Dma::device_addr`] pair. Both bulk rings live at fixed
+    /// offsets inside it.
     block: AtomicU64,
     block_device: AtomicU64,
-    /// The controller's doorbell window.
-    doorbell: AtomicU64,
-    doorbell_bytes: AtomicU64,
     /// `slot << 16 | in_dci << 8 | out_dci`.
     endpoints: AtomicU32,
-    /// What the CBW told the device the data phase moves, and where; a zero
-    /// length is a command that promised none.
-    data: AtomicU64,
-    data_len: AtomicU32,
-    /// Which way it moves, which is the ring it goes on.
+    /// Which way the data phase moves, which is the ring it goes on.
     data_in: AtomicBool,
     /// Each bulk ring's next enqueue point as `tail | cycle << 8`, the in ring
     /// in the low half and the out ring in the high one.
@@ -218,11 +202,7 @@ static OPEN: Open = Open {
     phase: AtomicU8::new(0),
     block: AtomicU64::new(0),
     block_device: AtomicU64::new(0),
-    doorbell: AtomicU64::new(0),
-    doorbell_bytes: AtomicU64::new(0),
     endpoints: AtomicU32::new(0),
-    data: AtomicU64::new(0),
-    data_len: AtomicU32::new(0),
     data_in: AtomicBool::new(false),
     rings: AtomicU32::new(0),
     ctx: AtomicU64::new(0),
@@ -230,22 +210,15 @@ static OPEN: Open = Open {
     ctx_size: AtomicU32::new(0),
 };
 
-/// The device and the data phase one Bulk-Only round trip is about to run.
-///
-/// What a finish puts on the bus comes from here and never off the wire: it must
-/// be what this kernel promised the device, not what the device then said about
-/// it. [`Self::ctx`] is the one exception and is never acted on — it is what the
-/// *controller* says, and the account reads it to report what state the reset
-/// found the hardware in.
+/// The device one Bulk-Only round trip is about to run on, as the account has
+/// to see it. Nothing here is acted on: [`Self::ctx`] is what the *controller*
+/// says and the rest is what the driver queued, and the account is the whole
+/// use either has.
 pub(in crate::drivers::xhci) struct Device {
     pub block: Dma<'static>,
-    pub doorbell: Mmio,
     pub slot: u8,
     pub in_dci: u8,
     pub out_dci: u8,
-    /// The data phase's buffer in the device's own address space.
-    pub data: u64,
-    pub data_len: u32,
     pub data_in: bool,
     /// The device's own context block, and the width of one context in it.
     pub ctx: Dma<'static>,
@@ -257,7 +230,7 @@ pub(in crate::drivers::xhci) struct Device {
 /// **Its lifetime is the command's and not a transfer's.** A device that has
 /// taken a CBW and is waiting for its data or its CSW holds no transfer this
 /// kernel is inside (BOT §5.1), and that gap — between two of the three phases —
-/// is where a port reset leaves the device this path exists to rescue.
+/// is the state a reset's account could otherwise not name at all.
 #[must_use = "the command counts as open for exactly as long as this lives"]
 pub(in crate::drivers::xhci) struct OpenCommand(());
 
@@ -276,14 +249,10 @@ impl OpenCommand {
         );
         OPEN.block.store(on.block.addr(), Ordering::Relaxed);
         OPEN.block_device.store(on.block.device_addr(), Ordering::Relaxed);
-        OPEN.doorbell.store(on.doorbell.addr(), Ordering::Relaxed);
-        OPEN.doorbell_bytes.store(on.doorbell.size(), Ordering::Relaxed);
         OPEN.endpoints.store(
             (u32::from(on.slot) << 16) | (u32::from(on.in_dci) << 8) | u32::from(on.out_dci),
             Ordering::Relaxed,
         );
-        OPEN.data.store(on.data, Ordering::Relaxed);
-        OPEN.data_len.store(on.data_len, Ordering::Relaxed);
         OPEN.data_in.store(on.data_in, Ordering::Relaxed);
         OPEN.ctx.store(on.ctx.addr(), Ordering::Relaxed);
         OPEN.ctx_device.store(on.ctx.device_addr(), Ordering::Relaxed);
@@ -294,9 +263,10 @@ impl OpenCommand {
     /// Publish where the two bulk rings now stand and which phase the round trip
     /// has reached.
     ///
-    /// Called after every enqueue and before its doorbell, and at each gap
-    /// between two phases: a transfer is never visible to the controller
-    /// without the reset being able to see where the ring it went on now is.
+    /// Called after every enqueue and before its doorbell, at each gap between
+    /// two phases, and after any recovery that rebuilt a ring: a transfer is
+    /// never visible to the controller without the reset being able to see
+    /// where the ring it went on now is.
     pub(in crate::drivers::xhci) fn at(&self, phase: Phase, in_ring: &TrbRing, out_ring: &TrbRing) {
         OPEN.rings.store(
             u32::from(point(in_ring)) | (u32::from(point(out_ring)) << 16),
@@ -323,7 +293,7 @@ fn point(ring: &TrbRing) -> u16 {
     ring.tail | (u16::from(ring.cycle) << 8)
 }
 
-/// The open command, as the two views and the numbers a finish needs, or `None`
+/// The open command, as the views and numbers the account reads, or `None`
 /// where no device is inside one.
 fn inside() -> Option<Inside> {
     let phase = Phase::of(OPEN.phase.load(Ordering::Acquire));
@@ -356,19 +326,9 @@ fn inside() -> Option<Inside> {
         ctx,
         ctx_size,
         phase,
-        block,
-        // SAFETY: one live `Mmio`'s own `addr()`/`size()`, as `Point::live`.
-        doorbell: unsafe {
-            Mmio::from_addr(
-                OPEN.doorbell.load(Ordering::Relaxed),
-                OPEN.doorbell_bytes.load(Ordering::Relaxed),
-            )
-        },
         slot: (endpoints >> 16) as u8,
         in_dci: (endpoints >> 8) as u8,
         out_dci: endpoints as u8,
-        data: OPEN.data.load(Ordering::Relaxed),
-        data_len: OPEN.data_len.load(Ordering::Relaxed),
         data_in: OPEN.data_in.load(Ordering::Relaxed),
         in_ring: ring(block, MSC_IN_RING, rings as u16),
         out_ring: ring(block, MSC_OUT_RING, (rings >> 16) as u16),
@@ -390,13 +350,9 @@ fn ring(block: Dma<'static>, at: usize, point: u16) -> TrbRing {
 #[derive(Clone, Copy)]
 struct Inside {
     phase: Phase,
-    block: Dma<'static>,
-    doorbell: Mmio,
     slot: u8,
     in_dci: u8,
     out_dci: u8,
-    data: u64,
-    data_len: u32,
     data_in: bool,
     in_ring: TrbRing,
     out_ring: TrbRing,
@@ -437,122 +393,29 @@ impl Inside {
         let pending = queued.wrapping_sub(reached) % super::RING_SIZE as u64;
         (state, pending as u16)
     }
-    /// Ring this device's doorbell for one endpoint.
-    ///
-    /// The driver's own `ring_doorbell` says the same thing through the
-    /// controller it borrows; this one has only the window, which is all a
-    /// reader that may take no lock can have.
-    fn ring_doorbell(self, dci: u8) {
-        fence(Ordering::Release);
-        self.doorbell.write_u32(u64::from(self.slot) * 4, u32::from(dci));
-    }
-
-    /// The CSW the device writes, as the region this path polls and reads.
-    fn csw(self) -> Dma<'static> {
-        self.block.subview(MSC_CSW, CSW_LEN as usize)
-    }
 }
 
-/// How long each of this path's two waits on a device gets.
+/// How long the driver gets to close the command it has open.
 ///
-/// The driver's own transfer bound, because both ask the same question — is
-/// this device still answering — and past it neither a longer wait nor a
-/// shorter one changes what the reset then has to do.
+/// The driver's own transfer bound, because it is the same question — is this
+/// device still answering — and past it a longer wait changes nothing the reset
+/// then has to do.
 const BOT_NS: u64 = USB_TIMEOUT_NS;
 
-/// Finish the Bulk-Only command this kernel has open, and say what that took.
+/// Give the driver its bound to close the command it has open, and say what
+/// the reset then found.
 ///
-/// **The reset's own transfers, on rings the driver built.** Everything here is
-/// a TRB on a ring this kernel owns, a doorbell write and a poll of the DMA the
-/// device writes its CSW into: no lock, no allocation, and no event ring, which
-/// is the one structure the wedged CPU is still the consumer of.
+/// **This path does not put a transfer on the bus.** The rings it can see are
+/// rebuilt from numbers [`OpenCommand`] published, and nothing here holds the
+/// lock that would stop the driver's own CPU from enqueuing on them — so a TRB
+/// written here could be a second write of a block the device already has,
+/// which is worse than the reset it would be avoiding. Finishing the command
+/// is not the way out the class offers either: BOT §5.3.4 makes reset recovery
+/// the device's obligation.
 ///
-/// What the device is owed is [`bot::owed`]'s to decide; a transfer already
-/// queued is the controller's to finish and queueing it again would move the
-/// same bytes twice — for an out data phase, a second write of the block.
-fn finish(inside: Inside, said: &mut dyn fmt::Write) {
-    let Some(owed) = bot::owed(inside.phase, inside.data_len) else { return };
-    let (mut in_ring, mut out_ring) = (inside.in_ring, inside.out_ring);
-    if owed.ring_data {
-        let (dci, ring) = match inside.data_in {
-            true => (inside.in_dci, &mut in_ring),
-            false => (inside.out_dci, &mut out_ring),
-        };
-        if owed.data {
-            ring.enqueue(super::normal_trb(inside.data, inside.data_len));
-        }
-        inside.ring_doorbell(dci);
-    }
-    if owed.status {
-        // Zeroed here because this is the transfer that fills it: a CSW the
-        // driver already queued was zeroed by the driver, and zeroing it again
-        // would discard the answer the poll below is waiting for.
-        super::zero_dma(inside.block, MSC_CSW, CSW_LEN as usize);
-        in_ring.enqueue(super::normal_trb(
-            inside.block.device_addr() + MSC_CSW as u64,
-            CSW_LEN,
-        ));
-        inside.ring_doorbell(inside.in_dci);
-    }
-    let csw = inside.csw();
-    let answered = crate::clock::settles(BOT_NS, || {
-        u32::from_le(csw.read::<u32>(0)) == CSW_SIGNATURE
-    });
-    let (state, pending) = inside.controller_state();
-    let _ = writeln!(
-        said,
-        "usb-quiesce: a Bulk-Only command was open in its {} phase on slot {}, so this reset \
-         sent the {} B it owed and asked for the status",
-        inside.phase,
-        inside.slot,
-        if owed.data { inside.data_len } else { 0 },
-    );
-    // What the hardware was doing, as against what the driver had queued. A
-    // reset that finds TRBs still ahead of the controller landed on a bus that
-    // was moving bytes, and that is the state this whole path is measured on.
-    let _ = writeln!(
-        said,
-        "usb-quiesce: the controller had that device's data endpoint {state} with {pending} \
-         TRB(s) it had not reached on the ring",
-    );
-    match answered {
-        // The device is back where BOT §5.1 leaves it between commands, which
-        // is the state a port reset is defined over.
-        true => {
-            let _ = writeln!(
-                said,
-                "usb-quiesce: the device answered with a CSW of status {:#04x}, {} B unmoved, so \
-                 this reset cuts no command",
-                csw.read::<u8>(12),
-                u32::from_le(csw.read::<u32>(8)),
-            );
-        }
-        false => {
-            let _ = writeln!(
-                said,
-                "usb-quiesce: the device sent no CSW inside {} ms, so this reset cuts the command \
-                 — a device cut between its CBW and its CSW may need a physical replug before its \
-                 next host can enumerate it",
-                BOT_NS / 1_000_000,
-            );
-        }
-    }
-}
-
-/// Settle the **protocol** and not only its transfers, and say which of the
-/// three this reset was.
-///
-/// **A port reset in a command's data phase is not free, whatever the class
-/// says.** USB Mass Storage Bulk-Only Transport §5.3.4 makes reset recovery the
-/// device's obligation and the port reset below clears strictly more than it
-/// asks for; a device that does not honour it is one no software on a laptop
-/// with no VBUS control can clear.
-///
-/// So the driver is given its own bound to close the command it has open, and
-/// where that does not happen this path finishes the command itself. Both are
-/// bounded and the reset follows either way: a machine nobody can turn off is
-/// worse than a device somebody has to replug, and the account is what says
-/// which of the two this reset was.
+/// So what is left is the account: which phase the device was left in, and what
+/// the controller was doing to it. The reset follows either way — a machine
+/// nobody can turn off is worse than a device somebody has to replug.
 fn settle_commands(said: &mut dyn fmt::Write) {
     if inside().is_none() {
         let _ = writeln!(
@@ -563,7 +426,7 @@ fn settle_commands(said: &mut dyn fmt::Write) {
     }
     crate::clock::settles(BOT_NS, || inside().is_none());
     // Read again rather than reusing the first: a command that walked a phase
-    // inside the wait owes what it owes now, not what it owed then.
+    // inside the wait is in the phase it is in now, not the one it was in then.
     let Some(open) = inside() else {
         let _ = writeln!(
             said,
@@ -573,7 +436,23 @@ fn settle_commands(said: &mut dyn fmt::Write) {
         );
         return;
     };
-    finish(open, said);
+    let (state, pending) = open.controller_state();
+    let _ = writeln!(
+        said,
+        "usb-quiesce: a Bulk-Only command was open in its {} phase on slot {} after {} ms, so \
+         this reset cuts it",
+        open.phase,
+        open.slot,
+        BOT_NS / 1_000_000,
+    );
+    // What the hardware was doing, as against what the driver had queued. A
+    // reset that finds TRBs still ahead of the controller landed on a bus that
+    // was moving bytes, and that is the state this account exists to name.
+    let _ = writeln!(
+        said,
+        "usb-quiesce: the controller had that device's data endpoint {state} with {pending} \
+         TRB(s) it had not reached on the ring",
+    );
 }
 
 /// Entered once for the machine's life.

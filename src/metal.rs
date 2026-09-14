@@ -710,25 +710,12 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // register and writes no firmware state; the kernel implies `WEDGE_ARM`
     // behind it, so the boot cannot end itself before its own bound.
     (LOCKUP_ARM, Flash::Ok),
-    // **The arms that stop this machine holding a device**, one per phase of the
-    // Bulk-Only command the stick is left inside — which of them a device does
-    // not come back from is what only this laptop can say. Each stops at the
-    // same point as `WEDGE_ARM`, after 4 MiB of writes the device has taken.
-    // Admissible for the rows above's reason and one more: every block written
-    // is a byte-for-byte rewrite of what was just read from it, past the end of
-    // the image, so the medium is what it was however much of it a reset
-    // completes and no partition a boot mounts is ever the subject.
-    (MID_WRITE_ARMS[0], Flash::Ok),
-    (MID_WRITE_ARMS[1], Flash::Ok),
-    (MID_WRITE_ARMS[2], Flash::Ok),
-    // **The arm that stops nothing and never stops writing.** The three above
-    // stop every CPU and then wait out the deadline, which leaves the bus idle
-    // long before the reset; this one sweeps the last eighth of the stick until
-    // the deadline takes the machine out from under it, so the reset lands on a
-    // controller moving bytes. Admissible for the same reasons: every run is a
-    // byte-for-byte rewrite of what was just read from it, no block is written
-    // twice in a boot, and the sweep is refused by name on a disk with no room
-    // for it.
+    // **The arm that stops nothing and never stops writing**, so the reset
+    // lands on a controller that is moving bytes. Admissible for the rows
+    // above's reason and one more: every run is read first and written back
+    // byte for byte in the last eighth of the disk, once and never twice, so
+    // the medium is what it was and no partition a boot mounts is the subject;
+    // and the sweep is refused by name on a disk with no room for it.
     (LOAD_ARM, Flash::Ok),
     (
         "quiesce-late-word",
@@ -756,17 +743,6 @@ pub const WEDGE_ARM: &str = "wedge-before-reset";
 /// and which bound sealed the page is the page's own first line to say.
 pub const LOCKUP_ARM: &str = "hard-lockup-probe";
 
-/// The arms that stop the machine with the boot stick inside a Bulk-Only
-/// command, one per phase the stick can be left in.
-///
-/// Three names and still not three judges: what each owes a readback is what
-/// the two above owe, and the one thing only these boots can say — whether the
-/// stick came back — is `stick_secs`, which every metal boot measures. **Which
-/// phase is the measurement**, so a boot carries exactly one of them and the
-/// kernel refuses a second.
-pub const MID_WRITE_ARMS: [&str; 3] =
-    ["usb-wedge-data-owed", "usb-wedge-in-data", "usb-wedge-before-status"];
-
 /// The arm that leaves the machine to its bound with the bus busy rather than
 /// idle: it stops no CPU and never stops writing.
 pub const LOAD_ARM: &str = "usb-reset-under-load";
@@ -777,14 +753,7 @@ pub const LOAD_ARM: &str = "usb-reset-under-load";
 /// arm added to [`FLASHABLE`] and not here is an image whose boot is judged by
 /// the word a shutdown writes — which it never reaches — so the reader that
 /// forgot it reds every boot it was staged for.
-pub const WEDGE_ARMS: &[&str] = &[
-    WEDGE_ARM,
-    LOCKUP_ARM,
-    MID_WRITE_ARMS[0],
-    MID_WRITE_ARMS[1],
-    MID_WRITE_ARMS[2],
-    LOAD_ARM,
-];
+pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM, LOAD_ARM];
 
 /// Whether this image is armed to stop itself, and so owes a sealed record
 /// rather than `Rebooting.`.

@@ -79,11 +79,6 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
     }
 
     /// This view's base as a number, to be handed back to [`Self::from_addr`].
-    ///
-    /// For the one caller that has to keep the *numbers* and not the view: the
-    /// reset-time xHCI stop reads the open Bulk-Only command out of atomics,
-    /// because the CPU holding the driver's lock may be the wedged one that
-    /// reset is ending.
     #[inline]
     pub fn addr(self) -> u64 {
         self.base as u64

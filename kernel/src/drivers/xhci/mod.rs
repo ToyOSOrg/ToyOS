@@ -242,20 +242,6 @@ impl ControlTrbs {
     }
 }
 
-/// One Normal TRB, the only shape a bulk transfer takes in this driver.
-///
-/// ISP so a device that sends less than asked reports it instead of leaving the
-/// transfer outstanding, IOC so it reports at all. One function because the
-/// reset path queues the same shape with no controller to build it from, and a
-/// second spelling of these two bits is a second answer.
-fn normal_trb(phys: u64, len: u32) -> Trb {
-    let mut trb = Trb::ZERO;
-    trb.param = phys;
-    trb.status = len;
-    trb.control = TRB_NORMAL | (1 << 5) | (1 << 2);
-    trb
-}
-
 /// Put one control transfer's TRBs on an EP0 ring, and say where each completion will come from.
 fn enqueue_control(
     ring: &mut TrbRing,

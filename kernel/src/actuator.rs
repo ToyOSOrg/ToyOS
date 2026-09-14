@@ -124,32 +124,25 @@ actuators! {
     /// Skip the waits of the next Reset Recovery's control transfers, once.
     usb_reset_break = "usb-reset-break";
 
-    /// Stop every CPU inside one WRITE(10) at the shutdown syscall — after the
-    /// job list and after 4 MiB of writes the device has already taken — with
-    /// the device holding the CBW and nothing queued for its data phase. Only
-    /// `crate::deadline` ends the machine, and what it ends is a device inside
-    /// a Bulk-Only command. Every block is a byte-for-byte rewrite of what was
-    /// just read from it, past the end of the image, so the medium is what it
-    /// was either way.
+    /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
+    /// device holding the CBW and nothing queued for its data phase, so the
+    /// bound that ends the machine ends a device inside a Bulk-Only command.
+    /// See `usb_gate::wedge_inside_a_write`; judged by
+    /// `usb_reset_finishes_an_open_command`.
     usb_wedge_data_owed = "usb-wedge-data-owed";
 
     /// The same, stopped one step later: the data phase's TRB is on the ring
-    /// and its doorbell has not been rung, so the device is owed bytes the
-    /// controller was never told to send.
+    /// and its doorbell has not been rung.
     usb_wedge_in_data = "usb-wedge-in-data";
 
     /// The same, stopped after the data phase completed and before anything has
-    /// asked for the CSW: the device holds the bytes and has a status to send
-    /// that nothing is reading.
+    /// asked for the CSW.
     usb_wedge_before_status = "usb-wedge-before-status";
 
-    /// Stream writes to the boot stick from the shutdown syscall and never
-    /// stop, so the boot deadline resets the machine with the controller moving
-    /// bytes and the device programming flash. The three arms above stop every
-    /// CPU and then wait two minutes, which leaves the controller free to finish
-    /// and the bus idle; this one denies it that. Every run written is a
-    /// byte-for-byte rewrite of what was just read from it, sweeping the last
-    /// eighth of the disk once so no block is programmed twice in a boot.
+    /// Sweep the boot stick from the shutdown syscall so the reset lands on a
+    /// controller that is moving bytes rather than on a bus idle since the
+    /// wedge. See `usb_gate::sweep_under_load`; judged by
+    /// `usb_reset_finishes_an_open_command`.
     usb_reset_under_load = "usb-reset-under-load";
 
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.

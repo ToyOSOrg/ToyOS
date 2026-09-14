@@ -4,7 +4,7 @@ kind: finding
 opened: 2026-09-14
 ---
 
-# Four phases of a cut command, and the bench's stick survived all four
+# Five cut commands, and the bench's stick survived every one
 
 The T14 has lost its boot stick to three boots: runs 25 and 26 (`ccorpus`,
 sustained multi-megabyte writes to `/log`) and run 33 (`metalcase`, the USB
@@ -16,24 +16,25 @@ and neither sysfs port-power nor Linux's own device resets reach it.
 
 The reading taken from that was that the reset cut a Bulk-Only Transport command
 mid-phase — a device that has taken a CBW and is waiting for its data or its CSW
-(BOT 1.0 §5.1, §6.7.2–3) is one a port reset leaves stranded. **Four boots
-measured that reading directly and it did not hold.**
+(BOT 1.0 §5.1, §6.7.2–3) is one a port reset leaves stranded. **Five boots
+measured that reading directly and it did not hold**, which is why the reset
+path records the phase a device was left in and does not try to finish the
+command.
 
 ## What was measured
 
-Every arm below ran `origin/main`'s reset path — the one that settles TRBs and
-not the command they belong to — with a stimulus staged on it, and ended at the
-deadline. Every one came back `stick_secs 0`, PASS, EXIT=0.
+Every arm below ran `origin/main`'s reset path with a stimulus staged on it, and
+came back `stick_secs 0`, PASS, EXIT=0.
 
-| run | what the device was left holding | stick |
-|---|---|---|
-| 39 | a CBW with nothing queued for its data phase, after one 4 KiB write | survived |
-| 43 | the same, after 4 MiB of writes | survived |
-| 43 | a data TRB on the ring whose doorbell was never rung | survived |
-| 43 | the data taken, with nothing reading its CSW | survived |
-| 45 | a write **in flight**: the sweep never stopped, so the reset landed on a controller moving bytes | survived |
+| run | what the device was left holding | what ended the machine | stick |
+|---|---|---|---|
+| 39 | a CBW with nothing queued for its data phase, after one 4 KiB write | the boot deadline at 120062 ms | survived |
+| 43 | the same, after 4 MiB of writes | the boot deadline at 120065 ms | survived |
+| 43 | a data TRB on the ring whose doorbell was never rung | the boot deadline at 120066 ms | survived |
+| 43 | the data taken, with nothing reading its CSW | the boot deadline at 120065 ms | survived |
+| 45 | a write **in flight**: the sweep never stopped, so the reset landed on a controller moving bytes | the hard-lockup detector at 60003 ms, because that sweep held `IF` clear | survived |
 
-Run 45 is the sharpest: the kernel's own account on that page reads
+Run 45 is the sharpest, and its page carries the kernel's own account:
 
 ```
 usb-quiesce: 1 bulk transfer(s) were outstanding and 1 still is after 2000 ms,
@@ -52,7 +53,7 @@ three kills share the *hang*, not the reset: what a hang leaves the controller
 and the device in — a storm of transfers with no CPU draining events, an
 endpoint the driver abandoned and never recovered, a device mid-program with its
 firmware in a state no host can name — is the unknown, and none of it is
-reachable through the four states a deliberate wedge can stage.
+reachable through the five states above.
 
 **And it is unknowable through the stick**, because the stick is the channel and
 the stick is what dies. Evidence about a hang of this kind has to leave the

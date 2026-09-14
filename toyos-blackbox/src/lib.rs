@@ -109,9 +109,7 @@ pub const TEXT_BYTES: usize = BYTES - HEADER;
 /// the boot whose reset is worth reading about, so the reserve comes off the
 /// records rather than off the account.
 ///
-/// An eighth of the page. The widest account the kernel's stop can write is one
-/// barrier line, two about the command a device was inside, five for each
-/// controller the reset can stop, and one summary.
+/// An eighth of the page.
 pub const ACCOUNT_BYTES: usize = 2048;
 
 /// What a report's own head and tail may spend: [`TEXT_BYTES`] less the reserve.
@@ -345,11 +343,24 @@ impl<'a> Report<'a> {
         }
     }
 
+    /// Close the envelope over what is written **so far**, leaving this writer
+    /// able to write more.
+    ///
+    /// **For a writer that may not reach its own last statement.** The account
+    /// under a sealed report is made from the reset path, whose every step is a
+    /// bounded wait on a device; a machine that ends inside one of them leaves
+    /// every byte already written covered by no length and no checksum, so the
+    /// next boot reads the report and none of the account and nothing says a
+    /// word. Committing each line costs one pass of the checksum over the page
+    /// and makes the record say how far the reset got.
+    pub fn commit(&mut self, state: State, stamp: u64, identity: Identity) -> usize {
+        seal_len(self.page, state, stamp, identity, self.at);
+        self.at
+    }
+
     /// Close the envelope over what was written.
-    pub fn seal(self, state: State, stamp: u64, identity: Identity) -> usize {
-        let at = self.at;
-        seal_len(self.page, state, stamp, identity, at);
-        at
+    pub fn seal(mut self, state: State, stamp: u64, identity: Identity) -> usize {
+        self.commit(state, stamp, identity)
     }
 }
 
@@ -782,6 +793,11 @@ mod tests {
     /// on exactly the boots that overflow the page.
     #[test]
     fn a_report_that_fills_the_page_still_leaves_the_account_its_room() {
+        // The account this test holds the page to is the widest the kernel's
+        // reset writes, measured off a T14 readback and rounded up — a size of
+        // its own, never `ACCOUNT_BYTES`, or the reserve would be asserting
+        // against itself and a reserve of nothing would pass.
+        const WIDEST_ACCOUNT: usize = 1024;
         let mut records = std::string::String::new();
         let mut n = 0usize;
         while records.len() < TEXT_BYTES * 2 {
@@ -791,24 +807,51 @@ mod tests {
         let mut page = blank();
         let filled = seal(&mut page, State::Wedged, STAMP, STICK, records.as_bytes());
         assert!(
-            filled <= REPORT_BYTES,
-            "a report ran to {filled}, past the {REPORT_BYTES} it may spend"
+            filled <= TEXT_BYTES - WIDEST_ACCOUNT,
+            "a report ran to {filled}, leaving under {WIDEST_ACCOUNT} B for the account"
         );
 
         // And the account then fits under it, whole.
-        let account = "a".repeat(ACCOUNT_BYTES);
+        let account = "a".repeat(WIDEST_ACCOUNT);
         let (_, _, _, text) = recover(&page).expect("a sealed report");
         let kept = text.len();
         let mut report = Report::reopened(&mut page, kept);
         report.write(account.as_bytes());
         let len = report.seal(State::Wedged, STAMP, STICK);
-        assert_eq!(len, kept + ACCOUNT_BYTES, "the account was cut");
+        assert_eq!(len, kept + WIDEST_ACCOUNT, "the account was cut");
         let (state, _, _, text) = recover(&page).expect("the reopened report is still sealed");
         assert_eq!(state, State::Wedged, "reopening changed what ended the boot");
         assert!(
             std::str::from_utf8(text).expect("text").ends_with(&account),
             "the account is not the last thing on the page"
         );
+    }
+
+    /// **An account the machine ends in the middle of is readable to where it
+    /// got.** Every line of it is a bounded wait on a device away from the next,
+    /// and the reset follows either way; a writer that only closed its envelope
+    /// at the end left the next boot the report and nothing about the reset,
+    /// with nothing saying so.
+    #[test]
+    fn an_account_cut_off_mid_write_is_still_readable_to_where_it_got() {
+        let mut page = blank();
+        let kept = seal(&mut page, State::Wedged, STAMP, STICK, b"[0000] why\n");
+        {
+            let mut report = Report::reopened(&mut page, kept);
+            for line in ["first\n", "second\n"] {
+                report.write(line.as_bytes());
+                report.commit(State::Wedged, STAMP, STICK);
+            }
+            // The machine ends here: the third line is written, and `seal` —
+            // which is what would cover it — is never reached.
+            report.write(b"third\n");
+        }
+
+        let (state, _, _, text) = recover(&page).expect("a page committed line by line");
+        assert_eq!(state, State::Wedged);
+        let text = std::str::from_utf8(text).expect("text");
+        assert!(text.ends_with("first\nsecond\n"), "{text:?}");
+        assert!(!text.contains("third"), "an uncommitted line was readable: {text:?}");
     }
 
     /// A head goes in before the tail and survives it: the crash's own message

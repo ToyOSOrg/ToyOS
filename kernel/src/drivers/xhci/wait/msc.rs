@@ -16,8 +16,8 @@ use crate::scheduler::Operation;
 use crate::time::{Budget, Deadline, Duration};
 use super::super::device::Endpoint;
 use super::{Owed, Quiet, Restart};
-use super::super::{with_disk, Disk, StorageGeometry, TrbRing, XhciController, PAGE};
-use super::super::{normal_trb, stop, CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, OFF_INPUT_CTX};
+use super::super::{with_disk, Disk, StorageGeometry, Trb, TrbRing, XhciController, PAGE};
+use super::super::{stop, CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_CTX};
 use super::super::{MSC_IN_RING, MSC_OUT_RING, MSC_CBW, MSC_CSW, MSC_SCRATCH, MSC_SCRATCH_LEN};
 use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS, MSC_STRIDE};
 use toyos_xhci::bot::Phase;
@@ -43,11 +43,9 @@ const READY_BUDGET: Budget = Budget::of(
 const MAX_TRANSPORT_ATTEMPTS: u8 = 3;
 
 const CBW_SIGNATURE: u32 = 0x4342_5355;
-/// BOT §5.2's dCSWSignature; the reset path reads it to tell a CSW the device
-/// has written from the zeros this driver left in its place.
-pub(in crate::drivers::xhci) const CSW_SIGNATURE: u32 = 0x5342_5355;
+const CSW_SIGNATURE: u32 = 0x5342_5355;
 const CBW_LEN: u32 = 31;
-pub(in crate::drivers::xhci) const CSW_LEN: u32 = 13;
+const CSW_LEN: u32 = 13;
 
 /// What the configuration descriptor said about a mass-storage interface;
 /// both endpoints, always, each valid because `Endpoint` only comes from
@@ -754,14 +752,11 @@ impl XhciController {
         // reaches the controller unpublished.
         let open = stop::OpenCommand::begin(stop::Device {
             block: dma.subview(dev.block, MSC_STRIDE),
-            doorbell: self.db_base,
             slot: dev.slot_id,
             in_dci: dev.in_dci,
             out_dci: dev.out_dci,
-            data: data_phys,
             ctx: dma.subview(dev.dev_block + super::super::DEV_OUT_CTX, 32 * self.context_size),
             ctx_size: self.context_size as u32,
-            data_len,
             data_in,
         });
 
@@ -801,6 +796,10 @@ impl XhciController {
                     if !self.restart_bulk(dev, data_in) {
                         return Err(Broke::Stall { phase: "data" });
                     }
+                    // The recovery rebuilt the ring this phase was on, so the
+                    // point the account reads is republished before anything
+                    // else reaches the controller.
+                    open.at(Phase::Data, &dev.in_ring, &dev.out_ring);
                     moved = data_len.saturating_sub(unmoved);
                 }
                 Ok((code, _)) => return Err(Broke::Code { phase: "data", code }),
@@ -880,7 +879,13 @@ impl XhciController {
         } else {
             (dev.out_dci, &mut dev.out_ring)
         };
-        let at = ring.enqueue(normal_trb(phys, len));
+        let mut trb = Trb::ZERO;
+        trb.param = phys;
+        trb.status = len;
+        // ISP so a device that sends less than asked reports it instead of
+        // leaving the transfer outstanding, IOC so it reports at all.
+        trb.control = TRB_NORMAL | (1 << 5) | (1 << 2);
+        let at = ring.enqueue(trb);
         let slot = dev.slot_id;
         // Before the doorbell, so no transfer is visible to the controller
         // without a reset being able to see the ring it went on.

@@ -52,12 +52,11 @@ fn quiesce(last: &str) {
     if crate::actuator::wedge_before_reset() {
         crate::deadline::stage_a_wedge();
     }
-    // The same shape with a device left inside a Bulk-Only command, which is
-    // what a boot that hangs during stick I/O leaves behind and what the reset's
-    // own account is then judged on. Here too, so the wedge is a boot that ran
-    // its job list: the traffic and the command it is taken inside are the
-    // actuator's. Which phase is the whole measurement, so each is its own arm
-    // and an image carrying two is refused rather than measuring neither.
+    // The same shape with a device left inside a Bulk-Only command. Here too,
+    // so the wedge is a boot that ran its job list. Which phase is the whole
+    // measurement, so an image carrying two stages neither and says so by name:
+    // the judge then reds on the staging line's absence rather than on a kernel
+    // panic raised from a parameter line.
     #[cfg(feature = "boot-actuators")]
     {
         use toyos_xhci::bot::Phase;
@@ -67,13 +66,13 @@ fn quiesce(last: &str) {
             (crate::actuator::usb_wedge_before_status(), Phase::StatusOwed),
         ];
         let mut armed = arms.iter().filter(|(on, _)| *on).map(|(_, phase)| *phase);
-        if let Some(phase) = armed.next() {
-            assert!(
-                armed.next().is_none(),
-                "two USB wedge phases are armed on one boot, and the phase a device is stopped \
-                 in is the whole measurement"
-            );
-            crate::usb_gate::wedge_inside_a_write(phase);
+        match (armed.next(), armed.next()) {
+            (Some(phase), None) => crate::usb_gate::wedge_inside_a_write(phase),
+            (Some(one), Some(two)) => log!(
+                "{}: {one} and {two} are both armed on this boot",
+                crate::usb_gate::USB_WEDGE_TWO_PHASES
+            ),
+            (None, _) => {}
         }
     }
     // The same machine ended by the same bound, with the bus busy rather than

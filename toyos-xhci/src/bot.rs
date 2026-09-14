@@ -1,29 +1,23 @@
-//! Where one Bulk-Only Transport command stands, and what a reset owes the
-//! device that is inside it.
+//! Where one Bulk-Only Transport command stands.
 //!
-//! **A reset is not a way to end a command.** USB Mass Storage Class Bulk-Only
-//! Transport 1.0 §5.1 makes every command three transfers — the 31-byte CBW
-//! out, an optional data phase, the 13-byte CSW in — and §6.7.2/§6.7.3 leave a
-//! device that has taken a CBW waiting for whichever of them has not arrived.
-//! A host that stops between two phases has told the device nothing. The
-//! class's own way out is Reset Recovery (§5.3.4): a class request and two
-//! CLEAR_FEATURE(HALT)s, all three of them control transfers on a live device,
-//! which is not a sequence a wedged kernel can issue. What such a kernel *can*
-//! do is finish the command it opened — the data the CBW promised, then the
-//! CSW — after which the device is back where §5.1 leaves it between commands.
+//! USB Mass Storage Class Bulk-Only Transport 1.0 §5.1 makes every command
+//! three transfers — the 31-byte CBW out, an optional data phase, the 13-byte
+//! CSW in — and §6.7.2/§6.7.3 leave a device that has taken a CBW waiting for
+//! whichever of them has not arrived. A host that stops between two phases has
+//! told the device nothing, so which phase it stopped in is the only thing that
+//! says what the device is holding.
 //!
 //! The phases are here and their effects are the driver's, because the reader
 //! is the reset path: it runs where no lock may be taken, so it reads the phase
-//! out of an atomic rather than out of the driver, and every decision it then
-//! makes is this module's.
+//! out of an atomic rather than out of the driver.
 
 /// Where one Bulk-Only round trip stands, published by the driver as it walks
 /// the three phases.
 ///
-/// **Five and not three**, though two pairs owe the same acts: which of a pair
-/// a wedged machine stopped in is the difference between a device the
-/// controller was still serving and one nothing had asked yet, and the reset's
-/// account is the only place that is ever said.
+/// **Five and not three**, though two pairs leave the device the same thing:
+/// which of a pair a stopped machine is in is the difference between a device
+/// the controller was still serving and one nothing had asked yet, and the
+/// reset's account is the only place that is ever said.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Phase {
     /// No command is open. Between round trips, and the state a device is left
@@ -99,51 +93,6 @@ impl core::fmt::Display for Phase {
     }
 }
 
-/// What a reset must put on the wire before it takes a port down.
-///
-/// [`Self::data`] and [`Self::status`] are about transfers the *host* has not
-/// queued. A transfer already queued is the controller's to finish and
-/// re-queueing it would move the same bytes twice — which for an out data phase
-/// is a second write of the block, so the distinction is not a nicety.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Owed {
-    /// The data phase the CBW promised has not been queued.
-    pub data: bool,
-    /// The data endpoint's doorbell must be rung.
-    ///
-    /// **Queued is not running.** The driver publishes its phase between the
-    /// enqueue and the doorbell, so that a reset can see the ring a transfer
-    /// went on — which means a machine stopped in that window leaves a TRB the
-    /// controller was never told about, and a reset that re-rang only the status
-    /// endpoint would wait out a data phase nothing is moving. A doorbell for a
-    /// transfer already running is a hint the controller may ignore (xHCI 1.2
-    /// §4.7), so this is rung whenever the data phase is still the device's to
-    /// receive — queued by the driver, or by [`Self::data`] just now.
-    pub ring_data: bool,
-    /// The CSW's transfer has not been queued. Until the device has sent one it
-    /// takes no further command (BOT §5.3), so this is what a reset owes even
-    /// where the data moved.
-    pub status: bool,
-}
-
-/// What finishing the command in `phase` takes, or `None` where no command is
-/// open and the reset owes the device nothing.
-///
-/// `data_len` is the CBW's own dCBWDataTransferLength (§5.1): zero is a command
-/// with no data phase, which owes only its status.
-pub fn owed(phase: Phase, data_len: u32) -> Option<Owed> {
-    if !phase.open() {
-        return None;
-    }
-    let has_data = data_len > 0;
-    Some(Owed {
-        data: has_data && matches!(phase, Phase::Command | Phase::DataOwed),
-        ring_data: has_data
-            && matches!(phase, Phase::Command | Phase::DataOwed | Phase::Data),
-        status: phase != Phase::Status,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,68 +132,21 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_command_owes_the_device_nothing() {
-        for len in [0, 13, 4096, u32::MAX] {
-            assert_eq!(owed(Phase::Closed, len), None, "{len} B");
+    fn every_phase_but_the_closed_one_is_a_device_holding_a_command() {
+        assert!(!Phase::Closed.open());
+        for phase in EVERY.iter().copied().filter(|p| *p != Phase::Closed) {
+            assert!(phase.open(), "{phase:?}");
         }
     }
 
     #[test]
-    fn every_open_phase_but_the_last_owes_a_status() {
-        for phase in EVERY.iter().copied().filter(|p| p.open()) {
-            let owed = owed(phase, 4096).expect("open");
-            assert_eq!(
-                owed.status,
-                phase != Phase::Status,
-                "{phase:?} disagrees about the CSW it owes"
-            );
-        }
-    }
-
-    #[test]
-    fn a_data_phase_already_queued_is_never_queued_again() {
-        // The negative control on the whole module: re-queueing an out data
-        // phase writes the block twice, which is worse than the reset it is
-        // avoiding.
-        for phase in [Phase::Data, Phase::StatusOwed, Phase::Status] {
-            assert!(!owed(phase, 4096).expect("open").data, "{phase:?} re-queued its data");
-        }
-    }
-
-    #[test]
-    fn a_data_phase_the_device_is_still_owed_is_always_rung_for() {
-        // Queued is not running: the phase is published between the enqueue and
-        // the doorbell, so `Data` can mean a TRB the controller never saw.
-        for phase in [Phase::Command, Phase::DataOwed, Phase::Data] {
-            assert!(
-                owed(phase, 4096).expect("open").ring_data,
-                "{phase:?} left a data phase nothing would move"
-            );
-        }
-        // And past it the device has the bytes; a doorbell there would be for a
-        // transfer that is over.
-        for phase in [Phase::StatusOwed, Phase::Status] {
-            assert!(!owed(phase, 4096).expect("open").ring_data, "{phase:?} rang for moved data");
-        }
-    }
-
-    #[test]
-    fn a_command_with_no_data_phase_owes_none() {
-        for phase in EVERY.iter().copied().filter(|p| p.open()) {
-            let owed = owed(phase, 0).expect("open");
-            assert!(!owed.data, "{phase:?} owed data it never promised");
-            assert!(!owed.ring_data, "{phase:?} rang for a data phase it never promised");
-        }
-    }
-
-    #[test]
-    fn the_two_phases_that_precede_a_data_transfer_owe_it() {
-        for phase in [Phase::Command, Phase::DataOwed] {
-            assert_eq!(
-                owed(phase, 4096).expect("open"),
-                Owed { data: true, ring_data: true, status: true },
-                "{phase:?}"
-            );
+    fn no_two_phases_are_named_the_same_thing() {
+        // The account names the phase and nothing else does; two phases with one
+        // name is a reader who cannot tell which device state a reset found.
+        for (at, phase) in EVERY.iter().enumerate() {
+            for other in &EVERY[at + 1..] {
+                assert_ne!(phase.named(), other.named(), "{phase:?} and {other:?}");
+            }
         }
     }
 }

@@ -1289,40 +1289,46 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// The three phases a Bulk-Only command can be open at, each its own boot,
-/// spelled as the actuator that stages it and the phase the account then names.
+/// The three phases a Bulk-Only command can be open at, each its own boot, as
+/// the parameters that stage it and the phase the account then names.
 ///
-/// **All three and not one.** The device sees a different thing at each — a CBW
-/// with no data coming, a data phase on the ring that was never rung for, and
-/// data it has taken with nothing reading its status — and a reset that
-/// finishes one of them is not one that finishes the others.
-const WEDGE_PHASES: &[(&str, &str)] = &[
-    ("usb-wedge-data-owed", "data (unqueued)"),
-    ("usb-wedge-in-data", "data"),
-    ("usb-wedge-before-status", "status (unqueued)"),
+/// **All three and not one.** The device is left holding something different at
+/// each — a CBW with no data coming, a data phase on the ring that was never
+/// rung for, and data it has taken with nothing reading its status — and an
+/// account that can name one of them is not one that can name the others.
+///
+/// **One declaration and no default.** `chained` takes its arms as one static
+/// list, so each boot's whole parameter list is here — the arm's name is its
+/// first element, and there is no spelling of it anywhere else in the harness
+/// for a name to drift away from.
+const WEDGE_PHASES: &[(&[&str], &str)] = &[
+    (&["usb-wedge-data-owed", WEDGE_DEADLINE], "data (unqueued)"),
+    (&["usb-wedge-in-data", WEDGE_DEADLINE], "data"),
+    (&["usb-wedge-before-status", WEDGE_DEADLINE], "status (unqueued)"),
 ];
 
 /// A machine stopped inside a Bulk-Only command ends itself, and the reset that
-/// ends it drives that command to its CSW — at every phase it can be stopped in.
+/// ends it says which phase it found the device in — at every phase it can be
+/// stopped in.
 ///
-/// **What an emulator can prove here and what it cannot.** QEMU's mass-storage
-/// device answers a command whichever way it is left, so nothing here can show a
-/// device surviving — the T14's own stick is the only instrument for that, and
-/// `boot.usbwedge-*.stick_secs` is where it says so. What this arm judges is the
-/// mechanism: the machine really stopped inside a command, and the reset path
-/// queued what the device was owed and read the status instead of resetting the
-/// port under it. [`Profile::Metal`](qemu::Profile::Metal) carries the boot
-/// stick on its xHCI, which is why the wedge has a device to be inside at all.
+/// **What an emulator can prove here and what it cannot.** Whether a device
+/// survives being cut is the T14's own stick to answer and nothing here can ask
+/// it; `boot.usbload.stick_secs` is where it is asked. What this arm judges is
+/// that the machine really stopped inside a command and that the reset's
+/// account names which one — the only evidence a reset leaves about what it
+/// found. [`Profile::Metal`](qemu::Profile::Metal) carries the boot stick on
+/// its xHCI, which is why the wedge has a device to be inside at all.
 pub fn usb_reset_finishes_an_open_command(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    // Every phase is run and every finding reported: a mutation that reverts the
-    // finish breaks all three, and stopping at the first would say so about one.
+    // Every phase is run and every finding reported: a mutation that reverts
+    // `OpenCommand`'s publication breaks all three, and stopping at the first
+    // would say so about one.
     let mut bad = Vec::new();
-    for (arm, phase) in WEDGE_PHASES {
-        if let Err(why) = one_wedge_phase(arm, phase) {
+    for (params, phase) in WEDGE_PHASES {
+        if let Err(why) = one_wedge_phase(params, phase) {
             bad.push(why);
         }
     }
@@ -1337,13 +1343,11 @@ pub fn usb_reset_finishes_an_open_command(
 
 /// The load arm's QEMU half, and it is the refusal and nothing else.
 ///
-/// **This machine's disk is the image, and the image is eighty megabytes.** The
-/// load sweeps the last eighth of a disk of at least a gibibyte so that no block
-/// is written twice in a boot, which no guest here has room for — so what a
-/// guest can establish is that the arm says so by name and lets the boot end,
-/// rather than silently staging nothing and reading back as a wedge that never
-/// happened. That it streams at all, and what a reset landing on it does to a
-/// device, is `boot.usbload.stick_secs` on the T14 and is not askable here.
+/// **This machine's disk is the image, and no guest here has the gibibyte the
+/// sweep demands.** What a guest can establish is that the arm says so by name
+/// and lets the boot end, rather than silently staging nothing and reading back
+/// as a wedge that never happened. That it streams at all, and what a reset
+/// landing on it does to a device, is `boot.usbload.stick_secs` on the T14.
 fn the_load_refuses_a_disk_with_no_room() -> Result<(), String> {
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
@@ -1365,6 +1369,8 @@ fn the_load_refuses_a_disk_with_no_room() -> Result<(), String> {
     second
         .must_say(bootlog::USB_LOAD_REFUSED)
         .map_err(|why| format!("usb-reset-under-load: {why}"))?;
+    says_nothing_of(&second, bootlog::USB_LOAD_RUNNING)
+        .map_err(|why| format!("usb-reset-under-load: {why}"))?;
     // And the refusal let the boot end, rather than parking a machine that then
     // reads back as a wedge nobody staged.
     second.must_say(REBOOTING).map_err(|why| format!("usb-reset-under-load: {why}"))?;
@@ -1376,18 +1382,12 @@ fn the_load_refuses_a_disk_with_no_room() -> Result<(), String> {
     Ok(())
 }
 
-/// One boot: stop inside a command at `arm`'s phase, and read what the reset
+/// One boot: stop inside a command at this arm's phase, and read what the reset
 /// did off the page the pass after it prints.
-fn one_wedge_phase(arm: &'static str, phase: &str) -> Result<(), String> {
+fn one_wedge_phase(params: &'static [&'static str], phase: &str) -> Result<(), String> {
+    let arm = params.first().expect("an arm list opens with its arm");
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    // `chained` takes the arms as one static list, so the pair is spelled here
-    // rather than built: a boot may carry exactly one of these.
-    let params: &'static [&'static str] = match arm {
-        "usb-wedge-data-owed" => &["usb-wedge-data-owed", WEDGE_DEADLINE],
-        "usb-wedge-in-data" => &["usb-wedge-in-data", WEDGE_DEADLINE],
-        _ => &["usb-wedge-before-status", WEDGE_DEADLINE],
-    };
     let mut qemu = QemuInstance::boot_with_options(case, &[], &[], chained(params));
     let first = serial::Serial::boot(&qemu);
     let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
@@ -1402,89 +1402,89 @@ fn one_wedge_phase(arm: &'static str, phase: &str) -> Result<(), String> {
         drop(resets);
         return Err(format!("{arm}: {}", silent_guest(&qemu, second.text())));
     }
-    usb_wedge_chain(&second, &second).map_err(|why| format!("{arm}: {why}"))?;
-    // And the phase the account names is the one this boot was staged for: an
-    // arm that wedged somewhere else would still have been finished, and would
-    // say so about a phase nobody asked about.
-    let named = format!("command was open in its {phase} phase");
-    if !second.text().contains(&named) {
-        return Err(format!("{arm}: the account does not say {named:?}"));
-    }
+    usb_wedge_chain(&second, &second, phase).map_err(|why| format!("{arm}: {why}"))?;
     ended_in_a_reset(&mut resets).map_err(|why| format!("{arm}: {why}"))?;
     drop(qemu);
 
-    eprintln!("  [power] {arm}: stopped in its {phase} phase, and the reset read the CSW");
+    eprintln!("  [power] {arm}: stopped in its {phase} phase, and the account named it");
     Ok(())
 }
 
-/// The line the reset writes about what the controller was doing, as
-/// `kernel/src/drivers/xhci/stop.rs` spells it.
-const CONTROLLER_STATE: &str = "usb-quiesce: the controller had that device's data endpoint";
-
 /// The metal half of the load arm: a T14 boot that never stopped writing, ended
-/// by the deadline with its controller mid-transfer, and the stick still there.
+/// by the boot deadline with its controller mid-transfer, and the stick still
+/// there afterwards.
 ///
-/// **The three phase arms measured the idle states and the stick survived every
-/// one.** A wedge that stops every CPU and then waits out two minutes leaves the
-/// controller free to finish whatever was queued, so by the time the reset
-/// arrives there is nothing in flight for it to cut. This boot denies it that,
-/// and what it is judged on is that the bus really was busy — the sweep's own
-/// line — and that the account says what the controller was doing.
+/// **The bound is the boot deadline's and not the hard-lockup detector's.** The
+/// sweep keeps its CPU taking interrupts for exactly that reason
+/// (`usb_gate::sweep_under_load`): a CPU that takes none is ended half a bound
+/// earlier by `kernel/src/hardlockup`, which is a different mechanism reported
+/// under this arm's name, so this judge names the bound it demands.
 pub fn usb_load_chain(kernel: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
     kernel.must_say(bootlog::USB_LOAD_RUNNING)?;
-    // A sweep that refused, or one the disk stopped answering, is a boot that
-    // measured the idle case again under this arm's name.
+    // A sweep that refused, one the disk stopped answering, and one that swept
+    // its whole span before the reset: each is a boot that measured the idle
+    // case again under this arm's name.
     says_nothing_of(kernel, bootlog::USB_LOAD_REFUSED)?;
     says_nothing_of(kernel, bootlog::USB_LOAD_STOPPED)?;
+    says_nothing_of(kernel, bootlog::USB_LOAD_SWEPT)?;
     says_nothing_of(kernel, REBOOTING)?;
 
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
-    // **The account reaching the page is itself under test**: a report that
-    // filled the page left `blackbox::append` no bytes and no way to say so, and
-    // no wedge boot this bench took before `toyos_blackbox::ACCOUNT_BYTES`
-    // carried one. This is that reserve, on the machine.
+    // A page that names the other bound is this arm measuring a hard lockup.
+    says_nothing_of(after, bootlog::LOCKED_UP)?;
+    // **The account reaching the page is itself under test**: it is made line by
+    // line from the reset path, under the reserve `toyos_blackbox::ACCOUNT_BYTES`
+    // keeps for it, and no wedge boot this bench took before carried one.
     after.must_say(toyos_build::metaldevices::QUIESCE_HEAD)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     // **Reported and not judged.** Which state the reset found the controller in
-    // is the open question this bench has four clean answers to and no theory
+    // is the open question this bench has five clean answers to and no theory
     // for; a predicate over it would be the suite deciding it. A reset that
     // found no command open writes no such line, and that is a fact about the
     // boot rather than a failure of it.
-    match after.text().lines().find(|line| line.contains(CONTROLLER_STATE)) {
+    let endpoint = toyos_build::metaldevices::QUIESCE_ENDPOINT;
+    match after.text().lines().find(|line| line.contains(endpoint)) {
         Some(said) => eprintln!("  [power] {}", said.trim()),
         None => eprintln!("  [power] the reset found no command open on the device"),
     }
     Ok(())
 }
 
-/// The metal half of `usb_reset_finishes_an_open_command`: a T14 boot stopped
-/// with the boot stick holding a WRITE(10)'s CBW and nothing queued for its data
-/// phase, ended by the deadline, with the stick still there afterwards.
+/// One wedge boot's two halves: the machine really stopped inside a Bulk-Only
+/// command, and the reset that ended it said which phase it found the device in.
 ///
-/// **Read against `src/metal.rs`'s own refusals and not alone.** The loop waits
-/// for the log partition by name before any judge runs, so a boot whose reset
-/// left the device wedged never reaches here — it is `Refusal::Stick`, and
-/// `stick_secs` is the number that says so. What is left for this judge is the
-/// two halves a readback can still carry: that the machine really did stop
-/// inside a command, and that the reset drove that command to its CSW rather
-/// than cutting it.
-pub fn usb_wedge_chain(kernel: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
+/// **The reset does not finish the command and this does not ask it to.** The
+/// rings it could write are rebuilt from published numbers a live driver may
+/// still be enqueuing on, and five T14 controls left the bench's stick usable
+/// at every phase, so what the account owes is the phase and what the
+/// controller was doing — which is what
+/// `kernel/src/drivers/xhci/stop.rs::settle_commands` writes and what reverting
+/// `OpenCommand`'s publication makes absent.
+fn usb_wedge_chain(
+    kernel: &serial::Serial,
+    after: &serial::Serial,
+    phase: &str,
+) -> Result<(), String> {
     // The control: the machine reached the staged write and stopped inside it.
     // Without the second line the boot would wedge anyway — at the shutdown,
     // holding nothing — and read back like the arm that proves the point.
     kernel.must_say(bootlog::USB_WEDGE_STAGED)?;
     says_nothing_of(kernel, bootlog::USB_WEDGE_MISSED)?;
+    says_nothing_of(kernel, bootlog::USB_WEDGE_TWO_PHASES)?;
     kernel.must_say(bootlog::WEDGE_STAGED)?;
     says_nothing_of(kernel, REBOOTING)?;
 
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
-    // What the reset did to the device it found inside a command, and the line
-    // it writes when it could not.
-    let said = after.must_say(toyos_build::metaldevices::QUIESCE_CSW)?.to_string();
-    says_nothing_of(after, toyos_build::metaldevices::QUIESCE_CUT)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    // The phase the account names is the one this boot was staged for: an
+    // account that named another would be about a device stopped somewhere
+    // nobody asked about.
+    let named = format!("command was open in its {phase} phase");
+    let said = after.must_say(&named)?.to_string();
+    // And the hardware's own word beside the driver's claim.
+    after.must_say(toyos_build::metaldevices::QUIESCE_ENDPOINT)?;
     eprintln!("  [power] {}", said.trim());
     Ok(())
 }

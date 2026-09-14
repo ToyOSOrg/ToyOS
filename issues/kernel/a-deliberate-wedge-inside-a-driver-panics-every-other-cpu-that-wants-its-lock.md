@@ -13,29 +13,26 @@ is waiting on them. An arm that stops *inside a driver* does: the USB wedge arms
 (`usb-wedge-data-owed` and its two siblings) stop with the xHCI controller lock
 and the block layer's partition lock held for the rest of the boot.
 
-On the T14, run 39, that cost a thread. `logd`'s `SYS_FSYNC` reached
-`Partition::write_blocks` 3.7 s after the wedge, spun on the partition lock, and
-`sync::Lock`'s own deadlock detector panicked it at 500M spins:
+`sync::Lock`'s deadlock detector then panics whichever CPU next reaches the
+disk. On the T14 that is `logd`'s `SYS_FSYNC`, which reaches
+`Partition::write_blocks` seconds after the wedge and is panicked at 500M spins:
 
 ```
-[ 6.216 cpu4] LOCK CONTENTION: 50M spins at src/block.rs:182:20, ticket=2652 now=2651
-[39.734 cpu4] LOCK CONTENTION: 500M spins at src/block.rs:182:20, ticket=2652 now=2651
-[39.734 cpu4] PANIC: DEADLOCK at src/block.rs:182:20: 500M spins, ticket=2652 now=2651
+[39.941 cpu4] PANIC: DEADLOCK at src/block.rs:182:20: 500M spins, ticket=2676 now=2675
     <kernel::block::Partition>::write_blocks
     <toyos_fat32::fs::Fat32<..>>::alloc_cluster
     kernel::object::ops::fsync
     kernel::arch::syscall::gate::syscall_entry
 ```
 
-The panic landed in a syscall, so `percpu::in_syscall` made it recoverable:
-`try_recover_from_panic` ended that thread and returned to the scheduler, where
-`deadline::wedge_if_staged` caught the CPU and folded it into the wedge.
-`apic::halt_all_cpus` was therefore never reached — and with it neither
-`deadline::stand_down` nor `panic_reboot::arm`, which is why the machine was
-ended at 120062 ms by the boot deadline rather than at ~99.7 s by the panic
-path's own minute. That composition is correct; what is not is that a boot
-staged to measure a *device* silently lost its log writer 37 s in, and that the
-only account of it is a `PANIC` record in a ring tail nobody was draining.
+The panic lands in a syscall, so `percpu::in_syscall` makes it recoverable:
+`try_recover_from_panic` ends that thread and returns to the scheduler, where
+`deadline::wedge_if_staged` folds the CPU into the wedge. `apic::halt_all_cpus`
+is therefore never reached, and neither is `deadline::stand_down` — which is why
+the boot deadline and not the panic path's own bound ends the machine. That
+composition is correct; what is not is that a boot staged to measure a *device*
+silently loses its log writer, and the only account of it is a `PANIC` record in
+a ring tail nobody was draining.
 
 Two things are true and neither is decided here:
 
@@ -47,10 +44,10 @@ Two things are true and neither is decided here:
 
 ## Where it bites
 
-Any actuator that stops a CPU inside a driver, which is now three of the five in
-`toyos_build::metal::WEDGE_ARMS`. It does not change those arms' verdicts —
-`stick_secs` is measured by the next host, not by the wedged kernel — but it
-adds a panic, a dead `logd`, and 138 dropped records to every one of them.
+Any actuator that stops a CPU inside a driver — today the `usb-wedge-*` arms,
+which are QEMU registrations and reach no flashed image. It does not change
+their verdicts, but it adds a panic, a dead `logd`, and a page of dropped
+records to every one of them.
 
 ## Exit condition
 
