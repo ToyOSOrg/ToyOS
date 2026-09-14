@@ -2648,41 +2648,33 @@ pub const KNOWN_RED: &[Red] = &[
         instrument: Instrument::Ci,
         finding: Finding::Seen,
         standing: Standing::Retired(
-            "the instrument was measuring nothing, and the kernel's wait was never what \
-             failed. `arch::tlb::shootdown` waits for every other CPU the machine brought \
-             up, so the sibling thread and the witness this test arranged its precondition \
-             with established a concurrency the shootdown never consulted. What could fail \
-             was the injected delay: `last_target()` chose the CPU to hold an \
-             acknowledgement back on by arithmetic over the *arming* CPU's id, and nothing \
-             kept the caller there — when the thread landed on that CPU it became the \
-             initiator and answered itself through `shootdown`'s local serve, the one path \
-             that never delayed, so the call returned in microseconds with every target \
-             genuinely flushed and genuinely waited for. Fixed in 78f8984d: the delay is \
-             held back on every path a CPU answers another CPU's shootdown on, the \
-             precondition is `SYS_CPU_COUNT > 1` asked of the kernel, and a \
-             `tlb: acks held back cpuN=` line reports the receiver side, so the next red \
-             under this name says whether the delay reached a CPU the initiator waited for",
+            "retired against 9398b0ee. The instrument was what failed, never the kernel's \
+             wait: the injected delay reached no CPU the initiator was waiting for. Action \
+             12 now holds each other CPU's acknowledgement back in turn and returns the \
+             smallest wait one of them cost, `stage_ack_delay` runs on `poll`'s serve as \
+             well as the IPI handler, the guest re-arms and re-asserts that wait \
+             immediately before every timed operation so none is timed against a lapsed \
+             arming, and the actuator block boots four wide — at two vCPUs a wait narrowed \
+             to one sibling is the whole target set and reds nothing",
         ),
-        what: "`exit code 101` at 53 ms — the guest binary's own assertion, and the \
-               2026-08-20 lock-conversion pass already recorded the sharper point when the \
-               same name red on a loaded dev host, ALONE: GREEN: the assertion that fires \
-               is the test's own *control*, so it is the one assertion in the suite that \
-               cannot tell a slow host from a broken measurement. **Not about the diff it \
-               was found on**, two issue files and a tests/CLAUDE.md bullet (PR #150). The \
-               2026-09-14 sighting is the one that settled it: red twice and then red again \
-               alone, `panicked at src/bin/tlb_shootdown_waits.rs:170:9` and then `:179:5`, \
-               under `ALONE tlb_shootdown_waits: red again, the same failure both times — \
+        what: "`exit code 101` at 53 ms — the guest binary's own assertion. **Not about \
+               the diff it was found on**, two issue files and a tests/CLAUDE.md bullet \
+               (PR #150). The 2026-09-14 sighting is the one that settled it: red twice \
+               and then red again alone, `panicked at \
+               src/bin/tlb_shootdown_waits.rs:170:9` and then `:179:5`, under \
+               `ALONE tlb_shootdown_waits: red again, the same failure both times — \
                the defect is real`",
         evidence: "PR #150 run 32334225614, job 96320634405 (`guest (5)`), 2026-08-20; the \
                    dev-host sighting the same night is in the source issue. Seen again on a \
                    doc-only branch: PR #451 run 34761663167, job 103735485106 (`guest (10)`), \
-                   2026-09-13 — `munmap returned in 19584ns with the last CPU answering \
-                   20000000ns late`, ALONE: GREEN in the same job. Decisive on PR #456, one \
-                   tracker file and no code: run 34832814196, job 103939901657 \
-                   (`guest (10)`), 2026-09-14, whose captures carry the mechanism — \
-                   `tlb: shootdowns=123 wait=45337us max=20030us ... unmap=101 staged=1` \
-                   with only the staged shootdown delayed, and `irq: cpu1 tlb=0` on the \
-                   isolated re-run with all six deliveries on cpu0",
+                   2026-09-13. Decisive on PR #456, one tracker file and no code: run \
+                   34832814196, job 103939901657 (`guest (10)`), 2026-09-14. Its isolated \
+                   re-run records `irq: cpu0 ... tlb=6`, `irq: cpu1 ... tlb=0` and \
+                   `tlb: shootdowns=6 wait=20301us max=20017us ... unmap=5 staged=1`: cpu1 \
+                   initiated all six and cpu0 answered all six by IPI, so the armed CPU was \
+                   a target the initiator did wait for and the staged shootdown did cost \
+                   20 ms — the five `munmap` shootdowns then shared 284 us between them, \
+                   the delay having reached none of them",
         source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-09-14",
     },
