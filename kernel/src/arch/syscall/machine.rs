@@ -30,10 +30,6 @@ pub(super) fn sys_log_read(
     if let Err(e) = demand_syscap(syscap, Rights::LOG) {
         return e.refuse();
     }
-    // Here, because this is where the capability was demanded: the shutdown's
-    // stop leaves the log's readers running until the boot's last word is
-    // durable, and no caller's own word may move that.
-    log::user::note_log_reader(process::current_process().raw());
     let mut cursor = match ctx.copy_in::<toyos_abi::log::LogCursor>(cursor_ptr) {
         Ok(cursor) => cursor,
         Err(e) => return e.to_u64(),
@@ -60,10 +56,10 @@ fn quiesce(last: &str) {
     crate::drivers::watchdog::disarm();
     // **Before the sync, because the sync is a claim about a machine.** A
     // process that issues a `write` after `sync_all` returns has dirty pages
-    // nothing will flush, and one that enters a syscall after the boot's last
-    // word puts its own record under that word. The carve-out is every process
-    // the log's durability can be owed to: those have to keep running until
-    // `wait_for_durable` below returns, and are stopped straight after.
+    // nothing will flush. The one carve-out is the process `wait_for_durable`
+    // below is waiting on, which is stopped as soon as that wait returns; what
+    // it writes in between is made durable by the `fsync` it publishes after,
+    // which is the word that ends the wait.
     let stopped = crate::quiesce::stop(toyos_quiesce::Stage::ExceptLog);
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.

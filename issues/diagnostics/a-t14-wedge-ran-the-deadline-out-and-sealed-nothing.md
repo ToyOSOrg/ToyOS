@@ -6,9 +6,8 @@ opened: 2026-09-14
 
 # A T14 wedge ran the boot deadline out and left no WEDGED record, so the one instrument built for it reported nothing
 
-T14 run 48, `tests/metalcase` on `wt/toyos-quiesce` `3f8f7fd3`, readback in
-`target/metal-quiesce-run47/metalcase/`. The boot wedged and the stick came back
-readable — the case
+T14 run 48, `tests/metalcase` on `wt/toyos-quiesce` `3f8f7fd3`. The boot wedged
+and the stick came back readable — the case
 `issues/hardware/a-t14-boot-wedges-after-a-jobs-exit-and-nothing-said-why.md`
 has been waiting for — and **the deadline sealed nothing**, so its exit
 condition is still unmet.
@@ -16,7 +15,7 @@ condition is still unmet.
 ## What the stick carries
 
 The files are not the ones the driver extracted: it refused before extracting,
-so these were read out of `log-partition.img` with `toyos-fat32` itself.
+so these were read out of the stick's log partition with `toyos-fat32` itself.
 
 | | |
 |---|---|

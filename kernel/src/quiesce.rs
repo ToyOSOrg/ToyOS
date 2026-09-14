@@ -29,7 +29,7 @@
 //! `usbd` are in the process table like anything else, and
 //! [`crate::sched::kthread::is_kernel_task`] is what tells them apart.
 //!
-//! Lock order: [`process::PROCESS_TABLE`], then the log's reader set.
+//! Lock order: [`process::PROCESS_TABLE`] alone.
 
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering::Acquire, Ordering::Relaxed, Ordering::Release};
 
@@ -42,12 +42,12 @@ use crate::time::{Budget, Cadence, Duration};
 
 /// How long the machine gets to stop.
 ///
-/// The sum of the two things a thread that must stop can be doing: running in
-/// Ring 3, which ends at the next timer tick — one `QUANTUM_NS`, and sooner
-/// than that in practice because [`stop`] kicks every CPU — or inside a
-/// syscall, whose longest uninterruptible stretch is one block-layer
-/// operation. A thread between block-layer retries is parked, and a parked
-/// thread is marked rather than waited for.
+/// **A budget, and not a bound the kernel can prove.** One `QUANTUM_NS` is
+/// what a thread running in Ring 3 needs to reach the boundary, and one
+/// `block::OPERATION` is the longest a thread lies inside the block layer
+/// without parking — but one syscall may open several operations in a row, and
+/// `block::DEADMAN` is what bounds that sequence. A thread can therefore
+/// outlast this, which is why its expiry is a clause in the record.
 const PARK: Budget = Budget::of(
     Duration::from_nanos(toyos_sched::fair::QUANTUM_NS + crate::block::OPERATION.nanos()),
     "the reset lands wherever the threads that never reached a safe point are, and \
@@ -105,7 +105,7 @@ pub fn stops_this_thread() -> bool {
     }
     let thread = Thread {
         id: ThreadId { pid: pid.raw(), tid: tid.raw() },
-        keeps_the_log: crate::log::user::keeps_the_log(pid.raw()),
+        makes_the_log_durable: crate::log::user::makes_the_log_durable(pid.raw()),
     };
     stage.must_stop(thread, caller())
 }
@@ -185,9 +185,10 @@ fn sweep(stage: Stage, caller: ThreadId) -> Sweep {
     let Some(table) = guard.as_ref() else { return out };
     for (_, proc) in table.iter() {
         let pid = proc.pid();
-        let keeps_the_log = crate::log::user::keeps_the_log(pid.raw());
+        let makes_the_log_durable = crate::log::user::makes_the_log_durable(pid.raw());
         for (tid, thread) in proc.threads().iter() {
-            let who = Thread { id: ThreadId { pid: pid.raw(), tid: tid.raw() }, keeps_the_log };
+            let who =
+                Thread { id: ThreadId { pid: pid.raw(), tid: tid.raw() }, makes_the_log_durable };
             if !stage.must_stop(who, caller) {
                 continue;
             }

@@ -11,7 +11,8 @@
 //! file is a userland process, so a stop that took every process before the
 //! last word was written would deadlock on the one process the last word has
 //! to reach. So it goes in two: everything but that process, then that process
-//! too.
+//! too. Which process that is, is whichever one the wait depends on — the
+//! kernel names it by what moved the durability word, never by a right.
 //!
 //! [`Record`] is written by the kernel and read back off a stick by
 //! `src/metal.rs` and by the harness, so its wire form is rendered and parsed
@@ -33,17 +34,17 @@ pub struct ThreadId {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Thread {
     pub id: ThreadId,
-    /// Whether this thread's process has read the kernel log, which is what a
-    /// process must have done for the shutdown's wait for durability to be
-    /// owed it an answer.
-    pub keeps_the_log: bool,
+    /// Whether this thread's process is the one the shutdown's wait for
+    /// durability depends on — the one that last made the log durable, not one
+    /// that merely holds the right to read it.
+    pub makes_the_log_durable: bool,
 }
 
 /// How far the stop has gone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stage {
-    /// Every userland thread but those of the processes the log's durability
-    /// can be owed to.
+    /// Every userland thread but those of the process the log's durability is
+    /// owed to.
     ExceptLog,
     /// Those too. Nothing in userland runs again.
     All,
@@ -62,7 +63,7 @@ impl Stage {
             return false;
         }
         match self {
-            Stage::ExceptLog => !thread.keeps_the_log,
+            Stage::ExceptLog => !thread.makes_the_log_durable,
             Stage::All => true,
         }
     }
@@ -205,11 +206,11 @@ mod tests {
     }
 
     fn thread(pid: u32, tid: u32) -> Thread {
-        Thread { id: id(pid, tid), keeps_the_log: false }
+        Thread { id: id(pid, tid), makes_the_log_durable: false }
     }
 
     fn log_thread(pid: u32, tid: u32) -> Thread {
-        Thread { id: id(pid, tid), keeps_the_log: true }
+        Thread { id: id(pid, tid), makes_the_log_durable: true }
     }
 
     #[test]
@@ -231,14 +232,14 @@ mod tests {
         assert!(Stage::All.must_stop(log_thread(LOGD, 0), CALLER), "and then it too");
     }
 
-    /// A boot where two programs have read the log carves out both: either
-    /// could be the one the durability wait is owed to, and the stop has no way
-    /// to tell which, so it may not pick.
+    /// **A reader that never made a record durable is not the carve-out.** The
+    /// wait ends when the durability word passes what the boot committed, and a
+    /// process that has only ever read the log moves that word not at all — so
+    /// it stops in the first stage with everything else.
     #[test]
-    fn every_process_that_has_read_the_log_is_carved_out() {
+    fn a_process_that_only_reads_the_log_is_not_carved_out() {
+        assert!(Stage::ExceptLog.must_stop(thread(LOGD + 4, 0), CALLER));
         assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 0), CALLER));
-        assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD + 4, 0), CALLER));
-        assert!(Stage::All.must_stop(log_thread(LOGD + 4, 0), CALLER));
     }
 
     /// The caller could itself be a process the log is owed to — `logd` may

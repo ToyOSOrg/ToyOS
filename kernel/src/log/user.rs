@@ -87,20 +87,32 @@ pub fn read(
     // Written unconditionally, so a caller starting from a zeroed cursor learns the shard count from the first reply.
     cursor.shards = shards;
     // `durable` travels caller-to-kernel; left as the caller wrote it so a reader that republishes the same cursor need not resend it.
-    publish_durable(cursor.durable);
+    publish_durable(cursor.durable, crate::process::current_process().raw());
     Ok(written)
 }
 
 // Zero means nothing durable yet; `fetch_max` keeps it monotone.
 static DURABLE_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// The process whose claim last moved [`DURABLE_NS`]; 0 until one has.
+///
+/// **The shutdown's carve-out is the wait's own dependency, not a right.**
+/// [`super::wait_for_durable`] returns when this word passes what the boot
+/// committed, so the one process that has to keep running to end that wait is
+/// the one that last advanced it. Holding [`Rights::LOG`] moves nothing here.
+static DURABLE_PID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 // Clamped to the newest committed record: an untrusted `durable` can only shorten its own wait, never claim a record that has not landed.
-fn publish_durable(claimed: u64) {
+fn publish_durable(claimed: u64, pid: u32) {
     if claimed == 0 {
         return;
     }
     let clamped = claimed.min(super::read::newest_committed_at_ns());
-    DURABLE_NS.fetch_max(clamped, core::sync::atomic::Ordering::Relaxed);
+    // Recorded only where the claim actually moved the word: a caller that
+    // published nothing new has ended nobody's wait and is no carve-out.
+    if DURABLE_NS.fetch_max(clamped, core::sync::atomic::Ordering::Relaxed) < clamped {
+        DURABLE_PID.store(pid, core::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Newest record `/system/bin/logd` has `fsync`ed to the device, or 0 if none yet.
@@ -108,36 +120,7 @@ pub fn durable_ns() -> u64 {
     DURABLE_NS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Every live process that has passed [`Rights::LOG`]'s check on
-/// `SYS_LOG_READ`.
-///
-/// **The kernel's only name for a log writer, and the name is the parent's.**
-/// The capability comes from `/system/bin/init`'s `system.toml`, so nothing a
-/// process says about itself joins this set. The shutdown's stop carves these
-/// out until the boot's last word is durable, because they are exactly the
-/// processes that can move [`durable_ns`] and so satisfy
-/// [`super::wait_for_durable`].
-///
-/// Bounded by the live process count, which is what [`forget_log_reader`] is
-/// for: an entry a teardown left behind would be a carve-out held by a pid
-/// nothing can hand back.
-static LOG_READERS: Lock<Vec<u32>> = Lock::new(Vec::new());
-
-/// Called where the capability was demanded, and nowhere a caller's own words
-/// reach.
-pub fn note_log_reader(pid: u32) {
-    let mut readers = LOG_READERS.lock();
-    if !readers.contains(&pid) {
-        readers.push(pid);
-    }
-}
-
-/// Called from the process teardown, under `PROCESS_TABLE`, which is this
-/// lock's order.
-pub fn forget_log_reader(pid: u32) {
-    LOG_READERS.lock().retain(|&p| p != pid);
-}
-
-pub fn keeps_the_log(pid: u32) -> bool {
-    LOG_READERS.lock().contains(&pid)
+/// Whether [`super::wait_for_durable`] is waiting on `pid`.
+pub fn makes_the_log_durable(pid: u32) -> bool {
+    pid != 0 && DURABLE_PID.load(core::sync::atomic::Ordering::Relaxed) == pid
 }

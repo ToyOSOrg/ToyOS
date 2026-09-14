@@ -30,15 +30,11 @@ use toyos_build::metalprofile::{job_ms_row, Profile, AROUND_THE_LIST_MS};
 use super::serial::Serial;
 
 /// The fields only the boots that took that path produce: the two bounds'
-/// lateness, and the stop's two numbers. Absent **and** unpriced is a boot that
+/// lateness, and the stop's own count. Absent **and** unpriced is a boot that
 /// did not take the path and owes nothing; absent and priced is a boot armed
 /// for one path that ended on another, which is a red the pricing loop names.
-const PATH_TAKEN: &[&str] = &[
-    "deadline_lateness_ms",
-    "lockup_lateness_ms",
-    "park_ms",
-    "park_open_operations",
-];
+const PATH_TAKEN: &[&str] =
+    &["deadline_lateness_ms", "lockup_lateness_ms", "park_open_operations"];
 
 /// One boot a metal test needs.
 pub struct Arm {
@@ -293,17 +289,9 @@ impl Readback {
         toyos_build::metal::lockup_lateness_ms(&self.loader)
     }
 
-    /// How long this boot spent stopping userland before it synced anything,
-    /// out of its own kernel log. `None` on a boot that reset without going
-    /// through `quiesce` — `deadlinewedge` and `hardlockup` are the two, and
-    /// the profile prices this for neither.
-    pub fn park_ms(&self) -> Option<u64> {
-        toyos_build::metal::park(&self.kernel).map(|park| park.elapsed_ms)
-    }
-
-    /// Block-device operations still open where that stop ended, from the same
-    /// record and `None` for the same boots. **Not a duration**, and priced
-    /// beside one only because it is the same record: it is the block layer's
+    /// Block-device operations still open where this boot's stop ended.
+    /// `None` on a boot that reset without going through `quiesce` —
+    /// `deadlinewedge` and `hardlockup` are the two. It is the block layer's
     /// own count, so it is what the stop can be wrong against.
     pub fn park_open_operations(&self) -> Option<u64> {
         toyos_build::metal::park(&self.kernel).map(|park| u64::from(park.in_flight))
@@ -313,10 +301,9 @@ impl Readback {
     /// trying.
     ///
     /// **No ceiling can ask this.** A stop that gave up returns having spent
-    /// its budget and no more, so `park_ms` reads under its own ceiling by
-    /// construction and `park_open_operations` reads whatever the threads it
-    /// left running happened to be doing. The shortfall the record names is
-    /// the only thing that says the machine was not stopped.
+    /// its budget and no more, and `park_open_operations` then reads whatever
+    /// the threads it left running happened to be doing. The shortfall the
+    /// record names is the only thing that says the machine was not stopped.
     pub fn stop_completed(&self) -> Result<(), String> {
         match toyos_build::metal::park(&self.kernel) {
             Some(park) if !park.stopped_the_machine() => Err(format!(
@@ -932,10 +919,8 @@ pub fn run(
                      after that",
                     back.back_secs, back.stick_secs
                 );
-                // **The profile's row is what a boot owes, and the boot's own
-                // record is what it paid.** A
-                // boot the file prices a lateness for and that produced none is
-                // therefore a boot some *other* bound ended, which is exactly
+                // A boot the file prices a lateness for and that produced
+                // none is a boot some *other* bound ended, which is exactly
                 // what a run of `deadlinewedge` sealed by the lockup detector
                 // was, and it used to be skipped rather than reported.
                 for (field, value) in [
@@ -944,7 +929,6 @@ pub fn run(
                     ("stick_secs", Some(back.stick_secs)),
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
-                    ("park_ms", back.park_ms()),
                     ("park_open_operations", back.park_open_operations()),
                 ] {
                     let name = format!("boot.{label}.{field}");

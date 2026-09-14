@@ -979,9 +979,6 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
 
     proclife::mark_all_zombie(proc, code);
 
-    // A pid nothing can hand back may hold no carve-out out of the shutdown's stop.
-    crate::log::user::forget_log_reader(process_pid.raw());
-
     // Dropping this `Arc` is the release; every other thread is already retired, so the thread running this line holds the last clone — which is why a lock-free crash-report read can never see a table whose owner is off every CPU.
     proc.symbols = Arc::new(SymbolTable::empty());
 
