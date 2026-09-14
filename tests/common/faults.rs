@@ -212,12 +212,6 @@ pub fn idle_stack_guard(
 /// A NIC that cannot raise an interrupt must cost the machine networking and
 /// nothing else.
 ///
-/// The MSI-X setup was written out three times and the copies answered this
-/// question three different ways: the xHCI driver fell back to MSI, and both
-/// virtio drivers called `panic!`. So the one device on the bus with no way to
-/// deliver a packet took down a kernel whose disk, console, audio and USB were
-/// all working — class M1 again, on the mechanism M1's own fix went through.
-///
 /// The other two virtio functions keep their vectors, which is what makes the
 /// verdict mean anything: the console that carries the refusal and the audio
 /// device beside it are on the same bus, driven by the same code, and neither
@@ -278,14 +272,8 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
     // Refused by name, at a named function, and not by claiming a mode it does
     // not have: the xHCI driver's `polled mode` line is the defect this whole
     // family exists to keep out of the tree.
-    //
-    // **The refusal moved with the driver.** It used to be the kernel's own
-    // virtio-net `init` giving up; it is now the *claim* being refused, before
-    // any driver exists — a function whose interrupt cannot be armed is one
-    // whose holder would never be told anything, and handing it over anyway
-    // would be handing out a device that looks alive and never speaks.
     log.must_say("pcidev: PCI 00:03.0 NOT HANDED OVER")?;
-    log.must_say("its MSI-X could not be armed")?;
+    log.must_say("neither its MSI-X nor its MSI could be armed")?;
     log.must_not_say("[1af4:1041] handed over")?;
     // And the refusal is the *whole* of it: no BAR moved for a function nobody
     // can be given one.

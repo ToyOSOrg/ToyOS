@@ -12,8 +12,8 @@ use common::qemu::{
     STALLED,
 };
 use common::{
-    audio, compile, devices, faults, hostload, metal, pkg, power, screen, serial, stats, storage,
-    usb,
+    audio, compile, devices, faults, hostload, lan, metal, pkg, power, screen, serial, stats,
+    storage, usb,
 };
 use toyos_build::day::Day;
 use toyos_build::bootlog::{self, boot_millis};
@@ -231,6 +231,11 @@ const RUST_SKIP: &[&str] = &[
     // Needs a NIC in front of netd; only `tests/netcase` has one.
     // `netd_listener_forgery` runs it there.
     "netd_listener_forgery",
+    // It asserts nothing at all: it holds a `tests/lancase` boot open for
+    // twenty seconds so the host can reach this machine over the cable, and
+    // `lan_dhcp_lease`'s metal arm is the only job list that names it. On a
+    // shared boot it would be twenty seconds of nothing.
+    "lan_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -643,6 +648,17 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // is the buffers' business and no arm's to demand; what it may never cost
     // is half a line, and that is what this one judges.
     ("log_stream_stalled_peer_delivers_whole_records", Sched::Parallel, Tier::Nightly),
+    // netd taking this machine's address from the network instead of carrying
+    // one written down. The DHCP server it is judged against is QEMU's own, an
+    // implementation of RFC 2131 this repository did not write, and its lease
+    // is known field by field. The verdicts are records and a lease's fields;
+    // no clock in it.
+    ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
+    // The same client on a wire with no server: it says it has no address and
+    // announces itself anyway. Its verdict waits out netd's own lease bound, so
+    // a slower machine moves it; `RELEGATED` says what leaves the per-PR tier
+    // with it.
+    ("lan_no_lease", Sched::Parallel, Tier::Nightly),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -651,6 +667,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
     ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
+    // The same boot again, read for what the kernel asked the machine before it
+    // moved that function's BAR. Its own boot rather than a second assertion in
+    // the row above, because that one's subject is exclusivity and a test that
+    // reds tells a reader which of the two it is about. It waits out a drain for
+    // the message record, so its price carries a fixed span of host wall clock.
+    ("bar_placement_is_proven", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
@@ -1295,6 +1317,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         "metal_device_probe",
         metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
     ),
+    (
+        "lan_dhcp_lease",
+        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
+    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1664,6 +1690,12 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 ];
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
+
+/// The cable's own boot: netd in front of the T14's I219, and one job that
+/// holds the machine up long enough for the host to reach it. The one arm in
+/// this suite that names a PCI function for the loop to reach the boot over.
+const LANCASE: &[metal::Arm] =
+    &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -13604,6 +13636,8 @@ fn run_machine_test(
             );
             Ok(())
         }
+        "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
+        "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO),
         "https_tls13_e1000e" => common::https::tls13_judge(rust_bins, common::https::E1000E),
         "log_stream" => common::logstream::stream(common::logstream::VIRTIO, c_bins, rust_bins),
@@ -13742,6 +13776,183 @@ fn run_machine_test(
                 "  [netcase] one PCI function, two claimants, one holder; and every \
                  assigned BAR inside the aperture firmware named"
             );
+            Ok(())
+        }
+        "bar_placement_is_proven" => {
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+            let options = BootOptions {
+                profile: qemu::Profile::Headless,
+                qmp: true,
+                ..Default::default()
+            };
+            if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+                return Err("this test needs a NIC and the profile has none".to_string());
+            }
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+            let mut console = qemu.boot_log().to_string();
+            let _ =
+                await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
+            console.push_str(&qemu.drain_serial(Duration::from_millis(500)));
+            let mtree = qemu::QmpMonitor::open(qemu.qmp_socket()).human("info mtree");
+            let log = serial::Serial::named("boot console", console.as_str());
+
+            // The memory the kernel was handed, read off its own record.
+            let named = log.must_say("pcidev: firmware declared root bridge memory: ")?;
+            let windows: Vec<(u64, u64)> = named
+                .rsplit_once("memory: ")
+                .map(|(_, rest)| rest)
+                .unwrap_or_default()
+                .split(", ")
+                .filter_map(|w| {
+                    let (base, end) = w.trim().strip_prefix("mem ")?.split_once("..")?;
+                    Some((
+                        u64::from_str_radix(base.trim_start_matches("0x"), 16).ok()?,
+                        u64::from_str_radix(end.trim().trim_start_matches("0x"), 16).ok()?,
+                    ))
+                })
+                .collect();
+
+            // The runs the kernel offered that BAR, off the same boot.
+            let runs: Vec<(u64, u64)> = log
+                .text()
+                .lines()
+                .filter_map(|line| line.split_once("pcidev:   0x").map(|(_, rest)| rest))
+                .filter_map(|rest| {
+                    let (start, rest) = rest.split_once("..0x")?;
+                    let end = rest.split_whitespace().next()?;
+                    Some((u64::from_str_radix(start, 16).ok()?, u64::from_str_radix(end, 16).ok()?))
+                })
+                .collect();
+            if runs.is_empty() {
+                return Err(format!(
+                    "this boot listed no run for a BAR to be offered, so nothing here is about \
+                     a placement:\n{}",
+                    log.text()
+                ));
+            }
+
+            // Exactly one placement record for the NIC, and every fact in it.
+            let placed: Vec<&str> = log
+                .text()
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.contains("pcidev: PCI 00:03.0 BAR") && l.contains(" placed at "))
+                .collect();
+            let [record] = placed[..] else {
+                return Err(format!(
+                    "the NIC's BAR was placed {} time(s) and this test is about the one \
+                     placement the boot makes:\n{}",
+                    placed.len(),
+                    log.text()
+                ));
+            };
+            eprintln!("  [netcase] {record}");
+            let number = |marker: &str| -> Option<u64> {
+                let (_, rest) = record.split_once(marker)?;
+                u64::from_str_radix(rest.split([' ', ';', ',']).next()?, 16).ok()
+            };
+            // **Read as numbers, not matched as a sentence.** A `contains` over
+            // the clause would pass on a record whose address is outside the
+            // window it claims, which is exactly the placement that hangs.
+            let at = number(" placed at 0x")
+                .ok_or_else(|| format!("{record:?} names no address"))?;
+            let window = number("inside firmware's mem 0x")
+                .ok_or_else(|| format!("{record:?} names no window the address is inside"))?;
+            let reference = number("; its +0x")
+                .ok_or_else(|| format!("{record:?} names no dword it read"))?;
+            let after = number("dword answers 0x")
+                .ok_or_else(|| format!("{record:?} does not say what the BAR answered"))?
+                as u32;
+            let signature = number("and answered 0x")
+                .ok_or_else(|| format!("{record:?} does not say what the function answered"))?
+                as u32;
+            let was = number(" from 0x")
+                .ok_or_else(|| format!("{record:?} does not say where the function was"))?;
+            // **The dword read is the one this function publishes a value at.**
+            // A modern virtio function opens its common configuration with a
+            // selector that reads zero (virtio 1.2 §4.1.4.3), so reading the
+            // BAR's first dword would settle every address against `0`.
+            if reference != 4 {
+                return Err(format!(
+                    "the kernel settled this placement on the +{reference:#x} dword; the dword a \
+                     modern virtio function answers a value of its own at is +0x4"
+                ));
+            }
+            // **Neither value may be one an unanswered read produces.** q35
+            // answers `0x00000000` where nothing claims an address and a root
+            // complex answers all-ones, so a proof resting on either of them is
+            // `0 == 0`.
+            for (what, value) in [("where firmware put it", signature), ("at the new address", after)]
+            {
+                if value == 0 || value == u32::MAX {
+                    return Err(format!(
+                        "the function answered {value:#010x} {what}, which is what a read nobody \
+                         answered comes back as, so this record settles nothing:\n{record}"
+                    ));
+                }
+            }
+            if after != signature {
+                return Err(format!(
+                    "the record calls {at:#x} placed and the function answers {after:#010x} there \
+                     against {signature:#010x} at {was:#x}:\n{record}"
+                ));
+            }
+            if !windows.iter().any(|(base, end)| *base == window && at >= *base && at < *end) {
+                return Err(format!(
+                    "the BAR went to {at:#x} and the record calls that inside the window at \
+                     {window:#x}; the windows this boot's firmware declared are {windows:x?}"
+                ));
+            }
+            // And the address came out of a run this boot itself printed.
+            if !runs.iter().any(|(start, end)| at >= *start && at < *end) {
+                return Err(format!(
+                    "the BAR went to {at:#x} and the runs this boot offered are {runs:x?}"
+                ));
+            }
+            // **And the emulator answers for the same address**: the kernel's
+            // printed one is checked against where QEMU maps that function's
+            // common configuration rather than believed.
+            // One address, however many address spaces it appears in: QEMU
+            // prints the region once per space that reaches it.
+            let mut mapped: Vec<u64> = mtree
+                .lines()
+                .filter(|line| line.contains("virtio-pci-common-virtio-net"))
+                .filter_map(|line| {
+                    let (start, _) = line.trim().split_once('-')?;
+                    u64::from_str_radix(start, 16).ok()
+                })
+                .collect();
+            mapped.sort_unstable();
+            mapped.dedup();
+            let [common] = mapped[..] else {
+                return Err(format!(
+                    "`info mtree` maps this function's common configuration {} time(s), so this \
+                     boot has no account of its own routing to check the kernel against:\n{mtree}",
+                    mapped.len()
+                ));
+            };
+            if common != at {
+                return Err(format!(
+                    "the kernel says the BAR went to {at:#x} and QEMU maps that function's \
+                     registers at {common:#x}:\n{mtree}"
+                ));
+            }
+            // And the placement is what the hand-over rests on: the same boot
+            // must have handed the function over, or the record above is about
+            // a BAR that moved for nothing.
+            let over = log.must_say("[1af4:1041] handed over on slot")?;
+            let slot = over
+                .split_once("handed over on slot ")
+                .and_then(|(_, rest)| rest.split(',').next())
+                .ok_or_else(|| format!("unparseable hand-over record: {over:?}"))?;
+            let spoke = log.must_say(&format!("pcidev: slot {slot} took its first message"))?;
+            log.must_be_clean()?;
+            eprintln!(
+                "  [netcase] {at:#x} is inside firmware's {window:#x}, inside a run this boot \
+                 printed and where QEMU itself maps that function's registers, and its \
+                 +{reference:#x} dword answers {after:#010x} there as it does at {was:#x}"
+            );
+            eprintln!("  [netcase] {}", spoke.trim());
             Ok(())
         }
         "netd_listener_forgery" => {
@@ -15810,9 +16021,9 @@ fn aperture_account(log: &serial::Serial) -> Result<(), String> {
             .map_err(|e| format!("{s:?} is not an address: {e}"))
     }
 
-    let named = log.must_say("pcidev: firmware root bridge windows: ")?;
+    let named = log.must_say("pcidev: firmware declared root bridge memory: ")?;
     let windows = named
-        .rsplit_once("windows: ")
+        .rsplit_once("memory: ")
         .ok_or_else(|| format!("unparseable aperture record: {named:?}"))?
         .1
         .split(", ")
@@ -15842,7 +16053,7 @@ fn aperture_account(log: &serial::Serial) -> Result<(), String> {
     let said: Vec<&str> = log
         .text()
         .lines()
-        .filter(|l| l.contains("is inside no window firmware named, so its bridge does not forward"))
+        .filter(|l| l.contains("is inside none of it, so this kernel has no declaration"))
         .collect();
     if said.len() != outside.len() {
         return Err(format!(
@@ -15853,20 +16064,37 @@ fn aperture_account(log: &serial::Serial) -> Result<(), String> {
         ));
     }
 
-    // And the two windows `publish` cut are accounted for by the addresses of
-    // the line that cut them, so an account of some other span is not one this
-    // takes for theirs.
-    let cut = log.must_say("functions; a 32-bit window comes from ")?;
-    let (narrow, wide) = cut
-        .rsplit_once("comes from ")
-        .and_then(|(_, r)| r.split_once(", a 64-bit one from "))
-        .ok_or_else(|| format!("unparseable window record: {cut:?}"))?;
-    for (width, span) in [("32-bit", narrow), ("64-bit", wide)] {
-        // A machine with no window of that width has no address to account for.
-        if span.trim() == "0x0..0x0" {
-            continue;
+    // And every address this kernel put a BAR at carries its own standing
+    // against those windows, recomputed here from the record's address rather
+    // than read off the clause beside it. A placement accounted from an empty
+    // window list says "inside no window firmware named" about an address that
+    // is inside one, and that is what this refuses.
+    let mut placements = 0usize;
+    for line in log.text().lines().filter(|l| l.contains(" placed at 0x")) {
+        let at = hex(
+            line.split_once(" placed at 0x")
+                .and_then(|(_, r)| r.split(' ').next())
+                .ok_or_else(|| format!("unparseable placement record: {line:?}"))?,
+        )?;
+        let account = match windows.iter().find(|(base, end)| at >= *base && at < *end) {
+            Some((base, _)) => format!("inside firmware's mem {base:#x}"),
+            None => "inside no window firmware declared".to_string(),
+        };
+        if !line.contains(&account) {
+            return Err(format!(
+                "{at:#x} is {account} by {named:?}, and the kernel's own record of putting a BAR \
+                 there says otherwise:\n{}",
+                line.trim()
+            ));
         }
-        log.must_say(&format!("pcidev: the {width} window {} is inside ", span.trim()))?;
+        placements += 1;
+    }
+    if placements == 0 {
+        return Err(format!(
+            "this boot put no BAR anywhere, so nothing on it accounts for an address against \
+             {named:?}:\n{}",
+            log.text()
+        ));
     }
     Ok(())
 }

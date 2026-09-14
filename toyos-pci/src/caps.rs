@@ -11,25 +11,38 @@ pub const FIRST_CAP: u8 = 0x40;
 #[derive(Debug, Default)]
 pub struct CapWalk {
     seen: [u64; 4],
+    truncated: bool,
 }
 
 impl CapWalk {
     pub const fn new() -> Self {
-        Self { seen: [0; 4] }
+        Self { seen: [0; 4], truncated: false }
     }
 
     /// The next capability's offset, or `None` to end the walk: the terminator
     /// (0), a pointer the spec forbids, or one already visited (a cycle).
     pub fn step(&mut self, raw: u8) -> Option<u8> {
-        if raw == 0 || raw < FIRST_CAP || raw & 0x3 != 0 {
+        if raw == 0 {
+            return None;
+        }
+        if raw < FIRST_CAP || raw & 0x3 != 0 {
+            self.truncated = true;
             return None;
         }
         let (word, bit) = ((raw >> 6) as usize, 1u64 << (raw & 0x3F));
         if self.seen[word] & bit != 0 {
+            self.truncated = true;
             return None;
         }
         self.seen[word] |= bit;
         Some(raw)
+    }
+
+    /// Whether the walk ended at a link the spec forbids rather than at the
+    /// terminator: nothing past that link was read, so what the function
+    /// publishes past it is unknown and never absent.
+    pub const fn truncated(&self) -> bool {
+        self.truncated
     }
 }
 
@@ -39,14 +52,18 @@ mod tests {
 
     #[test]
     fn the_terminator_ends_the_walk() {
-        assert_eq!(CapWalk::new().step(0), None);
+        let mut w = CapWalk::new();
+        assert_eq!(w.step(0), None);
+        assert!(!w.truncated());
     }
 
     /// PCI spec §6.7: a capability pointer is dword-aligned.
     #[test]
     fn a_pointer_that_is_not_dword_aligned_is_refused() {
         for raw in [0x41u8, 0x42, 0x43, 0x4F, 0xFD, 0xFE, 0xFF] {
-            assert_eq!(CapWalk::new().step(raw), None, "{raw:#x}");
+            let mut w = CapWalk::new();
+            assert_eq!(w.step(raw), None, "{raw:#x}");
+            assert!(w.truncated(), "{raw:#x}");
         }
     }
 
@@ -54,7 +71,9 @@ mod tests {
     #[test]
     fn a_pointer_below_the_standard_header_is_refused() {
         for raw in [0x04u8, 0x20, 0x3C] {
-            assert_eq!(CapWalk::new().step(raw), None, "{raw:#x}");
+            let mut w = CapWalk::new();
+            assert_eq!(w.step(raw), None, "{raw:#x}");
+            assert!(w.truncated(), "{raw:#x}");
         }
         assert_eq!(CapWalk::new().step(FIRST_CAP), Some(FIRST_CAP));
     }
@@ -66,6 +85,7 @@ mod tests {
         assert_eq!(w.step(0x50), Some(0x50));
         assert_eq!(w.step(0xF8), Some(0xF8));
         assert_eq!(w.step(0), None);
+        assert!(!w.truncated());
     }
 
     /// A visited set, not an "increasing" test: a list may be laid out out of
@@ -75,11 +95,13 @@ mod tests {
         let mut w = CapWalk::new();
         assert_eq!(w.step(0x40), Some(0x40));
         assert_eq!(w.step(0x40), None);
+        assert!(w.truncated());
 
         let mut w = CapWalk::new();
         assert_eq!(w.step(0x60), Some(0x60));
         assert_eq!(w.step(0x50), Some(0x50));
         assert_eq!(w.step(0x60), None);
+        assert!(w.truncated());
     }
 
     #[test]

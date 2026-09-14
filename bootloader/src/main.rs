@@ -34,6 +34,7 @@ macro_rules! println {
 mod attempt;
 mod blackbox;
 mod bootnext;
+mod gcd;
 mod loaderlog;
 mod rootbridge;
 mod watchdog;
@@ -576,9 +577,13 @@ fn report_reach(what: &str, at: u64, len: u64) {
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
     // The last of the firmware questions, and asked here for the same reason
     // the GOP's was asked before this: the protocol dies with boot services.
+    //
+    // Both readers answer memory the root bridges decode, which is what this
+    // array carries and the only thing the kernel asks of it.
     let mut root_bridge_windows = [RootBridgeWindow::default(); MAX_ROOT_BRIDGE_WINDOWS];
-    let root_bridge_window_count =
-        rootbridge::windows(&system_table, &mut root_bridge_windows) as u64;
+    let named = rootbridge::windows(&system_table, &mut root_bridge_windows);
+    let free = gcd::free_mmio(&system_table, &mut root_bridge_windows[named..]);
+    let root_bridge_window_count = (named + free) as u64;
 
     // Pre-allocated before exiting boot services, and flat: `alloc_page` splits
     // it into 512-entry pages.
