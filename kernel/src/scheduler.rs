@@ -363,12 +363,6 @@ pub fn do_preempt() {
     driver::pass(Dispose::None);
 }
 
-/// Whether the running thread's next return to Ring 3 is one it never makes.
-/// A kernel retry loop that would otherwise outlive its caller asks this.
-pub fn never_returns_to_ring3() -> bool {
-    driver::current_safe_point(crate::quiesce::stops_this_thread()).is_some()
-}
-
 /// The last thing a thread does before returning to Ring 3, if either mark it
 /// can carry says it never does. `kernel_exit_to_user_check` is the one caller;
 /// `kernel/src/quiesce.rs`'s header says why that boundary is the safe point.

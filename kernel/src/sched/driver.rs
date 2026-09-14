@@ -775,6 +775,11 @@ pub fn current_safe_point(stopping: bool) -> Option<toyos_sched::task::SafePoint
     try_with_cpu(|cpu| cpu.running().and_then(|t| t.shared().at_safe_point(stopping))).flatten()
 }
 
+/// Whether the running task has been killed — one relaxed load, no clone, since an `Arc` refcount here is too costly on this path.
+pub fn current_kill_pending() -> bool {
+    try_with_cpu(|cpu| cpu.running().is_some_and(|t| t.shared().kill_pending())).unwrap_or(false)
+}
+
 pub fn current_cpu() -> CpuId {
     CpuId(percpu::cpu_id())
 }
