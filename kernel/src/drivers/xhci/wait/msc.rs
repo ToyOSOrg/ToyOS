@@ -16,11 +16,10 @@ use crate::scheduler::Operation;
 use crate::time::{Budget, Deadline, Duration};
 use super::super::device::Endpoint;
 use super::{Owed, Quiet, Restart};
-use super::super::{with_disk, Disk, StorageGeometry, Trb, TrbRing, XhciController, PAGE};
-use super::super::{CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_CTX};
+use super::super::{with_disk, Disk, StorageGeometry, TrbRing, XhciController, PAGE};
+use super::super::{normal_trb, stop, CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, OFF_INPUT_CTX};
 use super::super::{MSC_IN_RING, MSC_OUT_RING, MSC_CBW, MSC_CSW, MSC_SCRATCH, MSC_SCRATCH_LEN};
-use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS};
-#[cfg(feature = "boot-actuators")]
+use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS, MSC_STRIDE};
 use toyos_xhci::bot::Phase;
 
 /// A region, not an address: the CBW's length is the region's own size, so
@@ -44,9 +43,11 @@ const READY_BUDGET: Budget = Budget::of(
 const MAX_TRANSPORT_ATTEMPTS: u8 = 3;
 
 const CBW_SIGNATURE: u32 = 0x4342_5355;
-const CSW_SIGNATURE: u32 = 0x5342_5355;
+/// BOT §5.2's dCSWSignature; the reset path reads it to tell a CSW the device
+/// has written from the zeros this driver left in its place.
+pub(in crate::drivers::xhci) const CSW_SIGNATURE: u32 = 0x5342_5355;
 const CBW_LEN: u32 = 31;
-const CSW_LEN: u32 = 13;
+pub(in crate::drivers::xhci) const CSW_LEN: u32 = 13;
 
 /// What the configuration descriptor said about a mass-storage interface;
 /// both endpoints, always, each valid because `Endpoint` only comes from
@@ -197,8 +198,21 @@ mod transport_break {
 }
 
 /// Stop every CPU inside one WRITE(10), at whichever of its three phases was
-/// staged — the control's half of that actuator, on a reset path that settles
-/// TRBs rather than the command they belong to.
+/// staged.
+///
+/// **The state a boot that hangs during stick I/O leaves the device in**, and
+/// the one thing no ordinary boot reaches: a machine wedged here is ended by
+/// the boot deadline alone, and what the reset then does to a device holding
+/// half a command is what `stop::settle_commands` exists to decide.
+///
+/// **Which phase is the whole question, so the caller names one.** The device
+/// sees three different things — a CBW with no data coming, a data phase queued
+/// and not rung for, and data it has taken with nothing asking for its CSW —
+/// and only the machine can say which of them it does not come back from.
+///
+/// Staged rather than waited for, because a shutdown reaches its sync with
+/// nothing dirty on most boots: the write this is taken inside is one
+/// `usb_gate::wedge_inside_a_write` issues for it.
 #[cfg(feature = "boot-actuators")]
 pub(in crate::drivers::xhci) mod mid_write {
     use core::sync::atomic::{AtomicU8, Ordering};
@@ -673,9 +687,11 @@ impl XhciController {
         in_dir: bool,
         phys: u64,
         len: u32,
-        what: &'static str,
+        phase: Phase,
+        open: &stop::OpenCommand,
     ) -> Result<(), Broke> {
-        match self.bulk(dev, in_dir, phys, len) {
+        let what = phase.named();
+        match self.bulk(dev, in_dir, phys, len, phase, open) {
             // Short Packet is how the xHC reports a sub-maximum-packet
             // transfer (a 13-byte CSW on a 512-byte endpoint); zero residue
             // means it all arrived.
@@ -731,22 +747,36 @@ impl XhciController {
         cbw.write::<u8>(14, cdb_len);
         cbw.copy_from(15, &cdb[..cdb_len as usize]);
 
+        // **From here the device is one this kernel has spoken a command to**,
+        // and stays one until the CSW below is in hand: a reset between any two
+        // phases leaves it waiting, which is what `stop::settle_commands`
+        // finishes. Opened before the CBW's transfer is queued, so nothing
+        // reaches the controller unpublished.
+        let open = stop::OpenCommand::begin(stop::Device {
+            block: dma.subview(dev.block, MSC_STRIDE),
+            doorbell: self.db_base,
+            slot: dev.slot_id,
+            in_dci: dev.in_dci,
+            out_dci: dev.out_dci,
+            data: data_phys,
+            data_len,
+            data_in,
+        });
+
         let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
-        self.framed_phase(dev, false, cbw_phys, CBW_LEN, "command")?;
+        self.framed_phase(dev, false, cbw_phys, CBW_LEN, Phase::Command, &open)?;
 
         // What the controller says reached the buffer; checked against the
         // CSW's residue below.
         let mut moved = 0u32;
         if data_len > 0 {
+            // The gap the class leaves open: the device has the CBW and this
+            // kernel has queued nothing for it.
+            open.at(Phase::DataOwed, &dev.in_ring, &dev.out_ring);
             #[cfg(feature = "boot-actuators")]
             if cdb.first() == Some(&0x2A) {
                 transport_break::arm();
                 mid_write::wedge_if_staged(Phase::DataOwed);
-                // On this tree `bulk` takes no phase, so the data-phase wedge
-                // is taken here rather than between the enqueue and the
-                // doorbell. The device cannot tell the two apart: a TRB nothing
-                // has rung for is a TRB it never sees.
-                mid_write::wedge_if_staged(Phase::Data);
             }
             #[cfg(feature = "boot-actuators")]
             let held = short_read::hold(
@@ -755,7 +785,7 @@ impl XhciController {
                 data_len,
                 data_in && cdb.first() == Some(&0x28),
             );
-            let completion = self.bulk(dev, data_in, data_phys, data_len);
+            let completion = self.bulk(dev, data_in, data_phys, data_len, Phase::Data, &open);
             #[cfg(feature = "boot-actuators")]
             let completion = short_read::release(dma, held, completion);
             match completion {
@@ -776,21 +806,25 @@ impl XhciController {
             }
         }
 
+        // The second gap: the data phase is done, or there was none, and the
+        // device is holding a CSW nothing has asked for.
+        open.at(Phase::StatusOwed, &dev.in_ring, &dev.out_ring);
         #[cfg(feature = "boot-actuators")]
         if data_len > 0 && cdb.first() == Some(&0x2A) {
             mid_write::wedge_if_staged(Phase::StatusOwed);
         }
         let csw_phys = dma.device_addr() + (dev.block + MSC_CSW) as u64;
         super::super::zero_dma(dma, dev.block + MSC_CSW, CSW_LEN as usize);
-        let mut got = self.framed_phase(dev, true, csw_phys, CSW_LEN, "status");
+        let mut got = self.framed_phase(dev, true, csw_phys, CSW_LEN, Phase::Status, &open);
         if let Err(Broke::Code { code: CC_STALL, .. }) = got {
             // The spec's one legal retry: the device may stall the status
             // phase once.
             if !self.restart_bulk(dev, true) {
                 return Err(Broke::Stall { phase: "status" });
             }
+            open.at(Phase::StatusOwed, &dev.in_ring, &dev.out_ring);
             super::super::zero_dma(dma, dev.block + MSC_CSW, CSW_LEN as usize);
-            got = self.framed_phase(dev, true, csw_phys, CSW_LEN, "status");
+            got = self.framed_phase(dev, true, csw_phys, CSW_LEN, Phase::Status, &open);
         }
         got?;
 
@@ -827,30 +861,35 @@ impl XhciController {
     }
 
     /// One Normal TRB on a bulk endpoint, and its completion.
+    ///
+    /// `phase` is the leg of the round trip this TRB is, published between the
+    /// enqueue and the doorbell.
     fn bulk(
         &mut self,
         dev: &mut MscDevice,
         in_dir: bool,
         phys: u64,
         len: u32,
+        phase: Phase,
+        open: &stop::OpenCommand,
     ) -> Result<(u32, u32), Quiet> {
         let (dci, ring) = if in_dir {
             (dev.in_dci, &mut dev.in_ring)
         } else {
             (dev.out_dci, &mut dev.out_ring)
         };
-        let mut trb = Trb::ZERO;
-        trb.param = phys;
-        trb.status = len;
-        // ISP so a device that sends less than asked reports it instead of
-        // leaving the transfer outstanding, IOC so it reports at all.
-        trb.control = TRB_NORMAL | (1 << 5) | (1 << 2);
-        let at = ring.enqueue(trb);
+        let at = ring.enqueue(normal_trb(phys, len));
         let slot = dev.slot_id;
         // Before the doorbell, so no transfer is visible to the controller
-        // without a reset being able to see it; the guard must stay named, or a
-        // `let _` would end it here and the count would never be raised at all.
-        let _rung = crate::drivers::xhci::stop::InFlight::rung();
+        // without a reset being able to see the ring it went on.
+        open.at(phase, &dev.in_ring, &dev.out_ring);
+        // Between the publish and the doorbell: the one window in which a TRB
+        // is on a ring the controller was never told about, which is the state
+        // `bot::Owed::ring_data` exists for.
+        #[cfg(feature = "boot-actuators")]
+        if phase == Phase::Data && !in_dir {
+            mid_write::wedge_if_staged(Phase::Data);
+        }
         self.ring_doorbell(slot, dci);
         #[cfg(feature = "boot-actuators")]
         if transport_break::take() {
