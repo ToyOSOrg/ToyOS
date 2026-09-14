@@ -617,10 +617,6 @@ ceiling_from = "as boot.testcases.stick_secs"
 # boot's whole time inside the painter, so a panel that keeps pace per paint by
 # painting far more than it needs to is a red as well. Paints and pixels are
 # printed beside the boot as evidence and are not gates.
-#
-# A boot that hands the machine back carries the census as an ordinary record;
-# a boot a bound ended seals the same line into the black-box page, which is
-# why the two wedge boots have a row at all.
 
 [[number]]
 name = "boot.testcases.panel_max_us"

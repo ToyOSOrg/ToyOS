@@ -793,6 +793,7 @@ fn paint_held_report() {
     if PAINTING.swap(true, Ordering::SeqCst) {
         return;
     }
+    forget_the_glass();
     paint(Fill::Boot, report_text(), Page::Last, Watch::Yes);
     PAINTING.store(false, Ordering::SeqCst);
 }
@@ -830,7 +831,6 @@ pub fn hold_report() {
         return;
     }
     log!("panic console: the panel was drawn over, putting the report back");
-    forget_the_glass();
     paint_held_report();
 }
 
@@ -1031,9 +1031,9 @@ unsafe impl Sync for GlassCell {}
 static GLASS: GlassCell = GlassCell(UnsafeCell::new(Glass::UNPAINTED));
 
 /// Whether [`GLASS`] still describes the panel. Cleared by everything that can
-/// leave something on the glass the panel did not put there — a userland
-/// claimant, a new framebuffer descriptor, a fatal report taking the screen
-/// back — because a stale grid is a cell this module would decline to redraw.
+/// leave something on the glass the panel did not put there, and by every
+/// painter that takes the screen back from one of them, because a stale grid is
+/// a cell this module would decline to redraw.
 static GLASS_KNOWN: AtomicBool = AtomicBool::new(false);
 
 fn forget_the_glass() {
@@ -1133,8 +1133,6 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
     let mut probes = 0usize;
     for r in 0..grid_rows {
         let Some(want) = want_row.get_mut(..cols) else { break };
-        // What this row is to show: its display row's text, ground past the
-        // end of that, and the footer on the bottom row of a paged report.
         want.fill(Cell::GROUND);
         let text_row = if r < draw { row_start.get(r).copied() } else { None };
         if let Some(row) = text_row {

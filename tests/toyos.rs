@@ -4101,10 +4101,6 @@ fn check_wrap(dump: &screen::Ppm) -> Result<(), String> {
 /// whose character or colour moved, so a cell it fails to write is one the
 /// previous paint left standing, and past the end of a line that replaced a
 /// longer one that is a string no line of the log contains.
-///
-/// The console's own tag comes off first and every byte outside the font's
-/// range becomes the `.` the panel draws for it
-/// (`panic_console::glyph_char`); nothing else is normalised.
 fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String> {
     let said: String = console
         .replace("[kernel ", "[")
@@ -5528,9 +5524,6 @@ fn run_screen_test(
                      panel says nothing:\n{said}"
                 ));
             }
-            // Under the line above, which is what establishes that this
-            // console is whole — a short capture is that and not a stale cell.
-            check_no_stale_cells(&dump, &said)?;
             if text.contains(AFTER_CAPTURE) {
                 return Err(format!(
                     "{AFTER_CAPTURE:?} is on the panel — the report was re-read from the \
@@ -5568,15 +5561,24 @@ fn run_screen_test(
             let mut pages: Vec<String> = Vec::new();
             let mut report: Option<String> = None;
             let mut head_seen = false;
+            // **The only incremental paints a guest makes**: the report's own
+            // paint follows a fill, and every page the pager puts up after it
+            // is written against the grid the one before left — which is the
+            // paint `check_no_stale_cells` exists for. The footers of the
+            // settled captures it judged.
+            let mut judged: Vec<String> = Vec::new();
+            let mut before: Option<String> = None;
             // A liveness ceiling on a machine that is halted and paging, so
             // there is no console to read progress off and this is the case
             // `qemu::budget` exists for.
             let deadline = Instant::now() + qemu.budget(Duration::from_secs(40));
             while Instant::now() < deadline && !(head_seen && report.is_some()) {
-                let text = qemu.screendump().text();
+                let dump = qemu.screendump();
+                let text = dump.text();
                 let Some(footer) = text.lines().rev().find(|l| l.starts_with("[page ")) else {
                     // Before the panic the screen still carries a boot
                     // checkpoint; only a paginated screen has a footer.
+                    before = None;
                     thread::sleep(Duration::from_millis(200));
                     continue;
                 };
@@ -5587,6 +5589,17 @@ fn run_screen_test(
                     report = Some(text.clone());
                 }
                 head_seen |= text.contains(HEAD);
+                // **A screendump is not a shutter**: one taken across a paint
+                // carries the rows already written above the rows the paint
+                // replaced, and a row half of each is in no line of any log. Two
+                // identical captures are a paint that finished.
+                if before.as_deref() == Some(text.as_str()) {
+                    check_no_stale_cells(&dump, &qemu.console_stream().since(0))?;
+                    if !judged.contains(&footer.to_string()) {
+                        judged.push(footer.to_string());
+                    }
+                }
+                before = Some(text.clone());
                 thread::sleep(Duration::from_millis(200));
             }
 
@@ -5614,6 +5627,16 @@ fn run_screen_test(
             if pages.len() < 2 {
                 return Err(format!(
                     "only one page footer ever appeared ({seen}); the pager is not cycling"
+                ));
+            }
+            // Two settled pages, because one of them is the paint that follows
+            // the fill and judges nothing about a grid.
+            if judged.len() < 2 {
+                return Err(format!(
+                    "only {} settled page(s) were judged for stale cells ({}), so no paint made \
+                     against the grid the one before it left was ever read",
+                    judged.len(),
+                    judged.join(" ")
                 ));
             }
             Ok(())
@@ -6125,22 +6148,23 @@ fn run_screen_test(
             // tries at every width and reads as forty seconds — the number the
             // reader of a red then goes looking for. Ten is the number.
             const DUMP_TRIES: usize = 10;
+            let chord = |on: &QemuInstance| {
+                let mut input = qemu::QmpInput::open(on.qmp_socket());
+                input.keys(&[
+                    ("ctrl", true),
+                    ("alt", true),
+                    ("d", true),
+                    ("d", false),
+                    ("alt", false),
+                    ("ctrl", false),
+                ]);
+            };
             let mut dump = up;
             for _ in 0..DUMP_TRIES {
                 if report_is_photographable(&dump, "").is_ok() {
                     break;
                 }
-                {
-                    let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                    input.keys(&[
-                        ("ctrl", true),
-                        ("alt", true),
-                        ("d", true),
-                        ("d", false),
-                        ("alt", false),
-                        ("ctrl", false),
-                    ]);
-                }
+                chord(&qemu);
                 dump = qemu.screendump_while(
                     Duration::from_secs(4),
                     Duration::from_millis(100),
@@ -6199,6 +6223,33 @@ fn run_screen_test(
             );
             print_screen(&format!("{name} after a client repaint"), &back.text());
             report_is_photographable(&back, "the report after a client repainted over it")?;
+
+            // **A report painted over a screen this kernel did not draw.** The
+            // hold expires and the desktop composes over the panel unopposed,
+            // so the next chord paints against a grid that describes nothing on
+            // the glass — and a painter that trusts it leaves the client's
+            // pixels in every cell the two reports agree on, the fill among
+            // them.
+            let theirs = qemu.screendump_while(
+                Duration::from_secs(30),
+                Duration::from_millis(200),
+                |d| d.fill() != FILL_BOOT,
+            );
+            if theirs.fill() == FILL_BOOT {
+                return Err(
+                    "the desktop never took the panel back, so the chord below would paint over \
+                     this kernel's own screen and prove nothing"
+                        .to_string(),
+                );
+            }
+            chord(&qemu);
+            let retaken = qemu.screendump_while(
+                Duration::from_secs(6),
+                Duration::from_millis(100),
+                |d| report_is_photographable(d, "").is_ok(),
+            );
+            print_screen(&format!("{name} over a screen the desktop owned"), &retaken.text());
+            report_is_photographable(&retaken, "the report painted over a desktop's own screen")?;
 
             let row = back.row_index("== VERDICT:").expect("checked above");
             eprintln!(
