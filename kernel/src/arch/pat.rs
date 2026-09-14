@@ -42,6 +42,11 @@ const _: () = assert!(ENTRIES[UC_ENTRY] == UC);
 /// Put [`ENTRIES`] in this CPU's `IA32_PAT`; every CPU must run it, and no
 /// rendezvous is needed because entry 4 selects nothing until it is mapped,
 /// which must happen only after every CPU has run this.
+///
+/// The write alone: [`check`] is the read-back it owes, and the two are apart
+/// because on the BSP this runs before the kernel holds a channel — the
+/// panel's own first paint goes through the entry written here — and a refusal
+/// owes somewhere to be read.
 pub fn init() {
     let flags: u64;
     // SAFETY: the whole sequence must run as one uninterruptible block inside
@@ -68,8 +73,12 @@ pub fn init() {
     if flags & RFLAGS_IF != 0 {
         cpu::enable_interrupts();
     }
+}
 
-    // Nothing downstream can tell a wrong PAT entry from a right one; verify here.
+/// Refuse a CPU whose `IA32_PAT` is not what [`init`] wrote: nothing
+/// downstream can tell a wrong entry from a right one. Every CPU owes this
+/// after its own [`init`], on a boot that has a channel to carry the refusal.
+pub fn check() {
     let read_back = cpu::rdmsr(IA32_PAT);
     assert!(
         read_back == PAT_VALUE,

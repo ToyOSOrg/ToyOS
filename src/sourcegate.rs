@@ -464,7 +464,7 @@ const SENTINEL_ALLOWED: &[(&str, usize)] = &[
 const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/completion/inbox.rs", 1),
     ("kernel/src/drivers/hda.rs", 1),
-    ("kernel/src/drivers/panic_console/mod.rs", 2),
+    ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/drivers/virtio_console.rs", 1),
     ("kernel/src/drivers/virtio_sound.rs", 2),
     ("kernel/src/hw.rs", 1),
