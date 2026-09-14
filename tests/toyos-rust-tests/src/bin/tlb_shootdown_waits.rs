@@ -3,10 +3,16 @@
 //!
 //! **Why this needs an actuator at all.** A correct wait and no wait whatsoever
 //! measure the same zero on a machine where every CPU answers in microseconds,
-//! so nothing a guest can do distinguishes them. `SYS_DEBUG` action 12 makes the
-//! last CPU an initiator waits for answer late — after flushing, so what is
-//! staged is a slow answer and never an incorrect one — and the wait becomes a
-//! duration userland can read off its own clock.
+//! so nothing a guest can do distinguishes them. `SYS_DEBUG` action 12 holds
+//! every acknowledgement an initiator waits for back — after the flush, so what
+//! is staged is a slow answer and never an incorrect one — and the wait becomes
+//! a duration userland can read off its own clock.
+//!
+//! **The precondition is the kernel's target set, and that set is every other
+//! CPU on the machine.** Nothing this process does puts a CPU into it or takes
+//! one out, so `SYS_CPU_COUNT` is the whole of the arrangement: with a second
+//! CPU there is one to wait for, and its acknowledgement is held back whichever
+//! CPU this thread is running on.
 //!
 //! **Why the harm itself is not the verdict here.** The honest gate would be a
 //! sibling reading through a stale translation into memory the PMM had reissued.
@@ -19,50 +25,7 @@
 //! the window — the free happens after the flush — measured where it is
 //! observable.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
 use toyos_abi::syscall::{self, MmapFlags, MmapProt, SYS_DEBUG};
-
-/// The sibling's own progress — the one thing the main thread can read to
-/// know another CPU is executing this address space right now.
-static TRAVERSALS: AtomicU64 = AtomicU64::new(0);
-static STOP: AtomicBool = AtomicBool::new(false);
-
-/// A window short enough that leaving the CPU inside it would blow it: the
-/// witness spin plus its two clock syscalls stay far under a millisecond, and
-/// a preemption costs a scheduler slice on top.
-const WITNESS_WINDOW_NANOS: u64 = 1_000_000;
-
-/// How long the witness keeps asking before calling the precondition
-/// unarrangeable on this machine.
-const WITNESS_DEADLINE_NANOS: u64 = 5_000_000_000;
-
-/// How many vacuous trials — the sibling provably parked across the whole
-/// operation — stage 2 re-arranges before refusing to judge.
-const TRIALS: u32 = 5;
-
-/// Whether the sibling advanced inside a window this thread never left the
-/// CPU for. Two instruction streams progressing at once are two CPUs, which
-/// is what puts a second CPU in the shootdown's target set.
-fn sibling_running_elsewhere() -> bool {
-    let start = syscall::clock_nanos();
-    loop {
-        let before = TRAVERSALS.load(Ordering::SeqCst);
-        let t0 = syscall::clock_nanos();
-        for _ in 0..200 {
-            std::hint::spin_loop();
-        }
-        let t1 = syscall::clock_nanos();
-        if TRAVERSALS.load(Ordering::SeqCst) > before
-            && t1.wrapping_sub(t0) < WITNESS_WINDOW_NANOS
-        {
-            return true;
-        }
-        if syscall::clock_nanos().wrapping_sub(start) > WITNESS_DEADLINE_NANOS {
-            return false;
-        }
-    }
-}
 
 /// Long enough to read off a clock through two syscalls, short enough that four
 /// of them are not a boot's worth of stalled CPU. The delay spins with
@@ -74,6 +37,16 @@ const DELAY_NANOS: u64 = 20_000_000;
 /// clock reads bracketing it are syscalls, and the margin is there so a slow
 /// host cannot turn a pass into a fail either way.
 const FLOOR_NANOS: u64 = DELAY_NANOS / 2;
+
+/// How many measured operations must *all* return fast before that is the
+/// verdict.
+///
+/// A target holds its acknowledgement back on every path it answers another
+/// CPU's shootdown on, so one fast return means the target published through a
+/// serve of its own — it was initiating a shootdown at that instant, the one
+/// path that does not delay — and the operation says nothing. A kernel that
+/// does not wait returns fast every time.
+const TRIALS: u32 = 3;
 
 const PAGE_2M: usize = 2 * 1024 * 1024;
 
@@ -126,61 +99,51 @@ fn map(size: usize) -> *mut u8 {
 }
 
 fn main() {
+    // The set the kernel computes, asked of the kernel. A machine with one CPU
+    // takes `shootdown`'s local-flush return, which issues no IPI and waits for
+    // nobody, so there is no wait to measure and a fast return is correct.
+    let cpus = syscall::cpu_count();
+    assert!(
+        cpus > 1,
+        "this guest has {cpus} CPU, so a shootdown has nobody to wait for and takes the \
+         local-flush return — the stage measures a wait and this machine has none",
+    );
+
     // 1. The primitive. The kernel times its own shootdown, so this number has
     //    no syscall overhead in it and no scheduling either — both CPUs are
     //    spinning for its whole duration.
     let bare = arm();
     assert!(
         bare >= FLOOR_NANOS,
-        "a shootdown with the last CPU answering {DELAY_NANOS}ns late took {bare}ns — \
-         the initiator is not waiting for it",
+        "a shootdown across {cpus} CPUs, each answering {DELAY_NANOS}ns late, took {bare}ns — \
+         the initiator is not waiting for them",
     );
 
-    // 2. `munmap`, which is the syscall the stage exists for: the pages go
-    //    back to the PMM. The stage's precondition — somebody else holds this
-    //    address space when the shootdown goes out — is arranged, not hoped
-    //    for: a sibling thread spins on its counter, the witness proves it is
-    //    executing on another CPU right now, and a fast return with the
-    //    sibling parked across the whole call is a vacuous trial re-arranged
-    //    rather than a verdict (an empty target set has nobody to wait for,
-    //    and its microseconds say nothing about the wait).
-    let sibling = std::thread::spawn(|| {
-        while !STOP.load(Ordering::SeqCst) {
-            TRAVERSALS.fetch_add(1, Ordering::SeqCst);
-        }
-    });
-    let mut judged = false;
+    // 2. `munmap`, which is the syscall the stage exists for: the pages go back
+    //    to the PMM behind the flush.
+    let mut judged = None;
     for trial in 1..=TRIALS {
-        assert!(
-            sibling_running_elsewhere(),
-            "no window ever showed the sibling executing beside this thread, so nothing can \
-             put a second CPU in the shootdown's target set — the stage's precondition is \
-             unarrangeable on this machine, which is a scheduler question and not a flush one",
-        );
         let region = map(PAGE_2M);
-        let before = TRAVERSALS.load(Ordering::SeqCst);
         let elapsed = timed(|| {
             unsafe { syscall::munmap(region, PAGE_2M) }.expect("munmap");
         });
-        let advanced = TRAVERSALS.load(Ordering::SeqCst) > before;
         if elapsed >= FLOOR_NANOS {
-            judged = true;
+            judged = Some(elapsed);
             break;
         }
-        assert!(
-            !advanced,
-            "munmap returned in {elapsed}ns with the last CPU answering {DELAY_NANOS}ns late, \
-             while a sibling on another CPU provably executed through the call — it freed the \
-             pages without waiting for the flush",
+        println!(
+            "trial {trial}: munmap returned in {elapsed}ns — a target that was initiating a \
+             shootdown of its own answers through a serve that does not delay, so this trial \
+             judges nothing and is re-run"
         );
-        println!("trial {trial}: the sibling parked across the whole munmap, so the target \
-                  set may have been empty — re-arranged");
     }
     assert!(
-        judged,
-        "{TRIALS} trials in a row returned fast with the sibling parked across each whole \
-         munmap — the stage never had a second CPU to wait for, so it refuses to judge the \
-         flush rather than read an empty target set as a missing wait",
+        judged.is_some(),
+        "every one of {TRIALS} munmaps returned in under {FLOOR_NANOS}ns with all {} other \
+         CPUs answering {DELAY_NANOS}ns late — it freed the pages without waiting for the \
+         flush. The kernel's `tlb: acks held back` line in this capture says which CPUs held \
+         one back, and `irq: cpuN tlb=` says which took the IPI",
+        cpus - 1,
     );
 
     // 3. A fixed mapping placed over a range, which is a *remap* rather than a
@@ -201,7 +164,7 @@ fn main() {
     });
     assert!(
         elapsed >= FLOOR_NANOS,
-        "a fixed mmap returned in {elapsed}ns with the last CPU answering {DELAY_NANOS}ns \
+        "a fixed mmap returned in {elapsed}ns with every other CPU answering {DELAY_NANOS}ns \
          late — it replaced the mapping without waiting for the flush",
     );
     unsafe { syscall::munmap(placed, PAGE_2M) }.expect("munmap the fixed mapping");
@@ -209,9 +172,9 @@ fn main() {
     disarm();
 
     // 4. And the delay is what produced every number above, not the machine:
-    //    disarmed, the same operation with the sibling still spinning is back
-    //    to microseconds. Without this the assertions above would still pass
-    //    on a kernel that happened to be slow for some other reason.
+    //    disarmed, the same operation is back to microseconds. Without this the
+    //    assertions above would still pass on a kernel that happened to be slow
+    //    for some other reason.
     let quiet = map(PAGE_2M);
     let elapsed = timed(|| {
         unsafe { syscall::munmap(quiet, PAGE_2M) }.expect("munmap");
@@ -222,8 +185,5 @@ fn main() {
          measured something other than the wait",
     );
 
-    STOP.store(true, Ordering::SeqCst);
-    sibling.join().expect("the sibling parks on STOP and exits");
-
-    println!("a shootdown waits for the last CPU, and munmap and a fixed mmap wait for it");
+    println!("a shootdown waits for every other CPU, and munmap and a fixed mmap wait for it");
 }

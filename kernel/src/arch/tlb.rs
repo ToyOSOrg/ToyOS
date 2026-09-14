@@ -5,6 +5,10 @@
 //! answers it directly instead of waiting on the interrupt vector. A stale
 //! memory-type translation surviving an early return is undefined per SDM
 //! Vol. 3A §11.12.4.
+//!
+//! **The target set is every other CPU the machine brought up**, not the CPUs
+//! sharing the initiator's address space: nothing a process does puts a CPU
+//! into it or takes one out.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -76,6 +80,8 @@ pub fn log_census() {
         MAX_NS.load(Ordering::Relaxed) / 1_000,
         Fields(&counts)
     );
+    #[cfg(feature = "test-actuators")]
+    log_acks_held_back();
 }
 
 /// Set above `USB_TIMEOUT_NS`, xHCI's longest `IF`-clear device spin, so no
@@ -191,7 +197,10 @@ pub fn poll() {
         return;
     }
     let cpu = percpu::cpu_id() as usize;
-    SHOOTDOWN.serve_if_owed(cpu, crate::mm::paging::flush_tlb_all);
+    SHOOTDOWN.serve_if_owed(cpu, || {
+        crate::mm::paging::flush_tlb_all();
+        stage_ack_delay();
+    });
 }
 
 /// Settle every shootdown issued before this CPU could answer one; called
@@ -206,12 +215,14 @@ fn stage_ack_delay() {}
 
 #[cfg(feature = "test-actuators")]
 mod delay {
-    use core::sync::atomic::{AtomicU32, AtomicU64};
+    use core::sync::atomic::AtomicU64;
 
     pub static NANOS: AtomicU64 = AtomicU64::new(0);
-    pub static CPU: AtomicU32 = AtomicU32::new(u32::MAX);
     /// Absolute nanoseconds past which the arming lapses.
     pub static UNTIL: AtomicU64 = AtomicU64::new(0);
+    /// Acknowledgements each CPU has held back.
+    pub static SPENT: [AtomicU64; crate::shootdown::MAX_CPUS] =
+        [const { AtomicU64::new(0) }; crate::shootdown::MAX_CPUS];
 }
 
 /// Expires rather than latches, so a panicked test can't leave it armed
@@ -221,41 +232,48 @@ const ARM_WINDOW_NANOS: u64 = 2_000_000_000;
 
 /// Delays after the flush and before publication, so it can only slow a
 /// correct answer, never hide an incorrect one.
+///
+/// Held back on every path a CPU answers *another* CPU's shootdown on, and on
+/// none where a CPU answers its own: an initiator's own flush is not part of
+/// the wait under measurement, so delaying it would spend that wait on the
+/// initiator's own hand.
 #[cfg(feature = "test-actuators")]
 fn stage_ack_delay() {
-    use core::sync::atomic::Ordering;
-    if delay::CPU.load(Ordering::Relaxed) != percpu::cpu_id() {
-        return;
-    }
     let now = crate::clock::nanos_since_boot();
     if now >= delay::UNTIL.load(Ordering::Relaxed) {
         return;
     }
+    delay::SPENT[percpu::cpu_id() as usize].fetch_add(1, Ordering::Relaxed);
     let until = now.saturating_add(delay::NANOS.load(Ordering::Relaxed));
     while crate::clock::nanos_since_boot() < until {
         core::hint::spin_loop();
     }
 }
 
-/// The last CPU `shootdown` waits for, so the delay is measured regardless of
-/// iteration order.
+/// The receiver side of the arming, so a measurement that saw no wait says
+/// whether the delay ever reached a CPU the initiator was waiting for.
 #[cfg(feature = "test-actuators")]
-fn last_target() -> Option<u32> {
-    let top = smp::cpu_count().checked_sub(1)?;
-    match percpu::cpu_id() {
-        me if me == top => top.checked_sub(1),
-        _ => Some(top),
+fn log_acks_held_back() {
+    if delay::SPENT.iter().all(|spent| spent.load(Ordering::Relaxed) == 0) {
+        return;
     }
+    struct Held;
+    impl core::fmt::Display for Held {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            for (cpu, spent) in delay::SPENT.iter().enumerate().take(smp::cpu_count() as usize) {
+                write!(f, " cpu{cpu}={}", spent.load(Ordering::Relaxed))?;
+            }
+            Ok(())
+        }
+    }
+    crate::log!("tlb: acks held back{}", Held);
 }
 
-/// Arms the last-waited CPU to answer `nanos` late, takes one shootdown, and
-/// reports what it cost; the arming outlives the call, so a caller can then
-/// time what follows too.
+/// Arms every acknowledgement an initiator waits for to come `nanos` late,
+/// takes one shootdown, and reports what it cost; the arming outlives the call,
+/// so a caller can then time what follows too.
 #[cfg(feature = "test-actuators")]
 pub fn debug_arm_ack_delay(nanos: u64) -> u64 {
-    use core::sync::atomic::Ordering;
-    let Some(target) = last_target() else { return 0 };
-    delay::CPU.store(target, Ordering::Relaxed);
     delay::NANOS.store(nanos, Ordering::Relaxed);
     delay::UNTIL.store(
         crate::clock::nanos_since_boot().saturating_add(ARM_WINDOW_NANOS),
@@ -269,8 +287,6 @@ pub fn debug_arm_ack_delay(nanos: u64) -> u64 {
 /// Give the machine its ordinary latency back before the window lapses.
 #[cfg(feature = "test-actuators")]
 pub fn debug_disarm_ack_delay() -> u64 {
-    use core::sync::atomic::Ordering;
     delay::UNTIL.store(0, Ordering::Relaxed);
-    delay::CPU.store(u32::MAX, Ordering::Relaxed);
     0
 }
