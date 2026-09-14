@@ -899,9 +899,10 @@ pub fn run(
                      after that",
                     back.back_secs, back.stick_secs
                 );
+                let panel = back.panel();
                 // Evidence beside the two numbers that are priced: what a
                 // reader needs to tell a slower paint from more of them.
-                if let Some(panel) = back.panel() {
+                if let Some(panel) = panel {
                     eprintln!(
                         "    the panel painted {} time(s) and put {} px on the glass",
                         panel.paints, panel.pixels
@@ -921,8 +922,8 @@ pub fn run(
                     ("stick_secs", Some(back.stick_secs)),
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
-                    ("panel_max_us", back.panel().map(|panel| panel.max_micros)),
-                    ("panel_us", back.panel().map(|panel| panel.micros)),
+                    ("panel_max_us", panel.map(|panel| panel.max_micros)),
+                    ("panel_us", panel.map(|panel| panel.micros)),
                 ] {
                     let name = format!("boot.{label}.{field}");
                     let priced = profile.row(&name).is_some();
