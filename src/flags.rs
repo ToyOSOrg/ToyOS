@@ -108,11 +108,6 @@ pub fn check(args: &[String]) -> Outcome {
     if let Some(word) = line.unknown {
         return Outcome::Refuse(unknown(word));
     }
-    for seen in &line.seen {
-        if let Given::Inline(_) = seen.given {
-            return Outcome::Refuse(inline(seen.word, seen.flag));
-        }
-    }
     if let Some(refusal) = line.malformed() {
         return Outcome::Refuse(format!("Error: {refusal}"));
     }
@@ -137,17 +132,6 @@ fn shape(value: Value) -> &'static str {
         Value::Optional => " [<value>]",
         Value::Rest => " <subcommand>",
     }
-}
-
-/// A value written onto the flag would be dropped in silence by a reader that
-/// takes the next word, so each kind of flag is refused with the shape it does
-/// accept.
-fn inline(word: &str, flag: &Flag) -> String {
-    let takes = match shape(flag.value) {
-        "" => format!("{} takes no value", flag.name),
-        shape => format!("{0} takes its value as the next word, {0}{shape}", flag.name),
-    };
-    format!("Error: {word:?}: {takes}.")
 }
 
 /// What a command line wrote after a flag.
@@ -188,17 +172,31 @@ pub(crate) struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    /// A flag the line named but did not complete. Both shapes would otherwise
-    /// reach a reader as a silent default — the value-taking flag left with
-    /// nothing after it answers `None`, and the flag written twice has every
-    /// use but one dropped — so every command line asks this before it runs.
+    /// A flag whose value no reader of this line would get. Each shape would
+    /// otherwise reach a reader as a silent default — the value-taking flag
+    /// left with nothing after it answers `None`, the flag written twice has
+    /// every use but one dropped, and a value written onto a flag that has no
+    /// reader for one is read by nobody — so every command line asks this
+    /// before it runs, and neither asks anything else.
     pub(crate) fn malformed(&self) -> Option<String> {
         for (at, seen) in self.seen.iter().enumerate() {
             let name = seen.flag.name;
+            let shape = shape(seen.flag.value);
+            // `Given::value` hands an inline value to every reader that takes
+            // one; `Value::None` has no reader and `rest` reads only the words
+            // after the flag, so those two alone would drop it.
+            if matches!(seen.given, Given::Inline(_))
+                && matches!(seen.flag.value, Value::None | Value::Rest)
+            {
+                let takes = match seen.flag.value {
+                    Value::Rest => format!("takes its words after it, {name}{shape}"),
+                    _ => "takes no value".to_string(),
+                };
+                return Some(format!("{:?}: {name} {takes}.", seen.word));
+            }
             if matches!(seen.given, Given::Nothing)
                 && matches!(seen.flag.value, Value::Next | Value::Each)
             {
-                let shape = shape(seen.flag.value);
                 return Some(format!("{name} was given no value: {name}{shape}."));
             }
             if seen.flag.value != Value::Each
@@ -267,13 +265,10 @@ impl Vocabulary {
             .collect()
     }
 
-    /// The one value `want` carried. A line [`Walk::malformed`] has passed
-    /// cannot carry two, so this fires only for a caller that read a command
-    /// line without checking it.
+    /// The one value `want` carried; [`Walk::malformed`] has already refused a
+    /// line that wrote it twice.
     pub fn value<'a>(&self, args: &'a [String], want: &Flag) -> Option<&'a str> {
-        let found = self.values(args, want);
-        assert!(found.len() < 2, "{} takes one value; this asks for {found:?}", want.name);
-        found.first().copied()
+        self.values(args, want).first().copied()
     }
 
     /// The words a [`Value::Rest`] flag owns.
@@ -344,16 +339,20 @@ mod tests {
         }
     }
 
-    /// A value written onto the flag is read by nothing, so the refusal says
-    /// what that flag does take.
+    /// The line drawn at the reader: a flag with no reader for a value, and one
+    /// whose reader takes the words after it, would drop an inline value in
+    /// silence; every other reader is handed it.
     #[test]
-    fn an_inline_value_is_refused_with_the_shape_the_flag_accepts() {
+    fn an_inline_value_is_refused_exactly_where_it_would_be_dropped() {
         let debug = refusal(&["--debug=1"]);
         assert!(debug.contains("--debug takes no value"), "{debug}");
-        let smp = refusal(&["--smp=4"]);
-        assert!(smp.contains("--smp takes its value as the next word, --smp <value>"), "{smp}");
         let worktree = refusal(&["--worktree=add"]);
         assert!(worktree.contains("--worktree <subcommand>"), "{worktree}");
+        let line = argv(&["--smp=4", "--known-red=audio_tone", "--kernel-param=slow"]);
+        assert!(matches!(check(&line), Outcome::Proceed));
+        assert_eq!(CARGO_RUN.value(&line, &SMP), Some("4"));
+        assert_eq!(CARGO_RUN.value(&line, &KNOWN_RED), Some("audio_tone"));
+        assert_eq!(CARGO_RUN.values(&line, &KERNEL_PARAM), ["slow"]);
     }
 
     #[test]
@@ -367,9 +366,6 @@ mod tests {
         assert!(refusal(&["--known-red", "--frobnicate"]).contains("--frobnicate"));
     }
 
-    /// The second use is read by nothing, so it is refused here rather than at
-    /// [`Vocabulary::value`]'s assert — which a `--smp 1 --smp 2` reached only
-    /// after the prerequisites and a `set_current_dir`.
     #[test]
     fn a_flag_that_reads_one_value_is_refused_when_it_is_written_twice() {
         for words in [
@@ -429,9 +425,13 @@ mod tests {
     /// and not a list of directories, so a script or workflow arriving anywhere
     /// is read on its first commit.
     ///
-    /// **What it does not reach**: `target/` is built and `rust/` is the fork;
-    /// a prose file carries no gate in this tree, so `.md` is not scanned and a
-    /// flag named only in documentation is not held to the declaration.
+    /// **What it does not reach**, each of them asserted below: `target/` is
+    /// built, `rust/` is the fork, and every dotted directory but `.github` is
+    /// skipped, so a `cargo run` in `.cargo/config.toml` is unread; `.md` is
+    /// not scanned, prose carrying no gate in this tree; a `cargo run` whose
+    /// `-- ` is on the next physical line is read by nothing, the scan taking
+    /// one line at a time; and a word's name ends at its `=`, so `--debug=1` —
+    /// a line the binary refuses — is read as the declared `--debug`.
     fn scanned_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         files_under(root, &mut files);
@@ -478,6 +478,16 @@ mod tests {
             "tests/toyos.rs",
         ] {
             assert!(files.contains(&root.join(named)), "the scan does not reach {named}");
+        }
+        for file in &files {
+            let under = file.strip_prefix(&root).expect("a file under the root");
+            let dotted =
+                under.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+            assert!(
+                !dotted || under.starts_with(".github"),
+                "the scan reaches {}, which it says it does not",
+                under.display()
+            );
         }
 
         let declared: BTreeSet<&str> = CARGO_RUN.0.iter().map(|f| f.name).collect();
@@ -563,9 +573,10 @@ mod tests {
         (token.starts_with("--") && token.len() > 2).then(|| token.to_string())
     }
 
-    /// The forms the scan has to read, and the ones it must not attribute to
-    /// this binary: the last two lines run another package and another example,
-    /// whose flags belong to vocabularies this table knows nothing about.
+    /// The forms the scan has to read, the ones it must not attribute to this
+    /// binary — `-p toyos-sched-sim` and `--example imgstat` run command lines
+    /// this table knows nothing about — and the two it does not reach at all:
+    /// the continued line yields nothing, and `--debug=1` yields `--debug`.
     #[test]
     fn the_scan_reads_this_binarys_command_lines_and_no_others() {
         let text = "\
@@ -574,10 +585,13 @@ mod tests {
             run: cargo run -- --diag-boot $base_arg $ARGS `--clippy`\n\
             //! cargo run -- --console-boot\n\
             cargo run --release -p toyos-sched-sim -- --fuzz-sweep\n\
-            cargo run --example imgstat -- --histogram\n";
+            cargo run --example imgstat -- --histogram\n\
+            cargo run --\n\
+            --rebuild-toolchain\n\
+            cargo run -- --debug=1\n";
         assert_eq!(
             flags_passed_to_cargo_run(text),
-            ["--build-only", "--clippy", "--console-boot", "--diag-boot", "--tier-base"]
+            ["--build-only", "--clippy", "--console-boot", "--debug", "--diag-boot", "--tier-base"]
                 .map(String::from)
                 .into_iter()
                 .collect::<BTreeSet<String>>()

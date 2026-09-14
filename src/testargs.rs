@@ -5,7 +5,7 @@
 //! that filter and report a one-test run as a pass. The table is the harness's
 //! whole vocabulary, and [`SUITE`] is the only way to read a word off its argv.
 
-use crate::flags::{declare_flags, Given, Value};
+use crate::flags::declare_flags;
 use std::time::Duration;
 
 /// One machine's slice of the suite.
@@ -187,16 +187,6 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
             SUITE.usage()
         ));
     }
-    for seen in &line.seen {
-        if matches!(seen.given, Given::Inline(_)) && seen.flag.value == Value::None {
-            return Err(format!(
-                "{}: {} takes no value.\nFlags it has:\n{}",
-                seen.word,
-                seen.flag.name,
-                SUITE.usage()
-            ));
-        }
-    }
     if let Some(refusal) = line.malformed() {
         return Err(refusal);
     }
@@ -249,6 +239,7 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flags::Value;
 
     fn owned(args: &[&str]) -> Vec<String> {
         args.iter().map(ToString::to_string).collect()
@@ -443,10 +434,9 @@ mod tests {
         assert_eq!(sizes, vec![4, 3, 3], "{sizes:?}");
     }
 
-    /// Every one of these answered `None` to its reader before, and every
-    /// `None` is a default the run then takes in silence: `--jobs` the built-in
-    /// width, `--audio-gate` the thorough tier off, `--host-slots` the host's
-    /// own budget, `--host-builds` no budget at all.
+    /// Every `None` here is a default the run then takes in silence: `--jobs`
+    /// the built-in width, `--audio-gate` the thorough tier off, `--host-slots`
+    /// the host's own budget, `--host-builds` no budget at all.
     #[test]
     fn a_flag_left_without_its_value_is_refused_by_name() {
         for flag in SUITE.0.iter().filter(|f| matches!(f.value, Value::Next | Value::Each)) {
