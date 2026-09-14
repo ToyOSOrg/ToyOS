@@ -134,9 +134,6 @@ pub(crate) const IDENTIFIER_HIGH_INTEL: u16 = 0x0154;
 /// reports whatever happened here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PhyRefusal {
-    /// This boot did not arm the bring-up, so nothing here drove `MDIC` at all.
-    /// See [`crate::Mdio`] for what that costs and why it is the default.
-    NotAttempted,
     /// A register this sequence reaches answered ones, so nothing decodes it
     /// and no write was made to it.
     Unrouted { reg: usize },
@@ -165,11 +162,6 @@ pub enum PhyRefusal {
 impl core::fmt::Display for PhyRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NotAttempted => write!(
-                f,
-                "was not driven at all: this boot did not arm the MDIO bring-up, so the PHY is \
-                 as the agent before this driver left it"
-            ),
             Self::Unrouted { reg } => write!(
                 f,
                 "register {reg:#x} answers ones, so nothing decodes it and this driver wrote \

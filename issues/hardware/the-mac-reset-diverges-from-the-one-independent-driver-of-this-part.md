@@ -9,9 +9,8 @@ opened: 2026-09-14
 `toyos-i219/src/lib.rs`'s `open` writes `CTRL.RST` (`kernel`-free, userland
 path) and then polls `CTRL` for the bit to clear, having waited §10.2.2.1's
 microsecond. Both halves diverge from the only independent implementation of
-this same silicon that can be read, and the divergence is on the path a
-*shipping* boot takes — not behind `Mdio`, which gates only `MDIC` and
-`EXTCNF_CTRL`.
+this same silicon that can be read, and the divergence is on the path every
+boot takes: the MAC reset is issued whatever happens to the PHY afterwards.
 
 Linux's `e1000_reset_hw_ich8lan` (`drivers/net/ethernet/intel/e1000e/ich8lan.c`,
 which covers I217/I218/I219 as `e1000_pch_lpt` and newer):

@@ -16,19 +16,9 @@ use crate::*;
 
 type Driver = I219<crate::stub::Bar, crate::stub::Ticker, crate::stub::Grant, crate::stub::Line>;
 
-/// The bring-up with the MDIO sequence armed, which is what the tests below
-/// are about. A boot arms it deliberately; a test always does.
 fn open(nic: &Nic) -> Driver {
     let (bar, clock, grant, line) = nic.parts();
-    I219::open(nic.part(), Mdio::Armed, bar, clock, grant, line)
-        .unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused it: {why}"))))
-}
-
-/// The bring-up as a boot that armed nothing runs it — the shipping path, which
-/// reaches neither `MDIC` nor `EXTCNF_CTRL`.
-fn open_as_shipped(nic: &Nic) -> Driver {
-    let (bar, clock, grant, line) = nic.parts();
-    I219::open(nic.part(), Mdio::Withheld, bar, clock, grant, line)
+    I219::open(nic.part(), bar, clock, grant, line)
         .unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused it: {why}"))))
 }
 
@@ -149,7 +139,7 @@ fn a_part_with_no_station_address_is_refused() {
     nic.without_nvm();
     let (bar, clock, grant, line) = nic.parts();
     assert_eq!(
-        I219::open(nic.part(), Mdio::Armed, bar, clock, grant, line).err(),
+        I219::open(nic.part(), bar, clock, grant, line).err(),
         Some(Refusal::NoStationAddress)
     );
 }
@@ -204,7 +194,6 @@ fn a_window_or_grant_too_small_is_refused() {
 
     let narrow = I219::open(
         Part::E82574,
-        Mdio::Armed,
         Narrow(regs::REGISTER_BYTES - 4),
         NoClock,
         Small(GRANT_BYTES as usize),
@@ -220,8 +209,7 @@ fn a_window_or_grant_too_small_is_refused() {
 
     let nic = Nic::new(3);
     let (bar, clock, _, line) = nic.parts();
-    let short =
-        I219::open(nic.part(), Mdio::Armed, bar, clock, Small(GRANT_BYTES as usize - 1), line);
+    let short = I219::open(nic.part(), bar, clock, Small(GRANT_BYTES as usize - 1), line);
     assert_eq!(
         short.err(),
         Some(Refusal::Grant {
@@ -262,7 +250,7 @@ fn a_window_that_reads_ones_is_refused() {
     let nic = Nic::new(4);
     let (_, _, grant, _) = nic.parts();
     assert_eq!(
-        I219::open(Part::E82574, Mdio::Armed, Dead, NoClock, grant, NoIrq).err(),
+        I219::open(Part::E82574, Dead, NoClock, grant, NoIrq).err(),
         Some(Refusal::Dead)
     );
 }
@@ -770,7 +758,7 @@ fn a_part_that_does_not_take_ivar_is_refused() {
     nic.refuses_writes_to(regs::IVAR);
     let (bar, clock, grant, line) = nic.parts();
     assert_eq!(
-        I219::open(nic.part(), Mdio::Armed, bar, clock, grant, line).err(),
+        I219::open(nic.part(), bar, clock, grant, line).err(),
         Some(Refusal::NotAccepted {
             reg: regs::IVAR,
             wrote: ivar::ALL_ON_VECTOR_ZERO,
@@ -787,7 +775,7 @@ fn a_part_that_does_not_take_rctl_is_refused() {
     nic.refuses_writes_to(regs::RCTL);
     let (bar, clock, grant, line) = nic.parts();
     assert_eq!(
-        I219::open(nic.part(), Mdio::Armed, bar, clock, grant, line).err(),
+        I219::open(nic.part(), bar, clock, grant, line).err(),
         Some(Refusal::NotAccepted {
             reg: regs::RCTL,
             wrote: rctl::EN | rctl::BAM | rctl::SECRC | rctl::BSIZE_2048,
@@ -805,7 +793,7 @@ fn a_reset_that_never_finishes_is_refused() {
     nic.reset_never_clears();
     let (bar, clock, grant, line) = nic.parts();
     let Some(Refusal::ResetUnfinished { after_nanos }) =
-        I219::open(nic.part(), Mdio::Armed, bar, clock, grant, line).err()
+        I219::open(nic.part(), bar, clock, grant, line).err()
     else {
         panic!("{}", nic.because("a reset that never cleared was not refused"));
     };
@@ -1231,51 +1219,19 @@ fn a_register_nothing_decodes_is_refused_and_never_written() {
     );
 }
 
-/// **The access the bench paid for, and the boot that does not make it.**
-/// `MDIC` is not a register the MAC answers out of itself: writing it starts a
+/// **The failure the host model could not express, and now does.** `MDIC` is
+/// not a register the MAC answers out of itself: writing it starts a
 /// transaction over an interconnect to separate silicon that may be powered
 /// down, in a low-power state, or held by the Management Engine, and §9 gives a
-/// driver nothing to read beforehand that says which. A software deadline is no
-/// answer, because a deadline is tested between accesses and what is at risk is
-/// one access. So a boot that armed nothing makes none of them.
+/// driver nothing to read beforehand that says which.
+///
+/// **This asserts the hazard and not a fix.** Nothing in this driver yet stops
+/// the sequence from reaching that access, and a software deadline cannot: a
+/// deadline is tested between accesses and what does not return is one. What
+/// has changed is that the model reaches it here, on a host that prints a
+/// seed, rather than on a machine that stops.
 #[test]
-fn a_boot_that_armed_nothing_reaches_neither_mdic_nor_the_semaphore() {
-    let nic = Nic::i219(60);
-    // The part at its worst: nothing on the far end of the interconnect, and a
-    // semaphore another agent is holding. Neither is reached.
-    nic.phy_is_off_the_interconnect();
-    nic.mdio_flag_held_by_another_agent();
-    nic.set_link(true);
-    let driver = open_as_shipped(&nic);
-
-    assert_eq!(
-        driver.brought_up().phy,
-        Err(PhyRefusal::NotAttempted),
-        "{}",
-        nic.because("a boot that armed nothing drove the PHY anyway")
-    );
-    assert_eq!(
-        nic.unanswered(),
-        Vec::<usize>::new(),
-        "{}",
-        nic.because("the bring-up made an access this part does not answer")
-    );
-    // The flag is a held agent's and this model answers it into the register on
-    // any read of it, so a clear bit here is that read never having happened.
-    assert_eq!(
-        nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
-        0,
-        "{}",
-        nic.because("EXTCNF_CTRL was reached on a boot that armed nothing")
-    );
-}
-
-/// The premise of the test above, and its negative control: with the sequence
-/// armed, the same part is reached and the access nothing answers is made. A
-/// green above is [`Mdio::Withheld`] doing its work and not a model with no
-/// hazard in it.
-#[test]
-fn an_armed_bring_up_makes_the_access_a_dead_interconnect_never_answers() {
+fn an_mdi_transaction_against_a_dead_interconnect_is_never_answered() {
     let nic = Nic::i219(61);
     nic.phy_is_off_the_interconnect();
     nic.expects_unanswered_accesses();
@@ -1286,8 +1242,8 @@ fn an_armed_bring_up_makes_the_access_a_dead_interconnect_never_answers() {
         nic.unanswered().contains(&regs::MDIC),
         "{}",
         nic.because(
-            "an armed bring-up against a dead interconnect reached no unanswered access, so \
-             the test above is green for a reason that is not the gate"
+            "a bring-up against a dead interconnect reached no unanswered access, so this \
+             model has no hazard in it to catch"
         )
     );
     assert!(!driver.link().up, "{}", nic.because("a PHY nothing answered for raised a link"));

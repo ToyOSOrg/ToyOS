@@ -12,12 +12,13 @@
 //! under §4.5.2's ownership arbitration. [`Part`] is which one this claim is,
 //! and [`phy`] is everything that follows from it.
 //!
-//! **Reaching that PHY is a boot's decision and never a part's.** [`Mdio`] gates
-//! every access to `MDIC` and `EXTCNF_CTRL`, which are the only accesses this
-//! driver makes whose completion rests on silicon the MAC does not contain. A
-//! deadline in software bounds a loop and never one load, so where an
-//! unanswered read holds the CPU instead of answering ones, the gate is the
-//! bound and the deadline is not.
+//! **`MDIC` is the one access here that leaves the MAC.** Writing it starts a
+//! transaction over an interconnect to separate silicon the Management Engine
+//! shares, so its completion rests on a part whose state this driver cannot
+//! read. A deadline in software bounds a poll loop and never one load, and on a
+//! machine whose unanswered read holds the CPU rather than answering ones, that
+//! distinction is the whole of the risk — [`phy`] carries what is guarded
+//! against it and what is not.
 //!
 //! # The boundary
 //!
@@ -406,30 +407,6 @@ pub enum Part {
     I219,
 }
 
-/// Whether this boot may drive the MDIO interface at all.
-///
-/// **Not a fact about the silicon, which is why it is not part of [`Part`].**
-/// An `MDIC` transaction is the one access this driver makes whose completion
-/// rests on silicon the MAC does not contain: the PHY is separate, the
-/// Management Engine shares it, and neither this driver nor the MAC can say
-/// beforehand that the interconnect between them is up — §9 describes the
-/// register map behind `MDIC` and nothing a driver may read says whether the
-/// PHY is on the far end of it. A software deadline is no answer to that,
-/// because a deadline is only ever tested between accesses and what is at risk
-/// is one access: on a machine whose unanswered read holds the CPU rather than
-/// answering ones, the boot ends inside the load.
-///
-/// So the sequence is armed by a boot and never by a part.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mdio {
-    /// The bring-up may take §4.5.2's semaphore and drive `MDIC`.
-    Armed,
-    /// It may not, and nothing here touches `MDIC` or `EXTCNF_CTRL`. The PHY is
-    /// left as the agent before this driver left it, and `STATUS.LU` reports
-    /// whatever link that agent raised.
-    Withheld,
-}
-
 /// What [`I219::open`] found on the way up, for the one line a caller prints
 /// about a function that raised no link.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -477,14 +454,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// §4.6.3.2 makes `STATUS.LU` the MAC's report of a link "from the PHY
     /// qualified with CTRL.SLU": a driver that let the MAC look before the PHY
     /// was configured would read the answer to the wrong question.
-    pub fn open(
-        part: Part,
-        mdio: Mdio,
-        regs: R,
-        clock: C,
-        dma: D,
-        irq: I,
-    ) -> Result<Self, Refusal> {
+    pub fn open(part: Part, regs: R, clock: C, dma: D, irq: I) -> Result<Self, Refusal> {
         if regs.bytes() < regs::REGISTER_BYTES {
             return Err(Refusal::Window { given: regs.bytes(), needed: regs::REGISTER_BYTES });
         }
@@ -581,13 +551,9 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // driver has is the I219's, and §10.2.2.7 addresses the 82574's own PHY
         // under a scheme of its own — so the sequence is refused by name on the
         // part it was not written from.
-        let phy = match (part, mdio) {
-            // Nothing is read and nothing is written: a boot that did not arm
-            // the sequence makes none of its accesses, which is the whole of
-            // what [`Mdio::Withheld`] buys.
-            (_, Mdio::Withheld) => Err(phy::PhyRefusal::NotAttempted),
-            (Part::I219, Mdio::Armed) => phy::bring_up(&regs, &clock, reset_at),
-            (Part::E82574, Mdio::Armed) => Err(phy::PhyRefusal::NotThisRegisterMap),
+        let phy = match part {
+            Part::I219 => phy::bring_up(&regs, &clock, reset_at),
+            Part::E82574 => Err(phy::PhyRefusal::NotThisRegisterMap),
         };
 
         // §10.2.2.1: `SLU` is what lets the MAC see the PHY's link at all;

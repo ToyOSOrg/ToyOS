@@ -144,11 +144,7 @@ pub struct Nic {
 
 impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
-    pub fn open(
-        dev: PciDev,
-        part: toyos_i219::Part,
-        mdio: toyos_i219::Mdio,
-    ) -> Result<Self, Opening> {
+    pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
         let dev = Rc::new(dev);
         let info = dev
             .describe()
@@ -187,7 +183,6 @@ impl Nic {
         let registers = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
         let driver = toyos_i219::I219::open(
             part,
-            mdio,
             Bar { window: registers, _mapped: mapped },
             Monotonic,
             Grant { window: grant, device_base, _region: region },
