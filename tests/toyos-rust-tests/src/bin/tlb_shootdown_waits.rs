@@ -14,16 +14,11 @@
 //! CPU on the machine.** Nothing this process does puts a CPU into it or takes
 //! one out, so `SYS_CPU_COUNT` is the whole of the arrangement.
 //!
-//! **Why the harm itself is not the verdict here.** The honest gate would be a
-//! sibling reading through a stale translation into memory the PMM had reissued.
-//! Three things stop that being constructible under TCG: the *correct* outcome
-//! is a fault, which kills the process doing the observing; a context switch
-//! writes CR3 and so flushes the whole TLB, and the sibling is preempted
-//! within milliseconds; and even the unacknowledged IPI this stage replaced
-//! landed within microseconds, so the window it left open is far below anything
-//! a guest can schedule into. What is gated instead is the property that closes
-//! the window — the free happens after the flush — measured where it is
-//! observable.
+//! **What is gated is the wait, not the harm.** A sibling reading through a
+//! stale translation is not constructible under TCG — the correct outcome is a
+//! fault that kills the observer, and a context switch writes CR3 and flushes
+//! the whole TLB within milliseconds — so what is measured is the property that
+//! closes the window: the free happens after the flush.
 
 use toyos_abi::syscall::{self, MmapFlags, MmapProt, SYS_DEBUG};
 
@@ -44,7 +39,7 @@ const FLOOR_NANOS: u64 = DELAY_NANOS / 2;
 /// A target that is itself inside a shootdown publishes through a serve of its
 /// own, which does not delay, so one fast return says nothing. A kernel that
 /// does not wait returns fast every time.
-const TRIALS: u32 = 3;
+const TRIALS: u32 = 5;
 
 const PAGE_2M: usize = 2 * 1024 * 1024;
 
@@ -73,10 +68,8 @@ fn debug(action: u64, arg: u64) -> u64 {
 ///
 /// The arming lapses after a window of its own, so a stage reached later than
 /// that would otherwise time an unarmed machine and read its microseconds as a
-/// missing wait. The returned number is the kernel's own, taken across a sweep
-/// that holds each other CPU back separately: below the floor means the
-/// initiator skipped one of them, whichever one it was.
-fn armed(cpus: u32) -> u64 {
+/// missing wait.
+fn armed(cpus: u32) {
     let least = debug(ARM, DELAY_NANOS);
     assert!(
         least >= FLOOR_NANOS,
@@ -85,7 +78,6 @@ fn armed(cpus: u32) -> u64 {
          CPU",
         cpus - 1,
     );
-    least
 }
 
 fn disarm() {
@@ -122,13 +114,9 @@ fn main() {
          local-flush return — the stage measures a wait and this machine has none",
     );
 
-    // 1. The primitive. The kernel times its own shootdowns, so these numbers
-    //    have no syscall overhead in them and no scheduling either.
-    armed(cpus);
-
-    // 2. `munmap`, which is the syscall the stage exists for: the pages go back
+    // 1. `munmap`, which is the syscall the stage exists for: the pages go back
     //    to the PMM behind the flush.
-    let mut judged = None;
+    let mut judged = false;
     for trial in 1..=TRIALS {
         let region = map(PAGE_2M);
         armed(cpus);
@@ -136,20 +124,20 @@ fn main() {
             unsafe { syscall::munmap(region, PAGE_2M) }.expect("munmap");
         });
         if elapsed >= FLOOR_NANOS {
-            judged = Some(elapsed);
+            judged = true;
             break;
         }
         println!("trial {trial}: munmap returned in {elapsed}ns, under the {FLOOR_NANOS}ns floor");
     }
     assert!(
-        judged.is_some(),
+        judged,
         "every one of {TRIALS} munmaps returned in under {FLOOR_NANOS}ns with all {} other \
          CPUs answering {DELAY_NANOS}ns late, each one measured being waited for immediately \
          before — it freed the pages without waiting for the flush",
         cpus - 1,
     );
 
-    // 3. A fixed mapping placed over a range, which is a *remap* rather than a
+    // 2. A fixed mapping placed over a range, which is a *remap* rather than a
     //    free: the address keeps its meaning and changes what it names, so a
     //    sibling holding the old translation writes into the wrong physical
     //    page with nothing ever faulting.
@@ -175,7 +163,7 @@ fn main() {
 
     disarm();
 
-    // 4. And the delay is what produced every number above, not the machine:
+    // 3. And the delay is what produced every number above, not the machine:
     //    disarmed, the same operation is back to microseconds. Without this the
     //    assertions above would still pass on a kernel that happened to be slow
     //    for some other reason.

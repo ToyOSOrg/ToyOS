@@ -187,8 +187,6 @@ const ACTUATOR_TESTS: &[&str] = &[
 /// no actuator armed in it.
 const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
-/// How wide that boot is, and why it is not the default.
-///
 /// `tlb_shootdown_waits` asserts a claim about every *other* CPU, and two vCPUs
 /// leave exactly one — a width at which a wait narrowed to a single sibling and
 /// a wait for the whole set are the same measurement. Four is the smallest

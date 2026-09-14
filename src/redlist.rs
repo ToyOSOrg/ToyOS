@@ -2659,8 +2659,7 @@ pub const KNOWN_RED: &[Red] = &[
         ),
         what: "`exit code 101` at 53 ms — the guest binary's own assertion. **Not about \
                the diff it was found on**, two issue files and a tests/CLAUDE.md bullet \
-               (PR #150). The 2026-09-14 sighting is the one that settled it: red twice \
-               and then red again alone, `panicked at \
+               (PR #150). Red twice and then red again alone, `panicked at \
                src/bin/tlb_shootdown_waits.rs:170:9` and then `:179:5`, under \
                `ALONE tlb_shootdown_waits: red again, the same failure both times — \
                the defect is real`",

@@ -240,10 +240,8 @@ fn open_arm_window() {
 /// Delays after the flush and before publication, so it can only slow a
 /// correct answer, never hide an incorrect one.
 ///
-/// Held back on every path a CPU answers *another* CPU's shootdown on, and on
-/// none where a CPU answers its own: an initiator's own flush is not part of
-/// the wait under measurement, so delaying it would spend that wait on the
-/// initiator's own hand.
+/// An initiator's own flush is not part of the wait under measurement, so
+/// delaying it would spend that wait on the initiator's own hand.
 #[cfg(feature = "test-actuators")]
 fn stage_ack_delay() {
     let now = crate::clock::nanos_since_boot();
@@ -262,11 +260,10 @@ fn stage_ack_delay() {
 
 /// Hold each other CPU's acknowledgement back for `nanos` in turn, take one
 /// shootdown against each, and report the **smallest** wait any of them cost
-/// the initiator: a CPU the initiator does not wait for answers in
-/// microseconds and drags that minimum below `nanos`, so this measures the
-/// width of the target set and not only its depth. The arming is then left
-/// standing against every other CPU and outlives the call, so a caller can time
-/// a syscall's own shootdown next.
+/// the initiator, which measures the width of the target set and not only its
+/// depth. The arming is then left standing against every other CPU until a
+/// disarm or the end of a fresh [`ARM_WINDOW_NANOS`], whichever comes first, so
+/// a caller can time a syscall's own shootdown inside that window.
 ///
 /// Preemption is off across the sweep because each held-back CPU is chosen
 /// against this one: a thread that migrated mid-sweep would arm the CPU it is
