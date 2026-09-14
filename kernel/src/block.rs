@@ -83,10 +83,6 @@ pub(crate) fn between_attempts(attempt: u32) {
 /// is not about time**: `quiesce` stops userland and then claims every
 /// filesystem is synced, and this is what the block layer says about that
 /// claim.
-///
-/// `iod`, `usbd` and the xHCI cache flush go on running across the stop by
-/// design, so an operation of theirs is not what the claim is about and is not
-/// counted here.
 static OPEN_OPERATIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// The same operations over the whole boot rather than right now. **The

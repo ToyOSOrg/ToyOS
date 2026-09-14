@@ -163,26 +163,10 @@ pub fn metal_job_reboot(
 
 /// **`Rebooting.` is the last record, and it is last by construction.**
 ///
-/// The guest writes and fsyncs from six threads and then asks for the reset
-/// from a seventh, so every claim `quiesce` makes is made over a machine that
-/// was busy an instant earlier. Four things are judged, and the stop reverted
-/// fails each on its own:
-///
-/// * **nothing at all follows `Rebooting.` on the console** — which is a judge
-///   and not a formality because each writer prints every pass, so six threads
-///   with the shutdown's staged hundred milliseconds still to run put lines
-///   under the last word on a machine that was not stopped;
-/// * the kernel's `stop:` record says every userland thread it had to stop was;
-/// * **zero block-device operations were open when the stop ended** — a count
-///   the block layer keeps, not one the stop derives, so the two can disagree;
-/// * and that count counted at all, which the operations this boot began is
-///   what says: a counter that never incremented reads zero for the wrong
-///   reason, and the writers above put thousands through it.
-///
 /// `quiesce-late-word` is armed for the reason `usb_reset_hands_devices_back`'s
 /// deadline arm arms it: QEMU has no window between the boot's last word and
-/// the reset and hardware does, so without it the third judge is green whether
-/// or not anything was stopped.
+/// the reset and hardware does, so without it the order judge below is green
+/// whether or not anything was stopped.
 pub fn quiesce_stops_the_machine(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -194,6 +178,10 @@ pub fn quiesce_stops_the_machine(
     // The one binary this config's job list names: every other one staged
     // beside it is image the boot pays to write and never reads.
     const JOB: &str = "quiesce_writers";
+    // What that binary prints every pass, and how many of its threads do. Spelt
+    // here because a guest binary cannot be linked from the harness.
+    const WRITING: &str = "quiesce-writer: ";
+    const WRITERS: usize = 6;
     let bins: Vec<(String, Vec<u8>)> =
         rust_bins.iter().filter(|(name, _)| name == JOB).cloned().collect();
     if bins.len() != 1 {
@@ -222,18 +210,36 @@ pub fn quiesce_stops_the_machine(
     serial::Serial::named("quiesce drain", tail.as_str()).must_be_clean()?;
     returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
 
-    // **First, because it is the defect and the rest are the mechanism.** The
-    // whole change reverted reds here, on the record a writer thread put under
-    // the boot's own last word.
-    //
-    // The word's presence is asserted before what follows it: a boot that
-    // never wrote it has nothing after it either, and would pass this
-    // vacuously.
-    let mut lines = whole.lines();
-    if !lines.any(|line| line.contains(REBOOTING)) {
-        return Err(format!("this boot never wrote {REBOOTING:?}\n{whole}"));
+    let lines: Vec<&str> = whole.lines().collect();
+    // The word's presence is asserted before what follows it: a boot that never
+    // wrote it has nothing after it either, and would pass vacuously.
+    let last_word = lines
+        .iter()
+        .position(|line| line.contains(REBOOTING))
+        .ok_or_else(|| format!("this boot never wrote {REBOOTING:?}\n{whole}"))?;
+
+    // **Each writer's own record, above the last word.** A boot whose workload
+    // never ran — a spawn that failed, an endowment that changed, a first
+    // `File::create` that did not open — leaves nothing under that word either,
+    // and would pass every judge below over a machine that had nothing to stop.
+    let silent: Vec<String> = (0..WRITERS)
+        .map(|writer| format!("{WRITING}{writer} "))
+        .filter(|said| !lines[..last_word].iter().any(|line| line.contains(said)))
+        .collect();
+    if !silent.is_empty() {
+        return Err(format!(
+            "{} of this boot's {WRITERS} writers never wrote above the boot's last word \
+             ({}), so nothing here is a claim about a machine that was busy:\n{whole}",
+            silent.len(),
+            silent.join(", ").trim_end(),
+        ));
     }
-    let after: Vec<&str> = lines.filter(|line| !line.trim().is_empty()).collect();
+
+    // **The defect itself, and the rest are the mechanism.** The whole change
+    // reverted reds here, on the record a writer thread put under the boot's
+    // own last word.
+    let after: Vec<&str> =
+        lines[last_word + 1..].iter().copied().filter(|line| !line.trim().is_empty()).collect();
     if !after.is_empty() {
         return Err(format!(
             "{} line(s) reached the console after the boot's last word:\n  {}",
@@ -1402,13 +1408,8 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
 }
 
 /// The shutdown's second stage: the log's own writer stopped once the boot's
-/// last word was durable.
-///
-/// **Read off the page and nowhere else.** That stage runs below the last
-/// word, so a record of it in the log would be the thing this whole path
-/// prevents — it goes on the black box, and the pass after the reset prints
-/// it. The first stage's record is in the same capture, on the first boot's
-/// console, which is why this reads only what follows the seal.
+/// last word was durable. Read after the seal, because the first stage's record
+/// is in the same capture on the first boot's console.
 fn stopped_the_log_writer_too(after: &serial::Serial) -> Result<(), String> {
     let said = after.must_say_after(&done_line(), toyos_quiesce::STOPPED)?;
     let record = toyos_quiesce::Record::parse(said)

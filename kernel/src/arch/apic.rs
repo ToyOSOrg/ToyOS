@@ -138,7 +138,6 @@ pub fn kick_cpu(cpu_id: u32) {
     Reg::Icr.write(((apic_id as u64) << 32) | 0x4000 | TIMER_VECTOR as u64);
 }
 
-/// Kick every CPU but the calling one.
 // Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the next scheduler pass.
 pub fn kick_all_but_self() {
     let me = percpu::cpu_id();

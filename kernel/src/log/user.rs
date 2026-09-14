@@ -108,15 +108,19 @@ pub fn durable_ns() -> u64 {
     DURABLE_NS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Every process that has passed [`Rights::LOG`]'s check on `SYS_LOG_READ`.
+/// Every live process that has passed [`Rights::LOG`]'s check on
+/// `SYS_LOG_READ`.
 ///
 /// **The kernel's only name for a log writer, and the name is the parent's.**
 /// The capability comes from `/system/bin/init`'s `system.toml`, so nothing a
 /// process says about itself joins this set. The shutdown's stop carves these
 /// out until the boot's last word is durable, because they are exactly the
 /// processes that can move [`durable_ns`] and so satisfy
-/// [`super::wait_for_durable`]; a config granting two programs the capability
-/// carves out both rather than picking.
+/// [`super::wait_for_durable`].
+///
+/// Bounded by the live process count, which is what [`forget_log_reader`] is
+/// for: an entry a teardown left behind would be a carve-out held by a pid
+/// nothing can hand back.
 static LOG_READERS: Lock<Vec<u32>> = Lock::new(Vec::new());
 
 /// Called where the capability was demanded, and nowhere a caller's own words
@@ -126,6 +130,12 @@ pub fn note_log_reader(pid: u32) {
     if !readers.contains(&pid) {
         readers.push(pid);
     }
+}
+
+/// Called from the process teardown, under `PROCESS_TABLE`, which is this
+/// lock's order.
+pub fn forget_log_reader(pid: u32) {
+    LOG_READERS.lock().retain(|&p| p != pid);
 }
 
 pub fn keeps_the_log(pid: u32) -> bool {

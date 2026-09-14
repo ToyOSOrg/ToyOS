@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::hasher::HashMap;
 use toyos_sched::fair::{ShareState, QUANTUM_NS};
 use toyos_sched::hw::{CpuId, Machine, Nanos};
-use toyos_sched::task::{WaitClass, WakeCause, WakeReason};
+use toyos_sched::task::{SafePoint, WaitClass, WakeCause, WakeReason};
 
 use crate::arch::percpu;
 use crate::completion::{self, Cancel, Outcome, Subject};
@@ -363,33 +363,36 @@ pub fn do_preempt() {
     driver::pass(Dispose::None);
 }
 
-/// A killed thread's last safe point: the return to Ring 3. Called from every
-/// Ring 3 exit boundary, since a killed task is dispatched rather than reaped
-/// and would otherwise run in userland unbounded.
-#[track_caller]
-pub fn exit_if_killed() {
-    if !driver::current_kill_pending() {
-        return;
-    }
-    assert_baseline(BASELINE_IRQ_EXIT);
-    // The retirer owns teardown; a mark_thread_zombie here would race it.
-    driver::pass(Dispose::Exit);
-    unreachable!("exit_if_killed: returned from the exit pass");
+/// Whether the running thread's next return to Ring 3 is one it never makes.
+/// A kernel retry loop that would otherwise outlive its caller asks this.
+pub fn never_returns_to_ring3() -> bool {
+    driver::current_safe_point(crate::quiesce::stops_this_thread()).is_some()
 }
 
-/// Stop the running thread where it stands, for the life of this machine.
+/// The last thing a thread does before returning to Ring 3, if either mark it
+/// can carry says it never does. `kernel_exit_to_user_check` is the one caller;
+/// `kernel/src/quiesce.rs`'s header says why that boundary is the safe point.
 ///
-/// Called from the same boundary [`exit_if_killed`] is, at the same baseline,
-/// and it rests on the same fact about that boundary: a thread standing there
-/// holds no kernel lock, has nothing in the block layer and nothing in flight
-/// on any controller — it is between two userland instructions. The one it
-/// never takes is what stops it entering the kernel again, and every record
-/// this kernel writes with a userland author is written from inside a syscall.
+/// **One call and one match, so the two marks have no order to disagree
+/// about**: `toyos_sched::task::SafePoint` ranks them, here and in
+/// `CpuSched::place` alike.
 #[track_caller]
-pub fn stop_current() -> ! {
+pub fn leave_ring3_if_due() {
+    let Some(due) = driver::current_safe_point(crate::quiesce::stops_this_thread()) else {
+        return;
+    };
     assert_baseline(BASELINE_IRQ_EXIT);
-    driver::pass(Dispose::Stop);
-    unreachable!("stop_current: a stopped task was dispatched again");
+    match due {
+        SafePoint::Stop => {
+            driver::pass(Dispose::Stop);
+            unreachable!("leave_ring3_if_due: a stopped task was dispatched again");
+        }
+        SafePoint::Exit => {
+            // The retirer owns teardown; a mark_thread_zombie here would race it.
+            driver::pass(Dispose::Exit);
+            unreachable!("leave_ring3_if_due: returned from the exit pass");
+        }
+    }
 }
 
 #[track_caller]

@@ -933,9 +933,7 @@ pub fn run(
                     back.back_secs, back.stick_secs
                 );
                 // **The profile's row is what a boot owes, and the boot's own
-                // record is what it paid.** The two lateness fields are `None`
-                // on every boot but the one armed to stop itself, and at most
-                // one is ever `Some` — a boot has one bound that ended it. A
+                // record is what it paid.** A
                 // boot the file prices a lateness for and that produced none is
                 // therefore a boot some *other* bound ended, which is exactly
                 // what a run of `deadlinewedge` sealed by the lockup detector

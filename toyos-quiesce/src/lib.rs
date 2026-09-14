@@ -22,14 +22,20 @@
 
 use core::fmt;
 
+/// One thread, as the kernel's task ids spell it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ThreadId {
+    pub pid: u32,
+    pub tid: u32,
+}
+
 /// What the stop knows about one thread.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Thread {
-    pub pid: u32,
-    pub tid: u32,
-    /// Whether this thread's process holds the capability to read the kernel
-    /// log — the whole set of processes that can satisfy the shutdown's wait
-    /// for durability, and so the whole set the first stage carves out.
+    pub id: ThreadId,
+    /// Whether this thread's process has read the kernel log, which is what a
+    /// process must have done for the shutdown's wait for durability to be
+    /// owed it an answer.
     pub keeps_the_log: bool,
 }
 
@@ -51,8 +57,8 @@ impl Stage {
     /// exempt — a sibling thread of the process that asked for the reboot
     /// stops like any other, because what the reset must outlast is one
     /// thread's remaining work and not one program's.
-    pub fn must_stop(self, thread: Thread, caller: (u32, u32)) -> bool {
-        if (thread.pid, thread.tid) == caller {
+    pub fn must_stop(self, thread: Thread, caller: ThreadId) -> bool {
+        if thread.id == caller {
             return false;
         }
         match self {
@@ -77,35 +83,17 @@ impl Sweep {
     pub fn total(self) -> u32 {
         self.stopped + self.running
     }
-}
 
-/// What the caller does next.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Progress {
-    /// Every thread that had to stop has. Nothing in userland can enter the
-    /// kernel again, so no record written from here on has a userland author.
-    Done,
-    /// Sweep again.
-    Waiting,
-    /// The budget is spent and some thread never reached a safe point. **A
-    /// record and not a hang**: a machine nobody can turn off is worse than a
-    /// reset that lands inside somebody's syscall, which is the state this
-    /// whole path is an improvement on rather than a guarantee against.
-    Expired,
-}
-
-impl Progress {
-    /// **`Done` outranks `Expired`.** A sweep that completed the stop on the
-    /// very tick the budget ran out stopped the machine, and reporting that as
-    /// an expiry would put a degradation in the log that did not happen.
-    pub fn of(sweep: Sweep, elapsed_ns: u64, budget_ns: u64) -> Progress {
-        if sweep.running == 0 {
-            return Progress::Done;
-        }
-        if elapsed_ns >= budget_ns {
-            return Progress::Expired;
-        }
-        Progress::Waiting
+    /// Whether the caller sweeps again.
+    ///
+    /// **A spent budget ends the wait; it never ends the reset.** What is left
+    /// running when this answers `false` is what [`Record`]'s shortfall clause
+    /// names, because a machine nobody can turn off is worse than a reset that
+    /// lands inside somebody's syscall. A sweep that finished the stop on the
+    /// very tick the budget ran out finished it: the running count is read
+    /// first.
+    pub fn keep_waiting(self, elapsed_ns: u64, budget_ns: u64) -> bool {
+        self.running != 0 && elapsed_ns < budget_ns
     }
 }
 
@@ -209,15 +197,19 @@ mod tests {
 
     use super::*;
 
-    const CALLER: (u32, u32) = (10, 0);
+    const CALLER: ThreadId = ThreadId { pid: 10, tid: 0 };
     const LOGD: u32 = 2;
 
+    fn id(pid: u32, tid: u32) -> ThreadId {
+        ThreadId { pid, tid }
+    }
+
     fn thread(pid: u32, tid: u32) -> Thread {
-        Thread { pid, tid, keeps_the_log: false }
+        Thread { id: id(pid, tid), keeps_the_log: false }
     }
 
     fn log_thread(pid: u32, tid: u32) -> Thread {
-        Thread { pid, tid, keeps_the_log: true }
+        Thread { id: id(pid, tid), keeps_the_log: true }
     }
 
     #[test]
@@ -239,11 +231,11 @@ mod tests {
         assert!(Stage::All.must_stop(log_thread(LOGD, 0), CALLER), "and then it too");
     }
 
-    /// A config that gives two programs the log capability carves out both:
-    /// either could be the one the durability wait is owed to, and the stop
-    /// has no way to tell which, so it may not pick.
+    /// A boot where two programs have read the log carves out both: either
+    /// could be the one the durability wait is owed to, and the stop has no way
+    /// to tell which, so it may not pick.
     #[test]
-    fn every_holder_of_the_capability_is_carved_out() {
+    fn every_process_that_has_read_the_log_is_carved_out() {
         assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 0), CALLER));
         assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD + 4, 0), CALLER));
         assert!(Stage::All.must_stop(log_thread(LOGD + 4, 0), CALLER));
@@ -254,39 +246,35 @@ mod tests {
     /// the other.
     #[test]
     fn the_caller_being_the_log_writer_stops_neither_rule_working() {
-        assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 0), (LOGD, 0)));
+        assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 0), id(LOGD, 0)));
         assert!(
-            !Stage::ExceptLog.must_stop(log_thread(LOGD, 7), (LOGD, 0)),
+            !Stage::ExceptLog.must_stop(log_thread(LOGD, 7), id(LOGD, 0)),
             "a sibling of the caller is still carved out while the stage names it",
         );
-        assert!(Stage::All.must_stop(log_thread(LOGD, 7), (LOGD, 0)), "and not after");
+        assert!(Stage::All.must_stop(log_thread(LOGD, 7), id(LOGD, 0)), "and not after");
     }
 
     #[test]
-    fn a_sweep_with_nothing_left_running_is_done_however_long_it_took() {
+    fn a_sweep_with_nothing_left_running_ends_the_wait_however_long_it_took() {
         let done = Sweep { stopped: 6, running: 0 };
-        assert_eq!(Progress::of(done, 0, 2_000), Progress::Done);
-        assert_eq!(Progress::of(done, 2_000, 2_000), Progress::Done);
-        assert_eq!(
-            Progress::of(done, u64::MAX, 2_000),
-            Progress::Done,
-            "a stop that completed is never reported as an expiry",
-        );
+        assert!(!done.keep_waiting(0, 2_000));
+        assert!(!done.keep_waiting(2_000, 2_000));
+        assert!(!done.keep_waiting(u64::MAX, 2_000));
     }
 
     #[test]
     fn the_budget_ends_the_wait_and_the_boundary_is_inclusive() {
         let left = Sweep { stopped: 4, running: 2 };
-        assert_eq!(Progress::of(left, 0, 2_000), Progress::Waiting);
-        assert_eq!(Progress::of(left, 1_999, 2_000), Progress::Waiting);
-        assert_eq!(Progress::of(left, 2_000, 2_000), Progress::Expired);
+        assert!(left.keep_waiting(0, 2_000));
+        assert!(left.keep_waiting(1_999, 2_000));
+        assert!(!left.keep_waiting(2_000, 2_000));
     }
 
     /// A machine with no userland left at all — every process already exited —
     /// is stopped, not waiting.
     #[test]
     fn an_empty_machine_is_already_stopped() {
-        assert_eq!(Progress::of(Sweep::default(), 0, 2_000), Progress::Done);
+        assert!(!Sweep::default().keep_waiting(0, 2_000));
     }
 
     const WHOLE: Record = Record {

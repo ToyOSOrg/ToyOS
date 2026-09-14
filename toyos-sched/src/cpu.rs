@@ -1143,7 +1143,7 @@ impl<X: SchedPayload> CpuSched<X> {
             // * `WaitTicket::commit` still refuses to park a killed task, which
             //   is what keeps it *running* rather than parked where no wake is
             //   coming;
-            // * and `kernel::scheduler::exit_if_killed` at the return to Ring 3
+            // * and `kernel::scheduler::leave_ring3_if_due` at the return to Ring 3
             //   is the backstop for a thread that never parks again, with an
             //   empty kernel stack by construction.
             //

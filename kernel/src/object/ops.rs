@@ -599,8 +599,8 @@ pub fn fsync(object: &KObjectRef) -> u64 {
             // A budget expired on a live device, never a device fact: retry on a fresh budget.
             // A refused attempt discards nothing — an unsettled debt needs no restoring.
             Err(SyscallError::WouldBlock) => {
-                // A killed caller stops retrying at the first safe point; the return value dies with the task.
-                if crate::sched::driver::current_kill_pending() {
+                // A caller that never returns to Ring 3 — killed, or named by the machine's stop — stops retrying here; the return value dies with the task.
+                if crate::scheduler::never_returns_to_ring3() {
                     return SyscallError::WouldBlock.to_u64();
                 }
                 if deadman.reached(crate::clock::now()) {

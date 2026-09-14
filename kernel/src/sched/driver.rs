@@ -770,9 +770,9 @@ pub fn current_symbols() -> Option<Arc<crate::symbols::SymbolTable>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().symbols.clone())).flatten()
 }
 
-/// Whether the running task has been killed — one relaxed load, no clone, since an `Arc` refcount here is too costly on this path.
-pub fn current_kill_pending() -> bool {
-    try_with_cpu(|cpu| cpu.running().is_some_and(|t| t.shared().kill_pending())).unwrap_or(false)
+/// What the running task's marks say it does instead of returning to Ring 3 — one load, no clone, since an `Arc` refcount here is too costly on this path.
+pub fn current_safe_point(stopping: bool) -> Option<toyos_sched::task::SafePoint> {
+    try_with_cpu(|cpu| cpu.running().and_then(|t| t.shared().at_safe_point(stopping))).flatten()
 }
 
 pub fn current_cpu() -> CpuId {

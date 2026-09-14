@@ -172,9 +172,19 @@ const RETIRE_QUEUED: u64 = 1 << 63;
 /// dispatched *sooner* so it can unwind and release what a retirer waits on;
 /// a stopped one is never dispatched at all, because the machine is going away
 /// and what it would do on the way out is the thing being prevented. Where a
-/// task carries both, this one decides.
+/// task carries both, [`SafePoint`] is where that is decided.
 const STOP: u64 = 1 << 61;
 const STICKY: u64 = KILL | RETIRE_QUEUED | STOP;
+
+/// What a thread standing at a Ring 3 boundary does instead of returning to
+/// userland.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SafePoint {
+    /// Band it where it stands; it takes [`STOP`] here.
+    Stop,
+    /// Let it unwind and die: [`KILL`].
+    Exit,
+}
 
 /// A sticky bit landing on a packed field would make `retarget` rewrite the
 /// discriminant, the home CPU or the commit generation, and nothing at runtime
@@ -349,6 +359,22 @@ impl<M> TaskShared<M> {
 
     pub fn stop_pending(&self) -> bool {
         self.state.load(Ordering::Acquire) & STOP != 0
+    }
+
+    /// **The one rank of the two marks**, read by the kernel's Ring 3 boundary
+    /// and applied to a task that is not running by `CpuSched::place`:
+    /// [`SafePoint::Stop`] outranks [`SafePoint::Exit`], because the unwind a
+    /// killed task is dispatched for is what writes the record the machine's
+    /// stop exists to keep out from under the boot's last word.
+    ///
+    /// `stopping` is a parameter and the kill is the word's: a running task may
+    /// not carry [`STOP`] while it might still hold a kernel lock, so it takes
+    /// that mark at this boundary and never before.
+    pub fn at_safe_point(&self, stopping: bool) -> Option<SafePoint> {
+        if stopping {
+            return Some(SafePoint::Stop);
+        }
+        self.kill_pending().then_some(SafePoint::Exit)
     }
 
     /// Stop a task that is parked, and answer whether it now carries [`STOP`].
@@ -1110,6 +1136,23 @@ mod tests {
         let s = running(C0);
         assert!(s.claim_retire());
         assert!(!s.claim_retire(), "single-retirer is a kernel invariant");
+    }
+
+    /// The kernel's Ring 3 boundary reads this and nothing else, so a boundary
+    /// that ranked the two marks the other way would dispatch a killed thread
+    /// to unwind — and log — on a machine that is stopping.
+    #[test]
+    fn stopping_outranks_killing_at_a_safe_point() {
+        let s = running(C0);
+        assert_eq!(s.at_safe_point(false), None);
+        assert_eq!(s.at_safe_point(true), Some(SafePoint::Stop));
+        s.mark_kill();
+        assert_eq!(s.at_safe_point(false), Some(SafePoint::Exit));
+        assert_eq!(
+            s.at_safe_point(true),
+            Some(SafePoint::Stop),
+            "a thread carrying both is banded, never unwound",
+        );
     }
 
     #[test]

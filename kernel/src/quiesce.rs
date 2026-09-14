@@ -6,13 +6,14 @@
 //!
 //! # Where the stop is taken, and why there
 //!
-//! [`stop_here_if_due`] is called from `kernel_exit_to_user_check`, the one
-//! function every return to Ring 3 in this kernel passes through — the syscall
-//! gate, every device interrupt, the timer, the TLB shootdown IPI, the general
-//! trap epilogue and a task's first dispatch. A thread standing there holds no
-//! kernel lock, has nothing in the block layer and nothing in flight on any
-//! controller; it is between two userland instructions, and every record this
-//! kernel writes with a userland author is written from inside a syscall.
+//! [`stops_this_thread`] is read by `scheduler::leave_ring3_if_due`, called
+//! from `kernel_exit_to_user_check` — the one function every return to Ring 3
+//! in this kernel passes through: the syscall gate, every device interrupt, the
+//! timer, the TLB shootdown IPI, the general trap epilogue and a task's first
+//! dispatch. A thread standing there holds no kernel lock, has nothing in the
+//! block layer and nothing in flight on any controller; it is between two
+//! userland instructions, and every record this kernel writes with a userland
+//! author is written from inside a syscall.
 //!
 //! # What keeps running
 //!
@@ -32,7 +33,7 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering::Acquire, Ordering::Relaxed, Ordering::Release};
 
-use toyos_quiesce::{Progress, Record, Stage, Sweep, Thread};
+use toyos_quiesce::{Record, Stage, Sweep, Thread, ThreadId};
 
 use crate::arch::percpu;
 use crate::process;
@@ -85,35 +86,28 @@ fn stage() -> Option<Stage> {
     }
 }
 
-fn caller() -> (u32, u32) {
-    (CALLER_PID.load(Relaxed), CALLER_TID.load(Relaxed))
+fn caller() -> ThreadId {
+    ThreadId { pid: CALLER_PID.load(Relaxed), tid: CALLER_TID.load(Relaxed) }
 }
 
-/// The running thread's last return to Ring 3, if this machine is stopping.
-///
-/// Called from `kernel_exit_to_user_check` beside
-/// [`crate::scheduler::exit_if_killed`]; see the module header for why there
-/// and nowhere else.
-pub fn stop_here_if_due() {
-    let Some(stage) = stage() else { return };
+/// Whether the machine's stop names the running thread, for the one Ring 3
+/// boundary that ranks this against the kill mark.
+pub fn stops_this_thread() -> bool {
+    let Some(stage) = stage() else { return false };
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
-        return;
+        return false;
     };
     // A kernel thread reaches this boundary on its first dispatch and has no
     // Ring 3 to be stopped from; `klogd` and `iod` are also what carries the
     // log to its volume while userland is being stopped around them.
     if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
-        return;
+        return false;
     }
     let thread = Thread {
-        pid: pid.raw(),
-        tid: tid.raw(),
+        id: ThreadId { pid: pid.raw(), tid: tid.raw() },
         keeps_the_log: crate::log::user::keeps_the_log(pid.raw()),
     };
-    if !stage.must_stop(thread, caller()) {
-        return;
-    }
-    crate::scheduler::stop_current()
+    stage.must_stop(thread, caller())
 }
 
 /// Stop every userland thread `stage` names, and answer with what it took.
@@ -127,12 +121,12 @@ pub fn stop(stage: Stage) -> Record {
     // Refused by name rather than defaulted: a caller with no task identity is
     // not a reboot syscall, and `(0, 0)` would exempt whichever thread holds
     // those ids instead.
-    let caller = (
-        percpu::current_pid().expect("quiesce::stop: the caller holds no process").raw(),
-        percpu::current_tid().expect("quiesce::stop: the caller holds no thread").raw(),
-    );
-    CALLER_PID.store(caller.0, Relaxed);
-    CALLER_TID.store(caller.1, Relaxed);
+    let caller = ThreadId {
+        pid: percpu::current_pid().expect("quiesce::stop: the caller holds no process").raw(),
+        tid: percpu::current_tid().expect("quiesce::stop: the caller holds no thread").raw(),
+    };
+    CALLER_PID.store(caller.pid, Relaxed);
+    CALLER_TID.store(caller.tid, Relaxed);
     // Last, and `Release`: a gate that sees this stage sees the caller it must
     // not stop.
     STAGE.store(
@@ -143,10 +137,7 @@ pub fn stop(stage: Stage) -> Record {
         Release,
     );
 
-    // Kicked, and not left to arrive on their own: a CPU halted in the idle
-    // path has stopped its own timer, and a thread spinning in Ring 3 would
-    // otherwise hold its CPU until the quantum it is in runs out. The kick is
-    // the timer vector, whose return to Ring 3 is the gate.
+    // The kick is the timer vector, whose return to Ring 3 is the gate.
     crate::arch::apic::kick_all_but_self();
     let cpus = crate::arch::smp::cpu_count();
 
@@ -156,23 +147,22 @@ pub fn stop(stage: Stage) -> Record {
         let swept = sweep(stage, caller);
         sweeps += 1;
         let elapsed = crate::clock::nanos_since_boot().saturating_sub(began);
-        match Progress::of(swept, elapsed, PARK.nanos()) {
-            Progress::Waiting => between_sweeps(),
-            Progress::Done | Progress::Expired => {
-                // Read here and not by the caller: the question is what was
-                // open at the moment the stop ended, and every line between
-                // here and the record's own would open more.
-                let (in_flight, begun) = crate::block::userland_operations();
-                return Record {
-                    sweep: swept,
-                    elapsed_ms: elapsed / 1_000_000,
-                    sweeps,
-                    cpus,
-                    in_flight,
-                    begun,
-                };
-            }
+        if swept.keep_waiting(elapsed, PARK.nanos()) {
+            between_sweeps();
+            continue;
         }
+        // Read here and not by the caller: the question is what was open at the
+        // moment the stop ended, and every line between here and the record's
+        // own would open more.
+        let (in_flight, begun) = crate::block::userland_operations();
+        return Record {
+            sweep: swept,
+            elapsed_ms: elapsed / 1_000_000,
+            sweeps,
+            cpus,
+            in_flight,
+            begun,
+        };
     }
 }
 
@@ -189,7 +179,7 @@ fn between_sweeps() {
 ///
 /// The table lock is held for the walk and given up before the cadence above:
 /// a thread on another CPU finishing its own teardown takes this same lock.
-fn sweep(stage: Stage, caller: (u32, u32)) -> Sweep {
+fn sweep(stage: Stage, caller: ThreadId) -> Sweep {
     let mut out = Sweep::default();
     let guard = process::PROCESS_TABLE.lock();
     let Some(table) = guard.as_ref() else { return out };
@@ -197,7 +187,7 @@ fn sweep(stage: Stage, caller: (u32, u32)) -> Sweep {
         let pid = proc.pid();
         let keeps_the_log = crate::log::user::keeps_the_log(pid.raw());
         for (tid, thread) in proc.threads().iter() {
-            let who = Thread { pid: pid.raw(), tid: tid.raw(), keeps_the_log };
+            let who = Thread { id: ThreadId { pid: pid.raw(), tid: tid.raw() }, keeps_the_log };
             if !stage.must_stop(who, caller) {
                 continue;
             }
@@ -206,10 +196,17 @@ fn sweep(stage: Stage, caller: (u32, u32)) -> Sweep {
             if matches!(thread.state(), process::ThreadLocation::Zombie(_)) {
                 continue;
             }
-            let Some(sched) = thread.sched() else { continue };
             if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
                 continue;
             }
+            // Counted as running and not skipped: a thread between its table
+            // insert and its task mint has no task to mark, and a sweep that
+            // passed over it would report a machine stopped with a thread still
+            // to be dispatched.
+            let Some(sched) = thread.sched() else {
+                out.running += 1;
+                continue;
+            };
             // `stop_if_blocked` refuses a running thread, which is the whole
             // of the difference: that one has to reach its own safe point, and
             // until it does it is what this sweep is waiting for.

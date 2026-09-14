@@ -349,12 +349,8 @@ extern "sysv64" fn common_entry() {
 pub(crate) extern "sysv64" fn kernel_exit_to_user_check() {
     flush_ring0_timer_fires_to_trace();
     loop {
-        // A killed thread returns to Ring 3 exactly once more: never.
-        crate::scheduler::exit_if_killed();
-        // Neither does one on a machine that is stopping — and this is the one
-        // function every return to Ring 3 goes through, which is the whole of
-        // why a stopped thread can enter no further syscall.
-        crate::quiesce::stop_here_if_due();
+        // A killed or stopped thread returns to Ring 3 exactly once more: never.
+        crate::scheduler::leave_ring3_if_due();
         // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
         if !crate::preempt::need_resched() {
             return;

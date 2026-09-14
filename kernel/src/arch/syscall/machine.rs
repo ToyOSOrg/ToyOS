@@ -69,8 +69,7 @@ fn quiesce(last: &str) {
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
     crate::writeback::drain_all();
     crate::vfs::lock().sync_all();
-    // The final census: no process runs after this to report another, which is
-    // what `stopped` says.
+    // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
     crate::drivers::nvme::log_census();
     log!("{stopped}");

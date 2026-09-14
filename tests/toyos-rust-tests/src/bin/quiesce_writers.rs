@@ -7,16 +7,10 @@
 //! write-and-fsync loop, lets them get into it, and then asks for the reset
 //! from a thread that is not one of them.
 //!
-//! **Each writer says so on the console every pass**, which is what makes the
-//! order of that console a judge rather than a formality: on a machine that was
-//! not stopped, six threads with a hundred milliseconds of shutdown left to run
-//! put lines under the boot's own last word, and on one that was stopped not
-//! one of them can. Without those lines the console reads the same either way
-//! under QEMU, because nothing else these threads do writes a kernel record.
-//!
 //! Nothing here asserts: `common::power::quiesce_stops_the_machine` reads the
-//! kernel's own `stop:` record and the order of the console afterwards, which
-//! are the two things a guest cannot see about its own death.
+//! kernel's own `stop:` record and the order of the console around it, which
+//! are the two things a guest cannot see about its own death. It matches
+//! [`WRITING`] and [`WRITERS`] by their spellings there.
 
 use std::fs::File;
 use std::io::Write;
@@ -53,9 +47,7 @@ fn main() {
                 let path = format!("/log/quiesce-{writer}.bin");
                 let payload = [b'q'; CHUNK];
                 for pass in 0u64.. {
-                    // The line the judge counts if it lands after the boot's
-                    // last word. One per pass, so the rate is the write's and
-                    // not a spin's.
+                    // One per pass, so the rate is the write's and not a spin's.
                     println!("{WRITING} {writer} {pass}");
                     // Reopened each pass: the close is what puts the last
                     // chunk's pages where only a sync can reach them.
