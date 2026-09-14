@@ -222,16 +222,16 @@ pub fn quiesce_stops_the_machine(
     // never ran — a spawn that failed, an endowment that changed, a first
     // `File::create` that did not open — leaves nothing under that word either,
     // and would pass every judge below over a machine that had nothing to stop.
-    let silent: Vec<String> = (0..WRITERS)
-        .map(|writer| format!("{WRITING}{writer} "))
-        .filter(|said| !lines[..last_word].iter().any(|line| line.contains(said)))
+    let silent: Vec<usize> = (0..WRITERS)
+        .filter(|writer| {
+            let said = format!("{WRITING}{writer} ");
+            !lines[..last_word].iter().any(|line| line.contains(&said))
+        })
         .collect();
     if !silent.is_empty() {
         return Err(format!(
-            "{} of this boot's {WRITERS} writers never wrote above the boot's last word \
-             ({}), so nothing here is a claim about a machine that was busy:\n{whole}",
-            silent.len(),
-            silent.join(", ").trim_end(),
+            "writer(s) {silent:?} of this boot's {WRITERS} wrote nothing above the boot's last \
+             word, so nothing here is a claim about a machine that was busy:\n{whole}"
         ));
     }
 
