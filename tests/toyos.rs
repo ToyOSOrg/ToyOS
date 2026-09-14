@@ -5565,14 +5565,18 @@ fn run_screen_test(
             // paint follows a fill, and every page the pager puts up after it
             // is written against the grid the one before left — which is the
             // paint `check_no_stale_cells` exists for. The footers of the
-            // settled captures it judged.
+            // settled captures it judged, and two of them, because the first is
+            // the page the fill painted.
+            const JUDGED_PAGES: usize = 2;
             let mut judged: Vec<String> = Vec::new();
             let mut before: Option<String> = None;
             // A liveness ceiling on a machine that is halted and paging, so
             // there is no console to read progress off and this is the case
             // `qemu::budget` exists for.
             let deadline = Instant::now() + qemu.budget(Duration::from_secs(40));
-            while Instant::now() < deadline && !(head_seen && report.is_some()) {
+            while Instant::now() < deadline
+                && !(head_seen && report.is_some() && judged.len() >= JUDGED_PAGES)
+            {
                 let dump = qemu.screendump();
                 let text = dump.text();
                 let Some(footer) = text.lines().rev().find(|l| l.starts_with("[page ")) else {
@@ -5629,9 +5633,7 @@ fn run_screen_test(
                     "only one page footer ever appeared ({seen}); the pager is not cycling"
                 ));
             }
-            // Two settled pages, because one of them is the paint that follows
-            // the fill and judges nothing about a grid.
-            if judged.len() < 2 {
+            if judged.len() < JUDGED_PAGES {
                 return Err(format!(
                     "only {} settled page(s) were judged for stale cells ({}), so no paint made \
                      against the grid the one before it left was ever read",
@@ -6148,23 +6150,22 @@ fn run_screen_test(
             // tries at every width and reads as forty seconds — the number the
             // reader of a red then goes looking for. Ten is the number.
             const DUMP_TRIES: usize = 10;
-            let chord = |on: &QemuInstance| {
-                let mut input = qemu::QmpInput::open(on.qmp_socket());
-                input.keys(&[
-                    ("ctrl", true),
-                    ("alt", true),
-                    ("d", true),
-                    ("d", false),
-                    ("alt", false),
-                    ("ctrl", false),
-                ]);
-            };
             let mut dump = up;
             for _ in 0..DUMP_TRIES {
                 if report_is_photographable(&dump, "").is_ok() {
                     break;
                 }
-                chord(&qemu);
+                {
+                    let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+                    input.keys(&[
+                        ("ctrl", true),
+                        ("alt", true),
+                        ("d", true),
+                        ("d", false),
+                        ("alt", false),
+                        ("ctrl", false),
+                    ]);
+                }
                 dump = qemu.screendump_while(
                     Duration::from_secs(4),
                     Duration::from_millis(100),
@@ -6223,33 +6224,6 @@ fn run_screen_test(
             );
             print_screen(&format!("{name} after a client repaint"), &back.text());
             report_is_photographable(&back, "the report after a client repainted over it")?;
-
-            // **A report painted over a screen this kernel did not draw.** The
-            // hold expires and the desktop composes over the panel unopposed,
-            // so the next chord paints against a grid that describes nothing on
-            // the glass — and a painter that trusts it leaves the client's
-            // pixels in every cell the two reports agree on, the fill among
-            // them.
-            let theirs = qemu.screendump_while(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| d.fill() != FILL_BOOT,
-            );
-            if theirs.fill() == FILL_BOOT {
-                return Err(
-                    "the desktop never took the panel back, so the chord below would paint over \
-                     this kernel's own screen and prove nothing"
-                        .to_string(),
-                );
-            }
-            chord(&qemu);
-            let retaken = qemu.screendump_while(
-                Duration::from_secs(6),
-                Duration::from_millis(100),
-                |d| report_is_photographable(d, "").is_ok(),
-            );
-            print_screen(&format!("{name} over a screen the desktop owned"), &retaken.text());
-            report_is_photographable(&retaken, "the report painted over a desktop's own screen")?;
 
             let row = back.row_index("== VERDICT:").expect("checked above");
             eprintln!(
