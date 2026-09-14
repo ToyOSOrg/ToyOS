@@ -78,6 +78,29 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         DirectMap::phys_of(self.base)
     }
 
+    /// This view's base as a number, to be handed back to [`Self::from_addr`].
+    ///
+    /// For the one caller that has to keep the *numbers* and not the view: the
+    /// reset-time xHCI stop reads the open Bulk-Only command out of atomics,
+    /// because the CPU holding the driver's lock may be the wedged one that
+    /// reset is ending.
+    #[inline]
+    pub fn addr(self) -> u64 {
+        self.base as u64
+    }
+
+    /// Rebuild a view from an [`addr`](Self::addr), a
+    /// [`device_addr`](Self::device_addr) and a [`size`](Self::size) taken off a
+    /// live one.
+    ///
+    /// # Safety
+    /// The three must be one live view's own, over a pool that lives for the
+    /// machine's life.
+    #[inline]
+    pub unsafe fn from_addr(addr: u64, device: u64, size: usize) -> Self {
+        Self::new(addr as *mut u8, device, size)
+    }
+
     /// The `size` bytes at `offset`, refused if not wholly inside `self`.
     #[inline]
     pub fn subview(self, offset: usize, size: usize) -> Self {
