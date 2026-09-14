@@ -1440,12 +1440,21 @@ pub fn usb_load_chain(kernel: &serial::Serial, after: &serial::Serial) -> Result
 
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
-    // What state the reset found the hardware in. **Reported and not judged**:
-    // which of those states this platform's device survives is the open
-    // question, and a predicate over it would be this suite deciding the answer.
-    let said = after.must_say(CONTROLLER_STATE)?.to_string();
+    // **The account reaching the page is itself under test**: a report that
+    // filled the page left `blackbox::append` no bytes and no way to say so, and
+    // no wedge boot this bench took before `toyos_blackbox::ACCOUNT_BYTES`
+    // carried one. This is that reserve, on the machine.
+    after.must_say(toyos_build::metaldevices::QUIESCE_HEAD)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
-    eprintln!("  [power] {}", said.trim());
+    // **Reported and not judged.** Which state the reset found the controller in
+    // is the open question this bench has four clean answers to and no theory
+    // for; a predicate over it would be the suite deciding it. A reset that
+    // found no command open writes no such line, and that is a fact about the
+    // boot rather than a failure of it.
+    match after.text().lines().find(|line| line.contains(CONTROLLER_STATE)) {
+        Some(said) => eprintln!("  [power] {}", said.trim()),
+        None => eprintln!("  [power] the reset found no command open on the device"),
+    }
     Ok(())
 }
 

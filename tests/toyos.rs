@@ -1490,40 +1490,21 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // Three boots of its own, and the row above's with a device in its
-        // hands: the same deadline ends the same machine, and each of these is
-        // holding the boot stick at a different phase of a WRITE(10) with 4 MiB
-        // of writes behind it — which is the shape every boot this bench has
-        // lost a stick to. **Which phase is the measurement**, so they cannot
-        // share a boot: a boot carries one arm and the kernel refuses a second.
-        // The stick coming back at all is `boot.usbwedge-*.stick_secs`, refused
-        // by the loop before this judge runs; what this judges is that the
-        // machine really stopped inside a command and that the reset drove that
-        // command to its CSW instead of cutting it.
+        // **One boot, and it is the owner's ruling as a standing check**: a
+        // machine writing to the stick continuously, reset out from under itself
+        // by the deadline with the controller mid-transfer, and the stick
+        // enumerable on the next host afterwards. `boot.usbload.stick_secs` is
+        // that, refused by the loop before this judge runs.
+        //
+        // Four phases of a Bulk-Only command were measured here too and every
+        // one of them left the stick alive, so they are not re-run: the answer
+        // is in `issues/kernel/four-phases-of-a-cut-command-and-the-stick-survived-all-four.md`
+        // and the QEMU registration still walks all three. This is the arm that
+        // would notice the day a reset does brick the bench's own device.
         "usb_reset_finishes_an_open_command",
         metal::Metal::Runs {
-            arms: &[
-                metal::once("usbwedge-data-owed", "tests/jobcase", &["usb-wedge-data-owed"], &[]),
-                metal::once("usbwedge-in-data", "tests/jobcase", &["usb-wedge-in-data"], &[]),
-                metal::once(
-                    "usbwedge-before-status",
-                    "tests/jobcase",
-                    &["usb-wedge-before-status"],
-                    &[],
-                ),
-                // The fourth boot is not a phase. It stops no CPU and never
-                // stops writing, so the deadline resets a machine whose
-                // controller is mid-transfer — the three above measured the
-                // idle states and the bench's stick survived every one.
-                metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[]),
-            ],
-            judge: |b| {
-                for arm in b.iter().take(3) {
-                    power::usb_wedge_chain(&arm.kernel(), &arm.after_the_reset()?)?;
-                }
-                let load = b[3];
-                power::usb_load_chain(&load.kernel(), &load.after_the_reset()?)
-            },
+            arms: &[metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[])],
+            judge: |b| power::usb_load_chain(&b[0].kernel(), &b[0].after_the_reset()?),
         },
     ),
     (
