@@ -174,15 +174,25 @@ pub(crate) struct Walk<'a> {
 impl Walk<'_> {
     /// A flag whose value no reader of this line would get — every shape that
     /// reaches a reader as a silent default, and the whole of what either
-    /// command line asks. A value-taking flag with nothing after it — the end
-    /// of the line, or an empty `--smp=` — answers `None`; a flag written twice
-    /// has every use but one dropped; and an inline value is dropped by exactly
-    /// two readers, `Value::None` having none and `rest` taking only the words
-    /// after the flag, [`Given::value`] handing it to all the rest.
+    /// command line asks. A flag with nothing after it — the end of the line,
+    /// an empty `--smp=`, or a `--worktree` owning no words — answers `None` to
+    /// [`Vocabulary::value`] and `&[]` to [`Vocabulary::rest`]; a flag written
+    /// twice has every use but one dropped; and an inline value is dropped by
+    /// exactly two readers, `Value::None` having none and `rest` taking only the
+    /// words after the flag, [`Given::value`] handing it to all the rest.
     pub(crate) fn malformed(&self) -> Option<String> {
         for (at, seen) in self.seen.iter().enumerate() {
             let name = seen.flag.name;
             let shape = shape(seen.flag.value);
+            let nothing_after = match seen.given {
+                Given::Next(_) => false,
+                Given::Inline(value) => value.is_empty() && seen.flag.value != Value::None,
+                Given::Nothing => matches!(seen.flag.value, Value::Next | Value::Each),
+                Given::Rest(rest) => rest.is_empty(),
+            };
+            if nothing_after {
+                return Some(format!("{name} was given no value: {name}{shape}."));
+            }
             if matches!(seen.given, Given::Inline(_))
                 && matches!(seen.flag.value, Value::None | Value::Rest)
             {
@@ -191,12 +201,6 @@ impl Walk<'_> {
                     _ => "takes no value".to_string(),
                 };
                 return Some(format!("{:?}: {name} {takes}.", seen.word));
-            }
-            if matches!(seen.given, Given::Inline(""))
-                || matches!(seen.given, Given::Nothing)
-                    && matches!(seen.flag.value, Value::Next | Value::Each)
-            {
-                return Some(format!("{name} was given no value: {name}{shape}."));
             }
             if seen.flag.value != Value::Each
                 && self.seen[..at].iter().any(|earlier| earlier.flag.name == name)
@@ -353,7 +357,9 @@ mod tests {
 
     #[test]
     fn a_flag_left_without_its_value_is_refused() {
-        for flag in CARGO_RUN.0.iter().filter(|f| matches!(f.value, Value::Next | Value::Each)) {
+        for flag in
+            CARGO_RUN.0.iter().filter(|f| !matches!(f.value, Value::None | Value::Optional))
+        {
             for word in [flag.name.to_string(), format!("{}=", flag.name)] {
                 let message = refusal(&[word.as_str()]);
                 assert!(message.contains(flag.name), "{word}: {message}");
@@ -443,8 +449,6 @@ mod tests {
                 files_under(&path, out);
                 continue;
             }
-            // An extensionless file is read too: `NOTICE` hands this binary two
-            // command lines and is gated like any other source.
             let carries = path.extension().is_none_or(|e| {
                 matches!(&*e.to_string_lossy(), "rs" | "sh" | "yml" | "yaml" | "toml")
             });

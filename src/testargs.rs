@@ -434,7 +434,7 @@ mod tests {
     /// the host's own budget, `--host-builds` no budget at all.
     #[test]
     fn a_flag_left_without_its_value_is_refused_by_name() {
-        for flag in SUITE.0.iter().filter(|f| matches!(f.value, Value::Next | Value::Each)) {
+        for flag in SUITE.0.iter().filter(|f| !matches!(f.value, Value::None | Value::Optional)) {
             for word in [flag.name.to_string(), format!("{}=", flag.name)] {
                 let refusal = parse_owned(&[word.as_str()]).unwrap_err();
                 assert!(refusal.contains(flag.name), "{word}: {refusal}");
