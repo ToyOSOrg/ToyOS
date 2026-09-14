@@ -7,9 +7,9 @@
 //! The Global Coherency Domain is DXE's own map of the physical address space
 //! (PI 1.8 Vol. 2 §7.2). EDK2's `PciHostBridgeDxe` adds each root bridge's
 //! Mem, PMem and MemAbove4G apertures to it as
-//! [`MEMORY_MAPPED_IO`][`GcdType::MEMORY_MAPPED_IO`] and allocates every BAR it
-//! assigns out of them, so an MMIO descriptor with no owner is aperture the
-//! bridges decode and nothing has taken. That is the necessary condition
+//! [`MEMORY_MAPPED_IO`] and allocates every BAR it assigns out of them, so an
+//! MMIO descriptor with no owner is aperture the bridges decode and nothing
+//! has taken. That is the necessary condition
 //! `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL`'s `Configuration()` cannot give: it
 //! answers a bridge's *current* settings, which a BAR may lie outside.
 //!
@@ -32,14 +32,9 @@ const DXE_SERVICES_TABLE_GUID: Guid = guid!("05ad34ba-6f02-4214-952e-4da0398e2bb
 /// firmware wrote and this loader calls through it.
 const SIGNATURE: u64 = u64::from_le_bytes(*b"DXE_SERV");
 
-/// `EFI_GCD_MEMORY_TYPE` (PI 1.8 Vol. 2 §7.2.1), which the descriptor carries
-/// as a C enum and therefore as four bytes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct GcdType(u32);
-
-impl GcdType {
-    const MEMORY_MAPPED_IO: Self = Self(3);
-}
+/// `EfiGcdMemoryTypeMemoryMappedIo` of `EFI_GCD_MEMORY_TYPE` (PI 1.8 Vol. 2
+/// §7.2.1).
+const MEMORY_MAPPED_IO: u32 = 3;
 
 /// `EFI_GCD_MEMORY_SPACE_DESCRIPTOR` (PI 1.8 Vol. 2 §7.2.1), in the spec's own
 /// field order.
@@ -50,7 +45,9 @@ struct MemorySpace {
     length: u64,
     capabilities: u64,
     attributes: u64,
-    kind: GcdType,
+    /// `EFI_GCD_MEMORY_TYPE`, which the descriptor carries as a C enum and
+    /// therefore as four bytes.
+    kind: u32,
     /// The image that allocated this range, and the device it was allocated
     /// for. **Both null is the whole of what "free" means here** (PI 1.8
     /// Vol. 2 §7.2.3: `AllocateMemorySpace` sets them and `FreeMemorySpace`
@@ -139,32 +136,39 @@ pub fn free_mmio(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow])
     }
 
     let mut added = 0usize;
+    let mut refused = 0usize;
     for index in 0..count {
         // SAFETY: firmware answered `count` descriptors at `map`, and `index`
         // is inside that count.
         let space = unsafe { *map.add(index) };
         let free = space.image.is_null() && space.device.is_null();
-        if space.kind != GcdType::MEMORY_MAPPED_IO || !free || space.length < GRANULE {
+        if space.kind != MEMORY_MAPPED_IO || !free || space.length < GRANULE {
             continue;
         }
-        let Some(slot) = out.get_mut(added) else {
-            println!("{HEAD} more free mmio ranges than the {} the kernel is handed", out.len());
-            break;
-        };
-        // **One line per range handed over and none per descriptor**: this log
-        // is the first screenful on a machine with no serial port, and the
-        // whole map is tens of lines of it.
+        // Every range this function found, whether it fits or not: one the
+        // kernel has no room for is aperture this machine has and the
+        // placement will not use.
+        let slot = out.get_mut(added);
         println!(
-            "{HEAD} {:#x}+{:#x} mmio cap={:#x} attr={:#x} free",
-            space.base, space.length, space.capabilities, space.attributes,
+            "{HEAD} {:#x}+{:#x} mmio cap={:#x} attr={:#x} free{}",
+            space.base,
+            space.length,
+            space.capabilities,
+            space.attributes,
+            if slot.is_some() { "" } else { ", past the room the kernel is handed" },
         );
-        *slot = RootBridgeWindow { base: space.base, length: space.length };
-        added += 1;
+        match slot {
+            Some(slot) => {
+                *slot = RootBridgeWindow { base: space.base, length: space.length };
+                added += 1;
+            }
+            None => refused += 1,
+        }
     }
 
     // SAFETY: `map` is the pool buffer `GetMemorySpaceMap` allocated, nothing
     // else holds it, and every descriptor has been copied out of it above.
     let _ = unsafe { system_table.boot_services().free_pool(map as *mut u8) };
-    println!("{HEAD} {count} descriptor(s); {added} free mmio range(s) of {GRANULE:#x} bytes or more handed to the kernel");
+    println!("{HEAD} {count} descriptor(s); {added} free mmio range(s) of {GRANULE:#x} bytes or more handed to the kernel, {refused} past its room");
     added
 }

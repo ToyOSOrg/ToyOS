@@ -150,7 +150,6 @@ mod tests {
     /// the message.
     const IPV4: [u8; 20] = [0x45, 0, 0, 36, 0, 0, 0, 0, 64, 1, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2];
 
-    /// The address asked, and the address every reply below comes from.
     const HOST: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
     fn reply_to(request: &[u8]) -> Vec<u8> {
@@ -185,7 +184,6 @@ mod tests {
         assert_ne!(token, super::token());
     }
 
-    /// The checksum is in bytes 2 and 3 (RFC 792) and no other byte carries it.
     #[test]
     fn the_checksum_is_the_field_rfc_792_gives_it() {
         let token = token();
@@ -216,8 +214,6 @@ mod tests {
         // The request itself, which a host that loops its own traffic back
         // would otherwise read as an answer.
         assert!(!is_reply(HOST.into(), HOST, &request, &token));
-        // This probe's own answer returned by a host that is not the one asked:
-        // the socket is handed every ICMP datagram this host receives.
         assert!(!is_reply(Ipv4Addr::new(10, 0, 0, 9).into(), HOST, &reply_to(&request), &token));
         // Another probe's reply, and a reply to nobody.
         assert!(!is_reply(HOST.into(), HOST, &reply_to(&super::request(&super::token())), &token));
