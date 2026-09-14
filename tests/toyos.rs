@@ -652,14 +652,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // one written down. The DHCP server it is judged against is QEMU's own, an
     // implementation of RFC 2131 this repository did not write, and its lease
     // is known field by field. The verdicts are records and a lease's fields;
-    // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
+    // no clock in it.
     ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
-    // announces itself anyway. Fast with the UNMEASURED marker, which only the
-    // fast tier carries; its verdict is timer-anchored, and
-    // `issues/build/a-timer-anchored-names-tier-is-decided-by-its-price.md`
-    // holds the relegation it owes.
-    ("lan_no_lease", Sched::Parallel, Tier::Fast),
+    // announces itself anyway. Its verdict waits out netd's own lease bound, so
+    // a slower machine moves it; `RELEGATED` says what leaves the per-PR tier
+    // with it.
+    ("lan_no_lease", Sched::Parallel, Tier::Nightly),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -672,8 +671,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // moved that function's BAR. Its own boot rather than a second assertion in
     // the row above, because that one's subject is exclusivity and a test that
     // reds tells a reader which of the two it is about. It waits out a drain for
-    // the message record, so its price carries a fixed span of host wall clock;
-    // Fast with the UNMEASURED bootstrap marker until priced.
+    // the message record, so its price carries a fixed span of host wall clock.
     ("bar_placement_is_proven", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
