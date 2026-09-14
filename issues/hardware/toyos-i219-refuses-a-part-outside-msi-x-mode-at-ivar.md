@@ -1,6 +1,6 @@
 ---
 status: open
-kind: defect
+kind: finding
 opened: 2026-09-08
 ---
 

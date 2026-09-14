@@ -24,10 +24,7 @@
 //! LAPIC decodes. **So a function is armed on MSI only where a walk that
 //! reached its capability list's terminator found no MSI-X**: its message is
 //! then a word of config space, which has no write path from userland, and it
-//! has no table in a BAR for [`msix_bar`] to keep back. A list that ends at a
-//! link the spec forbids says nothing about what it publishes past that link,
-//! so it is refused by name rather than armed on the mechanism the walk
-//! happened to reach.
+//! has no table in a BAR for [`msix_bar`] to keep back.
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding

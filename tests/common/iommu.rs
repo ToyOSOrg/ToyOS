@@ -808,7 +808,11 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
 
 /// The two lines a hand-over spends: one arm requires them, the other their absence.
 const BAR_MOVED: &str = "pcidev: PCI 00:03.0 BAR";
-const MSIX_ARMED: &str = "PCI 00:03.0: msix address=";
+pub const MSIX_ARMED: &str = "PCI 00:03.0: msix address=";
+
+/// The same function on the other mechanism. MSI-X first wherever a function
+/// has a table, so this line on 00:03.0 is an arming in the wrong order.
+pub const MSI_ARMED: &str = "PCI 00:03.0: msi address=";
 
 /// The control that makes the two arms above mean something: a guest that
 /// declines the feature its host offered gets no device, not a bypassing one.

@@ -16,10 +16,13 @@ true, and so nothing reaches:
   capability off where there is no table entry to mask;
 - `Refusal::MsixUnusable` and `Unarmed::Blocked`, owed only by a function that
   publishes MSI-X this kernel cannot arm and by a unit that refuses the message;
-- `Refusal::CapsTruncated` and `NoCapability::Truncated`, owed by a function
-  whose capability list ends at a link the spec forbids. The walk's half of that
-  decision is host-tested in `toyos-pci/src/caps.rs`; the kernel's refusal arm
-  is reached by nothing.
+- `Refusal::CapsTruncated`, the arm that turns a list ending at a link the spec
+  forbids into a refusal of the hand-over. The decision under it is read back:
+  `CapWalk::truncated` is host-tested in `toyos-pci/src/caps.rs` and
+  `PciDevice::capability`'s `Truncated`/`Absent` split is driven over a cyclic
+  list, a misaligned link, a below-header link and a forbidden head by the
+  `pci-cap-selftest` actuator, which `pci_capability_walk` reads as
+  `pci cap split 5/5`. What no test reaches is `bring_up` refusing on it.
 
 The two pre-existing MSI armings in this kernel — xHCI's and HDA's
 `arm_interrupt` — never disarm, so MSI teardown is exercised nowhere in the tree
@@ -28,7 +31,10 @@ at all.
 Owned by the network track's stage-2 I219 worker. Exit condition: the first
 `userdev` interrupt counted against a claim on `00:1f.6` on the bench, which
 needs the 32-bit BAR window before it, plus netd exiting from that claim, which
-runs `tear_down`'s MSI arm. A guest exit is the alternative and costs more: an
-actuator that hides a function's MSI-X capability from the claim path, a boot
-config whose own test binary holds a claimable function, and the tier row and CI
-price of the boot that carries them.
+runs `tear_down`'s MSI arm.
+
+A guest arm is the alternative and costs more than the bench does. It needs a
+claimable function that publishes MSI and no MSI-X, which nothing this harness
+hands to a claim is: the NIC under `vectors=0` publishes neither, so hiding a
+capability is not enough by itself. So it costs a boot config carrying such a
+function and a test binary to hold it, plus that boot's tier row and CI price.

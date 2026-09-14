@@ -759,12 +759,15 @@ pub fn used_selftest() {
 /// or forbidden link, a BAR/offset/length past the window, a chain missing a required capability.
 #[cfg(feature = "boot-actuators")]
 pub fn cap_selftest() {
-    use super::pci::{PciDevice, CAPABILITIES_PTR};
+    use super::pci::{NoCapability, PciDevice, CAPABILITIES_PTR};
     use super::DmaPool;
     use crate::mm::{DirectMap, Mmio};
     use alloc::vec::Vec;
+    use toyos_pci::msix;
 
     const CASES: usize = 14;
+    /// The walk cases above whose *end* is read back as well as their yield.
+    const SPLITS: usize = 5;
     // Twice the 0x4000 the window bound used to guess, so a capability past the
     // guess but inside the BAR's real size has a case to be accepted by.
     const WINDOW: u64 = 0x8000;
@@ -776,7 +779,8 @@ pub fn cap_selftest() {
     let device = PciDevice::over_config(cfg);
 
     let mut passed = 0usize;
-    let mut walk_case = |name: &str, head: u8, links: &[(u64, u8, u8)], want: &[u64]| {
+    let mut split_passed = 0usize;
+    let mut walk_case = |name: &str, head: u8, links: &[(u64, u8, u8)], want: &[u64], early: bool| {
         for off in 0..0x100u64 {
             cfg.write_u8(off, 0);
         }
@@ -792,14 +796,30 @@ pub fn cap_selftest() {
         } else {
             log!("virtio: pci cap selftest FAILED on {name}: yielded {got:?}, want {want:?}");
         }
+        // The split a claimed function's arming turns on: no layout here
+        // publishes MSI-X, and only a walk that reached the list's terminator
+        // may answer that as absent rather than as never read.
+        let split = match device.capability(msix::CAP_ID) {
+            Ok(_) => "found",
+            Err(NoCapability::Absent) => "absent",
+            Err(NoCapability::Truncated) => "truncated",
+        };
+        let want_split = if early { "truncated" } else { "absent" };
+        if split == want_split {
+            split_passed += 1;
+        } else {
+            log!("virtio: pci cap selftest FAILED on {name}: a capability it never publishes \
+                  reads {split}, want {want_split}");
+        }
     };
 
     const ID: u8 = PCI_CAP_ID_VENDOR;
-    walk_case("a well-formed chain", 0x40, &[(0x40, ID, 0x50), (0x50, ID, 0)], &[0x40, 0x50]);
-    walk_case("a list that cycles on itself", 0x40, &[(0x40, ID, 0x40)], &[0x40]);
-    walk_case("a link that is not dword-aligned", 0x40, &[(0x40, ID, 0x43)], &[0x40]);
-    walk_case("a link below the standard header", 0x40, &[(0x40, ID, 0x10)], &[0x40]);
-    walk_case("a head the spec forbids", 0x41, &[], &[]);
+    walk_case("a well-formed chain", 0x40, &[(0x40, ID, 0x50), (0x50, ID, 0)], &[0x40, 0x50], false);
+    walk_case("a list that cycles on itself", 0x40, &[(0x40, ID, 0x40)], &[0x40], true);
+    walk_case("a link that is not dword-aligned", 0x40, &[(0x40, ID, 0x43)], &[0x40], true);
+    walk_case("a link below the standard header", 0x40, &[(0x40, ID, 0x10)], &[0x40], true);
+    walk_case("a head the spec forbids", 0x41, &[], &[], true);
+    log!("virtio: pci cap split {split_passed}/{SPLITS}");
 
     let mut bars: [Option<Mmio>; 6] = [None, None, None, None, None, None];
     bars[0] = Some(cfg);

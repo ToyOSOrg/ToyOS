@@ -663,6 +663,9 @@ fn reset_stream(stream: Mmio) -> bool {
 /// panic, over a peripheral.
 fn arm_interrupt(pci: &PciDevice) -> bool {
     let vector = crate::arch::idt::HDA_VECTOR;
+    // A list that ends early takes MSI here rather than a refusal: this kernel
+    // drives the function and hands no BAR of it to a holder, so an MSI-X table
+    // past that link is one nobody but this kernel could reach.
     if pci.enable_msix(vector).is_ok() || pci.enable_msi(vector) {
         return true;
     }
