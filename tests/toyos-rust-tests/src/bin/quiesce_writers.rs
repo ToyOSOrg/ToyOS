@@ -30,12 +30,15 @@ const CHUNK: usize = 8192;
 
 /// How long the writers get to reach their loop before this boot gives up on
 /// being a machine with anything to stop.
-const SPIN_UP: Duration = Duration::from_secs(30);
+///
+/// Inside the host's own wait for this guest to stop, so the line below reaches
+/// the console it is read from rather than a budget ending the boot first.
+const SPIN_UP: Duration = Duration::from_secs(5);
 
 /// Writers that have finished a pass. **The reset is asked for over a machine
-/// every writer is known to be working on**, and not over one a fixed sleep
-/// hoped they had reached: a writer still being spawned when the last word is
-/// written puts no line above it, which is a boot that had nothing to stop.
+/// every writer is known to be working on**: a writer still being spawned when
+/// the last word is written puts no line above it, which is a boot that had
+/// nothing to stop.
 static IN_THE_LOOP: AtomicUsize = AtomicUsize::new(0);
 
 /// What a writer says every pass.

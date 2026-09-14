@@ -11,8 +11,8 @@
 //! file is a userland process, so a stop that took every process before the
 //! last word was written would deadlock on the one process the last word has
 //! to reach. So it goes in two: everything but that process, then that process
-//! too. Which process that is, is whichever one the wait depends on — the
-//! kernel names it by what moved the durability word, never by a right.
+//! too. Which processes those are the kernel takes from the capability their
+//! parent moved into them, never from a word a caller writes.
 //!
 //! [`Record`] is written by the kernel and read back off a stick by
 //! `src/metal.rs` and by the harness, so its wire form is rendered and parsed
@@ -34,44 +34,22 @@ pub struct ThreadId {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Thread {
     pub id: ThreadId,
-    /// Whether this thread's process is the one the shutdown's wait for
-    /// durability depends on — the one that last made the log durable, not one
-    /// that merely holds the right to read it.
-    pub makes_the_log_durable: bool,
+    /// Whether this thread's process holds the machine's log capability, which
+    /// is the whole of what can end the shutdown's wait for durability.
+    pub holds_the_log: bool,
 }
 
 /// How far the stop has gone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stage {
-    /// Every userland thread but those of the process the log's durability is
-    /// owed to.
+    /// Every userland thread but those of a process holding the log
+    /// capability.
     ExceptLog,
     /// Those too. Nothing in userland runs again.
     All,
 }
 
 impl Stage {
-    /// Whether this stage's stop covers `thread`.
-    ///
-    /// Asked without a caller because the block layer counts an operation
-    /// where it is opened, and an opener has no caller to be compared against.
-    pub fn covers(self, thread: Thread) -> bool {
-        match self {
-            Stage::ExceptLog => !thread.makes_the_log_durable,
-            Stage::All => true,
-        }
-    }
-
-    /// The stage whose stop closes a block-device operation `thread` opens:
-    /// the first one that covers it.
-    pub fn stopping(thread: Thread) -> Stage {
-        if Stage::ExceptLog.covers(thread) {
-            Stage::ExceptLog
-        } else {
-            Stage::All
-        }
-    }
-
     /// Whether `thread` must stop at its next safe point.
     ///
     /// **`caller` is never stopped**: it is the thread running the stop, and
@@ -80,7 +58,13 @@ impl Stage {
     /// stops like any other, because what the reset must outlast is one
     /// thread's remaining work and not one program's.
     pub fn must_stop(self, thread: Thread, caller: ThreadId) -> bool {
-        thread.id != caller && self.covers(thread)
+        if thread.id == caller {
+            return false;
+        }
+        match self {
+            Stage::ExceptLog => !thread.holds_the_log,
+            Stage::All => true,
+        }
     }
 }
 
@@ -133,14 +117,13 @@ pub struct Record {
     pub elapsed_ms: u64,
     pub sweeps: u32,
     pub cpus: u32,
-    /// Block-device operations still open on a thread this stage stopped — the
-    /// one number here the stop does not produce itself, and so the one that
-    /// can disagree with it. An operation lasts only while its opener is inside
-    /// the device, so a thread that has stopped holds none.
+    /// Block-device operations still open on a thread the stop stops: an
+    /// operation lasts only while its opener is inside the device, so a thread
+    /// that has stopped holds none.
     pub in_flight: u32,
-    /// How many operations either stage closes this boot began. Zero says the
-    /// counter behind [`Self::in_flight`] never counted at all, which no boot
-    /// that wrote a file can honestly report.
+    /// How many such operations this boot began. Zero says the counter behind
+    /// [`Self::in_flight`] never counted at all, which no boot that wrote a
+    /// file can honestly report.
     pub begun: u64,
 }
 
@@ -221,11 +204,11 @@ mod tests {
     }
 
     fn thread(pid: u32, tid: u32) -> Thread {
-        Thread { id: id(pid, tid), makes_the_log_durable: false }
+        Thread { id: id(pid, tid), holds_the_log: false }
     }
 
     fn log_thread(pid: u32, tid: u32) -> Thread {
-        Thread { id: id(pid, tid), makes_the_log_durable: true }
+        Thread { id: id(pid, tid), holds_the_log: true }
     }
 
     #[test]
@@ -247,27 +230,13 @@ mod tests {
         assert!(Stage::All.must_stop(log_thread(LOGD, 0), CALLER), "and then it too");
     }
 
-    /// **A reader that never made a record durable is not the carve-out.** The
-    /// wait ends when the durability word passes what the boot committed, and a
-    /// process that has only ever read the log moves that word not at all — so
-    /// it stops in the first stage with everything else.
+    /// **A process the capability was never moved into is not the carve-out**,
+    /// however much of the log it has seen: what ends the shutdown's wait is
+    /// making a record durable, and only a holder can do it.
     #[test]
-    fn a_process_that_only_reads_the_log_is_not_carved_out() {
+    fn a_process_without_the_capability_stops_in_the_first_stage() {
         assert!(Stage::ExceptLog.must_stop(thread(LOGD + 4, 0), CALLER));
         assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 0), CALLER));
-    }
-
-    /// **An operation is closed by the stage that stops the thread that opened
-    /// it**, which is why the carve-out's are outside the first stage's count:
-    /// that process is still running there, so a number but zero would be the
-    /// machine working exactly as the stop intends.
-    #[test]
-    fn the_stage_that_closes_an_operation_is_the_one_that_stops_its_opener() {
-        assert_eq!(Stage::stopping(thread(LOGD + 4, 0)), Stage::ExceptLog);
-        assert_eq!(Stage::stopping(log_thread(LOGD, 0)), Stage::All);
-        assert!(Stage::ExceptLog.covers(thread(LOGD + 4, 0)));
-        assert!(!Stage::ExceptLog.covers(log_thread(LOGD, 0)));
-        assert!(Stage::All.covers(log_thread(LOGD, 0)));
     }
 
     /// The caller could itself be a process the log is owed to — `logd` may

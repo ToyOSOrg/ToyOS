@@ -30,6 +30,9 @@ pub(super) fn sys_log_read(
     if let Err(e) = demand_syscap(syscap, Rights::LOG) {
         return e.refuse();
     }
+    // Where the capability is checked, and nowhere a caller's own words reach:
+    // the shutdown's first stage carves out what init moved this right into.
+    log::user::note_log_holder(process::current_process().raw());
     let mut cursor = match ctx.copy_in::<toyos_abi::log::LogCursor>(cursor_ptr) {
         Ok(cursor) => cursor,
         Err(e) => return e.to_u64(),
@@ -44,7 +47,14 @@ pub(super) fn sys_log_read(
     }
 }
 
-fn quiesce(last: &str) {
+fn quiesce(last: &str) -> Result<(), SyscallError> {
+    // Refused by name: this machine has one shutdown, and a second one's sweep
+    // would band the thread that is performing the first — which is the thread
+    // with a reset left to reach.
+    if !crate::quiesce::claim_the_shutdown() {
+        log!("power: this machine is already stopping, so this caller stops with the rest");
+        return Err(SyscallError::AlreadyExists);
+    }
     // Before the watchdog is disarmed and before a byte is synced: what the
     // control stages is a boot that ran its job list and then stopped, which is
     // the shape the T14 hangs in.
@@ -56,10 +66,10 @@ fn quiesce(last: &str) {
     crate::drivers::watchdog::disarm();
     // **Before the sync, because the sync is a claim about a machine.** A
     // process that issues a `write` after `sync_all` returns has dirty pages
-    // nothing will flush. The one carve-out is the process `wait_for_durable`
-    // below is waiting on, which is stopped as soon as that wait returns; what
-    // it writes in between is made durable by the `fsync` it publishes after,
-    // which is the word that ends the wait.
+    // nothing will flush. The carve-out is what holds the log capability, which
+    // is the whole of what can end the `wait_for_durable` below; those are
+    // stopped as soon as it returns, and what the writer puts on the volume in
+    // between is made durable by the `fsync` it publishes after.
     let stopped = crate::quiesce::stop(toyos_quiesce::Stage::ExceptLog);
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
@@ -115,6 +125,7 @@ fn quiesce(last: &str) {
     // `acpi::reboot`/`acpi::shutdown` do — which every reset this kernel
     // performs goes through. It is bounded, and the reset follows either way.
     crate::drivers::xhci::seal_shut();
+    Ok(())
 }
 
 /// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Does not return.
@@ -122,7 +133,9 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
     }
-    quiesce("Shutting down.");
+    if let Err(e) = quiesce("Shutting down.") {
+        return e.to_u64();
+    }
     acpi::shutdown();
 }
 
@@ -136,7 +149,9 @@ pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
         log!("reboot: this machine's FADT names no reset register — refused");
         return SyscallError::NotSupported.to_u64();
     }
-    quiesce("Rebooting.");
+    if let Err(e) = quiesce("Rebooting.") {
+        return e.to_u64();
+    }
     acpi::reboot();
 }
 

@@ -178,10 +178,9 @@ pub fn quiesce_stops_the_machine(
     // The one binary this config's job list names: every other one staged
     // beside it is image the boot pays to write and never reads.
     const JOB: &str = "quiesce_writers";
-    // What that binary prints every pass, and how many of its threads do. Spelt
-    // here because a guest binary cannot be linked from the harness.
-    const WRITING: &str = "quiesce-writer: ";
-    const WRITERS: usize = 6;
+    // How many threads that binary puts to work. Spelt here because a guest
+    // binary cannot be linked from the harness.
+    const WRITERS: u32 = 6;
     let bins: Vec<(String, Vec<u8>)> =
         rust_bins.iter().filter(|(name, _)| name == JOB).cloned().collect();
     if bins.len() != 1 {
@@ -218,23 +217,6 @@ pub fn quiesce_stops_the_machine(
         .position(|line| line.contains(REBOOTING))
         .ok_or_else(|| format!("this boot never wrote {REBOOTING:?}\n{whole}"))?;
 
-    // **Each writer's own record, above the last word.** A boot whose workload
-    // never ran — a spawn that failed, an endowment that changed, a first
-    // `File::create` that did not open — leaves nothing under that word either,
-    // and would pass every judge below over a machine that had nothing to stop.
-    let silent: Vec<usize> = (0..WRITERS)
-        .filter(|writer| {
-            let said = format!("{WRITING}{writer} ");
-            !lines[..last_word].iter().any(|line| line.contains(&said))
-        })
-        .collect();
-    if !silent.is_empty() {
-        return Err(format!(
-            "writer(s) {silent:?} of this boot's {WRITERS} wrote nothing above the boot's last \
-             word, so nothing here is a claim about a machine that was busy:\n{whole}"
-        ));
-    }
-
     // **The defect itself, and the rest are the mechanism.** The whole change
     // reverted reds here, on the record a writer thread put under the boot's
     // own last word.
@@ -265,6 +247,18 @@ pub fn quiesce_stops_the_machine(
         return Err(format!(
             "this boot began no block-device operation on a stoppable thread, so the zero above \
              is a counter that never counted rather than a machine that stopped:\n  {record}"
+        ));
+    }
+    // **The workload, counted by the kernel rather than by the guest.** A boot
+    // whose writers never ran — a spawn that failed, an endowment that changed,
+    // a first `File::create` that did not open — has a handful of threads to
+    // stop and would pass every judge above over a machine that had nothing to
+    // stop.
+    if record.sweep.total() < WRITERS {
+        return Err(format!(
+            "this boot's stop named {} userland thread(s), fewer than the {WRITERS} writers \
+             alone, so nothing here is a claim about a machine that was busy:\n  {record}\n{whole}",
+            record.sweep.total(),
         ));
     }
     if !record.stopped_the_machine() {
@@ -1420,11 +1414,9 @@ fn stopped_the_log_writer_too(after: &serial::Serial) -> Result<(), String> {
             record.sweep.running,
         ));
     }
-    // The log's own writer is inside this stage's count and outside the first
-    // one's, so this is the only judge that sees its operations closed.
     if record.in_flight != 0 {
         return Err(format!(
-            "the log's writer took {} block operation(s) into the reset:\n  {record}",
+            "the second stage took {} block operation(s) into the reset:\n  {record}",
             record.in_flight,
         ));
     }

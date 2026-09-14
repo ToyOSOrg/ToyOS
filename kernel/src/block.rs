@@ -10,8 +10,6 @@ use alloc::sync::Arc;
 #[cfg(feature = "boot-actuators")]
 use alloc::vec::Vec;
 
-use toyos_quiesce::{Stage, Thread, ThreadId};
-
 use crate::mm::PAGE_SIZE;
 use crate::scheduler::Operation;
 use crate::sync::{Lock, LockGuard};
@@ -80,61 +78,44 @@ pub(crate) fn between_attempts(attempt: u32) {
     );
 }
 
-/// Block-device operations open right now, by the stage of the machine's stop
-/// that stops the thread that opened each: the process the log's durability is
-/// owed to keeps running through the first stage, so its operations are closed
-/// only by the second.
+/// Operations open right now on a thread the machine's stop stops, and how
+/// many such operations this boot began.
 static OPEN_OPERATIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static OPEN_LOG_OPERATIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-/// The same operations over the whole boot rather than right now.
 static BEGUN_OPERATIONS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Open on a thread `stage` has stopped, and begun on this boot.
-pub fn userland_operations(stage: Stage) -> (u32, u64) {
-    let open = match stage {
-        Stage::ExceptLog => OPEN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed),
-        Stage::All => OPEN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed)
-            + OPEN_LOG_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed),
-    };
-    (open, BEGUN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed))
+/// Open on a thread the stop stops, and begun on this boot.
+pub fn userland_operations() -> (u32, u64) {
+    (
+        OPEN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed),
+        BEGUN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed),
+    )
 }
 
-fn open_count(stage: Stage) -> &'static core::sync::atomic::AtomicU32 {
-    match stage {
-        Stage::ExceptLog => &OPEN_OPERATIONS,
-        Stage::All => &OPEN_LOG_OPERATIONS,
-    }
-}
-
-/// Which stage of the machine's stop stops the thread opening an operation
-/// now; `None` for a kernel thread, which no stage stops.
-fn stopped_by() -> Option<Stage> {
+/// Whether the stop this count is read for stops the thread opening an
+/// operation now: no stage stops a kernel thread, and a holder of the log
+/// capability runs on through the stage whose record reads this.
+fn counted() -> bool {
     if crate::sched::kthread::current_is_kernel_thread() {
-        return None;
+        return false;
     }
-    let pid = crate::arch::percpu::current_pid()?;
-    let tid = crate::arch::percpu::current_tid()?;
-    Some(Stage::stopping(Thread {
-        id: ThreadId { pid: pid.raw(), tid: tid.raw() },
-        makes_the_log_durable: crate::log::user::makes_the_log_durable(pid.raw()),
-    }))
+    let Some(pid) = crate::arch::percpu::current_pid() else {
+        return false;
+    };
+    !crate::log::user::holds_the_log(pid.raw())
 }
 
-/// One open block-device operation: the deadline an [`Operation`] declares,
-/// and this layer's count of how many there are.
 #[must_use = "the operation lasts exactly as long as this guard"]
 pub struct OpenOperation {
     _deadline: Operation,
     /// Decided at the open and not at the close, so the two ends of one
-    /// operation cannot disagree about which count holds it.
-    stopped_by: Option<Stage>,
+    /// operation cannot disagree about whether it was counted.
+    counted: bool,
 }
 
 impl Drop for OpenOperation {
     fn drop(&mut self) {
-        if let Some(stage) = self.stopped_by {
-            open_count(stage).fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        if self.counted {
+            OPEN_OPERATIONS.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -143,16 +124,16 @@ impl Drop for OpenOperation {
 // An absolute deadline, not a relative duration: it crosses into a driver that loops, and re-basing per command would bound each command instead of the whole operation.
 #[must_use = "the operation lasts exactly as long as this guard"]
 pub fn begin_operation() -> OpenOperation {
-    let stopped_by = stopped_by();
-    if let Some(stage) = stopped_by {
-        open_count(stage).fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let counted = counted();
+    if counted {
+        OPEN_OPERATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         BEGUN_OPERATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
     OpenOperation {
         _deadline: Operation::begin(Deadline::at(
             crate::clock::now() + OPERATION.duration(),
         )),
-        stopped_by,
+        counted,
     }
 }
 

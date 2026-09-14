@@ -31,7 +31,10 @@
 //!
 //! Lock order: [`process::PROCESS_TABLE`] alone.
 
-use core::sync::atomic::{AtomicU32, AtomicU8, Ordering::Acquire, Ordering::Relaxed, Ordering::Release};
+use core::sync::atomic::{
+    AtomicBool, AtomicU32, AtomicU8, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
+    Ordering::Release,
+};
 
 use toyos_quiesce::{Record, Stage, Sweep, Thread, ThreadId};
 
@@ -105,10 +108,23 @@ pub fn stops_this_thread() -> bool {
     }
     let thread = Thread {
         id: ThreadId { pid: pid.raw(), tid: tid.raw() },
-        makes_the_log_durable: crate::log::user::makes_the_log_durable(pid.raw()),
+        holds_the_log: crate::log::user::holds_the_log(pid.raw()),
     };
     stage.must_stop(thread, caller())
 }
+
+/// Whether this thread is the one shutdown this boot gets.
+///
+/// **Refused by name rather than run twice.** A second caller overwrites the
+/// identity the first is exempt by, and the first can be parked inside the
+/// `sync_all` it is waiting on — so the second sweep would band the thread that
+/// has the rest of the shutdown to perform, and that reset would never be
+/// reached.
+pub fn claim_the_shutdown() -> bool {
+    !CLAIMED.swap(true, AcqRel)
+}
+
+static CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// Stop every userland thread `stage` names, and answer with what it took.
 ///
@@ -154,7 +170,7 @@ pub fn stop(stage: Stage) -> Record {
         // Read here and not by the caller: the question is what was open at the
         // moment the stop ended, and every line between here and the record's
         // own would open more.
-        let (in_flight, begun) = crate::block::userland_operations(stage);
+        let (in_flight, begun) = crate::block::userland_operations();
         return Record {
             sweep: swept,
             elapsed_ms: elapsed / 1_000_000,
@@ -185,10 +201,9 @@ fn sweep(stage: Stage, caller: ThreadId) -> Sweep {
     let Some(table) = guard.as_ref() else { return out };
     for (_, proc) in table.iter() {
         let pid = proc.pid();
-        let makes_the_log_durable = crate::log::user::makes_the_log_durable(pid.raw());
+        let holds_the_log = crate::log::user::holds_the_log(pid.raw());
         for (tid, thread) in proc.threads().iter() {
-            let who =
-                Thread { id: ThreadId { pid: pid.raw(), tid: tid.raw() }, makes_the_log_durable };
+            let who = Thread { id: ThreadId { pid: pid.raw(), tid: tid.raw() }, holds_the_log };
             if !stage.must_stop(who, caller) {
                 continue;
             }
