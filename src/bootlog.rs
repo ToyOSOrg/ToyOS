@@ -104,12 +104,6 @@ pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
 
 /// What the loader prints in place of a record's tail, with the count of the
 /// records it filed instead.
-///
-/// **The firmware's console is not a channel a log ring may be sent through.**
-/// It scrolls a 1080p panel by moving the whole frame, about three lines a
-/// second on the T14, so the ring tail of a wedged boot cost 60-70 s of every
-/// such boot's turnaround to render what `loader.log` already held. The file
-/// still carries every line; the screen carries this one.
 pub const TAIL_IN_THE_FILE: &str =
     "Black box: that record's log ring is in loader.log, not on a console the firmware scrolls:";
 
@@ -157,8 +151,17 @@ pub struct Panel {
 }
 
 /// The census `log` carries, or `None` for a boot that left neither channel.
+///
+/// **A line this reads has ended itself.** The page a wedged boot's census
+/// rides can be cut mid-line, and a `max_us=` whose digits the cut took the
+/// end of parses as a cheaper panel than the boot had — so a chunk with no
+/// newline behind it is not a census line.
 pub fn panel_census(log: &str) -> Option<Panel> {
-    let line = log.lines().rev().find(|line| line.contains(PANEL_CENSUS))?;
+    let line = log
+        .split_inclusive('\n')
+        .filter(|line| line.ends_with('\n'))
+        .rev()
+        .find(|line| line.contains(PANEL_CENSUS))?;
     let field = |name: &str| -> Option<u64> {
         let (_, rest) = line.split_once(name)?;
         rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
@@ -485,14 +488,19 @@ mod record_time_tests {
                     max_us=520000\n";
         let census = Panel { paints: 3, pixels: 6_220_800, micros: 1_500_000, max_micros: 520_000 };
         assert_eq!(panel_census(logd), Some(census));
-        let sealed = format!(
-            "| the boot deadline expired: a bound of 120000 ms ...\n| panel: paints=3 \
-             px=6220800 us=1500000 max_us=520000\n| [1.2 cpu0] Boot: complete (1199ms)\n"
-        );
-        assert_eq!(panel_census(&sealed), Some(census));
+        let sealed = "| the boot deadline expired: a bound of 120000 ms ...\n| panel: paints=3 \
+                      px=6220800 us=1500000 max_us=520000\n| [1.2 cpu0] Boot: complete (1199ms)\n";
+        assert_eq!(panel_census(sealed), Some(census));
         // The whole line or none of it: a truncated page must not read as a
-        // cheap panel.
+        // cheap panel. A field the cut took whole, and one it cut mid-number.
         assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000\n"), None);
+        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000 max_us=52"), None);
+        // The same cut, with the rest of the page still under it — the shape a
+        // wedged boot's loader.log actually has.
+        assert_eq!(
+            panel_census("| panel: paints=3 px=6220800 us=1500000 max_us=52"),
+            None
+        );
         assert_eq!(panel_census("nothing here\n"), None);
     }
 

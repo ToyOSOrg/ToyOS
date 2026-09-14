@@ -897,13 +897,12 @@ pub fn run(
                      after that",
                     back.back_secs, back.stick_secs
                 );
-                // Evidence beside the one number that is priced: what the
-                // panel painted and what it wrote, which is what a reader
-                // needs to tell a slower paint from more of them.
+                // Evidence beside the two numbers that are priced: what a
+                // reader needs to tell a slower paint from more of them.
                 if let Some(panel) = back.panel() {
                     eprintln!(
-                        "    the panel painted {} time(s), {} px, {} us in the painter",
-                        panel.paints, panel.pixels, panel.micros
+                        "    the panel painted {} time(s) and put {} px on the glass",
+                        panel.paints, panel.pixels
                     );
                 }
                 // **The profile's row is what a boot owes, and the boot's own
@@ -921,10 +920,11 @@ pub fn run(
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
                     ("panel_max_us", back.panel().map(|panel| panel.max_micros)),
+                    ("panel_us", back.panel().map(|panel| panel.micros)),
                 ] {
                     let name = format!("boot.{label}.{field}");
                     let priced = profile.row(&name).is_some();
-                    if value.is_none() && !priced {
+                    if value.is_none() && !priced && field.ends_with("_lateness_ms") {
                         continue;
                     }
                     let Some(value) = value else {

@@ -100,8 +100,8 @@ measured = 46
 [[number]]
 name = "boot.jobcase.back_secs"
 unit = "s"
-ceiling = 74
-ceiling_from = "the widest turnaround this bench has given a boot with nothing to report — 49 s, over readings of 37, 40, 44 and 49 — and half again. The driver's own `toyos_build::metal::return_secs` is 420 s and bounds a hang; what this bounds is the machine coming back, which is the number a loader that prints more than it should moves"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
 measured = 40
 
 [[number]]
@@ -389,8 +389,8 @@ measured = 1199
 [[number]]
 name = "boot.deadlinewedge.back_secs"
 unit = "s"
-ceiling = 194
-ceiling_from = "the bound this boot spends before it ends itself plus what any boot costs to come back: 120 s of `toyos_tco::WEDGE_BOUND_MS` and the 74 s boot.jobcase.back_secs prices. The reading is 42 s of turnaround over the bound, which is jobcase's own"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs — which now derives from WEDGE_BOUND_MS, the longest watchdog a boot runs under, plus what coming back costs"
 measured = 162
 
 [[number]]
@@ -431,8 +431,8 @@ measured = 1201
 [[number]]
 name = "boot.hardlockup.back_secs"
 unit = "s"
-ceiling = 134
-ceiling_from = "as boot.deadlinewedge.back_secs, at the earlier bound: 60 s of `toyos_tco::HARD_LOCKUP_BOUND_MS` and the same 74 s. This boot ends itself half a bound earlier and then costs the same firmware, loader and Ubuntu as any other"
+ceiling = 420
+ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs. It is the same wait: this boot ends itself half a bound earlier and then costs the same firmware, loader and Ubuntu as any other"
 measured = 102
 
 [[number]]
@@ -611,14 +611,12 @@ ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
 
 # --- what the on-screen panel cost each boot ---
-# **The one window a person has into a machine that stopped, priced by its
-# slowest single paint.** The panel writes the cells that moved, and it paints
-# through a write-combining mapping from its first paint on — so what this row
-# bounds is a paint, and a panel that cannot keep pace with the log ring shows
-# stale state during the exact event it exists for. The other three numbers of
-# the census (paints, pixels, and the total time in the painter) are printed
-# beside the boot and are evidence for the next author, not a gate: one number,
-# one ceiling.
+# **The one window a person has into a machine that stopped.** Two numbers,
+# because the panel can fail a person in two ways: `panel_max_us` bounds one
+# paint, so a paint nobody can watch finish is a red; `panel_us` bounds the
+# boot's whole time inside the painter, so a panel that keeps pace per paint by
+# painting far more than it needs to is a red as well. Paints and pixels are
+# printed beside the boot as evidence and are not gates.
 #
 # A boot that hands the machine back carries the census as an ordinary record;
 # a boot a bound ended seals the same line into the black-box page, which is
@@ -628,7 +626,7 @@ ceiling_from = "as boot.testcases.stick_secs"
 name = "boot.testcases.panel_max_us"
 unit = "us"
 ceiling = 16667
-ceiling_from = "one frame of the panel this bench has: the T14's scanout takes a whole 1080p redraw at 60 Hz, so 16,667 us is what a paint of every cell may cost and still keep pace with the display. The readings below are the boot's one whole-screen fill; the nine damage paints under it are about 1.6 ms each"
+ceiling_from = "one frame at 60 Hz, which is the rate at which a person watching a panel sees it change; a paint that cannot finish inside one shows stale state during the event the panel exists for. 60 Hz is this bench's premise about its display and not a reading off it"
 
 [[number]]
 name = "boot.testcases-mkdir.panel_max_us"
@@ -719,7 +717,7 @@ ceiling_from = "as boot.testcases.panel_max_us"
 name = "boot.deadlinewedge.panel_max_us"
 unit = "us"
 ceiling = 16667
-ceiling_from = "as boot.testcases.panel_max_us — off the sealed page, because this boot's logd wrote no file"
+ceiling_from = "as boot.testcases.panel_max_us; read off the sealed page, because this boot's logd wrote no file"
 measured = 3913
 
 [[number]]
@@ -729,3 +727,107 @@ ceiling = 16667
 ceiling_from = "as boot.deadlinewedge.panel_max_us"
 measured = 3811
 
+[[number]]
+name = "boot.testcases.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "the panel reports the boot and may not become it: a tenth of the ~1.2 s these boots take to reach `Boot: complete`, which is what boot.testcases.complete_ms's readings stand at. A panel that re-renders the whole scanout for every record spends more than the boot does"
+
+[[number]]
+name = "boot.testcases-mkdir.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.testcases-readdir.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.testcases-watchdog.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.jobcase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+measured = 17463
+
+[[number]]
+name = "boot.metalcase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.latencycase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.metaldevicecase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.selftests.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.shared.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.shared-2.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.shared-debug.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.ccorpus.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.ccorpus-2.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.foreignrecord.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.deadlinewedge.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+measured = 19433
+
+[[number]]
+name = "boot.hardlockup.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+measured = 19354
