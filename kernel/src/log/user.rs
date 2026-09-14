@@ -103,6 +103,81 @@ fn publish_durable(claimed: u64) {
     DURABLE_NS.fetch_max(clamped, core::sync::atomic::Ordering::Relaxed);
 }
 
+/// Holders one boot carves out of the first stage of its stop. Two programs
+/// hold the capability on the widest committed `system.toml`, and one of those
+/// may duplicate it into what it spawns.
+const MAX_LOG_HOLDERS: usize = 8;
+
+/// No process; no table issues it.
+const NO_PID: u32 = 0;
+
+/// Every process `/system/bin/init` moved [`Rights::LOG`] into, as this kernel
+/// learned it where it checked that capability.
+///
+/// **The shutdown's carve-out is a capability, and nothing a process says about
+/// itself joins this table.** [`super::wait_for_durable`] ends when a userland
+/// process makes the boot's last records durable, and [`publish_durable`] is
+/// reachable only through `SYS_LOG_READ`, so a holder of that right is exactly
+/// what can end the wait — and the first stage of the machine's stop leaves
+/// exactly those running.
+///
+/// [`Rights::LOG`]: toyos_abi::handle::Rights::LOG
+static LOG_HOLDERS: [core::sync::atomic::AtomicU32; MAX_LOG_HOLDERS] =
+    [const { core::sync::atomic::AtomicU32::new(NO_PID) }; MAX_LOG_HOLDERS];
+
+/// Said once: the refusal below is reached on every read a full table sees.
+static REFUSED_A_HOLDER: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Record a holder, called where the capability has just been checked and
+/// nowhere a caller's own words reach.
+///
+/// A surplus holder is refused by name rather than carried: the table is read
+/// with preemption off inside the block layer, so it is a fixed set of words,
+/// and a process it has no room for stops in the first stage like any other.
+pub fn note_log_holder(pid: u32) {
+    for slot in &LOG_HOLDERS {
+        match slot.compare_exchange(
+            NO_PID,
+            pid,
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(held) if held == pid => return,
+            Err(_) => {}
+        }
+    }
+    if !REFUSED_A_HOLDER.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        crate::alert!(
+            "log: pid {pid} is past the {MAX_LOG_HOLDERS} holders of the log capability this \
+             machine carves out of a shutdown's first stage; it stops in that stage with \
+             everything else"
+        );
+    }
+}
+
+/// Released here because a pid is issued again: the next process to hold this
+/// number is not the one that held the capability.
+pub fn forget_log_holder(pid: u32) {
+    for slot in &LOG_HOLDERS {
+        let _ = slot.compare_exchange(
+            pid,
+            NO_PID,
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+/// Whether the shutdown's first stage leaves `pid` running.
+pub fn holds_the_log(pid: u32) -> bool {
+    pid != NO_PID
+        && LOG_HOLDERS
+            .iter()
+            .any(|slot| slot.load(core::sync::atomic::Ordering::Relaxed) == pid)
+}
+
 /// Newest record `/system/bin/logd` has `fsync`ed to the device, or 0 if none yet.
 pub fn durable_ns() -> u64 {
     DURABLE_NS.load(core::sync::atomic::Ordering::Relaxed)

@@ -461,6 +461,9 @@ pub enum Dispose {
     None,
     Yield,
     Exit,
+    /// The machine is stopping and this task is standing at the one boundary
+    /// it may never cross again. Does not come back.
+    Stop,
 }
 
 /// The environment every pass runs against.
@@ -519,6 +522,7 @@ pub fn pass(dispose: Dispose) {
             Dispose::None => pass.dispose_none(),
             Dispose::Yield => pass.dispose_yield(),
             Dispose::Exit => pass.dispose_exit(),
+            Dispose::Stop => pass.dispose_stop(),
         };
         disposed.finish()
     });
@@ -766,6 +770,11 @@ pub fn current_symbols() -> Option<Arc<crate::symbols::SymbolTable>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().symbols.clone())).flatten()
 }
 
+/// What the running task's marks say it does instead of returning to Ring 3 — one load, no clone, since an `Arc` refcount here is too costly on this path.
+pub fn current_safe_point(stopping: bool) -> Option<toyos_sched::task::SafePoint> {
+    try_with_cpu(|cpu| cpu.running().and_then(|t| t.shared().at_safe_point(stopping))).flatten()
+}
+
 /// Whether the running task has been killed — one relaxed load, no clone, since an `Arc` refcount here is too costly on this path.
 pub fn current_kill_pending() -> bool {
     try_with_cpu(|cpu| cpu.running().is_some_and(|t| t.shared().kill_pending())).unwrap_or(false)
@@ -811,6 +820,11 @@ pub fn parked_len() -> usize {
 /// The dump's fourth container — without it a dying task is invisible to `unheld = claimed − scheduled`.
 pub fn dying_len() -> usize {
     try_with_cpu(|cpu| cpu.dying_len()).unwrap_or(0)
+}
+
+/// Threads on this CPU the machine's stop banded; no pick serves them again.
+pub fn stopped_len() -> usize {
+    try_with_cpu(|cpu| cpu.stopped_len()).unwrap_or(0)
 }
 
 /// Every dying thread on this CPU, in the order the pick will take them.

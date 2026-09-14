@@ -599,7 +599,7 @@ pub fn fsync(object: &KObjectRef) -> u64 {
             // A budget expired on a live device, never a device fact: retry on a fresh budget.
             // A refused attempt discards nothing — an unsettled debt needs no restoring.
             Err(SyscallError::WouldBlock) => {
-                // A killed caller stops retrying at the first safe point; the return value dies with the task.
+                // A killed caller stops retrying at the first safe point; the return value dies with the task. The machine's stop is deliberately not read here: `quiesce` claims every filesystem is synced, and a sync it named may not be abandoned by the stop that is about to make that claim.
                 if crate::sched::driver::current_kill_pending() {
                     return SyscallError::WouldBlock.to_u64();
                 }

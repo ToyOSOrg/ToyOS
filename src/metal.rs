@@ -1596,6 +1596,17 @@ pub fn deadline_lateness_ms(loader: &str) -> Option<u64> {
     reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
 }
 
+/// What the kernel's stop wrote about itself in this boot's own kernel log.
+///
+/// `None` on a boot that wrote none, which is every boot that reset without
+/// going through `quiesce` — `deadlinewedge` and `hardlockup` are the two.
+pub fn park(kernel: &str) -> Option<toyos_quiesce::Record> {
+    kernel
+        .lines()
+        .find(|line| line.contains(toyos_quiesce::STOPPED))
+        .and_then(toyos_quiesce::Record::parse)
+}
+
 /// The same for the other bound: how far past its own bound the hard-lockup
 /// sample was when it found the CPU stuck.
 ///

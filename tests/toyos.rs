@@ -204,6 +204,11 @@ const RUST_SKIP: &[&str] = &[
     // its own can hold: in the shared boot every other binary's output is in the
     // same stream. `console_line_atomicity` runs it.
     "console_line_atomicity",
+    // **It reboots the machine**, so in the shared block it would end the boot
+    // under whichever member came next; and its verdict is the order of the
+    // console after that reset, which only its own boot holds.
+    // `quiesce_stops_the_machine` runs it.
+    "quiesce_writers",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -704,6 +709,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("metal_device_probe", Sched::Parallel, Tier::Fast),
     // Its verdict waits out a staged window.
     ("job_deadline_reboots", Sched::Parallel, Tier::Fast),
+    // Its own boot, and its verdict waits out the same staged window.
+    ("quiesce_stops_the_machine", Sched::Parallel, Tier::Fast),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
     // changes the verdict; `RELEGATED` says what leaves the per-PR tier with it.
     ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
@@ -9717,6 +9724,7 @@ fn run_machine_test(
         "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
         "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
         "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
+        "quiesce_stops_the_machine" => power::quiesce_stops_the_machine(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
@@ -15746,10 +15754,10 @@ fn idle_is_spinning(serial: &str) -> Option<(u32, u64)> {
 /// names is violated, not just that it still passes when it is not.
 fn idle_trip_verdict() -> Result<(), String> {
     let healthy = "\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 parked=0 current=None trips=1\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 parked=0 current=None trips=1\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 parked=0 current=None trips=3\n\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 parked=0 current=None trips=2\n";
+[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
+[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
+[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=3\n\
+[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=2\n";
     if let Some((cpu, delta)) = idle_is_spinning(healthy) {
         return Err(format!("a healthy trace was refused: cpu{cpu} moved by {delta}"));
     }
@@ -15757,10 +15765,10 @@ fn idle_trip_verdict() -> Result<(), String> {
     // The regression's own shape: one CPU quarantines cleanly and stays
     // quiet, the other's undrained ring never lets it halt.
     let spinning = "\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 parked=0 current=None trips=1\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 parked=0 current=None trips=4\n\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 parked=0 current=None trips=2\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 parked=0 current=None trips=2685004\n";
+[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
+[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=4\n\
+[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=2\n\
+[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=2685004\n";
     match idle_is_spinning(spinning) {
         Some((1, delta)) if delta > MAX_IDLE_TRIP_DELTA => {}
         Some((cpu, delta)) => {

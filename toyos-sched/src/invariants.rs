@@ -26,6 +26,10 @@ pub enum Container {
     /// can unwind. Its state word reads `Ready`, because that is what it is —
     /// a task the pick takes before the fair queue.
     Dying,
+    /// Stopped for the life of this machine. Its state word reads `Ready` for
+    /// the reason a dying task's does — it is still counted into its share —
+    /// but no pick serves this band, so `Ready` here is where it stays.
+    Stopped,
     Parked,
     Zombie,
 }
@@ -39,6 +43,7 @@ pub fn residents<X: SchedPayload>(
         .into_iter()
         .chain(cpu.rq().keys().map(|k| (k, Container::Ready)))
         .chain(cpu.dying().map(|t| (t.key(), Container::Dying)))
+        .chain(cpu.stopped().map(|t| (t.key(), Container::Stopped)))
         .chain(cpu.parked().map(|p| (p.key(), Container::Parked)))
         .chain(cpu.zombie_key().map(|k| (k, Container::Zombie)))
 }
@@ -72,11 +77,30 @@ pub fn check_cpu<X: SchedPayload>(cpu: &CpuSched<X>) {
         );
     }
 
+    for task in cpu.stopped() {
+        assert_eq!(
+            task.shared().state(),
+            TaskState::Ready(id),
+            "stopped task {:?} disagrees with its state word",
+            task.key(),
+        );
+        assert!(
+            task.shared().stop_pending(),
+            "a live task {:?} is in the stopped band",
+            task.key(),
+        );
+    }
+
     for task in cpu.rq().tasks() {
         assert_eq!(
             task.shared().state(),
             TaskState::Ready(id),
             "ready task {:?} disagrees with its state word",
+            task.key(),
+        );
+        assert!(
+            !task.shared().stop_pending(),
+            "stopped task {:?} is in the run queue, where a pick will serve it",
             task.key(),
         );
     }
