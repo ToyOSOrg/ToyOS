@@ -19,9 +19,12 @@ pub struct Flag {
 pub(crate) enum Value {
     /// Nothing; the next word is the next argument.
     None,
-    /// The next word, whatever it looks like: `--kernel-param --help` arms the
-    /// actuator named `--help`. A line that ends without one is refused.
+    /// The next word, whatever it looks like, and the flag is written once. A
+    /// line that ends without the word is refused, and so is a second use.
     Next,
+    /// The next word, and the flag may be written again: `--kernel-param --help
+    /// --kernel-param slow` arms two actuators, and every value is read.
+    Each,
     /// The next word unless that word is itself a flag: `--known-red` alone
     /// answers about every row, and `--known-red <test>` about one.
     Optional,
@@ -76,8 +79,8 @@ declare_flags!(pub CARGO_RUN = {
     pub GOP = "--gop", None;
     pub METAL_SIM = "--metal-sim", None;
     pub MUTE = "--mute", None;
-    pub KERNEL_PARAM = "--kernel-param", Next;
-    pub KERNEL_FEATURE = "--kernel-feature", Next;
+    pub KERNEL_PARAM = "--kernel-param", Each;
+    pub KERNEL_FEATURE = "--kernel-feature", Each;
     pub DIAG_BOOT = "--diag-boot", None;
     pub CONSOLE_BOOT = "--console-boot", None;
     pub BOOT_CONFIG = "--boot-config", Next;
@@ -109,12 +112,9 @@ pub fn check(args: &[String]) -> Outcome {
         if let Given::Inline(_) = seen.given {
             return Outcome::Refuse(inline(seen.word, seen.flag));
         }
-        if matches!(seen.given, Given::Nothing) && seen.flag.value == Value::Next {
-            return Outcome::Refuse(format!(
-                "Error: {0} was given no value: {0} <value>.",
-                seen.flag.name
-            ));
-        }
+    }
+    if let Some(refusal) = line.malformed() {
+        return Outcome::Refuse(format!("Error: {refusal}"));
     }
     if let Some(word) = line.positionals.first() {
         return Outcome::Refuse(unknown(word));
@@ -129,20 +129,25 @@ fn unknown(word: &str) -> String {
     format!("Error: unknown argument {word:?}.\ncargo run -- accepts:\n{}", CARGO_RUN.usage())
 }
 
+/// What a flag accepts after it, as a refusal and a usage line both spell it.
+fn shape(value: Value) -> &'static str {
+    match value {
+        Value::None => "",
+        Value::Next | Value::Each => " <value>",
+        Value::Optional => " [<value>]",
+        Value::Rest => " <subcommand>",
+    }
+}
+
 /// A value written onto the flag would be dropped in silence by a reader that
 /// takes the next word, so each kind of flag is refused with the shape it does
 /// accept.
 fn inline(word: &str, flag: &Flag) -> String {
-    let shape = match flag.value {
-        Value::None => format!("{} takes no value", flag.name),
-        Value::Next | Value::Optional => {
-            format!("{0} takes its value as the next word, {0} <value>", flag.name)
-        }
-        Value::Rest => {
-            format!("{0} takes its subcommand as the next word, {0} <subcommand>", flag.name)
-        }
+    let takes = match shape(flag.value) {
+        "" => format!("{} takes no value", flag.name),
+        shape => format!("{0} takes its value as the next word, {0}{shape}", flag.name),
     };
-    format!("Error: {word:?}: {shape}.")
+    format!("Error: {word:?}: {takes}.")
 }
 
 /// What a command line wrote after a flag.
@@ -173,7 +178,6 @@ pub(crate) struct Seen<'a> {
     pub(crate) given: Given<'a>,
 }
 
-/// One walk of a command line against one vocabulary.
 pub(crate) struct Walk<'a> {
     pub(crate) seen: Vec<Seen<'a>>,
     /// Words that are nobody's value.
@@ -181,6 +185,32 @@ pub(crate) struct Walk<'a> {
     /// The first word the declaration does not account for; the walk stops
     /// there, because what follows it belongs to a flag nobody declared.
     pub(crate) unknown: Option<&'a str>,
+}
+
+impl Walk<'_> {
+    /// A flag the line named but did not complete. Both shapes would otherwise
+    /// reach a reader as a silent default — the value-taking flag left with
+    /// nothing after it answers `None`, and the flag written twice has every
+    /// use but one dropped — so every command line asks this before it runs.
+    pub(crate) fn malformed(&self) -> Option<String> {
+        for (at, seen) in self.seen.iter().enumerate() {
+            let name = seen.flag.name;
+            if matches!(seen.given, Given::Nothing)
+                && matches!(seen.flag.value, Value::Next | Value::Each)
+            {
+                let shape = shape(seen.flag.value);
+                return Some(format!("{name} was given no value: {name}{shape}."));
+            }
+            if seen.flag.value != Value::Each
+                && self.seen[..at].iter().any(|earlier| earlier.flag.name == name)
+            {
+                return Some(format!(
+                    "{name} was given twice, and a second use is read by nothing."
+                ));
+            }
+        }
+        None
+    }
 }
 
 impl Vocabulary {
@@ -206,7 +236,7 @@ impl Vocabulary {
             let given = match (inline, flag.value) {
                 (Some(value), _) => Given::Inline(value),
                 (None, Value::None) => Given::Nothing,
-                (None, Value::Next) => take(args, &mut at),
+                (None, Value::Next | Value::Each) => take(args, &mut at),
                 (None, Value::Optional) => match args.get(at) {
                     Some(next) if next.starts_with('-') => Given::Nothing,
                     _ => take(args, &mut at),
@@ -237,8 +267,9 @@ impl Vocabulary {
             .collect()
     }
 
-    /// The one value `want` carried; a second use is refused rather than
-    /// resolved.
+    /// The one value `want` carried. A line [`Walk::malformed`] has passed
+    /// cannot carry two, so this fires only for a caller that read a command
+    /// line without checking it.
     pub fn value<'a>(&self, args: &'a [String], want: &Flag) -> Option<&'a str> {
         let found = self.values(args, want);
         assert!(found.len() < 2, "{} takes one value; this asks for {found:?}", want.name);
@@ -261,12 +292,7 @@ impl Vocabulary {
     pub(crate) fn usage(&self) -> String {
         self.0
             .iter()
-            .map(|f| match f.value {
-                Value::None => format!("  {}", f.name),
-                Value::Next => format!("  {} <value>", f.name),
-                Value::Optional => format!("  {} [<value>]", f.name),
-                Value::Rest => format!("  {} <subcommand>", f.name),
-            })
+            .map(|f| format!("  {}{}", f.name, shape(f.value)))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -287,10 +313,6 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
-
-    fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-    }
 
     fn argv(words: &[&str]) -> Vec<String> {
         std::iter::once("toyos-build").chain(words.iter().copied()).map(String::from).collect()
@@ -334,17 +356,42 @@ mod tests {
         assert!(worktree.contains("--worktree <subcommand>"), "{worktree}");
     }
 
-    /// A missing value reached the dispatch as a panic, after the prerequisites
-    /// and a `set_current_dir`.
     #[test]
     fn a_flag_left_without_its_value_is_refused() {
-        for words in [vec!["--smp"], vec!["--boot-config"], vec!["--kernel-param"]] {
-            let message = refusal(&words);
-            assert!(message.contains(words[0]), "{words:?}: {message}");
+        for flag in CARGO_RUN.0.iter().filter(|f| matches!(f.value, Value::Next | Value::Each)) {
+            let message = refusal(&[flag.name]);
+            assert!(message.contains(flag.name), "{}: {message}", flag.name);
         }
         assert!(matches!(checked(&["--known-red"]), Outcome::Proceed), "--known-red answers alone");
         assert!(matches!(checked(&["--known-red", "audio_tone"]), Outcome::Proceed));
         assert!(refusal(&["--known-red", "--frobnicate"]).contains("--frobnicate"));
+    }
+
+    /// The second use is read by nothing, so it is refused here rather than at
+    /// [`Vocabulary::value`]'s assert — which a `--smp 1 --smp 2` reached only
+    /// after the prerequisites and a `set_current_dir`.
+    #[test]
+    fn a_flag_that_reads_one_value_is_refused_when_it_is_written_twice() {
+        for words in [
+            vec!["--smp", "1", "--smp", "2"],
+            vec!["--boot-config", "diag", "--boot-config", "console"],
+            vec!["--build-only", "--build-only"],
+        ] {
+            let message = refusal(&words);
+            assert!(message.contains(words[0]), "{words:?}: {message}");
+            assert!(message.contains("twice"), "{words:?}: {message}");
+        }
+    }
+
+    /// The only thing `values` does that `value` does not: a repeatable flag
+    /// keeps every value, in the order given.
+    #[test]
+    fn a_repeatable_flag_keeps_every_value_it_was_given() {
+        let line =
+            argv(&["--kernel-param", "slow", "--kernel-feature", "x", "--kernel-param", "a"]);
+        assert!(matches!(check(&line), Outcome::Proceed));
+        assert_eq!(CARGO_RUN.values(&line, &KERNEL_PARAM), ["slow", "a"]);
+        assert_eq!(CARGO_RUN.values(&line, &KERNEL_FEATURE), ["x"]);
     }
 
     /// The value of a flag that takes one is that flag's, whatever it spells —
@@ -378,22 +425,33 @@ mod tests {
         }
     }
 
+    /// Every file in this repository that can carry a command: the whole tree
+    /// and not a list of directories, so a script or workflow arriving anywhere
+    /// is read on its first commit.
+    ///
+    /// **What it does not reach**: `target/` is built and `rust/` is the fork;
+    /// a prose file carries no gate in this tree, so `.md` is not scanned and a
+    /// flag named only in documentation is not held to the declaration.
     fn scanned_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
-        files_with(&root.join(".github/workflows"), "yml", &mut files);
-        files_with(&root.join("src"), "rs", &mut files);
-        files_with(&root.join("tests/common"), "rs", &mut files);
-        files.push(root.join("tests/toyos.rs"));
-        files_with(&root.join("diag"), "sh", &mut files);
+        files_under(root, &mut files);
+        files.sort();
         files
     }
 
-    fn files_with(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
+    fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
             let path = entry.expect("readable dir entry").path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let dotted = name.starts_with('.') && name != ".github";
             if path.is_dir() {
-                files_with(&path, extension, out);
-            } else if path.extension().is_some_and(|e| e == extension) {
+                if name == "target" || name == "rust" || dotted {
+                    continue;
+                }
+                files_under(&path, out);
+            } else if path.extension().is_some_and(|e| {
+                matches!(&*e.to_string_lossy(), "rs" | "sh" | "yml" | "yaml" | "toml")
+            }) {
                 out.push(path);
             }
         }
@@ -407,20 +465,39 @@ mod tests {
     /// declaration lacks would refuse a run nothing is watching.
     #[test]
     fn every_flag_the_tree_passes_to_cargo_run_is_declared() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let files = scanned_files(&root);
+        // A walk that reached less than it claims would pass by reading
+        // nothing, so the reach is asserted before the flags are.
+        for named in [
+            ".github/workflows/ci.yml",
+            "diag/flash.sh",
+            "userland/doom/build.rs",
+            "toyos-symbols/tests/real.rs",
+            "kernel/Cargo.toml",
+            "tests/toyos.rs",
+        ] {
+            assert!(files.contains(&root.join(named)), "the scan does not reach {named}");
+        }
+
         let declared: BTreeSet<&str> = CARGO_RUN.0.iter().map(|f| f.name).collect();
-        for file in scanned_files(&repo_root()) {
+        let mut seen = BTreeSet::new();
+        for file in files {
             for flag in flags_passed_to_cargo_run(&read(&file)) {
                 assert!(
                     declared.contains(flag.as_str()),
                     "{} passes {flag} to `cargo run --`, and src/flags.rs does not declare it",
                     file.display()
                 );
+                seen.insert(flag);
             }
         }
+        assert!(seen.contains("--build-only"), "the scan read no command line at all: {seen:?}");
     }
 
-    /// Every `--flag` a text hands to `cargo run --`, directly on the line or
-    /// one shell variable away.
+    /// Every `--flag` a text hands to *this* binary's `cargo run --`, directly
+    /// on the line or one shell variable away. A `cargo run` naming another
+    /// package, binary or example runs a command line this table does not own.
     fn flags_passed_to_cargo_run(text: &str) -> BTreeSet<String> {
         let mut vars: BTreeMap<String, String> = BTreeMap::new();
         for line in text.lines() {
@@ -436,6 +513,13 @@ mod tests {
         for line in text.lines() {
             let Some(at) = line.find("cargo run") else { continue };
             let Some(sep) = line[at..].find("-- ") else { continue };
+            let selected = &line[at..at + sep];
+            if ["-p ", "--package", "--bin", "--example", "--manifest-path"]
+                .iter()
+                .any(|other| selected.contains(other))
+            {
+                continue;
+            }
             let tail = &line[at + sep + "-- ".len()..];
             collect_flags(tail, &vars, &mut BTreeSet::new(), &mut found);
         }
@@ -479,15 +563,21 @@ mod tests {
         (token.starts_with("--") && token.len() > 2).then(|| token.to_string())
     }
 
+    /// The forms the scan has to read, and the ones it must not attribute to
+    /// this binary: the last two lines run another package and another example,
+    /// whose flags belong to vocabularies this table knows nothing about.
     #[test]
-    fn the_scan_reads_a_flag_through_a_variable_and_out_of_punctuation() {
+    fn the_scan_reads_this_binarys_command_lines_and_no_others() {
         let text = "\
             base_arg=\"--tier-base $TIER_BASE\"\n\
             ARGS=$ARGS --build-only\n\
-            run: cargo run -- --diag-boot $base_arg $ARGS `--clippy`\n";
+            run: cargo run -- --diag-boot $base_arg $ARGS `--clippy`\n\
+            //! cargo run -- --console-boot\n\
+            cargo run --release -p toyos-sched-sim -- --fuzz-sweep\n\
+            cargo run --example imgstat -- --histogram\n";
         assert_eq!(
             flags_passed_to_cargo_run(text),
-            ["--build-only", "--clippy", "--diag-boot", "--tier-base"]
+            ["--build-only", "--clippy", "--console-boot", "--diag-boot", "--tier-base"]
                 .map(String::from)
                 .into_iter()
                 .collect::<BTreeSet<String>>()

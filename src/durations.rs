@@ -1151,7 +1151,6 @@ mod tests {
             Enforced::from_args(&root(), &args).renders("any_name_at_all")
         };
         assert!(renders(&["--merge-durations", "/tmp/durations"]));
-        assert!(renders(&["--merge-durations", "/tmp/durations", flags::TIER_BASE.name]));
         assert!(renders(&["--merge-durations", "/tmp/durations", flags::TIER_BASE.name, ""]));
     }
 

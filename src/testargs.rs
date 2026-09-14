@@ -105,10 +105,11 @@ pub fn parse_shard(args: &[String]) -> Result<Option<Shard>, String> {
     if !SUITE.present(args, &SHARD) {
         return Ok(None);
     }
-    let asked = SUITE.values(args, &SHARD);
-    let [spec] = asked[..] else {
-        return Err(format!("--shard {asked:?}: a run is one slice, e.g. --shard 2/4"));
-    };
+    // Total on its own, because a `None` here is the whole suite and this is
+    // public: [`parse`] refuses the same line, and does not run in every caller.
+    let spec = SUITE
+        .value(args, &SHARD)
+        .ok_or("--shard was given no value: --shard <index>/<count>, e.g. --shard 2/4")?;
     let (index, count) = spec
         .split_once('/')
         .ok_or_else(|| format!("--shard {spec}: not <index>/<count>, e.g. 2/4"))?;
@@ -196,6 +197,9 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
             ));
         }
     }
+    if let Some(refusal) = line.malformed() {
+        return Err(refusal);
+    }
 
     let mut filter: Option<&str> = None;
     for word in line.positionals {
@@ -211,6 +215,13 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
     }
 
     let has = |want| SUITE.present(args, want);
+    if has(&JOBS) && has(&JOBS_SHORT) {
+        return Err(
+            "--jobs and -j are two spellings of one width, and the run would read one of \
+             them and drop the other in silence; write one"
+                .to_string(),
+        );
+    }
     if has(&METAL_READBACK) && !has(&METAL) {
         return Err(
             "--metal-readback says where the metal profile's images and readbacks live and \
@@ -239,9 +250,12 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
 mod tests {
     use super::*;
 
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(ToString::to_string).collect()
+    }
+
     fn parse_owned(args: &[&str]) -> Result<Option<String>, String> {
-        let owned: Vec<String> = args.iter().map(ToString::to_string).collect();
-        parse(&owned).map(|f| f.map(ToString::to_string))
+        parse(&owned(args)).map(|f| f.map(ToString::to_string))
     }
 
     #[test]
@@ -293,7 +307,7 @@ mod tests {
     }
 
     fn shard_of(args: &[&str]) -> Result<Option<Shard>, String> {
-        parse_shard(&args.iter().map(ToString::to_string).collect::<Vec<_>>())
+        parse_shard(&owned(args))
     }
 
     #[test]
@@ -427,6 +441,45 @@ mod tests {
         seen.sort_unstable();
         assert_eq!(seen, items);
         assert_eq!(sizes, vec![4, 3, 3], "{sizes:?}");
+    }
+
+    /// Every one of these answered `None` to its reader before, and every
+    /// `None` is a default the run then takes in silence: `--jobs` the built-in
+    /// width, `--audio-gate` the thorough tier off, `--host-slots` the host's
+    /// own budget, `--host-builds` no budget at all.
+    #[test]
+    fn a_flag_left_without_its_value_is_refused_by_name() {
+        for flag in SUITE.0.iter().filter(|f| matches!(f.value, Value::Next | Value::Each)) {
+            let refusal = parse_owned(&[flag.name]).unwrap_err();
+            assert!(refusal.contains(flag.name), "{}: {refusal}", flag.name);
+            assert!(refusal.contains("no value"), "{}: {refusal}", flag.name);
+        }
+    }
+
+    /// **The one that drives a physical machine.** `tests/toyos.rs` reads the
+    /// readback directory to decide `metal::Mode`, and `None` there is
+    /// `Mode::Drive` — the T14, booted off a stick. A `--metal-readback` with
+    /// no directory after it must therefore never reach that reader.
+    #[test]
+    fn a_readback_flag_with_no_directory_never_reaches_the_metal_driver() {
+        let refusal = parse_owned(&["--metal", "--metal-readback"]).unwrap_err();
+        assert!(refusal.contains("--metal-readback"), "{refusal}");
+        assert!(refusal.contains("no value"), "{refusal}");
+        assert_eq!(SUITE.value(&owned(&["--metal", "--metal-readback"]), &METAL_READBACK), None);
+    }
+
+    /// A second use is read by nothing, so the run would take the first value
+    /// and say nothing about the one it dropped.
+    #[test]
+    fn a_flag_written_twice_is_refused_by_name() {
+        for argv in [vec!["--jobs", "1", "--jobs", "4"], vec!["--nightly", "--nightly"]] {
+            let refusal = parse_owned(&argv).unwrap_err();
+            assert!(refusal.contains(argv[0]), "{argv:?}: {refusal}");
+            assert!(refusal.contains("twice"), "{argv:?}: {refusal}");
+        }
+        // Two spellings of the width are the same drop under two names.
+        let refusal = parse_owned(&["--jobs", "1", "-j", "4"]).unwrap_err();
+        assert!(refusal.contains("--jobs and -j"), "{refusal}");
     }
 
     #[test]
