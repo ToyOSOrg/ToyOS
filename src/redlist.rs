@@ -2647,22 +2647,44 @@ pub const KNOWN_RED: &[Red] = &[
         test: "tlb_shootdown_waits",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the instrument was measuring nothing, and the kernel's wait was never what \
+             failed. `arch::tlb::shootdown` waits for every other CPU the machine brought \
+             up, so the sibling thread and the witness this test arranged its precondition \
+             with established a concurrency the shootdown never consulted. What could fail \
+             was the injected delay: `last_target()` chose the CPU to hold an \
+             acknowledgement back on by arithmetic over the *arming* CPU's id, and nothing \
+             kept the caller there — when the thread landed on that CPU it became the \
+             initiator and answered itself through `shootdown`'s local serve, the one path \
+             that never delayed, so the call returned in microseconds with every target \
+             genuinely flushed and genuinely waited for. Fixed in 78f8984d: the delay is \
+             held back on every path a CPU answers another CPU's shootdown on, the \
+             precondition is `SYS_CPU_COUNT > 1` asked of the kernel, and a \
+             `tlb: acks held back cpuN=` line reports the receiver side, so the next red \
+             under this name says whether the delay reached a CPU the initiator waited for",
+        ),
         what: "`exit code 101` at 53 ms — the guest binary's own assertion, and the \
                2026-08-20 lock-conversion pass already recorded the sharper point when the \
                same name red on a loaded dev host, ALONE: GREEN: the assertion that fires \
                is the test's own *control*, so it is the one assertion in the suite that \
                cannot tell a slow host from a broken measurement. **Not about the diff it \
-               was found on**, two issue files and a tests/CLAUDE.md bullet (PR #150)",
+               was found on**, two issue files and a tests/CLAUDE.md bullet (PR #150). The \
+               2026-09-14 sighting is the one that settled it: red twice and then red again \
+               alone, `panicked at src/bin/tlb_shootdown_waits.rs:170:9` and then `:179:5`, \
+               under `ALONE tlb_shootdown_waits: red again, the same failure both times — \
+               the defect is real`",
         evidence: "PR #150 run 32334225614, job 96320634405 (`guest (5)`), 2026-08-20; the \
                    dev-host sighting the same night is in the source issue. Seen again on a \
                    doc-only branch: PR #451 run 34761663167, job 103735485106 (`guest (10)`), \
                    2026-09-13 — `munmap returned in 19584ns with the last CPU answering \
-                   20000000ns late`, ALONE: GREEN in the same job; CI has one guest per \
-                   machine, so this one is not the load class and is filed as a kernel \
-                   defect at issues/kernel/a-shootdown-red-on-ci-is-not-a-slow-host.md",
+                   20000000ns late`, ALONE: GREEN in the same job. Decisive on PR #456, one \
+                   tracker file and no code: run 34832814196, job 103939901657 \
+                   (`guest (10)`), 2026-09-14, whose captures carry the mechanism — \
+                   `tlb: shootdowns=123 wait=45337us max=20030us ... unmap=101 staged=1` \
+                   with only the staged shootdown delayed, and `irq: cpu1 tlb=0` on the \
+                   isolated re-run with all six deliveries on cpu0",
         source: "issues/build/parallel-tests-red-under-other-suites.md",
-        measured: "2026-09-13",
+        measured: "2026-09-14",
     },
     // ---------------------------------------------------------------------
     // `wt/toyos-purecrates`, dev host, 2026-08-18: three full `cargo test` runs
