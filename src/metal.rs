@@ -1049,9 +1049,6 @@ impl Ping {
                 let silence = std::time::Duration::from_secs(PING_SILENCE_SECS);
                 let wait = std::time::Duration::from_millis(PING_WAIT_MS);
                 while !theirs.load(std::sync::atomic::Ordering::SeqCst) {
-                    // **A host that could not ask and an address that did not
-                    // answer are separate answers**: reporting the first as
-                    // silence would red the boot for this host's own state.
                     let answered = match crate::icmp::echo(addr, wait) {
                         Ok(answered) => answered,
                         Err(why) => {
