@@ -30,8 +30,12 @@ pure and tested, `a_released_address_is_offered_again` pins the give-back
 arithmetic, and `https_tls13_e1000e` asserts the count of BARs kept back by
 name, so deleting the `BarReferenceEmpty` refusal reds.
 
-**Exit condition.** A guest whose claimed function sits behind a bridge that
-forwards less than a declared window holds — a `pcie-root-port` with a memory
-window narrower than the aperture OVMF declares is the shape in reach — booted
-with an arm asserting the `left {at:#x}` record, that the BAR ended at a later
-candidate, and that deleting the comparison reds that arm.
+**Exit condition.** A guest whose claimed function sits behind a `pcie-root-port`
+given a memory window of a few MiB. **The port's window is the thing to arrange**:
+it produces the case only because `KernelArgs::root_bridge_windows` carries the
+loader's free GCD MMIO ranges, which are the host bridge's whole aperture and not
+the port's slice of it — on q35 that range is `0xc1100000+0x3af00000` — so a
+candidate past the port's window is an address this kernel may name and the
+function does not answer at. Booted with an arm asserting the `left {at:#x}`
+record, that the BAR ended at a later candidate, and that deleting the comparison
+reds that arm.
