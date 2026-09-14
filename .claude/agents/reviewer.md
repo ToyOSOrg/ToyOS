@@ -111,6 +111,8 @@ it.
   a different base.
 - A model that cannot distinguish the reverted state from the fixed one is a missing test, not a
   limit of the documentation.
+- A probe the committed tests cannot exercise is measured once by hand, and that measurement is
+  quoted in the commit that adds it.
 - Where a change reads an address back from a guest, that address comes from what the harness knows
   without it — the argv, a fixed base, the ECAM walk — and the kernel's printed address is asserted
   equal to it, never used.
