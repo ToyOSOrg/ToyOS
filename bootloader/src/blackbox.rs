@@ -35,6 +35,14 @@ pub const HEAD: &str = "Black box:";
 pub const TAIL_IN_THE_FILE: &str =
     "Black box: that record's log ring is in loader.log, not on a console the firmware scrolls:";
 
+/// What closes the one line of a record the page's end cut.
+///
+/// **This pass re-terminates every line it prints**, so without this a line the
+/// page ran out in the middle of is one no reader can tell from a whole one,
+/// and a field read off such a line is a number the page cut rather than the
+/// one the kernel wrote.
+pub const CUT_BY_THE_PAGE: &str = " <the page ended here, mid-line>";
+
 /// The page, once claimed. `None` is a boot with no black box at all, which is
 /// a machine and not a failure: it boots the kernel and leaves nothing behind.
 #[derive(Clone, Copy)]
@@ -93,13 +101,16 @@ pub struct Finding {
 /// declaration is filed with the tail, so no line the kernel writes above a
 /// record's tail may begin with one. `boot_deadline_ends_a_wedge` holds the
 /// head forms of a wedge — its reason and the panel's census — to the console,
-/// and the filed count to the file.
+/// and the filed count to the file. The one line the page's end cut carries
+/// [`CUT_BY_THE_PAGE`], which is the only place that cut is still visible.
 fn tail(text: &[u8], lines: &mut Vec<String>, filed: &mut Vec<String>) {
-    for line in text.split(|byte| *byte == b'\n') {
+    for chunk in text.split_inclusive(|byte| *byte == b'\n') {
+        let line = chunk.strip_suffix(b"\n").unwrap_or(chunk);
         if line.is_empty() {
             continue;
         }
-        let written = alloc::format!("| {}", Ascii(line));
+        let cut = if line.len() == chunk.len() { CUT_BY_THE_PAGE } else { "" };
+        let written = alloc::format!("| {}{cut}", Ascii(line));
         if line.starts_with(toyos_blackbox::RECORD_OPENS_WITH) {
             filed.push(written);
         } else {

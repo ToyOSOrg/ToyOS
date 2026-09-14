@@ -107,6 +107,13 @@ pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
 pub const TAIL_IN_THE_FILE: &str =
     "Black box: that record's log ring is in loader.log, not on a console the firmware scrolls:";
 
+/// What the loader closes the one line of a record the page's end cut with.
+///
+/// **The loader re-terminates every line it prints off the page**, so this is
+/// the only mark a cut leaves: without it a field read off such a line is a
+/// number the page cut rather than the one the kernel wrote.
+pub const CUT_BY_THE_PAGE: &str = " <the page ended here, mid-line>";
+
 /// The loader's last line on a pass that read that page and boots no kernel,
 /// which is what tells a chain that ended from one that went round again —
 /// [`LOADER_LAST_LINE`] is the other.
@@ -152,16 +159,18 @@ pub struct Panel {
 
 /// The census `log` carries, or `None` for a boot that left neither channel.
 ///
-/// **A line this reads has ended itself.** The page a wedged boot's census
-/// rides can be cut mid-line, and a `max_us=` whose digits the cut took the
-/// end of parses as a cheaper panel than the boot had — so a chunk with no
-/// newline behind it is not a census line.
+/// **This boot's census whole, or nothing.** A `max_us=` whose digits a cut
+/// took the end of parses as a cheaper panel than the boot had, and each
+/// channel says a line ended itself in its own way: `logd`'s file terminates
+/// one, and the black-box page is a fixed size whose one cut line the loader
+/// closes with [`CUT_BY_THE_PAGE`]. An older census standing in for a cut one
+/// would be a second boot's number under this boot's name, so the cut line is
+/// refused rather than skipped.
 pub fn panel_census(log: &str) -> Option<Panel> {
-    let line = log
-        .split_inclusive('\n')
-        .filter(|line| line.ends_with('\n'))
-        .rev()
-        .find(|line| line.contains(PANEL_CENSUS))?;
+    let line = log.split_inclusive('\n').rev().find(|line| line.contains(PANEL_CENSUS))?;
+    if !line.ends_with('\n') || line.contains(CUT_BY_THE_PAGE) {
+        return None;
+    }
     let field = |name: &str| -> Option<u64> {
         let (_, rest) = line.split_once(name)?;
         rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
@@ -375,6 +384,7 @@ mod tests {
             ("bootloader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{TAIL_IN_THE_FILE}\"")),
+            ("bootloader/src/blackbox.rs", format!("\"{CUT_BY_THE_PAGE}\"")),
         ];
         for (file, rhs) in wanted {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
@@ -486,21 +496,45 @@ mod record_time_tests {
     fn the_panel_census_is_read_off_either_channel() {
         let logd = "[2026-09-08 06:50:53 2.5 cpu0] panel: paints=3 px=6220800 us=1500000 \
                     max_us=520000\n";
-        let census = Panel { paints: 3, pixels: 6_220_800, micros: 1_500_000, max_micros: 520_000 };
-        assert_eq!(panel_census(logd), Some(census));
-        let sealed = "| the boot deadline expired: a bound of 120000 ms ...\n| panel: paints=3 \
-                      px=6220800 us=1500000 max_us=520000\n| [1.2 cpu0] Boot: complete (1199ms)\n";
-        assert_eq!(panel_census(sealed), Some(census));
-        // The whole line or none of it: a truncated page must not read as a
-        // cheap panel. A field the cut took whole, and one it cut mid-number.
-        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000\n"), None);
-        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000 max_us=52"), None);
-        // The same cut, with the rest of the page still under it — the shape a
-        // wedged boot's loader.log actually has.
         assert_eq!(
-            panel_census("| panel: paints=3 px=6220800 us=1500000 max_us=52"),
-            None
+            panel_census(logd),
+            Some(Panel { paints: 3, pixels: 6_220_800, micros: 1_500_000, max_micros: 520_000 })
         );
+
+        // A wedge boot's page as the pass after the reset prints it back, line
+        // for line off run 44's deadlinewedge `loader.log`: head lines, the
+        // count of what went to the file, and the filed records under it. Only
+        // the page's last line can be cut, and `cut` is where it fell.
+        let page = |census: &str, cut: &str| {
+            format!(
+                "Previous boot's panic: the last boot read WEDGED, so a bound of its own ended \
+                 it and this chain ends here\n\
+                 | the boot deadline expired: a bound of 120000 ms, reached at 120066 ms, with \
+                 this machine in `complete`. The tail of the log ring follows ... which is what \
+                 nothing was draining.\n\
+                 | panel: {census}\n\
+                 | older records dropped to fit this page: 84\n\
+                 | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n\
+                 | usb-quiesce: no bulk transfer was outstan{cut}\n\
+                 {TAIL_IN_THE_FILE} 221 record(s)\n\
+                 | [0.148 cpu0] iommu: unit3 scope ioapic 00:1e.7 id=2\n"
+            )
+        };
+        // Run 44's own reading, with the cut two lines under the census.
+        assert_eq!(
+            panel_census(&page("paints=10 px=8886656 us=18693 max_us=3867", CUT_BY_THE_PAGE)),
+            Some(Panel { paints: 10, pixels: 8_886_656, micros: 18_693, max_micros: 3_867 })
+        );
+        // The same page with the cut inside the census's last number instead —
+        // a 38 us panel, and every line under it still terminated.
+        let mid_number = format!("paints=10 px=8886656 us=18693 max_us=38{CUT_BY_THE_PAGE}");
+        assert_eq!(panel_census(&page(&mid_number, "")), None);
+
+        // `logd`'s file ends a record with the newline, so its own cut is a
+        // last line that never got one.
+        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000 max_us=52"), None);
+        // A field the cut took whole, and a log with no census at all.
+        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000\n"), None);
         assert_eq!(panel_census("nothing here\n"), None);
     }
 

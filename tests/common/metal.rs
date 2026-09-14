@@ -284,8 +284,10 @@ impl Readback {
     /// back after the reset. The page from *this* boot is the one after the
     /// separator: an earlier chain's report can sit in the pass before it.
     pub fn panel(&self) -> Option<bootlog::Panel> {
-        bootlog::panel_census(&self.kernel)
-            .or_else(|| bootlog::panel_census(self.loader.split(bootlog::SEPARATOR).nth(1)?))
+        bootlog::panel_census(&self.kernel).or_else(|| {
+            let after = self.after_the_reset().ok()?;
+            bootlog::panel_census(after.text())
+        })
     }
 
     /// The same for the other bound: how far past its own bound a hard-lockup

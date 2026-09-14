@@ -125,6 +125,17 @@ pub fn metal_job_reboot(
              boot\n{text}"
         )
     })?;
+    // The panel's census on the channel a boot that hands the machine back
+    // uses: `quiesce` writes it as an ordinary record while `logd` is still
+    // there to file it, which is how fifteen of the seventeen priced boots read
+    // it and is otherwise judged on no machine but the T14.
+    let panel = bootlog::panel_census(&text).ok_or_else(|| {
+        format!(
+            "{name} carries no whole {:?} record, so this boot has no account of what its \
+             panel cost\n{text}",
+            bootlog::PANEL_CENSUS
+        )
+    })?;
 
     let printed = loader_window(&console)?;
     let written = super::volumes::loader_log_lines(&image_path, start, len)?;
@@ -148,8 +159,10 @@ pub fn metal_job_reboot(
 
     kept.remove();
     eprintln!(
-        "  [power] {name} carries Boot: complete ({boot_ms}ms) and this boot's last line, and \
-         {} carries the loader's {} lines beside it",
+        "  [power] {name} carries Boot: complete ({boot_ms}ms), a panel that painted {} time(s) \
+         for {} us, and this boot's last line; {} carries the loader's {} lines beside it",
+        panel.paints,
+        panel.micros,
         bootlog::LOADER_LOG,
         written.len()
     );
