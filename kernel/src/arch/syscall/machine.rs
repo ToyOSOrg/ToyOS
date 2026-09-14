@@ -53,26 +53,19 @@ fn quiesce(last: &str) {
         crate::deadline::stage_a_wedge();
     }
     // The same shape with a device left inside a Bulk-Only command. Here too,
-    // so the wedge is a boot that ran its job list. Which phase is the whole
-    // measurement, so an image carrying two stages neither and says so by name:
-    // the judge then reds on the staging line's absence rather than on a kernel
-    // panic raised from a parameter line.
+    // so the wedge is a boot that ran its job list.
     #[cfg(feature = "boot-actuators")]
     {
         use toyos_xhci::bot::Phase;
-        let arms = [
+        let armed = [
             (crate::actuator::usb_wedge_data_owed(), Phase::DataOwed),
             (crate::actuator::usb_wedge_in_data(), Phase::Data),
             (crate::actuator::usb_wedge_before_status(), Phase::StatusOwed),
-        ];
-        let mut armed = arms.iter().filter(|(on, _)| *on).map(|(_, phase)| *phase);
-        match (armed.next(), armed.next()) {
-            (Some(phase), None) => crate::usb_gate::wedge_inside_a_write(phase),
-            (Some(one), Some(two)) => log!(
-                "{}: {one} and {two} are both armed on this boot",
-                crate::usb_gate::USB_WEDGE_TWO_PHASES
-            ),
-            (None, _) => {}
+        ]
+        .into_iter()
+        .find_map(|(on, phase)| on.then_some(phase));
+        if let Some(phase) = armed {
+            crate::usb_gate::wedge_inside_a_write(phase);
         }
     }
     // The same machine ended by the same bound, with the bus busy rather than

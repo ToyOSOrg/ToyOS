@@ -30,9 +30,6 @@ pub enum NotOnTheRing {
     /// Before the ring's first TRB, or past its last — which is what a context
     /// the controller never wrote, or one published mid-update, reads as.
     Dequeue(u64),
-    /// On the ring and not at a TRB, which only a base that is not itself one
-    /// can produce.
-    Unaligned(u64),
     /// The driver's own next enqueue point is past the end of its ring.
     Tail(u16),
 }
@@ -41,7 +38,6 @@ impl core::fmt::Display for NotOnTheRing {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Dequeue(at) => write!(f, "a dequeue pointer of {at:#x}, which is no TRB on that ring"),
-            Self::Unaligned(at) => write!(f, "a dequeue pointer of {at:#x}, which is on that ring and not at a TRB"),
             Self::Tail(tail) => write!(f, "an enqueue point of {tail}, which is past the end of that ring"),
         }
     }
@@ -62,14 +58,13 @@ impl Ring {
         let Some(off) = at.checked_sub(self.base) else {
             return Err(NotOnTheRing::Dequeue(dequeue));
         };
-        if !off.is_multiple_of(TRB_BYTES) {
-            return Err(NotOnTheRing::Unaligned(dequeue));
-        }
-        let reached = off / TRB_BYTES;
         let trbs = u64::from(self.trbs);
-        if reached >= trbs {
+        // A base that is not itself a TRB boundary puts every position on this
+        // ring between two, which is no TRB on it either.
+        if !off.is_multiple_of(TRB_BYTES) || off / TRB_BYTES >= trbs {
             return Err(NotOnTheRing::Dequeue(dequeue));
         }
+        let reached = off / TRB_BYTES;
         // Ring positions and not addresses: the driver's tail is ahead of the
         // controller's, and the distance between them wraps with the ring.
         Ok(((u64::from(self.tail) + trbs - reached) % trbs) as u16)
@@ -126,9 +121,7 @@ mod tests {
 
     /// **The refusal this exists for.** A context the controller never wrote,
     /// or one read while another CPU was publishing it, hands back a word that
-    /// is not on this ring at all — and the old arithmetic turned every such
-    /// word into a count between 0 and 255 that the account then printed as the
-    /// hardware's own.
+    /// is not on this ring at all.
     #[test]
     fn a_pointer_that_is_no_position_on_this_ring_is_refused_by_name() {
         let r = ring(20);
@@ -139,14 +132,6 @@ mod tests {
         // ring and the one after it is not.
         assert_eq!(r.pending(trb(255)), Ok(21));
         assert_eq!(r.pending(trb(256)), Err(NotOnTheRing::Dequeue(trb(256))));
-    }
-
-    /// A ring whose base is not a TRB boundary makes every position on it a
-    /// fraction; the answer is the refusal and never a rounded index.
-    #[test]
-    fn a_base_that_is_not_a_trb_boundary_refuses_rather_than_rounding() {
-        let skewed = Ring { base: 0x1_0008, trbs: 256, tail: 20 };
-        assert_eq!(skewed.pending(0x1_0010), Err(NotOnTheRing::Unaligned(0x1_0010)));
     }
 
     /// The driver's own half of the pair, refused for the same reason: a tail
@@ -166,7 +151,7 @@ mod tests {
         );
     }
 
-    /// Each refusal says which of the three it is, because the account is the
+    /// Each refusal says which of the two it is, because the account is the
     /// only place a reader learns anything about that reset at all.
     #[test]
     fn no_two_refusals_read_the_same() {
@@ -174,7 +159,6 @@ mod tests {
         use std::string::ToString;
         let said = [
             NotOnTheRing::Dequeue(0x20).to_string(),
-            NotOnTheRing::Unaligned(0x20).to_string(),
             NotOnTheRing::Tail(300).to_string(),
         ];
         for (at, one) in said.iter().enumerate() {

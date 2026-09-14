@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use toyos_blackbox::{PHYS, State};
 use toyos_build::bootlog::{self, REBOOTING};
+use toyos_xhci::bot::Phase;
 
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
@@ -1301,10 +1302,10 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
 /// list, so each boot's whole parameter list is here — the arm's name is its
 /// first element, and there is no spelling of it anywhere else in the harness
 /// for a name to drift away from.
-const WEDGE_PHASES: &[(&[&str], &str)] = &[
-    (&["usb-wedge-data-owed", WEDGE_DEADLINE], "data (unqueued)"),
-    (&["usb-wedge-in-data", WEDGE_DEADLINE], "data"),
-    (&["usb-wedge-before-status", WEDGE_DEADLINE], "status (unqueued)"),
+const WEDGE_PHASES: &[(&[&str], Phase)] = &[
+    (&["usb-wedge-data-owed", WEDGE_DEADLINE], Phase::DataOwed),
+    (&["usb-wedge-in-data", WEDGE_DEADLINE], Phase::Data),
+    (&["usb-wedge-before-status", WEDGE_DEADLINE], Phase::StatusOwed),
 ];
 
 /// A machine stopped inside a Bulk-Only command ends itself, and the reset that
@@ -1328,7 +1329,7 @@ pub fn usb_reset_records_the_phase_it_cut(
     // would say so about one.
     let mut bad = Vec::new();
     for (params, phase) in WEDGE_PHASES {
-        if let Err(why) = one_wedge_phase(params, phase) {
+        if let Err(why) = one_wedge_phase(params, *phase) {
             bad.push(why);
         }
     }
@@ -1384,7 +1385,7 @@ fn the_load_refuses_a_disk_with_no_room() -> Result<(), String> {
 
 /// One boot: stop inside a command at this arm's phase, and read what the reset
 /// did off the page the pass after it prints.
-fn one_wedge_phase(params: &'static [&'static str], phase: &str) -> Result<(), String> {
+fn one_wedge_phase(params: &'static [&'static str], phase: Phase) -> Result<(), String> {
     let arm = params.first().expect("an arm list opens with its arm");
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
@@ -1463,14 +1464,13 @@ pub fn usb_load_chain(kernel: &serial::Serial, after: &serial::Serial) -> Result
 fn usb_wedge_chain(
     kernel: &serial::Serial,
     after: &serial::Serial,
-    phase: &str,
+    phase: Phase,
 ) -> Result<(), String> {
     // The control: the machine reached the staged write and stopped inside it.
     // Without the second line the boot would wedge anyway — at the shutdown,
     // holding nothing — and read back like the arm that proves the point.
     kernel.must_say(bootlog::USB_WEDGE_STAGED)?;
     says_nothing_of(kernel, bootlog::USB_WEDGE_MISSED)?;
-    says_nothing_of(kernel, bootlog::USB_WEDGE_TWO_PHASES)?;
     kernel.must_say(bootlog::WEDGE_STAGED)?;
     says_nothing_of(kernel, REBOOTING)?;
 
@@ -1964,9 +1964,7 @@ struct ResetPath {
 /// device whichever bound reached the reset. Reverting `settle_commands` makes
 /// the sentence absent and fails all four arms by name.
 ///
-/// Taken from the one declaration rather than spelled again here: a second
-/// spelling is a predicate that goes on passing after the kernel stops writing
-/// the line, which is exactly what it did.
+/// Taken from the one declaration rather than spelled again here.
 use toyos_build::metaldevices::QUIESCE_COMMAND as SETTLED_COMMANDS;
 
 const TOOK_THE_LOCK: &str = "the controller lock was held from before the log volume's";

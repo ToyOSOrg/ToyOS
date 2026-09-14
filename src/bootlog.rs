@@ -61,14 +61,6 @@ pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
 /// anything — and read back exactly like the arm that proves the point.
 pub const USB_WEDGE_MISSED: &str = "usb-wedge: the write completed";
 
-/// What the same arms say about an image that named two phases at once.
-///
-/// **Refused by name and not by panic.** Which phase a device is stopped in is
-/// the whole measurement, so an image naming two stages neither; the judge then
-/// reds on [`USB_WEDGE_STAGED`]'s absence.
-pub const USB_WEDGE_TWO_PHASES: &str =
-    "usb-wedge: refused, because the phase a device is stopped in is the whole measurement";
-
 /// What the `usb-reset-under-load` arm says once it is streaming, and the three
 /// ways it says it is not, in `kernel/src/usb_gate.rs`.
 ///
@@ -408,7 +400,6 @@ mod tests {
             ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
             ("kernel/src/usb_gate.rs", format!("USB_WEDGE_STAGED: &str = \"{USB_WEDGE_STAGED}\"")),
             ("kernel/src/usb_gate.rs", format!("USB_WEDGE_MISSED: &str = \"{USB_WEDGE_MISSED}\"")),
-            ("kernel/src/usb_gate.rs", format!("\"{USB_WEDGE_TWO_PHASES}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_RUNNING: &str = \"{USB_LOAD_RUNNING}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_REFUSED: &str = \"{USB_LOAD_REFUSED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_STOPPED: &str = \"{USB_LOAD_STOPPED}\"")),

@@ -353,7 +353,7 @@ impl<'a> Report<'a> {
     /// next boot reads the report and none of the account and nothing says a
     /// word. Committing each line costs one pass of the checksum over the page
     /// and makes the record say how far the reset got.
-    pub fn commit(&mut self, state: State, stamp: u64, identity: Identity) -> usize {
+    fn commit(&mut self, state: State, stamp: u64, identity: Identity) -> usize {
         seal_len(self.page, state, stamp, identity, self.at);
         self.at
     }
@@ -380,11 +380,6 @@ impl core::fmt::Write for Report<'_> {
 /// sentence as a complete account. Nothing is covered until the newline that
 /// ends it arrives; bytes written past the last one are on the page, outside
 /// the length, and invisible to [`recover`].
-///
-/// **For a writer that may not reach its own last statement**: the account
-/// under a sealed report is made from the reset path, whose every line is a
-/// bounded wait on a device away from the next, and a machine that ends inside
-/// one of those waits leaves the record saying how far it got.
 ///
 /// `wrote_back` runs after each commit, because a page sealed into write-back
 /// memory and then reset over never reached DRAM ([`CACHE_LINE`]); the

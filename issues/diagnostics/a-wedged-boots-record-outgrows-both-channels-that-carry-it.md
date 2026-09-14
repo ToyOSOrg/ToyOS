@@ -40,21 +40,6 @@ newest records fit the page. `power::hard_lockup_chain` therefore judges the
 metal arm on the record's own fields and not on either witness line, and says so
 at the site.
 
-**3. The account under the report was written into the page and never sealed.**
-Run 43's `usb-wedge-data-owed` and `usb-wedge-in-data` pages carry **zero**
-`usb-quiesce` lines, while `usb-wedge-before-status` and run 45's page carry
-theirs. It is not room: measured off those pages the report ran to 13,773 and
-13,763 bytes of the 14,296 a report may spend, leaving 2,571 and 2,581 free.
-`blackbox::append` wrote the account into those bytes and the machine ended
-before `Report::seal` rewrote the length and the checksum that cover them, so
-the next boot read a valid page with none of it — and `append` returned `true`.
-Every line of the account is a bounded wait on a device away from the next.
-`toyos_blackbox::Account` — a writer that seals and writes the page back as each
-line closes, and covers no line it was cut off inside — is that fix: a page now
-says how far the reset got. `toyos_blackbox::ACCOUNT_BYTES` is the
-other half — the reserve that stops a report's tail from spending the room the
-account needs, which is what dropped it on `deadlinewedge` and `hardlockup`.
-
 **Exit condition**: a wedged boot on the T14 whose page carries the records
 either side of the wedge, and a `loader.log` that carries the pass's own last
 line — or, where a channel genuinely cannot hold the report, a refusal on the
