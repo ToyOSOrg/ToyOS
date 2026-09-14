@@ -1511,12 +1511,18 @@ const METAL: &[(&str, metal::Metal)] = &[
                     &["usb-wedge-before-status"],
                     &[],
                 ),
+                // The fourth boot is not a phase. It stops no CPU and never
+                // stops writing, so the deadline resets a machine whose
+                // controller is mid-transfer — the three above measured the
+                // idle states and the bench's stick survived every one.
+                metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[]),
             ],
             judge: |b| {
-                for arm in b {
+                for arm in b.iter().take(3) {
                     power::usb_wedge_chain(&arm.kernel(), &arm.after_the_reset()?)?;
                 }
-                Ok(())
+                let load = b[3];
+                power::usb_load_chain(&load.kernel(), &load.after_the_reset()?)
             },
         },
     ),

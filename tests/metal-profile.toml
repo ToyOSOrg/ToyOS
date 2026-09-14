@@ -517,6 +517,31 @@ unit = "s"
 ceiling = 5
 ceiling_from = "as boot.usbwedge-data-owed.stick_secs, for the phase whose data the device has taken with nothing reading its status"
 
+# --- and the boot that is never idle ---
+# `usbload` stops no CPU. It sweeps the last eighth of the stick, reading each
+# run and writing it back, until the deadline takes the machine out from under
+# it — so the reset lands on a controller that is moving bytes rather than on
+# one that finished two minutes ago. The three arms above measured the idle
+# states and the stick survived every one; this is the state that is left.
+
+[[number]]
+name = "boot.usbload.complete_ms"
+unit = "ms"
+ceiling = 120000
+ceiling_from = "as boot.usbwedge-data-owed.complete_ms"
+
+[[number]]
+name = "boot.usbload.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.usbwedge-data-owed.back_secs"
+
+[[number]]
+name = "boot.usbload.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.usbwedge-data-owed.stick_secs. On this arm it is the ruling: the reset is written while the controller is mid-transfer and the device is programming flash, which is the state runs 25, 26 and 33 lost the stick in"
+
 # --- what one member of a job list may cost this machine ---
 # **The number the suite sizes its lists by, and judges them against.** The
 # runner's bound (`toyos_tco::JOB_BOUND_MS`) runs from boot and ends the whole
@@ -643,6 +668,12 @@ ceiling_from = "as list.deadlinewedge.job_ms — the same list and the same wedg
 
 [[number]]
 name = "list.usbwedge-in-data.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.usbwedge-data-owed.job_ms"
+
+[[number]]
+name = "list.usbload.job_ms"
 unit = "ms"
 ceiling = 1400
 ceiling_from = "as list.usbwedge-data-owed.job_ms"

@@ -76,6 +76,13 @@ fn quiesce(last: &str) {
             crate::usb_gate::wedge_inside_a_write(phase);
         }
     }
+    // The same machine ended by the same bound, with the bus busy rather than
+    // idle: this one never stops writing, so the reset lands on a controller
+    // that is moving bytes. It returns only where it could not start.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_reset_under_load() {
+        crate::usb_gate::sweep_under_load();
+    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::drivers::watchdog::disarm();
     log!("Syncing filesystems...");

@@ -721,6 +721,15 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     (MID_WRITE_ARMS[0], Flash::Ok),
     (MID_WRITE_ARMS[1], Flash::Ok),
     (MID_WRITE_ARMS[2], Flash::Ok),
+    // **The arm that stops nothing and never stops writing.** The three above
+    // stop every CPU and then wait out the deadline, which leaves the bus idle
+    // long before the reset; this one sweeps the last eighth of the stick until
+    // the deadline takes the machine out from under it, so the reset lands on a
+    // controller moving bytes. Admissible for the same reasons: every run is a
+    // byte-for-byte rewrite of what was just read from it, no block is written
+    // twice in a boot, and the sweep is refused by name on a disk with no room
+    // for it.
+    (LOAD_ARM, Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(
@@ -758,7 +767,11 @@ pub const LOCKUP_ARM: &str = "hard-lockup-probe";
 pub const MID_WRITE_ARMS: [&str; 3] =
     ["usb-wedge-data-owed", "usb-wedge-in-data", "usb-wedge-before-status"];
 
-/// Every arm that deliberately stops this machine.
+/// The arm that leaves the machine to its bound with the bus busy rather than
+/// idle: it stops no CPU and never stops writing.
+pub const LOAD_ARM: &str = "usb-reset-under-load";
+
+/// Every arm that deliberately leaves this machine to be ended by a bound.
 ///
 /// **One list and not a condition spelled out at each reader.** A further such
 /// arm added to [`FLASHABLE`] and not here is an image whose boot is judged by
@@ -770,6 +783,7 @@ pub const WEDGE_ARMS: &[&str] = &[
     MID_WRITE_ARMS[0],
     MID_WRITE_ARMS[1],
     MID_WRITE_ARMS[2],
+    LOAD_ARM,
 ];
 
 /// Whether this image is armed to stop itself, and so owes a sealed record

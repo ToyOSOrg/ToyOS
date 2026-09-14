@@ -1326,10 +1326,54 @@ pub fn usb_reset_finishes_an_open_command(
             bad.push(why);
         }
     }
+    if let Err(why) = the_load_refuses_a_disk_with_no_room() {
+        bad.push(why);
+    }
     if bad.is_empty() {
         return Ok(());
     }
-    Err(format!("{} of {} phase(s) unmet:\n  {}", bad.len(), WEDGE_PHASES.len(), bad.join("\n  ")))
+    Err(format!("{} of {} arm(s) unmet:\n  {}", bad.len(), WEDGE_PHASES.len() + 1, bad.join("\n  ")))
+}
+
+/// The load arm's QEMU half, and it is the refusal and nothing else.
+///
+/// **This machine's disk is the image, and the image is eighty megabytes.** The
+/// load sweeps the last eighth of a disk of at least a gibibyte so that no block
+/// is written twice in a boot, which no guest here has room for — so what a
+/// guest can establish is that the arm says so by name and lets the boot end,
+/// rather than silently staging nothing and reading back as a wedge that never
+/// happened. That it streams at all, and what a reset landing on it does to a
+/// device, is `boot.usbload.stick_secs` on the T14 and is not askable here.
+fn the_load_refuses_a_disk_with_no_room() -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        chained(&["usb-reset-under-load", WEDGE_DEADLINE]),
+    );
+    let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    first.must_say(&armed_line()).map_err(|why| format!("usb-reset-under-load: {why}"))?;
+
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    if !second.text().contains(bootlog::CHAIN_ENDS_LINE) {
+        drop(resets);
+        return Err(format!("usb-reset-under-load: {}", silent_guest(&qemu, second.text())));
+    }
+    second
+        .must_say(bootlog::USB_LOAD_REFUSED)
+        .map_err(|why| format!("usb-reset-under-load: {why}"))?;
+    // And the refusal let the boot end, rather than parking a machine that then
+    // reads back as a wedge nobody staged.
+    second.must_say(REBOOTING).map_err(|why| format!("usb-reset-under-load: {why}"))?;
+    ended_in_a_reset(&mut resets).map_err(|why| format!("usb-reset-under-load: {why}"))?;
+    drop(qemu);
+
+    eprintln!("  [power] usb-reset-under-load: refused by name on a disk with no room, and the \
+               boot ended");
+    Ok(())
 }
 
 /// One boot: stop inside a command at `arm`'s phase, and read what the reset
@@ -1370,6 +1414,38 @@ fn one_wedge_phase(arm: &'static str, phase: &str) -> Result<(), String> {
     drop(qemu);
 
     eprintln!("  [power] {arm}: stopped in its {phase} phase, and the reset read the CSW");
+    Ok(())
+}
+
+/// The line the reset writes about what the controller was doing, as
+/// `kernel/src/drivers/xhci/stop.rs` spells it.
+const CONTROLLER_STATE: &str = "usb-quiesce: the controller had that device's data endpoint";
+
+/// The metal half of the load arm: a T14 boot that never stopped writing, ended
+/// by the deadline with its controller mid-transfer, and the stick still there.
+///
+/// **The three phase arms measured the idle states and the stick survived every
+/// one.** A wedge that stops every CPU and then waits out two minutes leaves the
+/// controller free to finish whatever was queued, so by the time the reset
+/// arrives there is nothing in flight for it to cut. This boot denies it that,
+/// and what it is judged on is that the bus really was busy — the sweep's own
+/// line — and that the account says what the controller was doing.
+pub fn usb_load_chain(kernel: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
+    kernel.must_say(bootlog::USB_LOAD_RUNNING)?;
+    // A sweep that refused, or one the disk stopped answering, is a boot that
+    // measured the idle case again under this arm's name.
+    says_nothing_of(kernel, bootlog::USB_LOAD_REFUSED)?;
+    says_nothing_of(kernel, bootlog::USB_LOAD_STOPPED)?;
+    says_nothing_of(kernel, REBOOTING)?;
+
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
+    // What state the reset found the hardware in. **Reported and not judged**:
+    // which of those states this platform's device survives is the open
+    // question, and a predicate over it would be this suite deciding the answer.
+    let said = after.must_say(CONTROLLER_STATE)?.to_string();
+    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    eprintln!("  [power] {}", said.trim());
     Ok(())
 }
 

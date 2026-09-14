@@ -205,6 +205,13 @@ struct Open {
     /// Each bulk ring's next enqueue point as `tail | cycle << 8`, the in ring
     /// in the low half and the out ring in the high one.
     rings: AtomicU32,
+    /// The device's own context block, as a second [`Dma`] pair, and the width
+    /// of one context in it. **What the controller says**, against what the
+    /// driver queued: the endpoint state and the dequeue pointer it has reached
+    /// are the only account of what a reset found the hardware doing.
+    ctx: AtomicU64,
+    ctx_device: AtomicU64,
+    ctx_size: AtomicU32,
 }
 
 static OPEN: Open = Open {
@@ -218,13 +225,18 @@ static OPEN: Open = Open {
     data_len: AtomicU32::new(0),
     data_in: AtomicBool::new(false),
     rings: AtomicU32::new(0),
+    ctx: AtomicU64::new(0),
+    ctx_device: AtomicU64::new(0),
+    ctx_size: AtomicU32::new(0),
 };
 
 /// The device and the data phase one Bulk-Only round trip is about to run.
 ///
-/// Every field is the driver's own, and none is read back off the wire: what a
-/// finish puts on the bus must be what this kernel promised the device, never
-/// what the device then said about it.
+/// What a finish puts on the bus comes from here and never off the wire: it must
+/// be what this kernel promised the device, not what the device then said about
+/// it. [`Self::ctx`] is the one exception and is never acted on — it is what the
+/// *controller* says, and the account reads it to report what state the reset
+/// found the hardware in.
 pub(in crate::drivers::xhci) struct Device {
     pub block: Dma<'static>,
     pub doorbell: Mmio,
@@ -235,6 +247,9 @@ pub(in crate::drivers::xhci) struct Device {
     pub data: u64,
     pub data_len: u32,
     pub data_in: bool,
+    /// The device's own context block, and the width of one context in it.
+    pub ctx: Dma<'static>,
+    pub ctx_size: u32,
 }
 
 /// Raised for exactly as long as one Bulk-Only command is open on a device.
@@ -270,6 +285,9 @@ impl OpenCommand {
         OPEN.data.store(on.data, Ordering::Relaxed);
         OPEN.data_len.store(on.data_len, Ordering::Relaxed);
         OPEN.data_in.store(on.data_in, Ordering::Relaxed);
+        OPEN.ctx.store(on.ctx.addr(), Ordering::Relaxed);
+        OPEN.ctx_device.store(on.ctx.device_addr(), Ordering::Relaxed);
+        OPEN.ctx_size.store(on.ctx_size, Ordering::Relaxed);
         Self(())
     }
 
@@ -322,9 +340,21 @@ fn inside() -> Option<Inside> {
             MSC_STRIDE,
         )
     };
+    let ctx_size = OPEN.ctx_size.load(Ordering::Relaxed) as usize;
+    // SAFETY: as `block` above, over the device context block `prepare` placed
+    // in the same pool; a device context is 32 contexts of `ctx_size`.
+    let ctx = unsafe {
+        Dma::from_addr(
+            OPEN.ctx.load(Ordering::Relaxed),
+            OPEN.ctx_device.load(Ordering::Relaxed),
+            32 * ctx_size,
+        )
+    };
     let endpoints = OPEN.endpoints.load(Ordering::Relaxed);
     let rings = OPEN.rings.load(Ordering::Relaxed);
     Some(Inside {
+        ctx,
+        ctx_size,
         phase,
         block,
         // SAFETY: one live `Mmio`'s own `addr()`/`size()`, as `Point::live`.
@@ -370,9 +400,43 @@ struct Inside {
     data_in: bool,
     in_ring: TrbRing,
     out_ring: TrbRing,
+    /// The device's own context block and the width of one context in it —
+    /// read for the account and never acted on.
+    ctx: Dma<'static>,
+    ctx_size: usize,
 }
 
 impl Inside {
+    /// Which endpoint the data phase is on, and the ring it went on.
+    fn data_endpoint(self) -> (u8, TrbRing) {
+        match self.data_in {
+            true => (self.in_dci, self.in_ring),
+            false => (self.out_dci, self.out_ring),
+        }
+    }
+
+    /// What the *controller* says about the data endpoint: the state it has it
+    /// in, and how many TRBs it has not reached on the ring the driver queued.
+    ///
+    /// **The one thing in this account that is not the driver's own claim.** A
+    /// reset that finds a Running endpoint with TRBs still ahead of its dequeue
+    /// pointer landed on a controller that was moving bytes; one that finds it
+    /// Running and caught up landed on an idle bus. Those are two different
+    /// resets and the device only survives one of them.
+    fn controller_state(self) -> (toyos_xhci::EndpointState, u16) {
+        let (dci, ring) = self.data_endpoint();
+        let at = usize::from(dci) * self.ctx_size;
+        // Volatile through `Dma`: the controller writes both of these by DMA.
+        let state = toyos_xhci::EndpointState::decode(self.ctx.read::<u32>(at));
+        let lo = u64::from(self.ctx.read::<u32>(at + 8));
+        let hi = u64::from(self.ctx.read::<u32>(at + 12));
+        let dequeue = ((hi << 32) | lo) & !0xF;
+        // Ring positions, not addresses: the difference wraps with the ring.
+        let reached = dequeue.wrapping_sub(ring.base_phys) / 16;
+        let queued = u64::from(ring.tail);
+        let pending = queued.wrapping_sub(reached) % super::RING_SIZE as u64;
+        (state, pending as u16)
+    }
     /// Ring this device's doorbell for one endpoint.
     ///
     /// The driver's own `ring_doorbell` says the same thing through the
@@ -434,6 +498,7 @@ fn finish(inside: Inside, said: &mut dyn fmt::Write) {
     let answered = crate::clock::settles(BOT_NS, || {
         u32::from_le(csw.read::<u32>(0)) == CSW_SIGNATURE
     });
+    let (state, pending) = inside.controller_state();
     let _ = writeln!(
         said,
         "usb-quiesce: a Bulk-Only command was open in its {} phase on slot {}, so this reset \
@@ -441,6 +506,14 @@ fn finish(inside: Inside, said: &mut dyn fmt::Write) {
         inside.phase,
         inside.slot,
         if owed.data { inside.data_len } else { 0 },
+    );
+    // What the hardware was doing, as against what the driver had queued. A
+    // reset that finds TRBs still ahead of the controller landed on a bus that
+    // was moving bytes, and that is the state this whole path is measured on.
+    let _ = writeln!(
+        said,
+        "usb-quiesce: the controller had that device's data endpoint {state} with {pending} \
+         TRB(s) it had not reached on the ring",
     );
     match answered {
         // The device is back where BOT §5.1 leaves it between commands, which

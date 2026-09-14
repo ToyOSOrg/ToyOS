@@ -314,3 +314,72 @@ pub fn wedge_inside_a_write(at: toyos_xhci::bot::Phase) {
 pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
 #[cfg(feature = "boot-actuators")]
 pub const USB_WEDGE_MISSED: &str = "usb-wedge: the write completed";
+
+/// The smallest disk this load will sweep: a gibibyte in 4 KiB blocks.
+///
+/// **A refusal and not a smaller sweep.** The point of the sweep is that no
+/// block is written twice in one boot, which is what keeps two minutes of
+/// continuous writes off the bench stick's endurance; a disk with no room for
+/// that is one this control cannot be staged on, and saying so is the answer.
+#[cfg(feature = "boot-actuators")]
+const SWEEP_FLOOR: u64 = 262_144;
+
+/// Stream writes to the stick until something else ends the machine.
+///
+/// **The state the three phase arms could not reach.** A wedge that stops every
+/// CPU and then waits out the boot deadline leaves the *controller* free: a TRB
+/// with its doorbell rung completes in microseconds, one never rung never
+/// starts, and two minutes later there is nothing in flight for the reset to
+/// cut. All three phases came back with the stick alive. What the boots that
+/// did lose it were doing is this — writing continuously, so the reset lands on
+/// a controller that is moving bytes and a device that is programming flash.
+///
+/// Returns only where it could not start, or where the disk stopped answering:
+/// that boot then reboots the ordinary way and the judge reds by name. When it
+/// does run it never returns, because the reset that ends this machine is the
+/// measurement and a loop that stopped first would hand the device the idle
+/// milliseconds the whole control exists to deny it.
+///
+/// **A sweep and not a rewrite.** It walks the last eighth of the disk once,
+/// reading each run and writing it back byte for byte, so the medium is what it
+/// was and no block is programmed twice in a boot.
+#[cfg(feature = "boot-actuators")]
+pub fn sweep_under_load() {
+    let Some((disk, _)) = usb_storage::handle(0) else {
+        log!("{LOAD_REFUSED}: no USB disk on this machine");
+        return;
+    };
+    let blocks = disk.block_count();
+    if blocks < SWEEP_FLOOR {
+        log!("{LOAD_REFUSED}: disk 0 holds {blocks} blocks and this load sweeps the last \
+             eighth of a disk of at least {SWEEP_FLOOR}");
+        return;
+    }
+    let first = blocks - blocks / 8;
+    log!("{LOAD_RUNNING} from block {first} to {blocks}, rewriting each run with the bytes \
+         just read from it, until this machine is reset out from under it");
+    let mut buf = vec![0u8; WEDGE_CHUNK as usize * BLOCK];
+    let mut at = first;
+    loop {
+        if at + u64::from(WEDGE_CHUNK) > blocks {
+            at = first;
+        }
+        if disk.lock().read_blocks(at, WEDGE_CHUNK, &mut buf).is_err()
+            || disk.lock().write_blocks(at, WEDGE_CHUNK, &buf).is_err()
+        {
+            log!("{LOAD_STOPPED} at block {at}");
+            return;
+        }
+        at += u64::from(WEDGE_CHUNK);
+    }
+}
+
+/// What the load says when it starts, when it cannot, and when the disk stopped
+/// answering it. Judged by the harness, so all three are constants
+/// (`src/bootlog.rs`).
+#[cfg(feature = "boot-actuators")]
+pub const LOAD_RUNNING: &str = "usb-load: sweeping disk 0";
+#[cfg(feature = "boot-actuators")]
+pub const LOAD_REFUSED: &str = "usb-load: refused";
+#[cfg(feature = "boot-actuators")]
+pub const LOAD_STOPPED: &str = "usb-load: the disk stopped answering";

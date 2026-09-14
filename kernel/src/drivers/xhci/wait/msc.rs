@@ -759,6 +759,8 @@ impl XhciController {
             in_dci: dev.in_dci,
             out_dci: dev.out_dci,
             data: data_phys,
+            ctx: dma.subview(dev.dev_block + super::super::DEV_OUT_CTX, 32 * self.context_size),
+            ctx_size: self.context_size as u32,
             data_len,
             data_in,
         });

@@ -143,6 +143,15 @@ actuators! {
     /// that nothing is reading.
     usb_wedge_before_status = "usb-wedge-before-status";
 
+    /// Stream writes to the boot stick from the shutdown syscall and never
+    /// stop, so the boot deadline resets the machine with the controller moving
+    /// bytes and the device programming flash. The three arms above stop every
+    /// CPU and then wait two minutes, which leaves the controller free to finish
+    /// and the bus idle; this one denies it that. Every run written is a
+    /// byte-for-byte rewrite of what was just read from it, sweeping the last
+    /// eighth of the disk once so no block is programmed twice in a boot.
+    usb_reset_under_load = "usb-reset-under-load";
+
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
