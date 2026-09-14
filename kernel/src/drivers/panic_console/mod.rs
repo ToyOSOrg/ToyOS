@@ -274,7 +274,6 @@ pub fn probe_due() -> bool {
 /// drawing on it — a claimer that returns mid-paint composes over glyphs a damage-tracked client never knows are there.
 pub fn screen_claimed_by_userland() {
     SCREEN_OWNED_BY_USERLAND.store(true, Ordering::SeqCst);
-    // Whatever the claimant composes is not this module's grid.
     forget_the_glass();
     #[cfg(feature = "boot-actuators")]
     CLAIMED_AT.store(crate::clock::nanos_since_boot().max(1), Ordering::Relaxed);
@@ -300,8 +299,6 @@ static RAW_SIZE: AtomicU64 = AtomicU64::new(0);
 
 /// Boot-time and `set_resolution`-window only: publishers never race, so the load-then-store of `SEQ` needs no CAS.
 fn publish(fb: Fb) {
-    // A descriptor nothing has painted through yet, so nothing is known about
-    // what its pixels hold.
     forget_the_glass();
     let seq = SEQ.load(Ordering::Relaxed);
     SEQ.store(seq.wrapping_add(1), Ordering::Relaxed);
@@ -437,23 +434,27 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     RAW_PHYS.store(args.gop_framebuffer, Ordering::Relaxed);
     RAW_SIZE.store(args.gop_framebuffer_size, Ordering::Relaxed);
 
-    // **Before the first paint, which is this function's own record.** The
-    // loader hands the scanout over uncacheable, and a whole-screen paint
-    // through those bits is 443 ms on the T14 against about 2 ms through
-    // write-combining; `pat::init` runs before this function so that there is
-    // an entry to point them at.
-    let combining = mm::paging::boot_map_write_combining(
-        args.gop_framebuffer,
-        align_2m(args.gop_framebuffer_size as usize) as u64,
-    );
-
     publish(fb);
     EARLY.store(true, Ordering::Relaxed);
-    // **The panel is taken before the memory map is read, and this record is
-    // what proves the kernel entered.** Every refusal below it, and every fault
-    // the walk itself can take, then reaches a panel that exists; when the walk
-    // came first a machine that died in it kept the loader's last line on the
-    // screen and said nothing about which of the two had happened. Painting
+
+    // **Decided before the retype below**: a range the PMM is going to own is
+    // never given a second memory type, however briefly.
+    let reclaimed =
+        framebuffer_is_reclaimed_ram(maps, args.gop_framebuffer, args.gop_framebuffer_size);
+
+    // **Before the first paint, which is this function's own record.** The
+    // loader hands the scanout over uncacheable; `pat::init` runs before this
+    // function so that there is a write-combining entry to point its leaves at.
+    let combining = reclaimed.is_none()
+        && mm::paging::boot_map_write_combining(
+            args.gop_framebuffer,
+            align_2m(args.gop_framebuffer_size as usize) as u64,
+        );
+
+    // **The panel is taken before anything above or below it can fail, and
+    // this record is what proves the kernel entered.** A fault in the walk or
+    // the retype above, and every refusal below, then reaches a panel that
+    // exists; the loader's last line left standing says neither. Painting
     // twice into a scanout the check may yet call PMM-owned RAM costs nothing:
     // the PMM does not exist until `mm::init`, hundreds of statements later.
     log!(
@@ -470,9 +471,7 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
         }
     );
 
-    if let Some(uefi_type) =
-        framebuffer_is_reclaimed_ram(maps, args.gop_framebuffer, args.gop_framebuffer_size)
-    {
+    if let Some(uefi_type) = reclaimed {
         log!(
             "panic console: disarmed, framebuffer at {:#x} is UEFI type {} (PMM-owned RAM)",
             args.gop_framebuffer,
@@ -601,9 +600,6 @@ pub fn render() -> bool {
     if PAINTING.swap(true, Ordering::SeqCst) {
         return false;
     }
-    // The screen is taken back unconditionally here, from a desktop as
-    // readily as from a boot checkpoint, so what is on it is not this
-    // module's to believe.
     forget_the_glass();
     let text = fatal_text();
     // Before the paint, from the same view the panel gets: a fault inside the
@@ -623,8 +619,6 @@ pub fn render() -> bool {
 ///
 /// The live shards and not the capture: what this record is for is the records
 /// that never reached the log file, which are the newest ones.
-/// The census rides the page because a boot a bound ends reaches no log file:
-/// `logd` is one of the things the wedge stopped.
 pub fn seal_wedge(said: core::fmt::Arguments) {
     if PAINTING.swap(true, Ordering::SeqCst) {
         crate::blackbox::record_wedge(format_args!("{said}{Census}\n"), &[]);
@@ -836,8 +830,6 @@ pub fn hold_report() {
         return;
     }
     log!("panic console: the panel was drawn over, putting the report back");
-    // The probes say another writer reached the glass, so every cell of it is
-    // suspect and not only the ones a probe caught.
     forget_the_glass();
     paint_held_report();
 }
@@ -994,8 +986,7 @@ impl Cell {
 /// **This is what keeps the panel's cost proportional to what changed.** The
 /// grid is re-rendered out of this copy in RAM, write-only, so a scroll moves
 /// no pixels through the scanout and a cell that did not move is not written
-/// at all — where clearing the whole scanout for every record cost one whole
-/// framebuffer a record, on a mapping whose stores are not combined.
+/// at all.
 struct Glass {
     cells: [Cell; MAX_COLS * MAX_ROWS],
     /// What those cells were drawn on and in. A paint that changes any of the
@@ -1149,14 +1140,12 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
         if let Some(row) = text_row {
             // Colour comes from the record's `Level`, so it holds for every display row a wrapped line occupies.
             let alerted = view.is_alert(row.line as usize);
-            let mut off = row.at as usize;
-            for cell in want.iter_mut() {
+            for (off, cell) in (row.at as usize..).zip(want.iter_mut()) {
                 let Some(&byte) = text.get(off) else { break };
                 if byte == b'\n' {
                     break;
                 }
                 *cell = Cell::of(byte, alerted);
-                off += 1;
             }
         }
         if pages > 1 && r == grid_rows - 1 {
@@ -1165,9 +1154,6 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
 
         let glassed = glass.row(r, cols);
         for (c, (&cell, was)) in want.iter().zip(glassed.iter_mut()).enumerate() {
-            // **The scroll's whole cost is here**: a cell whose byte and
-            // colour did not move is not written, so a repaint pays for what
-            // changed and not for the panel.
             if cell != *was {
                 let color = if cell.alert() { alert } else { white };
                 pixels += draw_cell(&fb, c, r, cell, ground, color);
