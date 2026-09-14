@@ -23,9 +23,11 @@ const OWNERSHIP_DEADLINE_NANOS: u64 = 20_000_000;
 /// How long [`Owned::transact`] waits for §10.2.2.7's `Ready` bit.
 ///
 /// **A driver-chosen bound, not a datasheet one**: §10.2.2.7 gives the
-/// transaction no time at all, so a part that never ends one says so instead of
-/// holding up the boot.
-const MDI_DEADLINE_NANOS: u64 = 1_000_000;
+/// transaction no time at all. Ninety-six milliseconds and not one, because a
+/// millisecond is under what an independent driver of this same interface found
+/// a working part needs, and a deadline shorter than the hardware refuses a
+/// part that was going to answer.
+const MDI_DEADLINE_NANOS: u64 = 96_000_000;
 
 /// §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
 /// attempting to access MDIO registers."
@@ -132,6 +134,17 @@ pub(crate) const IDENTIFIER_HIGH_INTEL: u16 = 0x0154;
 /// reports whatever happened here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PhyRefusal {
+    /// This boot did not arm the bring-up, so nothing here drove `MDIC` at all.
+    /// See [`crate::Mdio`] for what that costs and why it is the default.
+    NotAttempted,
+    /// A register this sequence reaches answered ones, so nothing decodes it
+    /// and no write was made to it.
+    Unrouted { reg: usize },
+    /// §4.5.2's interface was already somebody's when this driver looked, and
+    /// never went free inside the deadline. **No request was registered**: a
+    /// driver that asked anyway could not tell its own bit from a grant, and
+    /// giving the interface back afterwards would clear a flag it never owned.
+    OwnershipHeld { held_by: u32, after_nanos: u64 },
     /// §4.5.2's handshake never granted: the ownership bit did not read back
     /// set inside the deadline, so something else holds the interface.
     OwnershipBusy { held_by: u32, after_nanos: u64 },
@@ -152,6 +165,21 @@ pub enum PhyRefusal {
 impl core::fmt::Display for PhyRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::NotAttempted => write!(
+                f,
+                "was not driven at all: this boot did not arm the MDIO bring-up, so the PHY is \
+                 as the agent before this driver left it"
+            ),
+            Self::Unrouted { reg } => write!(
+                f,
+                "register {reg:#x} answers ones, so nothing decodes it and this driver wrote \
+                 nothing into it"
+            ),
+            Self::OwnershipHeld { held_by, after_nanos } => write!(
+                f,
+                "EXTCNF_CTRL read {held_by:#x} for {after_nanos} ns and the MDIO interface was \
+                 another agent's the whole time, so no request for it was ever registered"
+            ),
             Self::OwnershipBusy { held_by, after_nanos } => write!(
                 f,
                 "EXTCNF_CTRL read {held_by:#x} for {after_nanos} ns and never granted this \
@@ -210,18 +238,42 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// respective bit [...] The requesting agent is granted access when the
     /// same bit is read as 1b (such as, access is not granted as long as the
     /// bit is 0b)."
+    ///
+    /// **The interface is observed free before it is asked for.** §4.5.2 has
+    /// the software bit read 0b until the arbitration grants it, so under that
+    /// reading alone a driver could tell a grant from its own request by
+    /// reading back the one bit it wrote. On the part whose PHY the Management
+    /// Engine shares, a set bit says somebody owns the interface — and under
+    /// that reading the same test answers "granted" to this driver's own write,
+    /// so the sequence would drive `MDIC` against a second master and then hand
+    /// the interface back by clearing a flag that was never its own. Seeing all
+    /// three bits clear first is the one test that means a grant under both.
     fn claim(regs: &'a R, clock: &'a C) -> Result<Self, PhyRefusal> {
-        let started = clock.nanos();
         // §4.5.2 arbitrates three bits of this register, so one bit is the whole
         // of what this driver writes in it and the rest is read and carried.
         // The read and the write are two accesses and an agent writing between
         // them loses what it wrote — which a composed word would lose on every
         // write instead of on a race.
-        let inherited = regs.read(regs::EXTCNF_CTRL);
-        regs.write(regs::EXTCNF_CTRL, inherited | extcnf::MDIO_SW_OWNERSHIP);
+        let mut held = regs.read(regs::EXTCNF_CTRL);
+        // Ones is nothing decoding this offset, and the write below would
+        // otherwise set every field of a register this driver owns one bit of.
+        if held == u32::MAX {
+            return Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL });
+        }
+        let started = clock.nanos();
+        while held & extcnf::OWNERSHIP != 0 {
+            let waited = clock.nanos().saturating_sub(started);
+            if waited >= OWNERSHIP_DEADLINE_NANOS {
+                return Err(PhyRefusal::OwnershipHeld { held_by: held, after_nanos: waited });
+            }
+            held = regs.read(regs::EXTCNF_CTRL);
+        }
+        regs.write(regs::EXTCNF_CTRL, held | extcnf::MDIO_SW_OWNERSHIP);
         loop {
             let held = regs.read(regs::EXTCNF_CTRL);
-            if held & extcnf::MDIO_SW_OWNERSHIP != 0 {
+            // §4.5.2: "at any given time at most only one bit is 1b", so the
+            // grant is this driver's bit standing alone and never merely set.
+            if held & extcnf::OWNERSHIP == extcnf::MDIO_SW_OWNERSHIP {
                 return Ok(Self { regs, clock });
             }
             let waited = clock.nanos().saturating_sub(started);
@@ -304,6 +356,9 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
 
 impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
     /// §4.5.2: "the controlling agent must write a 0b to its ownership bit".
+    ///
+    /// The bit is this driver's to clear because [`Owned::claim`] saw all three
+    /// of them clear before it registered a request.
     fn drop(&mut self) {
         let held = self.regs.read(regs::EXTCNF_CTRL);
         self.regs.write(regs::EXTCNF_CTRL, held & !extcnf::MDIO_SW_OWNERSHIP);
@@ -324,6 +379,13 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
     // attempting to access MDIO registers." A wait and not a poll: the document
     // offers nothing to read that shortens it.
     while clock.nanos().saturating_sub(reset_at) < LCD_RESET_DELAY_NANOS {}
+
+    // The one plain read of `MDIC` this sequence makes, before it writes a
+    // command into it: ones is nothing decoding the offset, and every
+    // transaction below would then be written into a register no device reads.
+    if regs.read(regs::MDIC) == u32::MAX {
+        return Err(PhyRefusal::Unrouted { reg: regs::MDIC });
+    }
 
     let mdi = Owned::claim(regs, clock)?;
 
