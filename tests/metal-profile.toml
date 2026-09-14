@@ -62,7 +62,7 @@ name = "boot.metalcase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
-measured = 1260
+measured = 1199
 
 # --- what the machine spent coming back, on the host's clock ---
 # The loop already refuses past this; the row exists so the number is read and
@@ -109,7 +109,7 @@ name = "boot.metalcase.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
-measured = 45
+measured = 51
 
 [[number]]
 name = "boot.latencycase.complete_ms"
@@ -177,7 +177,7 @@ name = "boot.metaldevicecase.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
-measured = 51
+measured = 65
 
 [[number]]
 name = "usbwrite.metaldevicecase.span_us"
@@ -387,14 +387,14 @@ name = "boot.deadlinewedge.complete_ms"
 unit = "ms"
 ceiling = 120000
 ceiling_from = "toyos_tco::WEDGE_BOUND_MS — on this boot the kernel's own deadline is what runs from boot, so a later `Boot: complete` is a boot the deadline already reset"
-measured = 1199
+measured = 1254
 
 [[number]]
 name = "boot.deadlinewedge.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs — which now derives from WEDGE_BOUND_MS, the longest watchdog a boot runs under, plus what coming back costs"
-measured = 236
+measured = 231
 
 [[number]]
 name = "boot.deadlinewedge.stick_secs"
@@ -414,7 +414,7 @@ name = "boot.deadlinewedge.deadline_lateness_ms"
 unit = "ms"
 ceiling = 10000
 ceiling_from = "the poll's own cadence: the deadline is read on every timer interrupt and an idle CPU re-arms its LAPIC one-shot per fire, so the lateness is one timer period. That period has not been measured on this machine, and ten seconds — a twelfth of the bound — is the widest true bound before it has been"
-measured = 61
+measured = 60
 
 # --- the boot one CPU stops answering on ---
 # `hardlockup` is the deaf half of the boot above: the same staged wedge, and
@@ -429,14 +429,14 @@ name = "boot.hardlockup.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::HARD_LOCKUP_BOUND_MS — half the deadline and the earlier bound, so a later `Boot: complete` is a boot the detector already reset"
-measured = 1201
+measured = 1206
 
 [[number]]
 name = "boot.hardlockup.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs. It is the same wait: this boot ends itself half a bound earlier and then costs the same firmware, loader and Ubuntu as any other"
-measured = 172
+measured = 170
 
 [[number]]
 name = "boot.hardlockup.stick_secs"
@@ -688,12 +688,14 @@ name = "boot.metalcase.park_ms"
 unit = "ms"
 ceiling = 2010
 ceiling_from = "as boot.testcases.park_ms"
+measured = 70
 
 [[number]]
 name = "boot.metalcase.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"
+measured = 0
 
 [[number]]
 name = "boot.latencycase.park_ms"
@@ -712,12 +714,14 @@ name = "boot.metaldevicecase.park_ms"
 unit = "ms"
 ceiling = 2010
 ceiling_from = "as boot.testcases.park_ms"
+measured = 0
 
 [[number]]
 name = "boot.metaldevicecase.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"
+measured = 0
 
 [[number]]
 name = "boot.selftests.park_ms"
