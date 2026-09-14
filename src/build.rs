@@ -2776,6 +2776,40 @@ mod tests {
         assert!(one_claimant_per_device(&bad, None).is_err());
     }
 
+    /// netd's delivery actuator (`PROVOKE_MESSAGE` in `userland/netd/src/main.rs`)
+    /// writes §10.2.4.4's `ICS`, which is the Intel driver's register and not
+    /// virtio's — so a boot config that arms it on any other card is a boot that
+    /// panics instead of answering the question it was flashed for.
+    fn an_armed_actuator_claims_an_intel_function(cfg: &SystemConfig) -> Result<(), String> {
+        for (name, prog) in &cfg.programs {
+            if !prog.args.iter().any(|arg| arg == "--provoke-message") {
+                continue;
+            }
+            if !prog.devices.iter().any(|d| d.starts_with("pci:8086:")) {
+                return Err(format!(
+                    "`{name}` is armed with `--provoke-message` and claims {:?}, none of which \
+                     is a card with an `ICS` register",
+                    prog.devices
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_armed_delivery_actuator_claims_a_card_that_has_one() {
+        for cfg in ALL_CONFIGS {
+            an_armed_actuator_claims_an_intel_function(&load(cfg))
+                .unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        let bad: SystemConfig = toml::from_str(
+            "init = []\n[programs.netd]\ndevices = [\"pci:1af4:1041\"]\n\
+             args = [\"--provoke-message\"]\n",
+        )
+        .unwrap();
+        assert!(an_armed_actuator_claims_an_intel_function(&bad).is_err());
+    }
+
     /// A device name the ABI does not know renders fine and leaves init with a
     /// `devices` entry it cannot mint — a dead machine for a typo, where this is
     /// a red in milliseconds. Same for a `syscap` right.

@@ -133,6 +133,48 @@ impl Default for Permits {
     }
 }
 
+/// §9.3: registers 0 to 15 "are identical in all the pages and are the IEEE
+/// defined registers", and everything above them is the vendor's and therefore
+/// the page's. An access to one of those without a page selected first reaches
+/// whichever page was left behind.
+const FIRST_PAGED_REGISTER: u8 = 16;
+
+/// One register's §9.1 contract: the fields a driver does not compose, and what
+/// §9.5's own table says each of them comes up as.
+struct Carried {
+    mask: u16,
+    default: u16,
+}
+
+/// §9.1's tables, register by register. **They are the model's and not the
+/// driver's**: §9.1 says "other fields in the same 16-bit register must be
+/// loaded with their default values", and it is this file that holds a write to
+/// that and `lib.rs` that is held.
+mod carried {
+    use super::Carried;
+    use crate::phy::{control_1000t, custom_mode};
+
+    /// §9.5.2.1: Speed Selection (MSB, bit 6) and Duplex Mode (bit 8) come up
+    /// 1b, Collision Test (bit 7) and Speed Select (LSB, bit 13) come up 0b,
+    /// and bits 5:0 are "Reserved. Always set to 0x0".
+    pub const CONTROL: Carried = Carried { mask: 0x21FF, default: (1 << 6) | (1 << 8) };
+
+    /// §9.5.2.5's whole default is `0x01E1` — the selector and the four
+    /// abilities at bits 8:0 and nothing above them.
+    pub const ADVERTISE: Carried = Carried { mask: !0x01FF, default: 0 };
+
+    /// §9.5.2.10's table gives every other field of this register a default of
+    /// `0b` — bits 7:0 "Reserved. Set these bits to 0x00", Advertise
+    /// 1000BASE-T Half-Duplex (which the same note says this PHY does not
+    /// support), Port Type, both Master/Slave fields and Test Mode.
+    pub const CONTROL_1000T: Carried = Carried { mask: !control_1000t::FULL, default: 0 };
+
+    /// §9.5.3.1's two reserved fields either side of bit 10: 0x180 at bits 9:0
+    /// and 0x04 at bits 15:11.
+    pub const CUSTOM_MODE: Carried =
+        Carried { mask: !custom_mode::REDUCED_MDIO_FREQUENCY, default: 0x2180 };
+}
+
 /// How many `STATUS` reads §3.1.3.10's master enable stays set for.
 const MASTER_QUIESCE_READS: u32 = 3;
 
@@ -228,7 +270,7 @@ impl PhyModel {
         };
         Self {
             page: None,
-            custom_mode: custom_mode::CARRIED_DEFAULT,
+            custom_mode: carried::CUSTOM_MODE.default,
             file,
             negotiated_over: None,
             up: false,
@@ -824,9 +866,9 @@ impl Model {
     /// a selected page for everything else.
     fn phy_at(&self, addr: u8, reg: u8) -> PhyPlace {
         match (addr, reg) {
-            (phy::SPECIFIC, r) if r < phy::FIRST_PAGED_REGISTER => PhyPlace::Ieee(r),
+            (phy::SPECIFIC, r) if r < FIRST_PAGED_REGISTER => PhyPlace::Ieee(r),
             (phy::GENERAL, reg::PAGE_SELECT) => PhyPlace::Page,
-            (phy::GENERAL, r) if r < phy::FIRST_PAGED_REGISTER => PhyPlace::Ieee(r),
+            (phy::GENERAL, r) if r < FIRST_PAGED_REGISTER => PhyPlace::Ieee(r),
             (phy::GENERAL, reg::CUSTOM_MODE) => {
                 assert_eq!(
                     self.phy.page,
@@ -859,7 +901,8 @@ impl Model {
     /// their default values." So a write that changed a field it is not about
     /// is a driver composing a register it should have read first, and the
     /// defaults it had to carry are §9.5.2's and §9.5.3's own tables.
-    fn carried(&self, named: &str, data: u16, mask: u16, default: u16) {
+    fn carried(&self, named: &str, data: u16, table: &Carried) {
+        let (mask, default) = (table.mask, table.default);
         assert_eq!(
             data & mask,
             default,
@@ -877,39 +920,23 @@ impl Model {
             // ignored."
             PhyPlace::Page => self.phy.page = Some(data >> phy::PAGE_SHIFT),
             PhyPlace::CustomMode => {
-                self.carried(
-                    "§9.5.3.1's Custom Mode Control",
-                    data,
-                    custom_mode::CARRIED_MASK,
-                    custom_mode::CARRIED_DEFAULT,
-                );
+                self.carried("§9.5.3.1's Custom Mode Control", data, &carried::CUSTOM_MODE);
                 self.phy.custom_mode = data;
                 self.refresh_phy_link();
             }
             PhyPlace::Ieee(r) => {
                 if r == reg::CONTROL {
-                    self.carried(
-                        "§9.5.2.1's Control register",
-                        data,
-                        control::CARRIED_MASK,
-                        control::CARRIED_DEFAULT,
-                    );
+                    self.carried("§9.5.2.1's Control register", data, &carried::CONTROL);
                 }
                 if r == reg::ADVERTISE {
                     self.carried(
                         "§9.5.2.5's Auto-Negotiation Advertisement",
                         data,
-                        advertise::CARRIED_MASK,
-                        advertise::CARRIED_DEFAULT,
+                        &carried::ADVERTISE,
                     );
                 }
                 if r == reg::CONTROL_1000T {
-                    self.carried(
-                        "§9.5.2.10's 1000BASE-T Control",
-                        data,
-                        control_1000t::CARRIED_MASK,
-                        control_1000t::CARRIED_DEFAULT,
-                    );
+                    self.carried("§9.5.2.10's 1000BASE-T Control", data, &carried::CONTROL_1000T);
                 }
                 if r == reg::CONTROL && data & control::RESET != 0 {
                     // §9.5.2.1: "Writing a 1b to this bit causes immediate PHY

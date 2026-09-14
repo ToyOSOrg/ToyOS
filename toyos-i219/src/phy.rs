@@ -68,12 +68,6 @@ pub(crate) const PAGE_PORT_CONTROL: u16 = 769;
 /// page."
 pub(crate) const PAGE_SHIFT: u32 = 5;
 
-/// §9.3: registers 0 to 15 "are identical in all the pages and are the IEEE
-/// defined registers", and everything above them is the vendor's and therefore
-/// the page's. An access to one of those without a page selected first reaches
-/// whichever page was left behind.
-pub(crate) const FIRST_PAGED_REGISTER: u8 = 16;
-
 /// Control register bits (§9.5.2.1).
 pub(crate) mod control {
     /// Restart Auto-Negotiation (bit 9), self-clearing. §9.5.2.1: "1b =
@@ -92,14 +86,6 @@ pub(crate) mod control {
     /// Reset (bit 15). §9.5.2.1: "Writing a 1b to this bit causes immediate PHY
     /// reset."
     pub const RESET: u16 = 1 << 15;
-
-    /// §9.5.2.1's own defaults for every field a write of this register may not
-    /// change, and §9.1's rule that they must be carried: Speed Selection (MSB,
-    /// bit 6) and Duplex Mode (bit 8) come up 1b, Collision Test (bit 7) and
-    /// Speed Select (LSB, bit 13) come up 0b, and bits 5:0 are "Reserved.
-    /// Always set to 0x0".
-    pub const CARRIED_MASK: u16 = 0x21FF;
-    pub const CARRIED_DEFAULT: u16 = (1 << 6) | (1 << 8);
 }
 
 /// Auto-Negotiation Advertisement bits (§9.5.2.5).
@@ -115,26 +101,12 @@ pub(crate) mod advertise {
     /// control: this driver negotiates none, and `CTRL.RFCE` and `CTRL.TFCE`
     /// are what §4.6.3.2 would have it set from the resolution if it did.
     pub const WANTED: u16 = SELECTOR_802_3 | HALF_10 | FULL_10 | HALF_100 | FULL_100;
-
-    /// §9.5.2.5's whole default is `0x01E1` — the selector and the four
-    /// abilities at bits 8:0 and nothing above them — so every field this
-    /// driver does not compose is `0b`, which §9.1 says a write must carry.
-    pub const CARRIED_MASK: u16 = !0x01FF;
-    pub const CARRIED_DEFAULT: u16 = 0;
 }
 
 /// 1000BASE-T Control bits (§9.5.2.10).
 pub(crate) mod control_1000t {
     /// Advertise 1000BASE-T Full-Duplex Capability (bit 9).
     pub const FULL: u16 = 1 << 9;
-
-    /// §9.5.2.10's table gives every other field of this register a default of
-    /// `0b` — bits 7:0 "Reserved. Set these bits to 0x00", Advertise
-    /// 1000BASE-T Half-Duplex (which the same note says this PHY does not
-    /// support), Port Type, both Master/Slave fields and Test Mode — and §9.1
-    /// says a write carries them.
-    pub const CARRIED_MASK: u16 = !FULL;
-    pub const CARRIED_DEFAULT: u16 = 0;
 }
 
 /// Custom Mode Control bits (§9.5.3.1).
@@ -143,12 +115,6 @@ pub(crate) mod custom_mode {
     /// access", and §9.2 says access "should be done only when bit 10 in page
     /// 769 register 16 is set".
     pub const REDUCED_MDIO_FREQUENCY: u16 = 1 << 10;
-
-    /// §9.5.3.1's defaults for the two reserved fields either side of it —
-    /// 0x180 at bits 9:0 and 0x04 at bits 15:11 — which §9.1 says a write must
-    /// carry.
-    pub const CARRIED_MASK: u16 = !REDUCED_MDIO_FREQUENCY;
-    pub const CARRIED_DEFAULT: u16 = 0x2180;
 }
 
 /// §9.5.2.3's default for PHY Identifier 1: "the PHY identifier composed of bits
