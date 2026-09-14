@@ -208,6 +208,16 @@ impl Nic {
         &self.claim
     }
 
+    /// `crate::READ_MANAGEABILITY`: who holds the MDIO interface, read once.
+    pub fn manageability(&self) -> toyos_i219::Manageability {
+        self.driver.borrow().manageability()
+    }
+
+    /// `crate::PROVOKE_MESSAGE`: raise one enabled cause on purpose.
+    pub fn provoke_message(&self) {
+        self.driver.borrow().provoke_message();
+    }
+
     /// Take the interrupt, acknowledge its causes and refresh the link.
     pub fn begin_pass(&self) -> Result<(), SyscallError> {
         self.driver.borrow_mut().begin_pass()?;

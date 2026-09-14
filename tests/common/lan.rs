@@ -24,8 +24,72 @@ use super::serial;
 pub const CONFIG: &str = "tests/lancase";
 pub const BOOT: &str = "lancase";
 
+/// The same boot with netd's `--provoke-message` armed: the arm that says
+/// whether a message the card raises reaches a CPU at all, which no reading of
+/// the shipping boot separates from a card that raised none.
+pub const ICS_CONFIG: &str = "tests/lanicscase";
+pub const ICS_BOOT: &str = "lanicscase";
+
+/// The kernel's own record that a claim's vector took a message, which is what
+/// the armed boot is for. A kernel record and not netd's: on this machine a
+/// userland write reaches no channel the stick carries.
+const FIRST_MESSAGE: &str = "took its first message";
+
+/// The same boot with netd reading §10.2.2.15 once and exiting on what it said.
+pub const MNG_CONFIG: &str = "tests/lanmngcase";
+pub const MNG_BOOT: &str = "lanmngcase";
+
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
+
+/// The read-only boot's judge: **netd's exit code is the reading.** A userland
+/// write reaches no channel this machine's stick carries, so the kernel's
+/// record of netd exiting is the whole of what this boot said.
+///
+/// Every decodable reading passes. What the bits mean is a finding for whoever
+/// reads the run, not a verdict this judge can make: a boot that answered is a
+/// boot that told us something either way.
+pub fn manageability_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let code = back.exit_code("netd")?;
+    let Some(reading) = toyos_i219::Manageability::from_exit_code(code) else {
+        return Err(format!(
+            "netd exited {code} on this boot, which is no reading of the MDIO arbitration: it \
+             ended before it read that register, so this boot says nothing about who holds the \
+             PHY"
+        ));
+    };
+    eprintln!(
+        "  [lan] the MDIO arbitration reads sw={} hw={} mng={}{}",
+        reading.sw,
+        reading.hw,
+        reading.mng,
+        if reading.unanswered {
+            " — and the read answered all-ones, which is nothing answering it rather than a \
+             register with every bit set"
+        } else {
+            ""
+        },
+    );
+    Ok(())
+}
+
+/// The armed boot's judge: netd asked the part for a message, so the kernel's
+/// own record of the claim taking one says whether delivery works — whatever
+/// the PHY did about a link.
+pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let kernel = back.kernel();
+    let text = kernel.text();
+    match text.lines().find(|l| l.contains(FIRST_MESSAGE)) {
+        Some(line) => {
+            eprintln!("  [lan] {}", line.trim());
+            Ok(())
+        }
+        None => Err(format!(
+            "netd wrote one cause to ICS on this boot and no `{FIRST_MESSAGE}` record \
+             followed, so nothing this function raises reaches a CPU"
+        )),
+    }
+}
 
 /// The config the QEMU arm boots — the Intel driver in front of the user-mode
 /// backend, which is the same driver the T14 arm runs and the only DHCP server

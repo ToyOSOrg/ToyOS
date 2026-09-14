@@ -112,6 +112,10 @@ toyos-fat32 = { path = "toyos-fat32" }
 # not published until they have both passed on it.
 toyos-fat32-check = { path = "toyos-fat32-check" }
 toyos-gpt = { path = "toyos-gpt" }
+# The I219 driver's own decisions, for the one reading that crosses a T14 boot
+# as an exit code: netd encodes it and `tests/common/lan.rs` decodes it, and a
+# second spelling of that encoding is a judge that reads a different register.
+toyos-i219 = { path = "toyos-i219" }
 toyos-keymap = { path = "toyos-keymap" }
 # The record stream's boot parameter, so the gate that clears a valued
 # parameter by name reads the same constant the kernel and `logd` do.

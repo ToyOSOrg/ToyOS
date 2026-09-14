@@ -1,0 +1,32 @@
+# `tests/lancase` with netd reading §10.2.2.15 once, and nothing else.
+#
+# Two candidates stand behind a link that never comes up, and they need opposite
+# fixes: the ownership bit already standing set before anything asked for it
+# implicates §4.5.2's semaphore, and the manageability agent's own request
+# standing implicates reachability — the Management Engine holding the PHY this
+# driver has to go through. netd's `--read-manageability` reads that register
+# once, writes nothing, touches no PHY register, and exits on what it said:
+# a userland write reaches no channel this machine's stick carries, so the
+# reading crosses as the kernel's own `exit: netd` record.
+#
+# **The read itself is the risk this boot takes.** Nothing has established that
+# this part answers a read of that offset at all, and a read nothing answers
+# holds the CPU that made it. That is why this is a boot of its own and not one
+# more thing the delivery boot next door does.
+#
+# Nothing here reaches the internal NVMe. There is no `[disks]` row, and the
+# only device any program on this boot claims is the PCI function named below.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:15fc"]
+args = ["--read-manageability"]
+
+[programs.test-runner]
+syscap = ["logread"]
