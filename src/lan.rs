@@ -241,8 +241,6 @@ mod tests {
         source.split("\\\n").map(str::trim_start).collect()
     }
 
-    /// **Held here and not by netd's source**: no netd literal wraps at a head
-    /// today, so a scan over the file as written is green either way.
     #[test]
     fn a_head_rustfmt_split_across_two_lines_reads_as_one() {
         let wrapped = "    crate::say!(\"netd: DHCP: \\\n                 lease {}/{} from {}\");";
