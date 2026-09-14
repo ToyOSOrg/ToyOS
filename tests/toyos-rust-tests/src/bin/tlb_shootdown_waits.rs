@@ -4,15 +4,15 @@
 //! **Why this needs an actuator at all.** A correct wait and no wait whatsoever
 //! measure the same zero on a machine where every CPU answers in microseconds,
 //! so nothing a guest can do distinguishes them. `SYS_DEBUG` action 12 holds
-//! every acknowledgement an initiator waits for back — after the flush, so what
-//! is staged is a slow answer and never an incorrect one — and the wait becomes
-//! a duration userland can read off its own clock.
+//! each other CPU's acknowledgement back in turn — after the flush, so what is
+//! staged is a slow answer and never an incorrect one — and answers with the
+//! cheapest of those waits. So a wait that reaches only some of the target set
+//! is a small number here rather than an invisible one, and the set's *width*
+//! is assertable and not only its depth.
 //!
 //! **The precondition is the kernel's target set, and that set is every other
 //! CPU on the machine.** Nothing this process does puts a CPU into it or takes
-//! one out, so `SYS_CPU_COUNT` is the whole of the arrangement: with a second
-//! CPU there is one to wait for, and its acknowledgement is held back whichever
-//! CPU this thread is running on.
+//! one out, so `SYS_CPU_COUNT` is the whole of the arrangement.
 //!
 //! **Why the harm itself is not the verdict here.** The honest gate would be a
 //! sibling reading through a stale translation into memory the PMM had reissued.
@@ -27,24 +27,22 @@
 
 use toyos_abi::syscall::{self, MmapFlags, MmapProt, SYS_DEBUG};
 
-/// Long enough to read off a clock through two syscalls, short enough that four
-/// of them are not a boot's worth of stalled CPU. The delay spins with
+/// Long enough to read off a clock through two syscalls, short enough that a
+/// sweep of them is not a boot's worth of stalled CPU. The delay spins with
 /// interrupts disabled on the target, which is why it is not larger.
 const DELAY_NANOS: u64 = 20_000_000;
 
-/// Half the delay. The measurement is a lower bound on a spin the guest itself
-/// performs, so it cannot come out short for scheduling reasons — but the two
-/// clock reads bracketing it are syscalls, and the margin is there so a slow
-/// host cannot turn a pass into a fail either way.
+/// Half the delay. Every number compared against it is a lower bound on a spin
+/// the kernel or this process performs, so it cannot come out short for
+/// scheduling reasons — but the clock reads bracketing it are syscalls, and the
+/// margin is there so a slow host cannot turn a pass into a fail either way.
 const FLOOR_NANOS: u64 = DELAY_NANOS / 2;
 
-/// How many measured operations must *all* return fast before that is the
+/// How many measured `munmap`s must *all* return fast before that is the
 /// verdict.
 ///
-/// A target holds its acknowledgement back on every path it answers another
-/// CPU's shootdown on, so one fast return means the target published through a
-/// serve of its own — it was initiating a shootdown at that instant, the one
-/// path that does not delay — and the operation says nothing. A kernel that
+/// A target that is itself inside a shootdown publishes through a serve of its
+/// own, which does not delay, so one fast return says nothing. A kernel that
 /// does not wait returns fast every time.
 const TRIALS: u32 = 3;
 
@@ -70,9 +68,24 @@ fn debug(action: u64, arg: u64) -> u64 {
     ret
 }
 
-/// Arm the delay and report what one bare shootdown cost the kernel.
-fn arm() -> u64 {
-    debug(ARM, DELAY_NANOS)
+/// Arm, and refuse to time anything until the kernel has just demonstrated the
+/// wait it is about to be judged on.
+///
+/// The arming lapses after a window of its own, so a stage reached later than
+/// that would otherwise time an unarmed machine and read its microseconds as a
+/// missing wait. The returned number is the kernel's own, taken across a sweep
+/// that holds each other CPU back separately: below the floor means the
+/// initiator skipped one of them, whichever one it was.
+fn armed(cpus: u32) -> u64 {
+    let least = debug(ARM, DELAY_NANOS);
+    assert!(
+        least >= FLOOR_NANOS,
+        "with each of the {} other CPUs answering {DELAY_NANOS}ns late in turn, the cheapest \
+         of those shootdowns cost the initiator {least}ns — it is not waiting for every other \
+         CPU",
+        cpus - 1,
+    );
+    least
 }
 
 fn disarm() {
@@ -109,21 +122,16 @@ fn main() {
          local-flush return — the stage measures a wait and this machine has none",
     );
 
-    // 1. The primitive. The kernel times its own shootdown, so this number has
-    //    no syscall overhead in it and no scheduling either — both CPUs are
-    //    spinning for its whole duration.
-    let bare = arm();
-    assert!(
-        bare >= FLOOR_NANOS,
-        "a shootdown across {cpus} CPUs, each answering {DELAY_NANOS}ns late, took {bare}ns — \
-         the initiator is not waiting for them",
-    );
+    // 1. The primitive. The kernel times its own shootdowns, so these numbers
+    //    have no syscall overhead in them and no scheduling either.
+    armed(cpus);
 
     // 2. `munmap`, which is the syscall the stage exists for: the pages go back
     //    to the PMM behind the flush.
     let mut judged = None;
     for trial in 1..=TRIALS {
         let region = map(PAGE_2M);
+        armed(cpus);
         let elapsed = timed(|| {
             unsafe { syscall::munmap(region, PAGE_2M) }.expect("munmap");
         });
@@ -131,18 +139,13 @@ fn main() {
             judged = Some(elapsed);
             break;
         }
-        println!(
-            "trial {trial}: munmap returned in {elapsed}ns, which is no verdict on its own — \
-             only every trial returning fast is one, and the kernel's `tlb: acks held back` \
-             line says whether a delay reached this shootdown's targets"
-        );
+        println!("trial {trial}: munmap returned in {elapsed}ns, under the {FLOOR_NANOS}ns floor");
     }
     assert!(
         judged.is_some(),
         "every one of {TRIALS} munmaps returned in under {FLOOR_NANOS}ns with all {} other \
-         CPUs answering {DELAY_NANOS}ns late — it freed the pages without waiting for the \
-         flush. The kernel's `tlb: acks held back` line in this capture says which CPUs held \
-         one back, and `irq: cpuN tlb=` says which took the IPI",
+         CPUs answering {DELAY_NANOS}ns late, each one measured being waited for immediately \
+         before — it freed the pages without waiting for the flush",
         cpus - 1,
     );
 
@@ -151,6 +154,7 @@ fn main() {
     //    sibling holding the old translation writes into the wrong physical
     //    page with nothing ever faulting.
     let placed = map(PAGE_2M);
+    armed(cpus);
     let elapsed = timed(|| {
         let p = unsafe {
             syscall::mmap(
