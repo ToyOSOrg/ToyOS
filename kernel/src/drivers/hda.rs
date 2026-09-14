@@ -622,7 +622,7 @@ fn probe(pci: &PciDevice) -> Option<(Mmio, u16, u16)> {
 /// Put the function in D0 if firmware left it lower; D3hot reads all ones, indistinguishable from
 /// an absent controller.
 fn power_up(pci: &PciDevice) {
-    let Some(cap) = pci.capabilities().find(|c| c.id() == CAP_POWER_MANAGEMENT) else {
+    let Ok(cap) = pci.capability(CAP_POWER_MANAGEMENT) else {
         return;
     };
     let pmcsr = cap.read_u16(PM_CONTROL_STATUS);
@@ -663,7 +663,10 @@ fn reset_stream(stream: Mmio) -> bool {
 /// panic, over a peripheral.
 fn arm_interrupt(pci: &PciDevice) -> bool {
     let vector = crate::arch::idt::HDA_VECTOR;
-    if pci.enable_msix(vector).is_some() || pci.enable_msi(vector) {
+    // A list that ends early takes MSI here rather than a refusal: this kernel
+    // drives the function and hands no BAR of it to a holder, so an MSI-X table
+    // past that link is one nobody but this kernel could reach.
+    if pci.enable_msix(vector).is_ok() || pci.enable_msi(vector) {
         return true;
     }
     log!(

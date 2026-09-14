@@ -10553,6 +10553,14 @@ fn run_machine_test(
             if found != 2 {
                 return Err(format!("{found} controller(s) initialised, want 2:\n{boot}"));
             }
+            let msix = boot.matches("xHCI: MSI-X enabled").count();
+            if msix != 2 {
+                return Err(format!(
+                    "{msix} of the two controllers were armed on MSI-X; one that publishes a \
+                     table and takes MSI is the older mechanism chosen where the newer one was \
+                     there:\n{boot}"
+                ));
+            }
             // And the empty one came up rather than being skipped: it has been
             // reset and armed with MSI-X, so dropping it would leave a live
             // interrupter with nothing draining its event ring.
@@ -14490,8 +14498,6 @@ fn irq_census(capture: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Fourteen crafted PCI capability layouts, answered at init.
-///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn pci_cap_selftest(log: &str) -> Result<(), String> {
@@ -14501,9 +14507,19 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
         let Some(verdict) = log.lines().find(|l| l.contains("pci cap selftest")) else {
             return Err(format!("the walk's self-test never ran:\n{log}"));
         };
-        // `14/14`, not the absence of a FAILED line, which zero cases satisfy too.
-        if !verdict.contains("14/14") {
+        // The count, not the absence of a FAILED line, which zero cases satisfy too.
+        if !verdict.contains("15/15") {
             return Err(format!("not every crafted capability layout was answered: {verdict}"));
+        }
+        // And how those layouts *ended*, which is the split a claimed function's
+        // MSI arm turns on: a kernel that reads a list ending at a link the
+        // spec forbids as one that reached its terminator misses a function's
+        // MSI-X table and arms MSI on the walk's guess.
+        let Some(split) = log.lines().find(|l| l.contains("pci cap split")) else {
+            return Err(format!("nothing said how a capability list ended:\n{log}"));
+        };
+        if !split.contains("13/13") {
+            return Err(format!("a capability list's end was misclassified: {split}"));
         }
         // Once for the machine: it reads no real device.
         let ran = log.matches("pci cap selftest").count();

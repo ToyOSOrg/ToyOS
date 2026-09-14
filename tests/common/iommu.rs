@@ -806,14 +806,37 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// The two lines a hand-over spends, on the function `netcase` claims.
-///
-/// Named once because both arms of `iommu_virtio_platform` read them, in
-/// opposite directions: the arm with a unit requires them and the arm without
-/// one requires their absence. An absence nothing ever produces would pass
-/// against a kernel that had stopped writing the line at all.
+/// The two lines a hand-over spends: one arm requires them, the other their absence.
 const BAR_MOVED: &str = "pcidev: PCI 00:03.0 BAR";
 const MSIX_ARMED: &str = "PCI 00:03.0: msix address=";
+
+/// The claimed function was armed on MSI-X, and never on MSI.
+///
+/// MSI-X first wherever a function has a table, so an `msi address=` line for
+/// the function a claim holds is the older mechanism taken where the newer one
+/// was published. `claimed` is the `vendor:device` the boot config declares, so
+/// the BDF below is the one the guest handed that function over on rather than
+/// whichever function it handed over at all.
+pub fn armed_on_msix(log: &Serial, claimed: &str) -> Result<(), String> {
+    let named = format!("[{claimed}] handed over on slot");
+    let handed: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|line| line.contains(&named))
+        .filter_map(|line| line.split("pcidev: PCI ").nth(1))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .collect();
+    let [at] = handed.as_slice() else {
+        return Err(format!(
+            "{claimed} was handed over {} time(s), and this is an assertion about one:\n{}",
+            handed.len(),
+            log.text()
+        ));
+    };
+    log.must_say(&format!("PCI {at}: msix address="))?;
+    log.must_not_say(&format!("PCI {at}: msi address="))?;
+    Ok(())
+}
 
 /// The control that makes the two arms above mean something: a guest that
 /// declines the feature its host offered gets no device, not a bypassing one.

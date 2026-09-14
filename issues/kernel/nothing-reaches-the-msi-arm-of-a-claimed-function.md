@@ -1,0 +1,47 @@
+---
+status: open
+kind: tooling
+opened: 2026-09-08
+---
+
+# Nothing reaches the MSI arm of a claimed function
+
+`pcidev::bring_up` arms a claimed function on MSI where it publishes no MSI-X,
+and no test in any tier arms one. The *order* is guarded — `https_tls13_e1000e`
+holds a claimed `8086:10d3`, which publishes both mechanisms, and refuses an
+`msi address=` line for it — but the MSI arm itself is reached by nothing. `virtio_net_no_msix` calls
+`PciDevice::enable_msi` from `bring_up` and reads false back; nothing reaches a
+true, and so nothing reaches:
+
+- `PciDevice::disable_msi` from either hand-back site (`bring_up`'s `place_bars`
+  failure and `tear_down`), or `Armed::Msi`'s teardown, which turns the
+  capability off where there is no table entry to mask;
+- `Refusal::MsixUnusable` and `Unarmed::Blocked`, owed only by a function that
+  publishes MSI-X this kernel cannot arm and by a unit that refuses the message;
+- `Refusal::CapsTruncated`, the arm that turns a list ending at a link the spec
+  forbids into a refusal of the hand-over. Everything under that arm is read
+  back: `CapWalk::truncated` is host-tested in `toyos-pci/src/caps.rs`, and the
+  `pci-cap-selftest` actuator drives `PciDevice::capability`'s
+  `Truncated`/`Absent` split *and* the `Unarmed::NoTable` answer `bring_up`
+  matches on over a cyclic list, a misaligned link, a below-header link, a
+  forbidden head and a capability reached before a forbidden link, with
+  `pci_capability_walk` refusing a boot whose split verdict is short. What no
+  test reaches is `bring_up` itself refusing on that answer: replacing its two
+  `NoTable` arms with one that falls through to `enable_msi` stays green in
+  every tier. Reaching it needs a *claimed* function whose capability list ends
+  early, which no function this harness hands to a claim has.
+
+The two pre-existing MSI armings in this kernel — xHCI's and HDA's
+`arm_interrupt` — never disarm, so MSI teardown is exercised nowhere in the tree
+at all.
+
+Owned by the network track's stage-2 I219 worker. Exit condition: the first
+`userdev` interrupt counted against a claim on `00:1f.6` on the bench, which
+needs the 32-bit BAR window before it, plus netd exiting from that claim, which
+runs `tear_down`'s MSI arm.
+
+A guest arm is the alternative and costs more than the bench does. It needs a
+claimable function that publishes MSI and no MSI-X, which nothing this harness
+hands to a claim is: the NIC under `vectors=0` publishes neither, so hiding a
+capability is not enough by itself. So it costs a boot config carrying such a
+function and a test binary to hold it, plus that boot's tier row and CI price.
