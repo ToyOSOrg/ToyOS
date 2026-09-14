@@ -47,8 +47,11 @@ pub const NVM_MAC: [u8; 6] = [0x54, 0xbf, 0x64, 0x11, 0x22, 0x33];
 
 /// Nanoseconds the modelled clock moves on each read. A driver's deadline has
 /// to be reachable, and a clock that stood still would hang the test rather
-/// than fail it.
-const CLOCK_STEP_NANOS: u64 = 1_000;
+/// than fail it — but it stays **shorter than the shortest bound any driver
+/// here measures** (§10.2.2.1's microsecond settle), or one read of it would
+/// satisfy that bound and a wait and no wait at all would be the same thing to
+/// this model.
+const CLOCK_STEP_NANOS: u64 = 100;
 
 /// How many reads of `CTRL` the reset stays asserted for (§10.2.2.1: the bit is
 /// self-clearing, and the datasheet gives no time).
