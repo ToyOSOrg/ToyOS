@@ -126,13 +126,18 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
                 "  [lan] {} answered the host's ping {} s into the window",
                 cable.addr, reply.secs
             );
-            if let Err(why) = profile.judge(&format!("boot.{}.ping_secs", back.label), reply.secs) {
-                bad.push(why.to_string());
-            }
-            if let Err(why) =
-                bootlog::host_second_inside_this_boot(text, cable.skew, LEASE, reply.at)
-            {
-                bad.push(why);
+            // The bracket first: a reply from the operating system on the other
+            // side of the reset is not this boot's reading, and a ceiling may
+            // only be tightened against a reading this boot answered.
+            match bootlog::host_second_inside_this_boot(text, cable.skew, LEASE, reply.at) {
+                Ok(()) => {
+                    if let Err(why) =
+                        profile.judge(&format!("boot.{}.ping_secs", back.label), reply.secs)
+                    {
+                        bad.push(why.to_string());
+                    }
+                }
+                Err(why) => bad.push(why),
             }
         }
         None => bad.push(format!(

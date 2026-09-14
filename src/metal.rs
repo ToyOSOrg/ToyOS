@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use crate::bootlog;
+use crate::flags::{declare_flags, Flag};
 use crate::image::LBA;
 
 const CONNECT_SECS: u64 = 10;
@@ -278,8 +279,8 @@ impl fmt::Display for Refusal {
             ),
             Self::Probe { why } => write!(
                 f,
-                "this host could not run `ping`, the one question this loop can ask a boot that \
-                 is still up: {why}"
+                "this host could not ask the one question this loop can put to a boot that is \
+                 still up: {why}"
             ),
             Self::Silent { what, secs } => write!(
                 f,
@@ -1046,8 +1047,12 @@ impl Ping {
                 let began = std::time::Instant::now();
                 let mut quiet_since: Option<std::time::Instant> = None;
                 let silence = std::time::Duration::from_secs(PING_SILENCE_SECS);
+                let wait = std::time::Duration::from_millis(PING_WAIT_MS);
                 while !theirs.load(std::sync::atomic::Ordering::SeqCst) {
-                    let answered = match ping_once(addr) {
+                    // **A host that could not ask and an address that did not
+                    // answer are separate answers**: reporting the first as
+                    // silence would red the boot for this host's own state.
+                    let answered = match crate::icmp::echo(addr, wait) {
                         Ok(answered) => answered,
                         Err(why) => {
                             *mine.lock().expect("the ping's answer") = Err(why);
@@ -1085,29 +1090,6 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("a host clock before 1970 is a host to fix")
         .as_secs()
-}
-
-/// One probe, whose whole answer is whether the address replied.
-///
-/// **A host with no `ping` and a cable with nothing on it are separate
-/// answers.** A spawn that fails is this host's failing, and reporting it as
-/// silence would red the boot for a binary the host does not have.
-fn ping_once(addr: std::net::Ipv4Addr) -> Result<bool, String> {
-    // `-W` is milliseconds to macOS's `ping` and seconds to every other's, so a
-    // host this argument has not been read against is refused by name rather
-    // than waiting a thousand seconds a probe.
-    if !cfg!(target_os = "macos") {
-        return Err(format!(
-            "`ping -W {PING_WAIT_MS}` means milliseconds on macOS and seconds on {}",
-            std::env::consts::OS
-        ));
-    }
-    Command::new("ping")
-        .args(["-n", "-c", "1", "-W", &PING_WAIT_MS.to_string(), &addr.to_string()])
-        .stdin(Stdio::null())
-        .output()
-        .map(|out| out.status.success())
-        .map_err(|e| e.to_string())
 }
 
 /// The loop, over one target.
@@ -1316,7 +1298,7 @@ impl Driver {
         let back = self.wait(secs, "come back", true);
         let reply = ping.end();
         // The boot's own failure before this loop's: a machine that never came
-        // back is that, whatever this host's `ping` could or could not do.
+        // back is that, whatever this host's probe could or could not do.
         Ok((back?, reply?))
     }
 
@@ -1448,6 +1430,23 @@ fn answer(what: &str, out: Output) -> Result<Output, Refusal> {
     })
 }
 
+declare_flags!(METAL = {
+    IMAGE = "--image", Next;
+    HOST = "--host", Next;
+    KEY = "--key", Next;
+    DEVICE = "--device", Next;
+    INSTALL_SUDOERS = "--install-sudoers", Next;
+    READBACK = "--readback", Next;
+    FAT32_CHECK = "--fat32-check", None;
+    NIC = "--nic", Next;
+    WAIT_SECS = "--wait-secs", Next;
+    DRY_RUN = "--dry-run", None;
+});
+
+/// The flags that describe a boot, as against the ones that say which machine
+/// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
+const ABOUT_A_BOOT: &[&Flag] = &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS];
+
 /// What the binary was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -1490,84 +1489,50 @@ pub struct Args {
 
 impl Args {
     pub fn parse(args: &[String]) -> Result<Self, Refusal> {
+        let line = METAL.walk(args);
+        if let Some(word) = line.unknown.or_else(|| line.positionals.first().copied()) {
+            return Err(Refusal::Usage(format!(
+                "unknown argument {word:?}. toyos-metal accepts:\n{}",
+                METAL.usage()
+            )));
+        }
+        if let Some(why) = line.malformed() {
+            return Err(Refusal::Usage(why));
+        }
+        let value = |flag: &Flag| METAL.value(args, flag);
         let mut out = Args {
-            image: None,
+            image: value(&IMAGE).map(PathBuf::from),
             target: Target::t14()?,
-            dry_run: false,
-            install_sudoers: None,
-            about_a_boot: Vec::new(),
+            dry_run: METAL.present(args, &DRY_RUN),
+            install_sudoers: value(&INSTALL_SUDOERS).map(PathBuf::from),
+            about_a_boot: line
+                .seen
+                .iter()
+                .map(|seen| seen.flag.name)
+                .filter(|name| ABOUT_A_BOOT.iter().any(|flag| flag.name == *name))
+                .collect(),
             wait_secs: return_secs(),
-            readback: None,
-            fat32_check: false,
-            nic: None,
+            readback: value(&READBACK).map(PathBuf::from),
+            fat32_check: METAL.present(args, &FAT32_CHECK),
+            nic: value(&NIC).map(str::to_string),
         };
-        let mut at = 0;
-        while at < args.len() {
-            let flag = args[at].as_str();
-            let value = || {
-                args.get(at + 1)
-                    .cloned()
-                    .ok_or_else(|| Refusal::Usage(format!("{flag} needs a value")))
-            };
-            let took = match flag {
-                "--dry-run" => {
-                    out.about_a_boot.push("--dry-run");
-                    out.dry_run = true;
-                    1
-                }
-                "--image" => {
-                    out.about_a_boot.push("--image");
-                    out.image = Some(PathBuf::from(value()?));
-                    2
-                }
-                "--host" => {
-                    let host = value()?;
-                    let (user, machine) = host.split_once('@').ok_or_else(|| {
-                        Refusal::Usage(format!("--host wants <user>@<machine>, not {host:?}"))
-                    })?;
-                    user_word(user)?;
-                    out.target.user = user.to_string();
-                    out.target.host = machine.to_string();
-                    2
-                }
-                "--key" => {
-                    out.target.key = PathBuf::from(value()?);
-                    2
-                }
-                "--device" => {
-                    out.target.node = Node::parse(&value()?)?;
-                    2
-                }
-                "--install-sudoers" => {
-                    out.install_sudoers = Some(PathBuf::from(value()?));
-                    2
-                }
-                "--readback" => {
-                    out.about_a_boot.push("--readback");
-                    out.readback = Some(PathBuf::from(value()?));
-                    2
-                }
-                "--fat32-check" => {
-                    out.about_a_boot.push("--fat32-check");
-                    out.fat32_check = true;
-                    1
-                }
-                "--nic" => {
-                    out.about_a_boot.push("--nic");
-                    out.nic = Some(value()?);
-                    2
-                }
-                "--wait-secs" => {
-                    out.about_a_boot.push("--wait-secs");
-                    let secs = value()?;
-                    out.wait_secs = secs
-                        .parse()
-                        .map_err(|_| Refusal::Usage(format!("--wait-secs: {secs:?}")))?;
-                    2
-                }
-                other => return Err(Refusal::Usage(format!("unknown argument {other:?}"))),
-            };
-            at += took;
+        if let Some(host) = value(&HOST) {
+            let (user, machine) = host.split_once('@').ok_or_else(|| {
+                Refusal::Usage(format!("--host wants <user>@<machine>, not {host:?}"))
+            })?;
+            user_word(user)?;
+            out.target.user = user.to_string();
+            out.target.host = machine.to_string();
+        }
+        if let Some(key) = value(&KEY) {
+            out.target.key = PathBuf::from(key);
+        }
+        if let Some(node) = value(&DEVICE) {
+            out.target.node = Node::parse(node)?;
+        }
+        if let Some(secs) = value(&WAIT_SECS) {
+            out.wait_secs =
+                secs.parse().map_err(|_| Refusal::Usage(format!("--wait-secs: {secs:?}")))?;
         }
         // **`--install-sudoers` is an action, not a mode.** It installs the
         // rule and exits; a command line that also describes a boot is asking
@@ -2680,7 +2645,7 @@ mod tests {
             !Refusal::Wire { nic: "0000:00:1f.6".to_string(), why: "x".to_string() }
                 .about_the_boot()
         );
-        assert!(!Refusal::Probe { why: "no ping".to_string() }.about_the_boot());
+        assert!(!Refusal::Probe { why: "no ICMP socket".to_string() }.about_the_boot());
     }
 
     #[test]

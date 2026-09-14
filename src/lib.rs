@@ -14,6 +14,7 @@ pub mod fingerprint;
 pub mod flags;
 pub mod forkcheck;
 pub mod hostws;
+pub mod icmp;
 pub mod image;
 /// Which kernel containers may be hashed, and by whose keys; read by nothing
 /// but its own tests.

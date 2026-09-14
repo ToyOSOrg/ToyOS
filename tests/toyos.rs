@@ -13943,12 +13943,6 @@ fn run_machine_test(
             // must have handed the function over, or the record above is about
             // a BAR that moved for nothing.
             let over = log.must_say("[1af4:1041] handed over on slot")?;
-            // **And the function spoke through the BAR that moved.** A register
-            // read answering the right dword says the address decodes; a message
-            // arriving says the whole hand-over works, and it is the one reading
-            // that tells a device nothing made speak from a message that never
-            // reached a CPU — which is what an end-of-boot count of zero leaves
-            // ambiguous.
             let slot = over
                 .split_once("handed over on slot ")
                 .and_then(|(_, rest)| rest.split(',').next())
