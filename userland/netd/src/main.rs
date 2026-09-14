@@ -46,13 +46,9 @@ mod virtio_net;
 /// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models. One
 /// driver takes both, and each row names which part it is because below the
 /// register file they are not one.
-const CARDS: [(PciId, fn(toyos::PciDev, toyos_i219::Mdio) -> Card); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, |c, mdio| {
-        Card::intel(c, toyos_i219::Part::I219, mdio)
-    }),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, |c, mdio| {
-        Card::intel(c, toyos_i219::Part::E82574, mdio)
-    }),
+const CARDS: [(PciId, fn(toyos::PciDev, Mdio) -> Card); 3] = [
+    (PciId { vendor: 0x8086, device: 0x15fc }, |c, m| Card::intel(c, Part::I219, m)),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, |c, m| Card::intel(c, Part::E82574, m)),
     (PciId { vendor: 0x1af4, device: 0x1041 }, |c, _| Card::virtio(c)),
 ];
 
@@ -65,7 +61,7 @@ const PROVOKE_MESSAGE: &str = "--provoke-message";
 /// What lets the I219 driver drive the MDIO interface at all.
 ///
 /// **Nothing a shipped machine runs arms it either**, and unlike the one above
-/// it is not an instrument: [`toyos_i219::Mdio`] carries why. An `MDIC`
+/// it is not an instrument: [`Mdio`] carries why. An `MDIC`
 /// transaction is the one access in that bring-up whose completion rests on
 /// silicon the MAC does not contain, and a machine whose unanswered read holds
 /// a CPU may not make one unattended.
@@ -74,6 +70,7 @@ const BRING_UP_PHY: &str = "--bring-up-phy";
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
+use toyos_i219::{Mdio, Part};
 use virtio_net::VirtioNet;
 
 use toyos::net::*;
@@ -105,7 +102,7 @@ impl Card {
         panic!("netd: the NIC this program was given is not one it can drive — {why}")
     }
 
-    fn intel(claim: toyos::PciDev, part: toyos_i219::Part, mdio: toyos_i219::Mdio) -> Self {
+    fn intel(claim: toyos::PciDev, part: Part, mdio: Mdio) -> Self {
         match i219::Nic::open(claim, part, mdio) {
             Ok(nic) => Self::Intel(nic),
             Err(why) => Self::undrivable(why),
@@ -1332,9 +1329,9 @@ fn main() {
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
     let mdio = if std::env::args().any(|arg| arg == BRING_UP_PHY) {
-        toyos_i219::Mdio::Armed
+        Mdio::Armed
     } else {
-        toyos_i219::Mdio::Withheld
+        Mdio::Withheld
     };
     let nic = open(claim, mdio);
     if std::env::args().any(|arg| arg == PROVOKE_MESSAGE) {
