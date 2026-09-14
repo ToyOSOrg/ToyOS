@@ -467,18 +467,28 @@ name = "boot.usbload.complete_ms"
 unit = "ms"
 ceiling = 120000
 ceiling_from = "as boot.deadlinewedge.complete_ms, toyos_tco::WEDGE_BOUND_MS — the same bound ends this machine and the runner never reaches its own. Not toyos_tco::HARD_LOCKUP_BOUND_MS, which is half of it: the sweep keeps its CPU taking interrupts so that this bound and not that one is what ends the boot, and the judge refuses a page that names the other"
+measured = 1204
 
 [[number]]
 name = "boot.usbload.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs — this boot ends itself at the same bound and then costs the same firmware, loader and Ubuntu as any other"
+measured = 219
 
 [[number]]
 name = "boot.usbload.stick_secs"
 unit = "s"
 ceiling = 5
 ceiling_from = "as boot.deadlinewedge.stick_secs. On this arm it is the ruling itself: the reset is written while the controller is mid-transfer, and a stick the next host cannot enumerate is what the owner said a production operating system must not leave behind"
+measured = 0
+
+[[number]]
+name = "boot.usbload.deadline_lateness_ms"
+unit = "ms"
+ceiling = 10000
+ceiling_from = "as boot.deadlinewedge.deadline_lateness_ms — the poll's own cadence, read on every timer interrupt, so the lateness is one timer period whichever CPU reaches the bound first"
+measured = 66
 
 # --- what one member of a job list may cost this machine ---
 # **The number the suite sizes its lists by, and judges them against.** The

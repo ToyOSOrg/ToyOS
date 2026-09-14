@@ -1456,8 +1456,7 @@ pub fn usb_load_chain(kernel: &serial::Serial, after: &serial::Serial) -> Result
 ///
 /// **The reset does not finish the command and this does not ask it to.** The
 /// rings it could write are rebuilt from published numbers a live driver may
-/// still be enqueuing on, and five T14 controls left the bench's stick usable
-/// at every phase, so what the account owes is the phase and what the
+/// still be enqueuing on, so what the account owes is the phase and what the
 /// controller was doing — which is what
 /// `kernel/src/drivers/xhci/stop.rs::settle_commands` writes and what reverting
 /// `OpenCommand`'s publication makes absent.
