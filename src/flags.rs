@@ -172,19 +172,17 @@ pub(crate) struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    /// A flag whose value no reader of this line would get. Each shape would
-    /// otherwise reach a reader as a silent default — the value-taking flag
-    /// left with nothing after it answers `None`, the flag written twice has
-    /// every use but one dropped, and a value written onto a flag that has no
-    /// reader for one is read by nobody — so every command line asks this
-    /// before it runs, and neither asks anything else.
+    /// A flag whose value no reader of this line would get — every shape that
+    /// reaches a reader as a silent default, and the whole of what either
+    /// command line asks. A value-taking flag left with nothing after it
+    /// answers `None`; a flag written twice has every use but one dropped; and
+    /// an inline value is dropped by exactly two readers, `Value::None` having
+    /// none and `rest` taking only the words after the flag, [`Given::value`]
+    /// handing it to all the rest.
     pub(crate) fn malformed(&self) -> Option<String> {
         for (at, seen) in self.seen.iter().enumerate() {
             let name = seen.flag.name;
             let shape = shape(seen.flag.value);
-            // `Given::value` hands an inline value to every reader that takes
-            // one; `Value::None` has no reader and `rest` reads only the words
-            // after the flag, so those two alone would drop it.
             if matches!(seen.given, Given::Inline(_))
                 && matches!(seen.flag.value, Value::None | Value::Rest)
             {
@@ -483,11 +481,7 @@ mod tests {
             let under = file.strip_prefix(&root).expect("a file under the root");
             let dotted =
                 under.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
-            assert!(
-                !dotted || under.starts_with(".github"),
-                "the scan reaches {}, which it says it does not",
-                under.display()
-            );
+            assert!(!dotted || under.starts_with(".github"), "the scan reaches {under:?}");
         }
 
         let declared: BTreeSet<&str> = CARGO_RUN.0.iter().map(|f| f.name).collect();
