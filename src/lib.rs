@@ -11,6 +11,7 @@ pub mod day;
 pub mod durations;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
+pub mod flags;
 pub mod forkcheck;
 pub mod hostws;
 pub mod image;

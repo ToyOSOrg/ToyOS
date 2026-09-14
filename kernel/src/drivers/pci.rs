@@ -160,6 +160,24 @@ impl PciDevice {
         }
     }
 
+    /// How many BAR slots this function's header declares: six on a Type 0
+    /// header, two on a Type 1 bridge, and none on a header type this kernel
+    /// does not decode.
+    ///
+    /// **Every walk over this function's BARs is bounded by this.** A Type 1
+    /// header's registers past BAR 1 are its primary, secondary and subordinate
+    /// bus numbers and its I/O window, so a walk of six reads a bus number as an
+    /// address — and [`Self::bar_size`]'s write-ones probe would set that
+    /// bridge's secondary and subordinate bus to 0xFF for the length of it,
+    /// cutting off every function behind the bridge.
+    pub fn bar_slots(&self) -> u8 {
+        match self.read_config_u8(HEADER_TYPE) & !MULTI_FUNCTION {
+            0 => bar::MAX_INDEX + 1,
+            1 => 2,
+            _ => 0,
+        }
+    }
+
     /// The byte size Memory Space BAR `index` advertises, by the spec's
     /// write-ones probe; `index` must be ≤ [`bar::MAX_INDEX`]. Memory decode is
     /// off for the probe, so nothing can read through the BAR mid-dance.
@@ -464,17 +482,14 @@ fn print_device(pci: &PciDevice) {
 ///
 /// **Read, never probed.** [`PciDevice::bar_size`]'s write-ones dance turns
 /// memory decode off for the duration, and an inventory that only describes a
-/// function must not disturb one. The slot count comes from the header type
-/// because a Type 1 header's registers past BAR 1 are the bridge's bus numbers,
-/// not BARs.
+/// function must not disturb one.
 fn assigned_bars(pci: &PciDevice) -> alloc::string::String {
     use core::fmt::Write;
 
-    let slots: u8 = match pci.read_config_u8(HEADER_TYPE) & !MULTI_FUNCTION {
-        0 => bar::MAX_INDEX + 1,
-        1 => 2,
-        _ => return alloc::string::String::from("header type this kernel does not decode"),
-    };
+    let slots = pci.bar_slots();
+    if slots == 0 {
+        return alloc::string::String::from("header type this kernel does not decode");
+    }
     let mut out = alloc::string::String::new();
     let mut index = 0;
     while index < slots {

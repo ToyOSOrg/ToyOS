@@ -1,0 +1,11 @@
+The ACPI resource descriptors `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration`
+answered with on the one root bridge of the ThinkPad T14 this repository is
+tested on, off that machine's own firmware.
+
+  root-bridge-0.bin   186 bytes, off the `Root bridge: 0 (segment 0) 186 bytes:`
+                      line in the `loader.log` the stick came back with from
+                      metal run 33 (`tests/metalcase`).
+
+The bootloader printed the bytes and nothing decoded them on the way. What says
+the length was right is the file itself: four descriptors whose own declared
+lengths tile it exactly, then the End Tag.

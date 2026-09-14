@@ -17,7 +17,7 @@ use common::{
 };
 use toyos_build::day::Day;
 use toyos_build::bootlog::{self, boot_millis};
-use toyos_build::testargs::Shard;
+use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::tiers::{self, Tier};
 
 struct TestDef {
@@ -13736,8 +13736,12 @@ fn run_machine_test(
             log.must_say("init: test-runner: pci:1af4:1041 is already claimed")?;
             // netd is the one that got it, not merely the one that ran.
             log.must_say("netd: ready, at most ")?;
+            aperture_account(&log)?;
             log.must_be_clean()?;
-            eprintln!("  [netcase] one PCI function, two claimants, one holder");
+            eprintln!(
+                "  [netcase] one PCI function, two claimants, one holder; and every \
+                 assigned BAR inside the aperture firmware named"
+            );
             Ok(())
         }
         "netd_listener_forgery" => {
@@ -15792,6 +15796,79 @@ struct XhciLayout {
     scratchpad: usize,
     blocks: usize,
     stride: usize,
+}
+
+/// The kernel's account of the machine's aperture, held against addresses this
+/// harness read off the same boot without it: the `bars=` of the ECAM walk, and
+/// the windows `publish` said it cut.
+///
+/// Asking firmware where its root bridges decode, decoding what it answers and
+/// carrying the answer across `KernelArgs` all fail into the one missing record.
+fn aperture_account(log: &serial::Serial) -> Result<(), String> {
+    fn hex(s: &str) -> Result<u64, String> {
+        u64::from_str_radix(s.trim().trim_start_matches("0x"), 16)
+            .map_err(|e| format!("{s:?} is not an address: {e}"))
+    }
+
+    let named = log.must_say("pcidev: firmware root bridge windows: ")?;
+    let windows = named
+        .rsplit_once("windows: ")
+        .ok_or_else(|| format!("unparseable aperture record: {named:?}"))?
+        .1
+        .split(", ")
+        .map(|w| {
+            let (base, end) = w
+                .trim()
+                .strip_prefix("mem ")
+                .and_then(|r| r.split_once(".."))
+                .ok_or_else(|| format!("unparseable window {w:?} on {named:?}"))?;
+            Ok((hex(base)?, hex(end)?))
+        })
+        .collect::<Result<Vec<(u64, u64)>, String>>()?;
+
+    // Every memory BAR firmware itself assigned, off the enumeration rather
+    // than off the record being judged. A BAR outside every named window is a
+    // fact about the machine and the kernel has to name it — one line each,
+    // and none for a machine where there are none.
+    let outside: Vec<String> = log
+        .text()
+        .lines()
+        .filter_map(|l| Some((l, l.split("bars=[").nth(1)?.split_once(']')?.0)))
+        .flat_map(|(l, bars)| bars.split_whitespace().map(move |b| (l, b)))
+        .filter_map(|(l, bar)| Some((l, hex(bar.split_once('=')?.1).ok()?)))
+        .filter(|(_, at)| !windows.iter().any(|(base, end)| at >= base && at < end))
+        .map(|(l, at)| format!("{at:#x} on {}", l.trim()))
+        .collect();
+    let said: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| l.contains("is inside no window firmware named, so its bridge does not forward"))
+        .collect();
+    if said.len() != outside.len() {
+        return Err(format!(
+            "the enumeration puts {} assigned memory BAR(s) outside {named:?} and the kernel \
+             named {}:\nthe harness: {outside:#?}\nthe kernel: {said:#?}",
+            outside.len(),
+            said.len(),
+        ));
+    }
+
+    // And the two windows `publish` cut are accounted for by the addresses of
+    // the line that cut them, so an account of some other span is not one this
+    // takes for theirs.
+    let cut = log.must_say("functions; a 32-bit window comes from ")?;
+    let (narrow, wide) = cut
+        .rsplit_once("comes from ")
+        .and_then(|(_, r)| r.split_once(", a 64-bit one from "))
+        .ok_or_else(|| format!("unparseable window record: {cut:?}"))?;
+    for (width, span) in [("32-bit", narrow), ("64-bit", wide)] {
+        // A machine with no window of that width has no address to account for.
+        if span.trim() == "0x0..0x0" {
+            continue;
+        }
+        log.must_say(&format!("pcidev: the {width} window {} is inside ", span.trim()))?;
+    }
+    Ok(())
 }
 
 /// One PCI function as both readers name it: bus, device, function, vendor,
@@ -18425,72 +18502,45 @@ fn main() {
         }
     };
 
-    let debug_mode = args.iter().any(|a| a == "--debug");
-    let list_mode = args.iter().any(|a| a == "--list");
+    let debug_mode = SUITE.present(&args, &testargs::DEBUG);
+    let list_mode = SUITE.present(&args, &testargs::LIST);
     // The nightly tier, on. A flag and not an env var for `--audio-gate`'s
     // reason: an env var is invisible in the command line and easy to leave set,
     // and the whole point of the split is that a run says what it ran.
-    let nightly = args.iter().any(|a| a == "--nightly");
+    let nightly = SUITE.present(&args, &testargs::NIGHTLY);
     // The metal profile, and where its images and readbacks live. Naming the
     // directory means the machine is not touched — see `common::metal::Mode`.
-    let metal_mode = args.iter().any(|a| a == "--metal");
-    let mut metal_readback: Option<&str> = None;
-    for (i, a) in args.iter().enumerate() {
-        metal_readback = if let Some(v) = a.strip_prefix("--metal-readback=") {
-            Some(v)
-        } else if a == "--metal-readback" {
-            Some(args.get(i + 1).map(String::as_str).unwrap_or_else(|| {
-                panic!("--metal-readback needs a directory, e.g. --metal-readback target/metal")
-            }))
-        } else {
-            continue;
-        };
-    }
-    if args.iter().any(|a| a == "--slow-usb") {
+    let metal_mode = SUITE.present(&args, &testargs::METAL);
+    let metal_readback = SUITE.value(&args, &testargs::METAL_READBACK);
+    if SUITE.present(&args, &testargs::SLOW_USB) {
         SLOW_USB.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let nocapture = args.iter().any(|a| a == "--nocapture" || a == "--show-output");
+    let nocapture =
+        SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
 
     // Thorough tier. A flag rather than an env var or a test name: an env var
     // is invisible in the command line and easy to leave set, and a test name
     // would drag ~17 minutes into every plain `cargo test`.
-    let mut audio_gate: Option<u32> = None;
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--audio-gate=") {
-            v
-        } else if a == "--audio-gate" {
-            args.get(i + 1).map(|s| s.as_str()).unwrap_or_else(|| {
-                panic!("--audio-gate needs an iteration count, e.g. --audio-gate 30")
-            })
-        } else {
-            continue;
-        };
-        let n: u32 = n
-            .parse()
-            .unwrap_or_else(|_| panic!("--audio-gate: {n:?} is not an iteration count"));
-        assert!(n >= 2, "--audio-gate needs at least 2 iterations to compare anything");
-        audio_gate = Some(n);
-    }
+    let audio_gate: Option<u32> = SUITE.value(&args, &testargs::AUDIO_GATE).map(|n| {
+        let iterations: u32 =
+            n.parse().unwrap_or_else(|_| panic!("--audio-gate: {n:?} is not an iteration count"));
+        assert!(iterations >= 2, "--audio-gate needs at least 2 iterations to compare anything");
+        iterations
+    });
 
     // How many guests the parallel phase runs at once. The serial tail and gate
     // A ignore it — that is what they are.
-    let mut width = DEFAULT_WIDTH;
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--jobs=") {
-            v
-        } else if a == "--jobs" || a == "-j" {
-            args.get(i + 1)
-                .map(|s| s.as_str())
-                .unwrap_or_else(|| panic!("--jobs needs a width, e.g. --jobs 4"))
-        } else {
-            continue;
-        };
-        width = n.parse().unwrap_or_else(|_| panic!("--jobs: {n:?} is not a width"));
-        assert!(width >= 1, "--jobs needs at least one worker");
-    }
+    let width = SUITE
+        .value(&args, &testargs::JOBS)
+        .or_else(|| SUITE.value(&args, &testargs::JOBS_SHORT))
+        .map_or(DEFAULT_WIDTH, |n| {
+            let width: usize = n.parse().unwrap_or_else(|_| panic!("--jobs: {n:?} is not a width"));
+            assert!(width >= 1, "--jobs needs at least one worker");
+            width
+        });
 
     // Which slice of the suite this machine runs. Absent is the whole of it.
-    let shard = match toyos_build::testargs::parse_shard(&args) {
+    let shard = match testargs::parse_shard(&args) {
         Ok(shard) => shard,
         Err(refusal) => {
             eprintln!("[toyos] {refusal}");
@@ -18501,35 +18551,16 @@ fn main() {
     // How many guests may be up on the *host* at once, across every worktree.
     // `--jobs` is this run's demand; this is what the machine will supply, and
     // zero turns it off.
-    let mut host_budget = toyos_build::buildlock::HOST_GUESTS;
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--host-slots=") {
-            v
-        } else if a == "--host-slots" {
-            args.get(i + 1).map(|s| s.as_str()).unwrap_or_else(|| {
-                panic!("--host-slots needs a budget, e.g. --host-slots 12 (0 turns it off)")
-            })
-        } else {
-            continue;
-        };
-        host_budget =
-            n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget"));
-    }
+    let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or(
+        toyos_build::buildlock::HOST_GUESTS,
+        |n| n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget")),
+    );
 
     // And how many of this host's *compiles* may run at once, across every
     // worktree. A worker holds a guest slot from the moment it takes a task and
     // spends the first part of it building a kernel variant, so twelve workers
     // are twelve concurrent `cargo build`s and no guest at all.
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--host-builds=") {
-            v
-        } else if a == "--host-builds" {
-            args.get(i + 1).map(|s| s.as_str()).unwrap_or_else(|| {
-                panic!("--host-builds needs a budget, e.g. --host-builds 4 (0 turns it off)")
-            })
-        } else {
-            continue;
-        };
+    if let Some(n) = SUITE.value(&args, &testargs::HOST_BUILDS) {
         toyos_build::buildlock::set_host_builds(
             n.parse().unwrap_or_else(|_| panic!("--host-builds: {n:?} is not a budget")),
         );
