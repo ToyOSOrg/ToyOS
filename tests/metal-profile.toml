@@ -629,7 +629,7 @@ ceiling_from = "as boot.testcases.stick_secs"
 name = "boot.testcases.park_open_operations"
 unit = "operations"
 ceiling = 0
-ceiling_from = "the stop's own claim, judged by the block layer instead of by the stop: a machine whose userland is stopped is inside no block-device operation, so any number but zero is a sync claiming something about a machine that was still writing"
+ceiling_from = "the stop's own claim, judged by the block layer instead of by the stop: an operation lasts only while its opener is inside the device, so a thread the stop has stopped holds none and any number but zero is a sync claiming something about a machine that was still writing"
 
 [[number]]
 name = "boot.testcases-mkdir.park_open_operations"

@@ -51,6 +51,27 @@ pub enum Stage {
 }
 
 impl Stage {
+    /// Whether this stage's stop covers `thread`.
+    ///
+    /// Asked without a caller because the block layer counts an operation
+    /// where it is opened, and an opener has no caller to be compared against.
+    pub fn covers(self, thread: Thread) -> bool {
+        match self {
+            Stage::ExceptLog => !thread.makes_the_log_durable,
+            Stage::All => true,
+        }
+    }
+
+    /// The stage whose stop closes a block-device operation `thread` opens:
+    /// the first one that covers it.
+    pub fn stopping(thread: Thread) -> Stage {
+        if Stage::ExceptLog.covers(thread) {
+            Stage::ExceptLog
+        } else {
+            Stage::All
+        }
+    }
+
     /// Whether `thread` must stop at its next safe point.
     ///
     /// **`caller` is never stopped**: it is the thread running the stop, and
@@ -59,13 +80,7 @@ impl Stage {
     /// stops like any other, because what the reset must outlast is one
     /// thread's remaining work and not one program's.
     pub fn must_stop(self, thread: Thread, caller: ThreadId) -> bool {
-        if thread.id == caller {
-            return false;
-        }
-        match self {
-            Stage::ExceptLog => !thread.makes_the_log_durable,
-            Stage::All => true,
-        }
+        thread.id != caller && self.covers(thread)
     }
 }
 
@@ -118,14 +133,14 @@ pub struct Record {
     pub elapsed_ms: u64,
     pub sweeps: u32,
     pub cpus: u32,
-    /// Block-device operations a stoppable thread still had open when the stop
-    /// ended — the one number here the stop does not produce itself, and so
-    /// the one that can disagree with it. Zero is a machine that really
-    /// stopped before the shutdown claimed its filesystems were synced.
+    /// Block-device operations still open on a thread this stage stopped — the
+    /// one number here the stop does not produce itself, and so the one that
+    /// can disagree with it. An operation lasts only while its opener is inside
+    /// the device, so a thread that has stopped holds none.
     pub in_flight: u32,
-    /// How many such operations this boot began. Zero says the counter behind
-    /// [`Self::in_flight`] never counted at all, which no boot that wrote a
-    /// file can honestly report.
+    /// How many operations either stage closes this boot began. Zero says the
+    /// counter behind [`Self::in_flight`] never counted at all, which no boot
+    /// that wrote a file can honestly report.
     pub begun: u64,
 }
 
@@ -240,6 +255,19 @@ mod tests {
     fn a_process_that_only_reads_the_log_is_not_carved_out() {
         assert!(Stage::ExceptLog.must_stop(thread(LOGD + 4, 0), CALLER));
         assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 0), CALLER));
+    }
+
+    /// **An operation is closed by the stage that stops the thread that opened
+    /// it**, which is why the carve-out's are outside the first stage's count:
+    /// that process is still running there, so a number but zero would be the
+    /// machine working exactly as the stop intends.
+    #[test]
+    fn the_stage_that_closes_an_operation_is_the_one_that_stops_its_opener() {
+        assert_eq!(Stage::stopping(thread(LOGD + 4, 0)), Stage::ExceptLog);
+        assert_eq!(Stage::stopping(log_thread(LOGD, 0)), Stage::All);
+        assert!(Stage::ExceptLog.covers(thread(LOGD + 4, 0)));
+        assert!(!Stage::ExceptLog.covers(log_thread(LOGD, 0)));
+        assert!(Stage::All.covers(log_thread(LOGD, 0)));
     }
 
     /// The caller could itself be a process the log is owed to — `logd` may

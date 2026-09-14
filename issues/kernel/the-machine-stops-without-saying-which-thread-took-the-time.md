@@ -47,6 +47,27 @@ above; `sshd` wrote no `exit:` record on run 41 at all, so it was alive and
 running when the stop found it. Which of the seven took the time is not in the
 file.
 
+## What the dev host measures, and what the budget could be
+
+Twelve boots of `quiesce_stops_the_machine` at `feffffb6`, `tests/quiescecase`,
+six writer threads on two vcpus:
+
+| host | park, per boot |
+|---|---|
+| quiet | 10, 10, 10, 20, 169 ms |
+| loaded, 24 spinners, load 36-95 | 10, 10, 10, 12, 26, 156, 158 ms |
+
+All twelve read `9 of 9` stopped and `0` open, so none is a reading of a stop
+that struggled. `quiesce::PARK` is 2,010 ms, and the worst of them spends 8% of
+it — on the quiet host, which is what says the quantity is not a function of
+host load alone.
+
+The budget cannot simply be widened to the bound that would cover a thread
+inside a run of block work: `block::DEADMAN` is 120 s and the boot deadline is
+armed straight through `quiesce` — `kernel/src/deadline.rs` stands down only for
+a panic — so a park that long is sealed as a wedge rather than expiring with the
+record this issue is about.
+
 ## Why it is not free to answer
 
 The record is a fixed line rendered by `toyos-quiesce` and read back by

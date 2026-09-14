@@ -256,8 +256,8 @@ pub fn quiesce_stops_the_machine(
         .ok_or_else(|| format!("the kernel's stop record did not read back as one:\n  {said}"))?;
     if record.in_flight != 0 {
         return Err(format!(
-            "the block layer still had {} operation(s) open where the stop ended, so the machine \
-             was not stopped before the sync claimed it was:\n  {record}",
+            "the block layer still had {} operation(s) open on a thread this stop had stopped, so \
+             the machine was not stopped before the sync claimed it was:\n  {record}",
             record.in_flight,
         ));
     }
@@ -1418,6 +1418,14 @@ fn stopped_the_log_writer_too(after: &serial::Serial) -> Result<(), String> {
         return Err(format!(
             "the second stage left {} thread(s) running into the reset:\n  {record}",
             record.sweep.running,
+        ));
+    }
+    // The log's own writer is inside this stage's count and outside the first
+    // one's, so this is the only judge that sees its operations closed.
+    if record.in_flight != 0 {
+        return Err(format!(
+            "the log's writer took {} block operation(s) into the reset:\n  {record}",
+            record.in_flight,
         ));
     }
     Ok(())

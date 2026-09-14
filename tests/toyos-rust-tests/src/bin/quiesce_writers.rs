@@ -4,8 +4,8 @@
 //! filesystem and then says `Rebooting.`; both are claims about a machine, and
 //! a machine with threads still writing when they are made is a machine they
 //! are not true of. So this boot puts [`WRITERS`] threads into an unbounded
-//! write-and-fsync loop, lets them get into it, and then asks for the reset
-//! from a thread that is not one of them.
+//! write-and-fsync loop, waits for every one of them to say it has finished a
+//! pass, and then asks for the reset from a thread that is not one of them.
 //!
 //! Nothing here asserts: `common::power::quiesce_stops_the_machine` reads the
 //! kernel's own `stop:` record and the order of the console around it, which
@@ -14,7 +14,8 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
@@ -27,9 +28,15 @@ const WRITERS: usize = 6;
 /// rather than a page-cache touch.
 const CHUNK: usize = 8192;
 
-/// How long the writers get before the reset is asked for. Long enough that
-/// every one of them is inside its loop rather than still being spawned.
-const SPIN_UP: Duration = Duration::from_millis(300);
+/// How long the writers get to reach their loop before this boot gives up on
+/// being a machine with anything to stop.
+const SPIN_UP: Duration = Duration::from_secs(30);
+
+/// Writers that have finished a pass. **The reset is asked for over a machine
+/// every writer is known to be working on**, and not over one a fixed sleep
+/// hoped they had reached: a writer still being spawned when the last word is
+/// written puts no line above it, which is a boot that had nothing to stop.
+static IN_THE_LOOP: AtomicUsize = AtomicUsize::new(0);
 
 /// What a writer says every pass.
 const WRITING: &str = "quiesce-writer:";
@@ -65,12 +72,25 @@ fn main() {
                     if f.sync_all().is_err() {
                         return;
                     }
+                    if pass == 0 {
+                        IN_THE_LOOP.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             })
             .expect("spawn a writer");
     }
 
-    std::thread::sleep(SPIN_UP);
+    let give_up = Instant::now() + SPIN_UP;
+    while IN_THE_LOOP.load(Ordering::Relaxed) < WRITERS {
+        if Instant::now() >= give_up {
+            eprintln!(
+                "quiesce_writers: {} of {WRITERS} writers reached their loop in {SPIN_UP:?}",
+                IN_THE_LOOP.load(Ordering::Relaxed),
+            );
+            std::process::exit(1);
+        }
+        std::thread::yield_now();
+    }
     println!("{WRITERS} writers are running; asking for the reset");
 
     // Comes back only refused: on the other path the machine is already at its

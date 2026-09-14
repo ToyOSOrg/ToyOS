@@ -154,7 +154,7 @@ pub fn stop(stage: Stage) -> Record {
         // Read here and not by the caller: the question is what was open at the
         // moment the stop ended, and every line between here and the record's
         // own would open more.
-        let (in_flight, begun) = crate::block::userland_operations();
+        let (in_flight, begun) = crate::block::userland_operations(stage);
         return Record {
             sweep: swept,
             elapsed_ms: elapsed / 1_000_000,
