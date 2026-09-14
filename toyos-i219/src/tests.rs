@@ -1131,10 +1131,58 @@ fn an_interface_the_engine_never_gives_up_is_refused_by_name() {
     // bit left standing for a grant nobody is waiting on any more. What is
     // still set is the engine's own bit, which is read-only to this driver.
     assert_eq!(
-        nic.peek(regs::EXTCNF_CTRL),
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
         extcnf::MDIO_MNG_OWNERSHIP,
         "{}",
         nic.because("a request nobody is waiting on was left in EXTCNF_CTRL")
+    );
+}
+
+/// §4.5.2 arbitrates three bits of `EXTCNF_CTRL` and this driver writes one of
+/// them, so what stands in the rest of that register outlives the bring-up — on
+/// the path that is granted the interface and on the one that withdraws its
+/// request alike.
+#[test]
+fn the_ownership_claim_leaves_the_rest_of_the_register_standing() {
+    let elsewhere = |nic: &Nic| nic.peek(regs::EXTCNF_CTRL) & !extcnf::OWNERSHIP;
+
+    let granted = Nic::i219(51);
+    granted.set_link(true);
+    let before = elsewhere(&granted);
+    assert_ne!(
+        before,
+        0,
+        "{}",
+        granted.because("the part came up with nothing outside §4.5.2's three bits, so a \
+                         composed write would have had nothing to clear")
+    );
+    let mut driver = open(&granted);
+    assert!(driver.brought_up().phy.is_ok(), "{}", granted.because("the PHY was not reached"));
+    granted.negotiation_settles();
+    one_pass(&mut driver);
+    assert_eq!(
+        elsewhere(&granted),
+        before,
+        "{}",
+        granted.because("the bring-up cleared fields of EXTCNF_CTRL that are not its own")
+    );
+
+    // The withdrawal on the deadline is the other write of that register, and
+    // it is made having never been granted anything.
+    let refused = Nic::i219(52);
+    refused.mdio_never_granted();
+    let before = elsewhere(&refused);
+    let driver = open(&refused);
+    assert!(
+        matches!(driver.brought_up().phy, Err(PhyRefusal::OwnershipBusy { .. })),
+        "{}",
+        refused.because("the interface was granted, so the withdrawal never ran")
+    );
+    assert_eq!(
+        elsewhere(&refused),
+        before,
+        "{}",
+        refused.because("withdrawing the request cleared fields of EXTCNF_CTRL it does not own")
     );
 }
 
@@ -1155,7 +1203,7 @@ fn an_mdi_transaction_that_never_reports_ready_is_refused_by_name() {
         other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
     }
     assert_eq!(
-        nic.peek(regs::EXTCNF_CTRL),
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
         0,
         "{}",
         nic.because("the MDIO interface was left held after a transaction that never finished")
@@ -1353,6 +1401,7 @@ fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way
             phy_starts_in_loopback_or_resetting: false,
             phy_starts_with_autonegotiation_disabled: false,
             phy_advertises_what_the_last_agent_left: false,
+            extcnf_carries_firmware_fields: false,
             ..Permits::default()
         },
     );

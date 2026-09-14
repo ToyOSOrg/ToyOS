@@ -116,6 +116,10 @@ pub struct Permits {
     /// out of a claim is what the agent before this one left in it, not the
     /// power-on default.
     pub phy_advertises_what_the_last_agent_left: bool,
+    /// §4.5.2 arbitrates three bits of `EXTCNF_CTRL` and no more, so what
+    /// stands in the rest of that register is another agent's and a part comes
+    /// up with some of it set.
+    pub extcnf_carries_firmware_fields: bool,
 }
 
 impl Default for Permits {
@@ -133,6 +137,7 @@ impl Default for Permits {
             phy_starts_in_loopback_or_resetting: true,
             phy_starts_with_autonegotiation_disabled: true,
             phy_advertises_what_the_last_agent_left: true,
+            extcnf_carries_firmware_fields: true,
         }
     }
 }
@@ -209,6 +214,15 @@ const ADVERTISE_AFTER_BATTERY_SAVER: u16 = 0x0061;
 
 /// How many `MDIC` reads a transaction takes before §10.2.2.7's `Ready` is set.
 const MDI_READS: u32 = 2;
+
+/// §10.2.2.1's two reserved `CTRL` bits, documented as "Set to 1b" (bit 3) and
+/// "must be set to 1b" (bit 20, `ADVD3WUC`).
+const CTRL_RESERVED_SET: u32 = (1 << 3) | (1 << 20);
+
+/// What another agent left in `EXTCNF_CTRL` outside §4.5.2's three ownership
+/// bits. The value is arbitrary and its only property is that this driver never
+/// wrote it.
+const EXTCNF_FIRMWARE_FIELDS: u32 = 1 << 13;
 
 /// The PHY the *Intel Ethernet Connection I219 Datasheet* describes, as much of
 /// it as reaches this driver.
@@ -434,16 +448,16 @@ impl Model {
         model
     }
 
-    /// What the register file holds out of reset. §10.2.2.1's `CTRL` has two
-    /// reserved bits documented as "Set to 1b" (bit 3) and "must be set to 1b"
-    /// (bit 20, `ADVD3WUC`), and a driver that composes a whole `CTRL` value
-    /// instead of keeping what it read clears them — which is what makes them
-    /// worth modelling.
+    /// What the register file holds out of reset: the fields the documents give
+    /// a value, which are the fields a driver has to carry.
     fn power_on(&mut self) {
         for word in self.file.iter_mut() {
             *word = 0;
         }
-        self.set(regs::CTRL, (1 << 3) | (1 << 20));
+        self.set(regs::CTRL, CTRL_RESERVED_SET);
+        if self.permits.extcnf_carries_firmware_fields {
+            self.set(regs::EXTCNF_CTRL, EXTCNF_FIRMWARE_FIELDS);
+        }
         self.rx_head = 0;
         self.tx_head = 0;
         self.master_reads = 0;
@@ -691,6 +705,13 @@ impl Model {
         match reg {
             regs::CTRL => {
                 let was = self.get(regs::CTRL);
+                assert_eq!(
+                    value & CTRL_RESERVED_SET,
+                    CTRL_RESERVED_SET,
+                    "seed {}: the driver wrote {value:#010x} to CTRL, clearing a reserved bit \
+                     §10.2.2.1 documents as set",
+                    self.seed
+                );
                 self.set(regs::CTRL, value);
                 if value & !was & ctrl::GIO_MASTER_DISABLE != 0 {
                     // §3.1.3.10: the part "blocks new master requests [...] then
@@ -748,10 +769,18 @@ impl Model {
             // §4.5.2: "A request for ownership is registered by writing a 1b
             // into the respective bit", and it stands until the agent writes a
             // 0b back — so one write registers it and the reads after it are
-            // how the agent learns it was granted. Bits 6 and 7 are read-only
-            // (§10.2.2.15), so nothing a driver writes reaches them.
+            // how the agent learns it was granted.
             regs::EXTCNF_CTRL => {
                 self.not_modelled_on_the_82574("EXTCNF_CTRL");
+                let carried = self.get(regs::EXTCNF_CTRL) & !extcnf::OWNERSHIP;
+                assert_eq!(
+                    value & !extcnf::OWNERSHIP,
+                    carried,
+                    "seed {}: the driver wrote {value:#010x} to EXTCNF_CTRL, of which §4.5.2 \
+                     gives it one bit — the rest of the register is another agent's and this \
+                     write changed it from {carried:#010x}",
+                    self.seed
+                );
                 self.phy.sw_requested = value & extcnf::MDIO_SW_OWNERSHIP != 0;
                 self.refresh_ownership();
             }
@@ -785,7 +814,10 @@ impl Model {
         } else {
             0
         };
-        self.set(regs::EXTCNF_CTRL, held);
+        // The arbitration answers three bits and touches nothing else: what
+        // stands in the rest of the register outlives every access to it.
+        let carried = self.get(regs::EXTCNF_CTRL) & !extcnf::OWNERSHIP;
+        self.set(regs::EXTCNF_CTRL, carried | held);
     }
 
     /// A register this file models only behind the PCH part. §10.2.2.7
@@ -961,8 +993,7 @@ impl Model {
                 if r == reg::CONTROL && data & control::RESET != 0 {
                     // §9.5.2.1: "Writing a 1b to this bit causes immediate PHY
                     // reset", so every register below goes back to the default
-                    // §9.5 prints for it — and to the default, not to the
-                    // inherited state [`Permits`]'s four PHY latitudes are.
+                    // §9.5 prints for it.
                     let defaults = PhyModel::new(&self.permits.after_a_phy_reset());
                     self.phy.file = defaults.file;
                     self.phy.custom_mode = defaults.custom_mode;

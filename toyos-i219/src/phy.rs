@@ -212,13 +212,11 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// bit is 0b)."
     fn claim(regs: &'a R, clock: &'a C) -> Result<Self, PhyRefusal> {
         let started = clock.nanos();
-        // A read-modify-write, and the one field this driver composes is its own
-        // ownership bit. §10.2.2.15 is the 82574's account of this register and
-        // this part is not that one: on the I219 the same offset carries the
-        // configuration fields the firmware and the Management Engine own, so a
-        // driver that wrote a word it composed itself would clear whatever it
-        // does not know about in the very register that arbitrates the
-        // interface it is asking for.
+        // §4.5.2 arbitrates three bits of this register, so one bit is the whole
+        // of what this driver writes in it and the rest is read and carried.
+        // The read and the write are two accesses and an agent writing between
+        // them loses what it wrote — which a composed word would lose on every
+        // write instead of on a race.
         let inherited = regs.read(regs::EXTCNF_CTRL);
         regs.write(regs::EXTCNF_CTRL, inherited | extcnf::MDIO_SW_OWNERSHIP);
         loop {
@@ -305,8 +303,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
 }
 
 impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
-    /// §4.5.2: "the controlling agent must write a 0b to its ownership bit" —
-    /// its own bit, and not the register around it.
+    /// §4.5.2: "the controlling agent must write a 0b to its ownership bit".
     fn drop(&mut self) {
         let held = self.regs.read(regs::EXTCNF_CTRL);
         self.regs.write(regs::EXTCNF_CTRL, held & !extcnf::MDIO_SW_OWNERSHIP);

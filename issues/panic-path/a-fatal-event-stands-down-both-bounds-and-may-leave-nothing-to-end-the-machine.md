@@ -38,10 +38,8 @@ one mechanism that has never been observed to fire.
 
 Metal run 49 (`lancase`, branch `i219-phy`) was away 303 s with no ping answered
 at any point and no readback at all — the boot left the USB device in a state
-its next host could not enumerate, so `/dev/sda3` never came back. A healthy
-`lancase` boot returns in 60–85 s and a boot the 120 s deadline ends returns in
-about 220 s, so 303 s is past the deadline path. **Nothing from the machine
-side survived**, which is the shape this file is about rather than a gap in it:
+its next host could not enumerate, so `/dev/sda3` never came back. **Nothing
+from the machine side survived**, which is the shape this file is about rather than a gap in it:
 the channels that would have named the fault are the record ring (reaches the
 stick only through `logd`) and a sealed `WEDGED` record (`seal_wedge`, reached
 from `deadline::expire` and `hardlockup::locked_up`) — and the stand-down is
