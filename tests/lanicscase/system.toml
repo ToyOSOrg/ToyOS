@@ -1,0 +1,17 @@
+# `tests/lancase` with netd's delivery actuator armed, and nothing else. Like
+# it, nothing here reaches the internal NVMe: no `[disks]` row, and the only
+# device any program claims is the PCI function named below.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:15fc"]
+args = ["--provoke-message"]
+
+[programs.test-runner]
+syscap = ["logread"]

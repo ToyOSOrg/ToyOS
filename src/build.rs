@@ -2594,6 +2594,7 @@ mod tests {
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
         "tests/lancase/system.toml",
+        "tests/lanicscase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/metalcase/system.toml",
@@ -2759,6 +2760,125 @@ mod tests {
         )
         .unwrap();
         assert!(one_claimant_per_device(&bad, None).is_err());
+    }
+
+    /// netd's delivery actuator, spelled here and held to netd's own
+    /// declaration by [`netd_declares_the_flag_this_gate_spells`].
+    const PROVOKE_MESSAGE: &str = "--provoke-message";
+
+    /// netd's main module, which is where both halves of this gate's spelling
+    /// live: nothing links the two crates, so the build system reads the source.
+    fn netd_source() -> (std::path::PathBuf, String) {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src/main.rs");
+        let text = std::fs::read_to_string(&at).expect("netd's main module");
+        (at, text)
+    }
+
+    /// Nothing links the two crates: netd is a userland binary and this is the
+    /// build system, so the flag both ends spell is held to netd's own
+    /// declaration by reading its source.
+    #[test]
+    fn netd_declares_the_flag_this_gate_spells() {
+        let (at, source) = netd_source();
+        assert!(
+            crate::bootlog::declares(&source, &format!("\"{PROVOKE_MESSAGE}\"")),
+            "{} declares no constant equal to \"{PROVOKE_MESSAGE}\"",
+            at.display()
+        );
+    }
+
+    /// The four hex digits after `key` on this line.
+    fn hex_after(line: &str, key: &str) -> Option<String> {
+        let at = line.find(key)? + key.len();
+        let digits: String = line[at..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        (digits.len() == 4).then_some(digits)
+    }
+
+    /// The device entries netd opens with the driver that has §10.2.4.4's `ICS`,
+    /// read out of netd's own `CARDS` rather than guessed from a vendor id: each
+    /// row spells an id and the constructor that takes it on one line.
+    ///
+    /// **The scan reaches that one spelling and no other**, so every
+    /// `Card::intel` row it saw has to have yielded an id — a table written
+    /// another way reds here instead of narrowing this gate to nothing.
+    fn netd_intel_cards(source: &str) -> Vec<String> {
+        let mut cards = Vec::new();
+        let mut rows = 0;
+        for line in source.lines() {
+            if !line.contains("Card::intel") {
+                continue;
+            }
+            rows += 1;
+            if let (Some(vendor), Some(device)) =
+                (hex_after(line, "vendor: 0x"), hex_after(line, "device: 0x"))
+            {
+                cards.push(format!("pci:{vendor}:{device}"));
+            }
+        }
+        assert_eq!(
+            cards.len(),
+            rows,
+            "netd names `Card::intel` on {rows} line(s) and an id was read off {}; its `CARDS` \
+             table is spelled in a way this gate does not reach",
+            cards.len()
+        );
+        cards
+    }
+
+    /// netd's delivery actuator writes §10.2.4.4's `ICS`, which the Intel driver
+    /// has and virtio's has not — so a boot config that arms it on a card netd
+    /// opens with any other driver is a boot that panics instead of answering
+    /// the question it was flashed for.
+    fn an_armed_actuator_claims_a_card_with_an_ics(
+        cfg: &SystemConfig,
+        cards: &[String],
+    ) -> Result<(), String> {
+        for (name, prog) in &cfg.programs {
+            if !prog.args.iter().any(|arg| arg == PROVOKE_MESSAGE) {
+                continue;
+            }
+            if !prog.devices.iter().any(|d| cards.contains(d)) {
+                return Err(format!(
+                    "`{name}` is armed with `{PROVOKE_MESSAGE}` and claims {:?}, none of which \
+                     is one of the {cards:?} netd opens with that driver",
+                    prog.devices
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_armed_delivery_actuator_claims_a_card_that_has_one() {
+        let (_, source) = netd_source();
+        let cards = netd_intel_cards(&source);
+        assert!(!cards.is_empty(), "netd's `CARDS` names no card its Intel driver opens");
+        let mut armed = 0;
+        for cfg in ALL_CONFIGS {
+            let config = load(cfg);
+            armed += config
+                .programs
+                .values()
+                .filter(|p| p.args.iter().any(|arg| arg == PROVOKE_MESSAGE))
+                .count();
+            an_armed_actuator_claims_a_card_with_an_ics(&config, &cards)
+                .unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        // A walk that reached no armed program passes on having found nothing,
+        // which is the one way this gate can rot while every config still loads.
+        assert!(armed > 0, "no shipped boot config arms `{PROVOKE_MESSAGE}` at all");
+        let armed_on = |device: &str| {
+            let cfg: SystemConfig = toml::from_str(&format!(
+                "init = []\n[programs.netd]\ndevices = [\"{device}\"]\n\
+                 args = [\"{PROVOKE_MESSAGE}\"]\n"
+            ))
+            .unwrap();
+            an_armed_actuator_claims_a_card_with_an_ics(&cfg, &cards)
+        };
+        // The card netd drives with the other driver, and an Intel function it
+        // drives with none: a vendor id is not what gives a part an `ICS`.
+        assert!(armed_on("pci:1af4:1041").is_err());
+        assert!(armed_on("pci:8086:1502").is_err());
     }
 
     /// A device name the ABI does not know renders fine and leaves init with a

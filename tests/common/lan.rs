@@ -1,9 +1,5 @@
 //! The cable: netd taking this machine's address from the network, and the T14
 //! answering the development host on it.
-//!
-//! Every line read here is a record. On the T14 a userland `println!` reaches
-//! `Backend::None`, so what crosses to the stick is the kernel's log — into
-//! which netd's `say!` writes, being a `write` to a console object.
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -23,6 +19,19 @@ use super::serial;
 /// boot is under.
 pub const CONFIG: &str = "tests/lancase";
 pub const BOOT: &str = "lancase";
+
+/// The same boot with netd's `--provoke-message` armed.
+pub const ICS_CONFIG: &str = "tests/lanicscase";
+pub const ICS_BOOT: &str = "lanicscase";
+
+/// The kernel's own record that a claim's vector took a message, which is what
+/// the armed boot is for.
+const FIRST_MESSAGE: &str = "took its first message";
+
+/// netd's word for `toyos_i219::phy::PhyRefusal::NotThisRegisterMap`, which is
+/// the only thing the I219's §9 bring-up may say on the 82574 this host emulates.
+const PHY_NOT_THIS_MAP: &str = "the PHY was not brought up: this part's PHY answers MDIC under \
+                                the 82574's own addressing";
 
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
@@ -46,8 +55,9 @@ const ID: &str = "8086:15fc";
 /// cable the metal loop reaches this boot over while it runs.
 pub const NIC: &str = "0000:00:1f.6";
 
-/// The T14's judge: the claim, the card, the lease, and the host's own ping.
-pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
+/// The T14's judge: the claim, the card, the lease, the host's own ping — and
+/// the armed boot beside them.
+pub fn on_metal(back: &metal::Readback, provoked: &metal::Readback) -> Result<(), String> {
     let profile = Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())?;
     let kernel = back.kernel();
     let text = kernel.text();
@@ -151,6 +161,22 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         bad.push(why);
     }
 
+    // The delivery reading, keyed off the label so a reordering of `LANCASE`'s
+    // arms reads the shipping boot's record as the armed boot's.
+    if provoked.label != ICS_BOOT {
+        bad.push(format!(
+            "the delivery verdict was handed {}'s readback, and the record only means netd \
+             asked for a message on {ICS_BOOT}",
+            provoked.label
+        ));
+    } else {
+        let armed = provoked.kernel();
+        match armed.must_say(FIRST_MESSAGE) {
+            Ok(line) => eprintln!("  [lan] {}", line.trim()),
+            Err(why) => bad.push(why),
+        }
+    }
+
     if bad.is_empty() {
         return Ok(());
     }
@@ -204,6 +230,7 @@ pub fn lan_dhcp_lease(
             "the client read this lease as {lease:?} and the backend serves {want:?}"
         ));
     }
+    log.must_say(PHY_NOT_THIS_MAP)?;
     // The order, and not merely the presence of both.
     log.must_say_after(LEASE, READY)?;
     log.must_say(LINK_UP)?;

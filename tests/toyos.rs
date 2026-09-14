@@ -1321,7 +1321,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         "lan_dhcp_lease",
-        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
+        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0], b[1]) },
     ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
@@ -1694,10 +1694,13 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// The cable's own boot: netd in front of the T14's I219, and one job that
-/// holds the machine up long enough for the host to reach it. The one arm in
-/// this suite that names a PCI function for the loop to reach the boot over.
-const LANCASE: &[metal::Arm] =
-    &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
+/// holds the machine up long enough for the host to reach it. The second arm is
+/// the same boot with netd's delivery actuator armed, and its verdict is read
+/// out of the kernel's log alone.
+const LANCASE: &[metal::Arm] = &[
+    metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) },
+    metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS),
+];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.

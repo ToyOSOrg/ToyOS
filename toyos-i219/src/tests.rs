@@ -8,7 +8,9 @@
 use std::vec::Vec;
 use std::{format, vec};
 
-use crate::regs::{self, cause, ctrl, ivar, rctl, rx_desc, tctl, tx_desc};
+use crate::phy as toyos_phy;
+use crate::phy::{Phy, PhyRefusal};
+use crate::regs::{self, cause, ctrl, extcnf, ivar, rctl, rx_desc, tctl, tx_desc};
 use crate::stub::{Nic, Permits, Unanswered, NVM_MAC};
 use crate::*;
 
@@ -16,7 +18,7 @@ type Driver = I219<crate::stub::Bar, crate::stub::Ticker, crate::stub::Grant, cr
 
 fn open(nic: &Nic) -> Driver {
     let (bar, clock, grant, line) = nic.parts();
-    I219::open(bar, clock, grant, line)
+    I219::open(nic.part(), bar, clock, grant, line)
         .unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused it: {why}"))))
 }
 
@@ -71,6 +73,9 @@ fn bring_up_programs_what_the_initialization_sections_name() {
         (ctrl::FRCSPD, "FRCSPD"),
         (ctrl::FRCDPLX, "FRCDPLX"),
         (ctrl::RST, "RST"),
+        // §3.1.3.10: left set, the function issues no master request at all,
+        // so its rings are descriptors nothing fetches.
+        (ctrl::GIO_MASTER_DISABLE, "GIO_MASTER_DISABLE"),
     ] {
         assert!(control & bit == 0, "{}", nic.because(&format!("CTRL.{name} was left set")));
     }
@@ -133,7 +138,10 @@ fn a_part_with_no_station_address_is_refused() {
     let nic = Nic::new(2);
     nic.without_nvm();
     let (bar, clock, grant, line) = nic.parts();
-    assert_eq!(I219::open(bar, clock, grant, line).err(), Some(Refusal::NoStationAddress));
+    assert_eq!(
+        I219::open(nic.part(), bar, clock, grant, line).err(),
+        Some(Refusal::NoStationAddress)
+    );
 }
 
 /// The two bounds every later access rests on, refused before anything is
@@ -185,6 +193,7 @@ fn a_window_or_grant_too_small_is_refused() {
     }
 
     let narrow = I219::open(
+        Part::E82574,
         Narrow(regs::REGISTER_BYTES - 4),
         NoClock,
         Small(GRANT_BYTES as usize),
@@ -200,7 +209,7 @@ fn a_window_or_grant_too_small_is_refused() {
 
     let nic = Nic::new(3);
     let (bar, clock, _, line) = nic.parts();
-    let short = I219::open(bar, clock, Small(GRANT_BYTES as usize - 1), line);
+    let short = I219::open(nic.part(), bar, clock, Small(GRANT_BYTES as usize - 1), line);
     assert_eq!(
         short.err(),
         Some(Refusal::Grant {
@@ -240,7 +249,10 @@ fn a_window_that_reads_ones_is_refused() {
     }
     let nic = Nic::new(4);
     let (_, _, grant, _) = nic.parts();
-    assert_eq!(I219::open(Dead, NoClock, grant, NoIrq).err(), Some(Refusal::Dead));
+    assert_eq!(
+        I219::open(Part::E82574, Dead, NoClock, grant, NoIrq).err(),
+        Some(Refusal::Dead)
+    );
 }
 
 // --- what a written-back descriptor must satisfy ---
@@ -493,6 +505,7 @@ fn one_pass_hands_up_at_most_its_budget() {
 fn a_buffer_given_back_out_of_turn_does_not_carry_the_tail_over_an_older_one() {
     let nic = Nic::with(
         9,
+        Part::E82574,
         Permits { batched_writeback: false, spurious_interrupts: false, ..Permits::default() },
     );
     let mut driver = open(&nic);
@@ -530,6 +543,7 @@ fn a_buffer_given_back_out_of_turn_does_not_carry_the_tail_over_an_older_one() {
 fn a_refused_descriptor_does_not_carry_the_tail_over_a_frame_still_held() {
     let nic = Nic::with(
         23,
+        Part::E82574,
         Permits { batched_writeback: false, spurious_interrupts: false, ..Permits::default() },
     );
     let mut driver = open(&nic);
@@ -663,7 +677,7 @@ fn transmit_descriptors_are_reclaimed_under_batched_write_back() {
 #[test]
 fn causes_are_acknowledged_by_writing_them_back() {
     let permits = Permits { spurious_interrupts: false, ..Permits::default() };
-    let nic = Nic::with(12, permits);
+    let nic = Nic::with(12, Part::E82574, permits);
     let mut driver = open(&nic);
     nic.set_link(true);
     one_pass(&mut driver);
@@ -711,7 +725,7 @@ fn causes_are_acknowledged_by_writing_them_back() {
 /// nothing.
 #[test]
 fn a_part_is_told_which_vector_each_cause_uses() {
-    let nic = Nic::with(16, Permits { spurious_interrupts: false, ..Permits::default() });
+    let nic = Nic::with(16, Part::E82574, Permits { spurious_interrupts: false, ..Permits::default() });
     let mut driver = open(&nic);
     assert_eq!(
         nic.peek(regs::IVAR),
@@ -744,7 +758,7 @@ fn a_part_that_does_not_take_ivar_is_refused() {
     nic.refuses_writes_to(regs::IVAR);
     let (bar, clock, grant, line) = nic.parts();
     assert_eq!(
-        I219::open(bar, clock, grant, line).err(),
+        I219::open(nic.part(), bar, clock, grant, line).err(),
         Some(Refusal::NotAccepted {
             reg: regs::IVAR,
             wrote: ivar::ALL_ON_VECTOR_ZERO,
@@ -761,7 +775,7 @@ fn a_part_that_does_not_take_rctl_is_refused() {
     nic.refuses_writes_to(regs::RCTL);
     let (bar, clock, grant, line) = nic.parts();
     assert_eq!(
-        I219::open(bar, clock, grant, line).err(),
+        I219::open(nic.part(), bar, clock, grant, line).err(),
         Some(Refusal::NotAccepted {
             reg: regs::RCTL,
             wrote: rctl::EN | rctl::BAM | rctl::SECRC | rctl::BSIZE_2048,
@@ -779,7 +793,7 @@ fn a_reset_that_never_finishes_is_refused() {
     nic.reset_never_clears();
     let (bar, clock, grant, line) = nic.parts();
     let Some(Refusal::ResetUnfinished { after_nanos }) =
-        I219::open(bar, clock, grant, line).err()
+        I219::open(nic.part(), bar, clock, grant, line).err()
     else {
         panic!("{}", nic.because("a reset that never cleared was not refused"));
     };
@@ -807,7 +821,7 @@ fn a_claim_that_stops_answering_is_handed_up_and_not_read_as_quiet() {
 /// receive path, which are counted and never acted on.
 #[test]
 fn the_receiver_reporting_on_itself_is_counted() {
-    let nic = Nic::with(21, Permits { spurious_interrupts: false, ..Permits::default() });
+    let nic = Nic::with(21, Part::E82574, Permits { spurious_interrupts: false, ..Permits::default() });
     let mut driver = open(&nic);
     nic.set_link(true);
     one_pass(&mut driver);
@@ -848,7 +862,7 @@ fn a_frame_longer_than_a_transmit_buffer_is_refused_and_not_truncated() {
 fn a_spurious_interrupt_costs_a_pass_and_nothing_else() {
     // The model's own dice are off, so the one message below is the only one
     // and the count it is asserted against is exact.
-    let nic = Nic::with(13, Permits { spurious_interrupts: false, ..Permits::default() });
+    let nic = Nic::with(13, Part::E82574, Permits { spurious_interrupts: false, ..Permits::default() });
     let mut driver = open(&nic);
     nic.set_link(true);
     one_pass(&mut driver);
@@ -971,5 +985,595 @@ fn a_seeded_workload_loses_nothing_and_invents_nothing() {
         assert_eq!(counters.over_length, 0, "{}", nic.because("a length was refused"));
         assert_eq!(counters.errored, 0, "{}", nic.because("a frame was reported bad"));
         assert_eq!(counters.split, 0, "{}", nic.because("a frame was split"));
+    }
+}
+// --- the PHY behind MDIC ---
+
+/// **The test the branch exists for.** With a partner on the wire and the PHY
+/// where a part whose Management Engine drives it leaves one — powered down,
+/// isolated and advertising what §6.1.5's battery saver left — the bring-up has
+/// to satisfy every clause of §9 the stub holds it to before the model raises a
+/// link at all.
+#[test]
+fn the_phy_is_brought_up_and_the_mac_sees_the_link_it_raises() {
+    let nic = Nic::i219(31);
+    // The wire before the driver, so the only thing between a partner and a
+    // link is what `open` does to the PHY.
+    nic.set_link(true);
+    let mut driver = open(&nic);
+
+    assert_eq!(
+        driver.brought_up().phy,
+        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+        "{}",
+        nic.because("the PHY did not answer §9.5.2.3 as its own document says")
+    );
+    assert!(driver.brought_up().master_quiet, "{}", nic.because("§3.1.3.10 never went quiet"));
+    // §4.5.2: "Once the access completes, the controlling agent must write a 0b
+    // to its ownership bit to enable accesses by the other agents."
+    assert_eq!(
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
+        0,
+        "{}",
+        nic.because("the MDIO interface was left held after the bring-up")
+    );
+    assert_eq!(
+        nic.phy_unconfigured(),
+        Some("the restart of auto-negotiation has not resolved yet"),
+        "{}",
+        nic.because("the bring-up left a clause of §9 other than the negotiation outstanding")
+    );
+
+    nic.negotiation_settles();
+    assert_eq!(
+        nic.phy_unconfigured(),
+        None,
+        "{}",
+        nic.because("the bring-up left the PHY unable to raise a link")
+    );
+    one_pass(&mut driver);
+    assert_eq!(
+        driver.link(),
+        Link { up: true, speed_mbps: 1000, full_duplex: true },
+        "{}",
+        nic.because("§4.6.3.2's STATUS.LU did not follow the link the PHY raised")
+    );
+}
+
+/// **What §9.5.2.5's advertisement is for, ability by ability.** The link
+/// resolves to the best the two ends have in common, so every ability
+/// [`toyos_phy::advertise::WANTED`] offers is the whole of what a partner
+/// offering only that one can reach — and a partner offering nothing this part
+/// advertises gets no link at all.
+#[test]
+fn the_advertised_abilities_are_what_the_link_resolves_to() {
+    use toyos_phy::advertise::{FULL_10, FULL_100, HALF_10, HALF_100, SELECTOR_802_3};
+    let only = |ability| SELECTOR_802_3 | ability;
+    for (seed, partner, resolved) in [
+        (42, only(HALF_10), Some((10, false))),
+        (43, only(FULL_10), Some((10, true))),
+        (44, only(HALF_100), Some((100, false))),
+        (45, only(FULL_100), Some((100, true))),
+        // §9.5.2.5's Selector Field alone: a partner with no ability at bits
+        // 8:5 has nothing in common with this one, which is a cable that
+        // carries no link.
+        (46, SELECTOR_802_3, None),
+    ] {
+        let nic = Nic::i219(seed);
+        // No 1000BASE-T on the partner's side, or §9.5.2.10's ability would
+        // decide every row alike.
+        nic.partner_advertises(partner, 0);
+        nic.set_link(true);
+        let mut driver = open(&nic);
+
+        nic.negotiation_settles();
+        one_pass(&mut driver);
+        let wanted = match resolved {
+            Some((speed_mbps, full_duplex)) => Link { up: true, speed_mbps, full_duplex },
+            None => Link::default(),
+        };
+        assert_eq!(
+            driver.link(),
+            wanted,
+            "{}",
+            nic.because(&format!(
+                "against a partner advertising {partner:#06x} the link resolved to something \
+                 other than the best ability the two have in common"
+            ))
+        );
+    }
+}
+
+/// The premise of the test above: this model really does refuse a link to a PHY
+/// nothing configured, so a green there is not a model that raises one for a
+/// partner alone. The driver reaches no register at all here, because §4.5.2's
+/// arbitration never grants it the interface.
+#[test]
+fn a_partner_on_an_unconfigured_phy_raises_no_link() {
+    let nic = Nic::i219(32);
+    nic.mdio_never_granted();
+    nic.set_link(true);
+    let driver = open(&nic);
+
+    assert_eq!(
+        nic.phy_unconfigured(),
+        Some("§9.2's bit 10 of page 769 register 16 was never set"),
+        "{}",
+        nic.because("the model let a partner raise a link on a PHY nothing had touched")
+    );
+    assert!(!driver.link().up, "{}", nic.because("STATUS.LU came up with the PHY unconfigured"));
+}
+
+/// §4.5.2 gives manageability the highest priority in the arbitration, and on
+/// this part the Management Engine drives the same PHY. A driver that waited
+/// for ever would hold the boot; one that drove `MDIC` anyway would race the
+/// engine on the silicon they share.
+#[test]
+fn an_interface_the_engine_never_gives_up_is_refused_by_name() {
+    let nic = Nic::i219(33);
+    nic.mdio_never_granted();
+    let driver = open(&nic);
+
+    let held_by = match driver.brought_up().phy {
+        Err(PhyRefusal::OwnershipHeld { held_by, after_nanos }) => {
+            assert!(after_nanos > 0, "{}", nic.because("the wait was not measured"));
+            held_by
+        }
+        other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
+    };
+    assert_eq!(
+        held_by & extcnf::MDIO_MNG_OWNERSHIP,
+        extcnf::MDIO_MNG_OWNERSHIP,
+        "{}",
+        nic.because("the refusal does not carry which agent held the interface")
+    );
+    // No request was ever registered, because the interface was never free to
+    // ask for. What stands is the engine's own bit, which is read-only here.
+    assert_eq!(
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
+        extcnf::MDIO_MNG_OWNERSHIP,
+        "{}",
+        nic.because("this driver's bit was registered against an interface already owned")
+    );
+}
+
+/// **The bit is not a grant on the part this driver was written for.** §4.5.2
+/// has it read 0b until the arbitration grants it, so under that reading alone
+/// a requester can write it and read it back to learn it was granted. The part
+/// whose PHY the Management Engine shares holds the same bit as an ordinary
+/// mutex, and under *that* reading the read-back is the driver answering its
+/// own question — it would drive `MDIC` against a second master and then give
+/// the interface back by clearing a flag that was never its own.
+#[test]
+fn a_flag_another_agent_holds_is_neither_taken_nor_cleared() {
+    let nic = Nic::i219(62);
+    nic.mdio_flag_held_by_another_agent();
+    nic.set_link(true);
+    let driver = open(&nic);
+
+    match driver.brought_up().phy {
+        Err(PhyRefusal::OwnershipHeld { held_by, after_nanos }) => {
+            assert!(
+                held_by & extcnf::MDIO_SW_OWNERSHIP != 0,
+                "{}",
+                nic.because("the refusal does not carry the flag that was standing")
+            );
+            assert!(after_nanos > 0, "{}", nic.because("the wait was not measured"));
+        }
+        other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
+    }
+    // §4.5.2: "the controlling agent must write a 0b to its ownership bit" —
+    // and this driver was never the controlling agent, so the flag stands.
+    assert_eq!(
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
+        extcnf::MDIO_SW_OWNERSHIP,
+        "{}",
+        nic.because("the bring-up cleared a semaphore another agent was holding")
+    );
+}
+
+/// The other half of §4.5.2's handshake: the interface was free, the request
+/// was registered, and the arbitration never granted it. The request is
+/// withdrawn, or it is a bit left standing for a grant nobody waits on.
+#[test]
+fn a_request_the_arbitration_never_grants_is_withdrawn() {
+    let nic = Nic::with(
+        63,
+        Part::I219,
+        Permits { mdio_flag_is_a_plain_mutex: false, ..Permits::default() },
+    );
+    nic.mdio_request_never_granted();
+    let driver = open(&nic);
+
+    match driver.brought_up().phy {
+        Err(PhyRefusal::OwnershipBusy { after_nanos, .. }) => {
+            assert!(after_nanos > 0, "{}", nic.because("the wait was not measured"));
+        }
+        other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
+    }
+    assert_eq!(
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
+        0,
+        "{}",
+        nic.because("a request nobody is waiting on was left standing in EXTCNF_CTRL")
+    );
+}
+
+/// A window that answers ones at one offset decodes nothing there, and what it
+/// answered is not a register's value to carry: §4.5.2 gives this driver one
+/// bit of `EXTCNF_CTRL`, and a read-modify-write over ones would set every
+/// other field of it — including the fields that point the part's configuration
+/// engine somewhere. The model asserts on the write, so this test passing is
+/// the write not being made.
+#[test]
+fn a_register_nothing_decodes_is_refused_and_never_written() {
+    let nic = Nic::i219(64);
+    nic.window_does_not_decode(regs::EXTCNF_CTRL);
+    let driver = open(&nic);
+
+    assert_eq!(
+        driver.brought_up().phy,
+        Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL }),
+        "{}",
+        nic.because("a register answering ones was taken for one this driver may write")
+    );
+}
+
+/// **The failure the host model could not express, and now does.** `MDIC` is
+/// not a register the MAC answers out of itself: writing it starts a
+/// transaction over an interconnect to separate silicon that may be powered
+/// down, in a low-power state, or held by the Management Engine, and §9 gives a
+/// driver nothing to read beforehand that says which.
+///
+/// **This asserts the hazard and not a fix.** Nothing in this driver yet stops
+/// the sequence from reaching that access, and a software deadline cannot: a
+/// deadline is tested between accesses and what does not return is one. What
+/// has changed is that the model reaches it here, on a host that prints a
+/// seed, rather than on a machine that stops.
+#[test]
+fn an_mdi_transaction_against_a_dead_interconnect_is_never_answered() {
+    let nic = Nic::i219(61);
+    nic.phy_is_off_the_interconnect();
+    nic.expects_unanswered_accesses();
+    nic.set_link(true);
+    let driver = open(&nic);
+
+    assert!(
+        nic.unanswered().contains(&regs::MDIC),
+        "{}",
+        nic.because(
+            "a bring-up against a dead interconnect reached no unanswered access, so this \
+             model has no hazard in it to catch"
+        )
+    );
+    assert!(!driver.link().up, "{}", nic.because("a PHY nothing answered for raised a link"));
+}
+
+/// §4.5.2 arbitrates three bits of `EXTCNF_CTRL` and this driver writes one of
+/// them, so what stands in the rest of that register outlives the bring-up — on
+/// the path that is granted the interface and on the one that withdraws its
+/// request alike.
+#[test]
+fn the_ownership_claim_leaves_the_rest_of_the_register_standing() {
+    let elsewhere = |nic: &Nic| nic.peek(regs::EXTCNF_CTRL) & !extcnf::OWNERSHIP;
+
+    let granted = Nic::i219(51);
+    granted.set_link(true);
+    let before = elsewhere(&granted);
+    assert_ne!(
+        before,
+        0,
+        "{}",
+        granted.because("the part came up with nothing outside §4.5.2's three bits, so a \
+                         composed write would have had nothing to clear")
+    );
+    let mut driver = open(&granted);
+    assert!(driver.brought_up().phy.is_ok(), "{}", granted.because("the PHY was not reached"));
+    granted.negotiation_settles();
+    one_pass(&mut driver);
+    assert_eq!(
+        elsewhere(&granted),
+        before,
+        "{}",
+        granted.because("the bring-up cleared fields of EXTCNF_CTRL that are not its own")
+    );
+
+    // The withdrawal on the deadline is the other write of that register, and
+    // it is made having been granted nothing. It runs only where a request was
+    // registered at all — an interface free when it was asked for, and never
+    // granted after.
+    let refused = Nic::with(
+        52,
+        Part::I219,
+        Permits { mdio_flag_is_a_plain_mutex: false, ..Permits::default() },
+    );
+    refused.mdio_request_never_granted();
+    let before = elsewhere(&refused);
+    let driver = open(&refused);
+    assert!(
+        matches!(driver.brought_up().phy, Err(PhyRefusal::OwnershipBusy { .. })),
+        "{}",
+        refused.because("no request was registered, so the withdrawal never ran")
+    );
+    assert_eq!(
+        elsewhere(&refused),
+        before,
+        "{}",
+        refused.because("withdrawing the request cleared fields of EXTCNF_CTRL it does not own")
+    );
+}
+
+/// §10.2.2.7's `Ready` is what says a transaction happened. A part that never
+/// sets it is refused after a bounded wait, and the interface goes back.
+#[test]
+fn an_mdi_transaction_that_never_reports_ready_is_refused_by_name() {
+    let nic = Nic::i219(34);
+    nic.mdi_never_ready();
+    let driver = open(&nic);
+
+    match driver.brought_up().phy {
+        Err(PhyRefusal::MdiUnready { phy, reg, after_nanos }) => {
+            // The first transaction the bring-up makes is §9.3's page select.
+            assert_eq!((phy, reg), (toyos_phy::GENERAL, toyos_phy::reg::PAGE_SELECT));
+            // A millisecond is under what a working part of this family needs,
+            // so a deadline that short refuses one that was going to answer.
+            assert!(
+                after_nanos >= 96_000_000,
+                "{}",
+                nic.because("the transaction was given up on before the deadline it is owed")
+            );
+        }
+        other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
+    }
+    assert_eq!(
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
+        0,
+        "{}",
+        nic.because("the MDIO interface was left held after a transaction that never finished")
+    );
+}
+
+/// §10.2.2.7's `Error` is set "when it fails to complete an MDI read", and
+/// `Ready` comes back with it because the transaction ended — so a driver that
+/// read `Ready` first would believe a data field the PHY never drove.
+#[test]
+fn an_mdi_read_the_part_could_not_complete_is_refused_by_name() {
+    let nic = Nic::i219(35);
+    nic.mdi_fails_read_of(toyos_phy::SPECIFIC, toyos_phy::reg::IDENTIFIER_HIGH);
+    let driver = open(&nic);
+
+    assert_eq!(
+        driver.brought_up().phy,
+        Err(PhyRefusal::MdiError {
+            phy: toyos_phy::SPECIFIC,
+            reg: toyos_phy::reg::IDENTIFIER_HIGH
+        }),
+        "{}",
+        nic.because("a read the part flagged as failed was believed")
+    );
+}
+
+/// §9.5.2.1's other two states the agent before this one can leave behind, each
+/// named by the clause that holds the link down while it stands. The driver is
+/// stopped at §9.5.2.3's identifier, so §9.2's bit is set and the Control
+/// register is still the one it inherited.
+#[test]
+fn a_phy_left_in_loopback_or_configured_by_hand_raises_no_link() {
+    let left = |loopback, autonegotiation_disabled| Permits {
+        phy_starts_powered_down: false,
+        phy_starts_in_loopback_or_resetting: loopback,
+        phy_starts_with_autonegotiation_disabled: autonegotiation_disabled,
+        ..Permits::default()
+    };
+    for (seed, permits, unconfigured) in [
+        (48, left(true, false), "§9.5.2.1's Loopback was left set"),
+        (49, left(false, true), "§9.5.2.1's Auto-Negotiation Enable was left clear"),
+    ] {
+        let nic = Nic::with(seed, Part::I219, permits);
+        nic.set_link(true);
+        nic.mdi_fails_read_of(toyos_phy::SPECIFIC, toyos_phy::reg::IDENTIFIER_HIGH);
+        let driver = open(&nic);
+
+        assert_eq!(
+            nic.phy_unconfigured(),
+            Some(unconfigured),
+            "{}",
+            nic.because("the model named a clause other than the one §9.5.2.1 left standing")
+        );
+        assert!(
+            !driver.link().up,
+            "{}",
+            nic.because("STATUS.LU came up with §9.5.2.1 outstanding")
+        );
+    }
+}
+
+/// §9.5.2.1: "Writing a 1b to this bit causes immediate PHY reset", and what
+/// the register file comes back as is §9.5's own defaults — not the state the
+/// agent before this driver left, which is what a claim inherits and what a
+/// reset is the end of.
+#[test]
+fn a_phy_reset_restores_the_defaults_and_not_the_state_the_claim_inherited() {
+    let nic = Nic::i219(50);
+    nic.set_link(true);
+    let mut driver = open(&nic);
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert!(driver.link().up, "{}", nic.because("the bring-up raised no link to take away"));
+
+    nic.phy_is_reset();
+
+    assert_eq!(
+        nic.phy_unconfigured(),
+        Some("§9.2's bit 10 of page 769 register 16 was never set"),
+        "{}",
+        nic.because("the reset left the driver's §9 sequence standing")
+    );
+    // §9.5.2.1's table: Speed Selection (MSB, bit 6), Duplex Mode (bit 8) and
+    // Auto-Negotiation Enable (bit 12) come up 1b, and Power Down, Isolate,
+    // Loopback and Reset itself are not among them.
+    assert_eq!(
+        nic.phy_peek(toyos_phy::SPECIFIC, toyos_phy::reg::CONTROL),
+        (1 << 6) | (1 << 8) | (1 << 12),
+        "{}",
+        nic.because("§9.5.2.1's register 0 did not come back to its own default")
+    );
+    // §9.5.2.5's whole default is 0x01E1 — neither the 0x0061 §6.1.5's battery
+    // saver leaves behind nor the advertisement this driver wrote over it.
+    assert_eq!(
+        nic.phy_peek(toyos_phy::SPECIFIC, toyos_phy::reg::ADVERTISE),
+        0x01E1,
+        "{}",
+        nic.because("§9.5.2.5's advertisement did not come back to its own default")
+    );
+}
+
+/// §9.3 and Table 9-1 place §9.5.2's registers at different PHY addresses, so
+/// which one a part answers at is asked and not assumed: with nothing driving
+/// the address the table names, the identifier is what finds the other one and
+/// the link still comes up.
+#[test]
+fn the_phy_is_found_at_whichever_address_answers_its_identifier() {
+    let nic = Nic::i219(41);
+    nic.phy_is_deaf_at(toyos_phy::SPECIFIC);
+    nic.set_link(true);
+    let mut driver = open(&nic);
+
+    assert_eq!(
+        driver.brought_up().phy,
+        Ok(Phy { addr: toyos_phy::GENERAL, id: 0x0154_00a1 }),
+        "{}",
+        nic.because("the bring-up did not look past the address Table 9-1 names")
+    );
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert!(driver.link().up, "{}", nic.because("STATUS.LU did not follow the PHY's link"));
+}
+
+/// §9.5.2.3's identifier is the one word in the PHY that says a transaction
+/// reached it: a window that answers ones, an address nothing drives and a part
+/// that is not this one all fail it, and none of them can forge it.
+#[test]
+fn a_phy_that_is_not_the_one_this_map_describes_is_refused_by_its_identifier() {
+    let nic = Nic::i219(36);
+    // What QEMU's `e1000e` answers for its own modelled PHY.
+    nic.phy_identifies_as(0x0141);
+    let driver = open(&nic);
+
+    assert_eq!(
+        driver.brought_up().phy,
+        Err(PhyRefusal::Identity { specific: 0x0141_00a1, general: 0x0141_00a1 }),
+        "{}",
+        nic.because("a PHY whose identifier is not Intel's was configured anyway")
+    );
+    assert_eq!(
+        nic.phy_unconfigured(),
+        Some("§9.5.2.1's Power Down was left set"),
+        "{}",
+        nic.because("the bring-up configured a PHY it had already refused")
+    );
+}
+
+/// §10.2.2.7 addresses the 82574's own PHY as "1 = Gigabit PHY. 2 = PCIe PHY"
+/// and it has neither §9.3's page register nor §9.5.3's paged registers, so the
+/// I219's sequence is refused on it by name. The stub asserts on any access to
+/// `MDIC` there, which is what keeps the QEMU arm's part out of the path above.
+#[test]
+fn the_82574s_own_phy_register_map_is_refused_by_name() {
+    let nic = Nic::new(37);
+    let driver = open(&nic);
+    assert_eq!(driver.brought_up().phy, Err(PhyRefusal::NotThisRegisterMap));
+}
+
+/// §3.1.3.10 says a driver "might time out if the PCIe Master Enable Status bit
+/// is not cleared within a given time" and says nothing else, so the expiry is
+/// recorded and the reset is issued: a card refused for it is a machine with no
+/// network on a handshake the document itself calls optional.
+#[test]
+fn a_master_that_never_goes_quiet_does_not_stop_the_bring_up() {
+    let nic = Nic::i219(38);
+    nic.master_never_quiesces();
+    nic.set_link(true);
+    let mut driver = open(&nic);
+
+    assert!(
+        !driver.brought_up().master_quiet,
+        "{}",
+        nic.because("the quiesce was reported finished on a part that never finished it")
+    );
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert!(driver.link().up, "{}", nic.because("the bring-up did not go on to a link"));
+}
+
+/// **Every latitude §9, §4.5.2, §10.2.2.7 and §3.1.3.10 give the hardware,
+/// taken the other way.** A part that grants the MDIO interface on the first
+/// read, reports `Ready` on the first read, comes up out of power-down and
+/// still advertises §9.5.2.5's own default is as admissible as the one every
+/// other test here runs against, and the same bring-up has to work on it.
+#[test]
+fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way() {
+    let nic = Nic::with(
+        47,
+        Part::I219,
+        Permits {
+            master_takes_time_to_quiesce: false,
+            firmware_takes_the_mdio_interface: false,
+            mdi_takes_several_reads: false,
+            phy_starts_powered_down: false,
+            phy_starts_in_loopback_or_resetting: false,
+            phy_starts_with_autonegotiation_disabled: false,
+            phy_advertises_what_the_last_agent_left: false,
+            extcnf_carries_firmware_fields: false,
+            ..Permits::default()
+        },
+    );
+    nic.set_link(true);
+    let mut driver = open(&nic);
+
+    assert_eq!(
+        driver.brought_up().phy,
+        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+        "{}",
+        nic.because("the bring-up did not reach the PHY on a part that made it easy")
+    );
+    assert!(driver.brought_up().master_quiet, "{}", nic.because("§3.1.3.10 never went quiet"));
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert_eq!(
+        driver.link(),
+        Link { up: true, speed_mbps: 1000, full_duplex: true },
+        "{}",
+        nic.because("§4.6.3.2's STATUS.LU did not follow the link the PHY raised")
+    );
+}
+
+/// §10.2.4.4's `ICS` "sets" a cause, so a caller that has armed
+/// [`I219::provoke_message`] takes a message it asked for — and a bring-up
+/// that has not raises none on a part with no link and no frame behind it.
+#[test]
+fn a_message_is_raised_only_when_the_caller_asks_for_one() {
+    for nic in [Nic::new(39), Nic::i219(40)] {
+        let mut driver = open(&nic);
+        let quiet = one_pass(&mut driver);
+        assert_eq!(
+            quiet.messages,
+            0,
+            "{}",
+            nic.because("a bring-up nobody armed raised a message of its own")
+        );
+
+        driver.provoke_message();
+        let pass = one_pass(&mut driver);
+        assert!(
+            pass.messages > 0,
+            "{}",
+            nic.because("no message followed the ICS write, so a silent boot says nothing")
+        );
+        assert!(
+            pass.causes & cause::LSC != 0,
+            "{}",
+            nic.because("the message carried no cause, so nothing says which write raised it")
+        );
     }
 }

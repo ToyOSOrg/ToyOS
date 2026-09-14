@@ -144,7 +144,7 @@ pub struct Nic {
 
 impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
-    pub fn open(dev: PciDev) -> Result<Self, Opening> {
+    pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
         let dev = Rc::new(dev);
         let info = dev
             .describe()
@@ -182,6 +182,7 @@ impl Nic {
         // SAFETY: the same mapping, and `mapped` is moved into the `Bar` below.
         let registers = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
         let driver = toyos_i219::I219::open(
+            part,
             Bar { window: registers, _mapped: mapped },
             Monotonic,
             Grant { window: grant, device_base, _region: region },
@@ -189,6 +190,21 @@ impl Nic {
         )
         .map_err(Opening::Driver)?;
         let mac = driver.mac();
+        let brought_up = driver.brought_up();
+        crate::say!(
+            "netd: I219: {}, and the PHY {}",
+            if brought_up.master_quiet {
+                "the function stopped mastering before it was reset"
+            } else {
+                "the function was still mastering when it was reset"
+            },
+            match brought_up.phy {
+                Ok(phy) => {
+                    format!("answers at PHY address {:02} as {:#010x}", phy.addr, phy.id)
+                }
+                Err(why) => format!("was not brought up: {why}"),
+            },
+        );
         Ok(Self {
             driver: RefCell::new(driver),
             claim: dev,
@@ -206,6 +222,11 @@ impl Nic {
     /// The claim, for the poller: readable means an interrupt has landed.
     pub fn claim(&self) -> &PciDev {
         &self.claim
+    }
+
+    /// `crate::PROVOKE_MESSAGE`: raise one enabled cause on purpose.
+    pub fn provoke_message(&self) {
+        self.driver.borrow().provoke_message();
     }
 
     /// Take the interrupt, acknowledge its causes and refresh the link.
