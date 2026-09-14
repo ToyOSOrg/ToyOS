@@ -327,10 +327,6 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootB
 /// nothing more.** What the protocol answers is a bridge's *current* settings,
 /// and a fixed function whose BAR its bridge does not forward is a machine this
 /// is true of rather than firmware contradicting itself.
-///
-/// **Nothing here reads these records back**: what they are about is the
-/// machine's own firmware, so the judge is a boot of the machine, and
-/// `toyos_pci::aperture` is where the decision behind them is exercised.
 fn account_for(firmware: &[RootBridgeWindow], machine: &Machine) {
     if firmware.is_empty() {
         log!(

@@ -7,7 +7,9 @@ opened: 2026-09-08
 # Nothing reaches the MSI arm of a claimed function
 
 `pcidev::bring_up` arms a claimed function on MSI where it publishes no MSI-X,
-and no test in any tier arms one. `virtio_net_no_msix` calls
+and no test in any tier arms one. The *order* is guarded — `https_tls13_e1000e`
+holds a claimed `8086:10d3`, which publishes both mechanisms, and refuses an
+`msi address=` line for it — but the MSI arm itself is reached by nothing. `virtio_net_no_msix` calls
 `PciDevice::enable_msi` from `bring_up` and reads false back; nothing reaches a
 true, and so nothing reaches:
 
@@ -17,12 +19,17 @@ true, and so nothing reaches:
 - `Refusal::MsixUnusable` and `Unarmed::Blocked`, owed only by a function that
   publishes MSI-X this kernel cannot arm and by a unit that refuses the message;
 - `Refusal::CapsTruncated`, the arm that turns a list ending at a link the spec
-  forbids into a refusal of the hand-over. The decision under it is read back:
-  `CapWalk::truncated` is host-tested in `toyos-pci/src/caps.rs` and
-  `PciDevice::capability`'s `Truncated`/`Absent` split is driven over a cyclic
-  list, a misaligned link, a below-header link and a forbidden head by the
-  `pci-cap-selftest` actuator, which `pci_capability_walk` reads as
-  `pci cap split 5/5`. What no test reaches is `bring_up` refusing on it.
+  forbids into a refusal of the hand-over. Everything under that arm is read
+  back: `CapWalk::truncated` is host-tested in `toyos-pci/src/caps.rs`, and the
+  `pci-cap-selftest` actuator drives `PciDevice::capability`'s
+  `Truncated`/`Absent` split *and* the `Unarmed::NoTable` answer `bring_up`
+  matches on over a cyclic list, a misaligned link, a below-header link, a
+  forbidden head and a capability reached before a forbidden link, with
+  `pci_capability_walk` refusing a boot whose split verdict is short. What no
+  test reaches is `bring_up` itself refusing on that answer: replacing its two
+  `NoTable` arms with one that falls through to `enable_msi` stays green in
+  every tier. Reaching it needs a *claimed* function whose capability list ends
+  early, which no function this harness hands to a claim has.
 
 The two pre-existing MSI armings in this kernel — xHCI's and HDA's
 `arm_interrupt` — never disarm, so MSI teardown is exercised nowhere in the tree

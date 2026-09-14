@@ -51,6 +51,10 @@ pub struct Bench {
     /// suite's worst defect class, and a profile with no NIC would make every
     /// refusal below pass for the wrong reason.
     pub device: &'static str,
+    /// The function [`Bench::config`]'s netd declares, as its `devices` row
+    /// spells it. The arming below is asserted of this function rather than of
+    /// whichever one the guest reports handing over.
+    pub claims: &'static str,
 }
 
 /// The virtio NIC, which is the card every other network test uses.
@@ -58,6 +62,7 @@ pub const VIRTIO: Bench = Bench {
     profile: qemu::Profile::Headless,
     config: "tests/netcase",
     device: "virtio-net",
+    claims: "1af4:1041",
 };
 
 /// QEMU's `e1000e` — the 82574L, whose register file is the one the ThinkPad
@@ -67,6 +72,7 @@ pub const E1000E: Bench = Bench {
     profile: qemu::Profile::E1000e,
     config: "tests/e1000case",
     device: "e1000e",
+    claims: "8086:10d3",
 };
 
 pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), String> {
@@ -104,6 +110,14 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), 
         "netd to come up",
     )
     .map_err(|e| format!("netd never came up, so no fetch below means anything: {e}"))?;
+
+    // The claim's arming, before a byte is fetched. QEMU's `e1000e` publishes
+    // MSI at 0xd0 and MSI-X at 0xa0, so a kernel that took the older mechanism
+    // first would hold this card on MSI and serve every fetch below the same.
+    super::iommu::armed_on_msix(
+        &super::serial::Serial::named("boot console", console.as_str()),
+        bench.claims,
+    )?;
 
     let ok_line = format!(
         "https_fetch: ok bytes={} sha256={}",
