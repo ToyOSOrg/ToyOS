@@ -38,24 +38,7 @@ const SIGNATURE: u64 = u64::from_le_bytes(*b"DXE_SERV");
 struct GcdType(u32);
 
 impl GcdType {
-    const NON_EXISTENT: Self = Self(0);
-    const RESERVED: Self = Self(1);
-    const SYSTEM_MEMORY: Self = Self(2);
     const MEMORY_MAPPED_IO: Self = Self(3);
-    const PERSISTENT: Self = Self(4);
-    const MORE_RELIABLE: Self = Self(5);
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::NON_EXISTENT => "nonexistent",
-            Self::RESERVED => "reserved",
-            Self::SYSTEM_MEMORY => "memory",
-            Self::MEMORY_MAPPED_IO => "mmio",
-            Self::PERSISTENT => "persistent",
-            Self::MORE_RELIABLE => "more-reliable",
-            _ => "unknown",
-        }
-    }
 }
 
 /// `EFI_GCD_MEMORY_SPACE_DESCRIPTOR` (PI 1.8 Vol. 2 §7.2.1), in the spec's own
@@ -160,22 +143,21 @@ pub fn free_mmio(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow])
         // SAFETY: firmware answered `count` descriptors at `map`, and `index`
         // is inside that count.
         let space = unsafe { *map.add(index) };
-        let owner = if space.image.is_null() && space.device.is_null() { "free" } else { "held" };
-        println!(
-            "{HEAD} {:#x}+{:#x} {} cap={:#x} attr={:#x} {owner}",
-            space.base,
-            space.length,
-            space.kind.name(),
-            space.capabilities,
-            space.attributes,
-        );
-        if space.kind != GcdType::MEMORY_MAPPED_IO || owner != "free" || space.length < GRANULE {
+        let free = space.image.is_null() && space.device.is_null();
+        if space.kind != GcdType::MEMORY_MAPPED_IO || !free || space.length < GRANULE {
             continue;
         }
         let Some(slot) = out.get_mut(added) else {
             println!("{HEAD} more free mmio ranges than the {} the kernel is handed", out.len());
             break;
         };
+        // **One line per range handed over and none per descriptor**: this log
+        // is the first screenful on a machine with no serial port, and the
+        // whole map is tens of lines of it.
+        println!(
+            "{HEAD} {:#x}+{:#x} mmio cap={:#x} attr={:#x} free",
+            space.base, space.length, space.capabilities, space.attributes,
+        );
         *slot = RootBridgeWindow { base: space.base, length: space.length };
         added += 1;
     }
