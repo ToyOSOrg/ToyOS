@@ -106,6 +106,11 @@ it.
   name resolving to neither is a dead pointer.
 - The negative control reverts the WHOLE change onto the base the green arm was measured on and is
   red there; a judge added for a defect was shown red on the untouched base.
+- A negative control is anchored to a named commit hash, never to a relative expression such as
+  `HEAD^2` or `origin/main` — a merge moves what those name, and the control then silently measures
+  a different base.
+- A negative control reverts the whole commit under review; a model that cannot distinguish the
+  reverted state from the fixed one is a missing test, not a limit of the documentation.
 - Where a change reads an address back from a guest, that address comes from what the harness knows
   without it — the argv, a fixed base, the ECAM walk — and the kernel's printed address is asserted
   equal to it, never used.
