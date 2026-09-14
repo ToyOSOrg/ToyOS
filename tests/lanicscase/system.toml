@@ -1,0 +1,26 @@
+# `tests/lancase` with netd's delivery actuator armed, and nothing else.
+#
+# A boot whose only reading of the interrupt path is a count of messages cannot
+# tell a part nothing made speak from a message that reached no CPU. netd's
+# `--provoke-message` writes one enabled cause to `ICS` after the mask is set,
+# so the first message this claim takes is one netd asked for — and the kernel's
+# `pcidev: slot N took its first message` record then says the delivery path
+# works whatever the link did. The shipping config next door arms none of it, so
+# its own record still means the card spoke on its own.
+#
+# Nothing here reaches the internal NVMe. There is no `[disks]` row, and the
+# only device any program on this boot claims is the PCI function named below.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:15fc"]
+args = ["--provoke-message"]
+
+[programs.test-runner]
+syscap = ["logread"]

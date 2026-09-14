@@ -51,6 +51,26 @@ const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
 
+/// The actuator that makes the card raise one interrupt on purpose, so a boot
+/// whose only reading of the interrupt path is a count of messages can tell a
+/// part nothing made speak from a message that reached no CPU.
+///
+/// **Nothing a shipped machine runs arms it**: the argument comes from the
+/// `[programs.netd] args` row of a boot config, and the one config that carries
+/// it is `tests/lanicscase`. A boot that always raised a message would make the
+/// kernel's first-message record read the same on a working card and a dead
+/// one.
+const PROVOKE_MESSAGE: &str = "--provoke-message";
+
+/// The read-only reading of §4.5.2's MDIO arbitration, armed by
+/// `tests/lanmngcase` and by nothing else.
+///
+/// **It reads one register, writes none, and reaches no PHY.** netd then exits
+/// on what it read, because that is the only way the reading leaves a machine
+/// with no serial port: a userland write reaches `Backend::None`, and the
+/// kernel's own `exit:` record is what the stick carries.
+const READ_MANAGEABILITY: &str = "--read-manageability";
+
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
@@ -111,6 +131,25 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.claim(),
             Self::Intel(nic) => nic.claim(),
+        }
+    }
+
+    /// [`READ_MANAGEABILITY`], and `None` on the card that has no such
+    /// register — a virtio function's answer would be a reading of nothing.
+    fn manageability(&self) -> Option<toyos_i219::Manageability> {
+        match self {
+            Self::Virtio(_) => None,
+            Self::Intel(nic) => Some(nic.manageability()),
+        }
+    }
+
+    /// [`PROVOKE_MESSAGE`], carried to the driver that has one.
+    fn provoke_message(&self) {
+        match self {
+            Self::Virtio(_) => {
+                say!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio")
+            }
+            Self::Intel(nic) => nic.provoke_message(),
         }
     }
 
@@ -1302,6 +1341,23 @@ fn main() {
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
     let nic = open(claim);
+    if std::env::args().any(|arg| arg == PROVOKE_MESSAGE) {
+        say!("netd: {PROVOKE_MESSAGE}: the next message this claim takes is one netd asked for");
+        nic.provoke_message();
+    }
+    if std::env::args().any(|arg| arg == READ_MANAGEABILITY) {
+        match nic.manageability() {
+            // The exit is the record: this reading has no other way off a
+            // machine whose userland writes reach no channel a log carries.
+            Some(reading) => {
+                say!("netd: {READ_MANAGEABILITY}: {reading:?}");
+                std::process::exit(reading.exit_code());
+            }
+            None => {
+                say!("netd: {READ_MANAGEABILITY} is the Intel driver's and this card is virtio")
+            }
+        }
+    }
     let mac = nic.mac();
     let mut device = DmaNic { nic };
 
