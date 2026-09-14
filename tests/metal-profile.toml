@@ -170,12 +170,14 @@ name = "boot.metaldevicecase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1255
 
 [[number]]
 name = "boot.metaldevicecase.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 51
 
 [[number]]
 name = "usbwrite.metaldevicecase.span_us"
@@ -323,6 +325,7 @@ name = "boot.metaldevicecase.stick_secs"
 unit = "s"
 ceiling = 5
 ceiling_from = "as boot.jobcase.stick_secs, and this is the boot that reads it hardest: it writes, fsyncs and reads back megabytes before the reset, which is the shape a stop that cut a transfer would leave unenumerable"
+measured = 0
 
 [[number]]
 name = "boot.selftests.stick_secs"
@@ -685,12 +688,14 @@ name = "boot.metalcase.park_ms"
 unit = "ms"
 ceiling = 2010
 ceiling_from = "as boot.testcases.park_ms. **The boot this row exists for**: this config starts sshd, sshd spins in Ring 3 retrying a netd that has no NIC on this machine, and its own `exit:` record landing after `Rebooting.` is the defect the stop closes"
+measured = 129
 
 [[number]]
 name = "boot.metalcase.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"
+measured = 0
 
 [[number]]
 name = "boot.latencycase.park_ms"
@@ -709,12 +714,14 @@ name = "boot.metaldevicecase.park_ms"
 unit = "ms"
 ceiling = 2010
 ceiling_from = "as boot.testcases.park_ms. The boot that reads it hardest: megabytes written and fsynced before the reset, so a thread inside a block-layer operation when the stop is raised is the ordinary case here rather than the unlucky one"
+measured = 0
 
 [[number]]
 name = "boot.metaldevicecase.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"
+measured = 0
 
 [[number]]
 name = "boot.selftests.park_ms"
