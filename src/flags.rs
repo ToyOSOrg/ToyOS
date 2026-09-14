@@ -183,21 +183,19 @@ impl Walk<'_> {
         for (at, seen) in self.seen.iter().enumerate() {
             let name = seen.flag.name;
             let shape = shape(seen.flag.value);
-            let takes_value =
-                matches!(seen.flag.value, Value::Next | Value::Each | Value::Optional);
-            if matches!(seen.given, Given::Inline(_)) && !takes_value {
+            if matches!(seen.given, Given::Inline(_))
+                && matches!(seen.flag.value, Value::None | Value::Rest)
+            {
                 let takes = match seen.flag.value {
                     Value::Rest => format!("takes its words after it, {name}{shape}"),
                     _ => "takes no value".to_string(),
                 };
                 return Some(format!("{:?}: {name} {takes}.", seen.word));
             }
-            let nothing = match seen.given {
-                Given::Nothing => matches!(seen.flag.value, Value::Next | Value::Each),
-                Given::Inline(value) => value.is_empty(),
-                _ => false,
-            };
-            if nothing {
+            if matches!(seen.given, Given::Inline(""))
+                || matches!(seen.given, Given::Nothing)
+                    && matches!(seen.flag.value, Value::Next | Value::Each)
+            {
                 return Some(format!("{name} was given no value: {name}{shape}."));
             }
             if seen.flag.value != Value::Each
