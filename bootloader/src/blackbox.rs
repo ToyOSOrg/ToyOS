@@ -83,15 +83,17 @@ pub struct Finding {
 /// Split a record's text into what a person at the machine reads and what only
 /// the file carries.
 ///
-/// **The firmware's text console scrolls by moving the whole frame.** On the
-/// T14's 1080p panel that is about three lines a second, and this pass prints
-/// under the firmware's own watchdog — so what goes to the console is bounded
-/// by what the console can render before that watchdog ends the pass, and a
-/// report is not bounded by anything. A line that opens a log record
-/// (`toyos_blackbox::RECORD_OPENS_WITH`, the same declaration the kernel cuts
-/// the page on) is tail; every other line — why the boot ended, what was
-/// dropped, a fault's registers — is the head, and the head is what the screen
-/// gets, with the count of what it does not.
+/// **This pass prints under the firmware's own watchdog and a log ring is
+/// bounded by nothing**, so what the console gets has to be. A line opening
+/// with `toyos_blackbox::RECORD_OPENS_WITH` — the same declaration the kernel
+/// cuts the page on — is tail and reaches `loader.log` alone; every other line
+/// is head and reaches both, with the count of what it did not get.
+///
+/// **What this does not reach**: a head line that itself opens with that
+/// declaration is filed with the tail, so no line the kernel writes above a
+/// record's tail may begin with one. `boot_deadline_ends_a_wedge` holds the
+/// head forms of a wedge — its reason and the panel's census — to the console,
+/// and the filed count to the file.
 fn tail(text: &[u8], lines: &mut Vec<String>, filed: &mut Vec<String>) {
     for line in text.split(|byte| *byte == b'\n') {
         if line.is_empty() {

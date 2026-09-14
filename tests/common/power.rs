@@ -81,16 +81,11 @@ pub fn metal_job_reboot(
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
 
-    // Built here, because a boot deletes the image it built and this one is read after the guest is gone.
-    let image_path = super::lane::dir().join("jobcase-boot.img");
-    let mut image = qemu::build_boot_image(case, &[], &[], &[]);
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = super::volumes::log_extent(&image, &image_path)?;
     // A file under the loader's name that the last boot could have left: a
     // loader that opens without truncating ends in this one's tail.
     let stale = (bootlog::LOADER_LOG.to_string(), vec![b'x'; 64 * 1024]);
-    super::volumes::stage_files(&mut image[start..start + len], &[stale])?;
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let kept = Kept::build(case, &[], "jobcase-boot.img", &[stale])?;
+    let (image_path, start, len) = (kept.image.clone(), kept.start, kept.len);
 
     let mut qemu = QemuInstance::boot_with_options(
         case,
@@ -99,7 +94,7 @@ pub fn metal_job_reboot(
         BootOptions {
             profile: qemu::Profile::Metal,
             qmp: true,
-            boot_image: Some(qemu::Staged::Written(image_path.clone())),
+            boot_image: kept.boots(),
             ..Default::default()
         },
     );
@@ -151,7 +146,7 @@ pub fn metal_job_reboot(
         ));
     }
 
-    let _ = std::fs::remove_file(&image_path);
+    kept.remove();
     eprintln!(
         "  [power] {name} carries Boot: complete ({boot_ms}ms) and this boot's last line, and \
          {} carries the loader's {} lines beside it",
@@ -722,15 +717,54 @@ fn chained(params: &'static [&'static str]) -> BootOptions {
     }
 }
 
-/// Where a kept image's log volume is, for a judge that reads `loader.log`
-/// back off it once the guest is gone.
+/// An image the host keeps rather than a throwaway one, and where its log
+/// volume is: what the guest writes there is what the test reads once the
+/// guest is gone.
 struct Kept {
     image: PathBuf,
     start: usize,
     len: usize,
 }
 
-/// [`chained`] on an image the host keeps rather than a throwaway one.
+impl Kept {
+    /// Build `case` into such an image. `staged` goes onto its log volume
+    /// before the boot, for a test whose subject is what the loader does with
+    /// a file that was already there.
+    fn build(
+        case: &Path,
+        params: &[&str],
+        name: &str,
+        staged: &[(String, Vec<u8>)],
+    ) -> Result<Self, String> {
+        let image = super::lane::dir().join(name);
+        let mut bytes = qemu::build_boot_image(case, &[], &[], params);
+        std::fs::write(&image, &bytes).map_err(|e| format!("write the boot image: {e}"))?;
+        let (start, len) = super::volumes::log_extent(&bytes, &image)?;
+        if !staged.is_empty() {
+            super::volumes::stage_files(&mut bytes[start..start + len], staged)?;
+            std::fs::write(&image, &bytes).map_err(|e| format!("write the boot image: {e}"))?;
+        }
+        Ok(Self { image, start, len })
+    }
+
+    /// What `boot_with_options` boots instead of building one of its own.
+    fn boots(&self) -> Option<qemu::Staged> {
+        Some(qemu::Staged::Written(self.image.clone()))
+    }
+
+    /// The loader's own file, as the guest left it.
+    fn loader_log(&self) -> Result<String, String> {
+        Ok(super::volumes::loader_log_lines(&self.image, self.start, self.len)?.join("\n"))
+    }
+
+    /// **Hundreds of megabytes each** (`tests/common/qemu.rs`), so a kept
+    /// image outlives its test no longer than it has to.
+    fn remove(self) {
+        let _ = std::fs::remove_file(&self.image);
+    }
+}
+
+/// [`chained`] on a [`Kept`] image.
 ///
 /// **A wedged boot's own records reach no console.** Nothing drains the ring
 /// once every CPU has stopped taking scheduler passes, so the only copy of them
@@ -743,24 +777,9 @@ fn chained_on_a_kept_image(
     params: &'static [&'static str],
     name: &str,
 ) -> Result<(BootOptions, Kept), String> {
-    let image = super::lane::dir().join(name);
-    // Built here rather than by `boot_with_options`, because what the guest
-    // writes to it is what this test reads after the guest is gone.
-    let bytes = qemu::build_boot_image(case, &[], &[], params);
-    std::fs::write(&image, &bytes).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = super::volumes::log_extent(&bytes, &image)?;
-    let options = BootOptions {
-        boot_image: Some(qemu::Staged::Written(image.clone())),
-        ..chained(params)
-    };
-    Ok((options, Kept { image, start, len }))
-}
-
-impl Kept {
-    /// The loader's own file, as the guest left it.
-    fn loader_log(&self) -> Result<String, String> {
-        Ok(super::volumes::loader_log_lines(&self.image, self.start, self.len)?.join("\n"))
-    }
+    let kept = Kept::build(case, params, name, &[])?;
+    let options = BootOptions { boot_image: kept.boots(), ..chained(params) };
+    Ok((options, kept))
 }
 
 /// Resets a chain leaves behind: the kernel's own, and the pass that read the
@@ -946,17 +965,14 @@ pub fn boot_deadline_ends_a_wedge(
         return Err(silent_guest(&qemu, second.text()));
     }
     // Half of the control: the machine did *not* reach the reset it was one
-    // statement away from. `Rebooting.` is quiesce's own last word, and a
-    // deadline that fired on a boot merely slower than its bound would leave
-    // it here.
+    // statement away from, and `Rebooting.` is quiesce's own last word.
     second.must_not_say(bootlog::REBOOTING)?;
     second.must_say(bootlog::PREVIOUS_PANIC)?;
     // **After the harvest line**, so this is the page and not the wire.
     second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
-    // And the tail of a ring nothing was draining crossed the reset with it,
-    // which is the whole reason the record carries one. The console gets the
-    // count of it; the records themselves are asserted off the file below,
-    // where the loader puts them.
+    // The head of the record, which `blackbox::tail` owes the console whole:
+    // why the boot ended, above, and what its panel cost.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::PANEL_CENSUS)?;
     second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::TAIL_IN_THE_FILE)?;
     second.must_not_say(&armed_and_nothing_else())?;
     second.must_say(bootlog::CHAIN_ENDS_LINE)?;
@@ -965,18 +981,48 @@ pub fn boot_deadline_ends_a_wedge(
     drop(qemu);
 
     // **The other half of the control, off the only channel that carries it.**
-    // Both of these records were written after the last drain this machine
-    // ever ran — nothing takes a scheduler pass once the wedge is staged — so
-    // they exist nowhere but the tail the black box carried across the reset.
-    // The machine reached the wedge; and the CPU that asked for it took
+    // Both records are written after the last drain this machine ever ran, so
+    // they exist nowhere but the tail the black box carried across the reset:
+    // the machine reached the wedge, and the CPU that asked for it took
     // interrupts again rather than arriving deaf, which is what makes this a
     // wedge and not a hard lockup.
     let text = kept.loader_log()?;
     let filed = serial::Serial::named("the loader's file", text.as_str());
     filed.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
     filed.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_ARRIVED_DEAF)?;
+    // The count the console was given in place of the tail is the count of the
+    // tail: a number derived from anything else would leave a person at the
+    // machine believing records exist that the file does not carry.
+    filed_count_matches(second.text(), &text)?;
+    kept.remove();
 
     eprintln!("  [power] a wedge with every CPU stopped ended itself and said so off the page");
+    Ok(())
+}
+
+/// Every record the loader filed instead of printing is counted on the console,
+/// exactly. `printed` is the pass's console, `written` is `loader.log`.
+fn filed_count_matches(printed: &str, written: &str) -> Result<(), String> {
+    let said = printed
+        .lines()
+        .rev()
+        .find_map(|line| line.split_once(bootlog::TAIL_IN_THE_FILE))
+        .ok_or_else(|| format!("{:?} is on no line of the console", bootlog::TAIL_IN_THE_FILE))?
+        .1;
+    let count: usize = said
+        .split_whitespace()
+        .next()
+        .and_then(|word| word.parse().ok())
+        .ok_or_else(|| format!("the console's count of filed records is not a number: {said:?}"))?;
+    // The loader writes each filed record under its own margin; nothing else in
+    // the file opens a line that way.
+    let carried = written.lines().filter(|line| line.starts_with("| [")).count();
+    if count != carried {
+        return Err(format!(
+            "the console says {count} record(s) went to {} and the file carries {carried}",
+            bootlog::LOADER_LOG,
+        ));
+    }
     Ok(())
 }
 
@@ -1073,10 +1119,9 @@ pub fn hard_lockup_ends_a_deaf_cpu(
     let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
     // The arm, in the kernel's own words and with the kernel's own arithmetic.
     second.must_say(&format!("hard lockup: {bound_ms} ms"))?;
-    // Half of the control: the machine did not reach a reset of its own
-    // accord. That it reached the staged lockup at all is the record below,
-    // which reaches no console — the cpu that wrote it stopped answering, and
-    // nothing left was taking scheduler passes to drain it.
+    // Half of the control: the machine did not reach a reset of its own accord.
+    // That it reached the staged lockup at all is asserted off the file below,
+    // the only channel the cpu that wrote it had left.
     second.must_not_say(bootlog::REBOOTING)?;
 
     second.must_say(bootlog::PREVIOUS_PANIC)?;
@@ -1100,18 +1145,17 @@ pub fn hard_lockup_ends_a_deaf_cpu(
     ended_in_a_reset(&mut resets)?;
     drop(qemu);
 
-    // The other half of the control, off the only channel that carries it.
-    // Both records are written by the cpu this boot staged, after the last
-    // drain the machine ever ran, so they exist nowhere but the tail the black
-    // box carried across the reset — which the loader files rather than
-    // scrolling through the firmware's console. The machine reached the staged
-    // lockup; and which sample source this run proves, the whole difference
-    // between it and the metal arm: no counter here, so a sibling sends the
-    // NMI the counter would have.
+    // The other half of the control, off the only channel that carries it: both
+    // records are written by the cpu this boot staged, after the last drain the
+    // machine ever ran. The machine reached the staged lockup; and which sample
+    // source this run proves, the whole difference between it and the metal
+    // arm: no counter here, so a sibling sends the NMI the counter would have.
     let text = kept.loader_log()?;
     let filed = serial::Serial::named("the loader's file", text.as_str());
     filed.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKUP_STAGED)?;
     filed.must_say_after(bootlog::PREVIOUS_PANIC, "CPUID states no counter on cpu")?;
+    filed_count_matches(second.text(), &text)?;
+    kept.remove();
 
     eprintln!(
         "  [power] one cpu with interrupts off ended the machine {bound_ms} ms in, and the page \

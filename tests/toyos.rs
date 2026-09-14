@@ -4097,17 +4097,14 @@ fn check_wrap(dump: &screen::Ppm) -> Result<(), String> {
 
 /// Every row on the panel is text the log actually carries.
 ///
-/// **The check the panel's grid owes.** `panic_console` paints only the cells
-/// whose character or colour moved since the last paint, so a cell it fails to
-/// write is one the *previous* paint left standing — and past the end of a line
-/// that replaced a longer one, that is a string which occurs in no line of the
-/// log. The pager is where a screen of long lines is replaced by one of short
-/// lines, which is why this is asserted on a machine holding one.
+/// **The check the panel's grid owes**: `panic_console` writes only the cells
+/// whose character or colour moved, so a cell it fails to write is one the
+/// previous paint left standing, and past the end of a line that replaced a
+/// longer one that is a string no line of the log contains.
 ///
-/// The console's own tag comes off first, and every byte outside the font's
-/// range becomes the `.` the panel draws for it (`panic_console::glyph_char`);
-/// nothing else is normalised, so a row that differs from the log in any other
-/// way is a finding.
+/// The console's own tag comes off first and every byte outside the font's
+/// range becomes the `.` the panel draws for it
+/// (`panic_console::glyph_char`); nothing else is normalised.
 fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String> {
     let said: String = console
         .replace("[kernel ", "[")
@@ -5525,15 +5522,15 @@ fn run_screen_test(
             // snapshot, since a no-op `capture()` leaves `render()` re-reading the ring.
             const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
             let said = qemu.console_stream().since(0);
-            // This machine is halted for good and its console is whole, so
-            // every row on the panel is a row the log can be held to.
-            check_no_stale_cells(&dump, &said)?;
             if !said.contains(AFTER_CAPTURE) {
                 return Err(format!(
                     "{AFTER_CAPTURE:?} never reached the console, so its absence from the \
                      panel says nothing:\n{said}"
                 ));
             }
+            // Under the line above, which is what establishes that this
+            // console is whole — a short capture is that and not a stale cell.
+            check_no_stale_cells(&dump, &said)?;
             if text.contains(AFTER_CAPTURE) {
                 return Err(format!(
                     "{AFTER_CAPTURE:?} is on the panel — the report was re-read from the \
