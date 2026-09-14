@@ -113,6 +113,8 @@ it.
   limit of the documentation.
 - A probe the committed tests cannot exercise is measured once by hand, and that measurement is
   quoted in the commit that adds it.
+- A self-test whose verdict is a count prints a separate count for each decision it asserts; one
+  number cannot go red for a decision it never read.
 - Where a change reads an address back from a guest, that address comes from what the harness knows
   without it — the argv, a fixed base, the ECAM walk — and the kernel's printed address is asserted
   equal to it, never used.
