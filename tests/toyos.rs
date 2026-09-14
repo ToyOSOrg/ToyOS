@@ -13781,15 +13781,6 @@ fn run_machine_test(
             Ok(())
         }
         "bar_placement_is_proven" => {
-            // **Firmware says where a BAR may go and the function says whether
-            // it went there, and this is the reading that says both ran.** The
-            // same netcase boot, because the NIC it hands netd is the only
-            // function in QEMU whose BAR this kernel moves. What is asserted is
-            // not where the BAR went: that the address chosen is inside a window
-            // the kernel was handed, inside a run the same boot printed and
-            // where the emulator maps that function's own registers, and that
-            // the dword the function answers there is its own and is a value an
-            // unanswered read could not have produced.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
             let options = BootOptions {
                 profile: qemu::Profile::Headless,

@@ -11,7 +11,7 @@ process. The kernel half worked: the BAR moved to `0xae200000`, the function was
 handed over on slot 0 with vector `0x28` on MSI, netd mapped the register window
 and took a 2 MiB DMA grant. Then nothing. Over the twenty seconds `lan_hold`
 held the boot open, the end-of-boot census read `userdev=0` on every one of the
-eight CPUs (`t14-run36/lancase-green.log`).
+eight CPUs.
 
 **`I219::open` returned `Ok`.** `netd`'s `Nic::undrivable` panics, a panic is an
 exit, and no `exit: netd` record appears on that boot — netd was still alive

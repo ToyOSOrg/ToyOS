@@ -633,12 +633,14 @@ ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
 measured = 0
 
+# No `measured`: the one ping this row has been offered was answered by the
+# operating system on the other side of the reset, which the judge refuses, so
+# no boot has yet given this number a reading.
 [[number]]
 name = "boot.lancase.ping_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, which bounds the window a reply can fall in"
-measured = 81
 
 [[number]]
 name = "list.lancase.job_ms"
