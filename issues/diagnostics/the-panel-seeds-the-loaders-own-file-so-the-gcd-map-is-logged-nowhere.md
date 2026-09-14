@@ -10,9 +10,7 @@ opened: 2026-09-14
 two, oldest first (`userland/console/src/main.rs:277-286`). `/log` is the root of
 the log partition and the bootloader writes `loader.log` there
 (`userland/logd/src/store.rs:8-9`, `bootloader/src/loaderlog.rs:51`), so
-`loader.log` passes the extension filter, sorts after every
-`YYYY-MM-DD-HHMMSS.log` name, and is therefore always the newest seed file and
-the last one appended. A line the loader writes to its file costs a row of the
+`loader.log` passes the extension filter. A line the loader writes to its file costs a row of the
 kernel's log on the panel exactly as a line it prints to the firmware console
 does — the file is not a second channel.
 
