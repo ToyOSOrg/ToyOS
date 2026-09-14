@@ -28,6 +28,11 @@ pub const ICS_BOOT: &str = "lanicscase";
 /// the armed boot is for.
 const FIRST_MESSAGE: &str = "took its first message";
 
+/// netd's word for `toyos_i219::phy::PhyRefusal::NotThisRegisterMap`, which is
+/// the only thing the I219's §9 bring-up may say on the 82574 this host emulates.
+const PHY_NOT_THIS_MAP: &str = "the PHY was not brought up: this part's PHY answers MDIC under \
+                                the 82574's own addressing";
+
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 
@@ -50,21 +55,8 @@ const ID: &str = "8086:15fc";
 /// cable the metal loop reaches this boot over while it runs.
 pub const NIC: &str = "0000:00:1f.6";
 
-/// The armed boot's judge: netd asked the part for a message, so the kernel's
-/// own record of the claim taking one says whether delivery works — whatever
-/// the PHY did about a link.
-pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
-    let kernel = back.kernel();
-    eprintln!("  [lan] {}", kernel.must_say(FIRST_MESSAGE)?.trim());
-    Ok(())
-}
-
 /// The T14's judge: the claim, the card, the lease, the host's own ping — and
 /// the armed boot beside them.
-///
-/// **Both boots are judged and neither verdict hides the other**: the delivery
-/// reading is the one that still means something on a machine whose link never
-/// came up, which is the state the shipping boot fails in.
 pub fn on_metal(back: &metal::Readback, provoked: &metal::Readback) -> Result<(), String> {
     let profile = Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())?;
     let kernel = back.kernel();
@@ -164,8 +156,20 @@ pub fn on_metal(back: &metal::Readback, provoked: &metal::Readback) -> Result<()
         bad.push(why);
     }
 
-    if let Err(why) = provoked_on_metal(provoked) {
-        bad.push(why);
+    // The delivery reading, keyed off the label so a reordering of `LANCASE`'s
+    // arms reads the shipping boot's record as the armed boot's.
+    if provoked.label != ICS_BOOT {
+        bad.push(format!(
+            "the delivery verdict was handed {}'s readback, and the record only means netd \
+             asked for a message on {ICS_BOOT}",
+            provoked.label
+        ));
+    } else {
+        let armed = provoked.kernel();
+        match armed.must_say(FIRST_MESSAGE) {
+            Ok(line) => eprintln!("  [lan] {}", line.trim()),
+            Err(why) => bad.push(why),
+        }
     }
 
     if bad.is_empty() {
@@ -221,6 +225,10 @@ pub fn lan_dhcp_lease(
             "the client read this lease as {lease:?} and the backend serves {want:?}"
         ));
     }
+    // The part split, end to end: this backend is the 82574, whose own PHY the
+    // I219's §9 sequence is not written from, so the driver refuses that
+    // sequence by name here and the link below is the MAC's own.
+    log.must_say(PHY_NOT_THIS_MAP)?;
     // The order, and not merely the presence of both.
     log.must_say_after(LEASE, READY)?;
     log.must_say(LINK_UP)?;

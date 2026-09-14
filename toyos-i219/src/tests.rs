@@ -1182,6 +1182,41 @@ fn an_mdi_read_the_part_could_not_complete_is_refused_by_name() {
     );
 }
 
+/// §9.5.2.1's other two states the agent before this one can leave behind, each
+/// named by the clause that holds the link down while it stands. The driver is
+/// stopped at §9.5.2.3's identifier, so §9.2's bit is set and the Control
+/// register is still the one it inherited.
+#[test]
+fn a_phy_left_in_loopback_or_configured_by_hand_raises_no_link() {
+    let left = |loopback, autonegotiation_disabled| Permits {
+        phy_starts_powered_down: false,
+        phy_starts_in_loopback_or_resetting: loopback,
+        phy_starts_with_autonegotiation_disabled: autonegotiation_disabled,
+        ..Permits::default()
+    };
+    for (seed, permits, unconfigured) in [
+        (48, left(true, false), "§9.5.2.1's Loopback was left set"),
+        (49, left(false, true), "§9.5.2.1's Auto-Negotiation Enable was left clear"),
+    ] {
+        let nic = Nic::with(seed, Part::I219, permits);
+        nic.set_link(true);
+        nic.mdi_fails_read_of(toyos_phy::SPECIFIC, toyos_phy::reg::IDENTIFIER_HIGH);
+        let driver = open(&nic);
+
+        assert_eq!(
+            nic.phy_unconfigured(),
+            Some(unconfigured),
+            "{}",
+            nic.because("the model named a clause other than the one §9.5.2.1 left standing")
+        );
+        assert!(
+            !driver.link().up,
+            "{}",
+            nic.because("STATUS.LU came up with §9.5.2.1 outstanding")
+        );
+    }
+}
+
 /// §9.3 and Table 9-1 place §9.5.2's registers at different PHY addresses, so
 /// which one a part answers at is asked and not assumed: with nothing driving
 /// the address the table names, the identifier is what finds the other one and
@@ -1275,6 +1310,8 @@ fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way
             firmware_takes_the_mdio_interface: false,
             mdi_takes_several_reads: false,
             phy_starts_powered_down: false,
+            phy_starts_in_loopback_or_resetting: false,
+            phy_starts_with_autonegotiation_disabled: false,
             phy_advertises_what_the_last_agent_left: false,
             ..Permits::default()
         },

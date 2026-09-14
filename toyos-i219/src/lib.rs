@@ -492,11 +492,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // to 1b" — a driver that wrote a value it composed itself would clear
         // them.
         let held = regs.read(regs::CTRL);
-        // Read before the write and not after it, because the reset itself is
-        // what every bound below is measured from — §10.2.2.1's two and §9.2's
-        // delay before the first MDIO access.
-        let reset_at = clock.nanos();
         regs.write(regs::CTRL, held | ctrl::RST);
+        // Read after the write, because the write is the event §10.2.2.1's two
+        // bounds and §9.2's delay before the first MDIO access are measured
+        // from; a clock read before it dates them from an earlier instant and
+        // every one of them expires early.
+        let reset_at = clock.nanos();
         // The settle is a wait and not a poll: §10.2.2.1 owes the microsecond
         // to "attempting to check to see if the bit has cleared or attempting
         // to access (read or write) any other device register" alike, so there

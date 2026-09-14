@@ -94,6 +94,14 @@ pub struct Permits {
     /// PHY another agent drives, and nothing resets them when a claim on the
     /// function is minted.
     pub phy_starts_powered_down: bool,
+    /// §9.5.2.1's Loopback and Reset are the same ordinary PHY state, and a
+    /// write of that register that carries either back puts the PHY in
+    /// loopback or resets it under the driver that wrote it.
+    pub phy_starts_in_loopback_or_resetting: bool,
+    /// §9.5.2.1: with Auto-Negotiation Enable clear "the link configuration is
+    /// determined manually", which is what an agent that forced this link's
+    /// speed left behind and nothing resets when a claim is minted.
+    pub phy_starts_with_autonegotiation_disabled: bool,
     /// §5.2: "the integrated LAN controller configures the LCD registers", and
     /// §6.1.5's Auto-Connect Battery Saver has the last driver "negotiate to
     /// the lowest connection speed supported by the link partner (usually
@@ -115,6 +123,8 @@ impl Default for Permits {
             firmware_takes_the_mdio_interface: true,
             mdi_takes_several_reads: true,
             phy_starts_powered_down: true,
+            phy_starts_in_loopback_or_resetting: true,
+            phy_starts_with_autonegotiation_disabled: true,
             phy_advertises_what_the_last_agent_left: true,
         }
     }
@@ -198,6 +208,12 @@ impl PhyModel {
         file[reg::CONTROL as usize] = (1 << 6) | (1 << 8) | control::AUTONEG_ENABLE;
         if permits.phy_starts_powered_down {
             file[reg::CONTROL as usize] |= control::POWER_DOWN | control::ISOLATE;
+        }
+        if permits.phy_starts_in_loopback_or_resetting {
+            file[reg::CONTROL as usize] |= control::LOOPBACK | control::RESET;
+        }
+        if permits.phy_starts_with_autonegotiation_disabled {
+            file[reg::CONTROL as usize] &= !control::AUTONEG_ENABLE;
         }
         // §9.5.2.3 and §9.5.2.4: Intel's OUI, model 0xA, revision 0x1.
         file[reg::IDENTIFIER_HIGH as usize] = phy::IDENTIFIER_HIGH_INTEL;
@@ -891,6 +907,18 @@ impl Model {
                         control_1000t::CARRIED_MASK,
                         control_1000t::CARRIED_DEFAULT,
                     );
+                }
+                if r == reg::CONTROL && data & control::RESET != 0 {
+                    // §9.5.2.1: "Writing a 1b to this bit causes immediate PHY
+                    // reset", which takes every register below back to the
+                    // default §9.5 prints for it.
+                    let power_on = PhyModel::new(&self.permits);
+                    self.phy.file = power_on.file;
+                    self.phy.custom_mode = power_on.custom_mode;
+                    self.phy.negotiated_over = None;
+                    self.phy.negotiating = false;
+                    self.refresh_phy_link();
+                    return;
                 }
                 let abilities = |model: &PhyModel| {
                     (

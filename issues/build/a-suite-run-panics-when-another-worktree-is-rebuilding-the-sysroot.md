@@ -1,7 +1,7 @@
 ---
 status: open
 kind: tooling
-opened: 2026-09-13
+opened: 2026-09-14
 ---
 
 # A suite run panics on the toolchain another worktree is rebuilding under it

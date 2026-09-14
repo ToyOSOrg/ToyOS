@@ -657,9 +657,6 @@ unit = "ms"
 ceiling = 20000
 ceiling_from = "as lan.lancase.link_up_ms, which is netd's own dhcp::LEASE_BOUND: a boot with no lease by then has already said so in its log"
 
-# `lanicscase` is `lancase` with one argument added to netd's manifest row, so
-# every bound it is under is that boot's.
-
 [[number]]
 name = "boot.lanicscase.complete_ms"
 unit = "ms"

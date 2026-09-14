@@ -16,10 +16,8 @@ use crate::{Clock, Registers};
 /// How long [`Owned::claim`] waits for §4.5.2's ownership bit to read back set.
 ///
 /// **A driver-chosen bound, not a datasheet one**: §4.5.2 describes the
-/// handshake and gives no time for it. Twenty milliseconds is far past a
-/// firmware pass over the extended configuration area and still a bound, so a
-/// part whose Management Engine never lets go says so instead of holding up the
-/// boot.
+/// handshake and gives no time for it, so a part whose Management Engine never
+/// lets go says so instead of holding up the boot.
 const OWNERSHIP_DEADLINE_NANOS: u64 = 20_000_000;
 
 /// How long [`Owned::transact`] waits for §10.2.2.7's `Ready` bit.
@@ -41,12 +39,12 @@ pub(crate) const LCD_RESET_DELAY_NANOS: u64 = 10_000_000;
 /// general registers are located under PHY address 01 and the PHY specific
 /// registers are at PHY address 02". Table 9-1 says which address each register
 /// below is at, and these two names are what that table is read through.
-pub const GENERAL: u8 = 1;
-pub const SPECIFIC: u8 = 2;
+pub(crate) const GENERAL: u8 = 1;
+pub(crate) const SPECIFIC: u8 = 2;
 
 /// The registers of the PHY this driver touches, each at the address and page
 /// Table 9-1 gives it.
-pub mod reg {
+pub(crate) mod reg {
     /// Control (§9.5.2.1), PHY address 02, any page.
     pub const CONTROL: u8 = 0;
     /// PHY Identifier 1 and 2 (§9.5.2.3, §9.5.2.4), PHY address 02, any page.
@@ -63,21 +61,21 @@ pub mod reg {
 }
 
 /// The page §9.5.3's port control registers live in.
-pub const PAGE_PORT_CONTROL: u16 = 769;
+pub(crate) const PAGE_PORT_CONTROL: u16 = 769;
 
 /// §9.3: "Setting the page is done by writing page_num x 32 to Register 31.
 /// This is because only the 11 MSBs of register 31 are used for defining the
 /// page."
-pub const PAGE_SHIFT: u32 = 5;
+pub(crate) const PAGE_SHIFT: u32 = 5;
 
 /// §9.3: registers 0 to 15 "are identical in all the pages and are the IEEE
 /// defined registers", and everything above them is the vendor's and therefore
 /// the page's. An access to one of those without a page selected first reaches
 /// whichever page was left behind.
-pub const FIRST_PAGED_REGISTER: u8 = 16;
+pub(crate) const FIRST_PAGED_REGISTER: u8 = 16;
 
 /// Control register bits (§9.5.2.1).
-pub mod control {
+pub(crate) mod control {
     /// Restart Auto-Negotiation (bit 9), self-clearing. §9.5.2.1: "1b =
     /// Restarts auto-negotiation process."
     pub const RESTART_AUTONEG: u16 = 1 << 9;
@@ -105,7 +103,7 @@ pub mod control {
 }
 
 /// Auto-Negotiation Advertisement bits (§9.5.2.5).
-pub mod advertise {
+pub(crate) mod advertise {
     /// Selector Field (bits 4:0). §9.5.2.5: "00001b = IEEE 802.3 CSMA/CD."
     pub const SELECTOR_802_3: u16 = 0b00001;
     pub const HALF_10: u16 = 1 << 5;
@@ -126,7 +124,7 @@ pub mod advertise {
 }
 
 /// 1000BASE-T Control bits (§9.5.2.10).
-pub mod control_1000t {
+pub(crate) mod control_1000t {
     /// Advertise 1000BASE-T Full-Duplex Capability (bit 9).
     pub const FULL: u16 = 1 << 9;
 
@@ -140,7 +138,7 @@ pub mod control_1000t {
 }
 
 /// Custom Mode Control bits (§9.5.3.1).
-pub mod custom_mode {
+pub(crate) mod custom_mode {
     /// MDIO frequency access (bit 10). §9.5.3.1: "1b = reduced MDIO frequency
     /// access", and §9.2 says access "should be done only when bit 10 in page
     /// 769 register 16 is set".
@@ -158,7 +156,7 @@ pub mod custom_mode {
 /// assigned 00-AA-00 after bit reversal is this. It is the one word in the PHY
 /// that says a read reached the PHY: neither a window that answers ones nor an
 /// address nothing drives can produce it.
-pub const IDENTIFIER_HIGH_INTEL: u16 = 0x0154;
+pub(crate) const IDENTIFIER_HIGH_INTEL: u16 = 0x0154;
 
 /// Why the PHY was not reached, or not what this driver was told it would be.
 ///
@@ -224,8 +222,7 @@ pub struct Phy {
     /// Which of §9.3's two PHY addresses answered §9.5.2.3, and therefore the
     /// one every other register below was reached at.
     pub addr: u8,
-    /// §9.5.2.3 and §9.5.2.4's two registers, the high one first — the part's
-    /// own name for itself, which is what a reader identifies the silicon by.
+    /// §9.5.2.3 and §9.5.2.4's two registers, the high one first.
     pub id: u32,
 }
 

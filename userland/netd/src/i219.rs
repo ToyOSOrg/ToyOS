@@ -190,8 +190,6 @@ impl Nic {
         )
         .map_err(Opening::Driver)?;
         let mac = driver.mac();
-        // The bring-up's own reading, said once: a boot whose link never comes
-        // up has nothing else to say why.
         let brought_up = driver.brought_up();
         crate::say!(
             "netd: I219: {}, and the PHY {}",

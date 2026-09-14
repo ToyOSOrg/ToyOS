@@ -55,8 +55,7 @@ const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
 /// The actuator that makes the card raise one interrupt on purpose.
 ///
 /// **Nothing a shipped machine runs arms it**: the argument comes from the
-/// `[programs.netd] args` row of a boot config, and the one config that carries
-/// it is `tests/lanicscase`.
+/// `[programs.netd] args` row of a boot config.
 const PROVOKE_MESSAGE: &str = "--provoke-message";
 
 use toyos::endow;
@@ -125,12 +124,9 @@ impl Card {
     /// [`PROVOKE_MESSAGE`], carried to the driver that has one.
     fn provoke_message(&self) {
         match self {
-            // A config that armed the actuator on a card with no `ICS` asked
-            // this boot a question it cannot answer, and a green boot that
-            // answered none of it is worse than no boot.
-            Self::Virtio(_) => {
-                panic!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio")
-            }
+            Self::Virtio(_) => Self::undrivable(format_args!(
+                "{PROVOKE_MESSAGE} writes §10.2.4.4's `ICS`, which this card has not"
+            )),
             Self::Intel(nic) => nic.provoke_message(),
         }
     }
