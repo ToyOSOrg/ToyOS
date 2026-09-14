@@ -102,14 +102,9 @@ impl Shard {
 /// `Err` is a refusal to print and exit on, like [`parse`]'s: a shard number
 /// outside its range would take no tests and report the run green.
 pub fn parse_shard(args: &[String]) -> Result<Option<Shard>, String> {
-    if !SUITE.present(args, &SHARD) {
+    let Some(spec) = SUITE.value(args, &SHARD) else {
         return Ok(None);
-    }
-    // Total on its own, because a `None` here is the whole suite and this is
-    // public: [`parse`] refuses the same line, and does not run in every caller.
-    let spec = SUITE
-        .value(args, &SHARD)
-        .ok_or("--shard was given no value: --shard <index>/<count>, e.g. --shard 2/4")?;
+    };
     let (index, count) = spec
         .split_once('/')
         .ok_or_else(|| format!("--shard {spec}: not <index>/<count>, e.g. 2/4"))?;
@@ -440,9 +435,11 @@ mod tests {
     #[test]
     fn a_flag_left_without_its_value_is_refused_by_name() {
         for flag in SUITE.0.iter().filter(|f| matches!(f.value, Value::Next | Value::Each)) {
-            let refusal = parse_owned(&[flag.name]).unwrap_err();
-            assert!(refusal.contains(flag.name), "{}: {refusal}", flag.name);
-            assert!(refusal.contains("no value"), "{}: {refusal}", flag.name);
+            for word in [flag.name.to_string(), format!("{}=", flag.name)] {
+                let refusal = parse_owned(&[word.as_str()]).unwrap_err();
+                assert!(refusal.contains(flag.name), "{word}: {refusal}");
+                assert!(refusal.contains("no value"), "{word}: {refusal}");
+            }
         }
     }
 

@@ -78,7 +78,7 @@ fn check_prerequisites(root: &Path) {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = env::args().skip(1).collect();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     match flags::check(&args) {

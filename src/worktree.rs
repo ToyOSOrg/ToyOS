@@ -351,7 +351,7 @@ mod tests {
     /// only one between `--worktree add --help` and a worktree named `--help`.
     #[test]
     fn a_flag_is_refused_as_a_worktree_path_by_name() {
-        let args = ["toyos-build", "--worktree", "add", "--help"].map(String::from);
+        let args = ["--worktree", "add", "--help"].map(String::from);
         assert!(
             matches!(crate::flags::check(&args), crate::flags::Outcome::Proceed),
             "the command line has to reach this dispatch"

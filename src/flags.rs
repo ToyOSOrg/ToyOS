@@ -101,10 +101,10 @@ pub enum Outcome {
     Refuse(String),
 }
 
-/// Pure over `args` (as `std::env::args().collect()` produces them, `argv[0]`
-/// included) and the declaration.
+/// Pure over the words after the program name — the line every reader of it
+/// walks, `std::env::args().skip(1)` as `tests/toyos.rs` collects the harness's.
 pub fn check(args: &[String]) -> Outcome {
-    let line = CARGO_RUN.walk(args.get(1..).unwrap_or_default());
+    let line = CARGO_RUN.walk(args);
     if let Some(word) = line.unknown {
         return Outcome::Refuse(unknown(word));
     }
@@ -174,27 +174,30 @@ pub(crate) struct Walk<'a> {
 impl Walk<'_> {
     /// A flag whose value no reader of this line would get — every shape that
     /// reaches a reader as a silent default, and the whole of what either
-    /// command line asks. A value-taking flag left with nothing after it
-    /// answers `None`; a flag written twice has every use but one dropped; and
-    /// an inline value is dropped by exactly two readers, `Value::None` having
-    /// none and `rest` taking only the words after the flag, [`Given::value`]
-    /// handing it to all the rest.
+    /// command line asks. A value-taking flag with nothing after it — the end
+    /// of the line, or an empty `--smp=` — answers `None`; a flag written twice
+    /// has every use but one dropped; and an inline value is dropped by exactly
+    /// two readers, `Value::None` having none and `rest` taking only the words
+    /// after the flag, [`Given::value`] handing it to all the rest.
     pub(crate) fn malformed(&self) -> Option<String> {
         for (at, seen) in self.seen.iter().enumerate() {
             let name = seen.flag.name;
             let shape = shape(seen.flag.value);
-            if matches!(seen.given, Given::Inline(_))
-                && matches!(seen.flag.value, Value::None | Value::Rest)
-            {
+            let takes_value =
+                matches!(seen.flag.value, Value::Next | Value::Each | Value::Optional);
+            if matches!(seen.given, Given::Inline(_)) && !takes_value {
                 let takes = match seen.flag.value {
                     Value::Rest => format!("takes its words after it, {name}{shape}"),
                     _ => "takes no value".to_string(),
                 };
                 return Some(format!("{:?}: {name} {takes}.", seen.word));
             }
-            if matches!(seen.given, Given::Nothing)
-                && matches!(seen.flag.value, Value::Next | Value::Each)
-            {
+            let nothing = match seen.given {
+                Given::Nothing => matches!(seen.flag.value, Value::Next | Value::Each),
+                Given::Inline(value) => value.is_empty(),
+                _ => false,
+            };
+            if nothing {
                 return Some(format!("{name} was given no value: {name}{shape}."));
             }
             if seen.flag.value != Value::Each
@@ -308,7 +311,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn argv(words: &[&str]) -> Vec<String> {
-        std::iter::once("toyos-build").chain(words.iter().copied()).map(String::from).collect()
+        words.iter().copied().map(String::from).collect()
     }
 
     fn checked(words: &[&str]) -> Outcome {
@@ -337,9 +340,6 @@ mod tests {
         }
     }
 
-    /// The line drawn at the reader: a flag with no reader for a value, and one
-    /// whose reader takes the words after it, would drop an inline value in
-    /// silence; every other reader is handed it.
     #[test]
     fn an_inline_value_is_refused_exactly_where_it_would_be_dropped() {
         let debug = refusal(&["--debug=1"]);
@@ -356,9 +356,13 @@ mod tests {
     #[test]
     fn a_flag_left_without_its_value_is_refused() {
         for flag in CARGO_RUN.0.iter().filter(|f| matches!(f.value, Value::Next | Value::Each)) {
-            let message = refusal(&[flag.name]);
-            assert!(message.contains(flag.name), "{}: {message}", flag.name);
+            for word in [flag.name.to_string(), format!("{}=", flag.name)] {
+                let message = refusal(&[word.as_str()]);
+                assert!(message.contains(flag.name), "{word}: {message}");
+                assert!(message.contains("no value"), "{word}: {message}");
+            }
         }
+        assert!(refusal(&["--known-red="]).contains("no value"), "an optional value is a value");
         assert!(matches!(checked(&["--known-red"]), Outcome::Proceed), "--known-red answers alone");
         assert!(matches!(checked(&["--known-red", "audio_tone"]), Outcome::Proceed));
         assert!(refusal(&["--known-red", "--frobnicate"]).contains("--frobnicate"));
@@ -422,14 +426,6 @@ mod tests {
     /// Every file in this repository that can carry a command: the whole tree
     /// and not a list of directories, so a script or workflow arriving anywhere
     /// is read on its first commit.
-    ///
-    /// **What it does not reach**, each of them asserted below: `target/` is
-    /// built, `rust/` is the fork, and every dotted directory but `.github` is
-    /// skipped, so a `cargo run` in `.cargo/config.toml` is unread; `.md` is
-    /// not scanned, prose carrying no gate in this tree; a `cargo run` whose
-    /// `-- ` is on the next physical line is read by nothing, the scan taking
-    /// one line at a time; and a word's name ends at its `=`, so `--debug=1` —
-    /// a line the binary refuses — is read as the declared `--debug`.
     fn scanned_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         files_under(root, &mut files);
@@ -447,9 +443,14 @@ mod tests {
                     continue;
                 }
                 files_under(&path, out);
-            } else if path.extension().is_some_and(|e| {
+                continue;
+            }
+            // An extensionless file is read too: `NOTICE` hands this binary two
+            // command lines and is gated like any other source.
+            let carries = path.extension().is_none_or(|e| {
                 matches!(&*e.to_string_lossy(), "rs" | "sh" | "yml" | "yaml" | "toml")
-            }) {
+            });
+            if carries && !dotted {
                 out.push(path);
             }
         }
@@ -474,6 +475,7 @@ mod tests {
             "toyos-symbols/tests/real.rs",
             "kernel/Cargo.toml",
             "tests/toyos.rs",
+            "NOTICE",
         ] {
             assert!(files.contains(&root.join(named)), "the scan does not reach {named}");
         }
