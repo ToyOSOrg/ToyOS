@@ -251,13 +251,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         entry_count,
     );
 
-    // **Two register writes and no memory, before any channel exists**,
-    // because the panel's first paint goes through the memory type they
-    // establish and the loader's mapping of the scanout is uncacheable:
-    // `init_cr0` first, since `pat::init` restores the `CR0` it finds and a
-    // firmware `CD` would ride straight through it. Neither logs, so the
-    // boot's first record is still the panel's own.
-    arch::control_regs::init_cr0(0);
+    // **Before the panel and not after it**: the loader maps the scanout
+    // uncacheable, and `panic_console::arm`'s own record is the panel's first
+    // paint, so there is no window between arming the panel and painting
+    // through it in which to establish a memory type. The write alone, and it
+    // logs nothing: the read-back is `pat::check`, below, where a refusal has
+    // a channel to reach.
     pat::init();
 
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
@@ -301,8 +300,16 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         log::halt_before_the_next_repaint();
     }
 
-    // The state is established above, before the panel arms; the record is
-    // here, with the boot's other facts, and reads the live register.
+    // After actuator::init, whose table the `control-regs-bench` probe inside
+    // this call reads. `pat::init` above restored the `CR0` it found, so a
+    // firmware `CD` — which would make every mapping uncacheable whatever the
+    // PAT says — ends here.
+    arch::control_regs::init_cr0(0);
+
+    // The read-back `pat::init` owes, on a boot that now has three channels to
+    // carry a refusal.
+    pat::check();
+
     log!("PAT: IA32_PAT={:#018x}, entry {} = {}",
         pat::msr(), pat::WC_ENTRY, pat::entry_name(pat::WC_ENTRY));
 
