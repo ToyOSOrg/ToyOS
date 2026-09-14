@@ -402,8 +402,6 @@ impl<X: SchedPayload> CpuSched<X> {
         self.dying.len()
     }
 
-    /// The tasks this CPU has stopped, for the invariant walks and for the
-    /// shutdown's own record.
     pub fn stopped(&self) -> impl Iterator<Item = &ReadyTask<X>> + '_ {
         self.stopped.iter()
     }

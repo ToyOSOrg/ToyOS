@@ -1,13 +1,6 @@
 # A boot whose one job writes from six threads and then reboots out from under
-# them: the shape `quiesce`'s two claims — every filesystem synced, and
-# `Rebooting.` last — are false in unless the machine is stopped first.
-#
-# `common::power::quiesce_stops_the_machine` boots this with `quiesce-late-word`
-# armed, because QEMU has no window between the boot's last word and the reset
-# and hardware does; the actuator buys the guest the same span to be wrong in.
-#
-# **No `reboot` job.** The job asks for the reset itself, from a thread that is
-# not one of the writers, which is what puts the writers mid-loop when it lands.
+# them. The job asks for the reset itself, from a thread that is not one of the
+# writers, so no `reboot` job follows the list.
 [boot]
 start = ["logd", "test-runner"]
 

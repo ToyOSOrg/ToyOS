@@ -746,11 +746,13 @@ pub fn log_health() {
         let ready = driver::ready_len() + usize::from(percpu::current_tid().is_some());
         let parked = driver::parked_len();
         let dying = driver::dying_len();
+        let stopped = driver::stopped_len();
         crate::log!(
-            "sched: cpu={} ready={} dying={} parked={} current={:?} trips={}",
+            "sched: cpu={} ready={} dying={} stopped={} parked={} current={:?} trips={}",
             cpu,
             ready,
             dying,
+            stopped,
             parked,
             percpu::current_tid(),
             trips,

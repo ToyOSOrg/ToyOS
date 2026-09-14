@@ -78,16 +78,28 @@ pub(crate) fn between_attempts(attempt: u32) {
     );
 }
 
-/// How many block-device operations are open right now, across every CPU.
+/// Block-device operations open right now on a thread the shutdown's stop
+/// stops. **The shutdown's own oracle, and the one number in this module that
+/// is not about time**: `quiesce` stops userland and then claims every
+/// filesystem is synced, and this is what the block layer says about that
+/// claim.
 ///
-/// **The shutdown's own oracle, and the one number in this module that is not
-/// about time.** `quiesce` stops userland and then claims every filesystem is
-/// synced; this is what was still inside the block layer when it made that
-/// claim — zero if the machine had really stopped, and not if it had not.
+/// `iod`, `usbd` and the xHCI cache flush go on running across the stop by
+/// design, so an operation of theirs is not what the claim is about and is not
+/// counted here.
 static OPEN_OPERATIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-pub fn open_operations() -> u32 {
-    OPEN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed)
+/// The same operations over the whole boot rather than right now. **The
+/// control on the counter**: zero is a counter that never counted, which no
+/// boot that wrote a file can honestly report.
+static BEGUN_OPERATIONS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Open now, and begun on this boot.
+pub fn userland_operations() -> (u32, u64) {
+    (
+        OPEN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed),
+        BEGUN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 /// One open block-device operation: the deadline an [`Operation`] declares,
@@ -96,11 +108,16 @@ pub fn open_operations() -> u32 {
 pub struct OpenOperation {
     /// Held for its drop and read by nothing: it is what bounds the operation.
     _deadline: Operation,
+    /// Decided at the open and not at the close, so the two ends of one
+    /// operation cannot disagree about whether it was counted.
+    counted: bool,
 }
 
 impl Drop for OpenOperation {
     fn drop(&mut self) {
-        OPEN_OPERATIONS.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        if self.counted {
+            OPEN_OPERATIONS.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -108,11 +125,16 @@ impl Drop for OpenOperation {
 // An absolute deadline, not a relative duration: it crosses into a driver that loops, and re-basing per command would bound each command instead of the whole operation.
 #[must_use = "the operation lasts exactly as long as this guard"]
 pub fn begin_operation() -> OpenOperation {
-    OPEN_OPERATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let counted = !crate::sched::kthread::current_is_kernel_thread();
+    if counted {
+        OPEN_OPERATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        BEGUN_OPERATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
     OpenOperation {
         _deadline: Operation::begin(Deadline::at(
             crate::clock::now() + OPERATION.duration(),
         )),
+        counted,
     }
 }
 

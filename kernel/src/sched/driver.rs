@@ -817,6 +817,11 @@ pub fn dying_len() -> usize {
     try_with_cpu(|cpu| cpu.dying_len()).unwrap_or(0)
 }
 
+/// Threads on this CPU the machine's stop banded; no pick serves them again.
+pub fn stopped_len() -> usize {
+    try_with_cpu(|cpu| cpu.stopped_len()).unwrap_or(0)
+}
+
 /// Every dying thread on this CPU, in the order the pick will take them.
 pub fn for_each_dying(mut f: impl FnMut(TaskId)) -> bool {
     try_with_cpu(|cpu| {

@@ -165,7 +165,7 @@ pub fn metal_job_reboot(
 ///
 /// The guest writes and fsyncs from six threads and then asks for the reset
 /// from a seventh, so every claim `quiesce` makes is made over a machine that
-/// was busy an instant earlier. Three things are judged, and the stop reverted
+/// was busy an instant earlier. Four things are judged, and the stop reverted
 /// fails each on its own:
 ///
 /// * **nothing at all follows `Rebooting.` on the console** — which is a judge
@@ -174,7 +174,10 @@ pub fn metal_job_reboot(
 ///   under the last word on a machine that was not stopped;
 /// * the kernel's `stop:` record says every userland thread it had to stop was;
 /// * **zero block-device operations were open when the stop ended** — a count
-///   the block layer keeps, not one the stop derives, so the two can disagree.
+///   the block layer keeps, not one the stop derives, so the two can disagree;
+/// * and that count counted at all, which the operations this boot began is
+///   what says: a counter that never incremented reads zero for the wrong
+///   reason, and the writers above put thousands through it.
 ///
 /// `quiesce-late-word` is armed for the reason `usb_reset_hands_devices_back`'s
 /// deadline arm arms it: QEMU has no window between the boot's last word and
@@ -219,15 +222,18 @@ pub fn quiesce_stops_the_machine(
     serial::Serial::named("quiesce drain", tail.as_str()).must_be_clean()?;
     returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
 
-    // **First, because it is the defect and the other two are the mechanism.**
-    // The whole change reverted reds here, on the record a writer thread put
-    // under the boot's own last word.
-    let after: Vec<&str> = whole
-        .lines()
-        .skip_while(|line| !line.contains(REBOOTING))
-        .skip(1)
-        .filter(|line| !line.trim().is_empty())
-        .collect();
+    // **First, because it is the defect and the rest are the mechanism.** The
+    // whole change reverted reds here, on the record a writer thread put under
+    // the boot's own last word.
+    //
+    // The word's presence is asserted before what follows it: a boot that
+    // never wrote it has nothing after it either, and would pass this
+    // vacuously.
+    let mut lines = whole.lines();
+    if !lines.any(|line| line.contains(REBOOTING)) {
+        return Err(format!("this boot never wrote {REBOOTING:?}\n{whole}"));
+    }
+    let after: Vec<&str> = lines.filter(|line| !line.trim().is_empty()).collect();
     if !after.is_empty() {
         return Err(format!(
             "{} line(s) reached the console after the boot's last word:\n  {}",
@@ -236,32 +242,35 @@ pub fn quiesce_stops_the_machine(
         ));
     }
 
-    let record = whole
+    let said = whole
         .lines()
-        .find(|line| line.contains(STOP_RECORD))
-        .ok_or_else(|| format!("the kernel wrote no {STOP_RECORD:?} record\n{whole}"))?;
-    if !record.contains(NOTHING_OPEN) {
+        .find(|line| line.contains(toyos_quiesce::STOPPED))
+        .ok_or_else(|| format!("the kernel wrote no stop record\n{whole}"))?;
+    let record = toyos_quiesce::Record::parse(said)
+        .ok_or_else(|| format!("the kernel's stop record did not read back as one:\n  {said}"))?;
+    if record.in_flight != 0 {
         return Err(format!(
-            "the block layer still had operations open where the stop ended, so the machine was \
-             not stopped before the sync claimed it was:\n  {record}"
+            "the block layer still had {} operation(s) open where the stop ended, so the machine \
+             was not stopped before the sync claimed it was:\n  {record}",
+            record.in_flight,
         ));
     }
-    if record.contains(LEFT_RUNNING) {
+    if record.begun == 0 {
         return Err(format!(
-            "the stop gave up on threads that never reached a safe point:\n  {record}"
+            "this boot began no block-device operation on a stoppable thread, so the zero above \
+             is a counter that never counted rather than a machine that stopped:\n  {record}"
+        ));
+    }
+    if !record.stopped_the_machine() {
+        return Err(format!(
+            "the stop gave up on {} thread(s) that never reached a safe point:\n  {record}",
+            record.sweep.running,
         ));
     }
 
-    eprintln!("  [power] the machine stopped before it claimed anything: {}", record.trim());
+    eprintln!("  [power] the machine stopped before it claimed anything: {record}");
     Ok(())
 }
-
-/// The kernel's stop record, and the two things read out of it.
-/// `kernel/src/quiesce.rs` writes it and `toyos-quiesce` renders it; nothing
-/// links those crates to this one, which is why these are constants here.
-const STOP_RECORD: &str = "stop: ";
-const NOTHING_OPEN: &str = "0 block operation(s) still open";
-const LEFT_RUNNING: &str = "this reset lands wherever";
 
 /// A job list that never finishes ends the boot anyway, on the runner's own
 /// deadline: the kernel is alive and its scheduler passes keep feeding the
@@ -1379,6 +1388,7 @@ pub fn blackbox_foreign_record(
 /// appends to the same `loader.log` — so the argument is that file's tail.
 pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     after.must_say(&done_line())?;
+    stopped_the_log_writer_too(after)?;
     // The distinction the whole state machine exists for: a deliberate stop is
     // not a panic and not a kernel that vanished.
     says_nothing_of(after, &armed_and_nothing_else())?;
@@ -1388,6 +1398,27 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     eprintln!("  [power] a deliberate reboot sealed DONE and the chain ended in a reset");
+    Ok(())
+}
+
+/// The shutdown's second stage: the log's own writer stopped once the boot's
+/// last word was durable.
+///
+/// **Read off the page and nowhere else.** That stage runs below the last
+/// word, so a record of it in the log would be the thing this whole path
+/// prevents — it goes on the black box, and the pass after the reset prints
+/// it. The first stage's record is in the same capture, on the first boot's
+/// console, which is why this reads only what follows the seal.
+fn stopped_the_log_writer_too(after: &serial::Serial) -> Result<(), String> {
+    let said = after.must_say_after(&done_line(), toyos_quiesce::STOPPED)?;
+    let record = toyos_quiesce::Record::parse(said)
+        .ok_or_else(|| format!("the page's stop record did not read back as one:\n  {said}"))?;
+    if !record.stopped_the_machine() {
+        return Err(format!(
+            "the second stage left {} thread(s) running into the reset:\n  {record}",
+            record.sweep.running,
+        ));
+    }
     Ok(())
 }
 

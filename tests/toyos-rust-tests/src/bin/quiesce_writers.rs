@@ -37,8 +37,7 @@ const CHUNK: usize = 8192;
 /// every one of them is inside its loop rather than still being spawned.
 const SPIN_UP: Duration = Duration::from_millis(300);
 
-/// What a writer says every pass. Mirrored in `tests/common/power.rs`, which
-/// counts these under the boot's last word; nothing links the two crates.
+/// What a writer says every pass.
 const WRITING: &str = "quiesce-writer:";
 
 fn main() {

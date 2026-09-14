@@ -62,7 +62,7 @@ name = "boot.metalcase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
-measured = 1252
+measured = 1260
 
 # --- what the machine spent coming back, on the host's clock ---
 # The loop already refuses past this; the row exists so the number is read and
@@ -109,7 +109,7 @@ name = "boot.metalcase.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
-measured = 46
+measured = 45
 
 [[number]]
 name = "boot.latencycase.complete_ms"
@@ -687,15 +687,13 @@ ceiling_from = "as boot.testcases.park_open_operations"
 name = "boot.metalcase.park_ms"
 unit = "ms"
 ceiling = 2010
-ceiling_from = "as boot.testcases.park_ms. **The boot this row exists for**: this config starts sshd, sshd spins in Ring 3 retrying a netd that has no NIC on this machine, and its own `exit:` record landing after `Rebooting.` is the defect the stop closes"
-measured = 129
+ceiling_from = "as boot.testcases.park_ms"
 
 [[number]]
 name = "boot.metalcase.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"
-measured = 0
 
 [[number]]
 name = "boot.latencycase.park_ms"
@@ -713,15 +711,13 @@ ceiling_from = "as boot.testcases.park_open_operations"
 name = "boot.metaldevicecase.park_ms"
 unit = "ms"
 ceiling = 2010
-ceiling_from = "as boot.testcases.park_ms. The boot that reads it hardest: megabytes written and fsynced before the reset, so a thread inside a block-layer operation when the stop is raised is the ordinary case here rather than the unlucky one"
-measured = 0
+ceiling_from = "as boot.testcases.park_ms"
 
 [[number]]
 name = "boot.metaldevicecase.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"
-measured = 0
 
 [[number]]
 name = "boot.selftests.park_ms"

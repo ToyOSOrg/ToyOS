@@ -940,10 +940,14 @@ fn note_run_latency(vm: &mut Vm<'_>) {
                     // is spawn placement rather than either of the above.
                     None => ReadyCause::Fresh,
                     // A task cannot arrive in a run queue *from* one, and the
-                    // two remaining containers are terminal for this instrument.
-                    Some(Container::Ready | Container::Dying | Container::Zombie) => {
-                        ReadyCause::Fresh
-                    }
+                    // remaining containers are terminal for this instrument —
+                    // `Stopped` most of all, which nothing leaves.
+                    Some(
+                        Container::Ready
+                        | Container::Dying
+                        | Container::Stopped
+                        | Container::Zombie,
+                    ) => ReadyCause::Fresh,
                 };
                 vm.awaiting.insert(key, (now, cause));
             }

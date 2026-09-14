@@ -1596,28 +1596,15 @@ pub fn deadline_lateness_ms(loader: &str) -> Option<u64> {
     reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
 }
 
-/// How long the kernel spent stopping userland before it synced anything, out
-/// of the `stop:` record in this boot's own kernel log.
+/// What the kernel's stop wrote about itself in this boot's own kernel log.
 ///
 /// `None` on a boot that wrote none, which is every boot that reset without
 /// going through `quiesce` — `deadlinewedge` and `hardlockup` are the two.
-pub fn park_ms(kernel: &str) -> Option<u64> {
-    let said = kernel.lines().find(|l| l.contains(bootlog::MACHINE_STOPPED))?;
-    let (_, rest) = said.split_once(" cpu(s) in ")?;
-    let (ms, _) = rest.split_once(" ms over ")?;
-    ms.parse().ok()
-}
-
-/// How many block-device operations were still open where that stop ended.
-///
-/// **The number the stop does not produce itself**: the block layer counts it,
-/// so a stop that reported success over a machine still inside the block layer
-/// disagrees with itself here rather than reading consistent.
-pub fn park_open_operations(kernel: &str) -> Option<u64> {
-    let said = kernel.lines().find(|l| l.contains(bootlog::MACHINE_STOPPED))?;
-    let (_, rest) = said.split_once(" sweep(s), ")?;
-    let (open, _) = rest.split_once(" block operation(s)")?;
-    open.parse().ok()
+pub fn park(kernel: &str) -> Option<toyos_quiesce::Record> {
+    kernel
+        .lines()
+        .find(|line| line.contains(toyos_quiesce::STOPPED))
+        .and_then(toyos_quiesce::Record::parse)
 }
 
 /// The same for the other bound: how far past its own bound the hard-lockup

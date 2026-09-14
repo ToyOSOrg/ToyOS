@@ -298,7 +298,7 @@ impl Readback {
     /// through `quiesce` — `deadlinewedge` and `hardlockup` are the two, and
     /// the profile prices this for neither.
     pub fn park_ms(&self) -> Option<u64> {
-        toyos_build::metal::park_ms(&self.kernel)
+        toyos_build::metal::park(&self.kernel).map(|park| park.elapsed_ms)
     }
 
     /// Block-device operations still open where that stop ended, from the same
@@ -306,7 +306,28 @@ impl Readback {
     /// beside one only because it is the same record: it is the block layer's
     /// own count, so it is what the stop can be wrong against.
     pub fn park_open_operations(&self) -> Option<u64> {
-        toyos_build::metal::park_open_operations(&self.kernel)
+        toyos_build::metal::park(&self.kernel).map(|park| u64::from(park.in_flight))
+    }
+
+    /// Whether the stop stopped the machine, as against how long it spent
+    /// trying.
+    ///
+    /// **No ceiling can ask this.** A stop that gave up returns having spent
+    /// its budget and no more, so `park_ms` reads under its own ceiling by
+    /// construction and `park_open_operations` reads whatever the threads it
+    /// left running happened to be doing. The shortfall the record names is
+    /// the only thing that says the machine was not stopped.
+    pub fn stop_completed(&self) -> Result<(), String> {
+        match toyos_build::metal::park(&self.kernel) {
+            Some(park) if !park.stopped_the_machine() => Err(format!(
+                "{}'s stop gave up on {} userland thread(s) that never reached a safe point, so \
+                 this boot's sync and its last word are claims about a machine that was still \
+                 running:\n    {park}",
+                self.label,
+                park.sweep.running,
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// The loader pass **after** the kernel's reset, which is where a chain
@@ -918,10 +939,7 @@ pub fn run(
                 // boot the file prices a lateness for and that produced none is
                 // therefore a boot some *other* bound ended, which is exactly
                 // what a run of `deadlinewedge` sealed by the lockup detector
-                // was, and it used to be skipped rather than reported. The
-                // stop's two numbers are absent on the same boots and priced
-                // by the same rule, from the other side: those two reset
-                // without going through `quiesce`, so they stop nothing.
+                // was, and it used to be skipped rather than reported.
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),
@@ -956,6 +974,10 @@ pub fn run(
                 // machine fact into a missing line — and the missing line is
                 // what a reader would have to guess about.
                 if let Err(why) = back.log_reached_the_stick() {
+                    eprintln!("    FAIL {why}");
+                    red = true;
+                }
+                if let Err(why) = back.stop_completed() {
                     eprintln!("    FAIL {why}");
                     red = true;
                 }

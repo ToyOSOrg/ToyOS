@@ -30,6 +30,10 @@ pub(super) fn sys_log_read(
     if let Err(e) = demand_syscap(syscap, Rights::LOG) {
         return e.refuse();
     }
+    // Here, because this is where the capability was demanded: the shutdown's
+    // stop leaves the log's readers running until the boot's last word is
+    // durable, and no caller's own word may move that.
+    log::user::note_log_reader(process::current_process().raw());
     let mut cursor = match ctx.copy_in::<toyos_abi::log::LogCursor>(cursor_ptr) {
         Ok(cursor) => cursor,
         Err(e) => return e.to_u64(),
@@ -57,19 +61,16 @@ fn quiesce(last: &str) {
     // **Before the sync, because the sync is a claim about a machine.** A
     // process that issues a `write` after `sync_all` returns has dirty pages
     // nothing will flush, and one that enters a syscall after the boot's last
-    // word puts its own record under that word. The carve-out is the process
-    // the log's durability is owed to: it has to keep running until
-    // `wait_for_durable` below returns, and it is stopped straight after.
-    let stopped = crate::quiesce::stop(toyos_quiesce::Stage::ExceptLog {
-        keep: crate::log::user::durable_pid(),
-    });
+    // word puts its own record under that word. The carve-out is every process
+    // the log's durability can be owed to: those have to keep running until
+    // `wait_for_durable` below returns, and are stopped straight after.
+    let stopped = crate::quiesce::stop(toyos_quiesce::Stage::ExceptLog);
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
     crate::writeback::drain_all();
     crate::vfs::lock().sync_all();
-    // The final census: no process runs after this to report another — which
-    // is now a fact the stop established rather than a hope, and `stopped` is
-    // what says so.
+    // The final census: no process runs after this to report another, which is
+    // what `stopped` says.
     crate::irq_census::log_census();
     crate::drivers::nvme::log_census();
     log!("{stopped}");
@@ -90,9 +91,9 @@ fn quiesce(last: &str) {
     // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
     let durability = crate::log::wait_for_durable();
     // The carve-out's reason is spent: the last word is on the volume, so the
-    // one process still running stops here. Nothing it could write from now on
-    // would reach a file anyway, and everything below takes its device away.
-    let _ = crate::quiesce::stop(toyos_quiesce::Stage::All);
+    // processes still running stop here. Nothing they could write from now on
+    // would reach a file anyway, and everything below takes their device away.
+    let stopped_all = crate::quiesce::stop(toyos_quiesce::Stage::All);
     crate::log::console::drain_inline();
     // After the log is durable: the next boot's loader reads this page to learn
     // how the last one ended, and a machine that was asked to stop is the one
@@ -100,6 +101,12 @@ fn quiesce(last: &str) {
     // own `ARMED` and report a kernel that vanished. The reset's own account is
     // appended under it.
     crate::blackbox::record_done();
+    // **The second stage's only reader.** It runs below the boot's last word,
+    // so a record of it in the log would be the very thing this path exists to
+    // prevent; the page the next loader pass prints is the one channel left.
+    crate::blackbox::append(|account| {
+        let _ = writeln!(account, "{stopped_all}");
+    });
     // Under that seal, because it extends it: how much of this boot's log the
     // volume got, and the newest of what it did not. A file cannot report on
     // its own tail, and on a machine with no serial port this is the only
