@@ -13,7 +13,9 @@ An operating system built from scratch in Rust, held to a production-grade engin
 | `tests/CLAUDE.md` | the caveats that bite the harness |
 | `src/CLAUDE.md` | boot modes, the locks and slots, worktrees — the operational file |
 | `issues/README.md` | the issue tracker: one file per issue, typed by kind; `ls` is the index |
+| `.claude/agents/implementer.md` | the prompt the orchestrator spawns an implementer with |
 | `.claude/agents/reviewer.md` | the review prompt the orchestrator spawns a reviewer with |
+| `.claude/agents/orchestrator.md` | the orchestrator's own role: the loop's clock, and what it may not do |
 
 There are no spec documents. Rules live where they are enforced — a gate, a
 module header, the redlist, the review prompt — and everything else is an

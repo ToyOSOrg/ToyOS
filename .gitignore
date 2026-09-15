@@ -2,6 +2,8 @@ target/
 .claude/*
 !.claude/agents/
 .claude/agents/*
+!.claude/agents/implementer.md
+!.claude/agents/orchestrator.md
 !.claude/agents/reviewer.md
 # A SoundFont is a licence question, and this repository answers it for exactly
 # one: `assets/soundfont.sf2`, which `NOTICE` accounts for. The pattern stays
