@@ -331,6 +331,18 @@ pub const RELEGATED: &[Relegated] = &[
                  precedes it, and the T14 is the only judge of the device itself.",
     },
     Relegated {
+        test: "lan_no_lease",
+        ci_ms: 32_709,
+        why: Why::TimerAnchored,
+        guards: "netd on a wire with no DHCP server: it says it has no address and serves \
+                 anyway, which is what keeps an arm waiting for that line from hanging instead \
+                 of having its connects refused one at a time. The verdict is that no lease \
+                 arrived before `toyos_tco::LEASE_BOUND_MS` ran out and the boot went on \
+                 talking, so it is a span of clock counted down in the guest. What still runs \
+                 per pull request: `lan_dhcp_lease` carries the same client to a lease on a \
+                 wire that answers; nothing else asks what it does on one that does not.",
+    },
+    Relegated {
         test: "dump_nmi_probe",
         ci_ms: 8_098,
         why: Why::Cost,

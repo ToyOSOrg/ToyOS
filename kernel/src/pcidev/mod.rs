@@ -514,11 +514,6 @@ impl core::fmt::Display for Refusal {
                 "it would have no address space of its own — {why} — and a process driving \
                  it would be given physical addresses to put in descriptors"
             ),
-            // **Two sentences, because a 32-bit run is a different problem from
-            // a 64-bit one.** Above the highest address firmware described
-            // there is always room in 64 bits and never any in 32: the
-            // platform's fixed MMIO is up there, so the low side is what the
-            // run list in this log is about.
             Self::NoRun { wide: true } => write!(
                 f,
                 "this machine has no 2 MiB-aligned 64-bit address space both above what firmware \
@@ -835,6 +830,11 @@ fn msix_bar(pci: &PciDevice) -> Option<u8> {
 ///
 /// **Every caller has named `at` routed first.** A load no bridge forwards does
 /// not come back on real hardware.
+///
+/// **A refused candidate leaves the direct map's entries over its range
+/// uncacheable, and that is the whole of what it leaves**: the boot map already
+/// covers every physical address, so this takes no address space there is any
+/// giving back of, and a run holds no memory the firmware map described.
 fn probe_dword(at: u64, span: u64, offset: u64) -> u32 {
     crate::mm::paging::map_mmio(at, span, MmioPolicy::Uncacheable).read_u32(offset)
 }
@@ -921,9 +921,6 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64) -> Result<u64, Re
             return Err(Refusal::BarUnplaceable(index));
         }
         let after = probe_dword(at, span, reference);
-
-        // **The function answers at the new address what it answers at its own,
-        // which is the whole proof.**
         if after == signature {
             alone_in_its_page(pci, index, at, span);
             cut(pci, index, at, span);
@@ -1250,10 +1247,6 @@ pub fn drain_pending() {
         if !irq.take_pending() {
             continue;
         }
-        // **The one record that tells a silent device from an undelivered
-        // message.** The end-of-boot census counts what arrived and a count of
-        // zero is both facts at once; this is said when the first one lands,
-        // and its absence is then the other fact.
         if irq.take_unannounced() {
             log!(
                 "pcidev: slot {slot} took its first message on vector {:#x}",

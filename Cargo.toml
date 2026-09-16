@@ -96,7 +96,9 @@ fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
 # `statvfs` for `worktree::free_bytes`; `getloadavg` and the libproc pair
-# (`proc_listallpids`/`proc_pidpath`) for gate A's host-conditions line.
+# (`proc_listallpids`/`proc_pidpath`) for gate A's host-conditions line; and the
+# unprivileged ICMP datagram socket `icmp::echo` asks a metal boot over, which
+# is the platform call that replaces a `ping` binary.
 libc = "0.2"
 toml = "0.8"
 uuid = { version = "1", features = ["v4"] }

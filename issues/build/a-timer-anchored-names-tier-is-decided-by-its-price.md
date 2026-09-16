@@ -27,10 +27,6 @@ it". Two of the nine that stayed Fast are anchored by exactly that test:
   what decides them.
 - **`job_deadline_reboots`** (4,806 ms) — its verdict waits out a staged window,
   the runner's job list running past `toyos_tco::JOB_BOUND_MS`.
-- **`lan_no_lease`** (unpriced) — it waits out `toyos_tco::LEASE_BOUND_MS` in
-  real time for netd to say it has no address. Registered Fast with the
-  `UNMEASURED` marker, which only the fast tier carries, so its first CI price
-  decides it under the same unresolved rule.
 
 So the tier of a timer-anchored name is currently decided by its price, and the
 classification the boundary states is not what placed it. Either the two above

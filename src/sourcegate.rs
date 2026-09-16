@@ -464,7 +464,7 @@ const SENTINEL_ALLOWED: &[(&str, usize)] = &[
 const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/completion/inbox.rs", 1),
     ("kernel/src/drivers/hda.rs", 1),
-    ("kernel/src/drivers/panic_console/mod.rs", 2),
+    ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/drivers/virtio_console.rs", 1),
     ("kernel/src/drivers/virtio_sound.rs", 2),
     ("kernel/src/hw.rs", 1),
@@ -558,15 +558,6 @@ const HOST_SPAWNS: &[Spawn] = &[
               can: the machine runs Ubuntu and no ToyOS code. Outside the bar and declared by \
               nothing else — no build, boot or gate reaches it, and the metal loop runs only \
               when it is asked for",
-    },
-    Spawn {
-        arg: "\"ping\"",
-        sites: &[],
-        why: "the host's own ICMP client, in `src/metal.rs` alone: the one question this \
-              repository can ask a metal boot while that boot is still up, and an \
-              implementation of ICMP nobody here wrote, which is what makes it an oracle for \
-              the stack under test. Outside the bar and declared by nothing else: no build, \
-              boot or gate reaches it, and the metal loop runs only when it is asked for",
     },
     Spawn {
         arg: "\"/sbin/newfs_msdos\"",

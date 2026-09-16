@@ -11,11 +11,14 @@ is on a cable on the same LAN as the development Mac and its NIC is the onboard
 Intel I219 at `00:1f.6`, `8086:15fc`, which the kernel enumerates and nothing
 claims. The track is to make that cable the answer path.
 
-Built and green under QEMU: the substrate (`kernel/src/pcidev/mod.rs`), the I219
-driver (`toyos-i219/`), netd's address from DHCP, the record stream
-(`toyos-logstream/`) and sshd's exec, transfer and key auth. What is left is the
-laptop — its own card (`tests/lancase`), the stream and the ssh from the Mac, and
-a netboot spike.
+The substrate a process needs to drive a PCI function itself is built
+(`kernel/src/pcidev/mod.rs`, `userland/netd/src/virtio_net.rs`). What is left is
+the I219 driver in netd, with DHCP under the hostname `toyos-t14` and a first
+ping and ssh from the Mac; a record stream from logd to a listener in the
+harness, so a boot's log arrives while it is booting; command execution, file
+transfer both ways and key auth in sshd, with the harness running userland tests
+over ssh through a russh client; and a netboot spike in which the firmware
+fetches the loader over HTTP so the stick leaves the boot path.
 
 Constraints a reader would otherwise pay to re-derive:
 
@@ -31,15 +34,9 @@ Constraints a reader would otherwise pay to re-derive:
   before suspecting the driver.
 - **ssh is the bench's transport and a real feature**: sshd is built on russh
   and the harness's client is russh too. No host ssh binary, no fork.
-- **Addressing is DHCP with a hostname**, and netd sends `toyos-t14` as the
-  host-name option — but **the name resolves to nothing on this LAN**, measured,
-  so the metal loop reads the address off the claimed function (`Driver::wire`)
-  instead. Wi-Fi is out — the AX210 needs a firmware image.
-- **The I219 is an MSI part**, measured: `/proc/interrupts` names its interrupt
-  `IR-PCI-MSI-0000:00:1f.6` and `msi_irqs/162` reads `mode=msi`.
-- The I219 has a **32-bit BAR** (`bar0=0xbcf00000`) and it has to move: where
-  firmware put it, it shares a 2 MiB page with the internal NVMe's
-  `0xbce00000`, and 2 MiB is the only page size this kernel maps.
+- **Addressing is DHCP with a hostname**, resolved through the router's DNS. The
+  T14's MAC is the same under ToyOS and Ubuntu, so the lease is the one `t14`
+  already resolves to. Wi-Fi is out — the AX210 needs a firmware image.
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
   ground reddened every netd registration at once. So a re-claim is made safe by
@@ -49,8 +46,9 @@ Constraints a reader would otherwise pay to re-derive:
   one; the I219 does, so on the T14 both hold.
 - **The record stream is `logstream=<a.b.c.d>:<port>` on the parameter line**,
   copied by the kernel into `/system/bin/init`'s environment and read from there
-  by `logd` (`toyos-logstream`'s `PARAM` and `ENV`). A boot that dies before
-  `logd` runs still needs the stick.
+  by `logd` (`toyos-logstream`'s `PARAM` and `ENV`). What is left to build is the
+  metal half: arming the flashed image with the Mac's address and listening while
+  the T14 boots. A boot that dies before `logd` runs still needs the stick.
 - **A stalled peer's backpressure reaches `logd`'s queue only after megabytes.**
   Between them stand a 2 MiB kernel pipe (`kernel/src/pipe.rs`'s `PIPE_SIZE`) and
   netd's 64 KiB send buffer, and a `log-storm` at `--smp 8` produces 4,213 lines

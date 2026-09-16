@@ -17,7 +17,7 @@ use common::{
 };
 use toyos_build::day::Day;
 use toyos_build::bootlog::{self, boot_millis};
-use toyos_build::testargs::Shard;
+use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::tiers::{self, Tier};
 
 struct TestDef {
@@ -652,14 +652,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // one written down. The DHCP server it is judged against is QEMU's own, an
     // implementation of RFC 2131 this repository did not write, and its lease
     // is known field by field. The verdicts are records and a lease's fields;
-    // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
+    // no clock in it.
     ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
-    // announces itself anyway. Fast with the UNMEASURED marker, which only the
-    // fast tier carries; its verdict is timer-anchored, and
-    // `issues/build/a-timer-anchored-names-tier-is-decided-by-its-price.md`
-    // holds the relegation it owes.
-    ("lan_no_lease", Sched::Parallel, Tier::Fast),
+    // announces itself anyway. Its verdict waits out netd's own lease bound, so
+    // a slower machine moves it; `RELEGATED` says what leaves the per-PR tier
+    // with it.
+    ("lan_no_lease", Sched::Parallel, Tier::Nightly),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -672,8 +671,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // moved that function's BAR. Its own boot rather than a second assertion in
     // the row above, because that one's subject is exclusivity and a test that
     // reds tells a reader which of the two it is about. It waits out a drain for
-    // the message record, so its price carries a fixed span of host wall clock;
-    // Fast with the UNMEASURED bootstrap marker until priced.
+    // the message record, so its price carries a fixed span of host wall clock.
     ("bar_placement_is_proven", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
@@ -4132,6 +4130,38 @@ fn check_wrap(dump: &screen::Ppm) -> Result<(), String> {
     Ok(())
 }
 
+/// Every row on the panel is text the log actually carries.
+///
+/// **The check the panel's grid owes**: `panic_console` writes only the cells
+/// whose character or colour moved, so a cell it fails to write is one the
+/// previous paint left standing, and past the end of a line that replaced a
+/// longer one that is a string no line of the log contains.
+fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String> {
+    let said: String = console
+        .replace("[kernel ", "[")
+        .bytes()
+        .map(|byte| match byte {
+            b'\n' => '\n',
+            b'\t' => ' ',
+            0x20..=0x7E => byte as char,
+            _ => '.',
+        })
+        .collect();
+    for row in dump.rows() {
+        let row = row.trim_end();
+        if row.is_empty() || row.starts_with("[page ") || said.contains(row) {
+            continue;
+        }
+        return Err(format!(
+            "the panel row {row:?} is in no line of the log, so a cell the paint that put \
+             this screen up did not write is still standing from the one before \
+             it\ndecoded screen:\n{}",
+            dump.text()
+        ));
+    }
+    Ok(())
+}
+
 /// Run one screen test. `Err` carries the decoded screen, because a failure
 /// here is almost always "the text is not what I expected" and the decoded
 /// grid is the only readable form of that.
@@ -5566,15 +5596,28 @@ fn run_screen_test(
             let mut pages: Vec<String> = Vec::new();
             let mut report: Option<String> = None;
             let mut head_seen = false;
+            // **The only incremental paints a guest makes**: the report's own
+            // paint follows a fill, and every page the pager puts up after it
+            // is written against the grid the one before left — which is the
+            // paint `check_no_stale_cells` exists for. The footers of the
+            // settled captures it judged, and two of them, because the first is
+            // the page the fill painted.
+            const JUDGED_PAGES: usize = 2;
+            let mut judged: Vec<String> = Vec::new();
+            let mut before: Option<String> = None;
             // A liveness ceiling on a machine that is halted and paging, so
             // there is no console to read progress off and this is the case
             // `qemu::budget` exists for.
             let deadline = Instant::now() + qemu.budget(Duration::from_secs(40));
-            while Instant::now() < deadline && !(head_seen && report.is_some()) {
-                let text = qemu.screendump().text();
+            while Instant::now() < deadline
+                && !(head_seen && report.is_some() && judged.len() >= JUDGED_PAGES)
+            {
+                let dump = qemu.screendump();
+                let text = dump.text();
                 let Some(footer) = text.lines().rev().find(|l| l.starts_with("[page ")) else {
                     // Before the panic the screen still carries a boot
                     // checkpoint; only a paginated screen has a footer.
+                    before = None;
                     thread::sleep(Duration::from_millis(200));
                     continue;
                 };
@@ -5585,6 +5628,17 @@ fn run_screen_test(
                     report = Some(text.clone());
                 }
                 head_seen |= text.contains(HEAD);
+                // **A screendump is not a shutter**: one taken across a paint
+                // carries the rows already written above the rows the paint
+                // replaced, and a row half of each is in no line of any log. Two
+                // identical captures are a paint that finished.
+                if before.as_deref() == Some(text.as_str()) {
+                    check_no_stale_cells(&dump, &qemu.console_stream().since(0))?;
+                    if !judged.contains(&footer.to_string()) {
+                        judged.push(footer.to_string());
+                    }
+                }
+                before = Some(text.clone());
                 thread::sleep(Duration::from_millis(200));
             }
 
@@ -5612,6 +5666,14 @@ fn run_screen_test(
             if pages.len() < 2 {
                 return Err(format!(
                     "only one page footer ever appeared ({seen}); the pager is not cycling"
+                ));
+            }
+            if judged.len() < JUDGED_PAGES {
+                return Err(format!(
+                    "only {} settled page(s) were judged for stale cells ({}), so no paint made \
+                     against the grid the one before it left was ever read",
+                    judged.len(),
+                    judged.join(" ")
                 ));
             }
             Ok(())
@@ -13784,15 +13846,6 @@ fn run_machine_test(
             Ok(())
         }
         "bar_placement_is_proven" => {
-            // **Firmware says where a BAR may go and the function says whether
-            // it went there, and this is the reading that says both ran.** The
-            // same netcase boot, because the NIC it hands netd is the only
-            // function in QEMU whose BAR this kernel moves. What is asserted is
-            // not where the BAR went: that the address chosen is inside a window
-            // the kernel was handed, inside a run the same boot printed and
-            // where the emulator maps that function's own registers, and that
-            // the dword the function answers there is its own and is a value an
-            // unanswered read could not have produced.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
             let options = BootOptions {
                 profile: qemu::Profile::Headless,
@@ -13955,12 +14008,6 @@ fn run_machine_test(
             // must have handed the function over, or the record above is about
             // a BAR that moved for nothing.
             let over = log.must_say("[1af4:1041] handed over on slot")?;
-            // **And the function spoke through the BAR that moved.** A register
-            // read answering the right dword says the address decodes; a message
-            // arriving says the whole hand-over works, and it is the one reading
-            // that tells a device nothing made speak from a message that never
-            // reached a CPU — which is what an end-of-boot count of zero leaves
-            // ambiguous.
             let slot = over
                 .split_once("handed over on slot ")
                 .and_then(|(_, rest)| rest.split(',').next())
@@ -18750,72 +18797,45 @@ fn main() {
         }
     };
 
-    let debug_mode = args.iter().any(|a| a == "--debug");
-    let list_mode = args.iter().any(|a| a == "--list");
+    let debug_mode = SUITE.present(&args, &testargs::DEBUG);
+    let list_mode = SUITE.present(&args, &testargs::LIST);
     // The nightly tier, on. A flag and not an env var for `--audio-gate`'s
     // reason: an env var is invisible in the command line and easy to leave set,
     // and the whole point of the split is that a run says what it ran.
-    let nightly = args.iter().any(|a| a == "--nightly");
+    let nightly = SUITE.present(&args, &testargs::NIGHTLY);
     // The metal profile, and where its images and readbacks live. Naming the
     // directory means the machine is not touched — see `common::metal::Mode`.
-    let metal_mode = args.iter().any(|a| a == "--metal");
-    let mut metal_readback: Option<&str> = None;
-    for (i, a) in args.iter().enumerate() {
-        metal_readback = if let Some(v) = a.strip_prefix("--metal-readback=") {
-            Some(v)
-        } else if a == "--metal-readback" {
-            Some(args.get(i + 1).map(String::as_str).unwrap_or_else(|| {
-                panic!("--metal-readback needs a directory, e.g. --metal-readback target/metal")
-            }))
-        } else {
-            continue;
-        };
-    }
-    if args.iter().any(|a| a == "--slow-usb") {
+    let metal_mode = SUITE.present(&args, &testargs::METAL);
+    let metal_readback = SUITE.value(&args, &testargs::METAL_READBACK);
+    if SUITE.present(&args, &testargs::SLOW_USB) {
         SLOW_USB.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let nocapture = args.iter().any(|a| a == "--nocapture" || a == "--show-output");
+    let nocapture =
+        SUITE.present(&args, &testargs::NOCAPTURE) || SUITE.present(&args, &testargs::SHOW_OUTPUT);
 
     // Thorough tier. A flag rather than an env var or a test name: an env var
     // is invisible in the command line and easy to leave set, and a test name
     // would drag ~17 minutes into every plain `cargo test`.
-    let mut audio_gate: Option<u32> = None;
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--audio-gate=") {
-            v
-        } else if a == "--audio-gate" {
-            args.get(i + 1).map(|s| s.as_str()).unwrap_or_else(|| {
-                panic!("--audio-gate needs an iteration count, e.g. --audio-gate 30")
-            })
-        } else {
-            continue;
-        };
-        let n: u32 = n
-            .parse()
-            .unwrap_or_else(|_| panic!("--audio-gate: {n:?} is not an iteration count"));
-        assert!(n >= 2, "--audio-gate needs at least 2 iterations to compare anything");
-        audio_gate = Some(n);
-    }
+    let audio_gate: Option<u32> = SUITE.value(&args, &testargs::AUDIO_GATE).map(|n| {
+        let iterations: u32 =
+            n.parse().unwrap_or_else(|_| panic!("--audio-gate: {n:?} is not an iteration count"));
+        assert!(iterations >= 2, "--audio-gate needs at least 2 iterations to compare anything");
+        iterations
+    });
 
     // How many guests the parallel phase runs at once. The serial tail and gate
     // A ignore it — that is what they are.
-    let mut width = DEFAULT_WIDTH;
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--jobs=") {
-            v
-        } else if a == "--jobs" || a == "-j" {
-            args.get(i + 1)
-                .map(|s| s.as_str())
-                .unwrap_or_else(|| panic!("--jobs needs a width, e.g. --jobs 4"))
-        } else {
-            continue;
-        };
-        width = n.parse().unwrap_or_else(|_| panic!("--jobs: {n:?} is not a width"));
-        assert!(width >= 1, "--jobs needs at least one worker");
-    }
+    let width = SUITE
+        .value(&args, &testargs::JOBS)
+        .or_else(|| SUITE.value(&args, &testargs::JOBS_SHORT))
+        .map_or(DEFAULT_WIDTH, |n| {
+            let width: usize = n.parse().unwrap_or_else(|_| panic!("--jobs: {n:?} is not a width"));
+            assert!(width >= 1, "--jobs needs at least one worker");
+            width
+        });
 
     // Which slice of the suite this machine runs. Absent is the whole of it.
-    let shard = match toyos_build::testargs::parse_shard(&args) {
+    let shard = match testargs::parse_shard(&args) {
         Ok(shard) => shard,
         Err(refusal) => {
             eprintln!("[toyos] {refusal}");
@@ -18826,35 +18846,16 @@ fn main() {
     // How many guests may be up on the *host* at once, across every worktree.
     // `--jobs` is this run's demand; this is what the machine will supply, and
     // zero turns it off.
-    let mut host_budget = toyos_build::buildlock::HOST_GUESTS;
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--host-slots=") {
-            v
-        } else if a == "--host-slots" {
-            args.get(i + 1).map(|s| s.as_str()).unwrap_or_else(|| {
-                panic!("--host-slots needs a budget, e.g. --host-slots 12 (0 turns it off)")
-            })
-        } else {
-            continue;
-        };
-        host_budget =
-            n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget"));
-    }
+    let host_budget = SUITE.value(&args, &testargs::HOST_SLOTS).map_or(
+        toyos_build::buildlock::HOST_GUESTS,
+        |n| n.parse().unwrap_or_else(|_| panic!("--host-slots: {n:?} is not a budget")),
+    );
 
     // And how many of this host's *compiles* may run at once, across every
     // worktree. A worker holds a guest slot from the moment it takes a task and
     // spends the first part of it building a kernel variant, so twelve workers
     // are twelve concurrent `cargo build`s and no guest at all.
-    for (i, a) in args.iter().enumerate() {
-        let n = if let Some(v) = a.strip_prefix("--host-builds=") {
-            v
-        } else if a == "--host-builds" {
-            args.get(i + 1).map(|s| s.as_str()).unwrap_or_else(|| {
-                panic!("--host-builds needs a budget, e.g. --host-builds 4 (0 turns it off)")
-            })
-        } else {
-            continue;
-        };
+    if let Some(n) = SUITE.value(&args, &testargs::HOST_BUILDS) {
         toyos_build::buildlock::set_host_builds(
             n.parse().unwrap_or_else(|_| panic!("--host-builds: {n:?} is not a budget")),
         );

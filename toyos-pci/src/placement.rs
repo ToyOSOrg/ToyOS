@@ -52,11 +52,6 @@ fn offered(run: &Window, windows: &[RootBridgeWindow], span: u64) -> Option<(u64
 /// The next address `runs` offers for a `span`-byte window, taken out of `runs`
 /// in the same call — by `&mut`, so a second caller cannot be handed an address
 /// the first is still probing.
-///
-/// **Only an address inside a window firmware declared is ever answered**: a
-/// run holding none is passed over untouched, and so is the part of a run below
-/// the address this hands out — which is outside every window, or too low for
-/// this span's alignment.
 pub fn reserve(
     runs: &mut [Window],
     windows: &[RootBridgeWindow],

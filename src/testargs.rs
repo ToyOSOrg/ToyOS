@@ -1,17 +1,11 @@
 //! The suite's command line, checked against the flags it actually has.
 //!
-//! `tests/toyos.rs` reads its flags by name and takes the first remaining
-//! positional argument as the run's filter. A flag it does not have therefore
-//! costs nothing and its *value* becomes that filter, so a command line naming
-//! a deleted flag runs one test and reports the run as a pass, and nothing
-//! between such a command line and a green check refuses it.
-//!
-//! So the flag table is here, one entry per flag the harness reads, and the
-//! filter falls out of the same pass rather than out of a second guess about
-//! which words were already spoken for. A flag added to the harness and not to
-//! this table is refused the first time anyone types it — the drift that is
-//! loud rather than the one that narrows a gate.
+//! `tests/toyos.rs` takes the first word that is nobody's value as the run's
+//! filter, so a flag this table does not declare would hand its own value to
+//! that filter and report a one-test run as a pass. The table is the harness's
+//! whole vocabulary, and [`SUITE`] is the only way to read a word off its argv.
 
+use crate::flags::declare_flags;
 use std::time::Duration;
 
 /// One machine's slice of the suite.
@@ -108,35 +102,25 @@ impl Shard {
 /// `Err` is a refusal to print and exit on, like [`parse`]'s: a shard number
 /// outside its range would take no tests and report the run green.
 pub fn parse_shard(args: &[String]) -> Result<Option<Shard>, String> {
-    let mut out = None;
-    for (i, a) in args.iter().enumerate() {
-        let spec = if let Some(v) = a.strip_prefix("--shard=") {
-            v
-        } else if a == "--shard" {
-            args.get(i + 1)
-                .map(String::as_str)
-                .ok_or("--shard needs a slice, e.g. --shard 2/4")?
-        } else {
-            continue;
-        };
-        let (index, count) = spec
-            .split_once('/')
-            .ok_or_else(|| format!("--shard {spec}: not <index>/<count>, e.g. 2/4"))?;
-        let index: usize = index
-            .parse()
-            .map_err(|_| format!("--shard {spec}: {index:?} is not a shard number"))?;
-        let count: usize = count
-            .parse()
-            .map_err(|_| format!("--shard {spec}: {count:?} is not a shard count"))?;
-        if !(1..=count).contains(&index) {
-            return Err(format!(
-                "--shard {spec}: shards are numbered 1 through {count}, and a run outside \
-                 that range would take no tests and report itself green"
-            ));
-        }
-        out = Some(Shard { index, count });
+    let Some(spec) = SUITE.value(args, &SHARD) else {
+        return Ok(None);
+    };
+    let (index, count) = spec
+        .split_once('/')
+        .ok_or_else(|| format!("--shard {spec}: not <index>/<count>, e.g. 2/4"))?;
+    let index: usize = index
+        .parse()
+        .map_err(|_| format!("--shard {spec}: {index:?} is not a shard number"))?;
+    let count: usize = count
+        .parse()
+        .map_err(|_| format!("--shard {spec}: {count:?} is not a shard count"))?;
+    if !(1..=count).contains(&index) {
+        return Err(format!(
+            "--shard {spec}: shards are numbered 1 through {count}, and a run outside \
+             that range would take no tests and report itself green"
+        ));
     }
-    Ok(out)
+    Ok(Some(Shard { index, count }))
 }
 
 /// Refuse a shard that owns nothing after the ordinary suite's filter, tier,
@@ -161,55 +145,27 @@ pub fn validate_ordinary_shard(
     ))
 }
 
-/// Whether a flag is followed by a separate word, which is then not the filter.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Value {
-    None,
-    Required,
-}
-
-pub struct Flag {
-    pub name: &'static str,
-    pub value: Value,
-}
-
-const fn flag(name: &'static str, value: Value) -> Flag {
-    Flag { name, value }
-}
-
-/// Every flag `tests/toyos.rs` reads, and nothing else.
-pub const FLAGS: &[Flag] = &[
-    flag("--debug", Value::None),
-    flag("--list", Value::None),
-    flag("--nocapture", Value::None),
-    flag("--show-output", Value::None),
-    flag("--audio-gate", Value::Required),
-    flag("--jobs", Value::Required),
-    flag("-j", Value::Required),
-    flag("--host-slots", Value::Required),
-    flag("--host-builds", Value::Required),
-    flag("--shard", Value::Required),
-    flag("--slow-usb", Value::None),
-    flag("--nightly", Value::None),
-    // The metal profile: the registrations that run on the T14, batched into
-    // images and judged off the log the stick came back with.
-    flag("--metal", Value::None),
-    // Where those images and their readbacks live. **Naming it means the
-    // machine is not touched**: the run builds the images and writes down what
-    // to run on them, or judges readbacks a driver already left there.
-    flag("--metal-readback", Value::Required),
-];
-
-fn accepted() -> String {
-    FLAGS
-        .iter()
-        .map(|f| match f.value {
-            Value::None => f.name.to_string(),
-            Value::Required => format!("{} <value>", f.name),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+declare_flags!(pub SUITE = {
+    pub DEBUG = "--debug", None;
+    pub LIST = "--list", None;
+    pub NOCAPTURE = "--nocapture", None;
+    pub SHOW_OUTPUT = "--show-output", None;
+    pub AUDIO_GATE = "--audio-gate", Next;
+    pub JOBS = "--jobs", Next;
+    pub JOBS_SHORT = "-j", Next;
+    pub HOST_SLOTS = "--host-slots", Next;
+    pub HOST_BUILDS = "--host-builds", Next;
+    pub SHARD = "--shard", Next;
+    pub SLOW_USB = "--slow-usb", None;
+    pub NIGHTLY = "--nightly", None;
+    /// The metal profile: the registrations that run on the T14, batched into
+    /// images and judged off the log the stick came back with.
+    pub METAL = "--metal", None;
+    /// Where those images and their readbacks live. **Naming it means the
+    /// machine is not touched**: the run builds the images and writes down what
+    /// to run on them, or judges readbacks a driver already left there.
+    pub METAL_READBACK = "--metal-readback", Next;
+});
 
 /// Validate the harness's argv and return the run's filter.
 ///
@@ -217,60 +173,55 @@ fn accepted() -> String {
 /// and before anything is compiled, so a stale command line costs a message
 /// rather than a queue behind it.
 pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
-    let mut filter: Option<&str> = None;
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i].as_str();
-        i += 1;
-        if !arg.starts_with('-') {
-            if let Some(first) = filter {
-                return Err(format!(
-                    "{first:?} and {arg:?}: the suite takes one filter, and the second word \
-                     would have been dropped in silence.\n\
-                     A filter is a substring, so `{first}` and `{arg}` are one run only if one \
-                     substring matches both."
-                ));
-            }
-            filter = Some(arg);
-            continue;
-        }
-        let (name, inline) = match arg.split_once('=') {
-            Some((name, _)) => (name, true),
-            None => (arg, false),
-        };
-        let Some(f) = FLAGS.iter().find(|f| f.name == name) else {
-            return Err(format!(
-                "{arg}: the suite has no such flag, and an unknown flag's value becomes the \
-                 run's filter — so this would have measured whatever one test it named.\n\
-                 Flags it has: {}.",
-                accepted()
-            ));
-        };
-        if inline && f.value == Value::None {
-            return Err(format!("{arg}: {name} takes no value.\nFlags it has: {}.", accepted()));
-        }
-        if !inline && f.value == Value::Required {
-            i += 1;
-        }
+    let line = SUITE.walk(args);
+    if let Some(word) = line.unknown {
+        return Err(format!(
+            "{word}: the suite has no such flag, and an unknown flag's value becomes the \
+             run's filter — so this would have measured whatever one test it named.\n\
+             Flags it has:\n{}",
+            SUITE.usage()
+        ));
     }
-    let has = |want: &str| {
-        args.iter().any(|arg| arg == want || arg.strip_prefix(want).is_some_and(|v| v.starts_with('=')))
-    };
-    if has("--metal-readback") && !has("--metal") {
+    if let Some(refusal) = line.malformed() {
+        return Err(refusal);
+    }
+
+    let mut filter: Option<&str> = None;
+    for word in line.positionals {
+        if let Some(first) = filter {
+            return Err(format!(
+                "{first:?} and {word:?}: the suite takes one filter, and the second word \
+                 would have been dropped in silence.\n\
+                 A filter is a substring, so `{first}` and `{word}` are one run only if one \
+                 substring matches both."
+            ));
+        }
+        filter = Some(word);
+    }
+
+    let has = |want| SUITE.present(args, want);
+    if has(&JOBS) && has(&JOBS_SHORT) {
+        return Err(
+            "--jobs and -j are two spellings of one width, and the run would read one of \
+             them and drop the other in silence; write one"
+                .to_string(),
+        );
+    }
+    if has(&METAL_READBACK) && !has(&METAL) {
         return Err(
             "--metal-readback says where the metal profile's images and readbacks live and \
              decides nothing on its own; add --metal"
                 .to_string(),
         );
     }
-    if has("--metal") && has("--audio-gate") {
+    if has(&METAL) && has(&AUDIO_GATE) {
         return Err(
             "--metal and --audio-gate are separate tiers on separate machines and cannot be \
              combined; run one at a time"
                 .to_string(),
         );
     }
-    if has("--nightly") && has("--audio-gate") {
+    if has(&NIGHTLY) && has(&AUDIO_GATE) {
         return Err(
             "--nightly and --audio-gate are separate tiers and cannot be combined; run one \
              tier at a time"
@@ -283,14 +234,16 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flags::Value;
 
-    fn parse_owned(args: &[&str]) -> Result<Option<String>, String> {
-        let owned: Vec<String> = args.iter().map(ToString::to_string).collect();
-        parse(&owned).map(|f| f.map(ToString::to_string))
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(ToString::to_string).collect()
     }
 
-    /// The incident: `--skip` was deleted with the expected-failure declaration,
-    /// and every handover still carried it.
+    fn parse_owned(args: &[&str]) -> Result<Option<String>, String> {
+        parse(&owned(args)).map(|f| f.map(ToString::to_string))
+    }
+
     #[test]
     fn a_deleted_flag_is_refused_rather_than_becoming_the_filter() {
         let refusal = parse_owned(&["--skip", "desktop_window_child"]).unwrap_err();
@@ -340,7 +293,7 @@ mod tests {
     }
 
     fn shard_of(args: &[&str]) -> Result<Option<Shard>, String> {
-        parse_shard(&args.iter().map(ToString::to_string).collect::<Vec<_>>())
+        parse_shard(&owned(args))
     }
 
     #[test]
@@ -474,6 +427,46 @@ mod tests {
         seen.sort_unstable();
         assert_eq!(seen, items);
         assert_eq!(sizes, vec![4, 3, 3], "{sizes:?}");
+    }
+
+    /// Every `None` here is a default the run then takes in silence: `--jobs`
+    /// the built-in width, `--audio-gate` the thorough tier off, `--host-slots`
+    /// the host's own budget, `--host-builds` no budget at all.
+    #[test]
+    fn a_flag_left_without_its_value_is_refused_by_name() {
+        for flag in SUITE.0.iter().filter(|f| !matches!(f.value, Value::None | Value::Optional)) {
+            for word in [flag.name.to_string(), format!("{}=", flag.name)] {
+                let refusal = parse_owned(&[word.as_str()]).unwrap_err();
+                assert!(refusal.contains(flag.name), "{word}: {refusal}");
+                assert!(refusal.contains("no value"), "{word}: {refusal}");
+            }
+        }
+    }
+
+    /// **The one that drives a physical machine.** `tests/toyos.rs` reads the
+    /// readback directory to decide `metal::Mode`, and `None` there is
+    /// `Mode::Drive` — the T14, booted off a stick. A `--metal-readback` with
+    /// no directory after it must therefore never reach that reader.
+    #[test]
+    fn a_readback_flag_with_no_directory_never_reaches_the_metal_driver() {
+        let refusal = parse_owned(&["--metal", "--metal-readback"]).unwrap_err();
+        assert!(refusal.contains("--metal-readback"), "{refusal}");
+        assert!(refusal.contains("no value"), "{refusal}");
+        assert_eq!(SUITE.value(&owned(&["--metal", "--metal-readback"]), &METAL_READBACK), None);
+    }
+
+    /// A second use is read by nothing, so the run would take the first value
+    /// and say nothing about the one it dropped.
+    #[test]
+    fn a_flag_written_twice_is_refused_by_name() {
+        for argv in [vec!["--jobs", "1", "--jobs", "4"], vec!["--nightly", "--nightly"]] {
+            let refusal = parse_owned(&argv).unwrap_err();
+            assert!(refusal.contains(argv[0]), "{argv:?}: {refusal}");
+            assert!(refusal.contains("twice"), "{argv:?}: {refusal}");
+        }
+        // Two spellings of the width are the same drop under two names.
+        let refusal = parse_owned(&["--jobs", "1", "-j", "4"]).unwrap_err();
+        assert!(refusal.contains("--jobs and -j"), "{refusal}");
     }
 
     #[test]
