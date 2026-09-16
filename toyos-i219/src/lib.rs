@@ -12,14 +12,6 @@
 //! under §4.5.2's ownership arbitration. [`Part`] is which one this claim is,
 //! and [`phy`] is everything that follows from it.
 //!
-//! **`MDIC` is the one access here that leaves the MAC.** Writing it starts a
-//! transaction over an interconnect to separate silicon the Management Engine
-//! shares, so its completion rests on a part whose state this driver cannot
-//! read. A deadline in software bounds a poll loop and never one load, and on a
-//! machine whose unanswered read holds the CPU rather than answering ones, that
-//! distinction is the whole of the risk — [`phy`] carries what is guarded
-//! against it and what is not.
-//!
 //! # The boundary
 //!
 //! Four traits, named by what they do and not by what chip is behind them:

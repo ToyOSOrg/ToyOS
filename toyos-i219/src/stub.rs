@@ -122,13 +122,16 @@ pub struct Permits {
     pub extcnf_carries_firmware_fields: bool,
     /// §4.5.2 has the software ownership bit read 0b until the arbitration
     /// grants it, so a requester can tell a grant from its own request by
-    /// reading that one bit. The part whose PHY the Management Engine shares
-    /// holds the same bit as an ordinary mutex instead: it reads back set for
-    /// whichever agent set it, granted or not, and an agent that finds it set
-    /// is being told the interface is somebody else's. Both are readings of
-    /// this one interface, so the model takes one or the other and a driver has
-    /// to be right under either.
+    /// reading that one bit; read as a plain mutex, the same bit reads back set
+    /// for whichever agent set it, granted or not. Both are readings of this
+    /// one interface, so the model takes one or the other and a driver has to
+    /// be right under either.
     pub mdio_flag_is_a_plain_mutex: bool,
+    /// §4.5.2's manageability request comes whenever the engine likes — the
+    /// moment after another agent has read the interface free included — and
+    /// "the priority order is manageability, software and then hardware", so a
+    /// software request registered right after that read is answered second.
+    pub firmware_requests_after_a_free_read: bool,
 }
 
 impl Default for Permits {
@@ -148,6 +151,7 @@ impl Default for Permits {
             phy_advertises_what_the_last_agent_left: true,
             extcnf_carries_firmware_fields: true,
             mdio_flag_is_a_plain_mutex: true,
+            firmware_requests_after_a_free_read: true,
         }
     }
 }
@@ -285,24 +289,16 @@ struct PhyModel {
     never_ready: bool,
     /// Whether another agent is holding §4.5.2's *software* flag — the state a
     /// claim on this function inherits from firmware that drives the same PHY.
-    /// Visible only under [`Permits::mdio_flag_is_a_plain_mutex`], which is the
-    /// reading under which a set flag means anything to another agent at all.
     flag_held_by_another_agent: bool,
-    /// Whether the arbitration ever grants a registered software request. A
-    /// fault injector: it is how a test reaches
-    /// [`crate::phy::PhyRefusal::OwnershipBusy`] rather than the refusal for an
-    /// interface that was never free to begin with.
-    sw_never_granted: bool,
-    /// Whether the MAC-PHY interconnect carries anything.
-    ///
-    /// **The failure this model had no way to express.** `MDIC` is not a
-    /// register the MAC answers out of itself: writing it makes the MAC run a
-    /// transaction over an interconnect to separate silicon that may be powered
-    /// down, in a low-power state, or held by the Management Engine. With this
-    /// set, that transaction is one the MAC never completes — and on the
-    /// machine this driver runs on, a read nothing answers holds the CPU
-    /// instead of answering ones, so the boot ends inside the load.
-    off_the_interconnect: bool,
+    /// Whether the engine takes the interface the moment it is next read free
+    /// and keeps it until [`Nic::engine_lets_go`]. A fault injector: it is how
+    /// a test reaches [`crate::phy::PhyRefusal::OwnershipBusy`] — a request
+    /// registered on an interface that was free, and answered only after the
+    /// requester's own deadline.
+    engine_takes_it_at_the_request: bool,
+    /// How many times the engine registered its request right after an agent
+    /// read the interface free, so a test about that race can see it happened.
+    engine_cut_ins: u32,
 }
 
 impl PhyModel {
@@ -348,8 +344,8 @@ impl PhyModel {
             failing: None,
             never_ready: false,
             flag_held_by_another_agent: false,
-            sw_never_granted: false,
-            off_the_interconnect: false,
+            engine_takes_it_at_the_request: false,
+            engine_cut_ins: 0,
         }
     }
 }
@@ -415,14 +411,6 @@ struct Model {
     tx_holding: Vec<usize>,
     /// Messages the function has sent that the claim has not read.
     messages: u32,
-    /// Offsets the driver reached that this part does not answer.
-    ///
-    /// **A read that is never answered is not a read that answers ones.** On
-    /// the machine this driver runs on the load does not retire, so unless a
-    /// test has said it is about that hazard, reaching one of these is an
-    /// assertion here rather than a number a driver goes on from.
-    unanswered: Vec<usize>,
-    expects_unanswered: bool,
     /// One offset in the window that nothing decodes, which answers ones.
     not_decoding: Option<usize>,
     /// Whether the device does its work when a tail register is written.
@@ -485,8 +473,6 @@ impl Model {
             tx_head: 0,
             tx_holding: Vec::new(),
             messages: 0,
-            unanswered: Vec::new(),
-            expects_unanswered: false,
             not_decoding: None,
             held: false,
         };
@@ -698,10 +684,6 @@ impl Model {
             }
             regs::MDIC => {
                 self.not_modelled_on_the_82574("MDIC");
-                if self.phy.off_the_interconnect {
-                    self.unanswered(regs::MDIC);
-                    return u32::MAX;
-                }
                 if self.phy.mdi_reads > 0 {
                     self.phy.mdi_reads -= 1;
                     // §10.2.2.7: `Ready` is set "at the end of the MDI
@@ -724,7 +706,21 @@ impl Model {
                     self.phy.firmware_requests -= 1;
                 }
                 self.refresh_ownership();
-                self.get(regs::EXTCNF_CTRL)
+                let answer = self.get(regs::EXTCNF_CTRL);
+                // The manageability request nothing schedules: the one that
+                // lands between an agent reading the interface free and
+                // whatever that agent does about it.
+                if answer & extcnf::OWNERSHIP == 0 {
+                    if self.phy.engine_takes_it_at_the_request {
+                        self.phy.engine_takes_it_at_the_request = false;
+                        self.phy.mdio_sticks = true;
+                        self.phy.engine_cut_ins += 1;
+                    } else if self.permits.firmware_requests_after_a_free_read {
+                        self.phy.firmware_requests = MDIO_FIRMWARE_REQUESTS;
+                        self.phy.engine_cut_ins += 1;
+                    }
+                }
+                answer
             }
             regs::ICR => {
                 let value = self.get(regs::ICR);
@@ -868,46 +864,27 @@ impl Model {
     /// out of: "the priority order is manageability, software and then
     /// hardware", and "at any given time at most only one bit is 1b".
     fn refresh_ownership(&mut self) {
-        let engine = if self.phy.mdio_sticks || self.phy.firmware_requests > 0 {
-            extcnf::MDIO_MNG_OWNERSHIP
-        } else {
-            0
-        };
-        let software = if self.permits.mdio_flag_is_a_plain_mutex {
+        let engine_asks = self.phy.mdio_sticks || self.phy.firmware_requests > 0;
+        let (engine, software) = if self.permits.mdio_flag_is_a_plain_mutex {
             // An ordinary mutex bit: it reads back set for whichever agent set
-            // it, and says nothing at all about a grant.
-            if self.phy.sw_requested || self.phy.flag_held_by_another_agent {
-                extcnf::MDIO_SW_OWNERSHIP
-            } else {
-                0
-            }
-        } else if engine == 0 && self.phy.sw_requested && !self.phy.sw_never_granted {
+            // it and says nothing at all about a grant, so the engine's own
+            // ownership stands beside it.
+            (engine_asks, self.phy.sw_requested || self.phy.flag_held_by_another_agent)
+        } else if self.phy.flag_held_by_another_agent {
+            // Another agent holds the grant, and "at any given time at most
+            // only one bit is 1b": the engine's request waits behind it.
+            (false, true)
+        } else {
             // §4.5.2: "access is not granted as long as the bit is 0b", so the
             // bit stands only once the arbitration has granted the request.
-            extcnf::MDIO_SW_OWNERSHIP
-        } else {
-            0
+            (engine_asks, !engine_asks && self.phy.sw_requested)
         };
+        let bits = if engine { extcnf::MDIO_MNG_OWNERSHIP } else { 0 }
+            | if software { extcnf::MDIO_SW_OWNERSHIP } else { 0 };
         // The arbitration answers three bits and touches nothing else: what
         // stands in the rest of the register outlives every access to it.
         let carried = self.get(regs::EXTCNF_CTRL) & !extcnf::OWNERSHIP;
-        self.set(regs::EXTCNF_CTRL, carried | engine | software);
-    }
-
-    /// One access this part does not answer.
-    ///
-    /// **Not a read that answers ones.** On the machine this driver runs on the
-    /// load never retires: the boot ends inside it, nothing says why, and a
-    /// deadline in software cannot help because a deadline is tested between
-    /// accesses and what did not return is one.
-    fn unanswered(&mut self, reg: usize) {
-        self.unanswered.push(reg);
-        assert!(
-            self.expects_unanswered,
-            "seed {}: the driver made an access at {reg:#x} that this part does not answer, so \
-             on the machine this bring-up runs on the boot ends inside that load",
-            self.seed
-        );
+        self.set(regs::EXTCNF_CTRL, carried | bits);
     }
 
     /// A register this file models only behind the PCH part. §10.2.2.7
@@ -927,13 +904,6 @@ impl Model {
     /// One MDI transaction, as §10.2.2.7 defines its two sequences.
     fn mdi(&mut self, command: u32) {
         self.not_modelled_on_the_82574("MDIC");
-        if self.phy.off_the_interconnect {
-            // The MAC takes the command and starts a transaction over an
-            // interconnect that carries nothing, so nothing ever ends it and
-            // nothing answers the reads that poll for its end.
-            self.unanswered(regs::MDIC);
-            return;
-        }
         // §9.2: "After LCD reset to the I219 a delay of 10 ms is required
         // before attempting to access MDIO registers."
         assert!(
@@ -1450,41 +1420,36 @@ impl Nic {
         self.0.borrow_mut().phy.never_ready = true;
     }
 
-    /// Another agent is holding §4.5.2's software flag when this claim is
-    /// minted — the firmware that drives the same PHY, which on this part is
-    /// what the flag exists to arbitrate against.
+    /// Another agent holds §4.5.2's software flag when this claim is minted.
     pub fn mdio_flag_held_by_another_agent(&self) {
         self.0.borrow_mut().phy.flag_held_by_another_agent = true;
     }
 
-    /// The arbitration takes a registered software request and never grants it,
-    /// the interface having been free when it was asked for.
-    pub fn mdio_request_never_granted(&self) {
-        self.0.borrow_mut().phy.sw_never_granted = true;
+    /// §4.5.2's manageability agent registers its request the moment the
+    /// interface is next read free, and holds it until [`Self::engine_lets_go`]
+    /// — so the software request registered right after that read is one the
+    /// arbitration answers only after the requester's own deadline.
+    pub fn engine_takes_the_interface_at_the_request(&self) {
+        self.0.borrow_mut().phy.engine_takes_it_at_the_request = true;
     }
 
-    /// The MAC-PHY interconnect carries nothing, so an `MDIC` transaction is
-    /// one the MAC never completes and no read of it is ever answered.
-    pub fn phy_is_off_the_interconnect(&self) {
-        self.0.borrow_mut().phy.off_the_interconnect = true;
+    /// The engine writes its ownership bit back to 0b, and §4.5.2's
+    /// arbitration answers whatever request is still registered.
+    pub fn engine_lets_go(&self) {
+        let mut model = self.0.borrow_mut();
+        model.phy.mdio_sticks = false;
+        model.refresh_ownership();
+    }
+
+    /// How many times the engine registered its request right after the
+    /// interface was read free.
+    pub fn engine_cut_ins(&self) -> u32 {
+        self.0.borrow().phy.engine_cut_ins
     }
 
     /// Nothing in the window decodes `reg`, so reads of it answer ones.
     pub fn window_does_not_decode(&self, reg: usize) {
         self.0.borrow_mut().not_decoding = Some(reg);
-    }
-
-    /// This test is about the hazard itself, so an access the part does not
-    /// answer is recorded rather than asserted on. **Every other test in this
-    /// file reaches one and fails**, which is the point: the machine does not
-    /// carry on from such an access either.
-    pub fn expects_unanswered_accesses(&self) {
-        self.0.borrow_mut().expects_unanswered = true;
-    }
-
-    /// The offsets the driver reached that this part does not answer.
-    pub fn unanswered(&self) -> Vec<usize> {
-        self.0.borrow().unanswered.clone()
     }
 
     /// §10.2.2.7's `Error`: this part cannot complete a read of one register.

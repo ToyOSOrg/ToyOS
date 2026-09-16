@@ -10,8 +10,9 @@ opened: 2026-09-13
 `--provoke-message`, which writes one enabled cause to `ICS` so the kernel's
 `pcidev: slot N took its first message` record says whether delivery works at
 all. It is a second arm of `lan_dhcp_lease`, a second image flashed to the
-stick, a second boot of the machine and four rows of `tests/metal-profile.toml`
-(`boot.lanicscase.{complete_ms,back_secs,stick_secs}`, `list.lanicscase.job_ms`).
+stick, a second boot of the machine and six rows of `tests/metal-profile.toml`
+(`boot.lanicscase.{complete_ms,back_secs,stick_secs,panel_max_us,panel_us}`,
+`list.lanicscase.job_ms`).
 
 **A count of no messages is two facts** — a part nothing made speak and a
 message that reached no CPU — and only this arm separates them. On a card that
@@ -29,7 +30,7 @@ The shipping `lancase` arm recording `pcidev: slot N took its first message`
 without the actuator. Then the actuator has no question left and the arm is
 four files: `tests/lanicscase/system.toml`, its row in `src/build.rs`'s
 `ALL_CONFIGS`, the second `metal::Arm` in `tests/toyos.rs`'s `LANCASE` with
-`lan::provoked_on_metal`, and the four `tests/metal-profile.toml` rows.
+the readback `lan::on_metal` judges for it, and the six `tests/metal-profile.toml` rows.
 
 Until then the machine has read neither fact: nothing on this branch has run on
 the T14.

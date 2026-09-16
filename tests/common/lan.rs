@@ -9,7 +9,9 @@ use toyos_build::lan::{
     asked_under_its_own_name, lease_in, link_up_ms, Lease, HOSTNAME, LEASE, LINK_UP, MAC, NO_LEASE,
     READY,
 };
+use toyos_build::metaldevices;
 use toyos_build::metalprofile::Profile;
+use toyos_i219::phy::{Outcome, PhyRefusal};
 
 use super::metal;
 use super::qemu::{self, BootOptions, QemuInstance};
@@ -24,14 +26,18 @@ pub const BOOT: &str = "lancase";
 pub const ICS_CONFIG: &str = "tests/lanicscase";
 pub const ICS_BOOT: &str = "lanicscase";
 
+/// The same boot with netd's `--exit-with-phy-outcome` armed: netd ends right
+/// after the bring-up with the PHY's outcome as its exit code, which the
+/// kernel's `exit:` record carries off a machine whose console reaches nobody.
+pub const PHY_CONFIG: &str = "tests/lanphycase";
+pub const PHY_BOOT: &str = "lanphycase";
+
 /// The kernel's own record that a claim's vector took a message, which is what
 /// the armed boot is for.
 const FIRST_MESSAGE: &str = "took its first message";
 
-/// netd's word for `toyos_i219::phy::PhyRefusal::NotThisRegisterMap`, which is
-/// the only thing the I219's §9 bring-up may say on the 82574 this host emulates.
-const PHY_NOT_THIS_MAP: &str = "the PHY was not brought up: this part's PHY answers MDIC under \
-                                the 82574's own addressing";
+/// netd, as the kernel's `exit:` record names it.
+const NETD: &str = "netd";
 
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
@@ -40,6 +46,9 @@ pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 /// backend, which is the same driver the T14 arm runs and the only DHCP server
 /// this host can put in front of it.
 const QEMU_CONFIG: &str = "tests/e1000case";
+
+/// The same, with netd's `--exit-with-phy-outcome` armed.
+const PHY_QEMU_CONFIG: &str = "tests/e1000phycase";
 
 /// What QEMU's user-mode backend leases, and what it says about the network it
 /// leases on. Its own defaults, not this repository's: they are the oracle.
@@ -56,8 +65,12 @@ const ID: &str = "8086:15fc";
 pub const NIC: &str = "0000:00:1f.6";
 
 /// The T14's judge: the claim, the card, the lease, the host's own ping — and
-/// the armed boot beside them.
-pub fn on_metal(back: &metal::Readback, provoked: &metal::Readback) -> Result<(), String> {
+/// the two armed boots beside them.
+pub fn on_metal(
+    back: &metal::Readback,
+    provoked: &metal::Readback,
+    probed: &metal::Readback,
+) -> Result<(), String> {
     let profile = Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())?;
     let kernel = back.kernel();
     let text = kernel.text();
@@ -177,10 +190,78 @@ pub fn on_metal(back: &metal::Readback, provoked: &metal::Readback) -> Result<()
         }
     }
 
+    // The PHY reading: netd's exit code on the boot that arms the probe,
+    // decoded through the table the driver crate owns. A refusal is a finding
+    // by its name, which is what the shipping boot's silence cannot give.
+    if probed.label != PHY_BOOT {
+        bad.push(format!(
+            "the PHY verdict was handed {}'s readback, and netd's exit code only means the \
+             bring-up's outcome on {PHY_BOOT}",
+            probed.label
+        ));
+    } else {
+        match probed.exit_code(NETD) {
+            Ok(code) => match Outcome::from_exit_code(code) {
+                Some(Outcome::BroughtUp) => {
+                    eprintln!("  [lan] netd exited {code} on {PHY_BOOT}: the PHY was brought up")
+                }
+                Some(refused) => bad.push(format!(
+                    "netd exited {code} on {PHY_BOOT}: the bring-up refused the PHY with \
+                     {refused:?}"
+                )),
+                None => bad.push(format!(
+                    "netd exited {code} on {PHY_BOOT}, which is no outcome the probe encodes"
+                )),
+            },
+            Err(why) => bad.push(why),
+        }
+    }
+
     if bad.is_empty() {
         return Ok(());
     }
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
+}
+
+/// The probe's channel, end to end, on the one Intel part QEMU has: netd armed
+/// with the flag exits with the outcome's code, the kernel records it, and the
+/// record reads back through the driver crate's own table — which on the 82574
+/// is `NotThisRegisterMap`, the refusal [`lan_dhcp_lease`] reads as text.
+pub fn lan_phy_exit_code(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let case = super::compile::repo_root().join(PHY_QEMU_CONFIG);
+    let options = BootOptions { profile: qemu::Profile::E1000e, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")) {
+        return Err("this test needs an Intel NIC and the profile has none".to_string());
+    }
+    let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
+    let mut console = guest.boot_log().to_string();
+    let exited = format!("{}{NETD} pid=", bootlog::EXIT);
+    qemu::await_marker(&mut guest, &mut console, &exited, "netd to exit with the PHY outcome")?;
+    drop(guest);
+    let log = serial::Serial::named("the lan probe boot", console.as_str());
+    let exit = metaldevices::exit_of(log.text(), NETD)
+        .ok_or_else(|| format!("no readable `{exited}` record:\n{}", log.text()))?;
+    let code = i32::try_from(exit.code)
+        .map_err(|_| format!("netd's exit record carries {}, which is no i32", exit.code))?;
+    match Outcome::from_exit_code(code) {
+        Some(Outcome::NotThisRegisterMap) => {}
+        other => {
+            return Err(format!(
+                "netd exited {code} on the 82574, which the table reads as {other:?} and not \
+                 NotThisRegisterMap"
+            ))
+        }
+    }
+    log.must_say(&PhyRefusal::NotThisRegisterMap.to_string())?;
+    log.must_be_clean()?;
+    eprintln!(
+        "  [lan] netd exited {code}, which the driver crate's table reads as NotThisRegisterMap"
+    );
+    Ok(())
 }
 
 /// The QEMU arm: the client, against a DHCP server this repository did not
@@ -230,7 +311,9 @@ pub fn lan_dhcp_lease(
             "the client read this lease as {lease:?} and the backend serves {want:?}"
         ));
     }
-    log.must_say(PHY_NOT_THIS_MAP)?;
+    // The only thing the I219's §9 bring-up may say on the 82574 this host
+    // emulates, in the driver crate's own words.
+    log.must_say(&PhyRefusal::NotThisRegisterMap.to_string())?;
     // The order, and not merely the presence of both.
     log.must_say_after(LEASE, READY)?;
     log.must_say(LINK_UP)?;

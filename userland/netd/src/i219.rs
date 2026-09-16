@@ -229,6 +229,11 @@ impl Nic {
         self.driver.borrow().provoke_message();
     }
 
+    /// What the bring-up found, for `crate::EXIT_WITH_PHY_OUTCOME`.
+    pub fn brought_up(&self) -> toyos_i219::BringUp {
+        self.driver.borrow().brought_up()
+    }
+
     /// Take the interrupt, acknowledge its causes and refresh the link.
     pub fn begin_pass(&self) -> Result<(), SyscallError> {
         self.driver.borrow_mut().begin_pass()?;

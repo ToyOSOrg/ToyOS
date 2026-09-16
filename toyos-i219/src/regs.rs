@@ -161,8 +161,7 @@ pub mod extcnf {
     pub const MDIO_SW_OWNERSHIP: u32 = 1 << 5;
     /// MDIO HW Ownership (bit 6), read-only: the third of §4.5.2's agents.
     pub const MDIO_HW_OWNERSHIP: u32 = 1 << 6;
-    /// MDIO MNG Ownership (bit 7), read-only: the manageability request, which
-    /// on a part whose PHY the Management Engine shares is the one that holds.
+    /// MDIO MNG Ownership (bit 7), read-only: the manageability request.
     pub const MDIO_MNG_OWNERSHIP: u32 = 1 << 7;
     /// The three bits §4.5.2 arbitrates, which is the whole of this register
     /// any agent writes.

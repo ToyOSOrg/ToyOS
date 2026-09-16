@@ -58,6 +58,16 @@ const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
 /// `[programs.netd] args` row of a boot config.
 const PROVOKE_MESSAGE: &str = "--provoke-message";
 
+/// The probe under which this process ends right after the bring-up, with
+/// the PHY's outcome as its exit code.
+///
+/// **The one word of a process that crosses on a machine whose console reaches
+/// nobody** is the kernel's `exit:` record, and `toyos_i219::phy::Outcome` is
+/// the table both ends read the code through. Armed the same way as
+/// [`PROVOKE_MESSAGE`], and never beside it: the message that one asks for is
+/// taken by a pass this process would not live to make.
+const EXIT_WITH_PHY_OUTCOME: &str = "--exit-with-phy-outcome";
+
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
@@ -129,6 +139,17 @@ impl Card {
                 "{PROVOKE_MESSAGE} writes §10.2.4.4's `ICS`, which this card has not"
             )),
             Self::Intel(nic) => nic.provoke_message(),
+        }
+    }
+
+    /// [`EXIT_WITH_PHY_OUTCOME`]'s answer, from the driver that has a PHY
+    /// behind `MDIC`.
+    fn phy_outcome(&self) -> toyos_i219::phy::Outcome {
+        match self {
+            Self::Virtio(_) => Self::undrivable(format_args!(
+                "{EXIT_WITH_PHY_OUTCOME} reports a PHY bring-up, which this card has not"
+            )),
+            Self::Intel(nic) => toyos_i219::phy::Outcome::of(nic.brought_up().phy),
         }
     }
 
@@ -1320,8 +1341,18 @@ fn main() {
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
     let nic = open(claim);
-    if std::env::args().any(|arg| arg == PROVOKE_MESSAGE) {
+    let armed = |actuator: &str| std::env::args().any(|arg| arg == actuator);
+    if armed(PROVOKE_MESSAGE) && armed(EXIT_WITH_PHY_OUTCOME) {
+        panic!(
+            "netd: {PROVOKE_MESSAGE} and {EXIT_WITH_PHY_OUTCOME} cannot share a boot: the \
+             message one asks for is taken by a pass the other ends this process before"
+        );
+    }
+    if armed(PROVOKE_MESSAGE) {
         nic.provoke_message();
+    }
+    if armed(EXIT_WITH_PHY_OUTCOME) {
+        std::process::exit(nic.phy_outcome().exit_code());
     }
     let mac = nic.mac();
     let mut device = DmaNic { nic };

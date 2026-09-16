@@ -13,21 +13,13 @@
 use crate::regs::{self, extcnf, mdic};
 use crate::{Clock, Registers};
 
-/// How long [`Owned::claim`] waits for §4.5.2's ownership bit to read back set.
+/// How long [`Owned::claim`] waits for §4.5.2's grant and [`Owned::transact`]
+/// for §10.2.2.7's `Ready`, each before the part is refused by name.
 ///
-/// **A driver-chosen bound, not a datasheet one**: §4.5.2 describes the
-/// handshake and gives no time for it, so a part whose Management Engine never
-/// lets go says so instead of holding up the boot.
-const OWNERSHIP_DEADLINE_NANOS: u64 = 20_000_000;
-
-/// How long [`Owned::transact`] waits for §10.2.2.7's `Ready` bit.
-///
-/// **A driver-chosen bound, not a datasheet one**: §10.2.2.7 gives the
-/// transaction no time at all. Ninety-six milliseconds and not one, because a
-/// millisecond is under what an independent driver of this same interface found
-/// a working part needs, and a deadline shorter than the hardware refuses a
-/// part that was going to answer.
-const MDI_DEADLINE_NANOS: u64 = 96_000_000;
+/// **A driver-chosen bound, not a datasheet one**: §4.5.2 gives its handshake
+/// no time and §10.2.2.7 gives its transaction none, so a part that answers
+/// neither inside it is refused instead of holding up the boot.
+pub(crate) const DEADLINE_NANOS: u64 = 100_000_000;
 
 /// §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
 /// attempting to access MDIO registers."
@@ -212,6 +204,65 @@ pub struct Phy {
     pub id: u32,
 }
 
+/// The bring-up's outcome with its fields dropped: what one exit code carries
+/// off a machine whose console reaches nobody.
+///
+/// **One table, read at both ends.** netd exits with [`Outcome::exit_code`]
+/// when its caller asks for the outcome that way, the kernel records the code
+/// in its `exit:` record, and the harness reads the record back through
+/// [`Outcome::from_exit_code`]. The block starts at 64: clear of 0, a clean
+/// exit, and of the codes at 128 and above that a process ends with when it
+/// did not choose its own end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(i32)]
+pub enum Outcome {
+    BroughtUp = 64,
+    Unrouted = 65,
+    OwnershipHeld = 66,
+    OwnershipBusy = 67,
+    MdiUnready = 68,
+    MdiError = 69,
+    Identity = 70,
+    NotThisRegisterMap = 71,
+}
+
+impl Outcome {
+    /// Every outcome, in exit-code order.
+    pub const ALL: [Self; 8] = [
+        Self::BroughtUp,
+        Self::Unrouted,
+        Self::OwnershipHeld,
+        Self::OwnershipBusy,
+        Self::MdiUnready,
+        Self::MdiError,
+        Self::Identity,
+        Self::NotThisRegisterMap,
+    ];
+
+    pub fn of(phy: Result<Phy, PhyRefusal>) -> Self {
+        match phy {
+            Ok(_) => Self::BroughtUp,
+            Err(PhyRefusal::Unrouted { .. }) => Self::Unrouted,
+            Err(PhyRefusal::OwnershipHeld { .. }) => Self::OwnershipHeld,
+            Err(PhyRefusal::OwnershipBusy { .. }) => Self::OwnershipBusy,
+            Err(PhyRefusal::MdiUnready { .. }) => Self::MdiUnready,
+            Err(PhyRefusal::MdiError { .. }) => Self::MdiError,
+            Err(PhyRefusal::Identity { .. }) => Self::Identity,
+            Err(PhyRefusal::NotThisRegisterMap) => Self::NotThisRegisterMap,
+        }
+    }
+
+    pub fn exit_code(self) -> i32 {
+        self as i32
+    }
+
+    /// The outcome an exit code names, or `None` for a code outside
+    /// [`Self::ALL`] — a process that ended for some other reason.
+    pub fn from_exit_code(code: i32) -> Option<Self> {
+        Self::ALL.into_iter().find(|outcome| outcome.exit_code() == code)
+    }
+}
+
 /// The MDIO interface, held under §4.5.2's software ownership for as long as
 /// this value lives.
 ///
@@ -231,15 +282,12 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// same bit is read as 1b (such as, access is not granted as long as the
     /// bit is 0b)."
     ///
-    /// **The interface is observed free before it is asked for.** §4.5.2 has
-    /// the software bit read 0b until the arbitration grants it, so under that
-    /// reading alone a driver could tell a grant from its own request by
-    /// reading back the one bit it wrote. On the part whose PHY the Management
-    /// Engine shares, a set bit says somebody owns the interface — and under
-    /// that reading the same test answers "granted" to this driver's own write,
-    /// so the sequence would drive `MDIC` against a second master and then hand
-    /// the interface back by clearing a flag that was never its own. Seeing all
-    /// three bits clear first is the one test that means a grant under both.
+    /// **The interface is observed free before it is asked for.** Under §4.5.2
+    /// a set software bit is a grant some agent holds, so a request registered
+    /// over it would be a second one on an interface that has at most one
+    /// owner — and the bit reading back set after this driver's own write
+    /// would then say nothing about whose it is. Seeing all three bits clear
+    /// first is the one reading under which the grant below is this driver's.
     fn claim(regs: &'a R, clock: &'a C) -> Result<Self, PhyRefusal> {
         // §4.5.2 arbitrates three bits of this register, so one bit is the whole
         // of what this driver writes in it and the rest is read and carried.
@@ -255,7 +303,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         let started = clock.nanos();
         while held & extcnf::OWNERSHIP != 0 {
             let waited = clock.nanos().saturating_sub(started);
-            if waited >= OWNERSHIP_DEADLINE_NANOS {
+            if waited >= DEADLINE_NANOS {
                 return Err(PhyRefusal::OwnershipHeld { held_by: held, after_nanos: waited });
             }
             held = regs.read(regs::EXTCNF_CTRL);
@@ -269,7 +317,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
                 return Ok(Self { regs, clock });
             }
             let waited = clock.nanos().saturating_sub(started);
-            if waited >= OWNERSHIP_DEADLINE_NANOS {
+            if waited >= DEADLINE_NANOS {
                 // The request itself is withdrawn, or §4.5.2's "at most only
                 // one bit is 1b" would be a bit this driver left standing for a
                 // grant it is no longer waiting on.
@@ -303,7 +351,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
                 return Ok((answer & mdic::DATA_MASK) as u16);
             }
             let waited = self.clock.nanos().saturating_sub(started);
-            if waited >= MDI_DEADLINE_NANOS {
+            if waited >= DEADLINE_NANOS {
                 return Err(PhyRefusal::MdiUnready { phy, reg, after_nanos: waited });
             }
         }
@@ -351,6 +399,13 @@ impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
     ///
     /// The bit is this driver's to clear because [`Owned::claim`] saw all three
     /// of them clear before it registered a request.
+    ///
+    /// **After [`PhyRefusal::MdiUnready`] this releases with a transaction
+    /// still in flight**, where §4.5.2 has the release follow the access's
+    /// completion. A transaction this driver has already given
+    /// [`DEADLINE_NANOS`] is not waited on a second time, and a bit left
+    /// standing instead would keep every other agent off the interface for the
+    /// boot.
     fn drop(&mut self) {
         let held = self.regs.read(regs::EXTCNF_CTRL);
         self.regs.write(regs::EXTCNF_CTRL, held & !extcnf::MDIO_SW_OWNERSHIP);
@@ -371,13 +426,6 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
     // attempting to access MDIO registers." A wait and not a poll: the document
     // offers nothing to read that shortens it.
     while clock.nanos().saturating_sub(reset_at) < LCD_RESET_DELAY_NANOS {}
-
-    // The one plain read of `MDIC` this sequence makes, before it writes a
-    // command into it: ones is nothing decoding the offset, and every
-    // transaction below would then be written into a register no device reads.
-    if regs.read(regs::MDIC) == u32::MAX {
-        return Err(PhyRefusal::Unrouted { reg: regs::MDIC });
-    }
 
     let mdi = Owned::claim(regs, clock)?;
 
