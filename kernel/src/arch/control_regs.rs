@@ -87,8 +87,10 @@ static DECLARED_CR4: AtomicU64 = AtomicU64::new(0);
 /// evidence of the check having run and not a restatement of the CPU count.
 static CHECKED: AtomicU64 = AtomicU64::new(0);
 
-/// Puts this CPU's `CR0` into [`CR0`]. Must run before
-/// [`pat::init`](super::pat::init), whose no-fill window depends on `CD` being live.
+/// Puts this CPU's `CR0` into [`CR0`]. [`pat::init`](super::pat::init)
+/// restores the `CR0` it finds, so a firmware `CD` survives that write and is
+/// cleared here: every AP runs this first, and the BSP runs it after, because
+/// the BSP's `pat::init` has to precede the panel it would report a refusal on.
 pub fn init_cr0(cpu_id: u32) {
     let before = bench::sample();
     if !skipped(cpu_id) {

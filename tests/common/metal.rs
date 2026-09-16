@@ -284,6 +284,21 @@ impl Readback {
         toyos_build::metal::deadline_lateness_ms(&self.loader)
     }
 
+    /// What the on-screen panel cost this boot, off the kernel's own census.
+    ///
+    /// **Two channels, because the panel outlives one of them.** A boot that
+    /// hands the machine back writes the census as an ordinary record and
+    /// `logd` files it; a boot a bound ended has no `logd` left, and its
+    /// kernel seals the same line into the black-box page the loader prints
+    /// back after the reset. The page from *this* boot is the one after the
+    /// separator: an earlier chain's report can sit in the pass before it.
+    pub fn panel(&self) -> Option<bootlog::Panel> {
+        bootlog::panel_census(&self.kernel).or_else(|| {
+            let after = self.after_the_reset().ok()?;
+            bootlog::panel_census(after.text())
+        })
+    }
+
     /// The same for the other bound: how far past its own bound a hard-lockup
     /// sample was when it found a cpu stuck, or `None` on a boot no cpu locked
     /// up on. Read out of the same channel and for the same reason.
@@ -907,6 +922,15 @@ pub fn run(
                      after that",
                     back.back_secs, back.stick_secs
                 );
+                let panel = back.panel();
+                // Evidence beside the two numbers that are priced: what a
+                // reader needs to tell a slower paint from more of them.
+                if let Some(panel) = panel {
+                    eprintln!(
+                        "    the panel painted {} time(s) and put {} px on the glass",
+                        panel.paints, panel.pixels
+                    );
+                }
                 // **The profile's row is what a boot owes, and the boot's own
                 // record is what it paid.** The two lateness fields are `None`
                 // on every boot but the one armed to stop itself, and at most
@@ -921,6 +945,8 @@ pub fn run(
                     ("stick_secs", Some(back.stick_secs)),
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
+                    ("panel_max_us", panel.map(|panel| panel.max_micros)),
+                    ("panel_us", panel.map(|panel| panel.micros)),
                 ] {
                     let name = format!("boot.{label}.{field}");
                     let priced = profile.row(&name).is_some();
