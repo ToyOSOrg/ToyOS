@@ -45,11 +45,12 @@
 //! `updated_at` moves on *any* later edit to *any* rule, an unrelated
 //! required-check addition included, and would silently misdate the regime
 //! rather than refusing; the first `merge_group` run is a fact about the queue
-//! actually processing a landing and cannot be perturbed that way. (Read at
-//! most the 500 most recent such runs — this instrument refuses rather than
-//! silently under-counting if the queue ever outgrows that.) If the rule is
-//! required but has never yet run one, the boundary is "now": nothing in any
-//! window so far can be attributed to a queue nobody has used.
+//! actually processing a landing and cannot be perturbed that way.
+//! ([`queue_started`] walks the listing back to it a page at a time, because
+//! no single query reaches it: `gh run list` answers newest-first, and the
+//! listing behind it stops at 1000 results however large the limit.) If the
+//! rule is required but has never yet run one, the boundary is "now": nothing
+//! in any window so far can be attributed to a queue nobody has used.
 //!
 //! **Under a queue, an incident is not the same finding it was under the
 //! eased law, and a red on `main`'s tip is not by itself evidence the queue
@@ -289,47 +290,96 @@ fn regime(root: &Path) -> Regime {
     if !rules.split_whitespace().any(|r| r == "merge_queue") {
         return Regime::Eased;
     }
+    queue_started(root)
+}
 
-    let Ok(mg_out) = Command::new("gh")
-        .args([
-            "run",
-            "list",
-            "--event",
-            "merge_group",
-            "--limit",
-            "500",
-            "--json",
-            "createdAt,headBranch",
-            "--jq",
-            r#"[.[] | select(.headBranch | startswith("gh-readonly-queue/main/"))] | sort_by(.createdAt) | [length, (.[0].createdAt // "")] | @tsv"#,
-        ])
-        .current_dir(root)
-        .output()
-    else {
-        return Regime::Unknown;
-    };
-    if !mg_out.status.success() {
-        return Regime::Unknown;
-    }
-    let text = String::from_utf8_lossy(&mg_out.stdout);
+/// One page of [`queue_started`]'s walk — half the 1000-result ceiling the
+/// listing behind `gh run list` puts on any one query, so a page that comes
+/// back short is the listing's end and never that ceiling.
+const QUEUE_PAGE: usize = 500;
+
+/// What [`queue_started`] asks of each page: how many runs it carried, its
+/// oldest run's instant, and the oldest among just its
+/// `gh-readonly-queue/main/*` rows.
+const QUEUE_PAGE_JQ: &str = concat!(
+    r#"[length, ((sort_by(.createdAt) | .[0].createdAt) // ""), "#,
+    r#"(([.[] | select(.headBranch | startswith("gh-readonly-queue/main/"))] "#,
+    r#"| sort_by(.createdAt) | .[0].createdAt) // "")] | @tsv"#
+);
+
+/// [`QUEUE_PAGE_JQ`]'s row: the runs on the page, the oldest one's instant,
+/// and the oldest on the queue ref. Either instant is absent where the page —
+/// or the queue-ref part of it — held nothing, and a row whose whole tail is
+/// absent arrives with the empty fields trimmed off rather than as tabs.
+fn parse_queue_page(text: &str) -> (usize, Option<i64>, Option<i64>) {
     let mut fields = text.trim().split('\t');
     let count: usize = fields
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("{TAG} `gh run list --event merge_group` printed no count row"));
-    assert!(
-        count < 500,
-        "{TAG} 500 merge_group runs on gh-readonly-queue/main/* is this instrument's ceiling for \
-         finding the earliest one — the queue has outgrown it, widen the query rather than trust \
-         a possibly-truncated \"earliest\""
-    );
-    let earliest = fields.next().unwrap_or("");
-    if earliest.is_empty() {
+    let instant = |field: Option<&str>| field.filter(|s| !s.is_empty()).map(parse_instant);
+    (count, instant(fields.next()), instant(fields.next()))
+}
+
+/// The instant `main`'s queue started, as the [`Regime`] it settles: the
+/// earliest `merge_group` run on `gh-readonly-queue/main/*` on record, now if
+/// the rule is required but no landing has ever been queued, or
+/// [`Regime::Unknown`] if `gh` cannot answer at all.
+///
+/// Reaching the earliest is a walk and no `--limit` buys a way out of it:
+/// `gh run list` answers newest-first, and the listing behind it stops at 1000
+/// results however large the limit. So each page's oldest run becomes the next
+/// page's `--created <=` bound — inclusive, so a run sharing that instant is
+/// re-read rather than stepped over — and the first page shorter than
+/// [`QUEUE_PAGE`] is the end of the listing, whatever the queue's total.
+fn queue_started(root: &Path) -> Regime {
+    let page_size = QUEUE_PAGE.to_string();
+    let mut bound: Option<i64> = None;
+    let mut earliest: Option<i64> = None;
+    loop {
+        let created = bound.map(|b| format!("<={}", format_instant(b)));
+        let mut args = vec![
+            "run",
+            "list",
+            "--event",
+            "merge_group",
+            "--limit",
+            &page_size,
+            "--json",
+            "createdAt,headBranch",
+            "--jq",
+            QUEUE_PAGE_JQ,
+        ];
+        if let Some(created) = &created {
+            args.extend(["--created", created]);
+        }
+        let Ok(mg_out) = Command::new("gh").args(&args).current_dir(root).output() else {
+            return Regime::Unknown;
+        };
+        if !mg_out.status.success() {
+            return Regime::Unknown;
+        }
+        let (count, oldest, oldest_queued) = parse_queue_page(&String::from_utf8_lossy(&mg_out.stdout));
+        if let Some(queued) = oldest_queued {
+            earliest = Some(earliest.map_or(queued, |e: i64| e.min(queued)));
+        }
+        if count < QUEUE_PAGE {
+            break;
+        }
+        let oldest = oldest.expect("a page that carried runs names the oldest of them");
+        assert!(
+            bound.is_none_or(|b| oldest < b),
+            "{TAG} a whole page of {QUEUE_PAGE} merge_group runs shares {} — the walk back to the \
+             earliest one cannot step past that instant",
+            format_instant(oldest)
+        );
+        bound = Some(oldest);
+    }
+    match earliest {
+        Some(started) => Regime::Queued(started),
         // Required, but the queue has never processed a landing: nothing in
         // any window so far can be "queued" either.
-        Regime::Queued(now_epoch_secs())
-    } else {
-        Regime::Queued(parse_instant(earliest))
+        None => Regime::Queued(now_epoch_secs()),
     }
 }
 
@@ -805,6 +855,20 @@ mod tests {
             let ok = std::panic::catch_unwind(|| parse_instant(bad)).is_ok();
             assert!(!ok, "{bad:?} should have been refused");
         }
+    }
+
+    /// The three page shapes [`queue_started`]'s walk reads: a full page, a
+    /// page carrying runs but none on the queue ref, and an empty one — whose
+    /// empty fields `gh` hands over trimmed away rather than as tabs.
+    #[test]
+    fn a_walked_pages_row_parses_at_every_shape() {
+        let instant = |t: &str| Some(parse_instant(t));
+        assert_eq!(
+            parse_queue_page("500\t2026-08-22T16:48:03Z\t2026-08-22T18:56:06Z\n"),
+            (500, instant("2026-08-22T16:48:03Z"), instant("2026-08-22T18:56:06Z"))
+        );
+        assert_eq!(parse_queue_page("2\t2026-08-20T14:39:48Z\t"), (2, instant("2026-08-20T14:39:48Z"), None));
+        assert_eq!(parse_queue_page("0"), (0, None, None));
     }
 
     fn run(head_sha: &str, workflow: &str, conclusion: &str, created: &str, updated: &str) -> Run {
