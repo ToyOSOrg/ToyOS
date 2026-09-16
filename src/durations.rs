@@ -12,6 +12,12 @@
 //! which tests are long, the dev host overwrites every name it measures with its
 //! own, and the file exists for the checkout that has measured nothing.
 //!
+//! **And the merged file is committed whole.** One run's rows are one
+//! partition, so keeping a name's older number beside the rest prices nothing
+//! against that run: it leaves the tier declaration disagreeing with the
+//! instrument, on names nobody can see from the landing that did it, until a
+//! nightly renders the verdict on all of them at once.
+//!
 //! **One profile, one instrument**: `tests/test-durations` holds what twelve
 //! GitHub-hosted shards measured, and every event's guest lane is that same
 //! twelve-shard shape, so the tier verdict is always rendered on the

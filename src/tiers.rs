@@ -331,112 +331,6 @@ pub const RELEGATED: &[Relegated] = &[
                  precedes it, and the T14 is the only judge of the device itself.",
     },
     Relegated {
-        test: "dump_nmi_probe",
-        ci_ms: 8_098,
-        why: Why::Cost,
-        guards: "The blocked-task dump's NMI probe: a CPU that misses its kick is asked where it \
-                 is with the one interrupt it cannot mask, and the rip that comes back must \
-                 resolve against the kernel's own symbols into the actuator's spin — the \
-                 separation of the three causes a silent CPU can have, which on the owner's T14 \
-                 named three CPUs without saying which. What still runs per pull request: \
-                 `blocked_dump` drives the dump itself, counts and kick budget, on the desktop \
-                 boot; the probe's answer and its symbolization have no other gate. Returned to \
-                 Fast on 2026-08-21 at 6,284 ms; back for margin at this price.",
-    },
-    Relegated {
-        test: "esp_filesystem",
-        ci_ms: 10_123,
-        why: Why::Cost,
-        guards: "Both FAT32 partitions as ordinary mounts, attacked from inside and judged from \
-                 outside: the tree's one host-writes-guest-reads staging direction, and the only \
-                 gate where a guest `fs::write` on `/boot` — the write that once truncated \
-                 `kernel.elf` to five bytes — is judged refused against the image the *device* \
-                 received, with `toyos-fat32-check` silent before and after and every build \
-                 artifact byte-identical. What still runs per pull request: \
-                 `boot_volume_metadata_error` gates `/boot`'s refused reads and \
-                 `writeback_durability` the host-judged `/log` write path; the `/boot` write \
-                 attack and the staged-file direction are gated only here.",
-    },
-    Relegated {
-        test: "fat_backing_revoked",
-        ci_ms: 8_226,
-        why: Why::Cost,
-        guards: "A `FatBacking` handed out before an unlink reading nothing after it — before \
-                 `FatFs::revoke`, a descriptor held across somebody else's `rm` demand-paged \
-                 whatever the reissued clusters got next — with the two questions the guest \
-                 cannot ask about itself answered on the host: `fatfs` reads the attacker's file \
-                 end to end off the image so the clusters really were reissued, and \
-                 `toyos-fat32-check` must stay silent on a partition asserted clean before the \
-                 boot. `revoke` lives in the kernel's adapters where no host suite reaches, and \
-                 no other test stages the cycle, so the refusal and both host-side questions go \
-                 nightly together.",
-    },
-    Relegated {
-        test: "heap_ceiling_recovery",
-        ci_ms: 10_371,
-        why: Why::Cost,
-        guards: "The machine surviving the report of its own heap-ceiling bug: one past \
-                 `mm::MAX_HEAP_ALLOC` kills its caller and nothing else, and the CPU that \
-                 recovered survives its next allocation — the check once sat inside the \
-                 allocator's lock, the kernel does not unwind, and reporting the bug wedged the \
-                 heap for the rest of the boot. One CPU is what makes the recovery claim \
-                 precise, and the `SYS_DEBUG` actuator is what makes the crossing observable at \
-                 all. Nothing still gates it per pull request: the kernel allocator has no host \
-                 suite and no other test crosses the ceiling.",
-    },
-    Relegated {
-        test: "idle_stack_guard",
-        ci_ms: 9_601,
-        why: Why::Cost,
-        guards: "The guard page under every per-CPU idle stack being really there: an overflow \
-                 off that stack once rewrote whatever the allocator had put underneath and \
-                 surfaced somewhere else entirely, so the page's absence is invisible to every \
-                 log line and screendump, and `SYS_DEBUG` action 9 on the test kernel supplies \
-                 the one read that asks — asserted down to the page walk's split leaf. Nothing \
-                 cheap still gates it per pull request: `double_fault_stack` bounds IST1, a \
-                 different stack, and nothing else touches this page, that being the point of a \
-                 guard page. Returned to Fast on 2026-08-21 at 5,049 ms; the price has nearly \
-                 doubled since its return.",
-    },
-    Relegated {
-        test: "locale_detect",
-        ci_ms: 9_959,
-        why: Why::Cost,
-        guards: "The wizard answered over QMP on the stand-in `locale_gate`, swiss-german \
-                 identified in two presses and the surface acting on the config it wrote — \
-                 the `LOCALE_WIZARD` shared boot's carrier, priced 7,055 and 9,959 ms on \
-                 two consecutive hosted runs, which is the straddle this variant exists to \
-                 hold. What still runs per pull request: `console_locale_detect` and \
-                 `desktop_locale_detect` carry the same wizard to the same verdict on the \
-                 two surfaces the machine actually has, so only the stand-in configuration \
-                 moves — and its rider goes with the boot, the row below.",
-    },
-    Relegated {
-        test: "locale_detect_unrecognized",
-        ci_ms: 160,
-        why: Why::RidesTheBootOf("locale_detect"),
-        guards: "The wizard's negative control in the guest — presses no layout agrees \
-                 with must end in `detect: Unrecognized` and never in a layout applied — \
-                 160 ms riding the `LOCALE_WIZARD` boot, relegated only because its \
-                 carrier is. What still runs per pull request: `toyos-keymap`'s host suite \
-                 (`tests/detect.rs`) drives the same decision to `Step::Unrecognized`, so \
-                 the verdict logic keeps a per-PR gate and only the in-guest refusal \
-                 moves.",
-    },
-    Relegated {
-        test: "log_partition_identity",
-        ci_ms: 9_516,
-        why: Why::Cost,
-        guards: "The log partition being named, never discovered — proved by moving the name: a \
-                 forged `log.guid` must produce a `gpt:` refusal naming the GUID it could not \
-                 find, cost nothing else (`/boot` mounts, the boot completes), and not fall \
-                 back, with the partition read back empty off the host afterwards — falling \
-                 back to the ESP would leave it empty too, so `logd` must not have opened a \
-                 file either. What still runs per pull request: `log_partition_layout` gates \
-                 the image-side bytes, GUIDs written out in full, on the volume a desktop OS \
-                 picks up; the boot-side refusal and the no-fallback proof move to nightly.",
-    },
-    Relegated {
         test: "readdir_bound",
         ci_ms: 19_823,
         why: Why::Cost,
@@ -448,92 +342,6 @@ pub const RELEGATED: &[Relegated] = &[
                  failure, and nothing cheap still gates either per pull request: the bound and \
                  the count live in the kernel, not in a pure crate, and this is their only \
                  test.",
-    },
-    Relegated {
-        test: "usb_short_read",
-        ci_ms: 8_150,
-        why: Why::Cost,
-        guards: "A data phase the controller cut short while the device's own CSW claims it \
-                 moved everything: the driver must count the xHC's residue, not the device's, \
-                 or an under-delivered READ(10) hands the caller the previous transfer's bytes \
-                 — another LBA's data under this LBA's number, with no error anywhere — judged \
-                 against bytes the host staged before the boot. What still runs per pull \
-                 request: `usb_storage_write_error` gates real write failures propagating; the \
-                 short-read refusal has no cheaper gate.",
-    },
-    Relegated {
-        test: "writeback_spawn",
-        ci_ms: 8_820,
-        why: Why::Cost,
-        guards: "One of the write-back queue's three negative controls (wall 4 of \
-                 `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`), on the arm the file \
-                 cache does not answer: with `writeback-stall` holding the flush provably owed, \
-                 a binary written, closed and spawned must run — `Vfs::open_backing` settles \
-                 the queue — where the kernel once answered `ELF: fewer bytes than a file \
-                 header`. Write, close, exec is the self-hosting sequence. What still runs per \
-                 pull request: `writeback_reopen` gates the handle-re-open arm the cache does \
-                 answer, and `writeback_durability` the host-judged volume; the device-view \
-                 arm is gated only here.",
-    },
-    Relegated {
-        test: "xhci_full_speed_device",
-        ci_ms: 8_833,
-        why: Why::Cost,
-        guards: "EP0's max packet size on a device that attaches at full speed, where only the \
-                 device knows it: the driver reads eight bytes, takes `bMaxPacketSize0` from \
-                 them, and only then reads the rest, and what it prints about a device is what \
-                 the device sent — the T14's port 9 was once logged `vendor=0000 product=0000` \
-                 off a buffer no transfer had filled. QEMU's `.full`-only descriptor tables are \
-                 the bytes a guest cannot invent. What still runs per pull request: \
-                 `xhci_descriptor_walk` walks descriptors at the speeds whose EP0 size is \
-                 fixed; the discovery sequence and the error channel are gated only here. This \
-                 is the straddler `FAST_COMMIT_MS`'s own doc prices — six hosted runs from \
-                 4,700 to 9,890 ms — so margin is exactly what it lacks.",
-    },
-    Relegated {
-        test: "xhci_slot_exhaustion",
-        ci_ms: 8_149,
-        why: Why::Cost,
-        guards: "A device count as untrusted input: more devices than the driver's DMA layout \
-                 has blocks for must cost those devices and nothing else, staged by clamping \
-                 the kernel to one block (`xhci-one-slot`) under a six-device bus — QEMU's \
-                 Enable Slot ignores MaxSlotsEn, so the slot ids really do run past the pool — \
-                 with the vacuousness check that the controller offers more slots than the \
-                 blocks, since a build whose ceiling stopped reaching `Layout::new` drops \
-                 nothing and goes green with no shortage in it. What still runs per pull \
-                 request: `usb_pool_exhausted` gates the MSC pool's refusal-by-name with \
-                 host-side byte proof — a different pool; the xHCI slot bound is gated only \
-                 here.",
-    },
-    Relegated {
-        test: "cache_eviction",
-        ci_ms: 8_165,
-        why: Why::Cost,
-        guards: "The file-cache budget holding under pressure: eviction never takes a dirty \
-                 page, so a lawful over-budget episode is all-dirty, bounded, and returns to \
-                 budget once a flush lands, its pages read back byte-identical. Nightly because \
-                 it boots a guest and stages the all-dirty overage plus a post-flush sweep, and \
-                 the deterministic staging that made this test reliable also pushed it over the \
-                 fast line. What still holds per pull request is the code invariant it witnesses \
-                 — `evict_one` drains every clean, unreferenced page before it gives up — but no \
-                 cheap per-PR test proves the runtime bound, so that witness moves to nightly.",
-    },
-    Relegated {
-        test: "log_conservation_smp4",
-        ci_ms: 8_248,
-        why: Why::Cost,
-        guards: "The log's conservation law at the middle SMP width, four CPUs. What still runs \
-                 per pull request: `log_conservation_smp1` and `log_conservation_smp8` at 4686 \
-                 and 5112 ms with margin — the two subject shapes the law turns on, the producer \
-                 sharing the reader's CPU and not — so only the four-CPU width, whose CI price \
-                 straddles the fast line (8248 and 8572 ms against a 5512 ms dev-host baseline), \
-                 moves to nightly.",
-    },
-    Relegated {
-        test: "fs_rename_durable",
-        ci_ms: 9_346,
-        why: Why::Cost,
-        guards: "The end-to-end durable witness: a rename staged on /log, the guest shut                  down, and the destination judged byte-for-byte off the raw FAT image by                  the in-tree toyos-fat32-check. Nightly because the boot-plus-shutdown                  costs a full cycle. What runs per pull request is the Fast                  `fs_transactional` control (a rename with an absent source keeps its                  destination, rename(p,p) is a no-op, a shrunk tail regrows as zeros) and                  the compile-time invariants that make the class unrepresentable: the                  `Committed` witness that forbids releasing a destination before the move                  commits, and `same_object`/`same_entry` that decides the no-op by backend                  identity so a FAT case-only rename cannot destroy the file.",
     },
     Relegated {
         test: "klogd_panic_halts",
@@ -548,39 +356,6 @@ pub const RELEGATED: &[Relegated] = &[
                  three rows on the wire with the process table naming them — and every \
                  boot's console output is klogd's drain, so the thread starving or dying \
                  is visible in any test that reads a line.",
-    },
-    Relegated {
-        test: "wall_clock_rtc_dead",
-        ci_ms: 8_070,
-        why: Why::Cost,
-        guards: "A dead RTC — the update flag never clearing — still boots, still logs, \
-                 names its file `unknown-00.log`, and refuses userland with `wall-clock: \
-                 no epoch` instead of serving 1970. What still runs per pull request: \
-                 `wall_clock_rtc_unstable` (7,805 ms, Fast) walks the same refusal path \
-                 for the no-two-reads-agree cause, so the refusal machinery keeps a per-PR \
-                 gate and only the dead-flag cause moves.",
-    },
-    Relegated {
-        test: "wall_clock_century_register",
-        ci_ms: 9_030,
-        why: Why::Cost,
-        guards: "The century register's *contents* widening the year: staged 0x21, this \
-                 boot's log file must be named in 2133, so a kernel reading a fixed 2000 \
-                 shows up in the one digit pair nothing else moves. What still runs per \
-                 pull request: `wall_clock_no_century` (6,987 ms, Fast) gates that the \
-                 FADT's answer is what decides, and `wall_clock_file` names its file off \
-                 the same decoder every run.",
-    },
-    Relegated {
-        test: "wall_clock_zone",
-        ci_ms: 9_347,
-        why: Why::Cost,
-        guards: "A firmware-named zone separating local time from UTC in the direction \
-                 UEFI defines: the -120-minute stage must leave the FAT name and stamps \
-                 on local time and move only `SYS_CLOCK_EPOCH`, the sign a dual-booted \
-                 laptop gets four hours wrong instead of two. What still runs per pull \
-                 request: `wall_clock_file` gates the epoch syscall against an unzoned \
-                 staged instant, so only the offset's application and sign move nightly.",
     },
     Relegated {
         test: "desktop_window_child",
@@ -649,20 +424,6 @@ pub const RELEGATED: &[Relegated] = &[
                  `durability-settle-blind` control and the private `Settlement` token that \
                  makes a blind clear uncompilable; the nightly race adds the \
                  end-to-end runtime witness that a mid-flush write survives.",
-    },
-    Relegated {
-        test: "fsync_failed_commit",
-        ci_ms: 8_386,
-        why: Why::Cost,
-        guards: "One fsync over a device that refuses its SYNCHRONIZE CACHE, required to \
-                 come back refused rather than answered durable (F5) — the cheapest of the \
-                 three durability guest witnesses, but a full boot straddles the fast line \
-                 and cannot hold it. What still runs per pull request: the same compile-time \
-                 gate its siblings name — the two-variant `bcachefs::DeviceError` makes the \
-                 refusal-into-Io erasure uncompilable and the private `Settlement` makes a \
-                 blind clear uncompilable — plus host-tests' must-red `durability-settle-blind` \
-                 loom step and the `a_refused_sync_stays_refused` crate-boundary differential; \
-                 the nightly boot adds the runtime witness that fsync surfaces the refusal.",
     },
     Relegated {
         test: "desktop_audio_client",
@@ -756,14 +517,6 @@ pub const RELEGATED: &[Relegated] = &[
                  assertion on whether the guest kept up. It is the first domino of the T14 \
                  freeze: an `extern \"C\"` frame with no unwind path turned the overflow panic \
                  into abort, and the kernel and compositor followed it down.",
-    },
-    Relegated {
-        test: "screen_console_scroll",
-        ci_ms: 13_401,
-        why: Why::Cost,
-        guards: "Every row of the panel, character for character, after a workload built \
-                 to leave stale glyphs behind a scroll. #90 was the owner seeing prior \
-                 text survive in the middle of a cleared screen.",
     },
     Relegated {
         test: "desktop_typing_damage",
@@ -1207,37 +960,6 @@ pub const RELEGATED: &[Relegated] = &[
                  32506320411, 8% apart with the 10,000 ms line between them.",
     },
     Relegated {
-        test: "double_panic_names_the_fault",
-        ci_ms: 9_120,
-        why: Why::Cost,
-        guards: "The only execution anywhere of `fatal_exception`'s kernel arm and the \
-                 `DOUBLE PANIC` branch below it — a Ring 0 exception is not something a guest \
-                 program or a QEMU property can produce, so before this test the branch had \
-                 never run under a test at all. It asserts that a machine two crashes deep \
-                 names which of four states the arriving panic found, the fault by name and \
-                 rip, and the panic that ended it, on the record channel and again on the \
-                 lock-free 16550 copy that a wedged log path cannot hold. What still runs per \
-                 pull request: `reentry_names_the_first_panic` (5,073 ms) covers the other dead \
-                 end — the panic *report* panicking on a CPU already at depth one — so the \
-                 pre-panic byte capture still has a gate; what goes dark is the panic-on-fault \
-                 half, where the depth is zero and `FAULT rip=` never printed.",
-    },
-    Relegated {
-        test: "console_line_atomicity",
-        ci_ms: 8_925,
-        why: Why::Cost,
-        guards: "That a `write` syscall, and not a buffer boundary, is the unit of console \
-                 interleaving: two writers on two CPUs put 2,000 lines through one console and \
-                 not one line may carry both tags, at exact width, with both writers' full \
-                 counts present so a lost capture cannot pass as a clean one. Two more claims \
-                 ride the same capture and have no other gate: a process that exits mid-line \
-                 has its unterminated bytes flushed by the last handle's drop, asserted as an \
-                 exact run length in both directions, and no kernel record may land inside a \
-                 userland line. Every other test in the tree reads the console assuming all \
-                 three; none of them asserts one. Relegated for margin: 8,925 ms committed, \
-                 within 11% of the line.",
-    },
-    Relegated {
         test: "driver_wait_refused",
         ci_ms: 17_739,
         why: Why::Cost,
@@ -1249,53 +971,6 @@ pub const RELEGATED: &[Relegated] = &[
                  bounded waits, under the same budgets, on devices that answer, so a budget that \
                  stopped compiling or started refusing live hardware reds wide; the stuck arms \
                  and the refusal lines themselves have no other gate.",
-    },
-    Relegated {
-        test: "ftruncate_flush_race",
-        ci_ms: 9_452,
-        why: Why::Cost,
-        guards: "A truncate raced into a flush's stalled size-read/`update_metadata` window \
-                 (`ftruncate-flush-stall`, 400 ms) and required to serialise — the lockless \
-                 resize's regression shape — with the shut-down volume re-judged off the image \
-                 by the FAT reader and `toyos-fat32-check`. What still runs per pull request: \
-                 the `&mut Vfs` witness that keeps every flusher's metadata pair under the VFS \
-                 lock, and the Fast `fs_truncate_persist` for an ordinary truncate's durable \
-                 size; the staged race and the host-side re-judgment are gated only here.",
-    },
-    Relegated {
-        test: "gpu_set_resolution",
-        ci_ms: 8_610,
-        why: Why::Cost,
-        guards: "A mode change that succeeds, and no pull request runs one at all: the new \
-                 framebuffer, the old one's release, the fresh scanout objects and the registry \
-                 update the *next* claim reads — judged against QEMU's own scanout over QMP, \
-                 the oracle that catches a driver whose account of itself is entirely correct \
-                 and whose SET_SCANOUT never reached the device. What still runs per pull \
-                 request: `abuse_gpu_resolution` (198 ms, shared boot) gates who may make the \
-                 call — four arms killed at it, one refused `PermissionDenied` — which is the \
-                 claim gate and not the resize. There is no cheaper gate to build: \
-                 `Profile::VirtioGpu` is the one shape in `tests/common/qemu.rs` with a GPU at \
-                 all, every other profile takes firmware's GOP whose `set_resolution` is an \
-                 unconditional `NotSupported`, so a Fast companion for either half of the \
-                 verdict would be a second boot of this same machine at this same price. \
-                 Relegated for margin rather than for a crossing — 8,610 ms against the \
-                 8,000 ms line — and the boot is 87% of it on the dev host, 3,764 ms of 4,329 \
-                 with 565 ms of test, so what would return this name is the boot's cost and \
-                 nothing in the test.",
-    },
-    Relegated {
-        test: "writeback_durability",
-        ci_ms: 8_888,
-        why: Why::Cost,
-        guards: "The shrink's device-side witnesses, each read off the raw volume by a second \
-                 FAT reader and `toyos-fat32-check`: a shrunk page the cache does not hold reads \
-                 back as zeros, a flush retried after a refused metadata write keeps the page \
-                 written above the mark, and a refused straddled-page fault refuses the \
-                 truncate. What still runs per pull request: `fs_transactional` asserts the \
-                 same POSIX rule in memory on both mounts and the bcachefs gap-block zeroing; \
-                 `writeback_reopen` and `writeback_spawn` cover backing derivation. The three \
-                 device-side arms have no other gate. Priced at 5,883 ms with two arms; 8,888 \
-                 with five, over `FAST_COMMIT_MS`.",
     },
     Relegated {
         test: "iommu_domain_isolation",
@@ -1322,32 +997,6 @@ pub const RELEGATED: &[Relegated] = &[
                  function on the unit and no-unit machines, the audio function's \
                  declared exception, and the NIC declining the bit and losing the \
                  device. Three boots: 17,259 ms on the hosted shard.",
-    },
-    Relegated {
-        test: "screen_survived_panic_not_blamed",
-        ci_ms: 8_477,
-        why: Why::Cost,
-        guards: "`panic_console::discard_capture` told from a no-op, which is the only reading \
-                 of it there is: one boot survives a panic and then kills the machine, and the \
-                 panel must carry a record written after the first panic's snapshot was frozen \
-                 — which a snapshot the discard failed to drop cannot hold. What still runs per \
-                 pull request: `screen_recoverable_untouched`, which compares two screendumps \
-                 either side of the recovered panic and so holds whether or not the discard did \
-                 anything — measured green on a kernel with `discard_capture` stubbed out — and \
-                 `screen_late_panic`, which covers `capture` and not the discard. So the \
-                 recovery branch's wiring has no other gate. Two guests in one boot: 8,477 ms \
-                 on the hosted shard, over `FAST_COMMIT_MS`.",
-    },
-    Relegated {
-        test: "screen_gop_firmware_mode",
-        ci_ms: 12_624,
-        why: Why::Cost,
-        guards: "What still runs per pull request: `screen_console_clear` asserts the 8-pixel \
-                 strip below the last cell row that only the declared 1920x1080 panel has, so a \
-                 bootloader that chose a mode again reds on every pull request. What only this \
-                 name holds: the kernel's GOP line against QEMU's own scanout geometry on two \
-                 machines with different panels, plus stride and pixel format. Two boots: \
-                 12,624 ms on the hosted shard, over `FAST_CEILING_MS`.",
     },
     Relegated {
         test: "root_named_twice",
@@ -1428,6 +1077,23 @@ pub const RELEGATED: &[Relegated] = &[
                  the wire; `toyos-logstream`\'s host tests carry the drop accounting and red \
                  under the drop-count mutation with no guest at all. Its price is the storm and \
                  the per-arm image build `log_stream` describes.",
+    },
+    Relegated {
+        test: "sysret_ss_reload",
+        ci_ms: 15_402,
+        why: Why::Cost,
+        guards: "`KernelHw::switch` refreshing SS after `iod` nulls it (AMD \
+                 `X86_BUG_SYSRET_SS_ATTRS`), which is the one way a guest can observe an \
+                 erratum its own `SYSRET` does not reproduce: a `mov ss` leaving the switch \
+                 turns `sysret-ss: reloaded` into `NOT reloaded`. What still runs per pull \
+                 request: nothing asks whether the switch reloads SS at all — the `METAL` \
+                 declaration reads the same probe line off the T14's stick, which is a daily \
+                 run and not a per-pull-request gate. The price is the harness's and not the \
+                 kernel's: the probe line lands before `===READY===`, so `boot_log()` already \
+                 holds it and the `drain_until` ceiling can only time out, spent in full on \
+                 every run \
+                 (`issues/build/the-shard-split-prices-a-boot-and-not-the-image-behind-it.md`). \
+                 Fixing that returns this row by this table's own rule.",
     },
 ];
 
