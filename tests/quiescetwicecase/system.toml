@@ -1,0 +1,17 @@
+# A boot whose one job asks for the reset twice, from two processes: a child
+# that leaves a closed file's flush owed and reboots, and the job itself, which
+# reads the kernel's log until that flush is being refused and then reboots
+# too. Only a holder of the log capability is still running when the second
+# call is made, which is why the job reads the log before it spawns anything.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+# `power` because the job ends the machine, `logread` because the second
+# caller has to still be running when it calls, `dup` because the runner
+# passes a duplicate of what it holds to the job and the job to its child.
+[programs.test-runner]
+args = ["test_rs_quiesce_twice"]
+syscap = ["dup", "logread", "power"]

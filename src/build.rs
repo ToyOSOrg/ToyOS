@@ -2600,6 +2600,7 @@ mod tests {
         "tests/netcase/system.toml",
         "tests/pkgcase/system.toml",
         "tests/quiescecase/system.toml",
+        "tests/quiescetwicecase/system.toml",
         "tests/sshdcase/system.toml",
         "tests/testcases/system.toml",
     ];

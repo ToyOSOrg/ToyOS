@@ -30,8 +30,12 @@ pub(super) fn sys_log_read(
     if let Err(e) = demand_syscap(syscap, Rights::LOG) {
         return e.refuse();
     }
-    // Where the capability is checked, and nowhere a caller's own words reach:
-    // the shutdown's first stage carves out what init moved this right into.
+    // **The shutdown's carve-out is this capability, learned here where it is
+    // checked and nowhere a caller's own words reach.** `wait_for_durable` ends
+    // only when a userland process makes the boot's last records durable, and
+    // `publish_durable` is reachable only through this syscall — so a holder of
+    // this right is exactly what can end that wait, and the first stage of the
+    // machine's stop leaves exactly those running.
     log::user::note_log_holder(process::current_process().raw());
     let mut cursor = match ctx.copy_in::<toyos_abi::log::LogCursor>(cursor_ptr) {
         Ok(cursor) => cursor,
@@ -48,9 +52,7 @@ pub(super) fn sys_log_read(
 }
 
 fn quiesce(last: &str) -> Result<(), SyscallError> {
-    // Refused by name: this machine has one shutdown, and a second one's sweep
-    // would band the thread that is performing the first — which is the thread
-    // with a reset left to reach.
+    // Refused by name, and first: nothing below runs twice.
     if !crate::quiesce::claim_the_shutdown() {
         log!("power: this machine is already stopping, so this caller stops with the rest");
         return Err(SyscallError::AlreadyExists);
@@ -66,10 +68,9 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     crate::drivers::watchdog::disarm();
     // **Before the sync, because the sync is a claim about a machine.** A
     // process that issues a `write` after `sync_all` returns has dirty pages
-    // nothing will flush. The carve-out is what holds the log capability, which
-    // is the whole of what can end the `wait_for_durable` below; those are
-    // stopped as soon as it returns, and what the writer puts on the volume in
-    // between is made durable by the `fsync` it publishes after.
+    // nothing will flush. The log's holders run on until `wait_for_durable`
+    // below returns, and what they put on the volume in between is made
+    // durable by the `fsync` they publish after.
     let stopped = crate::quiesce::stop(toyos_quiesce::Stage::ExceptLog);
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.

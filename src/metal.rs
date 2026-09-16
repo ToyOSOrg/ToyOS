@@ -718,6 +718,13 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
         ),
     ),
     (
+        "quiesce-drain-refuse",
+        Flash::Never(
+            "it keeps a closed file's flush owed and refuses the shutdown's own drain of it, so \
+             an image armed with it stages a stall inside the one sync a metal verdict rests on",
+        ),
+    ),
+    (
         "xhci-lock-wedged",
         Flash::Never(
             "it makes the shutdown skip the disk-cache flush, so the boot's own log may never \

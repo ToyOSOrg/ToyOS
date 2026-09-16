@@ -100,6 +100,9 @@ actuators! {
     /// Refuse the first two FAT-1 mirror writes of a write-back drain flush; two, not one, because the retry ladder parks only at attempt 2.
     fat_mirror_write_refuse = "fat-mirror-write-refuse";
 
+    /// Refuse the FAT-1 mirror write of a write-back drain flush as a budget expiry: on `iod` every time, so a closed file's flush is still owed when the shutdown's own drain reaches it, and on the thread running the shutdown six times, so that thread parks in `block::between_attempts` between its attempts.
+    quiesce_drain_refuse = "quiesce-drain-refuse";
+
     /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
     fat_flush_meta_refuse = "fat-flush-meta-refuse";
 

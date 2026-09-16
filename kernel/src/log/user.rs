@@ -1,6 +1,6 @@
 //! Kernel side of `SYS_LOG_READ` and its readiness source.
 //!
-//! No per-reader state in a read: a cursor is the caller's own sequence numbers and loss count, copied in, walked, and copied back; readers coexist uncoordinated. Requires [`Rights::LOG`] on a `SysCap` — not ambient, and this is the one place in the kernel that capability is checked, which is why [`LOG_HOLDERS`] learns who holds it here.
+//! No per-reader state in a read: a cursor is the caller's own sequence numbers and loss count, copied in, walked, and copied back; readers coexist uncoordinated. Requires [`Rights::LOG`] on a `SysCap`, not ambient. [`LOG_HOLDERS`] is the one table here, and it is the shutdown's, not a reader's.
 
 use alloc::vec::Vec;
 
@@ -103,23 +103,18 @@ fn publish_durable(claimed: u64) {
     DURABLE_NS.fetch_max(clamped, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// Holders one boot carves out of the first stage of its stop. Two programs
-/// hold the capability on the widest committed `system.toml`, and one of those
-/// may duplicate it into what it spawns.
+/// Holders one boot carves out of the first stage of its stop: a fixed set of
+/// words, because the table is read with preemption off inside the block
+/// layer.
 const MAX_LOG_HOLDERS: usize = 8;
 
-/// No process; no table issues it.
-const NO_PID: u32 = 0;
+/// An empty slot. `u32::MAX` is the pid no table issues and the one
+/// `percpu::current_pid` spells idle with; zero is `/system/bin/init`.
+const NO_PID: u32 = u32::MAX;
 
-/// Every process `/system/bin/init` moved [`Rights::LOG`] into, as this kernel
-/// learned it where it checked that capability.
-///
-/// **The shutdown's carve-out is a capability, and nothing a process says about
-/// itself joins this table.** [`super::wait_for_durable`] ends when a userland
-/// process makes the boot's last records durable, and [`publish_durable`] is
-/// reachable only through `SYS_LOG_READ`, so a holder of that right is exactly
-/// what can end the wait — and the first stage of the machine's stop leaves
-/// exactly those running.
+/// Every live process that has read the log with [`Rights::LOG`], recorded
+/// where that capability is checked and nowhere a caller's own words reach;
+/// the shutdown's first stage leaves exactly these running.
 ///
 /// [`Rights::LOG`]: toyos_abi::handle::Rights::LOG
 static LOG_HOLDERS: [core::sync::atomic::AtomicU32; MAX_LOG_HOLDERS] =
@@ -129,14 +124,20 @@ static LOG_HOLDERS: [core::sync::atomic::AtomicU32; MAX_LOG_HOLDERS] =
 static REFUSED_A_HOLDER: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Record a holder, called where the capability has just been checked and
-/// nowhere a caller's own words reach.
-///
-/// A surplus holder is refused by name rather than carried: the table is read
-/// with preemption off inside the block layer, so it is a fixed set of words,
-/// and a process it has no room for stops in the first stage like any other.
+/// Record a holder. A surplus one is refused by name rather than carried, and
+/// stops in the first stage like any other process.
 pub fn note_log_holder(pid: u32) {
+    assert!(pid != NO_PID, "log: a holder with no pid");
     for slot in &LOG_HOLDERS {
+        // A load first: the steady state is the one holder that reads on every
+        // loop finding itself in slot 0, and that costs no RMW.
+        let held = slot.load(core::sync::atomic::Ordering::Relaxed);
+        if held == pid {
+            return;
+        }
+        if held != NO_PID {
+            continue;
+        }
         match slot.compare_exchange(
             NO_PID,
             pid,
@@ -144,7 +145,8 @@ pub fn note_log_holder(pid: u32) {
             core::sync::atomic::Ordering::Relaxed,
         ) {
             Ok(_) => return,
-            Err(held) if held == pid => return,
+            // A sibling thread's first read took the slot for this same process.
+            Err(now) if now == pid => return,
             Err(_) => {}
         }
     }
@@ -157,8 +159,8 @@ pub fn note_log_holder(pid: u32) {
     }
 }
 
-/// Released here because a pid is issued again: the next process to hold this
-/// number is not the one that held the capability.
+/// Released at teardown so the slots hold only the living: every job a test
+/// boot spawns gets a `SysCap` dup, and the dead would fill them.
 pub fn forget_log_holder(pid: u32) {
     for slot in &LOG_HOLDERS {
         let _ = slot.compare_exchange(
@@ -172,10 +174,10 @@ pub fn forget_log_holder(pid: u32) {
 
 /// Whether the shutdown's first stage leaves `pid` running.
 pub fn holds_the_log(pid: u32) -> bool {
-    pid != NO_PID
-        && LOG_HOLDERS
-            .iter()
-            .any(|slot| slot.load(core::sync::atomic::Ordering::Relaxed) == pid)
+    assert!(pid != NO_PID, "log: asked whether no pid holds the log");
+    LOG_HOLDERS
+        .iter()
+        .any(|slot| slot.load(core::sync::atomic::Ordering::Relaxed) == pid)
 }
 
 /// Newest record `/system/bin/logd` has `fsync`ed to the device, or 0 if none yet.

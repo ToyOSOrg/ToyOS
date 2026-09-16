@@ -77,9 +77,10 @@ const ALL: u8 = 2;
 /// a gate that sees a stage sees the caller that goes with it.
 static STAGE: AtomicU8 = AtomicU8::new(RUNNING);
 
-/// The thread running the stop, which never stops itself.
-static CALLER_PID: AtomicU32 = AtomicU32::new(0);
-static CALLER_TID: AtomicU32 = AtomicU32::new(0);
+/// The thread running the stop, which never stops itself; no thread at all
+/// until [`stop`] stores one, spelt as `percpu` spells idle.
+static CALLER_PID: AtomicU32 = AtomicU32::new(u32::MAX);
+static CALLER_TID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 fn stage() -> Option<Stage> {
     match STAGE.load(Acquire) {
@@ -113,18 +114,26 @@ pub fn stops_this_thread() -> bool {
     stage.must_stop(thread, caller())
 }
 
-/// Whether this thread is the one shutdown this boot gets.
-///
-/// **Refused by name rather than run twice.** A second caller overwrites the
-/// identity the first is exempt by, and the first can be parked inside the
-/// `sync_all` it is waiting on — so the second sweep would band the thread that
-/// has the rest of the shutdown to perform, and that reset would never be
-/// reached.
+/// Whether this thread is the one shutdown this boot gets: a second caller's
+/// sweep would band the first where it parks inside its own sync.
 pub fn claim_the_shutdown() -> bool {
     !CLAIMED.swap(true, AcqRel)
 }
 
 static CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the running thread is the one performing the shutdown: what the
+/// `quiesce-drain-refuse` actuator refuses by.
+#[cfg(feature = "boot-actuators")]
+pub fn runs_the_shutdown() -> bool {
+    if stage().is_none() {
+        return false;
+    }
+    let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
+        return false;
+    };
+    ThreadId { pid: pid.raw(), tid: tid.raw() } == caller()
+}
 
 /// Stop every userland thread `stage` names, and answer with what it took.
 ///
@@ -135,8 +144,7 @@ static CLAIMED: AtomicBool = AtomicBool::new(false);
 #[must_use]
 pub fn stop(stage: Stage) -> Record {
     // Refused by name rather than defaulted: a caller with no task identity is
-    // not a reboot syscall, and `(0, 0)` would exempt whichever thread holds
-    // those ids instead.
+    // not a reboot syscall.
     let caller = ThreadId {
         pid: percpu::current_pid().expect("quiesce::stop: the caller holds no process").raw(),
         tid: percpu::current_tid().expect("quiesce::stop: the caller holds no thread").raw(),

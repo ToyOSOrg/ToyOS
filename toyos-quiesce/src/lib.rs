@@ -11,8 +11,7 @@
 //! file is a userland process, so a stop that took every process before the
 //! last word was written would deadlock on the one process the last word has
 //! to reach. So it goes in two: everything but that process, then that process
-//! too. Which processes those are the kernel takes from the capability their
-//! parent moved into them, never from a word a caller writes.
+//! too.
 //!
 //! [`Record`] is written by the kernel and read back off a stick by
 //! `src/metal.rs` and by the harness, so its wire form is rendered and parsed
@@ -34,8 +33,7 @@ pub struct ThreadId {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Thread {
     pub id: ThreadId,
-    /// Whether this thread's process holds the machine's log capability, which
-    /// is the whole of what can end the shutdown's wait for durability.
+    /// Whether this thread's process holds the machine's log capability.
     pub holds_the_log: bool,
 }
 

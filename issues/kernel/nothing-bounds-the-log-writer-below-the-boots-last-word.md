@@ -46,10 +46,14 @@ programs:
       grep -c 'syscap = \[.*logread' $f; done | grep -c '^2$'
     10
 
-On `tests/testcases` and `tests/metalcase` the second holder is `test-runner`,
-which writes files and spawns, so on those boots two processes run across
-`sync_all` where the wait depends on one. That is narrower than `main`, where
-every process does, and wider than the wait needs.
+A holder is recorded at its first `SYS_LOG_READ`, not at its endowment. On
+`tests/testcases` the second holder is `test-runner`, which reads inside its
+`log-gate` and `log-close` builtins and writes files and spawns, so on that
+boot two processes run across `sync_all` where the wait depends on one. On
+`tests/metalcase` `test-runner` holds the right and runs no job list, so it
+never reads, is not in the table, and stops in the first stage; there the
+carve-out is `logd` alone. That is narrower than `main`, where every process
+runs across the sync, and wider than the wait needs.
 
 ## What has been seen
 

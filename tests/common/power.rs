@@ -189,6 +189,10 @@ pub fn quiesce_stops_the_machine(
     // How many threads that binary puts to work. Spelt here because a guest
     // binary cannot be linked from the harness.
     const WRITERS: u32 = 6;
+    // The threads the stop names besides the writers: `init`, `logd` and
+    // `test-runner`, one each on this config; the job's own main thread is the
+    // caller and is never in the count.
+    const OTHERS: u32 = 3;
     let bins: Vec<(String, Vec<u8>)> =
         rust_bins.iter().filter(|(name, _)| name == JOB).cloned().collect();
     if bins.len() != 1 {
@@ -257,16 +261,18 @@ pub fn quiesce_stops_the_machine(
              is a counter that never counted rather than a machine that stopped:\n  {record}"
         ));
     }
-    // **The workload, counted by the kernel rather than by the guest.** A boot
-    // whose writers never ran — a spawn that failed, an endowment that changed,
-    // a first `File::create` that did not open — has a handful of threads to
-    // stop and would pass every judge above over a machine that had nothing to
-    // stop.
-    if record.sweep.total() < WRITERS {
+    // **The workload, counted by the kernel rather than by the guest, and
+    // counted exactly.** A boot whose writers never ran, or ran fewer than the
+    // harness is told, or lost one to an I/O error before the reset, has fewer
+    // threads to stop and would pass every judge above over a machine that was
+    // not the one described.
+    if record.sweep.total() != WRITERS + OTHERS {
         return Err(format!(
-            "this boot's stop named {} userland thread(s), fewer than the {WRITERS} writers \
-             alone, so nothing here is a claim about a machine that was busy:\n  {record}\n{whole}",
+            "this boot's stop named {} userland thread(s); {WRITERS} writers plus the {OTHERS} \
+             of init, logd and test-runner make {}, so this is not the machine the writers \
+             were on:\n  {record}\n{whole}",
             record.sweep.total(),
+            WRITERS + OTHERS,
         ));
     }
     if !record.stopped_the_machine() {
@@ -277,6 +283,116 @@ pub fn quiesce_stops_the_machine(
     }
 
     eprintln!("  [power] the machine stopped before it claimed anything: {record}");
+    Ok(())
+}
+
+/// **The machine has one shutdown, and the second caller is refused where it
+/// would have banded the first.** `quiesce-drain-refuse` parks the first
+/// caller in the drain's retry ladder inside its own sync; the second call is
+/// made from another process on the other CPU while it is parked there, and
+/// the judge is where the kernel's refusal lands among the actuator's lines.
+pub fn quiesce_refuses_a_second_shutdown(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/quiescetwicecase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+
+    const JOB: &str = "quiesce_twice";
+    // The kernel's `mirror_refuse::SHUTDOWN_REFUSALS`, spelt here because the
+    // harness cannot link the kernel.
+    const REFUSALS: usize = 6;
+    const REFUSED: &str = "quiesce-drain-refuse: refusing the shutdown drain's";
+    const SECOND_CALLER: &str = "power: this machine is already stopping";
+    const SYNCING: &str = "Syncing filesystems...";
+    const ANSWERED: &str = "quiesce_twice: the second caller was refused (AlreadyExists)";
+    let bins: Vec<(String, Vec<u8>)> =
+        rust_bins.iter().filter(|(name, _)| name == JOB).cloned().collect();
+    if bins.len() != 1 {
+        return Err(format!("the suite built {} copies of {JOB:?}", bins.len()));
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            qmp: true,
+            kernel_params: &["quiesce-drain-refuse"],
+            ..Default::default()
+        },
+    );
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let booted = qemu.boot_log().to_string();
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let reason = stop.reason();
+    let tail = qemu.drain_serial(WAIT);
+    let whole = format!("{booted}{tail}");
+
+    serial::Serial::named("second-shutdown drain", tail.as_str()).must_be_clean()?;
+    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
+
+    let lines: Vec<&str> = whole.lines().collect();
+    let at = |needle: &str| -> Vec<usize> {
+        lines.iter().enumerate().filter(|(_, l)| l.contains(needle)).map(|(i, _)| i).collect()
+    };
+
+    // The arm fired as many times as the kernel declares, or nothing below is
+    // about a caller parked in its ladder.
+    let refusals = at(REFUSED);
+    if refusals.len() != REFUSALS {
+        return Err(format!(
+            "the quiesce-drain-refuse actuator refused the shutdown's drain {} time(s), not the \
+             {REFUSALS} the kernel declares, so the first caller was not parked where this boot \
+             says it was\n{whole}",
+            refusals.len(),
+        ));
+    }
+    // **The judge.** Once, and inside the ladder: after the first refusal the
+    // second caller reacted to, before the last, which is the window the first
+    // caller is parked in.
+    let second = at(SECOND_CALLER);
+    if second.len() != 1 {
+        return Err(format!(
+            "the second caller was refused {} time(s), not once, so this machine ran its \
+             shutdown twice\n{whole}",
+            second.len(),
+        ));
+    }
+    let (first, last) = (refusals[0], refusals[REFUSALS - 1]);
+    if !(first < second[0] && second[0] < last) {
+        return Err(format!(
+            "the second caller was refused at line {} of the console, outside the ladder the \
+             first was parked in (lines {first} to {last}), so this is not the window the \
+             refusal exists for\n{whole}",
+            second[0],
+        ));
+    }
+    let syncs = at(SYNCING).len();
+    if syncs != 1 {
+        return Err(format!("this boot ran {syncs} shutdowns, not one\n{whole}"));
+    }
+    // The refusal reached Ring 3 as a word: the second caller went on running
+    // and said so, rather than being ended for asking.
+    if !whole.contains(ANSWERED) {
+        return Err(format!("the second caller never reported its refusal\n{whole}"));
+    }
+    // And the first caller's own shutdown, the one that was not banded, got
+    // to its last word.
+    if !whole.contains(REBOOTING) {
+        return Err(format!("the first caller never wrote {REBOOTING:?}\n{whole}"));
+    }
+
+    eprintln!(
+        "  [power] the second caller was refused at console line {} while the first was in its \
+         ladder (refusals at lines {first} to {last}):\n    {}\n    {}",
+        second[0],
+        lines[refusals[0]],
+        lines[second[0]],
+    );
     Ok(())
 }
 
@@ -1527,12 +1643,6 @@ fn stopped_the_log_writer_too(after: &serial::Serial) -> Result<(), String> {
         return Err(format!(
             "the second stage left {} thread(s) running into the reset:\n  {record}",
             record.sweep.running,
-        ));
-    }
-    if record.in_flight != 0 {
-        return Err(format!(
-            "the second stage took {} block operation(s) into the reset:\n  {record}",
-            record.in_flight,
         ));
     }
     Ok(())

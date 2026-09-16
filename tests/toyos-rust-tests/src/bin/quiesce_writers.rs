@@ -9,8 +9,7 @@
 //!
 //! Nothing here asserts: `common::power::quiesce_stops_the_machine` reads the
 //! kernel's own `stop:` record and the order of the console around it, which
-//! are the two things a guest cannot see about its own death. [`WRITERS`] is
-//! spelt there too, because a guest binary cannot be linked from the harness.
+//! are the two things a guest cannot see about its own death.
 
 use std::fs::File;
 use std::io::Write;
@@ -61,18 +60,25 @@ fn main() {
                     println!("{WRITING} {writer} {pass}");
                     // Reopened each pass: the close is what puts the last
                     // chunk's pages where only a sync can reach them.
+                    //
+                    // A writer that fails says so and is gone; the harness
+                    // counts the threads the kernel stopped, so one fewer is
+                    // the red, and this line is its reason.
                     let mut f = match File::create(&path) {
                         Ok(f) => f,
-                        // The volume going away under us is the reset
-                        // arriving, which is this program's whole purpose.
-                        Err(_) => return,
+                        Err(e) => {
+                            eprintln!("{WRITING} {writer} could not create {path}: {e}");
+                            return;
+                        }
                     };
                     for _ in 0..8 {
-                        if f.write_all(&payload).is_err() {
+                        if let Err(e) = f.write_all(&payload) {
+                            eprintln!("{WRITING} {writer} could not write {path}: {e}");
                             return;
                         }
                     }
-                    if f.sync_all().is_err() {
+                    if let Err(e) = f.sync_all() {
+                        eprintln!("{WRITING} {writer} could not sync {path}: {e}");
                         return;
                     }
                     if pass == 0 {

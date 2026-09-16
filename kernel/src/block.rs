@@ -94,6 +94,12 @@ pub fn userland_operations() -> (u32, u64) {
 /// Whether the stop this count is read for stops the thread opening an
 /// operation now: no stage stops a kernel thread, and a holder of the log
 /// capability runs on through the stage whose record reads this.
+///
+/// Read at the open and never again, so a process whose sibling thread makes
+/// it a holder while this thread is inside the operation stays counted — an
+/// `in_flight` of one on a record that stopped everything, reachable only by
+/// a multi-threaded holder whose first `SYS_LOG_READ` lands as the stop ends,
+/// which no committed config has.
 fn counted() -> bool {
     if crate::sched::kthread::current_is_kernel_thread() {
         return false;
