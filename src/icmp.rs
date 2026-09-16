@@ -9,6 +9,8 @@
 //! **A host that cannot ask and an address that did not answer are different
 //! answers**, and the caller gets them as `Err` and `Ok(false)`: a socket the
 //! host refuses would otherwise red a boot for this machine's configuration.
+//! A send the host's own routing refuses is the *second* of those and not the
+//! first — [`wire_is_down`] is where that line is drawn.
 
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
@@ -39,9 +41,15 @@ pub fn echo(addr: Ipv4Addr, wait: Duration) -> Result<bool, String> {
     let token = token();
     let request = request(&token);
     let deadline = Instant::now() + wait;
-    socket
-        .send_to(&request, (addr, 0))
-        .map_err(|e| format!("this host could not send an ICMP echo request to {addr}: {e}"))?;
+    if let Err(e) = socket.send_to(&request, (addr, 0)) {
+        // The address this probe watches is down for the whole span it is asked
+        // across, so the host's own routing has nowhere to put the request: that
+        // is a second nothing answered, which is what `Ok(false)` already says.
+        if wire_is_down(&e) {
+            return Ok(false);
+        }
+        return Err(format!("this host could not send an ICMP echo request to {addr}: {e}"));
+    }
     let mut buf = [0u8; MOST];
     loop {
         let Some(left) = deadline.checked_duration_since(Instant::now()) else {
@@ -69,6 +77,21 @@ pub fn echo(addr: Ipv4Addr, wait: Duration) -> Result<bool, String> {
             Err(e) => return Err(format!("this host could not read an ICMP reply: {e}")),
         }
     }
+}
+
+/// Whether a send failed because the wire is down right now, rather than
+/// because this host cannot ask the question at all.
+///
+/// **Three errnos and no fourth, each named.** A send with nowhere to go is
+/// refused by the kernel by name — `EHOSTUNREACH` where the address has no
+/// neighbour to hand the frame to, `ENETUNREACH` where no route covers it,
+/// `ENETDOWN` where the interface itself is gone — and across the span this
+/// probe is asked over, every one of them is the machine being down, which is
+/// the silence [`echo`] answers `Ok(false)` for. Everything else stays this
+/// host's failing: a permission the kernel withheld, a socket that is closed,
+/// a message it would not take.
+fn wire_is_down(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::EHOSTUNREACH | libc::ENETUNREACH | libc::ENETDOWN))
 }
 
 /// The socket, or why this host would not open one.
@@ -194,6 +217,41 @@ mod tests {
         assert!(is_reply(&reply, &token));
         let headed: Vec<u8> = IPV4.iter().chain(reply.iter()).copied().collect();
         assert!(is_reply(&headed, &token));
+    }
+
+    /// **A wire that is down right now is a second nothing answered, and
+    /// nothing else is.**
+    ///
+    /// The case, off the bench: the loop flashed the stick, set `BootNext` and
+    /// rebooted the machine, the address's neighbour entry lapsed while it was
+    /// down, and the send earned `No route to host (os error 65)` — which the
+    /// loop read as a host that could not ask and ended the run at exit 2, with
+    /// the boot itself complete on the stick. The host was on the LAN either
+    /// side of it. The three the kernel refuses a routeless send with are this
+    /// probe's subject; the errnos below it are not, and a run that widened the
+    /// first set into the second would spend its whole window calling a host
+    /// with no socket a machine that never answered.
+    #[test]
+    fn a_wire_that_is_down_right_now_is_not_a_host_that_cannot_ask() {
+        for errno in [libc::EHOSTUNREACH, libc::ENETUNREACH, libc::ENETDOWN] {
+            assert!(wire_is_down(&io::Error::from_raw_os_error(errno)), "{errno}");
+        }
+        // The recorded failure's own number, as this host spells it.
+        #[cfg(target_os = "macos")]
+        assert_eq!(libc::EHOSTUNREACH, 65);
+        for errno in [
+            libc::EPERM,
+            libc::EACCES,
+            libc::EBADF,
+            libc::ENOTSOCK,
+            libc::EAFNOSUPPORT,
+            libc::EMSGSIZE,
+            libc::EINVAL,
+        ] {
+            assert!(!wire_is_down(&io::Error::from_raw_os_error(errno)), "{errno}");
+        }
+        // An error with no errno behind it is none of the three either.
+        assert!(!wire_is_down(&io::Error::other("no errno")));
     }
 
     /// Everything that carries the bytes and is not this probe's answer.
