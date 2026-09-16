@@ -1922,6 +1922,7 @@ dependencies = [
  "toyos 0.7.0",
  "toyos-abi 0.6.0",
  "toyos-i219",
+ "toyos-tco",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 toyos-window = { path = "../../userland/toyos-window" }
+toyos-tco = { path = "../../toyos-tco" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.2" }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }

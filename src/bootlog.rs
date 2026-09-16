@@ -283,6 +283,103 @@ pub fn record_millis(line: &str) -> Option<u64> {
     secs.checked_mul(1_000)?.checked_add(millis)
 }
 
+/// The UTC second one record line carries, as seconds since the epoch.
+///
+/// `logd` writes the wall clock and the panel writes none, so a line without one
+/// answers `None` rather than reading the milliseconds field as a date.
+fn record_unix_secs(line: &str) -> Option<u64> {
+    const EPOCH: &str = "1970-01-01";
+    let mut fields = line.strip_prefix('[')?.split_whitespace();
+    let day = crate::day::Day::parse(fields.next()?)?;
+    let days = crate::day::Day::parse(EPOCH).expect("the epoch is a date").until(day);
+    let (hours, rest) = fields.next()?.split_once(':')?;
+    let (minutes, seconds) = rest.split_once(':')?;
+    let (hours, minutes, seconds): (i64, i64, i64) =
+        (hours.parse().ok()?, minutes.parse().ok()?, seconds.parse().ok()?);
+    // A leap second is the one value past the ordinary range that is a time.
+    if !(0..24).contains(&hours) || !(0..60).contains(&minutes) || !(0..=60).contains(&seconds) {
+        return None;
+    }
+    u64::try_from(days * 86_400 + hours * 3_600 + minutes * 60 + seconds).ok()
+}
+
+/// Whether `source` declares a constant whose value is exactly `rhs`, wrapped
+/// or not.
+///
+/// **The only way two crates nothing links are held to one spelling.** The line
+/// must end `= <rhs>;`, so a name in a message or inside a longer literal is not
+/// a declaration, and rustfmt's wrap of a value too wide for its line still is.
+pub fn declares(source: &str, rhs: &str) -> bool {
+    let tail = format!("= {rhs};");
+    let mut joined = String::new();
+    for line in source.lines() {
+        let line = line.trim_end();
+        if joined.ends_with('=') {
+            joined.push(' ');
+            joined.push_str(line.trim_start());
+            continue;
+        }
+        joined.push('\n');
+        joined.push_str(line);
+    }
+    joined.lines().any(|line| line.trim_end().ends_with(&tail))
+}
+
+/// The daylight a host second needs on either side before it is this boot's.
+///
+/// **A judge reading whole seconds does not get to decide at one.** `skew` is a
+/// difference of two floored clocks across a round trip its reader holds to a
+/// second, which is three of these; the second the host read and the second the
+/// record carries are floored too, which is the fourth; and the fifth is what
+/// makes a refusal a distance rather than a coin.
+pub const MARGIN: u64 = 5;
+
+/// Whether a second on the *host's* clock fell inside the boot this log is of,
+/// clear of [`MARGIN`] on both the record `after` names and the reset.
+///
+/// **The records are the one place a host clock and a boot's clock meet.**
+/// `skew` is this machine's clock minus the host's as the caller measured the
+/// two against each other; how far into a host-side window an observation came
+/// separates nothing, because such a window holds the operating system that
+/// left and the one that came back as well as this boot.
+pub fn host_second_inside_this_boot(
+    log: &str,
+    skew: i64,
+    after: &str,
+    at: u64,
+) -> Result<(), String> {
+    let dated = |line: Option<&str>| line.and_then(record_unix_secs).map(i128::from);
+    let began = dated(log.lines().find(|l| l.contains(after)))
+        .ok_or_else(|| format!("this log carries no dated {after:?} record"))?;
+    let ended = dated(log.lines().rfind(|l| l.contains(REBOOTING))).ok_or_else(|| {
+        format!(
+            "this log carries no dated {REBOOTING:?} record, so nothing in it says when this boot \
+             handed the machine back"
+        )
+    })?;
+    let at = i128::from(
+        at.checked_add_signed(skew)
+            .ok_or_else(|| format!("a host second of {at} and a skew of {skew} is no second"))?,
+    );
+    if at - began < i128::from(MARGIN) {
+        return Err(format!(
+            "the host saw it at {at} on this machine's clock and this boot's {after:?} record is \
+             at {began}, {} s apart: nothing closer than {MARGIN} s past that record is this \
+             boot's, because these clocks are whole seconds",
+            at - began
+        ));
+    }
+    if ended - at < i128::from(MARGIN) {
+        return Err(format!(
+            "the host saw it at {at} on this machine's clock and this boot's {REBOOTING:?} record \
+             is at {ended}, {} s apart: nothing closer than {MARGIN} s before that record is this \
+             boot's, so it belongs to the operating system on the other side of the reset",
+            ended - at
+        ));
+    }
+    Ok(())
+}
+
 /// When the last record in `log` was written, in milliseconds since boot.
 pub fn last_record_millis(log: &str) -> Option<u64> {
     log.lines().rev().find_map(record_millis)
@@ -329,29 +426,6 @@ mod tests {
         assert!(matches!(verdict(&carried_on), Err(Unfit::Unfinished(_))));
         assert_eq!(verdict(&format!("[logd 0.9 cpu1] {REBOOTING}\n")), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
-    }
-
-    /// Whether `source` declares a constant whose value is exactly `rhs`.
-    ///
-    /// Anchored to the declaration, so a name that appears in a message or in
-    /// a longer literal is not one: the line must end `= <rhs>;`.
-    /// A declaration whose value is `rhs`, wrapped or not: rustfmt puts a value
-    /// too wide for the line under the `=`, and a scan that could not see one
-    /// would pass by finding nothing to hold.
-    fn declares(source: &str, rhs: &str) -> bool {
-        let tail = format!("= {rhs};");
-        let mut joined = String::new();
-        for line in source.lines() {
-            let line = line.trim_end();
-            if joined.ends_with('=') {
-                joined.push(' ');
-                joined.push_str(line.trim_start());
-                continue;
-            }
-            joined.push('\n');
-            joined.push_str(line);
-        }
-        joined.lines().any(|line| line.trim_end().ends_with(&tail))
     }
 
     #[test]
@@ -543,5 +617,89 @@ mod record_time_tests {
         let log = "[1.000 cpu0] first\n[2.500 cpu1] second\nnot a record\n";
         assert_eq!(last_record_millis(log), Some(2_500));
         assert_eq!(last_record_millis("nothing\n"), None);
+    }
+
+    const BOOT: &str = concat!(
+        "[2026-09-08 16:08:21 0.000 cpu0 boot] panic console: armed 1920x1080 stride=1920 \
+         format=1 at 0x4000000000\n",
+        "[2026-09-08 16:08:22 1.258 cpu0] Boot: complete (1258ms)\n",
+        "[2026-09-08 16:08:44 23.340 cpu1] Rebooting.\n",
+    );
+
+    /// That boot's first record, which every second below is placed against.
+    fn first() -> u64 {
+        record_unix_secs(BOOT.lines().next().expect("a record")).expect("a wall clock")
+    }
+
+    /// **[`MARGIN`] decides both edges**, and one second short of either is
+    /// refused rather than read as inside.
+    #[test]
+    fn a_second_clear_of_this_boots_records_by_the_margin_is_this_boots() {
+        let first = first();
+        for at in [first + MARGIN + 1, first + 23 - MARGIN] {
+            assert_eq!(host_second_inside_this_boot(BOOT, 0, "Boot: complete", at), Ok(()), "{at}");
+        }
+        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first + MARGIN)
+            .expect_err("a second short of the margin past the record it is anchored on");
+        assert!(why.contains(&format!("closer than {MARGIN} s past")), "{why}");
+        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first + 24 - MARGIN)
+            .expect_err("a second short of the margin before the reset");
+        assert!(why.contains(&format!("closer than {MARGIN} s before")), "{why}");
+    }
+
+    /// **The one reply this judge exists to refuse.** The loop wrote it 57 s
+    /// into a window opening no earlier than its own run, whose first line is
+    /// 33 s before this boot's first record; it is anchored here on the earliest
+    /// record the boot carries, which is the most favourable anchor there is,
+    /// and no skew the measurement can be wrong by brings it inside.
+    #[test]
+    fn that_reply_is_refused_at_every_skew_the_measurement_can_be_wrong_by() {
+        let earliest_window = first() - 33;
+        for skew in -3..=3 {
+            let why =
+                host_second_inside_this_boot(BOOT, skew, "Boot: complete", earliest_window + 57)
+                    .expect_err("a skew of this size does not place that reply inside the boot");
+            assert!(why.contains(&format!("closer than {MARGIN} s before")), "{skew}: {why}");
+        }
+    }
+
+    /// **A boot that never reached its reset brackets nothing**, and neither
+    /// does one that never wrote the record the caller anchors on.
+    #[test]
+    fn a_log_missing_either_record_is_refused_rather_than_widened() {
+        let first = first();
+        let unfinished: String = BOOT.lines().take(2).map(|l| format!("{l}\n")).collect();
+        let why = host_second_inside_this_boot(&unfinished, 0, "Boot: complete", first + 10)
+            .expect_err("a log with no reset says nothing about when this boot ended");
+        assert!(why.contains(&format!("no dated {REBOOTING:?} record")), "{why}");
+        let why = host_second_inside_this_boot(BOOT, 0, "netd: DHCP: lease ", first + 10)
+            .expect_err("this boot took no lease");
+        assert!(why.contains("no dated \"netd: DHCP: lease \" record"), "{why}");
+        let why = host_second_inside_this_boot("[1.000 cpu0] first\n", 0, "first", 0)
+            .expect_err("a panel log carries no wall clock");
+        assert!(why.contains("no dated \"first\" record"), "{why}");
+    }
+
+    /// **The measured skew is the whole of what places a host second.** The
+    /// same reading is this boot's on one clock and the next operating system's
+    /// on another.
+    #[test]
+    fn the_measured_skew_is_what_the_host_second_is_read_through() {
+        let first = first();
+        assert_eq!(host_second_inside_this_boot(BOOT, 30, "Boot: complete", first - 20), Ok(()));
+        let why = host_second_inside_this_boot(BOOT, -30, "Boot: complete", first + 10)
+            .expect_err("thirty seconds the other way is before this boot began");
+        assert!(why.contains(&format!("closer than {MARGIN} s past")), "{why}");
+    }
+
+    /// The panel writes no wall clock, and its milliseconds field must not be
+    /// read as one: `[1.000 cpu0]` would otherwise parse `1.000` as a date and
+    /// answer some second in 1970.
+    #[test]
+    fn a_line_with_no_wall_clock_answers_none() {
+        assert_eq!(record_unix_secs("[1.000 cpu0] first"), None);
+        assert_eq!(record_unix_secs("not a record"), None);
+        assert_eq!(record_unix_secs("[2026-09-08 25:00:00 0.000 cpu0] x"), None);
+        assert_eq!(record_unix_secs("[2026-02-31 10:00:00 0.000 cpu0] x"), None);
     }
 }
