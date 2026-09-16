@@ -32,22 +32,17 @@ const MSG_ADDR: u32 = 0xFEE0_0000;
 // The same CPU, named as a destination rather than encoded in an address, for the unit to put in an entry.
 const MSG_DEST: u32 = 0;
 
+/// No requester id: a bus/device/function is sixteen bits, so this is none of them.
+pub(crate) const NO_FUNCTION: u32 = u32::MAX;
+
 /// The one function whose capability list is staged to end early, as a
 /// requester id, or [`NO_FUNCTION`]: every other walk in this kernel reads the
 /// list the device published.
 #[cfg(feature = "boot-actuators")]
 static STAGED: AtomicU32 = AtomicU32::new(NO_FUNCTION);
 
-/// No requester id: a bus/device/function is 16 bits.
-#[cfg(feature = "boot-actuators")]
-const NO_FUNCTION: u32 = u32::MAX;
-
 /// Stages the function a claim is bringing up as one publishing MSI and, past a
 /// link the spec forbids, an MSI-X table — for as long as this is held.
-///
-/// No device in reach publishes that shape, and it is the shape the hand-over's
-/// refusal exists for: read the early end as a terminator and MSI is armed on
-/// the guess while `msix_bar` withholds no BAR for the table behind it.
 #[cfg(feature = "boot-actuators")]
 pub(crate) struct StagedCaps;
 
@@ -384,6 +379,12 @@ impl PciDevice {
     }
 
     /// Point this function's single MSI message at `vector` and enable it.
+    ///
+    /// **A driver in this kernel may arm this however the MSI-X walk failed**, a
+    /// list that ended early included: it hands no BAR of its function to a
+    /// holder, so an MSI-X table past that link is one nobody but this kernel
+    /// could reach. A hand-over is the caller that has to tell the two apart,
+    /// and `crate::pcidev`'s header says why.
     pub fn enable_msi(&self, vector: u8) -> bool {
         let Ok(cap) = self.capability(msi::CAP_ID) else {
             return false;

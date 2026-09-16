@@ -17,6 +17,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::qemu::{self, BootOptions, QemuInstance};
+use super::serial::Serial;
 
 /// The line `ist1_report` writes to the UART.
 const MARKER: &str = "[ist1] used ";
@@ -255,43 +256,18 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
     // that runs netd — and netd's own answer is the assertion below that the
     // refusal reached userland rather than stopping at a log line.
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-    // netd is spawned before the ready marker and speaks after it, so its line
-    // is drained for rather than read out of the boot capture. **What is waited
-    // for is the whole line and not a prefix naming the program**: init reports
-    // the claim it could not make as `init: netd: ...`, and that is already in
-    // the boot capture before netd has run at all, so a `"netd: "` predicate is
-    // satisfied by the wrong speaker.
-    const NETD_EXITS: &str = "netd: no NIC on this machine, exiting";
-    let mut text = qemu.boot_log().to_string();
-    let stalled =
-        qemu::await_guest(&mut qemu, &mut text, "netd's own answer", |c| c.contains(NETD_EXITS))
-            .err();
-    let log = crate::common::serial::Serial::named("boot console", text);
+    let (log, exited) = netd_answered(QemuInstance::boot_with_options(&config, &[], &[], options));
 
     // Refused by name, at a named function, and not by claiming a mode it does
     // not have: the xHCI driver's `polled mode` line is the defect this whole
     // family exists to keep out of the tree.
-    log.must_say("pcidev: PCI 00:03.0 NOT HANDED OVER")?;
-    log.must_say("neither its MSI-X nor its MSI could be armed")?;
-    log.must_not_say("[1af4:1041] handed over")?;
-    // And the refusal is the *whole* of it: no BAR moved for a function nobody
-    // can be given one.
-    log.must_not_say("pcidev: PCI 00:03.0 BAR")?;
-    // All the way out to userland, rather than a kernel that logged a refusal
-    // and handed netd a NIC anyway. init names what it could not mint in the
-    // config's own spelling, and **with this refusal's own word**: the machine
-    // has the function, so "no such device on this machine" would be false.
-    log.must_say(
-        "init: netd: pci:1af4:1041 is on this machine and could not be handed over",
+    refused_claim(
+        &log,
+        super::https::VIRTIO.claims,
+        "neither its MSI-X nor its MSI could be armed",
     )?;
-    if !log.text().contains(NETD_EXITS) {
-        return Err(format!(
-            "{}{NETD_EXITS:?} never reached the boot console:\n{}",
-            stalled.map(|why| format!("{why}\n")).unwrap_or_default(),
-            log.text()
-        ));
-    }
+    // And it reached userland rather than stopping at a log line.
+    exited?;
     // And the machine is otherwise whole. `must_be_clean` is what makes the
     // change from `panic!` an assertion rather than a hope.
     log.must_say("virtio-sound: MSI-X vector")?;
@@ -302,13 +278,6 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
 
 /// A claimed function whose capability list ends at a link the spec forbids is
 /// refused, and never armed on the older mechanism the walk did reach.
-///
-/// **The one claim path that gains privilege by reading a list wrong**: read
-/// that end as a terminator and an MSI-X table past it is absent, so MSI is
-/// armed on the guess while `msix_bar` — the same walk — withholds no BAR, and
-/// the BAR that table lives in goes to the holder with everything else. A
-/// process that can write that table aims the device's message at any address
-/// the LAPIC decodes.
 ///
 /// No device in reach publishes that shape, so the actuator stages it — for
 /// this claim's own walks and nothing else.
@@ -323,54 +292,115 @@ pub fn claim_caps_truncated() -> Result<(), String> {
         ..Default::default()
     };
     let config = super::compile::repo_root().join(bench.config);
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-    const NETD_EXITS: &str = "netd: no NIC on this machine, exiting";
-    // netd announces itself when the claim was *not* refused, so a kernel that
-    // handed this function over ends the wait at once instead of being waited
-    // out to the stall budget.
+    let (log, exited) = netd_answered(QemuInstance::boot_with_options(&config, &[], &[], options));
+
+    // Refused by the reason that is true of it: what the list holds past that
+    // link was never read — not "it has no table".
+    refused_claim(&log, bench.claims, "its capability list ends at a link the PCI spec forbids")?;
+    // And it reached userland rather than stopping at a log line.
+    exited?;
+    // And the machine is otherwise whole: one claim refused costs networking
+    // and nothing else.
+    log.must_say("Boot: complete")?;
+    log.must_be_clean()?;
+    Ok(())
+}
+
+/// The slot every profile in this suite puts the function netd claims on.
+///
+/// **The address is the harness's own and never the guest's.** A judge that
+/// reads the refused function out of the console and then asserts about *that*
+/// asserts about whichever function the kernel happened to name; what the guest
+/// printed is asserted equal to this instead.
+const CLAIMED_AT: &str = "00:03.0";
+
+/// The two lines a hand-over of that function spends. One arm requires them and
+/// [`refused_claim`] requires their absence, and both read them here: a kernel
+/// that stopped writing either line would otherwise satisfy both.
+pub fn bar_moved() -> String {
+    format!("pcidev: PCI {CLAIMED_AT} BAR")
+}
+
+pub fn msix_armed() -> String {
+    format!("PCI {CLAIMED_AT}: msix address=")
+}
+
+/// netd's own answer on a machine it was given no NIC on.
+const NETD_EXITS: &str = "netd: no NIC on this machine, exiting";
+
+/// Wait for that answer, and hand back the boot console beside it.
+///
+/// netd is spawned before the ready marker and speaks after it, so its line is
+/// drained for rather than read out of the boot capture. **What is waited for
+/// is the whole line and not a prefix naming the program**: init reports the
+/// claim it could not make as `init: netd: ...`, and that is already in the
+/// boot capture before netd has run at all, so a `"netd: "` predicate is
+/// satisfied by the wrong speaker. netd announces itself instead when the claim
+/// was *not* refused, so a kernel that handed the function over ends the wait
+/// at once rather than being waited out to the stall budget.
+///
+/// The verdict is handed back rather than raised, so a caller judges the
+/// kernel's own half first: a kernel that handed the function over fails on
+/// what it printed about the function, not on what netd did about it.
+fn netd_answered(mut qemu: QemuInstance) -> (Serial, Result<(), String>) {
     const NETD_RUNS: &str = "netd: ready, at most ";
     let mut text = qemu.boot_log().to_string();
     let stalled = qemu::await_guest(&mut qemu, &mut text, "netd's own answer", |c| {
         c.contains(NETD_EXITS) || c.contains(NETD_RUNS)
     })
     .err();
-    let log = crate::common::serial::Serial::named("boot console", text);
-
-    // Refused by the reason that is true of it: what the list holds past that
-    // link was never read — not "it has no table".
-    log.must_say("NOT HANDED OVER")?;
-    log.must_say("its capability list ends at a link the PCI spec forbids")?;
-    let at = log
-        .text()
-        .lines()
-        .find(|line| line.contains("NOT HANDED OVER"))
-        .and_then(|line| line.split("pcidev: PCI ").nth(1))
-        .and_then(|rest| rest.split_whitespace().next())
-        .ok_or_else(|| format!("no function was refused:\n{}", log.text()))?
-        .to_string();
-    // And nothing was armed on the mechanism the walk *did* reach: an
-    // `msi address=` line for this function is a hand-over made on a list this
-    // kernel had no right to trust.
-    log.must_not_say(&format!("PCI {at}: msi address="))?;
-    log.must_not_say(&format!("[{}] handed over", bench.claims))?;
-    // The refusal spent nothing on the way out, so the BAR the table lives in
-    // is still where firmware put it.
-    log.must_not_say(&format!("pcidev: PCI {at} BAR"))?;
-    log.must_say(&format!(
-        "init: netd: pci:{} is on this machine and could not be handed over",
-        bench.claims
-    ))?;
-    if !log.text().contains(NETD_EXITS) {
-        return Err(format!(
+    let log = Serial::named("boot console", text);
+    let exited = if log.text().contains(NETD_EXITS) {
+        Ok(())
+    } else {
+        Err(format!(
             "{}{NETD_EXITS:?} never reached the boot console:\n{}",
             stalled.map(|why| format!("{why}\n")).unwrap_or_default(),
             log.text()
+        ))
+    };
+    (log, exited)
+}
+
+/// **The claim on [`CLAIMED_AT`] was refused for `why`, and the refusal spent
+/// nothing**: no BAR of that function moved, neither of its two message
+/// mechanisms is armed, `claims` reached no holder, and init said so in the
+/// boot config's own spelling.
+///
+/// The three arms that refuse a claim read this one judge, so a kernel that
+/// answered a refusal by logging it and handing the function over anyway is red
+/// wherever the refusal is reached. `slot_space` put back below `place_bars`
+/// reds on the two unspent lines.
+pub fn refused_claim(log: &Serial, claims: &str, why: &str) -> Result<(), String> {
+    let refused: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|line| line.contains("NOT HANDED OVER"))
+        .filter_map(|line| line.split("pcidev: PCI ").nth(1))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .collect();
+    if refused.is_empty() || refused.iter().any(|at| *at != CLAIMED_AT) {
+        return Err(format!(
+            "the claim this judges is the one on {CLAIMED_AT}; this console refused \
+             {refused:?}:\n{}",
+            log.text()
         ));
     }
-    // And the machine is otherwise whole: one claim refused costs networking
-    // and nothing else.
-    log.must_say("Boot: complete")?;
-    log.must_be_clean()?;
+    // By the reason true of the path that raised it, on the line that names the
+    // function: a refusal whose reason belongs to another path is worse than no
+    // line at all.
+    log.must_say(&format!("pcidev: PCI {CLAIMED_AT} NOT HANDED OVER — {why}"))?;
+    log.must_not_say(&format!("[{claims}] handed over"))?;
+    log.must_not_say(&msix_armed())?;
+    log.must_not_say(&format!("PCI {CLAIMED_AT}: msi address="))?;
+    log.must_not_say(&bar_moved())?;
+    // All the way out to userland, rather than a kernel that logged a refusal
+    // and handed netd a NIC anyway. init names what it could not mint in the
+    // config's own spelling, and **with this refusal's own word**: the machine
+    // has the function, so "no such device on this machine" would be false.
+    log.must_say(&format!(
+        "init: netd: pci:{claims} is on this machine and could not be handed over"
+    ))?;
     Ok(())
 }
 

@@ -85,28 +85,25 @@ pub fn every_bench_claims_what_its_config_declares() {
         let at = compile::repo_root().join(bench.config).join("system.toml");
         let config =
             std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+        let config: toml::Value =
+            toml::from_str(&config).unwrap_or_else(|e| panic!("parse {}: {e}", at.display()));
         // netd's own row and not the file's: `tests/netcase` declares the same
         // function twice, once for the daemon and once for the test binary that
         // asks the kernel for a second claim on it.
-        let mut in_netd = false;
-        let mut declared: Vec<&str> = Vec::new();
-        for line in config.lines().map(str::trim) {
-            if line.starts_with('[') {
-                in_netd = line == "[programs.netd]";
-                continue;
-            }
-            if !in_netd {
-                continue;
-            }
-            if let Some(row) = line.strip_prefix("devices = [") {
-                declared.extend(
-                    row.trim_end_matches(']')
-                        .split(',')
-                        .map(|word| word.trim().trim_matches('"'))
-                        .filter(|word| !word.is_empty()),
-                );
-            }
-        }
+        let declared = config
+            .get("programs")
+            .and_then(|programs| programs.get("netd"))
+            .and_then(|netd| netd.get("devices"))
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("{}: [programs.netd] declares no devices", at.display()));
+        let declared: Vec<&str> = declared
+            .iter()
+            .map(|device| {
+                device
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{}: {device} is not a device name", at.display()))
+            })
+            .collect();
         assert_eq!(
             declared,
             [format!("pci:{}", bench.claims)],

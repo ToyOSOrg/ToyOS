@@ -101,9 +101,6 @@ fn arm_interrupt(pci_dev: &PciDevice) -> Option<&'static str> {
     if pci_dev.enable_msix(XHCI_VECTOR).is_ok() {
         return Some("MSI-X");
     }
-    // A list that ends early takes MSI here rather than a refusal: this kernel
-    // drives the controller and hands no BAR of it to a holder, so an MSI-X
-    // table past that link is one nobody but this kernel could reach.
     pci_dev.enable_msi(XHCI_VECTOR).then_some("MSI")
 }
 
