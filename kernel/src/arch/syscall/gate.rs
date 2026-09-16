@@ -38,12 +38,73 @@ pub fn init() {
 
 }
 
+/// The hold `nmi_gate::hold_one` asks for, spun inside the window.
+///
+/// Every instruction here runs at CPL 0 on the user's stack with every
+/// register the thread's, so each takes an immediate and per-CPU memory and
+/// nothing else: a push is the SMAP fault the window is about, and a register
+/// is state the thread gets back. `ASKED` is the storm's to set and to clear,
+/// `HELD` the entry's acknowledgement, and the spin ends only on `ASKED`
+/// clearing — an ask withdrawn under a late acknowledgement releases at once
+/// rather than holding the CPU for good.
+///
+/// The window under test is the same one: the `test`/`jz` pair every entry
+/// runs lengthens it by two instructions on this kernel and pushes nothing, and
+/// the row its survival rests on — IST2 on vector 2 — is one `idt_vectors!`
+/// table in both kernels.
+#[cfg(feature = "boot-actuators")]
+macro_rules! window_hold {
+    () => {
+        concat!(
+            "test qword ptr gs:[{nmi_hold}], {asked}\n",
+            "jz 2f\n",
+            "lock or qword ptr gs:[{nmi_hold}], {held}\n",
+            "3:\n",
+            "pause\n",
+            "test qword ptr gs:[{nmi_hold}], {asked}\n",
+            "jnz 3b\n",
+            "2:\n",
+        )
+    };
+}
+
+/// Absent `boot-actuators` the window is its three instructions and nothing else.
+#[cfg(not(feature = "boot-actuators"))]
+macro_rules! window_hold {
+    () => {
+        ""
+    };
+}
+
+/// [`ring3_naked_asm`] with the operands only [`window_hold`]'s armed body
+/// names; an operand a template never uses is refused, so the shipping
+/// kernel's entry is handed none.
+#[cfg(feature = "boot-actuators")]
+macro_rules! entry_naked_asm {
+    ($($body:tt)*) => {
+        ring3_naked_asm!(
+            $($body)*
+            nmi_hold = const percpu::OFF_NMI_HOLD,
+            asked = const crate::nmi_gate::hold::ASKED,
+            held = const crate::nmi_gate::hold::HELD,
+        )
+    };
+}
+
+#[cfg(not(feature = "boot-actuators"))]
+macro_rules! entry_naked_asm {
+    ($($body:tt)*) => {
+        ring3_naked_asm!($($body)*)
+    };
+}
+
 // GS permanently points to kernel per-CPU data here; no swapgs.
 // `SYSCALL` switches no stack: before the `rsp` switch below runs, the CPU is at CPL 0 on the user's stack, so nothing that can fault may execute there.
 #[unsafe(naked)]
 extern "sysv64" fn syscall_entry() {
-    ring3_naked_asm!(
+    entry_naked_asm!(
         "mov gs:[{user_rsp}], rsp",
+        window_hold!(),
         "mov rsp, gs:[{kernel_rsp}]",
         "mov gs:[{syscall_rip}], rcx",
         "mov gs:[{syscall_num}], rdi",

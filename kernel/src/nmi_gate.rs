@@ -5,6 +5,15 @@
 //! CPL is 0 and `rsp` is a user address — the gap in `arch::syscall`'s
 //! entry/exit — `ring3` when the frame was Ring 3, `ring0` otherwise. Runs on
 //! IST2: no lock, no allocation, nothing that can fault.
+//!
+//! **The first arrival is arranged; the rest are sprayed.** Where a sprayed NMI
+//! lands is the accelerator's answer — under KVM it is injected wherever the
+//! host's kick exited, which can be outside the window for a whole storm — so
+//! [`storm`] first holds the victim inside the entry through [`hold`]'s word,
+//! which the entry acknowledges and spins on at CPL 0 on the user's stack, and
+//! aims one NMI at it there. That arrival is the premise every verdict on the
+//! window rests on: with IST2 it is the window arrival every host witnesses,
+//! and without it the `#DF` the control stages.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -19,6 +28,45 @@ static RING3: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// Where the first window arrival was, for the report to symbolize.
 static FIRST_WINDOW_RIP: AtomicU64 = AtomicU64::new(0);
 
+/// The bits of `PerCpu::nmi_hold`, the word `arch::syscall`'s entry spins on inside its window.
+pub mod hold {
+    /// Set by the storm to ask the next entry on that CPU to hold, cleared by the storm to release it; the entry spins while it is set and only while it is set.
+    pub const ASKED: u64 = 1;
+    /// Set by the entry once it holds; a claim only while `ASKED` is still set, since the entry leaves the moment that clears.
+    pub const HELD: u64 = 2;
+}
+
+/// Each CPU's hold word and the slot its entry parks the user `rsp` in, as addresses; published by `percpu::alloc_percpu` before that CPU runs, `irq_census`'s way.
+static HOLD_WORDS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static USER_RSPS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// Publishes one CPU's two words; called from `percpu::alloc_percpu` before that CPU runs an instruction.
+pub fn publish(cpu_id: u32, hold: *const AtomicU64, user_rsp: *const u64) {
+    let cpu = cpu_id as usize;
+    let (Some(hold_slot), Some(rsp_slot)) = (HOLD_WORDS.get(cpu), USER_RSPS.get(cpu)) else {
+        return;
+    };
+    hold_slot.store(hold as u64, Ordering::Release);
+    rsp_slot.store(user_rsp as u64, Ordering::Release);
+}
+
+/// One CPU's hold word, or `None` for a CPU never built.
+fn hold_word(cpu: usize) -> Option<&'static AtomicU64> {
+    let addr = HOLD_WORDS.get(cpu)?.load(Ordering::Acquire);
+    if addr == 0 {
+        return None;
+    }
+    // SAFETY: `PerCpu::nmi_hold`'s address, published by `percpu::alloc_percpu` for a block that lives as long as the machine; an atomic is shared across CPUs by design.
+    Some(unsafe { &*(addr as *const AtomicU64) })
+}
+
+/// The user `rsp` a held CPU's entry parked, read while the hold is acknowledged and not yet released — after the entry's store of it and before its next.
+fn held_user_rsp(cpu: usize) -> u64 {
+    let addr = USER_RSPS[cpu].load(Ordering::Acquire);
+    // SAFETY: `PerCpu::user_rsp`'s address, published with the hold word for a block that lives as long as the machine; the caller's acknowledged hold is what keeps the owning CPU from writing it, and the read is volatile because the writer is that CPU's entry stub.
+    unsafe { core::ptr::read_volatile(addr as *const u64) }
+}
+
 /// Records one NMI arrival for the current CPU; called from `arch::idt::nmi` before anything else.
 pub fn observe(rip: u64, cs: u64, rsp: u64) {
     if !crate::actuator::syscall_window_nmi() {
@@ -28,13 +76,9 @@ pub fn observe(rip: u64, cs: u64, rsp: u64) {
     if me >= MAX_CPUS {
         return;
     }
-    // Release: storm()'s load of this word is Acquire, so it is a handshake and not only a counter.
-    SEEN[me].fetch_add(1, Ordering::Release);
     if toyos_userbound::Ring::of_cs(cs).is_user() {
         RING3[me].fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-    if !crate::mm::is_kernel_addr(rsp) {
+    } else if !crate::mm::is_kernel_addr(rsp) {
         WINDOW[me].fetch_add(1, Ordering::Relaxed);
         let _ = FIRST_WINDOW_RIP.compare_exchange(
             0,
@@ -43,6 +87,8 @@ pub fn observe(rip: u64, cs: u64, rsp: u64) {
             Ordering::Relaxed,
         );
     }
+    // Last, and Release: `storm`'s Acquire load of this word is a handshake, and what it hands over is the classification above, not only a count.
+    SEEN[me].fetch_add(1, Ordering::Release);
 }
 
 /// Stages one nested NMI entry (an early `iretq` on IST2) if `nmi_nested` is armed; one shot per boot.
@@ -89,6 +135,21 @@ const ENOUGH: u64 = 64;
 /// Wait budget per NMI before the next goes out; a delivery that misses it still counts as sent.
 const DELIVERY_BUDGET_NS: u64 = 100_000;
 
+/// Asks before the spray goes out without a held arrival, and how long each waits for the entry's acknowledgement: a spinner enters a syscall every few hundred nanoseconds, so a wait is spent only on a vCPU the host has descheduled. Bounds, not measurements.
+const HOLD_ATTEMPTS: u32 = 10;
+const HOLD_ACK_NS: u64 = 100_000_000;
+
+/// How long the held NMI is waited for: the one delivery whose landing is the premise gets a host's scheduling latency rather than [`DELIVERY_BUDGET_NS`], and the held CPU spins with `IF` clear throughout, which keeps this well under `hardlockup`'s bound. A bound, not a measurement.
+const HELD_DELIVERY_NS: u64 = 100_000_000;
+
+/// What the arranged arrival came to.
+enum Held {
+    /// No CPU took a syscall while asked, in any attempt.
+    Nobody,
+    /// The victim held; whether the NMI aimed at it was taken there.
+    Aimed { in_window: bool },
+}
+
 /// Counts one syscall on this CPU while `syscall_window_nmi` is armed; called from every `syscall_dispatch`.
 pub fn note_syscall() {
     if !crate::actuator::syscall_window_nmi() {
@@ -109,6 +170,44 @@ fn victim(me: usize, cpus: usize) -> Option<(usize, u64)> {
         .filter(|&(cpu, _)| cpu != me)
         .map(|(cpu, n)| (cpu, n.load(Ordering::Relaxed)))
         .max_by_key(|&(_, n)| n)
+}
+
+/// Holds the victim inside `syscall_entry`'s window and aims one NMI at it there, so the arrival the fixed arm counts and the `#DF` the control stages are arranged rather than hoped for.
+fn hold_one(me: usize, cpus: usize) -> Held {
+    for _ in 0..HOLD_ATTEMPTS {
+        let Some((cpu, _)) = victim(me, cpus) else { break };
+        let Some(word) = hold_word(cpu) else { break };
+        // A whole store: a fresh ask takes a stale acknowledgement with it, so what the wait below sees is this round's.
+        word.store(hold::ASKED, Ordering::Release);
+        let deadline = crate::clock::nanos_since_boot().saturating_add(HOLD_ACK_NS);
+        while word.load(Ordering::Acquire) & hold::HELD == 0
+            && crate::clock::nanos_since_boot() < deadline
+        {
+            core::hint::spin_loop();
+        }
+        if word.load(Ordering::Acquire) & hold::HELD == 0 {
+            // Withdrawn before the next ask: an entry that read this one late acknowledges into a clear word and leaves at once.
+            word.fetch_and(!hold::ASKED, Ordering::AcqRel);
+            continue;
+        }
+        let rsp = held_user_rsp(cpu);
+        let seen = &SEEN[cpu];
+        let before = seen.load(Ordering::Acquire);
+        let window_before = WINDOW[cpu].load(Ordering::Relaxed);
+        // Before the send, so that on the control's kernel it is the storm's last word and the `#DF` under it is its consequence.
+        log!("syscall-window-nmi: held cpu={cpu} rsp={rsp:#018x} inside the entry's window, one NMI aimed at it");
+        apic::send_nmi(cpu as u32);
+        let deadline = crate::clock::nanos_since_boot().saturating_add(HELD_DELIVERY_NS);
+        while seen.load(Ordering::Acquire) == before
+            && crate::clock::nanos_since_boot() < deadline
+        {
+            core::hint::spin_loop();
+        }
+        let in_window = WINDOW[cpu].load(Ordering::Relaxed) > window_before;
+        word.fetch_and(!hold::ASKED, Ordering::AcqRel);
+        return Held::Aimed { in_window };
+    }
+    Held::Nobody
 }
 
 /// Storms whichever sibling CPU is spinning in `syscall`, once per boot, and logs where the NMIs landed.
@@ -133,7 +232,9 @@ pub fn storm() {
     // Syscall count either side of the storm proves the victim kept running throughout.
     let spun_before: u64 = SYSCALLS.iter().map(|n| n.load(Ordering::Relaxed)).sum();
 
-    let mut sent = 0u64;
+    let held = hold_one(me, cpus);
+    // The held NMI is one of the storm's.
+    let mut sent = u64::from(matches!(held, Held::Aimed { .. }));
     while sent < MAX_NMIS {
         // Aimed at the victim CPU only: broadcasting would sample idle siblings instead of the window.
         let Some((cpu, _)) = victim(me, cpus) else { break };
@@ -158,7 +259,7 @@ pub fn storm() {
         .map(|n| n.load(Ordering::Relaxed))
         .sum::<u64>()
         .saturating_sub(spun_before);
-    report(sent, spun, cpus);
+    report(sent, spun, cpus, held);
 }
 
 fn total(counter: &[AtomicU64; MAX_CPUS]) -> u64 {
@@ -166,7 +267,10 @@ fn total(counter: &[AtomicU64; MAX_CPUS]) -> u64 {
 }
 
 /// Logs one line per CPU that saw anything, then the summary line the gate reads last; each field is key=value, read by name not position.
-fn report(sent: u64, spun: u64, cpus: usize) {
+fn report(sent: u64, spun: u64, cpus: usize, held: Held) {
+    if matches!(held, Held::Nobody) {
+        log!("syscall-window-nmi: held nobody — no syscall entered on a CPU asked to hold, so the spray went out without an arranged arrival");
+    }
     for cpu in 0..cpus {
         let seen = SEEN[cpu].load(Ordering::Relaxed);
         if seen == 0 {
@@ -189,7 +293,8 @@ fn report(sent: u64, spun: u64, cpus: usize) {
     let ring3 = total(&RING3);
     log!(
         "syscall-window-nmi: sent={sent} seen={seen} window={window} ring3={ring3} ring0={} \
-         spun={spun}",
+         spun={spun} held={}",
         seen - window - ring3,
+        u64::from(matches!(held, Held::Aimed { in_window: true })),
     );
 }

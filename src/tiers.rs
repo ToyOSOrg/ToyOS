@@ -961,12 +961,13 @@ pub const RELEGATED: &[Relegated] = &[
         ci_ms: 13_090,
         why: Why::Cost,
         guards: "That `syscall_window_nmi` is not vacuous: a kernel with vector 2's IST index \
-                 taken off must double fault at the syscall entry with `cr2 = rsp - 8`, and a \
+                 taken off must double fault at the syscall entry on the NMI aimed at the CPU \
+                 the storm holds inside it, with `cr2 = rsp - 8` at the held `rsp`, and a \
                  second NMI entered on IST2 through an early `iretq` must take the loud path \
                  rather than silently overwrite the outer handler's frame. The window property \
-                 itself — arrivals at CPL 0 with a user `rsp`, symbolized to the entry, and a \
-                 machine that survives 3,000 of them — is gated per pull request by the Fast \
-                 name and is not what this row costs.",
+                 itself — the held arrival at CPL 0 with a user `rsp`, symbolized to the entry, \
+                 and a machine that survives 3,000 sprayed after it — is gated per pull request \
+                 by the Fast name and is not what this row costs.",
     },
     Relegated {
         test: "kernel_log_file",
