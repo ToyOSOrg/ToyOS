@@ -1549,11 +1549,11 @@ pub fn arm_mid_write_wedge(at: toyos_xhci::bot::Phase) {
     msc::mid_write::arm(at);
 }
 
-/// Refuse as many CBWs in a row as the transport gets attempts, on the disk
-/// the gate is driving, and say how many that is. See [`msc::bad_cbw`].
+/// Refuse as many CBWs in a row as the transport gets breaks, on the disk the
+/// gate is driving, and say how many that is. See [`msc::bad_cbw`].
 #[cfg(feature = "boot-actuators")]
 pub fn arm_bad_cbws() -> u8 {
-    msc::bad_cbw::arm(msc::MAX_TRANSPORT_ATTEMPTS);
-    msc::MAX_TRANSPORT_ATTEMPTS
+    msc::bad_cbw::arm(msc::MAX_TRANSPORT_BREAKS);
+    msc::MAX_TRANSPORT_BREAKS
 }
 

@@ -304,7 +304,15 @@ impl XhciController {
                 false
             }
             None => {
-                log!("xHCI: {what} timed out");
+                // The controller's own word beside the silence: a command ring
+                // that stopped (CRCR.CRR clear) or a Host Controller Error
+                // (USBSTS.HCE) is a controller no further command reaches.
+                log!(
+                    "xHCI: {what} timed out after {} ms with USBSTS={:#010x} and CRCR.CRR={}",
+                    USB_TIMEOUT_NS / 1_000_000,
+                    self.op_base.read_u32(super::OP_USBSTS),
+                    (self.op_base.read_u64(super::OP_CRCR) >> 3) & 1
+                );
                 false
             }
         }

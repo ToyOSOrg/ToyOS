@@ -86,21 +86,18 @@ impl Command {
 pub enum Act {
     Command(Command),
     /// CLEAR_FEATURE(ENDPOINT_HALT) on EP0, naming the address the *device*
-    /// knows this endpoint by. It clears the condition at the device, so it
-    /// goes out only after a halt: an endpoint that never halted has nothing to
-    /// clear and may stall the request for asking.
+    /// knows this endpoint by. It clears the condition at the device and zeroes
+    /// the device's data toggle or sequence number (USB 2.0 §9.4.5, USB 3.2
+    /// §9.4.5), so here it goes out only after a Reset Endpoint has zeroed the
+    /// controller's: sent to an endpoint the controller never reset, it leaves
+    /// the two ends of the pipe disagreeing.
     ///
-    /// **The only act of a recovery that puts a packet on the bus**, which is
-    /// the line a class driver has to cut its own device reset in at. Bulk-Only
-    /// Transport's Reset Recovery (BOT §5.3.4) is a class request followed by a
-    /// CLEAR_FEATURE on each bulk endpoint, and that class request may not go
-    /// out while either endpoint still holds a transfer the driver stopped
-    /// waiting for: the device answers that transfer afterwards, and the answer
-    /// lands on a state machine the reset has already rewound, so the transfer
-    /// being recovered from is what undoes the recovery. A command changes
-    /// nothing on the bus, so both endpoints' commands run first and the reset
-    /// goes between the halves — a split of this sequence rather than a
-    /// reordering of it, which is `the_bus_is_reached_only_after_every_command`.
+    /// **The only act of a recovery that puts a packet on the bus.** A command
+    /// changes nothing there, which is why every command comes before it —
+    /// `the_bus_is_reached_only_after_every_command`. A mass-storage device's
+    /// class-level reset is a different sequence over both bulk endpoints at
+    /// once, [`crate::reset_recovery`], and it clears both pipes whatever
+    /// state either was found in.
     ClearHalt,
     /// The endpoint runs again. The driver queues its next transfer.
     Running,

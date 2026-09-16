@@ -16,6 +16,7 @@ pub mod port;
 pub mod protocol;
 pub mod portsc;
 pub mod recovery;
+pub mod reset_recovery;
 pub mod ring;
 
 pub use job::{Await, Outcome, Outstanding};
