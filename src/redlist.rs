@@ -296,6 +296,22 @@ const NIGHTLIES: &str = "a later measurement on the same instrument. The last th
     `log_flush_retry` in two each, and `xhci_slow_connect`, `usb_disk_index_stable` and \
     `doom_sound_flood` in one each";
 
+/// What retired both `kernel_heartbeat` rows, written once because it is one
+/// landing and not two: the open question they were disputed over has been
+/// measured, and the answer was the instrument.
+///
+/// The dispute was that the no-CPU-missing-from-two-consecutive-lines rule had
+/// never had its own rate taken. It has now.
+const HEARTBEAT_SETTLES: &str = "the dispute's own open question, taken. Nightly `35072262489` \
+    measured the successor rule at 2 of 2 on guest shard 8 — `cpu[5] missing from two consecutive \
+    heartbeats of 17` on the suite run and again on the ALONE re-run — and both captures put the \
+    verdict on the window rather than on the kernel: the first beat of each boot was `alive=8/8` \
+    (t=1.109 s, t=1.029 s), every clear bit was before t=2.6 s while `init` was still spawning, \
+    and the guest was 8/8 for the eleven and ten beats that ran to the end of each capture. The \
+    window opened at that first full mask, so the boot churn it exists to exclude sat inside it. \
+    It opens at the first of two *consecutive* full masks now, which puts both boots' churn \
+    outside it, and `tests/toyos.rs`'s `kernel_heartbeat` is the site that enforces it";
+
 /// Every measurement, grouped by the campaign that took it.
 ///
 /// Adding a row means answering all eight fields; there is no default and no
@@ -525,14 +541,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "kernel_heartbeat",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 5),
-        standing: Standing::Disputed(
-            "two harness defects were fixed for it (the torn beat/pin pair, and a window that \
-             opens at the first full mask), and the probe's fixed arm — run 31283095698, ten \
-             reps — was **1 of 10 again**, on a *different* line: \
-             `cpu6 last reached one 0.349s ago`. The \
-             no-CPU-missing-from-two-consecutive-lines rule was written for that line and its rate \
-             has not been re-measured",
-        ),
+        standing: Standing::Retired(HEARTBEAT_SETTLES),
         what: "2 of 12 heartbeats dropped a healthy CPU from the mask",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -865,10 +874,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "kernel_heartbeat",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 10),
-        standing: Standing::Disputed(
-            "run 31283095698, the fixed arm of the same ten reps, was 1 of 10 again on a different \
-             line. See the note on this name's probe-rate row",
-        ),
+        standing: Standing::Retired(HEARTBEAT_SETTLES),
         what: "2 of 11 beats dropped a CPU from the mask",
         evidence: "probe-green run 31282019974, tree 98e7247, ten reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",

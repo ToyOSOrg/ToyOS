@@ -10026,24 +10026,45 @@ fn run_machine_test(
             // all run while the guest is busy — run `31280428519` shard 5 had
             // `alive=7/8` at 1.373 s with `cpu1 has never reached a scheduler
             // pass` and `5/8` at 1.624 s, and run `31283095698` rep 2 had cpu0
-            // missing from two consecutive lines. So the window opens at the
-            // first full mask.
+            // missing from two consecutive lines.
             //
-            // Neither rule lets the tick-less control through, and that was run
+            // **One full mask is not that rule, because the first line of a boot
+            // carries one whatever the machine is about to do.** Every AP spins
+            // on `ROSTER.released()` and they all enter the idle loop at the
+            // same instant (`arch::smp`), each stamping `TICKED` at the top of
+            // its first pass, so the beat after the roster's release finds eight
+            // fresh stamps — and the lines after *that* thin out again while
+            // `init` spawns and eight vCPUs contend for four cores. So the
+            // window opens where the machine *holds* the full mask rather than
+            // where it first reaches one: `SETTLE_BEATS` consecutive full lines,
+            // which is the shape `handle_lifetime`'s `settled_census` already
+            // uses to tell a lag from a leak. The kernel's own end-of-boot
+            // record is no help: `Boot: complete` is printed as `init` is
+            // spawned, so it lands *before* everything `init` starts and before
+            // every thin line here, and the settling has to be read off the mask
+            // itself.
+            //
+            // **A liveness bound and not a margin.** A CPU that has stopped lets
+            // no run of full masks form at all, so it is refused for never
+            // opening the window instead of being admitted through it — and
+            // neither rule lets the tick-less control through, which was run
             // rather than argued: `heartbeat = []` in `kernel/Cargo.toml` reds
             // this on six of the eight CPUs.
-            let Some(settled) = beats.iter().position(|l| l.contains("alive=8/8")) else {
+            const SETTLE_BEATS: usize = 2;
+            let full = |l: &&str| l.contains("alive=8/8");
+            let Some(settled) = beats.windows(SETTLE_BEATS).position(|w| w.iter().all(full)) else {
                 return Err(format!(
-                    "no heartbeat in the whole capture reported every CPU alive, so the machine \
-                     never reached the state the mask is a claim about\n{log}"
+                    "no {SETTLE_BEATS} consecutive heartbeats in the whole capture reported every \
+                     CPU alive, so the machine never held the state the mask is a claim about\n\
+                     {log}"
                 ));
             };
             let quiet = &beats[settled..];
             if quiet.len() < 4 {
                 return Err(format!(
-                    "the mask was full for only the last {} of {} heartbeats — the machine did not \
-                     settle inside this capture, and a clear bit before it settles says nothing\n\
-                     {log}",
+                    "the machine first held {SETTLE_BEATS} full masks with only {} of {} heartbeats \
+                     left — it did not settle inside this capture, and a clear bit before it \
+                     settles says nothing\n{log}",
                     quiet.len(),
                     beats.len()
                 ));
