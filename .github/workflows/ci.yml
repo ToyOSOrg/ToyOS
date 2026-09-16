@@ -543,14 +543,14 @@ jobs:
   # measurements the same way an ordinary run's carry Fast ones — this job does
   # not need to know which trigger produced them.
   #
-  # **Which names, the owner's ruling of 2026-08-22.** A pull request and a
-  # merge-queue composition pass `--tier-base <sha>` naming what they are a
-  # change *to*, and `--merge-durations` then refuses the price verdict only for
-  # the names that change registered or re-tiered in `tests/toyos.rs` or gave a
-  # different `Why` in `src/tiers.rs`. Every other price verdict prints as a
-  # `::warning::` and the job exits 0. The nightly passes no base and refuses
-  # them all — a nightly red is fixed by a pull request the next day, like every
-  # other nightly red.
+  # **Which names, the owner's ruling of 2026-08-22.** A pull request, a
+  # merge-queue composition and a push to `main` pass `--tier-base <sha>`
+  # naming what they are a change *to*, and `--merge-durations` then refuses
+  # the price verdict only for the names that change registered or re-tiered in
+  # `tests/toyos.rs` or gave a different `Why` in `src/tiers.rs`. Every other
+  # price verdict prints as a `::warning::` and the job exits 0. The nightly
+  # passes no base and refuses them all — a nightly red is fixed by a pull
+  # request the next day, like every other nightly red.
   #
   # Why: a per-shard common price factor explains 57% of a name's run-to-run
   # variance across six twelve-shard runs and spreads about 1.28x p10 to
@@ -604,14 +604,16 @@ jobs:
       - name: merge durations
         env:
           # What this run is a change *to*, from the event that produced it.
-          # Empty on `schedule`, `push` and `workflow_dispatch` — none of them
-          # is a change under review — and empty means the whole verdict, never
-          # none of it. `merge_group` first: a queued composition is measured
-          # against the `main` the queue built it on, not against the base the
-          # pull request opened from. One line: a folded scalar would put a
-          # newline inside the `${{ }}`, which is a question nobody should have
-          # to ask of a value that decides what this gate refuses.
-          TIER_BASE: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          # `merge_group` first: a queued composition is measured against the
+          # `main` the queue built it on, not against the base the pull request
+          # opened from. A `push` to `main` names the tip it replaced: its
+          # composition is one the merge queue already measured, so it renders
+          # only what that composition moved. Empty on `schedule` and
+          # `workflow_dispatch` — neither is a change to anything — and empty
+          # means the whole verdict, never none of it. One line: a folded scalar
+          # would put a newline inside the `${{ }}`, which is a question nobody
+          # should have to ask of a value that decides what this gate refuses.
+          TIER_BASE: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -o pipefail
           if ! ls /tmp/durations/*/test-durations.shard-* >/dev/null 2>&1; then

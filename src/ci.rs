@@ -361,14 +361,16 @@ mod tests {
     /// The second axis of the same job, held together for the same reason.
     ///
     /// Which *names* a run renders the price verdict for is decided by
-    /// [`crate::flags::TIER_BASE`] and by the two event expressions
+    /// [`crate::flags::TIER_BASE`] and by the three event expressions
     /// that fill it. Both failure directions are silent in the file that
-    /// carries them: drop the flag and every pull request and every merge-queue
-    /// composition quietly becomes the nightly, reding on names nobody in them
-    /// touched; drop one of the two event expressions and that event quietly
-    /// stops narrowing at all, with the workflow still reading perfectly.
-    /// `merge_group` in particular is the lane the verdict is *rendered* on, so
-    /// losing its base is losing the whole change.
+    /// carries them: drop the flag and every pull request, every merge-queue
+    /// composition and every push to `main` quietly becomes the nightly, reding
+    /// on names nobody in them touched; drop one of the three event expressions
+    /// and that event quietly stops narrowing at all, with the workflow still
+    /// reading perfectly. `merge_group` in particular is the lane the verdict
+    /// is *rendered* on, so losing its base is losing the whole change; a push
+    /// to `main` is that composition measured a second time, so losing its base
+    /// reds `main` on names no pull request touched.
     #[test]
     fn the_names_a_landing_is_judged_on_come_from_the_event_that_produced_it() {
         let path = repo_root().join(".github/workflows/ci.yml");
@@ -385,7 +387,11 @@ mod tests {
              composition 32550410305 on a name nothing in it had touched",
             crate::flags::TIER_BASE.name
         );
-        for base in ["github.event.merge_group.base_sha", "github.event.pull_request.base.sha"] {
+        for base in [
+            "github.event.merge_group.base_sha",
+            "github.event.pull_request.base.sha",
+            "github.event.before",
+        ] {
             assert!(
                 durations.contains(base),
                 "the `durations` job stopped reading {base}, so that event names no base and \

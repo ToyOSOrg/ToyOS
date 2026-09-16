@@ -1078,23 +1078,6 @@ pub const RELEGATED: &[Relegated] = &[
                  under the drop-count mutation with no guest at all. Its price is the storm and \
                  the per-arm image build `log_stream` describes.",
     },
-    Relegated {
-        test: "sysret_ss_reload",
-        ci_ms: 15_402,
-        why: Why::Cost,
-        guards: "`KernelHw::switch` refreshing SS after `iod` nulls it (AMD \
-                 `X86_BUG_SYSRET_SS_ATTRS`), which is the one way a guest can observe an \
-                 erratum its own `SYSRET` does not reproduce: a `mov ss` leaving the switch \
-                 turns `sysret-ss: reloaded` into `NOT reloaded`. What still runs per pull \
-                 request: nothing asks whether the switch reloads SS at all — the `METAL` \
-                 declaration reads the same probe line off the T14's stick, which is a daily \
-                 run and not a per-pull-request gate. The price is the harness's and not the \
-                 kernel's: the probe line lands before `===READY===`, so `boot_log()` already \
-                 holds it and the `drain_until` ceiling can only time out, spent in full on \
-                 every run \
-                 (`issues/build/the-shard-split-prices-a-boot-and-not-the-image-behind-it.md`). \
-                 Fixing that returns this row by this table's own rule.",
-    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own

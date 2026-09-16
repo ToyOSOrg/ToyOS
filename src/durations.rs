@@ -13,10 +13,7 @@
 //! own, and the file exists for the checkout that has measured nothing.
 //!
 //! **And the merged file is committed whole.** One run's rows are one
-//! partition, so keeping a name's older number beside the rest prices nothing
-//! against that run: it leaves the tier declaration disagreeing with the
-//! instrument, on names nobody can see from the landing that did it, until a
-//! nightly renders the verdict on all of them at once.
+//! partition, so a name kept at an older number is priced against no run.
 //!
 //! **One profile, one instrument**: `tests/test-durations` holds what twelve
 //! GitHub-hosted shards measured, and every event's guest lane is that same
@@ -44,7 +41,9 @@
 //! every other one as a `::warning::` naming the name, the price and why this
 //! run does not enforce it. The nightly passes no base, so [`Enforced`] is
 //! `Everything` there and the full verdict reds — fixed by a pull request the
-//! next day like every other nightly red.
+//! next day like every other nightly red. A push to `main` names the tip it
+//! replaced, because its composition is one the merge queue already measured,
+//! so the nightly is the sole instrument of record.
 //!
 //! **A Rust guest test's registration is its file.** `tests/toyos.rs` discovers
 //! `tests/toyos-rust-tests/src/bin/<name>.rs` from the binaries it built and no
@@ -103,8 +102,8 @@ pub const TIER_DISAGREEMENT: &str = "the merged CI profile and tier declaration 
 /// on every run and every verdict is computed. This decides only which of them
 /// may stop a landing.
 pub enum Enforced {
-    /// All of them. The nightly's twelve hosted shards, a push to `main`, a
-    /// `workflow_dispatch`, a hand-run merge — anything that named no base.
+    /// All of them. The nightly's twelve hosted shards, a `workflow_dispatch`,
+    /// a hand-run merge — anything that named no base.
     /// **A base that is absent or empty means this and never the reverse**: a
     /// workflow expression that evaluates to nothing must widen the gate, not
     /// silence it.

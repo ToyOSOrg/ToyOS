@@ -124,8 +124,10 @@ tree.)
 probe line (`sysret-ss: reloaded`) lands BEFORE `===READY===`, so `boot_log()`
 already holds it and `drain_until`'s predicate can only time out — the ceiling
 (10 s scaled by width and host speed) is spent on every run: 334, 452, 388,
-352, 433 s across five tiers. The fix is the test's (probe after READY, or
-check `boot_log` first); this record is tooling.
+352, 433 s across five tiers. That mechanism is out of the test — it reads
+`boot_log()` for the line before it drains — and the five samples above are
+what this record's claim about the instrument's spread rests on; this record is
+tooling.
 
 So a taker needs, in order: the build clock keyed by config rather than by
 thread; a committed per-config profile that only `Shard::keep` reads, merged the

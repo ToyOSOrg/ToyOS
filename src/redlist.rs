@@ -3673,20 +3673,17 @@ pub const KNOWN_RED: &[Red] = &[
         source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-09-07",
     },
-    // Met on the metal branch's own `durations` job, and not this branch's to
-    // fix: the price is unenforced at this base and the nightly renders it.
     Red {
         test: "sysret_ss_reload",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
         standing: Standing::Retired(
-            "this landing: the whole measured profile is committed — nightly run 35072262489 \
-             priced it 15,402 ms — and `src/tiers.rs` carries the name Why::Cost, so its \
-             price no longer contradicts a Fast declaration. The price itself is untouched, and \
-             its cause is the harness's: \
-             `issues/build/the-shard-split-prices-a-boot-and-not-the-image-behind-it.md` owns \
-             the drain ceiling this test spends in full on every run, and fixing that returns \
-             the name by the tier table's own rule",
+            "this landing: the price was the harness's — the probe line lands before \
+             `===READY===`, so `boot_log()` already held it and the 10 s `drain_until` \
+             ceiling could only time out, spent in full on every run. The test now reads the \
+             boot log for the line and drains only when it is not there; the name stays Fast, \
+             its committed price the `UNMEASURED` marker until the first hosted run of the \
+             fixed test replaces it",
         ),
         what: "not the test — its **price**: `sysret_ss_reload measured 26927 ms in CI, over the \
                10000 ms line, but sysret_ss_reload remains Fast`, against a committed 6,453 ms. \
@@ -3701,7 +3698,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "pull request #431, `ci` run 34070261856\'s `durations` job 101589256298, \
                    2026-09-07, printed as a `::warning::` and unenforced at base 67cb15be \
                    because this change neither registered nor re-tiered the name",
-        source: "src/tiers.rs",
+        source: "tests/toyos.rs",
         measured: "2026-09-07",
     },
     // The metal branch's own new name, adjudicated here rather than in an issue

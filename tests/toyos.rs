@@ -1188,10 +1188,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("writeback_durability", Sched::Parallel, Tier::Fast),
     // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
-    // the day that `mov ss` leaves the switch. Nightly on price alone — no clock
-    // is in the verdict, and the `drain_until` ceiling below is spent in full on
-    // every run because the probe line lands before `===READY===`.
-    ("sysret_ss_reload", Sched::Parallel, Tier::Nightly),
+    // the day that `mov ss` leaves the switch.
+    ("sysret_ss_reload", Sched::Parallel, Tier::Fast),
     // The FAT32 read side's revocation gate, and a host-side volume oracle for
     // the same reason `writeback_durability` is one: whether the clusters the
     // unlink freed were really reissued, and whether the cycle left a volume, are
@@ -9845,14 +9843,16 @@ fn run_machine_test(
             };
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // A liveness ceiling, not a pace: a loaded shard once took past a
-            // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
-            // The T14's readback needs no drain at all — the whole boot's records
-            // are on the stick — so the wait is here and the predicate is shared.
-            let log = qemu.boot_log().to_string()
-                + &qemu.drain_until(Duration::from_secs(10), |l| {
-                    l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
-                });
+            // The probe line lands before `===READY===` on an ordinary boot, so
+            // the boot log is read first; the drain is a liveness ceiling for a
+            // shard where iod's probe runs late, never a pace, and a ceiling
+            // drained for a line the boot log already holds can only time out.
+            let probe =
+                |l: &str| l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded");
+            let mut log = qemu.boot_log().to_string();
+            if !log.lines().any(probe) {
+                log += &qemu.drain_until(Duration::from_secs(10), probe);
+            }
             sysret_ss(&log)
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
