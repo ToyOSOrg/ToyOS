@@ -20,6 +20,7 @@
 
 use std::path::Path;
 
+use crate::flags;
 use crate::pr::git;
 
 /// One published crate: where its manifest is, and which of the five it names
@@ -73,12 +74,7 @@ pub fn dispatch_versions(root: &Path) {
 
 /// `cargo run -- --sdk-version-check [--base <ref>]`.
 pub fn dispatch_check(root: &Path, args: &[String]) {
-    let base = args
-        .iter()
-        .position(|a| a == "--base")
-        .map_or("origin/main", |pos| {
-            args.get(pos + 1).map_or("origin/main", String::as_str)
-        });
+    let base = flags::CARGO_RUN.value(args, &flags::BASE).unwrap_or("origin/main");
     match judge(root, base) {
         Ok(line) => println!("[sdk] {line}"),
         Err(refusal) => {

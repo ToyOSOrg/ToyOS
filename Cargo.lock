@@ -1098,6 +1098,9 @@ dependencies = [
 [[package]]
 name = "toyos-acpi"
 version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
 
 [[package]]
 name = "toyos-blackbox"
@@ -1231,6 +1234,9 @@ version = "0.1.0"
 [[package]]
 name = "toyos-pci"
 version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
 
 [[package]]
 name = "toyos-pcid"

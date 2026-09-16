@@ -35,6 +35,7 @@ mod attempt;
 mod blackbox;
 mod bootnext;
 mod loaderlog;
+mod rootbridge;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
@@ -573,6 +574,12 @@ fn report_reach(what: &str, at: u64, len: u64) {
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
+    // The last of the firmware questions, and asked here for the same reason
+    // the GOP's was asked before this: the protocol dies with boot services.
+    let mut root_bridge_windows = [RootBridgeWindow::default(); MAX_ROOT_BRIDGE_WINDOWS];
+    let root_bridge_window_count =
+        rootbridge::windows(&system_table, &mut root_bridge_windows) as u64;
+
     // Pre-allocated before exiting boot services, and flat: `alloc_page` splits
     // it into 512-entry pages.
     let pt_layout = Layout::from_size_align(MAX_PAGES * 4096, 4096).unwrap();
@@ -656,8 +663,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         rtc_utc_offset_known: rtc_utc_offset.is_some() as u32,
         cmdline_addr: cmdline.as_ptr() as u64,
         cmdline_len: cmdline.len() as u64,
-        root_bridge_window_count: 0,
-        root_bridge_windows: [RootBridgeWindow::default(); MAX_ROOT_BRIDGE_WINDOWS],
+        root_bridge_window_count,
+        root_bridge_windows,
     };
     report_reach(
         "Kernel arguments",
@@ -846,6 +853,12 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     if let Some(finding) = finding {
         for line in &finding.lines {
             println!("{line}");
+        }
+        // The file and not the console: `blackbox::tail` says what the
+        // firmware's own scroll costs this machine, and every reader of these
+        // lines reads them off the stick.
+        for line in &finding.filed {
+            loaderlog::line(format_args!("{line}"));
         }
         if finding.ends_the_chain {
             // The last boot is accounted for, so this pass boots no kernel.

@@ -2,6 +2,7 @@ mod qemu;
 
 use std::env;
 use std::path::{Path, PathBuf};
+use toyos_build::flags::{self, CARGO_RUN};
 
 /// One prerequisite: any of `any` satisfies it, and `why` is what reaches it.
 struct Tool {
@@ -77,35 +78,48 @@ fn check_prerequisites(root: &Path) {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = env::args().skip(1).collect();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    match flags::check(&args) {
+        flags::Outcome::Proceed => {}
+        flags::Outcome::Help(message) => {
+            println!("{message}");
+            return;
+        }
+        flags::Outcome::Refuse(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    }
+    let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
     // The landing protocol, and the command it replaced — **before
     // `check_prerequisites`**, because none of these builds anything and the
     // runner that runs `--abi-split-check` has no QEMU on it. They are git, a
     // push, and a refusal.
-    if args.iter().any(|a| a == "--land") {
+    if asked(&flags::LAND) {
         toyos_build::pr::dispatch_retired_land();
     }
-    if args.iter().any(|a| a == "--pr") {
+    if asked(&flags::PR) {
         toyos_build::pr::dispatch_pr(&root, &args);
         return;
     }
-    if args.iter().any(|a| a == "--sync") {
+    if asked(&flags::SYNC) {
         toyos_build::pr::dispatch_sync(&root);
         return;
     }
-    if args.iter().any(|a| a == "--abi-split-check") {
+    if asked(&flags::ABI_SPLIT_CHECK) {
         toyos_build::pr::dispatch_abi_check(&root, &args);
         return;
     }
     // The published crates' rule, and the list the publish workflow reads. Here
     // for the same reason: git and five manifests, on a runner with no QEMU.
-    if args.iter().any(|a| a == "--sdk-version-check") {
+    if asked(&flags::SDK_VERSION_CHECK) {
         toyos_build::sdkversion::dispatch_check(&root, &args);
         return;
     }
-    if args.iter().any(|a| a == "--sdk-versions") {
+    if asked(&flags::SDK_VERSIONS) {
         toyos_build::sdkversion::dispatch_versions(&root);
         return;
     }
@@ -113,14 +127,14 @@ fn main() {
     // writes one, and it is meant to be run on the machine holding them —
     // which, since the run that produces them is CI's, is a runner with no
     // QEMU.
-    if args.iter().any(|a| a == "--merge-durations") {
+    if asked(&flags::MERGE_DURATIONS) {
         toyos_build::durations::dispatch(&root, &args);
         return;
     }
     // Runs the `host` job's clippy over three targets, so a branch verifies the
     // gate's own claim before a push. Here for the same reason as the two below:
     // it shells to `cargo clippy` and the runner that runs it has no QEMU.
-    if args.iter().any(|a| a == "--clippy") {
+    if asked(&flags::CLIPPY) {
         toyos_build::clippy::dispatch(&root);
         return;
     }
@@ -128,20 +142,20 @@ fn main() {
     // again, and for one more: the question it answers — "is this red known,
     // and on what?" — is asked while a build is broken as often as while one
     // works.
-    if args.iter().any(|a| a == "--known-red") {
+    if asked(&flags::KNOWN_RED) {
         toyos_build::redlist::dispatch(&root, &args);
         return;
     }
     // Asks `gh`, not the toolchain, so it runs on the bare `ubuntu-latest`
     // runner the nightly schedule gives it — no QEMU, no ToyOS toolchain.
     // Same reason as the two above: before `check_prerequisites`.
-    if args.iter().any(|a| a == "--merge-health") {
+    if asked(&flags::MERGE_HEALTH) {
         toyos_build::mergehealth::dispatch(&root, &args);
         return;
     }
     // Reads lockfiles and cargo's own checkouts, nothing else: the half of a
     // "zero callers" ABI sweep a monorepo grep cannot see.
-    if args.iter().any(|a| a == "--abi-callers") {
+    if asked(&flags::ABI_CALLERS) {
         toyos_build::forkcheck::dispatch_callers(&root, &args);
         return;
     }
@@ -149,51 +163,50 @@ fn main() {
     check_prerequisites(&root);
     env::set_current_dir(&root).expect("Failed to cd to project root");
 
-    let debug = args.iter().any(|a| a == "--debug");
-    let build_only = args.iter().any(|a| a == "--build-only");
-    let dump_audio = args.iter().any(|a| a == "--dump-audio");
-    let rebuild_toolchain = args.iter().any(|a| a == "--rebuild-toolchain");
-    let claim_sysroot = args.iter().any(|a| a == "--claim-sysroot");
-    if let Some(pos) = args.iter().position(|a| a == "--host-builds") {
-        let value = args
-            .get(pos + 1)
-            .unwrap_or_else(|| panic!("--host-builds needs a budget (0 turns it off)"));
+    let debug = asked(&flags::DEBUG);
+    let build_only = asked(&flags::BUILD_ONLY);
+    let dump_audio = asked(&flags::DUMP_AUDIO);
+    let rebuild_toolchain = asked(&flags::REBUILD_TOOLCHAIN);
+    let claim_sysroot = asked(&flags::CLAIM_SYSROOT);
+    if let Some(budget) = CARGO_RUN.value(&args, &flags::HOST_BUILDS) {
         toyos_build::buildlock::set_host_builds(
-            value.parse().unwrap_or_else(|_| panic!("--host-builds: {value:?} is not a budget")),
+            budget.parse().unwrap_or_else(|_| panic!("--host-builds: {budget:?} is not a budget")),
         );
     }
     let smp = parse_smp(&args);
     let profile = parse_profile(&args);
-    let mute = args.iter().any(|a| a == "--mute");
-    let kernel_param = toyos_build::build::repeated(&args, "--kernel-param");
+    let mute = asked(&flags::MUTE);
     // A machine with no serial port has the framebuffer and nothing else, and
     // the kernel stops painting it the moment userland claims it. `--diag-boot`
     // builds the image that never does; `--console-boot` builds the one that
     // claims it deliberately and puts a shell there, having first copied the
     // boot log into its scrollback.
-    let diag = args.iter().any(|a| a == "--diag-boot");
-    let console = args.iter().any(|a| a == "--console-boot");
+    let diag = asked(&flags::DIAG_BOOT);
+    let console = asked(&flags::CONSOLE_BOOT);
     assert!(!(diag && console), "--diag-boot and --console-boot are two images; build one");
     // `--boot-config <dir>` builds the `system.toml` in that directory.
     // **A flashed image carries no actuator**, so only the kernel's own boot
     // parameters are admitted beside it, and every flag it cannot combine with
     // is refused by name.
-    let boot_config = toyos_build::build::valued(&args, "--boot-config");
-    if let Some(asked) = &boot_config {
+    let boot_config = CARGO_RUN.value(&args, &flags::BOOT_CONFIG);
+    if let Some(dir) = boot_config {
         for (other, flag) in [
-            (diag, "--diag-boot"),
-            (console, "--console-boot"),
-            (rebuild_toolchain, "--rebuild-toolchain"),
+            (diag, &flags::DIAG_BOOT),
+            (console, &flags::CONSOLE_BOOT),
+            (rebuild_toolchain, &flags::REBUILD_TOOLCHAIN),
         ] {
-            assert!(!other, "--boot-config {asked} cannot be combined with {flag}");
+            assert!(!other, "--boot-config {dir} cannot be combined with {}", flag.name);
         }
-        assert!(build_only, "--boot-config {asked} builds an image; pass --build-only");
-        toyos_build::build::flashable_params(&root, &kernel_param)
+        assert!(build_only, "--boot-config {dir} builds an image; pass --build-only");
+        let params: Vec<String> =
+            CARGO_RUN.values(&args, &flags::KERNEL_PARAM).into_iter().map(String::from).collect();
+        toyos_build::build::flashable_params(&root, &params)
             .unwrap_or_else(|refusal| panic!("{refusal}"));
     }
-    let boot = match (&boot_config, diag, console) {
-        (Some(asked), _, _) => toyos_build::build::Boot::case(&root, asked)
-            .unwrap_or_else(|refusal| panic!("{refusal}")),
+    let boot = match (boot_config, diag, console) {
+        (Some(dir), _, _) => {
+            toyos_build::build::Boot::case(&root, dir).unwrap_or_else(|refusal| panic!("{refusal}"))
+        }
         (None, true, _) => toyos_build::build::Boot::diag(&root),
         (None, _, true) => toyos_build::build::Boot::console(&root),
         _ => toyos_build::build::Boot::shipped(&root),
@@ -207,33 +220,29 @@ fn main() {
         "--mute only means anything under --metal-sim; the others need their console"
     );
 
-    if args.iter().any(|a| a == "--regen-font") {
+    if asked(&flags::REGEN_FONT) {
         toyos_build::assets::regen_panic_font(&root);
         return;
     }
 
-    if args.iter().any(|a| a == "--regen-wallpaper") {
+    if asked(&flags::REGEN_WALLPAPER) {
         toyos_build::wallpaper::regen(&root);
         return;
     }
 
-    if let Some(pos) = args.iter().position(|a| a == "--regen-soundfont") {
-        let source = args.get(pos + 1).unwrap_or_else(|| {
-            panic!("--regen-soundfont needs the whole General MIDI bank to cut down: \
-                    --regen-soundfont <bank.sf2>")
-        });
-        toyos_build::soundfont::regen(&root, Path::new(source));
+    if let Some(bank) = CARGO_RUN.value(&args, &flags::REGEN_SOUNDFONT) {
+        toyos_build::soundfont::regen(&root, Path::new(bank));
         return;
     }
 
-    if args.iter().any(|a| a == "--worktree") {
+    if asked(&flags::WORKTREE) {
         toyos_build::worktree::dispatch(&root, &args);
         return;
     }
 
     // On demand and nowhere else: it asks GitHub for every fork branch head, so
     // neither `cargo test` nor `--land` may reach it.
-    if args.iter().any(|a| a == "--check-forks") {
+    if asked(&flags::CHECK_FORKS) {
         toyos_build::forkcheck::dispatch(&root);
         return;
     }
@@ -261,8 +270,8 @@ fn main() {
 /// further and removes every virtio device, which is what the target laptop
 /// actually presents. `--metal-sim --mute` additionally takes the 16550 away.
 fn parse_profile(args: &[String]) -> qemu::Profile {
-    let gop = args.iter().any(|a| a == "--gop");
-    let metal = args.iter().any(|a| a == "--metal-sim");
+    let gop = CARGO_RUN.present(args, &flags::GOP);
+    let metal = CARGO_RUN.present(args, &flags::METAL_SIM);
     match (gop, metal) {
         (_, true) => qemu::Profile::Metal,
         (true, false) => qemu::Profile::Gop,
@@ -273,15 +282,10 @@ fn parse_profile(args: &[String]) -> qemu::Profile {
 /// `--smp N` sets the QEMU core count (default 8). `--smp 1` is the
 /// single-CPU case the audio spec treats as first-class.
 fn parse_smp(args: &[String]) -> u32 {
-    let Some(pos) = args.iter().position(|a| a == "--smp") else {
+    let Some(value) = CARGO_RUN.value(args, &flags::SMP) else {
         return 8;
     };
-    let value = args
-        .get(pos + 1)
-        .unwrap_or_else(|| panic!("--smp requires a value"));
-    let smp: u32 = value
-        .parse()
-        .unwrap_or_else(|_| panic!("invalid --smp value: {value:?}"));
+    let smp: u32 = value.parse().unwrap_or_else(|_| panic!("invalid --smp value: {value:?}"));
     assert!(smp >= 1, "--smp must be at least 1");
     smp
 }

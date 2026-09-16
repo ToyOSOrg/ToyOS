@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::assets;
 use crate::buildlock;
+use crate::flags;
 use crate::hostws;
 use crate::image;
 use crate::toolchain;
@@ -762,8 +763,11 @@ impl Plan {
 /// the config decides which programs start and these decide what the kernel is,
 /// so every mode reaches every parameter and no mode implies one.
 pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan {
-    let feature = repeated(args, "--kernel-feature");
-    let param = repeated(args, "--kernel-param");
+    let owned = |flag| -> Vec<String> {
+        flags::CARGO_RUN.values(args, flag).into_iter().map(String::from).collect()
+    };
+    let feature = owned(&flags::KERNEL_FEATURE);
+    let param = owned(&flags::KERNEL_PARAM);
     // Both refuse an unknown name by name, and both run here rather than in the
     // build: a misspelling is the command line's and has to come back before
     // anything waits on a lock.
@@ -774,26 +778,6 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
         features: features.split(',').filter(|f| !f.is_empty()).map(Into::into).collect(),
         params: param,
     }
-}
-
-/// Every value a repeatable `<flag> <value>` carried, in the order given.
-pub fn repeated(args: &[String], flag: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        if arg == flag {
-            let name = rest.next().unwrap_or_else(|| panic!("{flag} needs a name: {flag} <name>"));
-            values.push(name.clone());
-        }
-    }
-    values
-}
-
-/// The same flag taken once: a second use is refused rather than resolved.
-pub fn valued(args: &[String], flag: &str) -> Option<String> {
-    let mut found = repeated(args, flag);
-    assert!(found.len() < 2, "{flag} takes one value; this asks for {found:?}");
-    found.pop()
 }
 
 /// Which boot the image being built is for: the directory holding its config,
@@ -2418,8 +2402,10 @@ mod tests {
                 .iter()
                 .map(|w| (*w).to_string())
                 .collect();
-        let asked = valued(&argv, "--boot-config").expect("the argv carries one");
-        let boot = Boot::case(root, &asked).unwrap_or_else(|why| panic!("{why}"));
+        let asked = flags::CARGO_RUN
+            .value(&argv, &flags::BOOT_CONFIG)
+            .expect("the argv carries one");
+        let boot = Boot::case(root, asked).unwrap_or_else(|why| panic!("{why}"));
         let plan = plan_for(root, &boot, false, &argv);
         assert_eq!(plan.config, root.join("tests/jobcase").join(CONFIG));
         assert_eq!(plan.params, ["watchdog"]);

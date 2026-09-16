@@ -338,6 +338,7 @@ extern "C" fn ap_entry() -> ! {
 
     // Must run before this CPU touches the framebuffer, which needs write-combining mapped first.
     crate::arch::pat::init();
+    crate::arch::pat::check();
 
     crate::mm::paging::load_kernel_flush();
 

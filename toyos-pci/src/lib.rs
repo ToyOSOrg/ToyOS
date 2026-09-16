@@ -22,6 +22,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod aperture;
 pub mod bar;
 pub mod caps;
 pub mod express;
