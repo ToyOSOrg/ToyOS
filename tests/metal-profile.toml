@@ -831,14 +831,10 @@ ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
 measured = 19488
 
-# --- the one number that can disagree with the stop about whether it worked
-# `quiesce` stops every userland thread before it syncs anything, so that
-# `Rebooting.` is the boot's last record by construction. This is what the block
-# layer still had open where that stop ended: the stop does not produce it, so
-# it is the number that can contradict it. How long the stop took is priced
-# nowhere, because a stop that gave up spends its budget and no more — the
-# record's own shortfall clause is the verdict, and `Readback::stop_completed`
-# reads it on every boot.
+# --- what the block layer had open where the stop ended
+# How long the stop took is priced nowhere: a stop that gave up spends its
+# budget and no more, so the record's own shortfall clause is the verdict, and
+# `Readback::stop_completed` reads it on every boot.
 #
 # `deadlinewedge` and `hardlockup` are absent on purpose: those two reset
 # without going through `quiesce`, so they stop nothing and write no record.

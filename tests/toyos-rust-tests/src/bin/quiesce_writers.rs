@@ -9,8 +9,8 @@
 //!
 //! Nothing here asserts: `common::power::quiesce_stops_the_machine` reads the
 //! kernel's own `stop:` record and the order of the console around it, which
-//! are the two things a guest cannot see about its own death. It matches
-//! [`WRITING`] and [`WRITERS`] by their spellings there.
+//! are the two things a guest cannot see about its own death. [`WRITERS`] is
+//! spelt there too, because a guest binary cannot be linked from the harness.
 
 use std::fs::File;
 use std::io::Write;

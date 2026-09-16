@@ -129,7 +129,7 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     Ok(())
 }
 
-/// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Does not return.
+/// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
 pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();

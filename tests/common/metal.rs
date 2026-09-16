@@ -943,10 +943,8 @@ pub fn run(
                         panel.paints, panel.pixels
                     );
                 }
-                // A boot the file prices a lateness for and that produced
-                // none is a boot some *other* bound ended, which is exactly
-                // what a run of `deadlinewedge` sealed by the lockup detector
-                // was, and it used to be skipped rather than reported.
+                // A boot the file prices a path-taken field for and that
+                // produced none is a boot some *other* bound ended.
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),

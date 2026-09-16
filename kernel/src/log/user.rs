@@ -1,6 +1,6 @@
 //! Kernel side of `SYS_LOG_READ` and its readiness source.
 //!
-//! No per-reader state: a cursor is the caller's own sequence numbers and loss count, copied in, walked, and copied back; readers coexist uncoordinated. Requires [`Rights::LOG`] on a `SysCap` — not ambient.
+//! No per-reader state in a read: a cursor is the caller's own sequence numbers and loss count, copied in, walked, and copied back; readers coexist uncoordinated. Requires [`Rights::LOG`] on a `SysCap` — not ambient, and this is the one place in the kernel that capability is checked, which is why [`LOG_HOLDERS`] learns who holds it here.
 
 use alloc::vec::Vec;
 

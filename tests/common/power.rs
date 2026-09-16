@@ -2028,10 +2028,10 @@ const RESET_PATHS: &[ResetPath] = &[
         barrier: TOOK_THE_LOCK,
     },
     // **Armed, because QEMU has no window and hardware does.** `quiesce` spends
-    // real time on hardware between the boot's last word and the reset, and the
-    // runner's loop — released by the deadline's own kill — can spawn another
-    // job into that gap. Without the actuator this arm is green either way and
-    // says nothing.
+    // real time on hardware between the boot's last word and the barrier below
+    // it, which is the window the carved-out log writer is still putting bytes
+    // on the volume in. Without the actuator this arm reads its account off a
+    // gap that does not exist and says nothing.
     ResetPath {
         what: "the runner's job deadline",
         config: "tests/jobdeadlinecase",
