@@ -6,9 +6,9 @@ opened: 2026-09-08
 
 # An xHCI interrupt storm starves the CPU that takes it out of its own timer
 
-T14 run 25's own census, over the 34 s the stick was being written
-(`/Users/jan/.claude/jobs/2280e09e/tmp/t14-run20/metaldevicecase.log`, the
-`irq:` block at 34.609 s):
+T14 run 20's own census, over the 34 s the stick was being written — the
+`metaldevicecase` boot at tip `f46f91eb`, the `irq:` block at 34.609 s
+(`[2026-09-07 08:51:28 34.609 cpu1] irq: cpu0 total=103171 timer=10 xhci=103161 net=0 sound=0 i8042=0 dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0`):
 
     irq: cpu0 total=103171 timer=10 xhci=103161 ...
     irq: cpu1 total=25     timer=25 xhci=0

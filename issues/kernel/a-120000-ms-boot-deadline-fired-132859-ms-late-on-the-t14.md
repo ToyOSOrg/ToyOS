@@ -121,8 +121,10 @@ second instrument is owed; a cause is.
 ## What is known and what is not
 
 - `issues/kernel/an-xhci-storm-starves-the-cpu-that-takes-it.md` carries the
-  same shape on run 25 (`irq: cpu0 total=103171 timer=10 xhci=103161`, over
-  34 s) and closes with the question this run does not answer: whether an xHCI
+  same shape, over the 34 s the stick was being written, on run 20's
+  `metaldevicecase` boot at tip `f46f91eb`
+  (`[2026-09-07 08:51:28 34.609 cpu1] irq: cpu0 total=103171 timer=10 xhci=103161 net=0 sound=0 i8042=0 dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0`)
+  and closes with the question this run does not answer: whether an xHCI
   storm can by itself hold a CPU out of its timer for the whole of a bound.
   Run 55's census shows cpu0 in that state at 3.47 s and other CPUs not; it
   does not show what held every CPU's timer entry off `poll` for 133 s.

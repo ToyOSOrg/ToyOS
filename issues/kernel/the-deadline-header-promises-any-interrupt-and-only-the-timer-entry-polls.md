@@ -19,8 +19,9 @@ nothing else's." Its call sites are exactly two, both in
 `kernel/src/arch/idt/timer.rs`: the Ring 0 naked entry's `call {deadline}`
 (`:71`, `deadline = sym crate::deadline::poll` at `:79`, placed there because
 "a CPU spinning on a ticket still takes this interrupt", `:61-63`) and
-`timer_handler`'s first statement (`:96`). `rg -n 'deadline::poll' kernel/src`
-finds no third. The same module already states the true requirement once, in
+`timer_handler`, which opens at `:92`: its first statement is
+`crate::irq_census::irq_took!(Timer);` at `:93`, and `crate::deadline::poll()`
+at `:96` is the second. `rg -n 'deadline::poll' kernel/src` finds no third. The same module already states the true requirement once, in
 `armed`'s doc (`deadline.rs:86-87`): "Both bounds rest on some CPU taking a
 timer interrupt".
 

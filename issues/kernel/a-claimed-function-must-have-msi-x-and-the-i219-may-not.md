@@ -1,5 +1,5 @@
 ---
-status: assigned
+status: open
 kind: defect
 opened: 2026-09-07
 ---
@@ -30,23 +30,30 @@ stands in for it.
 Why it matters: the ThinkPad T14's onboard NIC is an Intel I219 at `00:1f.6`,
 `8086:15fc`, and the e1000e family's PCH parts (I217/I218/I219) are documented
 as MSI parts — Linux's `e1000e` sets `FLAG_HAS_MSIX` for the 82574 and 82583
-and for nothing else. **Read off the laptop since, and it is an MSI part**:
-under Ubuntu, `/proc/interrupts` names its interrupt `IR-PCI-MSI-0000:00:1f.6`
-and `msi_irqs/162` reads `mode=msi`. That reading is recorded on the unmerged
-branch `lan-metal` (PR #442) and not in this tree's copy of the file —
+and for nothing else, so Linux would choose MSI on this family whether or not
+the capability exists: under Ubuntu, `/proc/interrupts` names its interrupt
+`IR-PCI-MSI-0000:00:1f.6` and `msi_irqs/162` reads `mode=msi`, and that
+reading is the delivery mode Linux chose, not a read of the function's MSI-X
+capability. The reading that bears on `:544` is this kernel's own, recorded
+on the unmerged branch `lan-metal` (PR #442) and not in this tree's copy of
+the file —
 `git show 0a5717f5:issues/hardware/the-t14-answers-only-through-a-usb-stick.md`,
-lines 61-63. So in this tree the claim on `pci:8086:15fc` is refused `NoMsix`
-at `:544` before any driver runs, netd exits, and no process on this machine
-can drive that cable.
+line 63: "`pcidev` armed MSI-X alone and refused it." So in this tree the
+claim on `pci:8086:15fc` is refused `NoMsix` at `:544` before any driver
+runs, netd exits, and no process on this machine can drive that cable.
 
-**Held by PR #442** (`lan-metal`): its `kernel/src/pcidev/mod.rs` arms MSI-X
-first and MSI where a function has none (`arm`,
+**PR #442** (`lan-metal`) holds the first half of the exit condition below and
+nobody holds the second. Its `kernel/src/pcidev/mod.rs` arms MSI-X first and
+MSI where a function has none (`arm`,
 `pci.enable_msi(vector).then_some(Armed::Msi)`), and bench boots of that
 family of branches carry the hand-over — run 42 (`lancase-placement`, tip
 `4204e090`), from its kernel log:
 
     [2026-09-14 10:09:09 1.334 cpu0] PCI 00:1f.6: msi address=0xfee000b8 data=0x00000000
     [2026-09-14 10:09:09 1.334 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
+
+What the I219 does with the IVAR write in MSI mode, measured on the bench, is
+unclaimed by any task.
 
 ## The driver's MSI-X-only register on an MSI part
 
