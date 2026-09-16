@@ -52,6 +52,29 @@ fn quiesce(last: &str) {
     if crate::actuator::wedge_before_reset() {
         crate::deadline::stage_a_wedge();
     }
+    // The same shape with a device left inside a Bulk-Only command. Here too,
+    // so the wedge is a boot that ran its job list.
+    #[cfg(feature = "boot-actuators")]
+    {
+        use toyos_xhci::bot::Phase;
+        let armed = [
+            (crate::actuator::usb_wedge_data_owed(), Phase::DataOwed),
+            (crate::actuator::usb_wedge_in_data(), Phase::Data),
+            (crate::actuator::usb_wedge_before_status(), Phase::StatusOwed),
+        ]
+        .into_iter()
+        .find_map(|(on, phase)| on.then_some(phase));
+        if let Some(phase) = armed {
+            crate::usb_gate::wedge_inside_a_write(phase);
+        }
+    }
+    // The same machine ended by the same bound, with the bus busy rather than
+    // idle: this one never stops writing, so the reset lands on a controller
+    // that is moving bytes.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_reset_under_load() {
+        crate::usb_gate::sweep_under_load();
+    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::drivers::watchdog::disarm();
     log!("Syncing filesystems...");
