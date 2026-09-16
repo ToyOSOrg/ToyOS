@@ -78,6 +78,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::flags;
 use crate::toolchain;
 
 const TAG: &str = "[check-forks]";
@@ -164,8 +165,10 @@ const CALLERS_TAG: &str = "[abi-callers]";
 /// and a name `toyos-abi/` itself never spells is refused as a typo before
 /// the sweep can prove it caller-less.
 pub fn dispatch_callers(root: &Path, args: &[String]) {
-    let at = args.iter().position(|a| a == "--abi-callers").expect("dispatched on this flag");
-    let Some(name) = args.get(at + 1).filter(|n| !n.starts_with('-')) else {
+    let Some(name) = flags::CARGO_RUN
+        .value(args, &flags::ABI_CALLERS)
+        .filter(|n| !n.starts_with('-'))
+    else {
         eprintln!("{CALLERS_TAG} --abi-callers takes the identifier to sweep for");
         std::process::exit(2);
     };

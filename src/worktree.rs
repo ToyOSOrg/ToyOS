@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::flags;
 use crate::toolchain;
 
 /// What a worktree's crate target directories reach: 4.1 GiB after
@@ -29,7 +30,7 @@ use crate::toolchain;
 const NEEDED_BYTES: u64 = 25 * 1024 * 1024 * 1024;
 
 pub fn dispatch(root: &Path, args: &[String]) {
-    let mut rest = args.iter().skip_while(|a| *a != "--worktree").skip(1);
+    let mut rest = flags::CARGO_RUN.rest(args, &flags::WORKTREE).iter();
     let verb = rest.next().map(String::as_str);
     let operand = rest.next().cloned();
     match verb {
@@ -346,9 +347,15 @@ fn ok(dir: &Path, args: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    /// `--worktree` owns the rest of the command line, so this refusal is the
+    /// only one between `--worktree add --help` and a worktree named `--help`.
     #[test]
     fn a_flag_is_refused_as_a_worktree_path_by_name() {
-        let args = ["toyos-build", "--worktree", "add", "--help"].map(String::from);
+        let args = ["--worktree", "add", "--help"].map(String::from);
+        assert!(
+            matches!(crate::flags::check(&args), crate::flags::Outcome::Proceed),
+            "the command line has to reach this dispatch"
+        );
         let panic = std::panic::catch_unwind(|| dispatch(Path::new("/not-used"), &args))
             .expect_err("a flag is not a worktree path");
         let message = panic.downcast::<String>().expect("the refusal is formatted");

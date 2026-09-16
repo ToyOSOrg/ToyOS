@@ -361,7 +361,7 @@ mod tests {
     /// The second axis of the same job, held together for the same reason.
     ///
     /// Which *names* a run renders the price verdict for is decided by
-    /// [`crate::durations::TIER_BASE_FLAG`] and by the two event expressions
+    /// [`crate::flags::TIER_BASE`] and by the two event expressions
     /// that fill it. Both failure directions are silent in the file that
     /// carries them: drop the flag and every pull request and every merge-queue
     /// composition quietly becomes the nightly, reding on names nobody in them
@@ -379,11 +379,11 @@ mod tests {
             .find(|(name, _)| name == "durations")
             .expect("ci.yml renders the duration verdict in a job called `durations`");
         assert!(
-            durations.contains(crate::durations::TIER_BASE_FLAG),
+            durations.contains(crate::flags::TIER_BASE.name),
             "the `durations` job no longer passes {:?}, so it renders the whole tier verdict on \
              every pull request and every merge-queue composition — the state that dequeued \
              composition 32550410305 on a name nothing in it had touched",
-            crate::durations::TIER_BASE_FLAG
+            crate::flags::TIER_BASE.name
         );
         for base in ["github.event.merge_group.base_sha", "github.event.pull_request.base.sha"] {
             assert!(

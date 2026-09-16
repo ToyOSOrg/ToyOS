@@ -131,6 +131,18 @@ pub const LOADER_GOP_LINE: &str = "GOP: mode";
 pub const BLACKBOX_HEAD: &str = "Black box:";
 pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
 
+/// What the loader prints in place of a record's tail, with the count of the
+/// records it filed instead.
+pub const TAIL_IN_THE_FILE: &str =
+    "Black box: that record's log ring is in loader.log, not on a console the firmware scrolls:";
+
+/// What the loader closes the one line of a record the page's end cut with.
+///
+/// **The loader re-terminates every line it prints off the page**, so this is
+/// the only mark a cut leaves: without it a field read off such a line is a
+/// number the page cut rather than the one the kernel wrote.
+pub const CUT_BY_THE_PAGE: &str = " <the page ended here, mid-line>";
+
 /// The loader's last line on a pass that read that page and boots no kernel,
 /// which is what tells a chain that ended from one that went round again —
 /// [`LOADER_LAST_LINE`] is the other.
@@ -154,6 +166,51 @@ pub const HUNG_WITHOUT_A_RECORD: &str =
 /// both in one `loader.log`: the loader points `BootNext` at itself before every
 /// handoff, and a pass with a finding appends under this rather than truncating.
 pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot above left";
+
+/// What the on-screen panel cost the boot, in
+/// `kernel/src/drivers/panic_console/mod.rs`.
+///
+/// **Two channels carry it**, because the panel is the window a boot that ends
+/// in a wedge still has: the shutdown census reaches `logd`'s file, and the
+/// same line is sealed into the black-box page for a boot no `logd` outlived.
+pub const PANEL_CENSUS: &str = "panel: paints=";
+
+/// What one boot's panel census says: how often the panel painted, how many
+/// pixels it put on the glass, how long it spent inside the painter, and the
+/// slowest single paint of the boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Panel {
+    pub paints: u64,
+    pub pixels: u64,
+    pub micros: u64,
+    pub max_micros: u64,
+}
+
+/// The census `log` carries, or `None` for a boot that left neither channel.
+///
+/// **This boot's census whole, or nothing.** A `max_us=` whose digits a cut
+/// took the end of parses as a cheaper panel than the boot had, and each
+/// channel says a line ended itself in its own way: `logd`'s file terminates
+/// one, and the black-box page is a fixed size whose one cut line the loader
+/// closes with [`CUT_BY_THE_PAGE`]. An older census standing in for a cut one
+/// would be a second boot's number under this boot's name, so the cut line is
+/// refused rather than skipped.
+pub fn panel_census(log: &str) -> Option<Panel> {
+    let line = log.split_inclusive('\n').rev().find(|line| line.contains(PANEL_CENSUS))?;
+    if !line.ends_with('\n') || line.contains(CUT_BY_THE_PAGE) {
+        return None;
+    }
+    let field = |name: &str| -> Option<u64> {
+        let (_, rest) = line.split_once(name)?;
+        rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+    };
+    Some(Panel {
+        paints: field("paints=")?,
+        pixels: field("px=")?,
+        micros: field(" us=")?,
+        max_micros: field("max_us=")?,
+    })
+}
 
 /// The kernel's record for a process that ended, in `kernel/src/process.rs`.
 ///
@@ -355,6 +412,8 @@ mod tests {
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_GOP_LINE}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),
+            ("bootloader/src/blackbox.rs", format!("\"{TAIL_IN_THE_FILE}\"")),
+            ("bootloader/src/blackbox.rs", format!("\"{CUT_BY_THE_PAGE}\"")),
         ];
         for (file, rhs) in wanted {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
@@ -409,6 +468,10 @@ mod tests {
                 "kernel/src/hardlockup/probe.rs",
                 format!("PROBE_STAGED: &str = \"{LOCKUP_STAGED}\""),
             ),
+            (
+                "kernel/src/drivers/panic_console/mod.rs",
+                format!("CENSUS: &str = \"{PANEL_CENSUS}\""),
+            ),
             ("kernel/src/log/mod.rs", format!("\"{LOG_COMPLETE}")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_SHORT}")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
@@ -459,6 +522,55 @@ mod record_time_tests {
         // first `cpu` would answer with a duration instead of a timestamp.
         assert_eq!(record_millis("no timestamp here, cpu=1ms"), None);
         assert_eq!(record_millis(""), None);
+    }
+
+    /// The two channels the census crosses, read by one reader: `logd`'s file,
+    /// and the black-box page the loader prints back with its own margin and
+    /// with the kernel's dashes flattened to ASCII.
+    #[test]
+    fn the_panel_census_is_read_off_either_channel() {
+        let logd = "[2026-09-08 06:50:53 2.5 cpu0] panel: paints=3 px=6220800 us=1500000 \
+                    max_us=520000\n";
+        assert_eq!(
+            panel_census(logd),
+            Some(Panel { paints: 3, pixels: 6_220_800, micros: 1_500_000, max_micros: 520_000 })
+        );
+
+        // A wedge boot's page as the pass after the reset prints it back, line
+        // for line off run 44's deadlinewedge `loader.log`: head lines, the
+        // count of what went to the file, and the filed records under it. Only
+        // the page's last line can be cut, and `cut` is where it fell.
+        let page = |census: &str, cut: &str| {
+            format!(
+                "Previous boot's panic: the last boot read WEDGED, so a bound of its own ended \
+                 it and this chain ends here\n\
+                 | the boot deadline expired: a bound of 120000 ms, reached at 120066 ms, with \
+                 this machine in `complete`. The tail of the log ring follows ... which is what \
+                 nothing was draining.\n\
+                 | panel: {census}\n\
+                 | older records dropped to fit this page: 84\n\
+                 | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n\
+                 | usb-quiesce: no bulk transfer was outstan{cut}\n\
+                 {TAIL_IN_THE_FILE} 221 record(s)\n\
+                 | [0.148 cpu0] iommu: unit3 scope ioapic 00:1e.7 id=2\n"
+            )
+        };
+        // Run 44's own reading, with the cut two lines under the census.
+        assert_eq!(
+            panel_census(&page("paints=10 px=8886656 us=18693 max_us=3867", CUT_BY_THE_PAGE)),
+            Some(Panel { paints: 10, pixels: 8_886_656, micros: 18_693, max_micros: 3_867 })
+        );
+        // The same page with the cut inside the census's last number instead —
+        // a 38 us panel, and every line under it still terminated.
+        let mid_number = format!("paints=10 px=8886656 us=18693 max_us=38{CUT_BY_THE_PAGE}");
+        assert_eq!(panel_census(&page(&mid_number, "")), None);
+
+        // `logd`'s file ends a record with the newline, so its own cut is a
+        // last line that never got one.
+        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000 max_us=52"), None);
+        // A field the cut took whole, and a log with no census at all.
+        assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000\n"), None);
+        assert_eq!(panel_census("nothing here\n"), None);
     }
 
     #[test]

@@ -1,9 +1,9 @@
 //! ACPI table decoding, over the byte reader [`Phys`] asks the caller for.
 //!
 //! Input is firmware-supplied and untrusted: no input path panics, no walk
-//! fails to terminate, and every refusal is a [`TableError`]. `tests/corpus.rs`
-//! holds that claim; `tests/fixtures.rs` holds the decode against the tables
-//! QEMU published to a real boot.
+//! fails to terminate, and nothing is returned but a decoded value or a named
+//! refusal. `tests/corpus.rs` holds that claim; `tests/fixtures.rs` holds the
+//! decode against the tables QEMU published to a real boot.
 //!
 //! Multi-byte fields are composed from bytes, little-endian, so no firmware
 //! byte is transmuted into a type. Field offsets cite ACPI 6.5, except MCFG's
@@ -16,6 +16,7 @@
 
 mod fadt;
 mod madt;
+mod resource;
 
 pub use fadt::{
     century_of, dsdt_address, iapc_boot_arch, reset_register, rtc_century, Century, Reset,
@@ -24,6 +25,7 @@ pub use fadt::{
 pub use madt::{
     madt_entries, IoApicEntry, MadtEntries, MadtEntry, MadtHalt, SourceOverride, MADT_ENTRIES,
 };
+pub use resource::{memory_windows, ResourceError, Walk, MAX_LIST_BYTES};
 
 /// Physical memory, as this decoder reads it.
 ///

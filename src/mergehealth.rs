@@ -80,6 +80,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::day::Day;
+use crate::flags;
 
 const TAG: &str = "[merge-health]";
 
@@ -97,13 +98,9 @@ const REQUIRED_WORKFLOWS: &[(&str, &str)] =
 /// against, ending now.
 pub fn dispatch(root: &Path, args: &[String]) {
     let now = now_epoch_secs();
-    let since = if let Some(pos) = args.iter().position(|a| a == "--since") {
-        let text = args
-            .get(pos + 1)
-            .unwrap_or_else(|| panic!("--since needs an RFC3339 instant: --since <YYYY-MM-DDTHH:MM:SSZ>"));
+    let since = if let Some(text) = flags::CARGO_RUN.value(args, &flags::SINCE) {
         parse_instant(text)
-    } else if let Some(pos) = args.iter().position(|a| a == "--days") {
-        let text = args.get(pos + 1).unwrap_or_else(|| panic!("--days needs a count"));
+    } else if let Some(text) = flags::CARGO_RUN.value(args, &flags::DAYS) {
         let days: i64 = text.parse().unwrap_or_else(|_| panic!("--days: {text:?} is not a count"));
         assert!(days >= 1, "--days must be at least 1");
         now - days * 86_400
