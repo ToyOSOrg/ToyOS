@@ -16,8 +16,8 @@ use crate::scheduler::Operation;
 use crate::time::{Budget, Deadline, Duration};
 use super::super::device::Endpoint;
 use super::{Owed, Quiet, Restart};
-use super::super::{with_disk, Disk, StorageGeometry, Trb, TrbRing, XhciController, PAGE};
-use super::super::{stop, CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_CTX};
+use super::super::{with_disk, Completion, Disk, StorageGeometry, Trb, TrbRing, XhciController};
+use super::super::{stop, CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_CTX, PAGE};
 use super::super::{MSC_IN_RING, MSC_OUT_RING, MSC_CBW, MSC_CSW, MSC_SCRATCH, MSC_SCRATCH_LEN};
 use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS, MSC_STRIDE};
 use toyos_xhci::bot::Phase;
@@ -40,7 +40,7 @@ const READY_BUDGET: Budget = Budget::of(
 
 /// Three attempts: the first may break on the fault itself, the second on
 /// the Reset Recovery that answer undid, the third runs clean.
-const MAX_TRANSPORT_ATTEMPTS: u8 = 3;
+pub(in crate::drivers::xhci) const MAX_TRANSPORT_ATTEMPTS: u8 = 3;
 
 const CBW_SIGNATURE: u32 = 0x4342_5355;
 const CSW_SIGNATURE: u32 = 0x5342_5355;
@@ -154,7 +154,9 @@ enum Broke {
 impl core::fmt::Display for Broke {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Code { phase, code } => write!(f, "{phase} phase completion code {code}"),
+            Self::Code { phase, code } => {
+                write!(f, "{phase} phase completion {}", Completion(*code))
+            }
             Self::Silence { phase, why } => why.about(phase, "phase", f),
             Self::Short { phase, moved, wanted } => {
                 write!(f, "{phase} phase moved {moved} of {wanted} B")
@@ -323,6 +325,38 @@ pub(in crate::drivers::xhci) mod short_read {
         let (code, residue) = completion?;
         dma.copy_from(held.at, &held.bytes);
         Ok((code, residue + SHORT_BY))
+    }
+}
+
+/// Corrupt the signature of the next few CBWs on the disk the gate designated,
+/// so the device refuses each as BOT §6.2.1 has it — a STALL of the Bulk-Out
+/// pipe — and the transport breaks that many times running, one full Reset
+/// Recovery after each. Staged from `usb_gate` immediately before the read it
+/// is taken inside, so it lands on a known disk and a known command.
+#[cfg(feature = "boot-actuators")]
+pub(in crate::drivers::xhci) mod bad_cbw {
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    static LEFT: AtomicU8 = AtomicU8::new(0);
+
+    /// Stage `n` refused CBWs, starting with the next one.
+    pub fn arm(n: u8) {
+        if !crate::actuator::usb_bad_cbw() {
+            return;
+        }
+        LEFT.store(n, Ordering::Relaxed);
+    }
+
+    /// Whether the CBW about to go out is one of the staged ones.
+    pub fn take() -> bool {
+        let mut left = LEFT.load(Ordering::Relaxed);
+        loop {
+            let Some(less) = left.checked_sub(1) else { return false };
+            match LEFT.compare_exchange_weak(left, less, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(now) => left = now,
+            }
+        }
     }
 }
 
@@ -744,6 +778,12 @@ impl XhciController {
         cbw.write::<u8>(13, 0); // LUN 0: this driver binds one logical unit
         cbw.write::<u8>(14, cdb_len);
         cbw.copy_from(15, &cdb[..cdb_len as usize]);
+        // A signature the device shall refuse (BOT §6.2.1), so the command
+        // phase stalls on a device that is otherwise answering.
+        #[cfg(feature = "boot-actuators")]
+        if bad_cbw::take() {
+            cbw.write::<u32>(0, 0);
+        }
 
         // **From here the device is one this kernel has spoken a command to**,
         // and stays one until the CSW below is in hand: a reset between any two

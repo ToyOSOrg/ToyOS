@@ -1667,22 +1667,7 @@ pub fn usb_transport_break(
         ));
     }
 
-    // `run_command` logs only failures, so each of these lines is the
-    // controller refusing a command the driver should not have sent — which is
-    // exactly what the T14 printed twice.
-    for illegal in [
-        "Reset Endpoint failed",
-        "Stop Endpoint failed",
-        "Set TR Dequeue failed",
-        "reset recovery failed; disk is offline",
-    ] {
-        if log.contains(illegal) {
-            return Err(format!(
-                "{illegal:?}: the recovery did not pick a command the endpoint's state \
-                 permits\n{log}"
-            ));
-        }
-    }
+    no_command_was_refused(&log)?;
 
     // Not one write reported a failure, and the disk stayed online. Before the
     // recovery existed this line reads `wr_err=3 healthy=false`; before the
@@ -1708,6 +1693,173 @@ pub fn usb_transport_break(
          break(s) of the {} this boot, and every block the guest was told to write verified \
          host-side",
         log.matches("transport broke").count()
+    );
+
+    transport_gives_up(test_config, c_bins, rust_bins)
+}
+
+/// `run_command` logs only failures, so each of these lines is the controller
+/// refusing a command the driver should not have sent — which is exactly what
+/// the T14 printed twice — or a recovery that could not be completed.
+fn no_command_was_refused(log: &str) -> Result<(), String> {
+    for illegal in [
+        "Reset Endpoint failed",
+        "Stop Endpoint failed",
+        "Set TR Dequeue failed",
+        "Configure Endpoint (the bulk pair dropped and added) failed",
+        "reset recovery failed; disk is offline",
+    ] {
+        if log.contains(illegal) {
+            return Err(format!(
+                "{illegal:?}: the recovery did not pick a command the endpoint's state \
+                 permits\n{log}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The other half of one abandoned transfer being recovered: a transport whose
+/// recovery is spent is not asked again.
+///
+/// The disk refuses three CBWs in a row — the stall BOT §6.2.1 has a device
+/// answer an invalid CBW with, staged by corrupting the signature of three of
+/// them on a device that answers every well-formed one. The first two are
+/// recovered, each by the class's own Reset Recovery, and the third is the end
+/// of it: the device is taken offline with its port reset and its slot given
+/// back, and every later operation is refused without a command reaching it.
+///
+/// **What the base does with the same three refusals is the defect.** It says
+/// `broke 3 times running; the transport is not coming back on its own` and
+/// leaves the disk online — so the next operation asks again, breaks three
+/// more times and is recovered three more times, for as long as the caller's
+/// deadman runs. That is the storm the T14's run 55 spent its stick in, and on
+/// the base the gate's own line below reads `healthy=true`.
+fn transport_gives_up(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["usb-storage-gate", "usb-bad-cbw"];
+    /// What the driver says of a CBW the device stalled; the code is the
+    /// controller's own word for it (xHCI 1.2 Table 6-90).
+    const STALLED: &str =
+        "transport broke on SCSI 0x28: command phase completion code 6 (Stall Error)";
+    /// The transport's whole budget, which the kernel's `MAX_TRANSPORT_BREAKS`
+    /// is and the gate arms exactly.
+    const BREAKS: usize = 3;
+
+    let (bytes, lba) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
+    let image = test_dir().join("usb-bad-cbw.img");
+    let nonce = stage(&image, bytes);
+
+    let log = boot_and_shutdown(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::UsbDisk,
+            kernel_params: PARAMS,
+            usb_images: vec![image.clone()],
+            ..Default::default()
+        },
+    )?;
+    gate_ran(&log, 2)?;
+    check_geometry(&log, bytes, lba)?;
+
+    // The stimulus reached the device and the device answered it as the class
+    // requires: a stalled command phase, three times, on one disk, each break
+    // counted as the driver's own running count says.
+    let stalls: Vec<&str> = log.lines().filter(|l| l.contains(STALLED)).collect();
+    if stalls.len() != BREAKS {
+        return Err(format!(
+            "the device stalled {} CBW(s), want the {BREAKS} the gate staged; did it run?\n{log}",
+            stalls.len()
+        ));
+    }
+    let under_test = broke_on(stalls[0])?;
+    for line in &stalls {
+        if broke_on(line)? != under_test {
+            return Err(format!("a staged stall landed on another device: {line:?}\n{log}"));
+        }
+    }
+
+    // The give-up, what it did to the device, and that nothing reached the
+    // device after it. **The behaviour first and the accounting after**, so
+    // that what the old driver reds on is the disk it left online.
+    let gave_up = format!(
+        "usb-storage: {under_test} SCSI 0x28 broke {BREAKS} times running; the transport is \
+         not coming back on its own"
+    );
+    let Some((_, after)) = log.split_once(gave_up.as_str()) else {
+        return Err(format!("the driver never said {gave_up:?}\n{log}"));
+    };
+    let offline = format!("usb-storage: {under_test} is offline: ");
+    let Some(said) = after.lines().find(|l| l.contains(offline.as_str())) else {
+        return Err(format!(
+            "no {offline:?} line after the give-up: the disk was left online\n{log}"
+        ));
+    };
+    for did in ["reset=true", "slot disabled=true"] {
+        if !said.contains(did) {
+            return Err(format!("{said:?} does not read {did:?}\n{log}"));
+        }
+    }
+    let recovering = format!("xHCI: {under_test} endpoint");
+    let asked_again = format!("usb-storage: {under_test} transport broke");
+    if after.contains(asked_again.as_str()) || after.contains(recovering.as_str()) {
+        return Err(format!("a command reached {under_test} after it was taken offline\n{log}"));
+    }
+
+    // The gate's own reading: the read the stalls were staged on is refused,
+    // the read after it is refused without a command going out, and the disk
+    // is not healthy. On the old driver the last word is `healthy=true`.
+    let read = format!(
+        "usb-gate: {BREAKS} refused CBWs in a row: read refused=true the read after it \
+         refused=true healthy=false"
+    );
+    if !log.contains(&read) {
+        let got = log.lines().find(|l| l.contains("refused CBWs in a row"));
+        return Err(format!("the gate read {got:?}, want {read:?}\n{log}"));
+    }
+    if !log.contains("usb-gate: disk done reads=ok writes=ok refusal=true wr_err=0 healthy=false") {
+        return Err(format!("the gate's sweep before the stalls did not survive them\n{log}"));
+    }
+
+    // The accounting: each break counted as the driver's running count says,
+    // and both endpoints of the pair recovered after each break but the last —
+    // a recovery after the last break is a device asked again.
+    for (i, line) in stalls.iter().enumerate() {
+        let counted = format!("break {} of {BREAKS} running", i + 1);
+        if !line.contains(&counted) {
+            return Err(format!("{line:?} does not read {counted:?}\n{log}"));
+        }
+    }
+    let recoveries = log
+        .lines()
+        .filter(|l| l.contains(recovering.as_str()) && l.contains(", recovering"))
+        .count();
+    if recoveries != 2 * (BREAKS - 1) {
+        return Err(format!(
+            "{recoveries} endpoint recoveries on {under_test}, want {} — one per endpoint after \
+             each break but the last\n{log}",
+            2 * (BREAKS - 1)
+        ));
+    }
+    no_command_was_refused(&log)?;
+
+    // Every byte the gate wrote before the give-up is on the image, and the
+    // machine went on: the boot stick beside the disk is the one it runs from.
+    verify(&image, bytes, nonce)?;
+    if !log.contains("Boot: complete") {
+        return Err(format!("the boot did not finish after the give-up\n{log}"));
+    }
+    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+    let _ = std::fs::remove_file(&image);
+
+    eprintln!(
+        "  [usb] {under_test} stalled {BREAKS} CBWs running: recovered twice, taken offline on \
+         the third with its port reset and its slot disabled, and asked nothing after"
     );
     Ok(())
 }

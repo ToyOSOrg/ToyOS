@@ -160,6 +160,12 @@ actuators! {
     /// Under-deliver one READ(10) data phase so the byte counts disagree.
     usb_short_read = "usb-short-read";
 
+    /// Corrupt the signature of as many CBWs in a row as the transport gets
+    /// breaks, on the gate's disk, so a device refusing each as BOT §6.2.1
+    /// requires — a stalled command phase — spends the whole budget on a disk
+    /// that answers every well-formed command.
+    usb_bad_cbw = "usb-bad-cbw";
+
     /// Hold every mass-storage bulk completion back 2ms before the driver may see it.
     usb_slow_device = "usb-slow-device";
 
@@ -416,6 +422,7 @@ actuators! {
 const IMPLIES: &[(&str, &[&str])] = &[
     ("i8042-trace", &["i8042-fast-health", "i8042-edge-race"]),
     ("usb-short-read", &["usb-storage-gate"]),
+    ("usb-bad-cbw", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),

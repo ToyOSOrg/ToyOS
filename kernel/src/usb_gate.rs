@@ -236,6 +236,24 @@ fn check(index: usize, disk: &Handle) {
         }
     }
 
+    // A device refusing every CBW, on a transport that comes back after each
+    // refusal and breaks again on the next: what the driver owes is to stop
+    // asking once its own recovery has been spent, and to leave the device
+    // in a state the next host can enumerate. Last, because the disk is
+    // offline after it and every line above would read differently.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_bad_cbw() {
+        let block = at(blocks, HOST_BLOCKS[0]);
+        let refused = crate::drivers::xhci::arm_bad_cbws();
+        let read_refused = read(block, 1, &mut buf).is_err();
+        let next_refused = read(block, 1, &mut buf).is_err();
+        log!(
+            "usb-gate: {refused} refused CBWs in a row: read refused={read_refused} the read \
+             after it refused={next_refused} healthy={}",
+            usb_storage::healthy(index)
+        );
+    }
+
     log!(
         "usb-gate: disk done reads={} writes={} refusal={past_end} wr_err={write_errors} healthy={}",
         if reads_ok { "ok" } else { "bad" },
