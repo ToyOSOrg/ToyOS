@@ -165,8 +165,9 @@ const ACTUATOR_TESTS: &[&str] = &[
     // kernel's address space, so without them a kernel that still made the write
     // under test answers a userland that cannot notice.
     "abuse_kernel_addr",
-    // Actions 12 and 13: hold one CPU's shootdown acknowledgement back, so that
-    // whether the initiator waits becomes a duration userland can read.
+    // Actions 12 and 13: hold each other CPU's shootdown acknowledgement back in
+    // turn, so that whether the initiator waits for every one of them becomes a
+    // duration userland can read.
     "tlb_shootdown_waits",
     // Action 16, the live-object census per kind, and 17 and 18 for the idle
     // stack the deferred release path runs on. A leak is two readings and a
@@ -185,6 +186,12 @@ const ACTUATOR_TESTS: &[&str] = &[
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with
 /// no actuator armed in it.
 const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
+
+/// `tlb_shootdown_waits` asserts a claim about every *other* CPU, and two vCPUs
+/// leave exactly one — a width at which a wait narrowed to a single sibling and
+/// a wait for the whole set are the same measurement. Four is the smallest
+/// width where they are not.
+const ACTUATOR_SMP: u32 = 4;
 
 /// How many times a shared block will answer a dead guest with a new one.
 ///
@@ -17810,6 +17817,15 @@ fn shared_kernel(name: &str) -> &'static [&'static str] {
     }
 }
 
+/// The other half of the same question: how wide that boot is.
+fn shared_smp(name: &str) -> u32 {
+    if ACTUATOR_TESTS.contains(&name) {
+        ACTUATOR_SMP
+    } else {
+        BootOptions::default().smp
+    }
+}
+
 /// The binaries and config every task boots with.
 struct Bins<'a> {
     test_config: &'a Path,
@@ -17841,12 +17857,13 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
                 // be called without a `LaneFree`, the only two things that
                 // produce one are this line and `QemuInstance::shutdown`, and
                 // `shutdown` takes the guest by value.
+                let smp = shared_smp(&tests[0].name);
                 let boot = |_: qemu::LaneFree| {
                     QemuInstance::boot_with_options(
                         bins.test_config,
                         bins.c_bins,
                         bins.rust_bins,
-                        BootOptions { kernel_features: features, ..Default::default() },
+                        BootOptions { kernel_features: features, smp, ..Default::default() },
                     )
                 };
                 let mut qemu = boot(qemu::LaneFree::no_guest_yet());
