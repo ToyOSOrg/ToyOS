@@ -1107,16 +1107,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("usb_flush_optional", Sched::Parallel, Tier::Nightly),
     ("xhci_deaf_registers", Sched::Parallel, Tier::Nightly),
     // Mirrors the kernel's `SLOW_CONNECT_NS` as a constant of its own and
-    // bounds the first port line from *both* sides. Both instants are the
-    // guest's own, and it is still serial: the *injection window* is 300 ms of
-    // guest **boot** time, so a guest that lost its share of the host reaches
-    // its controller after the ports have stopped lying and the gate refuses to
-    // certify — `the controller started at 0.366 s, past the 0.3 s the ports are
-    // held empty for`, measured at width 4 with four other worktrees' suites up.
-    // That is the test declining to measure nothing, which is correct, and a red
-    // all the same. The fix it asks for is the kernel's: anchor the window on
-    // the controller's own reset rather than on boot, which is where a real root
-    // hub's detection delay starts anyway.
+    // bounds the first port line from *both* sides. Every instant is the
+    // guest's own and every bound is a delta between two of them, because the
+    // injection is anchored at the controller's own port power — where a real
+    // root hub's detection delay starts — rather than at boot, which is a
+    // window a slower machine's boot outgrows. Still serial: the 150 ms ceiling
+    // on the settle is a staged latency window and timer-anchored however
+    // comfortable it looks.
     ("xhci_slow_connect", Sched::Serial, Tier::Nightly),
     ("xhci_portsc_rw1c", Sched::Parallel, Tier::Fast),
     // One staged break and no other, which puts the driver's recovery finishing
@@ -1172,11 +1169,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
     ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),
     ("wall_clock_zone", Sched::Parallel, Tier::Nightly),
-    // `xhci_slow_connect`'s shape against the disk's port, and serial for the
-    // same reason and not by association: it shares `SLOW_CONNECT_NS`, so a boot
-    // that outgrows the window binds the disk in the port scan and it reports
-    // `the boot scan bound a disk, so the port was not held empty`. Same
-    // measurement, same afternoon.
+    // `xhci_slow_connect`'s shape against the disk's port, and serial for a
+    // reason of its own and not by association: its port is held empty until the
+    // boot scan rather than for a duration, so what it stages is an ordering,
+    // and the settle it has to end by is the machine-wide wall-clock debounce.
     ("late_storage_connect", Sched::Serial, Tier::Nightly),
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
@@ -16446,6 +16442,12 @@ fn headline(reason: Option<&str>) -> String {
 /// one twice; it is a different and larger one, and the line now says which it
 /// was.
 ///
+/// **Which of the two it is, is not a text comparison**: an assertion that
+/// prints what it measured writes a different sentence every time it fires, so
+/// the divergence arm used to claim a second defect for every timing, counting
+/// or sizing red in the suite. `toyos_build::alone::same_failure` decides, and
+/// the two readings are both quoted when they differ.
+///
 /// The green arms are untouched. They are a classification the whole redlist is
 /// written against, and nothing about them was wrong.
 ///
@@ -16479,6 +16481,11 @@ fn alone_line(name: &str, wide: &str, shared_the_host: bool, alone: Option<&Outc
             if said == wide {
                 format!("  ALONE {name}: red again, the same failure both times — the defect \
                          is real. {said}")
+            } else if toyos_build::alone::same_failure(&said, wide) {
+                format!(
+                    "  ALONE {name}: red again, the same failure both times — the defect is real, \
+                     at two measurements.\n      wide:  {wide}\n      alone: {said}"
+                )
             } else {
                 format!(
                     "  ALONE {name}: red again on a DIFFERENT failure — it failed twice, on two \
@@ -16544,6 +16551,23 @@ fn alone_line_reports_the_alone_run() -> Result<(), String> {
     }
     if same.contains("[kernel 2.639") {
         return Err(format!("the line pasted the whole capture into the summary:\n{same}"));
+    }
+
+    // One assertion at two readings: still a reproduction, and it quotes both
+    // rather than picking one. Nightly `ci` run 35072262489 reported this pair
+    // as two assertions, which reads as the larger finding of the two.
+    const MEASURED: &str = "the controller started at 0.303 s, past the 0.3 s the ports are held \
+                            empty for";
+    const AGAIN: &str = "the controller started at 0.300 s, past the 0.3 s the ports are held \
+                         empty for";
+    let twice = alone_line("a_test", MEASURED, false, Some(&red(AGAIN)));
+    if !twice.contains("red again, the same failure both times") {
+        return Err(format!("one assertion at two readings reads as two assertions:\n{twice}"));
+    }
+    for both in [MEASURED, AGAIN] {
+        if !twice.contains(both) {
+            return Err(format!("the two-measurement line drops {both:?}:\n{twice}"));
+        }
     }
 
     // And the case the old line could not tell apart from it.

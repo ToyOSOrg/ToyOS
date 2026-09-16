@@ -267,16 +267,20 @@ const TYPING_UNATTRIBUTED: &str = "`shell_type_once` no longer sends a burst \
     `i8042-trace` armed and reading whether the drain count keeps rising after the first \
     failed line";
 
-/// What retired both `xhci_slow_connect` rows: a later measurement, not a fix.
+/// What retired all three `xhci_slow_connect` rows, written once because it is
+/// one landing and not three: the bound they are about is gone.
 ///
-/// The number in the second row was the whole finding, and it no longer holds.
-const SLOW_CONNECT_CLEARS: &str = "a later measurement. Re-run four times alone on the dev host \
-    on 2026-08-24, the controller starts at 0.109, 0.117, 0.122 and 0.227 s against the 300 ms \
-    held-empty window — 73 to 191 ms of clearance, not the 1 ms the row is about — on hosts the \
-    harness independently measured at 2.31x to 4.45x width, and every boot bound both sticks and \
-    named its first port at 0.400-0.418 s. The loaded-host half is answered structurally rather \
-    than by the number: `src/tiers.rs` relegates this name `Why::TimerAnchored`, because a slower \
-    machine changes its verdict rather than its price";
+/// **What used to stand here was a dev-host re-measurement, and it retired a CI
+/// row on the wrong instrument.** The third row is the reading that falsified
+/// it, kept so that the next reader meets the correction rather than repeats it.
+const SLOW_CONNECT_CLEARS: &str = "the bound is gone. The injection is anchored at the \
+    controller's own `powered_at` rather than at boot zero, so a boot cannot outgrow the \
+    held-empty window however slow the machine is, and the test's floor and ceiling are now \
+    deltas between two of the guest's own stamps rather than instants of the boot. What retired \
+    these rows before was a dev-host re-measurement — four boots alone on 2026-08-24 starting the \
+    controller at 0.109, 0.117, 0.122 and 0.227 s, so 73 to 191 ms of clearance against the 1 ms \
+    the second row is about — taken on cross-arch TCG, which is not the instrument that owns a \
+    booted kernel's boot speed. The row after them is what CI read on the same question";
 
 /// What retired all three `xhci_hid_break` endpoint-count rows, written once
 /// because it is one landing and not three: three measurements of one
@@ -728,6 +732,25 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "run 31261669826, the first on a tree carrying the harness's re-run-alone work",
         source: "tests/common/usb.rs xhci_slow_connect",
         measured: "2026-08-08",
+    },
+    // The nightly that re-took the measurement the dev host had retired, and the
+    // landing that answered it. Both rows above point their retirement at this
+    // one, because it is the reading that says why theirs was not enough.
+    Red {
+        test: "xhci_slow_connect",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Retired(SLOW_CONNECT_CLEARS),
+        what: "`the controller started at 0.303 s, past the 0.3 s the ports are held empty for, \
+               so nothing in this boot read a hidden port`, and 0.300 s on the isolated re-run. \
+               **The dev host's 73-191 ms of clearance did not transfer**: how long a boot takes \
+               to reach its controller is a fact about the host, and this instrument's reading of \
+               it is 0 to 3 ms. The assertion asked for a wider window; what it had was a window \
+               measured from the wrong instant",
+        evidence: "nightly `ci` run 35072262489, guest (10), 2026-09-16 — red in the wide phase \
+                   and red again on the isolated re-run",
+        source: "kernel/src/drivers/xhci/mod.rs SLOW_CONNECT_NS",
+        measured: "2026-09-16",
     },
     // ---------------------------------------------------------------------
     // Run 31247206462: twelve shards on KVM at `--jobs 1`, 2026-08-08. Every one

@@ -317,12 +317,20 @@ const SLOW_TRANSFER_NS: u64 = 2_000_000;
 use portmachine::DEBOUNCE_NS as PORT_DEBOUNCE_NS;
 
 
-/// Report an empty root hub for the first [`SLOW_CONNECT_NS`] of the boot; a kernel feature since QEMU cannot stage a port that connects late.
+/// Report an empty root hub for the first [`SLOW_CONNECT_NS`] after this controller powered its ports; a kernel feature since QEMU cannot stage a port that connects late.
 ///
 /// Replaces the register, not a verdict: the port reads exactly as unpopulated during the window.
+///
+/// **Anchored at `powered_at`, not at boot zero**, because what it stages is the
+/// delay between port power and connect and nothing else. A window measured
+/// from boot is one the boot can outgrow — a machine that reaches its
+/// controller later than the window is long finds the register already telling
+/// the truth, and stages nothing — and how long a boot takes to get here is a
+/// fact about the host. Every bound the settle it exercises is judged against —
+/// `EMPTY_BUS` and `PORT_SETTLE_CEILING` — is measured from that same instant.
 const SLOW_CONNECT_NS: u64 = 300_000_000;
 
-/// Report *one* root-hub port empty for the first [`SLOW_CONNECT_NS`], while every other port reads normally.
+/// Report *one* root-hub port empty while every other port reads normally.
 ///
 /// The window closes on the boot scan, not the clock: what it stages is an ordering, not a duration.
 const SLOW_STORAGE_PORT: u8 = 0;
@@ -670,7 +678,8 @@ impl XhciController {
 
     fn read_portsc_raw(&self, port_idx: u8) -> u32 {
         let raw = self.op_base.read_u32(OP_PORT_BASE + port_idx as u64 * PORT_REG_SIZE);
-        if crate::actuator::xhci_slow_connect() && crate::clock::nanos_since_boot() < SLOW_CONNECT_NS
+        if crate::actuator::xhci_slow_connect()
+            && crate::clock::nanos_since_boot().saturating_sub(self.powered_at) < SLOW_CONNECT_NS
         {
             return raw & !(PORTSC_CCS | PORTSC_PED | PORTSC_SPEED);
         }

@@ -912,18 +912,20 @@ pub const RELEGATED: &[Relegated] = &[
         test: "xhci_slow_connect",
         ci_ms: 4_999,
         why: Why::TimerAnchored,
-        guards: "Bounds the first port line from both sides at 0.400 s +/- 0.150 s, and \
-                 refuses outright when a slow boot reaches the controller after the 300 ms \
-                 held-empty window — a slower machine changes the verdict, not the price. \
-                 This is the delayed-enumeration shape real hubs impose after reset.",
+        guards: "Bounds the first port line from both sides, at the held-empty window plus the \
+                 debounce after the controller's own port power and no more than 0.150 s past \
+                 that — a staged latency window whichever host renders it. This is the \
+                 delayed-enumeration shape real hubs impose after reset.",
     },
     Relegated {
         test: "late_storage_connect",
         ci_ms: 6_229,
         why: Why::TimerAnchored,
-        guards: "The same SLOW_CONNECT_NS window applied to the disk's port: a boot that \
-                 outgrows it binds the disk in the port scan and the gate reds with \"the port \
-                 was not held empty\". It is the storage-side delayed-port regression gate.",
+        guards: "The same shape applied to the disk's port, held empty until the boot scan \
+                 rather than for a duration: a scan that binds the disk anyway reds with \"the \
+                 port was not held empty\", and the settle it has to leave by is the \
+                 machine-wide wall-clock debounce. It is the storage-side delayed-port \
+                 regression gate.",
     },
     Relegated {
         test: "audio_tone_load",
