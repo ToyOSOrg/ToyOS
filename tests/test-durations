@@ -315,6 +315,7 @@ panic_key_holds 42033 shards=12
 panic_reboots 9768 shards=12
 panic_recovery 130 shards=12
 pci_capability_walk 5775 shards=12
+pci_claim_caps_truncated 18446744073709551615 shards=none
 pci_inventory 4529 shards=12
 pci_function_is_exclusive 3007 shards=12
 pipe_flag_forgery 12 shards=12

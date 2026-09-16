@@ -300,6 +300,80 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
     Ok(())
 }
 
+/// A claimed function whose capability list ends at a link the spec forbids is
+/// refused, and never armed on the older mechanism the walk did reach.
+///
+/// **The one claim path that gains privilege by reading a list wrong**: read
+/// that end as a terminator and an MSI-X table past it is absent, so MSI is
+/// armed on the guess while `msix_bar` — the same walk — withholds no BAR, and
+/// the BAR that table lives in goes to the holder with everything else. A
+/// process that can write that table aims the device's message at any address
+/// the LAPIC decodes.
+///
+/// No device in reach publishes that shape, so the actuator stages it — for
+/// this claim's own walks and nothing else.
+pub fn claim_caps_truncated() -> Result<(), String> {
+    // The bench whose claimed function publishes MSI as well: on one that
+    // publishes neither mechanism the refusal is the one `virtio_net_no_msix`
+    // already earns, and no table BAR is at stake.
+    let bench = super::https::E1000E;
+    let options = BootOptions {
+        profile: bench.profile,
+        kernel_params: &["pcidev-caps-truncated"],
+        ..Default::default()
+    };
+    let config = super::compile::repo_root().join(bench.config);
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    const NETD_EXITS: &str = "netd: no NIC on this machine, exiting";
+    // netd announces itself when the claim was *not* refused, so a kernel that
+    // handed this function over ends the wait at once instead of being waited
+    // out to the stall budget.
+    const NETD_RUNS: &str = "netd: ready, at most ";
+    let mut text = qemu.boot_log().to_string();
+    let stalled = qemu::await_guest(&mut qemu, &mut text, "netd's own answer", |c| {
+        c.contains(NETD_EXITS) || c.contains(NETD_RUNS)
+    })
+    .err();
+    let log = crate::common::serial::Serial::named("boot console", text);
+
+    // Refused by the reason that is true of it: what the list holds past that
+    // link was never read — not "it has no table".
+    log.must_say("NOT HANDED OVER")?;
+    log.must_say("its capability list ends at a link the PCI spec forbids")?;
+    let at = log
+        .text()
+        .lines()
+        .find(|line| line.contains("NOT HANDED OVER"))
+        .and_then(|line| line.split("pcidev: PCI ").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .ok_or_else(|| format!("no function was refused:\n{}", log.text()))?
+        .to_string();
+    // And nothing was armed on the mechanism the walk *did* reach: an
+    // `msi address=` line for this function is a hand-over made on a list this
+    // kernel had no right to trust.
+    log.must_not_say(&format!("PCI {at}: msi address="))?;
+    log.must_not_say(&format!("[{}] handed over", bench.claims))?;
+    // The refusal spent nothing on the way out, so the BAR the table lives in
+    // is still where firmware put it.
+    log.must_not_say(&format!("pcidev: PCI {at} BAR"))?;
+    log.must_say(&format!(
+        "init: netd: pci:{} is on this machine and could not be handed over",
+        bench.claims
+    ))?;
+    if !log.text().contains(NETD_EXITS) {
+        return Err(format!(
+            "{}{NETD_EXITS:?} never reached the boot console:\n{}",
+            stalled.map(|why| format!("{why}\n")).unwrap_or_default(),
+            log.text()
+        ));
+    }
+    // And the machine is otherwise whole: one claim refused costs networking
+    // and nothing else.
+    log.must_say("Boot: complete")?;
+    log.must_be_clean()?;
+    Ok(())
+}
+
 /// A machine with no NVMe controller must boot.
 ///
 /// `.expect("NVMe: no controller found")` killed it at 0.08 s — before

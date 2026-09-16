@@ -800,9 +800,9 @@ pub fn cap_selftest() {
         } else {
             log!("virtio: pci cap selftest FAILED on {name}: yielded {got:?}, want {want:?}");
         }
-        // The split a claimed function's arming turns on: no layout here
-        // publishes MSI-X, and only a walk that reached the list's terminator
-        // may answer that as absent rather than as never read.
+        // The split a claimed function's arming turns on: only a walk that
+        // reached the list's terminator may answer a capability it did not
+        // yield as absent rather than as never read.
         let classify = |id: u8| match device.capability(id) {
             Ok(_) => "found",
             Err(NoCapability::Absent) => "absent",
@@ -813,11 +813,11 @@ pub fn cap_selftest() {
         if split == want_split {
             split_passed += 1;
         } else {
-            log!("virtio: pci cap selftest FAILED on {name}: a capability it never publishes \
-                  reads {split}, want {want_split}");
+            log!("virtio: pci cap selftest FAILED on {name}: a capability the walk never \
+                  reaches reads {split}, want {want_split}");
         }
-        // A capability the walk yielded before the link that ended it: an early
-        // end is a fact about the rest of the list, never about what was read.
+        // An early end is a fact about the rest of the list, never about what
+        // was read.
         if let Some(id) = reached {
             let found = classify(id);
             if found == "found" {
@@ -827,9 +827,8 @@ pub fn cap_selftest() {
                       before the link that ends the walk reads {found}, want found");
             }
         }
-        // And what the arming made of the same answer, which is what `bring_up`
-        // matches on. No layout here publishes MSI-X, so this returns at the
-        // capability lookup and touches no MMIO.
+        // No layout here publishes an MSI-X capability the walk reaches, so
+        // this returns at the capability lookup and touches no MMIO.
         let armed = match device.enable_msix(0) {
             Ok(_) => "armed",
             Err(Unarmed::NoTable(NoCapability::Absent)) => "absent",
@@ -852,12 +851,10 @@ pub fn cap_selftest() {
     walk_case("a link that is not dword-aligned", 0x40, &[(0x40, ID, 0x43)], &[0x40], true, None);
     walk_case("a link below the standard header", 0x40, &[(0x40, ID, 0x10)], &[0x40], true, None);
     walk_case("a head the spec forbids", 0x41, &[], &[], true, None);
-    // The shape the claim path exists to refuse: a capability the walk reaches,
-    // and a link the spec forbids between it and whatever follows.
     walk_case(
         "a capability reached before a link the spec forbids",
         0x40,
-        &[(0x40, msi::CAP_ID, 0x43)],
+        &[(0x40, msi::CAP_ID, 0x43), (0x44, msix::CAP_ID, 0)],
         &[0x40],
         true,
         Some(msi::CAP_ID),

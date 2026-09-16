@@ -52,8 +52,8 @@ pub struct Bench {
     /// refusal below pass for the wrong reason.
     pub device: &'static str,
     /// The function [`Bench::config`]'s netd declares, as its `devices` row
-    /// spells it. The arming below is asserted of this function rather than of
-    /// whichever one the guest reports handing over.
+    /// spells it. Held to that committed row by
+    /// [`every_bench_claims_what_its_config_declares`].
     pub claims: &'static str,
 }
 
@@ -75,7 +75,52 @@ pub const E1000E: Bench = Bench {
     claims: "8086:10d3",
 };
 
-pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), String> {
+/// Each bench's [`Bench::claims`] is the `devices` row of the boot config it
+/// names, read off the committed file rather than restated beside it.
+///
+/// A plain function, called from the harness's registration checks, for the
+/// reason [`super::devices::the_config_runs_exactly_these_jobs`] gives.
+pub fn every_bench_claims_what_its_config_declares() {
+    for bench in [VIRTIO, E1000E] {
+        let at = compile::repo_root().join(bench.config).join("system.toml");
+        let config =
+            std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+        // netd's own row and not the file's: `tests/netcase` declares the same
+        // function twice, once for the daemon and once for the test binary that
+        // asks the kernel for a second claim on it.
+        let mut in_netd = false;
+        let mut declared: Vec<&str> = Vec::new();
+        for line in config.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_netd = line == "[programs.netd]";
+                continue;
+            }
+            if !in_netd {
+                continue;
+            }
+            if let Some(row) = line.strip_prefix("devices = [") {
+                declared.extend(
+                    row.trim_end_matches(']')
+                        .split(',')
+                        .map(|word| word.trim().trim_matches('"'))
+                        .filter(|word| !word.is_empty()),
+                );
+            }
+        }
+        assert_eq!(
+            declared,
+            [format!("pci:{}", bench.claims)],
+            "{} declares those devices, and the bench names {:?}",
+            at.display(),
+            bench.claims
+        );
+    }
+}
+
+/// Answers the boot console, up to netd's ready line: what the claim spent is
+/// on it, and only the caller knows whether its bench can red an assertion
+/// about that.
+pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<String, String> {
     let bins: Vec<(String, Vec<u8>)> = rust_bins
         .iter()
         .filter(|(name, _)| name == "https_fetch")
@@ -110,14 +155,6 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), 
         "netd to come up",
     )
     .map_err(|e| format!("netd never came up, so no fetch below means anything: {e}"))?;
-
-    // The claim's arming, before a byte is fetched. QEMU's `e1000e` publishes
-    // MSI at 0xd0 and MSI-X at 0xa0, so a kernel that took the older mechanism
-    // first would hold this card on MSI and serve every fetch below the same.
-    super::iommu::armed_on_msix(
-        &super::serial::Serial::named("boot console", console.as_str()),
-        bench.claims,
-    )?;
 
     let ok_line = format!(
         "https_fetch: ok bytes={} sha256={}",
@@ -176,7 +213,7 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), 
         eprintln!("  [https:{}] {line}", bench.device);
     }
     eprintln!("  [https:{}] host arm agreed byte for byte: {host_ok}", bench.device);
-    Ok(())
+    Ok(console)
 }
 
 fn fetch_in_guest(

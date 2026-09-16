@@ -234,7 +234,7 @@ fn reserve(who: u16) -> Result<usize, ClaimError> {
     Ok(slot)
 }
 
-fn requester(pci: &PciDevice) -> u16 {
+pub(crate) fn requester(pci: &PciDevice) -> u16 {
     ((pci.bus as u16) << 8) | ((pci.dev as u16) << 3) | pci.func as u16
 }
 
@@ -540,6 +540,12 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // refusal that had already armed a vector and moved a function's BARs would
     // leave the machine changed by a hand-over that did not happen.
     let space = slot_space(slot).map_err(Refusal::Untranslated)?;
+
+    // Held across every walk this hand-over makes of the function's own list —
+    // both readers below and the MSI fallback between them — so the staged
+    // shape is the device's and not one reader's view of it.
+    #[cfg(feature = "boot-actuators")]
+    let _staged = crate::drivers::pci::StagedCaps::armed_for(&pci);
 
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.

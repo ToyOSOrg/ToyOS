@@ -198,6 +198,9 @@ actuators! {
     /// Walk the PCI capability list, window check and parse over crafted config-space layouts at init.
     pci_cap_selftest = "pci-cap-selftest";
 
+    /// End the capability list of the function a claim is bringing up at a link the spec forbids, one link past its MSI capability: a claimed function publishing an MSI-X table no walk may reach.
+    pcidev_caps_truncated = "pcidev-caps-truncated";
+
     /// Raise the local APIC's spurious vector on this CPU once.
     lapic_spurious_selftest = "lapic-spurious-selftest";
 

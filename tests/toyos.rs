@@ -801,6 +801,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Every verdict is a line of text or a device property, and no clock is in
     // any of them.
     ("virtio_net_no_msix", Sched::Parallel, Tier::Fast),
+    // One boot of the NIC config with a staged capability list, and every
+    // verdict a console line. No clock in any of them.
+    ("pci_claim_caps_truncated", Sched::Parallel, Tier::Fast),
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
@@ -10348,6 +10351,7 @@ fn run_machine_test(
         "dump_nmi_probe" => faults::dump_nmi_probe(test_config, c_bins, rust_bins),
         "diskless_boot" => faults::diskless_boot(test_config, c_bins, rust_bins),
         "virtio_net_no_msix" => faults::virtio_net_no_msix(),
+        "pci_claim_caps_truncated" => faults::claim_caps_truncated(),
         // Body in `tests/common/audio.rs`, so the hunk here stays one line.
         "metal_sim_null_audio" => audio::null_sink_real_rate(test_config, c_bins, rust_bins),
         "null_sink_shipped_client" => audio::null_sink_shipped_client(test_config, c_bins, rust_bins),
@@ -12869,11 +12873,8 @@ fn run_machine_test(
         }
         "pci_capability_walk" => {
             // A capability list is the device's, and QEMU publishes only
-            // well-formed ones, so the kernel drives fourteen crafted layouts —
-            // a cycle, a spec-forbidden link, a BAR/offset/length past the
-            // window, a window past the old 0x4000 guess a bigger BAR makes
-            // legal, a chain missing its required capabilities, and a refused
-            // device that must not keep bus mastering — at init under this parameter.
+            // well-formed ones, so the kernel drives crafted layouts at init
+            // under this parameter.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -13676,8 +13677,17 @@ fn run_machine_test(
             );
             Ok(())
         }
-        "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO),
-        "https_tls13_e1000e" => common::https::tls13_judge(rust_bins, common::https::E1000E),
+        "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
+        // The arming is asserted here and not on the bench above, whose claimed
+        // function publishes no MSI capability at all: that assertion there is
+        // green on every implementation of this kernel.
+        "https_tls13_e1000e" => common::https::tls13_judge(rust_bins, common::https::E1000E)
+            .and_then(|console| {
+                common::iommu::armed_on_msix(
+                    &serial::Serial::named("boot console", console.as_str()),
+                    common::https::E1000E.claims,
+                )
+            }),
         "log_stream" => common::logstream::stream(common::logstream::VIRTIO, c_bins, rust_bins),
         "log_stream_e1000e" => {
             common::logstream::stream(common::logstream::E1000E, c_bins, rust_bins)
@@ -18414,6 +18424,7 @@ fn check_metal_registration() {
         );
     }
     devices::the_config_runs_exactly_these_jobs();
+    common::https::every_bench_claims_what_its_config_declares();
     let registered: BTreeSet<&str> = MACHINE_TESTS
         .iter()
         .chain(SCREEN_TESTS)
