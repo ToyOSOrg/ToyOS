@@ -45,10 +45,7 @@
 //! `updated_at` moves on *any* later edit to *any* rule, an unrelated
 //! required-check addition included, and would silently misdate the regime
 //! rather than refusing; the first `merge_group` run is a fact about the queue
-//! actually processing a landing and cannot be perturbed that way.
-//! ([`queue_started`] walks the listing back to it a page at a time, because
-//! no single query reaches it: `gh run list` answers newest-first, and the
-//! listing behind it stops at 1000 results however large the limit.) If the
+//! actually processing a landing and cannot be perturbed that way. If the
 //! rule is required but has never yet run one, the boundary is "now": nothing
 //! in any window so far can be attributed to a queue nobody has used.
 //!
@@ -293,10 +290,13 @@ fn regime(root: &Path) -> Regime {
     queue_started(root)
 }
 
-/// One page of [`queue_started`]'s walk — half the 1000-result ceiling the
-/// listing behind `gh run list` puts on any one query, so a page that comes
-/// back short is the listing's end and never that ceiling.
+/// One page of [`queue_started`]'s walk. A page that comes back short is the
+/// listing's end only while the page stays under the 1000 results the listing
+/// behind `gh run list` stops at however large the `--limit`: at that size a
+/// short page is that ceiling instead, and the walk would stop wherever the
+/// API did rather than at the queue's first run.
 const QUEUE_PAGE: usize = 500;
+const _: () = assert!(QUEUE_PAGE < 1000);
 
 /// What [`queue_started`] asks of each page: how many runs it carried, its
 /// oldest run's instant, and the oldest among just its
@@ -307,18 +307,58 @@ const QUEUE_PAGE_JQ: &str = concat!(
     r#"| sort_by(.createdAt) | .[0].createdAt) // "")] | @tsv"#
 );
 
-/// [`QUEUE_PAGE_JQ`]'s row: the runs on the page, the oldest one's instant,
-/// and the oldest on the queue ref. Either instant is absent where the page —
-/// or the queue-ref part of it — held nothing, and a row whose whole tail is
-/// absent arrives with the empty fields trimmed off rather than as tabs.
+/// [`QUEUE_PAGE_JQ`]'s row, read back. Either instant is absent where the
+/// page — or the queue-ref part of it — held nothing; an absent instant is
+/// always the row's tail, which `text.trim()` takes off with the newline.
 fn parse_queue_page(text: &str) -> (usize, Option<i64>, Option<i64>) {
     let mut fields = text.trim().split('\t');
     let count: usize = fields
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("{TAG} `gh run list --event merge_group` printed no count row"));
-    let instant = |field: Option<&str>| field.filter(|s| !s.is_empty()).map(parse_instant);
+    let instant = |field: Option<&str>| field.map(parse_instant);
     (count, instant(fields.next()), instant(fields.next()))
+}
+
+/// [`queue_started`]'s walk between pages: the instant the next page is bounded
+/// at, the earliest queue-ref run any page has carried, and whether the listing
+/// has ended.
+#[derive(Default)]
+struct Walk {
+    bound: Option<i64>,
+    earliest: Option<i64>,
+    ended: bool,
+}
+
+impl Walk {
+    /// The `--created` argument the next page is fetched with — inclusive, so
+    /// a run sharing the bound instant is re-read rather than stepped over.
+    fn created(&self) -> Option<String> {
+        self.bound.map(|b| format!("<={}", format_instant(b)))
+    }
+
+    /// One page's whole effect on the walk: its queue-ref oldest joins
+    /// `earliest`, a page shorter than [`QUEUE_PAGE`] is the listing's end,
+    /// and a full one moves the bound back to its own oldest run. A full page
+    /// whose oldest run is the bound it was already fetched at is refused —
+    /// the bound is inclusive, so that page would come back forever.
+    fn step(&self, count: usize, oldest: Option<i64>, oldest_queued: Option<i64>) -> Walk {
+        let earliest = match (self.earliest, oldest_queued) {
+            (Some(seen), Some(queued)) => Some(seen.min(queued)),
+            (seen, queued) => seen.or(queued),
+        };
+        if count < QUEUE_PAGE {
+            return Walk { bound: self.bound, earliest, ended: true };
+        }
+        let oldest = oldest.expect("a page that carried runs names the oldest of them");
+        assert!(
+            self.bound.is_none_or(|b| oldest < b),
+            "{TAG} a whole page of {QUEUE_PAGE} merge_group runs shares {} — the walk back to the \
+             earliest one cannot step past that instant",
+            format_instant(oldest)
+        );
+        Walk { bound: Some(oldest), earliest, ended: false }
+    }
 }
 
 /// The instant `main`'s queue started, as the [`Regime`] it settles: the
@@ -326,18 +366,16 @@ fn parse_queue_page(text: &str) -> (usize, Option<i64>, Option<i64>) {
 /// the rule is required but no landing has ever been queued, or
 /// [`Regime::Unknown`] if `gh` cannot answer at all.
 ///
-/// Reaching the earliest is a walk and no `--limit` buys a way out of it:
-/// `gh run list` answers newest-first, and the listing behind it stops at 1000
-/// results however large the limit. So each page's oldest run becomes the next
-/// page's `--created <=` bound — inclusive, so a run sharing that instant is
-/// re-read rather than stepped over — and the first page shorter than
-/// [`QUEUE_PAGE`] is the end of the listing, whatever the queue's total.
+/// Reaching the earliest is a walk: `gh run list` answers newest-first, so
+/// each page's oldest run bounds the next page ([`Walk`]) until one comes back
+/// short. That a short page is the listing's end is the walk's one assumption,
+/// and it is measured rather than trusted — [`nothing_predates`] asks `gh` for
+/// anything older than what the walk found before any instant is returned.
 fn queue_started(root: &Path) -> Regime {
     let page_size = QUEUE_PAGE.to_string();
-    let mut bound: Option<i64> = None;
-    let mut earliest: Option<i64> = None;
-    loop {
-        let created = bound.map(|b| format!("<={}", format_instant(b)));
+    let mut walk = Walk::default();
+    while !walk.ended {
+        let created = walk.created();
         let mut args = vec![
             "run",
             "list",
@@ -360,27 +398,56 @@ fn queue_started(root: &Path) -> Regime {
             return Regime::Unknown;
         }
         let (count, oldest, oldest_queued) = parse_queue_page(&String::from_utf8_lossy(&mg_out.stdout));
-        if let Some(queued) = oldest_queued {
-            earliest = Some(earliest.map_or(queued, |e: i64| e.min(queued)));
-        }
-        if count < QUEUE_PAGE {
-            break;
-        }
-        let oldest = oldest.expect("a page that carried runs names the oldest of them");
-        assert!(
-            bound.is_none_or(|b| oldest < b),
-            "{TAG} a whole page of {QUEUE_PAGE} merge_group runs shares {} — the walk back to the \
-             earliest one cannot step past that instant",
-            format_instant(oldest)
-        );
-        bound = Some(oldest);
+        walk = walk.step(count, oldest, oldest_queued);
     }
-    match earliest {
-        Some(started) => Regime::Queued(started),
+    match walk.earliest {
+        Some(started) => {
+            let Some(closed) = nothing_predates(root, started) else {
+                return Regime::Unknown;
+            };
+            assert!(
+                closed,
+                "{TAG} a merge_group run predates {}, so the short page this walk stopped on was \
+                 not the listing's end — dating the queue from a truncated earliest would split \
+                 every window at the wrong instant",
+                format_instant(started)
+            );
+            Regime::Queued(started)
+        }
         // Required, but the queue has never processed a landing: nothing in
         // any window so far can be "queued" either.
         None => Regime::Queued(now_epoch_secs()),
     }
+}
+
+/// Whether `gh` has no `merge_group` run older than `started` on record — the
+/// one query that turns [`queue_started`]'s short-page stop from an assumption
+/// into a measurement. `None` where `gh` cannot answer at all, as everywhere
+/// else in this walk.
+fn nothing_predates(root: &Path, started: i64) -> Option<bool> {
+    let created = format!("<{}", format_instant(started));
+    let out = Command::new("gh")
+        .args([
+            "run",
+            "list",
+            "--event",
+            "merge_group",
+            "--created",
+            &created,
+            "--limit",
+            "1",
+            "--json",
+            "createdAt",
+            "--jq",
+            "length",
+        ])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim() == "0")
 }
 
 /// One push's four required-workflow runs, keyed by workflow name.
@@ -857,18 +924,61 @@ mod tests {
         }
     }
 
-    /// The three page shapes [`queue_started`]'s walk reads: a full page, a
-    /// page carrying runs but none on the queue ref, and an empty one — whose
-    /// empty fields `gh` hands over trimmed away rather than as tabs.
+    /// The three page shapes [`queue_started`]'s walk reads, each fixture the
+    /// bytes `gh` prints for it: a full page, a page carrying runs but none on
+    /// the queue ref, and an empty one.
     #[test]
     fn a_walked_pages_row_parses_at_every_shape() {
         let instant = |t: &str| Some(parse_instant(t));
         assert_eq!(
-            parse_queue_page("500\t2026-08-22T16:48:03Z\t2026-08-22T18:56:06Z\n"),
-            (500, instant("2026-08-22T16:48:03Z"), instant("2026-08-22T18:56:06Z"))
+            parse_queue_page("500\t2026-08-31T09:07:09Z\t2026-08-31T09:07:09Z\n"),
+            (500, instant("2026-08-31T09:07:09Z"), instant("2026-08-31T09:07:09Z"))
         );
-        assert_eq!(parse_queue_page("2\t2026-08-20T14:39:48Z\t"), (2, instant("2026-08-20T14:39:48Z"), None));
-        assert_eq!(parse_queue_page("0"), (0, None, None));
+        assert_eq!(parse_queue_page("8\t2026-09-16T13:25:42Z\t\n"), (8, instant("2026-09-16T13:25:42Z"), None));
+        assert_eq!(parse_queue_page("0\t\t\n"), (0, None, None));
+    }
+
+    #[test]
+    fn a_short_page_ends_the_walk() {
+        let walked = Walk {
+            bound: Some(parse_instant("2026-08-31T09:07:09Z")),
+            earliest: Some(parse_instant("2026-08-22T16:49:24Z")),
+            ended: false,
+        };
+        let end = walked.step(
+            QUEUE_PAGE - 1,
+            Some(parse_instant("2026-08-20T14:39:48Z")),
+            Some(parse_instant("2026-08-31T09:07:09Z")),
+        );
+        assert!(end.ended);
+        assert_eq!(end.earliest, Some(parse_instant("2026-08-22T16:49:24Z")));
+    }
+
+    #[test]
+    fn a_full_page_steps_below_its_oldest_run() {
+        let first = Walk::default().step(
+            QUEUE_PAGE,
+            Some(parse_instant("2026-08-31T09:07:09Z")),
+            Some(parse_instant("2026-08-31T09:07:09Z")),
+        );
+        assert!(!first.ended);
+        assert_eq!(first.bound, Some(parse_instant("2026-08-31T09:07:09Z")));
+        assert_eq!(first.created().as_deref(), Some("<=2026-08-31T09:07:09Z"));
+        let second = first.step(
+            QUEUE_PAGE,
+            Some(parse_instant("2026-08-22T16:49:24Z")),
+            Some(parse_instant("2026-08-22T16:49:24Z")),
+        );
+        assert_eq!(second.earliest, Some(parse_instant("2026-08-22T16:49:24Z")));
+        assert_eq!(second.created().as_deref(), Some("<=2026-08-22T16:49:24Z"));
+    }
+
+    #[test]
+    fn a_full_page_that_cannot_step_below_itself_is_refused() {
+        let bound = parse_instant("2026-08-31T09:07:09Z");
+        let walked = Walk { bound: Some(bound), earliest: None, ended: false };
+        let stepped = std::panic::catch_unwind(|| walked.step(QUEUE_PAGE, Some(bound), None)).is_ok();
+        assert!(!stepped, "a full page whose oldest run is the bound it was fetched at must be refused");
     }
 
     fn run(head_sha: &str, workflow: &str, conclusion: &str, created: &str, updated: &str) -> Run {
