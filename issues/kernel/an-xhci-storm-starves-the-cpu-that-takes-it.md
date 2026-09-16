@@ -41,5 +41,5 @@ does not need `XHCI` at all.
 **Not this task's**: found while root-causing the loaded-host hang whose cause
 was the timer arming and not this. Whether an xHCI storm can by itself hold a
 CPU out of its timer for the whole of a bound is unmeasured — and it is one of
-the shapes `a-job-list-hangs-with-interrupts-on-and-the-deadline-ends-it.md`
+the shapes `issues/kernel/a-120000-ms-boot-deadline-fired-132859-ms-late-on-the-t14.md`
 leaves open.
