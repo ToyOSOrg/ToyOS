@@ -78,11 +78,69 @@ pub(crate) fn between_attempts(attempt: u32) {
     );
 }
 
+/// Operations open right now on a thread the machine's stop stops, and how
+/// many such operations this boot began.
+static OPEN_OPERATIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static BEGUN_OPERATIONS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Open on a thread the stop stops, and begun on this boot.
+pub fn userland_operations() -> (u32, u64) {
+    (
+        OPEN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed),
+        BEGUN_OPERATIONS.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Whether the stop this count is read for stops the thread opening an
+/// operation now: no stage stops a kernel thread, and a holder of the log
+/// capability runs on through the stage whose record reads this.
+///
+/// Read at the open and never again, so a process whose sibling thread makes
+/// it a holder while this thread is inside the operation stays counted — an
+/// `in_flight` of one on a record that stopped everything, reachable only by
+/// a multi-threaded holder whose first `SYS_LOG_READ` lands as the stop ends,
+/// which no committed config has.
+fn counted() -> bool {
+    if crate::sched::kthread::current_is_kernel_thread() {
+        return false;
+    }
+    let Some(pid) = crate::arch::percpu::current_pid() else {
+        return false;
+    };
+    !crate::log::user::holds_the_log(pid.raw())
+}
+
+#[must_use = "the operation lasts exactly as long as this guard"]
+pub struct OpenOperation {
+    _deadline: Operation,
+    /// Decided at the open and not at the close, so the two ends of one
+    /// operation cannot disagree about whether it was counted.
+    counted: bool,
+}
+
+impl Drop for OpenOperation {
+    fn drop(&mut self) {
+        if self.counted {
+            OPEN_OPERATIONS.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 /// Declares the running context inside one block-device operation, bounded by `OPERATION`, until the guard drops.
 // An absolute deadline, not a relative duration: it crosses into a driver that loops, and re-basing per command would bound each command instead of the whole operation.
 #[must_use = "the operation lasts exactly as long as this guard"]
-pub fn begin_operation() -> Operation {
-    Operation::begin(Deadline::at(crate::clock::now() + OPERATION.duration()))
+pub fn begin_operation() -> OpenOperation {
+    let counted = counted();
+    if counted {
+        OPEN_OPERATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        BEGUN_OPERATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    OpenOperation {
+        _deadline: Operation::begin(Deadline::at(
+            crate::clock::now() + OPERATION.duration(),
+        )),
+        counted,
+    }
 }
 
 /// Why an operation on this trait did not complete.

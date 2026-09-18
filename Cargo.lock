@@ -1136,6 +1136,7 @@ dependencies = [
  "toyos-ld",
  "toyos-logstream",
  "toyos-manifest",
+ "toyos-quiesce",
  "toyos-sched",
  "toyos-tco",
  "toyos-wallclock",
@@ -1250,6 +1251,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-ps2"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-quiesce"
 version = "0.1.0"
 
 [[package]]

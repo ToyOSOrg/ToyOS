@@ -987,6 +987,9 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
     let name = proc.name_str();
     log!("exit: {name} pid={process_pid} code={code} cpu={cpu_ms}ms");
 
+    // The holder table has room only for the living.
+    crate::log::user::forget_log_holder(process_pid.raw());
+
     Arc::clone(&proc.object)
 }
 

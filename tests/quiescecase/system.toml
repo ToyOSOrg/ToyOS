@@ -1,0 +1,14 @@
+# A boot whose one job writes from six threads and then reboots out from under
+# them. The job asks for the reset itself, from a thread that is not one of the
+# writers, so no `reboot` job follows the list.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+# `power` because the job ends the machine, `dup` because the runner passes a
+# duplicate of what it holds to the binary it spawns.
+[programs.test-runner]
+args = ["test_rs_quiesce_writers"]
+syscap = ["dup", "power"]

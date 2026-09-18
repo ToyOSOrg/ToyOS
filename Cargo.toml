@@ -40,6 +40,7 @@ members = [
     "toyos-pcid",
     "toyos-proclife",
     "toyos-ps2",
+    "toyos-quiesce",
     "toyos-sched",
     "toyos-sched/loom",
     "toyos-sched/sim",
@@ -115,6 +116,9 @@ toyos-keymap = { path = "toyos-keymap" }
 # parameter by name reads the same constant the kernel and `logd` do.
 toyos-logstream = { path = "toyos-logstream" }
 toyos-manifest = { path = "toyos-manifest" }
+# The shutdown's stop record: the kernel renders it and this crate reads it back
+# off a stick, so one declaration is what both sides spell it with.
+toyos-quiesce = { path = "toyos-quiesce" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "toyos-tco" }

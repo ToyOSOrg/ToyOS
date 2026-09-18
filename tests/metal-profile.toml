@@ -62,7 +62,7 @@ name = "boot.metalcase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
-measured = 1252
+measured = 1199
 
 # --- what the machine spent coming back, on the host's clock ---
 # The loop already refuses past this; the row exists so the number is read and
@@ -109,7 +109,7 @@ name = "boot.metalcase.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
-measured = 46
+measured = 51
 
 [[number]]
 name = "boot.latencycase.complete_ms"
@@ -170,12 +170,14 @@ name = "boot.metaldevicecase.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1255
 
 [[number]]
 name = "boot.metaldevicecase.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
+measured = 65
 
 [[number]]
 name = "usbwrite.metaldevicecase.span_us"
@@ -323,6 +325,7 @@ name = "boot.metaldevicecase.stick_secs"
 unit = "s"
 ceiling = 5
 ceiling_from = "as boot.jobcase.stick_secs, and this is the boot that reads it hardest: it writes, fsyncs and reads back megabytes before the reset, which is the shape a stop that cut a transfer would leave unenumerable"
+measured = 0
 
 [[number]]
 name = "boot.selftests.stick_secs"
@@ -384,14 +387,14 @@ name = "boot.deadlinewedge.complete_ms"
 unit = "ms"
 ceiling = 120000
 ceiling_from = "toyos_tco::WEDGE_BOUND_MS — on this boot the kernel's own deadline is what runs from boot, so a later `Boot: complete` is a boot the deadline already reset"
-measured = 1160
+measured = 1254
 
 [[number]]
 name = "boot.deadlinewedge.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs — which now derives from WEDGE_BOUND_MS, the longest watchdog a boot runs under, plus what coming back costs"
-measured = 171
+measured = 231
 
 [[number]]
 name = "boot.deadlinewedge.stick_secs"
@@ -411,7 +414,7 @@ name = "boot.deadlinewedge.deadline_lateness_ms"
 unit = "ms"
 ceiling = 10000
 ceiling_from = "the poll's own cadence: the deadline is read on every timer interrupt and an idle CPU re-arms its LAPIC one-shot per fire, so the lateness is one timer period. That period has not been measured on this machine, and ten seconds — a twelfth of the bound — is the widest true bound before it has been"
-measured = 66
+measured = 60
 
 # --- the boot one CPU stops answering on ---
 # `hardlockup` is the deaf half of the boot above: the same staged wedge, and
@@ -426,14 +429,14 @@ name = "boot.hardlockup.complete_ms"
 unit = "ms"
 ceiling = 60000
 ceiling_from = "toyos_tco::HARD_LOCKUP_BOUND_MS — half the deadline and the earlier bound, so a later `Boot: complete` is a boot the detector already reset"
-measured = 1161
+measured = 1206
 
 [[number]]
 name = "boot.hardlockup.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs. It is the same wait: this boot ends itself half a bound earlier and then costs the same firmware, loader and Ubuntu as any other"
-measured = 117
+measured = 170
 
 [[number]]
 name = "boot.hardlockup.stick_secs"
@@ -827,3 +830,103 @@ unit = "us"
 ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
 measured = 19488
+
+# --- what the block layer had open where the stop ended
+# How long the stop took is priced nowhere: a stop that gave up spends its
+# budget and no more, so the record's own shortfall clause is the verdict, and
+# `Readback::stop_completed` reads it on every boot.
+#
+# `deadlinewedge` and `hardlockup` are absent on purpose: those two reset
+# without going through `quiesce`, so they stop nothing and write no record.
+
+[[number]]
+name = "boot.testcases.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "the stop's own claim, judged by the block layer instead of by the stop: an operation lasts only while its opener is inside the device, so a thread the stop has stopped holds none and any number but zero is a sync claiming something about a machine that was still writing"
+
+[[number]]
+name = "boot.testcases-mkdir.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.testcases-readdir.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.testcases-watchdog.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.jobcase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.metalcase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+measured = 0
+
+[[number]]
+name = "boot.latencycase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.metaldevicecase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+measured = 0
+
+[[number]]
+name = "boot.selftests.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.shared.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.shared-2.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.shared-debug.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.ccorpus.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.ccorpus-2.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.foreignrecord.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"

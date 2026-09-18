@@ -246,15 +246,27 @@ impl BlockAccess for FatVolume {
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        // `fat-mirror-write-refuse` actuator: refused before the write is
-        // issued, like a spent `block::OPERATION` — the volume stays untouched.
+        // The two mirror-write actuators: refused before the write is issued,
+        // like a spent `block::OPERATION` — the volume stays untouched.
         #[cfg(feature = "boot-actuators")]
-        if self.role == Role::Log && mirror_refuse::should_refuse(offset, buf.len()) {
-            log!(
-                "log-volume: fat-mirror-write-refuse: refusing the FAT-1 mirror write of a \
-                 drain flush at volume offset {offset} as a budget expiry"
-            );
-            return Err(IoError::BudgetExpired);
+        if self.role == Role::Log {
+            match mirror_refuse::should_refuse(offset, buf.len()) {
+                None => {}
+                Some(mirror_refuse::Refused::Drain) => {
+                    log!(
+                        "log-volume: fat-mirror-write-refuse: refusing the FAT-1 mirror write \
+                         of a drain flush at volume offset {offset} as a budget expiry"
+                    );
+                    return Err(IoError::BudgetExpired);
+                }
+                Some(mirror_refuse::Refused::ShutdownDrain { attempt, of }) => {
+                    log!(
+                        "log-volume: quiesce-drain-refuse: refusing the shutdown drain's FAT-1 \
+                         mirror write as a budget expiry, {attempt} of {of}"
+                    );
+                    return Err(IoError::BudgetExpired);
+                }
+            }
         }
         let mut guard = device(self.role).lock();
         guard.as_mut().ok_or(IoError::Device)?.write_at(offset, buf)
@@ -362,8 +374,10 @@ impl FatExtents {
     }
 }
 
-/// The `fat-mirror-write-refuse` actuator: refuses the first two FAT-1 mirror
-/// writes of a drain flush, as a budget expiry.
+/// The two actuators that refuse a drain flush's FAT-1 mirror write as a
+/// budget expiry: `fat-mirror-write-refuse` refuses the first two, and
+/// `quiesce-drain-refuse` refuses it [`mirror_refuse::SHUTDOWN_REFUSALS`]
+/// times on the thread running the shutdown.
 #[cfg(feature = "boot-actuators")]
 mod mirror_refuse {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -376,10 +390,25 @@ mod mirror_refuse {
     static IN_DRAIN: AtomicBool = AtomicBool::new(false);
     /// How many drain-flush mirror writes have been refused so far.
     static REFUSED: AtomicU32 = AtomicU32::new(0);
+    /// How many of the shutdown's own drain-flush mirror writes have been.
+    static SHUTDOWN_REFUSED: AtomicU32 = AtomicU32::new(0);
 
     /// Two, not one: a single refusal only reaches the retry ladder's attempt
     /// 1, which merely yields — attempt 2 is the one that parks.
     const REFUSALS: u32 = 2;
+
+    /// Eight: the ladder parks from attempt 2, doubling from 10 ms, so the
+    /// thread running the shutdown is parked for 1270 ms in all — a window a
+    /// second caller on another CPU lands in however loaded the host is.
+    pub const SHUTDOWN_REFUSALS: u32 = 8;
+
+    #[derive(Clone, Copy)]
+    pub enum Refused {
+        /// `fat-mirror-write-refuse`.
+        Drain,
+        /// `quiesce-drain-refuse`, on the thread running the shutdown.
+        ShutdownDrain { attempt: u32, of: u32 },
+    }
 
     pub fn capture(lo: u64, hi: u64) {
         LO.store(lo, Ordering::Relaxed);
@@ -390,22 +419,30 @@ mod mirror_refuse {
         IN_DRAIN.store(on, Ordering::Relaxed);
     }
 
-    /// Whether this log-volume write should be refused: actuator armed,
-    /// mid-drain, under [`REFUSALS`], and overlapping the mirror FAT.
-    pub fn should_refuse(offset: u64, len: usize) -> bool {
-        if !crate::actuator::fat_mirror_write_refuse()
-            || !IN_DRAIN.load(Ordering::Relaxed)
-            || REFUSED.load(Ordering::Relaxed) >= REFUSALS
-        {
-            return false;
+    /// Which actuator refuses this log-volume write, if one does: mid-drain,
+    /// overlapping the mirror FAT, and under that actuator's own count.
+    pub fn should_refuse(offset: u64, len: usize) -> Option<Refused> {
+        if !IN_DRAIN.load(Ordering::Relaxed) {
+            return None;
         }
         let (lo, hi) = (LO.load(Ordering::Relaxed), HI.load(Ordering::Relaxed));
         let end = offset + len as u64;
-        if hi > lo && offset < hi && end > lo {
-            REFUSED.fetch_add(1, Ordering::Relaxed);
-            return true;
+        if !(hi > lo && offset < hi && end > lo) {
+            return None;
         }
-        false
+        if crate::actuator::fat_mirror_write_refuse() && REFUSED.load(Ordering::Relaxed) < REFUSALS
+        {
+            REFUSED.fetch_add(1, Ordering::Relaxed);
+            return Some(Refused::Drain);
+        }
+        if crate::actuator::quiesce_drain_refuse()
+            && crate::quiesce::runs_the_shutdown()
+            && SHUTDOWN_REFUSED.load(Ordering::Relaxed) < SHUTDOWN_REFUSALS
+        {
+            let attempt = SHUTDOWN_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+            return Some(Refused::ShutdownDrain { attempt, of: SHUTDOWN_REFUSALS });
+        }
+        None
     }
 }
 
