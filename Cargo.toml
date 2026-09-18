@@ -146,6 +146,11 @@ toyos-ld = { path = "toyos-ld" }
 # from this workspace with its own lockfile, so nothing here reaches the kernel's
 # resolution of the same crate.
 toyos-sched = { path = "toyos-sched", features = ["check"] }
+# The root-hub port machine, for the three durations `xhci_slow_connect` derives
+# its bounds from: `DEBOUNCE_NS`, `EMPTY_BUS_NS` and `SLOW_CONNECT_NS` are
+# declared once there and `use`d by the driver, so the window the harness
+# certifies and the one the driver holds cannot drift apart.
+toyos-xhci = { path = "toyos-xhci" }
 # The second reader `pkg_install_gbae` is judged against: what is read back off
 # the guest's volume is compared with a third party's decoding of the committed
 # archive, never with `userland/pkg`'s own. The archive itself is committed

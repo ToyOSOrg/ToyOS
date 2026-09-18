@@ -27,12 +27,10 @@ use super::settles;
 use toyos_xhci::port::{self, GaveUp, Reset, ResetOutcome};
 use toyos_xhci::Protocol;
 
-/// How long a machine on which *nothing at all* has connected keeps looking.
-///
-/// Debounce alone can't tell an empty bus from a device still connecting: both
-/// read as already-settled until something changes.
+/// How long a machine on which *nothing at all* has connected keeps looking,
+/// as [`port::EMPTY_BUS_NS`] declares it.
 const EMPTY_BUS: Budget = Budget::of(
-    Duration::from_secs(1),
+    Duration::from_nanos(port::EMPTY_BUS_NS),
     "the scan reports the bus as empty and the boot goes on without whatever was slow",
 );
 
