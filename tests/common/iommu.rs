@@ -809,27 +809,24 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
 ///
 /// MSI-X first wherever a function has a table, so an `msi address=` line for
 /// the function a claim holds is the older mechanism taken where the newer one
-/// was published. `claimed` is the `vendor:device` the boot config declares, so
-/// the BDF below is the one the guest handed that function over on rather than
-/// whichever function it handed over at all.
+/// was published. `claimed` is the `vendor:device` the boot config declares, and
+/// the slot is [`faults::CLAIMED_AT`] — **the address is the harness's own and
+/// never the guest's**, so what the hand-over line printed is asserted equal to
+/// it rather than used, and the two arming lines have the spelling
+/// [`faults::msix_armed`] and [`faults::msi_armed`] give them.
 pub fn armed_on_msix(log: &Serial, claimed: &str) -> Result<(), String> {
-    let named = format!("[{claimed}] handed over on slot");
-    let handed: Vec<&str> = log
-        .text()
-        .lines()
-        .filter(|line| line.contains(&named))
-        .filter_map(|line| line.split("pcidev: PCI ").nth(1))
-        .filter_map(|rest| rest.split_whitespace().next())
-        .collect();
-    let [at] = handed.as_slice() else {
+    use super::faults::{self, CLAIMED_AT};
+
+    let handed = faults::functions_named(log, &format!("[{claimed}] handed over on slot"))?;
+    if handed != [CLAIMED_AT] {
         return Err(format!(
-            "{claimed} was handed over {} time(s), and this is an assertion about one:\n{}",
-            handed.len(),
+            "this is an assertion about the claim on {CLAIMED_AT}; {claimed} was handed over \
+             on {handed:?}:\n{}",
             log.text()
         ));
-    };
-    log.must_say(&format!("PCI {at}: msix address="))?;
-    log.must_not_say(&format!("PCI {at}: msi address="))?;
+    }
+    log.must_say(&faults::msix_armed())?;
+    log.must_not_say(&faults::msi_armed())?;
     Ok(())
 }
 

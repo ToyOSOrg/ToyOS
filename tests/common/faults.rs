@@ -306,13 +306,15 @@ pub fn claim_caps_truncated() -> Result<(), String> {
     Ok(())
 }
 
-/// The slot every profile in this suite puts the function netd claims on.
+/// The slot QEMU's `-device` order puts the function netd claims on, and the
+/// address every judge below is an assertion about.
 ///
 /// **The address is the harness's own and never the guest's.** A judge that
-/// reads the refused function out of the console and then asserts about *that*
-/// asserts about whichever function the kernel happened to name; what the guest
-/// printed is asserted equal to this instead.
-const CLAIMED_AT: &str = "00:03.0";
+/// reads the function out of the console and then asserts about *that* asserts
+/// about whichever function the kernel happened to name; what the guest printed
+/// is asserted equal to this instead, so a constant that names the wrong slot
+/// reds and never passes.
+pub const CLAIMED_AT: &str = "00:03.0";
 
 /// The two lines a hand-over of that function spends. One arm requires them and
 /// [`refused_claim`] requires their absence, and both read them here: a kernel
@@ -323,6 +325,36 @@ pub fn bar_moved() -> String {
 
 pub fn msix_armed() -> String {
     format!("PCI {CLAIMED_AT}: msix address=")
+}
+
+/// The older mechanism taken where the newer one was published — required
+/// absent by [`refused_claim`] and by [`super::iommu::armed_on_msix`], and read
+/// here by both for [`msix_armed`]'s reason.
+pub fn msi_armed() -> String {
+    format!("PCI {CLAIMED_AT}: msi address=")
+}
+
+/// Every function named by a line carrying `marker`, in the kernel's own
+/// spelling.
+///
+/// **A line that carries the marker and no `pcidev: PCI ` prefix is an error,
+/// never a dropped line.** A text scan closes only the spellings it matches, so
+/// a kernel that renamed the prefix would otherwise hand every caller here an
+/// empty list and satisfy whatever the caller asks of one.
+pub fn functions_named<'a>(log: &'a Serial, marker: &str) -> Result<Vec<&'a str>, String> {
+    const PREFIX: &str = "pcidev: PCI ";
+    let mut named = Vec::new();
+    for line in log.text().lines().filter(|line| line.contains(marker)) {
+        named.push(
+            line.split(PREFIX)
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .ok_or_else(|| {
+                    format!("{line:?} says {marker:?} and names no function after {PREFIX:?}")
+                })?,
+        );
+    }
+    Ok(named)
 }
 
 /// netd's own answer on a machine it was given no NIC on.
@@ -372,13 +404,7 @@ fn netd_answered(mut qemu: QemuInstance) -> (Serial, Result<(), String>) {
 /// wherever the refusal is reached. `slot_space` put back below `place_bars`
 /// reds on the two unspent lines.
 pub fn refused_claim(log: &Serial, claims: &str, why: &str) -> Result<(), String> {
-    let refused: Vec<&str> = log
-        .text()
-        .lines()
-        .filter(|line| line.contains("NOT HANDED OVER"))
-        .filter_map(|line| line.split("pcidev: PCI ").nth(1))
-        .filter_map(|rest| rest.split_whitespace().next())
-        .collect();
+    let refused = functions_named(log, "NOT HANDED OVER")?;
     if refused.is_empty() || refused.iter().any(|at| *at != CLAIMED_AT) {
         return Err(format!(
             "the claim this judges is the one on {CLAIMED_AT}; this console refused \
@@ -392,7 +418,7 @@ pub fn refused_claim(log: &Serial, claims: &str, why: &str) -> Result<(), String
     log.must_say(&format!("pcidev: PCI {CLAIMED_AT} NOT HANDED OVER — {why}"))?;
     log.must_not_say(&format!("[{claims}] handed over"))?;
     log.must_not_say(&msix_armed())?;
-    log.must_not_say(&format!("PCI {CLAIMED_AT}: msi address="))?;
+    log.must_not_say(&msi_armed())?;
     log.must_not_say(&bar_moved())?;
     // All the way out to userland, rather than a kernel that logged a refusal
     // and handed netd a NIC anyway. init names what it could not mint in the

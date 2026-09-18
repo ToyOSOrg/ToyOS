@@ -6,11 +6,12 @@ opened: 2026-09-14
 
 # A claim's own refusals are read by nothing
 
-Four of the refusals `kernel/src/pcidev/mod.rs` raises are read back:
+The refusals `kernel/src/pcidev/mod.rs` raises that are read back are
 `ClaimError::Owned` by `pci_function_is_exclusive`, `Refusal::Untranslated` by
-`iommu_virtio_platform`'s no-unit arm, the domain by `userdev_dma_fault`, and
-`SYS_DEVICE_REG_READ`'s bound by netd's own `config_space_is_bounded`. These are
-reached by no test in any tier:
+`iommu_virtio_platform`'s no-unit arm, `Refusal::NoInterrupt` by
+`virtio_net_no_msix`, `Refusal::CapsTruncated` by `pci_claim_caps_truncated`,
+the domain by `userdev_dma_fault`, and `SYS_DEVICE_REG_READ`'s bound by netd's
+own `config_space_is_bounded`. These are reached by no test in any tier:
 
 - `ClaimError::Ambiguous`, a config naming a device this machine has two of;
 - `ClaimError::KernelDriven`, a claim on a function one of this kernel's own
@@ -23,8 +24,11 @@ reached by no test in any tier:
   `MAX_GRANT_BYTES` and `MAX_GRANT_TOTAL`;
 - the withholding of the MSI-X table's own BAR on the *ordinary* path:
   `place_bars`'s `Some(index) == table_bar` (`kernel/src/pcidev/mod.rs`)
-  mutated to `false` hands that BAR to the holder of every function that
-  publishes a table, and every tier stays green. A holder that can write the
+  mutated to `(Some(index) == table_bar && false)` — the spelling that builds,
+  where a bare `false` is `unused variable: table_bar` — hands that BAR to the
+  holder of every function that publishes a table, and `https_tls13`,
+  `https_tls13_e1000e`, `pci_function_is_exclusive` and `userdev_dma_fault` are
+  each green on it. A holder that can write the
   table aims the device's message at any address the LAPIC decodes, and
   `msix_bar` is named as the boundary in the module header while nothing reads
   it back. A refused claim is not the arm that covers this: the refusal spends
