@@ -69,6 +69,11 @@ it.
 - Are they the right tests: the refusals and the boundary, not the happy path?
 - Would a one-field mutation of the implementation be seen? Write down the partial fix that would
   still pass. If one exists, the test is a finding.
+- A mutation is a measurement only once the mutated tree is shown to build; the build's exit is
+  quoted before the test's. A build failure reds every arm at once and is indistinguishable from
+  strong coverage.
+- A reviewer's named fix is a hypothesis until it is run; the implementer measures the arm before
+  choosing it and quotes the measurement.
 - A test that cannot fail is a finding: a walk that quietly found nothing, an assertion over a
   constant, an arm green on the base as well.
 - Anything tested twice, and anything the diff changed that nothing tests.
@@ -124,6 +129,10 @@ it.
   `NOTICE` entry carrying hash, upstream and the licence terms as read. A test that fetches anything
   at test time is a send-back whatever the brief said; a fixture is committed and `NOTICE` names the
   exact command that produced it.
+- A constant that keeps its name while changing what it counts has moved a bound; the change
+  names the old and new quantity.
+- A round that restores what an earlier round deleted for cause cites the ruling that reversed
+  it; there is none until the orchestrator writes one.
 
 ## Output
 
