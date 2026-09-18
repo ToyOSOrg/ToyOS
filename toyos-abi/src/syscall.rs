@@ -743,8 +743,13 @@ pub mod debug_action {
     /// wrote.
     pub const CANARY_ADDR: u64 = 10;
     pub const CANARY_CHANGED: u64 = 11;
-    /// Make the last CPU a shootdown waits for answer `arg` nanoseconds late,
-    /// and take it away again.
+    /// Hold each other CPU's shootdown acknowledgement back by `arg` nanoseconds
+    /// in turn, take one shootdown against each, and answer with the smallest
+    /// wait one of them cost the initiator. The arming is then left standing
+    /// against every other CPU until `TLB_ACK_DELAY_DISARM` or the end of a
+    /// two-second window that opens as this call returns, whichever comes
+    /// first, so the caller can time a syscall's own shootdown inside it. A
+    /// machine with no other CPU to hold back answers `0`, not a measured wait.
     pub const TLB_ACK_DELAY_ARM: u64 = 12;
     pub const TLB_ACK_DELAY_DISARM: u64 = 13;
     // Actions 14 and 15 are retired and unused: they were CENSUS_TOTAL and
