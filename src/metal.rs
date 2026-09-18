@@ -720,8 +720,8 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     (
         "quiesce-drain-refuse",
         Flash::Never(
-            "it keeps a closed file's flush owed and refuses the shutdown's own drain of it, so \
-             an image armed with it stages a stall inside the one sync a metal verdict rests on",
+            "it refuses the shutdown's own drain of a closed file's flush, so an image armed \
+             with it stages a stall inside the one sync a metal verdict rests on",
         ),
     ),
     (

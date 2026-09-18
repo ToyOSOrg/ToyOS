@@ -30,8 +30,8 @@ with no attempt of its own on that file, while cpu1 wrote `log-volume: write
 of quiesce-owed.bin: the device would not answer in the caller's own budget`
 at 0.719, 0.721, 0.734, 0.755, 0.798, 0.881, 1.044, 1.367 and 2.010 s — seven
 of them under the boot's last word. One boot in the five that actuator's
-first form was booted for; the actuator now keeps `iod` from popping at all,
-so that boot no longer stages it.
+first form was booted for; that config now arms `writeback-stall` instead,
+which parks `iod` before it drains, so it no longer stages this.
 
 Not seen: the loss itself on a kernel with no actuator, which needs a real
 budget expiry on `iod`'s flush inside the window. A USB stick slow enough to

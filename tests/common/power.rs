@@ -320,7 +320,9 @@ pub fn quiesce_refuses_a_second_shutdown(
         BootOptions {
             profile: qemu::Profile::Metal,
             qmp: true,
-            kernel_params: &["quiesce-drain-refuse"],
+            // `writeback-stall` parks `iod`, so the closed file's flush is the
+            // shutdown's own drain's to find and no other drainer's to hold.
+            kernel_params: &["writeback-stall", "quiesce-drain-refuse"],
             ..Default::default()
         },
     );
@@ -340,6 +342,15 @@ pub fn quiesce_refuses_a_second_shutdown(
         lines.iter().enumerate().filter(|(_, l)| l.contains(needle)).map(|(i, _)| i).collect()
     };
 
+    // **The harm, first.** A kernel that lets the second caller in runs a
+    // second shutdown over the first — banding it where it is parked, or
+    // interleaving with it — and either way this line is written twice.
+    let syncs = at(SYNCING).len();
+    if syncs != 1 {
+        return Err(format!(
+            "this boot ran {syncs} shutdowns, not one: the second caller was let in\n{whole}"
+        ));
+    }
     // The arm fired as many times as the kernel declares, or nothing below is
     // about a caller parked in its ladder.
     let refusals = at(REFUSED);
@@ -351,14 +362,13 @@ pub fn quiesce_refuses_a_second_shutdown(
             refusals.len(),
         ));
     }
-    // **The judge.** Once, and inside the ladder: after the first refusal the
-    // second caller reacted to, before the last, which is the window the first
-    // caller is parked in.
+    // **The refusal, by name.** Once, and inside the ladder: after the first
+    // refusal the second caller reacted to, before the last, which is the
+    // window the first caller is parked in.
     let second = at(SECOND_CALLER);
     if second.len() != 1 {
         return Err(format!(
-            "the second caller was refused {} time(s), not once, so this machine ran its \
-             shutdown twice\n{whole}",
+            "the kernel refused a second caller {} time(s), not once\n{whole}",
             second.len(),
         ));
     }
@@ -370,10 +380,6 @@ pub fn quiesce_refuses_a_second_shutdown(
              refusal exists for\n{whole}",
             second[0],
         ));
-    }
-    let syncs = at(SYNCING).len();
-    if syncs != 1 {
-        return Err(format!("this boot ran {syncs} shutdowns, not one\n{whole}"));
     }
     // The refusal reached Ring 3 as a word: the second caller went on running
     // and said so, rather than being ended for asking.
