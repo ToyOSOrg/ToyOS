@@ -109,23 +109,12 @@ bound on a correct price is *"about 31 s"* off the widest shard, and its own A/B
 moved the priced metric 147.0 s while moving the phase clock 11.0 s the wrong
 way — so the priced metric is not the verdict and only the twelve hosted shards'
 wall clocks are. Five full `cargo test` runs on this dev host, 2026-09-01 and
--02, none of whose trees differ in anything that touches partitioning:
-**1012.7 s, 989.3 s, 396.3 s, 214.9 s and 233.5 s**. The spread is 797.8 s
-against a best case of about 31 s, and almost all of it is one test:
-`sysret_ss_reload` took 971 s, 977 s, 388 s, 195 s and 227 s across the same
-five, unmodified throughout. A first reading of the leading pair alone said
-"23.4 s from nothing" and a second of the leading three said 616.4 s; both are
-what an instrument looks like when a few samples happen to agree. (The last two
-runs carry main's `d44b4978`, so they are not the same tree as the first three —
-which is why the claim here is about the instrument's spread and not about any
-tree.)
-
-**The mechanism, measured by bundle 16 on 2026-09-03**: `sysret_ss_reload`'s
-probe line (`sysret-ss: reloaded`) lands BEFORE `===READY===`, so `boot_log()`
-already holds it and `drain_until`'s predicate can only time out — the ceiling
-(10 s scaled by width and host speed) is spent on every run: 334, 452, 388,
-352, 433 s across five tiers. The fix is the test's (probe after READY, or
-check `boot_log` first); this record is tooling.
+-02, none of whose trees differ in anything that touches partitioning, net of
+`sysret_ss_reload` — whose drain ceiling, since out of the test, was 195 to
+977 s of each — come to about **41.7, 12.3, 8.3, 19.9 and 6.5 s**: a spread of
+about 35 s against a best case of about 31 s. (The last two runs carry main's
+`d44b4978`, so they are not the same tree as the first three — which is why the
+claim here is about the instrument's spread and not about any tree.)
 
 So a taker needs, in order: the build clock keyed by config rather than by
 thread; a committed per-config profile that only `Shard::keep` reads, merged the

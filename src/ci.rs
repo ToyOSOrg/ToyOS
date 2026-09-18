@@ -358,17 +358,33 @@ mod tests {
         assert!(self_hosted(walked).is_empty());
     }
 
+    /// The operands of a job's `TIER_BASE:` expression, in the order `||` tries
+    /// them. Empty when the job sets no such key, or sets it to anything but
+    /// one `${{ … }}` expression on the key's own line.
+    fn tier_base_precedence(job: &str) -> Vec<String> {
+        job.lines()
+            .filter_map(|line| line.trim().strip_prefix("TIER_BASE:"))
+            .filter_map(|value| value.trim().strip_prefix("${{")?.strip_suffix("}}"))
+            .flat_map(|expr| expr.split("||"))
+            .map(|operand| operand.trim().to_string())
+            .collect()
+    }
+
     /// The second axis of the same job, held together for the same reason.
     ///
     /// Which *names* a run renders the price verdict for is decided by
-    /// [`crate::flags::TIER_BASE`] and by the two event expressions
-    /// that fill it. Both failure directions are silent in the file that
-    /// carries them: drop the flag and every pull request and every merge-queue
-    /// composition quietly becomes the nightly, reding on names nobody in them
-    /// touched; drop one of the two event expressions and that event quietly
-    /// stops narrowing at all, with the workflow still reading perfectly.
-    /// `merge_group` in particular is the lane the verdict is *rendered* on, so
-    /// losing its base is losing the whole change.
+    /// [`crate::flags::TIER_BASE`] and by the one event expression that fills
+    /// it, **and the expression's order is the rule**: `||` takes the first
+    /// operand the event carries, and a `pull_request` `synchronize` payload
+    /// carries `before` — the branch's previous head — beside its base. Read
+    /// first, `before` narrows every pull request's verdict to what its last
+    /// push moved, with all three strings still in the file; so this holds the
+    /// sequence and not the set. Drop the flag and every event quietly becomes
+    /// the nightly, reding on names nobody in it touched; drop an operand and
+    /// that event stops narrowing at all. `merge_group` leads because a queued
+    /// composition is measured against the `main` the queue built it on; a push
+    /// to `main` is that composition measured a second time, and it alone
+    /// reaches `before`.
     #[test]
     fn the_names_a_landing_is_judged_on_come_from_the_event_that_produced_it() {
         let path = repo_root().join(".github/workflows/ci.yml");
@@ -385,17 +401,38 @@ mod tests {
              composition 32550410305 on a name nothing in it had touched",
             crate::flags::TIER_BASE.name
         );
-        for base in ["github.event.merge_group.base_sha", "github.event.pull_request.base.sha"] {
-            assert!(
-                durations.contains(base),
-                "the `durations` job stopped reading {base}, so that event names no base and \
-                 silently falls back to the nightly's whole-tree verdict"
-            );
-        }
+        assert_eq!(
+            tier_base_precedence(&durations),
+            [
+                "github.event.merge_group.base_sha",
+                "github.event.pull_request.base.sha",
+                "github.event.before",
+            ],
+            "the `durations` job's `TIER_BASE` tries the merge group's base, then the pull \
+             request's, then the tip a push replaced — in that order and nothing else. A missing \
+             operand leaves its event naming no base, and `before` ahead of the pull request's \
+             base judges a pull request against its own previous push"
+        );
         assert!(
             durations.contains("fetch-depth: 0"),
             "reading the base's `tests/toyos.rs` needs the base commit in the clone, and \
              actions/checkout leaves a depth-1 one without it"
+        );
+    }
+
+    /// The precedence scan, shown reading order, and shown blind to a comment
+    /// or a shell line that merely spells the key.
+    #[test]
+    fn the_tier_base_scan_reads_the_expression_in_order() {
+        let job = concat!(
+            "        env:\n",
+            "          # TIER_BASE: ${{ github.event.pull_request.base.sha }}\n",
+            "          TIER_BASE: ${{ github.event.before || github.event.merge_group.base_sha }}\n",
+            "        run: echo \"$TIER_BASE\"\n",
+        );
+        assert_eq!(
+            tier_base_precedence(job),
+            ["github.event.before", "github.event.merge_group.base_sha"]
         );
     }
 

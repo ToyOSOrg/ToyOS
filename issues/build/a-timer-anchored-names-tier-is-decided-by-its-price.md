@@ -36,11 +36,6 @@ real in both directions: relegating removes the only per-pull-request gate on a
 panicked kernel ending its own boot, and leaving them Fast lets a slow shard
 red a name for a reason its author cannot act on.
 
-`src/tiers.rs`'s `RELEGATED` rows say what left the per-PR tier. The one price
-this run could not enforce is a different name's — `sysret_ss_reload` measured
-26,927 ms and remains Fast, which the merge printed as a warning because this
-change neither registered nor re-tiered it.
-
 **Exit condition**: the owner's answer on whether the boundary is a
 classification or a cost rule, applied to `panic_before_peripherals_reboots` and
 `job_deadline_reboots`, with the wording at `FAST_CEILING_MS` matching whichever

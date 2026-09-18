@@ -2514,6 +2514,10 @@ pub struct QemuInstance {
     /// The host port [`BootOptions::ssh_port`] forwarded into this guest, kept
     /// so a boot several tests share can tell each of them which port it took.
     ssh_port: Option<u16>,
+    /// How many drains have read this guest's console since it booted. A test
+    /// whose line the boot log can already hold asserts on it that it did not
+    /// wait out a ceiling for that line.
+    drains: u32,
 }
 
 /// The bootable disk image a boot with these arguments would use.
@@ -3078,6 +3082,11 @@ impl QemuInstance {
         &self.boot_log
     }
 
+    /// How many drains have read this guest's console since it booted.
+    pub fn drains(&self) -> u32 {
+        self.drains
+    }
+
     /// The host port this boot forwarded into the guest's TCP 22. Panics
     /// rather than returning an option: a `None` here would become a connection
     /// refused several layers away from the option that was not set.
@@ -3178,6 +3187,7 @@ impl QemuInstance {
     }
 
     fn drain_for(&mut self, dur: Duration, line: impl Fn(&str) -> bool) -> String {
+        self.drains += 1;
         let deadline = Instant::now() + dur;
         let mut out = String::new();
         loop {
@@ -4365,6 +4375,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         i8042_trace: options.kernel_params.contains(&"i8042-trace"),
         smp: options.smp,
         ssh_port: options.ssh_port,
+        drains: 0,
     }
 }
 

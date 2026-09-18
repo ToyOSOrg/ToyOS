@@ -474,8 +474,8 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
     // The other half of the recovery branch: the test above reads the screen
     // either side of a survived panic, which holds whether or not the discard
-    // did anything. Nightly at 8,477 ms, over `FAST_COMMIT_MS`: two guests.
-    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Nightly),
+    // did anything.
+    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Fast),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
     ("screen_paged_scrollback", Sched::Parallel, Tier::Nightly),
@@ -573,9 +573,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("metal_sim_input", Sched::Parallel, Tier::Fast),
     ("input_claim_absent", Sched::Parallel, Tier::Fast),
     // One boot; every verdict is a PPM header field or a console line, and no
-    // clock is in any of them, so its Nightly row is `Why::Cost` and nothing
-    // else. `src/tiers.rs` carries the price and what goes dark with it.
-    ("gpu_set_resolution", Sched::Parallel, Tier::Nightly),
+    // clock is in any of them.
+    ("gpu_set_resolution", Sched::Parallel, Tier::Fast),
     // One boot from here to `metal_sim_compositor_stall` (`METAL_SIM_DESKTOP`).
     ("metal_sim_compositor", Sched::Parallel, Tier::Nightly),
     // Reads the boot log this group already has, after the member above has
@@ -698,7 +697,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // package path in one boot, judged off the DATA volume once the guest is
     // gone. Body in `tests/common/pkg.rs`.
     ("pkg_install_gbae", Sched::Parallel, Tier::Fast),
-    ("boot_partition_identity", Sched::Parallel, Tier::Fast),
+    ("boot_partition_identity", Sched::Parallel, Tier::Nightly),
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
     ("machine_reboot", Sched::Parallel, Tier::Fast),
@@ -787,11 +786,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // duration.
     ("syscall_window_nmi_controls", Sched::Parallel, Tier::Nightly),
     // Its own boot, its own feature, and it drives the guest only through
-    // stdin — nothing it touches is shared with another test. Returned to
-    // Fast on 2026-08-21: the 2026-08-17 drain fix took it from 52,822 ms to
-    // a measured 5,049 ms on KVM (nightly run 32444411794), exactly the
-    // crossing its relegation record said the next nightly would decide.
-    ("idle_stack_guard", Sched::Parallel, Tier::Nightly),
+    // stdin — nothing it touches is shared with another test.
+    ("idle_stack_guard", Sched::Parallel, Tier::Fast),
     // Its own boot and its own feature, and it deafens one CPU for 400 ms —
     // but the deafening is a *window*, and the verdict is whether the NMI is
     // answered inside `NMI_BUDGET_NS`, which is one millisecond. That is a
@@ -799,11 +795,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // probe missed the window and reported the NMI as never delivered, which
     // reads exactly like the defect it hunts, and it was green alone in the
     // same run and three times after it. Serial by the default rule — a
-    // verdict that is a duration does not go in the parallel phase. Returned
-    // to Fast on 2026-08-21: the 2026-08-17 drain fix took it from 24,625 ms
-    // to a measured 6,284 ms on KVM (nightly run 32444411794), the return its
-    // relegation record called the likeliest in the table.
-    ("dump_nmi_probe", Sched::Serial, Tier::Nightly),
+    // verdict that is a duration does not go in the parallel phase.
+    ("dump_nmi_probe", Sched::Serial, Tier::Fast),
     ("diskless_boot", Sched::Parallel, Tier::Fast),
     // Every verdict is a line of text or a device property, and no clock is in
     // any of them.
@@ -912,9 +905,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The kernel hasher's boot-order obligation, in the row above's shape and
     // for its reasons.
     ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Fast),
-    // Nightly 2026-08-21 by the margin rule: 9,120 ms committed, inside
-    // `FAST_COMMIT_MS`..`FAST_CEILING_MS`. Its twin above is 5,073 ms and stays.
-    ("double_panic_names_the_fault", Sched::Parallel, Tier::Nightly),
+    ("double_panic_names_the_fault", Sched::Parallel, Tier::Fast),
     // The third shape: a `#PF` inside a panic, which is the one
     // `fatal_exception`'s recursive short-circuit exists for and the one it
     // never classified. Same boot shape as its two neighbours — dies inside the
@@ -933,7 +924,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // further, which moves records from `read` into `lost` and leaves the law
     // exactly where it was.
     ("log_conservation_smp1", Sched::Parallel, Tier::Fast),
-    ("log_conservation_smp4", Sched::Parallel, Tier::Nightly),
+    ("log_conservation_smp4", Sched::Parallel, Tier::Fast),
     ("log_conservation_smp8", Sched::Parallel, Tier::Fast),
     ("log_nested_emit", Sched::Parallel, Tier::Fast),
     // The same interrupt one window earlier — between a record's shard-pointer
@@ -951,9 +942,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // host changes when the writers run and not whether a line is whole. It boots
     // its own machine because what it reads is the console capture, which a
     // shared boot fills with everything else.
-    // Nightly 2026-08-21 by the margin rule: 8,925 ms committed, inside
-    // `FAST_COMMIT_MS`..`FAST_CEILING_MS`.
-    ("console_line_atomicity", Sched::Parallel, Tier::Nightly),
+    ("console_line_atomicity", Sched::Parallel, Tier::Fast),
     // What the C family is allowed to conclude from the line above being whole:
     // a guest writes a daemon-shaped line into a real capture window on purpose
     // and the real comparison ignores it, with the filter turned off as the
@@ -1027,11 +1016,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One `LOCALE_WIZARD` boot for the pair since the drainer was made
     // runnable at commit — the boot-apiece and the injected drain keys it took
     // to share one were both the closed log-ring lag. Adjacent because
-    // `group_of` makes adjacency load-bearing; the carrier straddles the
-    // fast line run to run, so the pair is Nightly — the rider by its
-    // `RidesTheBootOf` row, the collateral that record exists to name.
-    ("locale_detect", Sched::Parallel, Tier::Nightly),
-    ("locale_detect_unrecognized", Sched::Parallel, Tier::Nightly),
+    // `group_of` makes adjacency load-bearing, and one tier because one boot
+    // cannot be in two.
+    ("locale_detect", Sched::Parallel, Tier::Fast),
+    ("locale_detect_unrecognized", Sched::Parallel, Tier::Fast),
     // The wizard on the two surfaces the machine actually has, rather than on
     // the stand-in `locale_gate` is. Each costs a boot of a different image.
     ("console_locale_detect", Sched::Parallel, Tier::Fast),
@@ -1085,7 +1073,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // report is on the pin or on a timer.
     ("i8042_health_cadence", Sched::Parallel, Tier::Nightly),
     ("xhci_xecp_walk", Sched::Parallel, Tier::Fast),
-    ("xhci_slot_exhaustion", Sched::Parallel, Tier::Nightly),
+    ("xhci_slot_exhaustion", Sched::Parallel, Tier::Fast),
     ("usb_storage_gate", Sched::Parallel, Tier::Nightly),
     ("usb_storage_shapes", Sched::Parallel, Tier::Nightly),
     ("usb_refused_disk_first", Sched::Parallel, Tier::Nightly),
@@ -1096,7 +1084,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // eleven others answers those late for reasons that are not the defect.
     ("usb_boot_stick_pulled", Sched::Serial, Tier::Nightly),
     ("usb_pool_exhausted", Sched::Parallel, Tier::Fast),
-    ("usb_short_read", Sched::Parallel, Tier::Nightly),
+    ("usb_short_read", Sched::Parallel, Tier::Fast),
     // A plug over QMP and two host-side verdicts, neither of them a byte
     // comparison alone: the fixed 1.2 s wait against a 100 ms debounce is a
     // staged latency window the LATE_READY assertion is waited out before
@@ -1126,7 +1114,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // had — its own doc says one break under KVM and two under TCG off the
     // same tree, which is the race timer-anchored, not a margin, describes.
     ("usb_transport_break", Sched::Serial, Tier::Nightly),
-    ("xhci_full_speed_device", Sched::Parallel, Tier::Nightly),
+    ("xhci_full_speed_device", Sched::Parallel, Tier::Fast),
     ("xhci_superspeed_ports", Sched::Parallel, Tier::Fast),
     // Two of the three below stage plug and unplug with fixed waits, 600-800 ms
     // against a 100 ms debounce, plus 20-200 ms sleeps pacing the input pokes
@@ -1143,7 +1131,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("xhci_flap", Sched::Serial, Tier::Nightly),
     ("xhci_hid_break", Sched::Parallel, Tier::Nightly),
     ("xhci_descriptor_walk", Sched::Parallel, Tier::Fast),
-    ("esp_filesystem", Sched::Parallel, Tier::Nightly),
+    ("esp_filesystem", Sched::Parallel, Tier::Fast),
     // Three boots: a budget-refused flush retried and kept, the deadman's
     // declared death, and a hung device's failed reset escalation — the three
     // exits of `object/ops.rs`'s fsync loop. Every verdict is line presence
@@ -1164,14 +1152,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The five RTC/firmware shapes, one kernel build and one boot each. Five
     // registrations because the artifact memo builds one kernel per feature
     // set anyway, so the split costs nothing and the parallel phase gets five
-    // jobs it can place instead of one serial five-boot job it cannot. Three
-    // priced inside the margin band across two runs and sit Nightly by the
-    // straddler rule; their relegation rows carry the prices.
-    ("wall_clock_rtc_dead", Sched::Parallel, Tier::Nightly),
+    // jobs it can place instead of one serial five-boot job it cannot.
+    ("wall_clock_rtc_dead", Sched::Parallel, Tier::Fast),
     ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Fast),
     ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
-    ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),
-    ("wall_clock_zone", Sched::Parallel, Tier::Nightly),
+    ("wall_clock_century_register", Sched::Parallel, Tier::Fast),
+    ("wall_clock_zone", Sched::Parallel, Tier::Fast),
     // `xhci_slow_connect`'s shape against the disk's port, and serial for the
     // same reason and not by association: it shares `SLOW_CONNECT_NS`, so a boot
     // that outgrows the window binds the disk in the port scan and it reports
@@ -1188,8 +1174,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("root_candidate_malformed", Sched::Serial, Tier::Fast),
     ("root_named_but_absent", Sched::Serial, Tier::Fast),
     ("root_named_twice", Sched::Serial, Tier::Nightly),
-    ("log_partition_identity", Sched::Parallel, Tier::Nightly),
-    ("cache_eviction", Sched::Parallel, Tier::Nightly),
+    ("log_partition_identity", Sched::Parallel, Tier::Fast),
+    ("cache_eviction", Sched::Parallel, Tier::Fast),
     // The write-back queue's three negative controls (wall 4 of
     // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
     // and `writeback_spawn` arm `writeback-stall`, so each needs its own actuator
@@ -1198,8 +1184,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // does not. `writeback_durability` is a host-side volume oracle that shuts the
     // guest down and reads `/log` back with `toyos-fat32-check`.
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
-    ("writeback_spawn", Sched::Parallel, Tier::Nightly),
-    ("writeback_durability", Sched::Parallel, Tier::Nightly),
+    ("writeback_spawn", Sched::Parallel, Tier::Fast),
+    ("writeback_durability", Sched::Parallel, Tier::Fast),
     // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
@@ -1212,18 +1198,18 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // F5 and F6's negative controls: an fsync that must keep refusing while the
     // device refuses its cache flush, and a mid-flush redirty raced for real and
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
-    ("fsync_failed_commit", Sched::Parallel, Tier::Nightly),
+    ("fsync_failed_commit", Sched::Parallel, Tier::Fast),
     ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
     // A truncate staged inside a flush's metadata window, re-read off the image.
     ("ftruncate_flush_race", Sched::Parallel, Tier::Nightly),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
-    ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
+    ("fs_rename_durable", Sched::Parallel, Tier::Fast),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
     // Fast is the bootstrap tier: the UNMEASURED marker buys one measured CI
     // run, and the measured price then assigns the final tier.
     ("fs_dirs_durable", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
-    ("heap_ceiling_recovery", Sched::Parallel, Tier::Nightly),
+    ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
@@ -9857,14 +9843,24 @@ fn run_machine_test(
             };
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // A liveness ceiling, not a pace: a loaded shard once took past a
-            // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
-            // The T14's readback needs no drain at all — the whole boot's records
-            // are on the stick — so the wait is here and the predicate is shared.
-            let log = qemu.boot_log().to_string()
-                + &qemu.drain_until(Duration::from_secs(10), |l| {
-                    l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
-                });
+            // The probe line lands before `===READY===` on an ordinary boot, so
+            // the boot log is read first; the drain is a liveness ceiling for a
+            // shard where iod's probe runs late, never a pace, and a ceiling
+            // drained for a line the boot log already holds can only time out.
+            let probe =
+                |l: &str| l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded");
+            let mut log = qemu.boot_log().to_string();
+            let held = log.lines().any(probe);
+            if !held {
+                log += &qemu.drain_until(Duration::from_secs(10), probe);
+            }
+            if held && qemu.drains() != 0 {
+                return Err(format!(
+                    "the boot log already held the probe line and the console was drained \
+                     {} time(s) for it anyway — a wait that can only run out its ceiling",
+                    qemu.drains()
+                ));
+            }
             sysret_ss(&log)
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
