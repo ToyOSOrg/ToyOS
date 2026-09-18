@@ -11,6 +11,9 @@
 pub const CTRL: usize = 0x00000;
 /// Device Status (§10.2.2.2, `0x00008`), read-only.
 pub const STATUS: usize = 0x00008;
+/// MDI Control (§10.2.2.7, `0x00020`), "used by software to read or write
+/// Management Data Interface (MDI) registers in a GMII/MII PHY".
+pub const MDIC: usize = 0x00020;
 /// Interrupt Cause Read (§10.2.4.1, `0x000C0`), read-to-clear and
 /// write-1-to-clear.
 pub const ICR: usize = 0x000C0;
@@ -62,6 +65,9 @@ pub const TDT: usize = 0x03818;
 pub const TIDV: usize = 0x03820;
 pub const TXDCTL: usize = 0x03828;
 pub const TADV: usize = 0x0382C;
+/// Extended Configuration Control (§10.2.2.15, `0x00F00`), which carries
+/// §4.5.2's arbitration for the MDIO interface.
+pub const EXTCNF_CTRL: usize = 0x00F00;
 
 /// The smallest register window this driver can be driven through: above every
 /// offset named here, and the bound the register accessor's contract rests on.
@@ -71,10 +77,15 @@ const _: () = {
     assert!(MTA + MTA_DWORDS * 4 <= REGISTER_BYTES);
     assert!(RAH0 < REGISTER_BYTES);
     assert!(TADV < REGISTER_BYTES);
+    assert!(EXTCNF_CTRL < REGISTER_BYTES);
 };
 
 /// Device Control bits (§10.2.2.1).
 pub mod ctrl {
+    /// PCIe Master Disable (bit 2). §3.1.3.10: set, "the 82574 blocks new
+    /// master requests, including manageability requests", and then "proceeds
+    /// to issue any pending requests by this function".
+    pub const GIO_MASTER_DISABLE: u32 = 1 << 2;
     /// Auto-Speed Detection Enable (bit 5). §10.2.2.1: "This bit must be set to
     /// 0b in the 82574".
     pub const ASDE: u32 = 1 << 5;
@@ -105,6 +116,56 @@ pub mod status {
     /// 1000 Mb/s.
     pub const SPEED_SHIFT: u32 = 6;
     pub const SPEED_MASK: u32 = 0b11;
+    /// PCIe Master Enable Status (bit 19). §3.1.3.10: "Cleared by the 82574
+    /// when the PCIe Master Disable bit is set and no master requests are
+    /// pending by the relevant function, set otherwise."
+    pub const GIO_MASTER_ENABLE: u32 = 1 << 19;
+}
+
+/// MDI Control fields (§10.2.2.7). Five-bit PHY and register addresses, a
+/// two-bit opcode, and the three bits the transaction is read back on.
+pub mod mdic {
+    /// Data (bits 15:0). §10.2.2.7: on a write "software places the data bits
+    /// and the MAC shifts them out to the PHY"; on a read the MAC puts what the
+    /// PHY answered here.
+    pub const DATA_MASK: u32 = 0xFFFF;
+    /// PHY register address (bits 20:16) — "Reg 0, 1, 2, … 31".
+    pub const REGADD_SHIFT: u32 = 16;
+    /// PHY address (bits 25:21).
+    pub const PHYADD_SHIFT: u32 = 21;
+    /// Five bits each, which is what clause 22 of IEEE 802.3 allows.
+    pub const ADDRESS_MASK: u32 = 0x1F;
+    /// Op-Code (bits 27:26). §10.2.2.7: "01b = MDI write. 10b = MDI read. Other
+    /// values are reserved."
+    pub const OP_WRITE: u32 = 0b01 << 26;
+    pub const OP_READ: u32 = 0b10 << 26;
+    /// Ready (bit 28). §10.2.2.7: "Set to 1b by the 82574 at the end of the MDI
+    /// transaction [...] It should be reset to 0b by software at the same time
+    /// the command is written."
+    pub const READY: u32 = 1 << 28;
+    /// Interrupt Enable (bit 29). §10.2.2.7: set, it "causes an Interrupt to be
+    /// asserted to indicate the end of an MDI cycle" — and this driver polls
+    /// [`READY`] instead, so it is never written.
+    pub const INTERRUPT: u32 = 1 << 29;
+    /// Error (bit 30). §10.2.2.7: set by hardware "when it fails to complete an
+    /// MDI read. Software should make sure this bit is clear (0b) before making
+    /// an MDI Read or Write command."
+    pub const ERROR: u32 = 1 << 30;
+}
+
+/// Extended Configuration Control fields (§10.2.2.15): §4.5.2's three ownership
+/// bits, of which "at any given time at most only one bit is 1b".
+pub mod extcnf {
+    /// MDIO SW Ownership (bit 5) — the software request, and the only one of
+    /// the three this driver may write.
+    pub const MDIO_SW_OWNERSHIP: u32 = 1 << 5;
+    /// MDIO HW Ownership (bit 6), read-only: the third of §4.5.2's agents.
+    pub const MDIO_HW_OWNERSHIP: u32 = 1 << 6;
+    /// MDIO MNG Ownership (bit 7), read-only: the manageability request.
+    pub const MDIO_MNG_OWNERSHIP: u32 = 1 << 7;
+    /// The three bits §4.5.2 arbitrates, which is the whole of this register
+    /// any agent writes.
+    pub const OWNERSHIP: u32 = MDIO_SW_OWNERSHIP | MDIO_HW_OWNERSHIP | MDIO_MNG_OWNERSHIP;
 }
 
 /// Interrupt cause bits, shared by `ICR`, `ICS`, `IMS` and `IMC` (§10.2.4.1).

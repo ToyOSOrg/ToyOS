@@ -43,17 +43,35 @@ mod virtio_net;
 ///
 /// `1af4:1041` is virtio's transitional device id `1000 + 1` for a network
 /// device (virtio 1.2 §5.1.1). `8086:15fc` is the ThinkPad T14's onboard I219
-/// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models, and
-/// one driver takes both because the register file is the same one.
+/// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models. One
+/// driver takes both, and each row names which part it is because below the
+/// register file they are not one.
 const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, Card::intel),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, Card::intel),
+    (PciId { vendor: 0x8086, device: 0x15fc }, |c| Card::intel(c, Part::I219)),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, |c| Card::intel(c, Part::E82574)),
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
+
+/// The actuator that makes the card raise one interrupt on purpose.
+///
+/// **Nothing a shipped machine runs arms it**: the argument comes from the
+/// `[programs.netd] args` row of a boot config.
+const PROVOKE_MESSAGE: &str = "--provoke-message";
+
+/// The probe under which this process ends right after the bring-up, with
+/// the PHY's outcome as its exit code.
+///
+/// **The one word of a process that crosses on a machine whose console reaches
+/// nobody** is the kernel's `exit:` record, and `toyos_i219::phy::Outcome` is
+/// the table both ends read the code through. Armed the same way as
+/// [`PROVOKE_MESSAGE`], and never beside it: the message that one asks for is
+/// taken by a pass this process would not live to make.
+const EXIT_WITH_PHY_OUTCOME: &str = "--exit-with-phy-outcome";
 
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
+use toyos_i219::Part;
 use virtio_net::VirtioNet;
 
 use toyos::net::*;
@@ -85,8 +103,8 @@ impl Card {
         panic!("netd: the NIC this program was given is not one it can drive — {why}")
     }
 
-    fn intel(claim: toyos::PciDev) -> Self {
-        match i219::Nic::open(claim) {
+    fn intel(claim: toyos::PciDev, part: Part) -> Self {
+        match i219::Nic::open(claim, part) {
             Ok(nic) => Self::Intel(nic),
             Err(why) => Self::undrivable(why),
         }
@@ -111,6 +129,27 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.claim(),
             Self::Intel(nic) => nic.claim(),
+        }
+    }
+
+    /// [`PROVOKE_MESSAGE`], carried to the driver that has one.
+    fn provoke_message(&self) {
+        match self {
+            Self::Virtio(_) => Self::undrivable(format_args!(
+                "{PROVOKE_MESSAGE} writes §10.2.4.4's `ICS`, which this card has not"
+            )),
+            Self::Intel(nic) => nic.provoke_message(),
+        }
+    }
+
+    /// [`EXIT_WITH_PHY_OUTCOME`]'s answer, from the driver that has a PHY
+    /// behind `MDIC`.
+    fn phy_outcome(&self) -> toyos_i219::phy::Outcome {
+        match self {
+            Self::Virtio(_) => Self::undrivable(format_args!(
+                "{EXIT_WITH_PHY_OUTCOME} reports a PHY bring-up, which this card has not"
+            )),
+            Self::Intel(nic) => toyos_i219::phy::Outcome::of(nic.brought_up().phy),
         }
     }
 
@@ -1302,6 +1341,19 @@ fn main() {
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
     let nic = open(claim);
+    let armed = |actuator: &str| std::env::args().any(|arg| arg == actuator);
+    if armed(PROVOKE_MESSAGE) && armed(EXIT_WITH_PHY_OUTCOME) {
+        panic!(
+            "netd: {PROVOKE_MESSAGE} and {EXIT_WITH_PHY_OUTCOME} cannot share a boot: the \
+             message one asks for is taken by a pass the other ends this process before"
+        );
+    }
+    if armed(PROVOKE_MESSAGE) {
+        nic.provoke_message();
+    }
+    if armed(EXIT_WITH_PHY_OUTCOME) {
+        std::process::exit(nic.phy_outcome().exit_code());
+    }
     let mac = nic.mac();
     let mut device = DmaNic { nic };
 
