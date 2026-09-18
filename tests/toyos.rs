@@ -736,7 +736,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Nightly row with no CI evidence and refuses the one-run marker on a
     // Nightly row alike, so a new name is bootstrapped Fast and re-tiered on
     // the measurement that run produces.
-    ("usb_reset_records_the_phase_it_cut", Sched::Parallel, Tier::Fast),
+    ("usb_reset_records_the_phase_it_cut", Sched::Parallel, Tier::Nightly),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
     // bounds counted down in the guest, so it belongs beside the row above.
