@@ -575,6 +575,10 @@ pub fn pass_block(ticket: Ticket<'_>, deadline: Option<Nanos>) {
     // No `preempt::disable()` of its own: the ticket has held the count raised since registration; that guard is this bracket.
     let ticket = ticket.into_raw();
     crate::preempt::clear_need_resched();
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::dump_in_blocking_pass() {
+        super::dump::stage_in_blocking_pass();
+    }
     drain_irqs();
     let now = HW.now();
     let (action, registration) = with_cpu(|cpu| {
@@ -716,6 +720,10 @@ extern "C" fn idle_loop() -> ! {
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::dump_deaf_cpu() {
             super::dump::deaf_window();
+        }
+        #[cfg(feature = "boot-actuators")]
+        if crate::actuator::dump_in_blocking_pass() {
+            super::dump::arm_in_blocking_pass();
         }
         // From the other side: the storming CPU has nothing to run,
         // while the one under observation spins on `syscall` from Ring 3.

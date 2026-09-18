@@ -38,6 +38,12 @@ pub fn take_dump_request() -> bool {
     DUMP_REQUESTED.swap(false, core::sync::atomic::Ordering::Relaxed)
 }
 
+/// The keystroke without a keyboard: `sched::dump`'s actuator files the request at the pass it stages.
+#[cfg(feature = "boot-actuators")]
+pub fn stage_dump_request() {
+    DUMP_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Which HID usages are down, one bit each, across every keyboard; keyed by usage, so releasing one keyboard's modifier drops it even if another still holds it.
 static HELD: Lock<[u64; 4]> = Lock::new([0; 4]);
 

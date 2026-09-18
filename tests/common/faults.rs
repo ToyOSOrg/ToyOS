@@ -852,3 +852,73 @@ pub fn dump_nmi_probe(
     }
     Ok(())
 }
+
+/// The blocked-task dump asked for from inside a user thread's blocking pass:
+/// the state `blocked_dump` met on a loaded dev host, where Ctrl+Alt+D was
+/// decoded by the CPU parking the compositor in `inbox::submit`, one level
+/// above a bare pass on a trap frame and a wait ticket and holding no lock.
+/// `dump-in-blocking-pass` files the request there on a settled machine.
+///
+/// The kernel's own assertion in `sched::dump::request` judges where the report
+/// ran — served at that depth, it panics the machine — so what is asserted here
+/// is the rest: the request was filed at that depth, the pass that met it said
+/// it left it, and a bare pass served it whole with the job still finishing.
+pub fn dump_in_blocking_pass(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            kernel_params: &["dump-in-blocking-pass"],
+            ..Default::default()
+        },
+    );
+    // A settled machine is the guest's own word: cpu0 arms at 3 s of guest time
+    // from an idle loop `diag-tick` keeps iterating, and nothing here counts.
+    const ARMED: &str = "dump-in-blocking-pass: armed";
+    let armed = qemu.drain_until(Duration::from_secs(20), |line| line.contains(ARMED));
+    if !armed.contains(ARMED) {
+        return Err(format!("the actuator never armed — is `dump-in-blocking-pass` on?\n{armed}"));
+    }
+
+    // Any job parks the runner in its wait and the job itself in its sleeps:
+    // user threads inside blocking passes, which is the state being staged.
+    let result = qemu.run_test("test_rs_abuse_short_sleep", Duration::from_secs(60));
+    // The arming line wakes whoever reads the log, so the request may be filed
+    // before the job is even asked for: the capture is every piece since boot.
+    let log = format!("{armed}{}{}{}", result.before, result.serial, result.stdout);
+
+    if log.contains("PANIC") {
+        return Err(format!(
+            "the kernel died: a request met by a syscall's pass was served there rather than \
+             left for a bare pass\n{log}"
+        ));
+    }
+    let Some(filed) = log.lines().find(|l| l.contains("dump-in-blocking-pass: cpu")) else {
+        return Err(format!("no user thread parked after the arming, so nothing was staged\n{log}"));
+    };
+    // The trap frame and the wait ticket, one level each above a bare pass — a
+    // stage at any other depth is a different state from the recorded one.
+    if !filed.contains("at depth 2") {
+        return Err(format!("the request was filed in the wrong state: `{filed}`\n{log}"));
+    }
+    if !log.contains("the next bare pass serves it") {
+        return Err(format!(
+            "the pass that met the request never said it left it for a bare pass\n{log}"
+        ));
+    }
+    if !log.contains("=== end of dump ===") {
+        return Err(format!("no complete report followed the deferred request\n{log}"));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "the job parked through the dump did not finish clean: exit {:?}\n{log}",
+            result.exit_code
+        ));
+    }
+    Ok(())
+}

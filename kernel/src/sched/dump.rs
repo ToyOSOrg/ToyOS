@@ -28,6 +28,13 @@ const ANSWER_BUDGET: Budget = Budget::of(
     "the silent CPUs are named and their part of the report is missing",
 );
 
+/// The depth a bare pass runs at: the pass's own level, with no trap frame, wait ticket or `Lock` guard under it.
+const BARE_PASS_DEPTH: u32 = 1;
+
+/// Late enough that the machine is up and every CPU has joined.
+#[cfg(feature = "boot-actuators")]
+const ARM_AT_NS: u64 = 3_000_000_000;
+
 /// Cap on ordinary parked lines per CPU; anomaly lines are never truncated.
 const LINES_PER_CPU: u32 = 16;
 
@@ -127,11 +134,19 @@ fn online_cpus() -> usize {
     (smp::cpu_count() as usize).min(MAX_CPUS)
 }
 
-/// Ctrl+Alt+D. Called from `drain_irqs` on the CPU that decoded the key, from nowhere else.
+#[cfg(feature = "boot-actuators")]
+fn at_bare_pass() -> bool {
+    crate::preempt::count() <= BARE_PASS_DEPTH
+}
+
+/// Ctrl+Alt+D. Called from `drain_irqs` on the CPU that decoded the key, and from the idle loop's actuator below.
 pub fn request() {
     // Runs holding nothing: a `Lock` guard would raise preempt depth above 1.
     let depth = crate::preempt::count();
-    assert!(depth <= 1, "the blocked-task dump ran under a lock: preempt depth {depth}");
+    assert!(
+        depth <= BARE_PASS_DEPTH,
+        "the blocked-task dump ran under a lock: preempt depth {depth}"
+    );
     if IN_PROGRESS.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -238,8 +253,6 @@ fn probe_silent(asked: &[bool; MAX_CPUS], cpus: usize) {
 /// short enough that the guest still shuts down cleanly.
 #[cfg(feature = "boot-actuators")]
 pub(super) fn deaf_window() {
-    /// Late enough that the machine is up and every CPU has joined.
-    const ARM_AT_NS: u64 = 3_000_000_000;
     /// Comfortably past [`ANSWER_BUDGET`], so silence isn't a race, and
     /// bounded so the guest still shuts down.
     const DEAF_NS: u64 = 400_000_000;
@@ -311,6 +324,41 @@ pub(super) fn deaf_window() {
         core::hint::spin_loop();
     }
     request();
+}
+
+#[cfg(feature = "boot-actuators")]
+static BLOCKING_PASS_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Arms [`stage_in_blocking_pass`] from cpu0's idle loop once the machine has
+/// settled, and says so: the harness parks a user thread only after this word.
+#[cfg(feature = "boot-actuators")]
+pub(super) fn arm_in_blocking_pass() {
+    if percpu::cpu_id() != 0 || crate::clock::nanos_since_boot() < ARM_AT_NS {
+        return;
+    }
+    if !BLOCKING_PASS_ARMED.swap(true, Ordering::AcqRel) {
+        log!("dump-in-blocking-pass: armed");
+    }
+}
+
+/// Stages the keystroke's request where a loaded machine once decoded it: inside a
+/// user thread's blocking pass, one level above a bare pass, once. Called from
+/// `pass_block` before its `drain_irqs`, so that drain is the first to meet it.
+#[cfg(feature = "boot-actuators")]
+pub(super) fn stage_in_blocking_pass() {
+    static FILED: AtomicBool = AtomicBool::new(false);
+    if at_bare_pass()
+        || !BLOCKING_PASS_ARMED.load(Ordering::Acquire)
+        || FILED.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    log!(
+        "dump-in-blocking-pass: cpu{} files the request inside a blocking pass at depth {}",
+        percpu::cpu_id(),
+        crate::preempt::count(),
+    );
+    crate::keyboard::stage_dump_request();
 }
 
 /// Where this CPU was, for the NMI probe. Called only from `arch/idt/nmi.rs`.

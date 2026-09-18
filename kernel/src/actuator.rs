@@ -157,6 +157,9 @@ actuators! {
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
+    /// File Ctrl+Alt+D's request from inside a user thread's blocking pass, once the machine has settled.
+    dump_in_blocking_pass = "dump-in-blocking-pass";
+
     /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
     /// and never gives back: the negative control on `crate::hardlockup`, and a
     /// machine nothing else in this tree ends. Where CPUID states no
@@ -397,6 +400,8 @@ const IMPLIES: &[(&str, &[&str])] = &[
     ("usb-short-read", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
+    // cpu0 arms it from its idle loop, which a settled guest otherwise leaves halted.
+    ("dump-in-blocking-pass", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),
     // The staged CPU has to still be deaf when its bound passes, and this boot
     // would otherwise have handed the machine back at the end of its job list —
