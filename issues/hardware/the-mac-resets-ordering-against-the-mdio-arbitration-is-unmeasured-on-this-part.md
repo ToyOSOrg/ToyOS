@@ -19,17 +19,17 @@ the bit to clear. Two questions about the part in the PCH are open:
 The 82574 document this driver cites answers neither for this part: it says
 only that the bit is self-clearing and that designers "must wait approximately
 1 µs" before checking it. The I219's own document is on this machine and is
-encrypted; nothing here claims its contents. The public driver for this family
-orders both the other way — the ownership bit is taken before the reset, and a
-fixed interval with no register read follows it — which is a fact about a
-public driver and neither a citation this tree may make nor a measurement of
-the part.
+encrypted; nothing here claims its contents.
 
 ## Evidence
 
 Metal run 51 issued exactly this reset with the PHY sequence absent and the
 machine was healthy: `Boot: complete (3199ms)`, ssh back in 84 s, readback
 written, stick survived. One boot.
+
+## Owner
+
+The I219 bring-up's author, and after it the network track.
 
 ## What would close it
 

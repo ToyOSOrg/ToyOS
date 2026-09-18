@@ -211,8 +211,10 @@ pub struct Phy {
 /// when its caller asks for the outcome that way, the kernel records the code
 /// in its `exit:` record, and the harness reads the record back through
 /// [`Outcome::from_exit_code`]. The block starts at 64: clear of 0, a clean
-/// exit, and of the codes at 128 and above that a process ends with when it
-/// did not choose its own end.
+/// exit, of the codes at 128 and above that a process ends with when it did
+/// not choose its own end, and of 101, which the Rust runtime ends a panicking
+/// netd with and which would therefore read back as an outcome the PHY never
+/// gave.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum Outcome {

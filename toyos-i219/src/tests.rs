@@ -1115,7 +1115,11 @@ fn an_interface_the_engine_never_gives_up_is_refused_by_name() {
 
     let held_by = match driver.brought_up().phy {
         Err(PhyRefusal::OwnershipHeld { held_by, after_nanos }) => {
-            assert!(after_nanos > 0, "{}", nic.because("the wait was not measured"));
+            assert!(
+                after_nanos >= toyos_phy::DEADLINE_NANOS,
+                "{}",
+                nic.because("the claim was given up on before the deadline it is owed")
+            );
             held_by
         }
         other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
@@ -1158,7 +1162,11 @@ fn a_flag_another_agent_holds_is_neither_taken_nor_cleared() {
                     "{}",
                     nic.because("the refusal does not carry the flag that was standing")
                 );
-                assert!(after_nanos > 0, "{}", nic.because("the wait was not measured"));
+                assert!(
+                    after_nanos >= toyos_phy::DEADLINE_NANOS,
+                    "{}",
+                    nic.because("the claim was given up on before the deadline it is owed")
+                );
             }
             other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
         }
@@ -1197,7 +1205,11 @@ fn a_request_the_engine_outlasts_is_withdrawn_before_the_engine_lets_go() {
                     "{}",
                     nic.because("the refusal does not carry the engine's bit")
                 );
-                assert!(after_nanos > 0, "{}", nic.because("the wait was not measured"));
+                assert!(
+                    after_nanos >= toyos_phy::DEADLINE_NANOS,
+                    "{}",
+                    nic.because("the claim was given up on before the deadline it is owed")
+                );
             }
             other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
         }
@@ -1278,11 +1290,14 @@ fn every_phy_outcome_has_one_exit_code_that_reads_back() {
         (Err(PhyRefusal::Identity { specific: 0, general: 0 }), Outcome::Identity),
         (Err(PhyRefusal::NotThisRegisterMap), Outcome::NotThisRegisterMap),
     ];
+    // The block's base is pinned, not read off the table it is judging.
+    assert_eq!(Outcome::ALL[0].exit_code(), 64, "the block no longer starts at 64");
     let mut codes = Vec::new();
     for (phy, outcome) in outcomes {
         assert_eq!(Outcome::of(phy), outcome, "{phy:?}");
         let code = outcome.exit_code();
         assert!((64..128).contains(&code), "{outcome:?} exits {code}");
+        assert_ne!(code, 101, "{outcome:?} exits the code a panicking netd ends with");
         assert_eq!(Outcome::from_exit_code(code), Some(outcome));
         assert!(!codes.contains(&code), "{outcome:?} shares {code} with another outcome");
         codes.push(code);
