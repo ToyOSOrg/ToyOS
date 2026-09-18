@@ -338,9 +338,10 @@ pub fn msi_armed() -> String {
 /// spelling.
 ///
 /// **A line that carries the marker and no `pcidev: PCI ` prefix is an error,
-/// never a dropped line.** A text scan closes only the spellings it matches, so
-/// a kernel that renamed the prefix would otherwise hand every caller here an
-/// empty list and satisfy whatever the caller asks of one.
+/// never a dropped line.** A scan closes only the spellings it matches, so a
+/// caller asking what a console named on *every* such line would otherwise be
+/// answered about the subset this walk could parse — one refusal read and a
+/// second one dropped is the case "and no other function" exists for.
 pub fn functions_named<'a>(log: &'a Serial, marker: &str) -> Result<Vec<&'a str>, String> {
     const PREFIX: &str = "pcidev: PCI ";
     let mut named = Vec::new();
