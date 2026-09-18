@@ -21,6 +21,21 @@ pub type Nanos = u64;
 /// calls `HUB_DEBOUNCE_STABLE`.
 pub const DEBOUNCE_NS: Nanos = 100_000_000;
 
+/// How long a scan on which *nothing at all* has connected keeps looking, from
+/// the instant the ports were powered.
+///
+/// Debounce alone can't tell an empty bus from a device still connecting: both
+/// read as already-settled until something changes.
+pub const EMPTY_BUS_NS: Nanos = 1_000_000_000;
+
+/// How long the slow-connect injection reports an empty root hub, from that same
+/// port power.
+///
+/// Here beside the two bounds it is staged between, because the harness derives
+/// the window it certifies from all three: a second copy of any of them bounds a
+/// driver nobody runs.
+pub const SLOW_CONNECT_NS: Nanos = 300_000_000;
+
 /// How long a reset may take before the port is given up on.
 ///
 /// Policy, and the caller's transfer budget: a register bit the controller sets

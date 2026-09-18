@@ -316,14 +316,13 @@ const SLOW_TRANSFER_NS: u64 = 2_000_000;
 /// The boot-time connect settle reads the same interval the per-port machine uses.
 use portmachine::DEBOUNCE_NS as PORT_DEBOUNCE_NS;
 
-
-/// Report an empty root hub for the first [`SLOW_CONNECT_NS`] after this controller powered its ports; a kernel feature since QEMU cannot stage a port that connects late.
+/// How long the slow-connect injection reports an empty root hub after this
+/// controller powered its ports.
 ///
-/// Replaces the register, not a verdict: the port reads exactly as unpopulated during the window.
-///
-/// Measured from this controller's `powered_at`, which is the instant
-/// `EMPTY_BUS` and `PORT_SETTLE_CEILING` are measured from too.
-const SLOW_CONNECT_NS: u64 = 300_000_000;
+/// A kernel feature since QEMU cannot stage a port that connects late, and it
+/// replaces the register rather than a verdict: the port reads exactly as
+/// unpopulated during the window.
+use portmachine::SLOW_CONNECT_NS;
 
 /// Report *one* root-hub port empty while every other port reads normally.
 ///

@@ -1255,41 +1255,22 @@ pub fn xhci_slow_connect(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     const PARAMS: &[&str] = &["usb-storage-gate", "xhci-slow-connect"];
-    /// Mirrors `xhci/mod.rs`'s `SLOW_CONNECT_NS` and `PORT_DEBOUNCE_NS`. These
-    /// are one wire format with the kernel's in the same sense the gate's stamp
-    /// is: a change to either without the other shows up as a failed assertion,
-    /// not as a silent pass.
-    const HELD_EMPTY_S: f64 = 0.300;
-    const DEBOUNCE_S: f64 = 0.100;
+    // The driver's own durations, from where the driver reads them: each is
+    // declared once in `toyos-xhci` and `use`d by `kernel/src/drivers/xhci`, so
+    // neither bound below can be a copy that drifted.
+    use toyos_xhci::port::{DEBOUNCE_NS, EMPTY_BUS_NS, SLOW_CONNECT_NS};
+    /// Nanoseconds per second, to put those in the units the log's stamps are in.
+    const PER_S: f64 = 1_000_000_000.0;
     /// How long after port power the driver can first name a port. The register
     /// reads empty for `SLOW_CONNECT_NS` after this controller powered its
-    /// ports, and `await_connect_settle` then wants `PORT_DEBOUNCE_NS` of a
-    /// connect set that has held still and is non-empty.
-    const FIRST_CONNECT_S: f64 = HELD_EMPTY_S + DEBOUNCE_S;
-    /// `wait/boot.rs`'s `EMPTY_BUS`: when a settle that never saw a device
-    /// appear stops looking, measured from the same port power.
-    const EMPTY_BUS_S: f64 = 1.000;
-    /// How late the first port line may be: halfway between the two settles
-    /// this test tells apart, so one that ends on the device appearing cannot
-    /// reach it and one that ends at `EMPTY_BUS` cannot stay under it.
-    const SETTLE_CEILING_S: f64 = FIRST_CONNECT_S + (EMPTY_BUS_S - FIRST_CONNECT_S) / 2.0;
-
-    // The ceiling is half of a kernel constant, so it is read back from the
-    // kernel's declaration: no assertion below would notice `EMPTY_BUS_S` alone
-    // going stale, and a ceiling above `EMPTY_BUS` certifies the settle it
-    // exists to refuse.
-    let declared =
-        format!("const EMPTY_BUS: Budget = Budget::of( Duration::from_secs({EMPTY_BUS_S:.0}),");
-    let settle = std::fs::read_to_string(
-        super::compile::repo_root().join("kernel/src/drivers/xhci/wait/boot.rs"),
-    )
-    .map_err(|why| format!("the boot settle's source: {why}"))?;
-    if !settle.split_whitespace().collect::<Vec<_>>().join(" ").contains(&declared) {
-        return Err(format!(
-            "the kernel declares no `{declared}`, so the ceiling here is half of a bound the \
-             driver does not hold"
-        ));
-    }
+    /// ports, and `await_connect_settle` then wants `DEBOUNCE_NS` of a connect
+    /// set that has held still and is non-empty.
+    const FIRST_CONNECT_S: f64 = (SLOW_CONNECT_NS + DEBOUNCE_NS) as f64 / PER_S;
+    /// How late the first port line may be: halfway between the two settles this
+    /// test tells apart, so one that ends on the device appearing cannot reach
+    /// it and one that ends at `EMPTY_BUS_NS` cannot stay under it.
+    const SETTLE_CEILING_S: f64 =
+        FIRST_CONNECT_S + (EMPTY_BUS_NS as f64 / PER_S - FIRST_CONNECT_S) / 2.0;
 
     let (bytes, lba) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
     let image = test_dir().join("usb-slow-connect.img");
@@ -1311,9 +1292,6 @@ pub fn xhci_slow_connect(
     // would be green on a driver that never waits and a QEMU that answers
     // instantly, which is exactly the pair that shipped.
     //
-    // **Every bound below is a delta between two of the guest's own stamps, and
-    // neither end is an instant of the boot.**
-    //
     // `powered_at` is not logged; the two lines that bracket it are.
     // `controller started` is taken before it, so it is the anchor that can only
     // make the floor generous; the port-power line is printed after it, so it is
@@ -1327,13 +1305,13 @@ pub fn xhci_slow_connect(
     // profile does not fix, since a SuperSpeed stick appears on a high one.
     let first_seen = stamp_of(&log, "xHCI: port ")?;
 
-    // What makes the bracket a bracket: two controllers have two `powered_at`s
-    // and `stamp_of` takes the first line of each kind, so the pair above would
-    // straddle them.
+    // What makes the bracket the settle's own: `await_connect_settle` anchors on
+    // the greatest `powered_at` across controllers, which on a second controller
+    // is not the instant these two lines bracket.
     if !log.contains("xHCI: 1 controller(s),") {
         return Err(format!(
-            "this profile grew a second controller, so `controller started` and the port-power \
-             line no longer bracket one `powered_at`\n{log}"
+            "this profile grew a second controller, so the settle no longer anchors on the \
+             `powered_at` these lines bracket\n{log}"
         ));
     }
     // The floor, and the non-vacuity with it: a driver that did not wait, or an
@@ -1395,10 +1373,10 @@ pub fn xhci_slow_connect(
     let _ = std::fs::remove_file(&image);
 
     eprintln!(
-        "  [usb] controller started at {started:.3} s, ports powered at {powered:.3} s and read \
-         empty for {HELD_EMPTY_S} s after that; first port named at {first_seen:.3} s, \
-         {after_start:.3} s after the start and {after_power:.3} s after the power, both sticks \
-         bound, host bytes verified host-side; Boot: complete at {boot_ms} ms"
+        "  [usb] controller started at {started:.3} s and powered its ports at {powered:.3} s; \
+         first port named at {first_seen:.3} s, {after_start:.3} s after the start and \
+         {after_power:.3} s after the power, both sticks bound, host bytes verified host-side; \
+         Boot: complete at {boot_ms} ms"
     );
     Ok(())
 }

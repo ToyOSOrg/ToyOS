@@ -912,10 +912,11 @@ pub const RELEGATED: &[Relegated] = &[
         test: "xhci_slow_connect",
         ci_ms: 4_999,
         why: Why::TimerAnchored,
-        guards: "Bounds the first port line from both sides, at the held-empty window plus the \
-                 debounce after the controller's own port power and no later than halfway from \
-                 there to the empty-bus budget — a staged latency window whichever host renders \
-                 it. This is the delayed-enumeration shape real hubs impose after reset.",
+        guards: "Bounds the first port line from both sides, no sooner than the held-empty \
+                 window plus the debounce after the controller started and no later than halfway \
+                 from there to the empty-bus budget after its ports were powered — a staged \
+                 latency window whichever host renders it. This is the delayed-enumeration shape \
+                 real hubs impose after reset.",
     },
     Relegated {
         test: "late_storage_connect",
