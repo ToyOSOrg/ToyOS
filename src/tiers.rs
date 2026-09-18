@@ -9,13 +9,15 @@
 //! writes [`Tier::Nightly`] against each of those names in its own registration.
 //!
 //! **This is interim and it is a loss.** Most of the committed profile's priced
-//! time is Nightly, for three reasons a row's [`Why`] names: a CI price without
+//! time is Nightly, for four reasons a row's [`Why`] names: a CI price without
 //! margin ([`Why::Cost`] — since 2026-08-21, over [`FAST_COMMIT_MS`] rather
-//! than over the ceiling itself), Nightly by classification rather than by cost
-//! ([`Why::TimerAnchored`]), or riding `metal_sim_compositor`'s shared boot
-//! ([`Why::RidesTheBootOf`]). None of it is gated per pull request. `guards`
-//! on every row says what stopped being gated, because a run that quietly does
-//! less is the whole failure mode here; the counts are [`RELEGATED`] itself.
+//! than over the ceiling itself), a price with margin on the nightly and none
+//! on the pull-request lane ([`Why::CostOnTheGate`]), Nightly by classification
+//! rather than by cost ([`Why::TimerAnchored`]), or riding
+//! `metal_sim_compositor`'s shared boot ([`Why::RidesTheBootOf`]). None of it is
+//! gated per pull request. `guards` on every row says what stopped being gated,
+//! because a run that quietly does less is the whole failure mode here; the
+//! counts are [`RELEGATED`] itself.
 //!
 //! **Nothing here is an optimisation and nothing here changes an assertion.**
 //! A relegated test measures exactly what it measured; the manual nightly
@@ -80,7 +82,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// verdict or price — belongs Nightly; only a compute-bound verdict stays Fast.
 /// **2026-08-13: the sweep applying this to the rest of the fast tier landed**
 /// — [`Why::TimerAnchored`] is the classification it needed, and every
-/// borderline name the cost audit raised has one of the three `Why` rows now.
+/// borderline name the cost audit raised has a `Why` row now.
 pub const FAST_CEILING_MS: u64 = 10_000;
 
 /// The price a test may be **committed** at and still be [`Tier::Fast`], in
@@ -115,6 +117,12 @@ pub const FAST_CEILING_MS: u64 = 10_000;
 /// a Fast name may not be priced in `(FAST_COMMIT_MS, FAST_CEILING_MS]`, and a
 /// [`Why::Cost`] row returns to Fast only at or under it. **A straddler cannot
 /// be Fast.**
+///
+/// **The return rule reads both lanes**: a name is Fast only if it is at or
+/// under this line on the instrument of record, the nightly, *and* on the gate
+/// it must then pass — the returning landing's own hosted run, which renders the
+/// name because that landing re-tiers it — and a row the second refused is
+/// [`Why::CostOnTheGate`], which no nightly price returns.
 ///
 /// **Margin is not enough by itself, and 2026-08-22 measured why.** A fifth of
 /// room does not make a *variable* name safe: `xhci_full_speed_device` is
@@ -151,7 +159,7 @@ pub enum Tier {
     Nightly,
 }
 
-/// Why a name is not in the fast tier. The three are not interchangeable and
+/// Why a name is not in the fast tier. The four are not interchangeable and
 /// the gates below check different things of each.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Why {
@@ -161,6 +169,16 @@ pub enum Why {
     /// the ceiling and expensive enough that a loaded one does not, which is
     /// the state this variant exists to hold rather than to oscillate through.
     Cost,
+    /// **Priced with margin by the nightly and without it by the gate a return
+    /// has to pass.** The pull-request lane prices a name above the nightly, and
+    /// a name under the line on one and over it on the other has no tier the
+    /// one-lane rule accepts on both runs. `ci_ms` is the hosted
+    /// pull-request-lane reading that refused the return, checked to be over
+    /// [`FAST_COMMIT_MS`] — a reading at or under the line holds nothing. No
+    /// price in the nightly's profile moves this row; it comes back through a
+    /// landing that re-tiers it Fast and whose own hosted run, which renders the
+    /// name for that reason, prices it at or under the line.
+    CostOnTheGate,
     /// **Under the ceiling, and relegated anyway** because it shares one boot
     /// with the named test that is over it. `group_of` in `tests/toyos.rs` makes
     /// a run of adjacent names one guest, so the group's cost is the group's and
@@ -186,9 +204,11 @@ pub struct Relegated {
     /// The last measurement recorded for this row, in milliseconds — for
     /// `audio_tone_load`, which registers one test but emits an `(smp=1)` and
     /// an `(smp=8)` label, the sum of both as last recorded. Documentation,
-    /// not a fixture: [`ci_profile_verdicts`] checks a fresh profile's tier
-    /// *placement*, never this field against it, so a nightly run refreshing
-    /// every Nightly label does not have to reproduce this number. A human
+    /// not a fixture, on every row but a [`Why::CostOnTheGate`] one, where it is
+    /// the reading that holds the row: [`ci_profile_verdicts`] checks a fresh
+    /// profile's tier *placement*, never this field against it, so a nightly
+    /// run refreshing every Nightly label does not have to reproduce this
+    /// number. A human
     /// updates it by hand when a "returns to Fast" or "belongs Nightly"
     /// finding lands a tier correction. Tier movement is by measurement in both
     /// directions, and a nightly run's measured profile is what refreshes these
@@ -332,6 +352,20 @@ pub const RELEGATED: &[Relegated] = &[
                  take its barrier must still reach its reset. What still runs per pull request: \
                  nothing reads that account at all; `metal_device_probe` judges the flush that \
                  precedes it, and the T14 is the only judge of the device itself.",
+    },
+    Relegated {
+        test: "fat_backing_revoked",
+        ci_ms: 8_333,
+        why: Why::CostOnTheGate,
+        guards: "A `FatBacking` handed out before an unlink reading nothing after it — before \
+                 `FatFs::revoke`, a descriptor held across somebody else's `rm` demand-paged \
+                 whatever the reissued clusters got next — with the two questions the guest \
+                 cannot ask about itself answered on the host: `fatfs` reads the attacker's file \
+                 end to end off the image so the clusters really were reissued, and \
+                 `toyos-fat32-check` must stay silent on a partition asserted clean before the \
+                 boot. `revoke` lives in the kernel's adapters where no host suite reaches, and \
+                 no other test stages the cycle, so the refusal and both host-side questions go \
+                 nightly together.",
     },
     Relegated {
         test: "readdir_bound",
@@ -520,6 +554,14 @@ pub const RELEGATED: &[Relegated] = &[
                  assertion on whether the guest kept up. It is the first domino of the T14 \
                  freeze: an `extern \"C\"` frame with no unwind path turned the overflow panic \
                  into abort, and the kernel and compositor followed it down.",
+    },
+    Relegated {
+        test: "screen_console_scroll",
+        ci_ms: 8_235,
+        why: Why::CostOnTheGate,
+        guards: "Every row of the panel, character for character, after a workload built \
+                 to leave stale glyphs behind a scroll. #90 was the owner seeing prior \
+                 text survive in the middle of a cleared screen.",
     },
     Relegated {
         test: "desktop_typing_damage",
@@ -976,6 +1018,18 @@ pub const RELEGATED: &[Relegated] = &[
                  and the refusal lines themselves have no other gate.",
     },
     Relegated {
+        test: "ftruncate_flush_race",
+        ci_ms: 8_111,
+        why: Why::CostOnTheGate,
+        guards: "A truncate raced into a flush's stalled size-read/`update_metadata` window \
+                 (`ftruncate-flush-stall`, 400 ms) and required to serialise — the lockless \
+                 resize's regression shape — with the shut-down volume re-judged off the image \
+                 by the FAT reader and `toyos-fat32-check`. What still runs per pull request: \
+                 the `&mut Vfs` witness that keeps every flusher's metadata pair under the VFS \
+                 lock, and the Fast `fs_truncate_persist` for an ordinary truncate's durable \
+                 size; the staged race and the host-side re-judgment are gated only here.",
+    },
+    Relegated {
         test: "iommu_domain_isolation",
         ci_ms: 15_756,
         why: Why::Cost,
@@ -1000,6 +1054,32 @@ pub const RELEGATED: &[Relegated] = &[
                  function on the unit and no-unit machines, the audio function's \
                  declared exception, and the NIC declining the bit and losing the \
                  device. Three boots: 17,259 ms on the hosted shard.",
+    },
+    Relegated {
+        test: "screen_gop_firmware_mode",
+        ci_ms: 9_090,
+        why: Why::CostOnTheGate,
+        guards: "What still runs per pull request: `screen_console_clear` asserts the 8-pixel \
+                 strip below the last cell row that only the declared 1920x1080 panel has, so a \
+                 bootloader that chose a mode again reds on every pull request. What only this \
+                 name holds: the kernel's GOP line against QEMU's own scanout geometry on two \
+                 machines with different panels, plus stride and pixel format. Two boots.",
+    },
+    Relegated {
+        test: "boot_partition_identity",
+        ci_ms: 9_527,
+        why: Why::CostOnTheGate,
+        guards: "The boot partition's identity surviving the whole trip — OVMF's device path, \
+                 the bootloader, `KernelArgs`, the kernel's NVMe driver — judged against the \
+                 image as a second GPT implementation reads it on the host: the entry matched \
+                 third behind an ESP-typed decoy, the answer going ambiguous when the stick and \
+                 the NVMe clone both claim one partition GUID, and the same GUID eight blocks \
+                 from where firmware saw it refused without costing the stick its volume. What \
+                 still runs per pull request: `toyos-gpt`'s host suite holds the parser over \
+                 crafted tables and every hostile field, and `foreign_disk_untouched` the \
+                 refusal to write a disk that is somebody else's; the firmware-against-table \
+                 agreement and the two-claimant arm are gated only here. Two boots and an image \
+                 build of its own.",
     },
     Relegated {
         test: "root_named_twice",
@@ -1210,6 +1290,9 @@ pub fn ci_profile_verdicts(ci: &BTreeMap<String, u64>) -> Vec<Verdict> {
             errors
                 .push(fact(row.test, format!("{} says nothing about what it guards", row.test)));
         }
+        if let Some(unheld) = unheld_on_the_gate(row) {
+            errors.push(fact(row.test, unheld));
+        }
         let labels: Vec<(&str, u64)> = ci
             .iter()
             .filter(|(label, _)| canonical_profile_name(label) == row.test)
@@ -1267,11 +1350,25 @@ pub fn ci_profile_verdicts(ci: &BTreeMap<String, u64>) -> Vec<Verdict> {
                     ));
                 }
             }
-            Why::Cost | Why::TimerAnchored => {}
+            // No nightly price returns a row the gate's own reading holds.
+            Why::Cost | Why::CostOnTheGate | Why::TimerAnchored => {}
         }
     }
 
     errors
+}
+
+/// The refusal a [`Why::CostOnTheGate`] row earns when the reading it names
+/// does not hold it: at or under [`FAST_COMMIT_MS`] the gate refused nothing,
+/// and the row is a [`Why::Cost`] one the nightly's price decides.
+fn unheld_on_the_gate(row: &Relegated) -> Option<String> {
+    (row.why == Why::CostOnTheGate && row.ci_ms <= FAST_COMMIT_MS).then(|| {
+        format!(
+            "{} is Nightly for CostOnTheGate, but the pull-request-lane reading it names, \
+             {} ms, is at or under the {FAST_COMMIT_MS} ms commitment line and holds nothing",
+            row.test, row.ci_ms
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1384,6 +1481,33 @@ mod tests {
         assert!(validate_ci_profile(&ci).is_ok());
         ci.insert("audio_tone_load (smp=8)".to_string(), FAST_CEILING_MS);
         assert!(validate_ci_profile(&ci).is_ok());
+    }
+
+    /// **The return rule's second lane.** The same nightly price that returns a
+    /// `Why::Cost` row leaves a `Why::CostOnTheGate` one where it is, and what
+    /// holds that row is its own reading, refused at the millisecond it stops
+    /// being over the line.
+    #[test]
+    fn a_nightly_price_does_not_return_a_row_the_gate_holds() {
+        let held = RELEGATED
+            .iter()
+            .find(|r| r.why == Why::CostOnTheGate)
+            .expect("a row the gate holds")
+            .test;
+        let mut ci = committed_profile();
+        ci.insert(held.to_string(), FAST_COMMIT_MS);
+        assert!(validate_ci_profile(&ci).is_ok());
+
+        ci.insert("desktop_window_child".to_string(), FAST_COMMIT_MS);
+        let refusal = validate_ci_profile(&ci).unwrap_err();
+        assert!(refusal.contains("desktop_window_child"), "{refusal}");
+        assert!(!refusal.contains(held), "{refusal}");
+
+        let row = |why, ci_ms| Relegated { test: "held", ci_ms, why, guards: "g" };
+        assert_eq!(unheld_on_the_gate(&row(Why::CostOnTheGate, FAST_COMMIT_MS + 1)), None);
+        let refusal = unheld_on_the_gate(&row(Why::CostOnTheGate, FAST_COMMIT_MS)).unwrap();
+        assert!(refusal.contains("held") && refusal.contains("holds nothing"), "{refusal}");
+        assert_eq!(unheld_on_the_gate(&row(Why::Cost, 1)), None);
     }
 
     /// Nightly measurements refresh the recorded Nightly costs; they are

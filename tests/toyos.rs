@@ -451,7 +451,7 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // marker. Every verdict is a count of rows against a count of lines off the
     // same boot's console; no clock is in either.
     ("screen_loader_lines", Sched::Parallel, Tier::Fast),
-    ("screen_gop_firmware_mode", Sched::Parallel, Tier::Fast),
+    ("screen_gop_firmware_mode", Sched::Parallel, Tier::Nightly),
     // `thread::sleep(5 s)` is the measurement, not a ceiling: the assertion is
     // literally that the log is still on the panel five seconds after the boot
     // finished, so a 2x slower machine changes nothing about the wait but the
@@ -463,7 +463,7 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_log_absent", Sched::Parallel, Tier::Fast),
     ("screen_console_shell", Sched::Parallel, Tier::Fast),
     ("screen_console_clear", Sched::Parallel, Tier::Fast),
-    ("screen_console_scroll", Sched::Parallel, Tier::Fast),
+    ("screen_console_scroll", Sched::Parallel, Tier::Nightly),
     ("screen_i8042_health", Sched::Parallel, Tier::Fast),
     // Ctrl+Alt+D with no console at all: the panel is the whole channel, and a
     // compositor is holding it. A fixed 2 s settle sits inside the dump's own
@@ -697,7 +697,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // package path in one boot, judged off the DATA volume once the guest is
     // gone. Body in `tests/common/pkg.rs`.
     ("pkg_install_gbae", Sched::Parallel, Tier::Fast),
-    ("boot_partition_identity", Sched::Parallel, Tier::Fast),
+    ("boot_partition_identity", Sched::Parallel, Tier::Nightly),
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
     ("machine_reboot", Sched::Parallel, Tier::Fast),
@@ -1194,14 +1194,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the same reason `writeback_durability` is one: whether the clusters the
     // unlink freed were really reissued, and whether the cycle left a volume, are
     // both questions the guest that staged them cannot answer about itself.
-    ("fat_backing_revoked", Sched::Parallel, Tier::Fast),
+    ("fat_backing_revoked", Sched::Parallel, Tier::Nightly),
     // F5 and F6's negative controls: an fsync that must keep refusing while the
     // device refuses its cache flush, and a mid-flush redirty raced for real and
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
     ("fsync_failed_commit", Sched::Parallel, Tier::Fast),
     ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
     // A truncate staged inside a flush's metadata window, re-read off the image.
-    ("ftruncate_flush_race", Sched::Parallel, Tier::Fast),
+    ("ftruncate_flush_race", Sched::Parallel, Tier::Nightly),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel, Tier::Fast),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.

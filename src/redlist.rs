@@ -3450,19 +3450,20 @@ pub const KNOWN_RED: &[Red] = &[
                it faster`. The nightly after them priced it 7,991 ms, 9 ms under, and refused the \
                `Why::Cost` row it had been given: `log_conservation_smp4 is Nightly for Cost, but \
                every current CI label is at or under the 8000 ms commitment line and it belongs \
-               Fast`. A straddler, the class `src/tiers.rs`'s `FAST_COMMIT_MS` documents, under a \
-               return rule that reads one sample and so holds one nowhere: the name is \
-               `Tier::Fast` at a committed 7,991 ms because that is where the rule puts it, and a \
-               price red on it is this row and not a finding about the diff that met it. Its \
-               siblings `log_conservation_smp1` and `log_conservation_smp8` are priced 4,228 and \
-               5,890 with margin, so the log's conservation law is gated per pull request at \
-               both subject shapes (producer sharing the reader's CPU, and not) whichever side \
-               of the line the middle width is priced on",
+               Fast`. The landing that returned it priced it 4,881 ms on its own hosted run, so \
+               the name is `Tier::Fast` under the line on both lanes `src/tiers.rs`'s return rule \
+               reads — and 9 ms under it on the nightly's, which is what stands: a nightly that \
+               prices it over 8,000 ms again is this row and not a finding about the diff that \
+               met it. Its siblings `log_conservation_smp1` and `log_conservation_smp8` are \
+               priced 4,228 and 5,890 with margin, so the log's conservation law is gated per \
+               pull request at both subject shapes (producer sharing the reader's CPU, and not) \
+               whichever side of the line the middle width is priced on",
         evidence: "`ci` runs 33202812787 (8572 ms) and 33212528174 (8248 ms), both `main` pushes \
                    on 2026-08-28, each red only in `durations` and its aggregate; `guest (12)` \
                    in the second passed the test itself in 8 s. Nightly 35072262489's \
-                   `durations-shard-11`, 2026-09-16: 7991 ms",
-        source: "issues/build/the-return-rule-reads-one-sample.md",
+                   `durations-shard-11`, 2026-09-16: 7991 ms. Pull request #467's `ci` run \
+                   35352795338, 2026-09-18: 4881 ms",
+        source: "tests/common/logread.rs",
         measured: "2026-09-16",
     },
     // ---------------------------------------------------------------------
