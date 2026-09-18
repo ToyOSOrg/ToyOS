@@ -29,8 +29,9 @@
 //! though `durations` itself is not on the required list. The usual cause is a
 //! committed `UNMEASURED` marker past its one bought run — the cure is the
 //! measured value from that run's own `test-durations-merged` artifact, never a
-//! re-run. Learned on 2026-08-19, when three PRs stalled on exactly this while
-//! everyone read the red as stale noise.
+//! re-run. A CI run's merged durations are committed only for the rows this
+//! change's own markers blocked. Learned on 2026-08-19, when three PRs stalled
+//! on exactly this while everyone read the red as stale noise.
 //!
 //! **Which names decide whether the price verdict is rendered.**
 //! The owner's ruling of 2026-08-22: a run measuring a change renders
