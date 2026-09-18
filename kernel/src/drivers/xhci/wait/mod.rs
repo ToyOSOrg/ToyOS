@@ -127,37 +127,17 @@ fn settles(ready: impl Fn() -> bool) -> bool {
     crate::clock::settles(USB_TIMEOUT_NS, ready)
 }
 
-
-/// What one endpoint's recovery still owes the **device**, once the
-/// controller has taken it off the transfer it was running. Produced only by
-/// [`XhciController::quiesce_endpoint`] and accepted only by
-/// [`XhciController::clear_endpoint_halt`], so the two halves cannot run out of order.
-#[derive(Clone, Copy)]
-pub(in crate::drivers::xhci) enum Owed {
-    /// The endpoint runs. Nothing further is owed.
-    Nothing,
-    /// The device is still holding a halt on the endpoint at this address.
-    ClearHalt { ep_addr: u8 },
-    /// The endpoint could not be taken off its transfer; carried through
-    /// rather than returned early, since the other endpoint's quiesce still
-    /// has to run.
-    Failed,
-}
-
 impl XhciController {
     /// Take one endpoint back to a state that runs TRBs, waiting for each step.
-    fn restart_endpoint(&mut self, mut ep: Restart<'_>) -> bool {
-        let owed = self.quiesce_endpoint(&mut ep);
-        self.clear_endpoint_halt(ep.slot_id, ep.ctx_block, ep.ep0_ring, owed)
+    fn restart_endpoint(&mut self, ep: Restart<'_>) -> bool {
+        let halt = Some((ep.ep_addr, ep.ep0_ring));
+        self.run_recovery(ep.slot_id, ep.dci, ep.ctx_block, ep.ring, ep.ring_at, halt)
     }
 
-    /// The half of one endpoint's recovery the **controller** answers, up to
-    /// the point where the sequence would speak to the device.
-    fn quiesce_endpoint(&mut self, ep: &mut Restart<'_>) -> Owed {
-        self.run_recovery(ep.slot_id, ep.dci, ep.ctx_block, ep.ring, ep.ring_at, ep.ep_addr)
-    }
-
-    /// [`Recovery`] run to whatever it owes the device, one blocking command at a time.
+    /// [`Recovery`] run to its end, one blocking command at a time. `halt` is
+    /// the address the device knows the endpoint by and the EP0 ring a
+    /// CLEAR_FEATURE for it goes out on, or `None` for an endpoint with no Halt
+    /// feature to clear.
     #[allow(clippy::too_many_arguments)]
     fn run_recovery(
         &mut self,
@@ -166,8 +146,8 @@ impl XhciController {
         ctx_block: usize,
         ring: &mut TrbRing,
         ring_at: usize,
-        ep_addr: u8,
-    ) -> Owed {
+        halt: Option<(u8, &mut TrbRing)>,
+    ) -> bool {
         let slot = self.slot(slot_id);
         let state = self.endpoint_state(ctx_block, dci);
         log!("xHCI: {slot} endpoint {dci} is {state}, recovering");
@@ -175,18 +155,26 @@ impl XhciController {
             Ok(begun) => begun,
             Err(NeedsConfigure(state)) => {
                 log_unrecoverable(slot, dci, state);
-                return Owed::Failed;
+                return false;
             }
         };
         loop {
             let cmd = match act {
-                Act::Running => return Owed::Nothing,
-                Act::ClearHalt => return Owed::ClearHalt { ep_addr },
+                Act::Running => return true,
+                // The last act of every route that has one.
+                Act::ClearHalt => {
+                    return match halt {
+                        Some((ep_addr, ep0_ring)) => {
+                            self.clear_endpoint_halt(slot_id, ctx_block, ep0_ring, ep_addr)
+                        }
+                        None => true,
+                    }
+                }
                 Act::Command(cmd) => cmd,
             };
             let trb = self.recovery_trb(cmd, slot_id, dci, ring, ring_at);
             if !self.run_command(trb, cmd.name()) {
-                return Owed::Failed;
+                return false;
             }
             act = seq.completed();
         }
@@ -201,30 +189,25 @@ impl XhciController {
         ctx_block: usize,
         ring: &mut TrbRing,
     ) -> bool {
-        let owed = self.run_recovery(
+        self.run_recovery(
             slot_id,
             super::EP0_DCI,
             ctx_block,
             ring,
             ctx_block + super::DEV_EP0_RING,
-            0,
-        );
-        !matches!(owed, Owed::Failed)
+            None,
+        )
     }
 
-    /// The half the **device** answers, the only packet a recovery puts on the bus.
+    /// CLEAR_FEATURE(ENDPOINT_HALT) for the endpoint the device knows as
+    /// `ep_addr`: the half of a recovery the **device** answers.
     fn clear_endpoint_halt(
         &mut self,
         slot_id: u8,
         ctx_block: usize,
         ep0_ring: &mut TrbRing,
-        owed: Owed,
+        ep_addr: u8,
     ) -> bool {
-        let ep_addr = match owed {
-            Owed::Nothing => return true,
-            Owed::Failed => return false,
-            Owed::ClearHalt { ep_addr } => ep_addr,
-        };
         let cleared = self
             .control_transfer(slot_id, ctx_block, ep0_ring, 0x02, 0x01, 0, ep_addr as u16, None, 0);
         if !cleared.done() {
@@ -296,13 +279,23 @@ impl XhciController {
     /// Submit `trb` and say whether the controller accepted it, logging
     /// anything it did not under `what`'s name.
     fn run_command(&mut self, trb: Trb, what: &str) -> bool {
-        let at = self.submit_command(trb);
-        match self.wait_command(at) {
-            Some((CC_SUCCESS, _)) => true,
-            Some((code, _)) => {
+        match self.command_code(trb, what) {
+            Some(CC_SUCCESS) => true,
+            Some(code) => {
                 log!("xHCI: {what} failed: {}", Completion(code));
                 false
             }
+            None => false,
+        }
+    }
+
+    /// Submit `trb` and hand back the completion code, for a caller with its
+    /// own answer to one; `None` is a controller that never answered, which is
+    /// logged here.
+    fn command_code(&mut self, trb: Trb, what: &str) -> Option<u32> {
+        let at = self.submit_command(trb);
+        match self.wait_command(at) {
+            Some((code, _)) => Some(code),
             None => {
                 // The controller's own word beside the silence: a command ring
                 // that stopped (CRCR.CRR clear) or a Host Controller Error
@@ -313,7 +306,7 @@ impl XhciController {
                     self.op_base.read_u32(super::OP_USBSTS),
                     (self.op_base.read_u64(super::OP_CRCR) >> 3) & 1
                 );
-                false
+                None
             }
         }
     }

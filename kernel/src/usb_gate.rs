@@ -236,22 +236,50 @@ fn check(index: usize, disk: &Handle) {
         }
     }
 
-    // A device refusing every CBW, on a transport that comes back after each
-    // refusal and breaks again on the next: what the driver owes is to stop
-    // asking once its own recovery has been spent, and to leave the device
-    // in a state the next host can enumerate. Last, because the disk is
-    // offline after it and every line above would read differently.
+    // Runs of transport faults, each staged immediately before the read it is
+    // taken inside. One short of the budget, in each of the two shapes a break
+    // leaves the bulk pair in, is a run the recovery brings back: the read
+    // returns the host's bytes, and because a completed read ends the run the
+    // second shape starts its own count. A run as long as the whole budget is
+    // what the driver owes a give-up for. Last, because the disk is offline
+    // after it and every line above would read differently.
     #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_bad_cbw() {
+    if crate::actuator::usb_transport_faults() {
+        use crate::drivers::xhci::{max_transport_breaks, stage_transport_faults, StagedFault};
+        use crate::drivers::xhci::disarm_transport_faults as disarm;
         let block = at(blocks, HOST_BLOCKS[0]);
-        let refused = crate::drivers::xhci::arm_bad_cbws();
+        let budget = max_transport_breaks();
+        for (fault, shape) in [
+            (StagedFault::BadSignature, "bad CBW signatures"),
+            (StagedFault::NoCbw, "withheld CBWs"),
+        ] {
+            buf.fill(0);
+            stage_transport_faults(budget - 1, fault, None);
+            let refused = read(block, 1, &mut buf).is_err();
+            let untaken = disarm();
+            let matched = !refused && first_bad(&buf, nonce, block).is_none();
+            log!(
+                "usb-gate: {} {shape} in a row of a budget of {budget}: read refused={refused} \
+                 matched={matched} untaken={untaken} healthy={}",
+                budget - 1,
+                usb_storage::healthy(index)
+            );
+        }
+        stage_transport_faults(budget, StagedFault::BadSignature, None);
         let read_refused = read(block, 1, &mut buf).is_err();
+        let untaken = disarm();
         let next_refused = read(block, 1, &mut buf).is_err();
         log!(
-            "usb-gate: {refused} refused CBWs in a row: read refused={read_refused} the read \
-             after it refused={next_refused} healthy={}",
+            "usb-gate: {budget} bad CBW signatures in a row of a budget of {budget}: read \
+             refused={read_refused} untaken={untaken} the read after it refused={next_refused} \
+             healthy={}",
             usb_storage::healthy(index)
         );
+        // And the same budget spent inside a bind: the next disk to enumerate
+        // has its INQUIRY — the first command `bring_up` issues through the
+        // recovering path — refused as many times.
+        const INQUIRY: u8 = 0x12;
+        stage_transport_faults(budget, StagedFault::BadSignature, Some(INQUIRY));
     }
 
     log!(
@@ -260,6 +288,22 @@ fn check(index: usize, disk: &Handle) {
         if writes_ok { "ok" } else { "bad" },
         usb_storage::healthy(index)
     );
+
+    // After the account above, which it would otherwise change: a read whose
+    // port reads gone is not a transport to recover, and the disk is left to
+    // the teardown its port owes.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_port_gone() {
+        use crate::drivers::xhci::{stage_transport_faults, StagedFault};
+        stage_transport_faults(1, StagedFault::PortGone, None);
+        let refused = read(at(blocks, HOST_BLOCKS[0]), 1, &mut buf).is_err();
+        let untaken = crate::drivers::xhci::disarm_transport_faults();
+        log!(
+            "usb-gate: a read whose port reads gone: refused={refused} untaken={untaken} \
+             healthy={}",
+            usb_storage::healthy(index)
+        );
+    }
 }
 
 /// Blocks per read-and-write-back pair — eight of this driver's largest SCSI

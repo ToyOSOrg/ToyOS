@@ -27,9 +27,11 @@ pub enum EndpointState {
     Running,
     Halted,
     Stopped,
-    /// 4 is Error, 5-7 are reserved and no xHC should report one. Neither has a
-    /// way back that does not re-run Configure Endpoint, so they are one case
-    /// here — and the number is carried because it is what the refusal names.
+    /// A TRB the controller could not run. Set TR Dequeue Pointer is defined
+    /// for it as it is for Stopped, and leaves it Stopped (§4.6.10).
+    Error,
+    /// 5-7 are reserved and no xHC should report one; the number is carried
+    /// because it is what the refusal names.
     Unusable(u8),
 }
 
@@ -40,6 +42,7 @@ impl EndpointState {
             1 => Self::Running,
             2 => Self::Halted,
             3 => Self::Stopped,
+            4 => Self::Error,
             other => Self::Unusable(other as u8),
         }
     }
@@ -52,6 +55,7 @@ impl core::fmt::Display for EndpointState {
             Self::Running => f.write_str("Running"),
             Self::Halted => f.write_str("Halted"),
             Self::Stopped => f.write_str("Stopped"),
+            Self::Error => f.write_str("Error"),
             Self::Unusable(n) => write!(f, "endpoint state {n}"),
         }
     }
@@ -86,11 +90,11 @@ impl Command {
 pub enum Act {
     Command(Command),
     /// CLEAR_FEATURE(ENDPOINT_HALT) on EP0, naming the address the *device*
-    /// knows this endpoint by. It clears the condition at the device and zeroes
-    /// the device's data toggle or sequence number (USB 2.0 §9.4.5, USB 3.2
-    /// §9.4.5), so here it goes out only after a Reset Endpoint has zeroed the
-    /// controller's: sent to an endpoint the controller never reset, it leaves
-    /// the two ends of the pipe disagreeing.
+    /// knows this endpoint by. It clears the condition at the device and
+    /// reinitialises the device's data toggle (USB 2.0 §9.4.5), so here it goes
+    /// out only after a Reset Endpoint has zeroed the controller's: sent to an
+    /// endpoint the controller never reset, it leaves the two ends of the pipe
+    /// disagreeing.
     ///
     /// **The only act of a recovery that puts a packet on the bus.** A command
     /// changes nothing there, which is why every command comes before it —
@@ -139,10 +143,10 @@ impl Recovery {
                 Self { halted: false, at: At::Quiesce },
                 Act::Command(Command::StopEndpoint),
             ),
-            // Already out of the way, so the ring is all that is left. Nothing
-            // is issued to move it, because Stop Endpoint against a Stopped
-            // endpoint is the Context State Error this type exists to avoid.
-            EndpointState::Stopped => (
+            // Already off its transfer, so the ring is all that is left. Nothing
+            // is issued to move it, because Stop Endpoint against either is the
+            // Context State Error this type exists to avoid.
+            EndpointState::Stopped | EndpointState::Error => (
                 Self { halted: false, at: At::Dequeue },
                 Act::Command(Command::SetDequeue),
             ),
@@ -177,6 +181,13 @@ mod tests {
     /// longest route so a sequence that grew one would run off it rather than
     /// being silently truncated into a passing comparison.
     const LONGEST: usize = 6;
+
+    const RECOVERABLE: [EndpointState; 4] = [
+        EndpointState::Halted,
+        EndpointState::Running,
+        EndpointState::Stopped,
+        EndpointState::Error,
+    ];
 
     fn route(state: EndpointState) -> Result<([Act; LONGEST], usize), NeedsConfigure> {
         let (mut seq, first) = Recovery::begin(state)?;
@@ -226,16 +237,23 @@ mod tests {
         assert_eq!(&acts[..n], [Act::Command(Command::SetDequeue), Act::Running]);
     }
 
-    /// Nothing short of Configure Endpoint takes an endpoint out of either, and
-    /// this driver does not re-configure a bound device — so the refusal has to
-    /// name the state rather than being a silent give-up.
+    /// Error is left the way Stopped is: §4.6.10 defines Set TR Dequeue Pointer
+    /// for both, and neither was halted at the device.
+    #[test]
+    fn an_endpoint_in_error_only_needs_its_ring_back() {
+        let (acts, n) = route(EndpointState::Error).expect("recoverable");
+        assert_eq!(&acts[..n], [Act::Command(Command::SetDequeue), Act::Running]);
+    }
+
+    /// No command is defined for either, so the refusal has to name the state
+    /// rather than being a silent give-up.
     #[test]
     fn disabled_and_reserved_states_are_refused_by_name() {
         assert_eq!(
             Recovery::begin(EndpointState::Disabled).err(),
             Some(NeedsConfigure(EndpointState::Disabled))
         );
-        for n in 4..=7 {
+        for n in 5..=7 {
             assert_eq!(
                 Recovery::begin(EndpointState::Unusable(n)).err(),
                 Some(NeedsConfigure(EndpointState::Unusable(n)))
@@ -248,7 +266,7 @@ mod tests {
     /// that broke, which is the failure no completion code reports.
     #[test]
     fn every_recovery_rebuilds_the_ring_exactly_once() {
-        for state in [EndpointState::Halted, EndpointState::Running, EndpointState::Stopped] {
+        for state in RECOVERABLE {
             let (acts, n) = route(state).expect("recoverable");
             let dequeues =
                 acts[..n].iter().filter(|a| **a == Act::Command(Command::SetDequeue)).count();
@@ -256,16 +274,10 @@ mod tests {
         }
     }
 
-    /// A class driver with a device-level reset of its own runs the commands
-    /// both its endpoints owe, then that reset, then whatever is left — and
-    /// that is a *split* of this sequence rather than a reordering of it only
-    /// while no command follows an act that is on the bus. Bulk-Only
-    /// Transport's `reset_recovery` is the driver of it, and if this ever grew
-    /// a command after `ClearHalt` that driver would issue it before the
-    /// CLEAR_FEATURE without saying so.
+    /// The one act on the bus is the last thing a route owes before Running.
     #[test]
     fn the_bus_is_reached_only_after_every_command() {
-        for state in [EndpointState::Halted, EndpointState::Running, EndpointState::Stopped] {
+        for state in RECOVERABLE {
             let (acts, n) = route(state).expect("recoverable");
             let Some(bus) = acts[..n].iter().position(|a| *a == Act::ClearHalt) else {
                 continue;
@@ -281,7 +293,7 @@ mod tests {
 
     #[test]
     fn only_a_halted_endpoint_is_cleared_at_the_device() {
-        for state in [EndpointState::Running, EndpointState::Stopped] {
+        for state in [EndpointState::Running, EndpointState::Stopped, EndpointState::Error] {
             let (acts, n) = route(state).expect("recoverable");
             assert!(!acts[..n].contains(&Act::ClearHalt), "{state:?} cleared a halt it never had");
         }
@@ -294,7 +306,7 @@ mod tests {
             EndpointState::Running,
             EndpointState::Halted,
             EndpointState::Stopped,
-            EndpointState::Unusable(4),
+            EndpointState::Error,
             EndpointState::Unusable(5),
             EndpointState::Unusable(6),
             EndpointState::Unusable(7),

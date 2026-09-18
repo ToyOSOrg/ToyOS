@@ -14,16 +14,17 @@ use crate::block::{BlockError, BlockResult};
 use crate::log;
 use crate::scheduler::Operation;
 use crate::time::{Budget, Deadline, Duration};
-use super::{Owed, Quiet, Restart};
+use super::{Quiet, Restart};
 use super::super::{log_unrecoverable, with_disk, Completion, Disk, StorageGeometry, Trb};
-use super::super::{TrbRing, XhciController, PAGE, TRB_CONFIGURE_EP, TRB_DISABLE_SLOT};
+use super::super::{TrbRing, XhciController, PAGE, TRB_CONFIGURE_EP, DEV_OUT_CTX};
 use super::super::{stop, CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_CTX};
+use super::super::CC_CONTEXT_STATE_ERROR;
 use super::super::{MSC_IN_RING, MSC_OUT_RING, MSC_CBW, MSC_CSW, MSC_SCRATCH, MSC_SCRATCH_LEN};
 use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS, MSC_STRIDE};
 use super::super::device::Endpoint;
 use toyos_xhci::bot::Phase;
 use toyos_xhci::recovery::NeedsConfigure;
-use toyos_xhci::reset_recovery::{Pipe, ResetRecovery, Step};
+use toyos_xhci::reset_recovery::{self, Pipe, Quiesce, Step};
 
 /// A region, not an address: the CBW's length is the region's own size, so
 /// no command can name a length its destination lacks.
@@ -46,11 +47,9 @@ const READY_BUDGET: Budget = Budget::of(
 /// second the answer the device still owed to the transfer that broke, and a
 /// third is a transport its own recovery does not bring back.
 ///
-/// **Per device, not per command.** The caller above asks again on a fresh
-/// budget after every refusal, and a count that started over with each ask
-/// let a device that was never coming back be asked, recovered and asked again
-/// for as long as the caller's own deadman ran — a hundred class resets against
-/// a device that had already lost the phase of the command it was inside.
+/// **Per device, not per command**: the run it bounds is the device's, however
+/// many callers and operations it is spread over, and only a completed round
+/// trip ends it.
 pub(in crate::drivers::xhci) const MAX_TRANSPORT_BREAKS: u8 = 3;
 
 const CBW_SIGNATURE: u32 = 0x4342_5355;
@@ -77,9 +76,8 @@ pub struct MscDevice {
     /// kept because a Reset Recovery re-creates both endpoints and has to
     /// describe them to the controller exactly as the bind did.
     pair: MscInterface,
-    /// What the port trained at, and which port: the slot context a
-    /// reconfigure carries names both.
-    speed: u8,
+    /// The root-hub port the device is on, known from the first command of its
+    /// bind — before the port itself is told which slot it holds.
     port_idx: u8,
     /// Byte offset of this device's block in its controller's DMA pool.
     block: usize,
@@ -98,6 +96,9 @@ pub struct MscDevice {
     breaks: u8,
     /// Set once the device was taken offline; the device is not spoken to again.
     failed: bool,
+    /// Set by [`XhciController::take_offline`] for a slot the poll still has to
+    /// give back; see [`Self::take_slot_owed`].
+    slot_owed: bool,
     /// Set once the device refuses SYNCHRONIZE CACHE; logged once, not per
     /// flush — a log line would itself be pending content the next flush drains.
     no_write_cache: bool,
@@ -121,6 +122,12 @@ impl MscDevice {
     /// Which slot this disk is on.
     pub fn slot_id(&self) -> u8 {
         self.slot_id
+    }
+
+    /// The port whose slot is owed back to the controller, once: the disk was
+    /// taken offline with its endpoints Stopped, and its slot is still enabled.
+    pub(in crate::drivers::xhci) fn take_slot_owed(&mut self) -> Option<u8> {
+        core::mem::take(&mut self.slot_owed).then_some(self.port_idx)
     }
 
     pub fn geometry(&self) -> StorageGeometry {
@@ -377,34 +384,71 @@ pub(in crate::drivers::xhci) mod short_read {
     }
 }
 
-/// Corrupt the signature of the next few CBWs on the disk the gate designated,
-/// so the device refuses each as BOT §6.2.1 has it — a STALL of the Bulk-Out
-/// pipe — and the transport breaks that many times running, one full Reset
-/// Recovery after each. Staged from `usb_gate` immediately before the read it
-/// is taken inside, so it lands on a known disk and a known command.
+/// Faults staged on the next few commands, from `usb_gate` immediately before
+/// the operation they are taken inside, so each lands on a known disk and a
+/// known command.
 #[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod bad_cbw {
-    use core::sync::atomic::{AtomicU8, Ordering};
+pub(in crate::drivers::xhci) mod staged {
+    use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
+
+    /// What a staged command does instead of going out well formed.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Fault {
+        /// The CBW goes out with a signature no device accepts. BOT §6.6.1 has
+        /// the device STALL the Bulk-In and either STALL the Bulk-Out or take
+        /// and discard what it is sent; QEMU's `usb-storage` STALLs the
+        /// Bulk-Out alone, so the break finds the Bulk-In Running and the
+        /// Bulk-Out Halted.
+        BadSignature = 1,
+        /// No CBW goes out, so the device is asked for bytes it holds no
+        /// command for, which QEMU's `usb-storage` answers with a STALL of the
+        /// Bulk-In: the break finds the Bulk-In Halted and the Bulk-Out Running.
+        NoCbw = 2,
+        /// Nothing is queued and the command ends as one whose port read
+        /// disconnected mid-wait does.
+        PortGone = 3,
+    }
 
     static LEFT: AtomicU8 = AtomicU8::new(0);
+    static FAULT: AtomicU8 = AtomicU8::new(0);
+    /// The one opcode the faults land on, or [`ANY`].
+    static ONLY: AtomicU16 = AtomicU16::new(ANY);
+    const ANY: u16 = u16::MAX;
 
-    /// Stage `n` refused CBWs, starting with the next one.
-    pub fn arm(n: u8) {
-        if !crate::actuator::usb_bad_cbw() {
-            return;
-        }
+    /// Stage `n` faults, starting with the next command — or, with `only`, the
+    /// next command carrying that opcode, whichever disk issues it.
+    pub fn arm(n: u8, fault: Fault, only: Option<u8>) {
+        FAULT.store(fault as u8, Ordering::Relaxed);
+        ONLY.store(only.map_or(ANY, u16::from), Ordering::Relaxed);
         LEFT.store(n, Ordering::Relaxed);
     }
 
-    /// Whether the CBW about to go out is one of the staged ones.
-    pub fn take() -> bool {
+    /// Take back whatever was staged and never taken, and say how many: a
+    /// fault left armed past the operation it was staged for lands on whichever
+    /// disk issues the next command.
+    pub fn disarm() -> u8 {
+        LEFT.swap(0, Ordering::Relaxed)
+    }
+
+    /// The fault the command about to go out was staged with, if any.
+    pub fn take(opcode: u8) -> Option<Fault> {
+        let only = ONLY.load(Ordering::Relaxed);
+        if only != ANY && only != u16::from(opcode) {
+            return None;
+        }
         let mut left = LEFT.load(Ordering::Relaxed);
         loop {
-            let Some(less) = left.checked_sub(1) else { return false };
+            let less = left.checked_sub(1)?;
             match LEFT.compare_exchange_weak(left, less, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => return true,
+                Ok(_) => break,
                 Err(now) => left = now,
             }
+        }
+        match FAULT.load(Ordering::Relaxed) {
+            1 => Some(Fault::BadSignature),
+            2 => Some(Fault::NoCbw),
+            3 => Some(Fault::PortGone),
+            _ => None,
         }
     }
 }
@@ -695,7 +739,9 @@ impl XhciController {
     /// **A break is counted against the device and not against this call**,
     /// so the run of breaks [`MAX_TRANSPORT_BREAKS`] bounds is the run the
     /// device has produced, across however many operations the caller spent
-    /// on it; a completed round trip is what ends the run.
+    /// on it; a completed round trip is what ends the run, and says so — the
+    /// call the break happened in may have ended on its budget before it
+    /// could ask again.
     #[allow(clippy::too_many_arguments)]
     fn scsi(
         &mut self,
@@ -710,7 +756,6 @@ impl XhciController {
         // Named per line so a multi-disk boot's retry log attributes to the
         // right disk.
         let slot = self.slot(dev.slot_id);
-        let mut attempt = 0u8;
         loop {
             if until.reached(crate::clock::now()) {
                 log!("usb-storage: {slot} SCSI {opcode:#04x} not issued: {}",
@@ -719,18 +764,13 @@ impl XhciController {
                 // untouched.
                 return Scsi::Budget;
             }
-            attempt += 1;
             match self.bot(dev, cdb, cdb_len, data, data_in) {
                 Ok(Bot::Done { delivered }) => {
-                    if attempt > 1 {
-                        log!("usb-storage: {slot} SCSI {opcode:#04x} completed on attempt \
-                             {attempt}");
-                    }
-                    dev.breaks = 0;
+                    self.transport_came_back(dev, opcode);
                     return Scsi::Ok { delivered };
                 }
                 Ok(Bot::Failed) => {
-                    dev.breaks = 0;
+                    self.transport_came_back(dev, opcode);
                     let (key, asc, ascq) = self.request_sense(dev);
                     return Scsi::Refused { key, asc, ascq };
                 }
@@ -764,54 +804,55 @@ impl XhciController {
         }
     }
 
+    /// A round trip completed: the run of breaks is over, and the log says so
+    /// where there was one.
+    fn transport_came_back(&mut self, dev: &mut MscDevice, opcode: u8) {
+        let breaks = core::mem::take(&mut dev.breaks);
+        if breaks > 0 {
+            log!("usb-storage: {} SCSI {opcode:#04x} completed after {breaks} break(s) running; \
+                 the transport came back and the count is cleared", self.slot(dev.slot_id));
+        }
+    }
+
     /// Take the device off the bus this kernel drives, once the class's own
-    /// recovery has failed it or been spent on it.
+    /// recovery has failed it or been spent on it. Every operation on the disk
+    /// is refused from here.
     ///
-    /// **The one rung the protocol has past Reset Recovery is the bus reset**:
-    /// PORTSC.PR drives reset signalling on the port (xHCI 1.2 §4.19.5), which
-    /// returns the device to its Default state and with it abandons whatever
-    /// command it was holding (USB 2.0 §9.1.1.5). A device left instead where
-    /// the last break found it — inside a command, one pipe halted at its end —
-    /// holds that state until something resets the bus, and on a machine whose
-    /// ports never lose power that is the next host's problem. Then the slot
-    /// goes back to the controller (§4.6.4), and the port keeps its belief that
-    /// something is attached with no slot behind it, as a HID device let go
-    /// does, so nothing enumerates the device again every debounce. Every
-    /// operation on the disk is refused from here.
+    /// **Both endpoints Stopped first, then the bus reset, then the slot.**
+    /// PORTSC.PR drives reset signalling on the port and leaves the device in
+    /// its Default state (xHCI 1.2 §4.19.5): the one rung past Reset Recovery,
+    /// and what a machine whose ports never lose power otherwise leaves to the
+    /// next host. Disable Slot is defined only over endpoints that are Stopped
+    /// or have nothing to run (§4.6.4's note), and a third break leaves one
+    /// Halted or mid-transfer — so a pair that cannot be Stopped keeps its slot
+    /// until the unplug.
+    ///
+    /// **The slot is given back by whoever the port says holds it.** A bound
+    /// disk's goes back from the poll ([`MscDevice::take_slot_owed`]), with the
+    /// port left believing something is attached so nothing enumerates the
+    /// device again every debounce. A disk still inside its bind holds no slot
+    /// as far as its port knows: the bind fails and `device::refuse` gives back
+    /// the slot it was enumerating on, once.
     fn take_offline(&mut self, dev: &mut MscDevice) {
         dev.failed = true;
-        let slot_id = dev.slot_id;
-        let slot = self.slot(slot_id);
-        let port = self.port_of_slot(slot_id);
-        let reset = match port {
-            Some(port_idx) => {
-                let portsc = self.read_portsc(port_idx);
-                // PR on a port with nothing connected is a write the controller
-                // ignores (§5.4.8), so the wait below would only spend its bound.
-                if portsc.connected() {
-                    self.write_portsc(port_idx, portsc.neutral().resetting());
-                    super::settles(|| !self.read_portsc(port_idx).in_reset())
-                } else {
-                    false
-                }
-            }
-            None => false,
+        let slot = self.slot(dev.slot_id);
+        let port_idx = dev.port_idx;
+        let stopped = self.quiesce_bulk_pair(dev, "stopping it before its slot goes back");
+        let portsc = self.read_portsc(port_idx);
+        let reset = portsc.connected() && {
+            self.write_portsc(port_idx, portsc.neutral().resetting());
+            super::settles(|| !self.read_portsc(port_idx).in_reset())
         };
-        let mut disable = Trb::ZERO;
-        disable.control = TRB_DISABLE_SLOT | (u32::from(slot_id) << 24);
-        let disabled = self.run_command(disable, "Disable Slot");
-        if disabled {
-            // After the command, never before: the controller may still be
-            // writing the output context until it completes.
-            self.write_dcbaa(usize::from(slot_id), 0);
-        }
-        if let Some(port_idx) = port {
-            self.ports[usize::from(port_idx)].take_slot();
-        }
+        dev.slot_owed = stopped;
         log!(
-            "usb-storage: {slot} is offline: port {} reset={reset}, slot disabled={disabled}; \
-             every operation on it is refused from here",
-            port.map_or(0, |p| u32::from(p) + 1)
+            "usb-storage: {slot} is offline: both bulk endpoints Stopped={stopped}, port {} \
+             reset={reset}, {}; every operation on it is refused from here",
+            u32::from(port_idx) + 1,
+            if stopped {
+                "its slot goes back to the controller"
+            } else {
+                "its slot is kept until the unplug"
+            }
         );
     }
 
@@ -887,6 +928,13 @@ impl XhciController {
             None => (0, 0),
         };
 
+        #[cfg(feature = "boot-actuators")]
+        let staged = staged::take(cdb.first().copied().unwrap_or(0));
+        #[cfg(feature = "boot-actuators")]
+        if staged == Some(staged::Fault::PortGone) {
+            return Err(Broke::Silence { phase: "command", why: Quiet::Gone });
+        }
+
         let dma = self.dma();
         let tag = dev.next_tag();
         #[cfg(feature = "stack-witness")]
@@ -902,10 +950,8 @@ impl XhciController {
         cbw.write::<u8>(13, 0); // LUN 0: this driver binds one logical unit
         cbw.write::<u8>(14, cdb_len);
         cbw.copy_from(15, &cdb[..cdb_len as usize]);
-        // A signature the device shall refuse (BOT §6.2.1), so the command
-        // phase stalls on a device that is otherwise answering.
         #[cfg(feature = "boot-actuators")]
-        if bad_cbw::take() {
+        if staged == Some(staged::Fault::BadSignature) {
             cbw.write::<u32>(0, 0);
         }
 
@@ -925,7 +971,13 @@ impl XhciController {
         });
 
         let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
-        self.framed_phase(dev, false, cbw_phys, CBW_LEN, Phase::Command, &open)?;
+        #[cfg(feature = "boot-actuators")]
+        let withheld = staged == Some(staged::Fault::NoCbw);
+        #[cfg(not(feature = "boot-actuators"))]
+        let withheld = false;
+        if !withheld {
+            self.framed_phase(dev, false, cbw_phys, CBW_LEN, Phase::Command, &open)?;
+        }
 
         // What the controller says reached the buffer; checked against the
         // CSW's residue below.
@@ -1094,11 +1146,10 @@ impl XhciController {
     /// owes ahead of it: `toyos_xhci::reset_recovery` decides the steps and
     /// this takes them, one blocking command or control transfer at a time.
     ///
-    /// `true` when every step took. A command that did not ends the plan,
-    /// since the requests after it assume both endpoints are off their
-    /// transfers; a request that did not is followed by the rest, because
-    /// leaving one pipe uncleared over another request's failure would make a
-    /// recoverable device permanently offline.
+    /// `true` when every step took. A command that did not ends it, since the
+    /// requests after it assume both endpoints are off their transfers; a
+    /// request that did not is followed by the rest, so the device is left
+    /// with both pipes cleared whatever the caller then does with it.
     fn reset_recovery(&mut self, dev: &mut MscDevice) -> bool {
         #[cfg(feature = "boot-actuators")]
         let staged = reset_break::begin();
@@ -1111,28 +1162,13 @@ impl XhciController {
     }
 
     fn run_reset_recovery(&mut self, dev: &mut MscDevice) -> bool {
+        if !self.quiesce_bulk_pair(dev, "recovering") {
+            return false;
+        }
         let slot = self.slot(dev.slot_id);
-        let (in_dci, out_dci) = (dev.in_dci(), dev.out_dci());
-        let in_state = self.endpoint_state(dev.dev_block, in_dci);
-        let out_state = self.endpoint_state(dev.dev_block, out_dci);
-        log!("xHCI: {slot} endpoint {in_dci} is {in_state}, recovering");
-        log!("xHCI: {slot} endpoint {out_dci} is {out_state}, recovering");
-        let plan = match ResetRecovery::plan(in_state, out_state) {
-            Ok(plan) => plan,
-            Err((pipe, NeedsConfigure(state))) => {
-                log_unrecoverable(slot, dev.dci(pipe), state);
-                return false;
-            }
-        };
         let mut recovered = true;
-        for step in plan.steps() {
-            let took = match *step {
-                Step::Command(cmd, pipe) => {
-                    let (slot_id, dci) = (dev.slot_id, dev.dci(pipe));
-                    let (ring, ring_at) = dev.ring_mut(pipe);
-                    let trb = self.recovery_trb(cmd, slot_id, dci, ring, ring_at);
-                    self.run_command(trb, cmd.name())
-                }
+        for step in reset_recovery::AFTER_QUIESCE {
+            let took = match step {
                 Step::Reconfigure => self.reconfigure_bulk_pair(dev),
                 Step::MassStorageReset => {
                     let (slot_id, block, iface) = (dev.slot_id, dev.dev_block, dev.pair.iface_num);
@@ -1145,53 +1181,121 @@ impl XhciController {
                     reset.done()
                 }
                 Step::ClearHalt(pipe) => {
-                    let owed = Owed::ClearHalt { ep_addr: dev.ep_addr(pipe) };
-                    self.clear_endpoint_halt(dev.slot_id, dev.dev_block, &mut dev.ep0_ring, owed)
+                    let ep_addr = dev.ep_addr(pipe);
+                    self.clear_endpoint_halt(dev.slot_id, dev.dev_block, &mut dev.ep0_ring, ep_addr)
                 }
             };
             if !took {
                 recovered = false;
-                if matches!(step, Step::Command(..) | Step::Reconfigure) {
+                if step == Step::Reconfigure {
                     break;
                 }
             }
         }
+        if recovered {
+            log!("usb-storage: {slot} Reset Recovery took: both bulk endpoints re-created, the \
+                 Bulk-Only reset and both clears answered");
+        }
         recovered
+    }
+
+    /// Both bulk endpoints to Stopped, one command per look at their states;
+    /// `toyos_xhci::reset_recovery` is where the looks and their bound are
+    /// decided. `why` ends the line that names each endpoint's state.
+    fn quiesce_bulk_pair(&mut self, dev: &mut MscDevice, why: &str) -> bool {
+        let slot = self.slot(dev.slot_id);
+        for look in 0..reset_recovery::MOST_LOOKS {
+            let in_state = self.endpoint_state(dev.dev_block, dev.in_dci());
+            let out_state = self.endpoint_state(dev.dev_block, dev.out_dci());
+            if look == 0 {
+                log!("xHCI: {slot} endpoint {} is {in_state}, {why}", dev.in_dci());
+                log!("xHCI: {slot} endpoint {} is {out_state}, {why}", dev.out_dci());
+            }
+            let (cmd, pipe) = match reset_recovery::quiesce(in_state, out_state) {
+                Ok(Quiesce::Stopped) => return true,
+                Ok(Quiesce::Command(cmd, pipe)) => (cmd, pipe),
+                Err((pipe, NeedsConfigure(state))) => {
+                    log_unrecoverable(slot, dev.dci(pipe), state);
+                    return false;
+                }
+            };
+            let (slot_id, dci) = (dev.slot_id, dev.dci(pipe));
+            let (ring, ring_at) = dev.ring_mut(pipe);
+            let trb = self.recovery_trb(cmd, slot_id, dci, ring, ring_at);
+            match self.command_code(trb, cmd.name()) {
+                Some(CC_SUCCESS) => {}
+                // The endpoint left the state the look saw before the command
+                // reached it; the next look reads where it went.
+                Some(CC_CONTEXT_STATE_ERROR) => log!(
+                    "xHCI: {slot} endpoint {dci} left {} under the look: {} answered {}; looking \
+                     again",
+                    if pipe == Pipe::In { in_state } else { out_state },
+                    cmd.name(),
+                    Completion(CC_CONTEXT_STATE_ERROR)
+                ),
+                Some(code) => {
+                    log!("xHCI: {} failed: {}", cmd.name(), Completion(code));
+                    return false;
+                }
+                None => return false,
+            }
+        }
+        log!("xHCI: {slot} bulk pair is not Stopped after {} looks", reset_recovery::MOST_LOOKS);
+        false
     }
 
     /// Configure Endpoint with both bulk endpoints dropped and added, on fresh
     /// rings (xHCI 1.2 §4.6.6): they come back Running at their rings' first
-    /// TRB with their data toggle or sequence number zeroed (§4.8.1), which is
-    /// what the ClearFeature(ENDPOINT_HALT) the device is about to get does at
-    /// its end. The input context is the bind's own writer's, so the pair is
-    /// described exactly as it was configured.
+    /// TRB with their data toggle or sequence number zeroed, which is what the
+    /// ClearFeature(ENDPOINT_HALT) the device is about to get does at its end.
+    /// The input context is the bind's own writer's, so the pair is described
+    /// exactly as it was configured.
+    ///
+    /// **The controller's own word is read back and printed, not judged.** No
+    /// doorbell has been rung on either ring, so an endpoint the output context
+    /// calls Running is one the command added. The field lags the endpoint
+    /// (§4.8.3), so a disk is not taken offline on it: the next transfer is
+    /// what says whether the pair runs.
     fn reconfigure_bulk_pair(&mut self, dev: &mut MscDevice) -> bool {
         let dma = self.dma();
         dev.in_ring = TrbRing::init(dma.subview(dev.block + MSC_IN_RING, PAGE));
         dev.out_ring = TrbRing::init(dma.subview(dev.block + MSC_OUT_RING, PAGE));
         let input_ctx = bulk_pair_input_context(
             self,
-            dev.speed,
-            dev.port_idx,
             &dev.pair,
             &dev.in_ring,
             &dev.out_ring,
-            Configure::Again,
+            Configure::Again { dev_block: dev.dev_block },
         );
         let mut configure = Trb::ZERO;
         configure.param = input_ctx.device_addr();
         configure.control = TRB_CONFIGURE_EP | (u32::from(dev.slot_id) << 24);
-        self.run_command(configure, "Configure Endpoint (the bulk pair dropped and added)")
+        if !self.run_command(configure, "Configure Endpoint (the bulk pair dropped and added)") {
+            return false;
+        }
+        let in_state = self.endpoint_state(dev.dev_block, dev.in_dci());
+        let out_state = self.endpoint_state(dev.dev_block, dev.out_dci());
+        let slot = self.slot(dev.slot_id);
+        log!("xHCI: {slot} bulk pair dropped and added: endpoint {} is {in_state}, endpoint {} is \
+             {out_state}", dev.in_dci(), dev.out_dci());
+        true
     }
 }
 
 /// Whether a bulk pair's input context creates the endpoints or re-creates
-/// them: the second sets the Drop flags beside the Add flags, which is the
-/// form that resets an endpoint's toggle or sequence number (xHCI 1.2 §4.8.1).
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// them.
+#[derive(Clone, Copy)]
 enum Configure {
-    First,
-    Again,
+    /// The bind: the slot context names what the port trained at and which
+    /// port it is.
+    First { speed: u8, port_idx: u8 },
+    /// A recovery: the Drop flags are set beside the Add flags, which is the
+    /// form that zeroes an endpoint's toggle or sequence number (xHCI 1.2
+    /// §4.6.8's note), and the slot context is the controller's own, copied
+    /// out of the device's output context — a Configure Endpoint evaluates its
+    /// Context Entries and hub fields only (§6.2.2.2), and what it ignores is
+    /// then what the controller already holds.
+    Again { dev_block: usize },
 }
 
 /// The input context that configures a device's bulk pair: its two endpoint
@@ -1202,8 +1306,6 @@ enum Configure {
 /// would be a second, disagreeing device on the same slot.
 fn bulk_pair_input_context(
     ctrl: &XhciController,
-    speed: u8,
-    port_idx: u8,
     info: &MscInterface,
     in_ring: &TrbRing,
     out_ring: &TrbRing,
@@ -1215,13 +1317,22 @@ fn bulk_pair_input_context(
     let endpoints = (1u32 << in_dci) | (1u32 << out_dci);
     // Drop flags in dword 0, Add flags in dword 1; A0 names the slot context
     // every Configure Endpoint evaluates, and D0/D1 stay clear (§6.2.5.1).
-    if configure == Configure::Again {
-        ctrl.write_ctx32(input_ctx, 0, 0, endpoints);
-    }
     ctrl.write_ctx32(input_ctx, 0, 1, 1 | endpoints);
-    let max_dci = in_dci.max(out_dci) as u32;
-    ctrl.write_ctx32(input_ctx, 1, 0, ((speed as u32) << 20) | (max_dci << 27));
-    ctrl.write_ctx32(input_ctx, 1, 1, (port_idx as u32 + 1) << 16);
+    let entries = (in_dci.max(out_dci) as u32) << 27;
+    match configure {
+        Configure::First { speed, port_idx } => {
+            ctrl.write_ctx32(input_ctx, 1, 0, ((speed as u32) << 20) | entries);
+            ctrl.write_ctx32(input_ctx, 1, 1, (port_idx as u32 + 1) << 16);
+        }
+        Configure::Again { dev_block } => {
+            ctrl.write_ctx32(input_ctx, 0, 0, endpoints);
+            for dword in 0..4 {
+                let held = dma.read::<u32>(dev_block + DEV_OUT_CTX + dword * 4);
+                let field = if dword == 0 { (held & !(0x1F << 27)) | entries } else { held };
+                ctrl.write_ctx32(input_ctx, 1, dword, field);
+            }
+        }
+    }
 
     // EP Type 2=Bulk Out, 6=Bulk In, CErr 3; Average TRB Length is advisory,
     // so the endpoint's own max packet size is used instead.
@@ -1255,9 +1366,7 @@ pub(in crate::drivers::xhci) struct MscRings {
     block: usize,
     in_ring: TrbRing,
     out_ring: TrbRing,
-    /// What the slot context named, carried so a recovery re-creating the
-    /// pair names the same.
-    speed: u8,
+    /// The port the device is on, which taking it offline resets.
     port_idx: u8,
 }
 
@@ -1282,8 +1391,9 @@ pub(in crate::drivers::xhci) fn prepare(
     let dma = ctrl.dma();
     let in_ring = TrbRing::init(dma.subview(block + MSC_IN_RING, PAGE));
     let out_ring = TrbRing::init(dma.subview(block + MSC_OUT_RING, PAGE));
-    bulk_pair_input_context(ctrl, speed, port_idx, info, &in_ring, &out_ring, Configure::First);
-    Some(MscRings { at, block, in_ring, out_ring, speed, port_idx })
+    let first = Configure::First { speed, port_idx };
+    bulk_pair_input_context(ctrl, info, &in_ring, &out_ring, first);
+    Some(MscRings { at, block, in_ring, out_ring, port_idx })
 }
 
 /// Ask the disk what it is and register it if it's one this driver serves.
@@ -1301,11 +1411,10 @@ pub(in crate::drivers::xhci) fn bind(
     rings: MscRings,
     info: &MscInterface,
 ) -> bool {
-    let MscRings { at, block, in_ring, out_ring, speed, port_idx } = rings;
+    let MscRings { at, block, in_ring, out_ring, port_idx } = rings;
     let mut dev = MscDevice {
         slot_id,
         pair: *info,
-        speed,
         port_idx,
         block,
         dev_block,
@@ -1318,6 +1427,7 @@ pub(in crate::drivers::xhci) fn bind(
         blocks: 0,
         breaks: 0,
         failed: false,
+        slot_owed: false,
         no_write_cache: false,
     };
 

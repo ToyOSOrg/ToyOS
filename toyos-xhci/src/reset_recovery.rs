@@ -5,26 +5,31 @@
 //! three requests, in order: a Bulk-Only Mass Storage Reset (§3.1), a
 //! ClearFeature(ENDPOINT_HALT) to the Bulk-In endpoint, and one to the
 //! Bulk-Out. **The second and third are not conditional on a halt.** A
-//! ClearFeature(ENDPOINT_HALT) reinitialises the device's data toggle
-//! (USB 2.0 §9.4.5) or sequence number (USB 3.2 §9.4.5) whether the endpoint
-//! was halted or not, so after it the device expects the host to start both
-//! pipes at zero — and a host that cleared only the pipe its controller had
-//! halted leaves the other pipe's two ends disagreeing, which is a transfer
-//! the device answers with no valid handshake.
+//! ClearFeature(ENDPOINT_HALT) reinitialises the device's data toggle whether
+//! the endpoint was halted or not (USB 2.0 §9.4.5), so after it the device
+//! expects the host to start both pipes at zero.
 //!
 //! What the host owes for that is two things per endpoint. First, taking it
-//! out of the state it broke in: Reset Endpoint from Halted (xHCI 1.2 §4.6.8),
-//! Stop Endpoint from Running (§4.6.9), nothing from Stopped. Second, zeroing
-//! its own toggle or sequence number to match the device's, which for an
-//! endpoint that is not Halted only a Configure Endpoint with the Drop and Add
-//! flags set does (§4.8.1): one such command re-creates both endpoints Running
-//! on fresh rings, so no Set TR Dequeue Pointer is owed either.
+//! off whatever it was running, to Stopped: Reset Endpoint from Halted (xHCI
+//! 1.2 §4.6.8), Stop Endpoint from Running (§4.6.9), Set TR Dequeue Pointer
+//! from Error (§4.6.10), nothing from Stopped. Second, zeroing its own toggle
+//! or sequence number to match the device's, which for an endpoint that is not
+//! Halted a Configure Endpoint with the Drop and Add flags set does (§4.6.8's
+//! note, which defines it from Stopped): one such command re-creates both
+//! endpoints Running on fresh rings.
+//!
+//! **One command per look, and the look after it decides the next.** The
+//! Endpoint State field is the controller's and moves without the driver: a
+//! transfer the driver stopped waiting for can still error, which turns
+//! Running into Halted between the look and the Stop Endpoint chosen from it,
+//! and the controller answers that command with a Context State Error
+//! (§4.8.3). A sequence planned from one look goes wrong there on a race and
+//! not on a device fact, so [`quiesce`] is asked again after every answer, at
+//! most [`MOST_LOOKS`] times.
 //!
 //! **Every command before the first request.** A request reaches the device
-//! and a command does not. A device still holding the transfer the host
-//! stopped waiting for answers it when next asked, and that answer landing on
-//! a state machine the class reset has already rewound undoes the reset — so
-//! the commands, which end every transfer on the host side, all come first.
+//! and a command does not, so the commands, which end every transfer on the
+//! host side, all come first.
 
 use crate::recovery::{Command, EndpointState, NeedsConfigure};
 
@@ -35,17 +40,46 @@ pub enum Pipe {
     Out,
 }
 
-/// One step of the recovery, in the order [`ResetRecovery::steps`] hands them
-/// out.
+/// What one look at the pair's two states asks of the driver.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Quiesce {
+    /// Issue this against this pipe, then look again whatever it answered.
+    Command(Command, Pipe),
+    /// Both endpoints are Stopped: [`AFTER_QUIESCE`] is what is left.
+    Stopped,
+}
+
+/// Looks a quiesce gets. Each pipe costs at most two commands — the one its
+/// state asked for, and the one that answers the state an error moved it to
+/// under that look — and the fifth look is the one that finds both Stopped.
+pub const MOST_LOOKS: u8 = 5;
+
+/// The next command that takes the pair towards Stopped, Bulk-In first, or a
+/// refusal naming the endpoint no command is defined for.
+pub fn quiesce(
+    in_state: EndpointState,
+    out_state: EndpointState,
+) -> Result<Quiesce, (Pipe, NeedsConfigure)> {
+    for (pipe, state) in [(Pipe::In, in_state), (Pipe::Out, out_state)] {
+        let cmd = match state {
+            EndpointState::Halted => Command::ResetEndpoint,
+            EndpointState::Running => Command::StopEndpoint,
+            EndpointState::Error => Command::SetDequeue,
+            EndpointState::Stopped => continue,
+            EndpointState::Disabled | EndpointState::Unusable(_) => {
+                return Err((pipe, NeedsConfigure(state)))
+            }
+        };
+        return Ok(Quiesce::Command(cmd, pipe));
+    }
+    Ok(Quiesce::Stopped)
+}
+
+/// One step of the recovery once both endpoints are Stopped.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Step {
-    /// A command against one endpoint, which the controller answers and the
-    /// device never sees. Never [`Command::SetDequeue`]: the reconfigure below
-    /// places both rings.
-    Command(Command, Pipe),
     /// Configure Endpoint with both bulk endpoints dropped and added, on fresh
-    /// rings, which is what zeroes the host's toggle or sequence number for an
-    /// endpoint that was not Halted (xHCI 1.2 §4.8.1).
+    /// rings.
     Reconfigure,
     /// The Bulk-Only Mass Storage Reset (BOT §3.1, §5.3.4 (a)).
     MassStorageReset,
@@ -53,72 +87,68 @@ pub enum Step {
     ClearHalt(Pipe),
 }
 
-/// The most steps a plan holds: one command per pipe, the reconfigure, the
-/// class reset and one clear per pipe.
-const MOST: usize = 6;
-
-/// One device's Reset Recovery, as the steps still to take.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ResetRecovery {
-    steps: [Step; MOST],
-    len: u8,
-}
-
-impl ResetRecovery {
-    /// The recovery a device whose bulk pair is in these two states needs, or
-    /// a refusal naming the endpoint no sequence of commands takes back.
-    pub fn plan(
-        in_state: EndpointState,
-        out_state: EndpointState,
-    ) -> Result<Self, (Pipe, NeedsConfigure)> {
-        let quiesce_in = quiesce(in_state).map_err(|why| (Pipe::In, why))?;
-        let quiesce_out = quiesce(out_state).map_err(|why| (Pipe::Out, why))?;
-        let mut steps = [Step::Reconfigure; MOST];
-        let mut len = 0usize;
-        let mut push = |step: Step| {
-            steps[len] = step;
-            len += 1;
-        };
-        if let Some(cmd) = quiesce_in {
-            push(Step::Command(cmd, Pipe::In));
-        }
-        if let Some(cmd) = quiesce_out {
-            push(Step::Command(cmd, Pipe::Out));
-        }
-        push(Step::Reconfigure);
-        push(Step::MassStorageReset);
-        push(Step::ClearHalt(Pipe::In));
-        push(Step::ClearHalt(Pipe::Out));
-        Ok(Self { steps, len: len as u8 })
-    }
-
-    /// The steps, in the order they are taken.
-    pub fn steps(&self) -> &[Step] {
-        &self.steps[..usize::from(self.len)]
-    }
-}
-
-/// The command that takes one endpoint out of the state it broke in, or none
-/// where it is already out of the way.
-fn quiesce(state: EndpointState) -> Result<Option<Command>, NeedsConfigure> {
-    match state {
-        EndpointState::Halted => Ok(Some(Command::ResetEndpoint)),
-        EndpointState::Running => Ok(Some(Command::StopEndpoint)),
-        // Stop Endpoint against a Stopped endpoint is a Context State Error
-        // (§4.6.9), and the reconfigure needs nothing more from it.
-        EndpointState::Stopped => Ok(None),
-        state @ (EndpointState::Disabled | EndpointState::Unusable(_)) => {
-            Err(NeedsConfigure(state))
-        }
-    }
-}
+/// What follows the quiesce, in the order it is taken: the one command left,
+/// then the class's three requests.
+pub const AFTER_QUIESCE: [Step; 4] = [
+    Step::Reconfigure,
+    Step::MassStorageReset,
+    Step::ClearHalt(Pipe::In),
+    Step::ClearHalt(Pipe::Out),
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const RECOVERABLE: [EndpointState; 3] =
-        [EndpointState::Halted, EndpointState::Running, EndpointState::Stopped];
+    const RECOVERABLE: [EndpointState; 4] = [
+        EndpointState::Halted,
+        EndpointState::Running,
+        EndpointState::Stopped,
+        EndpointState::Error,
+    ];
+
+    /// xHCI 1.2 §4.8.3's endpoint state machine for the three commands a
+    /// quiesce issues: the state each leaves, or `None` for the Context State
+    /// Error every other state answers with.
+    fn controller(state: EndpointState, cmd: Command) -> Option<EndpointState> {
+        match (cmd, state) {
+            (Command::ResetEndpoint, EndpointState::Halted)
+            | (Command::StopEndpoint, EndpointState::Running)
+            | (Command::SetDequeue, EndpointState::Stopped | EndpointState::Error) => {
+                Some(EndpointState::Stopped)
+            }
+            _ => None,
+        }
+    }
+
+    /// Run a quiesce against the model. `errors_under` names the pipes whose
+    /// abandoned transfer errors between the look that finds them Running and
+    /// the command chosen from it. Answers the looks taken, or `None` if the
+    /// bound ran out first.
+    fn walk(
+        mut in_state: EndpointState,
+        mut out_state: EndpointState,
+        mut errors_under: [bool; 2],
+    ) -> Option<u8> {
+        for look in 1..=MOST_LOOKS {
+            match quiesce(in_state, out_state).expect("recoverable") {
+                Quiesce::Stopped => return Some(look),
+                Quiesce::Command(cmd, pipe) => {
+                    let (state, errors) = match pipe {
+                        Pipe::In => (&mut in_state, &mut errors_under[0]),
+                        Pipe::Out => (&mut out_state, &mut errors_under[1]),
+                    };
+                    if *state == EndpointState::Running && core::mem::take(errors) {
+                        *state = EndpointState::Halted;
+                    }
+                    if let Some(next) = controller(*state, cmd) {
+                        *state = next;
+                    }
+                }
+            }
+        }
+        None
+    }
 
     fn every_pair() -> impl Iterator<Item = (EndpointState, EndpointState)> {
         RECOVERABLE
@@ -126,150 +156,78 @@ mod tests {
             .flat_map(|a| RECOVERABLE.into_iter().map(move |b| (a, b)))
     }
 
-    /// The T14's own case: the status phase babbled, so the controller halted
-    /// the Bulk-In and left the Bulk-Out Running.
+    /// Every command a look yields is one §4.8.3 defines for the state that
+    /// look saw, so a Context State Error is only ever the state having moved.
     #[test]
-    fn a_halted_in_pipe_beside_a_running_out_pipe() {
-        let plan = ResetRecovery::plan(EndpointState::Halted, EndpointState::Running)
-            .expect("recoverable");
-        assert_eq!(
-            plan.steps(),
-            [
-                Step::Command(Command::ResetEndpoint, Pipe::In),
-                Step::Command(Command::StopEndpoint, Pipe::Out),
-                Step::Reconfigure,
-                Step::MassStorageReset,
-                Step::ClearHalt(Pipe::In),
-                Step::ClearHalt(Pipe::Out),
-            ]
-        );
-    }
-
-    /// **The three requests are the class's and are unconditional**: whatever
-    /// state either endpoint was found in, the plan ends with the reset, then
-    /// the Bulk-In clear, then the Bulk-Out clear, in §5.3.4's order.
-    #[test]
-    fn every_plan_ends_with_the_classs_three_requests_in_order() {
+    fn every_command_is_defined_for_the_state_it_was_chosen_from() {
         for (a, b) in every_pair() {
-            let plan = ResetRecovery::plan(a, b).expect("recoverable");
-            let steps = plan.steps();
-            assert_eq!(
-                &steps[steps.len() - 3..],
-                [Step::MassStorageReset, Step::ClearHalt(Pipe::In), Step::ClearHalt(Pipe::Out)],
-                "{a:?}/{b:?}: {steps:?}"
-            );
-        }
-    }
-
-    /// A ClearFeature(ENDPOINT_HALT) zeroes the device's toggle or sequence
-    /// number on both pipes, so the host has to zero its own for both — which
-    /// is one reconfigure, and it comes after every quiesce and before every
-    /// request.
-    #[test]
-    fn every_plan_reconfigures_both_pipes_exactly_once_between_the_halves() {
-        for (a, b) in every_pair() {
-            let plan = ResetRecovery::plan(a, b).expect("recoverable");
-            let steps = plan.steps();
-            let at = steps.iter().position(|s| *s == Step::Reconfigure).expect("a reconfigure");
-            assert_eq!(steps.iter().filter(|s| **s == Step::Reconfigure).count(), 1, "{steps:?}");
-            assert!(
-                steps[..at].iter().all(|s| matches!(s, Step::Command(..))),
-                "{a:?}/{b:?}: a request before the reconfigure: {steps:?}"
-            );
-            assert!(
-                steps[at + 1..].iter().all(|s| !matches!(s, Step::Command(..))),
-                "{a:?}/{b:?}: a command after the reconfigure: {steps:?}"
-            );
-        }
-    }
-
-    /// **The bus is reached only after every command.** A command ends a
-    /// transfer on the host side; a request is what the device answers, and a
-    /// device still answering an ended transfer would undo the reset.
-    #[test]
-    fn the_bus_is_reached_only_after_every_command() {
-        for (a, b) in every_pair() {
-            let steps = ResetRecovery::plan(a, b).expect("recoverable");
-            let steps = steps.steps();
-            let first_request = steps
-                .iter()
-                .position(|s| matches!(s, Step::MassStorageReset | Step::ClearHalt(_)))
-                .expect("a request");
-            let last_command = steps
-                .iter()
-                .rposition(|s| matches!(s, Step::Command(..) | Step::Reconfigure))
-                .expect("a command");
-            assert!(last_command < first_request, "{a:?}/{b:?}: {steps:?}");
-        }
-    }
-
-    /// Which command takes an endpoint out of its state is the state's alone:
-    /// Reset Endpoint is defined only for Halted (§4.6.8) and Stop Endpoint
-    /// only for Running (§4.6.9), and a Stopped endpoint gets neither.
-    #[test]
-    fn each_pipe_gets_the_one_command_its_state_permits() {
-        for (a, b) in every_pair() {
-            let plan = ResetRecovery::plan(a, b).expect("recoverable");
-            for (pipe, state) in [(Pipe::In, a), (Pipe::Out, b)] {
-                let mut commands = plan.steps().iter().filter_map(|s| match s {
-                    Step::Command(cmd, on) if *on == pipe => Some(*cmd),
-                    _ => None,
-                });
-                let want = match state {
-                    EndpointState::Halted => Some(Command::ResetEndpoint),
-                    EndpointState::Running => Some(Command::StopEndpoint),
-                    EndpointState::Stopped => None,
-                    _ => unreachable!(),
-                };
-                assert_eq!(commands.next(), want, "{pipe:?} in {state:?}");
-                assert_eq!(commands.next(), None, "{pipe:?} in {state:?} got a second command");
+            if let Quiesce::Command(cmd, pipe) = quiesce(a, b).expect("recoverable") {
+                let state = if pipe == Pipe::In { a } else { b };
+                assert!(controller(state, cmd).is_some(), "{cmd:?} against {state:?}");
             }
         }
     }
 
-    /// The reconfigure places both rings, so a Set TR Dequeue Pointer would be
-    /// a second placement of a ring the controller was just handed.
+    /// Whatever pair a break leaves, and whichever pipes error under their
+    /// look, the pair is Stopped inside the bound.
     #[test]
-    fn no_plan_sets_a_dequeue_pointer() {
+    fn every_pair_is_stopped_inside_the_bound_whichever_pipes_error_under_the_look() {
         for (a, b) in every_pair() {
-            let plan = ResetRecovery::plan(a, b).expect("recoverable");
-            assert!(
-                !plan.steps().iter().any(|s| matches!(s, Step::Command(Command::SetDequeue, _))),
-                "{a:?}/{b:?}: {:?}",
-                plan.steps()
-            );
+            for errors_under in [[false, false], [true, false], [false, true], [true, true]] {
+                assert!(
+                    walk(a, b, errors_under).is_some(),
+                    "{a:?}/{b:?} with {errors_under:?} is not Stopped in {MOST_LOOKS} looks"
+                );
+            }
         }
+    }
+
+    /// The bound is the worst case and not a margin over it: both pipes
+    /// Running and both erroring under their look spends every look.
+    #[test]
+    fn the_bound_is_the_worst_case() {
+        let worst = walk(EndpointState::Running, EndpointState::Running, [true, true]);
+        assert_eq!(worst, Some(MOST_LOOKS));
+    }
+
+    /// A pair with nothing to move costs one look and no command.
+    #[test]
+    fn a_stopped_pair_is_asked_nothing() {
+        assert_eq!(
+            quiesce(EndpointState::Stopped, EndpointState::Stopped),
+            Ok(Quiesce::Stopped)
+        );
+    }
+
+    /// Bulk-In first, so the order the record shows is the order taken.
+    #[test]
+    fn the_in_pipe_is_quiesced_before_the_out_pipe() {
+        assert_eq!(
+            quiesce(EndpointState::Halted, EndpointState::Running),
+            Ok(Quiesce::Command(Command::ResetEndpoint, Pipe::In))
+        );
+        assert_eq!(
+            quiesce(EndpointState::Stopped, EndpointState::Running),
+            Ok(Quiesce::Command(Command::StopEndpoint, Pipe::Out))
+        );
     }
 
     /// An endpoint in a state no command leaves is refused by name, naming the
     /// pipe, and the other pipe's state does not rescue it.
     #[test]
     fn a_disabled_or_reserved_endpoint_refuses_the_whole_recovery() {
-        for bad in [EndpointState::Disabled, EndpointState::Unusable(4), EndpointState::Unusable(7)]
+        for bad in [EndpointState::Disabled, EndpointState::Unusable(5), EndpointState::Unusable(7)]
         {
-            for good in RECOVERABLE {
-                assert_eq!(
-                    ResetRecovery::plan(bad, good),
-                    Err((Pipe::In, NeedsConfigure(bad))),
-                    "{bad:?} in"
-                );
-                assert_eq!(
-                    ResetRecovery::plan(good, bad),
-                    Err((Pipe::Out, NeedsConfigure(bad))),
-                    "{bad:?} out"
-                );
-            }
+            assert_eq!(
+                quiesce(bad, EndpointState::Stopped),
+                Err((Pipe::In, NeedsConfigure(bad))),
+                "{bad:?} in"
+            );
+            assert_eq!(
+                quiesce(EndpointState::Stopped, bad),
+                Err((Pipe::Out, NeedsConfigure(bad))),
+                "{bad:?} out"
+            );
         }
-    }
-
-    /// The array is sized for the longest plan and no plan runs off it.
-    #[test]
-    fn the_longest_plan_fills_the_array() {
-        let plan = ResetRecovery::plan(EndpointState::Halted, EndpointState::Halted)
-            .expect("recoverable");
-        assert_eq!(plan.steps().len(), MOST);
-        let plan = ResetRecovery::plan(EndpointState::Stopped, EndpointState::Stopped)
-            .expect("recoverable");
-        assert_eq!(plan.steps().len(), MOST - 2);
     }
 }

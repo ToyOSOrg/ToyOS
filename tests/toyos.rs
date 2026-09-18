@@ -1504,6 +1504,18 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // Its own boot: the first WRITE(10) the boot stick takes is abandoned
+        // mid-flight, and what is judged is the one thing QEMU's `usb-storage`
+        // cannot answer — whether a device holding a toggle, a sequence number
+        // and half a command comes back from the class's Reset Recovery on the
+        // machine's own controller.
+        "usb_transport_break",
+        metal::Metal::Runs {
+            arms: &[metal::once("usbbreak", "tests/jobcase", &["usb-transport-break"], &[])],
+            judge: |b| usb::transport_break_on_metal(&b[0].kernel(), &b[0].after_the_reset()?),
+        },
+    ),
+    (
         // Its own boot, and the one arm in this profile the machine itself is
         // the instrument for: QEMU's TCG guest has no performance counter, so
         // only here is the NMI that samples a deaf CPU the counter's own. It

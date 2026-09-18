@@ -7,8 +7,8 @@ opened: 2026-09-16
 # A disk taken offline is never brought back
 
 When a mass-storage device's transport breaks `MAX_TRANSPORT_BREAKS` times
-running, or its Reset Recovery fails, `msc::take_offline` resets its port,
-disables its slot and refuses every later operation on it. The device is at its
+running, or its Reset Recovery fails, `msc::take_offline` stops its endpoints,
+resets its port, gives its slot back and refuses every later operation on it. The device is at its
 Default state on a powered port, which is what the next host needs; this boot
 has lost the disk, and on the T14 that disk is the root filesystem, so the boot
 is over from there.
@@ -30,7 +30,7 @@ stick, which the offline path was the first step towards not wedging.
 
 ## Exit condition
 
-A QEMU boot under `usb-bad-cbw` in which the third refused CBW is followed by a
+A QEMU boot under `usb-transport-faults` in which the third refused CBW is followed by a
 device reset, the disk re-binds under its original index and the gate's later
 reads succeed; and a T14 boot whose stick stalled mid-boot that finishes with
 its mounts intact.

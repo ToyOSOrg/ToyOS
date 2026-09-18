@@ -112,6 +112,7 @@ const EVENT_PORT_STATUS_CHANGE: u32 = 34;
 const CC_SUCCESS: u32 = 1;
 const CC_STALL: u32 = 6;
 const CC_SHORT_PACKET: u32 = 13;
+const CC_CONTEXT_STATE_ERROR: u32 = 19;
 
 /// A completion code, named where xHCI 1.2 §Table 6-90 names it; an unnamed code still keeps its number.
 #[derive(Clone, Copy)]
@@ -208,7 +209,7 @@ impl core::fmt::Display for Slot {
 enum AfterSlot {
     /// A port's device has left the bus; the port may be enumerated again.
     Teardown(u8),
-    /// Given up on while still plugged in; the port stays marked attached — see [`XhciController::let_go`].
+    /// Given up on while still plugged in; the port stays marked attached — see [`XhciController::let_go`] and [`XhciController::give_back_offline_slots`].
     LetGo,
     /// Enumeration ended in refusal with the device still plugged in; the port stays attached so it is not re-enumerated every debounce.
     Refused,
@@ -280,8 +281,8 @@ fn enqueue_control(
 
 /// The line for an endpoint no sequence of commands takes back to Running.
 fn log_unrecoverable(slot: Slot, dci: u8, state: EndpointState) {
-    log!("xHCI: {slot} endpoint {dci} is {state}; nothing short of Configure Endpoint \
-         takes an endpoint out of that, and this driver does not re-configure a bound device");
+    log!("xHCI: {slot} endpoint {dci} is {state}; no command this driver issues is defined \
+         for an endpoint in that state");
 }
 
 /// How many *consecutive* transfer failures let an interrupt endpoint's device go; a delivered report clears the count.
@@ -984,6 +985,22 @@ impl XhciController {
         }
     }
 
+    /// The slot of every disk the transport took offline, back to the controller.
+    ///
+    /// From the poll and never from the disk operation that took it offline: that one runs on a faulting thread beside whatever is outstanding, and [`Self::submit_disable_slot`] is one operation at a time. The port's slot is this device's, as in [`Self::let_go`], and the pool block stays the port's until the unplug.
+    fn give_back_offline_slots(&mut self) {
+        for at in 0..MSC_BLOCKS {
+            if self.outstanding.busy() {
+                return;
+            }
+            let Some(disk) = self.msc[at].disk.as_mut() else { continue };
+            let Some(port_idx) = disk.dev.take_slot_owed() else { continue };
+            if let Some(slot) = self.ports[port_idx as usize].take_slot() {
+                self.submit_disable_slot(slot.get(), AfterSlot::LetGo);
+            }
+        }
+    }
+
     /// The command `cmd` names against (`slot_id`, `dci`), rebuilding the ring where the command is Set TR Dequeue.
     fn recovery_trb(
         &self,
@@ -1202,7 +1219,7 @@ impl XhciController {
 
     /// Ask the controller for a slot back, and record what its answer is owed.
     ///
-    /// Disable Slot takes a slot out of any state (xHCI 1.2 §4.6.4) — unlike Reset Endpoint, which is why it needs no state check first.
+    /// **The one Disable Slot site.** The slot may be in any state, but its endpoints may not: xHCI 1.2 §4.6.4's note has them Stopped, or Running with nothing to run, before the command — which a caller giving back a device that is still on the bus owes first.
     fn submit_disable_slot(&mut self, slot_id: u8, then: AfterSlot) {
         let mut disable = Trb::ZERO;
         disable.control = TRB_DISABLE_SLOT | ((slot_id as u32) << 24);
@@ -1253,6 +1270,7 @@ impl XhciController {
         // After the drain, not inside it: an answer the drain recorded is issued where nobody else waits on this ring.
         self.advance_outstanding();
         self.recover_endpoints();
+        self.give_back_offline_slots();
 
         // Nothing below reads the event ring: every step `service_ports` takes is a submit, so one advance is enough.
         let mut wake_at = None;
@@ -1549,11 +1567,27 @@ pub fn arm_mid_write_wedge(at: toyos_xhci::bot::Phase) {
     msc::mid_write::arm(at);
 }
 
-/// Refuse as many CBWs in a row as the transport gets breaks, on the disk the
-/// gate is driving, and say how many that is. See [`msc::bad_cbw`].
 #[cfg(feature = "boot-actuators")]
-pub fn arm_bad_cbws() -> u8 {
-    msc::bad_cbw::arm(msc::MAX_TRANSPORT_BREAKS);
+pub use msc::staged::Fault as StagedFault;
+
+/// Stage `n` faults on the next commands, or on the next carrying `only`'s
+/// opcode. See [`msc::staged`].
+#[cfg(feature = "boot-actuators")]
+pub fn stage_transport_faults(n: u8, fault: StagedFault, only: Option<u8>) {
+    msc::staged::arm(n, fault, only);
+}
+
+/// Take back the staged faults no command took, and say how many. See
+/// [`msc::staged::disarm`].
+#[cfg(feature = "boot-actuators")]
+pub fn disarm_transport_faults() -> u8 {
+    msc::staged::disarm()
+}
+
+/// The breaks in a row a transport gets, for a gate that stages exactly that
+/// many.
+#[cfg(feature = "boot-actuators")]
+pub fn max_transport_breaks() -> u8 {
     msc::MAX_TRANSPORT_BREAKS
 }
 
