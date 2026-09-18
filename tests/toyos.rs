@@ -737,6 +737,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // bound counted down in the guest, so `src/tiers.rs` carries it
     // `Why::TimerAnchored` and says what leaves the per-PR tier with it.
     ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
+    // The same bound ending the same machine with a device in its hands. It
+    // belongs beside the row above, and the tree refuses to be told so before
+    // CI has priced it: `src/tiers.rs`'s `validate_ci_profile` refuses a
+    // Nightly row with no CI evidence and refuses the one-run marker on a
+    // Nightly row alike, so a new name is bootstrapped Fast and re-tiered on
+    // the measurement that run produces.
+    ("usb_reset_records_the_phase_it_cut", Sched::Parallel, Tier::Nightly),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
     // bounds counted down in the guest, so it belongs beside the row above.
@@ -1489,6 +1496,30 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs {
             arms: &[metal::once("deadlinewedge", "tests/jobcase", &["wedge-before-reset"], &[])],
             judge: |b| power::deadline_wedge_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+        },
+    ),
+    (
+        // One boot: a machine writing to the stick continuously, reset out from
+        // under itself by the deadline with the controller mid-transfer, and
+        // the stick enumerable on the next host afterwards.
+        // `boot.usbload.stick_secs` is that, refused by the loop before this
+        // judge runs.
+        "usb_reset_records_the_phase_it_cut",
+        metal::Metal::Runs {
+            arms: &[metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[])],
+            judge: |b| power::usb_load_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+        },
+    ),
+    (
+        // Its own boot: the first WRITE(10) the boot stick takes is abandoned
+        // mid-flight, and what is judged is the one thing QEMU's `usb-storage`
+        // cannot answer — whether a device holding a toggle, a sequence number
+        // and half a command comes back from the class's Reset Recovery on the
+        // machine's own controller.
+        "usb_transport_break",
+        metal::Metal::Runs {
+            arms: &[metal::once("usbbreak", "tests/jobcase", &["usb-transport-break"], &[])],
+            judge: |b| usb::transport_break_on_metal(&b[0].kernel(), &b[0].after_the_reset()?),
         },
     ),
     (
@@ -9803,6 +9834,9 @@ fn run_machine_test(
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
         "boot_deadline_ends_a_wedge" => {
             power::boot_deadline_ends_a_wedge(test_config, c_bins, rust_bins)
+        }
+        "usb_reset_records_the_phase_it_cut" => {
+            power::usb_reset_records_the_phase_it_cut(test_config, c_bins, rust_bins)
         }
         "hard_lockup_ends_a_deaf_cpu" => {
             power::hard_lockup_ends_a_deaf_cpu(test_config, c_bins, rust_bins)

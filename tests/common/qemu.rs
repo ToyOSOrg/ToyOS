@@ -2272,6 +2272,11 @@ pub struct BootOptions {
     /// than discover it. Short lists are allowed: the disks past the end get
     /// the blank image their size would have given them anyway.
     pub usb_images: Vec<PathBuf>,
+    /// Have QEMU write every packet the first data disk is sent to this file
+    /// (`usb-storage`'s `pcap=`, usbmon's format): the bus's own record of what
+    /// a driver put on it, which no line the guest prints can be. Refused by
+    /// name on a profile with no data disk, where it would record nothing.
+    pub usb_pcap: Option<PathBuf>,
     /// What the emulated RTC reads when the machine starts, as
     /// `YYYY-MM-DDTHH:MM:SS`.
     ///
@@ -2383,6 +2388,7 @@ impl Default for BootOptions {
             nvme_image: None,
             boot_image: None,
             usb_images: Vec::new(),
+            usb_pcap: None,
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_stream: None,
@@ -4049,11 +4055,19 @@ fn qemu_command(
     // is the only thing that decides which disk the guest enumerates first.
     // Each carries a device id as well as a drive id, because a test that
     // unplugs one over QMP has to be able to name it.
+    assert!(
+        options.usb_pcap.is_none() || !shape.usb_disks.is_empty(),
+        "usb_pcap records the first data disk's traffic and this profile has no data disk"
+    );
     let data_sticks: Vec<Vec<String>> = shape
         .usb_disks
         .iter()
         .enumerate()
         .map(|(i, disk)| {
+            let pcap = match &options.usb_pcap {
+                Some(path) if i == 0 => format!(",pcap={}", path.display()),
+                _ => String::new(),
+            };
             vec![
                 "-drive".to_string(),
                 format!(
@@ -4065,7 +4079,7 @@ fn qemu_command(
                 "-device".to_string(),
                 format!(
                     "usb-storage,bus={1},drive={2},id={3},logical_block_size={0},\
-                     physical_block_size={0}",
+                     physical_block_size={0}{pcap}",
                     disk.lba_bytes,
                     shape.storage_bus,
                     usb_drive_id(i),

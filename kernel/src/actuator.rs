@@ -124,6 +124,27 @@ actuators! {
     /// Skip the waits of the next Reset Recovery's control transfers, once.
     usb_reset_break = "usb-reset-break";
 
+    /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
+    /// device holding the CBW and nothing queued for its data phase, so the
+    /// bound that ends the machine ends a device inside a Bulk-Only command.
+    /// See `usb_gate::wedge_inside_a_write`; judged by
+    /// `usb_reset_records_the_phase_it_cut`.
+    usb_wedge_data_owed = "usb-wedge-data-owed";
+
+    /// The same, stopped one step later: the data phase's TRB is on the ring
+    /// and its doorbell has not been rung.
+    usb_wedge_in_data = "usb-wedge-in-data";
+
+    /// The same, stopped after the data phase completed and before anything has
+    /// asked for the CSW.
+    usb_wedge_before_status = "usb-wedge-before-status";
+
+    /// Sweep the boot stick from the shutdown syscall so the reset lands on a
+    /// controller that is moving bytes rather than on a bus idle since the
+    /// wedge. See `usb_gate::sweep_under_load`; judged by
+    /// `usb_reset_records_the_phase_it_cut`.
+    usb_reset_under_load = "usb-reset-under-load";
+
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
@@ -138,6 +159,15 @@ actuators! {
 
     /// Under-deliver one READ(10) data phase so the byte counts disagree.
     usb_short_read = "usb-short-read";
+
+    /// Have the gate stage runs of transport faults on its disk: runs the
+    /// recovery brings back, then one as long as the transport's whole budget,
+    /// then one on the next disk to bind.
+    usb_transport_faults = "usb-transport-faults";
+
+    /// Have the gate's last read end as one whose port read disconnected
+    /// mid-wait does.
+    usb_port_gone = "usb-port-gone";
 
     /// Hold every mass-storage bulk completion back 2ms before the driver may see it.
     usb_slow_device = "usb-slow-device";
@@ -395,6 +425,8 @@ actuators! {
 const IMPLIES: &[(&str, &[&str])] = &[
     ("i8042-trace", &["i8042-fast-health", "i8042-edge-race"]),
     ("usb-short-read", &["usb-storage-gate"]),
+    ("usb-transport-faults", &["usb-storage-gate"]),
+    ("usb-port-gone", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),

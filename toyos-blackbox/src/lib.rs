@@ -97,6 +97,24 @@ pub const CACHE_LINE: usize = 64;
 /// the tail of a panel is the crash and the head is how the boot went.
 pub const TEXT_BYTES: usize = BYTES - HEADER;
 
+/// Room no report may spend, kept for the account [`Report::reopened`] writes
+/// under it.
+///
+/// **Two writers, one page, and the second runs after the first has filled it.**
+/// A report ends with [`Report::tail`], which takes every byte left; the reset
+/// that follows then has an account of its own — what it did to the machine's
+/// devices — and `reopened` on a full page writes it into no bytes at all and
+/// says nothing about having done so. That account is the only evidence there
+/// is about the reset, and a boot whose log ring overflowed the page is exactly
+/// the boot whose reset is worth reading about, so the reserve comes off the
+/// records rather than off the account.
+///
+/// An eighth of the page.
+pub const ACCOUNT_BYTES: usize = 2048;
+
+/// What a report's own head and tail may spend: [`TEXT_BYTES`] less the reserve.
+pub const REPORT_BYTES: usize = TEXT_BYTES - ACCOUNT_BYTES;
+
 /// What the last boot got as far as saying.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
@@ -242,11 +260,15 @@ fn seal_len(page: &mut [u8; BYTES], state: State, stamp: u64, identity: Identity
 pub struct Report<'a> {
     page: &'a mut [u8; BYTES],
     at: usize,
+    /// What this writer may fill to. [`REPORT_BYTES`] for a report, the whole
+    /// of [`TEXT_BYTES`] for the account that reopens one — the reserve exists
+    /// for the second and is spent by nobody else.
+    limit: usize,
 }
 
 impl<'a> Report<'a> {
     pub fn new(page: &'a mut [u8; BYTES]) -> Self {
-        Self { page, at: 0 }
+        Self { page, at: 0, limit: REPORT_BYTES }
     }
 
     /// Carry on writing a report already sealed into this page, `kept` bytes long.
@@ -258,13 +280,13 @@ impl<'a> Report<'a> {
     /// than over it. `kept` is [`recover`]'s own answer for this page; a longer
     /// one is cut to what the text area holds, so nothing here indexes past it.
     pub fn reopened(page: &'a mut [u8; BYTES], kept: usize) -> Self {
-        Self { page, at: kept.min(TEXT_BYTES) }
+        Self { page, at: kept.min(TEXT_BYTES), limit: TEXT_BYTES }
     }
 
     /// Append, dropping whatever does not fit. Nothing here indexes or unwraps:
     /// the caller may not panic.
     pub fn write(&mut self, bytes: &[u8]) {
-        let room = TEXT_BYTES.saturating_sub(self.at);
+        let room = self.limit.saturating_sub(self.at);
         let take = bytes.get(..room.min(bytes.len())).unwrap_or(&[]);
         let from = HEADER.saturating_add(self.at);
         if let Some(slot) = self.page.get_mut(from..from.saturating_add(take.len())) {
@@ -290,7 +312,7 @@ impl<'a> Report<'a> {
     /// room comes off the records to pay for it, so saying it can never be what
     /// runs the page over.
     pub fn tail(&mut self, records: &[u8], opens_a_record: &[u8]) {
-        let room = TEXT_BYTES.saturating_sub(self.at);
+        let room = self.limit.saturating_sub(self.at);
         if records.len() <= room {
             return self.write(records);
         }
@@ -321,17 +343,81 @@ impl<'a> Report<'a> {
         }
     }
 
+    /// Close the envelope over what is written **so far**, leaving this writer
+    /// able to write more.
+    ///
+    /// **For a writer that may not reach its own last statement.** The account
+    /// under a sealed report is made from the reset path, whose every step is a
+    /// bounded wait on a device; a machine that ends inside one of them leaves
+    /// every byte already written covered by no length and no checksum, so the
+    /// next boot reads the report and none of the account and nothing says a
+    /// word. Committing each line costs one pass of the checksum over the page
+    /// and makes the record say how far the reset got.
+    fn commit(&mut self, state: State, stamp: u64, identity: Identity) -> usize {
+        seal_len(self.page, state, stamp, identity, self.at);
+        self.at
+    }
+
     /// Close the envelope over what was written.
-    pub fn seal(self, state: State, stamp: u64, identity: Identity) -> usize {
-        let at = self.at;
-        seal_len(self.page, state, stamp, identity, at);
-        at
+    pub fn seal(mut self, state: State, stamp: u64, identity: Identity) -> usize {
+        self.commit(state, stamp, identity)
     }
 }
 
 impl core::fmt::Write for Report<'_> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.write(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// A writer that closes the envelope over every whole **line** it takes.
+///
+/// **Per line and not per fragment.** One `writeln!` reaches a writer as
+/// several [`core::fmt::Write::write_str`] calls — the pieces around each
+/// argument — so a writer that committed on every one of them would cover a
+/// torn line with a valid checksum, and the next boot would read half a
+/// sentence as a complete account. Nothing is covered until the newline that
+/// ends it arrives; bytes written past the last one are on the page, outside
+/// the length, and invisible to [`recover`].
+///
+/// `wrote_back` runs after each commit, because a page sealed into write-back
+/// memory and then reset over never reached DRAM ([`CACHE_LINE`]); the
+/// instruction that writes it back is the caller's, since this crate forbids
+/// unsafe code.
+pub struct Account<'a, F: FnMut()> {
+    report: Report<'a>,
+    state: State,
+    stamp: u64,
+    identity: Identity,
+    wrote_back: F,
+}
+
+impl<'a, F: FnMut()> Account<'a, F> {
+    /// Write under the report `report` was reopened on, keeping its envelope:
+    /// this extends a record rather than writing one, so the state, the stamp
+    /// and the identity are the ones already on the page.
+    pub fn new(
+        report: Report<'a>,
+        state: State,
+        stamp: u64,
+        identity: Identity,
+        wrote_back: F,
+    ) -> Self {
+        Self { report, state, stamp, identity, wrote_back }
+    }
+}
+
+impl<F: FnMut()> core::fmt::Write for Account<'_, F> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        if s.is_empty() {
+            return Ok(());
+        }
+        self.report.write(s.as_bytes());
+        if s.ends_with('\n') {
+            self.report.commit(self.state, self.stamp, self.identity);
+            (self.wrote_back)();
+        }
         Ok(())
     }
 }
@@ -556,6 +642,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use core::fmt::Write;
     use std::{format, vec};
 
     use super::*;
@@ -749,6 +836,119 @@ mod tests {
             let kept = kept_records(back);
             assert!(records.ends_with(kept), "the cut at width {width} is not a suffix");
         }
+    }
+
+    /// **The account gets its room whatever the report did with the page.**
+    /// A report that filled every byte left `reopened` nothing, and `reopened`
+    /// writes into no bytes without saying so.
+    #[test]
+    fn a_report_that_fills_the_page_still_leaves_the_account_its_room() {
+        // A size of its own and never `ACCOUNT_BYTES`, or the reserve would be
+        // asserting against itself and a reserve of nothing would pass.
+        const WIDEST_ACCOUNT: usize = 1024;
+        let mut records = std::string::String::new();
+        let mut n = 0usize;
+        while records.len() < TEXT_BYTES * 2 {
+            records.push_str(&format!("[{n:04}] {}\n", "x".repeat(60)));
+            n += 1;
+        }
+        let mut page = blank();
+        let filled = seal(&mut page, State::Wedged, STAMP, STICK, records.as_bytes());
+        assert!(
+            filled <= TEXT_BYTES - WIDEST_ACCOUNT,
+            "a report ran to {filled}, leaving under {WIDEST_ACCOUNT} B for the account"
+        );
+
+        // And the account then fits under it, whole.
+        let account = "a".repeat(WIDEST_ACCOUNT);
+        let (_, _, _, text) = recover(&page).expect("a sealed report");
+        let kept = text.len();
+        let mut report = Report::reopened(&mut page, kept);
+        report.write(account.as_bytes());
+        let len = report.seal(State::Wedged, STAMP, STICK);
+        assert_eq!(len, kept + WIDEST_ACCOUNT, "the account was cut");
+        let (state, _, _, text) = recover(&page).expect("the reopened report is still sealed");
+        assert_eq!(state, State::Wedged, "reopening changed what ended the boot");
+        assert!(
+            std::str::from_utf8(text).expect("text").ends_with(&account),
+            "the account is not the last thing on the page"
+        );
+    }
+
+    /// **An account the machine ends in the middle of is readable to where it
+    /// got, and never past it.** Every line of it is a bounded wait on a device
+    /// away from the next, and the reset follows either way.
+    ///
+    /// The two mutations this is the control on: committing on every fragment
+    /// instead of every line seals the torn last line, and committing on
+    /// neither leaves the whole account covered by nothing.
+    #[test]
+    fn an_account_cut_off_mid_line_is_readable_to_the_last_whole_line() {
+        let mut page = blank();
+        let kept = seal(&mut page, State::Wedged, STAMP, STICK, b"[0000] why\n");
+        let mut wrote_back = 0usize;
+        {
+            let mut account = Account::new(
+                Report::reopened(&mut page, kept),
+                State::Wedged,
+                STAMP,
+                STICK,
+                || wrote_back += 1,
+            );
+            // Three fragments and one newline: the pieces either side of the
+            // argument, then the argument itself.
+            let ports = 5;
+            writeln!(account, "usb-quiesce: {ports} port(s) reset")
+                .expect("a writer that cannot fail");
+            // The machine ends here, between two fragments of one line: what is
+            // written reaches the page and the newline that would cover it
+            // never arrives.
+            let bus = "00:14.0";
+            write!(account, "usb-quiesce: xHCI {bus} halted=")
+                .expect("a writer that cannot fail");
+        }
+
+        let (state, _, _, text) = recover(&page).expect("a page committed line by line");
+        assert_eq!(state, State::Wedged, "extending the record changed what ended the boot");
+        let text = std::str::from_utf8(text).expect("text");
+        assert!(text.ends_with("usb-quiesce: 5 port(s) reset\n"), "{text:?}");
+        assert!(
+            !text.contains("halted="),
+            "a line the machine was cut off inside sealed as a complete account: {text:?}"
+        );
+        // One line, one seal — not one per fragment, which is the whole of what
+        // separates a record that says how far the reset got from one that
+        // certifies half a sentence.
+        assert_eq!(wrote_back, 1);
+    }
+
+    /// The other half: a line finished later is sealed then, so an account that
+    /// runs to its end is whole on the page.
+    #[test]
+    fn every_line_is_covered_once_its_last_fragment_arrives() {
+        let mut page = blank();
+        let kept = seal(&mut page, State::Wedged, STAMP, STICK, b"[0000] why\n");
+        let mut wrote_back = 0usize;
+        {
+            let mut account = Account::new(
+                Report::reopened(&mut page, kept),
+                State::Wedged,
+                STAMP,
+                STICK,
+                || wrote_back += 1,
+            );
+            for port in 0..3 {
+                writeln!(account, "usb-quiesce: port {port} reset")
+                    .expect("a writer that cannot fail");
+            }
+        }
+
+        let (_, _, _, text) = recover(&page).expect("a sealed account");
+        let text = std::str::from_utf8(text).expect("text");
+        for port in 0..3 {
+            assert!(text.contains(&format!("usb-quiesce: port {port} reset\n")), "{text:?}");
+        }
+        assert_eq!(wrote_back, 3);
     }
 
     /// A head goes in before the tail and survives it: the crash's own message
