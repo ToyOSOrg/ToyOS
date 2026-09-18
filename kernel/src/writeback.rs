@@ -102,6 +102,15 @@ enum Drained {
 
 /// Pops one entry and flushes/tears it down under the caller's VFS lock; a budget refusal within `deadman` returns [`Drained::Owed`] instead.
 fn drain_one(vfs: &mut crate::vfs::Vfs, deadman: Deadline) -> Drained {
+    // `quiesce-drain-refuse`: `iod` passes over the queue without popping, so
+    // an entry is never in its hands when the shutdown's drain counts what is
+    // owed — which that count takes without the VFS lock this pop is under.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::quiesce_drain_refuse()
+        && crate::sched::kthread::current_is_kernel_thread()
+    {
+        return if QUEUE.lock().is_empty() { Drained::Empty } else { Drained::Owed };
+    }
     let Some(pending) = QUEUE.lock().pop_front() else {
         return Drained::Empty;
     };

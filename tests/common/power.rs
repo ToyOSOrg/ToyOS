@@ -302,7 +302,7 @@ pub fn quiesce_refuses_a_second_shutdown(
     const JOB: &str = "quiesce_twice";
     // The kernel's `mirror_refuse::SHUTDOWN_REFUSALS`, spelt here because the
     // harness cannot link the kernel.
-    const REFUSALS: usize = 6;
+    const REFUSALS: usize = 8;
     const REFUSED: &str = "quiesce-drain-refuse: refusing the shutdown drain's";
     const SECOND_CALLER: &str = "power: this machine is already stopping";
     const SYNCING: &str = "Syncing filesystems...";

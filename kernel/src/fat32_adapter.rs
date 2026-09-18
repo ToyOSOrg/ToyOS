@@ -259,9 +259,6 @@ impl BlockAccess for FatVolume {
                     );
                     return Err(IoError::BudgetExpired);
                 }
-                Some(mirror_refuse::Refused::OwedForTheShutdown) => {
-                    return Err(IoError::BudgetExpired);
-                }
                 Some(mirror_refuse::Refused::ShutdownDrain { attempt, of }) => {
                     log!(
                         "log-volume: quiesce-drain-refuse: refusing the shutdown drain's FAT-1 \
@@ -379,9 +376,8 @@ impl FatExtents {
 
 /// The two actuators that refuse a drain flush's FAT-1 mirror write as a
 /// budget expiry: `fat-mirror-write-refuse` refuses the first two, and
-/// `quiesce-drain-refuse` keeps the flush owed on `iod` and refuses it
-/// [`mirror_refuse::SHUTDOWN_REFUSALS`] times on the thread running the
-/// shutdown.
+/// `quiesce-drain-refuse` refuses it [`mirror_refuse::SHUTDOWN_REFUSALS`]
+/// times on the thread running the shutdown.
 #[cfg(feature = "boot-actuators")]
 mod mirror_refuse {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -401,19 +397,16 @@ mod mirror_refuse {
     /// 1, which merely yields — attempt 2 is the one that parks.
     const REFUSALS: u32 = 2;
 
-    /// Six: the ladder parks from attempt 2, doubling from 10 ms, so the
-    /// thread running the shutdown is parked for 310 ms in all — a window a
-    /// second caller can be put into from another CPU on any host.
-    pub const SHUTDOWN_REFUSALS: u32 = 6;
+    /// Eight: the ladder parks from attempt 2, doubling from 10 ms, so the
+    /// thread running the shutdown is parked for 1270 ms in all — a window a
+    /// second caller on another CPU lands in however loaded the host is.
+    pub const SHUTDOWN_REFUSALS: u32 = 8;
 
     #[derive(Clone, Copy)]
     pub enum Refused {
         /// `fat-mirror-write-refuse`.
         Drain,
-        /// `quiesce-drain-refuse` on `iod`: the flush stays owed, silently,
-        /// until the shutdown's own drain reaches it.
-        OwedForTheShutdown,
-        /// `quiesce-drain-refuse` on the thread running the shutdown.
+        /// `quiesce-drain-refuse`, on the thread running the shutdown.
         ShutdownDrain { attempt: u32, of: u32 },
     }
 
@@ -442,16 +435,12 @@ mod mirror_refuse {
             REFUSED.fetch_add(1, Ordering::Relaxed);
             return Some(Refused::Drain);
         }
-        if crate::actuator::quiesce_drain_refuse() {
-            if crate::sched::kthread::current_is_kernel_thread() {
-                return Some(Refused::OwedForTheShutdown);
-            }
-            if crate::quiesce::runs_the_shutdown()
-                && SHUTDOWN_REFUSED.load(Ordering::Relaxed) < SHUTDOWN_REFUSALS
-            {
-                let attempt = SHUTDOWN_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
-                return Some(Refused::ShutdownDrain { attempt, of: SHUTDOWN_REFUSALS });
-            }
+        if crate::actuator::quiesce_drain_refuse()
+            && crate::quiesce::runs_the_shutdown()
+            && SHUTDOWN_REFUSED.load(Ordering::Relaxed) < SHUTDOWN_REFUSALS
+        {
+            let attempt = SHUTDOWN_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+            return Some(Refused::ShutdownDrain { attempt, of: SHUTDOWN_REFUSALS });
         }
         None
     }
