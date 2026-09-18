@@ -1257,6 +1257,36 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
     );
 }
 
+/// The labels `arch::syscall::gate`'s `window_hold!` defines inside
+/// `syscall_entry`, which `toyos-ld` carries into `.strtab`.
+const ENTRY_HOLD_LABELS: [&str; 2] = ["syscall_entry_hold_spin", "syscall_entry_hold_end"];
+
+/// Refuse to write a shipping image whose `syscall_entry` holds for
+/// `nmi_gate`'s storm.
+///
+/// The hold is instructions inside the entry's window and no actuator's name
+/// stands next to them, so [`assert_actuators_match_features`] cannot see it;
+/// the labels are in the same macro body as the spin, and a kernel that has the
+/// one names the other. Both directions, for that function's reason: the test
+/// kernel naming both is what says the search can find them.
+fn assert_entry_hold_matches_features(features: &str, kernel: &[u8]) {
+    let want = match features {
+        "" => false,
+        f if f == TEST_KERNEL.join(",") => true,
+        _ => return,
+    };
+    let named = |label: &&str| contains_subslice(kernel, label.as_bytes());
+    let wrong: Vec<&&str> = ENTRY_HOLD_LABELS.iter().filter(|l| named(l) != want).collect();
+    assert!(
+        wrong.is_empty(),
+        "the {} kernel {} {wrong:?}, the labels of the hold `window_hold!` spins inside \
+         `syscall_entry`'s window.\nAn image that ships must not be able to be asked to stop \
+         at CPL 0 on a user's stack.",
+        if want { "test" } else { "shipping" },
+        if want { "is missing" } else { "names" },
+    );
+}
+
 /// The scheduler core's `feature = "check"` instruments, by their own text, and
 /// the two kernels that must disagree about carrying them.
 ///
@@ -1334,6 +1364,7 @@ fn stage_and_certify_kernel(root: &Path, features: &str, path_env: &str) -> Vec<
     let bytes = fs::read(&staged).expect("Failed to read staged kernel");
     assert_overflow_checked("kernel", &bytes);
     assert_actuators_match_features(root, features, &bytes);
+    assert_entry_hold_matches_features(features, &bytes);
     assert_sched_check_matches_features(features, &bytes);
     assert_kernel_is_softfloat(path_env);
     bytes

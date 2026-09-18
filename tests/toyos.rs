@@ -780,7 +780,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // which is the marker's whole point and which only a Fast name may hold.
     ("syscall_window_nmi", Sched::Parallel, Tier::Fast),
     // The two controls on the name above: the kernel with vector 2's IST index
-    // taken off, which must double fault at the entry with `cr2 = rsp - 8`, and
+    // taken off, which must double fault at the entry on the NMI aimed at the
+    // CPU the storm holds inside it, with `cr2 = rsp - 8` at the held `rsp`, and
     // the one nested NMI an early `iretq` can stage, which must take the loud
     // path. Both boots end in a halted machine that has to be drained past its
     // own report, which is where the price is. Nothing in either verdict is a
