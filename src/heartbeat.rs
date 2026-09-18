@@ -722,7 +722,7 @@ compositor: ready
         added.push("sniffer".to_string());
         assert!(done_lines(&added).unwrap_err().contains("sniffer"));
 
-        let mut dropped = known.clone();
+        let mut dropped = known;
         dropped.pop();
         assert!(done_lines(&dropped).is_err());
     }

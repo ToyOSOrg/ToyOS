@@ -3743,7 +3743,7 @@ pub const KNOWN_RED: &[Red] = &[
     Red {
         test: "kernel_heartbeat",
         instrument: Instrument::DevHostLoaded,
-        finding: Finding::fires(1, 7),
+        finding: Finding::fires(1, 17),
         standing: Standing::Stands,
         what: "`cpu[4] missing from 2 consecutive heartbeats on a settled guest that was running` \
                — cpu4 absent from seven consecutive settled beats, `gap=0.250s` and `ran=26..38` \
@@ -3754,9 +3754,12 @@ pub const KNOWN_RED: &[Red] = &[
                pins its CPU for the whole round trip, so cpu4 reached no scheduler pass for \
                1.998 s. The mask told the truth; `src/heartbeat.rs` carries the capture and \
                reports it. `ALONE kernel_heartbeat: GREEN`",
-        evidence: "seven runs of `cargo test --test toyos-build kernel_heartbeat -- --nightly` on \
-                   cbe1cc59, dev host, 2026-09-18, load average 14.14 to 35.48 across them and \
-                   27.57 at the red",
+        evidence: "seventeen runs of `cargo test --test toyos-build kernel_heartbeat -- --nightly` \
+                   on the dev host, 2026-09-18, in two series the sighting sits in one of: seven \
+                   on cbe1cc59 at load average 14.14 to 35.48, one of them the red at 27.57, and \
+                   ten on 1c5cf415 at 26.13 to 29.95, all green. The rate is the USB status \
+                   phase's and not the predicate's — `src/heartbeat.rs` replays that capture and \
+                   reaches the same verdict on both",
         source: "src/heartbeat.rs",
         measured: "2026-09-18",
     },
