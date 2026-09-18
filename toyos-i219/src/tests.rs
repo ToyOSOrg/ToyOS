@@ -9,7 +9,7 @@ use std::vec::Vec;
 use std::{format, vec};
 
 use crate::phy as toyos_phy;
-use crate::phy::{Phy, PhyRefusal};
+use crate::phy::{Holders, Phy, PhyRefusal};
 use crate::regs::{self, cause, ctrl, extcnf, ivar, rctl, rx_desc, tctl, tx_desc};
 use crate::stub::{Nic, Permits, Unanswered, NVM_MAC};
 use crate::*;
@@ -1125,8 +1125,8 @@ fn an_interface_the_engine_never_gives_up_is_refused_by_name() {
         other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
     };
     assert_eq!(
-        held_by & extcnf::MDIO_MNG_OWNERSHIP,
-        extcnf::MDIO_MNG_OWNERSHIP,
+        held_by,
+        Holders::Manageability,
         "{}",
         nic.because("the refusal does not carry which agent held the interface")
     );
@@ -1157,8 +1157,9 @@ fn a_flag_another_agent_holds_is_neither_taken_nor_cleared() {
 
         match driver.brought_up().phy {
             Err(PhyRefusal::OwnershipHeld { held_by, after_nanos }) => {
-                assert!(
-                    held_by & extcnf::MDIO_SW_OWNERSHIP != 0,
+                assert_eq!(
+                    held_by,
+                    Holders::Software,
                     "{}",
                     nic.because("the refusal does not carry the flag that was standing")
                 );
@@ -1280,10 +1281,23 @@ fn a_register_nothing_decodes_is_refused_and_never_written() {
 #[test]
 fn every_phy_outcome_has_one_exit_code_that_reads_back() {
     use toyos_phy::Outcome;
-    let outcomes: [(Result<Phy, PhyRefusal>, Outcome); 8] = [
+    let held = |held_by| Err(PhyRefusal::OwnershipHeld { held_by, after_nanos: 1 });
+    let outcomes: [(Result<Phy, PhyRefusal>, Outcome); 14] = [
         (Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }), Outcome::BroughtUp),
         (Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL }), Outcome::Unrouted),
-        (Err(PhyRefusal::OwnershipHeld { held_by: 0x80, after_nanos: 1 }), Outcome::OwnershipHeld),
+        (held(Holders::Software), Outcome::OwnershipHeldBySoftware),
+        (held(Holders::Hardware), Outcome::OwnershipHeldByHardware),
+        (held(Holders::SoftwareAndHardware), Outcome::OwnershipHeldBySoftwareAndHardware),
+        (held(Holders::Manageability), Outcome::OwnershipHeldByManageability),
+        (
+            held(Holders::SoftwareAndManageability),
+            Outcome::OwnershipHeldBySoftwareAndManageability,
+        ),
+        (
+            held(Holders::HardwareAndManageability),
+            Outcome::OwnershipHeldByHardwareAndManageability,
+        ),
+        (held(Holders::AllThree), Outcome::OwnershipHeldByAllThree),
         (Err(PhyRefusal::OwnershipBusy { held_by: 0x80, after_nanos: 1 }), Outcome::OwnershipBusy),
         (Err(PhyRefusal::MdiUnready { phy: 1, reg: 31, after_nanos: 1 }), Outcome::MdiUnready),
         (Err(PhyRefusal::MdiError { phy: 2, reg: 2 }), Outcome::MdiError),
@@ -1305,6 +1319,143 @@ fn every_phy_outcome_has_one_exit_code_that_reads_back() {
     assert_eq!(codes.len(), Outcome::ALL.len());
     assert_eq!(Outcome::from_exit_code(0), None);
     assert_eq!(Outcome::from_exit_code(Outcome::ALL.len() as i32 + 64), None);
+}
+
+/// §4.5.2 arbitrates three bits of `EXTCNF_CTRL` and no more, so what a reading
+/// names is decided by those three and by nothing else in the word — and the
+/// one reading that names nobody is the interface being free, which is the
+/// reading a driver may ask for it on.
+#[test]
+fn every_reading_of_the_three_ownership_bits_names_who_holds_the_interface() {
+    let elsewhere = !extcnf::OWNERSHIP;
+    for (bits, holders) in [
+        (0, None),
+        (extcnf::MDIO_SW_OWNERSHIP, Some(Holders::Software)),
+        (extcnf::MDIO_HW_OWNERSHIP, Some(Holders::Hardware)),
+        (
+            extcnf::MDIO_SW_OWNERSHIP | extcnf::MDIO_HW_OWNERSHIP,
+            Some(Holders::SoftwareAndHardware),
+        ),
+        (extcnf::MDIO_MNG_OWNERSHIP, Some(Holders::Manageability)),
+        (
+            extcnf::MDIO_SW_OWNERSHIP | extcnf::MDIO_MNG_OWNERSHIP,
+            Some(Holders::SoftwareAndManageability),
+        ),
+        (
+            extcnf::MDIO_HW_OWNERSHIP | extcnf::MDIO_MNG_OWNERSHIP,
+            Some(Holders::HardwareAndManageability),
+        ),
+        (extcnf::OWNERSHIP, Some(Holders::AllThree)),
+    ] {
+        assert_eq!(Holders::in_reading(bits), holders, "{bits:#010x} names somebody else");
+        assert_eq!(
+            Holders::in_reading(bits | elsewhere),
+            holders,
+            "another agent's fields of EXTCNF_CTRL decided who holds {bits:#010x}"
+        );
+    }
+}
+
+/// **The one question a probe boot on a machine with no console can answer.**
+/// An interface already owned is the refusal whose cause is another agent, so
+/// every reading §4.5.2's three bits can stand is driven on the part and the
+/// exit code it produces is asserted: one code per holder, all seven distinct.
+#[test]
+fn each_holder_of_the_mdio_interface_has_its_own_exit_code() {
+    use toyos_phy::Outcome;
+    let mut codes = Vec::new();
+    for (seed, software, hardware, manageability, wanted) in [
+        (70, true, false, false, Outcome::OwnershipHeldBySoftware),
+        (71, false, true, false, Outcome::OwnershipHeldByHardware),
+        (72, true, true, false, Outcome::OwnershipHeldBySoftwareAndHardware),
+        (73, false, false, true, Outcome::OwnershipHeldByManageability),
+        (74, true, false, true, Outcome::OwnershipHeldBySoftwareAndManageability),
+        (75, false, true, true, Outcome::OwnershipHeldByHardwareAndManageability),
+        (76, true, true, true, Outcome::OwnershipHeldByAllThree),
+    ] {
+        let nic = Nic::i219(seed);
+        if software {
+            nic.mdio_flag_held_by_another_agent();
+        }
+        if hardware {
+            nic.hardware_holds_the_mdio_interface();
+        }
+        if manageability {
+            nic.mdio_never_granted();
+        }
+        let driver = open(&nic);
+
+        let phy = driver.brought_up().phy;
+        assert!(
+            matches!(phy, Err(PhyRefusal::OwnershipHeld { .. })),
+            "{}",
+            nic.because(&format!("the bring-up answered {phy:?} on a held interface"))
+        );
+        // The part really did answer the three bits this row is about, so the
+        // code below is about that reading and not about a model that lost one.
+        assert_eq!(
+            nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
+            if software { extcnf::MDIO_SW_OWNERSHIP } else { 0 }
+                | if hardware { extcnf::MDIO_HW_OWNERSHIP } else { 0 }
+                | if manageability { extcnf::MDIO_MNG_OWNERSHIP } else { 0 },
+            "{}",
+            nic.because("the part did not stand the agents this row holds the interface with")
+        );
+        let outcome = Outcome::of(phy);
+        assert_eq!(
+            outcome,
+            wanted,
+            "{}",
+            nic.because("the exit code does not name which agent held the interface")
+        );
+        let code = outcome.exit_code();
+        assert!(
+            !codes.contains(&code),
+            "{}",
+            nic.because(&format!("{outcome:?} shares exit code {code} with another holder"))
+        );
+        codes.push(code);
+    }
+    assert_eq!(codes.len(), 7);
+}
+
+/// §4.5.2's arbitration moves while a driver waits on it, and what a probe
+/// carries off a machine is the interface at the moment the wait ended — so the
+/// refusal names the *last* reading and not the one it started on.
+#[test]
+fn the_refusal_names_the_last_reading_before_the_deadline() {
+    let nic = Nic::i219(77);
+    // The part's own hardware holds the interface for the whole wait; the
+    // manageability agent holds it too across the reads §4.5.2 gives it to load
+    // the extended configuration area, and then lets go.
+    nic.hardware_holds_the_mdio_interface();
+    let driver = open(&nic);
+
+    // The premise: the reading really did move under the wait, and the two it
+    // moved between are two different codes.
+    let readings = nic.ownership_readings();
+    assert_eq!(
+        readings.first().copied(),
+        Some(extcnf::MDIO_HW_OWNERSHIP | extcnf::MDIO_MNG_OWNERSHIP),
+        "{}",
+        nic.because(&format!("the wait did not start on two agents: {readings:#x?}"))
+    );
+    assert_eq!(
+        readings.last().copied(),
+        Some(extcnf::MDIO_HW_OWNERSHIP),
+        "{}",
+        nic.because(&format!("the wait did not end on one agent: {readings:#x?}"))
+    );
+
+    match driver.brought_up().phy {
+        Err(PhyRefusal::OwnershipHeld { held_by, .. }) => assert_eq!(
+            held_by,
+            Holders::Hardware,
+            "{}",
+            nic.because("the refusal named the reading the wait began on")
+        ),
+        other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
+    }
 }
 
 /// §4.5.2 arbitrates three bits of `EXTCNF_CTRL` and this driver writes one of

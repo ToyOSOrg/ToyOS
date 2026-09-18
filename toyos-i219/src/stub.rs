@@ -290,6 +290,15 @@ struct PhyModel {
     /// Whether another agent is holding §4.5.2's *software* flag — the state a
     /// claim on this function inherits from firmware that drives the same PHY.
     flag_held_by_another_agent: bool,
+    /// Whether §4.5.2's third agent — the part's own hardware, whose bit 6 is
+    /// read-only to software — is holding the interface. §4.5.2 has it take one
+    /// "while loading the extended configuration area", and nothing a driver
+    /// writes ends that.
+    hardware_holds: bool,
+    /// §4.5.2's three ownership bits as this part answered them, one entry per
+    /// change: what an agent watching the interface would have seen, so a test
+    /// about *which* reading a refusal carries can say the reading moved.
+    ownership_readings: Vec<u32>,
     /// Whether the engine takes the interface the moment it is next read free
     /// and keeps it until [`Nic::engine_lets_go`]. A fault injector: it is how
     /// a test reaches [`crate::phy::PhyRefusal::OwnershipBusy`] — a request
@@ -344,6 +353,8 @@ impl PhyModel {
             failing: None,
             never_ready: false,
             flag_held_by_another_agent: false,
+            hardware_holds: false,
+            ownership_readings: Vec::new(),
             engine_takes_it_at_the_request: false,
             engine_cut_ins: 0,
         }
@@ -879,8 +890,18 @@ impl Model {
             // bit stands only once the arbitration has granted the request.
             (engine_asks, !engine_asks && self.phy.sw_requested)
         };
+        // §4.5.2's third agent. Under the mutex reading its bit stands beside
+        // whatever else does, the same way the software flag does; under the
+        // grant reading "the priority order is manageability, software and then
+        // hardware", so it stands only where neither of the others does.
+        let hardware = self.phy.hardware_holds
+            && (self.permits.mdio_flag_is_a_plain_mutex || !(engine || software));
         let bits = if engine { extcnf::MDIO_MNG_OWNERSHIP } else { 0 }
-            | if software { extcnf::MDIO_SW_OWNERSHIP } else { 0 };
+            | if software { extcnf::MDIO_SW_OWNERSHIP } else { 0 }
+            | if hardware { extcnf::MDIO_HW_OWNERSHIP } else { 0 };
+        if self.phy.ownership_readings.last() != Some(&bits) {
+            self.phy.ownership_readings.push(bits);
+        }
         // The arbitration answers three bits and touches nothing else: what
         // stands in the rest of the register outlives every access to it.
         let carried = self.get(regs::EXTCNF_CTRL) & !extcnf::OWNERSHIP;
@@ -1418,6 +1439,20 @@ impl Nic {
     /// §10.2.2.7's `Ready` bit never comes back.
     pub fn mdi_never_ready(&self) {
         self.0.borrow_mut().phy.never_ready = true;
+    }
+
+    /// §4.5.2's third agent holds the interface: the part's own hardware, which
+    /// takes one "while loading the extended configuration area" and whose
+    /// bit 6 no driver can write.
+    pub fn hardware_holds_the_mdio_interface(&self) {
+        self.0.borrow_mut().phy.hardware_holds = true;
+    }
+
+    /// §4.5.2's three ownership bits as this part answered them, one entry per
+    /// change — the premise a test about *which* reading a refusal carries has
+    /// to establish before it asserts on one.
+    pub fn ownership_readings(&self) -> Vec<u32> {
+        self.0.borrow().phy.ownership_readings.clone()
     }
 
     /// Another agent holds §4.5.2's software flag when this claim is minted.

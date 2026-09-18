@@ -32,5 +32,8 @@ readback `lan::on_metal` decodes for it, the six `tests/metal-profile.toml`
 rows — and netd's `--exit-with-phy-outcome` with `tests/e1000phycase` and
 `lan_phy_exit_code`, the QEMU arm that proves the channel.
 
-Until then the machine has read nothing through it: no boot of this arm has
-run on the T14.
+What the arm has read so far: one boot of it has run on the T14 and ended
+`exit: netd pid=5 code=66 cpu=973ms` — §4.5.2's MDIO interface already owned
+when the driver looked, for the whole deadline, with nothing written. Which of
+its three agents owned it is what the ownership codes are split one per holder
+to say, and no boot has carried one of those back yet.

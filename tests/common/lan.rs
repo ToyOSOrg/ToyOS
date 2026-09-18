@@ -192,7 +192,9 @@ pub fn on_metal(
 
     // The PHY reading: netd's exit code on the boot that arms the probe,
     // decoded through the table the driver crate owns. A refusal is a finding
-    // by its name, which is what the shipping boot's silence cannot give.
+    // by its name, which is what the shipping boot's silence cannot give — and
+    // where §4.5.2's interface was already owned, that name is which of its
+    // three agents the last reading before the deadline stood for.
     if probed.label != PHY_BOOT {
         bad.push(format!(
             "the PHY verdict was handed {}'s readback, and netd's exit code only means the \
@@ -227,6 +229,10 @@ pub fn on_metal(
 /// with the flag exits with the outcome's code, the kernel records it, and the
 /// record reads back through the driver crate's own table — which on the 82574
 /// is `NotThisRegisterMap`, the refusal [`lan_dhcp_lease`] reads as text.
+///
+/// **No number is written here.** The block's codes are the driver crate's to
+/// move, so this arm names the outcome and lets the one table say what it
+/// exits with.
 pub fn lan_phy_exit_code(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],

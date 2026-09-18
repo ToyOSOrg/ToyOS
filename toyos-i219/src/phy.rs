@@ -118,6 +118,63 @@ pub(crate) mod custom_mode {
 /// address nothing drives can produce it.
 pub(crate) const IDENTIFIER_HIGH_INTEL: u16 = 0x0154;
 
+/// Which of §4.5.2's three agents one reading of `EXTCNF_CTRL` names as holding
+/// the MDIO interface.
+///
+/// **A reading and not a state.** §4.5.2 says "at any given time at most only
+/// one bit is 1b", so the four names below that carry more than one agent are
+/// the part answering against its own document — which is what a driver can
+/// see, and therefore what it reports rather than folding into one of the three.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Holders {
+    Software,
+    Hardware,
+    SoftwareAndHardware,
+    Manageability,
+    SoftwareAndManageability,
+    HardwareAndManageability,
+    AllThree,
+}
+
+impl Holders {
+    /// Who one reading names, or `None` where §4.5.2's three bits are all
+    /// clear: an interface nobody holds is not a holder, and the caller that
+    /// gets `None` is the one that may take the interface.
+    pub fn in_reading(extcnf: u32) -> Option<Self> {
+        let held = |bit| extcnf & bit != 0;
+        Some(
+            match (
+                held(extcnf::MDIO_SW_OWNERSHIP),
+                held(extcnf::MDIO_HW_OWNERSHIP),
+                held(extcnf::MDIO_MNG_OWNERSHIP),
+            ) {
+                (false, false, false) => return None,
+                (true, false, false) => Self::Software,
+                (false, true, false) => Self::Hardware,
+                (true, true, false) => Self::SoftwareAndHardware,
+                (false, false, true) => Self::Manageability,
+                (true, false, true) => Self::SoftwareAndManageability,
+                (false, true, true) => Self::HardwareAndManageability,
+                (true, true, true) => Self::AllThree,
+            },
+        )
+    }
+}
+
+impl core::fmt::Display for Holders {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Software => "software",
+            Self::Hardware => "the part's own hardware",
+            Self::SoftwareAndHardware => "software and the part's own hardware",
+            Self::Manageability => "the manageability agent",
+            Self::SoftwareAndManageability => "software and the manageability agent",
+            Self::HardwareAndManageability => "the part's own hardware and the manageability agent",
+            Self::AllThree => "software, the part's own hardware and the manageability agent",
+        })
+    }
+}
+
 /// Why the PHY was not reached, or not what this driver was told it would be.
 ///
 /// **None of these ends the bring-up.** A MAC whose PHY this driver could not
@@ -133,9 +190,17 @@ pub enum PhyRefusal {
     /// never went free inside the deadline. **No request was registered**: a
     /// driver that asked anyway could not tell its own bit from a grant, and
     /// giving the interface back afterwards would clear a flag it never owned.
-    OwnershipHeld { held_by: u32, after_nanos: u64 },
+    ///
+    /// `held_by` is the *last* reading before the deadline: the arbitration
+    /// moves while a driver waits on it, and who holds the interface at the
+    /// moment the wait is given up on is what a machine can act on.
+    OwnershipHeld { held_by: Holders, after_nanos: u64 },
     /// §4.5.2's handshake never granted: the ownership bit did not read back
     /// set inside the deadline, so something else holds the interface.
+    ///
+    /// The word and not a [`Holders`], because a grant that never came names
+    /// nobody: the last reading here may have all three bits clear, which is
+    /// the arbitration between two agents and not one of them holding it.
     OwnershipBusy { held_by: u32, after_nanos: u64 },
     /// §10.2.2.7's `Ready` bit never came back for one transaction.
     MdiUnready { phy: u8, reg: u8, after_nanos: u64 },
@@ -161,8 +226,8 @@ impl core::fmt::Display for PhyRefusal {
             ),
             Self::OwnershipHeld { held_by, after_nanos } => write!(
                 f,
-                "EXTCNF_CTRL read {held_by:#x} for {after_nanos} ns and the MDIO interface was \
-                 another agent's the whole time, so no request for it was ever registered"
+                "§4.5.2's ownership bits named {held_by} for {after_nanos} ns and the MDIO \
+                 interface never went free, so no request for it was ever registered"
             ),
             Self::OwnershipBusy { held_by, after_nanos } => write!(
                 f,
@@ -215,25 +280,43 @@ pub struct Phy {
 /// not choose its own end, and of 101, which the Rust runtime ends a panicking
 /// netd with and which would therefore read back as an outcome the PHY never
 /// gave.
+///
+/// **[`PhyRefusal::OwnershipHeld`] is seven codes and not one.** An interface
+/// already owned is the one refusal whose cause is another agent, and on a
+/// machine whose console reaches nobody the exit code is the only channel that
+/// can say which — so every reading of §4.5.2's three bits [`Holders`] can name
+/// has a code of its own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum Outcome {
     BroughtUp = 64,
     Unrouted = 65,
-    OwnershipHeld = 66,
-    OwnershipBusy = 67,
-    MdiUnready = 68,
-    MdiError = 69,
-    Identity = 70,
-    NotThisRegisterMap = 71,
+    OwnershipHeldBySoftware = 66,
+    OwnershipHeldByHardware = 67,
+    OwnershipHeldBySoftwareAndHardware = 68,
+    OwnershipHeldByManageability = 69,
+    OwnershipHeldBySoftwareAndManageability = 70,
+    OwnershipHeldByHardwareAndManageability = 71,
+    OwnershipHeldByAllThree = 72,
+    OwnershipBusy = 73,
+    MdiUnready = 74,
+    MdiError = 75,
+    Identity = 76,
+    NotThisRegisterMap = 77,
 }
 
 impl Outcome {
     /// Every outcome, in exit-code order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 14] = [
         Self::BroughtUp,
         Self::Unrouted,
-        Self::OwnershipHeld,
+        Self::OwnershipHeldBySoftware,
+        Self::OwnershipHeldByHardware,
+        Self::OwnershipHeldBySoftwareAndHardware,
+        Self::OwnershipHeldByManageability,
+        Self::OwnershipHeldBySoftwareAndManageability,
+        Self::OwnershipHeldByHardwareAndManageability,
+        Self::OwnershipHeldByAllThree,
         Self::OwnershipBusy,
         Self::MdiUnready,
         Self::MdiError,
@@ -245,7 +328,15 @@ impl Outcome {
         match phy {
             Ok(_) => Self::BroughtUp,
             Err(PhyRefusal::Unrouted { .. }) => Self::Unrouted,
-            Err(PhyRefusal::OwnershipHeld { .. }) => Self::OwnershipHeld,
+            Err(PhyRefusal::OwnershipHeld { held_by, .. }) => match held_by {
+                Holders::Software => Self::OwnershipHeldBySoftware,
+                Holders::Hardware => Self::OwnershipHeldByHardware,
+                Holders::SoftwareAndHardware => Self::OwnershipHeldBySoftwareAndHardware,
+                Holders::Manageability => Self::OwnershipHeldByManageability,
+                Holders::SoftwareAndManageability => Self::OwnershipHeldBySoftwareAndManageability,
+                Holders::HardwareAndManageability => Self::OwnershipHeldByHardwareAndManageability,
+                Holders::AllThree => Self::OwnershipHeldByAllThree,
+            },
             Err(PhyRefusal::OwnershipBusy { .. }) => Self::OwnershipBusy,
             Err(PhyRefusal::MdiUnready { .. }) => Self::MdiUnready,
             Err(PhyRefusal::MdiError { .. }) => Self::MdiError,
@@ -303,10 +394,13 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
             return Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL });
         }
         let started = clock.nanos();
-        while held & extcnf::OWNERSHIP != 0 {
+        // Re-read and re-named on every turn, so the refusal below carries who
+        // held the interface when the wait ended and not who held it when it
+        // began — the arbitration moves underneath a driver waiting on it.
+        while let Some(held_by) = Holders::in_reading(held) {
             let waited = clock.nanos().saturating_sub(started);
             if waited >= DEADLINE_NANOS {
-                return Err(PhyRefusal::OwnershipHeld { held_by: held, after_nanos: waited });
+                return Err(PhyRefusal::OwnershipHeld { held_by, after_nanos: waited });
             }
             held = regs.read(regs::EXTCNF_CTRL);
         }
