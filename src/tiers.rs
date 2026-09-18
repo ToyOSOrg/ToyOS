@@ -965,9 +965,10 @@ pub const RELEGATED: &[Relegated] = &[
                  the storm holds inside it, with `cr2 = rsp - 8` at the held `rsp`, and a \
                  second NMI entered on IST2 through an early `iretq` must take the loud path \
                  rather than silently overwrite the outer handler's frame. The window property \
-                 itself — the held arrival at CPL 0 with a user `rsp`, symbolized to the entry, \
-                 and a machine that survives 3,000 sprayed after it — is gated per pull request \
-                 by the Fast name and is not what this row costs.",
+                 itself — the held arrival at CPL 0 with a user `rsp` and a `rip` inside the \
+                 entry's spin, no window arrival with a `rip` outside the entry, and a machine \
+                 that survives 3,000 sprayed after it — is gated per pull request by the Fast \
+                 name and is not what this row costs.",
     },
     Relegated {
         test: "kernel_log_file",

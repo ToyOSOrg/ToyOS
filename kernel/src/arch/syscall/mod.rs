@@ -15,7 +15,7 @@ mod proc;
 mod vm;
 
 #[cfg(feature = "boot-actuators")]
-pub(crate) use gate::hold_spin;
+pub(crate) use gate::{entry_extent, hold_spin};
 pub use gate::init;
 
 use toyos_abi::handle::RawHandle;

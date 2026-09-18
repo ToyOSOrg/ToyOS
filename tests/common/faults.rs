@@ -374,6 +374,14 @@ const HELD_NOBODY: &str = "syscall-window-nmi: held nobody";
 /// sprayed one.
 const RELEASED: &str = "syscall-window-nmi: released cpu=";
 
+/// A held CPU's word that its entry spent the ask's whole budget and left the
+/// window with nobody having released it.
+const HOLD_EXPIRED: &str = "syscall-window-nmi: hold expired cpu=";
+
+/// The storm's word that the victim it released made no syscall before the
+/// spray went out.
+const NO_SYSCALL_AFTER_RELEASE: &str = "of its release, so the spray's first samples may be";
+
 /// What the storm said of the hold it arranged.
 struct Hold {
     cpu: u64,
@@ -410,13 +418,26 @@ fn held_in_window(capture: &str) -> Result<Hold, String> {
     Ok(Hold { cpu, rsp, spin })
 }
 
-/// A hold nothing ended: the entry has no register to count in, so the asker's
-/// release is the only thing that ends one, and an asker that died inside its
-/// own bound leaves the victim spinning with interrupts off.
+/// Refuses a capture in which the kernel says a hold ended by the entry's own
+/// bound: nobody released that CPU, so nothing under the line is the run the
+/// storm arranges.
+fn hold_expired(capture: &str) -> Result<(), String> {
+    match capture.lines().find(|l| l.contains(HOLD_EXPIRED)) {
+        Some(line) => Err(format!(
+            "the kernel says a hold ended by the entry's own bound and not by the storm's \
+             release: `{}`\n{capture}",
+            line.trim(),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// A held CPU with neither end of its hold in the capture: what is absent, and
+/// no reason for it.
 fn never_released(hold: &Hold, capture: &str) -> String {
     format!(
-        "cpu{} was held inside the entry and the capture has no `{RELEASED}` line: the storm's \
-         CPU died between its ask and its release, and nothing else ends a hold\n{capture}",
+        "cpu{} was held inside the entry and the capture has no `{RELEASED}` line and no \
+         `{HOLD_EXPIRED}` line\n{capture}",
         hold.cpu,
     )
 }
@@ -462,7 +483,9 @@ fn hex(line: &str, field: &str) -> Option<u64> {
 /// `rsp` in the user half, and a `held` count in its report that the held CPU
 /// itself keeps — a window arrival taken while its own word still had both
 /// bits — whose frame stands at the held `rsp` with a `rip` inside the entry's
-/// spin. The spray's landings are not. Under TCG, QEMU checks for a pending interrupt between translation
+/// spin. The spray's landings are not.
+///
+/// Under TCG, QEMU checks for a pending interrupt between translation
 /// blocks and `syscall` ends one, so a pending NMI is delivered at
 /// `syscall_entry+0`: the dev host reads 36 to 58 arrivals per 3,000, run after
 /// run. Under KVM an NMI to a running vCPU is a host kick, a VM exit and an
@@ -493,7 +516,8 @@ fn hex(line: &str, field: &str) -> Option<u64> {
 /// - **under KVM** the sprayed counts are printed as the instrument's verdict,
 ///   and what is asserted is what every host witnesses: the held arrival, nine
 ///   of ten aimed NMIs delivered, at least one of them arriving somewhere only
-///   the victim can be — in Ring 3 *or* in the window — and no `#DF`.
+///   the victim can be — in Ring 3 *or* in the window — no window arrival with
+///   a `rip` outside the entry, and no `#DF`.
 ///
 /// The window itself is gated on both by `syscall_window_nmi_controls`, whose
 /// `nmi-without-ist` arm double faults at `syscall_entry` on the held arrival,
@@ -518,11 +542,13 @@ fn hex(line: &str, field: &str) -> Option<u64> {
 /// sprayed every sibling.
 ///
 /// The bound is not the teeth on its own. What says the count means the window
-/// is the first *sprayed* arrival's own `rip`, symbolized by the kernel and
-/// asserted against `syscall_entry`: `dump_nmi_probe`'s rule, that a probe
-/// naming the wrong instruction is worse than one naming none. The held
-/// arrival cannot say it — it is inside the entry by arrangement, whatever the
-/// classifier does — so the kernel keeps the two frames apart.
+/// is every counted arrival's own `rip`: the kernel holds each against
+/// `syscall_entry`'s extent and the report's `outside` has to be zero, on both
+/// accelerators. Under TCG the first *sprayed* one is also symbolized by the
+/// kernel and asserted against `syscall_entry`: `dump_nmi_probe`'s rule, that a
+/// probe naming the wrong instruction is worse than one naming none, read off
+/// the symbol table rather than off the labels `outside` is judged by. The held
+/// arrival cannot say either — it is inside the entry by arrangement.
 pub fn syscall_window_nmi(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -532,7 +558,7 @@ pub fn syscall_window_nmi(
     const SAME_ORDER: u64 = 10;
 
     let survived = storm(test_config, c_bins, rust_bins, &["syscall-window-nmi"], SPIN_SECS, |l| {
-        l.contains(NMI_REPORT)
+        l.contains(NMI_REPORT) || l.contains(HOLD_EXPIRED)
     })?;
     if survived.contains("DOUBLE FAULT") {
         return Err(format!(
@@ -540,6 +566,7 @@ pub fn syscall_window_nmi(
              is not doing what the table says\n{survived}"
         ));
     }
+    hold_expired(&survived)?;
     let Some(report) = survived.lines().find(|l| l.contains(NMI_REPORT)) else {
         return Err(match held_in_window(&survived) {
             Ok(hold) if !survived.contains(RELEASED) => never_released(&hold, &survived),
@@ -550,15 +577,40 @@ pub fn syscall_window_nmi(
     // victim inside the entry at the user's `rsp`, and the held CPU's own count
     // of the arrival it took there.
     let hold = held_in_window(&survived)?;
+    if let Some(line) = survived.lines().find(|l| l.contains(NO_SYSCALL_AFTER_RELEASE)) {
+        return Err(format!(
+            "the storm sprayed without waiting out the hold's end, so a window arrival of this \
+             run may be the released victim still inside the entry, which vouches for any \
+             classifier: `{}`\n{survived}",
+            line.trim(),
+        ));
+    }
     let (sent, seen) = (field(report, "sent=")?, field(report, "seen=")?);
     let (window, ring3) = (field(report, "window=")?, field(report, "ring3=")?);
     let (spun, held) = (field(report, "spun=")?, field(report, "held=")?);
+    let outside = field(report, "outside=")?;
+    let Some(released) = survived.lines().find(|l| l.contains(RELEASED)) else {
+        return Err(never_released(&hold, &survived));
+    };
+    // Printed and not judged: how much of the entry's budget a hold takes is
+    // the host's pace.
+    let (turns, budget) = (field(released, "turns=")?, field(released, "budget=")?);
     eprintln!(
-        "  [nmi-window] cpu{} held at rsp={:#x}; {sent} sent, {seen} taken, {window} in the window \
-         with {held} of them the held arrival, {ring3} in Ring 3, {spun} syscalls made under the \
-         storm",
+        "  [nmi-window] cpu{} held at rsp={:#x} for {turns} of the entry's {budget} turns; {sent} \
+         sent, {seen} taken, {window} in the window with {held} of them the held arrival and \
+         {outside} outside the entry, {ring3} in Ring 3, {spun} syscalls made under the storm",
         hold.cpu, hold.rsp,
     );
+    // Every arrival and every accelerator: the kernel holds each `window`
+    // frame's `rip` against the entry's own extent, which is the only code that
+    // runs at CPL 0 on a user's `rsp`.
+    if outside != 0 {
+        return Err(format!(
+            "{outside} of {window} window arrivals had a `rip` outside `syscall_entry`: either the \
+             classifier counts Ring 0 frames that are not the window, or there is a second place \
+             this kernel runs at CPL 0 on a user's `rsp`\n{survived}"
+        ));
+    }
     if held == 0 {
         return Err(format!(
             "cpu{} was held inside the entry at rsp={:#x} and took no window arrival while its \
@@ -768,8 +820,9 @@ pub fn syscall_window_nmi_controls(
         rust_bins,
         &["syscall-window-nmi", "nmi-without-ist"],
         SPIN_SECS,
-        |l| l.contains("Scanning kernel stack"),
+        |l| l.contains("Scanning kernel stack") || l.contains(HOLD_EXPIRED),
     )?;
+    hold_expired(&unfixed)?;
     // The premise before the consequence: a control whose stimulus missed can
     // only say what an absent defect says, and this one says which it was.
     let hold = held_in_window(&unfixed)?;
