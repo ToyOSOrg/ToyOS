@@ -16,19 +16,28 @@
 //!   the programs `init` starts do their own start-up after it, and that work
 //!   is what keeps a CPU off the mask. The boot has started when every
 //!   `[boot] start` program has said it is done — its ready line or its exit
-//!   record — and the window opens at the first beat whose whole period
-//!   follows the last of them.
-//! - **on a beat the machine ran through.** A beat later than [`LATE`] periods
+//!   record, which `DONE` is the one table of — and the window opens at the
+//!   first beat whose whole period follows the last of them.
+//! - **on a beat the machine ran through.** A beat later than `LATE` periods
 //!   is a period no CPU reached the idle loop in, and `ran=0` is a period no
 //!   CPU dispatched a task in. Either is the machine not running — a guest its
 //!   host did not schedule — and what a CPU did in it is unreadable, so such a
 //!   beat closes the window and the sample is [`Refused::NotRunning`], never a
 //!   CPU missing.
+//! - **over `MIN_SETTLED` beats.** A verdict about a CPU is read from that many
+//!   settled beats or from none: a shorter window says only why it is short.
 //!
 //! Inside the window a CPU absent from [`STOPPED_BEATS`] consecutive beats has
 //! stopped: `diag-tick` caps a sleep at 100 ms against a 250 ms line, so it has
 //! missed five wakes. Absent from one and back on the next it has missed two,
 //! which the owning instrument produces on a healthy guest.
+//!
+//! **The capture follows the window, not a clock.** How long a boot's start-up
+//! takes is the loaded host's to decide, so an instrument that drains for a
+//! fixed span hands this module whatever is left over and reds on its own
+//! refusal when that is less than a verdict needs. [`window_beats`] is what a
+//! capture is taken to: it says how much window the capture holds so far, and
+//! [`CAPTURE_BEATS`] is enough.
 
 #![forbid(unsafe_code)]
 
@@ -38,13 +47,24 @@ pub const PERIOD_MS: u64 = 250;
 /// A beat whose `gap=` exceeds this many periods is one the machine did not run
 /// through: eight CPUs whose longest sleep is 100 ms, and none reached the idle
 /// loop for a whole period.
-pub const LATE: u64 = 2;
+const LATE: u64 = 2;
 
 /// Consecutive settled beats a CPU is absent from before it has stopped.
 pub const STOPPED_BEATS: usize = 2;
 
 /// The fewest settled beats a verdict is read from.
-pub const MIN_SETTLED: usize = 4;
+const MIN_SETTLED: usize = 4;
+
+/// Settled beats a capture is taken to. `MIN_SETTLED` is the floor a verdict is
+/// read from and the spare is detection, not slack: a CPU whose first absence
+/// is the capture's last beat is a blip and convicts nobody, so the capture
+/// carries beats past the floor for the [`STOPPED_BEATS`]th one to land in.
+pub const CAPTURE_BEATS: usize = MIN_SETTLED + 3;
+
+/// The widest `alive=N/M` denominator that is a reading of the `mask=` beside
+/// it: that mask is 64 bits, so no `M` at 64 or above describes it, and `M = 0`
+/// describes no machine.
+const MOST_CPUS: u32 = 63;
 
 /// One `heartbeat: t=… alive=… mask=… ran=… gap=…` line, read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,29 +80,32 @@ pub struct Beat {
 
 impl Beat {
     /// The beat's reading of `text`, or `None` where any field is unreadable.
-    pub fn parse(line: usize, text: &str) -> Option<Beat> {
+    fn parse(line: usize, text: &str) -> Option<Beat> {
         let field = |key: &str| text.split(key).nth(1)?.split_whitespace().next();
-        let alive = field("alive=")?;
+        let cpus: u32 = field("alive=")?.split_once('/')?.1.parse().ok()?;
+        if !(1..=MOST_CPUS).contains(&cpus) {
+            return None;
+        }
         Some(Beat {
             line,
             t_ms: millis(field("t=")?)?,
-            cpus: alive.split_once('/')?.1.parse().ok()?,
+            cpus,
             mask: u64::from_str_radix(field("mask=0x")?, 16).ok()?,
             ran: field("ran=")?.parse().ok()?,
             gap_ms: millis(field("gap=")?)?,
         })
     }
 
-    pub fn full(&self) -> bool {
+    fn full(&self) -> bool {
         self.mask == (1u64 << self.cpus) - 1
     }
 
-    pub fn absent(&self, cpu: u32) -> bool {
+    fn absent(&self, cpu: u32) -> bool {
         self.mask & (1 << cpu) == 0
     }
 
     /// Whether the machine ran through this beat's period.
-    pub fn ran_through(&self) -> bool {
+    fn ran_through(&self) -> bool {
         self.gap_ms <= LATE * PERIOD_MS && self.ran > 0
     }
 }
@@ -96,6 +119,34 @@ fn millis(field: &str) -> Option<u64> {
     Some(s.parse::<u64>().ok()? * 1000 + ms.parse::<u64>().ok()?)
 }
 
+/// `tests/metalcase`'s `[boot] start` programs and the line each says it has
+/// finished starting with. The one table: [`done_lines`] holds it against the
+/// config, and a caller reads it through that rather than declaring its own.
+const DONE: &[(&str, &str)] = &[
+    ("logd", "logd: this boot's kernel log is"),
+    ("compositor", "compositor: ready"),
+    ("soundd", "soundd: null sink idle"),
+    ("netd", "exit: netd pid="),
+    ("sshd", "exit: sshd pid="),
+    ("test-runner", "===READY==="),
+];
+
+/// The done line of each program in `start`, or the disagreement between the
+/// config and [`DONE`] — a `[boot] start` program with no done line here leaves
+/// its own start-up inside the window, which is the one thing the window exists
+/// to exclude.
+pub fn done_lines(start: &[String]) -> Result<Vec<&'static str>, String> {
+    let start: Vec<&str> = start.iter().map(String::as_str).collect();
+    let known: Vec<&str> = DONE.iter().map(|(program, _)| *program).collect();
+    if start != known {
+        return Err(format!(
+            "`tests/metalcase` starts {start:?} and `src/heartbeat.rs` knows the done line of \
+             {known:?} — a program without one leaves its start-up inside the window"
+        ));
+    }
+    Ok(DONE.iter().map(|(_, line)| *line).collect())
+}
+
 /// Why a capture is not a claim about a settled, running machine's CPUs.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refused {
@@ -103,7 +154,7 @@ pub enum Refused {
     Unreadable(String),
     /// A `[boot] start` program never said it was done: the line it says it with.
     BootUnfinished(String),
-    /// Fewer than [`MIN_SETTLED`] beats had a whole period after the boot's
+    /// Fewer than `MIN_SETTLED` beats had a whole period after the boot's
     /// start-up.
     Unsettled { settled: usize, beats: usize },
     /// A settled beat the machine did not run through, after `held` it did.
@@ -119,6 +170,35 @@ pub struct Settled {
     pub beats: Vec<Beat>,
     /// Settled beats missing a CPU — for one line each, since none for two.
     pub blips: usize,
+    /// The widest `gap=` anywhere in the capture, settled or not: a window
+    /// between two lines is wide enough to hide a death wherever it falls.
+    pub widest_gap_ms: u64,
+}
+
+/// The beats whose whole period follows the last of `started`, or the done line
+/// nothing in `lines` said.
+fn window<'a>(beats: &'a [Beat], lines: &[&str], started: &[&str]) -> Result<&'a [Beat], String> {
+    let mut last = 0;
+    for said in started {
+        let Some(at) = lines.iter().position(|l| l.contains(said)) else {
+            return Err((*said).to_string());
+        };
+        last = last.max(at);
+    }
+    // The beat after the record straddles it; the one after that is the first
+    // whose whole period follows it.
+    let after = beats.iter().filter(|b| b.line > last).count();
+    Ok(&beats[(beats.len() - after + 1).min(beats.len())..])
+}
+
+/// How much window `lines` holds so far — what a capture is taken to, against
+/// [`CAPTURE_BEATS`]. Zero until every one of `started` has said it is done, and
+/// a line whose fields will not parse is not a beat here; [`settle`] is what
+/// refuses one.
+pub fn window_beats(lines: &[&str], started: &[&str]) -> usize {
+    let beats: Vec<Beat> =
+        lines.iter().enumerate().filter_map(|(i, l)| Beat::parse(i, l)).collect();
+    window(&beats, lines, started).map_or(0, <[Beat]>::len)
 }
 
 /// The verdict on `lines`, a capture whose boot's start-up ends with the last of
@@ -134,20 +214,19 @@ pub fn settle(lines: &[&str], started: &[&str]) -> Result<Settled, Refused> {
     if let Some(odd) = beats.iter().find(|b| b.cpus != beats[0].cpus) {
         return Err(Refused::Unreadable(lines[odd.line].to_string()));
     }
-    let mut last = 0;
-    for said in started {
-        let Some(at) = lines.iter().position(|l| l.contains(said)) else {
-            return Err(Refused::BootUnfinished(said.to_string()));
-        };
-        last = last.max(at);
-    }
-    // The beat after the record straddles it; the one after that is the first
-    // whose whole period follows it.
-    let after = beats.iter().filter(|b| b.line > last).count();
-    let window = &beats[(beats.len() - after + 1).min(beats.len())..];
+    let window = window(&beats, lines, started).map_err(Refused::BootUnfinished)?;
     let held = window.iter().position(|b| !b.ran_through()).unwrap_or(window.len());
     let read = &window[..held];
-    let cpus: Vec<u32> = (0..beats.first().map_or(0, |b| b.cpus))
+    // A CPU is read from `MIN_SETTLED` settled beats or from none, so what a
+    // short window says is only why it is short.
+    if held < MIN_SETTLED {
+        return Err(if held < window.len() {
+            Refused::NotRunning { beat: window[held].clone(), held }
+        } else {
+            Refused::Unsettled { settled: held, beats: beats.len() }
+        });
+    }
+    let cpus: Vec<u32> = (0..beats[0].cpus)
         .filter(|&c| read.windows(STOPPED_BEATS).any(|w| w.iter().all(|b| b.absent(c))))
         .collect();
     if !cpus.is_empty() {
@@ -156,26 +235,26 @@ pub fn settle(lines: &[&str], started: &[&str]) -> Result<Settled, Refused> {
     if held < window.len() {
         return Err(Refused::NotRunning { beat: window[held].clone(), held });
     }
-    if held < MIN_SETTLED {
-        return Err(Refused::Unsettled { settled: held, beats: beats.len() });
-    }
-    Ok(Settled { blips: read.iter().filter(|b| !b.full()).count(), beats: read.to_vec() })
+    Ok(Settled {
+        blips: read.iter().filter(|b| !b.full()).count(),
+        widest_gap_ms: beats.iter().map(|b| b.gap_ms).max().unwrap_or(0),
+        beats: read.to_vec(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
-    /// `tests/metalcase`'s `[boot] start`, each program's done line, as the
-    /// test passes them.
-    const STARTED: &[&str] = &[
-        "logd: this boot's kernel log is",
-        "compositor: ready",
-        "soundd: null sink idle",
-        "exit: netd pid=",
-        "exit: sshd pid=",
-        "===READY===",
-    ];
+    /// `tests/metalcase`'s done lines, as the test passes them.
+    fn started() -> Vec<&'static str> {
+        done_lines(&crate::build::boot_start(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase/system.toml"),
+        ))
+        .unwrap()
+    }
 
     /// Nightly `35072262489`, guest shard 8, suite run: every heartbeat line and
     /// every `[boot] start` program's done line, in the capture's order and
@@ -247,10 +326,9 @@ compositor: ready
 [kernel 5.065 cpu2] heartbeat: t=5.065s alive=8/8 mask=0xff ran=43 gap=0.251s
 ";
 
-    /// A dev-host boot of the unmutated tree, the same way, up to its torn last
-    /// beat: `logd`'s `fsync` waited out a USB status phase on cpu4, and no
-    /// disk wait in this kernel parks, so cpu4 reached no pass for the whole
-    /// 2000 ms budget on a machine that was settled and running.
+    /// A dev-host boot, up to its torn last beat: every heartbeat line, every
+    /// `[boot] start` program's done line and the two lines naming the wait, in
+    /// the capture's order and verbatim, the lines between them dropped.
     const DISK_WAIT_PINS_CPU4: &str = "\
 logd: this boot's kernel log is /log/2026-09-18-135738.log (2026-09-18 13:57:38 at UTC+0 recovered from two readings)
 [kernel 1.122 cpu3] heartbeat: t=1.121s alive=8/8 mask=0xff ran=11 gap=0.261s
@@ -285,7 +363,7 @@ compositor: ready
         let lines = lines(DISK_WAIT_PINS_CPU4);
         let opened = lines.iter().position(|l| l.contains("t=2.909s")).unwrap();
         assert_eq!(
-            settle(&lines, STARTED),
+            settle(&lines, &started()),
             Err(Refused::CpuMissing { cpus: vec![4], settled: 8, opened })
         );
     }
@@ -310,7 +388,7 @@ compositor: ready
 
     /// A capture whose boot's start-up ends before its first beat, then `beats`.
     fn settled_capture(beats: &[String]) -> String {
-        let mut capture: String = STARTED.iter().map(|s| format!("{s}\n")).collect();
+        let mut capture: String = started().iter().map(|s| format!("{s}\n")).collect();
         capture.push_str(&beat(2000, 0xff, 40, 250));
         capture.push('\n');
         for b in beats {
@@ -320,14 +398,14 @@ compositor: ready
         capture
     }
 
-    /// The two boots that red the rule before this one, replayed: the churn is
-    /// the started programs' own start-up and outlasts `init`'s last spawn
-    /// record, so a window opened at the first full mask, or at the first two,
-    /// holds cpu5 absent from two consecutive beats — and the window opened
-    /// after `exit: sshd` holds no clear bit at all.
+    /// The started programs' own start-up outlasts `init`'s last spawn record,
+    /// so a window opened at a full mask holds cpu5 absent from two consecutive
+    /// beats; opened after the last done line it holds no clear bit at all.
     #[test]
     fn the_nightly_shard_8_boots_settle_after_the_last_program_finishes_starting() {
-        for (capture, opens_at, settled) in [(SHARD_8_SUITE, 2937, 10), (SHARD_8_ALONE, 3044, 9)] {
+        for (capture, opens_at, settled, widest) in
+            [(SHARD_8_SUITE, 2937, 10, 315), (SHARD_8_ALONE, 3044, 9, 262)]
+        {
             let lines = lines(capture);
             let beats: Vec<Beat> = lines
                 .iter()
@@ -335,8 +413,6 @@ compositor: ready
                 .filter_map(|(i, l)| Beat::parse(i, l))
                 .collect();
             assert_eq!(beats.len(), 17);
-            // The first beat is full, and cpu5 is then absent from two
-            // consecutive beats after init's last spawn record.
             assert!(beats[0].full());
             let spawned = lines
                 .iter()
@@ -344,25 +420,26 @@ compositor: ready
                 .unwrap();
             let after_spawn: Vec<&Beat> = beats.iter().filter(|b| b.line > spawned).collect();
             assert!(after_spawn[0].absent(5) && after_spawn[1].absent(5));
-            let verdict = settle(&lines, STARTED).unwrap();
+            let verdict = settle(&lines, &started()).unwrap();
             assert_eq!(verdict.beats[0].t_ms, opens_at);
             assert_eq!(verdict.beats.len(), settled);
             assert_eq!(verdict.blips, 0);
-            // The beat before the opening straddles the record.
+            assert_eq!(verdict.widest_gap_ms, widest);
             let exit = lines.iter().position(|l| l.contains("exit: sshd")).unwrap();
             let straddling = beats.iter().find(|b| b.line > exit).unwrap();
             assert!(straddling.t_ms < opens_at);
         }
     }
 
-    /// The reviewer's clean run on the dev host, as the review states it:
-    /// 37 beats, a pair of full masks at t=2.654 s and 2.904 s, then seven
-    /// seconds of `alive=4/8 ran=0` naming cpu[0, 1, 2, 4, 5] between them.
-    /// Reconstructed from those numbers, not a verbatim capture: the boot beats
-    /// and the split of the missing set across the tail are this test's.
+    /// A dev-host boot the host stopped scheduling: 37 beats, a pair of full
+    /// masks at t=2.654 s and 2.904 s, then seven seconds of `alive=4/8 ran=0`
+    /// naming cpu[0, 1, 2, 4, 5]. Reconstructed from those numbers rather than
+    /// captured — the boot beats and the split of the missing set across the
+    /// tail are this test's.
     fn dev_host_capture() -> String {
+        let started = started();
         let mut capture = String::new();
-        for said in &STARTED[..4] {
+        for said in &started[..4] {
             capture.push_str(said);
             capture.push('\n');
         }
@@ -395,8 +472,6 @@ compositor: ready
         let beats: Vec<Beat> =
             lines.iter().enumerate().filter_map(|(i, l)| Beat::parse(i, l)).collect();
         assert_eq!(beats.len(), 37);
-        // Opened at the first two consecutive full masks, the window holds each
-        // of cpu 0, 1, 2, 4 and 5 absent from two consecutive beats.
         let pair = beats.windows(2).position(|w| w[0].full() && w[1].full()).unwrap();
         assert_eq!(beats[pair].t_ms, 2654);
         let stopped: Vec<u32> = (0..8)
@@ -404,7 +479,7 @@ compositor: ready
             .collect();
         assert_eq!(stopped, [0, 1, 2, 4, 5]);
         assert_eq!(
-            settle(&lines, STARTED),
+            settle(&lines, &started()),
             Err(Refused::NotRunning { beat: beats[pair + 2].clone(), held: 2 })
         );
         assert_eq!(beats[pair + 2].ran, 0);
@@ -418,9 +493,10 @@ compositor: ready
         beats.push(beat(4500, 0xbf, 43, 250));
         beats.extend((1..=8).map(|i| beat(4500 + i * 250, 0xff, 43, 250)));
         let capture = settled_capture(&beats);
-        let verdict = settle(&lines(&capture), STARTED).unwrap();
+        let verdict = settle(&lines(&capture), &started()).unwrap();
         assert_eq!(verdict.beats.len(), 18);
         assert_eq!(verdict.blips, 1);
+        assert_eq!(verdict.widest_gap_ms, 250);
     }
 
     #[test]
@@ -429,8 +505,8 @@ compositor: ready
         beats.extend((1..=6).map(|i| beat(2750 + i * 250, 0xdf, 43, 250)));
         let capture = settled_capture(&beats);
         assert_eq!(
-            settle(&lines(&capture), STARTED),
-            Err(Refused::CpuMissing { cpus: vec![5], settled: 9, opened: STARTED.len() + 1 })
+            settle(&lines(&capture), &started()),
+            Err(Refused::CpuMissing { cpus: vec![5], settled: 9, opened: started().len() + 1 })
         );
     }
 
@@ -439,35 +515,68 @@ compositor: ready
     /// is not read as a CPU.
     #[test]
     fn a_beat_the_machine_did_not_run_through_closes_the_window() {
-        for (late, empty) in [(true, false), (false, true)] {
+        for (gap_ms, ran) in [(600, 43), (250, 0)] {
             let mut beats: Vec<String> =
-                (1..=3).map(|i| beat(2000 + i * 250, 0xff, 43, 250)).collect();
-            let stalled = beat(3650, 0xdf, if empty { 0 } else { 43 }, if late { 900 } else { 250 });
+                (1..=4).map(|i| beat(2000 + i * 250, 0xff, 43, 250)).collect();
+            let stalled = beat(3650, 0xdf, ran, gap_ms);
             beats.push(stalled.clone());
             beats.extend((1..=6).map(|i| beat(3650 + i * 250, 0xdf, 43, 250)));
             let capture = settled_capture(&beats);
             let lines = lines(&capture);
             let at = lines.iter().position(|l| *l == stalled).unwrap();
             assert_eq!(
-                settle(&lines, STARTED),
-                Err(Refused::NotRunning { beat: Beat::parse(at, &stalled).unwrap(), held: 3 })
+                settle(&lines, &started()),
+                Err(Refused::NotRunning { beat: Beat::parse(at, &stalled).unwrap(), held: 4 })
             );
         }
-        // Exactly LATE periods is not late.
-        let mut beats: Vec<String> = (1..=3).map(|i| beat(2000 + i * 250, 0xff, 43, 250)).collect();
-        beats.push(beat(3250, 0xff, 43, LATE * PERIOD_MS));
-        let capture = settled_capture(&beats);
-        assert_eq!(settle(&lines(&capture), STARTED).unwrap().beats.len(), 4);
+    }
+
+    /// `LATE`, both sides of it, in milliseconds rather than in the constant: a
+    /// 0.500 s gap is two 250 ms periods and the machine ran through it, and a
+    /// 0.600 s gap is a period in which no CPU reached the idle loop at all —
+    /// five `diag-tick` wakes missed — and closes the window.
+    #[test]
+    fn two_periods_of_gap_is_run_through_and_more_than_two_is_not() {
+        let settled = |gap_ms| {
+            let mut beats: Vec<String> =
+                (1..=4).map(|i| beat(2000 + i * 250, 0xff, 43, 250)).collect();
+            beats.push(beat(3250, 0xff, 43, gap_ms));
+            settle(&lines(&settled_capture(&beats)), &started()).map(|s| s.beats.len())
+        };
+        assert_eq!(settled(500), Ok(5));
+        assert!(matches!(settled(600), Err(Refused::NotRunning { held: 4, .. })));
     }
 
     #[test]
     fn a_cpu_that_stopped_before_the_stall_is_still_the_finding() {
-        let mut beats: Vec<String> = (1..=2).map(|i| beat(2000 + i * 250, 0xdf, 43, 250)).collect();
-        beats.push(beat(3400, 0xdf, 43, 900));
+        let mut beats: Vec<String> = (1..=4).map(|i| beat(2000 + i * 250, 0xdf, 43, 250)).collect();
+        beats.push(beat(3400, 0xdf, 43, 600));
         let capture = settled_capture(&beats);
         assert_eq!(
-            settle(&lines(&capture), STARTED),
-            Err(Refused::CpuMissing { cpus: vec![5], settled: 2, opened: STARTED.len() + 1 })
+            settle(&lines(&capture), &started()),
+            Err(Refused::CpuMissing { cpus: vec![5], settled: 4, opened: started().len() + 1 })
+        );
+    }
+
+    /// A verdict about a CPU is read from `MIN_SETTLED` settled beats or from
+    /// none: a stall two beats in, and a capture that ends three beats in, each
+    /// say why the window is short and neither names a CPU.
+    #[test]
+    fn a_cpu_missing_from_a_window_shorter_than_the_minimum_is_not_named() {
+        let mut beats: Vec<String> = (1..=2).map(|i| beat(2000 + i * 250, 0xdf, 43, 250)).collect();
+        beats.push(beat(3400, 0xdf, 43, 600));
+        let capture = settled_capture(&beats);
+        let stalled = lines(&capture);
+        let at = stalled.iter().position(|l| l.contains("t=3.400s")).unwrap();
+        assert_eq!(
+            settle(&stalled, &started()),
+            Err(Refused::NotRunning { beat: Beat::parse(at, stalled[at]).unwrap(), held: 2 })
+        );
+
+        let beats: Vec<String> = (1..=3).map(|i| beat(2000 + i * 250, 0xdf, 43, 250)).collect();
+        assert_eq!(
+            settle(&lines(&settled_capture(&beats)), &started()),
+            Err(Refused::Unsettled { settled: 3, beats: 4 })
         );
     }
 
@@ -478,35 +587,38 @@ compositor: ready
             .filter(|l| !l.contains("exit: sshd"))
             .collect();
         assert_eq!(
-            settle(&without, STARTED),
+            settle(&without, &started()),
             Err(Refused::BootUnfinished("exit: sshd pid=".to_string()))
         );
+        assert_eq!(window_beats(&without, &started()), 0);
     }
 
     /// The beat after the last done line straddles it, so the window opens on
     /// the one after that; a done line after every beat opens nothing.
     #[test]
     fn the_window_opens_on_the_first_whole_period_after_the_last_done_line() {
+        let started = started();
         let beats: Vec<String> = (1..=6).map(|i| beat(2000 + i * 250, 0xff, 43, 250)).collect();
-        let mut capture: String = STARTED[..5].iter().map(|s| format!("{s}\n")).collect();
+        let mut capture: String = started[..5].iter().map(|s| format!("{s}\n")).collect();
         capture.push_str(&beats[0]);
         capture.push_str("\n===READY===\n");
         for b in &beats[1..] {
             capture.push_str(b);
             capture.push('\n');
         }
-        let verdict = settle(&lines(&capture), STARTED).unwrap();
+        let verdict = settle(&lines(&capture), &started).unwrap();
         assert_eq!(verdict.beats[0].t_ms, 2750);
         assert_eq!(verdict.beats.len(), 4);
+        assert_eq!(window_beats(&lines(&capture), &started), 4);
 
-        let mut capture: String = STARTED[..5].iter().map(|s| format!("{s}\n")).collect();
+        let mut capture: String = started[..5].iter().map(|s| format!("{s}\n")).collect();
         for b in &beats {
             capture.push_str(b);
             capture.push('\n');
         }
         capture.push_str("===READY===\n");
         assert_eq!(
-            settle(&lines(&capture), STARTED),
+            settle(&lines(&capture), &started),
             Err(Refused::Unsettled { settled: 0, beats: 6 })
         );
     }
@@ -515,9 +627,38 @@ compositor: ready
     fn fewer_settled_beats_than_the_minimum_is_not_a_verdict() {
         let beats: Vec<String> = (1..=3).map(|i| beat(2000 + i * 250, 0xff, 43, 250)).collect();
         let capture = settled_capture(&beats);
+        assert_eq!(window_beats(&lines(&capture), &started()), 3);
         assert_eq!(
-            settle(&lines(&capture), STARTED),
+            settle(&lines(&capture), &started()),
             Err(Refused::Unsettled { settled: 3, beats: 4 })
+        );
+    }
+
+    /// What `CAPTURE_BEATS` buys over the floor: cut at `MIN_SETTLED` the
+    /// capture ends on cpu5's first absence, which is a blip and names nobody;
+    /// taken to `CAPTURE_BEATS` the second absence lands inside it.
+    #[test]
+    fn the_capture_carries_beats_past_the_floor_for_the_convicting_one() {
+        let mut beats: Vec<String> =
+            (1..MIN_SETTLED as u64).map(|i| beat(2000 + i * 250, 0xff, 43, 250)).collect();
+        beats.push(beat(2000 + MIN_SETTLED as u64 * 250, 0xdf, 43, 250));
+        let cut = settled_capture(&beats);
+        assert_eq!(window_beats(&lines(&cut), &started()), MIN_SETTLED);
+        assert_eq!(settle(&lines(&cut), &started()).unwrap().blips, 1);
+
+        beats.extend(
+            (MIN_SETTLED as u64 + 1..=CAPTURE_BEATS as u64)
+                .map(|i| beat(2000 + i * 250, 0xdf, 43, 250)),
+        );
+        let whole = settled_capture(&beats);
+        assert_eq!(window_beats(&lines(&whole), &started()), CAPTURE_BEATS);
+        assert_eq!(
+            settle(&lines(&whole), &started()),
+            Err(Refused::CpuMissing {
+                cpus: vec![5],
+                settled: CAPTURE_BEATS,
+                opened: started().len() + 1
+            })
         );
     }
 
@@ -527,10 +668,62 @@ compositor: ready
         let mut capture = settled_capture(&[]);
         capture.push_str(torn);
         capture.push('\n');
-        assert_eq!(settle(&lines(&capture), STARTED), Err(Refused::Unreadable(torn.to_string())));
+        assert_eq!(
+            settle(&lines(&capture), &started()),
+            Err(Refused::Unreadable(torn.to_string()))
+        );
         assert_eq!(millis("0.251s"), Some(251));
         assert_eq!(millis("12.000s"), Some(12_000));
         assert_eq!(millis("0.25s"), None);
         assert_eq!(millis("0.251"), None);
+    }
+
+    /// The `mask=` is 64 bits, so an `alive=` denominator at 64 or above is no
+    /// reading of it and neither is zero — and the refusal is the contract's,
+    /// not a shift overflow's.
+    #[test]
+    fn a_cpu_count_the_mask_cannot_carry_is_unreadable() {
+        for alive in ["8/64", "8/100", "8/4294967296", "0/0"] {
+            let wide = format!(
+                "[kernel 2.5 cpu2] heartbeat: t=2.500s alive={alive} mask=0xff ran=43 gap=0.250s"
+            );
+            let mut capture = settled_capture(&[]);
+            capture.push_str(&wide);
+            capture.push('\n');
+            assert_eq!(
+                settle(&lines(&capture), &started()),
+                Err(Refused::Unreadable(wide.clone())),
+                "{alive}"
+            );
+        }
+    }
+
+    /// One capture is one machine: a beat whose `alive=` denominator is not the
+    /// first's describes a different one, and a mask read against the wrong
+    /// width is a CPU invented or a CPU dropped.
+    #[test]
+    fn a_capture_whose_cpu_count_changes_is_unreadable() {
+        let odd = "[kernel 3.0 cpu2] heartbeat: t=3.000s alive=7/7 mask=0x7f ran=43 gap=0.250s";
+        let mut beats: Vec<String> = (1..=2).map(|i| beat(2000 + i * 250, 0xff, 43, 250)).collect();
+        beats.push(odd.to_string());
+        beats.extend((1..=4).map(|i| beat(3000 + i * 250, 0xff, 43, 250)));
+        let capture = settled_capture(&beats);
+        assert_eq!(settle(&lines(&capture), &started()), Err(Refused::Unreadable(odd.to_string())));
+    }
+
+    /// The one table, held against the config it transcribes: a `[boot] start`
+    /// program it does not know is refused by name, here and not at the guest.
+    #[test]
+    fn a_program_the_done_table_does_not_know_is_refused() {
+        let known: Vec<String> = DONE.iter().map(|(program, _)| (*program).to_string()).collect();
+        assert_eq!(done_lines(&known).unwrap(), started());
+
+        let mut added = known.clone();
+        added.push("sniffer".to_string());
+        assert!(done_lines(&added).unwrap_err().contains("sniffer"));
+
+        let mut dropped = known.clone();
+        dropped.pop();
+        assert!(done_lines(&dropped).is_err());
     }
 }

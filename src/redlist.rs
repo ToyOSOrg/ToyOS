@@ -3757,7 +3757,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "seven runs of `cargo test --test toyos-build kernel_heartbeat -- --nightly` on \
                    cbe1cc59, dev host, 2026-09-18, load average 14.14 to 35.48 across them and \
                    27.57 at the red",
-        source: "issues/audio/disk-wait-pins-a-cpu.md",
+        source: "src/heartbeat.rs",
         measured: "2026-09-18",
     },
 ];
