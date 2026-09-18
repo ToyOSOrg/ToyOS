@@ -3740,6 +3740,26 @@ pub const KNOWN_RED: &[Red] = &[
         source: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md",
         measured: "2026-09-08",
     },
+    Red {
+        test: "kernel_heartbeat",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::fires(1, 7),
+        standing: Standing::Stands,
+        what: "`cpu[4] missing from 2 consecutive heartbeats on a settled guest that was running` \
+               — cpu4 absent from seven consecutive settled beats, `gap=0.250s` and `ran=26..38` \
+               on every one, and back on the next. Not a CPU that stopped: logd's `fsync` waited \
+               out a USB status phase on it (`[kernel 4.663 cpu4] usb-storage: 00:02.0 slot 1 \
+               transport broke on SCSI 0x2a: no answer in the status phase in 2000 ms`, then \
+               `fsync: … durable on attempt 2 after 2016ms`), and a disk wait in this kernel \
+               pins its CPU for the whole round trip, so cpu4 reached no scheduler pass for \
+               1.998 s. The mask told the truth; `src/heartbeat.rs` carries the capture and \
+               reports it. `ALONE kernel_heartbeat: GREEN`",
+        evidence: "seven runs of `cargo test --test toyos-build kernel_heartbeat -- --nightly` on \
+                   cbe1cc59, dev host, 2026-09-18, load average 14.14 to 35.48 across them and \
+                   27.57 at the red",
+        source: "issues/audio/disk-wait-pins-a-cpu.md",
+        measured: "2026-09-18",
+    },
 ];
 
 // ---------------------------------------------------------------------------

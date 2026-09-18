@@ -38,3 +38,15 @@ the log architecture, so no CPU takes a flush now — and
 are the fixes that came before. Each was right about its own defect; both chose
 which CPU absorbs a stall whose duration neither touched. The pinning disk wait
 is logd's `fsync` through the three spinlocks above.
+
+## A second instrument sees it: the heartbeat's mask (2026-09-18)
+
+`kernel_heartbeat` red 1 of 7 on the loaded dev host at `cbe1cc59` on exactly
+this: logd's `fsync` waited out a USB status phase on cpu4 (`usb-storage:
+00:02.0 slot 1 transport broke on SCSI 0x2a: no answer in the status phase in
+2000 ms`, then `fsync: … durable on attempt 2 after 2016ms`), and cpu4 reached
+no scheduler pass for 1.998 s — absent from seven consecutive heartbeats on a
+guest that had finished starting, with every beat on time and dispatching. The
+heartbeat's verdict is right and is not excused: `src/heartbeat.rs` carries the
+capture as a host test, and `cargo run -- --known-red kernel_heartbeat` has the
+row. It closes with this issue: a disk wait that parks leaves cpu4 on the mask.
