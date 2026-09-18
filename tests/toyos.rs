@@ -16480,13 +16480,13 @@ fn alone_line(name: &str, wide: &str, shared_the_host: bool, alone: Option<&Outc
         ),
         Verdict::Fail(_) | Verdict::Expected(_) => {
             let said = headline(outcome.reason.as_deref());
-            if said == wide {
-                format!("  ALONE {name}: red again, the same failure both times — the defect \
-                         is real. {said}")
-            } else if toyos_build::alone::same_failure(&said, wide) {
+            // One decision and one classifier: byte equality is the case
+            // `same_failure` already answers, so asking it first would be a
+            // second rule nothing tests.
+            if toyos_build::alone::same_failure(&said, wide) {
                 format!(
-                    "  ALONE {name}: red again, the same failure both times — the defect is real, \
-                     at two measurements.\n      wide:  {wide}\n      alone: {said}"
+                    "  ALONE {name}: red again, the same failure both times — the defect is \
+                     real.\n      wide:  {wide}\n      alone: {said}"
                 )
             } else {
                 format!(
@@ -16565,9 +16565,12 @@ fn alone_line_reports_the_alone_run() -> Result<(), String> {
     if !twice.contains("red again, the same failure both times") {
         return Err(format!("one assertion at two readings reads as two assertions:\n{twice}"));
     }
-    for both in [MEASURED, AGAIN] {
-        if !twice.contains(both) {
-            return Err(format!("the two-measurement line drops {both:?}:\n{twice}"));
+    // The labels are the whole content of the line: two sentences under swapped
+    // labels is the mis-attribution this gate exists to stop, said in the other
+    // direction.
+    for (label, sentence) in [("wide:  ", MEASURED), ("alone: ", AGAIN)] {
+        if !twice.contains(&format!("{label}{sentence}")) {
+            return Err(format!("{sentence:?} is not the line's {label:?} run:\n{twice}"));
         }
     }
 
