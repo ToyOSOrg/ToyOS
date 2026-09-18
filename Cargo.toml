@@ -133,6 +133,9 @@ sha2 = "0.10"
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
 toyos-ld = { path = "toyos-ld" }
+# `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
+# checks every user pointer against and not against a second copy of it.
+toyos-userbound = { path = "toyos-userbound" }
 # The scheduler core, for the one type the check build publishes and the
 # harness judges: `cpu::PassCostReport` is the wire form of the pass-cost
 # distribution, and its `Display`/`parse` pair is what keeps the kernel that

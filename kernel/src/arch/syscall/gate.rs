@@ -44,66 +44,62 @@ pub fn init() {
 /// register the thread's, so each takes an immediate and per-CPU memory and
 /// nothing else: a push is the SMAP fault the window is about, and a register
 /// is state the thread gets back. `ASKED` is the storm's to set and to clear,
-/// `HELD` the entry's acknowledgement, and the spin ends only on `ASKED`
-/// clearing — an ask withdrawn under a late acknowledgement releases at once
-/// rather than holding the CPU for good.
+/// `HELD` the entry's acknowledgement, and the spin ends on `ASKED` clearing
+/// and on nothing else: the entry has no register to count in, so the asker's
+/// bound — `nmi_gate::hold_one`'s two budgets — is the only one it has.
 ///
-/// The window under test is the same one: the `test`/`jz` pair every entry
-/// runs lengthens it by two instructions on this kernel and pushes nothing, and
-/// the row its survival rests on — IST2 on vector 2 — is one `idt_vectors!`
-/// table in both kernels.
+/// The two labels bound the instructions an NMI can interrupt with both bits
+/// set, for [`hold_spin`]; `src/build.rs` refuses a shipping kernel that names
+/// either, so no hold is compiled into an entry without saying so.
 #[cfg(feature = "boot-actuators")]
 macro_rules! window_hold {
     () => {
         concat!(
             "test qword ptr gs:[{nmi_hold}], {asked}\n",
-            "jz 2f\n",
+            "jz syscall_entry_hold_end\n",
             "lock or qword ptr gs:[{nmi_hold}], {held}\n",
-            "3:\n",
+            ".globl syscall_entry_hold_spin\n",
+            "syscall_entry_hold_spin:\n",
             "pause\n",
             "test qword ptr gs:[{nmi_hold}], {asked}\n",
-            "jnz 3b\n",
-            "2:\n",
+            "jnz syscall_entry_hold_spin\n",
+            ".globl syscall_entry_hold_end\n",
+            "syscall_entry_hold_end:\n",
         )
     };
 }
 
-/// Absent `boot-actuators` the window is its three instructions and nothing else.
-#[cfg(not(feature = "boot-actuators"))]
-macro_rules! window_hold {
-    () => {
-        ""
-    };
-}
-
-/// [`ring3_naked_asm`] with the operands only [`window_hold`]'s armed body
-/// names; an operand a template never uses is refused, so the shipping
-/// kernel's entry is handed none.
+/// Where [`window_hold`] spins, as addresses: an NMI taken under an acknowledged hold has its `rip` in this range.
 #[cfg(feature = "boot-actuators")]
-macro_rules! entry_naked_asm {
-    ($($body:tt)*) => {
-        ring3_naked_asm!(
-            $($body)*
-            nmi_hold = const percpu::OFF_NMI_HOLD,
-            asked = const crate::nmi_gate::hold::ASKED,
-            held = const crate::nmi_gate::hold::HELD,
-        )
-    };
-}
-
-#[cfg(not(feature = "boot-actuators"))]
-macro_rules! entry_naked_asm {
-    ($($body:tt)*) => {
-        ring3_naked_asm!($($body)*)
-    };
+pub(crate) fn hold_spin() -> core::ops::Range<u64> {
+    extern "C" {
+        static syscall_entry_hold_spin: u8;
+        static syscall_entry_hold_end: u8;
+    }
+    let (start, end): (u64, u64);
+    // A `rip`-relative `lea` and not the statics' addresses, for `arch::smp::asm_label_addr`'s reason.
+    // SAFETY: `lea` with `nomem` reads and writes no memory.
+    unsafe {
+        core::arch::asm!(
+            "lea {start}, [rip + {spin}]",
+            "lea {end}, [rip + {stop}]",
+            start = out(reg) start,
+            end = out(reg) end,
+            spin = sym syscall_entry_hold_spin,
+            stop = sym syscall_entry_hold_end,
+            options(nostack, nomem),
+        );
+    }
+    start..end
 }
 
 // GS permanently points to kernel per-CPU data here; no swapgs.
 // `SYSCALL` switches no stack: before the `rsp` switch below runs, the CPU is at CPL 0 on the user's stack, so nothing that can fault may execute there.
 #[unsafe(naked)]
 extern "sysv64" fn syscall_entry() {
-    entry_naked_asm!(
+    ring3_naked_asm!(
         "mov gs:[{user_rsp}], rsp",
+        #[cfg(feature = "boot-actuators")]
         window_hold!(),
         "mov rsp, gs:[{kernel_rsp}]",
         "mov gs:[{syscall_rip}], rcx",
@@ -157,6 +153,12 @@ extern "sysv64" fn syscall_entry() {
         syscall_num = const percpu::OFF_SYSCALL_NUM,
         syscall_rbp = const percpu::OFF_SYSCALL_RBP,
         preempt_count = const percpu::OFF_PREEMPT_COUNT,
+        #[cfg(feature = "boot-actuators")]
+        nmi_hold = const percpu::OFF_NMI_HOLD,
+        #[cfg(feature = "boot-actuators")]
+        asked = const crate::nmi_gate::hold::ASKED,
+        #[cfg(feature = "boot-actuators")]
+        held = const crate::nmi_gate::hold::HELD,
     );
 }
 

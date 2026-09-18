@@ -105,7 +105,7 @@ pub struct PerCpu {
     ap_token: u32,
     /// `nmi_gate::hold`'s word: the storm asks in it from another CPU, and `arch::syscall`'s entry acknowledges and spins on it inside its window, through [`OFF_NMI_HOLD`].
     #[cfg(feature = "boot-actuators")]
-    pub nmi_hold: AtomicU64,
+    nmi_hold: AtomicU64,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so growing `SLOTS` moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::SLOTS],
 }
@@ -382,7 +382,6 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     percpu.init_tss_descriptor();
     // Published before the CPU it belongs to runs an instruction — no window where the census misses it.
     crate::irq_census::publish(cpu_id, percpu.irq_counts.as_ptr());
-    // The two words the storm reaches on a sibling: the hold it asks in, and the user `rsp` the held entry parked.
     #[cfg(feature = "boot-actuators")]
     crate::nmi_gate::publish(cpu_id, &raw const percpu.nmi_hold, &raw const percpu.user_rsp);
     ptr

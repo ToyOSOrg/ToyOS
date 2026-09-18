@@ -364,34 +364,61 @@ const SPIN_SECS: u32 = 10;
 const NMI_REPORT: &str = "syscall-window-nmi: sent=";
 
 /// The storm's own word, before it sends, that it holds the victim inside the
-/// entry: which CPU, and the `rsp` it is held at.
+/// entry: which CPU, the `rsp` it is held at, and where the entry spins.
 const HELD: &str = "syscall-window-nmi: held cpu=";
 
-/// Where the user half ends: a Ring 3 stack is below it, and the kernel's
-/// `is_kernel_addr` draws its line above it.
-const USER_HALF_END: u64 = 1 << 47;
+/// The storm's word that it found nobody to hold, before it sprays.
+const HELD_NOBODY: &str = "syscall-window-nmi: held nobody";
+
+/// The storm's word that the hold is over: an arrival under this line is a
+/// sprayed one.
+const RELEASED: &str = "syscall-window-nmi: released cpu=";
+
+/// What the storm said of the hold it arranged.
+struct Hold {
+    cpu: u64,
+    /// The user `rsp` the victim was held at.
+    rsp: u64,
+    /// Where the entry spins while held.
+    spin: std::ops::Range<u64>,
+}
 
 /// The premise both arms rest on, read off the capture: the CPU the storm held
 /// inside the entry's window and the `rsp` it held it at, which has to be the
 /// user's or the hold was not the window.
-fn held_in_window(capture: &str) -> Result<(u64, u64), String> {
+fn held_in_window(capture: &str) -> Result<Hold, String> {
     let Some(line) = capture.lines().find(|l| l.contains(HELD)) else {
-        return Err(format!(
-            "the storm never held the victim inside the entry — no CPU took a syscall while \
-             asked to — so the premise every verdict rests on was not arranged, and this run \
-             says nothing about vector 2's IST\n{capture}"
-        ));
+        return Err(if capture.contains(HELD_NOBODY) {
+            format!(
+                "the storm says it held nobody, so the premise every verdict rests on was not \
+                 arranged and this run says nothing about vector 2's IST\n{capture}"
+            )
+        } else {
+            format!("the capture has no `{HELD}` line and no `{HELD_NOBODY}` line\n{capture}")
+        });
     };
     let cpu = field(line, "cpu=")?;
-    let rsp = hex(line, "rsp=").ok_or_else(|| format!("no rsp=0x… field in {line:?}"))?;
-    if rsp >= USER_HALF_END {
+    let part = |name: &str| hex(line, name).ok_or_else(|| format!("no {name}0x… field in {line:?}"));
+    let (rsp, spin) = (part("rsp=")?, part("spin=")?..part("end=")?);
+    if rsp >= toyos_userbound::USER_TOP {
         return Err(format!(
             "cpu{cpu} was held at rsp={rsp:#x}, which is not a user address: a hold on a kernel \
              stack is not the window, and an NMI there finds a stack the CPU may push \
              on\n{capture}"
         ));
     }
-    Ok((cpu, rsp))
+    Ok(Hold { cpu, rsp, spin })
+}
+
+/// A hold nothing ended: the entry has no register to count in, so the asker's
+/// release is the only thing that ends one, and an asker that died inside its
+/// own bound leaves the victim spinning with interrupts off.
+fn never_released(hold: &Hold, capture: &str) -> String {
+    format!(
+        "cpu{} was held inside the entry and the capture has no `{RELEASED}` line: the storm's \
+         CPU died between its ask and its release, and nothing else ends a hold\n{capture}",
+        hold.cpu,
+    )
 }
 
 /// The `name`N field of a key=value report line, by name and not position.
@@ -432,8 +459,10 @@ fn hex(line: &str, field: &str) -> Option<u64> {
 /// entry acknowledges and spins on at CPL 0 on the user's stack — and aims one
 /// NMI at it there. That arrival is every host's, and is asserted on every
 /// host: the `held cpu=… rsp=…` line the storm prints before the send, with an
-/// `rsp` in the user half, and `held=1` in its report. The spray's landings are
-/// not. Under TCG, QEMU checks for a pending interrupt between translation
+/// `rsp` in the user half, and a `held` count in its report that the held CPU
+/// itself keeps — a window arrival taken while its own word still had both
+/// bits — whose frame stands at the held `rsp` with a `rip` inside the entry's
+/// spin. The spray's landings are not. Under TCG, QEMU checks for a pending interrupt between translation
 /// blocks and `syscall` ends one, so a pending NMI is delivered at
 /// `syscall_entry+0`: the dev host reads 36 to 58 arrivals per 3,000, run after
 /// run. Under KVM an NMI to a running vCPU is a host kick, a VM exit and an
@@ -476,25 +505,24 @@ fn hex(line: &str, field: &str) -> Option<u64> {
 /// **The derivation, where it applies.** Every iteration of the spinner's loop
 /// passes through the window exactly once and through Ring 3 exactly once, so
 /// the two counts differ only by how many points an NMI can be delivered at
-/// inside each. The spinner's user loop is four instructions — `mov`, `syscall`,
-/// `dec`, `jnz` — and the window is six more on the kernel the storm boots:
-/// `cld`, the `rsp` save, the hold's `test` and `jz`, the switch, and the exit's
-/// gap between `pop rsp` and `sysretq`. Six against four under a delivery model
-/// uniform over instructions; under TCG the window contributes one block
-/// boundary and the user side two or three. Both readings say one traversal
-/// each within a small factor, and [`SAME_ORDER`] is the bound: an order of
-/// magnitude, which no reading of the delivery model reaches and a
-/// classification that has stopped tracking the loop fails at once. The held
-/// arrival is not a sample of the spray and is subtracted before the ratio.
+/// inside each: a few instructions either side under a delivery model uniform
+/// over instructions, and under TCG one block boundary in the window against
+/// two or three on the user side. Both readings say one traversal each within a
+/// small factor, and [`SAME_ORDER`] is the bound: an order of magnitude, which
+/// no reading of the delivery model reaches and a classification that has
+/// stopped tracking the loop fails at once. The held arrival is not a sample of
+/// the spray and is subtracted before the ratio.
 ///
 /// Measured, dev host, TCG, `-smp 4`, 3,000 NMIs sent: **47 window arrivals
 /// against 136 in Ring 3** aimed, **36 against 122** while the storm still
 /// sprayed every sibling.
 ///
 /// The bound is not the teeth on its own. What says the count means the window
-/// is the first arrival's own `rip` — the held one's — symbolized by the kernel
-/// and asserted against `syscall_entry` on every host: `dump_nmi_probe`'s rule,
-/// that a probe naming the wrong instruction is worse than one naming none.
+/// is the first *sprayed* arrival's own `rip`, symbolized by the kernel and
+/// asserted against `syscall_entry`: `dump_nmi_probe`'s rule, that a probe
+/// naming the wrong instruction is worse than one naming none. The held
+/// arrival cannot say it — it is inside the entry by arrangement, whatever the
+/// classifier does — so the kernel keeps the two frames apart.
 pub fn syscall_window_nmi(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -512,28 +540,32 @@ pub fn syscall_window_nmi(
              is not doing what the table says\n{survived}"
         ));
     }
+    let Some(report) = survived.lines().find(|l| l.contains(NMI_REPORT)) else {
+        return Err(match held_in_window(&survived) {
+            Ok(hold) if !survived.contains(RELEASED) => never_released(&hold, &survived),
+            _ => format!("the storm never reported — is `syscall-window-nmi` on?\n{survived}"),
+        });
+    };
     // The premise before any verdict: the storm's own word that it held the
-    // victim inside the entry at the user's `rsp`, and the report's count of
-    // that arrival landing there.
-    let (held_cpu, held_rsp) = held_in_window(&survived)?;
-    let report = survived
-        .lines()
-        .find(|l| l.contains(NMI_REPORT))
-        .ok_or_else(|| format!("the storm never reported — is `syscall-window-nmi` on?\n{survived}"))?;
+    // victim inside the entry at the user's `rsp`, and the held CPU's own count
+    // of the arrival it took there.
+    let hold = held_in_window(&survived)?;
     let (sent, seen) = (field(report, "sent=")?, field(report, "seen=")?);
     let (window, ring3) = (field(report, "window=")?, field(report, "ring3=")?);
     let (spun, held) = (field(report, "spun=")?, field(report, "held=")?);
     eprintln!(
-        "  [nmi-window] cpu{held_cpu} held at rsp={held_rsp:#x}; {sent} sent, {seen} taken, \
-         {window} in the window with {held} of them the held arrival, {ring3} in Ring 3, {spun} \
-         syscalls made under the storm"
+        "  [nmi-window] cpu{} held at rsp={:#x}; {sent} sent, {seen} taken, {window} in the window \
+         with {held} of them the held arrival, {ring3} in Ring 3, {spun} syscalls made under the \
+         storm",
+        hold.cpu, hold.rsp,
     );
     if held == 0 {
         return Err(format!(
-            "cpu{held_cpu} was held inside the entry at rsp={held_rsp:#x} and the one NMI aimed \
-             at it was not taken in the window — either it was not delivered inside the hold, \
-             or a Ring 0 frame with a user `rsp` is classified as something else; either way \
-             the premise is missing and nothing below is a verdict on the window\n{survived}"
+            "cpu{} was held inside the entry at rsp={:#x} and took no window arrival while its \
+             hold word had both bits — either the NMI aimed at it was not delivered inside the \
+             hold, or a Ring 0 frame with a user `rsp` is classified as something else; either \
+             way the premise is missing and nothing below is a verdict on the window\n{survived}",
+            hold.cpu, hold.rsp,
         ));
     }
     if window < held {
@@ -542,19 +574,19 @@ pub fn syscall_window_nmi(
              all — one counter did not read the other's decision\n{survived}"
         ));
     }
-    // What makes the count a claim about the window rather than about some
-    // other Ring 0 frame with a low `rsp`: the kernel symbolizes the first
-    // arrival it saw, the held one, and it has to be the entry — on every host.
-    let Some(rest) = survived.split("the first window arrival was here:\n").nth(1) else {
-        return Err(format!("the report named no rip for the first window arrival\n{survived}"));
+    // The held arrival's own frame, which the kernel keeps apart from the
+    // sprayed ones': at the `rsp` the storm read before it sent, and inside the
+    // spin the entry was held in.
+    let Some(arrival) = survived.lines().find(|l| l.contains("the held arrival had rip=")) else {
+        return Err(format!("the report counts a held arrival and names no frame for it\n{survived}"));
     };
-    let named = rest.lines().next().unwrap_or("");
-    if !named.contains("syscall_entry") {
+    let (rip, rsp) = (hex(arrival, "rip="), hex(arrival, "rsp="));
+    if rsp != Some(hold.rsp) || !rip.is_some_and(|rip| hold.spin.contains(&rip)) {
         return Err(format!(
-            "the first window arrival resolved to `{}`, not to the syscall entry — a Ring 0 \
-             frame with a user `rsp` somewhere else is a different finding, and this test is \
-             not measuring it\n{survived}",
-            named.trim(),
+            "the held arrival's frame is rip={rip:#x?} rsp={rsp:#x?}, and cpu{} was held at \
+             rsp={:#x} spinning in {:#x?}: the arrival counted as the held one is not the one \
+             the hold arranged\n{survived}",
+            hold.cpu, hold.rsp, hold.spin,
         ));
     }
 
@@ -672,6 +704,23 @@ pub fn syscall_window_nmi(
              says the arrivals are not being classified where they land\n{survived}"
         ));
     }
+    // What makes the count a claim about the window rather than about some
+    // other Ring 0 frame with a low `rsp`: the kernel symbolizes the first
+    // sprayed one it saw, and it has to be the entry.
+    let Some(rest) = survived.split("the first sprayed window arrival was here:\n").nth(1) else {
+        return Err(format!(
+            "the report named no rip for the first sprayed window arrival\n{survived}"
+        ));
+    };
+    let named = rest.lines().next().unwrap_or("");
+    if !named.contains("syscall_entry") {
+        return Err(format!(
+            "the first sprayed window arrival resolved to `{}`, not to the syscall entry — a \
+             Ring 0 frame with a user `rsp` somewhere else is a different finding, and this test \
+             is not measuring it\n{survived}",
+            named.trim(),
+        ));
+    }
     Ok(())
 }
 
@@ -723,24 +772,41 @@ pub fn syscall_window_nmi_controls(
     )?;
     // The premise before the consequence: a control whose stimulus missed can
     // only say what an absent defect says, and this one says which it was.
-    let (held_cpu, held_rsp) = held_in_window(&unfixed)?;
-    let Some(df) = unfixed.lines().find(|l| l.contains("DOUBLE FAULT")) else {
+    let hold = held_in_window(&unfixed)?;
+    let line_of = |what: &str| unfixed.lines().position(|l| l.contains(what));
+    let Some(df_at) = line_of("DOUBLE FAULT") else {
+        if line_of(RELEASED).is_none() {
+            return Err(never_released(&hold, &unfixed));
+        }
         return Err(format!(
-            "cpu{held_cpu} was held inside the entry at rsp={held_rsp:#x} with no IST on vector \
-             2 and an NMI aimed at it, and the machine survived — the CPU took that NMI at CPL \
-             0 on a user page without the stack IST2 provides and nothing refused the frame, so \
-             on this machine the row is not what stands between the window and a #DF\n{unfixed}"
+            "cpu{} was held inside the entry at rsp={:#x} with no IST on vector 2 and an NMI \
+             aimed at it, and the machine survived — the CPU took that NMI at CPL 0 on a user \
+             page without the stack IST2 provides and nothing refused the frame, so on this \
+             machine the row is not what stands between the window and a #DF\n{unfixed}",
+            hold.cpu, hold.rsp,
         ));
     };
+    // The held arrival's `#DF` and not a sprayed one's: the storm says when the
+    // hold ended, and the death has to be above that line or the victim was
+    // already out of the hold when it died.
+    if line_of(RELEASED).is_some_and(|released| released < df_at) {
+        return Err(format!(
+            "the storm released cpu{} before the #DF: the NMI aimed at the hold did not take the \
+             machine down, and the one that did was sprayed at a CPU nobody held\n{unfixed}",
+            hold.cpu,
+        ));
+    }
+    let df = unfixed.lines().nth(df_at).unwrap_or_default();
     eprintln!("  [nmi-window] without IST2: {}", df.trim());
     let df_cpu = df
         .split("on CPU ")
         .nth(1)
         .and_then(|rest| rest.split_whitespace().next()?.parse::<u64>().ok());
-    if df_cpu != Some(held_cpu) {
+    if df_cpu != Some(hold.cpu) {
         return Err(format!(
-            "the double fault was on CPU {df_cpu:?}, not on cpu{held_cpu} the storm held — a \
-             #DF on any other CPU is a different death\n{unfixed}"
+            "the double fault was on CPU {df_cpu:?}, not on cpu{} the storm held — a #DF on any \
+             other CPU is a different death\n{unfixed}",
+            hold.cpu,
         ));
     }
     if !unfixed.contains("syscall_entry") {
@@ -749,26 +815,32 @@ pub fn syscall_window_nmi_controls(
         ));
     }
     // **The exact signature, and the reason this is a control and not a
-    // coincidence**: the `#DF` stands at the `rsp` the victim was held at, and
-    // the address the CPU faulted on is the first qword of the frame it was
-    // trying to push there, one below it. A #DF for any other reason does not
-    // put `cr2` there, and one on any other stack is not the held one.
-    let report: Vec<&str> =
-        unfixed.lines().skip_while(|l| !l.contains("DOUBLE FAULT")).collect();
+    // coincidence**: the `#DF` stands inside the spin the victim was held in,
+    // at the `rsp` it was held at, and the address the CPU faulted on is the
+    // first qword of the frame it was trying to push there, one below it. A #DF
+    // for any other reason does not put `cr2` there, one on any other stack is
+    // not the held one, and a sprayed arrival's is at the entry's first
+    // instruction and not in the spin.
+    let report: Vec<&str> = unfixed.lines().skip(df_at).collect();
     let cr2 = report.iter().find_map(|l| hex(l, "cr2="));
+    let rip = report.iter().find_map(|l| hex(l, "rip="));
     let rsp = report.iter().find_map(|l| hex(l, "rsp="));
-    match (cr2, rsp) {
-        (Some(cr2), Some(rsp)) if rsp == held_rsp && cr2 == rsp.wrapping_sub(8) => {
+    match (cr2, rip, rsp) {
+        (Some(cr2), Some(rip), Some(rsp))
+            if rsp == hold.rsp && cr2 == rsp.wrapping_sub(8) && hold.spin.contains(&rip) =>
+        {
             eprintln!(
-                "  [nmi-window] without IST2: the #DF stands at the held rsp={rsp:#x}, and \
-                 cr2={cr2:#x} is rsp-8, the frame's first qword"
+                "  [nmi-window] without IST2: the #DF stands at the held rsp={rsp:#x} with \
+                 rip={rip:#x} inside the spin, and cr2={cr2:#x} is rsp-8, the frame's first qword"
             );
         }
-        (cr2, rsp) => {
+        (cr2, rip, rsp) => {
             return Err(format!(
-                "the control's #DF reports cr2={cr2:#x?} against rsp={rsp:#x?}, with the victim \
-                 held at rsp={held_rsp:#x}; the fault this stages is the frame's own first \
-                 qword at the held rsp-8, so this is a different death\n{unfixed}"
+                "the control's #DF reports cr2={cr2:#x?} rip={rip:#x?} rsp={rsp:#x?}, with the \
+                 victim held at rsp={:#x} spinning in {:#x?}; the fault this stages is the \
+                 frame's own first qword at the held rsp-8 from inside that spin, so this is a \
+                 different death\n{unfixed}",
+                hold.rsp, hold.spin,
             ));
         }
     }
