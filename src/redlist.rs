@@ -531,7 +531,13 @@ pub const KNOWN_RED: &[Red] = &[
              reps — was **1 of 10 again**, on a *different* line: \
              `cpu6 last reached one 0.349s ago`. The \
              no-CPU-missing-from-two-consecutive-lines rule was written for that line and its rate \
-             has not been re-measured",
+             has not been re-measured on the probe. Nightly 35072262489 took it on guest \
+             shard 8 at **2 of 2** — `cpu[5] missing from two consecutive heartbeats of 17`, suite \
+             run and ALONE re-run — with every clear bit inside the started programs' own \
+             start-up: the window opened at the first full mask (t=1.109 s, t=1.029 s) and the \
+             last clear bit preceded `exit: sshd` (2.618 s, 2.624 s). `src/heartbeat.rs` opens \
+             the window after every `[boot] start` program's done line and replays both captures \
+             with no clear bit, on the host; **that rule has no run on this instrument**",
         ),
         what: "2 of 12 heartbeats dropped a healthy CPU from the mask",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
@@ -3733,6 +3739,29 @@ pub const KNOWN_RED: &[Red] = &[
                    failed, 343 total in 1230.2 s, and the harness's own isolated re-run green",
         source: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md",
         measured: "2026-09-08",
+    },
+    Red {
+        test: "kernel_heartbeat",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::fires(1, 17),
+        standing: Standing::Stands,
+        what: "`cpu[4] missing from 2 consecutive heartbeats on a settled guest that was running` \
+               — cpu4 absent from seven consecutive settled beats, `gap=0.250s` and `ran=26..38` \
+               on every one, and back on the next. Not a CPU that stopped: logd's `fsync` waited \
+               out a USB status phase on it (`[kernel 4.663 cpu4] usb-storage: 00:02.0 slot 1 \
+               transport broke on SCSI 0x2a: no answer in the status phase in 2000 ms`, then \
+               `fsync: … durable on attempt 2 after 2016ms`), and a disk wait in this kernel \
+               pins its CPU for the whole round trip, so cpu4 reached no scheduler pass for \
+               1.998 s. The mask told the truth; `src/heartbeat.rs` carries the capture and \
+               reports it. `ALONE kernel_heartbeat: GREEN`",
+        evidence: "seventeen runs of `cargo test --test toyos-build kernel_heartbeat -- --nightly` \
+                   on the dev host, 2026-09-18, in two series the sighting sits in one of: seven \
+                   on cbe1cc59 at load average 14.14 to 35.48, one of them the red at 27.57, and \
+                   ten on 1c5cf415 at 26.13 to 29.95, all green. The rate is the USB status \
+                   phase's and not the predicate's — `src/heartbeat.rs` replays that capture and \
+                   reaches the same verdict on both",
+        source: "src/heartbeat.rs",
+        measured: "2026-09-18",
     },
 ];
 
