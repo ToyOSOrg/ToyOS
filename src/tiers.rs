@@ -331,6 +331,20 @@ pub const RELEGATED: &[Relegated] = &[
                  precedes it, and the T14 is the only judge of the device itself.",
     },
     Relegated {
+        test: "usb_reset_records_the_phase_it_cut",
+        ci_ms: 64_260,
+        why: Why::TimerAnchored,
+        guards: "A reset that ends a machine stopped inside a Bulk-Only command must say which \
+                 phase it cut: three chained boots stop every CPU with the device owed its data, \
+                 queued but not rung, or taken with its status unread, and a fourth streams to a \
+                 disk with no room and must refuse by name before it too reaches its own reset — \
+                 each watched to take that reset against the bound the first boot counts down. \
+                 Timer-anchored: the verdict is the account arriving inside that bound, which a \
+                 2x slower machine moves. What still runs per pull request: nothing reads the \
+                 phase at all; `usb_reset_hands_devices_back` judges beside it that the reset \
+                 hands the device back working, never which phase it was cut in.",
+    },
+    Relegated {
         test: "dump_nmi_probe",
         ci_ms: 8_098,
         why: Why::Cost,
