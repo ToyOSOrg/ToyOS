@@ -154,7 +154,7 @@ const ENOUGH: u64 = 64;
 /// Wait budget per NMI before the next goes out; a delivery that misses it still counts as sent.
 const DELIVERY_BUDGET_NS: u64 = 100_000;
 
-/// Asks before the spray goes out without a held arrival, and how long each waits for the entry's acknowledgement: a spinner enters a syscall every few hundred nanoseconds, so a wait is spent only on a vCPU the host has descheduled. Bounds, not measurements.
+/// Asks before the spray goes out without a held arrival, and how long each waits for the entry's acknowledgement — and a released victim for its next syscall: a spinner enters a syscall every few hundred nanoseconds, so a wait is spent only on a vCPU the host has descheduled. Bounds, not measurements.
 const HOLD_ATTEMPTS: u32 = 10;
 const HOLD_ACK_NS: u64 = 100_000_000;
 
@@ -224,7 +224,16 @@ fn hold_one(me: usize, cpus: usize) -> bool {
         {
             core::hint::spin_loop();
         }
+        // Read under the hold, where it cannot move: the held syscall counts itself once it is past the entry.
+        let taken = SYSCALLS[cpu].load(Ordering::Relaxed);
         release(word, cpu);
+        // The spray samples a victim that is running its loop again: one still leaving the hold is inside the entry whatever the classifier says, and its frame would vouch for any classifier.
+        let deadline = crate::clock::nanos_since_boot().saturating_add(HOLD_ACK_NS);
+        while SYSCALLS[cpu].load(Ordering::Relaxed) == taken
+            && crate::clock::nanos_since_boot() < deadline
+        {
+            core::hint::spin_loop();
+        }
         return true;
     }
     log!("syscall-window-nmi: held nobody — no syscall entered on a CPU asked to hold, so the spray goes out without an arranged arrival");
