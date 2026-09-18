@@ -321,13 +321,8 @@ use portmachine::DEBOUNCE_NS as PORT_DEBOUNCE_NS;
 ///
 /// Replaces the register, not a verdict: the port reads exactly as unpopulated during the window.
 ///
-/// **Anchored at `powered_at`, not at boot zero**, because what it stages is the
-/// delay between port power and connect and nothing else. A window measured
-/// from boot is one the boot can outgrow — a machine that reaches its
-/// controller later than the window is long finds the register already telling
-/// the truth, and stages nothing — and how long a boot takes to get here is a
-/// fact about the host. Every bound the settle it exercises is judged against —
-/// `EMPTY_BUS` and `PORT_SETTLE_CEILING` — is measured from that same instant.
+/// Measured from this controller's `powered_at`, which is the instant
+/// `EMPTY_BUS` and `PORT_SETTLE_CEILING` are measured from too.
 const SLOW_CONNECT_NS: u64 = 300_000_000;
 
 /// Report *one* root-hub port empty while every other port reads normally.

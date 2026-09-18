@@ -1266,18 +1266,30 @@ pub fn xhci_slow_connect(
     /// ports, and `await_connect_settle` then wants `PORT_DEBOUNCE_NS` of a
     /// connect set that has held still and is non-empty.
     const FIRST_CONNECT_S: f64 = HELD_EMPTY_S + DEBOUNCE_S;
-    /// How much later than that the first port line may be.
-    ///
-    /// The shape it exists to catch is a settle that leaves by `EMPTY_BUS_NS`
-    /// instead of on the device appearing — one second after port power, so
-    /// 600 ms past this ceiling — which would enumerate the same two sticks and
-    /// leave every other assertion here green.
-    ///
-    /// 150 ms because the connect becomes visible at a fixed offset from port
-    /// power on the guest's own clock and the settle re-reads it every
-    /// `PORT_POLL_NS`, so the spread is a millisecond of polling and the port
-    /// work behind the first line, not a share of the host.
-    const SETTLE_SLACK_S: f64 = 0.150;
+    /// `wait/boot.rs`'s `EMPTY_BUS`: when a settle that never saw a device
+    /// appear stops looking, measured from the same port power.
+    const EMPTY_BUS_S: f64 = 1.000;
+    /// How late the first port line may be: halfway between the two settles
+    /// this test tells apart, so one that ends on the device appearing cannot
+    /// reach it and one that ends at `EMPTY_BUS` cannot stay under it.
+    const SETTLE_CEILING_S: f64 = FIRST_CONNECT_S + (EMPTY_BUS_S - FIRST_CONNECT_S) / 2.0;
+
+    // The ceiling is half of a kernel constant, so it is read back from the
+    // kernel's declaration: no assertion below would notice `EMPTY_BUS_S` alone
+    // going stale, and a ceiling above `EMPTY_BUS` certifies the settle it
+    // exists to refuse.
+    let declared =
+        format!("const EMPTY_BUS: Budget = Budget::of( Duration::from_secs({EMPTY_BUS_S:.0}),");
+    let settle = std::fs::read_to_string(
+        super::compile::repo_root().join("kernel/src/drivers/xhci/wait/boot.rs"),
+    )
+    .map_err(|why| format!("the boot settle's source: {why}"))?;
+    if !settle.split_whitespace().collect::<Vec<_>>().join(" ").contains(&declared) {
+        return Err(format!(
+            "the kernel declares no `{declared}`, so the ceiling here is half of a bound the \
+             driver does not hold"
+        ));
+    }
 
     let (bytes, lba) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
     let image = test_dir().join("usb-slow-connect.img");
@@ -1300,11 +1312,7 @@ pub fn xhci_slow_connect(
     // instantly, which is exactly the pair that shipped.
     //
     // **Every bound below is a delta between two of the guest's own stamps, and
-    // neither end is an instant of the boot.** The injection is anchored at the
-    // controller's `powered_at`, so what a slower machine moves is when all
-    // three of these stamps happen, never the distance between them; an
-    // absolute bound here is one a slow enough boot outgrows, which is a verdict
-    // about the host.
+    // neither end is an instant of the boot.**
     //
     // `powered_at` is not logged; the two lines that bracket it are.
     // `controller started` is taken before it, so it is the anchor that can only
@@ -1341,7 +1349,7 @@ pub fn xhci_slow_connect(
     }
     // The ceiling.
     let after_power = first_seen - powered;
-    if after_power > FIRST_CONNECT_S + SETTLE_SLACK_S {
+    if after_power > SETTLE_CEILING_S {
         return Err(format!(
             "the first port was named {after_power:.3} s after the ports were powered, {:.3} s \
              after the connect became visible — the settle did not end on the device \

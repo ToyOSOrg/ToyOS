@@ -913,9 +913,9 @@ pub const RELEGATED: &[Relegated] = &[
         ci_ms: 4_999,
         why: Why::TimerAnchored,
         guards: "Bounds the first port line from both sides, at the held-empty window plus the \
-                 debounce after the controller's own port power and no more than 0.150 s past \
-                 that — a staged latency window whichever host renders it. This is the \
-                 delayed-enumeration shape real hubs impose after reset.",
+                 debounce after the controller's own port power and no later than halfway from \
+                 there to the empty-bus budget — a staged latency window whichever host renders \
+                 it. This is the delayed-enumeration shape real hubs impose after reset.",
     },
     Relegated {
         test: "late_storage_connect",
