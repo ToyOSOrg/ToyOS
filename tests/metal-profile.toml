@@ -489,6 +489,32 @@ ceiling = 10000
 ceiling_from = "as boot.deadlinewedge.deadline_lateness_ms — the poll's own cadence, read on every timer interrupt, so the lateness is one timer period whichever CPU reaches the bound first"
 measured = 66
 
+# --- the boot whose stick has one transfer abandoned under it ---
+# `usbbreak` is `jobcase` with the first WRITE(10) the boot stick takes abandoned
+# mid-flight, so the class's Reset Recovery runs against the bench's own device
+# on the bench's own controller. A recovery that takes ends like `jobcase`, by
+# its deliberate reboot; one that does not takes the root offline, and what then
+# ends the boot is the runner's bound. `stick_secs` is the row that says what
+# either left the stick in.
+
+[[number]]
+name = "boot.usbbreak.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.usbbreak.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.usbbreak.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.jobcase.stick_secs. On this arm the stick was sent a Bulk-Only Mass Storage Reset while it may still have been inside a WRITE(10), and then either came back or was left at its Default state by a port reset"
+
 # --- what one member of a job list may cost this machine ---
 # **The number the suite sizes its lists by, and judges them against.** The
 # runner's bound (`toyos_tco::JOB_BOUND_MS`) runs from boot and ends the whole
@@ -612,6 +638,12 @@ name = "list.usbload.job_ms"
 unit = "ms"
 ceiling = 1400
 ceiling_from = "as list.deadlinewedge.job_ms — the same list, and what ends this boot is the kernel's own deadline rather than the runner's"
+
+[[number]]
+name = "list.usbbreak.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.jobcase.job_ms — the same list"
 
 # --- the boots the split above adds ---
 
@@ -765,6 +797,12 @@ ceiling_from = "as boot.deadlinewedge.panel_max_us"
 measured = 3890
 
 [[number]]
+name = "boot.usbbreak.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
 name = "boot.testcases.panel_us"
 unit = "us"
 ceiling = 100000
@@ -868,3 +906,9 @@ unit = "us"
 ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
 measured = 19488
+
+[[number]]
+name = "boot.usbbreak.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
