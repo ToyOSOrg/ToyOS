@@ -6,6 +6,11 @@
 //! list unbounded. A CPU that misses the budget is named silent. Asking is
 //! itself an interrupt, so a machine frozen on an unfired deadline reports
 //! `0 OVERDUE`: summoning the report repairs the deadline it names.
+//!
+//! A request is served only at a bare pass — one reached from the idle loop or
+//! an interrupt exit, holding its own level and nothing under it. A syscall's
+//! pass sits on a trap frame and, in `pass_block`, a registered wait ticket,
+//! and leaves the request for the next bare pass on any CPU.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -56,6 +61,8 @@ const NMI_BUDGET: Budget = Budget::of(
 
 static IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static OWES: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// A pending request a syscall's pass met is announced once, not by every such pass until a bare one takes it.
+static DEFERRED: AtomicBool = AtomicBool::new(false);
 
 /// NMI handshake: the handler (`arch/idt/nmi.rs`) may not allocate, log, or
 /// lock, so it only stores and clears; the asking CPU reads.
@@ -134,14 +141,35 @@ fn online_cpus() -> usize {
     (smp::cpu_count() as usize).min(MAX_CPUS)
 }
 
-#[cfg(feature = "boot-actuators")]
 fn at_bare_pass() -> bool {
     crate::preempt::count() <= BARE_PASS_DEPTH
 }
 
-/// Ctrl+Alt+D. Called from `drain_irqs` on the CPU that decoded the key, and from the idle loop's actuator below.
+/// Ctrl+Alt+D's request, from `drain_irqs` on every pass: taken at a bare pass, left pending by a syscall's.
+pub fn serve_request() {
+    if !crate::keyboard::dump_requested() {
+        return;
+    }
+    if !at_bare_pass() {
+        if !DEFERRED.swap(true, Ordering::Relaxed) {
+            log!(
+                "blocked-task dump: asked for inside a syscall's pass on cpu{} at depth {}; the \
+                 next bare pass serves it",
+                percpu::cpu_id(),
+                crate::preempt::count(),
+            );
+        }
+        return;
+    }
+    if crate::keyboard::take_dump_request() {
+        DEFERRED.store(false, Ordering::Relaxed);
+        request();
+    }
+}
+
+/// Ctrl+Alt+D. Called from [`serve_request`] on the CPU whose bare pass took it, and from the idle loop's actuator below.
 pub fn request() {
-    // Runs holding nothing: a `Lock` guard would raise preempt depth above 1.
+    // Runs holding nothing: a `Lock` guard, a trap frame or a wait ticket each raise the depth past a bare pass's one level.
     let depth = crate::preempt::count();
     assert!(
         depth <= BARE_PASS_DEPTH,

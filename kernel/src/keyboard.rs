@@ -33,7 +33,12 @@ pub const MAX_QUEUED_EVENTS: usize = 512;
 static DUMP_REQUESTED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Consume a pending Ctrl+Alt+D. Called from `drain_irqs` and nowhere else.
+/// Whether a Ctrl+Alt+D is pending; `sched::dump::serve_request` decides whether this pass may take it.
+pub fn dump_requested() -> bool {
+    DUMP_REQUESTED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Consume a pending Ctrl+Alt+D. Called from `sched::dump::serve_request` and nowhere else.
 pub fn take_dump_request() -> bool {
     DUMP_REQUESTED.swap(false, core::sync::atomic::Ordering::Relaxed)
 }

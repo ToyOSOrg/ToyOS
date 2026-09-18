@@ -664,9 +664,7 @@ fn drain_irqs() {
     crate::drivers::xhci::poll_if_pending();
     crate::drivers::i8042::service();
     // Here, not at the keystroke: the keystroke's decoding driver's guard is done by this point.
-    if crate::keyboard::take_dump_request() {
-        super::dump::request();
-    }
+    super::dump::serve_request();
     // A CPU cannot read a sibling's `CpuSched`, so the dump reaches every CPU
     // by asking, and this is where each one answers.
     super::dump::serve_if_owed();
