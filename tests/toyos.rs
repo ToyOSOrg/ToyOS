@@ -16446,6 +16446,10 @@ fn headline(reason: Option<&str>) -> String {
 /// one twice; it is a different and larger one, and the line now says which it
 /// was.
 ///
+/// Which of the two it is is not a text comparison — an assertion that prints
+/// what it measured writes a different sentence every time it fires, so
+/// `toyos_build::alone::same_failure` decides it and both readings are quoted.
+///
 /// The green arms are untouched. They are a classification the whole redlist is
 /// written against, and nothing about them was wrong.
 ///
@@ -16479,6 +16483,11 @@ fn alone_line(name: &str, wide: &str, shared_the_host: bool, alone: Option<&Outc
             if said == wide {
                 format!("  ALONE {name}: red again, the same failure both times — the defect \
                          is real. {said}")
+            } else if toyos_build::alone::same_failure(&said, wide) {
+                format!(
+                    "  ALONE {name}: red again, the same failure both times — the defect is real, \
+                     at two measurements.\n      wide:  {wide}\n      alone: {said}"
+                )
             } else {
                 format!(
                     "  ALONE {name}: red again on a DIFFERENT failure — it failed twice, on two \
@@ -16544,6 +16553,22 @@ fn alone_line_reports_the_alone_run() -> Result<(), String> {
     }
     if same.contains("[kernel 2.639") {
         return Err(format!("the line pasted the whole capture into the summary:\n{same}"));
+    }
+
+    // One assertion at two readings: still a reproduction, and it quotes both
+    // rather than picking one.
+    const MEASURED: &str = "the controller started at 0.303 s, past the 0.3 s the ports are held \
+                            empty for";
+    const AGAIN: &str = "the controller started at 0.300 s, past the 0.3 s the ports are held \
+                         empty for";
+    let twice = alone_line("a_test", MEASURED, false, Some(&red(AGAIN)));
+    if !twice.contains("red again, the same failure both times") {
+        return Err(format!("one assertion at two readings reads as two assertions:\n{twice}"));
+    }
+    for both in [MEASURED, AGAIN] {
+        if !twice.contains(both) {
+            return Err(format!("the two-measurement line drops {both:?}:\n{twice}"));
+        }
     }
 
     // And the case the old line could not tell apart from it.
