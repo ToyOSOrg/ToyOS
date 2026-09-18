@@ -17,6 +17,7 @@ use common::{
 };
 use toyos_build::day::Day;
 use toyos_build::bootlog::{self, boot_millis};
+use toyos_build::heartbeat;
 use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::tiers::{self, Tier};
 
@@ -10006,104 +10007,87 @@ fn run_machine_test(
                     unpaired.iter().take(4).cloned().collect::<Vec<_>>().join("\n"),
                 ));
             }
-            // **What a clear bit has to mean is "that CPU stopped", and what
-            // makes that readable is that it does not come back.** `diag-tick`
-            // caps a sleep at 100 ms against a 250 ms line, so a healthy CPU
-            // contributes two or three passes to every one; a CPU absent from
-            // two consecutive lines has missed five wakes and is the shape the
-            // T14 produces — the mask thins CPU by CPU and stays thin, 56 lines
-            // naming a silent CPU and one silent for 2.811 s. A single line a
-            // CPU is missing from and is back on is the other thing entirely,
-            // and this guest has eight vCPUs on a runner's four cores: run
-            // `31283095698` rep 2 reported `cpu6 last reached one 0.349s ago`
-            // once, between eight lines of `8/8` either side of it. That is the
-            // host declining to run a halted thread, which no instrument in this
-            // guest claims anything about.
-            //
-            // **The boot is excluded for the same reason and needs a second
-            // rule.** `boot_with_options` returns on this config's ready marker
-            // with userland still spawning, and eight vCPUs on four cores do not
-            // all run while the guest is busy — run `31280428519` shard 5 had
-            // `alive=7/8` at 1.373 s with `cpu1 has never reached a scheduler
-            // pass` and `5/8` at 1.624 s, and run `31283095698` rep 2 had cpu0
-            // missing from two consecutive lines.
-            //
-            // **One full mask is not that rule, because the first line of a boot
-            // carries one whatever the machine is about to do.** Every AP spins
-            // on `ROSTER.released()` and they all enter the idle loop at the
-            // same instant (`arch::smp`), each stamping `TICKED` at the top of
-            // its first pass, so the beat after the roster's release finds eight
-            // fresh stamps — and the lines after *that* thin out again while
-            // `init` spawns and eight vCPUs contend for four cores. So the
-            // window opens where the machine *holds* the full mask rather than
-            // where it first reaches one: `SETTLE_BEATS` consecutive full lines,
-            // which is the shape `handle_lifetime`'s `settled_census` already
-            // uses to tell a lag from a leak. The kernel's own end-of-boot
-            // record is no help: `Boot: complete` is printed as `init` is
-            // spawned, so it lands *before* everything `init` starts and before
-            // every thin line here, and the settling has to be read off the mask
-            // itself.
-            //
-            // **A liveness bound and not a margin.** A CPU that has stopped lets
-            // no run of full masks form at all, so it is refused for never
-            // opening the window instead of being admitted through it — and
-            // neither rule lets the tick-less control through, which was run
-            // rather than argued: `heartbeat = []` in `kernel/Cargo.toml` reds
-            // this on six of the eight CPUs.
-            const SETTLE_BEATS: usize = 2;
-            let full = |l: &&str| l.contains("alive=8/8");
-            let Some(settled) = beats.windows(SETTLE_BEATS).position(|w| w.iter().all(full)) else {
+            // The mask is a claim only about a settled machine that is running,
+            // and `toyos_build::heartbeat` is where that is decided; the boot
+            // has started when every `[boot] start` program has said it is
+            // done, in the config's own order.
+            const DONE: &[(&str, &str)] = &[
+                ("logd", "logd: this boot's kernel log is"),
+                ("compositor", "compositor: ready"),
+                ("soundd", "soundd: null sink idle"),
+                ("netd", "exit: netd pid="),
+                ("sshd", "exit: sshd pid="),
+                ("test-runner", "===READY==="),
+            ];
+            let start = toyos_build::build::boot_start(&config.join("system.toml"));
+            let known: Vec<&str> = DONE.iter().map(|(program, _)| *program).collect();
+            if start != known {
                 return Err(format!(
-                    "no {SETTLE_BEATS} consecutive heartbeats in the whole capture reported every \
-                     CPU alive, so the machine never held the state the mask is a claim about\n\
-                     {log}"
+                    "`tests/metalcase` starts {start:?} and this test knows the done line of \
+                     {known:?} — a program without one leaves its start-up inside the window"
                 ));
+            }
+            let said: Vec<&str> = DONE.iter().map(|(_, line)| *line).collect();
+            let capture = &captured[..captured.len() - usize::from(torn)];
+            let settled = match heartbeat::settle(capture, &said) {
+                Ok(settled) => settled,
+                Err(heartbeat::Refused::Unreadable(line)) => {
+                    return Err(format!(
+                        "a heartbeat carries no readable t=, alive=, mask=, ran= or gap= — the \
+                         fields that say which CPU stopped and whether the machine ran: \
+                         {line}\n{log}"
+                    ));
+                }
+                Err(heartbeat::Refused::BootUnfinished(line)) => {
+                    return Err(format!(
+                        "the boot never finished starting: nothing said {line:?}, so every \
+                         heartbeat is inside the start-up and none is a claim about a settled \
+                         machine\n{log}"
+                    ));
+                }
+                Err(heartbeat::Refused::Unsettled { settled, beats }) => {
+                    return Err(format!(
+                        "too few heartbeats have a whole period after the last `[boot] start` \
+                         program finished starting — the machine did not settle inside this \
+                         capture, and a clear bit before it settles says nothing\n\
+                         {settled} of {beats}\n{log}"
+                    ));
+                }
+                Err(heartbeat::Refused::NotRunning { beat, held }) => {
+                    return Err(format!(
+                        "the machine was not running: a settled heartbeat came late or dispatched \
+                         nothing — a guest its host did not schedule, and what a CPU did in a \
+                         period the machine did not run is unreadable\n\
+                         t={}.{:03}s gap={}.{:03}s ran={} against a {} ms period, after {held} \
+                         settled heartbeat(s) it ran through\n{}\n{log}",
+                        beat.t_ms / 1000,
+                        beat.t_ms % 1000,
+                        beat.gap_ms / 1000,
+                        beat.gap_ms % 1000,
+                        beat.ran,
+                        heartbeat::PERIOD_MS,
+                        captured[beat.line],
+                    ));
+                }
+                Err(heartbeat::Refused::CpuMissing { cpus, settled, opened }) => {
+                    return Err(format!(
+                        "cpu{cpus:?} missing from {} consecutive heartbeats on a settled guest \
+                         that was running — a CPU that misses two lines has missed five \
+                         `diag-tick` wakes, so a clear bit does not mean that CPU stopped, which \
+                         is the whole of the field\n{settled} settled heartbeats\n{}\n{log}",
+                        heartbeat::STOPPED_BEATS,
+                        captured[opened..]
+                            .iter()
+                            .filter(|l| l.contains("heartbeat: "))
+                            .take(16)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ));
+                }
             };
-            let quiet = &beats[settled..];
-            if quiet.len() < 4 {
-                return Err(format!(
-                    "the machine first held {SETTLE_BEATS} full masks with only {} of {} heartbeats \
-                     left — it did not settle inside this capture, and a clear bit before it \
-                     settles says nothing\n{log}",
-                    quiet.len(),
-                    beats.len()
-                ));
-            }
-            const CPUS: usize = 8;
-            let masks: Vec<u64> = quiet
-                .iter()
-                .filter_map(|l| l.split("mask=0x").nth(1))
-                .filter_map(|m| u64::from_str_radix(m.split_whitespace().next()?, 16).ok())
-                .collect();
-            if masks.len() != quiet.len() {
-                return Err(format!(
-                    "{} of {} heartbeats carry no readable mask=0x — the field that says which CPU \
-                     stopped\n{log}",
-                    quiet.len() - masks.len(),
-                    quiet.len()
-                ));
-            }
-            let absent = |c: usize, m: &u64| m & (1 << c) == 0;
-            let stopped: Vec<usize> = (0..CPUS)
-                .filter(|&c| masks.windows(2).any(|w| absent(c, &w[0]) && absent(c, &w[1])))
-                .collect();
-            let named: Vec<&str> = captured[at[settled]..]
-                .iter()
-                .filter(|l| l.contains("heartbeat: cpu"))
-                .copied()
-                .collect();
-            if !stopped.is_empty() {
-                return Err(format!(
-                    "cpu{stopped:?} missing from two consecutive heartbeats of {}, on a settled \
-                     guest where every CPU is healthy — a CPU that misses two lines has missed \
-                     five `diag-tick` wakes, so a clear bit does not mean that CPU stopped, which \
-                     is the whole of the field\n{}\n{}\n{log}",
-                    quiet.len(),
-                    quiet.join("\n"),
-                    named.iter().take(8).cloned().collect::<Vec<_>>().join("\n"),
-                ));
-            }
-            let blips = masks.iter().filter(|m| **m != (1 << CPUS) - 1).count();
+            let quiet = &settled.beats;
+            let blips = settled.blips;
             // And no window between two lines may be wide enough to hide a
             // death. The metal boots this exists for went quiet for between 14 s
             // and 102 s; four times the period is far below any of them and far
@@ -10230,12 +10214,13 @@ fn run_machine_test(
                 ));
             }
             eprintln!(
-                "  [heartbeat] {} whole lines in ~3 s, each with its own pin reading, {settled} \
+                "  [heartbeat] {} whole lines in ~3 s, each with its own pin reading, {} \
                  before the machine settled and {} after, {blips} of those missing a CPU for one \
                  line and none for two, {moved} with ran>0, widest gap {worst:.3}s, t={} → t={}; \
                  {} i8042 line reading(s), vec 0x{vector} on gsi {kbd_gsi}, none masked, none with \
                  OBF set",
                 beats.len(),
+                beats.len() - quiet.len(),
                 quiet.len(),
                 stamps.first().unwrap_or(&"?"),
                 stamps.last().unwrap_or(&"?"),

@@ -13,6 +13,7 @@ pub mod durations;
 pub mod fingerprint;
 pub mod flags;
 pub mod forkcheck;
+pub mod heartbeat;
 pub mod hostws;
 pub mod image;
 /// Which kernel containers may be hashed, and by whose keys; read by nothing
