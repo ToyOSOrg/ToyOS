@@ -9850,8 +9850,16 @@ fn run_machine_test(
             let probe =
                 |l: &str| l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded");
             let mut log = qemu.boot_log().to_string();
-            if !log.lines().any(probe) {
+            let held = log.lines().any(probe);
+            if !held {
                 log += &qemu.drain_until(Duration::from_secs(10), probe);
+            }
+            if held && qemu.drains() != 0 {
+                return Err(format!(
+                    "the boot log already held the probe line and the console was drained \
+                     {} time(s) for it anyway — a wait that can only run out its ceiling",
+                    qemu.drains()
+                ));
             }
             sysret_ss(&log)
         }

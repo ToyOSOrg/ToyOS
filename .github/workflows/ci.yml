@@ -547,10 +547,11 @@ jobs:
   # merge-queue composition and a push to `main` pass `--tier-base <sha>`
   # naming what they are a change *to*, and `--merge-durations` then refuses
   # the price verdict only for the names that change registered or re-tiered in
-  # `tests/toyos.rs` or gave a different `Why` in `src/tiers.rs`. Every other
-  # price verdict prints as a `::warning::` and the job exits 0. The nightly
-  # passes no base and refuses them all — a nightly red is fixed by a pull
-  # request the next day, like every other nightly red.
+  # `tests/toyos.rs`, gave a different `Why` in `src/tiers.rs`, or re-priced in
+  # `tests/test-durations`. Every other price verdict prints as a `::warning::`
+  # and the job exits 0. The nightly passes no base and refuses them all — a
+  # nightly red is fixed by a pull request the next day, like every other
+  # nightly red.
   #
   # Why: a per-shard common price factor explains 57% of a name's run-to-run
   # variance across six twelve-shard runs and spreads about 1.28x p10 to

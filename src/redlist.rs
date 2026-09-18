@@ -3443,24 +3443,27 @@ pub const KNOWN_RED: &[Red] = &[
         instrument: Instrument::Ci,
         finding: Finding::Seen,
         standing: Standing::Stands,
-        what: "not the test — its **price**: `log_conservation_smp4 is priced at 8248 ms — over \
-               the 8000 ms a Fast test may be committed at and under the 10000 ms line — and \
+        what: "not the test — its **price**, which sits on the commitment line. Two `main` pushes \
+               priced it over: `log_conservation_smp4 is priced at 8248 ms — over the 8000 ms a \
+               Fast test may be committed at and under the 10000 ms line — and \
                log_conservation_smp4 remains Fast: priced without margin, so relegate it or make \
-               it faster. A price this close to the line is decided by which partition ran it, \
-               and reds whichever pull request measures it next`. The gate's own sentence is the \
-               diagnosis: a straddler, the 2026-08-21 class `src/tiers.rs` documents, against a \
-               committed 5512 ms in `tests/test-durations`. `src/tiers.rs`'s law names the two \
-               exits — relegate it or make it faster — and its siblings say which: \
-               `log_conservation_smp1` and `log_conservation_smp8` are priced 4686 and 5112 with \
-               margin, so a `Why::Cost` relegation of the middle width alone keeps the log's \
-               conservation law per-pull-request at both subject shapes (producer sharing the \
-               reader's CPU, and not). Recorded rather than relegated in the same landing: a \
-               tier move is a coverage decision, left to its owner with this row as the case",
+               it faster`. The nightly after them priced it 7,991 ms, 9 ms under, and refused the \
+               `Why::Cost` row it had been given: `log_conservation_smp4 is Nightly for Cost, but \
+               every current CI label is at or under the 8000 ms commitment line and it belongs \
+               Fast`. A straddler, the class `src/tiers.rs`'s `FAST_COMMIT_MS` documents, under a \
+               return rule that reads one sample and so holds one nowhere: the name is \
+               `Tier::Fast` at a committed 7,991 ms because that is where the rule puts it, and a \
+               price red on it is this row and not a finding about the diff that met it. Its \
+               siblings `log_conservation_smp1` and `log_conservation_smp8` are priced 4,228 and \
+               5,890 with margin, so the log's conservation law is gated per pull request at \
+               both subject shapes (producer sharing the reader's CPU, and not) whichever side \
+               of the line the middle width is priced on",
         evidence: "`ci` runs 33202812787 (8572 ms) and 33212528174 (8248 ms), both `main` pushes \
                    on 2026-08-28, each red only in `durations` and its aggregate; `guest (12)` \
-                   in the second passed the test itself in 8 s",
-        source: "tests/common/logread.rs",
-        measured: "2026-08-28",
+                   in the second passed the test itself in 8 s. Nightly 35072262489's \
+                   `durations-shard-11`, 2026-09-16: 7991 ms",
+        source: "issues/build/the-return-rule-reads-one-sample.md",
+        measured: "2026-09-16",
     },
     // ---------------------------------------------------------------------
     // This branch's own composition run: the tier batch put the whole nightly
@@ -3678,12 +3681,10 @@ pub const KNOWN_RED: &[Red] = &[
         instrument: Instrument::Ci,
         finding: Finding::Seen,
         standing: Standing::Retired(
-            "this landing: the price was the harness's — the probe line lands before \
+            "commit 20b04cc1: the price was the harness's — the probe line lands before \
              `===READY===`, so `boot_log()` already held it and the 10 s `drain_until` \
-             ceiling could only time out, spent in full on every run. The test now reads the \
-             boot log for the line and drains only when it is not there; the name stays Fast, \
-             its committed price the `UNMEASURED` marker until the first hosted run of the \
-             fixed test replaces it",
+             ceiling could only time out, spent in full on every run. The test reads the boot \
+             log for the line and drains only when it is not there, and the name stays Fast",
         ),
         what: "not the test — its **price**: `sysret_ss_reload measured 26927 ms in CI, over the \
                10000 ms line, but sysret_ss_reload remains Fast`, against a committed 6,453 ms. \

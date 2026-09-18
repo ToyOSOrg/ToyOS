@@ -47,10 +47,10 @@
 //! 2026-08-22.** The rule here is unchanged and so is the ceiling — what moved
 //! is which run's red stops a landing. A pull request's and a merge-queue
 //! composition's `durations` job refuses a price verdict only for the names
-//! that change registered or re-tiered, and prints every other one as a
-//! `::warning::`; the nightly's twelve hosted shards pass no base and refuse
-//! them all, and a nightly red is fixed by a pull request the next day like
-//! every other nightly red. The reason is a measurement, not a preference: over
+//! that change registered, re-tiered or re-priced, and prints every other one
+//! as a `::warning::`; the nightly's twelve hosted shards pass no base and
+//! refuse them all, and a nightly red is fixed by a pull request the next day
+//! like every other nightly red. The reason is a measurement, not a preference: over
 //! six hosted twelve-shard runs a per-shard common price factor explains 57% of
 //! a name's run-to-run variance and spreads 1.28x p10–p90
 //! (`issues/build/a-shards-boot-width-does-not-price-its-tests.md`), so a name
@@ -128,11 +128,14 @@ pub const FAST_CEILING_MS: u64 = 10_000;
 /// carries that rule and the measurement behind it.
 pub const FAST_COMMIT_MS: u64 = FAST_CEILING_MS * 4 / 5;
 
-/// A committed profile row that exists only to put a new registration into one
-/// KVM measurement run. `--merge-durations` always refuses a committed marker
-/// after writing the measured artifact, so it cannot be evidence on a merge
-/// head. Zero is not usable for this: several real in-guest verdicts measure
-/// below the profile's millisecond resolution.
+/// A committed profile row that exists only to buy one KVM measurement run for
+/// a name no hosted run has priced as it now stands — a new registration, or a
+/// registered name whose price the change re-takes. `--merge-durations` always
+/// refuses a committed marker after writing the measured artifact, so it cannot
+/// be evidence on a merge head; the number that replaces it is a row that
+/// differs from the base's, so the run of the commit that writes it renders the
+/// name's price verdict. Zero is not usable for this: several real in-guest
+/// verdicts measure below the profile's millisecond resolution.
 pub const UNMEASURED_MS: u64 = u64::MAX;
 
 /// Which run a registered test belongs to. Every entry of `MACHINE_TESTS`,
@@ -1116,8 +1119,8 @@ pub fn relegated_ms() -> u64 {
 ///
 /// The name is carried beside the sentence because *which* run renders a
 /// verdict is decided per name: `src/durations.rs` refuses the ones the change
-/// under measurement registered or re-tiered and prints the rest as warnings,
-/// and it cannot do that against a block of prose.
+/// under measurement registered, re-tiered or re-priced and prints the rest as
+/// warnings, and it cannot do that against a block of prose.
 pub struct Verdict {
     /// The registration name — `canonical_profile_name` of the label for a
     /// price verdict, `Relegated::test` for a row verdict.

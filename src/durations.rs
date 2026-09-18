@@ -12,8 +12,13 @@
 //! which tests are long, the dev host overwrites every name it measures with its
 //! own, and the file exists for the checkout that has measured nothing.
 //!
-//! **And the merged file is committed whole.** One run's rows are one
-//! partition, so a name kept at an older number is priced against no run.
+//! **What is committed from a run is decided by which run it is.** The nightly
+//! is the instrument of record, so a re-pricing of the profile is the nightly's
+//! whole artifact, landed as its own change: one run's rows are one partition,
+//! and a name kept at an older number beside them is priced against no run. A
+//! pull request replaces only the row its own `UNMEASURED` marker holds, from
+//! its own hosted run's `test-durations-merged` artifact, and that row stands
+//! priced by that run until the next nightly re-prices it.
 //!
 //! **One profile, one instrument**: `tests/test-durations` holds what twelve
 //! GitHub-hosted shards measured, and every event's guest lane is that same
@@ -37,13 +42,17 @@
 //!
 //! **Which names decide whether the price verdict is rendered.**
 //! The owner's ruling of 2026-08-22: a run measuring a change renders
-//! the verdict for the names that change registered or re-tiered, and prints
-//! every other one as a `::warning::` naming the name, the price and why this
-//! run does not enforce it. The nightly passes no base, so [`Enforced`] is
-//! `Everything` there and the full verdict reds — fixed by a pull request the
-//! next day like every other nightly red. A push to `main` names the tip it
-//! replaced, because its composition is one the merge queue already measured,
-//! so the nightly is the sole instrument of record.
+//! the verdict for the names that change registered, re-tiered or re-priced,
+//! and prints every other one as a `::warning::` naming the name, the price and
+//! why this run does not enforce it. **A re-priced name is one whose
+//! `tests/test-durations` row differs from the base's**: the landing that
+//! re-takes a price answers for it on its own run, a marker replaced by a number
+//! included — a name that bought its measurement with a marker would otherwise
+//! be judged by no run a landing can be stopped by. The nightly passes no base,
+//! so [`Enforced`] is `Everything` there and the full verdict reds — fixed by a
+//! pull request the next day like every other nightly red. A push to `main`
+//! names the tip it replaced, because its composition is one the merge queue
+//! already measured, so the nightly is the sole instrument of record.
 //!
 //! **A Rust guest test's registration is its file.** `tests/toyos.rs` discovers
 //! `tests/toyos-rust-tests/src/bin/<name>.rs` from the binaries it built and no
@@ -86,6 +95,9 @@ use crate::flags;
 /// The file name a sharded run leaves its own measurement in.
 const SHARD_PREFIX: &str = "test-durations.shard-";
 
+/// The committed profile: what a merge writes, and what a change re-prices.
+const PROFILE: &str = "tests/test-durations";
+
 /// The first line of the refusal this raises when the measured profile and
 /// `src/tiers.rs` disagree about a tier — the price verdict, and the only
 /// refusal here that a slower machine can manufacture on an innocent tree.
@@ -108,9 +120,10 @@ pub enum Enforced {
     /// workflow expression that evaluates to nothing must widen the gate, not
     /// silence it.
     Everything,
-    /// Only the names the change under measurement registered, re-tiered, or
-    /// gave a different `Why` in `src/tiers.rs`'s `RELEGATED`. Every other
-    /// price verdict prints as a `::warning::` and the job exits 0.
+    /// Only the names the change under measurement registered, re-tiered,
+    /// re-priced in `tests/test-durations`, or gave a different `Why` in
+    /// `src/tiers.rs`'s `RELEGATED`. Every other price verdict prints as a
+    /// `::warning::` and the job exits 0.
     Touched { base: String, names: BTreeSet<String> },
 }
 
@@ -142,13 +155,13 @@ impl Enforced {
                  this run named no base, so it is the instrument of record"
                 .to_string(),
             Enforced::Touched { base, names } if names.is_empty() => format!(
-                "[durations] the tier verdict is rendered for no name: this change registered \
-                 and re-tiered nothing against {base}, so every price verdict below is a \
-                 warning and the nightly renders them"
+                "[durations] the tier verdict is rendered for no name: this change registered, \
+                 re-tiered and re-priced nothing against {base}, so every price verdict below \
+                 is a warning and the nightly renders them"
             ),
             Enforced::Touched { base, names } => format!(
                 "[durations] the tier verdict is rendered for the {} name(s) this change \
-                 registered or re-tiered against {base}: {}",
+                 registered, re-tiered or re-priced against {base}: {}",
                 names.len(),
                 names.iter().cloned().collect::<Vec<_>>().join(", ")
             ),
@@ -190,7 +203,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
         }
     }
 
-    let out = root.join("tests/test-durations");
+    let out = root.join(PROFILE);
     let before = read_profile(&out);
     let carried = read_provenance(&out);
     report(&merged, &before, count);
@@ -258,14 +271,16 @@ struct Rendered {
 
 /// The verdict issued only after the measured artifact has been written.
 ///
-/// A new test's explicit UNMEASURED row buys exactly one KVM instrument run.
-/// Even when that execution is fast, the commit carrying the marker stays red;
-/// the next commit must replace it with the artifact's measured value. **That
-/// refusal does not move with the base** — a committed marker is a row the
-/// change itself put in the profile, so it is the change's own business on
-/// every run — and neither does any verdict `tiers::Verdict::priced` marks
-/// `false`. Only a measured price may be softened to a warning, and only for a
-/// name this change left alone.
+/// An explicit UNMEASURED row — a new registration's, or a registered name's
+/// whose price the change re-takes — buys exactly one KVM instrument run. Even
+/// when that execution is fast, the commit carrying the marker stays red; the
+/// next commit must replace it with the artifact's measured value, and the row
+/// that replaces it differs from the base's, so that commit's run renders the
+/// name's price verdict ([`touched_names`]). **That refusal does not move with
+/// the base** — a committed marker is a row the change itself put in the
+/// profile, so it is the change's own business on every run — and neither does
+/// any verdict `tiers::Verdict::priced` marks `false`. Only a measured price
+/// may be softened to a warning, and only for a name this change left alone.
 fn render_verdict(
     profile: &BTreeMap<String, u64>,
     before: &BTreeMap<String, u64>,
@@ -294,15 +309,16 @@ fn render_verdict(
             match enforced {
                 Enforced::Everything => out.refused.push(verdict.message),
                 Enforced::Touched { .. } => out.refused.push(format!(
-                    "{} [enforced on this run: this change registered or re-tiered {}]",
+                    "{} [enforced on this run: this change registered, re-tiered or re-priced \
+                     {}]",
                     verdict.message, verdict.name
                 )),
             }
         } else {
             out.warned.push(format!(
-                "{} [not enforced on this run: this change did not register or re-tier {}, and \
-                 a price near a line moves about 1.28x from p10 to p90 with the shard that ran \
-                 it. The nightly's twelve hosted shards render the full verdict, and a nightly \
+                "{} [not enforced on this run: this change did not register, re-tier or re-price \
+                 {}, and a price near a line moves about 1.28x from p10 to p90 with the shard \
+                 that ran it. The nightly's twelve hosted shards render the full verdict, and a nightly \
                  red on this name is fixed by a pull request the next day]",
                 verdict.message, verdict.name
             ));
@@ -318,23 +334,31 @@ fn render_verdict(
 /// for it, and no row anywhere.
 const RUST_TEST_BINS: &str = "tests/toyos-rust-tests/src/bin";
 
-/// Every name this change registered, re-tiered, re-scheduled, or moved into,
-/// out of, or across `src/tiers.rs`'s `RELEGATED`.
+/// Every name this change registered, re-tiered, re-scheduled, re-priced, or
+/// moved into, out of, or across `src/tiers.rs`'s `RELEGATED`.
 ///
-/// Three sources answer it and no fourth. `tests/toyos.rs` is where a name's
+/// Four sources answer it and no fifth. `tests/toyos.rs` is where a name's
 /// `(name, Sched, Tier)` row lives and `src/tiers.rs`'s `RELEGATED` is where
 /// its `Why` does; a change to either is a change to what tier that name
 /// claims, which is exactly the claim the price verdict grades. The third is a
 /// directory rather than a table, because a Rust guest test has no row at all:
 /// `tests/toyos.rs`'s `discover_rust_tests` finds it among the built binaries,
 /// so [`RUST_TEST_BINS`]`/<name>.rs` *is* its registration and touching that file
-/// is registering, deregistering or redefining the name it is called.
+/// is registering, deregistering or redefining the name it is called. The
+/// fourth is [`PROFILE`]: a row that differs from the base's is a price this
+/// change re-took, and the change that commits a price is the one that answers
+/// for what its own run measures the name at. **The head's profile is read
+/// before [`dispatch`] overwrites it**, so it is the committed one.
 ///
 /// Everything else a diff can touch — a kernel path, a registered test's body,
 /// a `ci_ms` note — may well move a price, and deliberately does not enter
-/// here: a name whose price moved without its declaration moving is what the
-/// nightly is for.
+/// here: a name whose *measured* price moved with neither its declaration nor
+/// its committed row moving is what the nightly is for.
 fn touched_names(root: &Path, base: &str) -> BTreeSet<String> {
+    let repriced = changed(
+        &profile_rows(&at_base(root, base, PROFILE)),
+        &profile_rows(&at_head(root, PROFILE)),
+    );
     let registered = changed(
         &registrations(&at_base(root, base, "tests/toyos.rs")),
         &registrations(&at_head(root, "tests/toyos.rs")),
@@ -344,7 +368,29 @@ fn touched_names(root: &Path, base: &str) -> BTreeSet<String> {
         &relegation_whys(&at_head(root, "src/tiers.rs")),
     );
     let discovered = discovered_names(&changed_under(root, base, RUST_TEST_BINS));
-    registered.union(&relegated).chain(discovered.iter()).cloned().collect()
+    registered
+        .union(&relegated)
+        .chain(discovered.iter())
+        .chain(repriced.iter())
+        .cloned()
+        .collect()
+}
+
+/// Every committed profile row, registration name to the rows its labels
+/// carry, provenance included.
+///
+/// Keyed by [`crate::tiers::canonical_profile_name`] because that is the name
+/// a verdict carries: `audio_tone (smp=8)` re-priced is `audio_tone` re-priced.
+/// Accumulated rather than overwritten, for the same reason.
+fn profile_rows(text: &str) -> BTreeMap<String, String> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for line in text.lines() {
+        let Some((label, _)) = parse_profile_line(line) else { continue };
+        let rows = out.entry(crate::tiers::canonical_profile_name(label).to_string()).or_default();
+        rows.push_str(line);
+        rows.push('\n');
+    }
+    out
 }
 
 /// The Rust guest tests a set of changed paths names, by the rule the suite
@@ -899,7 +945,7 @@ mod tests {
     }
 
     fn committed_profile() -> BTreeMap<String, u64> {
-        read_profile(&root().join("tests/test-durations"))
+        read_profile(&root().join(PROFILE))
     }
 
     /// The provenance column is whole or the commit is refused: every priced
@@ -908,7 +954,7 @@ mod tests {
     /// column exists to end.
     #[test]
     fn every_committed_price_names_the_partition_that_took_it() {
-        let text = fs::read_to_string(root().join("tests/test-durations"))
+        let text = fs::read_to_string(root().join(PROFILE))
             .expect("the committed profile exists");
         for line in text.lines() {
             let (name, ms) = parse_profile_line(line)
@@ -1253,6 +1299,7 @@ mod tests {
         };
         fs::write(dir.join("tests/toyos.rs"), registrations("Fast")).unwrap();
         fs::write(dir.join("src/tiers.rs"), relegated("")).unwrap();
+        fs::write(dir.join(PROFILE), "kept 100 shards=12\nretiered 9000 shards=12\n").unwrap();
         git(&dir, &["init", "-q", "-b", "main"]);
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-qm", "base"]);
@@ -1273,6 +1320,70 @@ mod tests {
         assert!(enforced.renders("retiered"));
         assert!(!enforced.renders("kept"));
         assert!(enforced.scope().contains("retiered"), "{}", enforced.scope());
+    }
+
+    /// **A name whose price a landing re-takes is judged by that landing.**
+    /// The base prices a Fast name, the head commits a different row for it and
+    /// moves no declaration, and the head's own run measures the name over the
+    /// line: that is a refusal on this run and not a warning. An unchanged row
+    /// names nothing, and a re-priced config label names its registration.
+    ///
+    /// The shape is a marker replaced by a number one commit after it bought
+    /// its run — the row differs from the base's and nothing else about the
+    /// name does, so without the profile as a source no run a landing can be
+    /// stopped by renders the name's verdict.
+    #[test]
+    fn a_repriced_name_is_rendered_by_the_landing_that_repriced_it() {
+        let dir = std::env::temp_dir()
+            .join(format!("toyos-durations-repriced-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("tests/toyos.rs"),
+            format!(
+                "const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[\n    \
+                 (\"{A_FAST_NAME}\", Sched::Parallel, Tier::Fast),\n    \
+                 (\"kept\", Sched::Parallel, Tier::Fast),\n];\n\
+                 const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[];\n\
+                 const AUDIO_TESTS: &[(&str, Tier)] = &[(\"audio_tone\", Tier::Nightly)];\n"
+            ),
+        )
+        .unwrap();
+        fs::write(dir.join("src/tiers.rs"), "pub const RELEGATED: &[Relegated] = &[\n];\n")
+            .unwrap();
+        let rows = |price: u64, smp8: u64| {
+            format!(
+                "audio_tone (smp=1) 8156 shards=12\naudio_tone (smp=8) {smp8} shards=12\n\
+                 {A_FAST_NAME} {price} shards=12\nkept 100 shards=12\n"
+            )
+        };
+        fs::write(dir.join(PROFILE), rows(6_453, 8_799)).unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-qm", "base"]);
+        let base = head_sha(&dir);
+
+        fs::write(dir.join(PROFILE), rows(3_000, 8_800)).unwrap();
+        git(&dir, &["commit", "-qam", "head"]);
+
+        assert_eq!(
+            touched_names(&dir, &base),
+            [A_FAST_NAME, "audio_tone"].iter().map(|n| n.to_string()).collect::<BTreeSet<_>>(),
+            "`kept`'s row did not move"
+        );
+
+        let args: Vec<String> =
+            vec!["--merge-durations".into(), "d".into(), flags::TIER_BASE.name.into(), base];
+        let enforced = Enforced::from_args(&dir, &args);
+        let mut profile = measured_profile();
+        profile.insert(A_FAST_NAME.to_string(), FAST_CEILING_MS + 1);
+        let rendered = render_verdict(&profile, &measured_profile(), &enforced);
+        assert!(rendered.warned.is_empty(), "{:?}", rendered.warned);
+        let refusal = rendered.refused.join("\n");
+        assert!(refusal.contains(A_FAST_NAME), "{refusal}");
+        assert!(refusal.contains("remains Fast"), "{refusal}");
+        assert!(refusal.contains("enforced on this run"), "{refusal}");
     }
 
     /// **A Rust guest test is registered by its file**, and this is the run
@@ -1304,6 +1415,7 @@ mod tests {
         .unwrap();
         fs::write(dir.join("src/tiers.rs"), "pub const RELEGATED: &[Relegated] = &[\n];\n")
             .unwrap();
+        fs::write(dir.join(PROFILE), "kept 100 shards=12\n").unwrap();
         for name in ["kept", "edited", "removed"] {
             fs::write(bins.join(format!("{name}.rs")), "fn main() {}\n").unwrap();
         }
