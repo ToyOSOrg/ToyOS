@@ -494,12 +494,14 @@ pub fn pass(dispose: Dispose) {
     };
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("a scheduler pass");
+    // Read before this pass's own level goes on top of it.
+    let entered = super::dump::Entered::Pass { depth: crate::preempt::count() };
     crate::preempt::disable();
     #[cfg(feature = "boot-actuators")]
     crate::deadline::wedge_if_staged();
     // Must clear before it drains, so a wake from this pass's own drain survives into the next poll.
     crate::preempt::clear_need_resched();
-    drain_irqs();
+    drain_irqs(entered);
     // After `drain_irqs` and before the pass picks, so a wake this
     // posts is in the run queue by the time the pass chooses.
     crate::object::drain_zero_handles();
@@ -575,11 +577,7 @@ pub fn pass_block(ticket: Ticket<'_>, deadline: Option<Nanos>) {
     // No `preempt::disable()` of its own: the ticket has held the count raised since registration; that guard is this bracket.
     let ticket = ticket.into_raw();
     crate::preempt::clear_need_resched();
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::dump_in_blocking_pass() {
-        super::dump::stage_in_blocking_pass();
-    }
-    drain_irqs();
+    drain_irqs(super::dump::Entered::Blocking);
     let now = HW.now();
     let (action, registration) = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
@@ -656,7 +654,7 @@ fn execute(action: Action<KernelPayload>) {
 }
 
 /// Consume this CPU's `irq_ring` records into wakes, before the mailbox drain, so a wake posted here reaches this pass's pick.
-fn drain_irqs() {
+fn drain_irqs(entered: super::dump::Entered) {
     // First in the function, so the stamp means "this CPU reached a
     // pass" and not "this CPU got all the way through one".
     #[cfg(feature = "boot-actuators")]
@@ -664,7 +662,7 @@ fn drain_irqs() {
     crate::drivers::xhci::poll_if_pending();
     crate::drivers::i8042::service();
     // Here, not at the keystroke: the keystroke's decoding driver's guard is done by this point.
-    super::dump::serve_request();
+    super::dump::serve_request(entered);
     // A CPU cannot read a sibling's `CpuSched`, so the dump reaches every CPU
     // by asking, and this is where each one answers.
     super::dump::serve_if_owed();
@@ -718,10 +716,6 @@ extern "C" fn idle_loop() -> ! {
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::dump_deaf_cpu() {
             super::dump::deaf_window();
-        }
-        #[cfg(feature = "boot-actuators")]
-        if crate::actuator::dump_in_blocking_pass() {
-            super::dump::arm_in_blocking_pass();
         }
         // From the other side: the storming CPU has nothing to run,
         // while the one under observation spins on `syscall` from Ring 3.

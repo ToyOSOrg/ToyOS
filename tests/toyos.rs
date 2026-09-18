@@ -296,6 +296,10 @@ const RUST_SKIP: &[&str] = &[
     // have somewhere to land, and on its own it asserts nothing and costs ten
     // seconds. `syscall_window_nmi` runs it on the kernel that storms it.
     "nmi_window_spin",
+    // A victim, not a test: three loads for `dump-in-blocking-pass` to file
+    // Ctrl+Alt+D inside, and on its own it asserts nothing. `dump_in_blocking_pass`
+    // and `dump_left_pending_is_owed` run it on the kernel that stages them.
+    "dump_stage_load",
     // Driven, not run: `screen_console_clear` types its name at a console it is
     // watching, and on its own it asks the kernel to paint over a panel nobody
     // is reading and exits 0. A verdict its own exit code cannot carry — the
@@ -804,11 +808,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // to a measured 6,284 ms on KVM (nightly run 32444411794), the return its
     // relegation record called the likeliest in the table.
     ("dump_nmi_probe", Sched::Serial, Tier::Nightly),
-    // The same dump asked for from inside a user thread's blocking pass.
-    // Parallel: every verdict is a line the guest prints, and the one duration
-    // in it is the guest's own 3 s arming, which the harness waits on and never
-    // measures. Fast with the UNMEASURED bootstrap marker until CI prices it.
+    // The same dump asked for inside the passes that may not serve it, on the
+    // default machine and on one CPU. Parallel: every verdict is a line the guest
+    // prints or a count the guest keeps, and no duration is in any of them.
     ("dump_in_blocking_pass", Sched::Parallel, Tier::Fast),
+    ("dump_left_pending_is_owed", Sched::Parallel, Tier::Fast),
     ("diskless_boot", Sched::Parallel, Tier::Fast),
     // Every verdict is a line of text or a device property, and no clock is in
     // any of them.
@@ -10360,6 +10364,9 @@ fn run_machine_test(
         "dump_nmi_probe" => faults::dump_nmi_probe(test_config, c_bins, rust_bins),
         "dump_in_blocking_pass" => {
             faults::dump_in_blocking_pass(test_config, c_bins, rust_bins)
+        }
+        "dump_left_pending_is_owed" => {
+            faults::dump_left_pending_is_owed(test_config, c_bins, rust_bins)
         }
         "diskless_boot" => faults::diskless_boot(test_config, c_bins, rust_bins),
         "virtio_net_no_msix" => faults::virtio_net_no_msix(),

@@ -157,7 +157,7 @@ actuators! {
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
-    /// File Ctrl+Alt+D's request from inside a user thread's blocking pass, once the machine has settled.
+    /// File Ctrl+Alt+D's request inside a job's blocking pass and a pass it enters above zero, and count the Ring 3 returns each leaves it pending across.
     dump_in_blocking_pass = "dump-in-blocking-pass";
 
     /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
@@ -400,7 +400,7 @@ const IMPLIES: &[(&str, &[&str])] = &[
     ("usb-short-read", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
-    // cpu0 arms it from its idle loop, which a settled guest otherwise leaves halted.
+    // It arms from a pass, and a settled guest otherwise runs none.
     ("dump-in-blocking-pass", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),
     // The staged CPU has to still be deaf when its bound passes, and this boot

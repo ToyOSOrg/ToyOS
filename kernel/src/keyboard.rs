@@ -5,6 +5,7 @@
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
 use crate::inbox::InboxId;
 use crate::sync::Lock;
@@ -30,23 +31,50 @@ static INBOX_WATCHERS: Lock<Vec<InboxId>> = Lock::new(Vec::new());
 pub const MAX_QUEUED_EVENTS: usize = 512;
 
 /// Ctrl+Alt+D is recorded here, not acted on; the scheduler pass consumes it with no driver lock held.
-static DUMP_REQUESTED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+///
+/// The request's whole state is this one word and every transition is one atomic operation on it.
+static DUMP_REQUEST: AtomicU8 = AtomicU8::new(DUMP_NONE);
 
-/// Whether a Ctrl+Alt+D is pending; `sched::dump::serve_request` decides whether this pass may take it.
-pub fn dump_requested() -> bool {
-    DUMP_REQUESTED.load(core::sync::atomic::Ordering::Relaxed)
+const DUMP_NONE: u8 = 0;
+/// Asked for, and no pass has said it left it.
+const DUMP_REQUESTED: u8 = 1;
+/// Asked for, and a pass that may not serve it has said so.
+const DUMP_ANNOUNCED: u8 = 2;
+
+/// What a pass that may not serve Ctrl+Alt+D found.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DumpLeft {
+    Nothing,
+    /// Pending, and this pass is the first to leave it: the one that says so.
+    First,
+    /// Pending, and an earlier pass has said so.
+    Again,
+}
+
+/// Ctrl+Alt+D pressed; a press while one is pending is that same request.
+pub fn file_dump_request() {
+    let _ = DUMP_REQUEST.compare_exchange(DUMP_NONE, DUMP_REQUESTED, Relaxed, Relaxed);
 }
 
 /// Consume a pending Ctrl+Alt+D. Called from `sched::dump::serve_request` and nowhere else.
 pub fn take_dump_request() -> bool {
-    DUMP_REQUESTED.swap(false, core::sync::atomic::Ordering::Relaxed)
+    // Loaded first: a pass with nothing pending pays a read, not a locked swap.
+    DUMP_REQUEST.load(Relaxed) != DUMP_NONE && DUMP_REQUEST.swap(DUMP_NONE, Relaxed) != DUMP_NONE
 }
 
-/// The keystroke without a keyboard: `sched::dump`'s actuator files the request at the pass it stages.
+/// Leave a pending Ctrl+Alt+D for a pass that may serve it. Called from `sched::dump::serve_request` and nowhere else.
+pub fn leave_dump_request() -> DumpLeft {
+    match DUMP_REQUEST.compare_exchange(DUMP_REQUESTED, DUMP_ANNOUNCED, Relaxed, Relaxed) {
+        Ok(_) => DumpLeft::First,
+        Err(DUMP_NONE) => DumpLeft::Nothing,
+        Err(_) => DumpLeft::Again,
+    }
+}
+
+/// Whether a Ctrl+Alt+D is pending, for `sched::dump`'s actuator.
 #[cfg(feature = "boot-actuators")]
-pub fn stage_dump_request() {
-    DUMP_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
+pub fn dump_request_pending() -> bool {
+    DUMP_REQUEST.load(Relaxed) != DUMP_NONE
 }
 
 /// Which HID usages are down, one bit each, across every keyboard; keyed by usage, so releasing one keyboard's modifier drops it even if another still holds it.
@@ -107,7 +135,7 @@ pub fn handle_key(usage: u8, pressed: bool) -> bool {
 
     // Ctrl+Alt+D: keyed by HID usage so it is the same three keys under every layout; recorded, not run, since the caller holds its driver's guard.
     if pressed && modifiers & MOD_CTRL != 0 && modifiers & MOD_ALT != 0 && usage == 0x07 {
-        DUMP_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
+        file_dump_request();
         return false;
     }
 

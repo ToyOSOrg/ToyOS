@@ -1446,28 +1446,6 @@ pub const KNOWN_RED: &[Red] = &[
         source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-07",
     },
-    Red {
-        test: "blocked_dump",
-        instrument: Instrument::DevHostLoaded,
-        finding: Finding::Seen,
-        standing: Standing::Retired(
-            "a request met by a syscall's pass is left for the next bare pass: \
-             `sched::dump::serve_request` takes it only at the pass's own level, and \
-             `dump_in_blocking_pass` stages the state on every run — a user thread parking, the \
-             request filed inside its pass — and reds without the deferral",
-        ),
-        what: "`PANIC: panicked at src/sched/dump.rs:134:5: the blocked-task dump ran under a \
-               lock: preempt depth 2`, backtrace `dump::request <- driver::drain_irqs <- \
-               driver::pass_block <- completion::wait_inner <- inbox::submit <- \
-               sys_inbox_submit`: Ctrl+Alt+D decoded by the CPU parking the compositor, one \
-               level above a bare pass on the trap frame and the wait ticket and holding no \
-               lock. `ALONE … GREEN`",
-        evidence: "the fast tier twelve wide beside a second worktree's suite on 2026-08-27 \
-                   (`wt/toyos-md1` at `03af5421`, a branch carrying no kernel byte), and again on \
-                   2026-09-16 beside three other worktrees' suites in the twelve guest slots",
-        source: "tests/common/faults.rs dump_in_blocking_pass",
-        measured: "2026-08-27",
-    },
     // ---------------------------------------------------------------------
     // **`fd_lifetime` is `handle_lifetime` since 2026-08-20.** The rename is the
     // fd/inbox naming wave's — owner ruling of 2026-08-19, "fds belong only in

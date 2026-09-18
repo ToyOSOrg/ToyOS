@@ -7,10 +7,10 @@
 //! itself an interrupt, so a machine frozen on an unfired deadline reports
 //! `0 OVERDUE`: summoning the report repairs the deadline it names.
 //!
-//! A request is served only at a bare pass — one reached from the idle loop or
-//! an interrupt exit, holding its own level and nothing under it. A syscall's
-//! pass sits on a trap frame and, in `pass_block`, a registered wait ticket,
-//! and leaves the request for the next bare pass on any CPU.
+//! A request is served only by `driver::pass` entered at preempt depth zero —
+//! no trap frame, no wait ticket and no `Lock` under it — and never by
+//! `pass_block`, where a depth cannot tell a wait ticket from a level of the
+//! pass's own. Every other pass leaves it pending and owes this CPU one that serves.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -33,8 +33,8 @@ const ANSWER_BUDGET: Budget = Budget::of(
     "the silent CPUs are named and their part of the report is missing",
 );
 
-/// The depth a bare pass runs at: the pass's own level, with no trap frame, wait ticket or `Lock` guard under it.
-const BARE_PASS_DEPTH: u32 = 1;
+/// The depth [`request`] runs at from a pass entered at zero: the pass's own level.
+const SERVING_DEPTH: u32 = 1;
 
 /// Late enough that the machine is up and every CPU has joined.
 #[cfg(feature = "boot-actuators")]
@@ -61,8 +61,6 @@ const NMI_BUDGET: Budget = Budget::of(
 
 static IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static OWES: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
-/// A pending request a syscall's pass met is announced once, not by every such pass until a bare one takes it.
-static DEFERRED: AtomicBool = AtomicBool::new(false);
 
 /// NMI handshake: the handler (`arch/idt/nmi.rs`) may not allocate, log, or
 /// lock, so it only stores and clears; the asking CPU reads.
@@ -141,39 +139,73 @@ fn online_cpus() -> usize {
     (smp::cpu_count() as usize).min(MAX_CPUS)
 }
 
-fn at_bare_pass() -> bool {
-    crate::preempt::count() <= BARE_PASS_DEPTH
+/// How the pass that met a request was entered: the whole of what decides whether it may serve.
+#[derive(Clone, Copy)]
+pub enum Entered {
+    /// `driver::pass`, by the preempt depth it was entered at, before it raised its own level.
+    Pass { depth: u32 },
+    /// `driver::pass_block`, inside a wait ticket's registration window at every depth.
+    Blocking,
 }
 
-/// Ctrl+Alt+D's request, from `drain_irqs` on every pass: taken at a bare pass, left pending by a syscall's.
-pub fn serve_request() {
-    if !crate::keyboard::dump_requested() {
-        return;
+impl Entered {
+    fn under_nothing(self) -> Option<UnderNothing> {
+        matches!(self, Self::Pass { depth: 0 }).then_some(UnderNothing(()))
     }
-    if !at_bare_pass() {
-        if !DEFERRED.swap(true, Ordering::Relaxed) {
-            log!(
-                "blocked-task dump: asked for inside a syscall's pass on cpu{} at depth {}; the \
-                 next bare pass serves it",
-                percpu::cpu_id(),
-                crate::preempt::count(),
-            );
+}
+
+impl core::fmt::Display for Entered {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Blocking => write!(f, "a blocking pass"),
+            Self::Pass { depth } => write!(f, "a pass entered at preempt depth {depth}"),
+        }
+    }
+}
+
+/// Proof that the caller has nothing under it: minted by [`Entered::under_nothing`], and by the idle loop's actuator for itself.
+struct UnderNothing(());
+
+/// Ctrl+Alt+D's request, from `drain_irqs` on every pass.
+pub fn serve_request(entered: Entered) {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::dump_in_blocking_pass() {
+        staged::at_the_load(entered);
+    }
+    if let Some(proof) = entered.under_nothing() {
+        if crate::keyboard::take_dump_request() {
+            request(proof);
         }
         return;
     }
-    if crate::keyboard::take_dump_request() {
-        DEFERRED.store(false, Ordering::Relaxed);
-        request();
+    leave_request(entered);
+}
+
+/// A pass that may not serve: the request stays pending, and the first such pass says so.
+fn leave_request(entered: Entered) {
+    let left = crate::keyboard::leave_dump_request();
+    if left == crate::keyboard::DumpLeft::Nothing {
+        return;
+    }
+    // Set by every pass that leaves one, not the first alone, since `pass_block` clears it on entry: this
+    // CPU's next Ring 3 exit, `preempt::enable` to zero or idle check is then a pass entered at zero.
+    crate::preempt::set_need_resched();
+    if left == crate::keyboard::DumpLeft::First {
+        log!(
+            "blocked-task dump: cpu{} met the request in {entered} and left it; a pass entered at \
+             preempt depth 0 serves it, and this cpu owes one",
+            percpu::cpu_id(),
+        );
     }
 }
 
-/// Ctrl+Alt+D. Called from [`serve_request`] on the CPU whose bare pass took it, and from the idle loop's actuator below.
-pub fn request() {
-    // Runs holding nothing: a `Lock` guard, a trap frame or a wait ticket each raise the depth past a bare pass's one level.
+/// Ctrl+Alt+D, on the CPU whose pass took it.
+fn request(_: UnderNothing) {
     let depth = crate::preempt::count();
     assert!(
-        depth <= BARE_PASS_DEPTH,
-        "the blocked-task dump ran under a lock: preempt depth {depth}"
+        depth <= SERVING_DEPTH,
+        "the blocked-task dump ran at preempt depth {depth}, above the {SERVING_DEPTH} of a pass \
+         entered at zero"
     );
     if IN_PROGRESS.swap(true, Ordering::AcqRel) {
         return;
@@ -351,42 +383,104 @@ pub(super) fn deaf_window() {
         }
         core::hint::spin_loop();
     }
-    request();
+    // The idle loop has nothing under it.
+    request(UnderNothing(()));
 }
 
+/// `dump-in-blocking-pass`: files a request inside a job's blocking pass and inside a pass it
+/// enters above zero, one at a time, and counts what each pass that left one owes.
 #[cfg(feature = "boot-actuators")]
-static BLOCKING_PASS_ARMED: AtomicBool = AtomicBool::new(false);
+pub mod staged {
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// Arms [`stage_in_blocking_pass`] from cpu0's idle loop once the machine has
-/// settled, and says so: the harness parks a user thread only after this word.
-#[cfg(feature = "boot-actuators")]
-pub(super) fn arm_in_blocking_pass() {
-    if percpu::cpu_id() != 0 || crate::clock::nanos_since_boot() < ARM_AT_NS {
-        return;
-    }
-    if !BLOCKING_PASS_ARMED.swap(true, Ordering::AcqRel) {
-        log!("dump-in-blocking-pass: armed");
-    }
-}
+    use super::{Entered, ARM_AT_NS};
+    use crate::arch::percpu;
 
-/// Stages the keystroke's request where a loaded machine once decoded it: inside a
-/// user thread's blocking pass, one level above a bare pass, once. Called from
-/// `pass_block` before its `drain_irqs`, so that drain is the first to meet it.
-#[cfg(feature = "boot-actuators")]
-pub(super) fn stage_in_blocking_pass() {
-    static FILED: AtomicBool = AtomicBool::new(false);
-    if at_bare_pass()
-        || !BLOCKING_PASS_ARMED.load(Ordering::Acquire)
-        || FILED.swap(true, Ordering::AcqRel)
-    {
-        return;
+    /// Which of the job's passes of one kind is staged: past its startup, so what the pass dispatches next is the job's load.
+    const STAGED_PASS: u32 = 32;
+    const NO_CPU: u32 = u32::MAX;
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    /// The highest pid that ran a pass before the arming; the harness starts the job after it, so a pid above this is the job's.
+    static BOOT_PIDS: AtomicU32 = AtomicU32::new(0);
+    static PASSES: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
+    static FILED: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
+    /// The CPU whose staged request is unreported: the gate that makes the stages one at a time.
+    static STAGER: AtomicU32 = AtomicU32::new(NO_CPU);
+    static REPORT_DUE: AtomicBool = AtomicBool::new(false);
+    static RETURNS: AtomicU32 = AtomicU32::new(0);
+
+    /// Immediately before `serve_request` decides, so no sibling's pass takes the request ahead of the staged one.
+    pub(super) fn at_the_load(entered: Entered) {
+        report_if_taken();
+        let pid = percpu::current_pid().map(|pid| pid.raw());
+        if !ARMED.load(Ordering::Acquire) {
+            if let Some(pid) = pid {
+                BOOT_PIDS.fetch_max(pid, Ordering::AcqRel);
+            }
+            if crate::clock::nanos_since_boot() >= ARM_AT_NS && !ARMED.swap(true, Ordering::AcqRel) {
+                log!("dump-in-blocking-pass: armed");
+            }
+            return;
+        }
+        let kind = match entered {
+            Entered::Blocking => 0,
+            Entered::Pass { depth: 0 } => return,
+            Entered::Pass { .. } => 1,
+        };
+        if !pid.is_some_and(|pid| pid > BOOT_PIDS.load(Ordering::Acquire)) {
+            return;
+        }
+        if PASSES[kind].fetch_add(1, Ordering::AcqRel) + 1 < STAGED_PASS
+            || FILED[kind].load(Ordering::Acquire)
+            || crate::keyboard::dump_request_pending()
+            || super::IN_PROGRESS.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let cpu = percpu::cpu_id();
+        if STAGER
+            .compare_exchange(NO_CPU, cpu, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        if FILED[kind].swap(true, Ordering::AcqRel) {
+            STAGER.store(NO_CPU, Ordering::Release);
+            return;
+        }
+        RETURNS.store(0, Ordering::Release);
+        log!("dump-in-blocking-pass: cpu{cpu} files a request in {entered}");
+        crate::keyboard::file_dump_request();
+        // Met twice by this pass, as by two passes in a row. A sibling's pass entered at zero can still take
+        // the request between the two statements, and that boot carries no line from the pass that left it.
+        super::leave_request(entered);
+        REPORT_DUE.store(true, Ordering::Release);
     }
-    log!(
-        "dump-in-blocking-pass: cpu{} files the request inside a blocking pass at depth {}",
-        percpu::cpu_id(),
-        crate::preempt::count(),
-    );
-    crate::keyboard::stage_dump_request();
+
+    /// From the Ring 3 exit check, once it has nothing more to run.
+    pub fn note_return_to_ring3() {
+        if STAGER.load(Ordering::Acquire) == percpu::cpu_id()
+            && crate::keyboard::dump_request_pending()
+        {
+            RETURNS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn report_if_taken() {
+        if !REPORT_DUE.load(Ordering::Acquire)
+            || crate::keyboard::dump_request_pending()
+            || !REPORT_DUE.swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        log!(
+            "dump-in-blocking-pass: cpu{} returned to Ring 3 {} time(s) with its request pending",
+            STAGER.load(Ordering::Acquire),
+            RETURNS.load(Ordering::Acquire),
+        );
+        STAGER.store(NO_CPU, Ordering::Release);
+    }
 }
 
 /// Where this CPU was, for the NMI probe. Called only from `arch/idt/nmi.rs`.
