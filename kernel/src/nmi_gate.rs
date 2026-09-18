@@ -262,7 +262,8 @@ pub fn storm() {
     // Syscall count either side of the storm proves the victim kept running throughout.
     let spun_before: u64 = SYSCALLS.iter().map(|n| n.load(Ordering::Relaxed)).sum();
 
-    let mut sent = u64::from(hold_one(me, cpus));
+    // No hold under `nmi_nested`: the first NMI ends that machine from `nested_nmi`'s lock-free raw writer, and `release`'s line would be logged into the middle of its report.
+    let mut sent = u64::from(!crate::actuator::nmi_nested() && hold_one(me, cpus));
     while sent < MAX_NMIS {
         // Aimed at the victim CPU only: broadcasting would sample idle siblings instead of the window.
         let Some((cpu, _)) = victim(me, cpus) else { break };
