@@ -48,11 +48,8 @@ that runs `netd` and then `reboot`: `system.toml` starts `netd` (`:24`) with
 its life, and nothing between `/system/bin/reboot`'s `SYS_REBOOT` and the port
 write asks it to let go.
 
-**The I219 is the instance this file was found on, and this tree does not
-reach it.** `pcidev/mod.rs:544` refuses a function without MSI-X, and the
-T14's `00:1f.6` has none
-(`issues/kernel/a-claimed-function-must-have-msi-x-and-the-i219-may-not.md`);
-the boot that puts `netd` in front of it, `tests/lancase`, is defined on
+**The I219 is the instance this file was found on, and no boot in this tree
+reaches it:** the boot that puts `netd` in front of it, `tests/lancase`, is defined on
 PR #442's branch `lan-metal` and on no branch that has merged. The bench boots
 this was read on were of those branches. The one that motivated it — run 55's,
 ended by `deadline::expire` → `reset_now` — is a path `quiesce` never runs on,

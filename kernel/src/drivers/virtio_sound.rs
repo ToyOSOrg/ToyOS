@@ -483,7 +483,7 @@ fn build_chains(
 /// every period in flight forever.
 fn arm_interrupt(pci: &PciDevice, device: &VirtioDevice) -> bool {
     let vector = crate::arch::idt::VIRTIO_SOUND_VECTOR;
-    if pci.enable_msix(vector).is_none() {
+    if pci.enable_msix(vector).is_err() {
         log!(
             "virtio-sound: NOT INITIALISED at PCI {:02x}:{:02x}.{} — its MSI-X could not be \
              armed and this driver has no other way to be told a period completed",
