@@ -2091,7 +2091,9 @@ fn transport_gives_up(
         let got = plugged.lines().find(|l| l.contains("is offline: "));
         return Err(format!("the bind's give-up read {got:?}, want {offline:?}\n{log}"));
     }
-    let staged = format!("bound under {budget} staged INQUIRY fault(s): untaken=0");
+    // One more than the budget was staged, so the bind's own disarm has one to
+    // take back and say so.
+    let staged = format!("bound under {} staged INQUIRY fault(s): untaken=1", budget + 1);
     if !plugged.contains(&staged) {
         let got = plugged.lines().find(|l| l.contains("staged INQUIRY fault(s)"));
         return Err(format!("the bind's staging read {got:?}, want {staged:?}\n{log}"));

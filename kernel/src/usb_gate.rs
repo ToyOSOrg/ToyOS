@@ -278,8 +278,9 @@ fn check(index: usize, disk: &Handle) {
         // And the same budget spent inside a bind: the next disk to enumerate
         // has its INQUIRY — the first command `bring_up` issues through the
         // recovering path — refused as many times. The bind stages and
-        // disarms them itself, since no operation of this gate spans one.
-        crate::drivers::xhci::stage_bind_faults(budget);
+        // disarms them itself, since no operation of this gate spans one; one
+        // more than the budget, so what it takes back is not nothing.
+        crate::drivers::xhci::stage_bind_faults(budget + 1);
     }
 
     log!(
