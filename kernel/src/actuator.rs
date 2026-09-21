@@ -157,7 +157,7 @@ actuators! {
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
-    /// File Ctrl+Alt+D's request inside a job's blocking pass and a pass it enters above zero, and count the Ring 3 returns each leaves it pending across.
+    /// On one CPU, file Ctrl+Alt+D's request inside each kind of pass that may not serve it and inside a report, and count the Ring 3 returns each is left pending across.
     dump_in_blocking_pass = "dump-in-blocking-pass";
 
     /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds

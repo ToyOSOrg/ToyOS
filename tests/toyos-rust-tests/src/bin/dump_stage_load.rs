@@ -1,10 +1,10 @@
 //! The load `dump-in-blocking-pass` files Ctrl+Alt+D inside: a victim, not a test.
 //!
-//! Two loads at once, one for each pass a Ring 3 program can drive that may not
+//! Two loads at once, one for each pass a job reaches on demand that may not
 //! serve the request: a pipe ping-pong with a child parks in blocking passes, and
 //! a spawner's threads exit from a syscall while it waits for each. Every such
 //! pass leaves a task it has just woken behind it and none of these tasks keeps
-//! the CPU for a quantum, so on one CPU no idle check and no tick comes: a request
+//! the CPU for a quantum, so on one CPU no idle loop and no tick comes: a request
 //! left pending there is served by nothing but the pass that the one who left it
 //! owes.
 //!

@@ -853,47 +853,28 @@ pub fn dump_nmi_probe(
     Ok(())
 }
 
-/// The blocked-task dump asked for inside the passes that may not serve it: a
-/// blocking pass, and a pass entered above zero, which a thread exiting from its
-/// syscall drives. `dump-in-blocking-pass` files one request in each, inside
-/// `test_rs_dump_stage_load`'s threads, and the staged pass meets its request
-/// twice, as two passes in a row would.
+/// The blocked-task dump asked for where it may not be served, on one CPU:
+/// `dump-in-blocking-pass` files one request in a kernel thread's blocking pass,
+/// one in a user thread's, one in a pass entered above zero — which a thread
+/// exiting from its syscall drives — and one during a report. Each staged pass
+/// meets its request twice, with the clear a pass makes on entry between the
+/// meetings, as a task woken behind it that blocks again would.
 ///
-/// The kernel's own assertion in `sched::dump` judges where a report ran — served
-/// above a pass entered at zero, it panics the machine. What is asserted here is
-/// the rest: each pass left its request and said so once, a report followed each,
-/// the CPU that left one never reached Ring 3 with it still pending, and the job
-/// whose threads were inside those passes finished clean.
-pub fn dump_in_blocking_pass(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    dump_staged(test_config, c_bins, rust_bins, BootOptions::default().smp)
-}
-
-/// The same on one CPU, where no sibling's pass can serve what a pass left: the
-/// job's tasks each leave the CPU before a quantum ends and one of them is always
-/// ready, so no tick and no idle check comes, and the only pass entered at zero
-/// is the one the leaving CPU owes itself.
+/// One CPU, so no sibling's pass serves what a pass left: under
+/// `test_rs_dump_stage_load` every task leaves the CPU before a quantum ends and
+/// one is always ready, so no tick and no idle loop comes, and the only pass
+/// entered at zero is the one the leaving CPU owes itself. The bound is the
+/// construction's own and not a duration: `need_resched` is set by every pass
+/// that leaves a request, and the Ring 3 exit check runs a pass entered at zero
+/// while it is set — so zero returns to Ring 3 with the request pending.
 ///
-/// The bound is the construction's own and not a duration: `need_resched` is set
-/// by the pass that leaves a request, and the Ring 3 exit check runs a pass
-/// entered at zero while it is set — so zero returns to Ring 3 with the request
-/// pending, on any machine.
+/// Judged per request: it was left and that was said once, every report ran from
+/// a pass entered at zero and none began inside another, the request filed during
+/// a report got a report of its own, and the job finished clean.
 pub fn dump_left_pending_is_owed(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    dump_staged(test_config, c_bins, rust_bins, 1)
-}
-
-fn dump_staged(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-    smp: u32,
 ) -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
@@ -901,13 +882,12 @@ fn dump_staged(
         rust_bins,
         BootOptions {
             kernel_params: &["dump-in-blocking-pass"],
-            smp,
+            smp: 1,
             ..Default::default()
         },
     );
-    // The arming closes the set of pids the actuator takes for the boot's own, so
-    // the job has to be asked for after it: a request is filed only in a process
-    // younger than this line.
+    // Nothing is staged before this line, and the boot log that precedes it is
+    // not read here: the job is asked for once the stage's lines land in what is.
     const ARMED: &str = "dump-in-blocking-pass: armed";
     let armed = qemu.drain_until(Duration::from_secs(20), |line| line.contains(ARMED));
     if !armed.contains(ARMED) {
@@ -916,41 +896,83 @@ fn dump_staged(
     let result = qemu.run_test("test_rs_dump_stage_load", Duration::from_secs(60));
     let log = format!("{armed}{}{}{}", result.before, result.serial, result.stdout);
 
-    if log.contains("PANIC") {
-        return Err(format!(
-            "the kernel died: a request met by a pass that may not serve it was served there\n{log}"
-        ));
+    if let Some(line) = log.lines().find(|line| line.contains("PANIC")) {
+        return Err(format!("a `PANIC` line is in the log: `{}`\n{log}", line.trim()));
     }
-    const PASSES: [&str; 2] = ["a blocking pass", "a pass entered at preempt depth"];
-    for pass in PASSES {
-        let filed = format!("files a request in {pass}");
-        if count(&log, &filed) != 1 {
-            return Err(format!("not exactly one request was filed in {pass}\n{log}"));
-        }
-        // Once per request and again for the next one: the staged pass met its
-        // request twice, so a line per meeting is two, and a line never re-armed
-        // is none for the second request.
-        let left = format!("met the request in {pass}");
-        if count(&log, &left) != 1 {
+    // A request is filed only once the one before it is accounted for, so the
+    // lines from one filing to the next are that request's.
+    const FILED: &str = "files a request in ";
+    let lines: Vec<&str> = log.lines().collect();
+    let starts: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].contains(FILED)).collect();
+    // What the filing line says, what the pass that left it says, and how many
+    // reports follow: the user thread's blocking pass hosts the request filed
+    // during a report.
+    const STAGES: [(&str, &str, usize); 3] = [
+        ("a blocking pass of a kernel thread", "met the request in a blocking pass", 1),
+        ("a blocking pass of a user thread", "met the request in a blocking pass", 2),
+        ("a pass entered at preempt depth", "met the request in a pass entered at preempt depth", 1),
+    ];
+    if starts.len() != STAGES.len() {
+        return Err(format!("{} request(s) filed in a pass, not {}\n{log}", starts.len(), STAGES.len()));
+    }
+    for (filed, left, reports) in STAGES {
+        let Some(at) = starts.iter().position(|&i| lines[i].contains(&format!("{FILED}{filed}"))) else {
+            return Err(format!("no request was filed in {filed}\n{log}"));
+        };
+        let end = starts.get(at + 1).copied().unwrap_or(lines.len());
+        let own = &lines[starts[at]..end];
+        let count = |needle: &str| own.iter().filter(|line| line.contains(needle)).count();
+
+        // Once per request: a line per meeting is two, and a line never re-armed
+        // is none for the requests after the first.
+        if count(left) != 1 || count("met the request in ") != 1 {
             return Err(format!(
-                "{pass} left its request and said so {} time(s), not once\n{log}",
-                count(&log, &left)
+                "the request filed in {filed} was left and that was said {} time(s), not once\n{log}",
+                count("met the request in ")
             ));
         }
-    }
-    let reports = count(&log, "=== end of dump ===");
-    if reports != PASSES.len() {
-        return Err(format!("{reports} complete report(s) for {} requests\n{log}", PASSES.len()));
-    }
-    const OWED: &str = " time(s) with its request pending";
-    let owed: Vec<&str> = log.lines().filter(|l| l.contains(OWED)).collect();
-    if owed.len() != PASSES.len() {
-        return Err(format!("{} of {} requests were accounted for\n{log}", owed.len(), PASSES.len()));
-    }
-    if let Some(line) = owed.iter().find(|l| !l.contains("returned to Ring 3 0 time(s)")) {
-        return Err(format!(
-            "a cpu that left a request went back to Ring 3 without serving it: `{line}`\n{log}"
-        ));
+        let mut open = false;
+        for line in own {
+            if line.contains("=== blocked-task dump:") {
+                if open {
+                    return Err(format!("a report began inside another, after {filed}\n{log}"));
+                }
+                open = true;
+            } else if line.contains("=== end of dump ===") {
+                open = false;
+            }
+        }
+        if count("=== end of dump ===") != reports || count("files a request during a report") != reports - 1 {
+            return Err(format!(
+                "{} complete report(s) and {} request(s) filed during one after {filed}, not {reports} and {}\n{log}",
+                count("=== end of dump ==="),
+                count("files a request during a report"),
+                reports - 1,
+            ));
+        }
+        const FROM: &str = " reports from ";
+        if let Some(line) = own
+            .iter()
+            .find(|line| line.contains(FROM) && !line.contains("reports from a pass entered at preempt depth 0"))
+        {
+            return Err(format!("a pass that may not serve ran a report: `{}`\n{log}", line.trim()));
+        }
+        if count(FROM) != reports {
+            return Err(format!("{} of {reports} report(s) said where they ran after {filed}\n{log}", count(FROM)));
+        }
+        const OWED: &str = " time(s) with its request pending";
+        if count(OWED) != 1 {
+            return Err(format!("the request filed in {filed} was accounted for {} time(s)\n{log}", count(OWED)));
+        }
+        if let Some(line) = own
+            .iter()
+            .find(|line| line.contains(OWED) && !line.contains("returned to Ring 3 0 time(s)"))
+        {
+            return Err(format!(
+                "a cpu that left a request went back to Ring 3 without serving it: `{}`\n{log}",
+                line.trim()
+            ));
+        }
     }
     if result.exit_code != Some(0) {
         return Err(format!(
@@ -959,8 +981,4 @@ fn dump_staged(
         ));
     }
     Ok(())
-}
-
-fn count(log: &str, needle: &str) -> usize {
-    log.lines().filter(|line| line.contains(needle)).count()
 }
