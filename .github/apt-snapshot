@@ -16,6 +16,12 @@
 # `sid-20260824` declares `created: 2026-08-24T00:00:00Z` and carries this
 # archive's `gcc-16-base 16.2.0-1` — which is what lets the two be one date.
 #
+# The first run after this date moves pays a cold archive and nothing else:
+# `deps` measured 295-428 s across eight shards on the pair's first run
+# (35576936014) and 52-66 s on the next one (35577703745), which is the 52-59 s
+# that step has always been priced at. A slow `deps` on the day the date moves
+# is not the transport and not the image.
+#
 # This date and `.github/qemu-version` are one fact in two files: the date is
 # one on which `sid` carried that QEMU. `qemu-system-x86 1:11.1.0+ds-2` entered
 # the archive at 20260818T142548Z and `1:11.1.1+ds-1` replaced it at
