@@ -1663,8 +1663,8 @@ pub fn usb_transport_break(
     // Scoped to the disk under test for the same reason the count is: another
     // device's endpoint being found Running says nothing about this one's.
     let recovered = format!("xHCI: {under_test} endpoint");
-    let states: Vec<&str> =
-        log.lines().filter(|l| l.contains(", stopping it before its port is reset")).collect();
+    let looked = |l: &&str| l.contains(", recovering") || l.contains(", stopping it before its port is reset");
+    let states: Vec<&str> = log.lines().filter(looked).collect();
     if !states.iter().any(|l| l.contains(recovered.as_str()) && l.contains("is Running,")) {
         return Err(format!(
             "no endpoint of {under_test} was found Running after the break, so this is not the \
