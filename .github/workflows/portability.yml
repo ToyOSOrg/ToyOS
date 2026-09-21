@@ -12,8 +12,8 @@ name: portability
 #
 # Three jobs. Linux proves as much of the premise as the tree currently
 # allows: `cargo run -- --build-only` from nothing but `rustup` and the
-# declared QEMU, inside the same minimal `debian:sid` container `ci.yml`'s
-# guest shards already run in — not a stock GitHub-hosted image, which is
+# declared QEMU, inside a minimal `debian:sid` container — not a stock
+# GitHub-hosted image, which is
 # itself heavily provisioned enough to quietly cover a gap in the declared
 # package list. macOS asks the same question on `macos-latest`, which
 # `host-tests.yml` already proves reachable on this plan; QEMU there comes
@@ -42,8 +42,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # What this proves today: inside the same minimal `debian:sid` container
-  # `ci.yml`'s guest shards run in — not a GitHub-hosted image — installing
+  # What this proves today: inside a minimal `debian:sid` container — not a
+  # GitHub-hosted image — installing
   # nothing but a C compiler (`cc`, the declared standing exception — `rustc`
   # links every host binary through it), Python (`rust/x`'s own bootstrap
   # dependency for a clean clone — `src/main.rs`'s `ALSO_USED` names it; the
@@ -59,8 +59,11 @@ jobs:
   # The move this replaces was the open gap in the previous version of this
   # job: a green run on `ubuntu-latest` could not distinguish "the three
   # packages this job installed were enough" from "the image's own contents
-  # quietly covered the rest". `debian:sid` is the same image `ci.yml`'s guest
-  # shards already run in for the identical reason.
+  # quietly covered the rest". `sid` as it stands, image and archive both: a
+  # fresh machine is this job's premise, and nothing here boots a guest whose
+  # verdict a moving instrument could decide — which is the whole of why
+  # `ci.yml`'s shards pin the pair to one date (`.github/apt-snapshot`) and
+  # this job does not.
   #
   # **Measured, finally**: dispatch 32749539353, 2026-08-24 — the first run of
   # this workflow that ever got past its own setup — went green in 4247 s

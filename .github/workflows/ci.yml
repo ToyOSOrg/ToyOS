@@ -120,11 +120,16 @@ jobs:
       max-parallel: 12
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    # `debian:sid` ships the QEMU `.github/qemu-version` declares, the dev
-    # host's version too; `ubuntu-24.04` ships 8.2.2 and the two were measured
+    # `sid` ships the QEMU `.github/qemu-version` declares, the dev host's
+    # version too; `ubuntu-24.04` ships 8.2.2 and the two were measured
     # disagreeing about test outcomes on the same tree. The firmware, boot
     # image and host CPU are unchanged from a bare runner — only the QEMU
     # binary and libraries under it differ.
+    #
+    # The tag is the date `.github/apt-snapshot` declares and the digest is
+    # what is actually pulled: the image and the archive under it are one
+    # decision, and an image newer than the archive is a `deps` step apt
+    # refuses.
     #
     # `--device=/dev/kvm` is how the container reaches the accelerator with no
     # chmod: the hosted node ships `crw-rw---- root:kvm` and root opens it.
@@ -132,37 +137,38 @@ jobs:
     # `.github/instrument.sh` reds on a node it cannot open rather than letting
     # the suite emulate.
     container:
-      image: debian:sid
+      image: debian:sid-20260824@sha256:c1acdb109bacb5adf0f2078892ac177ee2e2ce6f88e96c5b743998b5489d36a9
       options: --device=/dev/kvm
     steps:
       # Before the checkout: `actions/checkout` wants git and this image has
-      # none. Three attempts, since `sid` is a rolling release and its mirror
-      # is not a fixed artifact — `guest-suite` is required, so a mirror blip
+      # none. Three attempts, since the archive is a fixed artifact and the
+      # network to it is not — `guest-suite` is required, so a transport blip
       # must not be able to block a merge.
       - name: deps
         run: |
-          # From a dated snapshot, not sid-as-it-stands: .github/apt-snapshot says why.
-          apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y -qq ca-certificates > /dev/null
-          echo 'deb https://snapshot.debian.org/archive/debian/20260831T000000Z sid main' \
+          # One date for the archive and for the image it installs into:
+          # .github/apt-snapshot says why. `http`, because the image carries no
+          # ca-certificates and fetching them from sid-as-it-stands is the one
+          # unpinned apt this pin exists to remove; what apt trusts is the
+          # archive's signature either way.
+          echo 'deb http://snapshot.debian.org/archive/debian/20260824T000000Z sid main' \
             > /etc/apt/sources.list
           rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.list
           got=no
           for attempt in 1 2 3; do
-            if apt-get -o Acquire::Check-Valid-Until=false update -qq \
-               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades \
+            if apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
+               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                     git curl ca-certificates jq zstd xz-utils build-essential \
-                    qemu-system-x86 > /dev/null; then
+                    qemu-system-x86 >> /tmp/apt.log 2>&1; then
               got=yes
               break
             fi
             echo "apt attempt $attempt failed"
             [ "$attempt" = 3 ] || sleep 20
           done
-          # Named, so a mirror blip reads as one and not as a broken image.
           if [ "$got" != yes ]; then
-            echo "::error::apt failed three times against sid's mirror. Nothing here is about"
-            echo "::error::the tree — re-run the job."
+            echo "::error::apt failed three times. What the last attempt said:"
+            cat /tmp/apt.log
             exit 1
           fi
 
@@ -337,7 +343,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     container:
-      image: debian:sid
+      image: debian:sid-20260824@sha256:c1acdb109bacb5adf0f2078892ac177ee2e2ce6f88e96c5b743998b5489d36a9
     steps:
       - name: the toolchain built
         run: |
@@ -347,28 +353,26 @@ jobs:
       # Three attempts, for the reason the shards' own `deps` step carries.
       - name: deps
         run: |
-          # From a dated snapshot, not sid-as-it-stands: .github/apt-snapshot says why.
-          apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y -qq ca-certificates > /dev/null
-          echo 'deb https://snapshot.debian.org/archive/debian/20260831T000000Z sid main' \
+          # One date for the archive and for the image it installs into, `http`
+          # for the reason the shards' own `deps` step carries.
+          echo 'deb http://snapshot.debian.org/archive/debian/20260824T000000Z sid main' \
             > /etc/apt/sources.list
           rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.list
           got=no
           for attempt in 1 2 3; do
-            if apt-get -o Acquire::Check-Valid-Until=false update -qq \
-               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades \
+            if apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
+               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                     git curl ca-certificates jq zstd xz-utils build-essential \
-                    qemu-system-x86 > /dev/null; then
+                    qemu-system-x86 >> /tmp/apt.log 2>&1; then
               got=yes
               break
             fi
             echo "apt attempt $attempt failed"
             [ "$attempt" = 3 ] || sleep 20
           done
-          # Named, so a mirror blip reads as one and not as a broken image.
           if [ "$got" != yes ]; then
-            echo "::error::apt failed three times against sid's mirror. Nothing here is about"
-            echo "::error::the tree — re-run the job."
+            echo "::error::apt failed three times. What the last attempt said:"
+            cat /tmp/apt.log
             exit 1
           fi
 
@@ -436,23 +440,22 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     container:
-      image: debian:sid
+      image: debian:sid-20260824@sha256:c1acdb109bacb5adf0f2078892ac177ee2e2ce6f88e96c5b743998b5489d36a9
       options: --device=/dev/kvm
     steps:
       - name: deps
         run: |
-          # From a dated snapshot, not sid-as-it-stands: .github/apt-snapshot says why.
-          apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y -qq ca-certificates > /dev/null
-          echo 'deb https://snapshot.debian.org/archive/debian/20260831T000000Z sid main' \
+          # One date for the archive and for the image it installs into, `http`
+          # for the reason the shards' own `deps` step carries.
+          echo 'deb http://snapshot.debian.org/archive/debian/20260824T000000Z sid main' \
             > /etc/apt/sources.list
           rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.list
           got=no
           for attempt in 1 2 3; do
-            if apt-get -o Acquire::Check-Valid-Until=false update -qq \
-               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades \
+            if apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
+               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                     git curl ca-certificates jq zstd xz-utils build-essential \
-                    qemu-system-x86 > /dev/null; then
+                    qemu-system-x86 >> /tmp/apt.log 2>&1; then
               got=yes
               break
             fi
@@ -460,8 +463,8 @@ jobs:
             [ "$attempt" = 3 ] || sleep 20
           done
           if [ "$got" != yes ]; then
-            echo "::error::apt failed three times against sid's mirror. Nothing here is about"
-            echo "::error::the tree — re-run the job."
+            echo "::error::apt failed three times. What the last attempt said:"
+            cat /tmp/apt.log
             exit 1
           fi
 

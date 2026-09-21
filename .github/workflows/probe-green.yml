@@ -28,20 +28,19 @@ jobs:
       matrix:
         rep: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     container:
-      image: debian:sid
+      image: debian:sid-20260824@sha256:c1acdb109bacb5adf0f2078892ac177ee2e2ce6f88e96c5b743998b5489d36a9
       options: --device=/dev/kvm
     steps:
       - name: deps
         run: |
-          # From a dated snapshot, not sid-as-it-stands: .github/apt-snapshot says why.
-          apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y -qq ca-certificates > /dev/null
-          echo 'deb https://snapshot.debian.org/archive/debian/20260831T000000Z sid main' \
+          # One date for the archive and for the image it installs into, `http`
+          # for the reason `ci.yml`'s `deps` step carries.
+          echo 'deb http://snapshot.debian.org/archive/debian/20260824T000000Z sid main' \
             > /etc/apt/sources.list
           rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.list
           for attempt in 1 2 3; do
             apt-get -o Acquire::Check-Valid-Until=false update -qq \
-              && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades \
+              && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                    git curl ca-certificates jq zstd xz-utils build-essential \
                    qemu-system-x86 > /dev/null \
               && break
