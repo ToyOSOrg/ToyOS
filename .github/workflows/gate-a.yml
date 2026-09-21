@@ -46,28 +46,26 @@ jobs:
     # `--device=/dev/kvm`, exactly as the shards: the hosted node ships
     # `crw-rw---- root:kvm` and root opens it with no chmod.
     container:
-      image: debian:sid
+      image: debian:sid-20260824@sha256:c1acdb109bacb5adf0f2078892ac177ee2e2ce6f88e96c5b743998b5489d36a9
       options: --device=/dev/kvm
     steps:
       # Before the checkout: `actions/checkout` wants git and this image has
-      # none. Three attempts, for the reason `ci.yml`'s own `deps` carries:
-      # `sid` is a rolling release and its mirror is not a fixed artifact. No
-      # `ovmf` package: the firmware is `ovmf/` in this repository on every
-      # host.
+      # none. Three attempts, for the reason `ci.yml`'s own `deps` carries: the
+      # archive is a fixed artifact and the network to it is not. No `ovmf`
+      # package: the firmware is `ovmf/` in this repository on every host.
       - name: deps
         run: |
-          # From a dated snapshot, not sid-as-it-stands: .github/apt-snapshot says why.
-          apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y -qq ca-certificates > /dev/null
-          echo 'deb https://snapshot.debian.org/archive/debian/20260831T000000Z sid main' \
+          # One date for the archive and for the image it installs into, `http`
+          # for the reason `ci.yml`'s `deps` step carries.
+          echo 'deb http://snapshot.debian.org/archive/debian/20260824T000000Z sid main' \
             > /etc/apt/sources.list
           rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.list
           got=no
           for attempt in 1 2 3; do
-            if apt-get -o Acquire::Check-Valid-Until=false update -qq \
-               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades \
+            if apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
+               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                     git curl ca-certificates jq zstd xz-utils build-essential \
-                    qemu-system-x86 > /dev/null; then
+                    qemu-system-x86 >> /tmp/apt.log 2>&1; then
               got=yes
               break
             fi
@@ -75,8 +73,8 @@ jobs:
             [ "$attempt" = 3 ] || sleep 20
           done
           if [ "$got" != yes ]; then
-            echo "::error::apt failed three times against sid's mirror. Nothing here is about"
-            echo "::error::the tree — re-run the job."
+            echo "::error::apt failed three times. What the last attempt said:"
+            cat /tmp/apt.log
             exit 1
           fi
 

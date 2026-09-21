@@ -1,11 +1,25 @@
-# The dated Debian archive every hosted guest job installs from. `sid` is a
-# rolling release and its QEMU is the instrument this project's numbers are
-# taken on: on 2026-08-31 it moved 11.1.0 to 11.1.1 mid-afternoon and every
-# guest job refused at `instrument.sh`, correctly, because a number taken on
-# one QEMU is not a number about the other. Installing from a snapshot makes
-# the instrument a decision rather than a delivery date.
+# The dated Debian archive every hosted guest job installs from, and the date
+# of the container image it installs into. `sid` is a rolling release and its
+# QEMU is the instrument this project's numbers are taken on: on 2026-08-31 it
+# moved 11.1.0 to 11.1.1 mid-afternoon and every guest job refused at
+# `instrument.sh`, correctly, because a number taken on one QEMU is not a
+# number about the other. Installing from a snapshot makes the instrument a
+# decision rather than a delivery date.
+#
+# Half a pin is not a pin. Dating the packages and leaving `image: debian:sid`
+# rolling put every job in an image carrying packages *newer* than this
+# archive, and apt will not select the downgrade back to it — `gcc-16-base`,
+# run 35572642348, every guest shard of every pull request. So the image is
+# dated too: every `image:` that reaches this archive names
+# `debian:sid-<this date>` and pins its digest. The dated Debian image is
+# debuerreotype's build of this archive at this exact timestamp —
+# `sid-20260824` declares `created: 2026-08-24T00:00:00Z` and carries this
+# archive's `gcc-16-base 16.2.0-1` — which is what lets the two be one date.
 #
 # This date and `.github/qemu-version` are one fact in two files: the date is
-# one on which `sid` carried that QEMU. Moving either alone is a mistake, and
-# `src/ci.rs` holds every workflow's copy of this string against this file.
-20260831T000000Z
+# one on which `sid` carried that QEMU. `qemu-system-x86 1:11.1.0+ds-2` entered
+# the archive at 20260818T142548Z and `1:11.1.1+ds-1` replaced it at
+# 20260831T145707Z, so a date between those two declares 11.1.0. Moving one of
+# the three alone is a mistake, and `src/ci.rs` holds every workflow's copy of
+# this date — in its archive URL and in its image tag — against this file.
+20260824T000000Z
