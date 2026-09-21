@@ -1094,6 +1094,8 @@ pub const RELEGATED: &[Relegated] = &[
     },
     Relegated {
         test: "usb_transport_break",
+        // The price of the first of this test's two boots: no hosted run has
+        // measured both, and a nightly profile is what refreshes it.
         ci_ms: 5_382,
         why: Why::TimerAnchored,
         guards: "`breaks > 2` counts who won the race between the device's late answer to the \
