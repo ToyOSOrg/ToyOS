@@ -59,6 +59,12 @@ impl AfterBreak {
         self.ends.map_or(own, |ends| own.min(ends))
     }
 
+    /// How long a wait starting at `now` may spin: nothing, once the budget has
+    /// ended, however long ago that was.
+    pub fn wait_left(&self, now: Nanos, own: Nanos) -> Nanos {
+        self.wait_ends(now, own).saturating_sub(now)
+    }
+
     /// Whether a wait that gave up at `now` was cut short by this budget and
     /// not by its own timeout.
     pub fn cut(&self, began: Nanos, now: Nanos, own: Nanos) -> bool {
@@ -99,6 +105,7 @@ mod tests {
     fn a_call_whose_transport_has_not_broken_is_clipped_and_refused_nothing() {
         let call = AfterBreak::CLOSED;
         assert_eq!(call.wait_ends(10 * SECOND, OWN), 12 * SECOND);
+        assert_eq!(call.wait_left(10 * SECOND, OWN), OWN);
         assert_eq!(call.command(u64::MAX), Ok(()));
         assert_eq!(call.request(u64::MAX), Ok(()));
     }
@@ -119,7 +126,8 @@ mod tests {
         call.unanswered();
         assert_eq!(call.command(now), Err(NotTaken::ControllerSilent));
         assert_eq!(call.request(now), Err(NotTaken::Spent));
-        assert_eq!(call.wait_ends(now, OWN), now, "a settle started now does not spin");
+        assert_eq!(call.wait_left(now, OWN), 0, "a settle started now does not spin");
+        assert_eq!(call.wait_left(now + SECOND, OWN), 0, "nor one started after the budget ended");
     }
 
     /// A silent controller is refused by that name even with budget left: the

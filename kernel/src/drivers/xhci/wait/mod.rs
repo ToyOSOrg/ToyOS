@@ -146,8 +146,8 @@ impl XhciController {
 
     /// [`settles`], inside what the call may still spend.
     fn settles_within_call(&self, ready: impl Fn() -> bool) -> bool {
-        let (now, ends) = self.wait_ends();
-        crate::clock::settles(ends - now, ready)
+        let now = crate::clock::nanos_since_boot();
+        crate::clock::settles(self.after_break.wait_left(now, USB_TIMEOUT_NS), ready)
     }
 
     /// Take one endpoint back to a state that runs TRBs, waiting for each step.
