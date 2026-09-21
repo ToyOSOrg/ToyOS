@@ -1703,8 +1703,8 @@ pub fn usb_transport_break(
 }
 
 /// `run_command` logs only failures, so each of these lines is the controller
-/// refusing a command the driver should not have sent — which is exactly what
-/// the T14 printed twice — or a recovery that could not be completed.
+/// refusing a command the driver should not have sent, or a recovery that
+/// could not be completed.
 fn no_command_was_refused(log: &str) -> Result<(), String> {
     for illegal in [
         "Reset Endpoint failed",
@@ -1895,8 +1895,8 @@ fn transport_gives_up(
             plugged.push_str(&qemu.drain_serial(Duration::from_millis(250)));
         }
     };
-    // The offline disk keeps its pool block until it leaves its port, and this
-    // driver has two: it is pulled before the next disk is plugged.
+    // The offline disk keeps its pool block until it leaves its port, so it is
+    // pulled before the next disk is plugged.
     let mut devices = qemu::QmpDevices::open(qemu.qmp_socket());
     devices.del(&qemu::usb_device_id(0));
     drop(devices);
@@ -2091,12 +2091,33 @@ fn transport_gives_up(
         let got = plugged.lines().find(|l| l.contains("is offline: "));
         return Err(format!("the bind's give-up read {got:?}, want {offline:?}\n{log}"));
     }
-    // Two slots went back in this boot, each once: the gate's disk gave its
-    // own back while still plugged in, so its unplug had none left to give, and
-    // the failed bind's went back after its give-up. The controller hands a
-    // freed slot id out again, so the two are told apart by order.
+    let staged = format!("bound under {budget} staged INQUIRY fault(s): untaken=0");
+    if !plugged.contains(&staged) {
+        let got = plugged.lines().find(|l| l.contains("staged INQUIRY fault(s)"));
+        return Err(format!("the bind's staging read {got:?}, want {staged:?}\n{log}"));
+    }
+    // Two slots went back in this boot, each once, and the controller hands a
+    // freed slot id out again, so the two are told apart by order. The gate's
+    // disk gave its own back while it was still plugged in: before its port
+    // said it had gone, which is the only time an unplug's teardown could have
+    // done it instead.
     let slot_of = |name: &str| name.rsplit(' ').next().expect("a slot id ends the name").to_string();
     let want = [under_test, binding].map(|name| format!("xHCI: slot {} disabled", slot_of(name)));
+    let Some(gate_port) = said.split_once(", port ").and_then(|(_, rest)| rest.split(' ').next())
+    else {
+        return Err(format!("{said:?} does not name the port it reset\n{log}"));
+    };
+    let pulled = format!("xHCI: port {gate_port} disconnected");
+    match (log.find(want[0].as_str()), log.find(&pulled)) {
+        (Some(given_back), Some(gone)) if given_back < gone => {}
+        (given_back, gone) => {
+            return Err(format!(
+                "{:?} at {given_back:?} and {pulled:?} at {gone:?}: the offline disk's slot did \
+                 not go back while it was still plugged in\n{log}",
+                want[0]
+            ));
+        }
+    }
     let disabled: Vec<&str> = log
         .lines()
         .filter_map(|l| l.find("xHCI: slot ").map(|at| &l[at..]))

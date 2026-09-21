@@ -254,7 +254,7 @@ fn check(index: usize, disk: &Handle) {
             (StagedFault::NoCbw, "withheld CBWs"),
         ] {
             buf.fill(0);
-            stage_transport_faults(budget - 1, fault, None);
+            stage_transport_faults(budget - 1, fault);
             let refused = read(block, 1, &mut buf).is_err();
             let untaken = disarm();
             let matched = !refused && first_bad(&buf, nonce, block).is_none();
@@ -265,7 +265,7 @@ fn check(index: usize, disk: &Handle) {
                 usb_storage::healthy(index)
             );
         }
-        stage_transport_faults(budget, StagedFault::BadSignature, None);
+        stage_transport_faults(budget, StagedFault::BadSignature);
         let read_refused = read(block, 1, &mut buf).is_err();
         let untaken = disarm();
         let next_refused = read(block, 1, &mut buf).is_err();
@@ -277,9 +277,9 @@ fn check(index: usize, disk: &Handle) {
         );
         // And the same budget spent inside a bind: the next disk to enumerate
         // has its INQUIRY — the first command `bring_up` issues through the
-        // recovering path — refused as many times.
-        const INQUIRY: u8 = 0x12;
-        stage_transport_faults(budget, StagedFault::BadSignature, Some(INQUIRY));
+        // recovering path — refused as many times. The bind stages and
+        // disarms them itself, since no operation of this gate spans one.
+        crate::drivers::xhci::stage_bind_faults(budget);
     }
 
     log!(
@@ -295,7 +295,7 @@ fn check(index: usize, disk: &Handle) {
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::usb_port_gone() {
         use crate::drivers::xhci::{stage_transport_faults, StagedFault};
-        stage_transport_faults(1, StagedFault::PortGone, None);
+        stage_transport_faults(1, StagedFault::PortGone);
         let refused = read(at(blocks, HOST_BLOCKS[0]), 1, &mut buf).is_err();
         let untaken = crate::drivers::xhci::disarm_transport_faults();
         log!(

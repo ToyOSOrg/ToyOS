@@ -23,6 +23,7 @@ use crate::sync::Lock;
 use toyos_untrusted::Untrusted;
 use toyos_xhci::job::{Await, Outcome, Outstanding, Stages};
 use toyos_xhci::port::{self as portmachine, GaveUp, Gone, PortState, Reset, Step};
+use toyos_xhci::call::AfterBreak;
 use toyos_xhci::recovery::{self, Act, EndpointState, NeedsConfigure, Recovery};
 use toyos_xhci::Protocols;
 use toyos_xhci::Portsc;
@@ -294,6 +295,17 @@ const MAX_HID_FAILURES: u8 = 8;
 ///
 /// USB_TIMEOUT_NS and `block::OPERATION` are the same 2 s; the two must stay equal or the budget math (`Scsi::Budget` → `BlockError::BudgetExpired`) is wrong.
 const USB_TIMEOUT_NS: u64 = 2_000_000_000;
+
+/// Everything one disk call may spin for from the start of the wait its transport broke on: that wait, the recovery's commands and requests, the quiesce that takes a disk offline and its port reset's settle.
+///
+/// One wait that ran to its timeout and as long again for what the break owes; every wait after the break is clipped to it (`toyos_xhci::call`).
+pub(crate) const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of(
+    crate::time::Duration::from_nanos(2 * USB_TIMEOUT_NS),
+    "a step of the recovery reached with nothing left is not taken, the recovery fails, and the disk is taken offline",
+);
+
+// The caller spins with interrupts off, so a call that outlasted the TLB-ack tripwire would panic another CPU over a device.
+const _: () = assert!(CALL_AFTER_BREAK.nanos() < crate::arch::tlb::ACK_TIMEOUT.nanos());
 
 /// When a wait started now would give up; unbounded before `clock::init`, since `nanos_since_boot` stays 0.
 fn deadline() -> u64 {
@@ -648,6 +660,12 @@ pub struct XhciController {
 
     /// The event ring slot a slow device's completion is held in, and when it was first seen. See [`SLOW_TRANSFER_NS`].
     held_event: Option<(u16, u64)>,
+
+    /// What the disk call now inside this controller may still spend, once its transport has broken; closed between calls.
+    after_break: AfterBreak,
+
+    /// When the bulk wait now running, or the last one to run, began: where a break opens [`Self::after_break`] from.
+    bulk_began: u64,
 }
 
 impl XhciController {
@@ -987,7 +1005,7 @@ impl XhciController {
 
     /// The slot of every disk the transport took offline, back to the controller.
     ///
-    /// From the poll and never from the disk operation that took it offline: that one runs on a faulting thread beside whatever is outstanding, and [`Self::submit_disable_slot`] is one operation at a time. The port's slot is this device's, as in [`Self::let_go`], and the pool block stays the port's until the unplug.
+    /// From the poll and never from the disk operation that took it offline: that operation runs beside whatever is outstanding, and [`Self::submit_disable_slot`] is one operation at a time. The port's slot is this device's, as in [`Self::let_go`], and the pool block stays the port's until the unplug.
     fn give_back_offline_slots(&mut self) {
         for at in 0..MSC_BLOCKS {
             if self.outstanding.busy() {
@@ -1570,11 +1588,17 @@ pub fn arm_mid_write_wedge(at: toyos_xhci::bot::Phase) {
 #[cfg(feature = "boot-actuators")]
 pub use msc::staged::Fault as StagedFault;
 
-/// Stage `n` faults on the next commands, or on the next carrying `only`'s
-/// opcode. See [`msc::staged`].
+/// Stage `n` faults on the next commands. See [`msc::staged`].
 #[cfg(feature = "boot-actuators")]
-pub fn stage_transport_faults(n: u8, fault: StagedFault, only: Option<u8>) {
-    msc::staged::arm(n, fault, only);
+pub fn stage_transport_faults(n: u8, fault: StagedFault) {
+    msc::staged::arm(n, fault, None);
+}
+
+/// Have the next disk to bind refuse its INQUIRY `n` times. See
+/// [`msc::staged::on_the_next_bind`].
+#[cfg(feature = "boot-actuators")]
+pub fn stage_bind_faults(n: u8) {
+    msc::staged::on_the_next_bind(n);
 }
 
 /// Take back the staged faults no command took, and say how many. See

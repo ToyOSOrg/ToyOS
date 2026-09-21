@@ -13,10 +13,14 @@ Default state on a powered port, which is what the next host needs; this boot
 has lost the disk, and on the T14 that disk is the root filesystem, so the boot
 is over from there.
 
-The protocol has one more rung, and Linux's `usb-storage` climbs it before
-giving up: the USB device reset — port reset, then Reset Device (xHCI 1.2
-§4.6.11), Address Device (§4.6.5), SET_CONFIGURATION and Configure Endpoint —
-after which the same device, now clean, is spoken to again. What makes that
+The specifications define one more rung, which this driver does not climb.
+The port reset `take_offline` already issues leaves the device in its Default
+state, and xHCI 1.2 §4.6.11's Reset Device Command is what the host then owes
+the slot of a device that was reset: it sets the Slot State to Default and the
+USB Device Address to 0, and disables every endpoint but the default control
+one. Address Device (§4.6.5),
+SET_CONFIGURATION and Configure Endpoint (§4.6.6) then make the same device,
+now clean, one that can be spoken to again. What makes that
 worth doing is keeping the disk's identity: `usb_storage::handle` indexes by
 the number `bind` handed out, a mount holds it for life, and today
 `release_blocks` says a number never comes back. A device reset that re-binds

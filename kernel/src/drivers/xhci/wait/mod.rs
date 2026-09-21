@@ -42,6 +42,7 @@ use crate::log;
 use super::{deadline, enqueue_control, log_unrecoverable, Completion, Trb, TrbRing};
 use super::{XhciController, EVENT_TRANSFER, EVENT_CMD_COMPLETE, USB_TIMEOUT_NS};
 use super::{CC_SUCCESS, CC_SHORT_PACKET};
+use toyos_xhci::call::NotTaken;
 use toyos_xhci::job::Await;
 use toyos_xhci::recovery::{Act, NeedsConfigure, Recovery};
 
@@ -55,6 +56,8 @@ enum Control {
     Failed { stage: &'static str, code: u32 },
     /// Nothing came back for the named stage, for [`Quiet`]'s reason.
     Silent { stage: &'static str, why: Quiet },
+    /// Not put on the ring: the call it belongs to may spend nothing more.
+    NotSent(NotTaken),
 }
 
 /// Why a wait ended with no event; only [`Quiet::Elapsed`] spent the timeout budget.
@@ -64,6 +67,8 @@ pub(super) enum Quiet {
     Elapsed,
     /// The port reads disconnected.
     Gone,
+    /// The call's budget after a break ran out before this wait's own timeout did.
+    Spent,
     /// A staged break skipped the wait by design.
     #[cfg(feature = "boot-actuators")]
     Staged,
@@ -84,6 +89,10 @@ impl Quiet {
                 USB_TIMEOUT_NS / 1_000_000
             ),
             Self::Gone => write!(f, "the port disconnected during the {step} {kind}"),
+            Self::Spent => write!(
+                f,
+                "this call's budget after a break ran out during the {step} {kind}"
+            ),
             #[cfg(feature = "boot-actuators")]
             Self::Staged => write!(f, "a staged break skipped the {step} {kind} wait"),
         }
@@ -103,6 +112,7 @@ impl core::fmt::Display for Control {
             Self::Done { delivered } => write!(f, "{delivered} B delivered"),
             Self::Failed { stage, code } => write!(f, "{stage} stage completion {}", Completion(*code)),
             Self::Silent { stage, why } => why.about(stage, "stage", f),
+            Self::NotSent(why) => write!(f, "not sent: {why}"),
         }
     }
 }
@@ -128,6 +138,18 @@ fn settles(ready: impl Fn() -> bool) -> bool {
 }
 
 impl XhciController {
+    /// Now, and when a wait starting now gives up: on its own timeout, or where the call's budget after a break ends.
+    fn wait_ends(&self) -> (u64, u64) {
+        let now = crate::clock::nanos_since_boot();
+        (now, self.after_break.wait_ends(now, USB_TIMEOUT_NS))
+    }
+
+    /// [`settles`], inside what the call may still spend.
+    fn settles_within_call(&self, ready: impl Fn() -> bool) -> bool {
+        let (now, ends) = self.wait_ends();
+        crate::clock::settles(ends - now, ready)
+    }
+
     /// Take one endpoint back to a state that runs TRBs, waiting for each step.
     fn restart_endpoint(&mut self, ep: Restart<'_>) -> bool {
         let halt = Some((ep.ep_addr, ep.ep0_ring));
@@ -256,7 +278,7 @@ impl XhciController {
     /// address, not the next completion event, per Command Completion Event's
     /// own addressing (xHCI 1.2 §6.4.2.2).
     fn wait_command(&mut self, trb: u64) -> Option<(u32, u32)> {
-        let deadline = deadline();
+        let (_, deadline) = self.wait_ends();
         loop {
             // **Every iteration, not only an empty ring.** A ring that keeps
             // producing events this wait is not waiting for made the bound
@@ -293,16 +315,22 @@ impl XhciController {
     /// own answer to one; `None` is a controller that never answered, which is
     /// logged here.
     fn command_code(&mut self, trb: Trb, what: &str) -> Option<u32> {
+        let began = crate::clock::nanos_since_boot();
+        if let Err(why) = self.after_break.command(began) {
+            log!("xHCI: {what} not issued: {why}");
+            return None;
+        }
         let at = self.submit_command(trb);
         match self.wait_command(at) {
             Some((code, _)) => Some(code),
             None => {
+                self.after_break.unanswered();
                 // The controller's own word beside the silence: a command ring
                 // that stopped (CRCR.CRR clear) or a Host Controller Error
                 // (USBSTS.HCE) is a controller no further command reaches.
                 log!(
                     "xHCI: {what} timed out after {} ms with USBSTS={:#010x} and CRCR.CRR={}",
-                    USB_TIMEOUT_NS / 1_000_000,
+                    (crate::clock::nanos_since_boot() - began) / 1_000_000,
                     self.op_base.read_u32(super::OP_USBSTS),
                     (self.op_base.read_u64(super::OP_CRCR) >> 3) & 1
                 );
@@ -327,12 +355,14 @@ impl XhciController {
             return Err(Quiet::Staged);
         }
         let on = Await::Transfer { slot, dci, trb };
-        let deadline = deadline();
+        let (began, deadline) = self.wait_ends();
         let port = self.port_of_slot(slot);
         loop {
             // **Every iteration, not only an empty ring**; see `wait_command`.
-            if crate::clock::nanos_since_boot() >= deadline {
-                return Err(Quiet::Elapsed);
+            let now = crate::clock::nanos_since_boot();
+            if now >= deadline {
+                let cut = self.after_break.cut(began, now, USB_TIMEOUT_NS);
+                return Err(if cut { Quiet::Spent } else { Quiet::Elapsed });
             }
             let Some(event) = self.next_event() else {
                 // An unplugged device is not a slow one; the timeout budget is
@@ -375,6 +405,9 @@ impl XhciController {
         data_buf: Option<u64>,
         data_len: u16,
     ) -> Control {
+        if let Err(why) = self.after_break.request(crate::clock::nanos_since_boot()) {
+            return Control::NotSent(why);
+        }
         let trbs = enqueue_control(
             ring, bm_request_type, b_request, w_value, w_index, data_buf, data_len,
         );

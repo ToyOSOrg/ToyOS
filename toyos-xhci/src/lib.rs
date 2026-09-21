@@ -9,6 +9,8 @@
 #![forbid(unsafe_code)]
 
 pub mod bot;
+pub mod call;
+pub mod configure;
 pub mod enumerate;
 pub mod invariants;
 pub mod job;

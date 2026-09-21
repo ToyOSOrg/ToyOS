@@ -7,6 +7,7 @@ use toyos_xhci::enumerate::{
 use toyos_xhci::job::{Await, Outcome, Stages};
 use toyos_xhci::port::{self, Reset};
 use toyos_xhci::recovery;
+use toyos_xhci::reset_recovery::SlotGoes;
 use super::{deadline, Answer, Trb, TrbRing, What, XhciController, PAGE};
 use super::{OFF_INPUT_CTX, OFF_DATA_BUF};
 use super::{DEV_INT_RING, DEV_EP0_RING, DEV_OUT_CTX, DEV_REPORT, EP0_DCI};
@@ -14,7 +15,7 @@ use super::{TRB_ENABLE_SLOT, TRB_ADDRESS_DEVICE, TRB_CONFIGURE_EP, TRB_EVALUATE_
 use super::{enqueue_control, CC_SUCCESS};
 
 use super::hid::{HidType, HidRole, HidDevice};
-use super::msc::{MscInterface, MscRings};
+use super::msc::{Bind, MscInterface, MscRings};
 
 // `wTotalLength` is clamped to this size; the scratch page is four times it.
 const MAX_CONFIG_DESC: usize = 256;
@@ -674,15 +675,20 @@ fn bind(ctrl: &mut XhciController, state: Enumerating) {
     let (_, function) = state.parsed.expect("a configuration named a function");
     let rings = state.rings.expect("Configure Endpoint named this device's rings");
     // Whether a device came of it decides who keeps the slot; a refusal here would leak it.
-    let bound = match (function, rings) {
+    let keeps_slot = match (function, rings) {
         (Function::Msc(info), Rings::Msc(msc)) => {
-            super::msc::bind(ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info)
+            match super::msc::bind(ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info) {
+                Bind::Bound => true,
+                Bind::Refused(SlotGoes::Back) => false,
+                // No device came of it, and its bulk pair could not be Stopped: Disable Slot is not defined over it (xHCI 1.2 §4.6.4's note), so the port holds the slot and its teardown gives it back.
+                Bind::Refused(SlotGoes::WithTheUnplug) => true,
+            }
         }
         (Function::Hid(info), Rings::Hid(int_ring)) => bind_hid(ctrl, &state, &info, int_ring),
         // Rings are built from the function two acts earlier; nothing between can change it.
         _ => unreachable!("the rings were built for another function"),
     };
-    if bound {
+    if keeps_slot {
         finish(ctrl, state.port_idx, Some(state.slot_id));
     } else {
         refuse(ctrl, state.port_idx, state.slot_id);

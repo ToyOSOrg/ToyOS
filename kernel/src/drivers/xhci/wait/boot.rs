@@ -445,6 +445,8 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         outstanding: Outstanding::EMPTY,
         software_disabled: [0u64; 4],
         held_event: None,
+        after_break: toyos_xhci::call::AfterBreak::CLOSED,
+        bulk_began: 0,
     })
 }
 /// Initialize and configure one USB device on a port, waiting for each step.
