@@ -137,6 +137,45 @@ fn settles(ready: impl Fn() -> bool) -> bool {
     crate::clock::settles(USB_TIMEOUT_NS, ready)
 }
 
+/// When a wait on the event ring gives up.
+///
+/// **A deadline is the controller's silence, so past it the ring is still
+/// read, and the wait gives up at the first empty read.** A CPU can be held
+/// past a deadline with the answer already posted: QEMU answers a doorbell
+/// inside the vCPU's write to it, and a Stop Endpoint cancelling a USB disk's
+/// in-flight SCSI request there waits out the host's flush first.
+///
+/// **Checked before every read, not only an empty one**, and a ring read past
+/// the deadline at most once around: a ring that keeps producing events the
+/// wait is not waiting for would otherwise make the bound unreachable, and the
+/// caller holds `XHCI` and a block operation with preemption off for the whole
+/// of it.
+struct Late {
+    deadline: u64,
+    read_past: usize,
+}
+
+impl Late {
+    fn new(deadline: u64) -> Self {
+        Self { deadline, read_past: 0 }
+    }
+
+    /// Whether the deadline has passed.
+    fn past(&self) -> bool {
+        crate::clock::nanos_since_boot() >= self.deadline
+    }
+
+    /// Whether the wait gives up without reading the ring again; counts the
+    /// read it allows.
+    fn gives_up(&mut self) -> bool {
+        if !self.past() {
+            return false;
+        }
+        self.read_past += 1;
+        self.read_past > super::RING_SIZE
+    }
+}
+
 impl XhciController {
     /// Now, and when a wait starting now gives up: on its own timeout, or where this part of a call whose transport broke ends (`toyos_xhci::call`).
     fn wait_ends(&self) -> (u64, u64) {
@@ -279,15 +318,15 @@ impl XhciController {
     /// own addressing (xHCI 1.2 §6.4.2.2).
     fn wait_command(&mut self, trb: u64) -> Option<(u32, u32)> {
         let (_, deadline) = self.wait_ends();
+        let mut late = Late::new(deadline);
         loop {
-            // **Every iteration, not only an empty ring.** A ring that keeps
-            // producing events this wait is not waiting for made the bound
-            // unreachable, and the caller holds `XHCI` and a block operation
-            // with preemption off for the whole of it.
-            if crate::clock::nanos_since_boot() >= deadline {
+            if late.gives_up() {
                 return None;
             }
             let Some(event) = self.next_event() else {
+                if late.past() {
+                    return None;
+                }
                 core::hint::spin_loop();
                 continue;
             };
@@ -357,14 +396,19 @@ impl XhciController {
         let on = Await::Transfer { slot, dci, trb };
         let (began, deadline) = self.wait_ends();
         let port = self.port_of_slot(slot);
+        let mut late = Late::new(deadline);
+        let quiet = |call: &toyos_xhci::call::AfterBreak| {
+            let cut = call.cut(began, crate::clock::nanos_since_boot(), USB_TIMEOUT_NS);
+            if cut { Quiet::Spent } else { Quiet::Elapsed }
+        };
         loop {
-            // **Every iteration, not only an empty ring**; see `wait_command`.
-            let now = crate::clock::nanos_since_boot();
-            if now >= deadline {
-                let cut = self.after_break.cut(began, now, USB_TIMEOUT_NS);
-                return Err(if cut { Quiet::Spent } else { Quiet::Elapsed });
+            if late.gives_up() {
+                return Err(quiet(&self.after_break));
             }
             let Some(event) = self.next_event() else {
+                if late.past() {
+                    return Err(quiet(&self.after_break));
+                }
                 // An unplugged device is not a slow one; the timeout budget is
                 // for a port that might still answer.
                 if port.is_some_and(|p| !self.read_portsc(p).connected()) {
