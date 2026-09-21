@@ -717,6 +717,11 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // the medium is what it was and no partition a boot mounts is the subject;
     // and the sweep is refused by name on a disk with no room for it.
     (LOAD_ARM, Flash::Ok),
+    // It withholds transfers to the boot stick so the transport breaks on
+    // purpose. Admissible because it writes nothing the stick did not already
+    // hold, reaches neither the internal NVMe nor firmware state, and the worst
+    // it leaves is a stick a replug clears — the defect the arm exists to stage.
+    ("usb-transport-break", Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(
