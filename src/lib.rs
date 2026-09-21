@@ -7,7 +7,6 @@ pub mod build;
 pub mod buildlock;
 pub mod ci;
 pub mod clippy;
-pub mod day;
 pub mod durations;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
@@ -22,7 +21,6 @@ pub mod image;
 pub mod kernelkeys;
 pub mod lan;
 pub mod libc;
-pub mod mergehealth;
 pub mod metal;
 pub mod metaldevices;
 pub mod metalimage;

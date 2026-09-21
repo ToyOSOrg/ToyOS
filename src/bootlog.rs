@@ -288,19 +288,25 @@ pub fn record_millis(line: &str) -> Option<u64> {
 /// `logd` writes the wall clock and the panel writes none, so a line without one
 /// answers `None` rather than reading the milliseconds field as a date.
 fn record_unix_secs(line: &str) -> Option<u64> {
-    const EPOCH: &str = "1970-01-01";
     let mut fields = line.strip_prefix('[')?.split_whitespace();
-    let day = crate::day::Day::parse(fields.next()?)?;
-    let days = crate::day::Day::parse(EPOCH).expect("the epoch is a date").until(day);
-    let (hours, rest) = fields.next()?.split_once(':')?;
-    let (minutes, seconds) = rest.split_once(':')?;
-    let (hours, minutes, seconds): (i64, i64, i64) =
-        (hours.parse().ok()?, minutes.parse().ok()?, seconds.parse().ok()?);
-    // A leap second is the one value past the ordinary range that is a time.
-    if !(0..24).contains(&hours) || !(0..60).contains(&minutes) || !(0..=60).contains(&seconds) {
+    let (year, rest) = fields.next()?.split_once('-')?;
+    let (month, day) = rest.split_once('-')?;
+    let (hour, rest) = fields.next()?.split_once(':')?;
+    let (min, sec) = rest.split_once(':')?;
+    if [year, month, day, hour, min, sec].map(str::len) != [4, 2, 2, 2, 2, 2] {
         return None;
     }
-    u64::try_from(days * 86_400 + hours * 3_600 + minutes * 60 + seconds).ok()
+    let civil = toyos_wallclock::Civil {
+        year: year.parse().ok()?,
+        month: month.parse().ok()?,
+        day: day.parse().ok()?,
+        hour: hour.parse().ok()?,
+        min: min.parse().ok()?,
+        sec: sec.parse().ok()?,
+    };
+    // logd renders this field from the same `Civil`, so one it refuses is not
+    // a field logd wrote.
+    civil.is_valid().then(|| civil.to_unix_secs())
 }
 
 /// Whether `source` declares a constant whose value is exactly `rhs`, wrapped
@@ -701,5 +707,16 @@ mod record_time_tests {
         assert_eq!(record_unix_secs("not a record"), None);
         assert_eq!(record_unix_secs("[2026-09-08 25:00:00 0.000 cpu0] x"), None);
         assert_eq!(record_unix_secs("[2026-02-31 10:00:00 0.000 cpu0] x"), None);
+    }
+
+    /// A leap day and a month's end are counted as the days they are.
+    #[test]
+    fn a_wall_clock_across_a_leap_day_and_a_month_is_its_seconds() {
+        let at = |line| record_unix_secs(line).expect("a wall clock");
+        assert_eq!(at("[1970-01-01 00:00:00 0.000 cpu0] x"), 0);
+        assert_eq!(at("[2024-02-28 23:59:59 0.000 cpu0] x"), 1_709_164_799);
+        assert_eq!(at("[2024-02-29 00:00:00 0.000 cpu0] x"), 1_709_164_800);
+        assert_eq!(at("[2024-03-01 00:00:00 0.000 cpu0] x"), 1_709_164_800 + 86_400);
+        assert_eq!(record_unix_secs("[2023-02-29 00:00:00 0.000 cpu0] x"), None);
     }
 }

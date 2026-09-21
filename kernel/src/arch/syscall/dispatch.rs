@@ -544,8 +544,6 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             DA::CANARY_ADDR => canary::address(),
             DA::CANARY_CHANGED => canary::changed() as u64,
-            // Arms the last CPU a shootdown waits for to answer a2ns late; the arming
-            // outlives the call so the caller can then time a syscall's own shootdown path.
             DA::TLB_ACK_DELAY_ARM => crate::arch::tlb::debug_arm_ack_delay(a2),
             DA::TLB_ACK_DELAY_DISARM => crate::arch::tlb::debug_disarm_ack_delay(),
             // The two leaks this object model accepts — a stranded Arc, the cross-pair
