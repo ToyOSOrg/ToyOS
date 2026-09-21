@@ -18,7 +18,7 @@ use common::{
 use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::redlist::{self, Quarantined};
-use toyos_build::tiers::{self, Tier};
+use toyos_build::tiers::Tier;
 
 struct TestDef {
     name: String,
@@ -111,15 +111,23 @@ impl HostSlots {
     }
 }
 
-/// Which tier the shared boot's discovered members are in.
-///
-/// [`Tier::Fast`] because every member in the effective CI profile is at or
-/// under `toyos_build::tiers::FAST_COMMIT_MS`. [`check_no_collisions`] refuses
-/// a Fast shared member with no current measurement or one priced without
-/// margin, so a newly discovered binary starts conservative instead of
-/// inheriting this answer silently. Declared beside [`SHARED_BLOCK`] rather
-/// than assumed, for the same reason that is declared.
+/// Which tier the shared boot's discovered members are in: one boot, so one
+/// tier. Declared beside [`SHARED_BLOCK`] rather than assumed, for the same
+/// reason that is declared.
 const SHARED_TIER: Tier = Tier::Fast;
+
+/// The tier a duration label ran in: its registration's, or the shared boot's
+/// for a discovered test. An audio label is `<name> (smp=<n>)`.
+fn tier_of(label: &str) -> Tier {
+    let name = label.split_once(" (smp=").map_or(label, |(name, _)| name);
+    MACHINE_TESTS
+        .iter()
+        .chain(SCREEN_TESTS)
+        .map(|(n, _, tier)| (*n, *tier))
+        .chain(AUDIO_TESTS.iter().copied())
+        .find(|(n, _)| *n == name)
+        .map_or(SHARED_TIER, |(_, tier)| tier)
+}
 
 /// The one boot that carries every Rust and C test.
 ///
@@ -474,7 +482,7 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
     // The other half of the recovery branch: the test above reads the screen
     // either side of a survived panic, which holds whether or not the discard
-    // did anything. Nightly at 8,477 ms, over `FAST_COMMIT_MS`: two guests.
+    // did anything. Nightly at 8,477 ms: two guests.
     ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Nightly),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
@@ -565,16 +573,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     //
     // Serial: it is the one registration here whose verdict is a *time*, and a
     // wake latency measured beside eleven other guests is the host's schedule.
-    // Nightly for that same reason — `Why::TimerAnchored` in `src/tiers.rs`,
-    // which is what its classification was always going to be.
+    // Nightly for that same reason.
     ("latency_wake", Sched::Serial, Tier::Nightly),
     ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Fast),
     ("input_merge", Sched::Parallel, Tier::Fast),
     ("metal_sim_input", Sched::Parallel, Tier::Fast),
     ("input_claim_absent", Sched::Parallel, Tier::Fast),
     // One boot; every verdict is a PPM header field or a console line, and no
-    // clock is in any of them, so its Nightly row is `Why::Cost` and nothing
-    // else. `src/tiers.rs` carries the price and what goes dark with it.
+    // clock is in any of them, so it is Nightly for its price and nothing else.
     ("gpu_set_resolution", Sched::Parallel, Tier::Nightly),
     // One boot from here to `metal_sim_compositor_stall` (`METAL_SIM_DESKTOP`).
     ("metal_sim_compositor", Sched::Parallel, Tier::Nightly),
@@ -621,8 +627,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("doom_music", Sched::Parallel, Tier::Nightly),
     // ureq and rustls from crates.io, fetching over TLS 1.3 from a host this
     // test mints a CA for. Every verdict is a printed line or a digest; the
-    // only clock is `run_test`'s ceiling. Fast with the UNMEASURED bootstrap
-    // marker until CI prices it.
+    // only clock is `run_test`'s ceiling.
     ("https_tls13", Sched::Parallel, Tier::Fast),
     // The same judge over netd's Intel driver instead of the virtio one: the
     // 82574L QEMU models has the register file the T14's I219 has, so this is
@@ -632,7 +637,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // parameter line, and the guest's own `/log` as the oracle the wire is
     // compared with. The verdicts are a line's arrival and a line-for-line
     // comparison; the clocks in it are liveness guards on a guest that stopped
-    // talking. Fast with the UNMEASURED bootstrap marker until CI prices it.
+    // talking.
     ("log_stream", Sched::Parallel, Tier::Nightly),
     // The same stream over netd's Intel driver, for the same reason
     // `https_tls13_e1000e` exists: the T14's NIC is an I219 and this is the
@@ -653,7 +658,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
-    // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
+    // no clock in it.
     ("netd_listener_forgery", Sched::Parallel, Tier::Fast),
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
@@ -706,13 +711,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot, and the one whose numbers are the T14's: what it judges
     // here is the plumbing, since every span on an emulated device is a fact
-    // about TCG. Registered UNMEASURED, so the run that prices it is the one
-    // that decides its tier.
+    // about TCG.
     ("metal_device_probe", Sched::Parallel, Tier::Fast),
     // Its verdict waits out a staged window.
     ("job_deadline_reboots", Sched::Parallel, Tier::Fast),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
-    // changes the verdict; `RELEGATED` says what leaves the per-PR tier with it.
+    // changes the verdict.
     ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
     // Its own boot, and the verdict is QEMU's stop reason inside the bound.
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
@@ -734,8 +738,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
     // The one bound in this tree that ends a machine nothing else can: a boot
     // whose every CPU has stopped taking scheduler passes. Its verdict is a
-    // bound counted down in the guest, so `src/tiers.rs` carries it
-    // `Why::TimerAnchored` and says what leaves the per-PR tier with it.
+    // bound counted down in the guest, so it is Nightly.
     ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
@@ -775,9 +778,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     //
     // **It was three boots and priced at 19,740 ms** on the hosted lane (run
     // 32580794553), twice the Fast ceiling. The two negative controls are the
-    // name below; `src/tiers.rs` carries their row and the arithmetic that
-    // split that price between the two names. This one carries `UNMEASURED_MS`,
-    // which is the marker's whole point and which only a Fast name may hold.
+    // name below.
     ("syscall_window_nmi", Sched::Parallel, Tier::Fast),
     // The two controls on the name above: the kernel with vector 2's IST index
     // taken off, which must double fault at the entry with `cr2 = rsp - 8`, and
@@ -789,8 +790,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot, its own feature, and it drives the guest only through
     // stdin — nothing it touches is shared with another test. Returned to
     // Fast on 2026-08-21: the 2026-08-17 drain fix took it from 52,822 ms to
-    // a measured 5,049 ms on KVM (nightly run 32444411794), exactly the
-    // crossing its relegation record said the next nightly would decide.
+    // a measured 5,049 ms on KVM (nightly run 32444411794).
     ("idle_stack_guard", Sched::Parallel, Tier::Nightly),
     // Its own boot and its own feature, and it deafens one CPU for 400 ms —
     // but the deafening is a *window*, and the verdict is whether the NMI is
@@ -801,8 +801,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // same run and three times after it. Serial by the default rule — a
     // verdict that is a duration does not go in the parallel phase. Returned
     // to Fast on 2026-08-21: the 2026-08-17 drain fix took it from 24,625 ms
-    // to a measured 6,284 ms on KVM (nightly run 32444411794), the return its
-    // relegation record called the likeliest in the table.
+    // to a measured 6,284 ms on KVM (nightly run 32444411794).
     ("dump_nmi_probe", Sched::Serial, Tier::Nightly),
     ("diskless_boot", Sched::Parallel, Tier::Fast),
     // Every verdict is a line of text or a device property, and no clock is in
@@ -823,18 +822,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("shipped_config_boots", Sched::Parallel, Tier::Fast),
     // One boot whose verdict is three lines of kernel log and a census column.
     // The two waits inside the guest are bounded and report rather than hang, so
-    // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
-    // price it.
+    // no host clock decides anything.
     ("lapic_spurious_vector", Sched::Parallel, Tier::Fast),
     // One boot with both stuck-device actuators armed.
     ("driver_wait_refused", Sched::Parallel, Tier::Nightly),
-    // One boot; the leak-rollback controls' two verdict lines. Carrying
-    // `UNMEASURED_MS` until the shards price it.
+    // One boot; the leak-rollback controls' two verdict lines.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
     // One boot; the reopen control's one verdict line.
     ("process_reopen_selftest", Sched::Parallel, Tier::Fast),
-    // One boot; three read-fault control verdicts. Carrying `UNMEASURED_MS`
-    // until the shards price it.
+    // One boot; three read-fault control verdicts.
     ("read_fault_selftests", Sched::Parallel, Tier::Fast),
     ("xhci_many_devices", Sched::Parallel, Tier::Fast),
     // Its whole assertion is that a keystroke injected from the host crossed a
@@ -848,7 +844,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // on fixed sleeps, and nothing sent the right-button release
     // `test_rs_input_events` exits on — so 30 s of its 35.2 s CI price was a
     // client waiting out a fallback deadline with every assertion already
-    // satisfied. Carrying `UNMEASURED_MS` until the shards price it.
+    // satisfied.
     ("xhci_msi_only", Sched::Parallel, Tier::Fast),
     ("xhci_no_interrupt", Sched::Parallel, Tier::Fast),
     ("nvme_large_device", Sched::Parallel, Tier::Fast),
@@ -897,7 +893,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("klogd_hosted", Sched::Parallel, Tier::Fast),
     // The two actuator boots (`klogd-panic`, `usbd-panic`), split off so the
     // spawn half is per-PR again; alone they still price over the ceiling,
-    // which is what the relegation row carries.
+    // and sit Nightly.
     ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
@@ -912,8 +908,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The kernel hasher's boot-order obligation, in the row above's shape and
     // for its reasons.
     ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Fast),
-    // Nightly 2026-08-21 by the margin rule: 9,120 ms committed, inside
-    // `FAST_COMMIT_MS`..`FAST_CEILING_MS`. Its twin above is 5,073 ms and stays.
+    // Nightly at 9,120 ms. Its twin above is 5,073 ms and stays Fast.
     ("double_panic_names_the_fault", Sched::Parallel, Tier::Nightly),
     // The third shape: a `#PF` inside a panic, which is the one
     // `fatal_exception`'s recursive short-circuit exists for and the one it
@@ -941,8 +936,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // `log-unbracketed-reserve` has ever had. Parallel and Fast for
     // `log_nested_emit`'s reasons: both verdicts are the guest's ledger over its
     // own records, one saying the shard kept a single order and the other that
-    // it lost it by name, and no clock is in either. Carrying `UNMEASURED_MS`
-    // until the shards price them.
+    // it lost it by name, and no clock is in either.
     ("log_reserve_window", Sched::Parallel, Tier::Fast),
     ("log_reserve_window_negative", Sched::Parallel, Tier::Fast),
     // Two processes building a fixed-width line out of two `write`s each, and a
@@ -951,8 +945,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // host changes when the writers run and not whether a line is whole. It boots
     // its own machine because what it reads is the console capture, which a
     // shared boot fills with everything else.
-    // Nightly 2026-08-21 by the margin rule: 8,925 ms committed, inside
-    // `FAST_COMMIT_MS`..`FAST_CEILING_MS`.
+    // Nightly at 8,925 ms.
     ("console_line_atomicity", Sched::Parallel, Tier::Nightly),
     // What the C family is allowed to conclude from the line above being whole:
     // a guest writes a daemon-shaped line into a real capture window on purpose
@@ -960,7 +953,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // control. One boot, two `echo`s, and every verdict is a string comparison
     // the host makes over a capture — no clock in it; Nightly because its
     // *wall* clock is whatever the partition co-schedules, and it straddles the
-    // fast line run to run (`src/tiers.rs` has the two measurements).
+    // fast line run to run.
     ("c_capture_ignores_daemon_lines", Sched::Parallel, Tier::Nightly),
     // A poll on the machine's log against a *handle* going away. Parallel and
     // Fast: both halves are verdicts the guest computes — a completion count
@@ -978,9 +971,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot that stops dead in phase 3, read for what it managed to say.
     ("pre_idle_wedge_speaks", Sched::Parallel, Tier::Fast),
     // Returned to Fast 2026-08-21 on nightly run 32444411794's 9,509 ms, then
-    // back to Nightly the same day: run 32506320411 measured 10,281 ms and the
-    // 9,509 ms it returned on is inside `FAST_COMMIT_MS`..`FAST_CEILING_MS`.
-    // The i8042 pacing fix did cut it from 47,121 ms; it did not buy margin.
+    // back to Nightly the same day: run 32506320411 measured 10,281 ms.
+    // The i8042 pacing fix did cut it from 47,121 ms.
     ("i8042_health", Sched::Parallel, Tier::Nightly),
     // And one from here to `i8042_mouse` (`I8042_TRACE`), which is why all
     // three carry the answer the last of them needs.
@@ -1021,8 +1013,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // `test_rs_locale_gate layout` holding an idle keyboard open until a fixed
     // deadline expired, against half a second of injection; it exits on the End
     // key's release now, which is `i8042_keyboard`'s own sentinel and the fix
-    // made for that whole family. Carrying `UNMEASURED_MS` until the shards
-    // price it.
+    // made for that whole family.
     ("swiss_german_layout", Sched::Parallel, Tier::Fast),
     // One `LOCALE_WIZARD` boot for the pair since the drainer was made
     // runnable at commit — the boot-apiece and the injected drain keys it took
@@ -1056,7 +1047,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // with a 300 ms allowance, which is the whole assertion — a real-time
     // verdict, so Nightly as TimerAnchored. Returned to Fast for half a day
     // on 2026-08-21 (PR #186, on one 9,221 ms nightly sample) and bounced the
-    // merge queue at 10,738 ms twice; `src/tiers.rs` carries the straddle.
+    // merge queue at 10,738 ms twice.
     ("i8042_absent", Sched::Serial, Tier::Nightly),
     // The fault quarantines (masks) the controller's GSI within milliseconds
     // of readiness — confirmed from the serial log, before a host round trip
@@ -1165,8 +1156,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // registrations because the artifact memo builds one kernel per feature
     // set anyway, so the split costs nothing and the parallel phase gets five
     // jobs it can place instead of one serial five-boot job it cannot. Three
-    // priced inside the margin band across two runs and sit Nightly by the
-    // straddler rule; their relegation rows carry the prices.
+    // priced near the line across two runs and sit Nightly.
     ("wall_clock_rtc_dead", Sched::Parallel, Tier::Nightly),
     ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Fast),
     ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
@@ -1219,8 +1209,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
-    // Fast is the bootstrap tier: the UNMEASURED marker buys one measured CI
-    // run, and the measured price then assigns the final tier.
     ("fs_dirs_durable", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Nightly),
@@ -1229,7 +1217,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
     ("iommu_virtio_platform", Sched::Parallel, Tier::Nightly),
     ("iommu_domain_isolation", Sched::Parallel, Tier::Nightly),
-    // Fast with the UNMEASURED marker until the shards price them.
     ("iommu_gpu_scanout_swap", Sched::Parallel, Tier::Fast),
     ("iommu_gpu_foreign_backing", Sched::Parallel, Tier::Fast),
     ("iommu_hda_foreign_bdl", Sched::Parallel, Tier::Fast),
@@ -2226,10 +2213,7 @@ fn discover_c_tests() -> Vec<String> {
 ///
 /// **A name that arrives this way is registered by nothing but its file.**
 /// `tests/toyos-rust-tests/src/bin/<name>.rs` is the whole declaration — no row
-/// here names it — so `src/durations.rs`'s touched-names scan reads that
-/// directory beside the registration tables, on the same stem rule. Move the
-/// rule and both ends move, or a new test's price verdict goes unrendered on
-/// the run that introduces it.
+/// here names it.
 fn discover_rust_tests(bins: &[(String, Vec<u8>)]) -> Vec<String> {
     let mut names: Vec<String> = bins
         .iter()
@@ -7074,8 +7058,7 @@ fn i8042_keyboard(boot: &mut Boot) -> Result<(), String> {
     // is End, and the guest exits on its release, so a run that never receives
     // it runs out that binary's own five-second fallback instead and every
     // assertion above still passes: a green test six seconds slower than its
-    // price, which is what a lost sentinel used to look like and why it was read
-    // off the `durations` gate rather than off a verdict.
+    // price, which is what a lost sentinel used to look like.
     for usage in [0x0Bu8, 0x08, 0x0F, 0x12, 0x05, 0x29, 0x50, 0xE1, 0x4D] {
         let presses = events.iter().filter(|e| e.usage == usage && e.modifiers & 0x10 == 0).count();
         let releases = events.iter().filter(|e| e.usage == usage && e.modifiers & 0x10 != 0).count();
@@ -16550,10 +16533,8 @@ fn stall_is_not_a_verdict() -> Result<(), String> {
 /// **The failure mode the tier introduces is silence, not a wrong answer.** A
 /// green run holding back 60 tests and a green run holding back none print the
 /// same word, and the difference between them is the whole reason `--nightly`
-/// exists. `src/tiers.rs`'s gates hold the declaration against the measured
-/// profile and `check_registration` holds it against the registration; neither
-/// can see whether the *run* mentions it, and a run nobody can tell apart from a
-/// full one is how a temporary measure becomes permanent.
+/// exists. Nothing else can see whether the *run* mentions it, and a run nobody
+/// can tell apart from a full one is how a temporary measure becomes permanent.
 ///
 /// Both directions, because the second is the one that rots quietly: a suite
 /// that ran everything must not claim to have held anything back either, or the
@@ -16566,26 +16547,12 @@ fn nightly_tier_is_announced() -> Result<(), String> {
         "not run — the nightly tier",
         "desktop_window_child, sshd_fail_closed",
         "`cargo test --test toyos-build -- --nightly` runs them",
-        "src/tiers.rs",
         "2 held back for the nightly tier",
     ] {
         if !announced.contains(want) {
             return Err(format!("a run holding tests back never says {want:?}:\n{announced}"));
         }
     }
-    // The cost, added up from `RELEGATED` rather than from anything this
-    // function knows: a summary quoting a number the declaration does not
-    // support is worse than one quoting none.
-    let ms: u64 = tiers::RELEGATED
-        .iter()
-        .filter(|r| held.contains(&r.test))
-        .map(|r| r.ci_ms)
-        .sum();
-    let want = format!("{:.1} s of effective CI test time", ms as f64 / 1000.0);
-    if !announced.contains(&want) {
-        return Err(format!("the summary does not price what it held back as {want:?}:\n{announced}"));
-    }
-
     let whole = Tally::new(&[]).summary(1, Duration::ZERO, Duration::ZERO);
     if whole.contains("nightly") || whole.contains("held back") {
         return Err(format!("a run that held nothing back says it did:\n{whole}"));
@@ -16801,22 +16768,9 @@ impl Tally {
         // Above the result line and not below it, so the pointer is the last
         // thing before the verdict rather than an afterthought under it.
         if !self.relegated.is_empty() {
-            let ms: u64 = tiers::RELEGATED
-                .iter()
-                .filter(|r| self.relegated.contains(&r.test))
-                .map(|r| r.ci_ms)
-                .sum();
-            say(format!(
-                "not run — the nightly tier, {:.1} s of effective CI test time:",
-                ms as f64 / 1000.0
-            ));
+            say("not run — the nightly tier:".to_string());
             say(format!("    {}", self.relegated.join(", ")));
-            say(
-                "    `cargo test --test toyos-build -- --nightly` runs them. \
-                 `src/tiers.rs`'s `RELEGATED` says what each one guarded and why it is not \
-                 gated per pull request."
-                    .to_string(),
-            );
+            say("    `cargo test --test toyos-build -- --nightly` runs them.".to_string());
             say(String::new());
         }
 
@@ -17627,14 +17581,17 @@ fn save_durations(
             known.iter().map(|(n, d)| format!("{n} {}\n", d.as_millis())).collect::<String>(),
         ),
         // This shard's own tests and no others: a third of the suite is a third
-        // of a measurement, and the merge is what makes it a whole one.
+        // of a measurement, and the merge is what makes it a whole one. Each
+        // row carries its tier, which is what the merge's tier report reads.
         Some(s) => {
             let mut mine: Vec<&(String, Duration)> = timed.iter().collect();
             mine.sort_by(|a, b| a.0.cmp(&b.0));
             (
                 durations_path()
                     .with_file_name(format!("test-durations.shard-{}-of-{}", s.index, s.count)),
-                mine.iter().map(|(n, d)| format!("{n} {}\n", d.as_millis())).collect::<String>(),
+                mine.iter()
+                    .map(|(n, d)| format!("{n} {} {}\n", d.as_millis(), tier_of(n).token()))
+                    .collect::<String>(),
             )
         }
     };
@@ -17915,45 +17872,6 @@ fn check_shard_partition(all_tests: &[TestDef]) {
     }
 }
 
-/// The conservative half of the CI cutoff: a Fast registration must have a
-/// committed price at/below the line or the explicit one-run UNMEASURED marker.
-/// Missing evidence is refused rather than quietly joining Fast. The one-off
-/// measurement-branch bootstrap for a new name is recorded in the cost audit;
-/// its provisional price is never the evidence a final change lands with.
-///
-/// **The line here is `FAST_COMMIT_MS`, not `FAST_CEILING_MS`** — the price a
-/// test may be *committed* at, which is where the fast tier's margin rule bites
-/// on a registration. `tiers::ci_profile_verdicts` says the same of a merged
-/// measurement; two gates on one policy may not disagree about where it is.
-fn assert_fast_profile_label(
-    label: &str,
-    tier: Tier,
-    profile: &BTreeMap<String, Duration>,
-) {
-    if tier == Tier::Nightly {
-        return;
-    }
-    let measured = profile.get(label).unwrap_or_else(|| {
-        panic!(
-            "{label} is registered Fast but the committed CI profile has no measurement; \
-             obtain its one-off KVM measurement and commit the resulting profile before \
-             assigning its final tier"
-        )
-    });
-    if measured.as_millis() == tiers::UNMEASURED_MS as u128 {
-        return;
-    }
-    assert!(
-        measured.as_millis() <= tiers::FAST_COMMIT_MS as u128,
-        "{label} is registered Fast but the committed CI profile measures it at {} ms, \
-         over the {} ms price a Fast test may be committed at (the {} ms line less its \
-         margin) — relegate it or make it faster",
-        measured.as_millis(),
-        tiers::FAST_COMMIT_MS,
-        tiers::FAST_CEILING_MS,
-    );
-}
-
 /// Every claim the three explicit registration lists make about themselves,
 /// before anything boots.
 ///
@@ -18003,18 +17921,14 @@ fn check_metal_registration() {
 
 fn check_registration() {
     check_metal_registration();
-    let mut profile = BTreeMap::new();
-    read_durations(&committed_durations_path(), &mut profile);
-    let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
-    for (name, _, tier) in MACHINE_TESTS.iter().chain(SCREEN_TESTS) {
-        assert!(seen.insert(name, ()).is_none(), "{name} is registered twice");
-        assert_fast_profile_label(name, *tier, &profile);
-    }
-    for (name, tier) in AUDIO_TESTS {
-        assert!(seen.insert(name, ()).is_none(), "{name} is registered twice");
-        for smp in AUDIO_SMP {
-            assert_fast_profile_label(&format!("{name} (smp={smp})"), *tier, &profile);
-        }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for name in MACHINE_TESTS
+        .iter()
+        .chain(SCREEN_TESTS)
+        .map(|(n, _, _)| *n)
+        .chain(AUDIO_TESTS.iter().map(|(n, _)| *n))
+    {
+        assert!(seen.insert(name), "{name} is registered twice");
     }
 
     let mut groups: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
@@ -18035,57 +17949,13 @@ fn check_registration() {
             "{group} shares one boot, so its members must share one scheduling answer"
         );
         // **One boot cannot be in two tiers.** A group whose members disagreed
-        // would put the boot in the fast tier for whichever member ran first and
-        // charge the fast tier the whole group's cost — which is the arithmetic
-        // the ceiling exists to control. It is also what makes
-        // `tiers::Why::RidesTheBootOf` an honest row rather than an excuse: the
-        // cheap members of the metal-sim boot are relegated *because* this is
-        // enforced.
+        // would put the boot in the fast tier for whichever member ran first
+        // and charge the fast tier the whole group's cost.
         assert!(
             MACHINE_TESTS[first..=last].windows(2).all(|w| w[0].2 == w[1].2),
             "{group} shares one boot, so its members must share one tier"
         );
     }
-    for row in tiers::RELEGATED {
-        let tiers::Why::RidesTheBootOf(carrier) = row.why else { continue };
-        let rider_group = group_of(row.test);
-        let carrier_group = group_of(carrier);
-        assert!(
-            rider_group.is_some() && rider_group == carrier_group,
-            "{} says it rides {carrier}, but group_of gives {:?} and {:?}",
-            row.test,
-            rider_group,
-            carrier_group,
-        );
-    }
-
-    // The declaration and the registration, against each other and in both
-    // directions. `src/tiers.rs` carries what each relegated name cost and what
-    // it guarded — the record the owner reads and the input a future scheduled
-    // workflow takes — and this is the only place the two can be compared: the
-    // registration is here, and `cargo test --lib` cannot see it.
-    let registered: BTreeSet<&str> = MACHINE_TESTS
-        .iter()
-        .chain(SCREEN_TESTS)
-        .filter(|(_, _, tier)| *tier == Tier::Nightly)
-        .map(|(name, _, _)| *name)
-        .chain(AUDIO_TESTS.iter().filter(|(_, tier)| *tier == Tier::Nightly).map(|(name, _)| *name))
-        .collect();
-    let declared = tiers::relegated_names();
-    let undeclared: Vec<&&str> = registered.difference(&declared).collect();
-    assert!(
-        undeclared.is_empty(),
-        "{undeclared:?} are registered Tier::Nightly and src/tiers.rs says nothing about \
-         them — a test that stops being gated per pull request without a row saying what \
-         it guarded is exactly the silence this mechanism exists to refuse"
-    );
-    let unregistered: Vec<&&str> = declared.difference(&registered).collect();
-    assert!(
-        unregistered.is_empty(),
-        "src/tiers.rs relegates {unregistered:?} and no registration marks them \
-         Tier::Nightly — either the name is stale or the test is still running in the \
-         fast tier while the record says it is not"
-    );
 }
 
 /// The half [`check_registration`] could not ask: the shared boot's tests are
@@ -18123,13 +17993,6 @@ fn check_no_collisions(shared: &[TestDef]) {
          machine — two verdicts under one name, and `retry_task` takes the shared one. Add \
          each to RUST_SKIP with the reason its own test exists, or rename one of the two."
     );
-    if SHARED_TIER == Tier::Fast {
-        let mut profile = BTreeMap::new();
-        read_durations(&committed_durations_path(), &mut profile);
-        for test in shared {
-            assert_fast_profile_label(&test.name, SHARED_TIER, &profile);
-        }
-    }
 }
 
 fn main() {
@@ -18435,18 +18298,11 @@ fn main() {
         )
         .collect();
     if !held_back.is_empty() {
-        let ms: u64 = tiers::RELEGATED
-            .iter()
-            .filter(|r| held_back.contains(&r.test))
-            .map(|r| r.ci_ms)
-            .sum();
         eprintln!(
-            "[toyos] nightly tier: {} test(s) NOT run, {:.1} s of effective CI test time. \
+            "[toyos] nightly tier: {} test(s) NOT run. \
              `cargo test --test toyos-build -- --nightly` runs them manually; \
-             .github/workflows/ci.yml runs them every night at 03:00 UTC. \
-             `src/tiers.rs`'s `RELEGATED` says what each one guards.",
+             .github/workflows/ci.yml runs them every night at 03:00 UTC.",
             held_back.len(),
-            ms as f64 / 1000.0,
         );
         eprintln!("[toyos]   {}", held_back.join(", "));
     }

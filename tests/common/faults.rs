@@ -620,7 +620,7 @@ fn kvm_accelerated() -> bool {
 /// The two negative controls on [`syscall_window_nmi`], which is where the
 /// property is asserted and this is where it is shown not to be vacuous.
 ///
-/// **Nightly, and `src/tiers.rs` carries the row.** Two Metal boots of 3,000
+/// **Nightly.** Two Metal boots of 3,000
 /// NMIs, and both end in a halted machine that has to be drained past its own
 /// report — which is what the price is. A control is a claim about the
 /// instrument rather than about the kernel under review: it says the same test,
