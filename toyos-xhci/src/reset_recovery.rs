@@ -38,6 +38,14 @@
 //! **Every command before the first request.** A request reaches the device
 //! and a command does not, so the commands, which end every transfer on the
 //! host side, all come first.
+//!
+//! **The device's own answer ends it, and nothing else does.** §3.1 has the
+//! device ready for the next CBW once it answers the reset, and a device that
+//! answers and is not is one no request can tell from one that is. So the
+//! recovery closes with a TEST UNIT READY — a command with no data phase, which
+//! moves nothing whatever phase the device takes it in — and has taken only
+//! on a status carrying that command's tag ([`crate::bot::whose`]). A command
+//! with a buffer is not sent to a device that has not given one.
 
 use crate::recovery::{Command, EndpointState};
 
