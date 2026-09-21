@@ -140,7 +140,7 @@ apps_and_home_are_one_filesystem 7263 shards=12
 audio_idle_suspend 1013 shards=12
 audio_tone (smp=1) 8450 shards=12
 audio_tone_load (smp=1) 18139 shards=12
-bar_placement_is_proven 18446744073709551615 shards=none
+bar_placement_is_proven 3297 shards=12
 blackbox_done_chain 4119 shards=12
 blackbox_early_panic_sealed 2470 shards=12
 blackbox_early_panic_sealed_muted 3145 shards=12
@@ -255,8 +255,8 @@ keyboard_claim_close_spares_stdin 4580 shards=12
 kill_while_blocked 44 shards=12
 klogd_hosted 5674 shards=12
 klogd_panic_halts 16658 shards=12
-lan_dhcp_lease 18446744073709551615 shards=none
-lan_no_lease 18446744073709551615 shards=none
+lan_dhcp_lease 3029 shards=12
+lan_no_lease 32709 shards=12
 lapic_spurious_vector 6829 shards=12
 late_storage_connect 6455 shards=12
 latency_wake 8790 shards=12

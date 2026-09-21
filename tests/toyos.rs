@@ -652,14 +652,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // one written down. The DHCP server it is judged against is QEMU's own, an
     // implementation of RFC 2131 this repository did not write, and its lease
     // is known field by field. The verdicts are records and a lease's fields;
-    // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
+    // no clock in it.
     ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
-    // announces itself anyway. Fast with the UNMEASURED marker, which only the
-    // fast tier carries; its verdict is timer-anchored, and
-    // `issues/build/a-timer-anchored-names-tier-is-decided-by-its-price.md`
-    // holds the relegation it owes.
-    ("lan_no_lease", Sched::Parallel, Tier::Fast),
+    // announces itself anyway. Its verdict waits out netd's own lease bound, so
+    // a slower machine moves it; `RELEGATED` says what leaves the per-PR tier
+    // with it.
+    ("lan_no_lease", Sched::Parallel, Tier::Nightly),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -672,8 +671,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // moved that function's BAR. Its own boot rather than a second assertion in
     // the row above, because that one's subject is exclusivity and a test that
     // reds tells a reader which of the two it is about. It waits out a drain for
-    // the message record, so its price carries a fixed span of host wall clock;
-    // Fast with the UNMEASURED bootstrap marker until priced.
+    // the message record, so its price carries a fixed span of host wall clock.
     ("bar_placement_is_proven", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
@@ -4141,6 +4139,38 @@ fn check_wrap(dump: &screen::Ppm) -> Result<(), String> {
     Ok(())
 }
 
+/// Every row on the panel is text the log actually carries.
+///
+/// **The check the panel's grid owes**: `panic_console` writes only the cells
+/// whose character or colour moved, so a cell it fails to write is one the
+/// previous paint left standing, and past the end of a line that replaced a
+/// longer one that is a string no line of the log contains.
+fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String> {
+    let said: String = console
+        .replace("[kernel ", "[")
+        .bytes()
+        .map(|byte| match byte {
+            b'\n' => '\n',
+            b'\t' => ' ',
+            0x20..=0x7E => byte as char,
+            _ => '.',
+        })
+        .collect();
+    for row in dump.rows() {
+        let row = row.trim_end();
+        if row.is_empty() || row.starts_with("[page ") || said.contains(row) {
+            continue;
+        }
+        return Err(format!(
+            "the panel row {row:?} is in no line of the log, so a cell the paint that put \
+             this screen up did not write is still standing from the one before \
+             it\ndecoded screen:\n{}",
+            dump.text()
+        ));
+    }
+    Ok(())
+}
+
 /// Run one screen test. `Err` carries the decoded screen, because a failure
 /// here is almost always "the text is not what I expected" and the decoded
 /// grid is the only readable form of that.
@@ -5575,15 +5605,28 @@ fn run_screen_test(
             let mut pages: Vec<String> = Vec::new();
             let mut report: Option<String> = None;
             let mut head_seen = false;
+            // **The only incremental paints a guest makes**: the report's own
+            // paint follows a fill, and every page the pager puts up after it
+            // is written against the grid the one before left — which is the
+            // paint `check_no_stale_cells` exists for. The footers of the
+            // settled captures it judged, and two of them, because the first is
+            // the page the fill painted.
+            const JUDGED_PAGES: usize = 2;
+            let mut judged: Vec<String> = Vec::new();
+            let mut before: Option<String> = None;
             // A liveness ceiling on a machine that is halted and paging, so
             // there is no console to read progress off and this is the case
             // `qemu::budget` exists for.
             let deadline = Instant::now() + qemu.budget(Duration::from_secs(40));
-            while Instant::now() < deadline && !(head_seen && report.is_some()) {
-                let text = qemu.screendump().text();
+            while Instant::now() < deadline
+                && !(head_seen && report.is_some() && judged.len() >= JUDGED_PAGES)
+            {
+                let dump = qemu.screendump();
+                let text = dump.text();
                 let Some(footer) = text.lines().rev().find(|l| l.starts_with("[page ")) else {
                     // Before the panic the screen still carries a boot
                     // checkpoint; only a paginated screen has a footer.
+                    before = None;
                     thread::sleep(Duration::from_millis(200));
                     continue;
                 };
@@ -5594,6 +5637,17 @@ fn run_screen_test(
                     report = Some(text.clone());
                 }
                 head_seen |= text.contains(HEAD);
+                // **A screendump is not a shutter**: one taken across a paint
+                // carries the rows already written above the rows the paint
+                // replaced, and a row half of each is in no line of any log. Two
+                // identical captures are a paint that finished.
+                if before.as_deref() == Some(text.as_str()) {
+                    check_no_stale_cells(&dump, &qemu.console_stream().since(0))?;
+                    if !judged.contains(&footer.to_string()) {
+                        judged.push(footer.to_string());
+                    }
+                }
+                before = Some(text.clone());
                 thread::sleep(Duration::from_millis(200));
             }
 
@@ -5621,6 +5675,14 @@ fn run_screen_test(
             if pages.len() < 2 {
                 return Err(format!(
                     "only one page footer ever appeared ({seen}); the pager is not cycling"
+                ));
+            }
+            if judged.len() < JUDGED_PAGES {
+                return Err(format!(
+                    "only {} settled page(s) were judged for stale cells ({}), so no paint made \
+                     against the grid the one before it left was ever read",
+                    judged.len(),
+                    judged.join(" ")
                 ));
             }
             Ok(())
