@@ -29,6 +29,7 @@ macro_rules! say {
     }};
 }
 
+mod crumbs;
 mod device;
 mod dhcp;
 mod i219;
@@ -46,9 +47,9 @@ mod virtio_net;
 /// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models. One
 /// driver takes both, and each row names which part it is because below the
 /// register file they are not one.
-const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, |c| Card::intel(c, Part::I219)),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, |c| Card::intel(c, Part::E82574)),
+const CARDS: [(PciId, fn(toyos::PciDev, Option<&Crumbs>) -> Card); 3] = [
+    (PciId { vendor: 0x8086, device: 0x15fc }, |c, t| Card::intel(c, Part::I219, t)),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, |c, t| Card::intel(c, Part::E82574, t)),
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
 
@@ -88,8 +89,28 @@ const EXIT_WITH_MDIO_ASK: &str = "--exit-with-mdio-ask";
 /// deadline first — so this keeps further from the reset than that.
 const ASK_EXIT_DWELL: Duration = Duration::from_millis(500);
 
-/// The three, which cannot share a boot.
-const ACTUATORS: [&str; 3] = [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME, EXIT_WITH_MDIO_ASK];
+/// The probe under which this process leaves a durable crumb on the log volume
+/// before every step that reaches the claim or the card, and ends where
+/// [`EXIT_WITH_PHY_OUTCOME`] does, with the same code.
+///
+/// **For a machine that ends without a record**: a power-off seals no black box
+/// and outruns `/system/bin/logd`, so the last line of `crumbs::PATH` is the only
+/// thing left that says how far this process got. Armed the same way as the
+/// three above and never beside one: it is [`EXIT_WITH_PHY_OUTCOME`]'s boot with
+/// a trail, and the other two act where it never arrives.
+const EXIT_WITH_CRUMBS: &str = "--exit-with-crumbs";
+
+/// The trail [`EXIT_WITH_CRUMBS`] leaves: a poll is one crumb, and every one of
+/// them is on the device before the step it names.
+type Crumbs = toyos_i219::crumbs::Runs<crumbs::Stick>;
+
+/// What the Rust runtime ends a panicking process with, which is how this one
+/// ends on a card it cannot drive.
+const PANIC_EXIT: i32 = 101;
+
+/// The four, which cannot share a boot.
+const ACTUATORS: [&str; 4] =
+    [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME, EXIT_WITH_MDIO_ASK, EXIT_WITH_CRUMBS];
 
 fn armed(actuator: &str) -> bool {
     std::env::args().any(|arg| arg == actuator)
@@ -98,6 +119,7 @@ fn armed(actuator: &str) -> bool {
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
+use toyos_i219::crumbs::{Step, Trail};
 use toyos_i219::Part;
 use virtio_net::VirtioNet;
 
@@ -130,7 +152,18 @@ impl Card {
         panic!("netd: the NIC this program was given is not one it can drive — {why}")
     }
 
-    fn intel(claim: toyos::PciDev, part: Part) -> Self {
+    fn intel(claim: toyos::PciDev, part: Part, trail: Option<&Crumbs>) -> Self {
+        if let Some(trail) = trail {
+            match i219::leave_crumbs(claim, part, trail) {
+                Ok(never) => match never {},
+                // The refusal is a step too: a trail that stopped short of it
+                // would read as a machine that ended where this process did.
+                Err(why) => {
+                    trail.crumb(Step::Exit { code: PANIC_EXIT });
+                    Self::undrivable(why)
+                }
+            }
+        }
         // Before the bring-up and instead of it: the question is about the
         // part as a bring-up finds it, so none may have run.
         if armed(EXIT_WITH_MDIO_ASK) {
@@ -148,10 +181,15 @@ impl Card {
         }
     }
 
-    fn virtio(claim: toyos::PciDev) -> Self {
+    fn virtio(claim: toyos::PciDev, trail: Option<&Crumbs>) -> Self {
         if armed(EXIT_WITH_MDIO_ASK) {
             Self::undrivable(format_args!(
                 "{EXIT_WITH_MDIO_ASK} asks §4.5.2's MDIO arbitration, which this card has not"
+            ));
+        }
+        if trail.is_some() {
+            Self::undrivable(format_args!(
+                "{EXIT_WITH_CRUMBS} trails the Intel driver's bring-up, which this card has not"
             ));
         }
         match VirtioNet::open(claim) {
@@ -1365,6 +1403,12 @@ impl NetDaemon {
 }
 
 fn main() {
+    // Before the claim is looked for, so a trail with this line and no other
+    // is a process that ended without ever holding the function.
+    let trail = armed(EXIT_WITH_CRUMBS).then(|| Crumbs::over(crumbs::Stick::open()));
+    if let Some(trail) = &trail {
+        trail.crumb(Step::Start);
+    }
     // **The order this used to have was load-bearing and is now moot.** The
     // device was claimed before the name was published, because a client that
     // connected while netd was still in `DmaNic::open` reached a listener owned
@@ -1383,7 +1427,7 @@ fn main() {
     };
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
-    // Before the card is opened, because one of the three ends this process
+    // Before the card is opened, because two of the four end this process
     // inside that call.
     let asked_for: Vec<&str> = ACTUATORS.into_iter().filter(|actuator| armed(actuator)).collect();
     if asked_for.len() > 1 {
@@ -1392,7 +1436,10 @@ fn main() {
              point another of them acts at"
         );
     }
-    let nic = open(claim);
+    if let Some(trail) = &trail {
+        trail.crumb(Step::ClaimHeld);
+    }
+    let nic = open(claim, trail.as_ref());
     if armed(PROVOKE_MESSAGE) {
         nic.provoke_message();
     }

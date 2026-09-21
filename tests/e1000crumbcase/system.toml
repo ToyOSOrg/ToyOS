@@ -1,0 +1,18 @@
+# `tests/e1000phycase` with a trail: netd's `--exit-with-crumbs` leaves a
+# durable line in `/log/crumbs.txt` before every step of the same bring-up and
+# ends with the same code. Nothing here receives `netd`, because there is no
+# netd left to connect to once it has answered.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:10d3"]
+args = ["--exit-with-crumbs"]
+
+[programs.test-runner]
+syscap = ["logread"]

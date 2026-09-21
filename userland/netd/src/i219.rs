@@ -20,6 +20,7 @@ use std::rc::Rc;
 use toyos::shm::SharedMemory;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
+use toyos_i219::crumbs::{before, Crumbed, Silent, Step, Trail};
 use toyos_i219::{Clock, DmaBuffers, Interrupts, Registers};
 
 use crate::device::{KernelRefused, Latch, Window};
@@ -142,10 +143,10 @@ pub struct Nic {
     reported: Latch<(toyos_i219::Counters, toyos_i219::Link)>,
 }
 
-/// The claim's register window, mapped.
-fn registers(dev: &PciDev) -> Result<Bar, Opening> {
-    let info = dev
-        .describe()
+/// The claim's register window, mapped, with each call on the claim a step of
+/// `trail`'s.
+fn registers(dev: &PciDev, trail: &impl Trail) -> Result<Bar, Opening> {
+    let info = before(trail, Step::Describe, || dev.describe())
         .map_err(KernelRefused::on("the claim's description"))
         .map_err(Opening::Kernel)?;
     let (bar, bytes) = info
@@ -155,8 +156,7 @@ fn registers(dev: &PciDev) -> Result<Bar, Opening> {
         .find(|(_, bytes)| **bytes >= toyos_i219::regs::REGISTER_BYTES as u64)
         .map(|(index, bytes)| (index as u32, *bytes))
         .ok_or(Opening::NoWindow)?;
-    let mapped = dev
-        .map_bar(bar, bytes)
+    let mapped = before(trail, Step::MapBar, || dev.map_bar(bar, bytes))
         .map_err(KernelRefused::on("the BAR"))
         .map_err(Opening::Kernel)?;
     crate::say!(
@@ -178,7 +178,7 @@ fn registers(dev: &PciDev) -> Result<Bar, Opening> {
 /// The claim is borrowed, because when it is given up is the caller's decision
 /// and not this one's.
 pub fn ask(dev: &PciDev) -> Result<toyos_i219::ask::Reading, Opening> {
-    let bar = registers(dev)?;
+    let bar = registers(dev, &Silent)?;
     let reading = toyos_i219::ask::after_reset(&bar, &Monotonic, |nanos| {
         std::thread::sleep(std::time::Duration::from_nanos(nanos))
     })
@@ -187,51 +187,87 @@ pub fn ask(dev: &PciDev) -> Result<toyos_i219::ask::Reading, Opening> {
     Ok(reading)
 }
 
+/// Everything the claim is asked for before the part is reached, in the order
+/// it is asked: the register window, then one grant — as the driver reaches its
+/// descriptors, and as netd reaches its frames.
+///
+/// **One function because two bring-ups owe the kernel the same calls**:
+/// [`Nic::open`], and [`leave_crumbs`], whose trail is only worth reading if
+/// the boot it was left on did what a shipping boot does.
+fn granted(dev: &PciDev, trail: &impl Trail) -> Result<(Bar, Grant, Window), Opening> {
+    let bar = registers(dev, trail)?;
+    let region = before(trail, Step::DmaAlloc, || dev.dma_alloc(toyos_i219::GRANT_BYTES))
+        .map_err(KernelRefused::on("a DMA grant"))
+        .map_err(Opening::Kernel)?;
+    let device_base = region.device_addr;
+    // SAFETY: `dma_alloc` answered `GRANT_BYTES` bytes of live mapping, and
+    // `region` is moved into the `Grant`, which its caller keeps for as long
+    // as it keeps either window.
+    let frames =
+        unsafe { Window::new(region.memory.as_ptr(), toyos_i219::GRANT_BYTES as usize) };
+    Ok((bar, Grant { window: frames, device_base, _region: region }, frames))
+}
+
+/// The one line a bring-up says about itself.
+fn say_brought_up(brought_up: toyos_i219::BringUp) {
+    crate::say!(
+        "netd: I219: {}, and the PHY {}",
+        if brought_up.master_quiet {
+            "the function stopped mastering before it was reset"
+        } else {
+            "the function was still mastering when it was reset"
+        },
+        match brought_up.phy {
+            Ok(phy) => {
+                format!("answers at PHY address {:02} as {:#010x}", phy.addr, phy.id)
+            }
+            Err(why) => format!("was not brought up: {why}"),
+        },
+    );
+}
+
+/// `crate::EXIT_WITH_CRUMBS`: [`Nic::open`]'s bring-up with a crumb on `trail`
+/// before every call on the claim and every register access, ended where
+/// `crate::EXIT_WITH_PHY_OUTCOME` ends it and with the same code.
+///
+/// **Nothing is given back before the exit.** The process ending is what gives
+/// the claim up on the boot this one is compared with, so the last crumb is
+/// left before that and nothing is dropped by hand ahead of it.
+pub fn leave_crumbs(
+    dev: PciDev,
+    part: toyos_i219::Part,
+    trail: &impl Trail,
+) -> Result<std::convert::Infallible, Opening> {
+    let dev = Rc::new(dev);
+    let (bar, grant, _frames) = granted(&dev, trail)?;
+    let driver = toyos_i219::I219::open(
+        part,
+        Crumbed::over(bar, trail),
+        Monotonic,
+        grant,
+        Claim(Rc::clone(&dev)),
+    )
+    .map_err(Opening::Driver)?;
+    trail.crumb(Step::Opened);
+    say_brought_up(driver.brought_up());
+    let code = toyos_i219::phy::Outcome::of(driver.brought_up().phy).exit_code();
+    before(trail, Step::Exit { code }, || std::process::exit(code))
+}
+
 impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
     pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
         let dev = Rc::new(dev);
-        let bar = registers(&dev)?;
-
-        let region = dev
-            .dma_alloc(toyos_i219::GRANT_BYTES)
-            .map_err(KernelRefused::on("a DMA grant"))
-            .map_err(Opening::Kernel)?;
-        let device_base = region.device_addr;
-        // SAFETY: `dma_alloc` answered `GRANT_BYTES` bytes of live mapping, and
-        // `region` is moved into the `Grant` this `Nic` owns for its own life.
-        let grant = unsafe {
-            Window::new(region.memory.as_ptr(), toyos_i219::GRANT_BYTES as usize)
-        };
-
-        let driver = toyos_i219::I219::open(
-            part,
-            bar,
-            Monotonic,
-            Grant { window: grant, device_base, _region: region },
-            Claim(Rc::clone(&dev)),
-        )
-        .map_err(Opening::Driver)?;
+        let (bar, grant, frames) = granted(&dev, &Silent)?;
+        let driver =
+            toyos_i219::I219::open(part, bar, Monotonic, grant, Claim(Rc::clone(&dev)))
+                .map_err(Opening::Driver)?;
         let mac = driver.mac();
-        let brought_up = driver.brought_up();
-        crate::say!(
-            "netd: I219: {}, and the PHY {}",
-            if brought_up.master_quiet {
-                "the function stopped mastering before it was reset"
-            } else {
-                "the function was still mastering when it was reset"
-            },
-            match brought_up.phy {
-                Ok(phy) => {
-                    format!("answers at PHY address {:02} as {:#010x}", phy.addr, phy.id)
-                }
-                Err(why) => format!("was not brought up: {why}"),
-            },
-        );
+        say_brought_up(driver.brought_up());
         Ok(Self {
             driver: RefCell::new(driver),
             claim: dev,
-            frames: grant,
+            frames,
             dropped: RefCell::new(vec![0; toyos_i219::TX_BUF_BYTES]),
             mac,
             reported: Latch::default(),

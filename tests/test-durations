@@ -255,6 +255,7 @@ keyboard_claim_close_spares_stdin 4580 shards=12
 kill_while_blocked 44 shards=12
 klogd_hosted 5674 shards=12
 klogd_panic_halts 16658 shards=12
+lan_crumb_trail 18446744073709551615 shards=none
 lan_dhcp_lease 3029 shards=12
 lan_mdio_ask_exit_code 18446744073709551615 shards=none
 lan_no_lease 32709 shards=12

@@ -11,7 +11,8 @@
 //! PHY is separate silicon the Management Engine shares, reached over `MDIC`
 //! under §4.5.2's ownership arbitration. [`Part`] is which one this claim is,
 //! and [`phy`] is everything that follows from it. [`ask`] puts one question to
-//! that arbitration and reaches nothing behind it.
+//! that arbitration and reaches nothing behind it. [`crumbs`] is a trail left
+//! one durable line ahead of a bring-up, and decides nothing about one.
 //!
 //! # The boundary
 //!
@@ -69,6 +70,7 @@
 extern crate std;
 
 pub mod ask;
+pub mod crumbs;
 pub mod phy;
 pub mod regs;
 

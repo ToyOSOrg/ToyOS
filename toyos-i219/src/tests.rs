@@ -2105,3 +2105,227 @@ fn every_reading_of_the_arbitration_has_one_exit_code_that_reads_back() {
         127
     );
 }
+
+use crate::crumbs::{self, before, Broken, Crumbed, Ending, Runs, Step, Trail};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::string::{String, ToString};
+
+/// One thing a crumbed bring-up did, in the order it did it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Seen {
+    Crumb(Step),
+    Reached(Step),
+}
+
+type Seens = Rc<RefCell<Vec<Seen>>>;
+
+/// The part's own side of the order: what reached it, noted as it arrived.
+struct Tape<R> {
+    regs: R,
+    seen: Seens,
+}
+
+impl<R: Registers> Registers for Tape<R> {
+    fn bytes(&self) -> usize {
+        self.regs.bytes()
+    }
+
+    fn read(&self, reg: usize) -> u32 {
+        self.seen.borrow_mut().push(Seen::Reached(Step::Read { reg }));
+        self.regs.read(reg)
+    }
+
+    fn write(&self, reg: usize, value: u32) {
+        self.seen.borrow_mut().push(Seen::Reached(Step::Write { reg, value }));
+        self.regs.write(reg, value);
+    }
+}
+
+/// The trail's side of it.
+struct Noted(Seens);
+
+impl Trail for Noted {
+    fn crumb(&self, step: Step) {
+        self.0.borrow_mut().push(Seen::Crumb(step));
+    }
+}
+
+/// The three parts a trail is owed on: the 82574, an I219 whose PHY comes up,
+/// and an I219 whose MDIO interface the engine holds for the whole wait — which
+/// is what the T14's answers.
+fn crumbed_parts() -> [Nic; 3] {
+    let held = Nic::i219(83);
+    held.engine_holds_the_interface_until(u64::MAX);
+    [Nic::new(81), Nic::i219(82), held]
+}
+
+/// A bring-up over a taped part, and everything the tape and the trail saw.
+fn taped(nic: &Nic, trail: impl FnOnce(Seens) -> Option<Runs<Noted>>, every: bool) -> Vec<Seen> {
+    let seen: Seens = Rc::default();
+    let (bar, clock, grant, line) = nic.parts();
+    let tape = Tape { regs: bar, seen: Rc::clone(&seen) };
+    let opened = match (trail(Rc::clone(&seen)), every) {
+        (Some(runs), _) => {
+            I219::open(nic.part(), Crumbed::over(tape, runs), clock, grant, line).map(|_| ())
+        }
+        (None, true) => {
+            I219::open(nic.part(), Crumbed::over(tape, Noted(Rc::clone(&seen))), clock, grant, line)
+                .map(|_| ())
+        }
+        (None, false) => I219::open(nic.part(), tape, clock, grant, line).map(|_| ()),
+    };
+    opened.unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused it: {why}"))));
+    let seen = seen.borrow().clone();
+    seen
+}
+
+fn reached(seen: &[Seen]) -> Vec<Step> {
+    seen.iter().filter_map(|s| if let Seen::Reached(step) = s { Some(*step) } else { None }).collect()
+}
+
+fn crumbs_of(seen: &[Seen]) -> Vec<Step> {
+    seen.iter().filter_map(|s| if let Seen::Crumb(step) = s { Some(*step) } else { None }).collect()
+}
+
+/// The instrument's one claim: a crumb is on the trail before the access it
+/// names reaches the part, for every access of a whole bring-up.
+#[test]
+fn every_crumb_is_left_before_its_access_reaches_the_part() {
+    for nic in crumbed_parts() {
+        let seen = taped(&nic, |_| None, true);
+        assert!(seen.len() > 60, "{}", nic.because("the bring-up reached almost nothing"));
+        for pair in seen.chunks(2) {
+            match pair {
+                [Seen::Crumb(crumb), Seen::Reached(access)] if crumb == access => {}
+                other => panic!(
+                    "{}",
+                    nic.because(&format!("an access and its crumb arrived as {other:?}"))
+                ),
+            }
+        }
+    }
+    // And the same order for a step that is not a register access.
+    let seen: Seens = Rc::default();
+    let took = before(&Noted(Rc::clone(&seen)), Step::MapBar, || {
+        seen.borrow_mut().push(Seen::Reached(Step::MapBar));
+        7
+    });
+    assert_eq!(took, 7);
+    assert_eq!(*seen.borrow(), [Seen::Crumb(Step::MapBar), Seen::Reached(Step::MapBar)]);
+}
+
+/// A crumbed bring-up is the bring-up: the part is reached by the same accesses
+/// carrying the same values in the same order, whether or not a trail is kept.
+#[test]
+fn a_crumbed_bring_up_reaches_the_part_exactly_as_a_bare_one_does() {
+    for (bare, crumbed) in crumbed_parts().into_iter().zip(crumbed_parts()) {
+        let without = reached(&taped(&bare, |_| None, false));
+        let with = reached(&taped(&crumbed, |seen| Some(Runs::over(Noted(seen))), false));
+        assert!(without == with, "{}", bare.because("the trail changed what reached the part"));
+        assert_eq!(bare.now(), crumbed.now(), "{}", bare.because("the trail moved the clock"));
+    }
+}
+
+/// A poll is one crumb however long it spins, and §4.5.2's arbitration is never
+/// a poll: each access to it is a crumb of its own.
+#[test]
+fn a_run_is_one_crumb_and_the_arbitration_is_never_a_run() {
+    let [_, _, held] = crumbed_parts();
+    held.master_never_quiesces();
+    let seen = taped(&held, |seen| Some(Runs::over(Noted(seen))), false);
+    let (crumbs, accesses) = (crumbs_of(&seen), reached(&seen));
+    let of = |steps: &[Step], want: Step| steps.iter().filter(|s| **s == want).count();
+
+    let arbitration = Step::Read { reg: regs::EXTCNF_CTRL };
+    assert!(of(&accesses, arbitration) > 1000, "the engine never made this driver wait");
+    assert_eq!(of(&crumbs, arbitration), of(&accesses, arbitration));
+
+    let status = Step::Read { reg: regs::STATUS };
+    assert!(of(&accesses, status) > 1000, "the master quiesce never made this driver wait");
+    // The first read, the quiesce poll and the link's.
+    assert_eq!(of(&crumbs, status), 3);
+
+    let table = |s: &&Step| matches!(s, Step::Write { reg, .. } if (regs::MTA..regs::RAL0).contains(reg));
+    assert_eq!(accesses.iter().filter(table).count(), regs::MTA_DWORDS);
+    assert_eq!(crumbs.iter().filter(table).count(), 1);
+}
+
+
+#[test]
+fn the_82574s_trail_is_the_bring_up_in_the_datasheets_order() {
+    let [plain, brought_up, held] = crumbed_parts();
+    let trail = |nic: &Nic| -> Vec<String> {
+        crumbs_of(&taped(nic, |seen| Some(Runs::over(Noted(seen))), false))
+            .iter()
+            .map(|step| step.named().to_string())
+            .collect()
+    };
+    let owed: Vec<String> = crumbs::BRING_UP.iter().map(|s| s.to_string()).collect();
+    assert_eq!(trail(&plain), owed);
+    // The I219's is the same trail with the PHY's accesses in it and nothing
+    // else moved.
+    for nic in [brought_up, held] {
+        let without_the_phy: Vec<String> = trail(&nic)
+            .into_iter()
+            .filter(|s| !s.ends_with("EXTCNF_CTRL") && !s.ends_with("MDIC"))
+            .collect();
+        assert_eq!(without_the_phy, owed, "{}", nic.because("the PHY moved the rest of the trail"));
+    }
+}
+
+#[test]
+fn a_line_reads_back_as_it_was_written() {
+    let steps = [
+        Step::Start,
+        Step::ClaimHeld,
+        Step::Describe,
+        Step::MapBar,
+        Step::DmaAlloc,
+        Step::Read { reg: regs::EXTCNF_CTRL },
+        Step::Read { reg: 0x5b54 },
+        Step::Write { reg: regs::CTRL, value: ctrl::RST | 0x40 },
+        Step::Write { reg: regs::MTA, value: 0 },
+        Step::Opened,
+        Step::Exit { code: 69 },
+    ];
+    let mut file = String::new();
+    for (seq, step) in steps.into_iter().enumerate() {
+        let line = crumbs::Line { seq: seq as u32, at: 1_000 * seq as u64 + 7, synced: 990 * seq as u64, step };
+        file.push_str(&format!("{line}\n"));
+    }
+    let read: Vec<Step> = crumbs::lines(&file).map(|l| l.expect("a line it wrote").step).collect();
+    assert_eq!(read, steps);
+    assert!(file.contains("\n007 7007 6930 write CTRL 0x04000040\n"), "{file}");
+    assert!(file.contains(" read 0x05b54\n"), "{file}");
+}
+
+#[test]
+fn where_a_trail_stops_is_what_it_says() {
+    assert_eq!(Ending::of(""), Ok(Ending::Nothing));
+    let two = "000 10 0 start\n001 50 40 claim-held\n";
+    let Ok(Ending::In(last)) = Ending::of(two) else { panic!("{:?}", Ending::of(two)) };
+    assert_eq!((last.seq, last.step, last.at, last.synced), (1, Step::ClaimHeld, 50, 40));
+    assert!(Ending::In(last).to_string().contains("1 `claim-held` at 50 ns"));
+
+    // The write the machine ended in carries no newline, and the crumb before
+    // it is still the last one that was durable.
+    for torn in ["002 90 80 map", "002 90 80 map-bar", "0"] {
+        assert_eq!(Ending::of(&format!("{two}{torn}")), Ok(Ending::In(last)), "{torn:?}");
+    }
+    assert_eq!(Ending::of("000 10 0 sta"), Ok(Ending::Nothing));
+
+    let whole = format!("{two}002 90 80 exit 69\n");
+    let Ok(Ending::Complete { code: 69, last }) = Ending::of(&whole) else {
+        panic!("{:?}", Ending::of(&whole))
+    };
+    assert!(Ending::Complete { code: 69, last }.to_string().contains("all 3 crumbs"));
+
+    assert_eq!(
+        Ending::of("000 10 0 start\n002 90 80 map-bar\n").map_err(|why| matches!(why, Broken::Gap { wanted: 1, .. })),
+        Err(true)
+    );
+    for bad in ["000 10 0 start\nnonsense\n", "000 10 0 start\n\n", "000 10 0 read\n", "000 10 0 exit 69 70\n"] {
+        assert!(matches!(Ending::of(bad), Err(Broken::Unreadable { .. })), "{bad:?}");
+    }
+}
