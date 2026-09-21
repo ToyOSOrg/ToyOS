@@ -2595,7 +2595,6 @@ mod tests {
         "tests/jobdeadlinecase/system.toml",
         "tests/lancase/system.toml",
         "tests/lanicscase/system.toml",
-        "tests/lanmngcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/metalcase/system.toml",

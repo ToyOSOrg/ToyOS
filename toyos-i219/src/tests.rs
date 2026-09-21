@@ -655,65 +655,6 @@ fn transmit_descriptors_are_reclaimed_under_batched_write_back() {
     }
 }
 
-// --- the MDIO arbitration, read and never written ---
-
-/// §4.5.2 arbitrates the MDIO interface between three agents and §10.2.2.15 is
-/// where each one's request stands. **The reading is a read**: the software
-/// ownership bit is itself a request, so a driver that wrote here would be
-/// making the request the reading exists to characterise.
-#[test]
-fn the_mdio_arbitration_is_read_and_never_written() {
-    let nic = Nic::new(29);
-    let driver = open(&nic);
-    assert_eq!(
-        driver.manageability(),
-        Manageability::default(),
-        "{}",
-        nic.because("a part no agent has asked reads as one that has been asked")
-    );
-
-    nic.manageability_holds_the_mdio();
-    let held = driver.manageability();
-    assert!(held.mng, "{}", nic.because("the manageability agent's request was not read back"));
-    assert!(!held.sw, "{}", nic.because("this driver's own request stands and it made none"));
-    assert_eq!(
-        nic.peek(regs::EXTCNF_CTRL) & regs::extcnf::MDIO_SW_OWNERSHIP,
-        0,
-        "{}",
-        nic.because("reading the arbitration registered a request of this driver's own")
-    );
-}
-
-/// The reading has one channel off a machine with no serial port, so every
-/// reading has to survive the round trip through it — and a code that is not a
-/// reading must not decode as one.
-#[test]
-fn every_reading_crosses_as_an_exit_code_and_comes_back_the_same() {
-    let bits = [
-        0,
-        regs::extcnf::MDIO_SW_OWNERSHIP,
-        regs::extcnf::MDIO_HW_OWNERSHIP,
-        regs::extcnf::MDIO_MNG_OWNERSHIP,
-        regs::extcnf::MDIO_SW_OWNERSHIP | regs::extcnf::MDIO_MNG_OWNERSHIP,
-        u32::MAX,
-    ];
-    for value in bits {
-        let reading = Manageability::of(value);
-        assert_eq!(
-            Manageability::from_exit_code(reading.exit_code()),
-            Some(reading),
-            "{value:#010x} did not survive its own exit code"
-        );
-    }
-    // All-ones is no device answering, and it is not three agents at once
-    // holding one interface.
-    assert!(Manageability::of(u32::MAX).unanswered);
-    // A netd that ended any other way says nothing about this register.
-    for code in [0, 1, 2, 15] {
-        assert_eq!(Manageability::from_exit_code(code), None, "{code} decoded as a reading");
-    }
-}
-
 // --- interrupts and link ---
 
 /// §10.2.4.4: writing a cause to `ICS` sets it in `ICR` as if the event had

@@ -1323,11 +1323,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         "lan_dhcp_lease",
         metal::Metal::Runs {
             arms: LANCASE,
-            judge: |b| {
-                lan::on_metal(b[0])
-                    .and(lan::provoked_on_metal(b[1]))
-                    .and(lan::manageability_on_metal(b[2]))
-            },
+            judge: |b| lan::on_metal(b[0]).and(lan::provoked_on_metal(b[1])),
         },
     ),
     // ---- one image: tests/testcases, no parameters, one job list ----
@@ -1713,7 +1709,6 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 const LANCASE: &[metal::Arm] = &[
     metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) },
     metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS),
-    metal::once(lan::MNG_BOOT, lan::MNG_CONFIG, &[], lan::JOBS),
 ];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and

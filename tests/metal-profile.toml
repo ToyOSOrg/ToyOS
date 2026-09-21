@@ -686,31 +686,3 @@ name = "list.lanicscase.job_ms"
 unit = "ms"
 ceiling = 22000
 ceiling_from = "as list.lancase.job_ms — the same one job"
-
-# `lanmngcase` is `lancase` with netd reading §10.2.2.15 and exiting on what it
-# said. Its netd ends early by design, so only the boot around the list is
-# priced here and the bounds are that boot's.
-
-[[number]]
-name = "boot.lanmngcase.complete_ms"
-unit = "ms"
-ceiling = 60000
-ceiling_from = "as boot.lancase.complete_ms — the same boot config with one netd argument added"
-
-[[number]]
-name = "boot.lanmngcase.back_secs"
-unit = "s"
-ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs"
-
-[[number]]
-name = "boot.lanmngcase.stick_secs"
-unit = "s"
-ceiling = 30
-ceiling_from = "as boot.lancase.stick_secs"
-
-[[number]]
-name = "list.lanmngcase.job_ms"
-unit = "ms"
-ceiling = 22000
-ceiling_from = "as list.lancase.job_ms — the same one job"

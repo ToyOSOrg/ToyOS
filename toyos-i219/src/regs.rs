@@ -62,9 +62,6 @@ pub const TDT: usize = 0x03818;
 pub const TIDV: usize = 0x03820;
 pub const TXDCTL: usize = 0x03828;
 pub const TADV: usize = 0x0382C;
-/// Extended Configuration Control (§10.2.2.15, `0x00F00`), which carries
-/// §4.5.2's arbitration for the MDIO interface.
-pub const EXTCNF_CTRL: usize = 0x00F00;
 
 /// The smallest register window this driver can be driven through: above every
 /// offset named here, and the bound the register accessor's contract rests on.
@@ -74,21 +71,7 @@ const _: () = {
     assert!(MTA + MTA_DWORDS * 4 <= REGISTER_BYTES);
     assert!(RAH0 < REGISTER_BYTES);
     assert!(TADV < REGISTER_BYTES);
-    assert!(EXTCNF_CTRL < REGISTER_BYTES);
 };
-
-/// Extended Configuration Control bits (§10.2.2.15): §4.5.2's arbitration of
-/// the MDIO interface between three agents, one request bit each.
-pub mod extcnf {
-    /// MDIO SW Ownership (bit 5) — the software request, and the only one of
-    /// the three a driver may write.
-    pub const MDIO_SW_OWNERSHIP: u32 = 1 << 5;
-    /// MDIO HW Ownership (bit 6), read-only: the second of §4.5.2's agents.
-    pub const MDIO_HW_OWNERSHIP: u32 = 1 << 6;
-    /// MDIO MNG Ownership (bit 7), read-only: the manageability request, which
-    /// on a part whose PHY the Management Engine shares is the one that holds.
-    pub const MDIO_MNG_OWNERSHIP: u32 = 1 << 7;
-}
 
 /// Device Control bits (§10.2.2.1).
 pub mod ctrl {

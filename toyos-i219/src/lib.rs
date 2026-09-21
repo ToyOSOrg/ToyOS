@@ -365,78 +365,6 @@ impl Counters {
 /// register file it is not refuses rather than spinning for the boot.
 const RESET_DEADLINE_NANOS: u64 = 100_000_000;
 
-/// Who holds the MDIO interface (§4.5.2), as §10.2.2.15 answers it.
-///
-/// **A reading crosses as an exit code.** On a machine with no serial port a
-/// userland write reaches no channel a log carries, and the kernel's record of
-/// a process exiting is one that does — so the encoding is here, beside the
-/// read, rather than spelled once in the program that reads and again in the
-/// judge that decodes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Manageability {
-    /// §10.2.2.15's MDIO SW Ownership. Standing before any driver asked for it
-    /// means the bit is not the grant this arbitration is documented as.
-    pub sw: bool,
-    /// MDIO HW Ownership: the second agent's.
-    pub hw: bool,
-    /// MDIO MNG Ownership: the manageability agent's, which on a part whose PHY
-    /// the Management Engine shares is the request that holds against a driver.
-    pub mng: bool,
-    /// The read answered all-ones — no device answering, rather than a register
-    /// with every bit set.
-    pub unanswered: bool,
-}
-
-impl Manageability {
-    /// Set on every code a reading produces, so a netd that exited for any
-    /// other reason does not decode as one.
-    const TAKEN: i32 = 1 << 4;
-    const SW: i32 = 1 << 0;
-    const HW: i32 = 1 << 1;
-    const MNG: i32 = 1 << 2;
-    const UNANSWERED: i32 = 1 << 3;
-
-    /// What the register said.
-    pub fn of(value: u32) -> Self {
-        Self {
-            sw: value & regs::extcnf::MDIO_SW_OWNERSHIP != 0,
-            hw: value & regs::extcnf::MDIO_HW_OWNERSHIP != 0,
-            mng: value & regs::extcnf::MDIO_MNG_OWNERSHIP != 0,
-            unanswered: value == u32::MAX,
-        }
-    }
-
-    /// The reading as the one channel out of a boot that has no other.
-    pub fn exit_code(self) -> i32 {
-        let mut code = Self::TAKEN;
-        for (held, bit) in [
-            (self.sw, Self::SW),
-            (self.hw, Self::HW),
-            (self.mng, Self::MNG),
-            (self.unanswered, Self::UNANSWERED),
-        ] {
-            if held {
-                code |= bit;
-            }
-        }
-        code
-    }
-
-    /// The reading back out of an exit code, or `None` where the code is not
-    /// one — a netd that ended some other way says nothing about this register.
-    pub fn from_exit_code(code: i32) -> Option<Self> {
-        if code & Self::TAKEN == 0 {
-            return None;
-        }
-        Some(Self {
-            sw: code & Self::SW != 0,
-            hw: code & Self::HW != 0,
-            mng: code & Self::MNG != 0,
-            unanswered: code & Self::UNANSWERED != 0,
-        })
-    }
-}
-
 /// The function, brought up and driving.
 pub struct I219<R, C, D, I> {
     regs: R,
@@ -607,17 +535,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.opened_at = nic.clock.nanos();
         nic.refresh_link();
         Ok(nic)
-    }
-
-    /// Read §10.2.2.15 and say which of §4.5.2's three agents is holding the
-    /// MDIO interface.
-    ///
-    /// **One read, and it writes nothing.** The software ownership bit is a
-    /// request, so a driver that wrote here would be making the very request
-    /// this reading exists to characterise — and a bit found standing before
-    /// anyone asked for it is a fact about the part, not about the asking.
-    pub fn manageability(&self) -> Manageability {
-        Manageability::of(self.regs.read(regs::EXTCNF_CTRL))
     }
 
     /// Raise one enabled cause on purpose (§10.2.4.4), so the next message the

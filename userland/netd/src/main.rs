@@ -62,15 +62,6 @@ const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
 /// one.
 const PROVOKE_MESSAGE: &str = "--provoke-message";
 
-/// The read-only reading of §4.5.2's MDIO arbitration, armed by
-/// `tests/lanmngcase` and by nothing else.
-///
-/// **It reads one register, writes none, and reaches no PHY.** netd then exits
-/// on what it read, because that is the only way the reading leaves a machine
-/// with no serial port: a userland write reaches `Backend::None`, and the
-/// kernel's own `exit:` record is what the stick carries.
-const READ_MANAGEABILITY: &str = "--read-manageability";
-
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
@@ -131,15 +122,6 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.claim(),
             Self::Intel(nic) => nic.claim(),
-        }
-    }
-
-    /// [`READ_MANAGEABILITY`], and `None` on the card that has no such
-    /// register — a virtio function's answer would be a reading of nothing.
-    fn manageability(&self) -> Option<toyos_i219::Manageability> {
-        match self {
-            Self::Virtio(_) => None,
-            Self::Intel(nic) => Some(nic.manageability()),
         }
     }
 
@@ -1344,19 +1326,6 @@ fn main() {
     if std::env::args().any(|arg| arg == PROVOKE_MESSAGE) {
         say!("netd: {PROVOKE_MESSAGE}: the next message this claim takes is one netd asked for");
         nic.provoke_message();
-    }
-    if std::env::args().any(|arg| arg == READ_MANAGEABILITY) {
-        match nic.manageability() {
-            // The exit is the record: this reading has no other way off a
-            // machine whose userland writes reach no channel a log carries.
-            Some(reading) => {
-                say!("netd: {READ_MANAGEABILITY}: {reading:?}");
-                std::process::exit(reading.exit_code());
-            }
-            None => {
-                say!("netd: {READ_MANAGEABILITY} is the Intel driver's and this card is virtio")
-            }
-        }
     }
     let mac = nic.mac();
     let mut device = DmaNic { nic };

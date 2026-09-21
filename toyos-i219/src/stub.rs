@@ -651,16 +651,6 @@ impl Nic {
         self.0.borrow_mut().raise(causes);
     }
 
-    /// §4.5.2's manageability agent has registered its request for the MDIO
-    /// interface, which §10.2.2.15 answers in the register a driver reads. Not
-    /// a fault injector: it is the other agent doing what the document gives it
-    /// priority to do.
-    pub fn manageability_holds_the_mdio(&self) {
-        let mut model = self.0.borrow_mut();
-        let held = model.get(regs::EXTCNF_CTRL);
-        model.set(regs::EXTCNF_CTRL, held | regs::extcnf::MDIO_MNG_OWNERSHIP);
-    }
-
     /// This part has no NVM, so §10.2.5.23's "if no NVM is present" arm is
     /// what a driver reading `RAH0` finds.
     pub fn without_nvm(&self) {
