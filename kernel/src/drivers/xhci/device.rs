@@ -677,7 +677,15 @@ fn bind(ctrl: &mut XhciController, state: Enumerating) {
     // Whether a device came of it decides who keeps the slot; a refusal here would leak it.
     let keeps_slot = match (function, rings) {
         (Function::Msc(info), Rings::Msc(msc)) => {
-            match super::msc::bind(ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info) {
+            let (configuration, _) = state.parsed.expect("a configuration named a function");
+            let enumerated = super::msc::Enumerated {
+                speed: state.speed,
+                ep0_packet: state.packet,
+                configuration,
+            };
+            match super::msc::bind(
+                ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info, enumerated,
+            ) {
                 Bind::Bound => true,
                 Bind::Refused(SlotGoes::Back) => false,
                 // No device came of it, and its bulk pair could not be Stopped: Disable Slot is not defined over it (xHCI 1.2 §4.6.4's note), so the port holds the slot and its teardown gives it back.

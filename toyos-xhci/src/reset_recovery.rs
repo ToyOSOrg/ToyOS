@@ -42,10 +42,10 @@
 //! **The device's own answer ends it, and nothing else does.** §3.1 has the
 //! device ready for the next CBW once it answers the reset, and a device that
 //! answers and is not is one no request can tell from one that is. So the
-//! recovery closes with a TEST UNIT READY — a command with no data phase, which
-//! moves nothing whatever phase the device takes it in — and has taken only
-//! on a status carrying that command's tag ([`crate::bot::whose`]). A command
-//! with a buffer is not sent to a device that has not given one.
+//! recovery closes with a TEST UNIT READY and has taken only on a status
+//! carrying that command's tag; anything else is the next rung's
+//! ([`crate::ladder`]). A command with a buffer is not sent to a device that
+//! has not answered one without.
 
 use crate::recovery::{Command, EndpointState};
 
@@ -289,6 +289,13 @@ pub enum SlotGoes {
     /// Nowhere until the device leaves its port: the port keeps holding it and
     /// its teardown gives it back.
     WithTheUnplug,
+}
+
+/// Whether a pair has nothing on it for a quiesce to stop: both Disabled, which
+/// is how a Reset Device leaves every endpoint but the control endpoint (xHCI
+/// 1.2 §4.6.11).
+pub fn nothing_to_stop(in_field: EndpointState, out_field: EndpointState) -> bool {
+    in_field == EndpointState::Disabled && out_field == EndpointState::Disabled
 }
 
 /// Disable Slot is defined over endpoints that are Stopped, or Running with
@@ -597,6 +604,16 @@ mod tests {
             plan.look(EndpointState::Running, EndpointState::Stopped),
             Look::Command(Command::StopEndpoint, Pipe::In)
         );
+    }
+
+    #[test]
+    fn only_a_pair_a_reset_device_disabled_has_nothing_to_stop() {
+        let disabled = EndpointState::Disabled;
+        assert!(nothing_to_stop(disabled, disabled));
+        for other in RECOVERABLE {
+            assert!(!nothing_to_stop(other, disabled), "{other:?} in");
+            assert!(!nothing_to_stop(disabled, other), "{other:?} out");
+        }
     }
 
     /// §4.6.4's note, for the bound disk and the one still inside its bind

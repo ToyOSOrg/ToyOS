@@ -14,6 +14,7 @@ pub mod configure;
 pub mod enumerate;
 pub mod invariants;
 pub mod job;
+pub mod ladder;
 pub mod port;
 pub mod protocol;
 pub mod portsc;

@@ -973,7 +973,7 @@ pub fn transport_break_chain() -> Result<(), String> {
             })
     };
     let broke = carried("transport broke on SCSI 0x2a: a staged break skipped the data phase wait")?;
-    carried("Reset Recovery took")?;
+    carried("the port reset took")?;
     carried("SCSI 0x2a completed after ")?;
     eprintln!("  [power] the boot stick's own break crossed the reset on the page: {}", broke.trim());
     Ok(())

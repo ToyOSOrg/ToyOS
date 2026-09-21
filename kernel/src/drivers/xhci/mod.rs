@@ -22,7 +22,7 @@ use super::pci::PciDevice;
 use crate::sync::Lock;
 use toyos_untrusted::Untrusted;
 use toyos_xhci::job::{Await, Outcome, Outstanding, Stages};
-use toyos_xhci::port::{self as portmachine, AfterOffline, GaveUp, Gone, PortState, Reset, Step};
+use toyos_xhci::port::{self as portmachine, GaveUp, Gone, PortState, Reset, Step};
 use toyos_xhci::call::AfterBreak;
 use toyos_xhci::recovery::{self, Act, EndpointState, NeedsConfigure, Recovery};
 use toyos_xhci::Protocols;
@@ -104,6 +104,7 @@ const TRB_EVALUATE_CONTEXT: u32 = trb_type(13);
 const TRB_RESET_ENDPOINT: u32 = trb_type(14);
 const TRB_STOP_ENDPOINT:  u32 = trb_type(15);
 const TRB_SET_TR_DEQUEUE: u32 = trb_type(16);
+const TRB_RESET_DEVICE:   u32 = trb_type(17);
 
 const EVENT_TRANSFER:     u32 = 32;
 const EVENT_CMD_COMPLETE: u32 = 33;
@@ -214,8 +215,6 @@ enum AfterSlot {
     Teardown(u8),
     /// Given up on while still plugged in; the port stays marked attached — see [`XhciController::let_go`] and [`XhciController::give_back_offline_slots`].
     LetGo,
-    /// A disk the transport took offline and reset, on a connection that has not been enumerated again yet: its blocks go back and the port runs its fresh-connect path over the device still in it (`port::AfterOffline::Enumerate`).
-    Revive(u8),
     /// Enumeration ended in refusal with the device still plugged in; the port stays attached so it is not re-enumerated every debounce.
     Refused,
 }
@@ -300,12 +299,20 @@ const MAX_HID_FAILURES: u8 = 8;
 /// USB_TIMEOUT_NS and `block::OPERATION` are the same 2 s; the two must stay equal or the budget math (`Scsi::Budget` → `BlockError::BudgetExpired`) is wrong.
 const USB_TIMEOUT_NS: u64 = 2_000_000_000;
 
-/// Everything one disk call may spin for from the start of the wait its transport broke on: that wait, the recovery's commands and requests, the quiesce that takes a disk offline and its port reset's settle.
+/// What one disk call may spin for once its transport has broken, part by part: the wait that broke and the commands sent again after a rung that took, then each rung of `toyos_xhci::ladder` on a bound of its own, which `toyos_xhci::call` keeps the parts before it out of.
 ///
-/// One wait that ran to its timeout and as long again for what the break owes; every wait after the break is clipped to it (`toyos_xhci::call`).
+/// A rung's bound is what its commands, requests and reset cost a device that answers, and the rest of it is how long a TEST UNIT READY nothing answers is waited for.
+pub(crate) const AFTER_BREAK: toyos_xhci::call::Bounds = toyos_xhci::call::Bounds {
+    wait: USB_TIMEOUT_NS,
+    class_reset: 750_000_000,
+    port_reset: 1_500_000_000,
+    offline: 500_000_000,
+};
+
+/// Everything one disk call may spin for from the start of the wait its transport broke on.
 pub(crate) const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of(
-    crate::time::Duration::from_nanos(2 * USB_TIMEOUT_NS),
-    "a step of the recovery reached with nothing left is not taken, the recovery fails, and the disk is taken offline",
+    crate::time::Duration::from_nanos(AFTER_BREAK.whole()),
+    "every wait is clipped to where the rungs still ahead of it begin, so the last rung runs whatever was spent before it and the call ends here",
 );
 
 // The caller spins with interrupts off, so a call that outlasted the TLB-ack tripwire would panic another CPU over a device.
@@ -491,6 +498,8 @@ const MSC_CBW: usize       = 2 * PAGE;         // 31 B
 const MSC_CSW: usize       = 2 * PAGE + 0x40;  // 13 B
 const MSC_SCRATCH: usize   = 2 * PAGE + 0x80;  // INQUIRY, READ CAPACITY, sense
 const MSC_SCRATCH_LEN: usize = 64;
+/// The input context of the commands a rung of the ladder issues for this disk.
+const MSC_INPUT_CTX: usize = 3 * PAGE;
 /// The bulk data buffer, placed so it cannot cross a 64 KiB boundary — the one placement rule an xHCI Normal TRB's buffer has.
 const MSC_DATA: usize      = 8 * PAGE;
 const MSC_DATA_LEN: usize  = 8 * PAGE;
@@ -1018,7 +1027,7 @@ impl XhciController {
     ///
     /// From the poll and never from the disk operation that took it offline: that operation runs beside whatever is outstanding, and [`Self::submit_disable_slot`] is one operation at a time. The port's slot is this device's, as in [`Self::let_go`].
     ///
-    /// **What happens to the device then is the port's answer** (`PortState::taken_offline`): enumerated again once per connection, because a reset device answers address 0 until somebody addresses it (§4.19.5) and only an enumeration says whether what the reset left is a device a host can use; after that the port stays attached and the pool block stays the port's until the unplug.
+    /// The port stays attached and the pool block stays the port's until the unplug: the device on it answered nothing after a port reset, and enumerating it again asks the same question.
     fn give_back_offline_slots(&mut self) {
         for at in 0..MSC_BLOCKS {
             if self.outstanding.busy() {
@@ -1026,12 +1035,8 @@ impl XhciController {
             }
             let Some(disk) = self.msc[at].disk.as_mut() else { continue };
             let Some(port_idx) = disk.dev.take_slot_owed() else { continue };
-            let then = match self.ports[port_idx as usize].taken_offline() {
-                AfterOffline::Enumerate => AfterSlot::Revive(port_idx),
-                AfterOffline::StayAttached => AfterSlot::LetGo,
-            };
             if let Some(slot) = self.ports[port_idx as usize].take_slot() {
-                self.submit_disable_slot(slot.get(), then);
+                self.submit_disable_slot(slot.get(), AfterSlot::LetGo);
             }
         }
     }
@@ -1229,7 +1234,7 @@ impl XhciController {
             }
         }
         let Some(slot) = self.ports[port_idx as usize].take_slot() else {
-            self.release_blocks(port_idx, "unplugged from");
+            self.release_blocks(port_idx);
             return true;
         };
         self.submit_disable_slot(slot.get(), AfterSlot::Teardown(port_idx));
@@ -1237,16 +1242,14 @@ impl XhciController {
     }
 
     /// The pool blocks a port's device held, back in the pool — after the slot and never before, since the slot's endpoint contexts still name this memory.
-    ///
-    /// `left` is how the disk stopped being this port's, for the line that says its number is spent.
-    fn release_blocks(&mut self, port_idx: u8, left: &str) {
+    fn release_blocks(&mut self, port_idx: u8) {
         for at in 0..MSC_BLOCKS {
             if self.msc[at].port != Some(port_idx) {
                 continue;
             }
             // The disk's number does not come back: a mount holds it for the disk's whole life.
             match core::mem::replace(&mut self.msc[at], MscBlock::FREE).disk {
-                Some(disk) => log!("usb-storage: disk {} {left} port {}; it is offline",
+                Some(disk) => log!("usb-storage: disk {} unplugged from port {}; it is offline",
                     disk.index, port_idx + 1),
                 None => log!("usb-storage: the device this driver refused on port {} is gone; \
                     its pool block is free again", port_idx + 1),
@@ -1276,15 +1279,8 @@ impl XhciController {
         // Blocks go back whatever the controller said: leaving them held for the boot's life on a repeated refusal exhausts the pool.
         match then {
             AfterSlot::Teardown(port_idx) => {
-                self.release_blocks(port_idx, "unplugged from");
+                self.release_blocks(port_idx);
                 self.ports[port_idx as usize].torn_down();
-            }
-            AfterSlot::Revive(port_idx) => {
-                self.release_blocks(port_idx, "was taken offline and reset on");
-                self.ports[port_idx as usize].revive();
-                // No port event says so: the look that finds the device is this one's to ask for.
-                self.ports_dirty = true;
-                log!("xHCI: port {} is enumerated again: the disk on it was taken offline and reset", port_idx + 1);
             }
             AfterSlot::LetGo | AfterSlot::Refused => {}
         }
@@ -1623,7 +1619,7 @@ pub fn stage_transport_faults(n: u8, fault: StagedFault) {
     msc::staged::arm(n, fault, None);
 }
 
-/// Have the next `n` Reset Recoveries' TEST UNIT READY refused. See
+/// Have the next `n` class resets' TEST UNIT READY refused. See
 /// [`msc::staged::arm_probes`].
 #[cfg(feature = "boot-actuators")]
 pub fn stage_probe_faults(n: u8) {
@@ -1636,11 +1632,11 @@ pub fn disarm_probe_faults() -> u8 {
     msc::staged::disarm_probes()
 }
 
-/// Have a disk refuse its INQUIRY `n` times as it binds: the one that binds
-/// after `after` others have. See [`msc::staged::on_a_later_bind`].
+/// Have the next disk to bind refuse its INQUIRY `n` times. See
+/// [`msc::staged::on_a_later_bind`].
 #[cfg(feature = "boot-actuators")]
-pub fn stage_bind_faults(n: u8, after: u8) {
-    msc::staged::on_a_later_bind(n, after);
+pub fn stage_bind_faults(n: u8) {
+    msc::staged::on_a_later_bind(n);
 }
 
 /// Take back the staged faults no command took, and say how many. See

@@ -53,28 +53,15 @@ pub fn reset_needed(protocol: Option<Protocol>, portsc: Portsc) -> Option<Reset>
     Some(if portsc.link_state() == LinkState::Inactive { Reset::Warm } else { Reset::Hot })
 }
 
-/// The reset a device gets from a class driver that has given up on it: the
-/// most the port has. A warm reset does everything a hot one does and also
-/// takes the link through Rx.Detect (§4.19.5.1), and only a USB3 port has one.
+/// The reset a device gets from a class driver its own recovery did not bring
+/// back ([`crate::ladder`]): the most the port has. A warm reset does everything
+/// a hot one does and also takes the link through Rx.Detect (§4.19.5.1), and
+/// only a USB3 port has one.
 pub fn offline_reset(protocol: Option<Protocol>) -> Reset {
     match protocol {
         Some(Protocol::Usb3) => Reset::Warm,
         Some(Protocol::Usb2) | None => Reset::Hot,
     }
-}
-
-/// What a port does with a device that was reset because its class driver gave
-/// up on it, once the device's slot is back with the controller.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AfterOffline {
-    /// Enumerate it as a fresh connect. §4.19.5 leaves a reset device
-    /// answering address 0 and has software address it or disable the port
-    /// "immediately"; the enumeration is also the only thing that says whether
-    /// the device the reset left is one a host can use.
-    Enumerate,
-    /// This connection was enumerated again once already: the port stays
-    /// attached, so nothing enumerates the device a third time.
-    StayAttached,
 }
 
 /// The PORTSC write that performs `reset`.
@@ -279,9 +266,6 @@ pub struct PortState {
     /// Unknown is driven the USB2 way, which is what every port got before the
     /// Supported Protocol capability was read at all.
     protocol: Option<Protocol>,
-    /// This connection's device was taken offline and enumerated again once;
-    /// cleared by the teardown of a device that really left.
-    revived: bool,
     #[cfg(feature = "flaws")]
     flaw: Flaw,
 }
@@ -298,7 +282,6 @@ impl PortState {
         slot: None,
         work: Work::Settled,
         protocol: None,
-        revived: false,
         #[cfg(feature = "flaws")]
         flaw: Flaw::None,
     };
@@ -349,27 +332,6 @@ impl PortState {
     /// concerned, whatever the register says, so the next look runs the
     /// ordinary fresh-connect path.
     pub fn torn_down(&mut self) {
-        self.attached = false;
-        self.slot = None;
-        self.work = Work::Settled;
-        self.revived = false;
-    }
-
-    /// What this port owes a device its class driver took offline and reset:
-    /// one more enumeration per connection, and no second.
-    pub fn taken_offline(&mut self) -> AfterOffline {
-        if core::mem::replace(&mut self.revived, true) {
-            AfterOffline::StayAttached
-        } else {
-            AfterOffline::Enumerate
-        }
-    }
-
-    /// The offline device's slot is back with the controller and
-    /// [`Self::taken_offline`] said [`AfterOffline::Enumerate`]: the port is
-    /// empty as far as the driver is concerned, so the next look runs the
-    /// fresh-connect path over the device that is still in it.
-    pub fn revive(&mut self) {
         self.attached = false;
         self.slot = None;
         self.work = Work::Settled;
@@ -498,12 +460,6 @@ impl PortState {
         let held = match self.work {
             Work::Settled => {
                 if connected == self.attached {
-                    // An empty port that reads empty carries no connection for
-                    // [`Self::taken_offline`] to have spent: a device whose reset
-                    // moved it to another port leaves this one without a teardown.
-                    if !connected {
-                        self.revived = false;
-                    }
                     return Step::Idle;
                 }
                 self.work = Work::Debouncing { at: now };
@@ -541,81 +497,12 @@ impl PortState {
 mod tests {
     use super::*;
 
-    const CCS: u32 = 1 << 0;
-    const PED: u32 = 1 << 1;
-    const PP: u32 = 1 << 9;
-
     #[test]
-    fn a_device_given_up_on_gets_the_most_reset_its_port_has() {
+    fn a_device_its_class_reset_did_not_bring_back_gets_the_most_reset_its_port_has() {
         assert_eq!(offline_reset(Some(Protocol::Usb3)), Reset::Warm);
         // WPR is RsvdZ on a USB2 protocol port (§4.19.5.1's note), and a port
         // the controller did not describe is driven the USB2 way everywhere.
         assert_eq!(offline_reset(Some(Protocol::Usb2)), Reset::Hot);
         assert_eq!(offline_reset(None), Reset::Hot);
-    }
-
-    fn bound(protocol: Protocol) -> PortState {
-        let mut port = PortState::EMPTY;
-        port.speaks(Some(protocol));
-        port.adopt(NonZeroU8::new(5));
-        port
-    }
-
-    #[test]
-    fn an_offline_device_is_enumerated_again_once_per_connection() {
-        let mut port = bound(Protocol::Usb3);
-        assert_eq!(port.taken_offline(), AfterOffline::Enumerate);
-        port.revive();
-        assert!(!port.attached() && port.slot().is_none());
-
-        // The link the warm reset left is up, so the fresh-connect path
-        // debounces and enumerates with no reset of its own.
-        let up = Portsc::from_raw(CCS | PED | PP | (4 << 10));
-        assert!(matches!(port.step(up, 0), Step::Wait(at) if at == DEBOUNCE_NS));
-        match port.step(up, DEBOUNCE_NS) {
-            Step::Enumerate { after: None, pending } => drop(pending.running()),
-            other => panic!("{other:?}"),
-        }
-        port.enumerated(NonZeroU8::new(6));
-
-        // The same connection, given up on again: nothing enumerates it a
-        // third time.
-        assert_eq!(port.taken_offline(), AfterOffline::StayAttached);
-        assert!(port.attached());
-        assert!(matches!(port.step(up, 2 * DEBOUNCE_NS), Step::Idle));
-    }
-
-    #[test]
-    fn a_usb2_device_is_reset_by_the_fresh_connect_it_is_enumerated_as() {
-        let mut port = bound(Protocol::Usb2);
-        assert_eq!(port.taken_offline(), AfterOffline::Enumerate);
-        port.revive();
-        let enabled = Portsc::from_raw(CCS | PED | PP | (3 << 10));
-        assert!(matches!(port.step(enabled, 0), Step::Wait(_)));
-        assert!(matches!(port.step(enabled, DEBOUNCE_NS), Step::Reset(Reset::Hot, _)));
-    }
-
-    #[test]
-    fn a_real_unplug_gives_the_next_connection_its_own_enumeration() {
-        let mut port = bound(Protocol::Usb3);
-        assert_eq!(port.taken_offline(), AfterOffline::Enumerate);
-        port.revive();
-        port.enumerated(NonZeroU8::new(6));
-        port.torn_down();
-        port.adopt(NonZeroU8::new(7));
-        assert_eq!(port.taken_offline(), AfterOffline::Enumerate);
-    }
-
-    #[test]
-    fn a_device_whose_reset_moved_it_to_another_port_leaves_this_one_fresh() {
-        // T14 run 74: the stick was on the USB2 half of its receptacle, the
-        // offline reset sent it to the USB3 half, and this port read empty
-        // with no device of its own to tear down.
-        let mut port = bound(Protocol::Usb2);
-        assert_eq!(port.taken_offline(), AfterOffline::Enumerate);
-        port.revive();
-        assert!(matches!(port.step(Portsc::from_raw(PP), 0), Step::Idle));
-        port.adopt(NonZeroU8::new(8));
-        assert_eq!(port.taken_offline(), AfterOffline::Enumerate);
     }
 }

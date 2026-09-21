@@ -121,12 +121,15 @@ actuators! {
     /// Abandon the boot's first WRITE(10) data phase without waiting for it.
     usb_transport_break = "usb-transport-break";
 
-    /// Withhold the TEST UNIT READY every Reset Recovery closes with, so no
-    /// recovery is ever in step and a disk whose transport breaks once is taken
-    /// offline: the one way to the give-up on a device that answers.
+    /// Leave the TEST UNIT READY every rung of the recovery ladder ends on
+    /// unsent and unanswered for the whole of that rung's bound, so no rung is
+    /// ever in step, each spends all it may, and a disk whose transport breaks
+    /// once is taken offline: the one way to the last rung on a device that
+    /// answers, and with the rungs before it spent.
     usb_transport_offline = "usb-transport-offline";
 
-    /// Skip the waits of the next Reset Recovery's control transfers, once.
+    /// Skip the waits of every transfer of the next climb of the recovery
+    /// ladder, once: a device that answers nothing on any rung.
     usb_reset_break = "usb-reset-break";
 
     /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the

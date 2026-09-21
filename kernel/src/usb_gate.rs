@@ -295,14 +295,12 @@ fn check(index: usize, disk: &Handle) {
              healthy={}",
             usb_storage::healthy(index)
         );
-        // And the same budget spent inside a bind: a disk that enumerates has
-        // its INQUIRY — the first command `bring_up` issues through the
-        // recovering path — refused as many times. Not the next one to: that is
-        // this disk, which its port enumerates again once it has been taken
-        // offline and reset, and which is owed a clean bind. The bind stages
-        // and disarms them itself, since no operation of this gate spans one;
-        // one more than the budget, so what it takes back is not nothing.
-        crate::drivers::xhci::stage_bind_faults(budget + 1, 1);
+        // And the same budget spent inside a bind: the next disk to enumerate
+        // has its INQUIRY — the first command `bring_up` issues through the
+        // recovering path — refused as many times. The bind stages and disarms
+        // them itself, since no operation of this gate spans one; one more than
+        // the budget, so what it takes back is not nothing.
+        crate::drivers::xhci::stage_bind_faults(budget + 1);
     }
 
     log!(

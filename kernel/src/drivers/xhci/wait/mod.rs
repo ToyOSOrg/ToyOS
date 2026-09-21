@@ -67,7 +67,7 @@ pub(super) enum Quiet {
     Elapsed,
     /// The port reads disconnected.
     Gone,
-    /// The call's budget after a break ran out before this wait's own timeout did.
+    /// What this part of a call whose transport broke may spend ran out before this wait's own timeout did.
     Spent,
     /// A staged break skipped the wait by design.
     #[cfg(feature = "boot-actuators")]
@@ -91,7 +91,7 @@ impl Quiet {
             Self::Gone => write!(f, "the port disconnected during the {step} {kind}"),
             Self::Spent => write!(
                 f,
-                "this call's budget after a break ran out during the {step} {kind}"
+                "the bound on this part of the call ran out during the {step} {kind}"
             ),
             #[cfg(feature = "boot-actuators")]
             Self::Staged => write!(f, "a staged break skipped the {step} {kind} wait"),
@@ -138,7 +138,7 @@ fn settles(ready: impl Fn() -> bool) -> bool {
 }
 
 impl XhciController {
-    /// Now, and when a wait starting now gives up: on its own timeout, or where the call's budget after a break ends.
+    /// Now, and when a wait starting now gives up: on its own timeout, or where this part of a call whose transport broke ends (`toyos_xhci::call`).
     fn wait_ends(&self) -> (u64, u64) {
         let now = crate::clock::nanos_since_boot();
         (now, self.after_break.wait_ends(now, USB_TIMEOUT_NS))
@@ -348,8 +348,8 @@ impl XhciController {
         if crate::actuator::io_depth_probe() {
             depth_probe::report();
         }
-        // `usb-reset-break` stages a Reset Recovery control transfer to answer
-        // nothing; see `msc::reset_break`.
+        // `usb-reset-break` stages a climb of the recovery ladder whose
+        // transfers answer nothing; see `msc::reset_break`.
         #[cfg(feature = "boot-actuators")]
         if msc::reset_break::active() {
             return Err(Quiet::Staged);
