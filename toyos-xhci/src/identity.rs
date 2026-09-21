@@ -67,6 +67,9 @@ pub struct UsbId {
 pub const SERIAL_MAX: usize = 252;
 
 /// The serial number a device publishes.
+// Held by value in every disk's identity with no allocator to box it in; the
+// size is the longest string a descriptor can carry.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Serial {
     /// iSerialNumber is zero, or names an empty string.
@@ -229,7 +232,8 @@ mod tests {
     /// plugged in during the window differs in its serial number at least.
     #[test]
     fn a_device_that_differs_in_any_field_is_a_new_disk() {
-        let changes: [(fn(&mut Identity), Differs); 7] = [
+        type Change = fn(&mut Identity);
+        let changes: [(Change, Differs); 7] = [
             (|i| i.usb.vendor ^= 1, Differs::Vendor),
             (|i| i.usb.product ^= 1, Differs::Product),
             (|i| i.usb.release ^= 1, Differs::Release),
