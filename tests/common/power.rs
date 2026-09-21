@@ -1873,11 +1873,23 @@ pub fn blackbox_early_panic_sealed(
              {EARLY_WITNESS:?}\n{text}"
         ));
     }
-    // And the tail under it opens on a whole record. Only its *first* line is
+    // Under the head, the recovery section: this boot never reached a USB
+    // controller, so it is the one line that says no transport broke — and
+    // that the walk it takes over the ring runs this early, on the boot shard
+    // alone.
+    let mut under = text.lines().skip(1);
+    let section = under.next().unwrap_or_default();
+    if section != toyos_blackbox::RECOVERY_NONE {
+        return Err(format!(
+            "the line under the head is {section:?}, not the recovery section's {:?}\n{text}",
+            toyos_blackbox::RECOVERY_NONE
+        ));
+    }
+    // And the tail under that opens on a whole record. Only its *first* line is
     // the claim: a record renders as several lines — the panic's own message is
     // on one of its own — so a continuation below the first is a record being
     // shown, not a cut.
-    if let Some(opened) = text.lines().nth(1) {
+    if let Some(opened) = under.next() {
         if !opened.starts_with('[') {
             return Err(format!(
                 "the tail under the head opens {opened:?} and a record opens with its own \
