@@ -10,7 +10,10 @@
 //! `.github/qemu-version` is that declaration. CI reads it from
 //! `.github/instrument.sh` and **reds** on a disagreement, because `debian:sid`
 //! is a rolling release and the alternative is an instrument that moves out
-//! from under every recorded measurement in silence. This host reads it and
+//! from under every recorded measurement in silence. What stops it moving is a
+//! date: a job's container image and the apt archive it installs from name one,
+//! and dating either alone is a pin that apt refuses rather than honours. This
+//! host reads it and
 //! **notes** a disagreement, because brew moves QEMU when it feels like it and
 //! a build must not stop for that — but the dev host is where
 //! `tests/audio-baseline.toml` was recorded, so it drifting is the same fact
@@ -176,6 +179,20 @@ mod tests {
         );
     }
 
+    const SNAPSHOT_MARK: &str = "snapshot.debian.org/archive/debian/";
+
+    /// Every snapshot-archive timestamp `text` installs from, in source order.
+    ///
+    /// A `$`-prefixed one is not one: the Dockerfile builds the URL from the
+    /// declaration it copies in, so it carries no literal date.
+    fn snapshot_stamps(text: &str) -> Vec<String> {
+        text.lines()
+            .filter_map(|l| l.split(SNAPSHOT_MARK).nth(1))
+            .filter(|rest| !rest.starts_with('$'))
+            .map(|rest| rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect())
+            .collect()
+    }
+
     /// Every `.github` file that reaches the snapshot archive names the one
     /// date `.github/apt-snapshot` declares.
     ///
@@ -189,7 +206,6 @@ mod tests {
     fn every_snapshot_url_names_the_declared_date() {
         let root = repo_root();
         let want = declared_apt_snapshot(&root).expect(".github/apt-snapshot declares no date");
-        const MARK: &str = "snapshot.debian.org/archive/debian/";
         let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(root.join(".github/workflows"))
             .expect(".github/workflows is not readable")
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -201,16 +217,8 @@ mod tests {
         let mut bad = Vec::new();
         for path in files {
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            for line in text.lines() {
-                let Some(rest) = line.split(MARK).nth(1) else { continue };
-                // The Dockerfile builds the URL from a shell variable it read
-                // out of the declaration itself, so there is no literal date.
-                if rest.starts_with('$') {
-                    continue;
-                }
+            for stamp in snapshot_stamps(&text) {
                 seen += 1;
-                let stamp: String =
-                    rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
                 if stamp != want {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     bad.push(format!("{name}: {stamp}"));
@@ -227,6 +235,188 @@ mod tests {
             "these install from a date .github/apt-snapshot does not declare ({want}):\n  {}",
             bad.join("\n  ")
         );
+    }
+
+    /// The date half of a midnight snapshot stamp — `20260824T000000Z` →
+    /// `20260824` — and `None` for any other stamp.
+    ///
+    /// Midnight is not a formality. A dated `debian:sid-YYYYMMDD` image is
+    /// debuerreotype's build of `<YYYYMMDD>T000000Z` and of nothing else, so
+    /// only a midnight stamp has an image that is the same archive.
+    fn snapshot_date(stamp: &str) -> Option<&str> {
+        let (date, rest) = stamp.split_at(stamp.find('T')?);
+        (date.len() == 8 && date.chars().all(|c| c.is_ascii_digit()) && rest == "T000000Z")
+            .then_some(date)
+    }
+
+    /// Every `image:` value in `text`, in source order — the key and not the
+    /// prose around it, the same crude shape [`runs_on`] reads.
+    fn images(text: &str) -> Vec<String> {
+        text.lines()
+            .filter_map(|l| l.trim_start().strip_prefix("image:"))
+            .map(|v| v.trim().to_string())
+            .collect()
+    }
+
+    /// The tag of a `debian:` image reference and whether it pins a digest:
+    /// `debian:sid-20260824@sha256:<64 hex>` → `("sid-20260824", true)`.
+    /// `None` for any other image, which this rule says nothing about.
+    fn debian_ref(image: &str) -> Option<(&str, bool)> {
+        let rest = image.strip_prefix("debian:")?;
+        let Some((tag, digest)) = rest.split_once('@') else { return Some((rest, false)) };
+        let pinned = digest
+            .strip_prefix("sha256:")
+            .is_some_and(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()));
+        Some((tag, pinned))
+    }
+
+    /// The jobs in `text` whose container image and apt archive are not one
+    /// decision, given the tag the declared snapshot date asks for.
+    fn drifted(text: &str, want_tag: &str) -> Vec<String> {
+        let mut bad = Vec::new();
+        for (job, body) in jobs(text) {
+            let dated_archive = !snapshot_stamps(&body).is_empty();
+            for image in images(&body) {
+                let Some((tag, digest)) = debian_ref(&image) else { continue };
+                if tag == "sid" {
+                    if dated_archive {
+                        bad.push(format!(
+                            "`{job}` installs from the dated archive into a rolling debian:sid"
+                        ));
+                    }
+                    continue;
+                }
+                if tag != want_tag {
+                    bad.push(format!("`{job}` runs debian:{tag} and the archive is {want_tag}"));
+                }
+                if !digest {
+                    bad.push(format!("`{job}` names debian:{tag} by tag and pins no digest"));
+                }
+                if !dated_archive {
+                    bad.push(format!(
+                        "`{job}` runs debian:{tag} and installs from sid as it stands"
+                    ));
+                }
+            }
+        }
+        bad
+    }
+
+    /// **A job's container image and the archive it installs from are one
+    /// date.** Dating the packages alone is half a pin: the image rolls past
+    /// the archive, carries a package newer than the one the archive's
+    /// dependencies name, and apt refuses the install rather than downgrading
+    /// back — every guest shard of every pull request, at `deps`, with nothing
+    /// about the tree behind it.
+    ///
+    /// Both directions are refused, since both are silent. A dated archive
+    /// under a rolling image is the failure above; a dated image over
+    /// sid-as-it-stands is the same drift pointing the other way, and a dated
+    /// tag with no digest is a tag, which this repository does not pin to.
+    #[test]
+    fn every_dated_image_and_the_archive_under_it_name_one_date() {
+        let root = repo_root();
+        let stamp = declared_apt_snapshot(&root).expect(".github/apt-snapshot declares no date");
+        let date = snapshot_date(&stamp).unwrap_or_else(|| {
+            panic!("{stamp} is not a midnight stamp, so no dated debian image is that archive")
+        });
+        let want_tag = format!("sid-{date}");
+
+        let dir = root.join(".github/workflows");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect(".github/workflows is not readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "yml"))
+            .collect();
+        files.sort();
+
+        let mut seen = 0usize;
+        let mut bad = Vec::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("{} decides where CI runs: {e}", path.display()));
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            seen += images(&text).iter().filter(|i| debian_ref(i).is_some()).count();
+            bad.extend(drifted(&text, &want_tag).into_iter().map(|w| format!("{name}: {w}")));
+        }
+
+        // The published image's base, whose archive is the declaration itself
+        // (`$stamp`) rather than a literal date, so it is read here instead.
+        let path = root.join(".github/ci-image/Dockerfile");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is what that image is: {e}", path.display()));
+        let from = text
+            .lines()
+            .find_map(|l| l.strip_prefix("FROM "))
+            .expect("the Dockerfile names no base image");
+        let (tag, digest) = debian_ref(from).expect("the published image is built on debian");
+        seen += 1;
+        if tag != want_tag || !digest {
+            bad.push(format!(
+                "Dockerfile: FROM debian:{tag}, and it installs from {stamp}, which wants \
+                 debian:{want_tag} by digest"
+            ));
+        }
+
+        assert!(
+            seen > 0,
+            "no job names a debian image, so either the guest lanes moved off it or this scan \
+             no longer reads the key"
+        );
+        assert!(
+            bad.is_empty(),
+            "an image and the archive under it that are two decisions drift, and apt names the \
+             drift as a dependency conflict nobody can act on:\n  {}",
+            bad.join("\n  ")
+        );
+    }
+
+    /// Teeth, run rather than argued: the tree cannot contain the half pin
+    /// this rule is written against, so the rule is shown to refuse one.
+    #[test]
+    fn the_image_scan_refuses_half_a_pin() {
+        assert_eq!(snapshot_date("20260824T000000Z"), Some("20260824"));
+        assert_eq!(snapshot_date("20260824T145707Z"), None);
+        assert_eq!(snapshot_date("sid"), None);
+
+        let digest = "c".repeat(64);
+        assert_eq!(debian_ref("debian:sid"), Some(("sid", false)));
+        assert_eq!(debian_ref("ubuntu:24.04"), None);
+        assert_eq!(
+            debian_ref(&format!("debian:sid-20260824@sha256:{digest}")),
+            Some(("sid-20260824", true))
+        );
+        assert_eq!(debian_ref("debian:sid-20260824@sha256:c0ffee"), Some(("sid-20260824", false)));
+
+        let job = |image: &str, archive: &str| {
+            format!(
+                "jobs:\n  a:\n    container:\n      image: {image}\n    steps:\n      \
+                 - run: echo 'deb http://{SNAPSHOT_MARK}{archive} sid main'\n"
+            )
+        };
+        let pinned = job(&format!("debian:sid-20260824@sha256:{digest}"), "20260824T000000Z");
+        assert!(drifted(&pinned, "sid-20260824").is_empty());
+
+        // What every guest shard of every pull request ran into: the archive
+        // dated, the image not.
+        assert_eq!(
+            drifted(&job("debian:sid", "20260824T000000Z"), "sid-20260824"),
+            ["`a` installs from the dated archive into a rolling debian:sid"]
+        );
+        // The same drift pointing the other way, and the tag with no digest.
+        let stale = "jobs:\n  a:\n    container:\n      image: debian:sid-20260803\n";
+        assert_eq!(
+            drifted(stale, "sid-20260824"),
+            [
+                "`a` runs debian:sid-20260803 and the archive is sid-20260824",
+                "`a` names debian:sid-20260803 by tag and pins no digest",
+                "`a` runs debian:sid-20260803 and installs from sid as it stands",
+            ]
+        );
+        // A job on sid as it stands, image and archive both, is one decision
+        // and not a drift — `portability.yml`'s premise is a fresh machine.
+        assert!(drifted("jobs:\n  a:\n    container:\n      image: debian:sid\n", "sid-20260824")
+            .is_empty());
     }
 
     /// A gate job that boots a guest installs QEMU from the pinned archive.

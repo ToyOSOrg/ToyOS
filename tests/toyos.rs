@@ -165,8 +165,9 @@ const ACTUATOR_TESTS: &[&str] = &[
     // kernel's address space, so without them a kernel that still made the write
     // under test answers a userland that cannot notice.
     "abuse_kernel_addr",
-    // Actions 12 and 13: hold one CPU's shootdown acknowledgement back, so that
-    // whether the initiator waits becomes a duration userland can read.
+    // Actions 12 and 13: hold each other CPU's shootdown acknowledgement back in
+    // turn, so that whether the initiator waits for every one of them becomes a
+    // duration userland can read.
     "tlb_shootdown_waits",
     // Action 16, the live-object census per kind, and 17 and 18 for the idle
     // stack the deferred release path runs on. A leak is two readings and a
@@ -185,6 +186,12 @@ const ACTUATOR_TESTS: &[&str] = &[
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with
 /// no actuator armed in it.
 const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
+
+/// `tlb_shootdown_waits` asserts a claim about every *other* CPU, and two vCPUs
+/// leave exactly one — a width at which a wait narrowed to a single sibling and
+/// a wait for the whole set are the same measurement. Four is the smallest
+/// width where they are not.
+const ACTUATOR_SMP: u32 = 4;
 
 /// How many times a shared block will answer a dead guest with a new one.
 ///
@@ -4095,6 +4102,38 @@ fn check_wrap(dump: &screen::Ppm) -> Result<(), String> {
     Ok(())
 }
 
+/// Every row on the panel is text the log actually carries.
+///
+/// **The check the panel's grid owes**: `panic_console` writes only the cells
+/// whose character or colour moved, so a cell it fails to write is one the
+/// previous paint left standing, and past the end of a line that replaced a
+/// longer one that is a string no line of the log contains.
+fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String> {
+    let said: String = console
+        .replace("[kernel ", "[")
+        .bytes()
+        .map(|byte| match byte {
+            b'\n' => '\n',
+            b'\t' => ' ',
+            0x20..=0x7E => byte as char,
+            _ => '.',
+        })
+        .collect();
+    for row in dump.rows() {
+        let row = row.trim_end();
+        if row.is_empty() || row.starts_with("[page ") || said.contains(row) {
+            continue;
+        }
+        return Err(format!(
+            "the panel row {row:?} is in no line of the log, so a cell the paint that put \
+             this screen up did not write is still standing from the one before \
+             it\ndecoded screen:\n{}",
+            dump.text()
+        ));
+    }
+    Ok(())
+}
+
 /// Run one screen test. `Err` carries the decoded screen, because a failure
 /// here is almost always "the text is not what I expected" and the decoded
 /// grid is the only readable form of that.
@@ -5529,15 +5568,28 @@ fn run_screen_test(
             let mut pages: Vec<String> = Vec::new();
             let mut report: Option<String> = None;
             let mut head_seen = false;
+            // **The only incremental paints a guest makes**: the report's own
+            // paint follows a fill, and every page the pager puts up after it
+            // is written against the grid the one before left — which is the
+            // paint `check_no_stale_cells` exists for. The footers of the
+            // settled captures it judged, and two of them, because the first is
+            // the page the fill painted.
+            const JUDGED_PAGES: usize = 2;
+            let mut judged: Vec<String> = Vec::new();
+            let mut before: Option<String> = None;
             // A liveness ceiling on a machine that is halted and paging, so
             // there is no console to read progress off and this is the case
             // `qemu::budget` exists for.
             let deadline = Instant::now() + qemu.budget(Duration::from_secs(40));
-            while Instant::now() < deadline && !(head_seen && report.is_some()) {
-                let text = qemu.screendump().text();
+            while Instant::now() < deadline
+                && !(head_seen && report.is_some() && judged.len() >= JUDGED_PAGES)
+            {
+                let dump = qemu.screendump();
+                let text = dump.text();
                 let Some(footer) = text.lines().rev().find(|l| l.starts_with("[page ")) else {
                     // Before the panic the screen still carries a boot
                     // checkpoint; only a paginated screen has a footer.
+                    before = None;
                     thread::sleep(Duration::from_millis(200));
                     continue;
                 };
@@ -5548,6 +5600,17 @@ fn run_screen_test(
                     report = Some(text.clone());
                 }
                 head_seen |= text.contains(HEAD);
+                // **A screendump is not a shutter**: one taken across a paint
+                // carries the rows already written above the rows the paint
+                // replaced, and a row half of each is in no line of any log. Two
+                // identical captures are a paint that finished.
+                if before.as_deref() == Some(text.as_str()) {
+                    check_no_stale_cells(&dump, &qemu.console_stream().since(0))?;
+                    if !judged.contains(&footer.to_string()) {
+                        judged.push(footer.to_string());
+                    }
+                }
+                before = Some(text.clone());
                 thread::sleep(Duration::from_millis(200));
             }
 
@@ -5575,6 +5638,14 @@ fn run_screen_test(
             if pages.len() < 2 {
                 return Err(format!(
                     "only one page footer ever appeared ({seen}); the pager is not cycling"
+                ));
+            }
+            if judged.len() < JUDGED_PAGES {
+                return Err(format!(
+                    "only {} settled page(s) were judged for stale cells ({}), so no paint made \
+                     against the grid the one before it left was ever read",
+                    judged.len(),
+                    judged.join(" ")
                 ));
             }
             Ok(())
@@ -17720,6 +17791,15 @@ fn shared_kernel(name: &str) -> &'static [&'static str] {
     }
 }
 
+/// The other half of the same question: how wide that boot is.
+fn shared_smp(name: &str) -> u32 {
+    if ACTUATOR_TESTS.contains(&name) {
+        ACTUATOR_SMP
+    } else {
+        BootOptions::default().smp
+    }
+}
+
 /// The binaries and config every task boots with.
 struct Bins<'a> {
     test_config: &'a Path,
@@ -17751,12 +17831,13 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
                 // be called without a `LaneFree`, the only two things that
                 // produce one are this line and `QemuInstance::shutdown`, and
                 // `shutdown` takes the guest by value.
+                let smp = shared_smp(&tests[0].name);
                 let boot = |_: qemu::LaneFree| {
                     QemuInstance::boot_with_options(
                         bins.test_config,
                         bins.c_bins,
                         bins.rust_bins,
-                        BootOptions { kernel_features: features, ..Default::default() },
+                        BootOptions { kernel_features: features, smp, ..Default::default() },
                     )
                 };
                 let mut qemu = boot(qemu::LaneFree::no_guest_yet());

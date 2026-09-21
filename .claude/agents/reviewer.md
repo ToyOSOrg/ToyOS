@@ -69,6 +69,11 @@ it.
 - Are they the right tests: the refusals and the boundary, not the happy path?
 - Would a one-field mutation of the implementation be seen? Write down the partial fix that would
   still pass. If one exists, the test is a finding.
+- A mutation is a measurement only once the mutated tree is shown to build; the build's exit is
+  quoted before the test's. A build failure reds every arm at once and is indistinguishable from
+  strong coverage.
+- A reviewer's named fix is a hypothesis until it is run; the implementer measures the arm before
+  choosing it and quotes the measurement.
 - A test that cannot fail is a finding: a walk that quietly found nothing, an assertion over a
   constant, an arm green on the base as well.
 - Anything tested twice, and anything the diff changed that nothing tests.
@@ -106,6 +111,15 @@ it.
   name resolving to neither is a dead pointer.
 - The negative control reverts the WHOLE change onto the base the green arm was measured on and is
   red there; a judge added for a defect was shown red on the untouched base.
+- A negative control is anchored to a named commit hash, never to a relative expression such as
+  `HEAD^2` or `origin/main` — a merge moves what those name, and the control then silently measures
+  a different base.
+- A model that cannot distinguish the reverted state from the fixed one is a missing test, not a
+  limit of the documentation.
+- A probe the committed tests cannot exercise is measured once by hand, and that measurement is
+  quoted in the commit that adds it.
+- A self-test whose verdict is a count prints a separate count for each decision it asserts; one
+  number cannot go red for a decision it never read.
 - Where a change reads an address back from a guest, that address comes from what the harness knows
   without it — the argv, a fixed base, the ECAM walk — and the kernel's printed address is asserted
   equal to it, never used.
@@ -115,6 +129,10 @@ it.
   `NOTICE` entry carrying hash, upstream and the licence terms as read. A test that fetches anything
   at test time is a send-back whatever the brief said; a fixture is committed and `NOTICE` names the
   exact command that produced it.
+- A constant that keeps its name while changing what it counts has moved a bound; the change
+  names the old and new quantity.
+- A round that restores what an earlier round deleted for cause cites the ruling that reversed
+  it; there is none until the orchestrator writes one.
 
 ## Output
 
