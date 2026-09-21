@@ -815,8 +815,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     }
 
     // 3. A guest that merely stopped, with no panic of either kind, still
-    //    reports as a stall — the classification the whole redlist is written
-    //    against.
+    //    reports as a stall.
     let Some(stall) = ceiling_verdict(None, CEILING + Duration::from_secs(1), CEILING, quiet, 40)
     else {
         return Err(String::from("an expired guard on a silent guest returned no verdict at all"));
