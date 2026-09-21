@@ -683,6 +683,56 @@ unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
 
+# --- the cable: the boot that runs netd in front of the T14's own I219 ---
+
+[[number]]
+name = "boot.lancase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1208
+
+[[number]]
+name = "boot.lancase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 82
+
+[[number]]
+name = "boot.lancase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+# No `measured`: the one ping this row has been offered was answered by the
+# operating system on the other side of the reset, which the judge refuses, so
+# no boot has yet given this number a reading.
+[[number]]
+name = "boot.lancase.ping_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, which bounds the window a reply can fall in"
+
+[[number]]
+name = "list.lancase.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "toyos_tco::LEASE_BOUND_MS, which is lan_hold's whole sleep, plus two seconds for the spawn and the exit record around it"
+
+[[number]]
+name = "lan.lancase.link_up_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "toyos_tco::LEASE_BOUND_MS: a link that comes up later than lan_hold sleeps is a link this boot never had, because the machine has already handed itself back"
+
+[[number]]
+name = "lan.lancase.lease_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "as lan.lancase.link_up_ms, which is netd's own dhcp::LEASE_BOUND: a boot with no lease by then has already said so in its log"
+
 # --- what the on-screen panel cost each boot ---
 # **The one window a person has into a machine that stopped.** Two numbers,
 # because the panel can fail a person in two ways: `panel_max_us` bounds one
@@ -803,6 +853,12 @@ ceiling = 16667
 ceiling_from = "as boot.testcases.panel_max_us"
 
 [[number]]
+name = "boot.lancase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
 name = "boot.testcases.panel_us"
 unit = "us"
 ceiling = 100000
@@ -909,6 +965,12 @@ measured = 19488
 
 [[number]]
 name = "boot.usbbreak.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.lancase.panel_us"
 unit = "us"
 ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
