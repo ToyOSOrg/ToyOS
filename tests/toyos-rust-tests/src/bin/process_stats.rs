@@ -39,43 +39,64 @@ fn main() {
     println!("all process_stats tests passed");
 }
 
-/// Enough that the child spends almost all its CPU in the refused-call loop, so
-/// `syscall_total_ns` and `cpu_ns` compare as a ratio host speed cancels out of.
 const REFUSED_CALLS: u64 = 500_000;
 
+/// A refused call is timed, so each one the kernel counts adds at least this much
+/// to `syscall_total_ns`; one returned past the clock adds nothing.
+const MIN_NS_PER_REFUSED_CALL: u64 = 5;
+
+/// Says it is ready, waits for the parent's byte, then issues nothing but refusals.
 fn refused_child() {
     const NAME: [u8; 64] = [0u8; 64]; // past THREAD_NAME_LEN (28): refused before any pointer read
 
+    println!("ready");
+    std::io::stdout().flush().expect("refused: flush the marker");
+    let mut go = [0u8; 1];
+    std::io::stdin().read_exact(&mut go).expect("refused: the parent's go byte");
     for _ in 0..REFUSED_CALLS {
         syscall::set_thread_name(&NAME);
     }
 }
 
-/// A refused syscall is counted *and* timed: the child does little but refuse, so
-/// timing each keeps `syscall_total_ns` above a tenth of `cpu_ns` (~0.38 under TCG),
-/// where returning past the clock times only its few successful calls (~0.01).
+/// A refused syscall is counted *and* timed, read across the child's refusal loop
+/// alone so its startup's timed calls cannot stand in for the refusals'.
 fn refused_calls_are_timed() {
-    let mut child =
-        Command::new(SELF_PATH).arg("refused").spawn().expect("spawn the refused child");
-    child.wait().expect("wait the refused child");
+    let mut child = Command::new(SELF_PATH)
+        .arg("refused")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn the refused child");
+    let mut out = BufReader::new(child.stdout.take().expect("refused stdout"));
+    let mut line = String::new();
+    out.read_line(&mut line).expect("the refused child's marker");
+    assert_eq!(line.trim(), "ready", "the refused child said {line:?}");
 
-    let s = stats_of(&child).expect("the exited child answers");
+    let before = stats_of(&child).expect("the parked child answers");
+    child
+        .stdin
+        .take()
+        .expect("the refused child's stdin")
+        .write_all(b"g")
+        .expect("release the refused child");
+    child.wait().expect("wait the refused child");
+    let after = stats_of(&child).expect("the exited child answers");
+
+    let calls = after.syscall_total.saturating_sub(before.syscall_total);
+    let timed_ns = after.syscall_total_ns.saturating_sub(before.syscall_total_ns);
     assert!(
-        s.syscall_total >= REFUSED_CALLS,
-        "the child made {REFUSED_CALLS} refused calls but only {} were counted",
-        s.syscall_total,
+        calls >= REFUSED_CALLS,
+        "the child made {REFUSED_CALLS} refused calls but only {calls} were counted",
     );
     assert!(
-        s.syscall_total_ns.saturating_mul(10) >= s.cpu_ns,
-        "syscall_total_ns {} is under a tenth of cpu_ns {} — the child did little but issue \
-         refused calls, so their dispatch was a large fraction of its CPU; refused calls \
-         counted but not timed leave syscall_total_ns describing only the few successful calls",
-        s.syscall_total_ns,
-        s.cpu_ns,
+        timed_ns >= calls * MIN_NS_PER_REFUSED_CALL,
+        "{calls} calls counted across the refusal loop added {timed_ns} ns to syscall_total_ns, \
+         under {MIN_NS_PER_REFUSED_CALL} ns each — refused calls counted but not timed",
     );
     println!(
-        "  refused calls timed: ok (total={} total_ns={} cpu_ns={})",
-        s.syscall_total, s.syscall_total_ns, s.cpu_ns,
+        "  refused calls timed: ok (calls={calls} timed_ns={timed_ns} whole child: total={} \
+         total_ns={} cpu_ns={})",
+        after.syscall_total, after.syscall_total_ns, after.cpu_ns,
     );
 }
 
