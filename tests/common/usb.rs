@@ -1860,11 +1860,14 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     let left = [
         format!("usb-storage: {under_test} is owed the data of the command that broke"),
         HELD.to_string(),
-        "nothing is connected, so its port's teardown takes it from here".to_string(),
-        "usb-storage: disk 0 left port 1 (its port read empty) after this driver reset it; it is \
-         held "
-            .to_string(),
+        // Its port read empty inside the rung, or — when the host's move came
+        // after the rung's bound and the reset verified — disconnected at the
+        // next look: run 79's shape and run 74's, both a device that left
+        // under a reset of this driver's.
+        "usb-storage: disk 0 left port 1 (".to_string(),
+        " after this driver reset it; it is held ".to_string(),
     ];
+    let inside_the_rung = log.contains("usb-storage: disk 0 left port 1 (its port read empty)");
     match moved {
         Moved::SameStick => {
             let mut back = left.to_vec();
@@ -1896,9 +1899,14 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             }
             serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
             eprintln!(
-                "  [usb] {under_test}'s port reset moved the boot stick to port 3; it bound as \
-                 disk 0 again on its serial number, the write that broke went out again on it and \
-                 completed, and the boot finished on the root volume it carries"
+                "  [usb] {under_test}'s port reset moved the boot stick to port 3 ({}); it bound \
+                 as disk 0 again on its serial number, the operation waiting on it went out again \
+                 and completed, and the job on the root volume it carries ran to its reset",
+                if inside_the_rung {
+                    "inside the rung, so what went out again is the write that broke"
+                } else {
+                    "after the rung's reset verified, so the write that broke completed first"
+                }
             );
         }
         Moved::AnotherStick => {
