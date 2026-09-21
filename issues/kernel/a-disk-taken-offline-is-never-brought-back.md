@@ -16,11 +16,12 @@ the root filesystem, so the boot is over from there.
 
 Two ways a disk that could still be served is lost today:
 
-- **The port reset moves it.** T14 run 74: a SuperSpeed stick enumerated on the
-  USB2 half of its receptacle answered the bus reset by training SuperSpeed on
-  the other half, so it left port 1 and arrived on port 13. The rung reads its
-  port disconnected, the port's teardown takes the disk, and the device that
-  arrives is bound under a new number that no mount holds.
+- **The port reset moves it.** T14 runs 74 and 79: a SuperSpeed stick
+  enumerated on the USB2 half of its receptacle answered the bus reset by
+  training SuperSpeed on the other half, so it left port 1 and arrived on port
+  13. `toyos_xhci::identity` now holds such a disk for `RETURN_WINDOW` and
+  gives its number back to a device that proves the same identity; QEMU
+  judges it (`usb_transport_break`'s moved boots), the T14 has not yet.
 - **Offline is for the connection's life.** Nothing asks an offline device
   again, however long it stays plugged in.
 
