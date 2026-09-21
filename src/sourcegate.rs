@@ -546,12 +546,6 @@ const HOST_SPAWNS: &[Spawn] = &[
         why: "QEMU, the other half of the bar, and `REQUIRED`",
     },
     Spawn {
-        arg: "\"gh\"",
-        sites: &[],
-        why: "GitHub's CLI, read-only, in `--merge-health` alone. Outside the bar and \
-              declared by nothing else: no build, boot or gate reaches it",
-    },
-    Spawn {
         arg: "\"ssh\"",
         sites: &[],
         why: "OpenSSH's client, which is how `src/metal.rs` reaches the T14 and the only way it \

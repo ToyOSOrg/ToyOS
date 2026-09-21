@@ -145,13 +145,6 @@ fn main() {
         toyos_build::redlist::dispatch(&args);
         return;
     }
-    // Asks `gh`, not the toolchain, so it runs on the bare `ubuntu-latest`
-    // runner the nightly schedule gives it — no QEMU, no ToyOS toolchain.
-    // Same reason as the two above: before `check_prerequisites`.
-    if asked(&flags::MERGE_HEALTH) {
-        toyos_build::mergehealth::dispatch(&root, &args);
-        return;
-    }
     // Reads lockfiles and cargo's own checkouts, nothing else: the half of a
     // "zero callers" ABI sweep a monorepo grep cannot see.
     if asked(&flags::ABI_CALLERS) {
