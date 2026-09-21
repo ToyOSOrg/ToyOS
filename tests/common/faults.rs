@@ -896,8 +896,14 @@ pub fn dump_left_pending_is_owed(
     let result = qemu.run_test("test_rs_dump_stage_load", Duration::from_secs(60));
     let log = format!("{armed}{}{}{}", result.before, result.serial, result.stdout);
 
-    if let Some(line) = log.lines().find(|line| line.contains("PANIC")) {
-        return Err(format!("a `PANIC` line is in the log: `{}`\n{log}", line.trim()));
+    // A panic's message is the line after the one that says where.
+    let mut panic = log.lines().skip_while(|line| !line.contains("PANIC")).take(2);
+    if let Some(line) = panic.next() {
+        return Err(format!(
+            "a `PANIC` line is in the log: `{} {}`\n{log}",
+            line.trim(),
+            panic.next().unwrap_or("").trim()
+        ));
     }
     // A request is filed only once the one before it is accounted for, so the
     // lines from one filing to the next are that request's.
