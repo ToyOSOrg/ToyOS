@@ -260,7 +260,7 @@ jobs:
 
       # `cargo test` runs several binaries and each prints a `test result:`
       # line; the line grepped here is the suite's own, the one that
-      # counts a total and names any declared `EXPECTED_FAILURES`. The
+      # counts a total and names any quarantined failure. The
       # `ALONE:` verdicts say whether a re-run tells a reader anything, so they
       # go in the summary beside the count rather than requiring
       # `gh run view --log-failed`.
@@ -697,7 +697,7 @@ jobs:
           if [ "${{ needs.guest.result }}" != success ]; then
             echo "::error::a guest shard reported ${{ needs.guest.result }}. The run summary"
             echo "::error::names the shard, the test and whether it survived being re-run"
-            echo "::error::alone; \`cargo run -- --known-red <test>\` is the rate to read that against."
+            echo "::error::alone; \`cargo run -- --known-red <test>\` says whether it is quarantined."
             exit 1
           fi
           if [ "${{ needs.durations.result }}" != success ]; then

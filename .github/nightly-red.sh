@@ -6,7 +6,7 @@
 # green scheduled run never reaches it.
 #
 # The issue is the alarm and not the record: every nightly red is adjudicated
-# the same day into a fix, a `src/redlist.rs` row, or a tier correction.
+# the same day into a fix, a `src/redlist.rs` quarantine row, or a tier move.
 #
 # $TITLE names the issue; $BODY becomes a comment on it, or the body of a new
 # one if none is open yet. $GH_TOKEN is what `gh issue` authenticates with.
