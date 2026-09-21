@@ -434,6 +434,7 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         event_phase: true,
         devices: Vec::new(),
         msc: [MscBlock::FREE; MSC_BLOCKS],
+        awaited: Vec::new(),
         ports: (0..max_ports)
             .map(|p| {
                 let mut port = PortState::EMPTY;

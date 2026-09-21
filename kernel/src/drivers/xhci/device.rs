@@ -6,6 +6,7 @@ use toyos_xhci::enumerate::{
 };
 use toyos_xhci::job::{Await, Outcome, Stages};
 use toyos_xhci::port::{self, Reset};
+use toyos_xhci::identity::UsbId;
 use toyos_xhci::recovery;
 use toyos_xhci::reset_recovery::SlotGoes;
 use super::{deadline, Answer, Trb, TrbRing, What, XhciController, PAGE};
@@ -248,6 +249,9 @@ pub(super) struct Enumerating {
     issued: Act,
     /// The configuration value and the function the descriptor named.
     parsed: Option<(u8, Function)>,
+    /// What the device descriptor says the device is, and the index of the
+    /// string that names its serial number (0 for none): a disk's identity.
+    described: Option<(UsbId, u8)>,
     // Carried, not rebuilt: a second `TrbRing::init` would zero memory the controller is already reading.
     rings: Option<Rings>,
 }
@@ -325,6 +329,7 @@ pub(super) fn slot_answered(
         seq,
         issued: Act::Command(enumerate::Command::EnableSlot),
         parsed: None,
+        described: None,
         rings: None,
     };
     advance(ctrl, state, Learnt::Nothing);
@@ -516,6 +521,12 @@ fn read_back(
             let descriptor = &scratch[..18];
             log!("xHCI: device class={:#x} vendor={:04x} product={:04x}",
                 descriptor[4], le16(descriptor, 8), le16(descriptor, 10));
+            let usb = UsbId {
+                vendor: le16(descriptor, 8),
+                product: le16(descriptor, 10),
+                release: le16(descriptor, 12),
+            };
+            state.described = Some((usb, descriptor[16]));
             Ok(Learnt::Nothing)
         }
         // Nine bytes is the header holding `wTotalLength`; the parser is bounded by what arrived, not what was asked.
@@ -683,8 +694,11 @@ fn bind(ctrl: &mut XhciController, state: Enumerating) {
                 ep0_packet: state.packet,
                 configuration,
             };
+            // The full descriptor is read before the configuration is, so a
+            // device that reached here gave one.
+            let described = state.described.expect("the device descriptor was read before its configuration");
             match super::msc::bind(
-                ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info, enumerated,
+                ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info, enumerated, described,
             ) {
                 Bind::Bound => true,
                 Bind::Refused(SlotGoes::Back) => false,

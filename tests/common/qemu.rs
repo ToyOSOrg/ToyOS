@@ -1612,6 +1612,12 @@ pub fn usb_device_id(i: usize) -> String {
 /// is the removal the owner's machine dies on.
 pub const BOOT_STICK_ID: &str = "bootstick";
 
+/// The boot stick's serial number string. Stated rather than left to QEMU,
+/// whose default is built from the port the device is on, so the same stick
+/// plugged into another port would read as another unit — which is exactly
+/// what a test moving it has to be able to say is not so.
+pub const BOOT_STICK_SERIAL: &str = "TOYOS0BOOTSTICK1";
+
 /// What every profile but [`Profile::MetalDisk`] gives the guest. Large
 /// enough for a filesystem, small enough that a boot formats it quickly.
 pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
@@ -3910,6 +3916,19 @@ impl QmpDevices {
             .execute(&format!("{{\"execute\":\"device_del\",\"arguments\":{{\"id\":\"{id}\"}}}}"));
     }
 
+    /// [`Self::blockdev_add`] for a file a drive may still hold open: the
+    /// unplugged device's own, which QEMU may not have let go of yet. Taken
+    /// without the image lock that would refuse it; both read and write the one
+    /// file, so what the first wrote is what the second reads.
+    pub fn blockdev_add_again(&mut self, node: &str, image: &Path) {
+        self.0.execute(&format!(
+            "{{\"execute\":\"blockdev-add\",\"arguments\":{{\"node-name\":\"{node}\",\
+             \"driver\":\"raw\",\"file\":{{\"driver\":\"file\",\"locking\":\"off\",\
+             \"filename\":\"{}\"}}}}}}",
+            image.display()
+        ));
+    }
+
     /// Give QEMU an image to back a device that is not on the machine yet, so
     /// a hot-plugged disk needs nothing in argv. A disk declared at boot is a
     /// disk the guest could have enumerated at boot.
@@ -4103,7 +4122,8 @@ fn qemu_command(
                   physical_block_size=512");
     } else {
         qemu.arg("-device").arg(format!(
-            "usb-storage,bus={},drive=stick,id={BOOT_STICK_ID},bootindex=0",
+            "usb-storage,bus={},drive=stick,id={BOOT_STICK_ID},serial={BOOT_STICK_SERIAL},\
+             bootindex=0",
             shape.storage_bus
         ));
     }

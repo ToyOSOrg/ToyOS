@@ -1715,7 +1715,7 @@ pub fn usb_transport_break(
         .iter()
         .enumerate()
         .skip(sent_before)
-        .find(|(i, r)| r[..2] == [0x00, 0x09] && *i > 0 && requests[*i - 1][..2] != [0x80, 0x06])
+        .find(|(i, _)| is_a_rungs_configuration(&requests, *i))
         .map(|(i, _)| i)
     else {
         return Err(format!("no port reset's SET_CONFIGURATION follows the abandoned WRITE\n{log}"));
@@ -1766,7 +1766,164 @@ pub fn usb_transport_break(
 
     transport_gives_up(test_config, c_bins, rust_bins)?;
     abandoned_write_is_taken_offline(test_config, c_bins, rust_bins)?;
+    a_stick_its_reset_moved_carries_on(Moved::SameStick)?;
+    a_stick_its_reset_moved_carries_on(Moved::AnotherStick)?;
     super::power::transport_break_chain()
+}
+
+/// What the host plugs in on another port once the port rung's reset has
+/// emptied the boot stick's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Moved {
+    /// The same backing under the same serial number: the stick itself, as a
+    /// reset moved T14 run 79's from the USB2 half of its receptacle to the
+    /// USB3 half.
+    SameStick,
+    /// The same backing under another serial number, which is everything a
+    /// second unit of the same model shares with the first — INQUIRY,
+    /// capacity, USB ids — and the negative control: it must not be adopted.
+    AnotherStick,
+}
+
+/// T14 run 79 under QEMU: the boot stick's first WRITE(10) is abandoned, the
+/// ladder resets its port, and the device leaves that port and binds on
+/// another. **QEMU cannot move a device on a reset**, so `usb-reset-moves`
+/// holds the port rung's reset until the port reads empty and the host makes
+/// the move: `device_del` of the stick, then the same backing file plugged in
+/// on port 3 with the serial number the move says.
+///
+/// The same stick takes its disk number back inside the window, the write that
+/// broke goes out again on it and completes, and the job the root volume
+/// carries runs to its reset with nothing failed on disk 0. Another stick
+/// is refused by name, bound as a new disk, and disk 0 is lost when its window
+/// ends — as every disk whose device left was before.
+fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
+    const PARAMS: &[&str] = &["usb-transport-break", "usb-reset-moves"];
+    const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
+    let case = super::compile::repo_root().join("tests/jobcase");
+    let (name, serial) = match moved {
+        Moved::SameStick => ("usb-reset-moves-same.img", qemu::BOOT_STICK_SERIAL),
+        Moved::AnotherStick => ("usb-reset-moves-another.img", "TOYOS0OTHERSTICK"),
+    };
+    let image = test_dir().join(name);
+    std::fs::write(&image, qemu::build_boot_image(&case, &[], &[], PARAMS))
+        .map_err(|e| format!("write {}: {e}", image.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &case,
+        &[],
+        &[],
+        BootOptions {
+            profile: Profile::Metal,
+            qmp: true,
+            kernel_params: PARAMS,
+            boot_image: Some(qemu::Staged::Written(image.clone())),
+            ready_marker: toyos_build::bootlog::LOADER_LAST_LINE,
+            ..Default::default()
+        },
+    );
+    let mut log = qemu.boot_log().to_string();
+    log.push_str(&qemu.drain_until(Duration::from_secs(60), |l| l.contains(HELD)));
+    if !log.contains(HELD) {
+        return Err(format!("the port rung's reset was never held for the move\n{log}"));
+    }
+    let mut devices = qemu::QmpDevices::open(qemu.qmp_socket());
+    devices.del(qemu::BOOT_STICK_ID);
+    devices.blockdev_add_again("moved", &image);
+    devices.add("usb-storage", "xhci.0", "movedstick", &[("drive", "moved"), ("port", "3"), ("serial", serial)]);
+    drop(devices);
+    let ends = |l: &str| match moved {
+        Moved::SameStick => l.contains(toyos_build::bootlog::REBOOTING),
+        Moved::AnotherStick => l.contains(" did not come back within "),
+    };
+    log.push_str(&qemu.drain_until(Duration::from_secs(60), ends));
+    // The rest of the boot: the job's reset, or the lost disk's failures.
+    log.push_str(&qemu.drain_serial(Duration::from_secs(5)));
+    drop(qemu);
+    let _ = std::fs::remove_file(&image);
+
+    let staged = log
+        .lines()
+        .find(|l| l.contains("transport broke on SCSI 0x2a: a staged break skipped the data phase wait"))
+        .ok_or_else(|| format!("the staged break never happened\n{log}"))?;
+    let under_test = broke_on(staged)?;
+    let (_, after) = log.split_once(staged).expect("the line came from this text");
+    let in_order = |needles: &[String]| -> Result<(), String> {
+        let mut rest = after;
+        for needle in needles {
+            let Some((_, tail)) = rest.split_once(needle.as_str()) else {
+                return Err(format!("after the break, no line reads {needle:?}, in order\n{log}"));
+            };
+            rest = tail;
+        }
+        Ok(())
+    };
+    let left = [
+        format!("usb-storage: {under_test} is owed the data of the command that broke"),
+        HELD.to_string(),
+        "nothing is connected, so its port's teardown takes it from here".to_string(),
+        "usb-storage: disk 0 left port 1 (its port read empty) after this driver reset it; it is \
+         held "
+            .to_string(),
+    ];
+    match moved {
+        Moved::SameStick => {
+            let mut back = left.to_vec();
+            back.extend([
+                "xHCI: port 3 connected".to_string(),
+                format!(" serial number \"{serial}\""),
+                "usb-storage: disk 0 came back on port 3 slot ".to_string(),
+                "its volume carries on".to_string(),
+                "usb-storage: disk 0 is back, and the operation it was asked went out again on it: \
+                 it completed"
+                    .to_string(),
+                // The job this boot ran, and the reset it ends in, after it.
+                toyos_build::bootlog::REBOOTING.to_string(),
+            ]);
+            in_order(&back)?;
+            if !log.contains("Boot: complete") {
+                return Err(format!("the boot never completed\n{log}"));
+            }
+            for never in [
+                " failed on disk 0",
+                "ran out of its operation budget on disk 0",
+                " did not come back within ",
+                "disk 1 ready",
+                " is not disk 0 come back",
+            ] {
+                if let Some(line) = log.lines().find(|l| l.contains(never)) {
+                    return Err(format!("{line:?} of a stick that came back as itself\n{log}"));
+                }
+            }
+            serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+            eprintln!(
+                "  [usb] {under_test}'s port reset moved the boot stick to port 3; it bound as \
+                 disk 0 again on its serial number, the write that broke went out again on it and \
+                 completed, and the boot finished on the root volume it carries"
+            );
+        }
+        Moved::AnotherStick => {
+            let mut refused = left.to_vec();
+            refused.extend([
+                "usb-storage: the device on port 3 is not disk 0 come back: its serial number differs"
+                    .to_string(),
+                "usb-storage: disk 1 ready on slot ".to_string(),
+                "usb-storage: disk 0 did not come back within 2000 ms of its port reset; it is \
+                 offline"
+                    .to_string(),
+            ]);
+            in_order(&refused)?;
+            for never in ["usb-storage: disk 0 came back", "usb-storage: disk 0 is back"] {
+                if let Some(line) = log.lines().find(|l| l.contains(never)) {
+                    return Err(format!("{line:?}: another stick was taken for disk 0\n{log}"));
+                }
+            }
+            eprintln!(
+                "  [usb] a stick with another serial number arrived on port 3 while disk 0 was \
+                 held: it bound as disk 1, and disk 0 was lost when its window ended"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The ladder's last rung, with the rung before it spent:
@@ -1967,6 +2124,18 @@ pub fn transport_break_on_metal(
         "transport broke on SCSI 0x2a: a staged break skipped the data phase wait; break 1 of ",
     )?;
     let under_test = broke_on(staged)?;
+    // T14 runs 74 and 79: the port reset can move the stick to the other half
+    // of its receptacle. Then no rung verifies on the old slot, and what says
+    // the volume carried on is the same device taking its disk number back and
+    // the command that broke completing on it.
+    if let Ok(left) = kernel.must_say(" after this driver reset it; it is held ") {
+        eprintln!("  [usb] {left}");
+        let back = kernel.must_say(" as the same device (USB ")?;
+        eprintln!("  [usb] {back}");
+        kernel.must_say("is back, and the operation it was asked went out again on it: it completed")?;
+        kernel.must_not_say(" did not come back within ")?;
+        return super::power::done_chain(after);
+    }
     let rungs = [
         format!("usb-storage: {under_test} Reset Recovery took"),
         format!("usb-storage: {under_test} the port reset took"),
@@ -2102,22 +2271,35 @@ fn every_reset_is_followed_by_a_test_unit_ready(
     Ok(())
 }
 
+/// Whether request `i` is a port rung's SET_CONFIGURATION: an enumeration
+/// reads the configuration descriptor it chooses the value from after the
+/// configuration before it, and a rung reads none — string reads, the
+/// firmware's or a bind's, can stand between either and its request.
+fn is_a_rungs_configuration(requests: &[[u8; 8]], i: usize) -> bool {
+    const SET_CONFIGURATION: [u8; 2] = [0x00, 0x09];
+    const GET_CONFIGURATION_DESCRIPTOR: [u8; 4] = [0x80, 0x06, 0x00, 0x02];
+    requests[i][..2] == SET_CONFIGURATION
+        && !requests[..i]
+            .iter()
+            .rev()
+            .take_while(|r| r[..2] != SET_CONFIGURATION)
+            .any(|r| r[..4] == GET_CONFIGURATION_DESCRIPTOR)
+}
+
 /// The port reset's own question, on the wire: the first command block the
 /// disk is sent after every SET_CONFIGURATION the ladder's second rung sent it
 /// is a TEST UNIT READY. Answers how many there were.
 ///
 /// The capture opens with the firmware's own enumeration of the disk, and an
-/// enumeration's SET_CONFIGURATION follows the descriptor it chose the
-/// configuration from; the rung reads no descriptor, which is how its request
-/// is told from one.
+/// enumeration's SET_CONFIGURATION is told from a rung's by
+/// [`is_a_rungs_configuration`].
 fn every_port_reset_is_followed_by_a_test_unit_ready(
     requests: &[[u8; 8]],
     blocks: &[(usize, u8)],
 ) -> Result<usize, String> {
     let mut rungs = 0;
-    for (i, request) in requests.iter().enumerate() {
-        let enumerating = i > 0 && requests[i - 1][..2] == [0x80, 0x06];
-        if request[..2] != [0x00, 0x09] || enumerating {
+    for i in 0..requests.len() {
+        if !is_a_rungs_configuration(requests, i) {
             continue;
         }
         rungs += 1;

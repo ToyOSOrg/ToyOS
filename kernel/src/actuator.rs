@@ -132,6 +132,12 @@ actuators! {
     /// ladder, once: a device that answers nothing on any rung.
     usb_reset_break = "usb-reset-break";
 
+    /// Hold the port rung's first reset, once, until the port reads empty, so
+    /// the host can move the device to another port as a reset moved T14 run
+    /// 79's stick. See `xhci::msc::reset_moves`; judged by
+    /// `usb_transport_break`.
+    usb_reset_moves = "usb-reset-moves";
+
     /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
     /// device holding the CBW and nothing queued for its data phase, so the
     /// bound that ends the machine ends a device inside a Bulk-Only command.

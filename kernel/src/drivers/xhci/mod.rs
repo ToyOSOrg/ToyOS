@@ -318,6 +318,11 @@ pub(crate) const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of
 // The caller spins with interrupts off, so a call that outlasted the TLB-ack tripwire would panic another CPU over a device.
 const _: () = assert!(CALL_AFTER_BREAK.nanos() < crate::arch::tlb::ACK_TIMEOUT.nanos());
 
+// A disk whose device left under the port rung's reset is waited for no longer than the rungs from that reset on were given to spend on it.
+const _: () = assert!(
+    toyos_xhci::identity::RETURN_WINDOW <= AFTER_BREAK.port_reset + AFTER_BREAK.offline
+);
+
 /// When a wait started now would give up; unbounded before `clock::init`, since `nanos_since_boot` stays 0.
 fn deadline() -> u64 {
     crate::clock::nanos_since_boot() + USB_TIMEOUT_NS
@@ -600,6 +605,46 @@ struct Disk {
     dev: msc::MscDevice,
 }
 
+/// A disk whose device left its port under a reset of this driver's, held under
+/// its number for the same device to come back (`toyos_xhci::identity`).
+#[derive(Clone, Copy)]
+struct Awaited {
+    index: usize,
+    identity: toyos_xhci::identity::Identity,
+    /// The port it left, which its block stays claimed by until that port's
+    /// teardown.
+    port_idx: u8,
+    returns_by: u64,
+}
+
+/// Where the machine's `index`-th disk is, for an operation that found it
+/// answering nothing.
+pub(super) enum Whereabouts {
+    /// Bound, on some controller's pool block.
+    Here,
+    /// Held for its device to come back.
+    Awaited,
+    /// Neither: unplugged, never bound, or not back in time.
+    Gone,
+}
+
+/// Where the machine's `index`-th disk is, forgetting it if its window has
+/// passed.
+pub(super) fn whereabouts(index: usize) -> Whereabouts {
+    let now = crate::clock::nanos_since_boot();
+    let mut guard = XHCI.lock();
+    for ctrl in guard.iter_mut() {
+        if ctrl.msc.iter().any(|block| block.disk.is_some_and(|d| d.index == index)) {
+            return Whereabouts::Here;
+        }
+        ctrl.forget_the_unreturned(now);
+        if ctrl.awaited.iter().any(|a| a.index == index) {
+            return Whereabouts::Awaited;
+        }
+    }
+    Whereabouts::Gone
+}
+
 /// How many disks this machine has bound since boot, and the number the next bind hands out.
 ///
 /// A counter and not a position, and never reused: `usb_storage::handle` indexes by it and a mount holds it for the disk's whole life.
@@ -651,6 +696,10 @@ pub struct XhciController {
     ///
     /// Claimed before Configure Endpoint, before the disk is known, since keying off a count of *bound* disks would hand a live endpoint's memory to the next one.
     msc: [MscBlock; MSC_BLOCKS],
+
+    /// Disks whose device left its port under this driver's reset, until the
+    /// same device binds or their window passes.
+    awaited: Vec<Awaited>,
 
     /// This controller's root-hub ports, sized from HCSPARAMS1 rather than fixed at 255.
     ports: Vec<PortState>,
@@ -1247,14 +1296,75 @@ impl XhciController {
             if self.msc[at].port != Some(port_idx) {
                 continue;
             }
-            // The disk's number does not come back: a mount holds it for the disk's whole life.
+            // A disk this driver's reset lost is held under its number; any other's number does not come back, since a mount holds it for the disk's whole life.
+            if self.msc[at].disk.is_some() {
+                self.hold_for_return(at, "its port disconnected");
+            }
             match core::mem::replace(&mut self.msc[at], MscBlock::FREE).disk {
                 Some(disk) => log!("usb-storage: disk {} unplugged from port {}; it is offline",
                     disk.index, port_idx + 1),
+                None if self.awaited.iter().any(|a| a.port_idx == port_idx) => log!(
+                    "usb-storage: port {}'s pool block is free again; the disk it held is waiting \
+                     for its device", port_idx + 1),
                 None => log!("usb-storage: the device this driver refused on port {} is gone; \
                     its pool block is free again", port_idx + 1),
             }
         }
+    }
+
+    /// Take the disk on pool block `at` out of service and hold its number for its device to come back, if its port was reset by this driver inside `toyos_xhci::identity::RETURN_WINDOW`; otherwise leave it where it is. `why` is how its going was seen.
+    ///
+    /// The block stays claimed by its port until that port's teardown: the slot's endpoint contexts still name it.
+    fn hold_for_return(&mut self, at: usize, why: &str) {
+        let now = crate::clock::nanos_since_boot();
+        let Some(disk) = self.msc[at].disk else { return };
+        let Some(returns_by) = disk.dev.returns_by(now) else { return };
+        self.msc[at].disk = None;
+        let port_idx = disk.dev.port_idx();
+        self.awaited.push(Awaited { index: disk.index, identity: *disk.dev.identity(), port_idx, returns_by });
+        log!(
+            "usb-storage: disk {} left port {} ({why}) after this driver reset it; it is held {} ms \
+             for the same device to come back",
+            disk.index,
+            u32::from(port_idx) + 1,
+            (returns_by - now) / 1_000_000
+        );
+    }
+
+    /// The number of a disk held for its device, if the device that bound as `identity` on `port_idx` is it; the record is spent either way it matches. Every held disk it is not says why.
+    fn adopt(&mut self, identity: &toyos_xhci::identity::Identity, port_idx: u8) -> Option<usize> {
+        self.forget_the_unreturned(crate::clock::nanos_since_boot());
+        let mut adopted = None;
+        self.awaited.retain(|held| {
+            if adopted.is_some() {
+                return true;
+            }
+            match toyos_xhci::identity::same(&held.identity, identity) {
+                Ok(()) => {
+                    adopted = Some(held.index);
+                    false
+                }
+                Err(why) => {
+                    log!("usb-storage: the device on port {} is not disk {} come back: {why}",
+                        u32::from(port_idx) + 1, held.index);
+                    true
+                }
+            }
+        });
+        adopted
+    }
+
+    /// Every held disk whose window has passed, lost for good; answers when the next one's does.
+    fn forget_the_unreturned(&mut self, now: u64) -> Option<u64> {
+        self.awaited.retain(|held| {
+            let waiting = now < held.returns_by;
+            if !waiting {
+                log!("usb-storage: disk {} did not come back within {} ms of its port reset; it \
+                     is offline", held.index, toyos_xhci::identity::RETURN_WINDOW / 1_000_000);
+            }
+            waiting
+        });
+        self.awaited.iter().map(|held| held.returns_by).min()
     }
 
     /// Ask the controller for a slot back, and record what its answer is owed.
@@ -1314,6 +1424,7 @@ impl XhciController {
         self.advance_outstanding();
         self.recover_endpoints();
         self.give_back_offline_slots();
+        let returns = self.forget_the_unreturned(crate::clock::nanos_since_boot());
 
         // Nothing below reads the event ring: every step `service_ports` takes is a submit, so one advance is enough.
         let mut wake_at = None;
@@ -1321,7 +1432,7 @@ impl XhciController {
             self.ports_dirty = false;
             wake_at = self.service_ports();
         }
-        earliest(wake_at, self.outstanding.wake_at())
+        earliest(earliest(wake_at, self.outstanding.wake_at()), returns)
     }
 
     /// One dword of an input context: index 0 is the control context, 1 the slot context, `dci + 1` an endpoint's.
