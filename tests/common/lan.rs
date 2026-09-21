@@ -11,6 +11,7 @@ use toyos_build::lan::{
 };
 use toyos_build::metaldevices;
 use toyos_build::metalprofile::Profile;
+use toyos_i219::ask::{Answer, Others, Reading};
 use toyos_i219::phy::{Outcome, PhyRefusal};
 
 use super::metal;
@@ -32,6 +33,12 @@ pub const ICS_BOOT: &str = "lanicscase";
 pub const PHY_CONFIG: &str = "tests/lanphycase";
 pub const PHY_BOOT: &str = "lanphycase";
 
+/// The same boot with netd's `--exit-with-mdio-ask` armed: netd resets the card,
+/// puts one question to the MDIO arbitration, withdraws it, and ends with the
+/// answer as its exit code. The card is never brought up on it.
+pub const ASK_CONFIG: &str = "tests/lanaskcase";
+pub const ASK_BOOT: &str = "lanaskcase";
+
 /// The kernel's own record that a claim's vector took a message, which is what
 /// the armed boot is for.
 const FIRST_MESSAGE: &str = "took its first message";
@@ -50,6 +57,9 @@ const QEMU_CONFIG: &str = "tests/e1000case";
 /// The same, with netd's `--exit-with-phy-outcome` armed.
 const PHY_QEMU_CONFIG: &str = "tests/e1000phycase";
 
+/// The same, with netd's `--exit-with-mdio-ask` armed.
+const ASK_QEMU_CONFIG: &str = "tests/e1000askcase";
+
 /// What QEMU's user-mode backend leases, and what it says about the network it
 /// leases on. Its own defaults, not this repository's: they are the oracle.
 const SLIRP_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
@@ -65,11 +75,12 @@ const ID: &str = "8086:15fc";
 pub const NIC: &str = "0000:00:1f.6";
 
 /// The T14's judge: the claim, the card, the lease, the host's own ping — and
-/// the two armed boots beside them.
+/// the three armed boots beside them.
 pub fn on_metal(
     back: &metal::Readback,
     provoked: &metal::Readback,
     probed: &metal::Readback,
+    asked: &metal::Readback,
 ) -> Result<(), String> {
     let profile = Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())?;
     let kernel = back.kernel();
@@ -219,6 +230,27 @@ pub fn on_metal(
         }
     }
 
+    // The arbitration's answer. **A measurement and not a verdict**: every
+    // reading the table encodes is what the boot was flashed to learn, so the
+    // one red here is a code outside it.
+    if asked.label != ASK_BOOT {
+        bad.push(format!(
+            "the arbitration reading was handed {}'s readback, and netd's exit code only means \
+             the arbitration's answer on {ASK_BOOT}",
+            asked.label
+        ));
+    } else {
+        match asked.exit_code(NETD) {
+            Ok(code) => match Reading::from_exit_code(code) {
+                Some(reading) => eprintln!("  [lan] netd exited {code} on {ASK_BOOT}: {reading}"),
+                None => bad.push(format!(
+                    "netd exited {code} on {ASK_BOOT}, which is no reading the ask encodes"
+                )),
+            },
+            Err(why) => bad.push(why),
+        }
+    }
+
     if bad.is_empty() {
         return Ok(());
     }
@@ -238,21 +270,8 @@ pub fn lan_phy_exit_code(
     _c_bins: &[(String, Vec<u8>)],
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let case = super::compile::repo_root().join(PHY_QEMU_CONFIG);
-    let options = BootOptions { profile: qemu::Profile::E1000e, ..Default::default() };
-    if !qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")) {
-        return Err("this test needs an Intel NIC and the profile has none".to_string());
-    }
-    let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
-    let mut console = guest.boot_log().to_string();
-    let exited = format!("{}{NETD} pid=", bootlog::EXIT);
-    qemu::await_marker(&mut guest, &mut console, &exited, "netd to exit with the PHY outcome")?;
-    drop(guest);
+    let (code, console) = netd_exit_on_the_82574(PHY_QEMU_CONFIG)?;
     let log = serial::Serial::named("the lan probe boot", console.as_str());
-    let exit = metaldevices::exit_of(log.text(), NETD)
-        .ok_or_else(|| format!("no readable `{exited}` record:\n{}", log.text()))?;
-    let code = i32::try_from(exit.code)
-        .map_err(|_| format!("netd's exit record carries {}, which is no i32", exit.code))?;
     match Outcome::from_exit_code(code) {
         Some(Outcome::NotThisRegisterMap) => {}
         other => {
@@ -267,6 +286,60 @@ pub fn lan_phy_exit_code(
     eprintln!(
         "  [lan] netd exited {code}, which the driver crate's table reads as NotThisRegisterMap"
     );
+    Ok(())
+}
+
+/// Boot a config whose netd ends itself in front of QEMU's 82574, and hand back
+/// the code the kernel's `exit:` record carries and the console it was read off.
+fn netd_exit_on_the_82574(config: &str) -> Result<(i32, String), String> {
+    let case = super::compile::repo_root().join(config);
+    let options = BootOptions { profile: qemu::Profile::E1000e, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")) {
+        return Err("this test needs an Intel NIC and the profile has none".to_string());
+    }
+    let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
+    let mut console = guest.boot_log().to_string();
+    let exited = format!("{}{NETD} pid=", bootlog::EXIT);
+    qemu::await_marker(&mut guest, &mut console, &exited, "netd to exit with its probe's code")?;
+    drop(guest);
+    let exit = metaldevices::exit_of(&console, NETD)
+        .ok_or_else(|| format!("no readable `{exited}` record:\n{console}"))?;
+    let code = i32::try_from(exit.code)
+        .map_err(|_| format!("netd's exit record carries {}, which is no i32", exit.code))?;
+    Ok((code, console))
+}
+
+/// The ask's channel, end to end, in front of a register file this repository
+/// did not write: netd armed with the flag resets QEMU's 82574, registers
+/// §4.5.2's software request, reads it back, withdraws it and exits with the
+/// reading's code, and the record reads back through the driver crate's table.
+///
+/// Nothing in front of QEMU's 82574 shares its PHY, so the reading it owes is
+/// the request read straight back with nobody else's bit beside it.
+pub fn lan_mdio_ask_exit_code(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let (code, console) = netd_exit_on_the_82574(ASK_QEMU_CONFIG)?;
+    let log = serial::Serial::named("the lan ask boot", console.as_str());
+    let owed = Reading::Asked {
+        before: Others::Nobody,
+        answer: Answer::GrantedQuickly,
+        after: Others::Nobody,
+    };
+    match Reading::from_exit_code(code) {
+        Some(reading) if reading == owed => {}
+        other => {
+            return Err(format!(
+                "netd exited {code} on the 82574, which the table reads as {other:?} and not \
+                 {owed:?}"
+            ))
+        }
+    }
+    log.must_say(&owed.to_string())?;
+    log.must_be_clean()?;
+    eprintln!("  [lan] netd exited {code}: {owed}");
     Ok(())
 }
 

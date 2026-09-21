@@ -142,31 +142,56 @@ pub struct Nic {
     reported: Latch<(toyos_i219::Counters, toyos_i219::Link)>,
 }
 
+/// The claim's register window, mapped.
+fn registers(dev: &PciDev) -> Result<Bar, Opening> {
+    let info = dev
+        .describe()
+        .map_err(KernelRefused::on("the claim's description"))
+        .map_err(Opening::Kernel)?;
+    let (bar, bytes) = info
+        .bar_bytes
+        .iter()
+        .enumerate()
+        .find(|(_, bytes)| **bytes >= toyos_i219::regs::REGISTER_BYTES as u64)
+        .map(|(index, bytes)| (index as u32, *bytes))
+        .ok_or(Opening::NoWindow)?;
+    let mapped = dev
+        .map_bar(bar, bytes)
+        .map_err(KernelRefused::on("the BAR"))
+        .map_err(Opening::Kernel)?;
+    crate::say!(
+        "netd: I219: PCI {:02x}:{:02x}.{} registers in BAR {bar} ({bytes:#x} bytes)",
+        info.bus,
+        info.dev,
+        info.func,
+    );
+    // SAFETY: `map_bar` answered `bytes` bytes of live mapping, and
+    // `mapped` is moved into the `Bar` that carries the window.
+    let window = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
+    Ok(Bar { window, _mapped: mapped })
+}
+
+/// `crate::EXIT_WITH_MDIO_ASK`: reset the function and put one question to the
+/// MDIO arbitration. No grant is taken and no ring exists, so the function
+/// masters nothing on this path.
+///
+/// The claim is borrowed, because when it is given up is the caller's decision
+/// and not this one's.
+pub fn ask(dev: &PciDev) -> Result<toyos_i219::ask::Reading, Opening> {
+    let bar = registers(dev)?;
+    let reading = toyos_i219::ask::after_reset(&bar, &Monotonic, |nanos| {
+        std::thread::sleep(std::time::Duration::from_nanos(nanos))
+    })
+    .map_err(Opening::Driver)?;
+    crate::say!("netd: I219: {reading}");
+    Ok(reading)
+}
+
 impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
     pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
         let dev = Rc::new(dev);
-        let info = dev
-            .describe()
-            .map_err(KernelRefused::on("the claim's description"))
-            .map_err(Opening::Kernel)?;
-        let (bar, bytes) = info
-            .bar_bytes
-            .iter()
-            .enumerate()
-            .find(|(_, bytes)| **bytes >= toyos_i219::regs::REGISTER_BYTES as u64)
-            .map(|(index, bytes)| (index as u32, *bytes))
-            .ok_or(Opening::NoWindow)?;
-        let mapped = dev
-            .map_bar(bar, bytes)
-            .map_err(KernelRefused::on("the BAR"))
-            .map_err(Opening::Kernel)?;
-        crate::say!(
-            "netd: I219: PCI {:02x}:{:02x}.{} registers in BAR {bar} ({bytes:#x} bytes)",
-            info.bus,
-            info.dev,
-            info.func,
-        );
+        let bar = registers(&dev)?;
 
         let region = dev
             .dma_alloc(toyos_i219::GRANT_BYTES)
@@ -179,11 +204,9 @@ impl Nic {
             Window::new(region.memory.as_ptr(), toyos_i219::GRANT_BYTES as usize)
         };
 
-        // SAFETY: the same mapping, and `mapped` is moved into the `Bar` below.
-        let registers = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
         let driver = toyos_i219::I219::open(
             part,
-            Bar { window: registers, _mapped: mapped },
+            bar,
             Monotonic,
             Grant { window: grant, device_base, _region: region },
             Claim(Rc::clone(&dev)),

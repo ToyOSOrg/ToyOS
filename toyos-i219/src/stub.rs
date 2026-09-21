@@ -26,7 +26,7 @@
 //! them.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::vec::Vec;
 use std::{format, vec};
@@ -308,6 +308,11 @@ struct PhyModel {
     /// How many times the engine registered its request right after an agent
     /// read the interface free, so a test about that race can see it happened.
     engine_cut_ins: u32,
+    /// The modelled clock at which an engine that holds the interface writes
+    /// its bit back to 0b — §4.5.2: "once the access completes, the
+    /// controlling agent must write a 0b to its ownership bit" — so a test
+    /// can place the grant on either side of a bound.
+    engine_lets_go_at: Option<u64>,
 }
 
 impl PhyModel {
@@ -357,6 +362,7 @@ impl PhyModel {
             ownership_readings: Vec::new(),
             engine_takes_it_at_the_request: false,
             engine_cut_ins: 0,
+            engine_lets_go_at: None,
         }
     }
 }
@@ -424,6 +430,11 @@ struct Model {
     messages: u32,
     /// One offset in the window that nothing decodes, which answers ones.
     not_decoding: Option<usize>,
+    /// Every register offset the driver has read or written, so a test about
+    /// what a path does *not* reach can say so.
+    touched: BTreeSet<usize>,
+    /// The same for writes alone.
+    written: BTreeSet<usize>,
     /// Whether the device does its work when a tail register is written.
     ///
     /// **Nothing in the datasheet says *when* the hardware acts** — a fetch
@@ -485,6 +496,8 @@ impl Model {
             tx_holding: Vec::new(),
             messages: 0,
             not_decoding: None,
+            touched: BTreeSet::new(),
+            written: BTreeSet::new(),
             held: false,
         };
         model.power_on();
@@ -657,6 +670,7 @@ impl Model {
             "seed {}: a {reg:#x} register read is outside the file",
             self.seed
         );
+        self.touched.insert(reg);
         // Nothing decodes this offset, so the bus answers ones — which is a
         // value and not a register's value.
         if self.not_decoding == Some(reg) {
@@ -716,6 +730,10 @@ impl Model {
                 if self.phy.firmware_requests > 0 {
                     self.phy.firmware_requests -= 1;
                 }
+                if self.phy.engine_lets_go_at.is_some_and(|at| self.nanos >= at) {
+                    self.phy.engine_lets_go_at = None;
+                    self.phy.mdio_sticks = false;
+                }
                 self.refresh_ownership();
                 let answer = self.get(regs::EXTCNF_CTRL);
                 // The manageability request nothing schedules: the one that
@@ -761,6 +779,8 @@ impl Model {
             "seed {}: a {reg:#x} register write is outside the file",
             self.seed
         );
+        self.touched.insert(reg);
+        self.written.insert(reg);
         assert!(
             self.not_decoding != Some(reg),
             "seed {}: the driver wrote {value:#010x} into {reg:#x}, which nothing decodes — the \
@@ -1480,6 +1500,35 @@ impl Nic {
     /// interface was read free.
     pub fn engine_cut_ins(&self) -> u32 {
         self.0.borrow().phy.engine_cut_ins
+    }
+
+    /// The engine holds the interface from now until the modelled clock
+    /// reads `nanos`.
+    pub fn engine_holds_the_interface_until(&self, nanos: u64) {
+        let mut model = self.0.borrow_mut();
+        model.phy.mdio_sticks = true;
+        model.phy.engine_lets_go_at = Some(nanos);
+    }
+
+    /// The modelled clock moves on with nothing reaching the part: what a
+    /// caller that gave the processor away looks like from here.
+    pub fn sleep(&self, nanos: u64) {
+        self.0.borrow_mut().nanos += nanos;
+    }
+
+    /// Every register offset the driver has read or written.
+    pub fn touched(&self) -> BTreeSet<usize> {
+        self.0.borrow().touched.clone()
+    }
+
+    /// Every register offset the driver has written.
+    pub fn written(&self) -> BTreeSet<usize> {
+        self.0.borrow().written.clone()
+    }
+
+    /// The modelled clock, without moving it.
+    pub fn now(&self) -> u64 {
+        self.0.borrow().nanos
     }
 
     /// Nothing in the window decodes `reg`, so reads of it answer ones.

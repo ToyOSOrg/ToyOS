@@ -10,7 +10,8 @@
 //! 82574's PHY on the controller's own die; the T14's is a MAC in the PCH whose
 //! PHY is separate silicon the Management Engine shares, reached over `MDIC`
 //! under §4.5.2's ownership arbitration. [`Part`] is which one this claim is,
-//! and [`phy`] is everything that follows from it.
+//! and [`phy`] is everything that follows from it. [`ask`] puts one question to
+//! that arbitration and reaches nothing behind it.
 //!
 //! # The boundary
 //!
@@ -67,6 +68,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod ask;
 pub mod phy;
 pub mod regs;
 
@@ -383,6 +385,85 @@ const RESET_SETTLE_NANOS: u64 = 1_000;
 /// the PCIe Master Enable Status bit is not cleared within a given time".
 const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
 
+/// What [`reset`] leaves its caller.
+struct Reset {
+    /// Whether §3.1.3.10's master quiesce finished before the reset was issued.
+    master_quiet: bool,
+    /// When `CTRL.RST` was written, which §10.2.2.1's two bounds and §9.2's
+    /// delay before the first MDIO access are measured from.
+    at: u64,
+}
+
+/// §4.6.1's reset, with every interrupt masked on both sides of it.
+///
+/// **One function because two callers owe the part the same sequence**:
+/// [`I219::open`], and [`ask::after_reset`], whose reading is of the part as
+/// the bring-up would find it.
+fn reset<R: Registers, C: Clock>(regs: &R, clock: &C) -> Result<Reset, Refusal> {
+    // A window nothing decodes answers ones on every access, and a driver
+    // that went on would read a MAC address of `ff:ff:ff:ff:ff:ff` out of
+    // it and never say why nothing arrived.
+    if regs.read(regs::STATUS) == u32::MAX {
+        return Err(Refusal::Dead);
+    }
+
+    // §4.6.1: interrupts are masked before the reset, so nothing arrives
+    // while the register file is being rebuilt. `ICR` is read afterwards
+    // because §10.2.4.1's case 1 — mask all — is the one arm that clears
+    // it unconditionally.
+    regs.write(regs::IMC, u32::MAX);
+    let _ = regs.read(regs::ICR);
+
+    // §10.2.2.1: "Before issuing this reset, software has to insure that Tx
+    // and Rx processes are stopped by following the procedure described in
+    // Section 3.1.3.10" — §3.1.3.10's master disable, which is how a
+    // function firmware left driving stops reaching memory before its rings
+    // are rebuilt under it. The expiry is not a refusal because the same
+    // section sanctions it: "the software device driver might time out if
+    // the PCIe Master Enable Status bit is not cleared within a given
+    // time", and the reset clears the bit either way.
+    let held = regs.read(regs::CTRL);
+    regs.write(regs::CTRL, held | ctrl::GIO_MASTER_DISABLE);
+    let started = clock.nanos();
+    let master_quiet = loop {
+        if regs.read(regs::STATUS) & status::GIO_MASTER_ENABLE == 0 {
+            break true;
+        }
+        if clock.nanos().saturating_sub(started) >= MASTER_QUIESCE_DEADLINE_NANOS {
+            break false;
+        }
+    };
+
+    // §10.2.2.1: a read-modify-write, because two of this register's
+    // reserved bits are documented as "Set to 1b" and one as "must be set
+    // to 1b" — a driver that wrote a value it composed itself would clear
+    // them.
+    let held = regs.read(regs::CTRL);
+    regs.write(regs::CTRL, held | ctrl::RST);
+    // The write is the event §10.2.2.1's two bounds and §9.2's delay before
+    // the first MDIO access are measured from.
+    let reset_at = clock.nanos();
+    // The settle is a wait and not a poll: §10.2.2.1 owes the microsecond
+    // to "attempting to check to see if the bit has cleared or attempting
+    // to access (read or write) any other device register" alike, so there
+    // is nothing this driver may read to shorten it.
+    while clock.nanos().saturating_sub(reset_at) < RESET_SETTLE_NANOS {}
+    loop {
+        if regs.read(regs::CTRL) & ctrl::RST == 0 {
+            break;
+        }
+        let waited = clock.nanos().saturating_sub(reset_at);
+        if waited >= RESET_DEADLINE_NANOS {
+            return Err(Refusal::ResetUnfinished { after_nanos: waited });
+        }
+    }
+    // Again after the reset: §4.6.1 keeps them masked until the rings
+    // exist, and the reset itself is an event the part may have recorded.
+    regs.write(regs::IMC, u32::MAX);
+    let _ = regs.read(regs::ICR);
+    Ok(Reset { master_quiet, at: reset_at })
+}
+
 /// Which part the claim is on.
 ///
 /// **The parent's answer and never a probe**: `/system/bin/init` moved a claim
@@ -453,67 +534,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if (dma.bytes() as u64) < GRANT_BYTES {
             return Err(Refusal::Grant { given: dma.bytes(), needed: GRANT_BYTES as usize });
         }
-        // A window nothing decodes answers ones on every access, and a driver
-        // that went on would read a MAC address of `ff:ff:ff:ff:ff:ff` out of
-        // it and never say why nothing arrived.
-        if regs.read(regs::STATUS) == u32::MAX {
-            return Err(Refusal::Dead);
-        }
-
-        // §4.6.1: interrupts are masked before the reset, so nothing arrives
-        // while the register file is being rebuilt. `ICR` is read afterwards
-        // because §10.2.4.1's case 1 — mask all — is the one arm that clears
-        // it unconditionally.
-        regs.write(regs::IMC, u32::MAX);
-        let _ = regs.read(regs::ICR);
-
-        // §10.2.2.1: "Before issuing this reset, software has to insure that Tx
-        // and Rx processes are stopped by following the procedure described in
-        // Section 3.1.3.10" — §3.1.3.10's master disable, which is how a
-        // function firmware left driving stops reaching memory before its rings
-        // are rebuilt under it. The expiry is not a refusal because the same
-        // section sanctions it: "the software device driver might time out if
-        // the PCIe Master Enable Status bit is not cleared within a given
-        // time", and the reset clears the bit either way.
-        let held = regs.read(regs::CTRL);
-        regs.write(regs::CTRL, held | ctrl::GIO_MASTER_DISABLE);
-        let started = clock.nanos();
-        let master_quiet = loop {
-            if regs.read(regs::STATUS) & status::GIO_MASTER_ENABLE == 0 {
-                break true;
-            }
-            if clock.nanos().saturating_sub(started) >= MASTER_QUIESCE_DEADLINE_NANOS {
-                break false;
-            }
-        };
-
-        // §10.2.2.1: a read-modify-write, because two of this register's
-        // reserved bits are documented as "Set to 1b" and one as "must be set
-        // to 1b" — a driver that wrote a value it composed itself would clear
-        // them.
-        let held = regs.read(regs::CTRL);
-        regs.write(regs::CTRL, held | ctrl::RST);
-        // The write is the event §10.2.2.1's two bounds and §9.2's delay before
-        // the first MDIO access are measured from.
-        let reset_at = clock.nanos();
-        // The settle is a wait and not a poll: §10.2.2.1 owes the microsecond
-        // to "attempting to check to see if the bit has cleared or attempting
-        // to access (read or write) any other device register" alike, so there
-        // is nothing this driver may read to shorten it.
-        while clock.nanos().saturating_sub(reset_at) < RESET_SETTLE_NANOS {}
-        loop {
-            if regs.read(regs::CTRL) & ctrl::RST == 0 {
-                break;
-            }
-            let waited = clock.nanos().saturating_sub(reset_at);
-            if waited >= RESET_DEADLINE_NANOS {
-                return Err(Refusal::ResetUnfinished { after_nanos: waited });
-            }
-        }
-        // Again after the reset: §4.6.1 keeps them masked until the rings
-        // exist, and the reset itself is an event the part may have recorded.
-        regs.write(regs::IMC, u32::MAX);
-        let _ = regs.read(regs::ICR);
+        let Reset { master_quiet, at: reset_at } = reset(&regs, &clock)?;
 
         // §10.2.5.23: the reset reloads entry 0 from the NVM, so this is read
         // after it and not before.

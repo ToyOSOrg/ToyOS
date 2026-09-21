@@ -2590,10 +2590,12 @@ mod tests {
         "tests/desktopaudiocase/system.toml",
         "tests/doomcase/system.toml",
         "tests/doommusiccase/system.toml",
+        "tests/e1000askcase/system.toml",
         "tests/e1000case/system.toml",
         "tests/e1000phycase/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
+        "tests/lanaskcase/system.toml",
         "tests/lancase/system.toml",
         "tests/lanicscase/system.toml",
         "tests/lanphycase/system.toml",
@@ -2764,12 +2766,14 @@ mod tests {
         assert!(one_claimant_per_device(&bad, None).is_err());
     }
 
-    /// netd's two actuators that only its Intel driver answers, spelled here
+    /// netd's three actuators that only its Intel driver answers, spelled here
     /// and held to netd's own declarations by
     /// [`netd_declares_the_flags_this_gate_spells`].
     const PROVOKE_MESSAGE: &str = "--provoke-message";
     const EXIT_WITH_PHY_OUTCOME: &str = "--exit-with-phy-outcome";
-    const INTEL_ACTUATORS: [&str; 2] = [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME];
+    const EXIT_WITH_MDIO_ASK: &str = "--exit-with-mdio-ask";
+    const INTEL_ACTUATORS: [&str; 3] =
+        [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME, EXIT_WITH_MDIO_ASK];
 
     /// netd's main module, which is where both halves of this gate's spelling
     /// live: nothing links the two crates, so the build system reads the source.
@@ -2832,13 +2836,14 @@ mod tests {
         cards
     }
 
-    /// netd's two Intel-only actuators — `--provoke-message` writes §10.2.4.4's
-    /// `ICS` and `--exit-with-phy-outcome` reports a PHY bring-up, and virtio's
-    /// driver has neither — so a boot config that arms either on a card netd
+    /// netd's three Intel-only actuators — `--provoke-message` writes
+    /// §10.2.4.4's `ICS`, `--exit-with-phy-outcome` reports a PHY bring-up and
+    /// `--exit-with-mdio-ask` asks §4.5.2's arbitration, and virtio's driver
+    /// has none of the three — so a boot config that arms one on a card netd
     /// opens with any other driver is a boot that panics instead of answering
-    /// the question it was flashed for. One that arms both on one program is
-    /// refused too: the message one asks for is taken by a pass the other ends
-    /// the process before.
+    /// the question it was flashed for. One that arms two on one program is
+    /// refused too: a probe ends the process before the point another of them
+    /// acts at.
     fn an_armed_intel_actuator_claims_a_card_the_driver_opens(
         cfg: &SystemConfig,
         cards: &[String],
@@ -2904,8 +2909,14 @@ mod tests {
             assert!(armed_on("pci:8086:1502", &one).is_err(), "{flag}");
             assert!(armed_on(&cards[0], &one).is_ok(), "{flag}");
         }
-        let both = format!("\"{PROVOKE_MESSAGE}\", \"{EXIT_WITH_PHY_OUTCOME}\"");
-        assert!(armed_on(&cards[0], &both).is_err());
+        for (one, other) in [
+            (PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME),
+            (PROVOKE_MESSAGE, EXIT_WITH_MDIO_ASK),
+            (EXIT_WITH_PHY_OUTCOME, EXIT_WITH_MDIO_ASK),
+        ] {
+            let both = format!("\"{one}\", \"{other}\"");
+            assert!(armed_on(&cards[0], &both).is_err(), "{one} beside {other}");
+        }
     }
 
     /// A device name the ABI does not know renders fine and leaves init with a

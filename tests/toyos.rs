@@ -666,6 +666,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // driver crate's table reads it back. Records only; no clock in it. Fast
     // with the UNMEASURED bootstrap marker until priced.
     ("lan_phy_exit_code", Sched::Parallel, Tier::Fast),
+    // The MDIO ask's channel on the same part: netd registers §4.5.2's software
+    // request, withdraws it, and exits with the reading's code. Records only;
+    // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
+    ("lan_mdio_ask_exit_code", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it; `RELEGATED` says what leaves the per-PR tier
@@ -1331,7 +1335,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         "lan_dhcp_lease",
-        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0], b[1], b[2]) },
+        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0], b[1], b[2], b[3]) },
     ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
@@ -1706,12 +1710,13 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 /// The cable's own boot: netd in front of the T14's I219, and one job that
 /// holds the machine up long enough for the host to reach it. The second arm is
 /// the same boot with netd's delivery actuator armed, the third the same boot
-/// with its PHY probe armed, and both verdicts are read out of the kernel's
-/// log alone.
+/// with its PHY probe armed, the fourth the same boot with its MDIO ask armed,
+/// and all three are read out of the kernel's log alone.
 const LANCASE: &[metal::Arm] = &[
     metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) },
     metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS),
     metal::once(lan::PHY_BOOT, lan::PHY_CONFIG, &[], lan::JOBS),
+    metal::once(lan::ASK_BOOT, lan::ASK_CONFIG, &[], lan::JOBS),
 ];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
@@ -13719,6 +13724,7 @@ fn run_machine_test(
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
         "lan_phy_exit_code" => lan::lan_phy_exit_code(test_config, c_bins, rust_bins),
+        "lan_mdio_ask_exit_code" => lan::lan_mdio_ask_exit_code(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO),
         "https_tls13_e1000e" => common::https::tls13_judge(rust_bins, common::https::E1000E),

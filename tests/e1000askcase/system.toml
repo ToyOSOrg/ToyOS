@@ -1,0 +1,18 @@
+# `tests/e1000case` with netd's MDIO ask armed: netd resets the card, puts one
+# question to the MDIO arbitration and ends with the answer as its exit code.
+# Nothing here receives `netd`, because there is no netd left to connect to
+# once it has answered.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:10d3"]
+args = ["--exit-with-mdio-ask"]
+
+[programs.test-runner]
+syscap = ["logread"]

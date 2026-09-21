@@ -1,0 +1,21 @@
+# `tests/lancase` with netd's MDIO ask armed, and nothing else: netd resets the
+# card, puts one question to the MDIO arbitration, withdraws it and ends with
+# the answer as its exit code, which the kernel's `exit:` record carries off a
+# machine whose console reaches nobody. The card is never brought up on this
+# boot. Like `tests/lancase`, nothing here reaches the internal NVMe: no
+# `[disks]` row, and the only device any program claims is the PCI function
+# named below.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:15fc"]
+args = ["--exit-with-mdio-ask"]
+
+[programs.test-runner]
+syscap = ["logread"]

@@ -68,6 +68,33 @@ const PROVOKE_MESSAGE: &str = "--provoke-message";
 /// taken by a pass this process would not live to make.
 const EXIT_WITH_PHY_OUTCOME: &str = "--exit-with-phy-outcome";
 
+/// The probe under which this process resets the card, puts one question to
+/// §4.5.2's MDIO arbitration and ends with the answer as its exit code, through
+/// `toyos_i219::ask::Reading`'s table.
+///
+/// **The card is never brought up under it**: no grant, no ring, no PHY
+/// transaction. Armed the same way as the two above and never beside either,
+/// because it ends this process before the point either of them acts at.
+const EXIT_WITH_MDIO_ASK: &str = "--exit-with-mdio-ask";
+
+/// How long this process keeps the claim once [`EXIT_WITH_MDIO_ASK`] has its
+/// answer.
+///
+/// **A margin, and no requirement this driver can cite**: giving the claim up
+/// makes the kernel reset the function, and how soon after the driver's own
+/// `CTRL.RST` this part tolerates that is unmeasured. The ask can be over ten
+/// milliseconds after that reset, and the only boots the T14 has come back from
+/// with a netd that ended itself are ones whose bring-up waited out its whole
+/// deadline first — so this keeps further from the reset than that.
+const ASK_EXIT_DWELL: Duration = Duration::from_millis(500);
+
+/// The three, which cannot share a boot.
+const ACTUATORS: [&str; 3] = [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME, EXIT_WITH_MDIO_ASK];
+
+fn armed(actuator: &str) -> bool {
+    std::env::args().any(|arg| arg == actuator)
+}
+
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
@@ -104,6 +131,17 @@ impl Card {
     }
 
     fn intel(claim: toyos::PciDev, part: Part) -> Self {
+        // Before the bring-up and instead of it: the question is about the
+        // part as a bring-up finds it, so none may have run.
+        if armed(EXIT_WITH_MDIO_ASK) {
+            match i219::ask(&claim) {
+                Ok(reading) => {
+                    std::thread::sleep(ASK_EXIT_DWELL);
+                    std::process::exit(reading.exit_code())
+                }
+                Err(why) => Self::undrivable(why),
+            }
+        }
         match i219::Nic::open(claim, part) {
             Ok(nic) => Self::Intel(nic),
             Err(why) => Self::undrivable(why),
@@ -111,6 +149,11 @@ impl Card {
     }
 
     fn virtio(claim: toyos::PciDev) -> Self {
+        if armed(EXIT_WITH_MDIO_ASK) {
+            Self::undrivable(format_args!(
+                "{EXIT_WITH_MDIO_ASK} asks §4.5.2's MDIO arbitration, which this card has not"
+            ));
+        }
         match VirtioNet::open(claim) {
             Ok(nic) => Self::Virtio(nic),
             Err(why) => Self::undrivable(why),
@@ -1340,14 +1383,16 @@ fn main() {
     };
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
-    let nic = open(claim);
-    let armed = |actuator: &str| std::env::args().any(|arg| arg == actuator);
-    if armed(PROVOKE_MESSAGE) && armed(EXIT_WITH_PHY_OUTCOME) {
+    // Before the card is opened, because one of the three ends this process
+    // inside that call.
+    let asked_for: Vec<&str> = ACTUATORS.into_iter().filter(|actuator| armed(actuator)).collect();
+    if asked_for.len() > 1 {
         panic!(
-            "netd: {PROVOKE_MESSAGE} and {EXIT_WITH_PHY_OUTCOME} cannot share a boot: the \
-             message one asks for is taken by a pass the other ends this process before"
+            "netd: {asked_for:?} cannot share a boot: a probe ends this process before the \
+             point another of them acts at"
         );
     }
+    let nic = open(claim);
     if armed(PROVOKE_MESSAGE) {
         nic.provoke_message();
     }

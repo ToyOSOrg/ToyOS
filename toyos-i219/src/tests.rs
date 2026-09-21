@@ -1786,3 +1786,322 @@ fn a_message_is_raised_only_when_the_caller_asks_for_one() {
         );
     }
 }
+
+// --- the arbitration, asked ---
+
+use crate::ask::{self, Answer, Others, Reading};
+
+/// A part whose arbitration moves only when a test moves it: neither of the
+/// two latitudes that put the engine on the interface unasked.
+fn quiet_arbitration(seed: u64, mutex: bool) -> Nic {
+    Nic::with(
+        seed,
+        Part::I219,
+        Permits {
+            firmware_takes_the_mdio_interface: false,
+            firmware_requests_after_a_free_read: false,
+            mdio_flag_is_a_plain_mutex: mutex,
+            ..Permits::default()
+        },
+    )
+}
+
+fn asked(nic: &Nic) -> Reading {
+    let (bar, clock, _, _) = nic.parts();
+    ask::after_reset(&bar, &clock, |nanos| nic.sleep(nanos))
+        .unwrap_or_else(|why| panic!("{}", nic.because(&format!("the reset refused it: {why}"))))
+}
+
+/// The reset's own registers and `EXTCNF_CTRL`: no `MDIC`, and nothing else.
+fn only_the_reset_and_the_arbitration(nic: &Nic) {
+    let reached: Vec<usize> = nic.touched().into_iter().collect();
+    let mut allowed = vec![
+        regs::CTRL,
+        regs::STATUS,
+        regs::ICR,
+        regs::IMC,
+        regs::EXTCNF_CTRL,
+    ];
+    allowed.sort_unstable();
+    assert_eq!(
+        reached,
+        allowed,
+        "{}",
+        nic.because("the question reached a register it has no business in")
+    );
+}
+
+/// §4.5.2's handshake under both of its readings and every holder the model
+/// has, each driven on the part and not handed to the table as a literal.
+#[test]
+fn every_answer_the_arbitration_can_give_is_read_off_the_part() {
+    type Arrange = fn(&Nic);
+    let late = ask::QUICK_NANOS * 5;
+    assert!(late < ask::BOUND_NANOS);
+    let cases: [(u64, bool, Arrange, Others, Answer, Others); 8] = [
+        // The engine's bit stands for the boot and the flag is a mutex beside it.
+        (
+            80,
+            true,
+            |n| n.mdio_never_granted(),
+            Others::Manageability,
+            Answer::GrantedQuickly,
+            Others::Manageability,
+        ),
+        // The same engine under the grant reading: the bit never reads back.
+        (
+            81,
+            false,
+            |n| n.mdio_never_granted(),
+            Others::Manageability,
+            Answer::NeverGranted,
+            Others::Manageability,
+        ),
+        (
+            82,
+            false,
+            |n| n.engine_holds_the_interface_until(ask::QUICK_NANOS / 2),
+            Others::Manageability,
+            Answer::GrantedQuickly,
+            Others::Nobody,
+        ),
+        (
+            83,
+            false,
+            |n| n.engine_holds_the_interface_until(ask::QUICK_NANOS * 5),
+            Others::Manageability,
+            Answer::GrantedSlowly,
+            Others::Nobody,
+        ),
+        (
+            84,
+            false,
+            |_| {},
+            Others::Nobody,
+            Answer::GrantedQuickly,
+            Others::Nobody,
+        ),
+        (
+            85,
+            true,
+            |n| n.hardware_holds_the_mdio_interface(),
+            Others::Hardware,
+            Answer::GrantedQuickly,
+            Others::Hardware,
+        ),
+        // "The priority order is manageability, software and then hardware."
+        (
+            86,
+            false,
+            |n| n.hardware_holds_the_mdio_interface(),
+            Others::Hardware,
+            Answer::GrantedQuickly,
+            Others::Nobody,
+        ),
+        (
+            87,
+            true,
+            |n| {
+                n.hardware_holds_the_mdio_interface();
+                n.mdio_never_granted();
+            },
+            Others::HardwareAndManageability,
+            Answer::GrantedQuickly,
+            Others::HardwareAndManageability,
+        ),
+    ];
+    for (seed, mutex, arrange, before, answer, after) in cases {
+        let nic = quiet_arbitration(seed, mutex);
+        arrange(&nic);
+        let reading = asked(&nic);
+        assert_eq!(
+            reading,
+            Reading::Asked {
+                before,
+                answer,
+                after
+            },
+            "{}",
+            nic.because("the arbitration was read as something the part did not answer")
+        );
+        assert_eq!(
+            nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
+            0,
+            "{}",
+            nic.because("the request was left standing")
+        );
+        only_the_reset_and_the_arbitration(&nic);
+        assert_eq!(Reading::from_exit_code(reading.exit_code()), Some(reading));
+    }
+}
+
+/// The three instants the reading is made of, on the modelled clock: never
+/// before §9.2's delay, never given up on before the bound, and never held
+/// past the sample that saw the grant by more than one cadence.
+#[test]
+fn the_question_is_bounded_and_a_grant_is_given_straight_back() {
+    let nic = quiet_arbitration(88, false);
+    nic.mdio_never_granted();
+    assert!(matches!(
+        asked(&nic),
+        Reading::Asked {
+            answer: Answer::NeverGranted,
+            ..
+        }
+    ));
+    let took = nic.now();
+    assert!(
+        took >= toyos_phy::LCD_RESET_DELAY_NANOS + ask::BOUND_NANOS,
+        "{}",
+        nic.because("the request was given up on before its bound")
+    );
+    assert!(
+        took < toyos_phy::LCD_RESET_DELAY_NANOS + ask::BOUND_NANOS + 3 * ask::CADENCE_NANOS,
+        "{}",
+        nic.because("the request outlived its bound")
+    );
+
+    let nic = quiet_arbitration(89, false);
+    let lets_go = ask::QUICK_NANOS * 5;
+    nic.engine_holds_the_interface_until(lets_go);
+    assert!(matches!(
+        asked(&nic),
+        Reading::Asked {
+            answer: Answer::GrantedSlowly,
+            ..
+        }
+    ));
+    assert!(
+        nic.now() < lets_go + 3 * ask::CADENCE_NANOS,
+        "{}",
+        nic.because("a grant was held for longer than it took to see it")
+    );
+}
+
+/// A software bit already set is another agent's, so nothing is asked over it
+/// and nothing is cleared — under either reading of §4.5.2.
+#[test]
+fn a_software_flag_that_already_stands_is_not_asked_over() {
+    for (seed, mutex) in [(90, true), (91, false)] {
+        let nic = quiet_arbitration(seed, mutex);
+        nic.mdio_flag_held_by_another_agent();
+        assert_eq!(asked(&nic), Reading::SoftwareFlagStood);
+        assert!(nic.now() >= toyos_phy::DEADLINE_NANOS);
+        assert!(
+            !nic.written().contains(&regs::EXTCNF_CTRL),
+            "{}",
+            nic.because("a request was written over a flag that was already somebody's")
+        );
+        assert_eq!(
+            nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
+            extcnf::MDIO_SW_OWNERSHIP
+        );
+        only_the_reset_and_the_arbitration(&nic);
+    }
+}
+
+#[test]
+fn an_arbitration_register_nothing_decodes_is_never_written() {
+    let nic = quiet_arbitration(92, true);
+    nic.window_does_not_decode(regs::EXTCNF_CTRL);
+    assert_eq!(asked(&nic), Reading::Unrouted);
+    assert!(!nic.written().contains(&regs::EXTCNF_CTRL));
+}
+
+/// The part with every latitude the datasheet gives it, the engine's unasked
+/// requests included: whatever it answers, the request does not outlive it.
+#[test]
+fn the_request_is_withdrawn_on_a_part_that_takes_every_latitude() {
+    for seed in 93..103 {
+        let nic = Nic::i219(seed);
+        let reading = asked(&nic);
+        assert!(
+            matches!(reading, Reading::Asked { .. }),
+            "{}",
+            nic.because(&format!("{reading:?}"))
+        );
+        assert_eq!(nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP, 0);
+        only_the_reset_and_the_arbitration(&nic);
+    }
+}
+
+/// One code per reading, every one inside the block the bring-up's table
+/// starts, none of them the panic's, and the two tables agreeing about the one
+/// code they share.
+#[test]
+fn every_reading_of_the_arbitration_has_one_exit_code_that_reads_back() {
+    use toyos_phy::Outcome;
+
+    let readings: Vec<Reading> = Reading::all().collect();
+    assert_eq!(
+        readings.len(),
+        2 + Answer::ALL.len() * Others::ALL.len() * Others::ALL.len()
+    );
+    let mut codes = Vec::new();
+    for reading in &readings {
+        let code = reading.exit_code();
+        assert!((64..128).contains(&code), "{reading:?} exits {code}");
+        assert_ne!(
+            code, 101,
+            "{reading:?} exits the code a panicking netd ends with"
+        );
+        assert_eq!(Reading::from_exit_code(code), Some(*reading));
+        match Outcome::from_exit_code(code) {
+            None => {}
+            Some(Outcome::Unrouted) => assert_eq!(*reading, Reading::Unrouted),
+            Some(other) => {
+                panic!("{reading:?} exits {code}, which the bring-up's table reads as {other:?}")
+            }
+        }
+        codes.push(code);
+    }
+    codes.sort_unstable();
+    codes.dedup();
+    assert_eq!(codes.len(), readings.len(), "two readings share a code");
+    assert_eq!(Reading::from_exit_code(0), None);
+    assert_eq!(Reading::from_exit_code(101), None);
+    assert_eq!(Reading::from_exit_code(128), None);
+    // The readings the T14's next boot is flashed to tell apart, by number, so
+    // a table that moved says so here before it says so on a machine.
+    let named = |before, answer, after| {
+        Reading::Asked {
+            before,
+            answer,
+            after,
+        }
+        .exit_code()
+    };
+    assert_eq!(Reading::SoftwareFlagStood.exit_code(), 78);
+    assert_eq!(
+        named(Others::Nobody, Answer::GrantedQuickly, Others::Nobody),
+        79
+    );
+    assert_eq!(
+        named(
+            Others::Manageability,
+            Answer::GrantedQuickly,
+            Others::Manageability
+        ),
+        89
+    );
+    assert_eq!(
+        named(Others::Manageability, Answer::GrantedSlowly, Others::Nobody),
+        104
+    );
+    assert_eq!(
+        named(
+            Others::Manageability,
+            Answer::NeverGranted,
+            Others::Manageability
+        ),
+        122
+    );
+    assert_eq!(
+        named(
+            Others::HardwareAndManageability,
+            Answer::NeverGranted,
+            Others::HardwareAndManageability
+        ),
+        127
+    );
+}
