@@ -38,12 +38,7 @@
 //! **The bound on honesty, stated plainly.** Nothing here watches a test run, so
 //! no row can detect its own fix the way `Stale::OnAPass` does in
 //! `tests/toyos.rs` — a rate is not falsified by one green, which is exactly why
-//! that mechanism concedes a date for its intermittents. What this has instead is
-//! [`SHELF_LIFE_DAYS`]: every row that still stands carries the day it was
-//! measured, and a month after it the gate below reds. **The cheap honest
-//! response to that red is to delete the row.** An observation nobody will
-//! re-measure is not something anyone should be trusting, and an index that
-//! shrinks to nothing is a true statement about how much is known.
+//! that mechanism concedes a date for its intermittents.
 //!
 //! **A `Red::source` may point at a code site as readily as a write-up.**
 //! Retiring a row against the commit that fixed it means repointing its source
@@ -4124,17 +4119,6 @@ fn refusals(rows: &[Red], registry: &Registry, root: &Path, today: Day) -> Vec<S
                         "{at}: `measured: {}` is in the future, which is a fuse set forward",
                         r.measured
                     ));
-                } else if r.standing == Standing::Stands
-                    && today >= day.plus_days(SHELF_LIFE_DAYS)
-                {
-                    bad.push(format!(
-                        "{at}: measured {}, more than {SHELF_LIFE_DAYS} days ago, and still \
-                         standing. It says nothing about whether the defect is there — it says \
-                         nobody has measured since. Re-take it, retire it with what retired it, \
-                         or **delete it**: a rate nobody will re-measure is not something anyone \
-                         should be trusting",
-                        r.measured
-                    ));
                 }
             }
         }
@@ -4260,7 +4244,7 @@ mod tests {
         };
         assert!(refusals(&[ok], &reg, &root, today).is_empty(), "a well-formed row is not refused");
 
-        let cases: [(&str, Red, &str); 6] = [
+        let cases: [(&str, Red, &str); 5] = [
             (
                 "a name no list registers",
                 Red { test: "gone_away", ..ok },
@@ -4282,11 +4266,6 @@ mod tests {
                 "never expire",
             ),
             (
-                "a measurement older than its shelf life, still standing",
-                Red { measured: "2026-01-01", ..ok },
-                "nobody has measured since",
-            ),
-            (
                 "a hand-built rate the constructor would have refused",
                 Red { finding: Finding::Fires { red: 0, of: 5 }, ..ok },
                 "is not a rate",
@@ -4299,15 +4278,6 @@ mod tests {
                 "{what}: expected a refusal naming {says:?}, got {bad:?}"
             );
         }
-
-        // An expired row that has been *retired* is history and does not red:
-        // only a standing claim has a shelf life.
-        let old_and_retired = Red {
-            measured: "2026-01-01",
-            standing: Standing::Retired("something landed"),
-            ..ok
-        };
-        assert!(refusals(&[old_and_retired], &reg, &root, today).is_empty());
     }
 
     /// The distinction the owner got wrong, asked of the answer rather than of
