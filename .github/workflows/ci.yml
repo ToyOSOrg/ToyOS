@@ -298,6 +298,9 @@ jobs:
       # twelve partition files into it.
       - name: shard durations
         if: always()
+        # An artifact is evidence and never a verdict: GitHub refusing the
+        # transfer is not a finding about the tree.
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: durations-shard-${{ matrix.shard }}
@@ -315,6 +318,7 @@ jobs:
       # a finding.
       - name: failure logs
         if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: shard-${{ matrix.shard }}-serial
@@ -565,6 +569,7 @@ jobs:
           restore-keys: landing-${{ runner.os }}-
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
         with:
           pattern: durations-shard-*
           path: /tmp/durations
@@ -608,6 +613,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
+        continue-on-error: true
         with:
           name: test-durations-merged
           path: tests/test-durations
