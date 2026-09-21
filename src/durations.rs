@@ -62,8 +62,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
         let who = file.file_name().expect("a file has a name").to_string_lossy().into_owned();
         let text = fs::read_to_string(file)
             .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
-        for line in text.lines() {
-            let Some((name, ms, tier)) = parse_shard_line(line) else { continue };
+        for (name, ms, tier) in shard_rows(file, &text) {
             insert_measurement(&mut merged, name, ms, &who);
             tiers.insert(name.to_string(), tier);
         }
@@ -131,16 +130,6 @@ fn merged_profile(
 /// The shard count these files are all of, refusing anything that is not a
 /// whole run.
 ///
-/// **The other half of the partition, and it was not being checked.** The
-/// merge already refuses any duplicate execution label, including the
-/// observed defect where two shards claimed one name. From the other side a
-/// shard that measured *nothing* — cancelled at its timeout, or an artifact
-/// upload that failed — leaves eleven files, and merging them wrote a profile missing
-/// a twelfth of the suite. Those names then price at the longest the profile
-/// knows on every later run, which is exactly the eight phantom four-minute
-/// tests measured steering a twelve-way split. The command that exists to
-/// keep the profile honest was the thing that could quietly break it.
-///
 /// The information was always there: a shard writes
 /// `test-durations.shard-<i>-of-<n>`, so the file names say both how many
 /// shards there were and which one each is.
@@ -205,6 +194,23 @@ fn parse_shard_line(line: &str) -> Option<(&str, u64, Tier)> {
     Some((name, ms, Tier::from_token(tier)?))
 }
 
+/// Every row of one shard file. A row that does not parse is refused by file and
+/// line: skipping it keeps the committed price for a name this run measured.
+fn shard_rows<'a>(file: &Path, text: &'a str) -> Vec<(&'a str, u64, Tier)> {
+    text.lines()
+        .enumerate()
+        .map(|(at, line)| {
+            parse_shard_line(line).unwrap_or_else(|| {
+                panic!(
+                    "{}:{}: {line:?} is not a shard row, which is `<label> <ms> <tier>`",
+                    file.display(),
+                    at + 1
+                )
+            })
+        })
+        .collect()
+}
+
 fn read_profile(path: &Path) -> BTreeMap<String, u64> {
     fs::read_to_string(path)
         .unwrap_or_default()
@@ -221,13 +227,6 @@ fn read_profile(path: &Path) -> BTreeMap<String, u64> {
 /// shard files' own totals; the ideal is their sum over the shard count. Nobody
 /// has to be told what a better partition would have produced, because the run
 /// that produced these files already answered it.
-///
-/// The unpriced names are the ones that made this worth printing. `Shard::keep`
-/// costs a name the profile has never seen at the longest that *was* measured —
-/// deliberate conservatism, and eight such names in run `31331494794` were
-/// eight phantom four-minute tests steering a twelve-way partition. Nothing in
-/// the tree noticed: a test added without a profile entry is silent, and it
-/// stays silent until somebody reads two shard timings side by side.
 fn report(
     merged: &BTreeMap<String, (u64, String)>,
     before: &BTreeMap<String, u64>,
@@ -321,6 +320,20 @@ mod tests {
             Some(("audio_tone_load (smp=1)", 456, Tier::Nightly))
         );
         assert_eq!(parse_shard_line("foo 123"), None);
+    }
+
+    #[test]
+    fn a_shard_row_that_does_not_parse_is_refused_by_file_and_line() {
+        let file = PathBuf::from("/tmp/durations-shard-3/test-durations.shard-3-of-12");
+        assert_eq!(
+            shard_rows(&file, "foo 120 fast\nbar (smp=2) 45000 nightly\n"),
+            vec![("foo", 120, Tier::Fast), ("bar (smp=2)", 45_000, Tier::Nightly)]
+        );
+        let err = std::panic::catch_unwind(|| shard_rows(&file, "foo 120 fast\nbar 45000\n"))
+            .expect_err("a two-column row is not a shard row");
+        let refusal = err.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(refusal.contains("test-durations.shard-3-of-12:2:"), "{refusal}");
+        assert!(refusal.contains("\"bar 45000\""), "{refusal}");
     }
 
     #[test]

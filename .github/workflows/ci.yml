@@ -276,7 +276,7 @@ jobs:
           line=$(grep 'test result:' /tmp/suite.log | grep ' total (' | tail -1)
           echo "- shard ${{ matrix.shard }}: ${line:-no suite result line}" \
             >> "$GITHUB_STEP_SUMMARY"
-          verdicts=$(grep -E '^(FAIL|XFAIL) |^ +(STALL|INVL|STALE|ALONE) ' /tmp/suite.log || true)
+          verdicts=$(grep -E '^(FAIL|XFAIL) |^ +(STALL|INVL|ALONE) ' /tmp/suite.log || true)
           if [ -n "$verdicts" ]; then
             {
               echo "<details><summary>shard ${{ matrix.shard }}: what it said</summary>"
@@ -636,9 +636,7 @@ jobs:
             exit 1
           fi
           if [ "${{ needs.durations.result }}" != success ]; then
-            echo "::error::the merged duration profile reported \
-              ${{ needs.durations.result }}: two shards ran one label, so the twelve were \
-              not a partition of the suite."
+            echo "::error::the \`durations\` job reported ${{ needs.durations.result }}; its own log says why."
             exit 1
           fi
           # `cache-writer` runs on non-nightly work: every pull request and

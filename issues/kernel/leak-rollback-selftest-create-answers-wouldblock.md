@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: defect
 opened: 2026-09-03
 ---
@@ -19,4 +19,4 @@ A `create` answering `WouldBlock` is the shape
 for `ftruncate` — a sibling site, not this one.
 
 Owed: the site in the create path that lets `WouldBlock` reach the caller, and
-whether it retries. `src/redlist.rs` quarantines the name until then.
+whether it retries.
