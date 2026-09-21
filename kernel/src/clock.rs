@@ -191,7 +191,7 @@ pub fn nanos_of_ticks(ticks: u64) -> u64 {
 
 /// Polls `ready` until it holds or `nanos` pass; `false` is the deadline.
 /// Reads the TSC, not [`nanos_since_boot`], because that clock's out-of-line divide
-/// would appear as `src/redlist.rs`'s `dump_nmi_probe` red under an NMI sample.
+/// would appear as `dump_nmi_probe`'s red under an NMI sample.
 ///
 /// **Before [`init`] there is no period to measure a span with, so this asks
 /// `ready` once and answers it.** A wait nothing can bound is the one thing an

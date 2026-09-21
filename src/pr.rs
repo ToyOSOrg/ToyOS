@@ -23,9 +23,8 @@
 //! status check — branches up to date before merging — which bought the same
 //! property by serialising landings: the first merge moved main and every
 //! other branch was stale until it merged again. That tax, its measured
-//! breach, and the eased-law interlude between the two regimes are the
-//! tracker's record (`the-eased-merge-law-carries-a-threshold`); `--pr`
-//! remains the local half either way.
+//! breach, and the eased-law interlude between the two regimes are in the
+//! history; `--pr` remains the local half either way.
 //!
 //! Two rules gate a branch here and in CI's `abi-split` job alike: the
 //! ABI-first rule ([`abi_lands_alone`]) and the published crates
