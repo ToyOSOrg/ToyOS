@@ -27,3 +27,16 @@ driver yet, so nothing has run the write.
 
 Owned by the stage-2 I219 worker: the first `nic.accepted(regs::IVAR, …)` on the
 bench either passes or names the register that has to be driven differently.
+
+## What the bench has read since
+
+On bench boots of branches that arm MSI the part took the write: netd was
+spawned after the hand-over of `00:1f.6`, held the function for the whole boot,
+and no `exit: netd` record followed — and a `Refusal` out of `open` ends netd,
+which the kernel records. That is an inference from an absent record, and an
+echoed word is not evidence that the register routes causes outside MSI-X mode
+the way §10.2.4.9 documents inside it.
+
+**Exit condition**: an interrupt counted on the vector `pcidev` armed, on a boot
+that leased — or the write skipped by name where the function was armed with
+MSI.
