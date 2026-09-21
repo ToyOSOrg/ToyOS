@@ -108,8 +108,8 @@ impl core::fmt::Display for Serial {
             Self::Unread => f.write_str("named and not read"),
             Self::Read { len, units } => {
                 f.write_str("\"")?;
-                for unit in units[..usize::from(*len)].chunks_exact(2) {
-                    let unit = u16::from_le_bytes([unit[0], unit[1]]);
+                for unit in units[..usize::from(*len)].as_chunks::<2>().0 {
+                    let unit = u16::from_le_bytes(*unit);
                     // Device-supplied: rendered without letting it choose what the
                     // log looks like.
                     let c = match u8::try_from(unit) {
