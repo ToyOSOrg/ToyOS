@@ -5,6 +5,10 @@
 //! answers it directly instead of waiting on the interrupt vector. A stale
 //! memory-type translation surviving an early return is undefined per SDM
 //! Vol. 3A §11.12.4.
+//!
+//! **The target set is every other CPU the machine brought up**, not the CPUs
+//! sharing the initiator's address space: nothing a process does puts a CPU
+//! into it or takes one out.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -191,7 +195,10 @@ pub fn poll() {
         return;
     }
     let cpu = percpu::cpu_id() as usize;
-    SHOOTDOWN.serve_if_owed(cpu, crate::mm::paging::flush_tlb_all);
+    SHOOTDOWN.serve_if_owed(cpu, || {
+        crate::mm::paging::flush_tlb_all();
+        stage_ack_delay();
+    });
 }
 
 /// Settle every shootdown issued before this CPU could answer one; called
@@ -209,9 +216,12 @@ mod delay {
     use core::sync::atomic::{AtomicU32, AtomicU64};
 
     pub static NANOS: AtomicU64 = AtomicU64::new(0);
-    pub static CPU: AtomicU32 = AtomicU32::new(u32::MAX);
     /// Absolute nanoseconds past which the arming lapses.
     pub static UNTIL: AtomicU64 = AtomicU64::new(0);
+    /// Whose acknowledgement is held back; [`EVERY`] is all of them.
+    pub static TARGET: AtomicU32 = AtomicU32::new(EVERY);
+    /// Outside the CPU-id range, so it can never name one.
+    pub const EVERY: u32 = u32::MAX;
 }
 
 /// Expires rather than latches, so a panicked test can't leave it armed
@@ -219,16 +229,27 @@ mod delay {
 #[cfg(feature = "test-actuators")]
 const ARM_WINDOW_NANOS: u64 = 2_000_000_000;
 
+#[cfg(feature = "test-actuators")]
+fn open_arm_window() {
+    delay::UNTIL.store(
+        crate::clock::nanos_since_boot().saturating_add(ARM_WINDOW_NANOS),
+        Ordering::Relaxed,
+    );
+}
+
 /// Delays after the flush and before publication, so it can only slow a
 /// correct answer, never hide an incorrect one.
+///
+/// An initiator's own flush is not part of the wait under measurement, so
+/// delaying it would spend that wait on the initiator's own hand.
 #[cfg(feature = "test-actuators")]
 fn stage_ack_delay() {
-    use core::sync::atomic::Ordering;
-    if delay::CPU.load(Ordering::Relaxed) != percpu::cpu_id() {
-        return;
-    }
     let now = crate::clock::nanos_since_boot();
     if now >= delay::UNTIL.load(Ordering::Relaxed) {
+        return;
+    }
+    let target = delay::TARGET.load(Ordering::Relaxed);
+    if target != delay::EVERY && target != percpu::cpu_id() {
         return;
     }
     let until = now.saturating_add(delay::NANOS.load(Ordering::Relaxed));
@@ -237,40 +258,45 @@ fn stage_ack_delay() {
     }
 }
 
-/// The last CPU `shootdown` waits for, so the delay is measured regardless of
-/// iteration order.
-#[cfg(feature = "test-actuators")]
-fn last_target() -> Option<u32> {
-    let top = smp::cpu_count().checked_sub(1)?;
-    match percpu::cpu_id() {
-        me if me == top => top.checked_sub(1),
-        _ => Some(top),
-    }
-}
-
-/// Arms the last-waited CPU to answer `nanos` late, takes one shootdown, and
-/// reports what it cost; the arming outlives the call, so a caller can then
-/// time what follows too.
+/// Hold each other CPU's acknowledgement back for `nanos` in turn, take one
+/// shootdown against each, and report the **smallest** wait any of them cost
+/// the initiator, which measures the width of the target set and not only its
+/// depth. The arming is then left standing against every other CPU until a
+/// disarm or the end of a fresh [`ARM_WINDOW_NANOS`], whichever comes first, so
+/// a caller can time a syscall's own shootdown inside that window.
+///
+/// Preemption is off across the sweep because each held-back CPU is chosen
+/// against this one: a thread that migrated mid-sweep would arm the CPU it is
+/// about to initiate from, which holds nobody back.
 #[cfg(feature = "test-actuators")]
 pub fn debug_arm_ack_delay(nanos: u64) -> u64 {
-    use core::sync::atomic::Ordering;
-    let Some(target) = last_target() else { return 0 };
-    delay::CPU.store(target, Ordering::Relaxed);
     delay::NANOS.store(nanos, Ordering::Relaxed);
-    delay::UNTIL.store(
-        crate::clock::nanos_since_boot().saturating_add(ARM_WINDOW_NANOS),
-        Ordering::Relaxed,
-    );
-    let start = crate::clock::nanos_since_boot();
-    shootdown(Origin::Staged);
-    crate::clock::nanos_since_boot() - start
+    let mut least = u64::MAX;
+    crate::sched::driver::preempt_off(|_| {
+        let me = percpu::cpu_id();
+        for cpu in (0..smp::cpu_count()).filter(|cpu| *cpu != me) {
+            delay::TARGET.store(cpu, Ordering::Relaxed);
+            open_arm_window();
+            let began = crate::clock::nanos_since_boot();
+            shootdown(Origin::Staged);
+            least = least.min(crate::clock::nanos_since_boot().saturating_sub(began));
+        }
+    });
+    delay::TARGET.store(delay::EVERY, Ordering::Relaxed);
+    open_arm_window();
+    // A machine with one CPU has no other to hold back and `shootdown` takes
+    // its local-flush return there, so there is no wait to report.
+    if least == u64::MAX {
+        0
+    } else {
+        least
+    }
 }
 
 /// Give the machine its ordinary latency back before the window lapses.
 #[cfg(feature = "test-actuators")]
 pub fn debug_disarm_ack_delay() -> u64 {
-    use core::sync::atomic::Ordering;
     delay::UNTIL.store(0, Ordering::Relaxed);
-    delay::CPU.store(u32::MAX, Ordering::Relaxed);
+    delay::TARGET.store(delay::EVERY, Ordering::Relaxed);
     0
 }
