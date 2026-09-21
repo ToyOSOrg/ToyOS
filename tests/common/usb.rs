@@ -1865,7 +1865,7 @@ fn abandoned_write_is_taken_offline(
         .lines()
         .find(|l| l.contains(offline.as_str()))
         .ok_or_else(|| format!("no {offline:?} line after the rungs: the disk was left online\n{log}"))?;
-    for did in ["reset=true, the last thing it was sent, Reset Device=true", "its slot goes back"] {
+    for did in ["reset=true and nothing sent after it, Reset Device=true", "its slot goes back"] {
         if !said.contains(did) {
             return Err(format!("{said:?} does not read {did:?}\n{log}"));
         }
@@ -2449,7 +2449,7 @@ fn transport_gives_up(
     }
     for did in [
         "both bulk endpoints Stopped=true",
-        "reset=true, the last thing it was sent, Reset Device=true",
+        "reset=true and nothing sent after it, Reset Device=true",
         "its slot goes back",
     ] {
         if !said.contains(did) {

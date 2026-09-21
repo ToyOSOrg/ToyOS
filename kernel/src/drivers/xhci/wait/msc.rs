@@ -1085,7 +1085,7 @@ impl XhciController {
         dev.slot_goes = Some(goes);
         log!(
             "usb-storage: {slot} is offline: both bulk endpoints Stopped={stopped}, port {} \
-             reset={}, the last thing it was sent, Reset Device={told}, {}; every operation on it \
+             reset={} and nothing sent after it, Reset Device={told}, {}; every operation on it \
              is refused from here",
             u32::from(dev.port_idx) + 1,
             reset.finished(),

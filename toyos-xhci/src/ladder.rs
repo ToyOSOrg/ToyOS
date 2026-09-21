@@ -95,8 +95,8 @@ pub enum PortStep {
     /// The most reset the port has ([`crate::port::offline_reset`]), waited
     /// for, its change flags consumed.
     Reset,
-    /// USB 2.0 §7.1.7.5's reset recovery time: the device owes no answer for
-    /// 10 ms after a reset.
+    /// The reset recovery time ([`RESET_RECOVERY_NS`]): the device owes no
+    /// answer yet.
     Settle,
     /// Reset Device (§4.6.11): the slot to Default and address 0, every
     /// endpoint but the control endpoint Disabled — what the device now is.
@@ -123,8 +123,9 @@ pub const PORT_RESET: [PortStep; 7] = [
     PortStep::AddEndpoints,
 ];
 
-/// USB 2.0 §7.1.7.5, TRSTRCY.
-pub const RESET_RECOVERY_NS: u64 = 10_000_000;
+/// USB 2.0 §7.1.7.5 has a device answer 10 ms after a reset (TRSTRCY); this is
+/// the 50 ms Linux's hub driver waits, for the firmware that needs it.
+pub const RESET_RECOVERY_NS: u64 = 50_000_000;
 
 /// Whether a failed `step` ends [`Rung::PortReset`].
 pub fn ends_the_rung(step: PortStep) -> bool {
