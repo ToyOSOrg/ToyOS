@@ -21,9 +21,7 @@ guess driven on.
 The T14's `00:1f.6` is outside that mode: Linux's own reading of the same
 function is `IR-PCI-MSI-0000:00:1f.6 … enp0s31f6` in `/proc/interrupts` and
 `mode=msi` at `/sys/bus/pci/devices/0000:00:1f.6/msi_irqs/162`. So the driver may
-refuse the part the moment a claim on it is granted, and what `IVAR` answers on
-an MSI part has never been read: no hand-over of `00:1f.6` has reached the
-driver yet, so nothing has run the write.
+refuse the part the moment a claim on it is granted.
 
 Owned by the stage-2 I219 worker: the first `nic.accepted(regs::IVAR, …)` on the
 bench either passes or names the register that has to be driven differently.
