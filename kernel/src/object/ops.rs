@@ -567,6 +567,8 @@ pub fn fsync(object: &KObjectRef) -> u64 {
     #[cfg(feature = "boot-actuators")]
     let deadman = if crate::actuator::fsync_deadman_now() { Deadline::passed() } else { deadman };
     let mut attempt = 0u32;
+    // A refused attempt can leave the two FATs split, and the park below is where the machine's stop would find this thread.
+    let _update = crate::block::begin_update();
     // No spinlock is held at this depth, so waiting here (unlike everywhere below `vfs::lock()`) is safe.
     loop {
         attempt += 1;
@@ -578,9 +580,14 @@ pub fn fsync(object: &KObjectRef) -> u64 {
             // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
             // Flush and sync share one acquisition so this file cannot be unmounted between them.
             let mut vfs = crate::vfs::lock();
+            // Tags the flush as `SYS_FSYNC`'s, for `quiesce-fsync-refuse` to stage on this path.
+            #[cfg(feature = "boot-actuators")]
+            crate::fat32_adapter::enter_fsync_flush();
             let done = vfs
                 .flush_file(&path, file_id, mtime)
                 .and_then(|()| vfs.sync_for_path(&path));
+            #[cfg(feature = "boot-actuators")]
+            crate::fat32_adapter::leave_fsync_flush();
             drop(vfs);
             done
         };

@@ -108,13 +108,14 @@ fn publish_durable(claimed: u64) {
 /// layer.
 const MAX_LOG_HOLDERS: usize = 8;
 
-/// An empty slot. `u32::MAX` is the pid no table issues and the one
-/// `percpu::current_pid` spells idle with; zero is `/system/bin/init`.
+/// An empty slot: the pid `percpu::current_pid` cannot represent, because it
+/// spells idle with it; zero is `/system/bin/init`.
 const NO_PID: u32 = u32::MAX;
 
-/// Every live process that has read the log with [`Rights::LOG`], recorded
+/// Every process that has read the log with [`Rights::LOG`] on this boot, recorded
 /// where that capability is checked and nowhere a caller's own words reach;
-/// the shutdown's first stage leaves exactly these running.
+/// the shutdown's first stage leaves exactly these running. A slot is never
+/// given back: no pid is issued twice, so a dead holder's names nothing that runs.
 ///
 /// [`Rights::LOG`]: toyos_abi::handle::Rights::LOG
 static LOG_HOLDERS: [core::sync::atomic::AtomicU32; MAX_LOG_HOLDERS] =
@@ -155,19 +156,6 @@ pub fn note_log_holder(pid: u32) {
             "log: pid {pid} is past the {MAX_LOG_HOLDERS} holders of the log capability this \
              machine carves out of a shutdown's first stage; it stops in that stage with \
              everything else"
-        );
-    }
-}
-
-/// Released at teardown so the slots hold only the living: every job a test
-/// boot spawns gets a `SysCap` dup, and the dead would fill them.
-pub fn forget_log_holder(pid: u32) {
-    for slot in &LOG_HOLDERS {
-        let _ = slot.compare_exchange(
-            pid,
-            NO_PID,
-            core::sync::atomic::Ordering::Relaxed,
-            core::sync::atomic::Ordering::Relaxed,
         );
     }
 }

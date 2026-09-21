@@ -32,8 +32,7 @@
 //! Lock order: [`process::PROCESS_TABLE`] alone.
 
 use core::sync::atomic::{
-    AtomicBool, AtomicU32, AtomicU8, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
-    Ordering::Release,
+    AtomicU32, AtomicU8, Ordering::Acquire, Ordering::Relaxed, Ordering::Release,
 };
 
 use toyos_quiesce::{Record, Stage, Sweep, Thread, ThreadId};
@@ -43,12 +42,15 @@ use crate::process;
 use crate::scheduler::TaskId;
 use crate::time::{Budget, Cadence, Duration};
 
+mod claim;
+
 /// How long the machine gets to stop.
 ///
 /// **A budget, and not a bound the kernel can prove.** One `QUANTUM_NS` is
 /// what a thread running in Ring 3 needs to reach the boundary, and one
 /// `block::OPERATION` is the longest a thread lies inside the block layer
-/// without parking — but one syscall may open several operations in a row, and
+/// without parking — but one syscall may open several operations in a row,
+/// parking between them inside a `block::OpenUpdate` this stop waits out, and
 /// `block::DEADMAN` is what bounds that sequence. A thread can therefore
 /// outlast this, which is why its expiry is a clause in the record.
 const PARK: Budget = Budget::of(
@@ -117,16 +119,23 @@ pub fn stops_this_thread() -> bool {
 /// Whether this thread is the one shutdown this boot gets: a second caller's
 /// sweep would band the first where it parks inside its own sync.
 pub fn claim_the_shutdown() -> bool {
-    !CLAIMED.swap(true, AcqRel)
+    CLAIMED.take()
 }
 
-static CLAIMED: AtomicBool = AtomicBool::new(false);
+static CLAIMED: claim::Claim = claim::Claim::new();
+
+/// Whether the machine's stop has begun: what the `quiesce-fsync-refuse`
+/// actuator refuses from.
+#[cfg(feature = "boot-actuators")]
+pub fn stopping() -> bool {
+    stage().is_some()
+}
 
 /// Whether the running thread is the one performing the shutdown: what the
 /// `quiesce-drain-refuse` actuator refuses by.
 #[cfg(feature = "boot-actuators")]
 pub fn runs_the_shutdown() -> bool {
-    if stage().is_none() {
+    if !stopping() {
         return false;
     }
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
@@ -231,8 +240,8 @@ fn sweep(stage: Stage, caller: ThreadId) -> Sweep {
                 out.running += 1;
                 continue;
             };
-            // `stop_if_blocked` refuses a running thread, which is the whole
-            // of the difference: that one has to reach its own safe point, and
+            // `stop_if_blocked` refuses a running thread and one parked inside
+            // a `block::OpenUpdate`: each has to reach its own safe point, and
             // until it does it is what this sweep is waiting for.
             if sched.shared.stop_pending() || sched.shared.stop_if_blocked() {
                 out.stopped += 1;

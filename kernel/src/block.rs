@@ -78,6 +78,29 @@ pub(crate) fn between_attempts(attempt: u32) {
     );
 }
 
+/// The running thread is inside a filesystem update whose attempts park in
+/// [`between_attempts`]: a refused attempt leaves the volume half written and
+/// only this thread's next one completes it, so the machine's stop leaves it
+/// running until the guard drops instead of banding it where it parks.
+#[must_use = "the update lasts exactly as long as this guard"]
+pub struct OpenUpdate(Option<Arc<crate::sched::payload::KShared>>);
+
+pub fn begin_update() -> OpenUpdate {
+    let shared = crate::sched::driver::current_shared();
+    if let Some(shared) = &shared {
+        shared.begin_update();
+    }
+    OpenUpdate(shared)
+}
+
+impl Drop for OpenUpdate {
+    fn drop(&mut self) {
+        if let Some(shared) = &self.0 {
+            shared.end_update();
+        }
+    }
+}
+
 /// Operations open right now on a thread the machine's stop stops, and how
 /// many such operations this boot began.
 static OPEN_OPERATIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -97,9 +120,8 @@ pub fn userland_operations() -> (u32, u64) {
 ///
 /// Read at the open and never again, so a process whose sibling thread makes
 /// it a holder while this thread is inside the operation stays counted — an
-/// `in_flight` of one on a record that stopped everything, reachable only by
-/// a multi-threaded holder whose first `SYS_LOG_READ` lands as the stop ends,
-/// which no committed config has.
+/// `in_flight` of one on a record that stopped everything, when a process's
+/// first `SYS_LOG_READ` lands beside a sibling's operation as the stop ends.
 fn counted() -> bool {
     if crate::sched::kthread::current_is_kernel_thread() {
         return false;

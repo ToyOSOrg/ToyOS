@@ -187,6 +187,9 @@ pub mod log_registry;
 #[path = "../../kernel/src/sched/reap_gate.rs"]
 pub mod reap_gate;
 
+#[path = "../../kernel/src/quiesce/claim.rs"]
+pub mod shutdown_claim;
+
 /// The interrupt record a claimed PCI function's ISR writes and its holder
 /// reads. Pure `core` atomics and nothing else, so it compiles here unshimmed.
 #[path = "../../kernel/src/pcidev/record.rs"]

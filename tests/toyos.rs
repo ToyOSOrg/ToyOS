@@ -722,9 +722,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot, and its verdict waits out the same staged window.
     ("quiesce_stops_the_machine", Sched::Parallel, Tier::Fast),
     // Its own boot: it ends the machine, and its verdict is the order of
-    // kernel lines. Registered UNMEASURED, so the run that prices it decides
-    // its tier.
+    // kernel lines.
     ("quiesce_refuses_a_second_shutdown", Sched::Parallel, Tier::Fast),
+    // Its own boot: it ends the machine, and its verdict is the volume that
+    // boot leaves. Registered UNMEASURED, so the run that prices it decides
+    // its tier.
+    ("quiesce_leaves_the_volume_whole", Sched::Parallel, Tier::Fast),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
     // changes the verdict; `RELEGATED` says what leaves the per-PR tier with it.
     ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
@@ -9888,6 +9891,7 @@ fn run_machine_test(
         "ftruncate_flush_race" => common::volumes::ftruncate_flush_race(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
+        "quiesce_leaves_the_volume_whole" => common::volumes::quiesce_leaves_the_volume_whole(test_config, c_bins, rust_bins),
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.

@@ -725,6 +725,13 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
         ),
     ),
     (
+        "quiesce-fsync-refuse",
+        Flash::Never(
+            "it refuses `/system/bin/logd`'s own flush for longer than the shutdown waits for \
+             it, so an image armed with it never makes its last word durable",
+        ),
+    ),
+    (
         "xhci-lock-wedged",
         Flash::Never(
             "it makes the shutdown skip the disk-cache flush, so the boot's own log may never \

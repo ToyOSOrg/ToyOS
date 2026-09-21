@@ -2235,6 +2235,9 @@ mod tests {
                 "sched-tripwire",
                 "shard-publish-relaxed",
                 "shootdown-serve-relaxed",
+                // `quiesce/claim.rs`'s exchange split in two;
+                // `shutdown_claim.rs` reds.
+                "shutdown-claim-split",
                 // The eighth loom control, and the first over a *contended*
                 // acquire: `src/sleeplock.rs`'s two loads of `now` go
                 // `Relaxed` and `kernel-loom/tests/sleep_lock.rs` reds. Costs

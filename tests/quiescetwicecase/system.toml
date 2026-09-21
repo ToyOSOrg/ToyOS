@@ -1,8 +1,4 @@
-# A boot whose one job asks for the reset twice, from two processes: a child
-# that leaves a closed file's flush owed and reboots, and the job itself, which
-# reads the kernel's log until that flush is being refused and then reboots
-# too. Only a holder of the log capability is still running when the second
-# call is made, which is why the job reads the log before it spawns anything.
+# The boot `quiesce_refuses_a_second_shutdown` judges.
 [boot]
 start = ["logd", "test-runner"]
 

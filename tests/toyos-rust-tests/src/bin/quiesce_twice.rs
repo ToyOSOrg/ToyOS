@@ -1,17 +1,11 @@
 //! Two callers of the reset, from two processes, and the one that is refused.
 //!
-//! `quiesce` has one shutdown per boot: the thread that claims it is the one
-//! thread the stop never bands, and a second caller's sweep would band it
-//! wherever it parks inside its own sync. This boot puts the first caller
-//! exactly there and makes the second call while it is: a child process closes
-//! a file whose flush the `quiesce-drain-refuse` actuator keeps refusing, then
-//! asks for the reset, so its shutdown parks in the drain's retry ladder; this
-//! process — a holder of the log capability, and so still running in the
-//! stop's first stage — reads the kernel's log until that refusal is in it,
-//! and asks again from the other CPU.
+//! A child process leaves a closed file's flush owed and asks for the reset;
+//! this process reads the kernel's log until that flush is being refused, and
+//! asks again.
 //!
-//! Nothing here asserts: `common::power::quiesce_refuses_a_second_shutdown`
-//! reads where the kernel's refusal lands among the actuator's own lines.
+//! Nothing here asserts: `common::power::quiesce_refuses_a_second_shutdown` is
+//! the judge, and its doc is the scenario.
 
 use std::fs::File;
 use std::io::Write;
@@ -115,7 +109,9 @@ fn second_caller(cap: &SysCap) -> ! {
         std::thread::yield_now();
     }
     println!("quiesce_twice: the first caller's drain is being refused; asking again");
-    let refused = cap.reboot();
+    // The other power syscall, so the one boot judges the claim on both: moved
+    // into either one alone, this call or the first caller's is let in.
+    let refused = cap.shutdown();
     println!("quiesce_twice: the second caller was refused ({refused:?})");
     // Carved out of the first stage, so this thread runs until the second;
     // it has nothing left to do but wait for that.

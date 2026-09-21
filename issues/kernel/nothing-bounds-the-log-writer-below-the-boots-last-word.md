@@ -64,12 +64,22 @@ was not. That boot never reached `quiesce` at all (it wedged;
 `issues/diagnostics/a-t14-wedge-ran-the-deadline-out-and-sealed-nothing.md`), so
 it is the shape this would take and not an occurrence of it.
 
-## What would show it
+## What is judged, and what is still owed
 
-A boot whose `/log` is slow enough that `logd` is inside a retrying `fsync` when
-the durability wait returns, judged on `Rebooting.` still being the last record;
-and `toyos-fat32-check` over the stick of a boot whose `logd` was stopped
-mid-batch.
+`quiesce_leaves_the_volume_whole` stages the first half of that under QEMU:
+`quiesce-fsync-refuse` keeps `logd` inside a retrying `fsync` past the
+durability wait, with the two FATs split under it, and `toyos-fat32-check` reads
+the volume the reset left. The second stage waits that `fsync` out
+(`block::OpenUpdate`) instead of banding the thread where it parks, so the
+volume is whole — and the price is the second thing above, made certain on that
+boot: `fsync: … durable on attempt 10` is a kernel record under the boot's last
+word. A stop that outlasts `quiesce::PARK` still resets over the split, and its
+record says a thread never reached a safe point.
+
+Still owed: the same boot judged on `Rebooting.` being the last record, which
+needs the retry line to go somewhere other than the log once the last word is
+written; and a batch `logd` *starts* after its last publish, which nothing
+stages.
 
 **Exit condition**: the carved-out writer is stopped at a point where it has
 nothing outstanding, or a reading that says what it leaves behind there is

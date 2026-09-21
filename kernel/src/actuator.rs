@@ -100,8 +100,11 @@ actuators! {
     /// Refuse the first two FAT-1 mirror writes of a write-back drain flush; two, not one, because the retry ladder parks only at attempt 2.
     fat_mirror_write_refuse = "fat-mirror-write-refuse";
 
-    /// Refuse the FAT-1 mirror write of a write-back drain flush eight times as a budget expiry on the thread running the shutdown, so that thread parks in `block::between_attempts` between its attempts; armed beside `writeback-stall`, which is what leaves a closed file's flush for that drain to find.
+    /// Refuse the FAT-1 mirror write of a write-back drain flush as a budget expiry on the thread running the shutdown, which parks it in `block::between_attempts`; armed beside `writeback-stall`, which is what leaves a closed file's flush for that drain to find.
     quiesce_drain_refuse = "quiesce-drain-refuse";
+
+    /// Refuse the active-FAT write of a `SYS_FSYNC` flush as a budget expiry once the machine is stopping, after its mirror is written, so the stop's second stage reaches a caller parked in `block::between_attempts` over two FATs that disagree.
+    quiesce_fsync_refuse = "quiesce-fsync-refuse";
 
     /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
     fat_flush_meta_refuse = "fat-flush-meta-refuse";

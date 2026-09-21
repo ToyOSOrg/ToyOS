@@ -189,9 +189,9 @@ pub fn quiesce_stops_the_machine(
     // How many threads that binary puts to work. Spelt here because a guest
     // binary cannot be linked from the harness.
     const WRITERS: u32 = 6;
-    // The threads the stop names besides the writers: `init`, `logd` and
-    // `test-runner`, one each on this config; the job's own main thread is the
-    // caller and is never in the count.
+    // The threads the stop names besides the writers: `init`, and
+    // `test-runner`'s main and deadline threads. `logd` holds the log and is
+    // carved out uncounted; the job's own main thread is the caller.
     const OTHERS: u32 = 3;
     let bins: Vec<(String, Vec<u8>)> =
         rust_bins.iter().filter(|(name, _)| name == JOB).cloned().collect();
@@ -269,7 +269,7 @@ pub fn quiesce_stops_the_machine(
     if record.sweep.total() != WRITERS + OTHERS {
         return Err(format!(
             "this boot's stop named {} userland thread(s); {WRITERS} writers plus the {OTHERS} \
-             of init, logd and test-runner make {}, so this is not the machine the writers \
+             of init and test-runner's two make {}, so this is not the machine the writers \
              were on:\n  {record}\n{whole}",
             record.sweep.total(),
             WRITERS + OTHERS,
@@ -288,7 +288,8 @@ pub fn quiesce_stops_the_machine(
 
 /// **The machine has one shutdown, and the second caller is refused where it
 /// would have banded the first.** `quiesce-drain-refuse` parks the first
-/// caller in the drain's retry ladder inside its own sync; the second call is
+/// caller — `SYS_REBOOT` — in the drain's retry ladder inside its own sync; the
+/// second call is `SYS_SHUTDOWN`, so the claim is judged on both syscalls,
 /// made from another process on the other CPU while it is parked there, and
 /// the judge is where the kernel's refusal lands among the actuator's lines.
 pub fn quiesce_refuses_a_second_shutdown(
@@ -335,22 +336,24 @@ pub fn quiesce_refuses_a_second_shutdown(
     let whole = format!("{booted}{tail}");
 
     serial::Serial::named("second-shutdown drain", tail.as_str()).must_be_clean()?;
-    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
 
     let lines: Vec<&str> = whole.lines().collect();
     let at = |needle: &str| -> Vec<usize> {
         lines.iter().enumerate().filter(|(_, l)| l.contains(needle)).map(|(i, _)| i).collect()
     };
 
-    // **The harm, first.** A kernel that lets the second caller in runs a
-    // second shutdown over the first — banding it where it is parked, or
-    // interleaving with it — and either way this line is written twice.
+    // **The harm, first**, ahead of how the machine ended: a second caller let
+    // in through `SYS_SHUTDOWN` may be the one that ends it. A kernel that lets
+    // the second caller in runs a second shutdown over the first — banding it
+    // where it is parked, or interleaving with it — and either way this line
+    // is written twice.
     let syncs = at(SYNCING).len();
     if syncs != 1 {
         return Err(format!(
             "this boot ran {syncs} shutdowns, not one: the second caller was let in\n{whole}"
         ));
     }
+    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
     // The arm fired as many times as the kernel declares, or nothing below is
     // about a caller parked in its ladder.
     let refusals = at(REFUSED);

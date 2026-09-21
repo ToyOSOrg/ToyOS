@@ -42,7 +42,7 @@ pub unsafe fn publish_ap_shard(cpu: u32, shard: *mut Shard) {
 }
 
 // Distinct from `apic`'s `LOG_FILE_DRAIN`: this bounds an orderly shutdown, not a panic.
-const SHUTDOWN_DURABLE: Budget = Budget::of(
+pub(crate) const SHUTDOWN_DURABLE: Budget = Budget::of(
     Duration::from_secs(2),
     "the shutdown's last lines are on the console only, and it says so",
 );

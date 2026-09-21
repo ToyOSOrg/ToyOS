@@ -246,8 +246,8 @@ impl BlockAccess for FatVolume {
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        // The two mirror-write actuators: refused before the write is issued,
-        // like a spent `block::OPERATION` — the volume stays untouched.
+        // The FAT-write actuators: refused before the write is issued, like a
+        // spent `block::OPERATION`.
         #[cfg(feature = "boot-actuators")]
         if self.role == Role::Log {
             match mirror_refuse::should_refuse(offset, buf.len()) {
@@ -259,11 +259,24 @@ impl BlockAccess for FatVolume {
                     );
                     return Err(IoError::BudgetExpired);
                 }
-                Some(mirror_refuse::Refused::ShutdownDrain { attempt, of }) => {
+                Some(mirror_refuse::Refused::ShutdownDrain { attempt }) => {
                     log!(
                         "log-volume: quiesce-drain-refuse: refusing the shutdown drain's FAT-1 \
-                         mirror write as a budget expiry, {attempt} of {of}"
+                         mirror write as a budget expiry, {attempt} of {}",
+                        mirror_refuse::SHUTDOWN_REFUSALS
                     );
+                    return Err(IoError::BudgetExpired);
+                }
+                Some(mirror_refuse::Refused::Fsync { attempt: Some(attempt) }) => {
+                    log!(
+                        "log-volume: quiesce-fsync-refuse: refusing a SYS_FSYNC flush's \
+                         active-FAT write at volume offset {offset} as a budget expiry, its \
+                         mirror already written, {attempt} of {}",
+                        mirror_refuse::FSYNC_REFUSALS
+                    );
+                    return Err(IoError::BudgetExpired);
+                }
+                Some(mirror_refuse::Refused::Fsync { attempt: None }) => {
                     return Err(IoError::BudgetExpired);
                 }
             }
@@ -374,10 +387,14 @@ impl FatExtents {
     }
 }
 
-/// The two actuators that refuse a drain flush's FAT-1 mirror write as a
-/// budget expiry: `fat-mirror-write-refuse` refuses the first two, and
-/// `quiesce-drain-refuse` refuses it [`mirror_refuse::SHUTDOWN_REFUSALS`]
-/// times on the thread running the shutdown.
+/// The actuators that refuse a flush's FAT write as a budget expiry. Two
+/// refuse a drain flush's FAT-1 mirror write, which leaves the volume
+/// untouched: `fat-mirror-write-refuse` the first two, `quiesce-drain-refuse`
+/// [`mirror_refuse::SHUTDOWN_REFUSALS`] on the thread running the shutdown.
+/// `quiesce-fsync-refuse` refuses the *active* FAT's write in
+/// [`mirror_refuse::FSYNC_REFUSALS`] attempts of a `SYS_FSYNC` made while the
+/// machine is stopping — after `set_fat_entry` wrote the mirror, so the two
+/// FATs stand split until the caller's next attempt.
 #[cfg(feature = "boot-actuators")]
 mod mirror_refuse {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -397,22 +414,77 @@ mod mirror_refuse {
     /// 1, which merely yields — attempt 2 is the one that parks.
     const REFUSALS: u32 = 2;
 
-    /// Eight: the ladder parks from attempt 2, doubling from 10 ms, so the
-    /// thread running the shutdown is parked for 1270 ms in all — a window a
-    /// second caller on another CPU lands in however loaded the host is.
+    /// Eight, because the ladder parks from attempt 2.
     pub const SHUTDOWN_REFUSALS: u32 = 8;
 
-    #[derive(Clone, Copy)]
+    /// Enough that the caller's ladder outlasts the shutdown's wait for the
+    /// log, so the second stage of the stop meets it parked.
+    pub const FSYNC_REFUSALS: u32 = 9;
+
+    /// The parks between [`FSYNC_REFUSALS`] refused attempts: none after the
+    /// first, then `RETRY_SOONEST` doubling, never reaching its ceiling.
+    const _: () = assert!(
+        crate::block::RETRY_SOONEST.nanos() * ((1 << (FSYNC_REFUSALS - 1)) - 1)
+            > crate::log::SHUTDOWN_DURABLE.nanos()
+            && crate::block::RETRY_SOONEST.nanos() << (FSYNC_REFUSALS - 2)
+                <= crate::block::RETRY_SLOWEST.nanos(),
+        "quiesce-fsync-refuse: the refused ladder ends before the shutdown stops waiting for /log",
+    );
+
+    /// The active FAT's byte range, captured beside the mirror's.
+    static ACTIVE_LO: AtomicU64 = AtomicU64::new(0);
+    static ACTIVE_HI: AtomicU64 = AtomicU64::new(0);
+    /// Set while one `SYS_FSYNC` attempt holds its flush open, under the VFS
+    /// lock every FAT write is made under.
+    static IN_FSYNC: AtomicBool = AtomicBool::new(false);
+    /// Whether the open attempt has been refused already: every active-FAT
+    /// write of a refused attempt is, its rollback's included.
+    static FSYNC_ATTEMPT_REFUSED: AtomicBool = AtomicBool::new(false);
+    /// How many `SYS_FSYNC` attempts have been refused so far.
+    static FSYNC_REFUSED: AtomicU32 = AtomicU32::new(0);
+
     pub enum Refused {
         /// `fat-mirror-write-refuse`.
         Drain,
         /// `quiesce-drain-refuse`, on the thread running the shutdown.
-        ShutdownDrain { attempt: u32, of: u32 },
+        ShutdownDrain { attempt: u32 },
+        /// `quiesce-fsync-refuse`; `None` on a refused attempt's later writes,
+        /// which are refused in silence.
+        Fsync { attempt: Option<u32> },
     }
 
-    pub fn capture(lo: u64, hi: u64) {
-        LO.store(lo, Ordering::Relaxed);
-        HI.store(hi, Ordering::Relaxed);
+    pub fn capture(active: (u64, u64), mirror: (u64, u64)) {
+        ACTIVE_LO.store(active.0, Ordering::Relaxed);
+        ACTIVE_HI.store(active.1, Ordering::Relaxed);
+        LO.store(mirror.0, Ordering::Relaxed);
+        HI.store(mirror.1, Ordering::Relaxed);
+    }
+
+    pub fn set_in_fsync(on: bool) {
+        FSYNC_ATTEMPT_REFUSED.store(false, Ordering::Relaxed);
+        IN_FSYNC.store(on, Ordering::Relaxed);
+    }
+
+    fn fsync_refuses(offset: u64, end: u64) -> Option<Refused> {
+        if !IN_FSYNC.load(Ordering::Relaxed)
+            || !crate::actuator::quiesce_fsync_refuse()
+            || !crate::quiesce::stopping()
+        {
+            return None;
+        }
+        let (lo, hi) = (ACTIVE_LO.load(Ordering::Relaxed), ACTIVE_HI.load(Ordering::Relaxed));
+        if !(hi > lo && offset < hi && end > lo) {
+            return None;
+        }
+        if FSYNC_ATTEMPT_REFUSED.load(Ordering::Relaxed) {
+            return Some(Refused::Fsync { attempt: None });
+        }
+        if FSYNC_REFUSED.load(Ordering::Relaxed) >= FSYNC_REFUSALS {
+            return None;
+        }
+        FSYNC_ATTEMPT_REFUSED.store(true, Ordering::Relaxed);
+        let attempt = FSYNC_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+        Some(Refused::Fsync { attempt: Some(attempt) })
     }
 
     pub fn set_in_drain(on: bool) {
@@ -422,11 +494,14 @@ mod mirror_refuse {
     /// Which actuator refuses this log-volume write, if one does: mid-drain,
     /// overlapping the mirror FAT, and under that actuator's own count.
     pub fn should_refuse(offset: u64, len: usize) -> Option<Refused> {
+        let end = offset + len as u64;
+        if let Some(refused) = fsync_refuses(offset, end) {
+            return Some(refused);
+        }
         if !IN_DRAIN.load(Ordering::Relaxed) {
             return None;
         }
         let (lo, hi) = (LO.load(Ordering::Relaxed), HI.load(Ordering::Relaxed));
-        let end = offset + len as u64;
         if !(hi > lo && offset < hi && end > lo) {
             return None;
         }
@@ -440,7 +515,7 @@ mod mirror_refuse {
             && SHUTDOWN_REFUSED.load(Ordering::Relaxed) < SHUTDOWN_REFUSALS
         {
             let attempt = SHUTDOWN_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
-            return Some(Refused::ShutdownDrain { attempt, of: SHUTDOWN_REFUSALS });
+            return Some(Refused::ShutdownDrain { attempt });
         }
         None
     }
@@ -477,6 +552,17 @@ pub(crate) fn enter_drain_flush() {
 #[cfg(feature = "boot-actuators")]
 pub(crate) fn leave_drain_flush() {
     mirror_refuse::set_in_drain(false);
+}
+
+/// The same for one `SYS_FSYNC` attempt; called with the VFS lock held.
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn enter_fsync_flush() {
+    mirror_refuse::set_in_fsync(true);
+}
+
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn leave_fsync_flush() {
+    mirror_refuse::set_in_fsync(false);
 }
 
 /// A file's byte ranges, read without going back through the filesystem;
@@ -1084,13 +1170,13 @@ pub fn mount(role: Role) -> Option<FatFs> {
         mounted.len = volume_bytes;
     }
 
-    // FAT-1 mirror range for the `fat-mirror-write-refuse` actuator; empty
-    // and inert on a one-FAT volume.
+    // The two FATs' ranges for the FAT-write actuators; empty and inert on a
+    // volume that does not mirror.
     #[cfg(feature = "boot-actuators")]
-    if role == Role::Log && geom.num_fats >= 2 {
+    if role == Role::Log && geom.num_fats >= 2 && geom.active_fat.is_none() {
         let one_fat = geom.fat_sectors as u64 * geom.bytes_per_sector as u64;
-        let lo = geom.fat_base_offset(1);
-        mirror_refuse::capture(lo, lo + one_fat);
+        let (active, mirror) = (geom.fat_base_offset(0), geom.fat_base_offset(1));
+        mirror_refuse::capture((active, active + one_fat), (mirror, mirror + one_fat));
     }
 
     match Fat32::mount(volume) {
