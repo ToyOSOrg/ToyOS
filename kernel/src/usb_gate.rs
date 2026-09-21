@@ -240,8 +240,9 @@ fn check(index: usize, disk: &Handle) {
     // taken inside. One short of the budget, in each of the two shapes a break
     // leaves the bulk pair in, is a run the recovery brings back: the read
     // returns the host's bytes, and because a completed read ends the run the
-    // second shape starts its own count. A run as long as the whole budget is
-    // what the driver owes a give-up for. Last, because the disk is offline
+    // second shape starts its own count. Then one fault whose recovery the
+    // device answers without being in step after it. A run as long as the
+    // whole budget is what the driver owes a give-up for. Last, because the disk is offline
     // after it and every line above would read differently.
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::usb_transport_faults() {
@@ -265,6 +266,25 @@ fn check(index: usize, disk: &Handle) {
                 usb_storage::healthy(index)
             );
         }
+        // A recovery the device answers and is not in step after: the read's
+        // CBW is refused, and so is the TEST UNIT READY the recovery closes
+        // with, so that recovery has not taken and is the run's second break.
+        {
+            use crate::drivers::xhci::{disarm_probe_faults, stage_probe_faults};
+            buf.fill(0);
+            stage_transport_faults(1, StagedFault::BadSignature);
+            stage_probe_faults(1);
+            let refused = read(block, 1, &mut buf).is_err();
+            let untaken = disarm();
+            let probes_untaken = disarm_probe_faults();
+            let matched = !refused && first_bad(&buf, nonce, block).is_none();
+            log!(
+                "usb-gate: a bad CBW signature and then a recovery out of step: read \
+                 refused={refused} matched={matched} untaken={untaken} \
+                 probes_untaken={probes_untaken} healthy={}",
+                usb_storage::healthy(index)
+            );
+        }
         stage_transport_faults(budget, StagedFault::BadSignature);
         let read_refused = read(block, 1, &mut buf).is_err();
         let untaken = disarm();
@@ -275,12 +295,14 @@ fn check(index: usize, disk: &Handle) {
              healthy={}",
             usb_storage::healthy(index)
         );
-        // And the same budget spent inside a bind: the next disk to enumerate
-        // has its INQUIRY — the first command `bring_up` issues through the
-        // recovering path — refused as many times. The bind stages and
-        // disarms them itself, since no operation of this gate spans one; one
-        // more than the budget, so what it takes back is not nothing.
-        crate::drivers::xhci::stage_bind_faults(budget + 1);
+        // And the same budget spent inside a bind: a disk that enumerates has
+        // its INQUIRY — the first command `bring_up` issues through the
+        // recovering path — refused as many times. Not the next one to: that is
+        // this disk, which its port enumerates again once it has been taken
+        // offline and reset, and which is owed a clean bind. The bind stages
+        // and disarms them itself, since no operation of this gate spans one;
+        // one more than the budget, so what it takes back is not nothing.
+        crate::drivers::xhci::stage_bind_faults(budget + 1, 1);
     }
 
     log!(

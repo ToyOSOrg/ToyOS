@@ -121,6 +121,11 @@ actuators! {
     /// Abandon the boot's first WRITE(10) data phase without waiting for it.
     usb_transport_break = "usb-transport-break";
 
+    /// Withhold the TEST UNIT READY every Reset Recovery closes with, so no
+    /// recovery is ever in step and a disk whose transport breaks once is taken
+    /// offline: the one way to the give-up on a device that answers.
+    usb_transport_offline = "usb-transport-offline";
+
     /// Skip the waits of the next Reset Recovery's control transfers, once.
     usb_reset_break = "usb-reset-break";
 
