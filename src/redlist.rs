@@ -21,7 +21,9 @@ pub struct Quarantined {
     /// failure's text must contain one of these or the row does not apply.
     /// Alternatives rather than conjuncts, because one defect can surface at
     /// more than one of a test's assertions. A quotation, so that a reworded
-    /// assertion stops matching and the run reds asking about it.
+    /// assertion stops matching and the run reds asking about it — of the test's
+    /// own message and never of the harness's framing around it, which a gate
+    /// below refuses by name.
     pub says: &'static [&'static str],
     /// The issue file that owns the defect.
     pub issue: &'static str,
@@ -98,13 +100,8 @@ pub const QUARANTINE: &[Quarantined] = &[
         issue: "issues/build/the-pass-cost-gates-ci-sample-is-eight-days-stale-twice.md",
     },
     Quarantined {
-        test: "sched_stress",
-        says: &["within a shard the sequence order is the timestamp order"],
-        issue: "issues/diagnostics/a-shards-timestamps-run-backwards-at-seq-517.md",
-    },
-    Quarantined {
         test: "screen_fatal_halt",
-        says: &["Boot timed out waiting for ===READY==="],
+        says: &["transport broke on SCSI 0x35"],
         issue: "issues/boot-media/screen-fatal-halt-reds-on-ci-with-a-usb-storage-transport-break-during-boot.md",
     },
     Quarantined {
@@ -153,6 +150,11 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::Path;
 
+    /// How the harness frames a shared-boot failure the guest left no message
+    /// for: it heads every assertion of every such test, so a row quoting it —
+    /// or quoting any part of it — would excuse the test rather than a failure.
+    const FRAMING: &str = "exit code Some(";
+
     #[test]
     fn every_row_names_one_test_a_failure_and_an_issue_file_that_exists() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -168,6 +170,12 @@ mod tests {
                 assert!(
                     !fragment.trim().is_empty(),
                     "{} carries an empty fragment, which every failure text contains",
+                    q.test
+                );
+                assert!(
+                    !fragment.contains(FRAMING) && !FRAMING.contains(fragment),
+                    "{}: {fragment:?} is the harness's framing {FRAMING:?} and not an assertion \
+                     of the test, so the row would excuse every failure of it",
                     q.test
                 );
             }

@@ -269,14 +269,16 @@ jobs:
       # counts a total and names any quarantined failure. The
       # `ALONE:` verdicts say whether a re-run tells a reader anything, so they
       # go in the summary beside the count rather than requiring
-      # `gh run view --log-failed`.
+      # `gh run view --log-failed`. `is quarantined for something else` rides
+      # lines of neither shape, and it is the one red a reader must not take for
+      # the row's known failure.
       - name: suite summary
         if: always()
         run: |
           line=$(grep 'test result:' /tmp/suite.log | grep ' total (' | tail -1)
           echo "- shard ${{ matrix.shard }}: ${line:-no suite result line}" \
             >> "$GITHUB_STEP_SUMMARY"
-          verdicts=$(grep -E '^(FAIL|XFAIL) |^ +(STALL|INVL|ALONE) ' /tmp/suite.log || true)
+          verdicts=$(grep -E '^(FAIL|XFAIL) |^ +(STALL|INVL|ALONE) |is quarantined for something else' /tmp/suite.log || true)
           if [ -n "$verdicts" ]; then
             {
               echo "<details><summary>shard ${{ matrix.shard }}: what it said</summary>"

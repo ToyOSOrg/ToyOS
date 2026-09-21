@@ -129,10 +129,6 @@ fn merged_profile(
 
 /// The shard count these files are all of, refusing anything that is not a
 /// whole run.
-///
-/// The information was always there: a shard writes
-/// `test-durations.shard-<i>-of-<n>`, so the file names say both how many
-/// shards there were and which one each is.
 fn whole_run(files: &[std::path::PathBuf]) -> usize {
     let mut seen: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     let mut counts: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();

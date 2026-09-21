@@ -16860,7 +16860,11 @@ fn check_quarantine(
 /// The negative controls are the point: a quarantined test failing any way its
 /// row does not quote is an ordinary red, so is a failure of a name on no list
 /// — a name that merely extends a listed one is on no list — and a suspend
-/// invalidates a quarantined verdict like any other.
+/// invalidates a quarantined verdict like any other. The match is the row's
+/// fragment inside the *whole* failure text, spelled as the row spells it: a
+/// reason that says nothing is excused by nothing, a fragment reached only past
+/// the headline still excuses, and a fragment that differs only in case is a
+/// different fragment.
 fn quarantine_verdicts() -> Result<(), String> {
     static LISTED: &[Quarantined] = &[Quarantined {
         test: "known_to_red",
@@ -16870,13 +16874,34 @@ fn quarantine_verdicts() -> Result<(), String> {
     let awake = Duration::ZERO;
     let slept = common::clock::SUSPENDED_AT_LEAST + Duration::from_secs(120);
     let row = &LISTED[0];
-    let cases: [(&str, &str, Option<&str>, Duration, Verdict); 9] = [
+    let cases: [(&str, &str, Option<&str>, Duration, Verdict); 12] = [
         (
             "a quarantined test failing the way its row quotes",
             "known_to_red",
             Some("round 2: the shell never answered again:\n<log>"),
             awake,
             Verdict::Quarantined(row),
+        ),
+        (
+            "a quarantined test whose failure says nothing at all",
+            "known_to_red",
+            Some(""),
+            awake,
+            Verdict::Fail(Some(row)),
+        ),
+        (
+            "a quote the reason carries below its headline, as a shared boot's does",
+            "known_to_red",
+            Some("exit code Some(101)\nthe guest never answered"),
+            awake,
+            Verdict::Quarantined(row),
+        ),
+        (
+            "a quote the failure repeats in another case",
+            "known_to_red",
+            Some("The Guest Never Answered"),
+            awake,
+            Verdict::Fail(Some(row)),
         ),
         (
             "the row's second alternative",
