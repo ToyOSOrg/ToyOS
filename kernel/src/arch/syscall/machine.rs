@@ -114,6 +114,9 @@ fn quiesce(last: &str) {
     // reader left for the lines written past the point `/log` stopped taking
     // them.
     crate::log::account_for_durability(durability);
+    // Whether or not the volume got them: a stick this boot's transport broke
+    // on is a stick the next host may not be able to read the log off.
+    crate::blackbox::append_recovery();
     // **The barrier, and last of all.** Below the log volume's last durable
     // byte, because before it `logd` still has that volume to write and this
     // takes the controller away from it; and after everything else here,

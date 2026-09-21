@@ -933,6 +933,52 @@ pub fn blackbox_done_chain(
     Ok(())
 }
 
+/// The boot the T14 takes for `usb_transport_break`, under QEMU: the break is
+/// staged on the stick the machine booted from, and the page the next pass
+/// reads carries the transport's recovery whatever the log volume got.
+///
+/// **The page and not the file, because on the machine this is for the file is
+/// what goes missing.** The first WRITE(10) a boot issues is `logd` creating
+/// its file, so the staged break lands inside the one program that would have
+/// written the break down.
+pub fn transport_break_chain() -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu =
+        QemuInstance::boot_with_options(case, &[], &[], chained(&["usb-transport-break"]));
+    let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    first.must_say(&armed_line())?;
+
+    // One capture from the first boot's handoff on, so it is the kernel's
+    // console and the pass after the reset both.
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    super::usb::transport_break_on_metal(&second, &second)?;
+    ended_in_a_reset(&mut resets)?;
+    drop(qemu);
+
+    // Off the page: the loader's margin, the section's own head, then the
+    // record as the kernel rendered it.
+    let on_the_page = format!("| {}[", toyos_blackbox::RECOVERY_OPENS_WITH);
+    let carried = |said: &str| {
+        second
+            .text()
+            .lines()
+            .find(|line| line.starts_with(&on_the_page) && line.contains(said))
+            .ok_or_else(|| {
+                format!(
+                    "no line of the page's recovery section says {said:?}\n{}",
+                    second.text()
+                )
+            })
+    };
+    let broke = carried("transport broke on SCSI 0x2a: a staged break skipped the data phase wait")?;
+    carried("Reset Recovery took")?;
+    carried("SCSI 0x2a completed after ")?;
+    eprintln!("  [power] the boot stick's own break crossed the reset on the page: {}", broke.trim());
+    Ok(())
+}
+
 /// The boot deadline ends a machine nothing else in this tree can, and the next
 /// pass says what it ended.
 ///
@@ -987,6 +1033,9 @@ pub fn boot_deadline_ends_a_wedge(
     // The head of the record, which `blackbox::tail` owes the console whole:
     // why the boot ended, above, and what its panel cost.
     second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::PANEL_CENSUS)?;
+    // The same seal writes the recovery section, and this boot's transport
+    // never broke.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, toyos_blackbox::RECOVERY_NONE)?;
     second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::TAIL_IN_THE_FILE)?;
     second.must_not_say(&armed_and_nothing_else())?;
     second.must_say(bootlog::CHAIN_ENDS_LINE)?;
@@ -1400,6 +1449,9 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     // The chain ends rather than going round: a pass that booted a kernel would
     // have said so, and this one must not have.
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
+    // What its transport went through is on every record, in one line where
+    // nothing broke.
+    after.must_say_after(&done_line(), toyos_blackbox::RECOVERY_OPENS_WITH)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     eprintln!("  [power] a deliberate reboot sealed DONE and the chain ended in a reset");
     Ok(())

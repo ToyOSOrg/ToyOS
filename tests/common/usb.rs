@@ -1699,7 +1699,8 @@ pub fn usb_transport_break(
         log.matches("transport broke").count()
     );
 
-    transport_gives_up(test_config, c_bins, rust_bins)
+    transport_gives_up(test_config, c_bins, rust_bins)?;
+    super::power::transport_break_chain()
 }
 
 /// `run_command` logs only failures, so each of these lines is the controller

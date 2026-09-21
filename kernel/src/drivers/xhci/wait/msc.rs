@@ -1298,7 +1298,11 @@ impl XhciController {
                 log!("xHCI: {slot} endpoint {} is {out_state}, {why}", dev.out_dci());
             }
             let (cmd, pipe) = match plan.look(in_state, out_state) {
-                Look::Stopped => return true,
+                Look::Stopped => {
+                    self.log_unreached(dev, Pipe::In);
+                    self.log_unreached(dev, Pipe::Out);
+                    return true;
+                }
                 Look::Command(cmd, pipe) => (cmd, pipe),
                 Look::GaveUp(gave_up) => {
                     match gave_up {
@@ -1335,6 +1339,40 @@ impl XhciController {
                     Completion(CC_CONTEXT_STATE_ERROR)
                 );
             }
+        }
+    }
+
+    /// What the controller had not reached on a Stopped pipe's ring, off the TR
+    /// Dequeue Pointer it saves into the output context when the endpoint
+    /// leaves Running (xHCI 1.2 §4.6.9). Read and said, never acted on: whether
+    /// a transfer this driver stopped waiting for had completed or was cut is
+    /// what the device is left holding when the class reset reaches it, and no
+    /// event this driver keeps says which.
+    fn log_unreached(&self, dev: &MscDevice, pipe: Pipe) {
+        let ring = match pipe {
+            Pipe::In => &dev.in_ring,
+            Pipe::Out => &dev.out_ring,
+        };
+        let dma = self.dma();
+        let ctx = dev.dev_block
+            + super::super::DEV_OUT_CTX
+            + usize::from(dev.dci(pipe)) * self.context_size;
+        // Volatile through `Dma`: the controller writes both by DMA.
+        let dequeue =
+            u64::from(dma.read::<u32>(ctx + 8)) | (u64::from(dma.read::<u32>(ctx + 12)) << 32);
+        let queued = toyos_xhci::Ring {
+            base: ring.base_phys,
+            trbs: super::super::RING_SIZE as u16,
+            tail: ring.tail,
+        };
+        let slot = self.slot(dev.slot_id);
+        let dci = dev.dci(pipe);
+        match queued.pending(dequeue) {
+            Ok(unreached) => log!(
+                "xHCI: {slot} endpoint {dci} is Stopped with {unreached} TRB(s) on its ring the \
+                 controller had not reached"
+            ),
+            Err(why) => log!("xHCI: {slot} endpoint {dci} is Stopped and {why}"),
         }
     }
 
