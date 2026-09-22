@@ -31,9 +31,9 @@ pub const RESET_DEADLINE_NS: Nanos = 2_000_000_000;
 /// Which reset a connected port needs before anything can be enumerated on it,
 /// or `None` when its link is already up and there is nothing to do.
 ///
-/// **The one place that question is answered**: the hot-plug machine asks it,
-/// and the boot scan asks [`inherited_reset`], which answers the same for
-/// every port but a trained link.
+/// **The one place that question is answered**: the hot-plug machine acts on
+/// this answer, and the boot scan acts on the same one through
+/// [`inherited_reset`], which only says what its `None` costs at bring-up.
 pub fn reset_needed(protocol: Option<Protocol>, portsc: Portsc) -> Option<Reset> {
     if protocol != Some(Protocol::Usb3) {
         // USB2, or a port the controller did not describe. A reset is how a
@@ -52,8 +52,9 @@ pub fn reset_needed(protocol: Option<Protocol>, portsc: Portsc) -> Option<Reset>
     Some(if portsc.link_state() == LinkState::Inactive { Reset::Warm } else { Reset::Hot })
 }
 
-/// Which reset a device already connected when this kernel brings its controller
-/// up needs: **always one**, and on a link that reads trained the warm one.
+/// Which reset a device already connected when this kernel brings its
+/// controller up needs, given [`reset_needed`]'s answer for its port:
+/// **always one**, and on a link that reads trained the warm one.
 ///
 /// Such a device is whatever the firmware's driver left it: addressed,
 /// configured, possibly inside a Bulk-Only command. HCRST drives no reset on the
@@ -64,10 +65,11 @@ pub fn reset_needed(protocol: Option<Protocol>, portsc: Portsc) -> Option<Reset>
 /// its port has been reset and this kernel has enumerated it from its Default
 /// state. A trained link gets [`Reset::Warm`] because its link state is as
 /// unknown as its protocol state, and a warm reset does everything a hot one
-/// does and also retrains the link (§4.19.5.1). [`reset_needed`] still answers
-/// for a link this kernel watched train: its device came up from power-on.
-pub fn inherited_reset(protocol: Option<Protocol>, portsc: Portsc) -> Reset {
-    reset_needed(protocol, portsc).unwrap_or(Reset::Warm)
+/// does and also retrains the link (§4.19.5.1). A link this kernel watched
+/// train is not this question: its device came up from power-on, and the
+/// hot-plug machine acts on [`reset_needed`] unchanged.
+pub fn inherited_reset(needed: Option<Reset>) -> Reset {
+    needed.unwrap_or(Reset::Warm)
 }
 
 /// The reset a device gets from a class driver its own recovery did not bring
@@ -521,11 +523,16 @@ mod tests {
         Portsc::from_raw(1 | (u32::from(enabled) << 1) | (pls << 5) | (1 << 9) | (4 << 10))
     }
 
-    /// T14 run 86: port 13's warm reset was judged in the same millisecond it
-    /// was asked for, on a word with PR still set and a PRC nobody had cleared,
-    /// and the port given up as a link that would not train. The write clears
-    /// such a flag, the word is not a finished reset, and run 84's completion
-    /// word on the same port is.
+    /// What the boot scan does with a port it finds connected: one
+    /// [`reset_needed`], read through [`inherited_reset`].
+    fn inherited(protocol: Option<Protocol>, portsc: Portsc) -> Reset {
+        inherited_reset(reset_needed(protocol, portsc))
+    }
+
+    /// A warm reset judged in the millisecond it was asked for — a word with PR
+    /// still set beside a PRC nobody had cleared — reads on hardware as a link
+    /// that would not train. The write clears such a flag, that word is not a
+    /// finished reset, and the completion word that follows it is.
     #[test]
     fn a_warm_reset_is_finished_only_once_the_controller_has_cleared_pr() {
         const PR: u32 = 1 << 4;
@@ -534,17 +541,17 @@ mod tests {
         const WPR: u32 = 1 << 31;
         // Trained, with a reset-finished flag left by whatever ran before.
         let before = Portsc::from_raw(0x0020_1203);
-        assert_eq!(inherited_reset(Some(Protocol::Usb3), before), Reset::Warm);
+        assert_eq!(inherited(Some(Protocol::Usb3), before), Reset::Warm);
         let write = reset_write(Reset::Warm, before).raw();
         assert_eq!(write & (WPR | PRC), WPR | PRC, "{write:#010x}: the stale flag is cleared with it");
         assert_eq!(write & (1 << 1), 0, "{write:#010x} would disable the port");
 
-        // Run 86's word, in the millisecond the reset was asked for.
+        // The word read in the millisecond the reset was asked for.
         let during = Portsc::from_raw(0x0022_12b1);
         assert_eq!(during.raw() & (PR | PRC), PR | PRC);
         assert!(!during.reset_finished(), "PR is still set: the reset is on the wire");
 
-        // Run 84's word after port 13's warm reset: PR clear, PRC and WRC set, enabled.
+        // The word after the warm reset finished: PR clear, PRC and WRC set, enabled.
         let after = Portsc::from_raw(0x0028_1203);
         assert_eq!(after.raw() & (PR | PRC | WRC), PRC | WRC);
         assert!(after.reset_finished());
@@ -555,13 +562,13 @@ mod tests {
     fn a_device_found_at_bring_up_is_never_enumerated_without_a_reset() {
         let trained = connected(true, 0);
         assert_eq!(reset_needed(Some(Protocol::Usb3), trained), None, "a link watched training");
-        assert_eq!(inherited_reset(Some(Protocol::Usb3), trained), Reset::Warm);
+        assert_eq!(inherited(Some(Protocol::Usb3), trained), Reset::Warm);
         // Everything else is answered as it always was: the question is only
         // whether a reset is skipped.
-        assert_eq!(inherited_reset(Some(Protocol::Usb3), connected(false, 7)), Reset::Hot);
-        assert_eq!(inherited_reset(Some(Protocol::Usb3), connected(false, 6)), Reset::Warm);
-        assert_eq!(inherited_reset(Some(Protocol::Usb2), connected(true, 0)), Reset::Hot);
-        assert_eq!(inherited_reset(None, trained), Reset::Hot);
+        assert_eq!(inherited(Some(Protocol::Usb3), connected(false, 7)), Reset::Hot);
+        assert_eq!(inherited(Some(Protocol::Usb3), connected(false, 6)), Reset::Warm);
+        assert_eq!(inherited(Some(Protocol::Usb2), connected(true, 0)), Reset::Hot);
+        assert_eq!(inherited(None, trained), Reset::Hot);
     }
 
     #[test]

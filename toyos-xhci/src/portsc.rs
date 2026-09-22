@@ -124,7 +124,7 @@ impl Portsc {
     /// conformant controller sets PRC with it; one flag is enough to act on and
     /// both are cleared together. Whose reset it finished is
     /// [`Self::reset_finished`]'s question.
-    pub const fn reset_changed(self) -> bool {
+    const fn reset_changed(self) -> bool {
         self.0 & (PRC | WRC) != 0
     }
 

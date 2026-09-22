@@ -454,16 +454,17 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
 /// Initialize and configure one USB device found connected at bring-up,
 /// waiting for each step.
 ///
-/// The reset kind is [`port::inherited_reset`]'s answer alone — every device
-/// here was left by whatever ran before this kernel, so none is enumerated
-/// without one — and what a completion meant is [`port::reset_outcome`]'s.
+/// The reset kind is one [`port::reset_needed`] read through
+/// [`port::inherited_reset`] — every device here was left by whatever ran
+/// before this kernel, so none is enumerated without a reset — and what a
+/// completion meant is [`port::reset_outcome`]'s.
 pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Protocol>) {
-    let portsc = ctrl.read_portsc(port_idx);
-    let mut kind = port::inherited_reset(protocol, portsc);
-    if port::reset_needed(protocol, portsc).is_none() {
+    let needed = port::reset_needed(protocol, ctrl.read_portsc(port_idx));
+    if needed.is_none() {
         log!("xHCI: port {} link already trained before this kernel ran; warm resetting it \
              before its device is asked anything", port_idx + 1);
     }
+    let mut kind = port::inherited_reset(needed);
     reset_port(ctrl, port_idx, kind);
     // At most two rounds: §4.19.5.1 has one escalation, hot to warm, and both
     // failure shapes below leave `kind` warm, from which neither retries.
