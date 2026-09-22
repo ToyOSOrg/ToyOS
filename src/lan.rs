@@ -91,6 +91,79 @@ pub fn link_up_ms(text: &str) -> Result<u64, String> {
         .map_err(|_| format!("{line:?} carries no readable link-up time"))
 }
 
+/// The T14's I219, as the kernel's hand-over record spells its id.
+pub const I219: &str = "8086:15fc";
+
+/// The kernel's two records that say a message the I219 raised reached a CPU.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Delivery {
+    pub slot: usize,
+    pub vector: u8,
+    pub handed: String,
+    pub took: String,
+}
+
+/// One record's message: what follows the bracket every writer opens a line
+/// with.
+fn message(line: &str) -> Option<&str> {
+    line.strip_prefix('[')?.split_once("] ").map(|(_, message)| message)
+}
+
+/// Whether a message the I219 raised reached a CPU, out of the kernel's own
+/// records: the hand-over that names the function's slot and vector, and that
+/// slot's first-message record on that vector, after it.
+///
+/// **Whole messages in the kernel's spelling, never a substring**, so another
+/// writer's line, another slot's record, and a record with no hand-over of this
+/// function before it are each refused by what they lack.
+pub fn delivered(text: &str) -> Result<Delivery, String> {
+    let handed = format!("[{I219}] handed over on slot ");
+    let Some((at, line)) = text.lines().enumerate().find(|(_, l)| {
+        message(l).is_some_and(|m| m.starts_with("pcidev: PCI ") && m.contains(&handed))
+    }) else {
+        return Err(match text.lines().find(|l| l.contains("NOT HANDED OVER")) {
+            Some(refused) => format!(
+                "no `{handed}` record, and the kernel refused a function: {}",
+                refused.trim()
+            ),
+            None => format!(
+                "no `{handed}` record and no refusal either: nothing on this boot claimed {I219}"
+            ),
+        });
+    };
+    let (slot, vector) = message(line)
+        .and_then(|m| m.split_once(&handed))
+        .and_then(|(_, tail)| tail.split_once(", vector 0x"))
+        .and_then(|(slot, vector)| {
+            Some((slot.parse::<usize>().ok()?, u8::from_str_radix(vector, 16).ok()?))
+        })
+        .ok_or_else(|| format!("{line:?} carries no readable slot and vector"))?;
+
+    let want = format!("pcidev: slot {slot} took its first message on vector {vector:#x}");
+    if let Some(took) = text.lines().skip(at + 1).find(|l| message(l) == Some(want.as_str())) {
+        return Ok(Delivery { slot, vector, handed: line.to_string(), took: took.to_string() });
+    }
+
+    let mut why = format!(
+        "{I219} was handed over on slot {slot}, vector {vector:#x}, and no kernel record \
+         `{want}` follows it: the kernel took no message on this function's vector"
+    );
+    for (i, other) in text.lines().enumerate().filter(|(_, l)| l.contains("took its first message")) {
+        let said = message(other);
+        why.push_str(if said == Some(want.as_str()) && i < at {
+            "\n  the record, before the hand-over it would answer: "
+        } else if said.is_some_and(|m| {
+            m.starts_with("pcidev: slot ") && m.contains(" took its first message on vector 0x")
+        }) {
+            "\n  another claim's record, not this function's: "
+        } else {
+            "\n  a line not in the kernel's spelling of the record: "
+        });
+        why.push_str(other.trim());
+    }
+    Err(why)
+}
+
 /// **The one place the host-name option can be read.** A server that ignores it
 /// answers the same lease either way, so the frames the client sent are the only
 /// evidence that it asked at all — and `filter-dump` records both directions, so
@@ -202,6 +275,125 @@ mod tests {
         assert!(link_up_ms("nothing\n").unwrap_err().contains("never reported a link"));
         let why = link_up_ms(&format!("[x] {LINK_UP}1000 Mb/s")).expect_err("no comma");
         assert!(why.contains("already up"), "{why}");
+    }
+
+    /// Metal run 57's `lanicscase` kernel log, verbatim, from the I219's
+    /// hand-over to the record of its first message.
+    const RUN_57: &str = "\
+[2026-09-16 15:01:20 1.333 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
+[2026-09-16 15:01:20 1.360 cpu0] ELF: 3417 relocations indexed (RELATIVE + GLOB_DAT + TPOFF)
+[2026-09-16 15:01:20 1.360 cpu0] spawn: TLS 1 modules, total_memsz=144
+[2026-09-16 15:01:20 1.518 cpu0] spawn: /system/bin/netd pid=5 tid=0 dst=5 base=0x10000000000 entry=0x1000004e5c0 cr3=0x1cc1000 symbols=2048KiB (layout=25ms relocs=0ms deps=0ms tls=1ms total=184ms)
+[2026-09-16 15:01:20 1.552 cpu0] ELF: 2833 relocations indexed (RELATIVE + GLOB_DAT + TPOFF)
+[2026-09-16 15:01:20 1.552 cpu0] spawn: TLS 1 modules, total_memsz=144
+[2026-09-16 15:01:20 1.739 cpu0] spawn: /system/bin/test-runner pid=6 tid=0 dst=6 base=0x10000000000 entry=0x1000001fff0 cr3=0x1cbf000 symbols=2048KiB (layout=32ms relocs=0ms deps=0ms tls=2ms total=221ms)
+[2026-09-16 15:01:20 1.958 cpu4] usb-storage: disk 0 does not implement SYNCHRONIZE CACHE (sense 0x05/0x20/0x00); its writes are durable once they complete
+[2026-09-16 15:01:21 2.239 cpu5] shm: 0xa0800000 mapped Uncacheable into pid 5
+[2026-09-16 15:01:21 2.239 cpu5] iommu: domain6 maps 0x6800000..0x6a00000 at 0x2000000000
+[2026-09-16 15:01:21 2.239 cpu0] pcidev: slot 0 took its first message on vector 0x28
+";
+
+    const HANDED: &str = "[2026-09-16 15:01:20 1.333 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] \
+                          handed over on slot 0, vector 0x28\n";
+    const TOOK: &str =
+        "[2026-09-16 15:01:21 2.239 cpu0] pcidev: slot 0 took its first message on vector 0x28\n";
+
+    /// Run 57 with one of its lines replaced, refusing a fixture the edit did
+    /// not change.
+    fn edited(from: &str, to: &str) -> String {
+        assert!(RUN_57.contains(from), "run 57's excerpt carries no {from:?}");
+        RUN_57.replacen(from, to, 1)
+    }
+
+    #[test]
+    fn run_57_took_a_message_on_the_i219s_own_slot_and_vector() {
+        let got = delivered(RUN_57).expect("run 57 recorded the message");
+        assert_eq!((got.slot, got.vector), (0, 0x28));
+        assert_eq!(format!("{}\n", got.handed), HANDED);
+        assert_eq!(format!("{}\n", got.took), TOOK);
+    }
+
+    #[test]
+    fn a_boot_with_no_first_message_record_is_refused_by_the_record_it_lacks() {
+        let why = delivered(&edited(TOOK, "")).expect_err("no record");
+        assert!(
+            why.contains("no kernel record `pcidev: slot 0 took its first message on vector 0x28`"),
+            "{why}"
+        );
+    }
+
+    /// Another writer's line carrying the words is not the kernel's record.
+    #[test]
+    fn a_line_that_is_not_the_kernels_record_is_refused_and_named() {
+        let stray = "[2026-09-16 15:01:21 2.240 cpu3] test-runner: waiting until netd took its \
+                     first message\n";
+        let log = edited(TOOK, "").replacen(
+            "total=184ms)\n",
+            &format!("total=184ms)\n{stray}"),
+            1,
+        );
+        assert!(log.contains(stray));
+        let why = delivered(&log).expect_err("a userland line");
+        assert!(why.contains("no kernel record"), "{why}");
+        assert!(why.contains("a line not in the kernel's spelling of the record: "), "{why}");
+        assert!(why.contains("test-runner: waiting until netd"), "{why}");
+    }
+
+    #[test]
+    fn another_slots_record_is_refused_as_another_claims() {
+        let why = delivered(&edited(
+            TOOK,
+            "[2026-09-16 15:01:21 2.239 cpu0] pcidev: slot 1 took its first message on vector \
+             0x30\n",
+        ))
+        .expect_err("slot 1 is not the I219's");
+        assert!(why.contains("handed over on slot 0, vector 0x28"), "{why}");
+        assert!(why.contains("another claim's record, not this function's: "), "{why}");
+        assert!(why.contains("slot 1 took its first message on vector 0x30"), "{why}");
+        // The right slot on the wrong vector is not the record either.
+        let why = delivered(&edited(TOOK, &TOOK.replace("0x28", "0x29")))
+            .expect_err("vector 0x29 is not the one slot 0 was given");
+        assert!(why.contains("another claim's record"), "{why}");
+    }
+
+    #[test]
+    fn a_boot_where_the_i219_was_not_handed_over_is_refused_whatever_else_took_a_message() {
+        let log = edited(
+            HANDED,
+            "[2026-09-16 15:01:20 1.333 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] NOT HANDED OVER: \
+             refused\n",
+        )
+        .replacen(
+            TOOK,
+            "[2026-09-16 15:01:21 2.239 cpu0] pcidev: slot 3 took its first message on vector \
+             0x2a\n",
+            1,
+        );
+        assert!(!log.contains(TOOK));
+        let why = delivered(&log).expect_err("the I219 was refused");
+        assert!(why.contains("no `[8086:15fc] handed over on slot ` record"), "{why}");
+        assert!(why.contains("NOT HANDED OVER"), "{why}");
+    }
+
+    #[test]
+    fn the_record_before_the_hand_over_answers_nothing() {
+        let log = format!("{TOOK}{}", edited(TOOK, ""));
+        let why = delivered(&log).expect_err("the record precedes the claim");
+        assert!(why.contains("before the hand-over it would answer"), "{why}");
+    }
+
+    /// Nothing links the kernel to the build system, so the two records this
+    /// judge reads are held to the kernel's own format strings.
+    #[test]
+    fn the_kernel_writes_both_records_in_the_spelling_read_here() {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel/src/pcidev/mod.rs");
+        let source = std::fs::read_to_string(&at).expect("the kernel's pcidev module");
+        for spelled in [
+            "\"pcidev: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] handed over on slot {slot}, \\\n",
+            "\"pcidev: slot {slot} took its first message on vector {:#x}\"",
+        ] {
+            assert!(source.contains(spelled), "{} spells no {spelled:?}", at.display());
+        }
     }
 
     /// One pcap record per frame, with the timestamps a reader here never looks

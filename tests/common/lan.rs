@@ -30,30 +30,18 @@ pub const BOOT: &str = "lancase";
 pub const ICS_CONFIG: &str = "tests/lanicscase";
 pub const ICS_BOOT: &str = "lanicscase";
 
-/// The kernel's own record that a claim's vector took a message, which is what
-/// the armed boot is for. A kernel record and not netd's: on this machine a
-/// userland write reaches no channel the stick carries.
-const FIRST_MESSAGE: &str = "took its first message";
-
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 
-/// The armed boot's judge: netd asked the part for a message, so the kernel's
-/// own record of the claim taking one says whether delivery works — whatever
-/// the PHY did about a link.
+/// The armed boot's judge: the kernel's own records, tied to the I219's
+/// hand-over, say whether a message it raised reached a CPU — whatever the PHY
+/// did about a link. Kernel records and not netd's: on this machine a userland
+/// write reaches no channel the stick carries.
 pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
-    let kernel = back.kernel();
-    let text = kernel.text();
-    match text.lines().find(|l| l.contains(FIRST_MESSAGE)) {
-        Some(line) => {
-            eprintln!("  [lan] {}", line.trim());
-            Ok(())
-        }
-        None => Err(format!(
-            "netd wrote one cause to ICS on this boot and no `{FIRST_MESSAGE}` record \
-             followed, so nothing this function raises reaches a CPU"
-        )),
-    }
+    let got = toyos_build::lan::delivered(back.kernel().text())?;
+    eprintln!("  [lan] {}", got.handed.trim());
+    eprintln!("  [lan] {}", got.took.trim());
+    Ok(())
 }
 
 /// The config the QEMU arm boots — the Intel driver in front of the user-mode

@@ -1304,10 +1304,13 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         "lan_dhcp_lease",
-        metal::Metal::Runs {
-            arms: LANCASE,
-            judge: |b| lan::on_metal(b[0]).and(lan::provoked_on_metal(b[1])),
-        },
+        metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
+    ),
+    (
+        // Folded into `lan_dhcp_lease`'s judge once the PHY is brought up
+        // (#453): lancase's own first-message record then carries this fact.
+        "lan_message_delivery",
+        metal::Metal::Runs { arms: LANICSCASE, judge: |b| lan::provoked_on_metal(b[0]) },
     ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
@@ -1637,6 +1640,14 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
 ];
 
+/// **The [`METAL`] rows no QEMU registration answers for**, each with why none
+/// can: a verdict under a name only the T14 reports.
+const METAL_ONLY: &[(&str, &str)] = &[(
+    "lan_message_delivery",
+    "whether the T14's own I219 delivers a message through that machine's interrupt remapping \
+     is a fact of that part and that path; QEMU's e1000e is another part behind another path",
+)];
+
 /// The boot most of the first tranche rides: the plain `tests/testcases` shape
 /// with a job list that ends it.
 ///
@@ -1680,19 +1691,17 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// The cable's own boot: netd in front of the T14's I219, and one job that
-/// holds the machine up long enough for the host to reach it. The first arm is
-/// the one in this suite that names a PCI function for the loop to reach the
-/// boot over.
-///
-/// **The second is the first with netd's delivery actuator armed.** A count of
-/// no messages is two facts — a part nothing made speak and a message that
-/// reached no CPU — so one boot asks the part for a message and the other does
-/// not, and the pair separates them. It names no PCI function: its judge reads
-/// the kernel's own record and asks the cable nothing.
-const LANCASE: &[metal::Arm] = &[
-    metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) },
-    metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS),
-];
+/// holds the machine up long enough for the host to reach it. The one arm in
+/// this suite that names a PCI function for the loop to reach the boot over.
+const LANCASE: &[metal::Arm] =
+    &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
+
+/// The cable's boot with netd's delivery actuator armed. **A count of no
+/// messages is two facts** — a part nothing made speak and a message that
+/// reached no CPU — so this boot asks the part for a message and `LANCASE` does
+/// not. It names no PCI function: its judge reads the kernel's own records and
+/// asks the cable nothing.
+const LANICSCASE: &[metal::Arm] = &[metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS)];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -18263,11 +18272,12 @@ fn check_shard_partition(all_tests: &[TestDef]) {
 /// A group whose members drifted apart still passes — each one boots its own
 /// machine and reads its own console — so nothing downstream would notice, and
 /// a group split across the two phases could not share a guest at all.
-/// Every metal row names a registered test, once, and every boot it asks for is
-/// a committed config.
+/// Every metal row names a registered test or a [`METAL_ONLY`] row — exactly
+/// one of the two — once, and every boot it asks for is a committed config.
 ///
 /// **A row for a name nothing registers is a metal test with no QEMU one**, and
-/// its verdict would be reported under a name no other tier can answer for.
+/// its verdict would be reported under a name no other tier can answer for
+/// unless a [`METAL_ONLY`] row says why none can.
 fn check_metal_registration() {
     if let Err(why) = the_two_comparisons_use_one_rule() {
         panic!("{why}");
@@ -18288,13 +18298,29 @@ fn check_metal_registration() {
         .map(|(n, _, _)| *n)
         .chain(AUDIO_TESTS.iter().map(|(n, _)| *n))
         .collect();
+    let only: BTreeSet<&str> = METAL_ONLY.iter().map(|(n, _)| *n).collect();
+    assert_eq!(only.len(), METAL_ONLY.len(), "METAL_ONLY names one test twice");
+    for (name, why) in METAL_ONLY {
+        assert!(!why.trim().is_empty(), "METAL_ONLY declares {name:?} with no reason");
+        assert!(
+            METAL.iter().any(|(n, d)| n == name && matches!(d, metal::Metal::Runs { .. })),
+            "METAL_ONLY declares {name:?}, which no METAL row runs; a metal-only name with no \
+             metal arm is a test nothing runs"
+        );
+    }
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for (name, decl) in METAL {
-        assert!(
-            registered.contains(name),
-            "METAL rules on {name:?}, which no registration names; a metal-only test needs a \
-             registration of its own first"
-        );
+        match (registered.contains(name), only.contains(name)) {
+            (true, false) | (false, true) => {}
+            (false, false) => panic!(
+                "METAL rules on {name:?}, which no registration names; a metal-only test is \
+                 declared in METAL_ONLY with why no QEMU arm can answer for it"
+            ),
+            (true, true) => panic!(
+                "{name:?} is registered and declared metal-only; a test with a QEMU arm is not \
+                 one no QEMU arm can answer for"
+            ),
+        }
         assert!(seen.insert(name), "{name} has two metal declarations");
         let metal::Metal::Runs { arms, .. } = decl else { continue };
         assert!(!arms.is_empty(), "{name}'s metal declaration asks for no boot at all");

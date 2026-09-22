@@ -671,15 +671,18 @@ fn a_cause_written_to_ics_raises_a_message_the_claim_takes() {
 
     driver.provoke_message();
     let pass = one_pass(&mut driver);
-    assert!(
-        pass.messages > 0,
+    assert_eq!(
+        pass.messages, 1,
         "{}",
-        nic.because("a cause written to ICS raised no message at all")
+        nic.because("one cause written to ICS once is one message")
     );
-    assert!(
-        pass.causes & cause::LSC != 0,
+    // `OTHER` is §10.2.4.1's summary of `LSC` and is set with it; nothing else
+    // was written, so nothing else may be read.
+    assert_eq!(
+        pass.causes & !cause::INT_ASSERTED,
+        cause::LSC | cause::OTHER,
         "{}",
-        nic.because("the message the claim took carried no LSC")
+        nic.because("the causes read are not exactly the one written")
     );
 }
 

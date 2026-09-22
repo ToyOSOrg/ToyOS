@@ -125,11 +125,13 @@ impl Card {
         }
     }
 
-    /// [`PROVOKE_MESSAGE`], carried to the driver that has one.
+    /// [`PROVOKE_MESSAGE`], carried to the driver that has one. Armed on a card
+    /// with none it is refused, not skipped: that card's own first message
+    /// would read as the instrument's.
     fn provoke_message(&self) {
         match self {
             Self::Virtio(_) => {
-                say!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio")
+                panic!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio")
             }
             Self::Intel(nic) => nic.provoke_message(),
         }
@@ -1324,7 +1326,6 @@ fn main() {
         .expect("the manifest declares this program serves `netd`");
     let nic = open(claim);
     if std::env::args().any(|arg| arg == PROVOKE_MESSAGE) {
-        say!("netd: {PROVOKE_MESSAGE}: the next message this claim takes is one netd asked for");
         nic.provoke_message();
     }
     let mac = nic.mac();

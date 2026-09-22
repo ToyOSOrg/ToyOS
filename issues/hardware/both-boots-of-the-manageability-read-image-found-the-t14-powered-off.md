@@ -13,15 +13,8 @@ Both times the owner came back to a machine that was **off**: not frozen, not
 wedged at a panic, powered down. Neither boot left a black box.
 
 The persisted kernel log is the same on both runs: it ends at the first `logd`
-batch, 192 lines, at around 0.6 s — before netd ran at all. So the stick carries
-nothing from the moment the machine went away, and nothing recorded says what
-took the power.
-
-**Every other image booted clean off the same stick**, including run 57 the same
-round, which is the delivery experiment (`tests/lanicscase`, netd's
-`--provoke-message`) and recorded `pcidev: slot 0 took its first message on
-vector 0x28`. The two power-offs are the two boots of this one image and no
-others.
+batch, 192 lines, at around 0.6 s. So the stick carries nothing from the moment
+the machine went away, and nothing recorded says what took the power.
 
 The cause is unknown. The arm has been removed from the tree rather than left
 armed: the reading it was after is asked through the PHY probe's exit code

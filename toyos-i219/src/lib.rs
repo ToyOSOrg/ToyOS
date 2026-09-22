@@ -537,8 +537,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         Ok(nic)
     }
 
-    /// Raise one enabled cause on purpose (§10.2.4.4), so the next message the
-    /// claim takes is one this driver asked for.
+    /// Raise one enabled cause on purpose (§10.2.4.4).
     ///
     /// **Nothing on a shipping path calls this**: the caller arms it and
     /// [`Self::open`] does not, because a driver that raised a message every
