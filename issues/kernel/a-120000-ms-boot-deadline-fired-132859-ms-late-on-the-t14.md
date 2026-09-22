@@ -26,7 +26,7 @@ from bench run 42's kernel log, the text `deadline.rs:174-177` and
     hard lockup: 60000 ms, sampled every 1000 ms by each cpu's own performance counter, after which a cpu that has taken no interrupt seals a WEDGED record and resets the machine
 
 Run 55's boot — armed at 2026-09-14 20:54:57Z, the `lancase` image of the
-unmerged branch `i219-delivery` at `4d604c86`, whose `kernel/src/deadline.rs`,
+branch `i219-delivery` (#461) at `4d604c86`, whose `kernel/src/deadline.rs`,
 `kernel/src/hardlockup/mod.rs` and `kernel/src/drivers/acpi.rs` are
 byte-identical to this tree's (`git diff --stat 4d604c86 HEAD -- <those>` is
 empty) — did not come back inside the loop's 420 s, and its own kernel log
