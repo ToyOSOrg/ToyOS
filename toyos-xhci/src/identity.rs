@@ -36,10 +36,7 @@ pub type Nanos = u64;
 /// How long after this driver reset a disk's port the disk is held for its
 /// device to come back, once the device has been seen to leave.
 ///
-/// T14 run 79 measured 0.98 s from the port rung's reset (1.897 s) to the same
-/// stick bound on its companion port (2.878 s): the old port going empty, the
-/// SuperSpeed link training, the enumeration and the bind's own commands. Two
-/// seconds is twice that, and is the port rung's and the last rung's bounds
+/// Two seconds is the port rung's and the last rung's bounds
 /// together — what the ladder already gave a reset device to answer, which a
 /// device that left made moot.
 pub const RETURN_WINDOW: Nanos = 2_000_000_000;

@@ -15,8 +15,8 @@ use crate::log;
 use crate::scheduler::Operation;
 use crate::time::{Budget, Deadline, Duration};
 use super::{Control, Quiet, Restart};
-use super::super::{log_unrecoverable, with_disk, Completion, Disk, StorageGeometry, Trb};
-use super::super::{recheck_ports, whereabouts, Whereabouts};
+use super::super::{log_unrecoverable, Completion, Disk, StorageGeometry, Trb};
+use super::super::{look_for, ports_wanted, with_disk_by, Whereabouts};
 use super::super::{TrbRing, XhciController, PAGE, TRB_ADDRESS_DEVICE, TRB_CONFIGURE_EP, TRB_RESET_DEVICE};
 use super::super::{stop, CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_CTX};
 use super::super::{AFTER_BREAK, CC_CONTEXT_STATE_ERROR, EP0_DCI};
@@ -113,6 +113,12 @@ pub struct MscDevice {
     /// Set once the device refuses SYNCHRONIZE CACHE; logged once, not per
     /// flush — a log line would itself be pending content the next flush drains.
     no_write_cache: bool,
+    /// A write the device reported complete since its last SYNCHRONIZE CACHE
+    /// that did: bytes a volatile cache may hold and nothing has made durable.
+    unflushed: bool,
+    /// This disk was taken back by a device that came back owing a flush
+    /// ([`Self::owes_a_flush`]); its next flush fails, once.
+    flush_lost: bool,
     /// What the device says it is, which a device that binds after this one
     /// left must match to take its number.
     identity: Identity,
@@ -161,6 +167,18 @@ impl MscDevice {
 
     pub(in crate::drivers::xhci) fn identity(&self) -> &Identity {
         &self.identity
+    }
+
+    /// Whether a device that left now could take writes it reported complete
+    /// with it: a volatile cache holding a write no flush has emptied since.
+    ///
+    /// **A device that comes back is not known to have kept its power.** A
+    /// reset that moved it and an unplug and replug of it look alike to the
+    /// host, and the second empties a volatile cache the device already
+    /// answered for; a device that said it has none (`no_write_cache`) has
+    /// nothing to lose there.
+    pub(in crate::drivers::xhci) fn owes_a_flush(&self) -> bool {
+        self.unflushed && !self.no_write_cache
     }
 
     pub(in crate::drivers::xhci) fn port_idx(&self) -> u8 {
@@ -265,21 +283,19 @@ enum Broke {
 }
 
 impl Broke {
-    /// Where the break left the device. A data phase that did not complete,
-    /// of a command whose data goes out, is a device owed bytes; `data_in` is
-    /// the direction of the command that broke.
-    fn left(&self, data_in: bool) -> Left {
-        let in_data = match self {
-            Self::Code { phase, .. } | Self::Silence { phase, .. } | Self::Stall { phase } => {
-                *phase == Phase::Data.named()
+    /// Where the break left the device (`toyos_xhci::ladder::left`);
+    /// `data_out` is whether the command that broke sends data.
+    fn left(&self, data_out: bool) -> Left {
+        let phase = match self {
+            Self::Code { phase, .. }
+            | Self::Silence { phase, .. }
+            | Self::Stall { phase }
+            | Self::Short { phase, .. } => {
+                [Phase::Command, Phase::Data].into_iter().find(|p| p.named() == *phase).unwrap_or(Phase::Status)
             }
-            Self::Short { .. } | Self::PhaseError | Self::Csw { .. } | Self::Residue { .. } => false,
+            Self::PhaseError | Self::Csw { .. } | Self::Residue { .. } => Phase::Status,
         };
-        if in_data && !data_in {
-            Left::OwedDataOut
-        } else {
-            Left::Elsewhere
-        }
+        ladder::left(phase, data_out)
     }
 
     /// The transfer event that ended the round trip, where one did: what the
@@ -343,9 +359,13 @@ mod transport_break {
     static UNSPENT: AtomicBool = AtomicBool::new(true);
     static ARMED: AtomicBool = AtomicBool::new(false);
 
-    /// Called where the driver is about to run a WRITE(10) data phase.
-    pub fn arm() {
-        if !crate::actuator::usb_transport_break() {
+    /// Called where the driver is about to run a WRITE(10) data phase; `owed`
+    /// is whether its device owes a flush (`MscDevice::owes_a_flush`), which
+    /// `usb-transport-break-owed` waits for.
+    pub fn arm(owed: bool) {
+        let wanted = crate::actuator::usb_transport_break()
+            || (crate::actuator::usb_transport_break_owed() && owed);
+        if !wanted {
             return;
         }
         ARMED.store(UNSPENT.swap(false, Ordering::Relaxed), Ordering::Relaxed);
@@ -783,6 +803,12 @@ impl XhciController {
             if dev.failed {
                 return Err(BlockError::Device);
             }
+            if core::mem::take(&mut dev.flush_lost) {
+                log!("usb-storage: disk {number} flush failed: its device came back from leaving \
+                     its port owing a flush, so writes it reported complete before then may not \
+                     have survived, and no flush now can say they are durable");
+                return Err(BlockError::Device);
+            }
             // **The latch decides before the command is built, not after it is
             // refused.** A device that has answered INVALID COMMAND OPERATION
             // CODE once answers it every time, and issuing anyway costs a full
@@ -810,7 +836,10 @@ impl XhciController {
                 return Ok(());
             }
             match outcome {
-                Scsi::Ok { .. } => Ok(()),
+                Scsi::Ok { .. } => {
+                    dev.unflushed = false;
+                    Ok(())
+                }
                 Scsi::Refused { key, asc, ascq } => {
                     log_refusal(&cdb, key, asc, ascq);
                     Err(BlockError::Device)
@@ -883,10 +912,11 @@ impl XhciController {
             }
 
             match self.scsi(dev, &cdb, 10, Some(data.subview(0, bytes)), !write, until) {
-                Scsi::Ok { delivered } if delivered as usize == bytes => {}
+                Scsi::Ok { delivered } if delivered as usize == bytes => dev.unflushed |= write,
                 // Short of what was asked: nothing above can say which
                 // blocks arrived, so a partial transfer is a failed one.
                 Scsi::Ok { delivered } => {
+                    dev.unflushed |= write;
                     log!("usb-storage: {delivered} of {bytes} B at block {}", lba + done as u64);
                     return Err(BlockError::Device);
                 }
@@ -924,8 +954,10 @@ impl XhciController {
     /// could ask again.
     ///
     /// **Everything the call does once its transport has broken is bounded,
-    /// rung by rung** ([`AFTER_BREAK`]): opened by the first break, closed here
-    /// on every way out, so no call inherits another's.
+    /// rung by rung** ([`AFTER_BREAK`]): opened by the first break and closed
+    /// by whoever the call is — [`served`] for a block operation, the bind for
+    /// each of its commands — so a later command of the same operation spends
+    /// what the break left it, and no call inherits another's.
     #[allow(clippy::too_many_arguments)]
     fn scsi(
         &mut self,
@@ -936,22 +968,8 @@ impl XhciController {
         data_in: bool,
         until: Deadline,
     ) -> Scsi {
-        let answer = self.scsi_within_one_budget(dev, cdb, cdb_len, data, data_in, until);
-        self.after_break = AfterBreak::CLOSED;
-        answer
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn scsi_within_one_budget(
-        &mut self,
-        dev: &mut MscDevice,
-        cdb: &[u8],
-        cdb_len: u8,
-        data: DataPhase,
-        data_in: bool,
-        until: Deadline,
-    ) -> Scsi {
         let opcode = cdb.first().copied().unwrap_or(0);
+        let data_out = data.is_some() && !data_in;
         // Named per line so a multi-disk boot's retry log attributes to the
         // right disk.
         let slot = self.slot(dev.slot_id);
@@ -989,13 +1007,16 @@ impl XhciController {
                          its port's teardown takes it from here");
                     dev.failed = true;
                     dev.left = true;
+                    // A hold for its device is part of this call, from the
+                    // wait that saw it go.
+                    self.after_break.open(self.bulk_began, AFTER_BREAK);
                     return Scsi::Broken;
                 }
                 Err(broke) => {
                     self.after_break.open(self.bulk_began, AFTER_BREAK);
                     log!("usb-storage: {slot} transport broke on SCSI {opcode:#04x}: {broke}; \
                          break {} of {MAX_TRANSPORT_BREAKS} running", dev.breaks.saturating_add(1));
-                    if !self.climb_until_in_step(dev, broke.event(), broke.left(data_in)) {
+                    if !self.climb_until_in_step(dev, broke.event(), broke.left(data_out)) {
                         return Scsi::Broken;
                     }
                 }
@@ -1433,7 +1454,7 @@ impl XhciController {
             open.at(Phase::DataOwed, &dev.in_ring, &dev.out_ring);
             #[cfg(feature = "boot-actuators")]
             if cdb.first() == Some(&0x2A) {
-                transport_break::arm();
+                transport_break::arm(dev.owes_a_flush());
                 mid_write::wedge_if_staged(Phase::DataOwed);
             }
             #[cfg(feature = "boot-actuators")]
@@ -1969,6 +1990,8 @@ pub(in crate::drivers::xhci) fn bind(
         failed: false,
         slot_goes: None,
         no_write_cache: false,
+        unflushed: false,
+        flush_lost: false,
         identity: Identity {
             usb,
             serial: Serial::Absent,
@@ -1981,6 +2004,13 @@ pub(in crate::drivers::xhci) fn bind(
     };
 
     #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_slow_return() && ctrl.awaits_a_device() {
+        const SLOW_NS: u64 = 2_500_000_000;
+        log!("usb-storage: slot {slot_id} {} {} ms before its first command",
+            slow_return::STALLED, SLOW_NS / 1_000_000);
+        let _ = crate::clock::settles(SLOW_NS, || false);
+    }
+    #[cfg(feature = "boot-actuators")]
     let staged = staged::bind_begins();
     let up = bring_up(ctrl, &mut dev);
     #[cfg(feature = "boot-actuators")]
@@ -1988,10 +2018,12 @@ pub(in crate::drivers::xhci) fn bind(
         log!("usb-storage: slot {slot_id} bound under {staged} staged INQUIRY fault(s): \
              untaken={}", staged::disarm());
     }
-    if !up {
+    match up {
+        Up::Ready => {}
         // A bind that failed without going offline spoke to a transport that
         // answered: its pair has nothing on its rings.
-        return Bind::Refused(dev.slot_goes.unwrap_or(SlotGoes::Back));
+        Up::Refused => return Bind::Refused(dev.slot_goes.unwrap_or(SlotGoes::Back)),
+        Up::NotReady => return Bind::NotReady,
     }
     dev.identity.serial = read_serial(ctrl, &mut dev, serial_index);
     log!("usb-storage: slot {slot_id} serial number {}", dev.identity.serial);
@@ -1999,12 +2031,14 @@ pub(in crate::drivers::xhci) fn bind(
     // holds for life, so it must not move when another controller binds or
     // loses a disk — and a device that is a disk this driver's reset lost
     // takes that disk's back.
-    if let Some(index) = ctrl.adopt(&dev.identity, port_idx) {
+    if let Some((index, owed)) = ctrl.adopt(&dev.identity, port_idx) {
+        dev.flush_lost = owed;
         log!("usb-storage: disk {index} came back on port {} slot {slot_id} as the same device \
              (USB {:04x}:{:04x}, serial number {}, {} blocks of {} B), msc_block +{:#x}; its \
-             volume carries on",
+             volume carries on{}",
             u32::from(port_idx) + 1, usb.vendor, usb.product, dev.identity.serial, dev.blocks,
-            dev.logical_block_bytes, block);
+            dev.logical_block_bytes, block,
+            if owed { OWED_A_FLUSH } else { "" });
         ctrl.msc[at].disk = Some(Disk { index, dev });
         return Bind::Bound;
     }
@@ -2021,6 +2055,16 @@ pub(in crate::drivers::xhci) fn bind(
     Bind::Bound
 }
 
+/// What the adopting line adds for a disk whose device came back owing a flush.
+const OWED_A_FLUSH: &str = ", and it left owing a flush of writes it had reported complete, so \
+    its next flush fails";
+
+/// What the staged slow bind says it is doing.
+#[cfg(feature = "boot-actuators")]
+pub(in crate::drivers::xhci) mod slow_return {
+    pub const STALLED: &str = "answers slowly (usb-slow-return): its bind is stalled";
+}
+
 /// What came of a bind.
 pub(in crate::drivers::xhci) enum Bind {
     /// A disk, which holds the slot.
@@ -2028,11 +2072,25 @@ pub(in crate::drivers::xhci) enum Bind {
     /// No disk; the caller releases the claimed block at the unplug, and the
     /// slot goes where this says.
     Refused(SlotGoes),
+    /// The device answered and never became ready inside [`READY_BUDGET`]; it
+    /// holds nothing on its rings, and its slot goes back.
+    NotReady,
+}
+
+/// How far [`bring_up`] got.
+enum Up {
+    /// A disk with a size.
+    Ready,
+    /// It answered, and never said it was ready: a device a later enumeration
+    /// may find ready.
+    NotReady,
+    /// Anything else, each said by name.
+    Refused,
 }
 
 /// TEST UNIT READY, INQUIRY and READ CAPACITY: everything between a configured
 /// interface and a disk with a size.
-fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
+fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> Up {
     // Drives the transport directly, not `scsi`: NOT READY is expected, not
     // an error, so it must not log per attempt, and fetching sense also
     // clears the condition on a device still spinning up.
@@ -2065,7 +2123,7 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
     if !ready {
         log!("usb-storage: slot {} never became ready, sense {:#04x}/{:#04x}/{:#04x}",
             dev.slot_id, sense.0, sense.1, sense.2);
-        return false;
+        return if dev.failed { Up::Refused } else { Up::NotReady };
     }
 
     let dma = ctrl.dma();
@@ -2082,8 +2140,10 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
                         out: &mut [u8]| {
         scratch.zero();
         // `subview` refuses a command asking for more than the scratch
-        // buffer holds.
-        match ctrl.scsi(dev, cdb, cdb_len, Some(scratch.subview(0, want as usize)), true, until) {
+        // buffer holds. Each command of a bind is a call of its own.
+        let answer = ctrl.scsi(dev, cdb, cdb_len, Some(scratch.subview(0, want as usize)), true, until);
+        ctrl.after_break = AfterBreak::CLOSED;
+        match answer {
             Scsi::Ok { delivered } if delivered as usize >= out.len() => {
                 dma.copy_to(dev.block + MSC_SCRATCH, out);
                 true
@@ -2099,13 +2159,13 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
     let mut inquiry = [0u8; 36];
     if !read_scratch(ctrl, dev, &[0x12u8, 0, 0, 0, 36, 0], 6, 36, &mut inquiry) {
         log!("usb-storage: slot {} would not answer INQUIRY", dev.slot_id);
-        return false;
+        return Up::Refused;
     }
     let peripheral = inquiry[0] & 0x1F;
     if peripheral != 0 {
         log!("usb-storage: slot {} is SCSI peripheral type {peripheral:#04x}, not a disk",
             dev.slot_id);
-        return false;
+        return Up::Refused;
     }
     log!("usb-storage: slot {} vendor {} product {}", dev.slot_id,
         Printable(&inquiry[8..16]), Printable(&inquiry[16..32]));
@@ -2116,7 +2176,7 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
     let mut cap10 = [0u8; 8];
     if !read_scratch(ctrl, dev, &[0x25u8, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10, 8, &mut cap10) {
         log!("usb-storage: slot {} would not answer READ CAPACITY(10)", dev.slot_id);
-        return false;
+        return Up::Refused;
     }
     let (last_lba, block_bytes) = if u32::from_be_bytes([cap10[0], cap10[1], cap10[2], cap10[3]])
         == u32::MAX
@@ -2125,7 +2185,7 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
         let cdb = [0x9Eu8, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0];
         if !read_scratch(ctrl, dev, &cdb, 16, 32, &mut cap16) {
             log!("usb-storage: slot {} would not answer READ CAPACITY(16)", dev.slot_id);
-            return false;
+            return Up::Refused;
         }
         (
             u64::from_be_bytes([
@@ -2146,14 +2206,14 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
     if !matches!(block_bytes, 512 | 1024 | 2048 | 4096) {
         log!("usb-storage: slot {} reports {block_bytes}-byte blocks; this driver \
              serves 4096-byte blocks and needs 512..=4096", dev.slot_id);
-        return false;
+        return Up::Refused;
     }
     // READ/WRITE(10) carry a 32-bit LBA; serving the first 2 TiB of a
     // bigger disk would silently truncate it.
     if last_lba > u32::MAX as u64 {
         log!("usb-storage: slot {} has {} sectors; this driver issues READ(10) and \
              addresses 2^32", dev.slot_id, last_lba as u128 + 1);
-        return false;
+        return Up::Refused;
     }
     let sectors = last_lba + 1;
     let sectors_per_block = HOST_BLOCK / block_bytes;
@@ -2161,7 +2221,7 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
     if blocks == 0 {
         log!("usb-storage: slot {} holds {sectors} sectors of {block_bytes} B, less \
              than one 4096-byte block", dev.slot_id);
-        return false;
+        return Up::Refused;
     }
 
     dev.logical_block_bytes = block_bytes;
@@ -2169,7 +2229,7 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
     dev.blocks = blocks;
     dev.identity.sectors = sectors;
     dev.identity.sector_bytes = block_bytes;
-    true
+    Up::Ready
 }
 
 /// The serial number string a device's iSerialNumber names (USB 2.0 §9.6.1),
@@ -2186,9 +2246,13 @@ fn read_serial(ctrl: &mut XhciController, dev: &mut MscDevice, index: u8) -> Ser
     let phys = dma.device_addr() + (dev.block + MSC_DATA) as u64;
     let mut get = |ctrl: &mut XhciController, index: u8, language: u16| -> Option<([u8; 255], usize)> {
         dma.subview(dev.block + MSC_DATA, 255).zero();
+        #[cfg(feature = "boot-actuators")]
+        let asks = if index != 0 && crate::actuator::usb_serial_short() { 8 } else { 255 };
+        #[cfg(not(feature = "boot-actuators"))]
+        let asks = 255;
         let asked = ctrl.control_transfer(
             dev.slot_id, dev.dev_block, &mut dev.ep0_ring, 0x80, 0x06,
-            0x0300 | u16::from(index), language, Some(phys), 255,
+            0x0300 | u16::from(index), language, Some(phys), asks,
         );
         let Control::Done { delivered } = asked else {
             log!("usb-storage: slot {} would not give string descriptor {index}: {asked}",
@@ -2254,70 +2318,105 @@ pub fn storage_flush(index: usize) -> BlockResult {
 /// command at the device (USB 2.0 §9.1.1: every state returns to Default). The
 /// command is issued again from the caller's own buffer, whole: every CDB here
 /// is idempotent, so blocks of it the device took before it left are written
-/// with the same bytes, and a block it took half of is written whole.
+/// with the same bytes, and a block it took half of is written whole. A device
+/// that left owing a flush comes back with its next flush failing
+/// ([`MscDevice::owes_a_flush`]).
 ///
-/// **The wait is bounded twice**: by the disk's own window
-/// (`toyos_xhci::identity::RETURN_WINDOW`), past which it is lost and the
-/// operation fails as any offline disk's does; and by the caller's
-/// `block::OPERATION`, past which the answer is `BudgetExpired` — nothing was
-/// issued while it waited, and the caller asks again above every lock. It
-/// begins only once the ladder has ended, so no rung is ever what it spends.
+/// **The operation is one call, and its bound is the call's**
+/// (`toyos_xhci::call`): opened by the first break or by finding the disk
+/// held, carried across every command, the hold and the command sent again,
+/// and closed here. The caller spins with `IF` clear for all of it, which is
+/// why `CALL_AFTER_BREAK` is held under the TLB-ack tripwire.
+///
+/// **The hold only waits for a verdict.** It ends at the disk's own window
+/// (`toyos_xhci::identity::RETURN_WINDOW`), past which the disk is lost and the
+/// operation fails as any offline disk's does; at the caller's
+/// `block::OPERATION`; or where the call's bound says, both of which answer
+/// `BudgetExpired`: nothing was issued while it waited, and the caller asks
+/// again above every lock.
 fn served(index: usize, mut op: impl FnMut(&mut XhciController, usize) -> BlockResult) -> BlockResult {
     let until = Operation::deadline();
-    let mut waited = false;
+    let mut call = AfterBreak::CLOSED;
+    // Once the disk was found held: until when this call may wait for it, which
+    // bounds taking the controller lock again to send the operation too.
+    let mut hold_ends = None;
+    let mut back = false;
     loop {
-        let done = with_disk(index, &mut op).unwrap_or(Err(BlockError::Device));
-        if waited {
+        let ran = with_disk_by(index, hold_ends, |ctrl, at| {
+            ctrl.after_break = call;
+            let done = op(ctrl, at);
+            call = core::mem::replace(&mut ctrl.after_break, AfterBreak::CLOSED);
+            (done, ctrl.msc[at].disk.is_none())
+        });
+        let (done, held) = match ran {
+            Some(Some(ran)) => ran,
+            // Not on any controller: held, or gone, which is the wait's to say.
+            Some(None) => (Err(BlockError::Device), true),
+            None => {
+                log!("usb-storage: disk {index} is back, and the controller lock was not free \
+                     before this call's bound ended; the operation is asked again");
+                return Err(BlockError::BudgetExpired);
+            }
+        };
+        if back {
             log!("usb-storage: disk {index} is back, and the operation it was asked went out \
                  again on it: {}", CameTo(done));
         }
-        if done != Err(BlockError::Device) {
+        if !held || done != Err(BlockError::Device) {
             return done;
         }
-        match wait_for_return(index, until) {
-            Returned::Back => waited = true,
-            Returned::NotYet => return Err(BlockError::BudgetExpired),
+        let ends = call.hold(crate::clock::nanos_since_boot(), AFTER_BREAK);
+        hold_ends = Some(ends);
+        match wait_for_return(index, until, ends) {
+            Returned::Back => back = true,
+            Returned::NotYet => {
+                log!("usb-storage: disk {index} {STILL_HELD}");
+                return Err(BlockError::BudgetExpired);
+            }
             Returned::Lost => return done,
         }
     }
 }
 
+/// What a call that ended its hold with the disk still held says.
+const STILL_HELD: &str = "is still held when this call may wait no longer; nothing was issued, \
+    and the operation is asked again";
+
 /// How a wait for a disk's device ended.
 enum Returned {
-    /// A device that is the disk bound, and the disk is served by it.
+    /// The disk is served again, by the device that came back.
     Back,
-    /// The caller's operation ran out first; the disk is still waited for.
+    /// The call may wait no longer; the disk is still waited for.
     NotYet,
-    /// The disk is not waited for: it is here and failed, or it is gone.
+    /// The disk is not waited for: it is gone, or not back in time.
     Lost,
 }
 
-/// Drive the ports until the disk is back, lost, or `until` passes.
+/// Wait until the disk is back, lost, or `until` or `ends` passes.
 ///
-/// **From here, and not only from the scheduler pass**: the caller holds its
-/// CPU, so it steps the controller itself, with the controller lock taken and
-/// given back each time round, and the enumeration and bind of whatever
-/// arrived happen inside this wait.
-fn wait_for_return(index: usize, until: Deadline) -> Returned {
-    // Once a first look has found the disk waited for: a disk found here on
-    // that look failed for a reason of its own.
-    let mut awaited = false;
+/// **Only the verdict is waited for here.** Whatever arrives is enumerated and
+/// bound where every hot-plugged device is, by the port machine on a CPU that
+/// reaches a scheduler pass — never on this one, which spins with `IF` clear —
+/// so this asks for the ports to be stepped and looks, without taking the
+/// controller lock from a bind that holds it.
+fn wait_for_return(index: usize, until: Deadline, ends: u64) -> Returned {
+    let mut asked = false;
     loop {
-        match whereabouts(index) {
-            Whereabouts::Here => return if awaited { Returned::Back } else { Returned::Lost },
-            Whereabouts::Gone => return Returned::Lost,
-            Whereabouts::Awaited => awaited = true,
+        match look_for(index) {
+            Some(Whereabouts::Here) => return Returned::Back,
+            Some(Whereabouts::Gone) => return Returned::Lost,
+            Some(Whereabouts::Awaited) | None => {}
         }
-        if until.reached(crate::clock::now()) {
+        if crate::clock::nanos_since_boot() >= ends || until.reached(crate::clock::now()) {
             return Returned::NotYet;
         }
-        recheck_ports();
+        ports_wanted(!core::mem::replace(&mut asked, true));
         let _ = crate::clock::settles(PORT_LOOK_NS, || false);
     }
 }
 
-/// How often a caller waiting for a disk's device steps the ports: under the
-/// 100 ms debounce a connect waits out, so the step is never what it waited on.
+/// How often a caller waiting for a disk's device looks: under the 100 ms
+/// debounce a connect waits out, so the look is never what it waited on.
 const PORT_LOOK_NS: u64 = 1_000_000;
 
 /// A block result as one word, for the line that says what a re-issue came to.

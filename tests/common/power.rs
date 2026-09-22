@@ -1556,23 +1556,28 @@ fn one_wedge_phase(params: &'static [&'static str], phase: Phase) -> Result<(), 
     let arm = params.first().expect("an arm list opens with its arm");
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], chained(params));
+    let (options, kept) = chained_on_a_kept_image(case, params, &format!("{arm}-boot.img"))?;
+    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], options);
     let first = serial::Serial::boot(&qemu);
     let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line()).map_err(|why| format!("{arm}: {why}"))?;
 
-    // One capture from the first boot's handoff to the pass that reports it, so
-    // the wedge's own lines and the account read back off the page are both in
-    // it — which is why the judge below is handed it as both halves.
+    // The account is the page's head, so it is on the console; the wedge's own
+    // records are written after the last drain the machine ran, so they cross
+    // the reset only in the black box's tail, which the loader files in
+    // `loader.log` — the file the T14's judge reads too.
     let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
     if !second.text().contains(bootlog::CHAIN_ENDS_LINE) {
         // One monitor per socket: the reset watcher goes before the question.
         drop(resets);
         return Err(format!("{arm}: {}", silent_guest(&qemu, second.text())));
     }
-    usb_wedge_chain(&second, &second, phase).map_err(|why| format!("{arm}: {why}"))?;
     ended_in_a_reset(&mut resets).map_err(|why| format!("{arm}: {why}"))?;
     drop(qemu);
+    let text = kept.loader_log().map_err(|why| format!("{arm}: {why}"))?;
+    let filed = serial::Serial::named("the loader's file", text.as_str());
+    usb_wedge_chain(&filed, &second, phase).map_err(|why| format!("{arm}: {why}"))?;
+    kept.remove();
 
     eprintln!("  [power] {arm}: stopped in its {phase} phase, and the account named it");
     Ok(())

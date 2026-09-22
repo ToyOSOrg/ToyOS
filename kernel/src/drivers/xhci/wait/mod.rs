@@ -137,42 +137,21 @@ fn settles(ready: impl Fn() -> bool) -> bool {
     crate::clock::settles(USB_TIMEOUT_NS, ready)
 }
 
-/// When a wait on the event ring gives up.
-///
-/// **A deadline is the controller's silence, so past it the ring is still
-/// read, and the wait gives up at the first empty read.** A CPU can be held
-/// past a deadline with the answer already posted: QEMU answers a doorbell
-/// inside the vCPU's write to it, and a Stop Endpoint cancelling a USB disk's
-/// in-flight SCSI request there waits out the host's flush first.
-///
-/// **Checked before every read, not only an empty one**, and a ring read past
-/// the deadline at most once around: a ring that keeps producing events the
-/// wait is not waiting for would otherwise make the bound unreachable, and the
-/// caller holds `XHCI` and a block operation with preemption off for the whole
-/// of it.
-struct Late {
-    deadline: u64,
-    read_past: usize,
-}
+/// When a wait on the event ring gives up (`toyos_xhci::late`), against this
+/// kernel's clock and this driver's ring.
+struct Late(toyos_xhci::late::Late);
 
 impl Late {
     fn new(deadline: u64) -> Self {
-        Self { deadline, read_past: 0 }
+        Self(toyos_xhci::late::Late::new(deadline, super::RING_SIZE))
     }
 
-    /// Whether the deadline has passed.
     fn past(&self) -> bool {
-        crate::clock::nanos_since_boot() >= self.deadline
+        self.0.past(crate::clock::nanos_since_boot())
     }
 
-    /// Whether the wait gives up without reading the ring again; counts the
-    /// read it allows.
     fn gives_up(&mut self) -> bool {
-        if !self.past() {
-            return false;
-        }
-        self.read_past += 1;
-        self.read_past > super::RING_SIZE
+        self.0.gives_up(crate::clock::nanos_since_boot())
     }
 }
 

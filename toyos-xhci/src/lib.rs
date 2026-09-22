@@ -15,6 +15,7 @@ pub mod enumerate;
 pub mod identity;
 pub mod invariants;
 pub mod job;
+pub mod late;
 pub mod ladder;
 pub mod port;
 pub mod protocol;

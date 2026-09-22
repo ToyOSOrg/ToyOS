@@ -163,6 +163,23 @@ impl AfterBreak {
     pub fn unanswered(&mut self) {
         self.silent = true;
     }
+
+    /// The disk this call is on is held for its device to come back
+    /// ([`crate::identity`]), as found at `now`: until when the call may wait
+    /// for the verdict. A call whose transport had not broken opens here, as if
+    /// a wait had broken now.
+    ///
+    /// **The hold is part of the call, not an addition to it.** It ends where
+    /// the last rung begins, and the command sent again on a device that came
+    /// back is clipped there too, as after a port rung that took: a break of it
+    /// climbs on what is left, and the call still ends at its bounds' sum. The
+    /// wait for a returning device never binds it; that is the port machine's,
+    /// wherever it runs.
+    pub fn hold(&mut self, now: Nanos, bounds: Bounds) -> Nanos {
+        self.open(now, bounds);
+        self.took(Rung::PortReset);
+        self.open.map_or(now, |open| open.window_ends)
+    }
 }
 
 #[cfg(test)]
@@ -191,11 +208,8 @@ mod tests {
         assert_eq!(call, AfterBreak::CLOSED, "a rung of a call that never broke opens nothing");
     }
 
-    /// T14 run 77, the defect this module's shape answers: two verifications
-    /// that each ran to the end of what they were allowed left the give-up
-    /// nothing, so it stopped no endpoint and waited for no reset. Here every
-    /// rung is spun to the end of its window, the re-issues between them too,
-    /// and each rung is still entered with the whole of its own bound.
+    /// Every rung is spun to the end of its window, the re-issues between them
+    /// too, and each rung is still entered with the whole of its own bound.
     #[test]
     fn a_rung_is_never_starved_by_what_was_spent_before_it() {
         let began = 100 * SECOND;
@@ -284,6 +298,104 @@ mod tests {
         call.enter(Rung::Offline, 0);
         call.took(Rung::Offline);
         assert_eq!(call.wait_ends(0, u64::MAX), BOUNDS.whole());
+    }
+
+    /// What a disk call does once its transport broke or its disk was found
+    /// held, as far as time goes: every wait, rung, hold and command sent again
+    /// the driver makes is one of these.
+    #[derive(Clone, Copy, Debug)]
+    enum Does {
+        Enter(Rung),
+        Took(Rung),
+        /// Waits for a returning device to the end of what the hold allows.
+        Hold,
+        /// A wait that spins to the end of its window, whatever its own timeout.
+        Spin,
+    }
+
+    const EVERYTHING: [Does; 8] = [
+        Does::Enter(Rung::ClassReset),
+        Does::Enter(Rung::PortReset),
+        Does::Enter(Rung::Offline),
+        Does::Took(Rung::ClassReset),
+        Does::Took(Rung::PortReset),
+        Does::Took(Rung::Offline),
+        Does::Hold,
+        Does::Spin,
+    ];
+
+    /// Every path a call can take, each step spun to its worst case, ends
+    /// inside the bounds' sum from where it opened: a break, a ladder, a hold
+    /// for a device that left, the command sent again on the one that came
+    /// back, a break of that and the rungs after it, and a hold again. This is
+    /// the whole of what a call spins for with `IF` clear once it has broken or
+    /// found its disk held, so it is what the kernel's `CALL_AFTER_BREAK` is
+    /// held under the TLB-ack tripwire for.
+    #[test]
+    fn every_path_through_a_call_ends_inside_its_bounds() {
+        const STEPS: usize = 6;
+        let began = 100 * SECOND;
+        let whole = BOUNDS.whole();
+        // Where a call opens: a wait that broke at once, one that ran out its
+        // own timeout, and a call that found its disk already held.
+        for start in 0..3 {
+            let mut path = [0usize; STEPS];
+            loop {
+                let mut call = AfterBreak::CLOSED;
+                let mut now = began;
+                match start {
+                    0 => call.open(began, BOUNDS),
+                    1 => {
+                        call.open(began, BOUNDS);
+                        now = began + OWN;
+                    }
+                    _ => {
+                        let ends = call.hold(now, BOUNDS);
+                        assert_eq!(ends, began + whole - BOUNDS.offline, "a hold opens a call");
+                        now = ends;
+                    }
+                }
+                let steps = path.map(|s| EVERYTHING[s]);
+                for (at, &does) in steps.iter().enumerate() {
+                    let taken = &steps[..=at];
+                    match does {
+                        Does::Enter(rung) => call.enter(rung, now),
+                        Does::Took(rung) => call.took(rung),
+                        Does::Hold => {
+                            let ends = call.hold(now, BOUNDS);
+                            assert!(ends <= began + whole - BOUNDS.offline, "start {start}, {taken:?}");
+                            now = now.max(ends);
+                        }
+                        Does::Spin => now = now.max(call.wait_ends(now, u64::MAX)),
+                    }
+                    assert!(now <= began + whole, "start {start}, {taken:?}: {now} past {}", began + whole);
+                    assert!(call.wait_ends(now, u64::MAX) <= began + whole, "start {start}, {taken:?}");
+                }
+                // The next path, as a number in base `EVERYTHING.len()`.
+                let Some(carry) = path.iter().position(|&s| s + 1 < EVERYTHING.len()) else { break };
+                path[carry] += 1;
+                path[..carry].fill(0);
+            }
+        }
+    }
+
+    /// The command sent again on a device that came back may not reach into
+    /// what the last rung is owed, and a break of it still finds that rung.
+    #[test]
+    fn a_command_sent_again_after_a_hold_leaves_the_last_rung_its_bound() {
+        let mut call = AfterBreak::CLOSED;
+        call.open(0, BOUNDS);
+        call.enter(Rung::PortReset, OWN);
+        // The device left at once, and came back at once.
+        let ends = call.hold(OWN, BOUNDS);
+        assert_eq!(ends, BOUNDS.whole() - BOUNDS.offline);
+        assert_eq!(call.wait_ends(OWN, u64::MAX), ends, "the command sent again spins to the hold's end");
+        // It broke there: the rungs below the last find nothing left.
+        call.enter(Rung::ClassReset, ends);
+        assert_eq!(call.request(ends), Err(NotTaken::Spent));
+        call.enter(Rung::Offline, ends);
+        assert_eq!(call.wait_left(ends, u64::MAX), BOUNDS.offline, "and the last one its whole bound");
+        assert_eq!(call.wait_ends(ends, u64::MAX), BOUNDS.whole());
     }
 
     /// A wait inside its window keeps its own timeout, and one that ends on it

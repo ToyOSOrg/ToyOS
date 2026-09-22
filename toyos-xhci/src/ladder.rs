@@ -64,6 +64,21 @@ pub enum Left {
     Elsewhere,
 }
 
+/// Where a break in `phase` of a command left the device; `data_out` is whether
+/// the command has a Data-Out phase.
+///
+/// **A command-phase break of such a command is a device owed data too**: a CBW
+/// whose handshake was lost after the device took it is a command the device
+/// holds, and the bytes it then waits for are the Data-Out phase's. Only a break
+/// in the status phase is past the data.
+pub fn left(phase: crate::bot::Phase, data_out: bool) -> Left {
+    use crate::bot::Phase;
+    match phase {
+        Phase::Command | Phase::DataOwed | Phase::Data if data_out => Left::OwedDataOut,
+        _ => Left::Elsewhere,
+    }
+}
+
 /// The lowest rung a break that left the device there may be answered with.
 pub fn enters_at(left: Left) -> Rung {
     match left {
@@ -141,8 +156,7 @@ pub enum AfterReset {
     /// The reset was written and its completion was not seen.
     NeverFinished,
     /// Nothing is connected: the device left, and its port's teardown owns
-    /// what it held. (T14 run 74: a stick on the USB2 half of its receptacle
-    /// answered a bus reset by training SuperSpeed on the other half.)
+    /// what it held.
     Left,
     /// The reset completed and the port is not enabled (§4.19.5's failure).
     NotEnabled,
@@ -230,14 +244,28 @@ mod tests {
         assert_eq!(next(Some(Rung::PortReset), Left::Elsewhere), Rung::Offline);
     }
 
-    /// T14 runs 74, 75 and 77: a stick given the class reset while it was owed
-    /// a WRITE's data answered every request and never left the WRITE.
     #[test]
     fn a_device_owed_data_out_is_never_given_the_class_reset() {
         for climbed in [None, Some(Rung::ClassReset), Some(Rung::PortReset)] {
             assert_ne!(next(climbed, Left::OwedDataOut), Rung::ClassReset, "{climbed:?}");
         }
         assert_eq!(next(None, Left::OwedDataOut), Rung::PortReset);
+    }
+
+    /// A command that sends data leaves its device owed it from the moment its
+    /// CBW may have been taken until its data phase is done; nothing else does.
+    #[test]
+    fn a_break_before_a_data_out_phase_is_done_leaves_the_device_owed_it() {
+        use crate::bot::Phase;
+        for phase in [Phase::Command, Phase::DataOwed, Phase::Data] {
+            assert_eq!(left(phase, true), Left::OwedDataOut, "{phase:?}");
+            assert_eq!(left(phase, false), Left::Elsewhere, "{phase:?} of a command sending nothing");
+        }
+        for phase in [Phase::Closed, Phase::StatusOwed, Phase::Status] {
+            for data_out in [true, false] {
+                assert_eq!(left(phase, data_out), Left::Elsewhere, "{phase:?}");
+            }
+        }
     }
 
     /// The order is the specifications': nothing reaches the device between
@@ -255,8 +283,6 @@ mod tests {
         assert_eq!(at(PortStep::AddEndpoints), PORT_RESET.len() - 1);
     }
 
-    /// T14 run 77: a quiesce that could not run must not be what keeps the
-    /// port from being reset.
     #[test]
     fn only_a_quiesce_that_failed_lets_the_rung_go_on() {
         for step in PORT_RESET {

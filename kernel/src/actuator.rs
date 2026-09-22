@@ -138,6 +138,23 @@ actuators! {
     /// `usb_transport_break`.
     usb_reset_moves = "usb-reset-moves";
 
+    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
+    /// while its device holds a write it reported complete and no flush has
+    /// emptied: a device that leaves then may have lost it. Judged by
+    /// `usb_transport_break`.
+    usb_transport_break_owed = "usb-transport-break-owed";
+
+    /// Stall the bind of a disk that arrives while another is held for its
+    /// device, before its first command, as a stick slow to answer after a
+    /// reset: the wait held for it is not where it binds. Judged by
+    /// `usb_transport_break`.
+    usb_slow_return = "usb-slow-return";
+
+    /// Ask for a disk's serial number string in fewer bytes than it carries, as
+    /// a device that delivered part of its descriptor. Judged by
+    /// `usb_transport_break`.
+    usb_serial_short = "usb-serial-short";
+
     /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
     /// device holding the CBW and nothing queued for its data phase, so the
     /// bound that ends the machine ends a device inside a Bulk-Only command.

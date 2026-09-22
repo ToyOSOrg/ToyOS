@@ -1567,7 +1567,8 @@ pub fn usb_transport_break(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    const PARAMS: &[&str] = &["usb-storage-gate", "usb-transport-break", "usb-port-gone"];
+    const PARAMS: &[&str] =
+        &["usb-storage-gate", "usb-transport-break", "usb-port-gone", "usb-serial-short"];
 
     let (bytes, lba) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
     let image = test_dir().join("usb-transport-break.img");
@@ -1589,6 +1590,7 @@ pub fn usb_transport_break(
     )?;
     gate_ran(&log, 2)?;
     check_geometry(&log, bytes, lba)?;
+    serial_short_is_not_read(&log)?;
 
     // The injection reached the driver, and the driver said *what* broke. Both
     // halves are assertions: without the first this is a boot with nothing
@@ -1768,12 +1770,45 @@ pub fn usb_transport_break(
     abandoned_write_is_taken_offline(test_config, c_bins, rust_bins)?;
     a_stick_its_reset_moved_carries_on(Moved::SameStick)?;
     a_stick_its_reset_moved_carries_on(Moved::AnotherStick)?;
+    a_stick_its_reset_moved_carries_on(Moved::SlowStick)?;
+    a_stick_its_reset_moved_carries_on(Moved::OwedFlush)?;
     super::power::transport_break_chain()
+}
+
+/// `usb-serial-short` asks each disk for its serial number string in 8 bytes,
+/// fewer than QEMU's string carries: the bytes past what was delivered are the
+/// zeroed buffer, and a driver that read them would take a string the device
+/// never sent whole for the unit's name. Every disk this boot binds says it
+/// could not read one.
+fn serial_short_is_not_read(log: &str) -> Result<(), String> {
+    let said: Vec<&str> =
+        log.lines().filter(|l| l.contains("usb-storage: slot ") && l.contains(" serial number ")).collect();
+    if said.is_empty() {
+        return Err(format!("no disk said what its serial number was\n{log}"));
+    }
+    if let Some(read) = said.iter().find(|l| !l.ends_with(" serial number named and not read")) {
+        return Err(format!("{read:?}: a serial number that arrived short was read\n{log}"));
+    }
+    Ok(())
+}
+
+/// The CPU a kernel record was written on.
+fn cpu_of(line: &str) -> Result<u32, String> {
+    line.split_once("[kernel ")
+        .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+        .and_then(|cpu| cpu.trim_end_matches(']').strip_prefix("cpu"))
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| format!("{line:?} names no CPU"))
+}
+
+/// The one line carrying `needle`, as the log wrote it.
+fn line_with<'a>(log: &'a str, needle: &str) -> Result<&'a str, String> {
+    log.lines().find(|l| l.contains(needle)).ok_or_else(|| format!("no line reads {needle:?}\n{log}"))
 }
 
 /// What the host plugs in on another port once the port rung's reset has
 /// emptied the boot stick's.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Moved {
     /// The same backing under the same serial number: the stick itself, as a
     /// reset moved T14 run 79's from the USB2 half of its receptacle to the
@@ -1783,7 +1818,22 @@ enum Moved {
     /// second unit of the same model shares with the first — INQUIRY,
     /// capacity, USB ids — and the negative control: it must not be adopted.
     AnotherStick,
+    /// The stick itself, whose bind `usb-slow-return` stalls past both the
+    /// write's operation budget and the disk's window: the call held for it
+    /// ends on its own bound on its own CPU, the bind runs on another, and the
+    /// disk is still taken back, since the enumeration began inside its window.
+    SlowStick,
+    /// The stick itself, broken by `usb-transport-break-owed` on a write that
+    /// went out while an earlier one was reported complete and not flushed: it
+    /// is taken back, and its next flush fails, since a device that comes back
+    /// is not known to have kept its cache.
+    OwedFlush,
 }
+
+/// What one disk call may spin for from the wait its transport broke on:
+/// `AFTER_BREAK`'s sum in `kernel/src/drivers/xhci/mod.rs`, the bound
+/// `toyos_xhci::call` keeps every path of a call inside.
+const CALL_AFTER_BREAK_SECS: f64 = 4.75;
 
 /// T14 run 79 under QEMU: the boot stick's first WRITE(10) is abandoned, the
 /// ladder resets its port, and the device leaves that port and binds on
@@ -1792,21 +1842,36 @@ enum Moved {
 /// the move: `device_del` of the stick, then the same backing file plugged in
 /// on port 3 with the serial number the move says.
 ///
-/// The same stick takes its disk number back inside the window, the write that
-/// broke goes out again on it and completes, and the job the root volume
-/// carries runs to its reset with nothing failed on disk 0. Another stick
-/// is refused by name, bound as a new disk, and disk 0 is lost when its window
-/// ends — as every disk whose device left was before.
+/// The same stick takes its disk number back, the write that broke goes out
+/// again on it and completes, and the job the root volume carries runs to its
+/// reset with nothing failed on disk 0. Another stick is refused by name, bound
+/// as a new disk, and disk 0 is lost when its window ends — as every disk whose
+/// device left was before.
+///
+/// **The call held for the stick only waits.** It spins with `IF` clear, so
+/// the bind is another CPU's, and the call ends inside `CALL_AFTER_BREAK` of
+/// the break however slow the bind is — both read off the kernel's own stamps.
 fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
-    const PARAMS: &[&str] = &["usb-transport-break", "usb-reset-moves"];
     const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
+    const STALLED: &str = "answers slowly (usb-slow-return): its bind is stalled";
+    const OWED: &str = ", and it left owing a flush of writes it had reported complete, so its \
+        next flush fails";
+    const FLUSH_LOST: &str = "flush failed: its device came back from leaving its port owing a flush";
+    const STILL_HELD: &str = "is still held when this call may wait no longer";
+    let params: &'static [&'static str] = match moved {
+        Moved::SameStick | Moved::AnotherStick => &["usb-transport-break", "usb-reset-moves"],
+        Moved::SlowStick => &["usb-transport-break", "usb-reset-moves", "usb-slow-return"],
+        Moved::OwedFlush => &["usb-transport-break-owed", "usb-reset-moves"],
+    };
     let case = super::compile::repo_root().join("tests/jobcase");
     let (name, serial) = match moved {
         Moved::SameStick => ("usb-reset-moves-same.img", qemu::BOOT_STICK_SERIAL),
         Moved::AnotherStick => ("usb-reset-moves-another.img", "TOYOS0OTHERSTICK"),
+        Moved::SlowStick => ("usb-reset-moves-slow.img", qemu::BOOT_STICK_SERIAL),
+        Moved::OwedFlush => ("usb-reset-moves-owed.img", qemu::BOOT_STICK_SERIAL),
     };
     let image = test_dir().join(name);
-    std::fs::write(&image, qemu::build_boot_image(&case, &[], &[], PARAMS))
+    std::fs::write(&image, qemu::build_boot_image(&case, &[], &[], params))
         .map_err(|e| format!("write {}: {e}", image.display()))?;
     let mut qemu = QemuInstance::boot_with_options(
         &case,
@@ -1815,7 +1880,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         BootOptions {
             profile: Profile::Metal,
             qmp: true,
-            kernel_params: PARAMS,
+            kernel_params: params,
             boot_image: Some(qemu::Staged::Written(image.clone())),
             ready_marker: toyos_build::bootlog::LOADER_LAST_LINE,
             ..Default::default()
@@ -1824,7 +1889,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     let mut log = qemu.boot_log().to_string();
     log.push_str(&qemu.drain_until(Duration::from_secs(60), |l| l.contains(HELD)));
     if !log.contains(HELD) {
-        return Err(format!("the port rung's reset was never held for the move\n{log}"));
+        return Err(format!("{moved:?}: the port rung's reset was never held for the move\n{log}"));
     }
     let mut devices = qemu::QmpDevices::open(qemu.qmp_socket());
     devices.del(qemu::BOOT_STICK_ID);
@@ -1832,8 +1897,9 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     devices.add("usb-storage", "xhci.0", "movedstick", &[("drive", "moved"), ("port", "3"), ("serial", serial)]);
     drop(devices);
     let ends = |l: &str| match moved {
-        Moved::SameStick => l.contains(toyos_build::bootlog::REBOOTING),
+        Moved::SameStick | Moved::SlowStick => l.contains(toyos_build::bootlog::REBOOTING),
         Moved::AnotherStick => l.contains(" did not come back within "),
+        Moved::OwedFlush => l.contains(FLUSH_LOST),
     };
     log.push_str(&qemu.drain_until(Duration::from_secs(60), ends));
     // The rest of the boot: the job's reset, or the lost disk's failures.
@@ -1844,14 +1910,14 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     let staged = log
         .lines()
         .find(|l| l.contains("transport broke on SCSI 0x2a: a staged break skipped the data phase wait"))
-        .ok_or_else(|| format!("the staged break never happened\n{log}"))?;
+        .ok_or_else(|| format!("{moved:?}: the staged break never happened\n{log}"))?;
     let under_test = broke_on(staged)?;
     let (_, after) = log.split_once(staged).expect("the line came from this text");
     let in_order = |needles: &[String]| -> Result<(), String> {
         let mut rest = after;
         for needle in needles {
             let Some((_, tail)) = rest.split_once(needle.as_str()) else {
-                return Err(format!("after the break, no line reads {needle:?}, in order\n{log}"));
+                return Err(format!("{moved:?}: after the break, no line reads {needle:?}, in order\n{log}"));
             };
             rest = tail;
         }
@@ -1868,45 +1934,109 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         " after this driver reset it; it is held ".to_string(),
     ];
     let inside_the_rung = log.contains("usb-storage: disk 0 left port 1 (its port read empty)");
+    let back = [
+        "xHCI: port 3 connected".to_string(),
+        format!(" serial number \"{serial}\""),
+        "usb-storage: disk 0 came back on port 3 slot ".to_string(),
+        "its volume carries on".to_string(),
+    ];
+    // The call held for the device: where it ended, on which CPU, and when.
+    let held_call = |ended: &str| -> Result<(), String> {
+        let line = line_with(&log, ended)?;
+        let took = stamp_of(&log, ended)? - stamp_of(&log, staged)?;
+        if took > CALL_AFTER_BREAK_SECS {
+            return Err(format!(
+                "{moved:?}: the call its transport broke in ended {took:.3} s after the break, past \
+                 the {CALL_AFTER_BREAK_SECS} s a call may spin for\n{log}"
+            ));
+        }
+        let bound = line_with(&log, "usb-storage: disk 0 came back on port 3 slot ")?;
+        let (call_cpu, bind_cpu) = (cpu_of(line)?, cpu_of(bound)?);
+        if call_cpu == bind_cpu {
+            return Err(format!(
+                "{moved:?}: the stick was bound on cpu{bind_cpu}, the CPU the call held for it \
+                 spins on with IF clear\n{log}"
+            ));
+        }
+        eprintln!("  [usb] {moved:?}: the held call ended {took:.3} s after the break on cpu{call_cpu}; \
+                   the stick was bound on cpu{bind_cpu}");
+        Ok(())
+    };
+    let completed = "usb-storage: disk 0 is back, and the operation it was asked went out again on \
+                     it: it completed";
     match moved {
-        Moved::SameStick => {
-            let mut back = left.to_vec();
-            back.extend([
-                "xHCI: port 3 connected".to_string(),
-                format!(" serial number \"{serial}\""),
-                "usb-storage: disk 0 came back on port 3 slot ".to_string(),
-                "its volume carries on".to_string(),
-                "usb-storage: disk 0 is back, and the operation it was asked went out again on it: \
-                 it completed"
-                    .to_string(),
-                // The job this boot ran, and the reset it ends in, after it.
-                toyos_build::bootlog::REBOOTING.to_string(),
-            ]);
-            in_order(&back)?;
-            if !log.contains("Boot: complete") {
-                return Err(format!("the boot never completed\n{log}"));
+        Moved::SameStick | Moved::SlowStick => {
+            let mut want = left.to_vec();
+            if moved == Moved::SlowStick {
+                want.extend(["xHCI: port 3 connected".to_string(), STALLED.to_string()]);
+                want.extend(back[1..].iter().cloned());
+            } else {
+                want.extend(back.iter().cloned());
+                want.push(completed.to_string());
             }
-            for never in [
+            want.push(toyos_build::bootlog::REBOOTING.to_string());
+            in_order(&want)?;
+            if moved == Moved::SlowStick {
+                // The break's own call ended holding, before the bind was done.
+                in_order(&[left[3].clone(), format!("usb-storage: disk 0 {STILL_HELD}")])?;
+                held_call(STILL_HELD)?;
+                let stalled = line_with(&log, STALLED)?;
+                let call = line_with(&log, STILL_HELD)?;
+                if cpu_of(stalled)? == cpu_of(call)? {
+                    return Err(format!("{moved:?}: the slow bind ran on the held call's CPU\n{log}"));
+                }
+            } else {
+                held_call(completed)?;
+            }
+            if !log.contains("Boot: complete") {
+                return Err(format!("{moved:?}: the boot never completed\n{log}"));
+            }
+            let mut never = vec![
                 " failed on disk 0",
-                "ran out of its operation budget on disk 0",
                 " did not come back within ",
                 "disk 1 ready",
                 " is not disk 0 come back",
-            ] {
+                OWED,
+            ];
+            if moved == Moved::SameStick {
+                never.push("ran out of its operation budget on disk 0");
+            }
+            for never in never {
                 if let Some(line) = log.lines().find(|l| l.contains(never)) {
-                    return Err(format!("{line:?} of a stick that came back as itself\n{log}"));
+                    return Err(format!("{moved:?}: {line:?} of a stick that came back as itself\n{log}"));
                 }
             }
             serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
             eprintln!(
                 "  [usb] {under_test}'s port reset moved the boot stick to port 3 ({}); it bound \
-                 as disk 0 again on its serial number, the operation waiting on it went out again \
-                 and completed, and the job on the root volume it carries ran to its reset",
+                 as disk 0 again on its serial number and the job on the root volume it carries \
+                 ran to its reset{}",
                 if inside_the_rung {
                     "inside the rung, so what went out again is the write that broke"
                 } else {
                     "after the rung's reset verified, so the write that broke completed first"
+                },
+                if moved == Moved::SlowStick {
+                    ", though its bind was stalled past the window"
+                } else {
+                    ""
                 }
+            );
+        }
+        Moved::OwedFlush => {
+            let mut want = left.to_vec();
+            want.extend(back.iter().cloned());
+            want.push(OWED.to_string());
+            want.push(format!("usb-storage: disk 0 {FLUSH_LOST}"));
+            in_order(&want)?;
+            for never in [" did not come back within ", "disk 1 ready", " is not disk 0 come back"] {
+                if let Some(line) = log.lines().find(|l| l.contains(never)) {
+                    return Err(format!("{moved:?}: {line:?}\n{log}"));
+                }
+            }
+            eprintln!(
+                "  [usb] a stick that left owing a flush was taken back as disk 0, and its next \
+                 flush failed by name"
             );
         }
         Moved::AnotherStick => {

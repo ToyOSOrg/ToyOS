@@ -217,6 +217,8 @@ enum AfterSlot {
     LetGo,
     /// Enumeration ended in refusal with the device still plugged in; the port stays attached so it is not re-enumerated every debounce.
     Refused,
+    /// A disk refused for a reason a later look may not find — not ready, or no pool block free — while a disk on this controller is held for its device: the refused one may be that device, back early or slow, so its block goes back and its port is enumerated again rather than left refused until a replug.
+    Again(u8),
 }
 
 /// The earlier of two instants something wants to be looked at again.
@@ -615,6 +617,8 @@ struct Awaited {
     /// teardown.
     port_idx: u8,
     returns_by: u64,
+    /// It left owing a flush (`msc::MscDevice::owes_a_flush`).
+    owed_flush: bool,
 }
 
 /// Where the machine's `index`-th disk is, for an operation that found it
@@ -629,20 +633,44 @@ pub(super) enum Whereabouts {
 }
 
 /// Where the machine's `index`-th disk is, forgetting it if its window has
-/// passed.
-pub(super) fn whereabouts(index: usize) -> Whereabouts {
+/// passed; `None` while the controller lock is taken, which a bind may hold for
+/// seconds.
+///
+/// Every port is marked to be read again, so whoever steps the ports next reads
+/// them all.
+pub(super) fn look_for(index: usize) -> Option<Whereabouts> {
     let now = crate::clock::nanos_since_boot();
-    let mut guard = XHCI.lock();
+    let mut guard = XHCI.try_lock()?;
+    for ctrl in guard.iter_mut() {
+        ctrl.ports_dirty = true;
+    }
     for ctrl in guard.iter_mut() {
         if ctrl.msc.iter().any(|block| block.disk.is_some_and(|d| d.index == index)) {
-            return Whereabouts::Here;
+            return Some(Whereabouts::Here);
         }
         ctrl.forget_the_unreturned(now);
         if ctrl.awaited.iter().any(|a| a.index == index) {
-            return Whereabouts::Awaited;
+            return Some(Whereabouts::Awaited);
         }
     }
-    Whereabouts::Gone
+    Some(Whereabouts::Gone)
+}
+
+/// Have the ports stepped now by a CPU that reaches a scheduler pass, for a
+/// caller that waits for a device on a CPU it holds with `IF` clear: the
+/// interrupt a connect raises may be this CPU's, and it takes none. `kick`
+/// wakes every other CPU, since a halted one has stopped its own timer.
+pub(super) fn ports_wanted(kick: bool) {
+    PORT_WORK_AT.store(crate::clock::nanos_since_boot().max(1), Ordering::Relaxed);
+    if !kick {
+        return;
+    }
+    let me = crate::arch::percpu::cpu_id();
+    for cpu in 0..crate::arch::smp::cpu_count() {
+        if cpu != me {
+            crate::arch::apic::kick_cpu(cpu);
+        }
+    }
 }
 
 /// How many disks this machine has bound since boot, and the number the next bind hands out.
@@ -1141,11 +1169,20 @@ impl XhciController {
     /// Step every port that is not where the driver left it, and say when it wants to be looked at again.
     ///
     /// One step per call, no wait; the enumeration it eventually starts is submit-and-return too.
+    ///
+    /// **Ports that read empty first**: a teardown gives back the pool block its device held, and a disk this driver's reset moved arrives on another port wanting one — the controller answers one operation at a time, so an enumeration begun first would reach its Configure Endpoint with the block still claimed.
     fn service_ports(&mut self) -> Option<u64> {
         let now = crate::clock::nanos_since_boot();
-        (0..self.max_ports)
-            .filter_map(|p| self.service_port(p, now))
-            .min()
+        let mut wake: Option<u64> = None;
+        for empty in [true, false] {
+            for p in 0..self.max_ports {
+                if self.read_portsc(p).connected() == empty {
+                    continue;
+                }
+                wake = earliest(wake, self.service_port(p, now));
+            }
+        }
+        wake
     }
 
     /// One port's step, and when it next wants one.
@@ -1321,7 +1358,13 @@ impl XhciController {
         let Some(returns_by) = disk.dev.returns_by(now) else { return };
         self.msc[at].disk = None;
         let port_idx = disk.dev.port_idx();
-        self.awaited.push(Awaited { index: disk.index, identity: *disk.dev.identity(), port_idx, returns_by });
+        self.awaited.push(Awaited {
+            index: disk.index,
+            identity: *disk.dev.identity(),
+            port_idx,
+            returns_by,
+            owed_flush: disk.dev.owes_a_flush(),
+        });
         log!(
             "usb-storage: disk {} left port {} ({why}) after this driver reset it; it is held {} ms \
              for the same device to come back",
@@ -1331,9 +1374,10 @@ impl XhciController {
         );
     }
 
-    /// The number of a disk held for its device, if the device that bound as `identity` on `port_idx` is it; the record is spent either way it matches. Every held disk it is not says why.
-    fn adopt(&mut self, identity: &toyos_xhci::identity::Identity, port_idx: u8) -> Option<usize> {
-        self.forget_the_unreturned(crate::clock::nanos_since_boot());
+    /// The number of a disk held for its device, if the device that bound as `identity` on `port_idx` is it, and whether it left owing a flush; the record is spent when it matches. Every held disk it is not says why.
+    ///
+    /// Asked at the end of a bind, and every record still here is one the enumeration that began it was inside the window of ([`Self::forget_the_unreturned`]): a device's own bind is not what makes it late.
+    fn adopt(&mut self, identity: &toyos_xhci::identity::Identity, port_idx: u8) -> Option<(usize, bool)> {
         let mut adopted = None;
         self.awaited.retain(|held| {
             if adopted.is_some() {
@@ -1341,7 +1385,7 @@ impl XhciController {
             }
             match toyos_xhci::identity::same(&held.identity, identity) {
                 Ok(()) => {
-                    adopted = Some(held.index);
+                    adopted = Some((held.index, held.owed_flush));
                     false
                 }
                 Err(why) => {
@@ -1354,8 +1398,18 @@ impl XhciController {
         adopted
     }
 
+    /// Whether a disk on this controller is held for its device.
+    pub(super) fn awaits_a_device(&self) -> bool {
+        !self.awaited.is_empty()
+    }
+
     /// Every held disk whose window has passed, lost for good; answers when the next one's does.
+    ///
+    /// **None while an enumeration is under way**: one only begins after this has run, so every record left is one it began inside the window of, and the device it is enumerating may be that disk's. Its bind — a stick slow to become ready after a reset, the whole of `READY_BUDGET` — is not what makes it late.
     fn forget_the_unreturned(&mut self, now: u64) -> Option<u64> {
+        if matches!(self.outstanding.what(), Some(What::SlotWanted { .. } | What::Enumerating(_))) {
+            return self.awaited.iter().map(|held| held.returns_by).filter(|by| *by > now).min();
+        }
         self.awaited.retain(|held| {
             let waiting = now < held.returns_by;
             if !waiting {
@@ -1391,6 +1445,14 @@ impl XhciController {
             AfterSlot::Teardown(port_idx) => {
                 self.release_blocks(port_idx);
                 self.ports[port_idx as usize].torn_down();
+            }
+            AfterSlot::Again(port_idx) => {
+                // Only a block no disk came of: this port's device was refused.
+                for block in self.msc.iter_mut().filter(|b| b.port == Some(port_idx) && b.disk.is_none()) {
+                    *block = MscBlock::FREE;
+                }
+                self.ports[port_idx as usize].torn_down();
+                log!("xHCI: port {} is enumerated again while a disk is held for its device", port_idx + 1);
             }
             AfterSlot::LetGo | AfterSlot::Refused => {}
         }
@@ -1682,7 +1744,28 @@ pub fn storage_count() -> usize {
 
 /// Run `f` against the machine's `index`-th disk, wherever it is — a search, since neither its controller nor its block is derivable from the machine-wide number.
 fn with_disk<R>(index: usize, f: impl FnOnce(&mut XhciController, usize) -> R) -> Option<R> {
-    let mut guard = XHCI.lock();
+    on_disk(XHCI.lock(), index, f)
+}
+
+/// [`with_disk`], with the lock taken before `by` or not at all (the outer
+/// `None`); `None` for `by` takes it as `with_disk` does.
+pub(super) fn with_disk_by<R>(
+    index: usize,
+    by: Option<u64>,
+    f: impl FnOnce(&mut XhciController, usize) -> R,
+) -> Option<Option<R>> {
+    let guard = match by {
+        None => XHCI.lock(),
+        Some(by) => take_within(by.saturating_sub(crate::clock::nanos_since_boot()))?,
+    };
+    Some(on_disk(guard, index, f))
+}
+
+fn on_disk<R>(
+    mut guard: crate::sync::LockGuard<'static, Vec<XhciController>>,
+    index: usize,
+    f: impl FnOnce(&mut XhciController, usize) -> R,
+) -> Option<R> {
     for ctrl in guard.iter_mut() {
         if let Some(at) = ctrl
             .msc

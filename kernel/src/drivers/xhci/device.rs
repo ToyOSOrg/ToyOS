@@ -407,6 +407,11 @@ fn perform(ctrl: &mut XhciController, mut state: Enumerating, act: Act) {
         Act::Request(request) => Some(control(ctrl, &mut state, request)),
     };
     let Some((on, stages)) = submitted else {
+        // A Configure Endpoint is refused only for want of a pool block, which
+        // a held disk's teardown may be about to give back.
+        if act == Act::Command(enumerate::Command::ConfigureEndpoint) {
+            return refuse_for_now(ctrl, state.port_idx, state.slot_id);
+        }
         return refuse(ctrl, state.port_idx, state.slot_id);
     };
     ctrl.outstanding.submit(What::Enumerating(state), on, stages, deadline());
@@ -701,6 +706,7 @@ fn bind(ctrl: &mut XhciController, state: Enumerating) {
                 ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info, enumerated, described,
             ) {
                 Bind::Bound => true,
+                Bind::NotReady => return refuse_for_now(ctrl, state.port_idx, state.slot_id),
                 Bind::Refused(SlotGoes::Back) => false,
                 // No device came of it, and its bulk pair could not be Stopped: Disable Slot is not defined over it (xHCI 1.2 §4.6.4's note), so the port holds the slot and its teardown gives it back.
                 Bind::Refused(SlotGoes::WithTheUnplug) => true,
@@ -784,6 +790,16 @@ pub(super) fn refuse(ctrl: &mut XhciController, port_idx: u8, slot_id: u8) {
     ctrl.acknowledge_port_read(port_idx);
     // Released here, not at unplug: a refused device left plugged in would otherwise hold a slot for the rest of the boot.
     ctrl.submit_disable_slot(slot_id, super::AfterSlot::Refused);
+}
+
+/// [`refuse`], for a disk refused for a reason a later look may not find: while a disk on this controller is held for its device, the one refused may be that device, so its port is enumerated again once its slot is back (`AfterSlot::Again`). Bounded by the held disk's window, after which a refusal is [`refuse`]'s.
+fn refuse_for_now(ctrl: &mut XhciController, port_idx: u8, slot_id: u8) {
+    if !ctrl.awaits_a_device() {
+        return refuse(ctrl, port_idx, slot_id);
+    }
+    ctrl.ports[port_idx as usize].enumerated(None);
+    ctrl.acknowledge_port_read(port_idx);
+    ctrl.submit_disable_slot(slot_id, super::AfterSlot::Again(port_idx));
 }
 
 /// Drops the outstanding enumeration for a port whose device has gone; the slot passes to the port for teardown.
