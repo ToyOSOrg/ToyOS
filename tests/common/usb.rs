@@ -1902,9 +1902,10 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             profile: Profile::Metal,
             qmp: true,
             kernel_params: params,
-            // The held call sees the stick back only if a CPU in no call on the
-            // held disk binds it, and this boot can put two CPUs in calls on it.
-            smp: if moved == Moved::SilentReturn { 4 } else { 2 },
+            // The held call sees the stick back, and the job resets after it,
+            // only if a CPU in no call on the held disk binds it: these boots
+            // put two CPUs in calls on it.
+            smp: if matches!(moved, Moved::SilentReturn | Moved::FlushedStick) { 4 } else { 2 },
             boot_image: Some(qemu::Staged::Written(image.clone())),
             ready_marker: toyos_build::bootlog::LOADER_LAST_LINE,
             ..Default::default()
@@ -2017,14 +2018,15 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                     return Err(format!("{moved:?}: the break was not the one after a flush\n{log}"));
                 }
             }
-            // First, so a debt the stick came back with is named as one.
+            // First, and the debt first of all, so a debt the stick came back
+            // with is named as one.
             for never in [
+                OWED,
+                FLUSH_LOST,
                 " failed on disk 0",
                 " did not come back within ",
                 "disk 1 ready",
                 " is not disk 0 come back",
-                OWED,
-                FLUSH_LOST,
             ] {
                 if let Some(line) = log.lines().find(|l| l.contains(never)) {
                     return Err(format!("{moved:?}: {line:?} of a stick that came back as itself\n{log}"));
