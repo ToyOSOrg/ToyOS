@@ -1405,9 +1405,13 @@ impl XhciController {
 
     /// Every held disk whose window has passed, lost for good; answers when the next one's does.
     ///
-    /// **None while an enumeration is under way**: one only begins after this has run, so every record left is one it began inside the window of, and the device it is enumerating may be that disk's. Its bind — a stick slow to become ready after a reset, the whole of `READY_BUDGET` — is not what makes it late.
+    /// **None while a device has arrived and is not yet bound** — a port that reads connected and that the port machine has not taken, or an enumeration under way: this runs before any of them is acted on, so every record left is one the device arrived inside the window of, and it may be that disk's. The CPU that would enumerate it may be spinning in a call held for it, and its bind — a stick slow to become ready after a reset, the whole of `READY_BUDGET` — may be slow: neither is the device arriving late.
     fn forget_the_unreturned(&mut self, now: u64) -> Option<u64> {
-        if matches!(self.outstanding.what(), Some(What::SlotWanted { .. } | What::Enumerating(_))) {
+        let enumerating =
+            matches!(self.outstanding.what(), Some(What::SlotWanted { .. } | What::Enumerating(_)));
+        let arrived = (0..self.max_ports)
+            .any(|p| self.read_portsc(p).connected() && !self.ports[p as usize].attached());
+        if enumerating || arrived {
             return self.awaited.iter().map(|held| held.returns_by).filter(|by| *by > now).min();
         }
         self.awaited.retain(|held| {

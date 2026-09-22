@@ -472,8 +472,18 @@ pub(in crate::drivers::xhci) mod reset_moves {
     /// What the held reset says, which the host acts on.
     pub const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
 
+    /// The cue the host moves the device on, written to the console directly:
+    /// the record above reaches it only when `klogd` runs, which it may not
+    /// while this CPU spins in the rung, and a cue that arrives after the
+    /// rung's bound stages a device that left too late.
+    const MOVE_NOW: &[u8] = b"usb-reset-moves: move the device now\n";
+
     pub fn take() -> bool {
         crate::actuator::usb_reset_moves() && UNSPENT.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn cue() {
+        crate::drivers::serial::BackendGuard::lock().write_raw(MOVE_NOW);
     }
 }
 
@@ -1192,6 +1202,7 @@ impl XhciController {
         if finished && why == RECOVERING && reset_moves::take() {
             log!("xHCI: {} port {} {}", self.slot(dev.slot_id), u32::from(port_idx) + 1,
                 reset_moves::HELD);
+            reset_moves::cue();
             let _ = self.settles_within_call(|| !self.read_portsc(port_idx).connected());
         }
         let after = self.read_portsc(port_idx);

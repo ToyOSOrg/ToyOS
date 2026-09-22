@@ -1853,6 +1853,7 @@ const CALL_AFTER_BREAK_SECS: f64 = 4.75;
 /// the break however slow the bind is — both read off the kernel's own stamps.
 fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
+    const MOVE_NOW: &str = "usb-reset-moves: move the device now";
     const STALLED: &str = "answers slowly (usb-slow-return): its bind is stalled";
     const OWED: &str = ", and it left owing a flush of writes it had reported complete, so its \
         next flush fails";
@@ -1887,8 +1888,10 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         },
     );
     let mut log = qemu.boot_log().to_string();
-    log.push_str(&qemu.drain_until(Duration::from_secs(60), |l| l.contains(HELD)));
-    if !log.contains(HELD) {
+    // On the cue the staging writes to the console itself: the record above it
+    // waits for `klogd`, which may not run while the rung holds its CPU.
+    log.push_str(&qemu.drain_until(Duration::from_secs(60), |l| l.contains(MOVE_NOW)));
+    if !log.contains(MOVE_NOW) {
         return Err(format!("{moved:?}: the port rung's reset was never held for the move\n{log}"));
     }
     let mut devices = qemu::QmpDevices::open(qemu.qmp_socket());
@@ -1940,8 +1943,9 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         "usb-storage: disk 0 came back on port 3 slot ".to_string(),
         "its volume carries on".to_string(),
     ];
-    // The call held for the device: where it ended, on which CPU, and when.
-    let held_call = |ended: &str| -> Result<(), String> {
+    // The call held for the device: where it ended, and when. A bind while it
+    // held ran on another CPU; one after it ended may run on any.
+    let held_call = |ended: &str, bind: &str| -> Result<(), String> {
         let line = line_with(&log, ended)?;
         let took = stamp_of(&log, ended)? - stamp_of(&log, staged)?;
         if took > CALL_AFTER_BREAK_SECS {
@@ -1950,58 +1954,59 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                  the {CALL_AFTER_BREAK_SECS} s a call may spin for\n{log}"
             ));
         }
-        let bound = line_with(&log, "usb-storage: disk 0 came back on port 3 slot ")?;
+        let bound = line_with(&log, bind)?;
         let (call_cpu, bind_cpu) = (cpu_of(line)?, cpu_of(bound)?);
-        if call_cpu == bind_cpu {
+        let during = stamp_of(&log, bind)? <= stamp_of(&log, ended)?;
+        if during && call_cpu == bind_cpu {
             return Err(format!(
-                "{moved:?}: the stick was bound on cpu{bind_cpu}, the CPU the call held for it \
-                 spins on with IF clear\n{log}"
+                "{moved:?}: the stick was bound on cpu{bind_cpu} while the call held for it spun \
+                 there with IF clear\n{log}"
             ));
         }
-        eprintln!("  [usb] {moved:?}: the held call ended {took:.3} s after the break on cpu{call_cpu}; \
-                   the stick was bound on cpu{bind_cpu}");
+        eprintln!(
+            "  [usb] {moved:?}: the held call ended {took:.3} s after the break on cpu{call_cpu}; \
+             the stick was bound on cpu{bind_cpu}, {} it ended",
+            if during { "before" } else { "after" }
+        );
         Ok(())
     };
+    let came_back = "usb-storage: disk 0 came back on port 3 slot ";
     let completed = "usb-storage: disk 0 is back, and the operation it was asked went out again on \
                      it: it completed";
+    let still_held = format!("usb-storage: disk 0 {STILL_HELD}");
     match moved {
         Moved::SameStick | Moved::SlowStick => {
             let mut want = left.to_vec();
+            want.push(back[0].clone());
             if moved == Moved::SlowStick {
-                want.extend(["xHCI: port 3 connected".to_string(), STALLED.to_string()]);
-                want.extend(back[1..].iter().cloned());
-            } else {
-                want.extend(back.iter().cloned());
-                want.push(completed.to_string());
+                want.push(STALLED.to_string());
             }
+            want.extend(back[1..].iter().cloned());
             want.push(toyos_build::bootlog::REBOOTING.to_string());
             in_order(&want)?;
-            if moved == Moved::SlowStick {
-                // The break's own call ended holding, before the bind was done.
-                in_order(&[left[3].clone(), format!("usb-storage: disk 0 {STILL_HELD}")])?;
-                held_call(STILL_HELD)?;
-                let stalled = line_with(&log, STALLED)?;
-                let call = line_with(&log, STILL_HELD)?;
-                if cpu_of(stalled)? == cpu_of(call)? {
-                    return Err(format!("{moved:?}: the slow bind ran on the held call's CPU\n{log}"));
-                }
+            // Two shapes, both the ruling's: the held call saw the stick bound
+            // and sent its write again; or it ended on its bound first — the
+            // stall, or every CPU inside a call on the held disk, so no CPU
+            // took the pass that binds — and the write was asked again.
+            let shape = if moved == Moved::SameStick && log.contains(completed) {
+                in_order(&[left[3].clone(), came_back.to_string(), completed.to_string()])?;
+                held_call(completed, came_back)?;
+                "the write that waited went out again on it"
             } else {
-                held_call(completed)?;
-            }
+                in_order(&[left[3].clone(), still_held.clone()])?;
+                held_call(STILL_HELD, if moved == Moved::SlowStick { STALLED } else { came_back })?;
+                "the call that waited ended on its bound and the write was asked again"
+            };
             if !log.contains("Boot: complete") {
                 return Err(format!("{moved:?}: the boot never completed\n{log}"));
             }
-            let mut never = vec![
+            for never in [
                 " failed on disk 0",
                 " did not come back within ",
                 "disk 1 ready",
                 " is not disk 0 come back",
                 OWED,
-            ];
-            if moved == Moved::SameStick {
-                never.push("ran out of its operation budget on disk 0");
-            }
-            for never in never {
+            ] {
                 if let Some(line) = log.lines().find(|l| l.contains(never)) {
                     return Err(format!("{moved:?}: {line:?} of a stick that came back as itself\n{log}"));
                 }
@@ -2009,12 +2014,12 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
             eprintln!(
                 "  [usb] {under_test}'s port reset moved the boot stick to port 3 ({}); it bound \
-                 as disk 0 again on its serial number and the job on the root volume it carries \
-                 ran to its reset{}",
+                 as disk 0 again on its serial number, {shape}, and the job on the root volume it \
+                 carries ran to its reset{}",
                 if inside_the_rung {
-                    "inside the rung, so what went out again is the write that broke"
+                    "inside the rung"
                 } else {
-                    "after the rung's reset verified, so the write that broke completed first"
+                    "after the rung's reset verified"
                 },
                 if moved == Moved::SlowStick {
                     ", though its bind was stalled past the window"
