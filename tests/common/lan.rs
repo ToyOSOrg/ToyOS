@@ -2,8 +2,7 @@
 //! answering the development host on it.
 //!
 //! Every line read here is a record. On the T14 a userland `println!` reaches
-//! `Backend::None`, so what crosses to the stick is the kernel's log — into
-//! which netd's `say!` writes, being a `write` to a console object.
+//! `Backend::None`, so what crosses to the stick is the kernel's log.
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -24,8 +23,25 @@ use super::serial;
 pub const CONFIG: &str = "tests/lancase";
 pub const BOOT: &str = "lancase";
 
+/// The same boot with netd's `--provoke-message` armed: the arm that says
+/// whether a message the card raises reaches a CPU at all, which no reading of
+/// the shipping boot separates from a card that raised none.
+pub const ICS_CONFIG: &str = "tests/lanicscase";
+pub const ICS_BOOT: &str = "lanicscase";
+
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
+
+/// The armed boot's judge: the kernel's own records, tied to the I219's
+/// hand-over, say whether a message it raised reached a CPU — whatever the PHY
+/// did about a link. Kernel records and not netd's: on this machine a userland
+/// write reaches no channel the stick carries.
+pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let got = toyos_build::lan::delivered(back.kernel().text())?;
+    eprintln!("  [lan] {}", got.handed.trim());
+    eprintln!("  [lan] {}", got.took.trim());
+    Ok(())
+}
 
 /// The config the QEMU arm boots — the Intel driver in front of the user-mode
 /// backend, which is the same driver the T14 arm runs and the only DHCP server

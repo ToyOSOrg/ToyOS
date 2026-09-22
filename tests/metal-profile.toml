@@ -733,6 +733,33 @@ unit = "ms"
 ceiling = 20000
 ceiling_from = "as lan.lancase.link_up_ms, which is netd's own dhcp::LEASE_BOUND: a boot with no lease by then has already said so in its log"
 
+# `lanicscase` is `lancase` with one argument added to netd's manifest row, so
+# every bound it is under is that boot's.
+
+[[number]]
+name = "boot.lanicscase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.lancase.complete_ms — the same boot config with one netd argument added"
+
+[[number]]
+name = "boot.lanicscase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.lanicscase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.lancase.stick_secs"
+
+[[number]]
+name = "list.lanicscase.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "as list.lancase.job_ms — the same one job"
+
 # --- what the on-screen panel cost each boot ---
 # **The one window a person has into a machine that stopped.** Two numbers,
 # because the panel can fail a person in two ways: `panel_max_us` bounds one
@@ -859,6 +886,12 @@ ceiling = 16667
 ceiling_from = "as boot.testcases.panel_max_us"
 
 [[number]]
+name = "boot.lanicscase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
 name = "boot.testcases.panel_us"
 unit = "us"
 ceiling = 100000
@@ -971,6 +1004,12 @@ ceiling_from = "as boot.testcases.panel_us"
 
 [[number]]
 name = "boot.lancase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.lanicscase.panel_us"
 unit = "us"
 ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"

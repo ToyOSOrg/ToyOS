@@ -247,8 +247,7 @@ const RUST_SKIP: &[&str] = &[
     // `netd_listener_forgery` runs it there.
     "netd_listener_forgery",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
-    // twenty seconds so the host can reach this machine over the cable, and
-    // `lan_dhcp_lease`'s metal arm is the only job list that names it. On a
+    // twenty seconds so the host can reach this machine over the cable. On a
     // shared boot it would be twenty seconds of nothing.
     "lan_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
@@ -1309,6 +1308,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "lan_dhcp_lease",
         metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
     ),
+    (
+        // Folded into `lan_dhcp_lease`'s judge once the PHY is brought up
+        // (#453): lancase's own first-message record then carries this fact.
+        "lan_message_delivery",
+        metal::Metal::Runs { arms: LANICSCASE, judge: |b| lan::provoked_on_metal(b[0]) },
+    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1661,6 +1666,14 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
 ];
 
+/// **The [`METAL`] rows no QEMU registration answers for**, each with why none
+/// can: a verdict under a name only the T14 reports.
+const METAL_ONLY: &[(&str, &str)] = &[(
+    "lan_message_delivery",
+    "whether the T14's own I219 delivers a message through that machine's interrupt remapping \
+     is a fact of that part and that path; QEMU's e1000e is another part behind another path",
+)];
+
 /// The boot most of the first tranche rides: the plain `tests/testcases` shape
 /// with a job list that ends it.
 ///
@@ -1708,6 +1721,13 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 /// this suite that names a PCI function for the loop to reach the boot over.
 const LANCASE: &[metal::Arm] =
     &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
+
+/// The cable's boot with netd's delivery actuator armed. **A count of no
+/// messages is two facts** — a part nothing made speak and a message that
+/// reached no CPU — so this boot asks the part for a message and `LANCASE` does
+/// not. It names no PCI function: its judge reads the kernel's own records and
+/// asks the cable nothing.
+const LANICSCASE: &[metal::Arm] = &[metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS)];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -18281,11 +18301,12 @@ fn check_shard_partition(all_tests: &[TestDef]) {
 /// A group whose members drifted apart still passes — each one boots its own
 /// machine and reads its own console — so nothing downstream would notice, and
 /// a group split across the two phases could not share a guest at all.
-/// Every metal row names a registered test, once, and every boot it asks for is
-/// a committed config.
+/// Every metal row names a registered test or a [`METAL_ONLY`] row — exactly
+/// one of the two — once, and every boot it asks for is a committed config.
 ///
 /// **A row for a name nothing registers is a metal test with no QEMU one**, and
-/// its verdict would be reported under a name no other tier can answer for.
+/// its verdict would be reported under a name no other tier can answer for
+/// unless a [`METAL_ONLY`] row says why none can.
 fn check_metal_registration() {
     if let Err(why) = the_two_comparisons_use_one_rule() {
         panic!("{why}");
@@ -18300,27 +18321,196 @@ fn check_metal_registration() {
     }
     devices::the_config_runs_exactly_these_jobs();
     common::https::every_bench_claims_what_its_config_declares();
+    if let Err(why) = the_metal_gates_refuse_what_they_name() {
+        panic!("{why}");
+    }
     let registered: BTreeSet<&str> = MACHINE_TESTS
         .iter()
         .chain(SCREEN_TESTS)
         .map(|(n, _, _)| *n)
         .chain(AUDIO_TESTS.iter().map(|(n, _)| *n))
         .collect();
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    for (name, decl) in METAL {
-        assert!(
-            registered.contains(name),
-            "METAL rules on {name:?}, which no registration names; a metal-only test needs a \
-             registration of its own first"
-        );
-        assert!(seen.insert(name), "{name} has two metal declarations");
-        let metal::Metal::Runs { arms, .. } = decl else { continue };
-        assert!(!arms.is_empty(), "{name}'s metal declaration asks for no boot at all");
-        for arm in *arms {
-            let at = compile::repo_root().join(arm.config).join("system.toml");
-            assert!(at.is_file(), "{name} boots {}, which holds no system.toml", arm.config);
+    if let Err(why) = metal_rows_are_registered(&registered, METAL, METAL_ONLY) {
+        panic!("{why}");
+    }
+}
+
+/// [`check_metal_registration`]'s rule over any three tables, so the gate is
+/// held to fixtures as well as to the tables it guards.
+fn metal_rows_are_registered(
+    registered: &BTreeSet<&str>,
+    rows: &[(&str, metal::Metal)],
+    metal_only: &[(&str, &str)],
+) -> Result<(), String> {
+    let only: BTreeSet<&str> = metal_only.iter().map(|(n, _)| *n).collect();
+    if only.len() != metal_only.len() {
+        return Err("METAL_ONLY names one test twice".to_string());
+    }
+    for (name, why) in metal_only {
+        if why.trim().is_empty() {
+            return Err(format!("METAL_ONLY declares {name:?} with no reason"));
+        }
+        if !rows.iter().any(|(n, d)| n == name && matches!(d, metal::Metal::Runs { .. })) {
+            return Err(format!(
+                "METAL_ONLY declares {name:?}, which no METAL row runs; a metal-only name with \
+                 no metal arm is a test nothing runs"
+            ));
         }
     }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for (name, decl) in rows {
+        match (registered.contains(name), only.contains(name)) {
+            (true, false) | (false, true) => {}
+            (false, false) => {
+                return Err(format!(
+                    "METAL rules on {name:?}, which no registration names; a metal-only test \
+                     is declared in METAL_ONLY with why no QEMU arm can answer for it"
+                ))
+            }
+            (true, true) => {
+                return Err(format!(
+                    "{name:?} is registered and declared metal-only; a test with a QEMU arm is \
+                     not one no QEMU arm can answer for"
+                ))
+            }
+        }
+        if !seen.insert(name) {
+            return Err(format!("{name} has two metal declarations"));
+        }
+        let metal::Metal::Runs { arms, .. } = decl else { continue };
+        if arms.is_empty() {
+            return Err(format!("{name}'s metal declaration asks for no boot at all"));
+        }
+        for arm in *arms {
+            let at = compile::repo_root().join(arm.config).join("system.toml");
+            if !at.is_file() {
+                return Err(format!("{name} boots {}, which holds no system.toml", arm.config));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// **A [`METAL_ONLY`] name the shared boot answers under is a QEMU test hiding
+/// behind a declaration that no QEMU arm answers for it**, and its metal verdict
+/// would be reported beside the shared member's under one name. `shared` is
+/// every name the shared registry discovers, Rust and C, and every name a
+/// shared metal boot's members are recorded under.
+fn metal_only_is_unshared(
+    metal_only: &[(&str, &str)],
+    shared: &BTreeSet<&str>,
+) -> Result<(), String> {
+    let clash: Vec<&str> =
+        metal_only.iter().map(|(n, _)| *n).filter(|n| shared.contains(n)).collect();
+    if !clash.is_empty() {
+        return Err(format!(
+            "METAL_ONLY declares {clash:?}, which the shared boot also answers for — two \
+             verdicts under one name, and one of them a QEMU arm the declaration says cannot \
+             exist. Rename the metal row."
+        ));
+    }
+    Ok(())
+}
+
+/// [`metal_only_is_unshared`] against this process's discovered binaries and
+/// the shared metal boots built from them, unfiltered.
+fn check_metal_only_unshared(rust_bins: &[(String, Vec<u8>)], c_bins: &[(String, Vec<u8>)]) {
+    let rust = discover_rust_tests(rust_bins);
+    let mut boots = shared_metal(rust_bins, |_| true);
+    boots.push(c_corpus_metal(c_bins, |_| true));
+    let shared: BTreeSet<&str> = rust
+        .iter()
+        .map(String::as_str)
+        .chain(c_bins.iter().map(|(n, _)| n.as_str()))
+        .chain(boots.iter().flat_map(|b| &b.jobs).flat_map(|job| {
+            [job.as_str(), job.strip_prefix("test_rs_").unwrap_or(job)]
+        }))
+        .collect();
+    if let Err(why) = metal_only_is_unshared(METAL_ONLY, &shared) {
+        panic!("{why}");
+    }
+}
+
+/// Both metal gates, on fixtures: every refusal each one names is shown to
+/// fire, and the tables it must accept are accepted.
+fn the_metal_gates_refuse_what_they_name() -> Result<(), String> {
+    fn judge(_: &[&metal::Readback]) -> Result<(), String> {
+        Ok(())
+    }
+    const RUNS: metal::Metal = metal::Metal::Runs { arms: JOBCASE, judge };
+    const NONE: metal::Metal = metal::Metal::Runs { arms: &[], judge };
+    const QEMU_ONLY: metal::Metal = metal::Metal::QemuOnly("a fixture");
+    const NO_CONFIG: metal::Metal = metal::Metal::Runs {
+        arms: &[metal::once("nowhere", "tests/no-such-config", &[], &[])],
+        judge,
+    };
+    let registered: BTreeSet<&str> = ["qemu_too"].into_iter().collect();
+    const WHY: &str = "a fixture's reason";
+    /// A fixture's name, its METAL rows, its METAL_ONLY rows, and the refusal
+    /// it must draw, `None` for none.
+    type Case = (
+        &'static str,
+        &'static [(&'static str, metal::Metal)],
+        &'static [(&'static str, &'static str)],
+        Option<&'static str>,
+    );
+    let cases: &[Case] = &[
+        ("both kinds", &[("qemu_too", RUNS), ("metal", RUNS)], &[("metal", WHY)], None),
+        ("a QEMU-only row", &[("qemu_too", QEMU_ONLY)], &[], None),
+        ("an unregistered row", &[("stray", RUNS)], &[], Some("which no registration names")),
+        (
+            "a registered metal-only row",
+            &[("qemu_too", RUNS)],
+            &[("qemu_too", WHY)],
+            Some("registered and declared metal-only"),
+        ),
+        (
+            "a metal-only name twice",
+            &[("metal", RUNS)],
+            &[("metal", WHY), ("metal", WHY)],
+            Some("names one test twice"),
+        ),
+        ("a blank reason", &[("metal", RUNS)], &[("metal", " ")], Some("with no reason")),
+        ("no row", &[], &[("metal", WHY)], Some("which no METAL row runs")),
+        (
+            "a QEMU-only row declared metal-only",
+            &[("metal", QEMU_ONLY)],
+            &[("metal", WHY)],
+            Some("which no METAL row runs"),
+        ),
+        (
+            "a row twice",
+            &[("qemu_too", RUNS), ("qemu_too", RUNS)],
+            &[],
+            Some("has two metal declarations"),
+        ),
+        ("no boot", &[("qemu_too", NONE)], &[], Some("asks for no boot at all")),
+        ("no config", &[("qemu_too", NO_CONFIG)], &[], Some("holds no system.toml")),
+    ];
+    for (case, rows, only, refused) in cases {
+        match (metal_rows_are_registered(&registered, rows, only), refused) {
+            (Ok(()), None) => {}
+            (Err(got), Some(want)) if got.contains(want) => {}
+            (got, _) => {
+                return Err(format!(
+                    "the metal registration gate on {case} answered {got:?}, and it has to \
+                     answer {}",
+                    refused.map_or("Ok".to_string(), |w| format!("a refusal saying {w:?}"))
+                ))
+            }
+        }
+    }
+    let shared: BTreeSet<&str> = ["abuse_connect_flood", "00_hello"].into_iter().collect();
+    for (name, refused) in [("abuse_connect_flood", true), ("00_hello", true), ("metal", false)] {
+        if metal_only_is_unshared(&[(name, WHY)], &shared).is_err() != refused {
+            return Err(format!(
+                "the shared-name gate {} a METAL_ONLY {name:?} beside the shared names \
+                 {shared:?}",
+                if refused { "accepted" } else { "refused" }
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn check_registration() {
@@ -18518,6 +18708,7 @@ fn main() {
         let c_names = discover_c_tests();
         eprintln!("[toyos] Compiling {} C tests for the corpus boot...", c_names.len());
         let c_bins = compile_c_tests(&c_names);
+        check_metal_only_unshared(&rust_bins, &c_bins);
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
             .iter()
             .filter(|(name, _)| filter.is_none_or(|f| name.contains(f)))
@@ -18641,6 +18832,7 @@ fn main() {
 
     let all_tests = build_test_registry(&rust_bins, &c_compiled);
     check_no_collisions(&all_tests);
+    check_metal_only_unshared(&rust_bins, &c_bins);
     check_shard_partition(&all_tests);
     // Every name this process could produce a verdict for, which is what a
     // quarantine row has to be one of. Taken before the filter, so a filtered
