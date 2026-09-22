@@ -118,6 +118,8 @@ pub fn init(devices: &[PciDevice]) {
     let mut present = 0;
     for pci_dev in devices.iter().filter(|d| d.matches_class(0x0C, 0x03, Some(0x30))) {
         present += 1;
+        #[cfg(feature = "boot-actuators")]
+        play_firmware(pci_dev);
         if let Some(ctrl) = init_one(pci_dev) {
             controllers.push(ctrl);
         }
@@ -164,6 +166,45 @@ pub fn init(devices: &[PciDevice]) {
         );
     }
     *XHCI.lock() = controllers;
+}
+
+/// `usb-inherited-data-in`: a firmware's use of `pci_dev` before this kernel's
+/// own bring-up of it, staged because the firmware every guest boots finishes
+/// every command it sends. This driver's bring-up, a scan that enumerates the
+/// first device on a trained USB3 link with no reset and leaves it inside a
+/// READ(10)'s data-in ([`super::msc::inherited`]), and the controller halted
+/// with that slot still in it, as a firmware's exit leaves one. Once, on the
+/// first controller with such a device; its pool is leaked.
+#[cfg(feature = "boot-actuators")]
+fn play_firmware(pci_dev: &PciDevice) {
+    use core::sync::atomic::AtomicBool;
+    static UNSPENT: AtomicBool = AtomicBool::new(true);
+    if !crate::actuator::usb_inherited_data_in() || !UNSPENT.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(mut ctrl) = init_one(pci_dev) else { return };
+    await_connect_settle(core::slice::from_ref(&ctrl));
+    let trained = (0..ctrl.max_ports).find(|&p| {
+        ctrl.protocols.of(p) == Some(Protocol::Usb3) && ctrl.read_portsc(p).enabled()
+    });
+    if let Some(port_idx) = trained {
+        UNSPENT.store(false, Ordering::Relaxed);
+        log!("usb-inherited-data-in: port {} is enumerated as a firmware would, on its trained \
+             link with no reset", port_idx + 1);
+        super::msc::inherited::begin();
+        configure(&mut ctrl, port_idx, None);
+        super::msc::inherited::done();
+    }
+    let usbcmd = ctrl.op_base.read_u32(OP_USBCMD);
+    ctrl.op_base.write_u32(OP_USBCMD, usbcmd & !USBCMD_RS);
+    let halted =
+        settles(|| controller_answers() && ctrl.op_base.read_u32(OP_USBSTS) & USBSTS_HCH != 0);
+    match trained {
+        Some(port_idx) => log!("usb-inherited-data-in: the controller is halted={halted} with port \
+             {}'s device inside that data-in; this kernel brings it up again", port_idx + 1),
+        None => log!("usb-inherited-data-in: no trained USB3 link on this controller; this kernel \
+             brings it up again"),
+    }
 }
 
 // A controller that reports nothing leaves every port UNKNOWN, driven the USB2 way.
@@ -458,8 +499,6 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
 /// here was left by whatever ran before this kernel, so none is enumerated
 /// without one — and what a completion meant is [`port::reset_outcome`]'s.
 pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Protocol>) {
-    #[cfg(feature = "boot-actuators")]
-    super::msc::inherited::stage(ctrl, port_idx, protocol);
     let portsc = ctrl.read_portsc(port_idx);
     let mut kind = port::inherited_reset(protocol, portsc);
     if port::reset_needed(protocol, portsc).is_none() {

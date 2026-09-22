@@ -1649,11 +1649,10 @@ impl XhciController {
     }
 
     /// `usb-inherited-data-in`'s firmware: a READ(10) of one block at LBA 0
-    /// whose command block goes out and whose data nothing asks for, and both
-    /// bulk endpoints Stopped after it. Whether the device took the command
-    /// block, and whether the pair stopped.
+    /// whose command block goes out and whose data nothing asks for. Whether
+    /// the device took the command block.
     #[cfg(feature = "boot-actuators")]
-    fn leave_inside_a_data_in(&mut self, dev: &mut MscDevice) -> (bool, bool) {
+    fn leave_inside_a_data_in(&mut self, dev: &mut MscDevice) -> bool {
         let dma = self.dma();
         let tag = dev.next_tag();
         let sectors = dev.sectors_per_block;
@@ -1671,8 +1670,7 @@ impl XhciController {
         let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
         let taken = self.framed_phase(dev, false, cbw_phys, CBW_LEN, Phase::Command, &open).is_ok();
         drop(open);
-        let stopped = self.quiesce_bulk_pair(dev, None, "stopping it with its data unread");
-        (taken, stopped)
+        taken
     }
 
     /// One Normal TRB on a bulk endpoint, and its completion.
@@ -2185,48 +2183,29 @@ pub(in crate::drivers::xhci) fn bind(
 const OWED_A_FLUSH: &str = ", and it left owing a flush of writes it had reported complete, so \
     its next flush fails";
 
-/// A device the boot scan finds inside a Bulk-Only data-in it did not open, as
-/// a firmware's driver can leave one: staged, because the firmware every guest
-/// boots finishes every command it sends. This kernel plays that firmware
-/// first — enumerates the device on its trained link with no reset, binds it,
-/// sends a READ(10) whose data nothing reads, stops the bulk pair and gives the
-/// slot back — and then forgets it, as a hand-over does; the scan then finds it
-/// as it finds every device something else left.
+/// The firmware `usb-inherited-data-in` has this kernel play before its own
+/// bring-up (`wait::boot::play_firmware`): the bind it asks for sends a
+/// READ(10) whose data nothing reads, and hands the device over as it is —
+/// slot, endpoints and all — for the controller's reset to find.
 #[cfg(feature = "boot-actuators")]
 pub(in crate::drivers::xhci) mod inherited {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use toyos_xhci::reset_recovery::SlotGoes;
-    use toyos_xhci::Protocol;
 
     use super::{Bind, MscDevice};
-    use crate::drivers::xhci::{MscBlock, XhciController};
+    use crate::drivers::xhci::XhciController;
     use crate::log;
 
-    static UNSPENT: AtomicBool = AtomicBool::new(true);
     static LEAVING: AtomicBool = AtomicBool::new(false);
 
-    /// Called by the boot scan before it decides anything about `port_idx`:
-    /// the first device on a trained USB3 link is left inside a data-in.
-    pub fn stage(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Protocol>) {
-        if !crate::actuator::usb_inherited_data_in()
-            || protocol != Some(Protocol::Usb3)
-            || !ctrl.read_portsc(port_idx).enabled()
-            || !UNSPENT.swap(false, Ordering::Relaxed)
-        {
-            return;
-        }
-        log!("usb-inherited-data-in: port {} is enumerated as a firmware would, on its trained \
-             link with no reset", port_idx + 1);
+    /// The binds from here to [`done`] are the staged firmware's.
+    pub fn begin() {
         LEAVING.store(true, Ordering::Relaxed);
-        super::super::boot::configure(ctrl, port_idx, None);
+    }
+
+    pub fn done() {
         LEAVING.store(false, Ordering::Relaxed);
-        for block in ctrl.msc.iter_mut().filter(|b| b.port == Some(port_idx)) {
-            *block = MscBlock::FREE;
-        }
-        ctrl.ports[port_idx as usize].torn_down();
-        log!("usb-inherited-data-in: port {} is forgotten, as a hand-over forgets it",
-            port_idx + 1);
     }
 
     /// Whether the bind asking is the staged firmware's.
@@ -2234,12 +2213,14 @@ pub(in crate::drivers::xhci) mod inherited {
         LEAVING.load(Ordering::Relaxed)
     }
 
-    /// The staged firmware's last act on a device it bound.
+    /// The staged firmware's last act on a device it bound. Its slot stays
+    /// with the port: nothing here tells the controller or the device anything
+    /// more, and the controller's own reset is what ends the slot.
     pub fn leave(ctrl: &mut XhciController, dev: &mut MscDevice) -> Bind {
-        let (taken, stopped) = ctrl.leave_inside_a_data_in(dev);
-        log!("usb-inherited-data-in: slot {} took a READ(10) command block={taken}, its data \
-             unread, both bulk endpoints Stopped={stopped}; its slot goes back", dev.slot_id);
-        Bind::Refused(if stopped { SlotGoes::Back } else { SlotGoes::WithTheUnplug })
+        let taken = ctrl.leave_inside_a_data_in(dev);
+        log!("usb-inherited-data-in: slot {} took a READ(10) command block={taken}, and its data \
+             is left unread", dev.slot_id);
+        Bind::Refused(SlotGoes::WithTheUnplug)
     }
 }
 

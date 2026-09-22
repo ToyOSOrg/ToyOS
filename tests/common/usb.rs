@@ -1789,12 +1789,14 @@ const INHERITED: &str =
 /// opened is reset before this kernel sends it anything, so its first command
 /// is answered in step.
 ///
-/// `usb-inherited-data-in` has this kernel play the firmware first: enumerate
-/// the first device on a trained USB3 link with no reset, send it a READ(10)
-/// whose data nothing reads, stop its endpoints, give its slot back and forget
-/// it. A scan that then enumerated it on its trained link with no reset would
-/// send its first command block to a device still inside that data-in, a break
-/// this boot names.
+/// `usb-inherited-data-in` has this kernel play the firmware first, on a
+/// bring-up of its own: enumerate the first device on a trained USB3 link with
+/// no reset, send it a READ(10) whose data nothing reads, and halt the
+/// controller with the slot still in it. This kernel's own bring-up then resets
+/// the controller, which drives no reset on the bus, and scans. A scan that
+/// enumerated the device on its trained link with no reset would send its
+/// first command block to a device still inside that data-in, which QEMU's
+/// `usb-storage` stalls: a break this boot names.
 fn a_device_left_inside_a_data_in_is_reset_before_its_first_command(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -1817,29 +1819,30 @@ fn a_device_left_inside_a_data_in_is_reset_before_its_first_command(
     )?;
 
     // The staging ran, whole: the command block went out, nothing read its
-    // data, and the device was forgotten with its pair stopped.
+    // data, and the controller was halted with the device inside it.
     let left = line_with(&log, "usb-inherited-data-in: slot ")?;
-    if !left.contains(
-        "took a READ(10) command block=true, its data unread, both bulk endpoints Stopped=true; \
-         its slot goes back",
-    ) {
+    if !left.contains("took a READ(10) command block=true, and its data is left unread") {
         return Err(format!("{left:?}: the device was not left inside a data-in\n{log}"));
     }
-    let forgotten = log
-        .lines()
-        .find(|l| l.contains("usb-inherited-data-in: port ") && l.contains(" is forgotten"))
-        .ok_or_else(|| format!("the staged device was never forgotten\n{log}"))?;
-    let port = forgotten
-        .split_once("usb-inherited-data-in: port ")
-        .and_then(|(_, rest)| rest.split_once(' '))
+    let handed = line_with(&log, "usb-inherited-data-in: the controller is halted=")?;
+    let port = handed
+        .split_once("halted=true with port ")
+        .and_then(|(_, rest)| rest.split_once('\''))
         .map(|(port, _)| port)
-        .ok_or_else(|| format!("{forgotten:?} names no port\n{log}"))?;
+        .ok_or_else(|| format!("{handed:?}: the controller was not halted with the device in it\n{log}"))?;
 
-    // Then the scan, on that port: the reset before anything else, and the
-    // disk bound after it.
-    let (_, after) = log.split_once(forgotten).expect("the line came from this text");
+    // The harm first: no command of this boot broke, the first the scan sent
+    // that device included.
+    let (_, after) = log.split_once(handed).expect("the line came from this text");
+    if let Some(line) = after.lines().find(|l| l.contains(" broke on ") || l.contains("transport broke")) {
+        return Err(format!("{line:?}: the device the firmware left inside a data-in broke\n{log}"));
+    }
+    // Then why: this kernel's own reset of the controller, and on that port the
+    // reset before anything else, then the disk bound after it.
     let mut rest = after;
+    let mut stamps = Vec::new();
     for needle in [
+        "xHCI: controller reset".to_string(),
         format!("xHCI: port {port} {INHERITED}"),
         format!("xHCI: port {port} enabled, speed="),
         "xHCI: device addressed".to_string(),
@@ -1847,15 +1850,16 @@ fn a_device_left_inside_a_data_in_is_reset_before_its_first_command(
     ] {
         let Some(line) = rest.lines().find(|l| l.contains(needle.as_str())) else {
             return Err(format!(
-                "after the device was forgotten, no line reads {needle:?}, in order\n{log}"
+                "after the controller was handed over, no line reads {needle:?}, in order\n{log}"
             ));
         };
+        stamps.push(stamp_of(line, "xHCI: ").or_else(|_| stamp_of(line, "usb-storage: ")));
         rest = rest.split_once(line).expect("the line came from this text").1;
     }
-    // And its first command was answered: no break anywhere this boot.
-    if let Some(line) = log.lines().find(|l| l.contains(" broke on ") || l.contains("transport broke")) {
-        return Err(format!("{line:?}: a device reset before its first command broke\n{log}"));
-    }
+    let reset_took = match (&stamps[1], &stamps[2]) {
+        (Ok(asked), Ok(enabled)) => enabled - asked,
+        _ => return Err(format!("the reset's records carry no kernel timestamp\n{log}")),
+    };
     gate_ran(&log, 2)?;
     if !log.contains("usb-gate: disk done reads=ok writes=ok refusal=true wr_err=0 healthy=true") {
         return Err(format!("the disk did not serve the gate\n{log}"));
@@ -1868,7 +1872,7 @@ fn a_device_left_inside_a_data_in_is_reset_before_its_first_command(
     let _ = std::fs::remove_file(&image);
     eprintln!(
         "  [usb] a device left inside a data-in on port {port} was warm reset before its first \
-         command, and answered every command after it"
+         command ({reset_took:.3} s from asking to enabled), and answered every command after it"
     );
     Ok(())
 }
