@@ -2,8 +2,7 @@
 //! answering the development host on it.
 //!
 //! Every line read here is a record. On the T14 a userland `println!` reaches
-//! `Backend::None`, so what crosses to the stick is the kernel's log — into
-//! which netd's `say!` writes, being a `write` to a console object.
+//! `Backend::None`, so what crosses to the stick is the kernel's log.
 
 use std::net::Ipv4Addr;
 use std::path::Path;

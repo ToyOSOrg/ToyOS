@@ -111,7 +111,8 @@ fn message(line: &str) -> Option<&str> {
 
 /// Whether a message the I219 raised reached a CPU, out of the kernel's own
 /// records: the hand-over that names the function's slot and vector, and that
-/// slot's first-message record on that vector, after it.
+/// slot's first-message record on that vector, after it and before the slot's
+/// next hand-over.
 ///
 /// **Whole messages in the kernel's spelling, never a substring**, so another
 /// writer's line, another slot's record, and a record with no hand-over of this
@@ -139,8 +140,22 @@ pub fn delivered(text: &str) -> Result<Delivery, String> {
         })
         .ok_or_else(|| format!("{line:?} carries no readable slot and vector"))?;
 
+    // A hand-over clears the slot's record, so the next one of this slot ends
+    // the span the record can answer this claim in.
+    let again = format!("handed over on slot {slot},");
+    let end = text
+        .lines()
+        .enumerate()
+        .skip(at + 1)
+        .find(|(_, l)| {
+            message(l).is_some_and(|m| m.starts_with("pcidev: PCI ") && m.contains(&again))
+        })
+        .map(|(i, l)| (i, l.trim()));
+    let span = end.map_or(usize::MAX, |(i, _)| i);
     let want = format!("pcidev: slot {slot} took its first message on vector {vector:#x}");
-    if let Some(took) = text.lines().skip(at + 1).find(|l| message(l) == Some(want.as_str())) {
+    if let Some(took) =
+        text.lines().take(span).skip(at + 1).find(|l| message(l) == Some(want.as_str()))
+    {
         return Ok(Delivery { slot, vector, handed: line.to_string(), took: took.to_string() });
     }
 
@@ -148,10 +163,15 @@ pub fn delivered(text: &str) -> Result<Delivery, String> {
         "{I219} was handed over on slot {slot}, vector {vector:#x}, and no kernel record \
          `{want}` follows it: the kernel took no message on this function's vector"
     );
+    if let Some((_, handed_again)) = end {
+        why.push_str(&format!("\n  the slot, handed over again: {handed_again}"));
+    }
     for (i, other) in text.lines().enumerate().filter(|(_, l)| l.contains("took its first message")) {
         let said = message(other);
         why.push_str(if said == Some(want.as_str()) && i < at {
             "\n  the record, before the hand-over it would answer: "
+        } else if said == Some(want.as_str()) && i > span {
+            "\n  the record, after the slot was handed over again: "
         } else if said.is_some_and(|m| {
             m.starts_with("pcidev: slot ") && m.contains(" took its first message on vector 0x")
         }) {
@@ -382,17 +402,70 @@ mod tests {
         assert!(why.contains("before the hand-over it would answer"), "{why}");
     }
 
+    /// A hand-over of the same slot to another function clears the slot's
+    /// record, so a record after it answers that claim and not the I219's.
+    #[test]
+    fn a_record_after_the_slot_is_handed_over_again_is_refused() {
+        let again =
+            "[2026-09-16 15:01:21 2.200 cpu0] pcidev: PCI 00:1f.7 [8086:a0f0] handed over on \
+             slot 0, vector 0x28\n";
+        let log = edited(TOOK, &format!("{again}{TOOK}"));
+        let why = delivered(&log).expect_err("the record answers the later claim");
+        assert!(why.contains("the slot, handed over again: "), "{why}");
+        assert!(why.contains("[8086:a0f0] handed over on slot 0"), "{why}");
+        assert!(why.contains("the record, after the slot was handed over again: "), "{why}");
+        // Another slot's hand-over ends nothing.
+        let other = again.replace("slot 0, vector 0x28", "slot 1, vector 0x29");
+        assert!(delivered(&edited(TOOK, &format!("{other}{TOOK}"))).is_ok());
+    }
+
+    /// Another writer's line carrying the hand-over's words is not the kernel's
+    /// hand-over.
+    #[test]
+    fn a_hand_over_not_in_the_kernels_spelling_is_refused() {
+        let stray = "[2026-09-16 15:01:20 1.333 cpu0] netd: [8086:15fc] handed over on slot 0, \
+                     vector 0x28\n";
+        let why = delivered(&edited(HANDED, stray)).expect_err("a userland line");
+        assert!(why.contains("no `[8086:15fc] handed over on slot ` record"), "{why}");
+    }
+
+    /// The string literal whose text begins `head`, as the compiler reads it:
+    /// a `\` at a line's end joins the next line with its indent dropped.
+    fn literal(source: &str, head: &str) -> Option<String> {
+        let (_, rest) = source.split_once(&format!("\"{head}"))?;
+        let (body, _) = rest.split_once('"')?;
+        let mut out = head.to_string();
+        let mut lines = body.split("\\\n");
+        out.push_str(lines.next()?);
+        for line in lines {
+            out.push_str(line.trim_start());
+        }
+        Some(out)
+    }
+
     /// Nothing links the kernel to the build system, so the two records this
-    /// judge reads are held to the kernel's own format strings.
+    /// judge reads are held to the kernel's own format strings, whole.
     #[test]
     fn the_kernel_writes_both_records_in_the_spelling_read_here() {
         let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel/src/pcidev/mod.rs");
         let source = std::fs::read_to_string(&at).expect("the kernel's pcidev module");
-        for spelled in [
-            "\"pcidev: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] handed over on slot {slot}, \\\n",
-            "\"pcidev: slot {slot} took its first message on vector {:#x}\"",
+        for (head, whole) in [
+            (
+                "pcidev: PCI ",
+                "pcidev: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] handed over on slot {slot}, \
+                 vector {:#x}",
+            ),
+            ("pcidev: slot ", "pcidev: slot {slot} took its first message on vector {:#x}"),
         ] {
-            assert!(source.contains(spelled), "{} spells no {spelled:?}", at.display());
+            let spelled: Vec<String> = source
+                .match_indices(&format!("\"{head}"))
+                .filter_map(|(i, _)| literal(&source[i..], head))
+                .collect();
+            assert!(
+                spelled.iter().any(|l| l == whole),
+                "{} spells no {whole:?}; its {head:?} literals are {spelled:#?}",
+                at.display()
+            );
         }
     }
 
