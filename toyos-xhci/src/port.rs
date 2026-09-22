@@ -81,11 +81,13 @@ pub fn offline_reset(protocol: Option<Protocol>) -> Reset {
     }
 }
 
-/// The PORTSC write that performs `reset`.
+/// The PORTSC write that performs `reset`, clearing any reset-finished flag an
+/// earlier reset left, so the one that comes up next is this reset's.
 pub fn reset_write(reset: Reset, portsc: Portsc) -> portsc::Write {
+    let ack = portsc.neutral().acknowledging_reset(portsc);
     match reset {
-        Reset::Hot => portsc.neutral().resetting(),
-        Reset::Warm => portsc.neutral().warm_resetting(),
+        Reset::Hot => ack.resetting(),
+        Reset::Warm => ack.warm_resetting(),
     }
 }
 
@@ -408,7 +410,7 @@ impl PortState {
         // Before any change flag is cleared, because PRC is the one this state
         // is waiting for.
         if let Work::Resetting { until, kind } = self.work {
-            if portsc.reset_changed() {
+            if portsc.reset_finished() {
                 match reset_outcome(kind, self.protocol, portsc) {
                     ResetOutcome::Enumerate => {
                         return Step::Enumerate { after: Some(kind), pending: Pending(self) };
@@ -517,6 +519,36 @@ mod tests {
     /// PORTSC with CCS and PP set, PED as given, and `pls` as the link state.
     fn connected(enabled: bool, pls: u32) -> Portsc {
         Portsc::from_raw(1 | (u32::from(enabled) << 1) | (pls << 5) | (1 << 9) | (4 << 10))
+    }
+
+    /// T14 run 86: port 13's warm reset was judged in the same millisecond it
+    /// was asked for, on a word with PR still set and a PRC nobody had cleared,
+    /// and the port given up as a link that would not train. The write clears
+    /// such a flag, the word is not a finished reset, and run 84's completion
+    /// word on the same port is.
+    #[test]
+    fn a_warm_reset_is_finished_only_once_the_controller_has_cleared_pr() {
+        const PR: u32 = 1 << 4;
+        const PRC: u32 = 1 << 21;
+        const WRC: u32 = 1 << 19;
+        const WPR: u32 = 1 << 31;
+        // Trained, with a reset-finished flag left by whatever ran before.
+        let before = Portsc::from_raw(0x0020_1203);
+        assert_eq!(inherited_reset(Some(Protocol::Usb3), before), Reset::Warm);
+        let write = reset_write(Reset::Warm, before).raw();
+        assert_eq!(write & (WPR | PRC), WPR | PRC, "{write:#010x}: the stale flag is cleared with it");
+        assert_eq!(write & (1 << 1), 0, "{write:#010x} would disable the port");
+
+        // Run 86's word, in the millisecond the reset was asked for.
+        let during = Portsc::from_raw(0x0022_12b1);
+        assert_eq!(during.raw() & (PR | PRC), PR | PRC);
+        assert!(!during.reset_finished(), "PR is still set: the reset is on the wire");
+
+        // Run 84's word after port 13's warm reset: PR clear, PRC and WRC set, enabled.
+        let after = Portsc::from_raw(0x0028_1203);
+        assert_eq!(after.raw() & (PR | PRC | WRC), PRC | WRC);
+        assert!(after.reset_finished());
+        assert_eq!(reset_outcome(Reset::Warm, Some(Protocol::Usb3), after), ResetOutcome::Enumerate);
     }
 
     #[test]

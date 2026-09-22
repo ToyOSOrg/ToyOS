@@ -1271,9 +1271,9 @@ impl XhciController {
         // the device this is about: its teardown owns what is left.
         let here = before.connected() && !before.connect_changed();
         let finished = here && {
-            self.write_portsc(port_idx, port::reset_write(kind, before).acknowledging_reset(before));
+            self.write_portsc(port_idx, port::reset_write(kind, before));
             dev.reset_at = Some(crate::clock::nanos_since_boot());
-            self.settles_within_call(|| self.read_portsc(port_idx).reset_changed())
+            self.settles_within_call(|| self.read_portsc(port_idx).reset_finished())
         };
         #[cfg(feature = "boot-actuators")]
         if finished && why == RECOVERING && reset_moves::take() {

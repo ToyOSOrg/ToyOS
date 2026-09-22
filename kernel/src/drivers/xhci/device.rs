@@ -231,7 +231,7 @@ pub fn reset_port(ctrl: &mut XhciController, port_idx: u8, kind: Reset) {
 
 /// Whether the port has finished the reset it was asked for.
 pub fn reset_done(ctrl: &XhciController, port_idx: u8) -> bool {
-    super::port_answers() && ctrl.read_portsc(port_idx).reset_changed()
+    super::port_answers() && ctrl.read_portsc(port_idx).reset_finished()
 }
 
 /// One device's enumeration: the state an answer needs, carried because the pass that asked gave up its stack.

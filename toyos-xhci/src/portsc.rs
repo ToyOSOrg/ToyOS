@@ -120,11 +120,20 @@ impl Portsc {
         self.0 & PR != 0
     }
 
-    /// Whether a reset of either kind has finished. A warm reset sets WRC and a
+    /// Whether a reset-finished flag is set. A warm reset sets WRC and a
     /// conformant controller sets PRC with it; one flag is enough to act on and
-    /// both are cleared together.
+    /// both are cleared together. Whose reset it finished is
+    /// [`Self::reset_finished`]'s question.
     pub const fn reset_changed(self) -> bool {
         self.0 & (PRC | WRC) != 0
+    }
+
+    /// Whether the reset software asked for has finished: PR is back to '0'
+    /// **and** PRC or WRC is set (xHCI 1.2 §4.19.5, §4.19.5.1). A flag beside
+    /// PR still set is an earlier reset's, left by whatever ran before, and
+    /// says nothing about this one.
+    pub const fn reset_finished(self) -> bool {
+        !self.in_reset() && self.reset_changed()
     }
 
     /// What the link is doing, which on a USB3 port is what decides whether a
