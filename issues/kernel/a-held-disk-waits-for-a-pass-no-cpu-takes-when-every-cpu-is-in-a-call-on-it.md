@@ -30,6 +30,12 @@ refused create (`issues/boot-media/logd-ends-the-boots-log-on-one-refused-create
 clear too, so on a machine with one CPU the device binds only when the caller
 leaves the kernel.
 
+**A demand fill spins across calls.** `file_backing::read_block_retrying`
+retries `BudgetExpired` for up to `block::DEADMAN` (120 s) without leaving the
+kernel, since a fill cannot park. A fill on a held disk therefore spins call
+after call: each is inside `CALL_AFTER_BREAK`, and their sum is bounded only by
+the deadman. Derived from the code in review round 2 of #466, not staged.
+
 **Not staged**: the `ARRIVED` mutation (the arrival rule removed) survives a
 run of `usb_transport_break`, because nothing makes every CPU enter a call on
 the held disk; the interleaving comes at a rate.

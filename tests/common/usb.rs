@@ -1772,6 +1772,8 @@ pub fn usb_transport_break(
     a_stick_its_reset_moved_carries_on(Moved::AnotherStick)?;
     a_stick_its_reset_moved_carries_on(Moved::SlowStick)?;
     a_stick_its_reset_moved_carries_on(Moved::OwedFlush)?;
+    a_stick_its_reset_moved_carries_on(Moved::FlushedStick)?;
+    a_stick_its_reset_moved_carries_on(Moved::SilentReturn)?;
     super::power::transport_break_chain()
 }
 
@@ -1811,8 +1813,8 @@ fn line_with<'a>(log: &'a str, needle: &str) -> Result<&'a str, String> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Moved {
     /// The same backing under the same serial number: the stick itself, as a
-    /// reset moved T14 run 79's from the USB2 half of its receptacle to the
-    /// USB3 half.
+    /// reset can move a stick from the USB2 half of its receptacle to the USB3
+    /// half.
     SameStick,
     /// The same backing under another serial number, which is everything a
     /// second unit of the same model shares with the first — INQUIRY,
@@ -1828,16 +1830,25 @@ enum Moved {
     /// is taken back, and its next flush fails, since a device that comes back
     /// is not known to have kept its cache.
     OwedFlush,
+    /// The stick itself, broken by `usb-transport-break-flushed` on the first
+    /// write after a flush that succeeded over the one before it: it is taken
+    /// back owing nothing, since that flush emptied the cache it left with.
+    FlushedStick,
+    /// The stick itself, which `usb-return-silent` has come back late in the
+    /// held call and answer nothing on the operation sent again on it: every
+    /// wait of it spins to its end, and the call still ends inside its bound,
+    /// timed from the break.
+    SilentReturn,
 }
 
-/// What one disk call may spin for from the wait its transport broke on:
-/// `AFTER_BREAK`'s sum in `kernel/src/drivers/xhci/mod.rs`, the bound
-/// `toyos_xhci::call` keeps every path of a call inside.
-const CALL_AFTER_BREAK_SECS: f64 = 4.75;
+/// What one disk call may spin for from the wait its transport broke on, in
+/// seconds: the bound `toyos_xhci::call` keeps every path of a call inside.
+fn call_after_break_secs() -> f64 {
+    toyos_xhci::call::AFTER_BREAK.whole() as f64 / 1e9
+}
 
-/// T14 run 79 under QEMU: the boot stick's first WRITE(10) is abandoned, the
-/// ladder resets its port, and the device leaves that port and binds on
-/// another. **QEMU cannot move a device on a reset**, so `usb-reset-moves`
+/// The boot stick's first WRITE(10) is abandoned, the ladder resets its port,
+/// and the device leaves that port and binds on another. **QEMU cannot move a device on a reset**, so `usb-reset-moves`
 /// holds the port rung's reset until the port reads empty and the host makes
 /// the move: `device_del` of the stick, then the same backing file plugged in
 /// on port 3 with the serial number the move says.
@@ -1849,7 +1860,7 @@ const CALL_AFTER_BREAK_SECS: f64 = 4.75;
 /// device left was before.
 ///
 /// **The call held for the stick only waits.** It spins with `IF` clear, so
-/// the bind is another CPU's, and the call ends inside `CALL_AFTER_BREAK` of
+/// the bind is another CPU's, and the call ends inside [`call_after_break_secs`] of
 /// the break however slow the bind is — both read off the kernel's own stamps.
 fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
@@ -1859,10 +1870,17 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         next flush fails";
     const FLUSH_LOST: &str = "flush failed: its device came back from leaving its port owing a flush";
     const STILL_HELD: &str = "is still held when this call may wait no longer";
+    const AFTER_A_FLUSH: &str = "breaks next (usb-transport-break-flushed)";
+    const SILENT: &str = "answers nothing on the operation sent again on it (usb-return-silent)";
+    const LATE: &str = "comes back late (usb-return-silent): its bind is stalled";
+    const WENT_OUT_AGAIN: &str = "usb-storage: disk 0 is back, and the operation it was asked went \
+        out again on it";
     let params: &'static [&'static str] = match moved {
         Moved::SameStick | Moved::AnotherStick => &["usb-transport-break", "usb-reset-moves"],
         Moved::SlowStick => &["usb-transport-break", "usb-reset-moves", "usb-slow-return"],
         Moved::OwedFlush => &["usb-transport-break-owed", "usb-reset-moves"],
+        Moved::FlushedStick => &["usb-transport-break-flushed", "usb-reset-moves"],
+        Moved::SilentReturn => &["usb-transport-break", "usb-reset-moves", "usb-return-silent"],
     };
     let case = super::compile::repo_root().join("tests/jobcase");
     let (name, serial) = match moved {
@@ -1870,6 +1888,8 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         Moved::AnotherStick => ("usb-reset-moves-another.img", "TOYOS0OTHERSTICK"),
         Moved::SlowStick => ("usb-reset-moves-slow.img", qemu::BOOT_STICK_SERIAL),
         Moved::OwedFlush => ("usb-reset-moves-owed.img", qemu::BOOT_STICK_SERIAL),
+        Moved::FlushedStick => ("usb-reset-moves-flushed.img", qemu::BOOT_STICK_SERIAL),
+        Moved::SilentReturn => ("usb-reset-moves-silent.img", qemu::BOOT_STICK_SERIAL),
     };
     let image = test_dir().join(name);
     std::fs::write(&image, qemu::build_boot_image(&case, &[], &[], params))
@@ -1900,9 +1920,12 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     devices.add("usb-storage", "xhci.0", "movedstick", &[("drive", "moved"), ("port", "3"), ("serial", serial)]);
     drop(devices);
     let ends = |l: &str| match moved {
-        Moved::SameStick | Moved::SlowStick => l.contains(toyos_build::bootlog::REBOOTING),
+        Moved::SameStick | Moved::SlowStick | Moved::FlushedStick => {
+            l.contains(toyos_build::bootlog::REBOOTING)
+        }
         Moved::AnotherStick => l.contains(" did not come back within "),
         Moved::OwedFlush => l.contains(FLUSH_LOST),
+        Moved::SilentReturn => l.contains(WENT_OUT_AGAIN) || l.contains(STILL_HELD),
     };
     log.push_str(&qemu.drain_until(Duration::from_secs(60), ends));
     // The rest of the boot: the job's reset, or the lost disk's failures.
@@ -1943,20 +1966,32 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
         "usb-storage: disk 0 came back on port 3 slot ".to_string(),
         "its volume carries on".to_string(),
     ];
-    // The call held for the device: where it ended, and when. A bind while it
-    // held ran on another CPU; one after it ended may run on any.
-    let held_call = |ended: &str, bind: &str| -> Result<(), String> {
-        let line = line_with(&log, ended)?;
-        let took = stamp_of(&log, ended)? - stamp_of(&log, staged)?;
-        if took > CALL_AFTER_BREAK_SECS {
+    // The call its transport broke in: the first line on the break's CPU that
+    // ends a held call on disk 0 — a call on another CPU may find the disk
+    // held too, and ends its own.
+    let staged_cpu = cpu_of(staged)?;
+    let held_end = after
+        .lines()
+        .find(|l| {
+            (l.contains(WENT_OUT_AGAIN) || l.contains(STILL_HELD))
+                && cpu_of(l).is_ok_and(|cpu| cpu == staged_cpu)
+        })
+        .ok_or_else(|| format!("{moved:?}: the call held on cpu{staged_cpu} never ended\n{log}"))?;
+    // Where it ended, and when. A bind while it held ran on another CPU; one
+    // after it ended may run on any.
+    let held_call = |bind: &str| -> Result<f64, String> {
+        let line = held_end;
+        let ended = stamp_of(line, "[kernel ")?;
+        let took = ended - stamp_of(&log, staged)?;
+        let bound = call_after_break_secs();
+        if took > bound {
             return Err(format!(
                 "{moved:?}: the call its transport broke in ended {took:.3} s after the break, past \
-                 the {CALL_AFTER_BREAK_SECS} s a call may spin for\n{log}"
+                 the {bound} s a call may spin for\n{log}"
             ));
         }
-        let bound = line_with(&log, bind)?;
-        let (call_cpu, bind_cpu) = (cpu_of(line)?, cpu_of(bound)?);
-        let during = stamp_of(&log, bind)? <= stamp_of(&log, ended)?;
+        let (call_cpu, bind_cpu) = (cpu_of(line)?, cpu_of(line_with(&log, bind)?)?);
+        let during = stamp_of(&log, bind)? <= ended;
         if during && call_cpu == bind_cpu {
             return Err(format!(
                 "{moved:?}: the stick was bound on cpu{bind_cpu} while the call held for it spun \
@@ -1968,14 +2003,17 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
              the stick was bound on cpu{bind_cpu}, {} it ended",
             if during { "before" } else { "after" }
         );
-        Ok(())
+        Ok(took)
     };
     let came_back = "usb-storage: disk 0 came back on port 3 slot ";
-    let completed = "usb-storage: disk 0 is back, and the operation it was asked went out again on \
-                     it: it completed";
-    let still_held = format!("usb-storage: disk 0 {STILL_HELD}");
     match moved {
-        Moved::SameStick | Moved::SlowStick => {
+        Moved::SameStick | Moved::SlowStick | Moved::FlushedStick => {
+            if moved == Moved::FlushedStick {
+                let flushed = line_with(&log, AFTER_A_FLUSH)?;
+                if !log.split_once(staged).is_some_and(|(before, _)| before.contains(flushed)) {
+                    return Err(format!("{moved:?}: the break was not the one after a flush\n{log}"));
+                }
+            }
             let mut want = left.to_vec();
             want.push(back[0].clone());
             if moved == Moved::SlowStick {
@@ -1988,14 +2026,16 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             // and sent its write again; or it ended on its bound first — the
             // stall, or every CPU inside a call on the held disk, so no CPU
             // took the pass that binds — and the write was asked again.
-            let shape = if moved == Moved::SameStick && log.contains(completed) {
-                in_order(&[left[3].clone(), came_back.to_string(), completed.to_string()])?;
-                held_call(completed, came_back)?;
+            let shape = if moved != Moved::SlowStick && held_end.ends_with(": it completed") {
+                in_order(&[left[3].clone(), came_back.to_string(), held_end.to_string()])?;
+                held_call(came_back)?;
                 "the write that waited went out again on it"
-            } else {
-                in_order(&[left[3].clone(), still_held])?;
-                held_call(STILL_HELD, if moved == Moved::SlowStick { STALLED } else { came_back })?;
+            } else if held_end.contains(STILL_HELD) {
+                in_order(&[left[3].clone(), held_end.to_string()])?;
+                held_call(if moved == Moved::SlowStick { STALLED } else { came_back })?;
                 "the call that waited ended on its bound and the write was asked again"
+            } else {
+                return Err(format!("{moved:?}: {held_end:?} of a stick that came back as itself\n{log}"));
             };
             if !log.contains("Boot: complete") {
                 return Err(format!("{moved:?}: the boot never completed\n{log}"));
@@ -2006,6 +2046,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                 "disk 1 ready",
                 " is not disk 0 come back",
                 OWED,
+                FLUSH_LOST,
             ] {
                 if let Some(line) = log.lines().find(|l| l.contains(never)) {
                     return Err(format!("{moved:?}: {line:?} of a stick that came back as itself\n{log}"));
@@ -2021,10 +2062,12 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                 } else {
                     "after the rung's reset verified"
                 },
-                if moved == Moved::SlowStick {
-                    ", though its bind was stalled past the window"
-                } else {
-                    ""
+                match moved {
+                    Moved::SlowStick => ", though its bind was stalled past the window",
+                    Moved::FlushedStick => {
+                        ", owing no flush: it broke after a flush that succeeded over its last write"
+                    }
+                    _ => "",
                 }
             );
         }
@@ -2042,6 +2085,42 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             eprintln!(
                 "  [usb] a stick that left owing a flush was taken back as disk 0, and its next \
                  flush failed by name"
+            );
+        }
+        Moved::SilentReturn => {
+            let mut want = left.to_vec();
+            want.push(back[0].clone());
+            want.push(LATE.to_string());
+            want.extend(back[1..].iter().cloned());
+            want.extend([
+                format!("usb-storage: disk 0 {SILENT}"),
+                " is offline: both bulk endpoints Stopped=".to_string(),
+                format!("{WENT_OUT_AGAIN}: it failed"),
+            ]);
+            in_order(&want)?;
+            // The stick came back late enough that the operation sent again on
+            // a bound of its own would run past the call's: on the call's,
+            // its waits reach where the last rung begins, and no further.
+            if !held_end.contains(&format!("{WENT_OUT_AGAIN}: it failed")) {
+                return Err(format!(
+                    "{moved:?}: {held_end:?}: the call held on cpu{staged_cpu} did not send its \
+                     operation again on the stick that came back\n{log}"
+                ));
+            }
+            let took = held_call(came_back)?;
+            let bounds = toyos_xhci::call::AFTER_BREAK;
+            let spun = (bounds.whole() - bounds.offline) as f64 / 1e9;
+            if took < spun {
+                return Err(format!(
+                    "{moved:?}: the call ended {took:.3} s after the break, before the {spun} s its \
+                     waits may reach: the operation sent again did not spend what the call had \
+                     left\n{log}"
+                ));
+            }
+            eprintln!(
+                "  [usb] a stick that came back and answered nothing on the operation sent again \
+                 on it spun what the held call had left, went offline on the last rung, and the \
+                 call ended {took:.3} s after the break"
             );
         }
         Moved::AnotherStick => {

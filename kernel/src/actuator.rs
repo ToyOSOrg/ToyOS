@@ -144,6 +144,19 @@ actuators! {
     /// `usb_transport_break`.
     usb_transport_break_owed = "usb-transport-break-owed";
 
+    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
+    /// after a write was reported complete and a SYNCHRONIZE CACHE then
+    /// succeeded, with no write since: a device that leaves then owes nothing.
+    /// Judged by `usb_transport_break`.
+    usb_transport_break_flushed = "usb-transport-break-flushed";
+
+    /// Stall the bind of a disk that arrives while another is held for its
+    /// device, for less than `usb-slow-return` does, and leave every transfer
+    /// of the operation the held call sends again on it unanswered, once, each
+    /// waited for to the end of what the call may spend. See
+    /// `xhci::msc::return_silent`; judged by `usb_transport_break`.
+    usb_return_silent = "usb-return-silent";
+
     /// Stall the bind of a disk that arrives while another is held for its
     /// device, before its first command, as a stick slow to answer after a
     /// reset: the wait held for it is not where it binds. Judged by

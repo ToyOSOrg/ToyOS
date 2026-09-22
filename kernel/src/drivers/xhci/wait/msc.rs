@@ -27,6 +27,7 @@ use super::super::device::Endpoint;
 use toyos_xhci::bot::Phase;
 use toyos_xhci::call::AfterBreak;
 use toyos_xhci::configure::{self, BulkEndpoint};
+use toyos_xhci::flush::{Debt, Flush};
 use toyos_xhci::identity::{self, Identity, Serial, UsbId};
 use toyos_xhci::ladder::{self, AfterReset, Left, PortStep, Rung};
 use toyos_xhci::port;
@@ -113,12 +114,9 @@ pub struct MscDevice {
     /// Set once the device refuses SYNCHRONIZE CACHE; logged once, not per
     /// flush — a log line would itself be pending content the next flush drains.
     no_write_cache: bool,
-    /// A write the device reported complete since its last SYNCHRONIZE CACHE
-    /// that did: bytes a volatile cache may hold and nothing has made durable.
-    unflushed: bool,
-    /// This disk was taken back by a device that came back owing a flush
-    /// ([`Self::owes_a_flush`]); its next flush fails, once.
-    flush_lost: bool,
+    /// The flush this instance owes: its own writes, and whatever it took the
+    /// disk back owing ([`Self::owes_a_flush`]).
+    debt: Debt,
     /// What the device says it is, which a device that binds after this one
     /// left must match to take its number.
     identity: Identity,
@@ -169,16 +167,21 @@ impl MscDevice {
         &self.identity
     }
 
-    /// Whether a device that left now could take writes it reported complete
-    /// with it: a volatile cache holding a write no flush has emptied since.
-    ///
-    /// **A device that comes back is not known to have kept its power.** A
-    /// reset that moved it and an unplug and replug of it look alike to the
-    /// host, and the second empties a volatile cache the device already
-    /// answered for; a device that said it has none (`no_write_cache`) has
-    /// nothing to lose there.
+    /// Whether a device that left now could take writes reported complete with
+    /// it: its own, held in a volatile cache no flush has emptied since, or a
+    /// debt it took the disk back with (`toyos_xhci::flush`).
     pub(in crate::drivers::xhci) fn owes_a_flush(&self) -> bool {
-        self.unflushed && !self.no_write_cache
+        self.debt.owed(self.no_write_cache)
+    }
+
+    /// The device reported a transfer complete, whole or in part; `write` is
+    /// whether it was one.
+    fn wrote(&mut self, write: bool) {
+        if write {
+            self.debt.wrote();
+            #[cfg(feature = "boot-actuators")]
+            transport_break::wrote();
+        }
     }
 
     pub(in crate::drivers::xhci) fn port_idx(&self) -> u8 {
@@ -358,17 +361,45 @@ mod transport_break {
 
     static UNSPENT: AtomicBool = AtomicBool::new(true);
     static ARMED: AtomicBool = AtomicBool::new(false);
+    /// A write was reported complete, and then a SYNCHRONIZE CACHE succeeded
+    /// with none since: kept here and not read off the driver's own debt, so
+    /// `usb-transport-break-flushed` stages what it says whatever that debt
+    /// holds.
+    static WROTE: AtomicBool = AtomicBool::new(false);
+    static FLUSHED: AtomicBool = AtomicBool::new(false);
+
+    /// What the break `usb-transport-break-flushed` stages says before it.
+    pub const AFTER_A_FLUSH: &str = "breaks next (usb-transport-break-flushed): a write was \
+        reported complete and a SYNCHRONIZE CACHE succeeded after it, with no write since";
+
+    /// A write was reported complete.
+    pub fn wrote() {
+        WROTE.store(true, Ordering::Relaxed);
+        FLUSHED.store(false, Ordering::Relaxed);
+    }
+
+    /// A SYNCHRONIZE CACHE succeeded.
+    pub fn flushed() {
+        FLUSHED.store(WROTE.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
 
     /// Called where the driver is about to run a WRITE(10) data phase; `owed`
     /// is whether its device owes a flush (`MscDevice::owes_a_flush`), which
     /// `usb-transport-break-owed` waits for.
     pub fn arm(owed: bool) {
+        let after_a_flush =
+            crate::actuator::usb_transport_break_flushed() && FLUSHED.load(Ordering::Relaxed);
         let wanted = crate::actuator::usb_transport_break()
-            || (crate::actuator::usb_transport_break_owed() && owed);
+            || (crate::actuator::usb_transport_break_owed() && owed)
+            || after_a_flush;
         if !wanted {
             return;
         }
-        ARMED.store(UNSPENT.swap(false, Ordering::Relaxed), Ordering::Relaxed);
+        let armed = UNSPENT.swap(false, Ordering::Relaxed);
+        if armed && after_a_flush {
+            crate::log!("usb-storage: the WRITE(10) going out {AFTER_A_FLUSH}");
+        }
+        ARMED.store(armed, Ordering::Relaxed);
     }
 
     /// Called after the doorbell, where the wait would otherwise begin.
@@ -423,6 +454,44 @@ pub(in crate::drivers::xhci) mod mid_write {
         if taken.is_ok() {
             crate::deadline::stage_a_wedge()
         }
+    }
+}
+
+/// Have every transfer of the operation sent again on a device that came back
+/// answer nothing, once, each waited for to the end of what the call lets it
+/// spend: a returning device that stops answering, which spends the whole of
+/// what the held call has left — staged because nothing on the host side stops
+/// a device answering.
+#[cfg(feature = "boot-actuators")]
+pub(in crate::drivers::xhci) mod return_silent {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static UNSPENT: AtomicBool = AtomicBool::new(true);
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    /// What the staged operation's disk says before it goes out again.
+    pub const SILENT: &str =
+        "answers nothing on the operation sent again on it (usb-return-silent)";
+
+    /// `true` means the operation disk `index` is about to send again is the
+    /// staged one, and must call [`end`] once it has.
+    pub fn begin(index: usize) -> bool {
+        if !crate::actuator::usb_return_silent() || !UNSPENT.swap(false, Ordering::Relaxed) {
+            return false;
+        }
+        crate::log!("usb-storage: disk {index} {SILENT}");
+        ACTIVE.store(true, Ordering::Relaxed);
+        true
+    }
+
+    pub fn end() {
+        ACTIVE.store(false, Ordering::Relaxed);
+    }
+
+    /// Only the staged operation's own transfers can see this set: it holds
+    /// the controller lock throughout.
+    pub fn active() -> bool {
+        ACTIVE.load(Ordering::Relaxed)
     }
 }
 
@@ -813,7 +882,7 @@ impl XhciController {
             if dev.failed {
                 return Err(BlockError::Device);
             }
-            if core::mem::take(&mut dev.flush_lost) {
+            if dev.debt.flush() == Flush::Lost {
                 log!("usb-storage: disk {number} flush failed: its device came back from leaving \
                      its port owing a flush, so writes it reported complete before then may not \
                      have survived, and no flush now can say they are durable");
@@ -847,7 +916,9 @@ impl XhciController {
             }
             match outcome {
                 Scsi::Ok { .. } => {
-                    dev.unflushed = false;
+                    dev.debt.flushed();
+                    #[cfg(feature = "boot-actuators")]
+                    transport_break::flushed();
                     Ok(())
                 }
                 Scsi::Refused { key, asc, ascq } => {
@@ -922,11 +993,11 @@ impl XhciController {
             }
 
             match self.scsi(dev, &cdb, 10, Some(data.subview(0, bytes)), !write, until) {
-                Scsi::Ok { delivered } if delivered as usize == bytes => dev.unflushed |= write,
+                Scsi::Ok { delivered } if delivered as usize == bytes => dev.wrote(write),
                 // Short of what was asked: nothing above can say which
                 // blocks arrived, so a partial transfer is a failed one.
                 Scsi::Ok { delivered } => {
-                    dev.unflushed |= write;
+                    dev.wrote(write);
                     log!("usb-storage: {delivered} of {bytes} B at block {}", lba + done as u64);
                     return Err(BlockError::Device);
                 }
@@ -2001,8 +2072,7 @@ pub(in crate::drivers::xhci) fn bind(
         failed: false,
         slot_goes: None,
         no_write_cache: false,
-        unflushed: false,
-        flush_lost: false,
+        debt: Debt::NONE,
         identity: Identity {
             usb,
             serial: Serial::Absent,
@@ -2015,11 +2085,10 @@ pub(in crate::drivers::xhci) fn bind(
     };
 
     #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_slow_return() && ctrl.awaits_a_device() {
-        const SLOW_NS: u64 = 2_500_000_000;
-        log!("usb-storage: slot {slot_id} {} {} ms before its first command",
-            slow_return::STALLED, SLOW_NS / 1_000_000);
-        let _ = crate::clock::settles(SLOW_NS, || false);
+    if let Some((why, stall_ns)) = slow_return::staged().filter(|_| ctrl.awaits_a_device()) {
+        log!("usb-storage: slot {slot_id} {why} {} ms before its first command",
+            stall_ns / 1_000_000);
+        let _ = crate::clock::settles(stall_ns, || false);
     }
     #[cfg(feature = "boot-actuators")]
     let staged = staged::bind_begins();
@@ -2043,7 +2112,7 @@ pub(in crate::drivers::xhci) fn bind(
     // loses a disk — and a device that is a disk this driver's reset lost
     // takes that disk's back.
     if let Some((index, owed)) = ctrl.adopt(&dev.identity, port_idx) {
-        dev.flush_lost = owed;
+        dev.debt = Debt::adopted(owed);
         log!("usb-storage: disk {index} came back on port {} slot {slot_id} as the same device \
              (USB {:04x}:{:04x}, serial number {}, {} blocks of {} B), msc_block +{:#x}; its \
              volume carries on{}",
@@ -2070,10 +2139,26 @@ pub(in crate::drivers::xhci) fn bind(
 const OWED_A_FLUSH: &str = ", and it left owing a flush of writes it had reported complete, so \
     its next flush fails";
 
-/// What the staged slow bind says it is doing.
+/// A bind stalled while another disk is held for its device: what it says it
+/// is doing, and for how long.
 #[cfg(feature = "boot-actuators")]
 pub(in crate::drivers::xhci) mod slow_return {
     pub const STALLED: &str = "answers slowly (usb-slow-return): its bind is stalled";
+
+    /// `usb-return-silent`'s: late enough that the operation sent again on a
+    /// bound of its own would run past the call's, and early enough that the
+    /// held call still sees the device back.
+    pub const LATE: &str = "comes back late (usb-return-silent): its bind is stalled";
+
+    pub fn staged() -> Option<(&'static str, u64)> {
+        if crate::actuator::usb_slow_return() {
+            Some((STALLED, 2_500_000_000))
+        } else if crate::actuator::usb_return_silent() {
+            Some((LATE, 1_500_000_000))
+        } else {
+            None
+        }
+    }
 }
 
 /// What came of a bind.
@@ -2355,7 +2440,13 @@ fn served(index: usize, mut op: impl FnMut(&mut XhciController, usize) -> BlockR
     loop {
         let ran = with_disk_by(index, hold_ends, |ctrl, at| {
             ctrl.after_break = call;
+            #[cfg(feature = "boot-actuators")]
+            let silent = back && return_silent::begin(index);
             let done = op(ctrl, at);
+            #[cfg(feature = "boot-actuators")]
+            if silent {
+                return_silent::end();
+            }
             call = core::mem::replace(&mut ctrl.after_break, AfterBreak::CLOSED);
             (done, ctrl.msc[at].disk.is_none())
         });

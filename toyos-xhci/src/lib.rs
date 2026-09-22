@@ -12,6 +12,7 @@ pub mod bot;
 pub mod call;
 pub mod configure;
 pub mod enumerate;
+pub mod flush;
 pub mod identity;
 pub mod invariants;
 pub mod job;

@@ -52,6 +52,20 @@ pub struct Bounds {
     pub offline: Nanos,
 }
 
+/// What one disk call may spin for once its transport has broken, part by part:
+/// the kernel's, and the one declaration a test times a call against.
+///
+/// A rung's bound is what its commands, requests and reset cost a device that
+/// answers, and the rest of it is how long a TEST UNIT READY nothing answers is
+/// waited for. `wait` is the driver's own timeout on one command, which the
+/// kernel asserts.
+pub const AFTER_BREAK: Bounds = Bounds {
+    wait: 2_000_000_000,
+    class_reset: 750_000_000,
+    port_reset: 1_500_000_000,
+    offline: 500_000_000,
+};
+
 impl Bounds {
     /// Everything the call may spin for from the start of the wait that broke.
     pub const fn whole(&self) -> Nanos {

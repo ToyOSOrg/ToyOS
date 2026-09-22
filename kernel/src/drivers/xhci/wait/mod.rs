@@ -380,6 +380,13 @@ impl XhciController {
             let cut = call.cut(began, crate::clock::nanos_since_boot(), USB_TIMEOUT_NS);
             if cut { Quiet::Spent } else { Quiet::Elapsed }
         };
+        // `usb-return-silent` stages an operation sent again whose transfers
+        // answer nothing and are waited for; see `msc::return_silent`.
+        #[cfg(feature = "boot-actuators")]
+        if msc::return_silent::active() {
+            let _ = crate::clock::settles(deadline.saturating_sub(began), || false);
+            return Err(quiet(&self.after_break));
+        }
         loop {
             if late.gives_up() {
                 return Err(quiet(&self.after_break));

@@ -302,14 +302,10 @@ const MAX_HID_FAILURES: u8 = 8;
 const USB_TIMEOUT_NS: u64 = 2_000_000_000;
 
 /// What one disk call may spin for once its transport has broken, part by part: the wait that broke and the commands sent again after a rung that took, then each rung of `toyos_xhci::ladder` on a bound of its own, which `toyos_xhci::call` keeps the parts before it out of.
-///
-/// A rung's bound is what its commands, requests and reset cost a device that answers, and the rest of it is how long a TEST UNIT READY nothing answers is waited for.
-pub(crate) const AFTER_BREAK: toyos_xhci::call::Bounds = toyos_xhci::call::Bounds {
-    wait: USB_TIMEOUT_NS,
-    class_reset: 750_000_000,
-    port_reset: 1_500_000_000,
-    offline: 500_000_000,
-};
+pub(crate) const AFTER_BREAK: toyos_xhci::call::Bounds = toyos_xhci::call::AFTER_BREAK;
+
+// The wait that broke is given what any wait is.
+const _: () = assert!(AFTER_BREAK.wait == USB_TIMEOUT_NS);
 
 /// Everything one disk call may spin for from the start of the wait its transport broke on.
 pub(crate) const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of(
@@ -659,7 +655,9 @@ pub(super) fn look_for(index: usize) -> Option<Whereabouts> {
 /// Have the ports stepped now by a CPU that reaches a scheduler pass, for a
 /// caller that waits for a device on a CPU it holds with `IF` clear: the
 /// interrupt a connect raises may be this CPU's, and it takes none. `kick`
-/// wakes every other CPU, since a halted one has stopped its own timer.
+/// wakes every other CPU, since a halted one has stopped its own timer; the
+/// kick is refused only before `apic::init`, and no other CPU has been started
+/// before it.
 pub(super) fn ports_wanted(kick: bool) {
     PORT_WORK_AT.store(crate::clock::nanos_since_boot().max(1), Ordering::Relaxed);
     if !kick {
