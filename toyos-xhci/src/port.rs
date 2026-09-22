@@ -53,6 +53,24 @@ pub fn reset_needed(protocol: Option<Protocol>, portsc: Portsc) -> Option<Reset>
     Some(if portsc.link_state() == LinkState::Inactive { Reset::Warm } else { Reset::Hot })
 }
 
+/// Which reset a device already connected when this kernel brings its controller
+/// up needs: **always one**, and on a link that reads trained the warm one.
+///
+/// Such a device is whatever the firmware's driver left it: addressed,
+/// configured, possibly inside a Bulk-Only command. HCRST drives no reset on the
+/// bus (xHCI 1.2 §5.4.1), so the controller's own reset tells the device
+/// nothing; SET_ADDRESS to a device in the Configured state is not specified
+/// (USB 2.0 §9.4.6), and every enumeration the USB specification describes
+/// begins with a port reset (USB 2.0 §9.1.2). So nothing is asked of it until
+/// its port has been reset and this kernel has enumerated it from its Default
+/// state. A trained link gets [`Reset::Warm`] because its link state is as
+/// unknown as its protocol state, and a warm reset does everything a hot one
+/// does and also retrains the link (§4.19.5.1). [`reset_needed`] still answers
+/// for a link this kernel watched train: its device came up from power-on.
+pub fn inherited_reset(protocol: Option<Protocol>, portsc: Portsc) -> Reset {
+    reset_needed(protocol, portsc).unwrap_or(Reset::Warm)
+}
+
 /// The reset a device gets from a class driver its own recovery did not bring
 /// back ([`crate::ladder`]): the most the port has. A warm reset does everything
 /// a hot one does and also takes the link through Rx.Detect (§4.19.5.1), and
@@ -496,6 +514,24 @@ impl PortState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PORTSC with CCS and PP set, PED as given, and `pls` as the link state.
+    fn connected(enabled: bool, pls: u32) -> Portsc {
+        Portsc::from_raw(1 | (u32::from(enabled) << 1) | (pls << 5) | (1 << 9) | (4 << 10))
+    }
+
+    #[test]
+    fn a_device_found_at_bring_up_is_never_enumerated_without_a_reset() {
+        let trained = connected(true, 0);
+        assert_eq!(reset_needed(Some(Protocol::Usb3), trained), None, "a link watched training");
+        assert_eq!(inherited_reset(Some(Protocol::Usb3), trained), Reset::Warm);
+        // Everything else is answered as it always was: the question is only
+        // whether a reset is skipped.
+        assert_eq!(inherited_reset(Some(Protocol::Usb3), connected(false, 7)), Reset::Hot);
+        assert_eq!(inherited_reset(Some(Protocol::Usb3), connected(false, 6)), Reset::Warm);
+        assert_eq!(inherited_reset(Some(Protocol::Usb2), connected(true, 0)), Reset::Hot);
+        assert_eq!(inherited_reset(None, trained), Reset::Hot);
+    }
 
     #[test]
     fn a_device_its_class_reset_did_not_bring_back_gets_the_most_reset_its_port_has() {

@@ -236,6 +236,29 @@ fn check(index: usize, disk: &Handle) {
         }
     }
 
+    // A READ whose first wait spends its operation's whole budget, then a class
+    // reset the device answers out of step, then a port reset that takes: the
+    // READ goes out again on what the call has left and returns the host's
+    // bytes.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_first_wait_spent() {
+        use crate::drivers::xhci::{disarm_probe_faults, disarm_transport_faults};
+        use crate::drivers::xhci::{stage_probe_faults, stage_transport_faults, StagedFault};
+        let block = at(blocks, HOST_BLOCKS[0]);
+        buf.fill(0);
+        stage_transport_faults(1, StagedFault::Unanswered);
+        stage_probe_faults(1);
+        let refused = read(block, 1, &mut buf).is_err();
+        let (untaken, probes_untaken) = (disarm_transport_faults(), disarm_probe_faults());
+        let matched = !refused && first_bad(&buf, nonce, block).is_none();
+        log!(
+            "usb-gate: a first wait that spent the operation's budget, a recovery out of step and \
+             a port reset: read refused={refused} matched={matched} untaken={untaken} \
+             probes_untaken={probes_untaken} healthy={}",
+            usb_storage::healthy(index)
+        );
+    }
+
     // Runs of transport faults, each staged immediately before the read it is
     // taken inside. One short of the budget, in each of the two shapes a break
     // leaves the bulk pair in, is a run the recovery brings back: the read

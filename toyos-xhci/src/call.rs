@@ -13,6 +13,15 @@
 //! spent, and the last rung — the one that leaves the device reset — always
 //! runs.
 //!
+//! **A command sent again after a rung that took is the call's, not the
+//! operation's** ([`AfterBreak::issue`]). The caller's operation budget decides
+//! whether a command is *started*; the wait that broke may have spent all of it,
+//! and a recovery that took with nothing left to send the command again on
+//! would fail an operation whose device had just answered. So the command that
+//! broke goes out again whenever its window has room, and that window holds
+//! everything the rung that took left of its own (the proof is the
+//! `every_path_through_a_call_ends_inside_its_bounds` walk).
+//!
 //! **A controller that left a command unanswered is sent no other in the same
 //! call.** Its command ring is one queue: whatever follows waits behind the
 //! command it did not answer, and costs a whole timeout to say so again. A
@@ -39,6 +48,16 @@ impl core::fmt::Display for NotTaken {
             Self::ControllerSilent => "the controller left an earlier command of this call unanswered",
         })
     }
+}
+
+/// Why a command was not sent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NotIssued {
+    /// The operation's own budget is spent, and this command would start
+    /// something new in it.
+    Operation,
+    /// The call's bound refuses it.
+    Call(NotTaken),
 }
 
 /// What each part of a call whose transport broke may spend.
@@ -106,10 +125,13 @@ struct Open {
 pub struct AfterBreak {
     open: Option<Open>,
     silent: bool,
+    /// A rung took, or a held disk came back, and the command it was for has
+    /// not gone out again yet.
+    again: bool,
 }
 
 impl AfterBreak {
-    pub const CLOSED: Self = Self { open: None, silent: false };
+    pub const CLOSED: Self = Self { open: None, silent: false, again: false };
 
     /// The transport broke on a wait that began at `wait_began`. The first
     /// break of a call opens it and a later one does not extend it. Until a
@@ -136,7 +158,24 @@ impl AfterBreak {
     pub fn took(&mut self, rung: Rung) {
         if let Some(open) = &mut self.open {
             open.window_ends = open.call_ends - open.bounds.above(rung);
+            self.again = true;
         }
+    }
+
+    /// Whether the command about to go out at `now` may, in an operation whose
+    /// own budget ends at `operation_ends`.
+    ///
+    /// The first command to go out after a rung took, or after a held disk came
+    /// back, is the one the break was in, sent again: only the call's window
+    /// decides it, since the operation's budget was spent on the break it
+    /// recovered from. Every other command starts something new in the
+    /// operation, and needs both.
+    pub fn issue(&mut self, now: Nanos, operation_ends: Nanos) -> Result<(), NotIssued> {
+        let again = core::mem::take(&mut self.again);
+        if !again && now >= operation_ends {
+            return Err(NotIssued::Operation);
+        }
+        self.request(now).map_err(NotIssued::Call)
     }
 
     /// When a wait starting at `now`, with `own` as its own timeout, gives up.
@@ -370,15 +409,34 @@ mod tests {
                     }
                 }
                 let steps = path.map(|s| EVERYTHING[s]);
+                // The rung the call is inside, as its last step entered it.
+                let mut inside = None;
                 for (at, &does) in steps.iter().enumerate() {
                     let taken = &steps[..=at];
                     match does {
-                        Does::Enter(rung) => call.enter(rung, now),
-                        Does::Took(rung) => call.took(rung),
+                        Does::Enter(rung) => {
+                            call.enter(rung, now);
+                            inside = Some(rung);
+                        }
+                        Does::Took(rung) => {
+                            let rung_ends = call.wait_ends(now, u64::MAX);
+                            call.took(rung);
+                            // A rung that took inside its own window leaves the
+                            // command sent again at least what it had left.
+                            if inside == Some(rung) && now < rung_ends {
+                                assert!(
+                                    call.wait_ends(now, u64::MAX) >= rung_ends,
+                                    "start {start}, {taken:?}: the command sent again ends before \
+                                     the rung that took would have"
+                                );
+                            }
+                            inside = None;
+                        }
                         Does::Hold => {
                             let ends = call.hold(now, BOUNDS);
                             assert!(ends <= began + whole - BOUNDS.offline, "start {start}, {taken:?}");
                             now = now.max(ends);
+                            inside = None;
                         }
                         Does::Spin => now = now.max(call.wait_ends(now, u64::MAX)),
                     }
@@ -424,5 +482,65 @@ mod tests {
         assert_eq!(call.wait_ends(SECOND, OWN), BOUNDS.port_reset);
         assert!(call.cut(SECOND, BOUNDS.port_reset, OWN));
         assert!(!AfterBreak::CLOSED.cut(0, OWN, OWN));
+    }
+
+    const MS: Nanos = 1_000_000;
+
+    /// A stick whose first READ(10) was not taken for the whole of its wait: the
+    /// wait spent the operation's two seconds, the class reset's TEST UNIT READY
+    /// babbled, the port reset took, and the READ goes out again with its whole
+    /// own timeout — on the kernel's own bounds, at the times the T14 recorded.
+    #[test]
+    fn a_read_whose_wait_spent_the_operation_goes_out_again_after_the_port_reset_took() {
+        let own = AFTER_BREAK.wait;
+        let operation_ends = 600 * MS + 2 * SECOND;
+        let wait_began = 602 * MS;
+        let mut call = AfterBreak::CLOSED;
+        assert_eq!(call.issue(wait_began, operation_ends), Ok(()), "the READ goes out");
+
+        let broke = wait_began + own;
+        call.open(wait_began, AFTER_BREAK);
+        call.enter(Rung::ClassReset, broke);
+        // Its TEST UNIT READY out of step at once: the next rung.
+        call.enter(Rung::PortReset, broke);
+        let took = 2_757 * MS;
+        assert_eq!(call.request(took), Ok(()), "the port rung took inside its window");
+        call.took(Rung::PortReset);
+
+        assert!(took >= operation_ends, "the operation's budget is spent");
+        assert_eq!(call.issue(took, operation_ends), Ok(()), "and the READ still goes out again");
+        assert_eq!(call.wait_left(took, own), own, "with the whole of its own timeout");
+
+        // What goes out after it starts something new: the operation's budget
+        // refuses it, by that name.
+        assert_eq!(call.issue(took, operation_ends), Err(NotIssued::Operation));
+
+        // It broke too, on its whole wait: the last rung is still whole, and the
+        // call ends inside the bounds' sum.
+        let broke_again = took + own;
+        call.enter(Rung::Offline, broke_again);
+        assert_eq!(call.wait_left(broke_again, u64::MAX), AFTER_BREAK.offline);
+        assert!(call.wait_ends(broke_again, u64::MAX) <= wait_began + AFTER_BREAK.whole());
+    }
+
+    /// Only the command sent again is exempt from the operation's budget, and
+    /// only after a rung that took: a call whose transport never broke, or whose
+    /// rung did not take, sends nothing past it.
+    #[test]
+    fn nothing_but_the_command_sent_again_outlives_the_operations_budget() {
+        let mut call = AfterBreak::CLOSED;
+        assert_eq!(call.issue(2 * SECOND, 2 * SECOND), Err(NotIssued::Operation));
+        call.open(0, BOUNDS);
+        call.enter(Rung::ClassReset, OWN);
+        assert_eq!(call.issue(OWN, SECOND), Err(NotIssued::Operation), "no rung has taken");
+        call.took(Rung::ClassReset);
+        assert_eq!(call.issue(OWN, SECOND), Ok(()));
+        assert_eq!(call.issue(OWN, SECOND), Err(NotIssued::Operation), "and only once");
+        // A held disk that came back is sent the operation again the same way.
+        let ends = call.hold(OWN, BOUNDS);
+        assert_eq!(call.issue(OWN, SECOND), Ok(()));
+        // The call's own bound still refuses it, whichever it is.
+        call.took(Rung::PortReset);
+        assert_eq!(call.issue(ends, SECOND), Err(NotIssued::Call(NotTaken::Spent)));
     }
 }

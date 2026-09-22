@@ -25,7 +25,7 @@ use super::super::MSC_INPUT_CTX;
 use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS, MSC_STRIDE};
 use super::super::device::Endpoint;
 use toyos_xhci::bot::Phase;
-use toyos_xhci::call::AfterBreak;
+use toyos_xhci::call::{AfterBreak, NotIssued};
 use toyos_xhci::configure::{self, BulkEndpoint};
 use toyos_xhci::flush::{Debt, Flush};
 use toyos_xhci::identity::{self, Identity, Serial, UsbId};
@@ -1023,7 +1023,8 @@ impl XhciController {
 
     /// One SCSI command with transport recovery applied and re-issued;
     /// every CDB here is idempotent, so a re-issue is genuine. `until` is
-    /// checked only here, between commands — it costs the device nothing (no
+    /// checked only here, before a command starts and never before the one a
+    /// rung that took sends again — it costs the device nothing (no
     /// TRB on a ring, no phase half done); checking inside [`Self::bot`]
     /// would abandon a transfer the device is still going to answer.
     ///
@@ -1055,19 +1056,24 @@ impl XhciController {
         // right disk.
         let slot = self.slot(dev.slot_id);
         loop {
-            if until.reached(crate::clock::now()) {
-                log!("usb-storage: {slot} SCSI {opcode:#04x} not issued: {}",
-                    crate::block::OPERATION);
-                // Not `Broken`: nothing was issued and `dev.failed` stays
-                // untouched.
-                return Scsi::Budget;
-            }
-            // A command re-issued with nothing left would have every wait cut
-            // at once, and count against the device a break that was the
-            // budget's.
-            if let Err(why) = self.after_break.request(crate::clock::nanos_since_boot()) {
-                log!("usb-storage: {slot} SCSI {opcode:#04x} not issued again: {why}");
-                return Scsi::Budget;
+            // Not `Broken` either way: nothing was issued and `dev.failed` stays
+            // untouched. The command sent again after a rung that took is the
+            // call's to decide and not the operation's, whose budget the break
+            // may have spent (`toyos_xhci::call`).
+            match self.after_break.issue(crate::clock::nanos_since_boot(), until.nanos()) {
+                Ok(()) => {}
+                Err(NotIssued::Operation) => {
+                    log!("usb-storage: {slot} SCSI {opcode:#04x} not issued: {}",
+                        crate::block::OPERATION);
+                    return Scsi::Budget;
+                }
+                // A command re-issued with nothing left would have every wait
+                // cut at once, and count against the device a break that was
+                // the budget's.
+                Err(NotIssued::Call(why)) => {
+                    log!("usb-storage: {slot} SCSI {opcode:#04x} not issued again: {why}");
+                    return Scsi::Budget;
+                }
             }
             match self.bot(dev, cdb, cdb_len, data, data_in, Asks::Command) {
                 Ok(Bot::Done { delivered }) => {
@@ -1476,6 +1482,8 @@ impl XhciController {
         #[cfg(feature = "boot-actuators")]
         if staged == Some(staged::Fault::Unanswered) {
             let began = crate::clock::nanos_since_boot();
+            // The staged wait is the wait a break opens the call from.
+            self.bulk_began = began;
             let _ = self.settles_within_call(|| false);
             let now = crate::clock::nanos_since_boot();
             let cut = self.after_break.cut(began, now, super::super::USB_TIMEOUT_NS);
@@ -1508,15 +1516,7 @@ impl XhciController {
         // phases leaves it waiting, which is what `stop::settle_commands`
         // finishes. Opened before the CBW's transfer is queued, so nothing
         // reaches the controller unpublished.
-        let open = stop::OpenCommand::begin(stop::Device {
-            block: dma.subview(dev.block, MSC_STRIDE),
-            slot: dev.slot_id,
-            in_dci: dev.in_dci(),
-            out_dci: dev.out_dci(),
-            ctx: dma.subview(dev.dev_block + super::super::DEV_OUT_CTX, 32 * self.context_size),
-            ctx_size: self.context_size as u32,
-            data_in,
-        });
+        let open = self.open_command(dev, data_in);
 
         let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
         #[cfg(feature = "boot-actuators")]
@@ -1631,6 +1631,48 @@ impl XhciController {
             1 => Ok(Bot::Failed),
             _ => Err(Broke::PhaseError),
         }
+    }
+
+    /// The record that this device has been spoken a command to, published
+    /// for a reset to read (`stop::OpenCommand`).
+    fn open_command(&self, dev: &MscDevice, data_in: bool) -> stop::OpenCommand {
+        let dma = self.dma();
+        stop::OpenCommand::begin(stop::Device {
+            block: dma.subview(dev.block, MSC_STRIDE),
+            slot: dev.slot_id,
+            in_dci: dev.in_dci(),
+            out_dci: dev.out_dci(),
+            ctx: dma.subview(dev.dev_block + super::super::DEV_OUT_CTX, 32 * self.context_size),
+            ctx_size: self.context_size as u32,
+            data_in,
+        })
+    }
+
+    /// `usb-inherited-data-in`'s firmware: a READ(10) of one block at LBA 0
+    /// whose command block goes out and whose data nothing asks for, and both
+    /// bulk endpoints Stopped after it. Whether the device took the command
+    /// block, and whether the pair stopped.
+    #[cfg(feature = "boot-actuators")]
+    fn leave_inside_a_data_in(&mut self, dev: &mut MscDevice) -> (bool, bool) {
+        let dma = self.dma();
+        let tag = dev.next_tag();
+        let sectors = dev.sectors_per_block;
+        let cdb = [0x28u8, 0, 0, 0, 0, 0, 0, (sectors >> 8) as u8, sectors as u8, 0];
+        let cbw: Dma<'static, Unaligned> =
+            super::super::zero_dma(dma, dev.block + MSC_CBW, CBW_LEN as usize).unaligned();
+        cbw.write::<u32>(0, CBW_SIGNATURE.to_le());
+        cbw.write::<u32>(4, tag.to_le());
+        cbw.write::<u32>(8, HOST_BLOCK.to_le());
+        cbw.write::<u8>(12, 0x80);
+        cbw.write::<u8>(13, 0);
+        cbw.write::<u8>(14, cdb.len() as u8);
+        cbw.copy_from(15, &cdb);
+        let open = self.open_command(dev, true);
+        let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
+        let taken = self.framed_phase(dev, false, cbw_phys, CBW_LEN, Phase::Command, &open).is_ok();
+        drop(open);
+        let stopped = self.quiesce_bulk_pair(dev, None, "stopping it with its data unread");
+        (taken, stopped)
     }
 
     /// One Normal TRB on a bulk endpoint, and its completion.
@@ -2105,6 +2147,10 @@ pub(in crate::drivers::xhci) fn bind(
         Up::Refused => return Bind::Refused(dev.slot_goes.unwrap_or(SlotGoes::Back)),
         Up::NotReady => return Bind::NotReady,
     }
+    #[cfg(feature = "boot-actuators")]
+    if inherited::leaving() {
+        return inherited::leave(ctrl, &mut dev);
+    }
     dev.identity.serial = read_serial(ctrl, &mut dev, serial_index);
     log!("usb-storage: slot {slot_id} serial number {}", dev.identity.serial);
     // Machine-wide index: what `usb_storage::handle` looks up by and a mount
@@ -2138,6 +2184,64 @@ pub(in crate::drivers::xhci) fn bind(
 /// What the adopting line adds for a disk whose device came back owing a flush.
 const OWED_A_FLUSH: &str = ", and it left owing a flush of writes it had reported complete, so \
     its next flush fails";
+
+/// A device the boot scan finds inside a Bulk-Only data-in it did not open, as
+/// a firmware's driver can leave one: staged, because the firmware every guest
+/// boots finishes every command it sends. This kernel plays that firmware
+/// first — enumerates the device on its trained link with no reset, binds it,
+/// sends a READ(10) whose data nothing reads, stops the bulk pair and gives the
+/// slot back — and then forgets it, as a hand-over does; the scan then finds it
+/// as it finds every device something else left.
+#[cfg(feature = "boot-actuators")]
+pub(in crate::drivers::xhci) mod inherited {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use toyos_xhci::reset_recovery::SlotGoes;
+    use toyos_xhci::Protocol;
+
+    use super::{Bind, MscDevice};
+    use crate::drivers::xhci::{MscBlock, XhciController};
+    use crate::log;
+
+    static UNSPENT: AtomicBool = AtomicBool::new(true);
+    static LEAVING: AtomicBool = AtomicBool::new(false);
+
+    /// Called by the boot scan before it decides anything about `port_idx`:
+    /// the first device on a trained USB3 link is left inside a data-in.
+    pub fn stage(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Protocol>) {
+        if !crate::actuator::usb_inherited_data_in()
+            || protocol != Some(Protocol::Usb3)
+            || !ctrl.read_portsc(port_idx).enabled()
+            || !UNSPENT.swap(false, Ordering::Relaxed)
+        {
+            return;
+        }
+        log!("usb-inherited-data-in: port {} is enumerated as a firmware would, on its trained \
+             link with no reset", port_idx + 1);
+        LEAVING.store(true, Ordering::Relaxed);
+        super::super::boot::configure(ctrl, port_idx, None);
+        LEAVING.store(false, Ordering::Relaxed);
+        for block in ctrl.msc.iter_mut().filter(|b| b.port == Some(port_idx)) {
+            *block = MscBlock::FREE;
+        }
+        ctrl.ports[port_idx as usize].torn_down();
+        log!("usb-inherited-data-in: port {} is forgotten, as a hand-over forgets it",
+            port_idx + 1);
+    }
+
+    /// Whether the bind asking is the staged firmware's.
+    pub fn leaving() -> bool {
+        LEAVING.load(Ordering::Relaxed)
+    }
+
+    /// The staged firmware's last act on a device it bound.
+    pub fn leave(ctrl: &mut XhciController, dev: &mut MscDevice) -> Bind {
+        let (taken, stopped) = ctrl.leave_inside_a_data_in(dev);
+        log!("usb-inherited-data-in: slot {} took a READ(10) command block={taken}, its data \
+             unread, both bulk endpoints Stopped={stopped}; its slot goes back", dev.slot_id);
+        Bind::Refused(if stopped { SlotGoes::Back } else { SlotGoes::WithTheUnplug })
+    }
+}
 
 /// A bind stalled while another disk is held for its device: what it says it
 /// is doing, and for how long.

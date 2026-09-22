@@ -1766,6 +1766,8 @@ pub fn usb_transport_break(
         log.matches("transport broke").count()
     );
 
+    a_device_left_inside_a_data_in_is_reset_before_its_first_command(test_config, c_bins, rust_bins)?;
+    a_read_whose_first_wait_spent_its_budget_goes_out_again(test_config, c_bins, rust_bins)?;
     transport_gives_up(test_config, c_bins, rust_bins)?;
     abandoned_write_is_taken_offline(test_config, c_bins, rust_bins)?;
     a_stick_its_reset_moved_carries_on(Moved::SameStick)?;
@@ -1775,6 +1777,166 @@ pub fn usb_transport_break(
     a_stick_its_reset_moved_carries_on(Moved::FlushedStick)?;
     a_stick_its_reset_moved_carries_on(Moved::SilentReturn)?;
     super::power::transport_break_chain()
+}
+
+/// What the boot scan says of a device on a link something before this kernel
+/// trained, before it asks the device anything.
+const INHERITED: &str =
+    "link already trained before this kernel ran; warm resetting it before its device is asked \
+     anything";
+
+/// A device the boot scan finds inside a Bulk-Only data-in something else
+/// opened is reset before this kernel sends it anything, so its first command
+/// is answered in step.
+///
+/// `usb-inherited-data-in` has this kernel play the firmware first: enumerate
+/// the first device on a trained USB3 link with no reset, send it a READ(10)
+/// whose data nothing reads, stop its endpoints, give its slot back and forget
+/// it. A scan that then enumerated it on its trained link with no reset would
+/// send its first command block to a device still inside that data-in, a break
+/// this boot names.
+fn a_device_left_inside_a_data_in_is_reset_before_its_first_command(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["usb-storage-gate", "usb-inherited-data-in"];
+    let (bytes, _) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
+    let image = test_dir().join("usb-inherited-data-in.img");
+    let nonce = stage(&image, bytes);
+    let log = boot_and_shutdown(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::UsbDisk,
+            kernel_params: PARAMS,
+            usb_images: vec![image.clone()],
+            ..Default::default()
+        },
+    )?;
+
+    // The staging ran, whole: the command block went out, nothing read its
+    // data, and the device was forgotten with its pair stopped.
+    let left = line_with(&log, "usb-inherited-data-in: slot ")?;
+    if !left.contains(
+        "took a READ(10) command block=true, its data unread, both bulk endpoints Stopped=true; \
+         its slot goes back",
+    ) {
+        return Err(format!("{left:?}: the device was not left inside a data-in\n{log}"));
+    }
+    let forgotten = log
+        .lines()
+        .find(|l| l.contains("usb-inherited-data-in: port ") && l.contains(" is forgotten"))
+        .ok_or_else(|| format!("the staged device was never forgotten\n{log}"))?;
+    let port = forgotten
+        .split_once("usb-inherited-data-in: port ")
+        .and_then(|(_, rest)| rest.split_once(' '))
+        .map(|(port, _)| port)
+        .ok_or_else(|| format!("{forgotten:?} names no port\n{log}"))?;
+
+    // Then the scan, on that port: the reset before anything else, and the
+    // disk bound after it.
+    let (_, after) = log.split_once(forgotten).expect("the line came from this text");
+    let mut rest = after;
+    for needle in [
+        format!("xHCI: port {port} {INHERITED}"),
+        format!("xHCI: port {port} enabled, speed="),
+        "xHCI: device addressed".to_string(),
+        "usb-storage: disk ".to_string(),
+    ] {
+        let Some(line) = rest.lines().find(|l| l.contains(needle.as_str())) else {
+            return Err(format!(
+                "after the device was forgotten, no line reads {needle:?}, in order\n{log}"
+            ));
+        };
+        rest = rest.split_once(line).expect("the line came from this text").1;
+    }
+    // And its first command was answered: no break anywhere this boot.
+    if let Some(line) = log.lines().find(|l| l.contains(" broke on ") || l.contains("transport broke")) {
+        return Err(format!("{line:?}: a device reset before its first command broke\n{log}"));
+    }
+    gate_ran(&log, 2)?;
+    if !log.contains("usb-gate: disk done reads=ok writes=ok refusal=true wr_err=0 healthy=true") {
+        return Err(format!("the disk did not serve the gate\n{log}"));
+    }
+    verify(&image, bytes, nonce)?;
+    if !log.contains("Boot: complete") {
+        return Err(format!("the boot did not finish\n{log}"));
+    }
+    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+    let _ = std::fs::remove_file(&image);
+    eprintln!(
+        "  [usb] a device left inside a data-in on port {port} was warm reset before its first \
+         command, and answered every command after it"
+    );
+    Ok(())
+}
+
+/// A READ whose first wait spends its operation's whole budget, then a class
+/// reset the device answers out of step, then a port reset that takes: the
+/// READ goes out again on what the call has left and returns the host's bytes.
+fn a_read_whose_first_wait_spent_its_budget_goes_out_again(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["usb-storage-gate", "usb-first-wait-spent"];
+    let (bytes, _) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
+    let image = test_dir().join("usb-first-wait-spent.img");
+    let nonce = stage(&image, bytes);
+    let log = boot_and_shutdown(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::UsbDisk,
+            kernel_params: PARAMS,
+            usb_images: vec![image.clone()],
+            ..Default::default()
+        },
+    )?;
+    gate_ran(&log, 2)?;
+    let want = "usb-gate: a first wait that spent the operation's budget, a recovery out of step \
+                and a port reset: read refused=false matched=true untaken=0 probes_untaken=0 \
+                healthy=true";
+    if !log.contains(want) {
+        let got = log.lines().find(|l| l.contains("a first wait that spent"));
+        return Err(format!("the gate read {got:?}, want {want:?}\n{log}"));
+    }
+    let broke = line_with(&log, "transport broke on SCSI 0x28: no answer in the ")?;
+    let under_test = broke_on(broke)?;
+    // The staged wait really spent the operation's two seconds.
+    let waited = elapsed_before(&log, broke)?;
+    if waited < 1.9 {
+        return Err(format!(
+            "{broke:?} came {waited:.3} s after the record before it: the staged wait did not \
+             spend the operation's budget\n{log}"
+        ));
+    }
+    let (_, after) = log.split_once(broke).expect("the line came from this text");
+    let mut rest = after;
+    for needle in [
+        format!("usb-storage: {under_test} transport broke on the class reset's TEST UNIT READY"),
+        format!("usb-storage: {under_test} the port reset took"),
+        format!("usb-storage: {under_test} SCSI 0x28 completed after 2 break(s) running"),
+    ] {
+        let Some(line) = rest.lines().find(|l| l.contains(needle.as_str())) else {
+            return Err(format!("after the break, no line reads {needle:?}, in order\n{log}"));
+        };
+        rest = rest.split_once(line).expect("the line came from this text").1;
+    }
+    if let Some(line) = after.lines().find(|l| l.contains(" not issued")) {
+        return Err(format!("{line:?}: the command the recovery was for was not sent again\n{log}"));
+    }
+    verify(&image, bytes, nonce)?;
+    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+    let _ = std::fs::remove_file(&image);
+    eprintln!(
+        "  [usb] {under_test}: a READ whose wait spent {waited:.3} s went out again after the port \
+         reset took, and returned the host's bytes"
+    );
+    Ok(())
 }
 
 /// `usb-serial-short` asks each disk for its serial number string in 8 bytes,
@@ -3041,8 +3203,9 @@ fn broke_on(line: &str) -> Result<&str, String> {
 /// against a controller's own bytes. It has no link training and no Inactive
 /// state, so the warm-reset recovery is unreachable and is certified by the
 /// host model instead (`toyos-xhci/sim/tests/superspeed.rs`). This says: the
-/// driver read the split correctly and stopped resetting the ports that did not
-/// need it. It says nothing about what happens when a link falls over.
+/// driver read the split correctly, hot resets no trained link, and warm resets
+/// the one the firmware trained before enumerating its device. It says nothing
+/// about what happens when a link falls over.
 pub fn xhci_superspeed_ports(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3066,7 +3229,8 @@ pub fn xhci_superspeed_ports(
 
     // The boot stick is the only SuperSpeed device this profile attaches, so it
     // takes a USB3 register and every HID takes a USB2 one. Exactly one port
-    // must therefore have been brought up with no reset at all.
+    // must therefore have been found on a trained link — and, the firmware
+    // having trained it, warm reset before its device is asked anything.
     let trained: Vec<&str> = log.lines().filter(|l| l.contains("link already trained")).collect();
     if trained.len() != 1 {
         return Err(format!(
@@ -3075,15 +3239,18 @@ pub fn xhci_superspeed_ports(
             trained.len()
         ));
     }
+    if !trained[0].contains(INHERITED) {
+        return Err(format!("{:?} does not read {INHERITED:?}\n{log}", trained[0]));
+    }
 
-    // And every device still reached Enabled, so not resetting cost nothing.
+    // And every device still reached Enabled.
     let enabled = log.matches("enabled, speed=").count();
     if enabled != devices {
         return Err(format!(
             "{enabled} port(s) reached Enabled, {devices} devices on the bus\n{log}"
         ));
     }
-    for wrong in ["never finished its reset", "would not train", "warm reset"] {
+    for wrong in ["never finished its reset", "would not train", "failed its hot reset", "did not take a hot reset"] {
         if let Some(line) = log.lines().find(|l| l.contains(wrong)) {
             return Err(format!("{line:?} on a bus where every link is healthy\n{log}"));
         }

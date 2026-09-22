@@ -168,6 +168,19 @@ actuators! {
     /// `usb_transport_break`.
     usb_serial_short = "usb-serial-short";
 
+    /// Before the boot scan enumerates the first device on a trained USB3
+    /// link, have this kernel play the firmware: enumerate and bind it, send a
+    /// READ(10) whose data nothing reads, stop its endpoints, give its slot back
+    /// and forget it, so the scan finds a device inside a data-in it did not
+    /// open. See `xhci::msc::inherited`; judged by `usb_transport_break`.
+    usb_inherited_data_in = "usb-inherited-data-in";
+
+    /// Leave one READ(10) the gate stages it on unanswered for the whole of
+    /// its wait, and the class reset's TEST UNIT READY out of step, so a port
+    /// reset that takes comes after a wait that spent the operation's budget.
+    /// Judged by `usb_transport_break`.
+    usb_first_wait_spent = "usb-first-wait-spent";
+
     /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
     /// device holding the CBW and nothing queued for its data phase, so the
     /// bound that ends the machine ends a device inside a Bulk-Only command.
@@ -474,6 +487,7 @@ const IMPLIES: &[(&str, &[&str])] = &[
     ("usb-short-read", &["usb-storage-gate"]),
     ("usb-transport-faults", &["usb-storage-gate"]),
     ("usb-port-gone", &["usb-storage-gate"]),
+    ("usb-first-wait-spent", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),
