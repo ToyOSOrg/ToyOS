@@ -70,15 +70,12 @@ static UNITS: [FaultUnit; MAX_UNITS] = [const { FaultUnit::EMPTY }; MAX_UNITS];
 /// past it keep bus mastering through a fault.
 const MAX_FUNCTIONS: usize = 64;
 
-/// A requester id no `StreamId::pci` produces: bus/device/function is sixteen bits.
-const NO_FUNCTION: u32 = u32::MAX;
-
 /// A `pcidev` slot number no claim has: this function is not driven by one.
 const NO_SLOT: u32 = u32::MAX;
 
 /// One enumerated function, published before any unit is armed.
 struct Function {
-    // `NO_FUNCTION` while the slot is free; a requester id once taken.
+    // `pci::NO_FUNCTION` while the slot is free; a requester id once taken.
     who: AtomicU32,
     config: AtomicU64,
     domain: AtomicU32,
@@ -92,7 +89,7 @@ struct Function {
 impl Function {
     #[allow(clippy::declare_interior_mutable_const)]
     const EMPTY: Self = Self {
-        who: AtomicU32::new(NO_FUNCTION),
+        who: AtomicU32::new(pci::NO_FUNCTION),
         config: AtomicU64::new(0),
         domain: AtomicU32::new(0),
         faults: AtomicU32::new(0),
@@ -112,7 +109,7 @@ struct FirstFault {
 }
 
 static FIRST: FirstFault = FirstFault {
-    who: AtomicU32::new(NO_FUNCTION),
+    who: AtomicU32::new(pci::NO_FUNCTION),
     address: AtomicU64::new(0),
     reason: AtomicU32::new(0),
     unit: AtomicU32::new(0),
@@ -400,7 +397,7 @@ fn blamed(stream: StreamId) -> Blamed {
 /// Take the first fault whole, once: a second finds `who` taken and leaves it.
 fn latch(unit: usize, stream: StreamId, address: u64, reason: u8) {
     let taken = FIRST.who.compare_exchange(
-        NO_FUNCTION,
+        pci::NO_FUNCTION,
         u32::from(stream.requester()),
         Ordering::AcqRel,
         Ordering::Relaxed,

@@ -393,8 +393,7 @@ jobs:
   # is somebody watching it directly. `windows` is deliberately not named
   # here — its red is the declared, tracked frontier this file exists to
   # measure, and filing "nightly is red" against a gap that already has its
-  # own open issue every night would be exactly the noise the redlist
-  # doctrine calls "absorbed" rather than "declared". A `linux` or `macos`
+  # own open issue every night would be noise. A `linux` or `macos`
   # red is new information neither job's own comment already explains away,
   # so both report here; `windows`'s is not new information until the day it
   # turns green.

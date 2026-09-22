@@ -26,9 +26,7 @@ with no working-tree diff at all:
 | 3 | `t14-run4` | cpu6 | 517 | 736451308 behind 739564366 ns (3.1 ms) | 325/325 green |
 | 4 | `t14-run4`, one more boot record | cpu6 | 518 | 736406061 behind 737807237 ns (1.4 ms) | 325/325 green |
 
-So it is **not** the `t14-run4` diff — it fires on the untouched base — and it is
-not the retired `sched_stress` entry in `src/redlist.rs` either, whose signature
-is a `BTreeMap` panic at `navigate.rs:161`. It is a third thing, and the only
+So it is **not** the `t14-run4` diff — it fires on the untouched base. The only
 reason it is not a permanent red is that the boot it lands in is usually not one
 a test is judging.
 

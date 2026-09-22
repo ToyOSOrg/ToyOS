@@ -30,7 +30,7 @@ QEMU's 82574 `lan_crumb_trail` measured 49 crumbs at 1,960 µs each, the slowest
 trail holds it for 40 ms. The T14's stick has not been measured, and every
 crumb line carries the clocks that will.
 
-It is a fifth arm of `lan_dhcp_lease`, a fifth image and six rows of
+It is `lan_crumb_trail`'s metal row, a fifth image and six rows of
 `tests/metal-profile.toml`.
 
 ## Owner
@@ -48,7 +48,7 @@ tests, `userland/netd/src/crumbs.rs`, the `trail` parameter of
 netd's `--exit-with-crumbs` and the second parameter of its `CARDS`
 constructors, `tests/lancrumbcase`, `tests/e1000crumbcase`, their two rows in
 `src/build.rs`'s `ALL_CONFIGS` and the fourth entry of its `INTEL_ACTUATORS`,
-the fifth `metal::Arm` in `tests/toyos.rs`'s `LANCASE` with the readback
-`lan::on_metal` decodes for it and `Readback::log_volume_file`,
-`lan_crumb_trail` and its `tests/test-durations` row, and the six
+`lan_crumb_trail`'s metal row in `tests/toyos.rs` with `LANCRUMBCASE`,
+`lan::trailed_on_metal` and `Readback::log_volume_file`, the
+`lan_crumb_trail` registration, and the six
 `tests/metal-profile.toml` rows.

@@ -149,6 +149,9 @@ fn registers(dev: &PciDev, trail: &impl Trail) -> Result<Bar, Opening> {
     let info = before(trail, Step::Describe, || dev.describe())
         .map_err(KernelRefused::on("the claim's description"))
         .map_err(Opening::Kernel)?;
+    // The lowest BAR wide enough, rather than BAR 0 by name: the kernel
+    // reports 0 bytes for a BAR it keeps back, and the MSI-X table's is one
+    // it keeps.
     let (bar, bytes) = info
         .bar_bytes
         .iter()

@@ -13,7 +13,7 @@ the line netd prints about the same outcome is a console write, and on the T14
 a console write reaches no file: the kernel's `exit: netd pid=N code=N` record
 is the one word of a process that crosses
 (`issues/diagnostics/the-cable-judge-reads-three-netd-records-that-cannot-arrive-on-the-t14.md`).
-It is a third arm of `lan_dhcp_lease`, a third image flashed to the stick, a
+It is the `lan_phy_outcome` metal row, a third image flashed to the stick, a
 third boot of the machine and six rows of `tests/metal-profile.toml`.
 
 ## Owner
@@ -27,8 +27,8 @@ Userland's console reaching the stick
 which the shipping `lancase` arm carries netd's own line naming the outcome
 and the probe answers a question already answered. Then the arm is five
 files: `tests/lanphycase/system.toml`, its row in `src/build.rs`'s
-`ALL_CONFIGS`, the third `metal::Arm` in `tests/toyos.rs`'s `LANCASE` and the
-readback `lan::on_metal` decodes for it, the six `tests/metal-profile.toml`
+`ALL_CONFIGS`, `tests/toyos.rs`'s `lan_phy_outcome` row with its `METAL_ONLY`
+entry, `LANPHYCASE` and `lan::probed_on_metal`, the six `tests/metal-profile.toml`
 rows — and netd's `--exit-with-phy-outcome` with `tests/e1000phycase` and
 `lan_phy_exit_code`, the QEMU arm that proves the channel.
 

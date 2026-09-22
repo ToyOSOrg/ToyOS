@@ -671,6 +671,58 @@ fn transmit_descriptors_are_reclaimed_under_batched_write_back() {
 
 // --- interrupts and link ---
 
+/// §10.2.4.4: writing a cause to `ICS` sets it in `ICR` as if the event had
+/// happened, so a driver can make the part raise a message nothing on the wire
+/// caused. That is the whole of the delivery experiment: a claim that takes
+/// this message has an interrupt path, whatever the link is doing.
+#[test]
+fn a_cause_written_to_ics_raises_a_message_the_claim_takes() {
+    for part in [Part::E82574, Part::I219] {
+        let nic =
+            Nic::with(23, part, Permits { spurious_interrupts: false, ..Permits::default() });
+        let mut driver = open(&nic);
+        // The bring-up's own causes first, so what the pass below reads is the
+        // provoked one and not what `open` left standing.
+        one_pass(&mut driver);
+
+        driver.provoke_message();
+        let pass = one_pass(&mut driver);
+        assert_eq!(
+            pass.messages, 1,
+            "{}",
+            nic.because("one cause written to ICS once is one message")
+        );
+        // `OTHER` is §10.2.4.1's summary of `LSC` and is set with it; nothing
+        // else was written, so nothing else may be read.
+        assert_eq!(
+            pass.causes & !cause::INT_ASSERTED,
+            cause::LSC | cause::OTHER,
+            "{}",
+            nic.because("the causes read are not exactly the one written")
+        );
+    }
+}
+
+/// The negative control for the test above: the same boot with nothing written
+/// to `ICS` takes no message, so a green arm there is the write's doing and not
+/// a part that speaks on its own.
+#[test]
+fn a_pass_with_no_provoked_cause_takes_no_message() {
+    for part in [Part::E82574, Part::I219] {
+        let nic =
+            Nic::with(23, part, Permits { spurious_interrupts: false, ..Permits::default() });
+        let mut driver = open(&nic);
+        one_pass(&mut driver);
+
+        let pass = one_pass(&mut driver);
+        assert_eq!(
+            pass.messages, 0,
+            "{}",
+            nic.because("a message arrived on a pass nothing asked the part for one")
+        );
+    }
+}
+
 /// §10.2.4.1's case 3 says a read of `ICR` with no interrupt asserted "has no
 /// side affect". A driver that treated the read as the acknowledgement would
 /// see the same causes for ever, so the causes it acted on are written back.
@@ -1755,36 +1807,6 @@ fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way
         "{}",
         nic.because("§4.6.3.2's STATUS.LU did not follow the link the PHY raised")
     );
-}
-
-/// §10.2.4.4's `ICS` "sets" a cause, so a caller that has armed
-/// [`I219::provoke_message`] takes a message it asked for — and a bring-up
-/// that has not raises none on a part with no link and no frame behind it.
-#[test]
-fn a_message_is_raised_only_when_the_caller_asks_for_one() {
-    for nic in [Nic::new(39), Nic::i219(40)] {
-        let mut driver = open(&nic);
-        let quiet = one_pass(&mut driver);
-        assert_eq!(
-            quiet.messages,
-            0,
-            "{}",
-            nic.because("a bring-up nobody armed raised a message of its own")
-        );
-
-        driver.provoke_message();
-        let pass = one_pass(&mut driver);
-        assert!(
-            pass.messages > 0,
-            "{}",
-            nic.because("no message followed the ICS write, so a silent boot says nothing")
-        );
-        assert!(
-            pass.causes & cause::LSC != 0,
-            "{}",
-            nic.because("the message carried no cause, so nothing says which write raised it")
-        );
-    }
 }
 
 // --- the arbitration, asked ---

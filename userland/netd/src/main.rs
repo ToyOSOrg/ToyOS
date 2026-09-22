@@ -47,16 +47,21 @@ mod virtio_net;
 /// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models. One
 /// driver takes both, and each row names which part it is because below the
 /// register file they are not one.
-const CARDS: [(PciId, fn(toyos::PciDev, Option<&Crumbs>) -> Card); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, |c, t| Card::intel(c, Part::I219, t)),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, |c, t| Card::intel(c, Part::E82574, t)),
+const CARDS: [(PciId, fn(toyos::PciDev, Option<&Crumbs>, bool) -> Card); 3] = [
+    (PciId { vendor: 0x8086, device: 0x15fc }, |c, t, p| Card::intel(c, Part::I219, t, p)),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, |c, t, p| Card::intel(c, Part::E82574, t, p)),
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
 
-/// The actuator that makes the card raise one interrupt on purpose.
+/// The actuator that makes the card raise one interrupt on purpose, so a boot
+/// whose only reading of the interrupt path is a count of messages can tell a
+/// part nothing made speak from a message that reached no CPU.
 ///
 /// **Nothing a shipped machine runs arms it**: the argument comes from the
-/// `[programs.netd] args` row of a boot config.
+/// `[programs.netd] args` row of a boot config, and the one config that carries
+/// it is `tests/lanicscase`. A boot that always raised a message would make the
+/// kernel's first-message record read the same on a working card and a dead
+/// one.
 const PROVOKE_MESSAGE: &str = "--provoke-message";
 
 /// The probe under which this process ends right after the bring-up, with
@@ -152,7 +157,8 @@ impl Card {
         panic!("netd: the NIC this program was given is not one it can drive — {why}")
     }
 
-    fn intel(claim: toyos::PciDev, part: Part, trail: Option<&Crumbs>) -> Self {
+    /// `provoke` is [`PROVOKE_MESSAGE`], carried out once the card is up.
+    fn intel(claim: toyos::PciDev, part: Part, trail: Option<&Crumbs>, provoke: bool) -> Self {
         if let Some(trail) = trail {
             match i219::leave_crumbs(claim, part, trail) {
                 Ok(never) => match never {},
@@ -176,12 +182,22 @@ impl Card {
             }
         }
         match i219::Nic::open(claim, part) {
-            Ok(nic) => Self::Intel(nic),
+            Ok(nic) => {
+                if provoke {
+                    nic.provoke_message();
+                }
+                Self::Intel(nic)
+            }
             Err(why) => Self::undrivable(why),
         }
     }
 
-    fn virtio(claim: toyos::PciDev, trail: Option<&Crumbs>) -> Self {
+    /// [`PROVOKE_MESSAGE`] and every probe are the Intel driver's: armed here
+    /// each is refused, not skipped, before `open` touches the card.
+    fn virtio(claim: toyos::PciDev, trail: Option<&Crumbs>, provoke: bool) -> Self {
+        if provoke {
+            panic!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio");
+        }
         if armed(EXIT_WITH_MDIO_ASK) {
             Self::undrivable(format_args!(
                 "{EXIT_WITH_MDIO_ASK} asks §4.5.2's MDIO arbitration, which this card has not"
@@ -210,16 +226,6 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.claim(),
             Self::Intel(nic) => nic.claim(),
-        }
-    }
-
-    /// [`PROVOKE_MESSAGE`], carried to the driver that has one.
-    fn provoke_message(&self) {
-        match self {
-            Self::Virtio(_) => Self::undrivable(format_args!(
-                "{PROVOKE_MESSAGE} writes §10.2.4.4's `ICS`, which this card has not"
-            )),
-            Self::Intel(nic) => nic.provoke_message(),
         }
     }
 
@@ -1439,10 +1445,7 @@ fn main() {
     if let Some(trail) = &trail {
         trail.crumb(Step::ClaimHeld);
     }
-    let nic = open(claim, trail.as_ref());
-    if armed(PROVOKE_MESSAGE) {
-        nic.provoke_message();
-    }
+    let nic = open(claim, trail.as_ref(), armed(PROVOKE_MESSAGE));
     if armed(EXIT_WITH_PHY_OUTCOME) {
         std::process::exit(nic.phy_outcome().exit_code());
     }

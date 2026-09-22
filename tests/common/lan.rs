@@ -1,5 +1,9 @@
 //! The cable: netd taking this machine's address from the network, and the T14
 //! answering the development host on it.
+//!
+//! Every line read here is a record. On the T14 a userland `println!` reaches
+//! `Backend::None`, so what crosses to the stick is the kernel's log — and the
+//! one file netd leaves beside it, the crumb trail.
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -24,7 +28,9 @@ use super::serial;
 pub const CONFIG: &str = "tests/lancase";
 pub const BOOT: &str = "lancase";
 
-/// The same boot with netd's `--provoke-message` armed.
+/// The same boot with netd's `--provoke-message` armed: the arm that says
+/// whether a message the card raises reaches a CPU at all, which no reading of
+/// the shipping boot separates from a card that raised none.
 pub const ICS_CONFIG: &str = "tests/lanicscase";
 pub const ICS_BOOT: &str = "lanicscase";
 
@@ -50,15 +56,22 @@ pub const CRUMB_BOOT: &str = "lancrumbcase";
 /// `crumbs::PATH` under `/log`.
 pub const CRUMBS_FILE: &str = "crumbs.txt";
 
-/// The kernel's own record that a claim's vector took a message, which is what
-/// the armed boot is for.
-const FIRST_MESSAGE: &str = "took its first message";
-
 /// netd, as the kernel's `exit:` record names it.
 const NETD: &str = "netd";
 
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
+
+/// The armed boot's judge: the kernel's own records, tied to the I219's
+/// hand-over, say whether a message it raised reached a CPU — whatever the PHY
+/// did about a link. Kernel records and not netd's: on this machine a userland
+/// write reaches no channel the stick carries.
+pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let got = toyos_build::lan::delivered(back.kernel().text())?;
+    eprintln!("  [lan] {}", got.handed.trim());
+    eprintln!("  [lan] {}", got.took.trim());
+    Ok(())
+}
 
 /// The config the QEMU arm boots — the Intel driver in front of the user-mode
 /// backend, which is the same driver the T14 arm runs and the only DHCP server
@@ -88,15 +101,8 @@ const ID: &str = "8086:15fc";
 /// cable the metal loop reaches this boot over while it runs.
 pub const NIC: &str = "0000:00:1f.6";
 
-/// The T14's judge: the claim, the card, the lease, the host's own ping — and
-/// the four armed boots beside them.
-pub fn on_metal(
-    back: &metal::Readback,
-    provoked: &metal::Readback,
-    probed: &metal::Readback,
-    asked: &metal::Readback,
-    trailed: &metal::Readback,
-) -> Result<(), String> {
+/// The T14's judge: the claim, the card, the lease, and the host's own ping.
+pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     let profile = Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())?;
     let kernel = back.kernel();
     let text = kernel.text();
@@ -200,98 +206,57 @@ pub fn on_metal(
         bad.push(why);
     }
 
-    // The delivery reading, keyed off the label so a reordering of `LANCASE`'s
-    // arms reads the shipping boot's record as the armed boot's.
-    if provoked.label != ICS_BOOT {
-        bad.push(format!(
-            "the delivery verdict was handed {}'s readback, and the record only means netd \
-             asked for a message on {ICS_BOOT}",
-            provoked.label
-        ));
-    } else {
-        let armed = provoked.kernel();
-        match armed.must_say(FIRST_MESSAGE) {
-            Ok(line) => eprintln!("  [lan] {}", line.trim()),
-            Err(why) => bad.push(why),
-        }
-    }
-
-    // The PHY reading: netd's exit code on the boot that arms the probe,
-    // decoded through the table the driver crate owns. A refusal is a finding
-    // by its name, which is what the shipping boot's silence cannot give — and
-    // where §4.5.2's interface was already owned, that name is which of its
-    // three agents the last reading before the deadline stood for.
-    if probed.label != PHY_BOOT {
-        bad.push(format!(
-            "the PHY verdict was handed {}'s readback, and netd's exit code only means the \
-             bring-up's outcome on {PHY_BOOT}",
-            probed.label
-        ));
-    } else {
-        match probed.exit_code(NETD) {
-            Ok(code) => match Outcome::from_exit_code(code) {
-                Some(Outcome::BroughtUp) => {
-                    eprintln!("  [lan] netd exited {code} on {PHY_BOOT}: the PHY was brought up")
-                }
-                Some(refused) => bad.push(format!(
-                    "netd exited {code} on {PHY_BOOT}: the bring-up refused the PHY with \
-                     {refused:?}"
-                )),
-                None => bad.push(format!(
-                    "netd exited {code} on {PHY_BOOT}, which is no outcome the probe encodes"
-                )),
-            },
-            Err(why) => bad.push(why),
-        }
-    }
-
-    // The arbitration's answer. **A measurement and not a verdict**: every
-    // reading the table encodes is what the boot was flashed to learn, so the
-    // one red here is a code outside it.
-    if asked.label != ASK_BOOT {
-        bad.push(format!(
-            "the arbitration reading was handed {}'s readback, and netd's exit code only means \
-             the arbitration's answer on {ASK_BOOT}",
-            asked.label
-        ));
-    } else {
-        match asked.exit_code(NETD) {
-            Ok(code) => match Reading::from_exit_code(code) {
-                Some(reading) => eprintln!("  [lan] netd exited {code} on {ASK_BOOT}: {reading}"),
-                None => bad.push(format!(
-                    "netd exited {code} on {ASK_BOOT}, which is no reading the ask encodes"
-                )),
-            },
-            Err(why) => bad.push(why),
-        }
-    }
-
-    // The trail. **Only a boot that came back is judged here**, and a boot
-    // that came back owes a whole trail ending in the code its `exit:` record
-    // carries; the boot the arm exists for is the one that does not come back,
-    // whose file is read off the stick by hand and through [`trail_ending`].
-    if trailed.label != CRUMB_BOOT {
-        bad.push(format!(
-            "the trail was handed {}'s readback, and only {CRUMB_BOOT} leaves one",
-            trailed.label
-        ));
-    } else {
-        let judged = trailed.exit_code(NETD).and_then(|code| {
-            let text = trailed.log_volume_file(CRUMBS_FILE)?.ok_or_else(|| {
-                format!("{CRUMB_BOOT}'s log volume carries no {CRUMBS_FILE}")
-            })?;
-            whole_trail(&text, code)
-        });
-        match judged {
-            Ok(cost) => eprintln!("  [lan] {CRUMB_BOOT}: {cost}"),
-            Err(why) => bad.push(why),
-        }
-    }
-
     if bad.is_empty() {
         return Ok(());
     }
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
+}
+
+/// The probe boot's judge: netd's exit code, decoded through the table the
+/// driver crate owns. A refusal is a finding by its name, which is what the
+/// shipping boot's silence cannot give — and where §4.5.2's interface was
+/// already owned, that name is which of its three agents the last reading
+/// before the deadline stood for.
+pub fn probed_on_metal(probed: &metal::Readback) -> Result<(), String> {
+    let code = probed.exit_code(NETD)?;
+    match Outcome::from_exit_code(code) {
+        Some(Outcome::BroughtUp) => {
+            eprintln!("  [lan] netd exited {code} on {PHY_BOOT}: the PHY was brought up");
+            Ok(())
+        }
+        Some(refused) => Err(format!(
+            "netd exited {code} on {PHY_BOOT}: the bring-up refused the PHY with {refused:?}"
+        )),
+        None => Err(format!("netd exited {code} on {PHY_BOOT}, which is no outcome the probe encodes")),
+    }
+}
+
+/// The ask boot's judge: the arbitration's answer. **A measurement and not a
+/// verdict**: every reading the table encodes is what the boot was flashed to
+/// learn, so the one red here is a code outside it.
+pub fn asked_on_metal(asked: &metal::Readback) -> Result<(), String> {
+    let code = asked.exit_code(NETD)?;
+    match Reading::from_exit_code(code) {
+        Some(reading) => {
+            eprintln!("  [lan] netd exited {code} on {ASK_BOOT}: {reading}");
+            Ok(())
+        }
+        None => Err(format!("netd exited {code} on {ASK_BOOT}, which is no reading the ask encodes")),
+    }
+}
+
+/// The trail boot's judge. **Only a boot that came back is judged here**, and
+/// a boot that came back owes a whole trail ending in the code its `exit:`
+/// record carries; the boot the arm exists for is the one that does not come
+/// back, whose file is read off the stick by hand and through [`trail_ending`].
+pub fn trailed_on_metal(trailed: &metal::Readback) -> Result<(), String> {
+    let code = trailed.exit_code(NETD)?;
+    let text = trailed
+        .log_volume_file(CRUMBS_FILE)?
+        .ok_or_else(|| format!("{CRUMB_BOOT}'s log volume carries no {CRUMBS_FILE}"))?;
+    let cost = whole_trail(&text, code)?;
+    eprintln!("  [lan] {CRUMB_BOOT}: {cost}");
+    Ok(())
 }
 
 /// What a crumb file says about how its boot ended, in one sentence — the

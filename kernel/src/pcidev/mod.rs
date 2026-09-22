@@ -40,10 +40,7 @@
 //! LAPIC decodes. **So a function is armed on MSI only where a walk that
 //! reached its capability list's terminator found no MSI-X**: its message is
 //! then a word of config space, which has no write path from userland, and it
-//! has no table in a BAR for [`msix_bar`] to keep back. A list that ends at a
-//! link the spec forbids says nothing about what it publishes past that link,
-//! so it is refused by name rather than armed on the mechanism the walk
-//! happened to reach.
+//! has no table in a BAR for [`msix_bar`] to keep back.
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding
@@ -269,7 +266,7 @@ fn reserve(who: u16) -> Result<usize, ClaimError> {
     Ok(slot)
 }
 
-fn requester(pci: &PciDevice) -> u16 {
+pub(crate) fn requester(pci: &PciDevice) -> u16 {
     ((pci.bus as u16) << 8) | ((pci.dev as u16) << 3) | pci.func as u16
 }
 
@@ -659,6 +656,12 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // refusal that had already armed a vector and moved a function's BARs would
     // leave the machine changed by a hand-over that did not happen.
     let space = slot_space(slot).map_err(Refusal::Untranslated)?;
+
+    // Held across every walk this hand-over makes of the function's own list —
+    // both readers below and the MSI fallback between them — so the staged
+    // shape is the device's and not one reader's view of it.
+    #[cfg(feature = "boot-actuators")]
+    let _staged = crate::drivers::pci::StagedCaps::armed_for(&pci);
 
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.

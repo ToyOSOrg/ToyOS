@@ -16,7 +16,7 @@ The card is never brought up on that boot. It exists because two boots of
 agent's for the whole of the bring-up's wait, and a bring-up that waits for the
 interface to go free never learns what asking would have been answered.
 
-It is a fourth arm of `lan_dhcp_lease`, a fourth image, six rows of
+It is the `lan_mdio_ask_reading` metal row, a fourth image, six rows of
 `tests/metal-profile.toml`, and its codes fill what `phy::Outcome` left of the
 block under 128: `ask::Reading` ends at 127 and no third table fits beside the
 two.
@@ -31,7 +31,6 @@ One boot of the arm on the T14 read, and the bring-up in
 `toyos-i219/src/phy.rs` changed — or deliberately left — on that reading. Then
 the arm goes, all of it: `toyos-i219/src/ask.rs` and its tests,
 `tests/lanaskcase`, `tests/e1000askcase`, their two rows in `src/build.rs`'s
-`ALL_CONFIGS` and the third entry of its `INTEL_ACTUATORS`, the fourth
-`metal::Arm` in `tests/toyos.rs`'s `LANCASE` and the readback `lan::on_metal`
-decodes for it, `lan_mdio_ask_exit_code` and its `tests/test-durations` row, the
-six `tests/metal-profile.toml` rows, and netd's `--exit-with-mdio-ask`.
+`ALL_CONFIGS` and the third entry of its `INTEL_ACTUATORS`, `tests/toyos.rs`'s
+`lan_mdio_ask_reading` row with its `METAL_ONLY` entry, `LANASKCASE` and
+`lan::asked_on_metal`, `lan_mdio_ask_exit_code`, the six `tests/metal-profile.toml` rows, and netd's `--exit-with-mdio-ask`.
