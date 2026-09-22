@@ -18415,29 +18415,37 @@ fn the_metal_gates_refuse_what_they_name() -> Result<(), String> {
         judge,
     };
     let registered: BTreeSet<&str> = ["qemu_too"].into_iter().collect();
-    let why = "a fixture's reason";
-    let cases: &[(&str, &[(&str, metal::Metal)], &[(&str, &str)], Option<&str>)] = &[
-        ("both kinds", &[("qemu_too", RUNS), ("metal", RUNS)], &[("metal", why)], None),
+    const WHY: &str = "a fixture's reason";
+    /// A fixture's name, its METAL rows, its METAL_ONLY rows, and the refusal
+    /// it must draw, `None` for none.
+    type Case = (
+        &'static str,
+        &'static [(&'static str, metal::Metal)],
+        &'static [(&'static str, &'static str)],
+        Option<&'static str>,
+    );
+    let cases: &[Case] = &[
+        ("both kinds", &[("qemu_too", RUNS), ("metal", RUNS)], &[("metal", WHY)], None),
         ("a QEMU-only row", &[("qemu_too", QEMU_ONLY)], &[], None),
         ("an unregistered row", &[("stray", RUNS)], &[], Some("which no registration names")),
         (
             "a registered metal-only row",
             &[("qemu_too", RUNS)],
-            &[("qemu_too", why)],
+            &[("qemu_too", WHY)],
             Some("registered and declared metal-only"),
         ),
         (
             "a metal-only name twice",
             &[("metal", RUNS)],
-            &[("metal", why), ("metal", why)],
+            &[("metal", WHY), ("metal", WHY)],
             Some("names one test twice"),
         ),
         ("a blank reason", &[("metal", RUNS)], &[("metal", " ")], Some("with no reason")),
-        ("no row", &[], &[("metal", why)], Some("which no METAL row runs")),
+        ("no row", &[], &[("metal", WHY)], Some("which no METAL row runs")),
         (
             "a QEMU-only row declared metal-only",
             &[("metal", QEMU_ONLY)],
-            &[("metal", why)],
+            &[("metal", WHY)],
             Some("which no METAL row runs"),
         ),
         (
@@ -18464,7 +18472,7 @@ fn the_metal_gates_refuse_what_they_name() -> Result<(), String> {
     }
     let shared: BTreeSet<&str> = ["abuse_connect_flood", "00_hello"].into_iter().collect();
     for (name, refused) in [("abuse_connect_flood", true), ("00_hello", true), ("metal", false)] {
-        if metal_only_is_unshared(&[(name, why)], &shared).is_err() != refused {
+        if metal_only_is_unshared(&[(name, WHY)], &shared).is_err() != refused {
             return Err(format!(
                 "the shared-name gate {} a METAL_ONLY {name:?} beside the shared names \
                  {shared:?}",
