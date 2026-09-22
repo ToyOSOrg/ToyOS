@@ -69,6 +69,21 @@ the stick is what dies. Evidence about a hang of this kind has to leave the
 machine some other way; that is the network track's question, not the USB
 driver's.
 
+**T14 run 84 lost the stick with nothing cut.** The firmware could not read it
+and Linux listed it with no disk until it was replugged, the shape above. The
+ladder's last rung had left it reset with nothing sent after it (`port 13 reset
+while taking it offline (warm on a USB3 port) … reset, and the port is
+enabled`, `Reset Device=true`); the panic's reboot then reset every connected
+port, halted and reset the controller and unpowered its ports, and said
+`no Bulk-Only command was open, so this reset cuts none`. And the device had
+stopped answering media commands before any of that: the boot's first READ(10)
+was the first thing that broke
+(`issues/kernel/a-stick-that-answers-late-is-broken-by-the-two-second-abandon.md`).
+Every path a host drives ended with the device reset and inside no command, and
+it was still lost — so what loses it is in the device, reached before this
+kernel's first media command, and cleared only by taking VBUS away, which this
+machine's ports do not do.
+
 ## What is not claimed
 
 That cutting a command is harmless in general. BOT §5.3.4 makes reset recovery

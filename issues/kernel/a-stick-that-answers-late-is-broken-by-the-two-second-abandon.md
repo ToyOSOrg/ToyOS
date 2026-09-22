@@ -6,7 +6,7 @@ opened: 2026-09-16
 
 # A stick that answers late is broken by the two-second abandon
 
-Both T14 records of the mass-storage transport breaking open the same way:
+The first two T14 records of the mass-storage transport breaking open the same way:
 the device took a READ(10)'s CBW, delivered its data, and had not produced the
 13-byte CSW two seconds later.
 
@@ -41,6 +41,24 @@ the device took a READ(10)'s CBW, delivered its data, and had not produced the
   `cpu=2143ms` on a process 3.47 s into the boot is read here as one 2 s wait
   spent inside a disk transfer: an inference, since the record of that wait
   was dropped.
+
+- T14 run 84, read by run 85, a scout image carrying this driver's ladder. The
+  boot's first READ(10), 0.6 s in and on the only CPU yet running, went to a
+  stick whose TEST UNIT READY, INQUIRY, READ CAPACITY and serial string had each
+  just completed in step, tag checked:
+
+  ```
+  [2.602 cpu0] usb-storage: 00:14.0 slot 5 transport broke on SCSI 0x28: no answer in the command phase in 2000 ms; break 1 of 3 running
+  [2.602 cpu0] usb-storage: 00:14.0 slot 5 transport broke on the class reset's TEST UNIT READY: status phase completion code 3 (Babble Detected); break 2 of 3 running
+  [2.757 cpu0] usb-storage: 00:14.0 slot 5 the port reset took: addressed and configured again, the device answered TEST UNIT READY under its own tag 0xe
+  [4.758 cpu0] usb-storage: 00:14.0 slot 5 transport broke on SCSI 0x28: no answer in the data phase in 2000 ms; break 3 of 3 running
+  ```
+
+  The device went offline behind a warm reset, and neither the firmware nor
+  Linux could use it until it was replugged (`lsusb` listed it, no disk). Read
+  here, and only an inference: the stick's own protocol answered every reset
+  while its media did not — the command that needed the media was the one
+  that stopped, before and after a warm port reset that took.
 
 A CSW that takes longer than two seconds is legal USB: a device may withhold
 its handshake for as long as it likes, and a consumer flash stick doing
