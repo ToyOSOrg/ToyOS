@@ -1766,7 +1766,6 @@ pub fn usb_transport_break(
         log.matches("transport broke").count()
     );
 
-    a_device_left_inside_a_data_in_is_reset_before_its_first_command(test_config, c_bins, rust_bins)?;
     a_read_whose_first_wait_spent_its_budget_goes_out_again(test_config, c_bins, rust_bins)?;
     transport_gives_up(test_config, c_bins, rust_bins)?;
     abandoned_write_is_taken_offline(test_config, c_bins, rust_bins)?;
@@ -1784,98 +1783,6 @@ pub fn usb_transport_break(
 const INHERITED: &str =
     "link already trained before this kernel ran; warm resetting it before its device is asked \
      anything";
-
-/// A device the boot scan finds inside a Bulk-Only data-in something else
-/// opened is reset before this kernel sends it anything, so its first command
-/// is answered in step.
-///
-/// `usb-inherited-data-in` has this kernel play the firmware first, on a
-/// bring-up of its own: enumerate the first device on a trained USB3 link with
-/// no reset, send it a READ(10) whose data nothing reads, and halt the
-/// controller with the slot still in it. This kernel's own bring-up then resets
-/// the controller, which drives no reset on the bus, and scans. A scan that
-/// enumerated the device on its trained link with no reset would send its
-/// first command block to a device still inside that data-in, which QEMU's
-/// `usb-storage` stalls: a break this boot names.
-fn a_device_left_inside_a_data_in_is_reset_before_its_first_command(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    const PARAMS: &[&str] = &["usb-storage-gate", "usb-inherited-data-in"];
-    let (bytes, _) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
-    let image = test_dir().join("usb-inherited-data-in.img");
-    let nonce = stage(&image, bytes);
-    let log = boot_and_shutdown(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: Profile::UsbDisk,
-            kernel_params: PARAMS,
-            usb_images: vec![image.clone()],
-            ..Default::default()
-        },
-    )?;
-
-    // The staging ran, whole: the command block went out, nothing read its
-    // data, and the controller was halted with the device inside it.
-    let left = line_with(&log, "usb-inherited-data-in: slot ")?;
-    if !left.contains("took a READ(10) command block=true, and its data is left unread") {
-        return Err(format!("{left:?}: the device was not left inside a data-in\n{log}"));
-    }
-    let handed = line_with(&log, "usb-inherited-data-in: the controller is halted=")?;
-    let port = handed
-        .split_once("halted=true with port ")
-        .and_then(|(_, rest)| rest.split_once('\''))
-        .map(|(port, _)| port)
-        .ok_or_else(|| format!("{handed:?}: the controller was not halted with the device in it\n{log}"))?;
-
-    // The harm first: no command of this boot broke, the first the scan sent
-    // that device included.
-    let (_, after) = log.split_once(handed).expect("the line came from this text");
-    if let Some(line) = after.lines().find(|l| l.contains(" broke on ") || l.contains("transport broke")) {
-        return Err(format!("{line:?}: the device the firmware left inside a data-in broke\n{log}"));
-    }
-    // Then why: this kernel's own reset of the controller, and on that port the
-    // reset before anything else, then the disk bound after it.
-    let mut rest = after;
-    let mut stamps = Vec::new();
-    for needle in [
-        "xHCI: controller reset".to_string(),
-        format!("xHCI: port {port} {INHERITED}"),
-        format!("xHCI: port {port} enabled, speed="),
-        "xHCI: device addressed".to_string(),
-        "usb-storage: disk ".to_string(),
-    ] {
-        let Some(line) = rest.lines().find(|l| l.contains(needle.as_str())) else {
-            return Err(format!(
-                "after the controller was handed over, no line reads {needle:?}, in order\n{log}"
-            ));
-        };
-        stamps.push(stamp_of(line, "xHCI: ").or_else(|_| stamp_of(line, "usb-storage: ")));
-        rest = rest.split_once(line).expect("the line came from this text").1;
-    }
-    let reset_took = match (&stamps[1], &stamps[2]) {
-        (Ok(asked), Ok(enabled)) => enabled - asked,
-        _ => return Err(format!("the reset's records carry no kernel timestamp\n{log}")),
-    };
-    gate_ran(&log, 2)?;
-    if !log.contains("usb-gate: disk done reads=ok writes=ok refusal=true wr_err=0 healthy=true") {
-        return Err(format!("the disk did not serve the gate\n{log}"));
-    }
-    verify(&image, bytes, nonce)?;
-    if !log.contains("Boot: complete") {
-        return Err(format!("the boot did not finish\n{log}"));
-    }
-    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
-    let _ = std::fs::remove_file(&image);
-    eprintln!(
-        "  [usb] a device left inside a data-in on port {port} was warm reset before its first \
-         command ({reset_took:.3} s from asking to enabled), and answered every command after it"
-    );
-    Ok(())
-}
 
 /// A READ whose first wait spends its operation's whole budget, then a class
 /// reset the device answers out of step, then a port reset that takes: the

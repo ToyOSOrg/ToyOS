@@ -1516,7 +1516,15 @@ impl XhciController {
         // phases leaves it waiting, which is what `stop::settle_commands`
         // finishes. Opened before the CBW's transfer is queued, so nothing
         // reaches the controller unpublished.
-        let open = self.open_command(dev, data_in);
+        let open = stop::OpenCommand::begin(stop::Device {
+            block: dma.subview(dev.block, MSC_STRIDE),
+            slot: dev.slot_id,
+            in_dci: dev.in_dci(),
+            out_dci: dev.out_dci(),
+            ctx: dma.subview(dev.dev_block + super::super::DEV_OUT_CTX, 32 * self.context_size),
+            ctx_size: self.context_size as u32,
+            data_in,
+        });
 
         let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
         #[cfg(feature = "boot-actuators")]
@@ -1631,46 +1639,6 @@ impl XhciController {
             1 => Ok(Bot::Failed),
             _ => Err(Broke::PhaseError),
         }
-    }
-
-    /// The record that this device has been spoken a command to, published
-    /// for a reset to read (`stop::OpenCommand`).
-    fn open_command(&self, dev: &MscDevice, data_in: bool) -> stop::OpenCommand {
-        let dma = self.dma();
-        stop::OpenCommand::begin(stop::Device {
-            block: dma.subview(dev.block, MSC_STRIDE),
-            slot: dev.slot_id,
-            in_dci: dev.in_dci(),
-            out_dci: dev.out_dci(),
-            ctx: dma.subview(dev.dev_block + super::super::DEV_OUT_CTX, 32 * self.context_size),
-            ctx_size: self.context_size as u32,
-            data_in,
-        })
-    }
-
-    /// `usb-inherited-data-in`'s firmware: a READ(10) of one block at LBA 0
-    /// whose command block goes out and whose data nothing asks for. Whether
-    /// the device took the command block.
-    #[cfg(feature = "boot-actuators")]
-    fn leave_inside_a_data_in(&mut self, dev: &mut MscDevice) -> bool {
-        let dma = self.dma();
-        let tag = dev.next_tag();
-        let sectors = dev.sectors_per_block;
-        let cdb = [0x28u8, 0, 0, 0, 0, 0, 0, (sectors >> 8) as u8, sectors as u8, 0];
-        let cbw: Dma<'static, Unaligned> =
-            super::super::zero_dma(dma, dev.block + MSC_CBW, CBW_LEN as usize).unaligned();
-        cbw.write::<u32>(0, CBW_SIGNATURE.to_le());
-        cbw.write::<u32>(4, tag.to_le());
-        cbw.write::<u32>(8, HOST_BLOCK.to_le());
-        cbw.write::<u8>(12, 0x80);
-        cbw.write::<u8>(13, 0);
-        cbw.write::<u8>(14, cdb.len() as u8);
-        cbw.copy_from(15, &cdb);
-        let open = self.open_command(dev, true);
-        let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
-        let taken = self.framed_phase(dev, false, cbw_phys, CBW_LEN, Phase::Command, &open).is_ok();
-        drop(open);
-        taken
     }
 
     /// One Normal TRB on a bulk endpoint, and its completion.
@@ -2145,10 +2113,6 @@ pub(in crate::drivers::xhci) fn bind(
         Up::Refused => return Bind::Refused(dev.slot_goes.unwrap_or(SlotGoes::Back)),
         Up::NotReady => return Bind::NotReady,
     }
-    #[cfg(feature = "boot-actuators")]
-    if inherited::leaving() {
-        return inherited::leave(ctrl, &mut dev);
-    }
     dev.identity.serial = read_serial(ctrl, &mut dev, serial_index);
     log!("usb-storage: slot {slot_id} serial number {}", dev.identity.serial);
     // Machine-wide index: what `usb_storage::handle` looks up by and a mount
@@ -2182,47 +2146,6 @@ pub(in crate::drivers::xhci) fn bind(
 /// What the adopting line adds for a disk whose device came back owing a flush.
 const OWED_A_FLUSH: &str = ", and it left owing a flush of writes it had reported complete, so \
     its next flush fails";
-
-/// The firmware `usb-inherited-data-in` has this kernel play before its own
-/// bring-up (`wait::boot::play_firmware`): the bind it asks for sends a
-/// READ(10) whose data nothing reads, and hands the device over as it is —
-/// slot, endpoints and all — for the controller's reset to find.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod inherited {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    use toyos_xhci::reset_recovery::SlotGoes;
-
-    use super::{Bind, MscDevice};
-    use crate::drivers::xhci::XhciController;
-    use crate::log;
-
-    static LEAVING: AtomicBool = AtomicBool::new(false);
-
-    /// The binds from here to [`done`] are the staged firmware's.
-    pub fn begin() {
-        LEAVING.store(true, Ordering::Relaxed);
-    }
-
-    pub fn done() {
-        LEAVING.store(false, Ordering::Relaxed);
-    }
-
-    /// Whether the bind asking is the staged firmware's.
-    pub fn leaving() -> bool {
-        LEAVING.load(Ordering::Relaxed)
-    }
-
-    /// The staged firmware's last act on a device it bound. Its slot stays
-    /// with the port: nothing here tells the controller or the device anything
-    /// more, and the controller's own reset is what ends the slot.
-    pub fn leave(ctrl: &mut XhciController, dev: &mut MscDevice) -> Bind {
-        let taken = ctrl.leave_inside_a_data_in(dev);
-        log!("usb-inherited-data-in: slot {} took a READ(10) command block={taken}, and its data \
-             is left unread", dev.slot_id);
-        Bind::Refused(SlotGoes::WithTheUnplug)
-    }
-}
 
 /// A bind stalled while another disk is held for its device: what it says it
 /// is doing, and for how long.

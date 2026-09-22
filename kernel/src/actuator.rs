@@ -168,13 +168,6 @@ actuators! {
     /// `usb_transport_break`.
     usb_serial_short = "usb-serial-short";
 
-    /// Before the boot scan enumerates the first device on a trained USB3
-    /// link, have this kernel play the firmware: enumerate and bind it, send a
-    /// READ(10) whose data nothing reads, stop its endpoints, give its slot back
-    /// and forget it, so the scan finds a device inside a data-in it did not
-    /// open. See `xhci::msc::inherited`; judged by `usb_transport_break`.
-    usb_inherited_data_in = "usb-inherited-data-in";
-
     /// Leave one READ(10) the gate stages it on unanswered for the whole of
     /// its wait, and the class reset's TEST UNIT READY out of step, so a port
     /// reset that takes comes after a wait that spent the operation's budget.
