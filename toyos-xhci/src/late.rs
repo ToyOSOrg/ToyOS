@@ -61,8 +61,11 @@ mod tests {
         now: impl Fn(usize) -> Nanos,
         event: impl Fn(usize) -> Option<bool>,
     ) -> (usize, bool) {
+        // Far past anything a wait may take, so a wait that never gives up is
+        // a failure here and not a test that never ends.
+        const NEVER: usize = 1_000 * RING;
         let mut late = Late::new(deadline, RING);
-        for n in 0.. {
+        for n in 0..NEVER {
             if late.gives_up(now(n)) {
                 return (n, false);
             }
@@ -73,7 +76,7 @@ mod tests {
                 None => continue,
             }
         }
-        unreachable!("the loop above ends")
+        panic!("the wait read {NEVER} events and never gave up")
     }
 
     /// The bound this exists to keep: a ring that never stops producing events
