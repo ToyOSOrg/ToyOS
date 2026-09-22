@@ -30,6 +30,7 @@ macro_rules! say {
 }
 
 mod device;
+mod dhcp;
 mod i219;
 mod virtio_net;
 
@@ -44,11 +45,22 @@ mod virtio_net;
 /// device (virtio 1.2 §5.1.1). `8086:15fc` is the ThinkPad T14's onboard I219
 /// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models, and
 /// one driver takes both because the register file is the same one.
-const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
+const CARDS: [(PciId, fn(toyos::PciDev, bool) -> Card); 3] = [
     (PciId { vendor: 0x8086, device: 0x15fc }, Card::intel),
     (PciId { vendor: 0x8086, device: 0x10d3 }, Card::intel),
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
+
+/// The actuator that makes the card raise one interrupt on purpose, so a boot
+/// whose only reading of the interrupt path is a count of messages can tell a
+/// part nothing made speak from a message that reached no CPU.
+///
+/// **Nothing a shipped machine runs arms it**: the argument comes from the
+/// `[programs.netd] args` row of a boot config, and the one config that carries
+/// it is `tests/lanicscase`. A boot that always raised a message would make the
+/// kernel's first-message record read the same on a working card and a dead
+/// one.
+const PROVOKE_MESSAGE: &str = "--provoke-message";
 
 use toyos::endow;
 use toyos::Pipe;
@@ -59,9 +71,9 @@ use toyos::net::*;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::{dns, tcp, udp};
+use smoltcp::socket::{dhcpv4, dns, tcp, udp};
 use smoltcp::time::Instant as SmoltcpInstant;
-use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint};
+use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpEndpoint};
 
 use std::net::Ipv4Addr;
 
@@ -84,14 +96,25 @@ impl Card {
         panic!("netd: the NIC this program was given is not one it can drive — {why}")
     }
 
-    fn intel(claim: toyos::PciDev) -> Self {
+    /// `provoke` is [`PROVOKE_MESSAGE`], carried out once the card is up.
+    fn intel(claim: toyos::PciDev, provoke: bool) -> Self {
         match i219::Nic::open(claim) {
-            Ok(nic) => Self::Intel(nic),
+            Ok(nic) => {
+                if provoke {
+                    nic.provoke_message();
+                }
+                Self::Intel(nic)
+            }
             Err(why) => Self::undrivable(why),
         }
     }
 
-    fn virtio(claim: toyos::PciDev) -> Self {
+    /// [`PROVOKE_MESSAGE`] is the Intel driver's: armed here it is refused, not
+    /// skipped, before `open` touches the card.
+    fn virtio(claim: toyos::PciDev, provoke: bool) -> Self {
+        if provoke {
+            panic!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio");
+        }
         match VirtioNet::open(claim) {
             Ok(nic) => Self::Virtio(nic),
             Err(why) => Self::undrivable(why),
@@ -1300,7 +1323,7 @@ fn main() {
     };
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
-    let nic = open(claim);
+    let nic = open(claim, std::env::args().any(|arg| arg == PROVOKE_MESSAGE));
     let mac = nic.mac();
     let mut device = DmaNic { nic };
 
@@ -1313,29 +1336,18 @@ fn main() {
     let now = SmoltcpInstant::from_millis(0);
     let mut iface = Interface::new(config, &mut device, now);
 
-    iface.update_ip_addrs(|addrs| {
-        addrs.push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24)).ok();
-    });
-    iface.routes_mut()
-        .add_default_ipv4_route(Ipv4Addr::new(10, 0, 2, 2))
-        .ok();
-
     let mut socket_set = SocketSet::new(vec![]);
 
-    let dns_servers = &[IpAddress::v4(10, 0, 2, 3)];
-    let dns_socket = dns::Socket::new(dns_servers, vec![]);
+    // Empty, because the lease names the resolvers and nothing else may: a
+    // server written down here would answer for one network on every other.
+    let dns_socket = dns::Socket::new(&[], vec![]);
     let dns_handle = socket_set.add(dns_socket);
+    let dhcp_handle = socket_set.add(dhcp::socket());
+    let mut dhcp = dhcp::Dhcp::new();
 
     let total_mem = total_memory();
     let max_piped = max_piped_connections(total_mem);
     let mut daemon = NetDaemon::new(dns_handle, max_piped);
-
-    say!(
-        "netd: ready, at most {max_piped} piped connections \
-         ({} MiB each of {} MiB total)",
-        PIPED_CONNECTION_BYTES / (1024 * 1024),
-        total_mem / (1024 * 1024),
-    );
 
     // Sized for the slot ceiling rather than for `max_piped`: the batch
     // between two `wait` calls is the two fixed registrations, one per live piped
@@ -1358,6 +1370,20 @@ fn main() {
         device.nic.begin_pass();
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
         while iface.poll(now, &mut device, &mut socket_set) != PollResult::None {}
+
+        // **After the poll and before anything is served.** The lease is what
+        // gives this machine an address, a route and its resolvers, so a client
+        // answered before it was applied would be answered on a machine that is
+        // on no network.
+        let change = dhcp::Change::of(socket_set.get_mut::<dhcpv4::Socket>(dhcp_handle));
+        if dhcp.pass(change, &mut iface, socket_set.get_mut::<dns::Socket>(dns_handle)) {
+            say!(
+                "netd: ready, at most {max_piped} piped connections \
+                 ({} MiB each of {} MiB total)",
+                PIPED_CONNECTION_BYTES / (1024 * 1024),
+                total_mem / (1024 * 1024),
+            );
+        }
 
         daemon.bridge_piped(&mut socket_set);
 

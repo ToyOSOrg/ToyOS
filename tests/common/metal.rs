@@ -62,6 +62,11 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
+    /// The PCI function this boot's image claims, where the loop reaches the
+    /// boot over its cable while it runs. **`None` on every boot that does not
+    /// ask**: a boot whose judges read no cable would be refused for a fact
+    /// none of them looks at.
+    pub nic: Option<&'static str>,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -75,7 +80,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[] }
+    Arm { boot, config, params, jobs, features: &[], nic: None }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -204,6 +209,10 @@ pub struct Readback {
     /// this machine holds, and it is a row rather than the reason a mount
     /// happened to work.
     pub stick_secs: u64,
+    /// What the host asked the cable while the machine was between its two
+    /// operating systems, and `None` on every boot that named no function to
+    /// ask over.
+    pub cable: Option<toyos_build::metal::Cable>,
 }
 
 impl Readback {
@@ -439,6 +448,8 @@ struct Batch {
     jobs: Vec<String>,
     files: Vec<(String, Vec<u8>)>,
     links: Vec<(String, String)>,
+    /// [`Arm::nic`], carried to the invocation that drives this boot.
+    nic: Option<&'static str>,
 }
 
 impl Batch {
@@ -483,6 +494,7 @@ fn batches(
                 jobs: boot.jobs.clone(),
                 files: boot.files.clone(),
                 links: boot.links.clone(),
+                nic: None,
             },
         );
         if was.is_some() {
@@ -499,21 +511,25 @@ fn batches(
                 jobs: Vec::new(),
                 files: Vec::new(),
                 links: Vec::new(),
+                nic: arm.nic,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
+                || batch.nic != arm.nic
             {
                 return Err(format!(
-                    "{name} rides the boot {:?} as ({}, {:?}, {:?}) and another row rides it \
-                     as ({}, {:?}, {:?}); one boot is one image",
+                    "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}) and another row rides \
+                     it as ({}, {:?}, {:?}, {:?}); one boot is one image",
                     arm.boot,
                     arm.config,
                     arm.params,
                     arm.features,
+                    arm.nic,
                     batch.config,
                     batch.params,
-                    batch.features
+                    batch.features,
+                    batch.nic
                 ));
             }
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
@@ -677,8 +693,8 @@ fn fingerprint(text: &str) -> u64 {
 
 /// The invocation that turns one image into one readback. Written down in the
 /// staged request and run by [`Mode::Drive`], so the two cannot differ.
-fn invocation(image: &Path, home: &Path) -> Vec<String> {
-    vec![
+fn invocation(image: &Path, home: &Path, nic: Option<&str>) -> Vec<String> {
+    let mut words = vec![
         "run".to_string(),
         "--bin".to_string(),
         "toyos-metal".to_string(),
@@ -692,7 +708,12 @@ fn invocation(image: &Path, home: &Path) -> Vec<String> {
         // `/log` has no reader of those bytes that is not the family of code
         // that wrote them.
         "--fat32-check".to_string(),
-    ]
+    ];
+    if let Some(nic) = nic {
+        words.push("--nic".to_string());
+        words.push(nic.to_string());
+    }
+    words
 }
 
 fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
@@ -710,6 +731,7 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
     let stick_secs = toyos_build::metal::stick_secs(&boot)
         .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
+    let cable = toyos_build::metal::cable(&boot).map_err(|why| format!("{label}: {why}"))?;
     Ok(Readback {
         label: label.to_string(),
         boot_ms: bootlog::boot_millis(&kernel),
@@ -717,6 +739,7 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         kernel,
         back_secs,
         stick_secs,
+        cable,
     })
 }
 
@@ -833,7 +856,7 @@ pub fn run(
             request.push_str(&format!(
                 "\n{label}\n  image: {}\n  cargo {}\n",
                 image.display(),
-                invocation(image, &at(dir, label)).join(" ")
+                invocation(image, &at(dir, label), batches[*label].nic).join(" ")
             ));
         }
         let path = dir.join("request.txt");
@@ -860,7 +883,7 @@ pub fn run(
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if mode == Mode::Drive {
         for (label, image) in &images {
-            let words = invocation(image, &at(dir, label));
+            let words = invocation(image, &at(dir, label), batches[*label].nic);
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
             match Command::new("cargo").args(&words).current_dir(&root).status() {
                 Ok(status) if status.success() => {}

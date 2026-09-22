@@ -140,6 +140,7 @@ apps_and_home_are_one_filesystem 7263
 audio_idle_suspend 1013
 audio_tone (smp=1) 8450
 audio_tone_load (smp=1) 18139
+bar_placement_is_proven 3297
 blackbox_done_chain 4119
 blackbox_early_panic_sealed 2470
 blackbox_early_panic_sealed_muted 3145
@@ -254,6 +255,8 @@ keyboard_claim_close_spares_stdin 4580
 kill_while_blocked 44
 klogd_hosted 5674
 klogd_panic_halts 16658
+lan_dhcp_lease 3029
+lan_no_lease 32709
 lapic_spurious_vector 6829
 late_storage_connect 6455
 latency_wake 8790

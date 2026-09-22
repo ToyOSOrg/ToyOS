@@ -537,6 +537,17 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         Ok(nic)
     }
 
+    /// Raise one enabled cause on purpose (§10.2.4.4).
+    ///
+    /// **Nothing on a shipping path calls this**: the caller arms it and
+    /// [`Self::open`] does not, because a driver that raised a message every
+    /// boot would make the kernel's first-message record read the same on a
+    /// working card and a dead one. `LSC` is the cause, because acting on it is
+    /// re-reading `STATUS`, which the next pass does anyway.
+    pub fn provoke_message(&self) {
+        self.regs.write(regs::ICS, cause::LSC);
+    }
+
     /// A register wrote what it was told, so a window that is not this register
     /// file is refused here instead of looking like a dead network.
     fn accepted(&self, reg: usize, wrote: u32) -> Result<(), Refusal> {
