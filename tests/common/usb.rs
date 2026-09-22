@@ -1993,7 +1993,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                 held_call(completed, came_back)?;
                 "the write that waited went out again on it"
             } else {
-                in_order(&[left[3].clone(), still_held.clone()])?;
+                in_order(&[left[3].clone(), still_held])?;
                 held_call(STILL_HELD, if moved == Moved::SlowStick { STALLED } else { came_back })?;
                 "the call that waited ended on its bound and the write was asked again"
             };
