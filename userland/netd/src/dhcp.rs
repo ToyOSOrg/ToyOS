@@ -45,10 +45,26 @@ const LEASE_BOUND: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS);
 
 /// The DHCP client socket this machine runs, asking for a lease under
 /// [`HOSTNAME`].
+///
+/// **Its discovery restarts when the link comes up with no lease held**
+/// (`restart`): the client's own retry is ten seconds apart, so a DISCOVER sent
+/// into a link still negotiating would otherwise cost the lease that long.
 pub fn socket() -> dhcpv4::Socket<'static> {
     let mut socket = dhcpv4::Socket::new();
     socket.set_outgoing_options(&OUTGOING);
     socket
+}
+
+/// Ask again from the start, now: the link has just come up and no lease is
+/// held.
+///
+/// **Never on a bound lease.** The client's restart gives the address up
+/// before it asks again, so a link that went down and came back would take
+/// this machine off its network for a whole exchange. The client offers no
+/// way to renew early, so a bound lease is kept across a flap and renews on
+/// its own timer.
+pub fn restart(client: &mut dhcpv4::Socket) {
+    client.reset();
 }
 
 /// What the client decided, owned: the resolver this lease writes lives in the
@@ -72,6 +88,15 @@ impl Change {
             dhcpv4::Event::Deconfigured => Some(Self::Lost),
         }
     }
+
+    /// The address, the router and the server that leased them, where this
+    /// change is a lease.
+    pub fn lease(&self) -> Option<(Ipv4Cidr, Option<Ipv4Address>, Ipv4Address)> {
+        match self {
+            Self::Leased { address, router, server, .. } => Some((*address, *router, *server)),
+            Self::Lost => None,
+        }
+    }
 }
 
 /// The lease's own state, and what the boot's log still owes about it.
@@ -87,6 +112,11 @@ pub struct Dhcp {
 impl Dhcp {
     pub fn new() -> Self {
         Self { began: Instant::now(), leased: false, settled: false }
+    }
+
+    /// Whether the interface holds a lease now.
+    pub fn leased(&self) -> bool {
+        self.leased
     }
 
     /// Apply what the client decided, and answer whether this machine's address

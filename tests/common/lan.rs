@@ -2,7 +2,8 @@
 //! answering the development host on it.
 //!
 //! Every line read here is a record. On the T14 a userland `println!` reaches
-//! `Backend::None`, so what crosses to the stick is the kernel's log.
+//! `Backend::None`, so what crosses to the stick is the kernel's log — and the
+//! one file netd leaves beside it, the lease probe's report.
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -12,7 +13,10 @@ use toyos_build::lan::{
     asked_under_its_own_name, lease_in, link_up_ms, Lease, HOSTNAME, LEASE, LINK_UP, MAC, NO_LEASE,
     READY,
 };
+use toyos_build::metaldevices;
 use toyos_build::metalprofile::Profile;
+use toyos_i219::lease::{self, Event, Verdict};
+use toyos_i219::phy::PhyRefusal;
 
 use super::metal;
 use super::qemu::{self, BootOptions, QemuInstance};
@@ -28,6 +32,21 @@ pub const BOOT: &str = "lancase";
 /// the shipping boot separates from a card that raised none.
 pub const ICS_CONFIG: &str = "tests/lanicscase";
 pub const ICS_BOOT: &str = "lanicscase";
+
+/// The same boot with netd's `--exit-with-lease` armed: netd brings the card up
+/// and serves as that boot does, leaves [`LEASE_FILE`] on the log volume one
+/// durable line at a time, and ends with the lease's verdict as its exit code,
+/// which the kernel's `exit:` record carries off a machine whose console
+/// reaches nobody.
+pub const LEASE_CONFIG: &str = "tests/lanleasecase";
+pub const LEASE_BOOT: &str = "lanleasecase";
+
+/// The file that report is left in, at the root of the log volume — netd's
+/// `report::PATH` under `/log`.
+pub const LEASE_FILE: &str = "lease.txt";
+
+/// netd, as the kernel's `exit:` record names it.
+const NETD: &str = "netd";
 
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
@@ -47,6 +66,9 @@ pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// backend, which is the same driver the T14 arm runs and the only DHCP server
 /// this host can put in front of it.
 const QEMU_CONFIG: &str = "tests/e1000case";
+
+/// The same, with netd's `--exit-with-lease` armed.
+const LEASE_QEMU_CONFIG: &str = "tests/e1000leasecase";
 
 /// What QEMU's user-mode backend leases, and what it says about the network it
 /// leases on. Its own defaults, not this repository's: they are the oracle.
@@ -173,6 +195,236 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
 }
 
+/// The lease probe's judge: netd's exit code, decoded through the table the
+/// driver crate owns, and the report it left on the log volume — the lease,
+/// the router, and what the driver and the MAC counted each way. A code that is
+/// no lease is a finding by its name, which the shipping boot's silence cannot
+/// give.
+///
+/// **The host's ping is printed and not judged**: the lease is a server this
+/// machine does not control answering it, which is the claim; a reply at the
+/// leased address inside this boot is the same claim made from the bench's
+/// side, and the loop asks for it only where it was told the cable.
+pub fn leased_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let code = back.exit_code(NETD)?;
+    let text = back
+        .log_volume_file(LEASE_FILE)?
+        .ok_or_else(|| format!("{LEASE_BOOT}'s log volume carries no {LEASE_FILE}"))?;
+    for line in text.lines() {
+        eprintln!("  [lan] {LEASE_FILE}: {line}");
+    }
+    let summary = lease::summary(&text).map_err(|why| format!("{LEASE_FILE}: {why}"))?;
+    if summary.exit != Some(code) {
+        return Err(format!(
+            "netd exited {code} and its report ends in {:?}: the two records of one exit disagree",
+            summary.exit
+        ));
+    }
+    match Verdict::from_exit_code(code) {
+        Some(Verdict::Leased) => {}
+        Some(other) => return Err(format!("netd exited {code} on {LEASE_BOOT}: {other}")),
+        None => {
+            return Err(format!("netd exited {code} on {LEASE_BOOT}, which is no verdict the probe encodes"))
+        }
+    }
+    let Some((ms, Event::Leased { address, prefix, server, router })) = summary.lease else {
+        return Err(format!("netd exited leased and {LEASE_FILE} records no lease"));
+    };
+    let counts = summary.counts.ok_or_else(|| format!("{LEASE_FILE} carries no counts"))?;
+    eprintln!(
+        "  [lan] leased {address}/{prefix} from {server}, router {router:?}, {ms} ms after netd \
+         started; the driver counted {} sent and {} received, the MAC {} sent, {} received of \
+         {} seen",
+        counts.sent, counts.received, counts.wire.sent, counts.wire.received, counts.wire.seen
+    );
+    if counts.sent == 0 || counts.received == 0 {
+        return Err(format!("a lease with {counts:?} is no exchange this card carried"));
+    }
+    match back.cable.as_ref() {
+        None => eprintln!("  [lan] no cable was named, so the host asked nothing of this boot"),
+        Some(cable) => match cable.reply {
+            None => eprintln!("  [lan] nothing answered the host's ping at {}", cable.addr),
+            Some(reply) => {
+                let handed = format!("[{ID}] handed over on slot");
+                match bootlog::host_second_inside_this_boot(
+                    back.kernel().text(),
+                    cable.skew,
+                    &handed,
+                    reply.at,
+                ) {
+                    Ok(()) => eprintln!(
+                        "  [lan] {} answered the host's ping {} s into the window, inside this \
+                         boot",
+                        cable.addr, reply.secs
+                    ),
+                    Err(why) => eprintln!(
+                        "  [lan] {} answered the host's ping, and not inside this boot: {why}",
+                        cable.addr
+                    ),
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
+/// The netdev QEMU's `e1000e` profile names its backend, which the monitor's
+/// `set_link` is addressed to.
+const FLAP_NETDEV: &str = "net0";
+
+/// netd's own line for a pass that found the link gone, which the link is
+/// kept away until: the pass that says it is the one that records the down.
+const LINK_DOWN: &str = "netd: I219: link down";
+
+/// The report of a boot whose link was taken away after its lease: the link
+/// goes down and comes back up after the first lease, and neither a `lost` nor
+/// a second `leased` line follows it — the client never started over, which
+/// is what gives the address up. Against QEMU's server the second is the one
+/// that shows: a restart is answered inside the pass that made it, so the loss
+/// between the two never reaches the report.
+fn flap_kept_the_lease(text: &str) -> Result<(), String> {
+    let events: Vec<Event> =
+        text.lines().filter_map(lease::Line::parse).map(|line| line.event).collect();
+    let leased = events
+        .iter()
+        .position(|event| matches!(event, Event::Leased { .. }))
+        .ok_or_else(|| format!("the report records no lease:\n{text}"))?;
+    let after = &events[leased..];
+    let down = after
+        .iter()
+        .position(|event| *event == Event::Link(toyos_i219::Link::Down))
+        .ok_or_else(|| format!("the report never saw the link go down after its lease:\n{text}"))?;
+    if !after[down..].iter().any(|event| matches!(event, Event::Link(toyos_i219::Link::Up { .. }))) {
+        return Err(format!("the report never saw the link come back:\n{text}"));
+    }
+    if after.contains(&Event::Lost) {
+        return Err(format!("the lease was given up across the flap:\n{text}"));
+    }
+    if after[1..].iter().any(|event| matches!(event, Event::Leased { .. })) {
+        return Err(format!("the client started over across the flap:\n{text}"));
+    }
+    Ok(())
+}
+
+/// The lease probe, end to end, in front of QEMU's 82574 and its user-mode
+/// DHCP server: netd serves its window, the kernel's `exit:` record carries the
+/// verdict, and the report read back out of the image by the host's own FAT
+/// implementation names the lease that server hands out, field by field, with
+/// frames counted both ways by the driver and by the MAC's statistics —
+/// which QEMU's model keeps, and not this repository.
+///
+/// **The link is taken away and given back once the lease has landed**, from
+/// QEMU's own monitor, and the lease has to outlive it: the report says the
+/// link went down and came up after the lease, never that the lease was lost,
+/// and the verdict is a lease held at the end of the window.
+pub fn lan_lease_report(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let case = super::compile::repo_root().join(LEASE_QEMU_CONFIG);
+    let image_path = super::lane::dir().join("lan-lease-report.img");
+    let image = qemu::build_boot_image(&case, &[], &[], &[]);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = super::volumes::log_extent(&image, &image_path)?;
+
+    let options = BootOptions {
+        profile: qemu::Profile::E1000e,
+        boot_image: Some(qemu::Staged::Written(image_path.clone())),
+        qmp: true,
+        ..Default::default()
+    };
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")) {
+        return Err("this test needs an Intel NIC and the profile has none".to_string());
+    }
+    let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
+    let mut console = guest.boot_log().to_string();
+    // netd says it is ready once the lease is applied, which is when a flap is
+    // one a bound lease has to survive.
+    qemu::await_marker(&mut guest, &mut console, READY, "netd to take its lease")?;
+    {
+        let mut monitor = qemu::QmpMonitor::open(guest.qmp_socket());
+        let mut set_link = |state: &str| {
+            let said = monitor.human(&format!("set_link {FLAP_NETDEV} {state}"));
+            match said.trim().is_empty() {
+                true => Ok(()),
+                false => Err(format!("QEMU's monitor refused `set_link {state}`: {said}")),
+            }
+        };
+        let from = console.len();
+        set_link("off")?;
+        qemu::await_marker_new(&mut guest, &mut console, LINK_DOWN, from, "netd to see the link go down")?;
+        set_link("on")?;
+    }
+    // Drained rather than waited on: once the lease lands netd says nothing
+    // until its window ends, and every wait in this harness reads a quiet guest
+    // as one that stopped. The window ends inside this drain.
+    console.push_str(
+        &guest.drain_serial(std::time::Duration::from_millis(toyos_tco::LEASE_BOUND_MS)),
+    );
+    let exited = format!("{}{NETD} pid=", bootlog::EXIT);
+    qemu::await_marker(&mut guest, &mut console, &exited, "netd to end its lease probe")?;
+    drop(guest);
+    let code = metaldevices::exit_of(&console, NETD)
+        .and_then(|exit| i32::try_from(exit.code).ok())
+        .ok_or_else(|| format!("no readable `{exited}` record:\n{console}"))?;
+    let log = serial::Serial::named("the lan lease boot", console.as_str());
+    log.must_be_clean()?;
+    if Verdict::from_exit_code(code) != Some(Verdict::Leased) {
+        return Err(format!(
+            "netd exited {code} on the 82574, which the table reads as {:?} and not a lease",
+            Verdict::from_exit_code(code)
+        ));
+    }
+
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    let volume = after.get(start..start + len).ok_or("the image shrank under the log partition")?;
+    let text = super::volumes::read_files(volume, &[LEASE_FILE])?
+        .pop()
+        .flatten()
+        .ok_or_else(|| format!("the log volume carries no {LEASE_FILE}"))?;
+    let text = String::from_utf8(text).map_err(|e| format!("{LEASE_FILE}: {e}"))?;
+    let complaints = toyos_fat32_check::check(volume);
+    if !complaints.is_empty() {
+        return Err(format!(
+            "the report gave the checker something to say about the log volume:\n{}",
+            toyos_fat32_check::describe(&complaints)
+        ));
+    }
+    let _ = std::fs::remove_file(&image_path);
+
+    let summary = lease::summary(&text).map_err(|why| format!("{LEASE_FILE}: {why}\n{text}"))?;
+    if summary.exit != Some(code) {
+        return Err(format!("netd exited {code} and its report ends {:?}:\n{text}", summary.exit));
+    }
+    let want = Event::Leased {
+        address: SLIRP_ADDRESS,
+        prefix: SLIRP_PREFIX,
+        server: SLIRP_ROUTER,
+        router: Some(SLIRP_ROUTER),
+    };
+    match summary.lease {
+        Some((_, got)) if got == want => {}
+        other => return Err(format!("the report's lease is {other:?} and the backend serves {want:?}:\n{text}")),
+    }
+    let counts = summary.counts.ok_or_else(|| format!("the report carries no counts:\n{text}"))?;
+    if counts.sent == 0 || counts.received == 0 || counts.wire.sent == 0 || counts.wire.received == 0 {
+        return Err(format!("a lease with {counts:?} is no exchange both counts saw:\n{text}"));
+    }
+    if !text.lines().any(|line| line.ends_with(" link up 1000 full")) {
+        return Err(format!("the report never says the emulated link came up:\n{text}"));
+    }
+    flap_kept_the_lease(&text)?;
+    if !summary.held {
+        return Err(format!("netd exited leased and its report ends without a lease:\n{text}"));
+    }
+    eprintln!("  [lan] netd exited {code}, a lease; its report:");
+    for line in text.lines() {
+        eprintln!("  [lan]   {line}");
+    }
+    Ok(())
+}
+
 /// The QEMU arm: the client, against a DHCP server this repository did not
 /// write.
 ///
@@ -220,6 +472,9 @@ pub fn lan_dhcp_lease(
             "the client read this lease as {lease:?} and the backend serves {want:?}"
         ));
     }
+    // The only thing the I219's §9 bring-up may say on the 82574 this host
+    // emulates, in the driver crate's own words.
+    log.must_say(&PhyRefusal::NotThisRegisterMap.to_string())?;
     // The order, and not merely the presence of both.
     log.must_say_after(LEASE, READY)?;
     log.must_say(LINK_UP)?;

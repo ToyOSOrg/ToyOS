@@ -665,6 +665,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // is known field by field. The verdicts are records and a lease's fields;
     // no clock in it.
     ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
+    // The lease probe on the same part: netd serves its window, exits with the
+    // lease's verdict, and the report it leaves on the log volume names the
+    // backend's lease with frames counted both ways and the lease kept across
+    // a link flap. Records and a file; its clocks are the flap's hold and the
+    // drain that outlasts netd's window, and a slower machine moves neither.
+    ("lan_lease_report", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -1315,6 +1321,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "lan_message_delivery",
         metal::Metal::Runs { arms: LANICSCASE, judge: |b| lan::provoked_on_metal(b[0]) },
     ),
+    (
+        // The first byte: a lease from the bench's own router, read off the
+        // stick, while the host pings the address this machine had before.
+        "lan_lease_report",
+        metal::Metal::Runs { arms: LANLEASECASE, judge: |b| lan::leased_on_metal(b[0]) },
+    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1729,6 +1741,15 @@ const LANCASE: &[metal::Arm] =
 /// not. It names no PCI function: its judge reads the kernel's own records and
 /// asks the cable nothing.
 const LANICSCASE: &[metal::Arm] = &[metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS)];
+
+/// The cable's boot with netd's lease probe armed: netd's exit code is the
+/// lease's verdict, read out of the kernel's own `exit:` record, and its report
+/// is on the log volume. It names the I219 for the loop to ping over the cable,
+/// as [`LANCASE`] does.
+const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
+    nic: Some(lan::NIC),
+    ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
+}];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -13598,6 +13619,7 @@ fn run_machine_test(
             Ok(())
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
+        "lan_lease_report" => lan::lan_lease_report(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed
