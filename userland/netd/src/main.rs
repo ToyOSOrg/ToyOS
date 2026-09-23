@@ -1019,6 +1019,19 @@ impl NetDaemon {
             IpAddress::Ipv4(Ipv4Addr::from(req.addr)),
             req.port,
         );
+        if req.port == 0 || remote.addr.is_unspecified() {
+            msg.client.error(ERR_INVALID_INPUT);
+            return;
+        }
+        // **This machine holding no address is not a peer's refusal.** Before
+        // the lease there is no source for a SYN, and the socket's own
+        // `Unaddressable` would reach the client as `ERR_CONNECTION_REFUSED`,
+        // which says "that peer says no, give up" about a condition of this
+        // machine that clears when the lease lands.
+        if iface.ipv4_addr().is_none() {
+            msg.client.error(ERR_NOT_CONNECTED);
+            return;
+        }
         let local_port = self.alloc_port();
 
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);

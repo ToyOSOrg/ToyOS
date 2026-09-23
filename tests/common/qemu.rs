@@ -3940,6 +3940,14 @@ impl QmpDevices {
         self.0.execute(&format!("{{\"execute\":\"device_add\",\"arguments\":{{{args}}}}}"));
     }
 
+    /// Take the cable out of `netdev`, or put it back: the NIC reports its link
+    /// down and nothing crosses, which is a network that comes up late.
+    pub fn set_link(&mut self, netdev: &str, up: bool) {
+        self.0.execute(&format!(
+            "{{\"execute\":\"set_link\",\"arguments\":{{\"name\":\"{netdev}\",\"up\":{up}}}}}"
+        ));
+    }
+
     pub fn del(&mut self, id: &str) {
         self.0
             .execute(&format!("{{\"execute\":\"device_del\",\"arguments\":{{\"id\":\"{id}\"}}}}"));

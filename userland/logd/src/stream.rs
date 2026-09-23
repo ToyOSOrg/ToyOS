@@ -14,10 +14,10 @@
 //! queue fills, and lines are refused — counted, and said out loud in one line
 //! that goes into the file and is never offered back to the queue.
 //!
-//! What it cannot do at all it says once, in the boot's own log. A refusal from
-//! the peer is final — netd's `ERR_CONNECTION_REFUSED` means the peer will keep
-//! refusing — so the attempt stops there; everything else is this machine not
-//! being ready yet, so it is retried until [`OPEN_BOUND`] and then said once.
+//! What it cannot do at all it says once, in the boot's own log. Nothing short
+//! of netd's absence ends the attempt before [`OPEN_BOUND`]: a machine with no
+//! lease yet is netd's `ERR_NOT_CONNECTED`, and a peer's refusal is said at
+//! once and asked again, because a listener that is not up yet refuses too.
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -36,6 +36,10 @@ const CONNECT_TIMEOUT_MS: u32 = 2_000;
 /// netd becoming ready, long enough that a boot with no network is not spending
 /// a core on saying so.
 const RETRY_EVERY: Duration = Duration::from_millis(250);
+
+/// Between two attempts at a peer that refused: each one is a SYN on the wire
+/// and a reset back, where a machine with no address sends nothing.
+const REFUSED_RETRY_EVERY: Duration = Duration::from_secs(1);
 
 /// How long this machine has to become able to open the connection at all.
 ///
@@ -187,18 +191,34 @@ fn run(shared: &Shared, addr: [u8; 4], port: u16) {
 fn open(shared: &Shared, addr: [u8; 4], port: u16) -> Option<TcpConnection> {
     let began = Instant::now();
     let at = format!("{}.{}.{}.{}:{port}", addr[0], addr[1], addr[2], addr[3]);
+    let mut refused = 0u32;
     loop {
         match net::tcp_connect(addr, port, CONNECT_TIMEOUT_MS) {
-            Ok(conn) => return Some(conn),
-            // **The peer answered, and its answer is final.** A refused SYN is
-            // a listener that is not there; retrying it for thirty seconds
-            // would delay the one line that says so and change nothing.
+            Ok(conn) => {
+                if refused > 0 {
+                    say(shared, format!(
+                        "logd: the log stream to {at} opened after {refused} refusal(s)"
+                    ));
+                }
+                return Some(conn);
+            }
+            // **Said at once, and asked again until the bound.** A refused SYN
+            // is a listener that is not there yet as often as one that never
+            // will be — a host starting its listener late is the same answer —
+            // so the line goes into the log now and the attempt goes on, at a
+            // pace a peer that keeps refusing is not flooded by.
             Err(NetError::ConnectionRefused) => {
-                say(shared, format!(
-                    "logd: nothing is listening at {at} for this boot's log stream - \
-                     this boot's log is on /log only"
-                ));
-                return None;
+                if refused == 0 {
+                    say(shared, format!(
+                        "logd: nothing is listening at {at} for this boot's log stream - asking \
+                         again until {OPEN_BOUND:?} after logd started; /log has every record"
+                    ));
+                }
+                refused += 1;
+                if began.elapsed() >= OPEN_BOUND {
+                    return None;
+                }
+                std::thread::sleep(REFUSED_RETRY_EVERY);
             }
             // The manifest gave this program no `netd`, so there is no network
             // to wait for either.

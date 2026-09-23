@@ -753,49 +753,20 @@ pub fn lan_talk(
     _c_bins: &[(String, Vec<u8>)],
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    use toyos_build::metaltalk::{self, Ssh, Stream};
+    use toyos_build::metaltalk::{self, Ssh};
 
     let root = super::compile::repo_root();
-    let case = root.join(TALK_QEMU_CONFIG);
-    let scratch = super::lane::dir().join("lan-talk");
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
-    let identity = super::ssh::Identity::mint(TALK_KEY)?;
-    let stream = Stream::listen(
-        std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-        &scratch.join(toyos_build::metal::READBACK_STREAM),
-        false,
-    )?;
-    let at = (qemu::GUEST_VIEW_OF_HOST, stream.local().port());
-    let param = qemu::log_stream_param(at);
-    let bytes = qemu::build_boot_image_carrying(
-        &case,
-        &[],
-        &[],
-        &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
-        &[&param],
-    );
-    let image = super::lane::dir().join("lan-talk.img");
-    std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
-    let (start, len) = super::volumes::log_extent(&bytes, &image)?;
-
+    let staged = TalkBoot::stage("lan-talk")?;
+    let (stream, scratch) = (&staged.stream, &staged.scratch);
     let ssh_port = qemu::free_host_port();
-    let options = BootOptions {
-        profile: qemu::Profile::E1000e,
-        boot_image: Some(qemu::Staged::Written(image.clone())),
-        log_stream: Some(at),
-        ssh_port: Some(ssh_port),
-        ..Default::default()
-    };
-    if !qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")) {
-        return Err("this test needs an Intel NIC and the profile has none".to_string());
-    }
-    let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
+    let options = BootOptions { ssh_port: Some(ssh_port), ..staged.options() };
+    let mut guest = QemuInstance::boot_with_options(&staged.case, &[], &[], options);
     let mut console = guest.boot_log().to_string();
 
-    let ssh = Ssh::at(&root, identity.private().to_path_buf())?;
+    let ssh = Ssh::at(&root, staged.identity.private().to_path_buf())?;
     let forward = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, ssh_port));
     let conversation =
-        metaltalk::converse(&stream, &ssh, Some(forward), false, TALK_CEILING, &scratch)?;
+        metaltalk::converse(stream, &ssh, Some(forward), false, TALK_CEILING, scratch)?;
     // `-no-reboot`: the guest's own reset ends QEMU, and its last word is
     // the kernel's.
     qemu::await_marker(&mut guest, &mut console, bootlog::REBOOTING, "`reboot` over ssh")?;
@@ -806,7 +777,7 @@ pub fn lan_talk(
         .ok_or("a rendered conversation names its peer")?;
     let said = metaltalk::judge(&heard, &stream.lines())
         .map_err(|bad| format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))?;
-    let file = super::volumes::whole_log(&image, start, len)?;
+    let file = super::volumes::whole_log(&staged.image, staged.start, staged.len)?;
     super::logstream::is_subsequence_of(&stream.lines(), &file)?;
     for line in said {
         eprintln!("  [talk] {line}");
@@ -816,7 +787,128 @@ pub fn lan_talk(
         stream.lines().len(),
         file.len()
     );
-    let _ = std::fs::remove_file(&image);
+    let _ = std::fs::remove_file(&staged.image);
+    Ok(())
+}
+
+/// A talking boot in front of QEMU's 82574, staged: its listener, the key its
+/// image authorizes, and where its log partition sits in the image.
+struct TalkBoot {
+    case: std::path::PathBuf,
+    stream: toyos_build::metaltalk::Stream,
+    identity: super::ssh::Identity,
+    image: std::path::PathBuf,
+    scratch: std::path::PathBuf,
+    at: (&'static str, u16),
+    start: usize,
+    len: usize,
+}
+
+impl TalkBoot {
+    fn stage(name: &str) -> Result<Self, String> {
+        let case = super::compile::repo_root().join(TALK_QEMU_CONFIG);
+        let scratch = super::lane::dir().join(name);
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        let identity = super::ssh::Identity::mint(TALK_KEY)?;
+        let stream = toyos_build::metaltalk::Stream::listen(
+            std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            &scratch.join(toyos_build::metal::READBACK_STREAM),
+            false,
+        )?;
+        let at = (qemu::GUEST_VIEW_OF_HOST, stream.local().port());
+        let param = qemu::log_stream_param(at);
+        let bytes = qemu::build_boot_image_carrying(
+            &case,
+            &[],
+            &[],
+            &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
+            &[&param],
+        );
+        let image = super::lane::dir().join(format!("{name}.img"));
+        std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
+        let (start, len) = super::volumes::log_extent(&bytes, &image)?;
+        Ok(Self { case, stream, identity, image, scratch, at, start, len })
+    }
+
+    /// The boot's options, the NIC asked of the argv rather than assumed.
+    fn options(&self) -> BootOptions {
+        let options = BootOptions {
+            profile: qemu::Profile::E1000e,
+            boot_image: Some(qemu::Staged::Written(self.image.clone())),
+            log_stream: Some(self.at),
+            ..Default::default()
+        };
+        assert!(
+            qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")),
+            "[lan] this boot needs an Intel NIC and the profile has none"
+        );
+        options
+    }
+}
+
+/// The marker a late-link boot takes its cable out at: `logd` exists and netd
+/// does not yet, so no lease can have landed.
+const LOGD_SPAWNED: &str = "spawn: /system/bin/logd ";
+
+/// How long the late-link boot's cable stays out: a stimulus's pace, never a
+/// verdict — long enough that `logd` asks through a machine with no address
+/// many times over, which is what the T14's slow PHY gives it.
+const CABLE_OUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// **The network comes up late, and the stream still opens.** The talking boot
+/// with its cable taken out before netd starts and put back seconds later. On
+/// the T14 the lease lands seconds after `logd` first asks for its stream, and
+/// a machine with no address yet answered that ask as a peer's refusal, which
+/// `logd` took as final. The premise is asked of the guest's own console — no
+/// lease before the cable goes back — and the verdict is the stream opening
+/// and carrying the boot's `Boot: complete`.
+pub fn lan_talk_late_link(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let staged = TalkBoot::stage("lan-talk-late-link")?;
+    let options = BootOptions { qmp: true, ready_marker: LOGD_SPAWNED, ..staged.options() };
+    let mut guest = QemuInstance::boot_with_options(&staged.case, &[], &[], options);
+    let mut qmp = qemu::QmpDevices::open(guest.qmp_socket());
+    qmp.set_link("net0", false);
+    let mut console = guest.boot_log().to_string();
+    console.push_str(&guest.drain_serial(CABLE_OUT));
+    if console.contains(LEASE) {
+        return Err(format!(
+            "the premise did not hold: the guest leased before its cable went out, so nothing \
+             here came up late\n{console}"
+        ));
+    }
+    if let Some(peer) = staged.stream.peer() {
+        return Err(format!("the stream opened from {peer} with the cable out"));
+    }
+    qmp.set_link("net0", true);
+    drop(qmp);
+    let opened = staged.stream.wait_connected(TALK_CEILING);
+    console.push_str(&guest.drain_serial(std::time::Duration::from_millis(500)));
+    drop(guest);
+    if opened.is_none() {
+        return Err(format!(
+            "the cable went back and the stream never opened in {} s\n{console}",
+            TALK_CEILING.as_secs()
+        ));
+    }
+    let lines = staged.stream.lines();
+    if bootlog::boot_millis(&lines.concat()).is_none() {
+        return Err(format!("the stream opened and carries no `Boot: complete`: {lines:?}"));
+    }
+    if !console.contains(LEASE) {
+        return Err(format!("the stream opened and the guest never said it leased\n{console}"));
+    }
+    serial::Serial::named("the late-link boot", console.as_str()).must_be_clean()?;
+    eprintln!(
+        "  [talk] the cable went out before netd, back {} s later, and the stream opened with {} \
+         record(s), `Boot: complete` among them",
+        CABLE_OUT.as_secs(),
+        lines.len()
+    );
+    let _ = std::fs::remove_file(&staged.image);
     Ok(())
 }
 

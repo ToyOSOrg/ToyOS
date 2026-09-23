@@ -684,6 +684,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // for byte, and `reboot` over ssh ending the guest. Records, bytes and a
     // reset; its clocks are liveness guards on a guest that stopped talking.
     ("lan_talk", Sched::Parallel, Tier::Fast),
+    // The same boot with its cable out before netd starts and back seconds
+    // later: the stream must still open. The verdict is the stream opening
+    // and the guest's own records; its one clock paces the cable, and the
+    // premise — no lease before the cable goes back — is asked of the guest.
+    ("lan_talk_late_link", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -13660,6 +13665,7 @@ fn run_machine_test(
         "lan_lease_report" => lan::lan_lease_report(test_config, c_bins, rust_bins),
         "lan_crumb_trail" => lan::lan_crumb_trail(test_config, c_bins, rust_bins),
         "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
+        "lan_talk_late_link" => lan::lan_talk_late_link(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed
