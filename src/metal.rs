@@ -1758,6 +1758,14 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     };
     let armed = crate::image::params_of(image)
         .map_err(|why| Refusal::File { path: image.display().to_string(), why })?;
+    // Before anything can refuse: a swap file left standing is one a judge
+    // reads as this swap's.
+    let at = dir.join(READBACK_SWAP);
+    match std::fs::remove_file(&at) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Refusal::File { path: at.display().to_string(), why: e.to_string() }),
+    }
     let cable = Talking::prepare_into(&armed, key, dir, READBACK_SWAP_STREAM, "swap")?;
     println!("asking whichever machine opens it to run {} as {service}", binary.display());
     let swapped = crate::metalswap::swap(
@@ -2503,6 +2511,42 @@ mod tests {
             assert!(!refusal.about_the_boot());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A swap flashes nothing and reboots nothing**, so every flag that
+    /// describes a boot is refused beside it, and it is refused without the
+    /// four things it acts with. A `--binary` with no swap is no swap.
+    #[test]
+    fn a_swap_is_not_a_boot_and_names_what_it_acts_with() {
+        let whole = [
+            "--swap", "netd", "--binary", "n", "--image", "x.img", "--talk", "/tmp/k",
+            "--readback", "/tmp/r",
+        ]
+        .map(String::from);
+        let args = Args::parse(&whole).expect("a whole swap");
+        assert_eq!(args.swap.as_deref(), Some("netd"));
+
+        for flag in [vec!["--fat32-check"], vec!["--dry-run"], vec!["--nic", "0000:00:1f.6"]] {
+            let mut words = whole.to_vec();
+            words.extend(flag.iter().map(|w| (*w).to_string()));
+            let said = Args::parse(&words).unwrap_err().to_string();
+            assert!(said.contains(flag[0]) && said.contains("will not make"), "{said}");
+        }
+        for missing in ["--binary", "--image", "--talk", "--readback"] {
+            let at = whole.iter().position(|w| w == missing).unwrap();
+            let words: Vec<String> = whole
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != at && *i != at + 1)
+                .map(|(_, w)| w.clone())
+                .collect();
+            assert!(Args::parse(&words).is_err(), "a swap without {missing} was taken");
+        }
+        let lone = ["--binary", "n"].map(String::from);
+        assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
+        let mut bent = whole.to_vec();
+        bent[1] = "../netd".to_string();
+        assert!(Args::parse(&bent).unwrap_err().to_string().contains("no service"));
     }
 
     /// **There is nothing to fall through to.** A default image was what let the
