@@ -277,8 +277,11 @@ const FLAP_NETDEV: &str = "net0";
 const FLAP_DOWN: std::time::Duration = std::time::Duration::from_millis(1_500);
 
 /// The report of a boot whose link was taken away after its lease: the link
-/// goes down and comes back up after the first lease, and no `lost` line
-/// follows that lease — the address was never given up.
+/// goes down and comes back up after the first lease, and neither a `lost` nor
+/// a second `leased` line follows it — the client never started over, which
+/// is what gives the address up. Against QEMU's server the second is the one
+/// that shows: a restart is answered inside the pass that made it, so the loss
+/// between the two never reaches the report.
 fn flap_kept_the_lease(text: &str) -> Result<(), String> {
     let events: Vec<Event> =
         text.lines().filter_map(lease::Line::parse).map(|line| line.event).collect();
@@ -296,6 +299,9 @@ fn flap_kept_the_lease(text: &str) -> Result<(), String> {
     }
     if after.contains(&Event::Lost) {
         return Err(format!("the lease was given up across the flap:\n{text}"));
+    }
+    if after[1..].iter().any(|event| matches!(event, Event::Leased { .. })) {
+        return Err(format!("the client started over across the flap:\n{text}"));
     }
     Ok(())
 }
