@@ -10,16 +10,39 @@
 //! initialization and link setup steps. The device driver uses the MDIC
 //! register to initialize the PHY and setup the link."
 
-use crate::regs::{self, extcnf, mdic};
-use crate::{Clock, Registers};
+use core::cell::Cell;
 
-/// How long [`Owned::claim`] waits for §4.5.2's grant and [`Owned::transact`]
-/// for §10.2.2.7's `Ready`, each before the part is refused by name.
+use crate::regs::{self, extcnf, mdic};
+use crate::{Clock, Link, Registers, Speed};
+
+/// How long [`Owned::transact`] waits for §10.2.2.7's `Ready` before the part
+/// is refused by name.
+///
+/// **A driver-chosen bound, not a datasheet one**: §10.2.2.7 gives its
+/// transaction no time, so a part that does not end one inside this is refused
+/// instead of holding up the boot.
+pub(crate) const MDI_DEADLINE_NANOS: u64 = 100_000_000;
+
+/// How long each of §4.5.2's two waits is given: another agent's software flag
+/// to go, and this driver's own request to be granted.
 ///
 /// **A driver-chosen bound, not a datasheet one**: §4.5.2 gives its handshake
-/// no time and §10.2.2.7 gives its transaction none, so a part that answers
-/// neither inside it is refused instead of holding up the boot.
-pub(crate) const DEADLINE_NANOS: u64 = 100_000_000;
+/// no time. At [`ARBITRATION_PACE_NANOS`] between accesses this is five
+/// readings of the register, and the one grant this driver has measured on the
+/// part came back at the first reading after the request — so a bound this wide
+/// refuses an arbitration that is not answering rather than one that is slow.
+pub(crate) const ARBITRATION_DEADLINE_NANOS: u64 = 500_000_000;
+
+/// How long this driver leaves §4.5.2's arbitration alone between two accesses
+/// of its own.
+///
+/// **A bench fact and not a datasheet one.** Neither §4.5.2 nor §10.2.2.15 asks
+/// for any pace at all. On the T14 this same request, put to this same register
+/// with about a millisecond between accesses, left a machine that had to be
+/// powered off by hand; the run that put it with 88 to 133 ms between accesses
+/// came back and answered. One run each, and the cause is unmeasured: this is
+/// the wider of the two paces, and it stands until something measures why.
+pub(crate) const ARBITRATION_PACE_NANOS: u64 = 100_000_000;
 
 /// §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
 /// attempting to access MDIO registers."
@@ -118,59 +141,42 @@ pub(crate) mod custom_mode {
 /// address nothing drives can produce it.
 pub(crate) const IDENTIFIER_HIGH_INTEL: u16 = 0x0154;
 
-/// Which of §4.5.2's three agents one reading of `EXTCNF_CTRL` names as holding
-/// the MDIO interface.
+/// Which of §4.5.2's two agents that are not software one reading of
+/// `EXTCNF_CTRL` names.
 ///
-/// **A reading and not a state.** §4.5.2 says "at any given time at most only
-/// one bit is 1b", so the four names below that carry more than one agent are
-/// the part answering against its own document — which is what a driver can
-/// see, and therefore what it reports rather than folding into one of the three.
+/// **The software bit is left out because around a request it is this driver's
+/// own**: whether it read back set is the grant, and the one reading in which
+/// it is somebody else's is [`PhyRefusal::SoftwareFlagStood`], which is what
+/// this type accompanies.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Holders {
-    Software,
+pub enum Others {
+    Nobody,
     Hardware,
-    SoftwareAndHardware,
     Manageability,
-    SoftwareAndManageability,
     HardwareAndManageability,
-    AllThree,
 }
 
-impl Holders {
-    /// Who one reading names, or `None` where §4.5.2's three bits are all
-    /// clear: an interface nobody holds is not a holder, and the caller that
-    /// gets `None` is the one that may take the interface.
-    pub fn in_reading(extcnf: u32) -> Option<Self> {
-        let held = |bit| extcnf & bit != 0;
-        Some(
-            match (
-                held(extcnf::MDIO_SW_OWNERSHIP),
-                held(extcnf::MDIO_HW_OWNERSHIP),
-                held(extcnf::MDIO_MNG_OWNERSHIP),
-            ) {
-                (false, false, false) => return None,
-                (true, false, false) => Self::Software,
-                (false, true, false) => Self::Hardware,
-                (true, true, false) => Self::SoftwareAndHardware,
-                (false, false, true) => Self::Manageability,
-                (true, false, true) => Self::SoftwareAndManageability,
-                (false, true, true) => Self::HardwareAndManageability,
-                (true, true, true) => Self::AllThree,
-            },
-        )
+impl Others {
+    pub fn in_reading(extcnf: u32) -> Self {
+        match (
+            extcnf & extcnf::MDIO_HW_OWNERSHIP != 0,
+            extcnf & extcnf::MDIO_MNG_OWNERSHIP != 0,
+        ) {
+            (false, false) => Self::Nobody,
+            (true, false) => Self::Hardware,
+            (false, true) => Self::Manageability,
+            (true, true) => Self::HardwareAndManageability,
+        }
     }
 }
 
-impl core::fmt::Display for Holders {
+impl core::fmt::Display for Others {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
-            Self::Software => "software",
+            Self::Nobody => "nobody else",
             Self::Hardware => "the part's own hardware",
-            Self::SoftwareAndHardware => "software and the part's own hardware",
             Self::Manageability => "the manageability agent",
-            Self::SoftwareAndManageability => "software and the manageability agent",
             Self::HardwareAndManageability => "the part's own hardware and the manageability agent",
-            Self::AllThree => "software, the part's own hardware and the manageability agent",
         })
     }
 }
@@ -186,22 +192,25 @@ pub enum PhyRefusal {
     /// A register this sequence reaches answered ones, so nothing decodes it
     /// and no write was made to it.
     Unrouted { reg: usize },
-    /// §4.5.2's interface was already somebody's when this driver looked, and
-    /// never went free inside the deadline. **No request was registered**: a
-    /// driver that asked anyway could not tell its own bit from a grant, and
-    /// giving the interface back afterwards would clear a flag it never owned.
+    /// §4.5.2's *software* bit was already set when this driver looked and
+    /// stayed set for [`ARBITRATION_DEADLINE_NANOS`], so it is another software
+    /// agent's — a grant it holds under one reading of the clause, a flag it
+    /// set under the other. **No request was registered**: this driver's own
+    /// request is the same bit, so one written over that flag could not be told
+    /// from it, and the release below would clear a flag this driver never set.
     ///
-    /// `held_by` is the *last* reading before the deadline: the arbitration
-    /// moves while a driver waits on it, and who holds the interface at the
-    /// moment the wait is given up on is what a machine can act on.
-    OwnershipHeld { held_by: Holders, after_nanos: u64 },
-    /// §4.5.2's handshake never granted: the ownership bit did not read back
-    /// set inside the deadline, so something else holds the interface.
+    /// `beside` is the *last* reading before the deadline: the arbitration
+    /// moves while a driver waits on it, and who stood beside that flag when
+    /// the wait was given up on is what a machine can act on.
+    SoftwareFlagStood { beside: Others, after_nanos: u64 },
+    /// The request was registered and the software bit never read back set
+    /// inside [`ARBITRATION_DEADLINE_NANOS`]. **The request has been
+    /// withdrawn**, or it would stand for a grant nobody is waiting on.
     ///
-    /// The word and not a [`Holders`], because a grant that never came names
-    /// nobody: the last reading here may have all three bits clear, which is
-    /// the arbitration between two agents and not one of them holding it.
-    OwnershipBusy { held_by: u32, after_nanos: u64 },
+    /// The word and not an [`Others`], because a grant that never came names
+    /// nobody: the last reading here may have every bit clear, which is the
+    /// arbitration between two agents and not one of them holding it.
+    GrantNeverCame { held_by: u32, after_nanos: u64 },
     /// §10.2.2.7's `Ready` bit never came back for one transaction.
     MdiUnready { phy: u8, reg: u8, after_nanos: u64 },
     /// §10.2.2.7's `Error` bit: the part "fails to complete an MDI read".
@@ -224,15 +233,15 @@ impl core::fmt::Display for PhyRefusal {
                 "register {reg:#x} answers ones, so nothing decodes it and this driver wrote \
                  nothing into it"
             ),
-            Self::OwnershipHeld { held_by, after_nanos } => write!(
+            Self::SoftwareFlagStood { beside, after_nanos } => write!(
                 f,
-                "§4.5.2's ownership bits named {held_by} for {after_nanos} ns and the MDIO \
-                 interface never went free, so no request for it was ever registered"
+                "§4.5.2's software ownership bit was another agent's for {after_nanos} ns, with \
+                 {beside} beside it, so no request of this driver's was ever registered over it"
             ),
-            Self::OwnershipBusy { held_by, after_nanos } => write!(
+            Self::GrantNeverCame { held_by, after_nanos } => write!(
                 f,
-                "EXTCNF_CTRL read {held_by:#x} for {after_nanos} ns and never granted this \
-                 driver the MDIO interface"
+                "EXTCNF_CTRL read {held_by:#x} for {after_nanos} ns after this driver registered \
+                 §4.5.2's request, which was never granted and has been withdrawn"
             ),
             Self::MdiUnready { phy, reg, after_nanos } => write!(
                 f,
@@ -269,8 +278,10 @@ pub struct Phy {
     pub id: u32,
 }
 
-/// The bring-up's outcome with its fields dropped: what one exit code carries
-/// off a machine whose console reaches nobody.
+/// What one probe boot answers, with every field dropped: the bring-up's
+/// outcome and, where it brought the PHY up, the link that came after it —
+/// which is what one exit code carries off a machine whose console reaches
+/// nobody.
 ///
 /// **One table, read at both ends.** netd exits with [`Outcome::exit_code`]
 /// when its caller asks for the outcome that way, the kernel records the code
@@ -281,68 +292,169 @@ pub struct Phy {
 /// netd with and which would therefore read back as an outcome the PHY never
 /// gave.
 ///
-/// **[`PhyRefusal::OwnershipHeld`] is seven codes and not one.** An interface
-/// already owned is the one refusal whose cause is another agent, and on a
-/// machine whose console reaches nobody the exit code is the only channel that
-/// can say which — so every reading of §4.5.2's three bits [`Holders`] can name
-/// has a code of its own.
+/// **A PHY that came up is seven codes and not one.** The question the probe
+/// is flashed for is whether the cable came up, and the only channel it has is
+/// this number — so the link's absence and each speed and duplex §10.2.2.2's
+/// `STATUS` can resolve to has a code of its own.
+///
+/// **[`PhyRefusal::SoftwareFlagStood`] is four codes and not one**, for the
+/// same reason: a flag that is another software agent's is the one refusal
+/// whose cause is another agent, and which of §4.5.2's other two stood beside
+/// it is what a machine with no console cannot otherwise say.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum Outcome {
-    BroughtUp = 64,
-    Unrouted = 65,
-    OwnershipHeldBySoftware = 66,
-    OwnershipHeldByHardware = 67,
-    OwnershipHeldBySoftwareAndHardware = 68,
-    OwnershipHeldByManageability = 69,
-    OwnershipHeldBySoftwareAndManageability = 70,
-    OwnershipHeldByHardwareAndManageability = 71,
-    OwnershipHeldByAllThree = 72,
-    OwnershipBusy = 73,
-    MdiUnready = 74,
-    MdiError = 75,
-    Identity = 76,
-    NotThisRegisterMap = 77,
+    BroughtUpNoLink = 64,
+    LinkAt10Half = 65,
+    LinkAt10Full = 66,
+    LinkAt100Half = 67,
+    LinkAt100Full = 68,
+    LinkAt1000Half = 69,
+    LinkAt1000Full = 70,
+    Unrouted = 71,
+    SoftwareFlagStood = 72,
+    SoftwareFlagStoodBesideHardware = 73,
+    SoftwareFlagStoodBesideManageability = 74,
+    SoftwareFlagStoodBesideBoth = 75,
+    GrantNeverCame = 76,
+    MdiUnready = 77,
+    MdiError = 78,
+    Identity = 79,
+    NotThisRegisterMap = 80,
+}
+
+impl core::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.link() {
+            Some(Link::Up { speed, full_duplex }) => write!(
+                f,
+                "the PHY was brought up and the link came at {} Mb/s {}",
+                speed.mbps(),
+                if full_duplex { "full duplex" } else { "half duplex" }
+            ),
+            Some(Link::Down) => {
+                write!(f, "the PHY was brought up and no link came inside the driver's bound")
+            }
+            None => write!(f, "the bring-up refused the PHY: {}", self.refusal_word()),
+        }
+    }
 }
 
 impl Outcome {
+    /// The clause each refusal stands for, in a word — the other half of
+    /// [`Display`], and never reached for an outcome that brought the PHY up.
+    ///
+    /// [`Display`]: core::fmt::Display
+    fn refusal_word(self) -> &'static str {
+        match self {
+            Self::BroughtUpNoLink
+            | Self::LinkAt10Half
+            | Self::LinkAt10Full
+            | Self::LinkAt100Half
+            | Self::LinkAt100Full
+            | Self::LinkAt1000Half
+            | Self::LinkAt1000Full => "it did not",
+            Self::Unrouted => "a register it reaches answers ones",
+            Self::SoftwareFlagStood => "§4.5.2's software flag was another agent's",
+            Self::SoftwareFlagStoodBesideHardware => {
+                "§4.5.2's software flag was another agent's, the part's own hardware beside it"
+            }
+            Self::SoftwareFlagStoodBesideManageability => {
+                "§4.5.2's software flag was another agent's, the manageability agent beside it"
+            }
+            Self::SoftwareFlagStoodBesideBoth => {
+                "§4.5.2's software flag was another agent's, the part's own hardware and the \
+                 manageability agent beside it"
+            }
+            Self::GrantNeverCame => "§4.5.2's request was never granted",
+            Self::MdiUnready => "an MDI transaction never reported §10.2.2.7's Ready",
+            Self::MdiError => "the part reported §10.2.2.7's Error on a transaction",
+            Self::Identity => "§9.5.2.3's identifier is not Intel's at either PHY address",
+            Self::NotThisRegisterMap => "this part's PHY is not the one §9 describes",
+        }
+    }
+
     /// Every outcome, in exit-code order.
-    pub const ALL: [Self; 14] = [
-        Self::BroughtUp,
+    pub const ALL: [Self; 17] = [
+        Self::BroughtUpNoLink,
+        Self::LinkAt10Half,
+        Self::LinkAt10Full,
+        Self::LinkAt100Half,
+        Self::LinkAt100Full,
+        Self::LinkAt1000Half,
+        Self::LinkAt1000Full,
         Self::Unrouted,
-        Self::OwnershipHeldBySoftware,
-        Self::OwnershipHeldByHardware,
-        Self::OwnershipHeldBySoftwareAndHardware,
-        Self::OwnershipHeldByManageability,
-        Self::OwnershipHeldBySoftwareAndManageability,
-        Self::OwnershipHeldByHardwareAndManageability,
-        Self::OwnershipHeldByAllThree,
-        Self::OwnershipBusy,
+        Self::SoftwareFlagStood,
+        Self::SoftwareFlagStoodBesideHardware,
+        Self::SoftwareFlagStoodBesideManageability,
+        Self::SoftwareFlagStoodBesideBoth,
+        Self::GrantNeverCame,
         Self::MdiUnready,
         Self::MdiError,
         Self::Identity,
         Self::NotThisRegisterMap,
     ];
 
-    pub fn of(phy: Result<Phy, PhyRefusal>) -> Self {
+    /// The outcome of a bring-up, and of the link that followed it.
+    ///
+    /// **`link` is read only where the PHY came up**: what a part whose PHY
+    /// this driver never configured reports about its link is the agent before
+    /// it talking, and the refusal is the whole of what that boot has to say.
+    pub fn of(phy: Result<Phy, PhyRefusal>, link: Link) -> Self {
         match phy {
-            Ok(_) => Self::BroughtUp,
-            Err(PhyRefusal::Unrouted { .. }) => Self::Unrouted,
-            Err(PhyRefusal::OwnershipHeld { held_by, .. }) => match held_by {
-                Holders::Software => Self::OwnershipHeldBySoftware,
-                Holders::Hardware => Self::OwnershipHeldByHardware,
-                Holders::SoftwareAndHardware => Self::OwnershipHeldBySoftwareAndHardware,
-                Holders::Manageability => Self::OwnershipHeldByManageability,
-                Holders::SoftwareAndManageability => Self::OwnershipHeldBySoftwareAndManageability,
-                Holders::HardwareAndManageability => Self::OwnershipHeldByHardwareAndManageability,
-                Holders::AllThree => Self::OwnershipHeldByAllThree,
+            Ok(_) => match link {
+                Link::Down => Self::BroughtUpNoLink,
+                Link::Up { speed: Speed::Mbps10, full_duplex: false } => Self::LinkAt10Half,
+                Link::Up { speed: Speed::Mbps10, full_duplex: true } => Self::LinkAt10Full,
+                Link::Up { speed: Speed::Mbps100, full_duplex: false } => Self::LinkAt100Half,
+                Link::Up { speed: Speed::Mbps100, full_duplex: true } => Self::LinkAt100Full,
+                Link::Up { speed: Speed::Mbps1000, full_duplex: false } => Self::LinkAt1000Half,
+                Link::Up { speed: Speed::Mbps1000, full_duplex: true } => Self::LinkAt1000Full,
             },
-            Err(PhyRefusal::OwnershipBusy { .. }) => Self::OwnershipBusy,
+            Err(PhyRefusal::Unrouted { .. }) => Self::Unrouted,
+            Err(PhyRefusal::SoftwareFlagStood { beside, .. }) => match beside {
+                Others::Nobody => Self::SoftwareFlagStood,
+                Others::Hardware => Self::SoftwareFlagStoodBesideHardware,
+                Others::Manageability => Self::SoftwareFlagStoodBesideManageability,
+                Others::HardwareAndManageability => Self::SoftwareFlagStoodBesideBoth,
+            },
+            Err(PhyRefusal::GrantNeverCame { .. }) => Self::GrantNeverCame,
             Err(PhyRefusal::MdiUnready { .. }) => Self::MdiUnready,
             Err(PhyRefusal::MdiError { .. }) => Self::MdiError,
             Err(PhyRefusal::Identity { .. }) => Self::Identity,
             Err(PhyRefusal::NotThisRegisterMap) => Self::NotThisRegisterMap,
         }
+    }
+
+    /// The link this outcome carries, or `None` where the PHY was not brought
+    /// up at all — on which the link is the agent before this driver's and
+    /// never this bring-up's reading.
+    pub fn link(self) -> Option<Link> {
+        let up = |speed, full_duplex| Some(Link::Up { speed, full_duplex });
+        match self {
+            Self::BroughtUpNoLink => Some(Link::Down),
+            Self::LinkAt10Half => up(Speed::Mbps10, false),
+            Self::LinkAt10Full => up(Speed::Mbps10, true),
+            Self::LinkAt100Half => up(Speed::Mbps100, false),
+            Self::LinkAt100Full => up(Speed::Mbps100, true),
+            Self::LinkAt1000Half => up(Speed::Mbps1000, false),
+            Self::LinkAt1000Full => up(Speed::Mbps1000, true),
+            Self::Unrouted
+            | Self::SoftwareFlagStood
+            | Self::SoftwareFlagStoodBesideHardware
+            | Self::SoftwareFlagStoodBesideManageability
+            | Self::SoftwareFlagStoodBesideBoth
+            | Self::GrantNeverCame
+            | Self::MdiUnready
+            | Self::MdiError
+            | Self::Identity
+            | Self::NotThisRegisterMap => None,
+        }
+    }
+
+    /// Whether the PHY was brought up, whatever the link then did.
+    pub fn came_up(self) -> bool {
+        self.link().is_some()
     }
 
     pub fn exit_code(self) -> i32 {
@@ -356,6 +468,56 @@ impl Outcome {
     }
 }
 
+/// Every access this driver makes to §4.5.2's arbitration, paced.
+///
+/// **The pace is the whole of what this adds.** The register is one word two
+/// other agents read and write too, and [`ARBITRATION_PACE_NANOS`] is how much
+/// of it this driver leaves them between two accesses of its own.
+struct Arbitration<'a, R: Registers, C: Clock> {
+    regs: &'a R,
+    clock: &'a C,
+    /// When this driver last reached the register, and `None` before its first
+    /// access: nothing is owed a pace ahead of the first one.
+    last: Cell<Option<u64>>,
+}
+
+impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
+    fn over(regs: &'a R, clock: &'a C) -> Self {
+        Self { regs, clock, last: Cell::new(None) }
+    }
+
+    /// Give the processor away until [`ARBITRATION_PACE_NANOS`] has passed
+    /// since this driver's last access to the register.
+    ///
+    /// A loop, because a pause decides nothing: it may return early, and what
+    /// says the pace has been kept is the clock.
+    fn pace(&self) {
+        let Some(last) = self.last.get() else {
+            return;
+        };
+        loop {
+            let since = self.clock.nanos().saturating_sub(last);
+            if since >= ARBITRATION_PACE_NANOS {
+                return;
+            }
+            self.clock.pause(ARBITRATION_PACE_NANOS - since);
+        }
+    }
+
+    fn read(&self) -> u32 {
+        self.pace();
+        let reading = self.regs.read(regs::EXTCNF_CTRL);
+        self.last.set(Some(self.clock.nanos()));
+        reading
+    }
+
+    fn write(&self, value: u32) {
+        self.pace();
+        self.regs.write(regs::EXTCNF_CTRL, value);
+        self.last.set(Some(self.clock.nanos()));
+    }
+}
+
 /// The MDIO interface, held under §4.5.2's software ownership for as long as
 /// this value lives.
 ///
@@ -363,10 +525,9 @@ impl Outcome {
 /// completes, the controlling agent must write a 0b to its ownership bit to
 /// enable accesses by the other agents", and a bring-up that returned early
 /// from any of the transactions below would otherwise leave the Management
-/// Engine locked out for the boot.
+/// Engine locked out for the boot. Every `?` in [`bring_up`] is such a return.
 struct Owned<'a, R: Registers, C: Clock> {
-    regs: &'a R,
-    clock: &'a C,
+    mdio: Arbitration<'a, R, C>,
 }
 
 impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
@@ -375,50 +536,72 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// same bit is read as 1b (such as, access is not granted as long as the
     /// bit is 0b)."
     ///
-    /// **The interface is observed free before it is asked for.** Under §4.5.2
-    /// a set software bit is a grant some agent holds, so a request registered
-    /// over it would be a second one on an interface that has at most one
-    /// owner — and the bit reading back set after this driver's own write
-    /// would then say nothing about whose it is. Seeing all three bits clear
-    /// first is the one reading under which the grant below is this driver's.
+    /// **The request is registered whoever else's bit stands.** §4.5.2 gives
+    /// the arbitration a priority order — "manageability, software and then
+    /// hardware" — which is a statement about requests that are waiting, so an
+    /// interface another agent holds is one this driver asks for and never one
+    /// it declines to ask about. On the T14 the part grants it while
+    /// manageability's own bit stands: the clause's "at any given time at most
+    /// only one bit is 1b" is not what that silicon answers, and the grant is
+    /// therefore this driver's bit reading back set and never its bit alone.
+    /// **A bench fact**: one run of that request on that machine read
+    /// `EXTCNF_CTRL` as `0x00300089`, wrote `0x003000a9`, and read `0x003000a9`
+    /// back.
+    ///
+    /// **The one bit that is not asked over is a software bit already set.**
+    /// This driver's request is that same bit, so one registered on top of
+    /// another software agent's could not be told from its grant, and the
+    /// release would clear a flag this driver never set.
     fn claim(regs: &'a R, clock: &'a C) -> Result<Self, PhyRefusal> {
+        let mdio = Arbitration::over(regs, clock);
         // §4.5.2 arbitrates three bits of this register, so one bit is the whole
         // of what this driver writes in it and the rest is read and carried.
         // The read and the write are two accesses and an agent writing between
         // them loses what it wrote — which a composed word would lose on every
         // write instead of on a race.
-        let mut held = regs.read(regs::EXTCNF_CTRL);
+        let mut held = mdio.read();
         // Ones is nothing decoding this offset, and the write below would
         // otherwise set every field of a register this driver owns one bit of.
         if held == u32::MAX {
             return Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL });
         }
         let started = clock.nanos();
-        // Re-read and re-named on every turn, so the refusal below carries who
-        // held the interface when the wait ended and not who held it when it
-        // began — the arbitration moves underneath a driver waiting on it.
-        while let Some(held_by) = Holders::in_reading(held) {
+        // Re-read on every turn, so the refusal carries who stood beside that
+        // flag when the wait ended and not who stood there when it began — the
+        // arbitration moves underneath a driver waiting on it.
+        while held & extcnf::MDIO_SW_OWNERSHIP != 0 {
             let waited = clock.nanos().saturating_sub(started);
-            if waited >= DEADLINE_NANOS {
-                return Err(PhyRefusal::OwnershipHeld { held_by, after_nanos: waited });
+            if waited >= ARBITRATION_DEADLINE_NANOS {
+                return Err(PhyRefusal::SoftwareFlagStood {
+                    beside: Others::in_reading(held),
+                    after_nanos: waited,
+                });
             }
-            held = regs.read(regs::EXTCNF_CTRL);
+            held = mdio.read();
+            if held == u32::MAX {
+                return Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL });
+            }
         }
-        regs.write(regs::EXTCNF_CTRL, held | extcnf::MDIO_SW_OWNERSHIP);
+        mdio.write(held | extcnf::MDIO_SW_OWNERSHIP);
+        let asked_at = clock.nanos();
         loop {
-            let held = regs.read(regs::EXTCNF_CTRL);
-            // §4.5.2: "at any given time at most only one bit is 1b", so the
-            // grant is this driver's bit standing alone and never merely set.
-            if held & extcnf::OWNERSHIP == extcnf::MDIO_SW_OWNERSHIP {
-                return Ok(Self { regs, clock });
+            let reading = mdio.read();
+            // Ones before the bit is read out of it: every bit of that word is
+            // set, and a grant read out of a window nothing decodes would put
+            // this driver on `MDIC` with no part behind it.
+            if reading == u32::MAX {
+                return Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL });
             }
-            let waited = clock.nanos().saturating_sub(started);
-            if waited >= DEADLINE_NANOS {
-                // The request itself is withdrawn, or §4.5.2's "at most only
-                // one bit is 1b" would be a bit this driver left standing for a
-                // grant it is no longer waiting on.
-                regs.write(regs::EXTCNF_CTRL, held & !extcnf::MDIO_SW_OWNERSHIP);
-                return Err(PhyRefusal::OwnershipBusy { held_by: held, after_nanos: waited });
+            if reading & extcnf::MDIO_SW_OWNERSHIP != 0 {
+                return Ok(Self { mdio });
+            }
+            let waited = clock.nanos().saturating_sub(asked_at);
+            if waited >= ARBITRATION_DEADLINE_NANOS {
+                // The request itself is withdrawn: a bit left standing would be
+                // a request for a grant nobody is waiting on, and the agent it
+                // is registered against would answer it to nobody.
+                mdio.write(reading & !extcnf::MDIO_SW_OWNERSHIP);
+                return Err(PhyRefusal::GrantNeverCame { held_by: reading, after_nanos: waited });
             }
         }
     }
@@ -436,18 +619,18 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
             | ((reg as u32 & mdic::ADDRESS_MASK) << mdic::REGADD_SHIFT)
             | ((phy as u32 & mdic::ADDRESS_MASK) << mdic::PHYADD_SHIFT)
             | op;
-        self.regs.write(regs::MDIC, command);
-        let started = self.clock.nanos();
+        self.mdio.regs.write(regs::MDIC, command);
+        let started = self.mdio.clock.nanos();
         loop {
-            let answer = self.regs.read(regs::MDIC);
+            let answer = self.mdio.regs.read(regs::MDIC);
             if answer & mdic::ERROR != 0 {
                 return Err(PhyRefusal::MdiError { phy, reg });
             }
             if answer & mdic::READY != 0 {
                 return Ok((answer & mdic::DATA_MASK) as u16);
             }
-            let waited = self.clock.nanos().saturating_sub(started);
-            if waited >= DEADLINE_NANOS {
+            let waited = self.mdio.clock.nanos().saturating_sub(started);
+            if waited >= MDI_DEADLINE_NANOS {
                 return Err(PhyRefusal::MdiUnready { phy, reg, after_nanos: waited });
             }
         }
@@ -493,18 +676,23 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
 impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
     /// §4.5.2: "the controlling agent must write a 0b to its ownership bit".
     ///
-    /// The bit is this driver's to clear because [`Owned::claim`] saw all three
-    /// of them clear before it registered a request.
+    /// The bit is this driver's to clear because [`Owned::claim`] saw it clear
+    /// before it registered the request that set it.
     ///
     /// **After [`PhyRefusal::MdiUnready`] this releases with a transaction
     /// still in flight**, where §4.5.2 has the release follow the access's
     /// completion. A transaction this driver has already given
-    /// [`DEADLINE_NANOS`] is not waited on a second time, and a bit left
+    /// [`MDI_DEADLINE_NANOS`] is not waited on a second time, and a bit left
     /// standing instead would keep every other agent off the interface for the
     /// boot.
     fn drop(&mut self) {
-        let held = self.regs.read(regs::EXTCNF_CTRL);
-        self.regs.write(regs::EXTCNF_CTRL, held & !extcnf::MDIO_SW_OWNERSHIP);
+        let held = self.mdio.read();
+        // Ones is a window that stopped decoding under this driver, and the
+        // write would set every field of the register it answered for.
+        if held == u32::MAX {
+            return;
+        }
+        self.mdio.write(held & !extcnf::MDIO_SW_OWNERSHIP);
     }
 }
 
@@ -520,8 +708,15 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
 ) -> Result<Phy, PhyRefusal> {
     // §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
     // attempting to access MDIO registers." A wait and not a poll: the document
-    // offers nothing to read that shortens it.
-    while clock.nanos().saturating_sub(reset_at) < LCD_RESET_DELAY_NANOS {}
+    // offers nothing to read that shortens it. The loop is because a pause
+    // decides nothing — what says the delay is over is the clock.
+    loop {
+        let since = clock.nanos().saturating_sub(reset_at);
+        if since >= LCD_RESET_DELAY_NANOS {
+            break;
+        }
+        clock.pause(LCD_RESET_DELAY_NANOS - since);
+    }
 
     let mdi = Owned::claim(regs, clock)?;
 

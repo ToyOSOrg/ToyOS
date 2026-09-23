@@ -9,10 +9,10 @@
 //! **Below the register file the two parts are not one.** §3.2.1 puts the
 //! 82574's PHY on the controller's own die; the T14's is a MAC in the PCH whose
 //! PHY is separate silicon the Management Engine shares, reached over `MDIC`
-//! under §4.5.2's ownership arbitration. [`Part`] is which one this claim is,
-//! and [`phy`] is everything that follows from it. [`ask`] puts one question to
-//! that arbitration and reaches nothing behind it. [`crumbs`] is a trail left
-//! one durable line ahead of a bring-up, and decides nothing about one.
+//! under §4.5.2's ownership arbitration — which this driver asks for, waits a
+//! bounded time on, and gives back. [`Part`] is which one this claim is, and
+//! [`phy`] is everything that follows from it. [`crumbs`] is a trail left one
+//! durable line ahead of a bring-up, and decides nothing about one.
 //!
 //! # The boundary
 //!
@@ -69,7 +69,6 @@
 #[cfg(test)]
 extern crate std;
 
-pub mod ask;
 pub mod crumbs;
 pub mod phy;
 pub mod regs;
@@ -97,9 +96,17 @@ pub trait Registers {
     fn write(&self, reg: usize, value: u32);
 }
 
-/// One counter read: nanoseconds on a clock that does not go backwards.
+/// The clock, and the one way this driver gives the processor away.
 pub trait Clock {
+    /// One counter read: nanoseconds on a clock that does not go backwards.
     fn nanos(&self) -> u64;
+    /// Give the processor away for about `nanos`.
+    ///
+    /// **It decides nothing**: every bound and every pace in this crate is read
+    /// off [`Self::nanos`], so a pause that returns early or late moves when a
+    /// register is next reached and never what a reading of one means. A
+    /// substrate with nothing to yield to may return at once.
+    fn pause(&self, nanos: u64);
 }
 
 /// The memory this process and the device both reach.
@@ -275,12 +282,56 @@ pub(crate) enum RxRefusal {
 }
 
 /// What the link is doing, as `STATUS` last answered.
+///
+/// **Speed and duplex live inside the up arm**, because §10.2.2.2 makes them a
+/// resolution and a link that is down resolved nothing: a driver that carried
+/// the last speed across a link going away would report a number the part is no
+/// longer standing behind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Link {
-    pub up: bool,
-    /// Megabits per second, from `STATUS.SPEED` (§10.2.2.2); 0 while down.
-    pub speed_mbps: u16,
-    pub full_duplex: bool,
+pub enum Link {
+    #[default]
+    Down,
+    Up {
+        speed: Speed,
+        full_duplex: bool,
+    },
+}
+
+impl Link {
+    pub fn is_up(self) -> bool {
+        matches!(self, Self::Up { .. })
+    }
+}
+
+/// What §10.2.2.2's `STATUS.SPEED` resolved to.
+///
+/// **Three of them and not a number**: the field is two bits and `11b` is
+/// 1000 Mb/s as well, so every value it can hold is one of these and nothing
+/// downstream has an "unknown speed" arm to write.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Speed {
+    Mbps10,
+    Mbps100,
+    #[default]
+    Mbps1000,
+}
+
+impl Speed {
+    fn in_status(status: u32) -> Self {
+        match (status >> status::SPEED_SHIFT) & status::SPEED_MASK {
+            0b00 => Self::Mbps10,
+            0b01 => Self::Mbps100,
+            _ => Self::Mbps1000,
+        }
+    }
+
+    pub fn mbps(self) -> u16 {
+        match self {
+            Self::Mbps10 => 10,
+            Self::Mbps100 => 100,
+            Self::Mbps1000 => 1000,
+        }
+    }
 }
 
 /// One received frame, and the receipt for the buffer it arrived in.
@@ -379,6 +430,20 @@ const RESET_DEADLINE_NANOS: u64 = 100_000_000;
 /// attempting to check to see if the bit has cleared or attempting to access
 /// (read or write) any other device register."
 const RESET_SETTLE_NANOS: u64 = 1_000;
+
+/// How long [`I219::await_link`] waits for `STATUS.LU`.
+///
+/// **A driver-chosen bound, not a datasheet one**: §4.6.3.2 makes the link the
+/// PHY's to raise and neither document times the negotiation that raises it.
+/// Five seconds is far past every other wait here because this one is not a
+/// register settling — it is two ends of a cable agreeing, and on 1000BASE-T
+/// that is a conversation measured in seconds.
+pub const LINK_DEADLINE_NANOS: u64 = 5_000_000_000;
+
+/// How long [`I219::await_link`] leaves `STATUS` alone between two readings of
+/// it. Ten milliseconds is a five-hundredth of the bound above, so what the
+/// pace costs the answer is nothing a bench can read.
+pub const LINK_PACE_NANOS: u64 = 10_000_000;
 
 /// How long [`I219::open`] waits for §3.1.3.10's master quiesce.
 ///
@@ -794,7 +859,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // also come up before the mask was written, and then no `LSC` is ever
         // delivered for it.
         let before = self.link;
-        if causes & cause::LSC != 0 || !self.link.up {
+        if causes & cause::LSC != 0 || !self.link.is_up() {
             self.refresh_link();
         }
         Ok(Pass { messages, causes, link_changed: self.link != before })
@@ -803,22 +868,55 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// Re-read `STATUS` and take what it says about the link.
     fn refresh_link(&mut self) {
         let status = self.regs.read(regs::STATUS);
-        let up = status & status::LU != 0;
-        // §10.2.2.2: `11b` is 1000 Mb/s too, so this is not a lookup that can
-        // answer "unknown".
-        let speed = match (status >> status::SPEED_SHIFT) & status::SPEED_MASK {
-            0b00 => 10,
-            0b01 => 100,
-            _ => 1000,
+        self.link = if status & status::LU != 0 {
+            Link::Up {
+                speed: Speed::in_status(status),
+                full_duplex: status & status::FD != 0,
+            }
+        } else {
+            Link::Down
         };
-        self.link = Link {
-            up,
-            speed_mbps: if up { speed } else { 0 },
-            full_duplex: status & status::FD != 0,
-        };
-        if up && self.link_up_at.is_none() {
+        if self.link.is_up() && self.link_up_at.is_none() {
             self.link_up_at = Some(self.clock.nanos());
         }
+    }
+
+    /// Wait out [`LINK_DEADLINE_NANOS`] for `STATUS.LU`, and answer with what
+    /// the link is doing when the wait ends.
+    ///
+    /// **Nothing on the serving path calls this.** A server never blocks, and
+    /// what the event loop does about a link is act on §10.2.4.1's `LSC` when
+    /// it arrives. This is for the boot whose whole purpose is to say whether
+    /// the cable came up, and the number it waits is the only reason a link
+    /// that came late reads as one that came at all.
+    pub fn await_link(&mut self) -> Link {
+        let started = self.clock.nanos();
+        loop {
+            self.refresh_link();
+            if self.link.is_up() {
+                return self.link;
+            }
+            if self.clock.nanos().saturating_sub(started) >= LINK_DEADLINE_NANOS {
+                return self.link;
+            }
+            self.clock.pause(LINK_PACE_NANOS);
+        }
+    }
+
+    /// What one probe boot has to say: what the bring-up did with the PHY and,
+    /// where it brought one up, the link that came inside
+    /// [`LINK_DEADLINE_NANOS`].
+    ///
+    /// **The wait is taken only where the PHY came up.** A PHY this driver
+    /// could not configure is not one whose link is its to wait for, and the
+    /// refusal is the whole of what that boot has to report.
+    pub fn probe_outcome(&mut self) -> phy::Outcome {
+        let brought_up = self.brought_up.phy;
+        let link = match brought_up {
+            Ok(_) => self.await_link(),
+            Err(_) => self.link,
+        };
+        phy::Outcome::of(brought_up, link)
     }
 
     /// The next received frame, or `None` — for an empty ring and for a budget

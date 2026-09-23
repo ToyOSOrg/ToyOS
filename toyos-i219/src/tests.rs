@@ -9,7 +9,7 @@ use std::vec::Vec;
 use std::{format, vec};
 
 use crate::phy as toyos_phy;
-use crate::phy::{Holders, Phy, PhyRefusal};
+use crate::phy::{Others, Phy, PhyRefusal};
 use crate::regs::{self, cause, ctrl, extcnf, ivar, rctl, rx_desc, tctl, tx_desc};
 use crate::stub::{Nic, Permits, Unanswered, NVM_MAC};
 use crate::*;
@@ -165,6 +165,9 @@ fn a_window_or_grant_too_small_is_refused() {
         fn nanos(&self) -> u64 {
             0
         }
+        fn pause(&self, _: u64) {
+            panic!("a refused window waited")
+        }
     }
     struct Small(usize);
     impl DmaBuffers for Small {
@@ -237,6 +240,9 @@ fn a_window_that_reads_ones_is_refused() {
     impl Clock for NoClock {
         fn nanos(&self) -> u64 {
             0
+        }
+        fn pause(&self, _: u64) {
+            panic!("a refused window waited")
         }
     }
     struct NoIrq;
@@ -939,24 +945,28 @@ fn a_spurious_interrupt_costs_a_pass_and_nothing_else() {
 fn the_link_going_away_and_coming_back_is_seen() {
     let nic = Nic::new(14);
     let mut driver = open(&nic);
-    assert!(!driver.link().up, "{}", nic.because("the link was up before anything plugged in"));
+    assert_eq!(
+        driver.link(),
+        Link::Down,
+        "{}",
+        nic.because("the link was up before anything plugged in")
+    );
 
     nic.set_link(true);
     let up = one_pass(&mut driver);
-    assert!(up.link_changed && driver.link().up);
-    assert_eq!(driver.link().speed_mbps, 1000);
-    assert!(driver.link().full_duplex);
+    assert!(up.link_changed);
+    assert_eq!(driver.link(), Link::Up { speed: Speed::Mbps1000, full_duplex: true });
     let at = driver.link_up_after_nanos().expect("a link-up time");
 
     nic.set_link(false);
     let down = one_pass(&mut driver);
     assert!(down.causes & cause::LSC != 0, "{}", nic.because("no LSC for the link going away"));
-    assert!(down.link_changed && !driver.link().up);
-    assert_eq!(driver.link().speed_mbps, 0);
+    assert!(down.link_changed);
+    assert_eq!(driver.link(), Link::Down);
 
     nic.set_link(true);
     one_pass(&mut driver);
-    assert!(driver.link().up);
+    assert!(driver.link().is_up());
     // The first time it came up is the one the profile measures, so a drop and
     // a recovery may not move it.
     assert_eq!(driver.link_up_after_nanos(), Some(at));
@@ -1085,7 +1095,7 @@ fn the_phy_is_brought_up_and_the_mac_sees_the_link_it_raises() {
     one_pass(&mut driver);
     assert_eq!(
         driver.link(),
-        Link { up: true, speed_mbps: 1000, full_duplex: true },
+        Link::Up { speed: Speed::Mbps1000, full_duplex: true },
         "{}",
         nic.because("§4.6.3.2's STATUS.LU did not follow the link the PHY raised")
     );
@@ -1101,10 +1111,10 @@ fn the_advertised_abilities_are_what_the_link_resolves_to() {
     use toyos_phy::advertise::{FULL_10, FULL_100, HALF_10, HALF_100, SELECTOR_802_3};
     let only = |ability| SELECTOR_802_3 | ability;
     for (seed, partner, resolved) in [
-        (42, only(HALF_10), Some((10, false))),
-        (43, only(FULL_10), Some((10, true))),
-        (44, only(HALF_100), Some((100, false))),
-        (45, only(FULL_100), Some((100, true))),
+        (42, only(HALF_10), Some((Speed::Mbps10, false))),
+        (43, only(FULL_10), Some((Speed::Mbps10, true))),
+        (44, only(HALF_100), Some((Speed::Mbps100, false))),
+        (45, only(FULL_100), Some((Speed::Mbps100, true))),
         // §9.5.2.5's Selector Field alone: a partner with no ability at bits
         // 8:5 has nothing in common with this one, which is a cable that
         // carries no link.
@@ -1120,8 +1130,8 @@ fn the_advertised_abilities_are_what_the_link_resolves_to() {
         nic.negotiation_settles();
         one_pass(&mut driver);
         let wanted = match resolved {
-            Some((speed_mbps, full_duplex)) => Link { up: true, speed_mbps, full_duplex },
-            None => Link::default(),
+            Some((speed, full_duplex)) => Link::Up { speed, full_duplex },
+            None => Link::Down,
         };
         assert_eq!(
             driver.link(),
@@ -1137,11 +1147,15 @@ fn the_advertised_abilities_are_what_the_link_resolves_to() {
 
 /// The premise of the test above: this model really does refuse a link to a PHY
 /// nothing configured, so a green there is not a model that raises one for a
-/// partner alone. The driver reaches no register at all here, because §4.5.2's
-/// arbitration never grants it the interface.
+/// partner alone. The driver reaches no PHY register at all here, because
+/// §4.5.2's arbitration never grants its request on this reading of the clause.
 #[test]
 fn a_partner_on_an_unconfigured_phy_raises_no_link() {
-    let nic = Nic::i219(32);
+    let nic = Nic::with(
+        32,
+        Part::I219,
+        Permits { mdio_flag_is_a_plain_mutex: false, ..Permits::default() },
+    );
     nic.mdio_never_granted();
     nic.set_link(true);
     let driver = open(&nic);
@@ -1152,51 +1166,102 @@ fn a_partner_on_an_unconfigured_phy_raises_no_link() {
         "{}",
         nic.because("the model let a partner raise a link on a PHY nothing had touched")
     );
-    assert!(!driver.link().up, "{}", nic.because("STATUS.LU came up with the PHY unconfigured"));
+    assert!(
+        !driver.link().is_up(),
+        "{}",
+        nic.because("STATUS.LU came up with the PHY unconfigured")
+    );
 }
 
-/// §4.5.2 gives manageability the highest priority in the arbitration, and on
-/// this part the Management Engine drives the same PHY. A driver that waited
-/// for ever would hold the boot; one that drove `MDIC` anyway would race the
-/// engine on the silicon they share.
+/// **What the T14 answers, and the whole reason this driver asks at all.**
+/// §4.5.2's manageability agent holds the interface and does not let go, and
+/// the part grants the software request registered under it anyway — the clause
+/// says "at any given time at most only one bit is 1b" and that silicon reads
+/// back both. A driver that waited for the engine's bit to go would wait out
+/// the boot on a part that was never going to take it away.
 #[test]
-fn an_interface_the_engine_never_gives_up_is_refused_by_name() {
+fn a_part_that_grants_over_the_engines_standing_bit_is_brought_up() {
     let nic = Nic::i219(33);
     nic.mdio_never_granted();
-    let driver = open(&nic);
+    nic.set_link(true);
+    let mut driver = open(&nic);
 
-    let held_by = match driver.brought_up().phy {
-        Err(PhyRefusal::OwnershipHeld { held_by, after_nanos }) => {
-            assert!(
-                after_nanos >= toyos_phy::DEADLINE_NANOS,
-                "{}",
-                nic.because("the claim was given up on before the deadline it is owed")
-            );
-            held_by
-        }
-        other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
-    };
     assert_eq!(
-        held_by,
-        Holders::Manageability,
+        driver.brought_up().phy,
+        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
         "{}",
-        nic.because("the refusal does not carry which agent held the interface")
+        nic.because("the bring-up did not take an interface the part offered it")
     );
-    // No request was ever registered, because the interface was never free to
-    // ask for. What stands is the engine's own bit, which is read-only here.
+    // The premise: the engine's own bit stood for the whole of it, so the grant
+    // this bring-up drove on was one it shared.
+    assert!(
+        nic.ownership_readings()
+            .iter()
+            .all(|reading| reading & extcnf::MDIO_MNG_OWNERSHIP != 0),
+        "{}",
+        nic.because("the engine let go, so this is not the reading the T14 gives")
+    );
     assert_eq!(
         nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
         extcnf::MDIO_MNG_OWNERSHIP,
         "{}",
-        nic.because("this driver's bit was registered against an interface already owned")
+        nic.because("the request was left standing over the engine's own bit")
+    );
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert!(driver.link().is_up(), "{}", nic.because("STATUS.LU did not follow the PHY's link"));
+}
+
+/// The other reading of §4.5.2 — "access is not granted as long as the bit is
+/// 0b" — on a part whose engine never lets go: the request is registered, the
+/// bit never reads back set, and what is refused is the *grant* and not the
+/// interface. **The judge is what the arbitration does once the engine lets
+/// go**: a request still registered would be granted then, to a driver that
+/// stopped waiting, so no grant may appear.
+#[test]
+fn a_grant_that_never_comes_is_refused_by_name_and_the_request_withdrawn() {
+    let nic = Nic::with(
+        63,
+        Part::I219,
+        Permits { mdio_flag_is_a_plain_mutex: false, ..Permits::default() },
+    );
+    nic.mdio_never_granted();
+    let driver = open(&nic);
+
+    match driver.brought_up().phy {
+        Err(PhyRefusal::GrantNeverCame { held_by, after_nanos }) => {
+            assert!(
+                held_by & extcnf::MDIO_MNG_OWNERSHIP != 0,
+                "{}",
+                nic.because("the refusal does not carry the engine's bit")
+            );
+            assert!(
+                after_nanos >= toyos_phy::ARBITRATION_DEADLINE_NANOS,
+                "{}",
+                nic.because("the grant was given up on before the deadline it is owed")
+            );
+        }
+        other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
+    }
+
+    nic.engine_lets_go();
+    assert_eq!(
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
+        0,
+        "{}",
+        nic.because(
+            "the engine let go and the arbitration granted a request this driver had stopped \
+             waiting on, so the request was never withdrawn"
+        )
     );
 }
 
 /// A software bit already set when this driver looks is another agent's under
-/// either reading of §4.5.2 — a grant it holds, or a flag it set — so it is
-/// neither taken as this driver's own nor cleared on the way out.
+/// either reading of §4.5.2 — a grant it holds, or a flag it set — and this
+/// driver's own request is that same bit, so nothing is registered over it and
+/// nothing is cleared on the way out.
 #[test]
-fn a_flag_another_agent_holds_is_neither_taken_nor_cleared() {
+fn a_flag_another_agent_holds_is_neither_asked_over_nor_cleared() {
     for (seed, mutex) in [(62, true), (65, false)] {
         let nic = Nic::with(
             seed,
@@ -1208,24 +1273,31 @@ fn a_flag_another_agent_holds_is_neither_taken_nor_cleared() {
         let driver = open(&nic);
 
         match driver.brought_up().phy {
-            Err(PhyRefusal::OwnershipHeld { held_by, after_nanos }) => {
+            Err(PhyRefusal::SoftwareFlagStood { beside, after_nanos }) => {
                 assert_eq!(
-                    held_by,
-                    Holders::Software,
+                    beside,
+                    Others::in_reading(
+                        nic.ownership_readings().last().copied().expect("a reading of the bits")
+                    ),
                     "{}",
-                    nic.because("the refusal does not carry the flag that was standing")
+                    nic.because("the refusal does not carry who stood beside the flag")
                 );
                 assert!(
-                    after_nanos >= toyos_phy::DEADLINE_NANOS,
+                    after_nanos >= toyos_phy::ARBITRATION_DEADLINE_NANOS,
                     "{}",
-                    nic.because("the claim was given up on before the deadline it is owed")
+                    nic.because("the flag was given up on before the deadline it is owed")
                 );
             }
             other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
         }
-        // §4.5.2: "the controlling agent must write a 0b to its ownership bit"
-        // — and this driver was never the controlling agent, so the flag
-        // stands.
+        // Nothing at all was written to that register on this path, which is
+        // the whole claim: no request over another agent's flag, and therefore
+        // no release of one either.
+        assert!(
+            !nic.written().contains(&regs::EXTCNF_CTRL),
+            "{}",
+            nic.because("a request was registered over a flag that was already somebody's")
+        );
         assert_eq!(
             nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
             extcnf::MDIO_SW_OWNERSHIP,
@@ -1235,76 +1307,165 @@ fn a_flag_another_agent_holds_is_neither_taken_nor_cleared() {
     }
 }
 
-/// The other half of §4.5.2's handshake: the interface was free, the request
-/// was registered, and the engine held the interface past this driver's
-/// deadline. **The judge is what the arbitration does once the engine lets
-/// go**: a request still registered would be granted then, to a driver that
-/// stopped waiting — so no grant may appear, under either reading.
+/// §4.5.2 lets the manageability agent register its request at any moment, the
+/// one between this driver reading the register and writing its own request
+/// included; "the priority order is manageability, software and then hardware",
+/// so the request registered under it is answered second and not lost.
 #[test]
-fn a_request_the_engine_outlasts_is_withdrawn_before_the_engine_lets_go() {
-    for (seed, mutex) in [(63, true), (66, false)] {
+fn a_request_registered_while_the_engine_holds_it_is_still_granted() {
+    for (seed, mutex) in [(67, true), (68, false)] {
         let nic = Nic::with(
             seed,
             Part::I219,
             Permits { mdio_flag_is_a_plain_mutex: mutex, ..Permits::default() },
         );
-        nic.engine_takes_the_interface_at_the_request();
-        let driver = open(&nic);
+        nic.set_link(true);
+        let mut driver = open(&nic);
 
-        match driver.brought_up().phy {
-            Err(PhyRefusal::OwnershipBusy { held_by, after_nanos }) => {
-                assert!(
-                    held_by & extcnf::MDIO_MNG_OWNERSHIP != 0,
-                    "{}",
-                    nic.because("the refusal does not carry the engine's bit")
-                );
-                assert!(
-                    after_nanos >= toyos_phy::DEADLINE_NANOS,
-                    "{}",
-                    nic.because("the claim was given up on before the deadline it is owed")
-                );
-            }
-            other => panic!("{}", nic.because(&format!("the bring-up answered {other:?}"))),
-        }
-        assert_eq!(nic.engine_cut_ins(), 1, "{}", nic.because("the engine never cut in"));
-
-        nic.engine_lets_go();
-        assert_eq!(
-            nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
-            0,
+        // The premise: the engine really did hold the interface at the moment
+        // the request was registered.
+        assert!(
+            nic.ownership_readings()
+                .first()
+                .is_some_and(|reading| reading & extcnf::MDIO_MNG_OWNERSHIP != 0),
             "{}",
-            nic.because(
-                "the engine let go and the arbitration granted a request this driver had \
-                 stopped waiting on, so the request was never withdrawn"
-            )
+            nic.because("the engine was not on the interface when this driver asked")
+        );
+        assert_eq!(
+            driver.brought_up().phy,
+            Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+            "{}",
+            nic.because("the bring-up did not wait the engine out and reach the PHY")
+        );
+        nic.negotiation_settles();
+        one_pass(&mut driver);
+        assert!(
+            driver.link().is_up(),
+            "{}",
+            nic.because("STATUS.LU did not follow the PHY's link")
         );
     }
 }
 
-/// §4.5.2 lets the manageability agent register its request at any moment,
-/// the one between this driver reading the interface free and writing its own
-/// request included; the arbitration answers the engine first, and under the
-/// mutex reading the driver's bit reads back set beside the engine's. A grant
-/// is the driver's bit standing alone: a driver that took the bit merely set
-/// for a grant would drive `MDIC` while the engine owns the interface, which
-/// the model refuses by name.
+/// **The pace, which is a bench fact and not a clause.** Two accesses to
+/// §4.5.2's arbitration are never nearer each other than
+/// [`toyos_phy::ARBITRATION_PACE_NANOS`]: on the T14 the same request put to
+/// the same register about a millisecond apart left a machine that had to be
+/// powered off, and the run that paced it came back and answered.
 #[test]
-fn a_request_the_engine_cut_in_ahead_of_is_not_taken_as_a_grant() {
-    let nic = Nic::i219(67);
-    nic.set_link(true);
-    let mut driver = open(&nic);
+fn no_two_accesses_to_the_arbitration_are_nearer_than_the_pace() {
+    for (seed, arrange) in [
+        (80u64, (|_: &Nic| {}) as fn(&Nic)),
+        (81, |n: &Nic| n.mdio_never_granted()),
+        (82, |n: &Nic| n.mdio_flag_held_by_another_agent()),
+        (83, |n: &Nic| n.mdi_never_ready()),
+    ] {
+        let nic = Nic::i219(seed);
+        arrange(&nic);
+        let _ = open(&nic);
 
-    // The premise: the race really happened on this bring-up.
-    assert!(nic.engine_cut_ins() > 0, "{}", nic.because("the engine never cut in"));
+        let at = nic.arbitration_at();
+        assert!(at.len() >= 2, "{}", nic.because("this bring-up barely reached the arbitration"));
+        for pair in at.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= toyos_phy::ARBITRATION_PACE_NANOS,
+                "{}",
+                nic.because(&format!(
+                    "two accesses to EXTCNF_CTRL are {} ns apart and the pace is {} ns",
+                    pair[1] - pair[0],
+                    toyos_phy::ARBITRATION_PACE_NANOS
+                ))
+            );
+        }
+    }
+}
+
+/// §4.5.2: "once the access completes, the controlling agent must write a 0b to
+/// its ownership bit to enable accesses by the other agents" — on the path that
+/// finished the bring-up and on every path that left it early alike. A bit left
+/// standing keeps the Management Engine off the PHY they share for the boot.
+#[test]
+fn the_interface_is_given_back_on_every_path_that_took_it() {
+    for (seed, arrange) in [
+        (90u64, (|_: &Nic| {}) as fn(&Nic)),
+        (91, |n: &Nic| n.mdi_never_ready()),
+        (92, |n: &Nic| n.mdi_fails_read_of(toyos_phy::SPECIFIC, toyos_phy::reg::IDENTIFIER_HIGH)),
+        (93, |n: &Nic| n.phy_identifies_as(0x1234)),
+        (94, |n: &Nic| n.phy_is_deaf_at(toyos_phy::SPECIFIC)),
+    ] {
+        let nic = Nic::i219(seed);
+        arrange(&nic);
+        let driver = open(&nic);
+
+        // The premise: the request really was registered on this path, so the
+        // release below is a bit this driver had.
+        assert!(
+            nic.ownership_readings()
+                .iter()
+                .any(|reading| reading & extcnf::MDIO_SW_OWNERSHIP != 0),
+            "{}",
+            nic.because("no request was ever registered, so nothing was there to give back")
+        );
+        assert_eq!(
+            nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
+            0,
+            "{}",
+            nic.because(&format!(
+                "the interface was left held after the bring-up answered {:?}",
+                driver.brought_up().phy
+            ))
+        );
+    }
+}
+
+/// The link the probe waits for, on the three answers a boot can carry off a
+/// machine with no console: a PHY brought up onto a link, a PHY brought up onto
+/// a cable with nothing at the other end, and a part whose PHY this bring-up
+/// refuses — whose link is not this driver's to wait for.
+#[test]
+fn the_probe_waits_a_bounded_time_for_the_link_and_names_what_came() {
+    use toyos_phy::Outcome;
+
+    let raised = Nic::i219(95);
+    raised.set_link(true);
+    let mut driver = open(&raised);
+    raised.negotiation_settles();
     assert_eq!(
-        driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+        driver.probe_outcome(),
+        Outcome::LinkAt1000Full,
         "{}",
-        nic.because("the bring-up did not wait the engine out and reach the PHY")
+        raised.because("the probe did not name the link the PHY raised")
     );
-    nic.negotiation_settles();
-    one_pass(&mut driver);
-    assert!(driver.link().up, "{}", nic.because("STATUS.LU did not follow the PHY's link"));
+
+    let quiet = Nic::i219(96);
+    let mut driver = open(&quiet);
+    let started = quiet.now();
+    assert_eq!(
+        driver.probe_outcome(),
+        Outcome::BroughtUpNoLink,
+        "{}",
+        quiet.because("the probe named a link on a cable with nothing at the other end")
+    );
+    assert!(
+        quiet.now() - started >= LINK_DEADLINE_NANOS,
+        "{}",
+        quiet.because("the link was given up on before the bound it is owed")
+    );
+
+    let refused = Nic::new(97);
+    let mut driver = open(&refused);
+    let started = refused.now();
+    assert_eq!(
+        driver.probe_outcome(),
+        Outcome::NotThisRegisterMap,
+        "{}",
+        refused.because("the probe did not carry the bring-up's own refusal")
+    );
+    assert!(
+        refused.now() - started < LINK_DEADLINE_NANOS,
+        "{}",
+        refused.because("a bring-up that refused the PHY waited for its link anyway")
+    );
 }
 
 /// A window that answers ones at one offset decodes nothing there, and what it
@@ -1327,40 +1488,44 @@ fn a_register_nothing_decodes_is_refused_and_never_written() {
     );
 }
 
-/// Every outcome of the bring-up has one exit code, and every code reads back
-/// as its outcome: the table netd exits through and the harness decodes with
-/// is one declaration, so the two ends cannot disagree about a number.
+/// Every answer the probe can give has one exit code, and every code reads back
+/// as its answer: the table netd exits through and the harness decodes with is
+/// one declaration, so the two ends cannot disagree about a number.
 #[test]
-fn every_phy_outcome_has_one_exit_code_that_reads_back() {
+fn every_probe_outcome_has_one_exit_code_that_reads_back() {
     use toyos_phy::Outcome;
-    let held = |held_by| Err(PhyRefusal::OwnershipHeld { held_by, after_nanos: 1 });
-    let outcomes: [(Result<Phy, PhyRefusal>, Outcome); 14] = [
-        (Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }), Outcome::BroughtUp),
-        (Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL }), Outcome::Unrouted),
-        (held(Holders::Software), Outcome::OwnershipHeldBySoftware),
-        (held(Holders::Hardware), Outcome::OwnershipHeldByHardware),
-        (held(Holders::SoftwareAndHardware), Outcome::OwnershipHeldBySoftwareAndHardware),
-        (held(Holders::Manageability), Outcome::OwnershipHeldByManageability),
+    let up = Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 });
+    let link = |speed, full_duplex| Link::Up { speed, full_duplex };
+    let stood = |beside| Err(PhyRefusal::SoftwareFlagStood { beside, after_nanos: 1 });
+    let down = Link::Down;
+    let outcomes: [(Result<Phy, PhyRefusal>, Link, Outcome); 17] = [
+        (up, down, Outcome::BroughtUpNoLink),
+        (up, link(Speed::Mbps10, false), Outcome::LinkAt10Half),
+        (up, link(Speed::Mbps10, true), Outcome::LinkAt10Full),
+        (up, link(Speed::Mbps100, false), Outcome::LinkAt100Half),
+        (up, link(Speed::Mbps100, true), Outcome::LinkAt100Full),
+        (up, link(Speed::Mbps1000, false), Outcome::LinkAt1000Half),
+        (up, link(Speed::Mbps1000, true), Outcome::LinkAt1000Full),
+        (Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL }), down, Outcome::Unrouted),
+        (stood(Others::Nobody), down, Outcome::SoftwareFlagStood),
+        (stood(Others::Hardware), down, Outcome::SoftwareFlagStoodBesideHardware),
+        (stood(Others::Manageability), down, Outcome::SoftwareFlagStoodBesideManageability),
+        (stood(Others::HardwareAndManageability), down, Outcome::SoftwareFlagStoodBesideBoth),
         (
-            held(Holders::SoftwareAndManageability),
-            Outcome::OwnershipHeldBySoftwareAndManageability,
+            Err(PhyRefusal::GrantNeverCame { held_by: 0x80, after_nanos: 1 }),
+            down,
+            Outcome::GrantNeverCame,
         ),
-        (
-            held(Holders::HardwareAndManageability),
-            Outcome::OwnershipHeldByHardwareAndManageability,
-        ),
-        (held(Holders::AllThree), Outcome::OwnershipHeldByAllThree),
-        (Err(PhyRefusal::OwnershipBusy { held_by: 0x80, after_nanos: 1 }), Outcome::OwnershipBusy),
-        (Err(PhyRefusal::MdiUnready { phy: 1, reg: 31, after_nanos: 1 }), Outcome::MdiUnready),
-        (Err(PhyRefusal::MdiError { phy: 2, reg: 2 }), Outcome::MdiError),
-        (Err(PhyRefusal::Identity { specific: 0, general: 0 }), Outcome::Identity),
-        (Err(PhyRefusal::NotThisRegisterMap), Outcome::NotThisRegisterMap),
+        (Err(PhyRefusal::MdiUnready { phy: 1, reg: 31, after_nanos: 1 }), down, Outcome::MdiUnready),
+        (Err(PhyRefusal::MdiError { phy: 2, reg: 2 }), down, Outcome::MdiError),
+        (Err(PhyRefusal::Identity { specific: 0, general: 0 }), down, Outcome::Identity),
+        (Err(PhyRefusal::NotThisRegisterMap), down, Outcome::NotThisRegisterMap),
     ];
     // The block's base is pinned, not read off the table it is judging.
     assert_eq!(Outcome::ALL[0].exit_code(), 64, "the block no longer starts at 64");
     let mut codes = Vec::new();
-    for (phy, outcome) in outcomes {
-        assert_eq!(Outcome::of(phy), outcome, "{phy:?}");
+    for (phy, link, outcome) in outcomes {
+        assert_eq!(Outcome::of(phy, link), outcome, "{phy:?} {link:?}");
         let code = outcome.exit_code();
         assert!((64..128).contains(&code), "{outcome:?} exits {code}");
         assert_ne!(code, 101, "{outcome:?} exits the code a panicking netd ends with");
@@ -1371,64 +1536,61 @@ fn every_phy_outcome_has_one_exit_code_that_reads_back() {
     assert_eq!(codes.len(), Outcome::ALL.len());
     assert_eq!(Outcome::from_exit_code(0), None);
     assert_eq!(Outcome::from_exit_code(Outcome::ALL.len() as i32 + 64), None);
+
+    // A refusal carries no link, whatever the part's `STATUS` was saying: the
+    // agent before this driver may have left one up.
+    for (phy, _, outcome) in outcomes.into_iter().filter(|(phy, ..)| phy.is_err()) {
+        assert_eq!(Outcome::of(phy, link(Speed::Mbps1000, true)), outcome, "{phy:?}");
+    }
 }
 
-/// §4.5.2 arbitrates three bits of `EXTCNF_CTRL` and no more, so what a reading
-/// names is decided by those three and by nothing else in the word — and the
-/// one reading that names nobody is the interface being free, which is the
-/// reading a driver may ask for it on.
+/// §4.5.2 arbitrates three bits of `EXTCNF_CTRL` and no more, so who stands
+/// beside another agent's software flag is decided by the other two and by
+/// nothing else in the word.
 #[test]
-fn every_reading_of_the_three_ownership_bits_names_who_holds_the_interface() {
+fn every_reading_of_the_other_two_ownership_bits_names_who_stands_beside_the_flag() {
     let elsewhere = !extcnf::OWNERSHIP;
-    for (bits, holders) in [
-        (0, None),
-        (extcnf::MDIO_SW_OWNERSHIP, Some(Holders::Software)),
-        (extcnf::MDIO_HW_OWNERSHIP, Some(Holders::Hardware)),
-        (
-            extcnf::MDIO_SW_OWNERSHIP | extcnf::MDIO_HW_OWNERSHIP,
-            Some(Holders::SoftwareAndHardware),
-        ),
-        (extcnf::MDIO_MNG_OWNERSHIP, Some(Holders::Manageability)),
-        (
-            extcnf::MDIO_SW_OWNERSHIP | extcnf::MDIO_MNG_OWNERSHIP,
-            Some(Holders::SoftwareAndManageability),
-        ),
+    for (bits, others) in [
+        (0, Others::Nobody),
+        (extcnf::MDIO_HW_OWNERSHIP, Others::Hardware),
+        (extcnf::MDIO_MNG_OWNERSHIP, Others::Manageability),
         (
             extcnf::MDIO_HW_OWNERSHIP | extcnf::MDIO_MNG_OWNERSHIP,
-            Some(Holders::HardwareAndManageability),
+            Others::HardwareAndManageability,
         ),
-        (extcnf::OWNERSHIP, Some(Holders::AllThree)),
     ] {
-        assert_eq!(Holders::in_reading(bits), holders, "{bits:#010x} names somebody else");
-        assert_eq!(
-            Holders::in_reading(bits | elsewhere),
-            holders,
-            "another agent's fields of EXTCNF_CTRL decided who holds {bits:#010x}"
-        );
+        for flag in [0, extcnf::MDIO_SW_OWNERSHIP] {
+            assert_eq!(
+                Others::in_reading(bits | flag),
+                others,
+                "{bits:#010x} names somebody else"
+            );
+            assert_eq!(
+                Others::in_reading(bits | flag | elsewhere),
+                others,
+                "another agent's fields of EXTCNF_CTRL decided who stands beside {bits:#010x}"
+            );
+        }
     }
 }
 
 /// **The one question a probe boot on a machine with no console can answer.**
-/// An interface already owned is the refusal whose cause is another agent, so
-/// every reading §4.5.2's three bits can stand is driven on the part and the
-/// exit code it produces is asserted: one code per holder, all seven distinct.
+/// Another software agent's flag is the refusal whose cause is another agent,
+/// so each reading of the two bits that can stand beside it is driven on the
+/// part and the exit code it produces is asserted: one code each, all four
+/// distinct.
 #[test]
-fn each_holder_of_the_mdio_interface_has_its_own_exit_code() {
+fn each_agent_standing_beside_the_flag_has_its_own_exit_code() {
     use toyos_phy::Outcome;
     let mut codes = Vec::new();
-    for (seed, software, hardware, manageability, wanted) in [
-        (70, true, false, false, Outcome::OwnershipHeldBySoftware),
-        (71, false, true, false, Outcome::OwnershipHeldByHardware),
-        (72, true, true, false, Outcome::OwnershipHeldBySoftwareAndHardware),
-        (73, false, false, true, Outcome::OwnershipHeldByManageability),
-        (74, true, false, true, Outcome::OwnershipHeldBySoftwareAndManageability),
-        (75, false, true, true, Outcome::OwnershipHeldByHardwareAndManageability),
-        (76, true, true, true, Outcome::OwnershipHeldByAllThree),
+    for (seed, hardware, manageability, wanted) in [
+        (70, false, false, Outcome::SoftwareFlagStood),
+        (71, true, false, Outcome::SoftwareFlagStoodBesideHardware),
+        (72, false, true, Outcome::SoftwareFlagStoodBesideManageability),
+        (73, true, true, Outcome::SoftwareFlagStoodBesideBoth),
     ] {
         let nic = Nic::i219(seed);
-        if software {
-            nic.mdio_flag_held_by_another_agent();
-        }
+        nic.mdio_flag_held_by_another_agent();
         if hardware {
             nic.hardware_holds_the_mdio_interface();
         }
@@ -1439,36 +1601,36 @@ fn each_holder_of_the_mdio_interface_has_its_own_exit_code() {
 
         let phy = driver.brought_up().phy;
         assert!(
-            matches!(phy, Err(PhyRefusal::OwnershipHeld { .. })),
+            matches!(phy, Err(PhyRefusal::SoftwareFlagStood { .. })),
             "{}",
-            nic.because(&format!("the bring-up answered {phy:?} on a held interface"))
+            nic.because(&format!("the bring-up answered {phy:?} on a flag another agent holds"))
         );
-        // The part really did answer the three bits this row is about, so the
-        // code below is about that reading and not about a model that lost one.
+        // The part really did answer the bits this row is about, so the code
+        // below is about that reading and not about a model that lost one.
         assert_eq!(
             nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
-            if software { extcnf::MDIO_SW_OWNERSHIP } else { 0 }
+            extcnf::MDIO_SW_OWNERSHIP
                 | if hardware { extcnf::MDIO_HW_OWNERSHIP } else { 0 }
                 | if manageability { extcnf::MDIO_MNG_OWNERSHIP } else { 0 },
             "{}",
-            nic.because("the part did not stand the agents this row holds the interface with")
+            nic.because("the part did not stand the agents this row names")
         );
-        let outcome = Outcome::of(phy);
+        let outcome = Outcome::of(phy, Link::Down);
         assert_eq!(
             outcome,
             wanted,
             "{}",
-            nic.because("the exit code does not name which agent held the interface")
+            nic.because("the exit code does not name which agent stood beside the flag")
         );
         let code = outcome.exit_code();
         assert!(
             !codes.contains(&code),
             "{}",
-            nic.because(&format!("{outcome:?} shares exit code {code} with another holder"))
+            nic.because(&format!("{outcome:?} shares exit code {code} with another reading"))
         );
         codes.push(code);
     }
-    assert_eq!(codes.len(), 7);
+    assert_eq!(codes.len(), 4);
 }
 
 /// §4.5.2's arbitration moves while a driver waits on it, and what a probe
@@ -1477,9 +1639,11 @@ fn each_holder_of_the_mdio_interface_has_its_own_exit_code() {
 #[test]
 fn the_refusal_names_the_last_reading_before_the_deadline() {
     let nic = Nic::i219(77);
-    // The part's own hardware holds the interface for the whole wait; the
-    // manageability agent holds it too across the reads §4.5.2 gives it to load
-    // the extended configuration area, and then lets go.
+    // Another agent's flag stands for the whole wait; the part's own hardware
+    // holds the interface too, and the manageability agent holds it across the
+    // reads §4.5.2 gives it to load the extended configuration area and then
+    // lets go.
+    nic.mdio_flag_held_by_another_agent();
     nic.hardware_holds_the_mdio_interface();
     let driver = open(&nic);
 
@@ -1488,21 +1652,21 @@ fn the_refusal_names_the_last_reading_before_the_deadline() {
     let readings = nic.ownership_readings();
     assert_eq!(
         readings.first().copied(),
-        Some(extcnf::MDIO_HW_OWNERSHIP | extcnf::MDIO_MNG_OWNERSHIP),
+        Some(extcnf::OWNERSHIP),
         "{}",
-        nic.because(&format!("the wait did not start on two agents: {readings:#x?}"))
+        nic.because(&format!("the wait did not start on all three agents: {readings:#x?}"))
     );
     assert_eq!(
         readings.last().copied(),
-        Some(extcnf::MDIO_HW_OWNERSHIP),
+        Some(extcnf::MDIO_SW_OWNERSHIP | extcnf::MDIO_HW_OWNERSHIP),
         "{}",
-        nic.because(&format!("the wait did not end on one agent: {readings:#x?}"))
+        nic.because(&format!("the wait did not end on two agents: {readings:#x?}"))
     );
 
     match driver.brought_up().phy {
-        Err(PhyRefusal::OwnershipHeld { held_by, .. }) => assert_eq!(
-            held_by,
-            Holders::Hardware,
+        Err(PhyRefusal::SoftwareFlagStood { beside, .. }) => assert_eq!(
+            beside,
+            Others::Hardware,
             "{}",
             nic.because("the refusal named the reading the wait began on")
         ),
@@ -1541,18 +1705,18 @@ fn the_ownership_claim_leaves_the_rest_of_the_register_standing() {
 
     // The withdrawal on the deadline is the other write of that register, and
     // it is made having been granted nothing. It runs only where a request was
-    // registered at all — an interface free when it was asked for, and not
-    // granted inside the deadline.
+    // registered at all — which is every path but the one that found another
+    // software agent's flag standing.
     let refused = Nic::with(
         52,
         Part::I219,
         Permits { mdio_flag_is_a_plain_mutex: false, ..Permits::default() },
     );
-    refused.engine_takes_the_interface_at_the_request();
+    refused.mdio_never_granted();
     let before = elsewhere(&refused);
     let driver = open(&refused);
     assert!(
-        matches!(driver.brought_up().phy, Err(PhyRefusal::OwnershipBusy { .. })),
+        matches!(driver.brought_up().phy, Err(PhyRefusal::GrantNeverCame { .. })),
         "{}",
         refused.because("no request was registered, so the withdrawal never ran")
     );
@@ -1577,7 +1741,7 @@ fn an_mdi_transaction_that_never_reports_ready_is_refused_by_name() {
             // The first transaction the bring-up makes is §9.3's page select.
             assert_eq!((phy, reg), (toyos_phy::GENERAL, toyos_phy::reg::PAGE_SELECT));
             assert!(
-                after_nanos >= toyos_phy::DEADLINE_NANOS,
+                after_nanos >= toyos_phy::MDI_DEADLINE_NANOS,
                 "{}",
                 nic.because("the transaction was given up on before the deadline it is owed")
             );
@@ -1640,7 +1804,7 @@ fn a_phy_left_in_loopback_or_configured_by_hand_raises_no_link() {
             nic.because("the model named a clause other than the one §9.5.2.1 left standing")
         );
         assert!(
-            !driver.link().up,
+            !driver.link().is_up(),
             "{}",
             nic.because("STATUS.LU came up with §9.5.2.1 outstanding")
         );
@@ -1658,7 +1822,7 @@ fn a_phy_reset_restores_the_defaults_and_not_the_state_the_claim_inherited() {
     let mut driver = open(&nic);
     nic.negotiation_settles();
     one_pass(&mut driver);
-    assert!(driver.link().up, "{}", nic.because("the bring-up raised no link to take away"));
+    assert!(driver.link().is_up(), "{}", nic.because("the bring-up raised no link to take away"));
 
     nic.phy_is_reset();
 
@@ -1706,7 +1870,7 @@ fn the_phy_is_found_at_whichever_address_answers_its_identifier() {
     );
     nic.negotiation_settles();
     one_pass(&mut driver);
-    assert!(driver.link().up, "{}", nic.because("STATUS.LU did not follow the PHY's link"));
+    assert!(driver.link().is_up(), "{}", nic.because("STATUS.LU did not follow the PHY's link"));
 }
 
 /// §9.5.2.3's identifier is the one word in the PHY that says a transaction
@@ -1762,7 +1926,7 @@ fn a_master_that_never_goes_quiet_does_not_stop_the_bring_up() {
     );
     nic.negotiation_settles();
     one_pass(&mut driver);
-    assert!(driver.link().up, "{}", nic.because("the bring-up did not go on to a link"));
+    assert!(driver.link().is_up(), "{}", nic.because("the bring-up did not go on to a link"));
 }
 
 /// **Every latitude §9, §4.5.2, §10.2.2.7 and §3.1.3.10 give the hardware,
@@ -1803,334 +1967,13 @@ fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way
     one_pass(&mut driver);
     assert_eq!(
         driver.link(),
-        Link { up: true, speed_mbps: 1000, full_duplex: true },
+        Link::Up { speed: Speed::Mbps1000, full_duplex: true },
         "{}",
         nic.because("§4.6.3.2's STATUS.LU did not follow the link the PHY raised")
     );
 }
 
-// --- the arbitration, asked ---
-
-use crate::ask::{self, Answer, Others, Reading};
-
-/// A part whose arbitration moves only when a test moves it: neither of the
-/// two latitudes that put the engine on the interface unasked.
-fn quiet_arbitration(seed: u64, mutex: bool) -> Nic {
-    Nic::with(
-        seed,
-        Part::I219,
-        Permits {
-            firmware_takes_the_mdio_interface: false,
-            firmware_requests_after_a_free_read: false,
-            mdio_flag_is_a_plain_mutex: mutex,
-            ..Permits::default()
-        },
-    )
-}
-
-fn asked(nic: &Nic) -> Reading {
-    let (bar, clock, _, _) = nic.parts();
-    ask::after_reset(&bar, &clock, |nanos| nic.sleep(nanos))
-        .unwrap_or_else(|why| panic!("{}", nic.because(&format!("the reset refused it: {why}"))))
-}
-
-/// The reset's own registers and `EXTCNF_CTRL`: no `MDIC`, and nothing else.
-fn only_the_reset_and_the_arbitration(nic: &Nic) {
-    let reached: Vec<usize> = nic.touched().into_iter().collect();
-    let mut allowed = vec![
-        regs::CTRL,
-        regs::STATUS,
-        regs::ICR,
-        regs::IMC,
-        regs::EXTCNF_CTRL,
-    ];
-    allowed.sort_unstable();
-    assert_eq!(
-        reached,
-        allowed,
-        "{}",
-        nic.because("the question reached a register it has no business in")
-    );
-}
-
-/// §4.5.2's handshake under both of its readings and every holder the model
-/// has, each driven on the part and not handed to the table as a literal.
-#[test]
-fn every_answer_the_arbitration_can_give_is_read_off_the_part() {
-    type Arrange = fn(&Nic);
-    let late = ask::QUICK_NANOS * 5;
-    assert!(late < ask::BOUND_NANOS);
-    let cases: [(u64, bool, Arrange, Others, Answer, Others); 8] = [
-        // The engine's bit stands for the boot and the flag is a mutex beside it.
-        (
-            80,
-            true,
-            |n| n.mdio_never_granted(),
-            Others::Manageability,
-            Answer::GrantedQuickly,
-            Others::Manageability,
-        ),
-        // The same engine under the grant reading: the bit never reads back.
-        (
-            81,
-            false,
-            |n| n.mdio_never_granted(),
-            Others::Manageability,
-            Answer::NeverGranted,
-            Others::Manageability,
-        ),
-        (
-            82,
-            false,
-            |n| n.engine_holds_the_interface_until(ask::QUICK_NANOS / 2),
-            Others::Manageability,
-            Answer::GrantedQuickly,
-            Others::Nobody,
-        ),
-        (
-            83,
-            false,
-            |n| n.engine_holds_the_interface_until(ask::QUICK_NANOS * 5),
-            Others::Manageability,
-            Answer::GrantedSlowly,
-            Others::Nobody,
-        ),
-        (
-            84,
-            false,
-            |_| {},
-            Others::Nobody,
-            Answer::GrantedQuickly,
-            Others::Nobody,
-        ),
-        (
-            85,
-            true,
-            |n| n.hardware_holds_the_mdio_interface(),
-            Others::Hardware,
-            Answer::GrantedQuickly,
-            Others::Hardware,
-        ),
-        // "The priority order is manageability, software and then hardware."
-        (
-            86,
-            false,
-            |n| n.hardware_holds_the_mdio_interface(),
-            Others::Hardware,
-            Answer::GrantedQuickly,
-            Others::Nobody,
-        ),
-        (
-            87,
-            true,
-            |n| {
-                n.hardware_holds_the_mdio_interface();
-                n.mdio_never_granted();
-            },
-            Others::HardwareAndManageability,
-            Answer::GrantedQuickly,
-            Others::HardwareAndManageability,
-        ),
-    ];
-    for (seed, mutex, arrange, before, answer, after) in cases {
-        let nic = quiet_arbitration(seed, mutex);
-        arrange(&nic);
-        let reading = asked(&nic);
-        assert_eq!(
-            reading,
-            Reading::Asked {
-                before,
-                answer,
-                after
-            },
-            "{}",
-            nic.because("the arbitration was read as something the part did not answer")
-        );
-        assert_eq!(
-            nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
-            0,
-            "{}",
-            nic.because("the request was left standing")
-        );
-        only_the_reset_and_the_arbitration(&nic);
-        assert_eq!(Reading::from_exit_code(reading.exit_code()), Some(reading));
-    }
-}
-
-/// The three instants the reading is made of, on the modelled clock: never
-/// before §9.2's delay, never given up on before the bound, and never held
-/// past the sample that saw the grant by more than one cadence.
-#[test]
-fn the_question_is_bounded_and_a_grant_is_given_straight_back() {
-    let nic = quiet_arbitration(88, false);
-    nic.mdio_never_granted();
-    assert!(matches!(
-        asked(&nic),
-        Reading::Asked {
-            answer: Answer::NeverGranted,
-            ..
-        }
-    ));
-    let took = nic.now();
-    assert!(
-        took >= toyos_phy::LCD_RESET_DELAY_NANOS + ask::BOUND_NANOS,
-        "{}",
-        nic.because("the request was given up on before its bound")
-    );
-    assert!(
-        took < toyos_phy::LCD_RESET_DELAY_NANOS + ask::BOUND_NANOS + 3 * ask::CADENCE_NANOS,
-        "{}",
-        nic.because("the request outlived its bound")
-    );
-
-    let nic = quiet_arbitration(89, false);
-    let lets_go = ask::QUICK_NANOS * 5;
-    nic.engine_holds_the_interface_until(lets_go);
-    assert!(matches!(
-        asked(&nic),
-        Reading::Asked {
-            answer: Answer::GrantedSlowly,
-            ..
-        }
-    ));
-    assert!(
-        nic.now() < lets_go + 3 * ask::CADENCE_NANOS,
-        "{}",
-        nic.because("a grant was held for longer than it took to see it")
-    );
-}
-
-/// A software bit already set is another agent's, so nothing is asked over it
-/// and nothing is cleared — under either reading of §4.5.2.
-#[test]
-fn a_software_flag_that_already_stands_is_not_asked_over() {
-    for (seed, mutex) in [(90, true), (91, false)] {
-        let nic = quiet_arbitration(seed, mutex);
-        nic.mdio_flag_held_by_another_agent();
-        assert_eq!(asked(&nic), Reading::SoftwareFlagStood);
-        assert!(nic.now() >= toyos_phy::DEADLINE_NANOS);
-        assert!(
-            !nic.written().contains(&regs::EXTCNF_CTRL),
-            "{}",
-            nic.because("a request was written over a flag that was already somebody's")
-        );
-        assert_eq!(
-            nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
-            extcnf::MDIO_SW_OWNERSHIP
-        );
-        only_the_reset_and_the_arbitration(&nic);
-    }
-}
-
-#[test]
-fn an_arbitration_register_nothing_decodes_is_never_written() {
-    let nic = quiet_arbitration(92, true);
-    nic.window_does_not_decode(regs::EXTCNF_CTRL);
-    assert_eq!(asked(&nic), Reading::Unrouted);
-    assert!(!nic.written().contains(&regs::EXTCNF_CTRL));
-}
-
-/// The part with every latitude the datasheet gives it, the engine's unasked
-/// requests included: whatever it answers, the request does not outlive it.
-#[test]
-fn the_request_is_withdrawn_on_a_part_that_takes_every_latitude() {
-    for seed in 93..103 {
-        let nic = Nic::i219(seed);
-        let reading = asked(&nic);
-        assert!(
-            matches!(reading, Reading::Asked { .. }),
-            "{}",
-            nic.because(&format!("{reading:?}"))
-        );
-        assert_eq!(nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP, 0);
-        only_the_reset_and_the_arbitration(&nic);
-    }
-}
-
-/// One code per reading, every one inside the block the bring-up's table
-/// starts, none of them the panic's, and the two tables agreeing about the one
-/// code they share.
-#[test]
-fn every_reading_of_the_arbitration_has_one_exit_code_that_reads_back() {
-    use toyos_phy::Outcome;
-
-    let readings: Vec<Reading> = Reading::all().collect();
-    assert_eq!(
-        readings.len(),
-        2 + Answer::ALL.len() * Others::ALL.len() * Others::ALL.len()
-    );
-    let mut codes = Vec::new();
-    for reading in &readings {
-        let code = reading.exit_code();
-        assert!((64..128).contains(&code), "{reading:?} exits {code}");
-        assert_ne!(
-            code, 101,
-            "{reading:?} exits the code a panicking netd ends with"
-        );
-        assert_eq!(Reading::from_exit_code(code), Some(*reading));
-        match Outcome::from_exit_code(code) {
-            None => {}
-            Some(Outcome::Unrouted) => assert_eq!(*reading, Reading::Unrouted),
-            Some(other) => {
-                panic!("{reading:?} exits {code}, which the bring-up's table reads as {other:?}")
-            }
-        }
-        codes.push(code);
-    }
-    codes.sort_unstable();
-    codes.dedup();
-    assert_eq!(codes.len(), readings.len(), "two readings share a code");
-    assert_eq!(Reading::from_exit_code(0), None);
-    assert_eq!(Reading::from_exit_code(101), None);
-    assert_eq!(Reading::from_exit_code(128), None);
-    // The readings the T14's next boot is flashed to tell apart, by number, so
-    // a table that moved says so here before it says so on a machine.
-    let named = |before, answer, after| {
-        Reading::Asked {
-            before,
-            answer,
-            after,
-        }
-        .exit_code()
-    };
-    assert_eq!(Reading::SoftwareFlagStood.exit_code(), 78);
-    assert_eq!(
-        named(Others::Nobody, Answer::GrantedQuickly, Others::Nobody),
-        79
-    );
-    assert_eq!(
-        named(
-            Others::Manageability,
-            Answer::GrantedQuickly,
-            Others::Manageability
-        ),
-        89
-    );
-    assert_eq!(
-        named(Others::Manageability, Answer::GrantedSlowly, Others::Nobody),
-        104
-    );
-    assert_eq!(
-        named(
-            Others::Manageability,
-            Answer::NeverGranted,
-            Others::Manageability
-        ),
-        122
-    );
-    assert_eq!(
-        named(
-            Others::HardwareAndManageability,
-            Answer::NeverGranted,
-            Others::HardwareAndManageability
-        ),
-        127
-    );
-}
-
-use crate::crumbs::{
-    self, before, Broken, Crumbed, Deed, Ending, Runs, Step, Trail, Unpaired,
-};
+use crate::crumbs::{self, before, Broken, Crumbed, Ending, Runs, Step, Trail};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::string::{String, ToString};
@@ -2176,12 +2019,16 @@ impl Trail for Noted {
 }
 
 /// The three parts a trail is owed on: the 82574, an I219 whose PHY comes up,
-/// and an I219 whose MDIO interface the engine holds for the whole wait — which
-/// is what the T14's answers.
+/// and an I219 that never grants the request this driver registers — the one
+/// arm whose bring-up ends in §4.5.2 and not at the PHY.
 fn crumbed_parts() -> [Nic; 3] {
-    let held = Nic::i219(83);
-    held.engine_holds_the_interface_until(u64::MAX);
-    [Nic::new(81), Nic::i219(82), held]
+    let ungranted = Nic::with(
+        83,
+        Part::I219,
+        Permits { mdio_flag_is_a_plain_mutex: false, ..Permits::default() },
+    );
+    ungranted.engine_holds_the_interface_until(u64::MAX);
+    [Nic::new(81), Nic::i219(82), ungranted]
 }
 
 /// A bring-up over a taped part, and everything the tape and the trail saw.
@@ -2255,14 +2102,17 @@ fn a_crumbed_bring_up_reaches_the_part_exactly_as_a_bare_one_does() {
 /// a poll: each access to it is a crumb of its own.
 #[test]
 fn a_run_is_one_crumb_and_the_arbitration_is_never_a_run() {
-    let [_, _, held] = crumbed_parts();
-    held.master_never_quiesces();
-    let seen = taped(&held, |seen| Some(Runs::over(Noted(seen))), false);
+    let [_, _, ungranted] = crumbed_parts();
+    ungranted.master_never_quiesces();
+    let seen = taped(&ungranted, |seen| Some(Runs::over(Noted(seen))), false);
     let (crumbs, accesses) = (crumbs_of(&seen), reached(&seen));
     let of = |steps: &[Step], want: Step| steps.iter().filter(|s| **s == want).count();
 
+    // Two of them at the very least — the reading before the request and one
+    // after it — and every one on the trail under its own line. The count is
+    // small because each is paced and never because a run was folded.
     let arbitration = Step::Read { reg: regs::EXTCNF_CTRL };
-    assert!(of(&accesses, arbitration) > 1000, "the engine never made this driver wait");
+    assert!(of(&accesses, arbitration) > 1, "the engine never made this driver wait");
     assert_eq!(of(&crumbs, arbitration), of(&accesses, arbitration));
 
     let status = Step::Read { reg: regs::STATUS };
@@ -2312,14 +2162,6 @@ fn a_line_reads_back_as_it_was_written() {
         Step::Write { reg: regs::MTA, value: 0 },
         Step::Opened,
         Step::Exit { code: 69 },
-        Step::Before { deed: Deed::Read { reg: regs::EXTCNF_CTRL, value: None } },
-        Step::After { deed: Deed::Read { reg: regs::EXTCNF_CTRL, value: Some(0x0018_0244) } },
-        Step::Before { deed: Deed::Write { reg: regs::EXTCNF_CTRL, value: 0x20 } },
-        Step::After { deed: Deed::Write { reg: regs::EXTCNF_CTRL, value: 0x20 } },
-        Step::Before { deed: Deed::Read { reg: 0x5b54, value: None } },
-        Step::After { deed: Deed::Read { reg: 0x5b54, value: Some(u32::MAX) } },
-        Step::Before { deed: Deed::Hold },
-        Step::After { deed: Deed::Hold },
     ];
     let mut file = String::new();
     for (seq, step) in steps.into_iter().enumerate() {
@@ -2330,10 +2172,6 @@ fn a_line_reads_back_as_it_was_written() {
     assert_eq!(read, steps);
     assert!(file.contains("\n007 7007 6930 write CTRL 0x04000040\n"), "{file}");
     assert!(file.contains(" read 0x05b54\n"), "{file}");
-    assert!(file.contains(" before read EXTCNF_CTRL\n"), "{file}");
-    assert!(file.contains(" after read EXTCNF_CTRL 0x00180244\n"), "{file}");
-    assert!(file.contains(" before write EXTCNF_CTRL 0x00000020\n"), "{file}");
-    assert!(file.contains(" after hold\n"), "{file}");
 }
 
 #[test]
@@ -2364,187 +2202,4 @@ fn where_a_trail_stops_is_what_it_says() {
     for bad in ["000 10 0 start\nnonsense\n", "000 10 0 start\n\n", "000 10 0 read\n", "000 10 0 exit 69 70\n"] {
         assert!(matches!(Ending::of(bad), Err(Broken::Unreadable { .. })), "{bad:?}");
     }
-}
-
-// --- the arbitration, asked with both sides of every access on the trail ---
-
-/// The ask over a taped part, with or without [`ask::after_reset_witnessed`]'s
-/// trail: the reading, and everything the tape and the trail saw in order.
-fn taped_ask(nic: &Nic, witness: bool) -> (Reading, Vec<Seen>) {
-    let seen: Seens = Rc::default();
-    let (bar, clock, _, _) = nic.parts();
-    let tape = Tape { regs: bar, seen: Rc::clone(&seen) };
-    let pause = |nanos| nic.sleep(nanos);
-    let asked = if witness {
-        ask::after_reset_witnessed(tape, &clock, pause, Runs::over(Noted(Rc::clone(&seen))))
-    } else {
-        ask::after_reset(&tape, &clock, pause)
-    };
-    let reading =
-        asked.unwrap_or_else(|why| panic!("{}", nic.because(&format!("the reset refused it: {why}"))));
-    let seen = seen.borrow().clone();
-    (reading, seen)
-}
-
-/// One shape of arbitration the ask has an answer on: the stub's seed, whether
-/// §4.5.2's flag is a plain mutex on that part, and what arranges it.
-struct Asked {
-    seed: u64,
-    mutex: bool,
-    arrange: fn(&Nic),
-}
-
-/// Every shape of it, so the pair below is compared on more than one.
-fn asked_parts() -> [Asked; 4] {
-    let asked = |seed, mutex, arrange| Asked { seed, mutex, arrange };
-    [
-        asked(140, false, |n: &Nic| n.engine_holds_the_interface_until(ask::QUICK_NANOS / 2)),
-        asked(141, false, |n: &Nic| n.engine_holds_the_interface_until(ask::QUICK_NANOS * 5)),
-        asked(142, false, |n: &Nic| n.mdio_never_granted()),
-        asked(143, true, |n: &Nic| n.mdio_never_granted()),
-    ]
-}
-
-/// **The scout arm's one claim**: a witnessed ask asks the part exactly what a
-/// bare ask asks it — the same registers, the same words, in the same order,
-/// for the same answer. The trail is a record and not a move in the handshake.
-#[test]
-fn a_witnessed_ask_asks_the_part_exactly_what_a_bare_one_does() {
-    for Asked { seed, mutex, arrange } in asked_parts() {
-        let (bare, witnessed) = (quiet_arbitration(seed, mutex), quiet_arbitration(seed, mutex));
-        arrange(&bare);
-        arrange(&witnessed);
-        let (was, bare_seen) = taped_ask(&bare, false);
-        let (now, with_seen) = taped_ask(&witnessed, true);
-        assert_eq!(was, now, "{}", bare.because("the trail changed the arbitration's answer"));
-        assert_eq!(
-            reached(&bare_seen),
-            reached(&with_seen),
-            "{}",
-            bare.because("the trail changed what reached the part")
-        );
-        assert_eq!(
-            bare.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
-            witnessed.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
-            "{}",
-            bare.because("the trail changed what the request was left as")
-        );
-        only_the_reset_and_the_arbitration(&witnessed);
-    }
-}
-
-/// The trail's own claim: one line before every access and one after it, the
-/// `after` line carrying the word the part answered — and the reset's accesses,
-/// which happen before the question, on neither.
-#[test]
-fn a_witnessed_ask_leaves_both_sides_of_every_access_and_of_no_other() {
-    let nic = quiet_arbitration(144, false);
-    nic.engine_holds_the_interface_until(ask::QUICK_NANOS / 2);
-    let (_, seen) = taped_ask(&nic, true);
-    let crumbs = crumbs_of(&seen);
-    let arbitration = |step: &Seen| {
-        matches!(step, Seen::Reached(Step::Read { reg } | Step::Write { reg, .. }) if *reg == regs::EXTCNF_CTRL)
-    };
-    let accesses = seen.iter().filter(|s| arbitration(s)).count();
-    assert!(accesses >= 4, "{}", nic.because("the question reached the arbitration barely at all"));
-    assert_eq!(
-        crumbs.len(),
-        2 * accesses,
-        "{}",
-        nic.because("the trail is not two lines per access of the question")
-    );
-
-    // The order, access by access: the `before` line is durable, then the part
-    // is reached, then the `after` line — and nothing of the reset is on it.
-    let witnessed: Vec<&Seen> =
-        seen.iter().filter(|s| matches!(s, Seen::Crumb(_)) || arbitration(s)).collect();
-    for pair in witnessed.chunks(3) {
-        match pair {
-            [Seen::Crumb(Step::Before { deed }), Seen::Reached(access), Seen::Crumb(Step::After { deed: back })]
-                if deed.is_the_same_deed(*back) && *access == bare_step(*deed) => {}
-            other => panic!("{}", nic.because(&format!("an access arrived as {other:?}"))),
-        }
-    }
-
-    // What the register held before the request is on the trail, and the word
-    // written is that reading with §4.5.2's software bit set and nothing else.
-    let read_back: Vec<u32> = crumbs
-        .iter()
-        .filter_map(|step| match step {
-            Step::After { deed: Deed::Read { reg, value } } if *reg == regs::EXTCNF_CTRL => *value,
-            _ => None,
-        })
-        .collect();
-    let written: Vec<u32> = crumbs
-        .iter()
-        .filter_map(|step| match step {
-            Step::Before { deed: Deed::Write { reg, value } } if *reg == regs::EXTCNF_CTRL => {
-                Some(*value)
-            }
-            _ => None,
-        })
-        .collect();
-    let before_the_request = *read_back.first().expect("the reading before the request");
-    assert_eq!(
-        written.first().copied(),
-        Some(before_the_request | extcnf::MDIO_SW_OWNERSHIP),
-        "{}",
-        nic.because("the word written is not the reading the trail carries with bit 5 set")
-    );
-}
-
-/// The step a [`Deed`] is the two sides of, which is how a witnessed line is
-/// held against what the tape saw reach the part.
-fn bare_step(deed: Deed) -> Step {
-    match deed {
-        Deed::Read { reg, .. } => Step::Read { reg },
-        Deed::Write { reg, value } => Step::Write { reg, value },
-        Deed::Hold => panic!("a hold reaches no register"),
-    }
-}
-
-/// A trail says which deed it stops inside, and refuses a file whose lines do
-/// not pair — because a `before` followed by something other than its own
-/// `after` cannot say which deed its last line is about.
-#[test]
-fn a_witnessed_trail_pairs_or_names_the_deed_it_stops_inside() {
-    let line = |seq: u32, step: Step| crumbs::Line { seq, at: 10 * seq as u64, synced: 0, step };
-    let read = Deed::Read { reg: regs::EXTCNF_CTRL, value: None };
-    let answered = Deed::Read { reg: regs::EXTCNF_CTRL, value: Some(0x0018_0244) };
-    let write = Deed::Write { reg: regs::EXTCNF_CTRL, value: 0x0018_0264 };
-
-    let whole = [
-        line(0, Step::Start),
-        line(1, Step::Before { deed: read }),
-        line(2, Step::After { deed: answered }),
-        line(3, Step::Before { deed: write }),
-        line(4, Step::After { deed: write }),
-        line(5, Step::Before { deed: Deed::Hold }),
-        line(6, Step::After { deed: Deed::Hold }),
-        line(7, Step::Exit { code: 79 }),
-    ];
-    assert_eq!(crumbs::witnessed(&whole), Ok((3, None)));
-
-    // The machine ended inside the write: the trail names it, and the reading
-    // the line before it carries is what the register held.
-    assert_eq!(crumbs::witnessed(&whole[..4]), Ok((1, Some(write))));
-    assert_eq!(crumbs::witnessed(&whole[..3]), Ok((1, None)));
-
-    // A `before` whose next line is not its own `after`.
-    let interleaved = [whole[1], whole[3], whole[2], whole[4]];
-    assert!(matches!(
-        crumbs::witnessed(&interleaved),
-        Err(Unpaired::Interrupted { before, next }) if before.seq == 1 && next.seq == 3
-    ));
-    // The same register on both sides, and not the same word written.
-    let other = [
-        line(0, Step::Before { deed: write }),
-        line(1, Step::After { deed: Deed::Write { reg: regs::EXTCNF_CTRL, value: 0 } }),
-    ];
-    assert!(matches!(crumbs::witnessed(&other), Err(Unpaired::Interrupted { .. })));
-    // An `after` with nothing in front of it.
-    assert!(matches!(
-        crumbs::witnessed(&[whole[0], whole[2]]),
-        Err(Unpaired::Stray { after }) if after.seq == 2
-    ));
 }

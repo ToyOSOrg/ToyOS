@@ -32,8 +32,12 @@ entry, `LANPHYCASE` and `lan::probed_on_metal`, the six `tests/metal-profile.tom
 rows — and netd's `--exit-with-phy-outcome` with `tests/e1000phycase` and
 `lan_phy_exit_code`, the QEMU arm that proves the channel.
 
-What the arm has read so far: one boot of it has run on the T14 and ended
-`exit: netd pid=5 code=66 cpu=973ms` — §4.5.2's MDIO interface already owned
-when the driver looked, for the whole deadline, with nothing written. Which of
-its three agents owned it is what the ownership codes are split one per holder
-to say, and no boot has carried one of those back yet.
+What the arm has read so far: boots of it on the T14 ended with the code the
+table then gave §4.5.2's interface being somebody else's for the whole wait —
+the manageability agent's, as the crumbed boot of `tests/lancrumbcase` later
+named it. **Those codes are not this table's any more.** The bring-up now
+registers a request against that arbitration instead of waiting for it to go
+free, and `toyos_i219::phy::Outcome` is laid out around what the probe answers
+today: a PHY brought up, with the speed and duplex of the link that followed or
+the absence of one, and the refusals behind that. A code read off an older boot
+means what the table meant then.

@@ -299,12 +299,6 @@ struct PhyModel {
     /// change: what an agent watching the interface would have seen, so a test
     /// about *which* reading a refusal carries can say the reading moved.
     ownership_readings: Vec<u32>,
-    /// Whether the engine takes the interface the moment it is next read free
-    /// and keeps it until [`Nic::engine_lets_go`]. A fault injector: it is how
-    /// a test reaches [`crate::phy::PhyRefusal::OwnershipBusy`] — a request
-    /// registered on an interface that was free, and answered only after the
-    /// requester's own deadline.
-    engine_takes_it_at_the_request: bool,
     /// How many times the engine registered its request right after an agent
     /// read the interface free, so a test about that race can see it happened.
     engine_cut_ins: u32,
@@ -360,7 +354,6 @@ impl PhyModel {
             flag_held_by_another_agent: false,
             hardware_holds: false,
             ownership_readings: Vec::new(),
-            engine_takes_it_at_the_request: false,
             engine_cut_ins: 0,
             engine_lets_go_at: None,
         }
@@ -430,10 +423,8 @@ struct Model {
     messages: u32,
     /// One offset in the window that nothing decodes, which answers ones.
     not_decoding: Option<usize>,
-    /// Every register offset the driver has read or written, so a test about
-    /// what a path does *not* reach can say so.
-    touched: BTreeSet<usize>,
-    /// The same for writes alone.
+    /// Every register offset the driver has written, so a test about what a
+    /// path does *not* write can say so.
     written: BTreeSet<usize>,
     /// Whether the device does its work when a tail register is written.
     ///
@@ -442,6 +433,13 @@ struct Model {
     /// a write-back "opportunistically" (§7.1.7.1) — so a test may hold it and
     /// watch a driver meet a device that has not caught up.
     held: bool,
+    /// The modelled clock at every access the driver made to `EXTCNF_CTRL`.
+    ///
+    /// **Recorded and never judged here.** What the gaps between them have to
+    /// be is a bench fact about one machine and no clause of any document, so
+    /// the model notes when this driver reached the arbitration and a test
+    /// holds the gaps to [`crate::phy::ARBITRATION_PACE_NANOS`].
+    arbitration_at: Vec<u64>,
 }
 
 /// Where one PHY register address lands in [`PhyModel`].
@@ -496,9 +494,9 @@ impl Model {
             tx_holding: Vec::new(),
             messages: 0,
             not_decoding: None,
-            touched: BTreeSet::new(),
             written: BTreeSet::new(),
             held: false,
+            arbitration_at: Vec::new(),
         };
         model.power_on();
         model
@@ -670,7 +668,6 @@ impl Model {
             "seed {}: a {reg:#x} register read is outside the file",
             self.seed
         );
-        self.touched.insert(reg);
         // Nothing decodes this offset, so the bus answers ones — which is a
         // value and not a register's value.
         if self.not_decoding == Some(reg) {
@@ -724,6 +721,7 @@ impl Model {
             }
             regs::EXTCNF_CTRL => {
                 self.not_modelled_on_the_82574("EXTCNF_CTRL");
+                self.arbitration_at.push(self.nanos);
                 // §4.5.2's arbitration runs on its own: the request registered
                 // by one write is granted when the agent ahead of it lets go,
                 // and the requester learns that by reading the bit back.
@@ -739,15 +737,11 @@ impl Model {
                 // The manageability request nothing schedules: the one that
                 // lands between an agent reading the interface free and
                 // whatever that agent does about it.
-                if answer & extcnf::OWNERSHIP == 0 {
-                    if self.phy.engine_takes_it_at_the_request {
-                        self.phy.engine_takes_it_at_the_request = false;
-                        self.phy.mdio_sticks = true;
-                        self.phy.engine_cut_ins += 1;
-                    } else if self.permits.firmware_requests_after_a_free_read {
-                        self.phy.firmware_requests = MDIO_FIRMWARE_REQUESTS;
-                        self.phy.engine_cut_ins += 1;
-                    }
+                if answer & extcnf::OWNERSHIP == 0
+                    && self.permits.firmware_requests_after_a_free_read
+                {
+                    self.phy.firmware_requests = MDIO_FIRMWARE_REQUESTS;
+                    self.phy.engine_cut_ins += 1;
                 }
                 answer
             }
@@ -779,7 +773,6 @@ impl Model {
             "seed {}: a {reg:#x} register write is outside the file",
             self.seed
         );
-        self.touched.insert(reg);
         self.written.insert(reg);
         assert!(
             self.not_decoding != Some(reg),
@@ -860,6 +853,7 @@ impl Model {
             // how the agent learns it was granted.
             regs::EXTCNF_CTRL => {
                 self.not_modelled_on_the_82574("EXTCNF_CTRL");
+                self.arbitration_at.push(self.nanos);
                 let carried = self.get(regs::EXTCNF_CTRL) & !extcnf::OWNERSHIP;
                 assert_eq!(
                     value & !extcnf::OWNERSHIP,
@@ -974,15 +968,22 @@ impl Model {
              in this driver reads",
             self.seed
         );
-        // §4.5.2: "at any given time at most only one bit is 1b". Anything but
-        // this driver's bit standing alone is a transaction driven while
-        // another agent owns the interface — and on this part the other agent
-        // is the Management Engine, driving the same PHY through it.
-        assert_eq!(
-            self.get(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
-            extcnf::MDIO_SW_OWNERSHIP,
+        // §4.5.2: "The requesting agent is granted access when the same bit is
+        // read as 1b", so a transaction driven with the software bit clear is
+        // one driven on an interface this driver was never granted — and on
+        // this part the agent it would be racing is the Management Engine,
+        // driving the same PHY through the same pins.
+        //
+        // **The clause's "at any given time at most only one bit is 1b" is not
+        // asserted, because the part does not honour it**: on the T14 the grant
+        // came back as `0x003000a9`, this driver's bit set with manageability's
+        // own still standing. A model that demanded the bit alone would refuse
+        // the one bring-up the silicon allows.
+        assert_ne!(
+            self.get(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
+            0,
             "seed {}: the driver started an MDI transaction with {:#010x} standing in §4.5.2's \
-             three ownership bits",
+             three ownership bits, its own software bit clear among them",
             self.seed,
             self.get(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP
         );
@@ -1475,17 +1476,15 @@ impl Nic {
         self.0.borrow().phy.ownership_readings.clone()
     }
 
+    /// The modelled clock at every access this driver made to `EXTCNF_CTRL`, in
+    /// the order it made them.
+    pub fn arbitration_at(&self) -> Vec<u64> {
+        self.0.borrow().arbitration_at.clone()
+    }
+
     /// Another agent holds §4.5.2's software flag when this claim is minted.
     pub fn mdio_flag_held_by_another_agent(&self) {
         self.0.borrow_mut().phy.flag_held_by_another_agent = true;
-    }
-
-    /// §4.5.2's manageability agent registers its request the moment the
-    /// interface is next read free, and holds it until [`Self::engine_lets_go`]
-    /// — so the software request registered right after that read is one the
-    /// arbitration answers only after the requester's own deadline.
-    pub fn engine_takes_the_interface_at_the_request(&self) {
-        self.0.borrow_mut().phy.engine_takes_it_at_the_request = true;
     }
 
     /// The engine writes its ownership bit back to 0b, and §4.5.2's
@@ -1508,17 +1507,6 @@ impl Nic {
         let mut model = self.0.borrow_mut();
         model.phy.mdio_sticks = true;
         model.phy.engine_lets_go_at = Some(nanos);
-    }
-
-    /// The modelled clock moves on with nothing reaching the part: what a
-    /// caller that gave the processor away looks like from here.
-    pub fn sleep(&self, nanos: u64) {
-        self.0.borrow_mut().nanos += nanos;
-    }
-
-    /// Every register offset the driver has read or written.
-    pub fn touched(&self) -> BTreeSet<usize> {
-        self.0.borrow().touched.clone()
     }
 
     /// Every register offset the driver has written.
@@ -1741,6 +1729,19 @@ impl Clock for Ticker {
         let mut model = self.0.borrow_mut();
         model.nanos += CLOCK_STEP_NANOS;
         model.nanos
+    }
+
+    /// The clock moves on with nothing reaching the part, which is the whole of
+    /// what a caller giving the processor away looks like from here.
+    ///
+    /// **Half the seeds get a pause that lands short.** A substrate's pause is
+    /// not a bound, and a driver that took one for a bound would be waiting on
+    /// a promise nobody made — so on those seeds every pace and every deadline
+    /// has to come back to the clock to be kept.
+    fn pause(&self, nanos: u64) {
+        let mut model = self.0.borrow_mut();
+        let short = model.seed.is_multiple_of(2);
+        model.nanos += if short { nanos - nanos / 4 } else { nanos };
     }
 }
 

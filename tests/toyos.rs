@@ -669,20 +669,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // outcome as its code, the kernel's `exit:` record carries it, and the
     // driver crate's table reads it back. Records only; no clock in it.
     ("lan_phy_exit_code", Sched::Parallel, Tier::Fast),
-    // The MDIO ask's channel on the same part: netd registers §4.5.2's software
-    // request, withdraws it, and exits with the reading's code. Records only;
-    // no clock in it.
-    ("lan_mdio_ask_exit_code", Sched::Parallel, Tier::Fast),
     // The crumb trail on the same part and on a USB stick: netd leaves a durable
     // line before every step of the bring-up, and the file read back out of the
     // image is that bring-up in order and whole. Records and a file; the one
     // clock in it is printed, never judged.
     ("lan_crumb_trail", Sched::Parallel, Tier::Fast),
-    // The same ask with a durable line on both sides of every access it makes:
-    // the reading is the one the ask gives with no trail under it, and the file
-    // read back pairs line by line. Records and a file; the one clock in it is
-    // printed, never judged.
-    ("lan_ask_crumb_trail", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -1338,22 +1329,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs { arms: LANPHYCASE, judge: |b| lan::probed_on_metal(b[0]) },
     ),
     (
-        // A scout arm, deleted with `tests/lanaskcase` once its answer is in.
-        "lan_mdio_ask_reading",
-        metal::Metal::Runs { arms: LANASKCASE, judge: |b| lan::asked_on_metal(b[0]) },
-    ),
-    (
         // A scout arm, deleted with `tests/lancrumbcase` once the step is named.
         "lan_crumb_trail",
         metal::Metal::Runs { arms: LANCRUMBCASE, judge: |b| lan::trailed_on_metal(b[0]) },
-    ),
-    (
-        // A scout arm, deleted with `tests/lanaskcrumbcase` once the access the
-        // machine dies on is named. **This boot is expected not to come back**:
-        // what it is flashed for is the last line on the stick, and this judge
-        // is only reached on a boot that did come back.
-        "lan_ask_crumb_trail",
-        metal::Metal::Runs { arms: LANASKCRUMBCASE, judge: |b| lan::ask_trailed_on_metal(b[0]) },
     ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
@@ -1722,12 +1700,6 @@ const METAL_ONLY: &[(&str, &str)] = &[
          MDIO interface; QEMU's 82574 has no such PHY and answers `lan_phy_exit_code` with its \
          own refusal of the register map",
     ),
-    (
-        "lan_mdio_ask_reading",
-        "the MDIO arbitration's answer is given by whatever else shares the T14's I219; nothing \
-         in front of QEMU's 82574 shares the interface, which `lan_mdio_ask_exit_code` holds as \
-         the one reading it owes",
-    ),
 ];
 
 /// The boot most of the first tranche rides: the plain `tests/testcases` shape
@@ -1789,20 +1761,10 @@ const LANICSCASE: &[metal::Arm] = &[metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, 
 /// bring-up's outcome, read out of the kernel's own `exit:` record.
 const LANPHYCASE: &[metal::Arm] = &[metal::once(lan::PHY_BOOT, lan::PHY_CONFIG, &[], lan::JOBS)];
 
-/// The cable's boot with netd's MDIO ask armed: its exit code is the
-/// arbitration's answer to one request, and the card is never brought up.
-const LANASKCASE: &[metal::Arm] = &[metal::once(lan::ASK_BOOT, lan::ASK_CONFIG, &[], lan::JOBS)];
-
 /// [`LANPHYCASE`] with a crumb trail, read out of the log volume beside the
 /// kernel's log.
 const LANCRUMBCASE: &[metal::Arm] =
     &[metal::once(lan::CRUMB_BOOT, lan::CRUMB_CONFIG, &[], lan::JOBS)];
-
-/// [`LANASKCASE`]'s question with a durable line on both sides of every access
-/// it makes: the boot whose answer is the last line of that trail on a machine
-/// that never reports one.
-const LANASKCRUMBCASE: &[metal::Arm] =
-    &[metal::once(lan::ASK_CRUMB_BOOT, lan::ASK_CRUMB_CONFIG, &[], lan::JOBS)];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -13670,9 +13632,7 @@ fn run_machine_test(
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
         "lan_phy_exit_code" => lan::lan_phy_exit_code(test_config, c_bins, rust_bins),
-        "lan_mdio_ask_exit_code" => lan::lan_mdio_ask_exit_code(test_config, c_bins, rust_bins),
         "lan_crumb_trail" => lan::lan_crumb_trail(test_config, c_bins, rust_bins),
-        "lan_ask_crumb_trail" => lan::lan_ask_crumb_trail(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed

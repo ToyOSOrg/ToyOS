@@ -64,35 +64,17 @@ const CARDS: [(PciId, fn(toyos::PciDev, Option<&Crumbs>, bool) -> Card); 3] = [
 /// one.
 const PROVOKE_MESSAGE: &str = "--provoke-message";
 
-/// The probe under which this process ends right after the bring-up, with
-/// the PHY's outcome as its exit code.
+/// The probe under which this process waits a bounded time for the link and
+/// then ends, with what the bring-up and that wait answered as its exit code.
 ///
 /// **The one word of a process that crosses on a machine whose console reaches
 /// nobody** is the kernel's `exit:` record, and `toyos_i219::phy::Outcome` is
-/// the table both ends read the code through. Armed the same way as
-/// [`PROVOKE_MESSAGE`], and never beside it: the message that one asks for is
-/// taken by a pass this process would not live to make.
+/// the table both ends read the code through — which says the speed and duplex
+/// a link came up at, and says so apart from a PHY that came up onto a cable
+/// with nothing at the other end. Armed the same way as [`PROVOKE_MESSAGE`],
+/// and never beside it: the message that one asks for is taken by a pass this
+/// process would not live to make.
 const EXIT_WITH_PHY_OUTCOME: &str = "--exit-with-phy-outcome";
-
-/// The probe under which this process resets the card, puts one question to
-/// §4.5.2's MDIO arbitration and ends with the answer as its exit code, through
-/// `toyos_i219::ask::Reading`'s table.
-///
-/// **The card is never brought up under it**: no grant, no ring, no PHY
-/// transaction. Armed the same way as the two above and never beside either,
-/// because it ends this process before the point either of them acts at.
-const EXIT_WITH_MDIO_ASK: &str = "--exit-with-mdio-ask";
-
-/// How long this process keeps the claim once [`EXIT_WITH_MDIO_ASK`] has its
-/// answer.
-///
-/// **A margin, and no requirement this driver can cite**: giving the claim up
-/// makes the kernel reset the function, and how soon after the driver's own
-/// `CTRL.RST` this part tolerates that is unmeasured. The ask can be over ten
-/// milliseconds after that reset, and the only boots the T14 has come back from
-/// with a netd that ended itself are ones whose bring-up waited out its whole
-/// deadline first — so this keeps further from the reset than that.
-const ASK_EXIT_DWELL: Duration = Duration::from_millis(500);
 
 /// The probe under which this process leaves a durable crumb on the log volume
 /// before every step that reaches the claim or the card, and ends where
@@ -101,42 +83,20 @@ const ASK_EXIT_DWELL: Duration = Duration::from_millis(500);
 /// **For a machine that ends without a record**: a power-off seals no black box
 /// and outruns `/system/bin/logd`, so the last line of `crumbs::PATH` is the only
 /// thing left that says how far this process got. Armed the same way as the
-/// three above and never beside one: it is [`EXIT_WITH_PHY_OUTCOME`]'s boot with
-/// a trail, and the other two act where it never arrives.
+/// two above and never beside one: it is [`EXIT_WITH_PHY_OUTCOME`]'s boot with
+/// a trail.
 const EXIT_WITH_CRUMBS: &str = "--exit-with-crumbs";
 
-/// The probe under which this process puts [`EXIT_WITH_MDIO_ASK`]'s question to
-/// the part with a durable crumb on **both** sides of every register access it
-/// makes, and of the dwell it ends on.
-///
-/// **For a machine that dies inside one access.** [`EXIT_WITH_MDIO_ASK`]'s boot
-/// left a machine the owner had to power off and a stick whose log ends in SMP
-/// bring-up, so nothing said which access it was in; a line on the device
-/// before the access and another after it does. The question is that probe's,
-/// unchanged — same register, same bit, same order, same words — and what
-/// changes is only what is recorded around it. Armed the same way as the four
-/// above and never beside one.
-const EXIT_WITH_ASK_CRUMBS: &str = "--exit-with-ask-crumbs";
-
-/// The trail [`EXIT_WITH_CRUMBS`] and [`EXIT_WITH_ASK_CRUMBS`] leave: a poll is
-/// one crumb, and every one of them is on the device before the step it names.
-///
-/// One type under both, because a witnessed line is never folded into a run:
-/// the pair around one access is what the second arm exists for.
+/// The trail [`EXIT_WITH_CRUMBS`] leaves: a poll is one crumb, and every one of
+/// them is on the device before the step it names.
 type Crumbs = toyos_i219::crumbs::Runs<crumbs::Stick>;
 
 /// What the Rust runtime ends a panicking process with, which is how this one
 /// ends on a card it cannot drive.
 const PANIC_EXIT: i32 = 101;
 
-/// The five, which cannot share a boot.
-const ACTUATORS: [&str; 5] = [
-    PROVOKE_MESSAGE,
-    EXIT_WITH_PHY_OUTCOME,
-    EXIT_WITH_MDIO_ASK,
-    EXIT_WITH_CRUMBS,
-    EXIT_WITH_ASK_CRUMBS,
-];
+/// The three, which cannot share a boot.
+const ACTUATORS: [&str; 3] = [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME, EXIT_WITH_CRUMBS];
 
 fn armed(actuator: &str) -> bool {
     std::env::args().any(|arg| arg == actuator)
@@ -145,7 +105,7 @@ fn armed(actuator: &str) -> bool {
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
-use toyos_i219::crumbs::{around, before, Deed, Step, Trail};
+use toyos_i219::crumbs::{Step, Trail};
 use toyos_i219::Part;
 use virtio_net::VirtioNet;
 
@@ -181,25 +141,6 @@ impl Card {
     /// `provoke` is [`PROVOKE_MESSAGE`], carried out once the card is up.
     fn intel(claim: toyos::PciDev, part: Part, trail: Option<&Crumbs>, provoke: bool) -> Self {
         if let Some(trail) = trail {
-            // One trail, opened for two arms: which of them is armed decides
-            // what is taken under it — the bring-up, or the question.
-            if armed(EXIT_WITH_ASK_CRUMBS) {
-                match i219::ask_with_crumbs(&claim, trail) {
-                    Ok(reading) => {
-                        let code = reading.exit_code();
-                        // The dwell is [`EXIT_WITH_MDIO_ASK`]'s own, and it is
-                        // the one stretch of this probe that reaches no
-                        // register: a trail that ends inside it says the death
-                        // is not an access at all.
-                        around(trail, Deed::Hold, || std::thread::sleep(ASK_EXIT_DWELL));
-                        before(trail, Step::Exit { code }, || std::process::exit(code))
-                    }
-                    Err(why) => {
-                        trail.crumb(Step::Exit { code: PANIC_EXIT });
-                        Self::undrivable(why)
-                    }
-                }
-            }
             match i219::leave_crumbs(claim, part, trail) {
                 Ok(never) => match never {},
                 // The refusal is a step too: a trail that stopped short of it
@@ -208,17 +149,6 @@ impl Card {
                     trail.crumb(Step::Exit { code: PANIC_EXIT });
                     Self::undrivable(why)
                 }
-            }
-        }
-        // Before the bring-up and instead of it: the question is about the
-        // part as a bring-up finds it, so none may have run.
-        if armed(EXIT_WITH_MDIO_ASK) {
-            match i219::ask(&claim) {
-                Ok(reading) => {
-                    std::thread::sleep(ASK_EXIT_DWELL);
-                    std::process::exit(reading.exit_code())
-                }
-                Err(why) => Self::undrivable(why),
             }
         }
         match i219::Nic::open(claim, part) {
@@ -237,16 +167,6 @@ impl Card {
     fn virtio(claim: toyos::PciDev, trail: Option<&Crumbs>, provoke: bool) -> Self {
         if provoke {
             panic!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio");
-        }
-        if armed(EXIT_WITH_MDIO_ASK) {
-            Self::undrivable(format_args!(
-                "{EXIT_WITH_MDIO_ASK} asks §4.5.2's MDIO arbitration, which this card has not"
-            ));
-        }
-        if armed(EXIT_WITH_ASK_CRUMBS) {
-            Self::undrivable(format_args!(
-                "{EXIT_WITH_ASK_CRUMBS} trails that same arbitration, which this card has not"
-            ));
         }
         if trail.is_some() {
             Self::undrivable(format_args!(
@@ -275,13 +195,14 @@ impl Card {
     }
 
     /// [`EXIT_WITH_PHY_OUTCOME`]'s answer, from the driver that has a PHY
-    /// behind `MDIC`.
+    /// behind `MDIC`: what the bring-up did with it, and the link that came
+    /// after it.
     fn phy_outcome(&self) -> toyos_i219::phy::Outcome {
         match self {
             Self::Virtio(_) => Self::undrivable(format_args!(
                 "{EXIT_WITH_PHY_OUTCOME} reports a PHY bring-up, which this card has not"
             )),
-            Self::Intel(nic) => toyos_i219::phy::Outcome::of(nic.brought_up().phy),
+            Self::Intel(nic) => nic.probe_outcome(),
         }
     }
 
@@ -1456,8 +1377,7 @@ impl NetDaemon {
 fn main() {
     // Before the claim is looked for, so a trail with this line and no other
     // is a process that ended without ever holding the function.
-    let trail = (armed(EXIT_WITH_CRUMBS) || armed(EXIT_WITH_ASK_CRUMBS))
-        .then(|| Crumbs::over(crumbs::Stick::open()));
+    let trail = armed(EXIT_WITH_CRUMBS).then(|| Crumbs::over(crumbs::Stick::open()));
     if let Some(trail) = &trail {
         trail.crumb(Step::Start);
     }
@@ -1479,7 +1399,7 @@ fn main() {
     };
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
-    // Before the card is opened, because two of the four end this process
+    // Before the card is opened, because one of the three ends this process
     // inside that call.
     let asked_for: Vec<&str> = ACTUATORS.into_iter().filter(|actuator| armed(actuator)).collect();
     if asked_for.len() > 1 {

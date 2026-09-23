@@ -49,12 +49,18 @@ impl Registers for Bar {
 }
 
 /// The machine's monotonic clock: one syscall, which the kernel serves from an
-/// anchor plus the timestamp counter.
+/// anchor plus the timestamp counter — and the thread's own sleep, which is how
+/// this process gives the processor away between two accesses to a register
+/// another agent is also reading.
 pub struct Monotonic;
 
 impl Clock for Monotonic {
     fn nanos(&self) -> u64 {
         toyos_abi::syscall::clock_nanos()
+    }
+
+    fn pause(&self, nanos: u64) {
+        std::thread::sleep(std::time::Duration::from_nanos(nanos));
     }
 }
 
@@ -174,46 +180,6 @@ fn registers(dev: &PciDev, trail: &impl Trail) -> Result<Bar, Opening> {
     Ok(Bar { window, _mapped: mapped })
 }
 
-/// `crate::EXIT_WITH_MDIO_ASK`: reset the function and put one question to the
-/// MDIO arbitration. No grant is taken and no ring exists, so the function
-/// masters nothing on this path.
-///
-/// The claim is borrowed, because when it is given up is the caller's decision
-/// and not this one's.
-pub fn ask(dev: &PciDev) -> Result<toyos_i219::ask::Reading, Opening> {
-    let bar = registers(dev, &Silent)?;
-    let reading = toyos_i219::ask::after_reset(&bar, &Monotonic, |nanos| {
-        std::thread::sleep(std::time::Duration::from_nanos(nanos))
-    })
-    .map_err(Opening::Driver)?;
-    crate::say!("netd: I219: {reading}");
-    Ok(reading)
-}
-
-/// `crate::EXIT_WITH_ASK_CRUMBS`: [`ask`]'s question, with a durable line on
-/// both sides of every register access it makes from `EXTCNF_CTRL` on, and one
-/// before each of the two calls on the claim that come first.
-///
-/// **The reset is asked through the bare window**, exactly as [`ask`] asks it:
-/// the accesses this arm exists to name start at `EXTCNF_CTRL`, and a trail
-/// that ends at `describe` or `map-bar` already says the machine never reached
-/// the part at all.
-pub fn ask_with_crumbs(
-    dev: &PciDev,
-    trail: &impl Trail,
-) -> Result<toyos_i219::ask::Reading, Opening> {
-    let bar = registers(dev, trail)?;
-    let reading = toyos_i219::ask::after_reset_witnessed(
-        bar,
-        &Monotonic,
-        |nanos| std::thread::sleep(std::time::Duration::from_nanos(nanos)),
-        trail,
-    )
-    .map_err(Opening::Driver)?;
-    crate::say!("netd: I219: {reading}");
-    Ok(reading)
-}
-
 /// Everything the claim is asked for before the part is reached, in the order
 /// it is asked: the register window, then one grant — as the driver reaches its
 /// descriptors, and as netd reaches its frames.
@@ -253,9 +219,25 @@ fn say_brought_up(brought_up: toyos_i219::BringUp) {
     );
 }
 
+/// The one line a probe says about the link it waited for.
+fn say_link(link: toyos_i219::Link) {
+    match link {
+        toyos_i219::Link::Up { speed, full_duplex } => crate::say!(
+            "netd: I219: link up at {} Mb/s {}",
+            speed.mbps(),
+            if full_duplex { "full duplex" } else { "half duplex" },
+        ),
+        toyos_i219::Link::Down => crate::say!(
+            "netd: I219: no link in {} ms",
+            toyos_i219::LINK_DEADLINE_NANOS / 1_000_000
+        ),
+    }
+}
+
 /// `crate::EXIT_WITH_CRUMBS`: [`Nic::open`]'s bring-up with a crumb on `trail`
-/// before every call on the claim and every register access, ended where
-/// `crate::EXIT_WITH_PHY_OUTCOME` ends it and with the same code.
+/// before every call on the claim and every register access, its link waited
+/// for as `crate::EXIT_WITH_PHY_OUTCOME` waits for one, ended where that probe
+/// ends it and with the same code.
 ///
 /// **Nothing is given back before the exit.** The process ending is what gives
 /// the claim up on the boot this one is compared with, so the last crumb is
@@ -267,7 +249,7 @@ pub fn leave_crumbs(
 ) -> Result<std::convert::Infallible, Opening> {
     let dev = Rc::new(dev);
     let (bar, grant, _frames) = granted(&dev, trail)?;
-    let driver = toyos_i219::I219::open(
+    let mut driver = toyos_i219::I219::open(
         part,
         Crumbed::over(bar, trail),
         Monotonic,
@@ -277,7 +259,12 @@ pub fn leave_crumbs(
     .map_err(Opening::Driver)?;
     trail.crumb(Step::Opened);
     say_brought_up(driver.brought_up());
-    let code = toyos_i219::phy::Outcome::of(driver.brought_up().phy).exit_code();
+    // The link's own wait is behind this crumb, so a trail that ends in the run
+    // of `STATUS` reads says the machine ended waiting for a link and not
+    // inside the bring-up.
+    let outcome = driver.probe_outcome();
+    say_link(driver.link());
+    let code = outcome.exit_code();
     before(trail, Step::Exit { code }, || std::process::exit(code))
 }
 
@@ -315,9 +302,14 @@ impl Nic {
         self.driver.borrow().provoke_message();
     }
 
-    /// What the bring-up found, for `crate::EXIT_WITH_PHY_OUTCOME`.
-    pub fn brought_up(&self) -> toyos_i219::BringUp {
-        self.driver.borrow().brought_up()
+    /// `crate::EXIT_WITH_PHY_OUTCOME`'s answer: what the bring-up did with the
+    /// PHY, and — where it brought one up — the link that came inside the
+    /// driver's bound. **This waits**, which is why nothing on the serving path
+    /// calls it.
+    pub fn probe_outcome(&self) -> toyos_i219::phy::Outcome {
+        let outcome = self.driver.borrow_mut().probe_outcome();
+        say_link(self.driver.borrow().link());
+        outcome
     }
 
     /// Take the interrupt, acknowledge its causes and refresh the link.
@@ -386,18 +378,17 @@ impl Nic {
             return;
         };
         if link != was_link {
-            if link.up {
-                crate::say!(
+            match link {
+                toyos_i219::Link::Up { speed, full_duplex } => crate::say!(
                     "netd: I219: link up at {} Mb/s {}{}",
-                    link.speed_mbps,
-                    if link.full_duplex { "full duplex" } else { "half duplex" },
+                    speed.mbps(),
+                    if full_duplex { "full duplex" } else { "half duplex" },
                     match driver.link_up_after_nanos() {
                         Some(nanos) => format!(", {} ms after the driver came up", nanos / 1_000_000),
                         None => String::new(),
                     },
-                );
-            } else {
-                crate::say!("netd: I219: link down");
+                ),
+                toyos_i219::Link::Down => crate::say!("netd: I219: link down"),
             }
         }
         if counters.anomalies() != was_counters {
