@@ -9,8 +9,7 @@
 //! **A program's record opens with the form only the kernel writes for one**
 //! (`toyos_elide::spoken`'s `Head`): the sigil, the name its holder was spawned
 //! under with every byte that could read as structure replaced, and `: `. The
-//! kernel's own records never open with the sigil (`log::commit`), so no name
-//! and no line makes a record a judge of the kernel's would read.
+//! kernel's own records never open with the sigil (`log::commit`).
 //!
 //! **A program's share of the ring is bounded** ([`PROGRAM_BURST`],
 //! [`PROGRAM_PER_SEC`]), so no console holder can lap the kernel's own records

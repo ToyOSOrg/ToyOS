@@ -15,8 +15,7 @@
 //! **A program's record is told from the kernel's by its form, never by its
 //! words.** It opens with [`SIGIL`], which the kernel writes in front of every
 //! program's line and at the head of none of its own records, then the
-//! program's [`Tag`] and its [`Line`] — so no name a program is spawned under
-//! and nothing it writes can make a line a judge of the kernel's records reads.
+//! program's [`Tag`] and its [`Line`].
 
 use core::fmt::{self, Display, Write};
 
