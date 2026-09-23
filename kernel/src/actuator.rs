@@ -168,6 +168,15 @@ actuators! {
     /// `usb_transport_break`.
     usb_serial_short = "usb-serial-short";
 
+    /// Have the first disk the boot scan binds answer nothing for longer than
+    /// the scan's whole silence bound and then be refused, as T14 run 103's
+    /// stick was: the refusal's Disable Slot is submitted into the scan's one
+    /// operation slot after the scan has stopped listening, and the next port
+    /// to connect enumerates on top of it. See
+    /// `xhci::msc::bind_spends_the_scan`; judged by
+    /// `xhci_scan_hands_over_a_free_slot`.
+    usb_bind_spends_the_scan = "usb-bind-spends-the-scan";
+
     /// Leave one READ(10) the gate stages it on unanswered for the whole of
     /// its wait, and the class reset's TEST UNIT READY out of step, so a port
     /// reset that takes comes after a wait that spent the operation's budget.

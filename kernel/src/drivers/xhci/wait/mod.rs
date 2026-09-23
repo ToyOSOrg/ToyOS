@@ -45,6 +45,7 @@ use super::{CC_SUCCESS, CC_SHORT_PACKET};
 use toyos_xhci::call::NotTaken;
 use toyos_xhci::job::Await;
 use toyos_xhci::recovery::{Act, NeedsConfigure, Recovery};
+use toyos_xhci::scan;
 
 /// How one control transfer ended; `Done` carries the bytes actually moved,
 /// since the completion code alone cannot say.
@@ -260,34 +261,44 @@ impl XhciController {
 
     /// Run whatever is outstanding to its end, waiting for each answer; the
     /// boot scan only, before `init` publishes the controller for anything else to poll.
+    ///
+    /// **The slot is free when this returns**, which is the contract the scan's
+    /// next port rests on: `device::begin` submits its Enable Slot into the one
+    /// slot without asking, as the runtime path cannot. What bounds the wait is
+    /// the operation's own deadline, taken by `advance_outstanding`, and not
+    /// the silence bound below — a bound the blocking bind inside
+    /// `advance_outstanding` has usually spent before the refusal at the end of
+    /// it submits anything. [`toyos_xhci::scan`] is the decision.
     fn settle_outstanding(&mut self) {
-        // **Bounded on silence and not on work.** Neither loop's exit is this
-        // driver's — `busy` clears when the controller answers and `broke_with`
-        // when a recovery takes — so a controller that answers neither is a boot
-        // scan that never returns, before there is a scheduler to preempt it. A
-        // scan that is still being answered is not stuck, though, and a bound on
-        // its *total* time is one a crowded bus reaches honestly: this one is
-        // re-armed by every event the controller produces.
+        // **Bounded on silence and not on work**, and spendable only on the
+        // broken-endpoint half: `broke_with` clears when a recovery takes, a
+        // device can break again as soon as it has, and nothing in that says
+        // when to stop. A scan that is still being answered is not stuck, so
+        // every event the controller produces re-arms it.
         let mut quiet_until = deadline();
-        // Also loops on `broke_with`: a halted endpoint raises no further
-        // interrupt, so a first-transfer failure would otherwise go
-        // unrecovered for the rest of boot.
-        while self.outstanding.busy() || self.devices.iter().any(|d| d.broke_with.is_some()) {
-            if crate::clock::nanos_since_boot() >= quiet_until {
-                log!("xHCI: the boot scan heard nothing for {} ms with work still outstanding; \
-                     the rest of this boot goes on without it", USB_TIMEOUT_NS / 1_000_000);
-                return;
+        loop {
+            if self.drain_events() {
+                quiet_until = deadline();
             }
-            self.recover_endpoints();
-            while self.outstanding.busy() {
-                if self.drain_events() {
-                    quiet_until = deadline();
-                } else if crate::clock::nanos_since_boot() >= quiet_until {
-                    break;
+            // After the drain, never inside it: everything below submits.
+            self.advance_outstanding();
+            // Also asks about `broke_with`: a halted endpoint raises no further
+            // interrupt, so a first-transfer failure would otherwise go
+            // unrecovered for the rest of boot.
+            let broken = self.devices.iter().any(|d| d.broke_with.is_some());
+            let now = crate::clock::nanos_since_boot();
+            match scan::settle(self.outstanding.busy(), broken, now, quiet_until) {
+                scan::Settle::Done => return,
+                scan::Settle::GaveUp => {
+                    log!("xHCI: the boot scan heard nothing for {} ms with an endpoint still \
+                         broken; the rest of this boot goes on without it",
+                        USB_TIMEOUT_NS / 1_000_000);
+                    return;
                 }
-                self.advance_outstanding();
-                core::hint::spin_loop();
+                scan::Settle::Recover => self.recover_endpoints(),
+                scan::Settle::Wait => {}
             }
+            core::hint::spin_loop();
         }
     }
 

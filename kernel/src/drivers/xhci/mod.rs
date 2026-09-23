@@ -870,6 +870,12 @@ impl XhciController {
         if crate::actuator::usb_slow_device() && !self.slow_device_would_have_answered(&event) {
             return None;
         }
+        // A controller that has not answered yet, which QEMU cannot be: it
+        // posts a command's completion inside the write to the doorbell.
+        #[cfg(feature = "boot-actuators")]
+        if !msc::bind_spends_the_scan::answered() {
+            return None;
+        }
         self.advance_event_ring();
         Some(event)
     }
