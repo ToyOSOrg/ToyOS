@@ -287,18 +287,20 @@ fn a_reader_racing_a_recycle_gets_nothing_rather_than_a_mixture() {
 /// is what makes a stale mark unable to answer for the new generation.
 ///
 /// Red with the mark stored ahead of the `WRITING` store: the reader then takes
-/// the old generation's body under the new generation's origin.#[test]
+/// the old generation's body under the new generation's origin.
+#[test]
 fn a_record_keeps_its_own_origin_across_a_recycle() {
     loom::model(|| {
         let shard = Arc::new(Shard::new());
-        let guard = kernel_loom::arch::LogCommitGuard::close();
-        for i in 0..SHARD_RECORDS {
-            // SAFETY: this model's sole producer, before any other thread exists.
-            let seq = unsafe { shard.reserve(&guard) };
-            let origin = if i == 0 { Origin::Spoken } else { Origin::Kernel };
-            unsafe { shard.commit(seq, &record(seq), origin, &guard) };
+        {
+            let guard = kernel_loom::arch::LogCommitGuard::close();
+            for i in 0..SHARD_RECORDS {
+                // SAFETY: this model's sole producer, before any other thread exists.
+                let seq = unsafe { shard.reserve(&guard) };
+                let origin = if i == 0 { Origin::Spoken } else { Origin::Kernel };
+                unsafe { shard.commit(seq, &record(seq), origin, &guard) };
+            }
         }
-        drop(guard);
         assert_eq!(shard.read_as(FIRST_SEQ).map(|(_, o)| o), Some(Origin::Spoken));
 
         let writer = shard.clone();
