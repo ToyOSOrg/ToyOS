@@ -1468,6 +1468,10 @@ name = "toyos-font"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-i219"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-keymap"
 version = "0.1.0"
 
@@ -1483,6 +1487,7 @@ dependencies = [
  "sha2",
  "toyos 0.7.0",
  "toyos-abi 0.6.0",
+ "toyos-i219",
  "toyos-tco",
  "toyos-window",
  "ureq",

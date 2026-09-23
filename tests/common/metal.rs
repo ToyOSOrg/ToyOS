@@ -857,6 +857,7 @@ fn swap_invocation(image: &Path, home: &Path, service: &str) -> Vec<String> {
         &talk_home(home).join("id_ed25519").display().to_string(),
         "--readback",
         &home.display().to_string(),
+        "--hand-back",
     ]
     .map(str::to_string)
     .to_vec()

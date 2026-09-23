@@ -236,6 +236,17 @@ impl<'a> Service<'a> {
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
     ) -> std::io::Result<u32> {
+        // **Checked again at every start, not only on arrival**: the installed
+        // file lives in an ambient directory, so what init verified when it
+        // wrote it is not a claim about what is there now. This narrows the
+        // window to the spawn itself and does not close it
+        // (`issues/isolation/a-swapped-binary-lives-where-any-process-can-rewrite-it.md`).
+        if let Some(digest) = toyos_swap::installed_digest(path) {
+            let bytes = read_binary(path).map_err(|why| std::io::Error::other(why.to_string()))?;
+            toyos_swap::verify(&bytes, &digest).map_err(|why| {
+                std::io::Error::other(format!("{path} no longer holds what was installed: {why}"))
+            })?;
+        }
         let mut kept = self.kept.lock().expect("init: a service's state is poisoned");
         // Every start after the first follows a process of this service
         // that init stopped or saw end.
@@ -483,7 +494,7 @@ impl<'a> Init<'a> {
         let name = request.service.as_str();
         // Read and removed before anything else can refuse, so a refused
         // request leaves nothing staged behind it.
-        let bytes = read_staged(&request.staged);
+        let bytes = read_binary(&request.staged);
         let _ = std::fs::remove_file(&request.staged);
         let Some(index) = self.services.iter().position(|s| s.program.name == name) else {
             return refuse(name, Refusal::NotAService(name.to_string()));
@@ -688,9 +699,9 @@ impl<'a> Init<'a> {
     }
 }
 
-/// A staged binary's bytes, refused past [`toyos_swap::MAX_BINARY_BYTES`]
+/// A staged or installed binary's bytes, refused past [`toyos_swap::MAX_BINARY_BYTES`]
 /// before any of it is read.
-fn read_staged(path: &str) -> Result<Vec<u8>, Refusal> {
+fn read_binary(path: &str) -> Result<Vec<u8>, Refusal> {
     let unreadable = |e: std::io::Error| Refusal::Unreadable { path: path.to_string(), why: e.to_string() };
     let len = std::fs::metadata(path).map_err(unreadable)?.len();
     if len > toyos_swap::MAX_BINARY_BYTES {

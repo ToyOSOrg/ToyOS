@@ -242,6 +242,9 @@ const RUST_SKIP: &[&str] = &[
     // A binary that panics at once, sent over ssh as a service's replacement;
     // `swap_crash_rolls_back` stages it from the host and never runs it as a job.
     "swap_crash",
+    // The swap DMA control's replacement netd: it claims the 82574 and masters
+    // with the registers untouched. `swap_quiets_the_function` stages it.
+    "swap_claim_idle",
     "i8042_keyboard",
     "i8042_mouse",
     "input_events",
@@ -267,6 +270,9 @@ const RUST_SKIP: &[&str] = &[
     // The same for `tests/lantalkcase`, held until the runner's bound is near
     // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
     "lan_talk_hold",
+    // The swapping boot's hold: it lasts until the host's `reboot` over ssh,
+    // and the runner's bound is the fallback. `lan_swap` rides it.
+    "lan_swap_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -720,6 +726,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("lan_swap", Sched::Parallel, Tier::Fast),
     ("swap_refusals", Sched::Parallel, Tier::Fast),
     ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
+    // The 82574 swapped to a holder that masters it with its registers
+    // untouched while the host sends it frames: the release must have reset
+    // it. The verdict is the kernel's console; its clocks are liveness guards.
+    ("swap_quiets_the_function", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -1824,10 +1834,11 @@ const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
 /// The talking boot's config with netd swapped while it runs: the image
 /// streams and authorizes a key as the talking boot's does, and the loop that
 /// flashes it is not told `--talk` — the `--swap` invocation beside it owns the
-/// listener. Its one job is the talking boot's hold, which is also what ends it.
+/// listener. Its one job holds the machine until that invocation hands it back
+/// with `reboot`, the runner's bound standing behind it.
 const LANSWAPCASE: &[metal::Arm] = &[metal::Arm {
     swap: Some("netd"),
-    ..metal::once("lanswapcase", lan::TALK_CONFIG, &[], lan::TALK_JOBS)
+    ..metal::once("lanswapcase", lan::TALK_CONFIG, &[], common::swap::HOLD_JOBS)
 }];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
@@ -13873,6 +13884,9 @@ fn run_machine_test(
         "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),
         "swap_crash_rolls_back" => common::swap::swap_crash_rolls_back(test_config, c_bins, rust_bins),
+        "swap_quiets_the_function" => {
+            common::swap::swap_quiets_the_function(test_config, c_bins, rust_bins)
+        }
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed

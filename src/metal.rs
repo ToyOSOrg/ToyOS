@@ -1495,6 +1495,7 @@ declare_flags!(METAL = {
     DRY_RUN = "--dry-run", None;
     SWAP = "--swap", Next;
     BINARY = "--binary", Next;
+    HAND_BACK = "--hand-back", None;
 });
 
 /// The flags a swap of a running machine's service refuses beside it: it
@@ -1559,6 +1560,10 @@ pub struct Args {
     /// the stream and the swap's facts are written.
     swap: Option<String>,
     binary: Option<PathBuf>,
+    /// After the swap is judged, whichever way, ask the machine to `reboot`
+    /// over ssh: the host saying it is done with a boot held for it. Absent
+    /// leaves the machine running, which is the development loop.
+    hand_back: bool,
 }
 
 impl Args {
@@ -1592,6 +1597,7 @@ impl Args {
             talk: value(&TALK).map(PathBuf::from),
             swap: value(&SWAP).map(str::to_string),
             binary: value(&BINARY).map(PathBuf::from),
+            hand_back: METAL.present(args, &HAND_BACK),
         };
         if let Some(host) = value(&HOST) {
             let (user, machine) = host.split_once('@').ok_or_else(|| {
@@ -1633,6 +1639,9 @@ impl Args {
             ));
         }
         match (&out.swap, &out.binary) {
+            (None, None) if out.hand_back => {
+                return Err(Refusal::Usage("--hand-back ends a --swap".to_string()))
+            }
             (None, None) => {}
             (None, Some(_)) => {
                 return Err(Refusal::Usage("--binary is the new binary of a --swap".to_string()))
@@ -1787,12 +1796,22 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     for line in &swapped.said {
         print!("  {service}| {line}");
     }
-    let said = crate::metalswap::judge(&swapped, crate::metalswap::Expect::InService)
-        .map_err(Refusal::Swap)?;
-    for line in said {
+    let judged = crate::metalswap::judge(&swapped, crate::metalswap::Expect::InService);
+    // Whichever way it was judged: a boot held for this host is handed back
+    // either way. `exec` and not `fire`, so sshd does not end the reboot for a
+    // client that left (`issues/build/fire-can-end-the-reboot-it-asked-for.md`).
+    if args.hand_back {
+        let at = match cable.stream.peer() {
+            Some(std::net::SocketAddr::V4(peer)) => std::net::SocketAddr::from((*peer.ip(), crate::metaltalk::SSH_PORT)),
+            _ => std::net::SocketAddr::from((swapped.peer, crate::metaltalk::SSH_PORT)),
+        };
+        let asked = cable.ssh.exec(at, crate::metaltalk::REBOOT, &cable.scratch);
+        println!("handed back: `{}` at {at} answered {asked:?}", crate::metaltalk::REBOOT);
+    }
+    for line in judged.map_err(Refusal::Swap)? {
         println!("swap: {line}");
     }
-    println!("SWAPPED: {service} runs {} and the machine was not rebooted", binary.display());
+    println!("SWAPPED: {service} runs {} and nothing was rebooted to put it there", binary.display());
     Ok(())
 }
 
@@ -2515,7 +2534,8 @@ mod tests {
 
     /// **A swap flashes nothing and reboots nothing**, so every flag that
     /// describes a boot is refused beside it, and it is refused without the
-    /// four things it acts with. A `--binary` with no swap is no swap.
+    /// four things it acts with. A `--binary` or a `--hand-back` with no swap
+    /// is no swap.
     #[test]
     fn a_swap_is_not_a_boot_and_names_what_it_acts_with() {
         let whole = [
@@ -2544,6 +2564,11 @@ mod tests {
         }
         let lone = ["--binary", "n"].map(String::from);
         assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
+        let lone = ["--hand-back"].map(String::from);
+        assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
+        let mut back = whole.to_vec();
+        back.push("--hand-back".into());
+        assert!(Args::parse(&back).expect("a swap that hands back").hand_back);
         let mut bent = whole.to_vec();
         bent[1] = "../netd".to_string();
         assert!(Args::parse(&bent).unwrap_err().to_string().contains("no service"));

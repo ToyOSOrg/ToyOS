@@ -244,11 +244,18 @@ pub fn installed_dir(digest: &Digest) -> String {
 /// Whether `path` is a binary a swap installed, which is what init may delete
 /// once nothing runs it. A path in the image never is.
 pub fn is_installed(path: &str) -> bool {
-    let Some(rest) = path.strip_prefix(STAGING).and_then(|rest| rest.strip_prefix('/')) else {
-        return false;
-    };
-    let Some((dir, service)) = rest.split_once('/') else { return false };
-    parse_hex(dir).is_some() && is_service_name(service)
+    installed_digest(path).is_some()
+}
+
+/// The digest an installed binary's path names, which its bytes must still
+/// hash to when it is started; `None` for any other path.
+pub fn installed_digest(path: &str) -> Option<Digest> {
+    let rest = path.strip_prefix(STAGING)?.strip_prefix('/')?;
+    let (dir, service) = rest.split_once('/')?;
+    if !is_service_name(service) {
+        return None;
+    }
+    parse_hex(dir)
 }
 
 /// The request sshd sends init: the service, the staged path and the digest the
@@ -448,6 +455,7 @@ mod tests {
         let path = installed_path("netd", &digest(b"abc"));
         assert_eq!(path, format!("/tmp/swap/{ABC}/netd"));
         assert!(is_installed(&path));
+        assert_eq!(installed_digest(&path), Some(digest(b"abc")));
         assert!(!is_installed("/system/bin/netd"));
         assert!(!is_installed(&staged_path("netd", 1)));
         assert!(!is_staged(&path));

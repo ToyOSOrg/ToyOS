@@ -48,9 +48,9 @@ const EXEC_RETRY: Duration = Duration::from_secs(1);
 
 /// The record stream, as this host receives it.
 ///
-/// **One connection at a time, and another after it ends.** A boot's `logd`
-/// asks for its stream again whenever it ends — netd swapped under it, or a
-/// listener that left and came back — so the listener goes back to accepting,
+/// **Connection after connection, the newest ending the one before.** A boot's
+/// `logd` asks for its stream again whenever it ends — netd swapped under it,
+/// or a listener that left and came back — so the listener keeps accepting,
 /// and every line from every connection is one sequence in arrival order.
 #[derive(Clone)]
 pub struct Stream {
@@ -95,8 +95,9 @@ impl Stream {
         socket
             .set_nonblocking(true)
             .map_err(|e| format!("this host would not poll its listener at {at}: {e}"))?;
-        let mut out = std::fs::File::create(file)
-            .map_err(|e| format!("{}: {e}", file.display()))?;
+        let out = Arc::new(Mutex::new(
+            std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?,
+        ));
         let shared = Arc::new(Shared {
             lines: Mutex::new(Vec::new()),
             peer: Mutex::new(None),
@@ -109,55 +110,45 @@ impl Stream {
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("metal-stream".into())
-            .spawn(move || loop {
-                let (conn, peer) = loop {
+            .spawn(move || {
+                // The connection being read, so a newer one can end it.
+                let mut reading: Option<std::net::TcpStream> = None;
+                loop {
                     if theirs.stop.load(Ordering::SeqCst) {
                         return;
                     }
-                    match socket.accept() {
-                        Ok(pair) => break pair,
+                    let (conn, peer) = match socket.accept() {
+                        Ok(pair) => pair,
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(50));
+                            continue;
                         }
-                        Err(_) => return,
+                        // One connection that died in the backlog is not the
+                        // listener: the next one is still owed.
+                        Err(_) => continue,
+                    };
+                    // **A new connection ends the one before it.** A swapped
+                    // netd goes without a FIN or a reset, so the host's side of
+                    // the old connection can wait for a byte for ever while the
+                    // boot's `logd` writes into the new one — which is what a
+                    // reader that went back to `accept` only after its
+                    // connection ended met.
+                    if let Some(old) = reading.take() {
+                        let _ = old.shutdown(std::net::Shutdown::Both);
                     }
-                };
-                // Accepted sockets inherit the listener's mode on this host's
-                // BSD half; the reader below blocks.
-                let _ = conn.set_nonblocking(false);
-                *theirs.peer.lock().expect("the stream's peer") = Some(peer);
-                theirs.ended.store(false, Ordering::SeqCst);
-                theirs.accepted.fetch_add(1, Ordering::SeqCst);
-                if echo {
-                    println!("  stream: {peer} connected");
-                }
-                let opened = Instant::now();
-                let mut reader = BufReader::new(conn);
-                let how = loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(0) => break "the peer closed it".to_string(),
-                        Err(e) => break e.to_string(),
-                        Ok(_) if !line.ends_with('\n') => {
-                            theirs.torn.fetch_add(1, Ordering::SeqCst);
-                        }
-                        Ok(_) => {
-                            let _ = out.write_all(line.as_bytes());
-                            let _ = out.flush();
-                            if echo {
-                                print!("  stream| {line}");
-                                let _ = std::io::stdout().flush();
-                            }
-                            theirs.lines.lock().expect("the stream's lines").push(line);
-                        }
+                    // Accepted sockets inherit the listener's mode on this
+                    // host's BSD half; the reader below blocks.
+                    let _ = conn.set_nonblocking(false);
+                    reading = conn.try_clone().ok();
+                    *theirs.peer.lock().expect("the stream's peer") = Some(peer);
+                    theirs.ended.store(false, Ordering::SeqCst);
+                    let index = theirs.accepted.fetch_add(1, Ordering::SeqCst) + 1;
+                    if echo {
+                        println!("  stream: {peer} connected");
                     }
-                };
-                let end = End { after_ms: opened.elapsed().as_millis() as u64, how };
-                if echo {
-                    println!("  stream: {peer} ended {} ms after it opened: {}", end.after_ms, end.how);
+                    let (shared, out) = (Arc::clone(&theirs), Arc::clone(&out));
+                    std::thread::spawn(move || read(conn, peer, index, &shared, &out, echo));
                 }
-                *theirs.end.lock().expect("the stream's end") = Some(end);
-                theirs.ended.store(true, Ordering::SeqCst);
             })
             .map_err(|e| format!("the stream's reader could not be started: {e}"))?;
         Ok(Self { shared, at })
@@ -221,6 +212,50 @@ impl Stream {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+}
+
+/// Read one connection's lines into the stream until it ends, and record how
+/// it ended if it is still the latest.
+fn read(
+    conn: std::net::TcpStream,
+    peer: SocketAddr,
+    index: usize,
+    shared: &Shared,
+    out: &Mutex<std::fs::File>,
+    echo: bool,
+) {
+    let opened = Instant::now();
+    let mut reader = BufReader::new(conn);
+    let how = loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break "the peer closed it".to_string(),
+            Err(e) => break e.to_string(),
+            Ok(_) if !line.ends_with('\n') => {
+                shared.torn.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(_) => {
+                {
+                    let mut out = out.lock().expect("the stream's file");
+                    let _ = out.write_all(line.as_bytes());
+                    let _ = out.flush();
+                }
+                if echo {
+                    print!("  stream| {line}");
+                    let _ = std::io::stdout().flush();
+                }
+                shared.lines.lock().expect("the stream's lines").push(line);
+            }
+        }
+    };
+    let end = End { after_ms: opened.elapsed().as_millis() as u64, how };
+    if echo {
+        println!("  stream: {peer} ended {} ms after it opened: {}", end.after_ms, end.how);
+    }
+    if shared.accepted.load(Ordering::SeqCst) == index {
+        *shared.end.lock().expect("the stream's end") = Some(end);
+        shared.ended.store(true, Ordering::SeqCst);
     }
 }
 
@@ -609,7 +644,8 @@ pub fn judge(heard: &Heard, stream: &[String]) -> Result<Vec<String>, Vec<String
             "the connection from {} ended {} ms after this host accepted it, {}, before a byte \
              arrived: a host firewall that blocks this binary's incoming connections ends \
              one exactly so (on macOS: `/usr/libexec/ApplicationFirewall/socketfilterfw \
-             --getappblocked <this binary>`)",
+             --listapps` names this binary with `Block incoming connections`; its \
+             `--getappblocked` answered `permitted` for a binary `--listapps` blocked)",
             heard.peer, end.after_ms, end.how
         ));
     }
@@ -809,6 +845,33 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(stream.lines(), vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A swapped netd leaves its connection open on this side**: no FIN, no
+    /// reset. The boot's next connection must be read while the old one is
+    /// still waiting for a byte, and it ends the old one.
+    #[test]
+    fn a_new_connection_is_read_while_the_old_one_still_hangs_open() {
+        let dir = std::env::temp_dir().join(format!("metaltalk-again-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stream = Stream::listen("127.0.0.1:0".parse().unwrap(), &dir.join("s.log"), false)
+            .expect("a loopback listener");
+        let mut first = std::net::TcpStream::connect(stream.local()).unwrap();
+        writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
+        stream.wait_connected(Duration::from_secs(5)).expect("the first peer");
+        let mut second = std::net::TcpStream::connect(stream.local()).unwrap();
+        writeln!(second, "[kernel 9.000 cpu0] after the swap").unwrap();
+        let began = Instant::now();
+        while stream.lines().len() < 2 && began.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(stream.connections(), 2);
+        assert_eq!(
+            stream.lines(),
+            vec!["[kernel 0.001 cpu0] before the swap\n", "[kernel 9.000 cpu0] after the swap\n"]
+        );
+        drop(first);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

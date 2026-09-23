@@ -111,6 +111,10 @@ impl Capability<'_> {
         self.device.read_config_u32(self.offset + field)
     }
 
+    pub fn write_u8(&self, field: u64, val: u8) {
+        self.device.write_config_u8(self.offset + field, val)
+    }
+
     pub fn write_u16(&self, field: u64, val: u16) {
         self.device.write_config_u16(self.offset + field, val)
     }
@@ -241,6 +245,10 @@ impl PciDevice {
         });
         self.mmio.write_u16(COMMAND, cmd);
         bar::advertised_size(mask_lo, mask_hi)
+    }
+
+    pub fn write_config_u8(&self, offset: u64, val: u8) {
+        self.mmio.write_u8(offset, val)
     }
 
     pub fn write_config_u16(&self, offset: u64, val: u16) {

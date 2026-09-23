@@ -32,6 +32,11 @@ pub const VIRTIO: Bench =
 /// A liveness guard on a guest that stopped talking, never a verdict.
 const CEILING: Duration = Duration::from_secs(120);
 
+/// The swapping boot's one job on the T14: it holds the machine until the
+/// swap invocation hands it back.
+const HOLD: &str = "test_rs_lan_swap_hold";
+pub const HOLD_JOBS: &[&str] = &[HOLD];
+
 /// A test binary that panics the instant it starts, and its panic's own line.
 const CRASH: &str = "swap_crash";
 const CRASH_PANIC: &str = "panicked at src/bin/swap_crash.rs";
@@ -97,7 +102,7 @@ impl Rig {
         let said = match super::volumes::whole_log(&self.staged.image, self.staged.start, self.staged.len) {
             Ok(file) => file
                 .into_iter()
-                .filter(|l| l.contains("@logd: ") || l.contains("init: swap "))
+                .filter(|l| l.contains("logd: ") || l.contains("init: swap ") || l.contains("pcidev: "))
                 .collect::<Vec<_>>()
                 .concat(),
             Err(e) => format!("/log could not be read: {e}\n"),
@@ -307,8 +312,104 @@ pub fn swapped_on_metal(back: &super::metal::Readback) -> Result<(), String> {
         }
         None => bad.push(format!("the swap file's digest {:?} is no digest", swapped.digest)),
     }
+    // The host said it was done: its `reboot` ended the boot, not the
+    // runner's bound over a hold that never ends on its own.
+    if file.iter().any(|l| l.contains(toyos_build::bootlog::JOB_DEADLINE_SAID)) {
+        bad.push(format!(
+            "the runner's bound ended the boot inside {HOLD}, so the swap invocation never \
+             handed the machine back"
+        ));
+    }
     if bad.is_empty() {
         return Ok(());
     }
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
+}
+
+/// The replacement a DMA control swaps in: it stops the 82574 the way netd does
+/// before its first grant, and does nothing else.
+const IDLE: &str = "swap_claim_idle";
+
+/// **The part keeps running across a release, and the next holder stops it
+/// before its first grant.** netd on QEMU's 82574 is swapped for a program that
+/// takes the function, reports the receive and transmit enables it inherited,
+/// runs `toyos_i219::quiesce` — netd's own first act — and then masters with
+/// one grant, while this host sends the guest frames through slirp. The verdict
+/// is the kernel's console saying the unit saw no DMA fault.
+///
+/// **The kernel's reset cannot be this test's subject**: the 82574 advertises
+/// the D3hot round trip and QEMU does not reset it on one — measured, the
+/// inherited `RCTL` still has receive enabled — and no NIC in reach both resets
+/// and can be claimed. So a holder that skipped the quiesce faults here (the
+/// negative control), and the kernel's reset is the T14's to measure, through
+/// netd's own `inherited RCTL` line.
+pub fn swap_quiets_the_function(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut rig = Rig::boot("swap-quiet", super::lan::TALK_BENCH)?;
+    let (_, idle) = rust_bins
+        .iter()
+        .find(|(name, _)| name == IDLE)
+        .ok_or_else(|| format!("no `{IDLE}` among the test binaries"))?;
+    let binary = rig.staged.scratch.join(IDLE);
+    std::fs::write(&binary, idle).map_err(|e| format!("{}: {e}", binary.display()))?;
+    let digest = toyos_swap::digest(idle);
+
+    // Asked once sshd answers: a boot's stream opens when netd leases, and sshd
+    // may still be binding then.
+    rig.staged.stream.wait_connected(CEILING).ok_or("the boot never opened its stream")?;
+    let asked = std::time::Instant::now();
+    let answer = loop {
+        match rig.ssh.swap(rig.forward, "netd", &binary, &digest) {
+            Err(why) if asked.elapsed() < Duration::from_secs(30) => {
+                eprintln!("  [swap] not taken yet: {why}");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            answered => break answered,
+        }
+    };
+    // Frames at the guest for as long as the replacement holds the part, from
+    // the answer on — before it, they would be sshd's: every connect to the
+    // forward is a SYN slirp sends the guest's address.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let knocking = {
+        let (stop, at) = (std::sync::Arc::clone(&stop), rig.forward);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = std::net::TcpStream::connect_timeout(&at, Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+    let held = qemu::await_marker(
+        &mut rig.guest,
+        &mut rig.console,
+        "swap_claim_idle: done",
+        "the replacement holding the part mastering",
+    );
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = knocking.join();
+    eprintln!("  [swap] the swap was answered {answer:?}");
+    if let Err(why) = held {
+        return Err(rig.fail(why));
+    }
+    rig.console.push_str(&rig.guest.drain_serial(Duration::from_secs(1)));
+    let text = rig.console.clone();
+    let console = serial::Serial::named("the quieting boot", text.as_str());
+    let released = console.must_say("released from slot 0; reset by")?.to_string();
+    console.must_say("swap_claim_idle: holding the NIC mastering")?;
+    let inherited = console.must_say("swap_claim_idle: inherited")?.to_string();
+    if let Err(why) = console.must_be_clean() {
+        return Err(rig.fail(format!("{why}\n  the release said: {}", released.trim_end())));
+    }
+    eprintln!(
+        "  [swap] {}; {}; the next holder stopped it, mastered it, and the unit saw no fault",
+        released.trim_end(),
+        inherited.trim_end()
+    );
+    drop(rig.guest);
+    let _ = std::fs::remove_file(&rig.staged.image);
+    Ok(())
 }

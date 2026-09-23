@@ -28,3 +28,14 @@ alone, and this is the one step of it the capability model does not cover.
 spawn from a file handle init holds, or from bytes init hands over — an ABI
 change — or a directory only init may write, which the ambient-filesystem
 track would have to rule on.
+
+## Narrowed, not closed
+
+init now hashes an installed binary again at every start — the swap's and a
+restore's — and refuses to start one that no longer holds what its path names
+(`toyos_swap::installed_digest`). That moves the first window from "until the
+requester hangs up" to the spawn syscall itself. The second is unchanged: the
+kernel still pages the running binary in from the file. A directory only init
+may write does not exist in this kernel: every writable mount is ambient, and
+gating one on the writer's identity would be pid-as-authority. So the exit
+condition above stands, and choosing between its three shapes is the owner's.
