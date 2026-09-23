@@ -1095,6 +1095,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("usb_storage_gate", Sched::Parallel, Tier::Nightly),
     ("usb_storage_shapes", Sched::Parallel, Tier::Nightly),
     ("usb_refused_disk_first", Sched::Parallel, Tier::Nightly),
+    ("xhci_scan_hands_over_a_free_slot", Sched::Parallel, Tier::Fast),
     // The owner's freeze, staged: `device_del` on the stick carrying `/boot`
     // and `/log` while the desktop draws. Serial because both verdicts are
     // liveness ceilings — two 2 s compositor reporting intervals inside 20 s,
@@ -9744,6 +9745,9 @@ fn run_machine_test(
         "usb_boot_stick_pulled" => usb::usb_boot_stick_pulled(test_config, c_bins, rust_bins),
         "usb_refused_disk_first" => {
             usb::usb_refused_disk_first(test_config, c_bins, rust_bins)
+        }
+        "xhci_scan_hands_over_a_free_slot" => {
+            usb::xhci_scan_hands_over_a_free_slot(test_config, c_bins, rust_bins)
         }
         "usb_pool_exhausted" => usb::usb_pool_exhausted(test_config, c_bins, rust_bins),
         "usb_short_read" => usb::usb_short_read(test_config, c_bins, rust_bins),
