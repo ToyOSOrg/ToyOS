@@ -269,6 +269,10 @@ enum Rings {
 /// `after` is the reset this enumeration follows, and what the acknowledge is a
 /// function of; `port::enumeration_ack` is that function, and the simulator's
 /// enumerate step calls the same one.
+///
+/// **The caller owes a free operation slot**: the Enable Slot below goes into
+/// it unasked. The poll's `service_port` defers on `outstanding.wake_at`, and
+/// the boot scan's `settle_outstanding` returns only with the slot empty.
 pub(super) fn begin(ctrl: &mut XhciController, port_idx: u8, after: Option<Reset>) {
     let portsc = ctrl.read_portsc(port_idx);
     ctrl.write_portsc(port_idx, port::enumeration_ack(after, portsc));

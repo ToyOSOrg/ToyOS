@@ -495,6 +495,61 @@ pub(in crate::drivers::xhci) mod return_silent {
     }
 }
 
+/// Stage the boot's first bind to spend the scan's whole silence bound and then
+/// refuse, once: T14 run 103's stick, whose first command went unanswered, whose
+/// recovery ladder then ran on bounds of its own, and whose refusal at the end
+/// of all that submitted a Disable Slot into a scan that had already stopped
+/// listening. Staged because no QEMU device stops answering its first command.
+///
+/// The spending and the refusal are staged and the ladder is not: what the
+/// defect needs is a submit later than the scan's bound, and which rungs ran
+/// decides nothing about that.
+///
+/// **The held answer is the second half and not decoration.** QEMU posts a
+/// Command Completion Event inside the vCPU's write to the doorbell, so the very
+/// next read of the event ring already has it and the scan's silence bound is
+/// re-armed before it can be spent — on a machine whose controller takes
+/// microseconds to answer it is not. [`hold_answers`] is that latency, and
+/// without it no QEMU boot reaches the state this stages.
+#[cfg(feature = "boot-actuators")]
+pub(in crate::drivers::xhci) mod bind_spends_the_scan {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// Past the scan's bound, which is `USB_TIMEOUT_NS`: the refusal has to
+    /// land after the scan has stopped re-arming it, and a bind that spent
+    /// exactly the bound would race it.
+    pub const SPEND: u64 = super::super::super::USB_TIMEOUT_NS + 200_000_000;
+
+    /// How long the controller's answer to what the refusal submits is held
+    /// back. It has only to outlast the one loop iteration that follows the
+    /// submit; the width above that is so a scan that waits can be seen to.
+    const HOLD: u64 = 50_000_000;
+
+    pub const WHY: &str = "answers nothing for the boot scan's whole bound \
+        (usb-bind-spends-the-scan) and is then refused";
+
+    static UNSPENT: AtomicBool = AtomicBool::new(true);
+    static HELD_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+    /// Whether this bind is the staged one.
+    pub fn take() -> bool {
+        crate::actuator::usb_bind_spends_the_scan() && UNSPENT.swap(false, Ordering::Relaxed)
+    }
+
+    /// Hold the controller's answers back, from the staged bind's way out — so
+    /// the window covers what its refusal submits and nothing before it.
+    pub fn hold_answers() {
+        HELD_UNTIL.store(crate::clock::nanos_since_boot() + HOLD, Ordering::Relaxed);
+    }
+
+    /// Whether the event ring may be read yet. Zero is the unarmed state, so an
+    /// unstaged boot pays one relaxed load per event and no clock read.
+    pub fn answered() -> bool {
+        let until = HELD_UNTIL.load(Ordering::Relaxed);
+        until == 0 || crate::clock::nanos_since_boot() >= until
+    }
+}
+
 /// Stage one climb of the recovery ladder to run its transfers unwaited, once:
 /// a device that answers nothing, on any rung — staged because nothing on the
 /// host side stops answering EP0 on its own.
@@ -2059,6 +2114,13 @@ pub(in crate::drivers::xhci) fn bind(
     enumerated: Enumerated,
     described: (UsbId, u8),
 ) -> Bind {
+    #[cfg(feature = "boot-actuators")]
+    if bind_spends_the_scan::take() {
+        log!("usb-storage: slot {slot_id} {}", bind_spends_the_scan::WHY);
+        let _ = crate::clock::settles(bind_spends_the_scan::SPEND, || false);
+        bind_spends_the_scan::hold_answers();
+        return Bind::Refused(SlotGoes::Back);
+    }
     let MscRings { at, block, in_ring, out_ring, port_idx } = rings;
     let (usb, serial_index) = described;
     let mut dev = MscDevice {

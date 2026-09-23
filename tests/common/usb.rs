@@ -4299,6 +4299,95 @@ pub fn usb_refused_disk_first(
     Ok(())
 }
 
+/// **The boot scan hands the next port a free operation slot, whatever its own
+/// bound says.**
+///
+/// T14 runs 103 and 104 panicked in `toyos_xhci::job::Outstanding::submit` — "a
+/// second operation was submitted over an outstanding one" — with nothing wrong
+/// but a stick whose first `READ CAPACITY(10)` went unanswered. The scan's
+/// blocking bind spent the whole of the scan's silence bound inside
+/// `advance_outstanding`; the refusal at the end of it submitted a Disable Slot
+/// into the controller's one slot; and the scan, whose bound had expired two
+/// seconds before that submit, returned with the slot still occupied. The next
+/// port to connect then reached `device::begin`, which submits its Enable Slot
+/// unasked — and the kernel died of what a device did.
+///
+/// `usb-bind-spends-the-scan` stages that one thing: the boot's first bind
+/// spends longer than the bound and is then refused. Everything else is
+/// `UsbDiskRefusedFirst`'s own doing — QEMU hands out ports in device-creation
+/// order, so a data disk created before the boot stick *is* "the port that
+/// enumerates first", and the boot stick behind it is "another device arriving".
+///
+/// The assertion is that the scan waited: it never says it heard nothing, and
+/// the disk behind the refused one binds. With the fix reverted this boot
+/// panics at the line above rather than failing an assertion.
+pub fn xhci_scan_hands_over_a_free_slot(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    // No gate: what this boot has to show is which ports were enumerated, and
+    // a sweep of the bytes on them would only make it slower.
+    const PARAMS: &[&str] = &["usb-bind-spends-the-scan"];
+    /// What `msc::bind_spends_the_scan::WHY` prints. Two halves of one wire
+    /// format, as everything else in this file is: a rename shows up here as a
+    /// failed assertion and not as a test that quietly stopped staging anything.
+    const STAGED: &str = "answers nothing for the boot scan's whole bound \
+        (usb-bind-spends-the-scan) and is then refused";
+
+    let options = BootOptions {
+        profile: Profile::UsbDiskRefusedFirst,
+        kernel_params: PARAMS,
+        ..Default::default()
+    };
+    // The ordering is the injection, and argv is the only place it is visible.
+    let argv = qemu::profile_argv(&options);
+    let sticks: Vec<&String> = argv.iter().filter(|a| a.starts_with("usb-storage,")).collect();
+    match sticks.as_slice() {
+        [first, second] if first.contains("drive=usbdisk") && second.contains("drive=stick") => {}
+        other => {
+            return Err(format!("want the data disk created before the boot stick, got {other:?}"))
+        }
+    }
+
+    let log = boot_and_shutdown(test_config, c_bins, rust_bins, options)?;
+
+    if !log.contains(STAGED) {
+        return Err(format!("the bind that spends the scan's bound never ran\n{log}"));
+    }
+    // The finding. The scan may only leave while its slot is free, so a bound
+    // that expired inside the bind is not a reason to leave at all: the Disable
+    // Slot the refusal submitted is waited for, on its own deadline.
+    if log.contains("the boot scan heard nothing") {
+        return Err(format!(
+            "the scan gave up with the refusal's Disable Slot still outstanding; the next port's \
+             Enable Slot goes into that slot\n{log}"
+        ));
+    }
+    // It waited for the answer and then acted on it: the slot the refusal asked
+    // for goes back. A scan that abandoned the operation would leave this line
+    // out and the slot enabled for the life of the boot.
+    if !log.contains("xHCI: slot 1 disabled") {
+        return Err(format!("the refused disk's slot never came back\n{log}"));
+    }
+    // And the port behind the refused disk was enumerated rather than skipped:
+    // the boot stick is on it, so nothing else here would run if it were not.
+    if !log.contains("usb-storage: 1 device(s)") {
+        return Err(format!("the boot stick did not bind behind the refused disk\n{log}"));
+    }
+    if !log.contains("Boot: complete") {
+        return Err(format!("the boot did not finish\n{log}"));
+    }
+    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+
+    eprintln!(
+        "  [usb] a bind that spent the boot scan's whole bound and was then refused: the scan \
+         waited out the Disable Slot it submitted, the boot stick behind it enumerated into a \
+         free slot, and the machine came up"
+    );
+    Ok(())
+}
+
 /// The stick the machine booted from, pulled while the desktop is up.
 ///
 /// **The instrument for #152, and the reason it exists is that the failure has
