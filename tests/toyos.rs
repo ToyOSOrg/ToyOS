@@ -6161,11 +6161,13 @@ fn run_screen_test(
         }
         "screen_recoverable_untouched" => {
             // The negative of screen_fatal_halt: a panic the kernel recovers
-            // from must not clobber a live display. Action 0 panics in syscall
-            // context, which the handler recovers from, so it never reaches
-            // halt_all_cpus. **Two endpoints and not an interval** — a paint
-            // made and undone between the screendumps is invisible here, and
-            // observing the middle needs a QMP client of its own.
+            // from must not paint its report over a live display. Action 0
+            // panics in syscall context, which the handler recovers from, so it
+            // never reaches halt_all_cpus. **The fill, not the pixels**: the
+            // runner's and the child's lines repaint the panel between the two
+            // endpoints, and a report's paint keeps the panel for good
+            // (`render` never gives the painter latch back), so a fatal fill
+            // after the recovery is the paint this test refuses.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -6199,10 +6201,15 @@ fn run_screen_test(
                 ));
             }
             let after = qemu.screendump();
-            if !before.identical_to(&after) {
-                return Err("recovering panic changed the screen".to_string());
+            if after.fill() != FILL_BOOT {
+                return Err(format!(
+                    "recovering panic painted over the display: the fill is {:?}, not the boot \
+                     panel's {FILL_BOOT:?}\ndecoded screen:\n{}",
+                    after.fill(),
+                    after.text()
+                ));
             }
-            // A screen that was blank to begin with would pass the diff for
+            // A screen that was blank to begin with would pass the fill for
             // the wrong reason.
             let text = before.text();
             print_screen(name, &text);
