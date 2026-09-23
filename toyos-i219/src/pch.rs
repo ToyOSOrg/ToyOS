@@ -1,20 +1,31 @@
-//! The PCH's MAC before its rings: what Intel's own Linux host driver for this
-//! family writes into it on every initialisation, and nothing it does not.
+//! The PCH's MAC before its rings: three registers written, each bit for a
+//! property of the part this driver rests on, and nothing that stands on
+//! neither a document nor such a property.
 //!
-//! **None of these bits is in a document in hand.** The *Intel® 500 Series
-//! Chipset Family On-Package Platform Controller Hub Datasheet, Volume 2*
-//! (631120, rev 002) §8.2 publishes nine of this MAC's registers and calls
-//! every bit below reserved or leaves its register out; the 82574's datasheet
-//! describes another part. So each is stated as a fact about the hardware from
-//! the host driver that drives this `8086:15fc` to a working network under
-//! another operating system, and [`crate::regs`] names each where it stands.
+//! - `CTRL_EXT` bit 17 (`regs::ctrl_ext::STRICT_WRITE_ORDER`): the part's
+//!   writes to memory land in the order it made them. [`crate::I219::poll_rx`]
+//!   reads a frame on the strength of its descriptor's `DD`, so a write-back
+//!   that could pass the frame's own bytes would hand up a buffer the frame has
+//!   not reached.
+//! - `CTRL_EXT` bit 28 (`regs::ctrl_ext::DRIVER_HOLDS_THE_FUNCTION`): the
+//!   firmware on this part shares the PHY with the host, and this bit is the
+//!   host's word to it that a driver holds the function. Set here and cleared by
+//!   [`release`] when the driver is dropped, so the word is never left standing
+//!   for a function nobody holds.
+//! - §8.2.8's APM wake-up enable (the register's one writable bit) cleared:
+//!   this driver arms no wake, and one the agent before it armed would
+//!   otherwise stand while the function is driven.
+//! - The PCIe control's six no-snoop requests cleared, and every other bit of
+//!   that register carried: the descriptors and buffers live in memory the
+//!   processor caches, and a DMA without the snoop attribute is not coherent
+//!   with it.
 //!
-//! **One refusal.** That driver's own `GCR` write sets every bit above the six
-//! no-snoop requests as it clears them, which no source explains; this one
-//! clears the six and carries the rest.
+//! **The order is free.** The three registers are independent of one another;
+//! what the hardware fixes is that all of them come after the reset, which
+//! returns each to its default, and before the rings, whose first fetch is a
+//! DMA the ordering and snoop settings govern.
 
-use crate::regs::{self, ctrl, ctrl_ext, fflt_dbg, gcr, pbeccsts, rfctl, tarc, tctl, txdctl};
-use crate::TX_CONTROL;
+use crate::regs::{self, ctrl_ext, pcie_control, wake_up};
 use crate::Registers;
 
 /// One read-modify-write: `set` raised and `clear` lowered, every other bit as
@@ -24,37 +35,27 @@ fn modify<R: Registers>(regs: &R, reg: usize, set: u32, clear: u32) {
     regs.write(reg, (held | set) & !clear);
 }
 
-/// `TARC1`'s word: the three bits always set, and bit 28 exactly where `tctl`
-/// — the transmit control this driver writes — has Multiple Request Support
-/// clear.
-pub(crate) fn tarc1(held: u32, tctl: u32) -> u32 {
-    let single = if tctl & tctl::MULR == 0 { tarc::TARC1_SINGLE_REQUEST } else { 0 };
-    (held & !tarc::TARC1_SINGLE_REQUEST) | tarc::TARC1_REQUIRED | single
-}
-
 /// Everything this module owes the part, after its reset and before its rings.
 pub(crate) fn prepare<R: Registers>(regs: &R) {
-    // The bits the host driver calls required for transmit and receive, and
-    // its word to the firmware that a driver holds the function; strict
-    // ordering of the part's own writes to memory.
     modify(
         regs,
         regs::CTRL_EXT,
-        ctrl_ext::REQUIRED_22 | ctrl_ext::DRIVER_LOADED | ctrl_ext::RELAXED_ORDERING_DISABLE,
+        ctrl_ext::STRICT_WRITE_ORDER | ctrl_ext::DRIVER_HOLDS_THE_FUNCTION,
         0,
     );
-    // Both queues alike: the host driver sets the second queue's the same as
-    // the first's, as an erratum's workaround, and this driver's first is
-    // written with its ring.
-    regs.write(regs::TXDCTL1, txdctl::PCH);
-    modify(regs, regs::TARC0, tarc::TARC0_REQUIRED, 0);
-    let held = regs.read(regs::TARC1);
-    regs.write(regs::TARC1, tarc1(held, TX_CONTROL));
-    modify(regs, regs::RFCTL, rfctl::NFS_FILTERS_OFF, 0);
-    modify(regs, regs::PBECCSTS, pbeccsts::ECC_ENABLE, 0);
-    modify(regs, regs::CTRL, ctrl::MEHE, 0);
-    // Every wake-up source off: the function is in D0 and driven.
-    regs.write(regs::WUC, 0);
-    modify(regs, regs::GCR, 0, gcr::NO_SNOOP);
-    modify(regs, regs::FFLT_DBG, fflt_dbg::DONT_GATE_WAKE_DMA_CLOCK, 0);
+    modify(regs, regs::WAKE_UP, 0, wake_up::APM_WAKE);
+    modify(regs, regs::PCIE_CONTROL, 0, pcie_control::NO_SNOOP);
+}
+
+/// What [`prepare`] told the firmware, taken back: bit 28 cleared and every
+/// other bit of `CTRL_EXT` carried.
+///
+/// **A word of ones is not written back**: it is a window that did not decode
+/// the read, and the word composed from it would set every field of the
+/// register.
+pub(crate) fn release<R: Registers>(regs: &R) {
+    let held = regs.read(regs::CTRL_EXT);
+    if held != u32::MAX {
+        regs.write(regs::CTRL_EXT, held & !ctrl_ext::DRIVER_HOLDS_THE_FUNCTION);
+    }
 }

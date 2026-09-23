@@ -13,9 +13,9 @@ use core::net::Ipv4Addr;
 use crate::phy::Outcome;
 use crate::{Counters, Link, Speed, Wire};
 
-/// The code a probe that was leased an address exits with. Clear of
-/// [`Outcome`]'s block, which ends at 82, and of 101, which a panicking netd
-/// ends with.
+/// The code a probe that holds a leased address when its window ends exits
+/// with. Clear of [`Outcome`]'s block and its retired 82, and of 101, which a
+/// panicking netd ends with.
 pub const LEASED: i32 = 83;
 
 const _: () = {
@@ -29,7 +29,7 @@ const _: () = {
 /// What one lease probe boot answers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verdict {
-    /// An address was leased inside the probe's window.
+    /// A leased address was held when the probe's window ended.
     Leased,
     /// None was, and this is what the bring-up and the link said: a PHY that
     /// came up with a link and still no lease is a network that did not
@@ -89,6 +89,8 @@ pub enum Event<'a> {
     Link(Link),
     /// The lease, the moment it landed.
     Leased { address: Ipv4Addr, prefix: u8, server: Ipv4Addr, router: Option<Ipv4Addr> },
+    /// The address given up, the moment the client gave it up.
+    Lost,
     Counts(Counts),
     /// The last line: the code the process ends with.
     Exit { code: i32 },
@@ -121,6 +123,7 @@ impl core::fmt::Display for Line<'_> {
                     None => f.write_str("none"),
                 }
             }
+            Event::Lost => f.write_str("lost"),
             Event::Counts(Counts { sent, received, wire }) => write!(
                 f,
                 "counts sent {sent} received {received} wire-sent {} wire-received {} \
@@ -141,6 +144,7 @@ impl<'a> Line<'a> {
             "brought-up" if !rest.is_empty() => Event::BroughtUp(rest),
             "link" => Event::Link(parse_link(rest)?),
             "leased" => parse_lease(rest)?,
+            "lost" if rest.is_empty() => Event::Lost,
             "counts" => Event::Counts(parse_counts(rest)?),
             "exit" => Event::Exit { code: rest.parse().ok()? },
             _ => return None,
@@ -210,11 +214,13 @@ fn parse_counts(text: &str) -> Option<Counts> {
     words.next().is_none().then_some(counts)
 }
 
-/// What a whole file says: the lease it recorded, the last counts, and the
-/// code it ended with.
+/// What a whole file says: the first lease it recorded, whether a lease was
+/// still held after its last line, the last counts, and the code it ended with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Summary {
     pub lease: Option<(u64, Event<'static>)>,
+    /// Whether the last of the file's `leased` and `lost` lines is a lease.
+    pub held: bool,
     pub counts: Option<Counts>,
     pub exit: Option<i32>,
 }
@@ -235,14 +241,18 @@ impl core::fmt::Display for Unreadable<'_> {
 /// machine ended in**, and is left out rather than refused.
 pub fn summary(text: &str) -> Result<Summary, Unreadable<'_>> {
     let whole = text.rfind('\n').map_or("", |end| &text[..=end]);
-    let mut summary = Summary { lease: None, counts: None, exit: None };
+    let mut summary = Summary { lease: None, held: false, counts: None, exit: None };
     for line in whole.lines() {
         let parsed = Line::parse(line).ok_or(Unreadable { line })?;
         match parsed.event {
-            Event::Leased { address, prefix, server, router } if summary.lease.is_none() => {
-                summary.lease =
-                    Some((parsed.ms, Event::Leased { address, prefix, server, router }));
+            Event::Leased { address, prefix, server, router } => {
+                summary.held = true;
+                if summary.lease.is_none() {
+                    summary.lease =
+                        Some((parsed.ms, Event::Leased { address, prefix, server, router }));
+                }
             }
+            Event::Lost => summary.held = false,
             Event::Counts(counts) => summary.counts = Some(counts),
             Event::Exit { code } => summary.exit = Some(code),
             _ => {}

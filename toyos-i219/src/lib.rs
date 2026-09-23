@@ -13,10 +13,8 @@
 //! bounded time on, and gives back. [`Part`] is which one this claim is, and
 //! [`phy`] is everything that follows from it. [`wake`] is what brings that PHY
 //! within `MDIC`'s reach before the reset and what shape the reset then takes —
-//! the MAC and the PHY together — on facts no Intel document publishes and
-//! Intel's own host driver for this family acts on, and `pch` is what that
-//! driver writes into the PCH's MAC before its rings. [`crumbs`] is a trail
-//! left one durable line ahead of a bring-up, and decides nothing about one;
+//! the MAC and the PHY together — on properties of the part no Intel document
+//! publishes, and `pch` is what the PCH's MAC is given before its rings.
 //! [`lease`] is the one table a lease probe's answer crosses a machine with no
 //! console through.
 //!
@@ -75,7 +73,6 @@
 #[cfg(test)]
 extern crate std;
 
-pub mod crumbs;
 pub mod lease;
 mod pch;
 pub mod phy;
@@ -474,20 +471,6 @@ const RESET_DEADLINE_NANOS: u64 = 100_000_000;
 /// (read or write) any other device register."
 const RESET_SETTLE_NANOS: u64 = 1_000;
 
-/// How long [`I219::await_link`] waits for `STATUS.LU`.
-///
-/// **A driver-chosen bound, not a datasheet one**: §4.6.3.2 makes the link the
-/// PHY's to raise and neither document times the negotiation that raises it.
-/// Five seconds is far past every other wait here because this one is not a
-/// register settling — it is two ends of a cable agreeing, and on 1000BASE-T
-/// that is a conversation measured in seconds.
-pub const LINK_DEADLINE_NANOS: u64 = 5_000_000_000;
-
-/// How long [`I219::await_link`] leaves `STATUS` alone between two readings of
-/// it. Ten milliseconds is a five-hundredth of the bound above, so what the
-/// pace costs the answer is nothing a bench can read.
-pub const LINK_PACE_NANOS: u64 = 10_000_000;
-
 /// How long [`I219::open`] waits for §3.1.3.10's master quiesce.
 ///
 /// **A driver-chosen bound, not a datasheet one**: §3.1.3.10 describes the
@@ -496,9 +479,8 @@ pub const LINK_PACE_NANOS: u64 = 10_000_000;
 const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
 
 /// The transmit control [`I219::open`] writes: §4.6.6's suggested values with
-/// the transmitter enabled — and what [`pch`] decides `TARC1` against before it
-/// is.
-pub(crate) const TX_CONTROL: u32 = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX;
+/// the transmitter enabled.
+const TX_CONTROL: u32 = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX;
 
 /// What [`reset`] leaves its caller.
 struct Reset {
@@ -591,10 +573,11 @@ fn reset<R: Registers, C: Clock>(
         Whole::WithThePhy { after } => {
             let firmware = regs.read(regs::FWSM);
             let word = wake::reset_word(held, firmware);
-            // Under §8.2.4's flag, as the host driver for this family issues
-            // it, and a flag that would not come is no reason to leave the part
-            // unreset: that driver resets it either way. The reset clears the
-            // flag, and the drop below gives back one it left standing.
+            // Under §8.2.4's flag, which arbitrates the CSRs this MAC shares
+            // with its firmware — and a flag that would not come is no reason
+            // to leave the part unreset, so the write goes out either way. The reset
+            // clears the flag, and the drop below gives back one it left
+            // standing.
             let claimed = phy::Owned::claim(regs, clock, after);
             match &claimed {
                 Ok(mdi) => mdi.write_paced(regs::CTRL, word),
@@ -602,12 +585,12 @@ fn reset<R: Registers, C: Clock>(
             }
             let reset_at = clock.nanos();
             // Nothing is touched while the part resets both ends of its
-            // interconnect: the host driver's 20 ms, a wait and not a poll.
+            // interconnect ([`wake`]'s header): a wait and not a poll.
             phy::hold(clock, reset_at, wake::RESET_QUIET_NANOS);
             let full = wake::FullReset {
                 phy_reset: word & ctrl::PHY_RST != 0,
                 flag: claimed.as_ref().map(|_| ()).map_err(|why| *why),
-                init_done_after_nanos: None,
+                configured_after_nanos: None,
             };
             flag = Some(claimed);
             (reset_at, Some(full))
@@ -626,7 +609,7 @@ fn reset<R: Registers, C: Clock>(
     // waited on and never refused on: I219 Table 5-2 bounds it, and the PHY's
     // own answer to the bring-up is the test of whether it finished.
     let full = full.map(|full| wake::FullReset {
-        init_done_after_nanos: full.phy_reset.then(|| init_done(regs, clock, reset_at)).flatten(),
+        configured_after_nanos: full.phy_reset.then(|| phy_configured(regs, clock, reset_at)).flatten(),
         ..full
     });
     let released = flag.map(|flag| {
@@ -640,19 +623,19 @@ fn reset<R: Registers, C: Clock>(
     Ok(Reset { master_quiet, at: reset_at, full, released })
 }
 
-/// How long after `since` `STATUS.LAN_INIT_DONE` read set, or `None` where
-/// [`wake::LAN_INIT_DEADLINE_NANOS`] ran out first.
-fn init_done<R: Registers, C: Clock>(regs: &R, clock: &C, since: u64) -> Option<u64> {
+/// How long after `since` `STATUS` said the PHY was configured, or `None`
+/// where [`wake::PHY_CONFIGURED_DEADLINE_NANOS`] ran out first.
+fn phy_configured<R: Registers, C: Clock>(regs: &R, clock: &C, since: u64) -> Option<u64> {
     loop {
-        let done = regs.read(regs::STATUS) & status::LAN_INIT_DONE != 0;
+        let done = regs.read(regs::STATUS) & status::PHY_CONFIGURED != 0;
         let waited = clock.nanos().saturating_sub(since);
         if done {
             return Some(waited);
         }
-        if waited >= wake::LAN_INIT_DEADLINE_NANOS {
+        if waited >= wake::PHY_CONFIGURED_DEADLINE_NANOS {
             return None;
         }
-        clock.pause(wake::LAN_INIT_PACE_NANOS);
+        clock.pause(wake::PHY_CONFIGURED_PACE_NANOS);
     }
 }
 
@@ -688,7 +671,12 @@ pub struct BringUp {
 }
 
 /// The function, brought up and driving.
-pub struct I219<R, C, D, I> {
+///
+/// **Dropping it lets the function go**: on the I219, [`pch::release`] takes
+/// back the word [`pch::prepare`] gave the firmware, on every way a holder
+/// leaves that runs its destructors.
+pub struct I219<R: Registers, C, D, I> {
+    part: Part,
     regs: R,
     clock: C,
     dma: D,
@@ -716,6 +704,14 @@ pub struct I219<R, C, D, I> {
     wire: Wire,
 }
 
+impl<R: Registers, C, D, I> Drop for I219<R, C, D, I> {
+    fn drop(&mut self) {
+        if self.part == Part::I219 {
+            pch::release(&self.regs);
+        }
+    }
+}
+
 impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// Bring the function up in the order §4.6 fixes: reset with every
     /// interrupt masked, the station address, the multicast table, the PHY, the
@@ -728,24 +724,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// qualified with CTRL.SLU": a driver that let the MAC look before the PHY
     /// was configured would read the answer to the wrong question.
     pub fn open(part: Part, regs: R, clock: C, dma: D, irq: I) -> Result<Self, Refusal> {
-        Self::open_trailing(part, regs, clock, dma, irq, &crumbs::Silent)
-    }
-
-    /// The same, with a trail the PHY's power step leaves its readings on.
-    ///
-    /// **The trail is for the readings and nothing else.** A [`crumbs::Crumbed`]
-    /// window already leaves a durable line before every access and carries the
-    /// value of every *write*; what a read answered is a second line behind it
-    /// (`crumbs`' own header), and the bring-up's power step is the one place
-    /// where what a read answered has to survive the machine.
-    pub fn open_trailing<T: crumbs::Trail>(
-        part: Part,
-        regs: R,
-        clock: C,
-        dma: D,
-        irq: I,
-        trail: &T,
-    ) -> Result<Self, Refusal> {
         if regs.bytes() < regs::REGISTER_BYTES {
             return Err(Refusal::Window { given: regs.bytes(), needed: regs::REGISTER_BYTES });
         }
@@ -757,18 +735,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // PHY is not on the MAC's own die.
         let (woke, whole) = match part {
             Part::I219 => {
-                let woke = phy::wake(&regs, &clock, None, trail);
+                let woke = phy::wake(&regs, &clock, None);
                 (Some(woke), Whole::WithThePhy { after: Some(clock.nanos()) })
             }
             Part::E82574 => (None, Whole::MacAlone),
         };
         let Reset { master_quiet, at: reset_at, full, released } =
             reset(&regs, &clock, whole)?;
-        // What the host driver for the PCH's MAC writes into it after every
-        // reset and before anything else: [`pch`]'s header.
-        if part == Part::I219 {
-            pch::prepare(&regs);
-        }
 
         // §10.2.5.23: the reset reloads entry 0 from the NVM, so this is read
         // after it and not before.
@@ -786,6 +759,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             (high >> 8) as u8,
         ];
 
+        // What the PCH's MAC is given after its reset and before its rings:
+        // [`pch`]'s header. After the last refusal that comes before `Self`
+        // exists, so every refusal after it is a drop that lets the function go.
+        if part == Part::I219 {
+            pch::prepare(&regs);
+        }
+
         // §4.6.5: "Set up the Multicast Table Array (MTA) per software. This
         // generally means zeroing all entries initially."
         for entry in 0..regs::MTA_DWORDS {
@@ -799,7 +779,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // under a scheme of its own — so the sequence is refused by name on the
         // part it was not written from.
         let phy = match part {
-            Part::I219 => phy::bring_up(&regs, &clock, reset_at, released, trail),
+            Part::I219 => phy::bring_up(&regs, &clock, reset_at, released),
             Part::E82574 => Err(phy::PhyRefusal::NotThisRegisterMap),
         };
 
@@ -830,6 +810,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         regs.write(regs::EIAC, 0);
 
         let mut nic = Self {
+            part,
             regs,
             clock,
             dma,
@@ -870,13 +851,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.arm_tx_ring();
 
         // §4.6.6, in its order: the write-back policy, the gap, then the
-        // transmitter. The PCH's MAC gets the policy its own host driver gives
-        // it, which [`pch`] gave the second queue already.
-        let policy = match part {
-            Part::I219 => txdctl::PCH,
-            Part::E82574 => txdctl::SUGGESTED,
-        };
-        nic.regs.write(regs::TXDCTL, policy);
+        // transmitter.
+        nic.regs.write(regs::TXDCTL, txdctl::SUGGESTED);
         nic.regs.write(regs::TIPG, regs::TIPG_DEFAULT);
         nic.regs.write(regs::TCTL, TX_CONTROL);
         nic.accepted(regs::TCTL, TX_CONTROL)?;
@@ -1075,44 +1051,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if self.link.is_up() && self.link_up_at.is_none() {
             self.link_up_at = Some(self.clock.nanos());
         }
-    }
-
-    /// Wait out [`LINK_DEADLINE_NANOS`] for `STATUS.LU`, and answer with what
-    /// the link is doing when the wait ends.
-    ///
-    /// **Nothing on the serving path calls this.** A server never blocks, and
-    /// what the event loop does about a link is act on §10.2.4.1's `LSC` when
-    /// it arrives. This is for the boot whose whole purpose is to say whether
-    /// the cable came up, and the number it waits is the only reason a link
-    /// that came late reads as one that came at all.
-    pub fn await_link(&mut self) -> Link {
-        let started = self.clock.nanos();
-        loop {
-            self.refresh_link();
-            if self.link.is_up() {
-                return self.link;
-            }
-            if self.clock.nanos().saturating_sub(started) >= LINK_DEADLINE_NANOS {
-                return self.link;
-            }
-            self.clock.pause(LINK_PACE_NANOS);
-        }
-    }
-
-    /// What one probe boot has to say: what the bring-up did with the PHY and,
-    /// where it brought one up, the link that came inside
-    /// [`LINK_DEADLINE_NANOS`].
-    ///
-    /// **The wait is taken only where the PHY came up.** A PHY this driver
-    /// could not configure is not one whose link is its to wait for, and the
-    /// refusal is the whole of what that boot has to report.
-    pub fn probe_outcome(&mut self) -> phy::Outcome {
-        let brought_up = self.brought_up.phy;
-        let link = match brought_up {
-            Ok(_) => self.await_link(),
-            Err(_) => self.link,
-        };
-        phy::Outcome::of(brought_up, link)
     }
 
     /// The next received frame, or `None` — for an empty ring and for a budget

@@ -20,7 +20,6 @@ use std::rc::Rc;
 use toyos::shm::SharedMemory;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
-use toyos_i219::crumbs::{before, Crumbed, Silent, Step, Trail};
 use toyos_i219::{Clock, DmaBuffers, Interrupts, Registers};
 
 use crate::device::{KernelRefused, Latch, Window};
@@ -149,10 +148,10 @@ pub struct Nic {
     reported: Latch<(toyos_i219::Counters, toyos_i219::Link)>,
 }
 
-/// The claim's register window, mapped, with each call on the claim a step of
-/// `trail`'s.
-fn registers(dev: &PciDev, trail: &impl Trail) -> Result<Bar, Opening> {
-    let info = before(trail, Step::Describe, || dev.describe())
+/// The claim's register window, mapped.
+fn registers(dev: &PciDev) -> Result<Bar, Opening> {
+    let info = dev
+        .describe()
         .map_err(KernelRefused::on("the claim's description"))
         .map_err(Opening::Kernel)?;
     // The lowest BAR wide enough, rather than BAR 0 by name: the kernel
@@ -165,7 +164,8 @@ fn registers(dev: &PciDev, trail: &impl Trail) -> Result<Bar, Opening> {
         .find(|(_, bytes)| **bytes >= toyos_i219::regs::REGISTER_BYTES as u64)
         .map(|(index, bytes)| (index as u32, *bytes))
         .ok_or(Opening::NoWindow)?;
-    let mapped = before(trail, Step::MapBar, || dev.map_bar(bar, bytes))
+    let mapped = dev
+        .map_bar(bar, bytes)
         .map_err(KernelRefused::on("the BAR"))
         .map_err(Opening::Kernel)?;
     crate::say!(
@@ -183,13 +183,10 @@ fn registers(dev: &PciDev, trail: &impl Trail) -> Result<Bar, Opening> {
 /// Everything the claim is asked for before the part is reached, in the order
 /// it is asked: the register window, then one grant — as the driver reaches its
 /// descriptors, and as netd reaches its frames.
-///
-/// **One function because two bring-ups owe the kernel the same calls**:
-/// [`Nic::open`], and [`leave_crumbs`], whose trail is only worth reading if
-/// the boot it was left on did what a shipping boot does.
-fn granted(dev: &PciDev, trail: &impl Trail) -> Result<(Bar, Grant, Window), Opening> {
-    let bar = registers(dev, trail)?;
-    let region = before(trail, Step::DmaAlloc, || dev.dma_alloc(toyos_i219::GRANT_BYTES))
+fn granted(dev: &PciDev) -> Result<(Bar, Grant, Window), Opening> {
+    let bar = registers(dev)?;
+    let region = dev
+        .dma_alloc(toyos_i219::GRANT_BYTES)
         .map_err(KernelRefused::on("a DMA grant"))
         .map_err(Opening::Kernel)?;
     let device_base = region.device_addr;
@@ -234,62 +231,11 @@ fn say_brought_up(brought_up: toyos_i219::BringUp) {
     }
 }
 
-/// The one line a probe says about the link it waited for.
-fn say_link(link: toyos_i219::Link) {
-    match link {
-        toyos_i219::Link::Up { speed, full_duplex } => crate::say!(
-            "netd: I219: link up at {} Mb/s {}",
-            speed.mbps(),
-            if full_duplex { "full duplex" } else { "half duplex" },
-        ),
-        toyos_i219::Link::Down => crate::say!(
-            "netd: I219: no link in {} ms",
-            toyos_i219::LINK_DEADLINE_NANOS / 1_000_000
-        ),
-    }
-}
-
-/// `crate::EXIT_WITH_CRUMBS`: [`Nic::open`]'s bring-up with a crumb on `trail`
-/// before every call on the claim and every register access, its link waited
-/// for a bounded time, and the process ended with
-/// `toyos_i219::phy::Outcome`'s code for the two.
-///
-/// **Nothing is given back before the exit.** The process ending is what gives
-/// the claim up on the boot this one is compared with, so the last crumb is
-/// left before that and nothing is dropped by hand ahead of it.
-pub fn leave_crumbs(
-    dev: PciDev,
-    part: toyos_i219::Part,
-    trail: &impl Trail,
-) -> Result<std::convert::Infallible, Opening> {
-    let dev = Rc::new(dev);
-    let (bar, grant, _frames) = granted(&dev, trail)?;
-    let bar = Crumbed::over(bar, trail);
-    let mut driver = toyos_i219::I219::open_trailing(
-        part,
-        bar,
-        Monotonic,
-        grant,
-        Claim(Rc::clone(&dev)),
-        trail,
-    )
-    .map_err(Opening::Driver)?;
-    trail.crumb(Step::Opened);
-    say_brought_up(driver.brought_up());
-    // The link's own wait is behind this crumb, so a trail that ends in the run
-    // of `STATUS` reads says the machine ended waiting for a link and not
-    // inside the bring-up.
-    let outcome = driver.probe_outcome();
-    say_link(driver.link());
-    let code = outcome.exit_code();
-    before(trail, Step::Exit { code }, || std::process::exit(code))
-}
-
 impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
     pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
         let dev = Rc::new(dev);
-        let (bar, grant, frames) = granted(&dev, &Silent)?;
+        let (bar, grant, frames) = granted(&dev)?;
         let driver =
             toyos_i219::I219::open(part, bar, Monotonic, grant, Claim(Rc::clone(&dev)))
                 .map_err(Opening::Driver)?;

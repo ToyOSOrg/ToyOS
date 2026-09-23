@@ -5,6 +5,7 @@
 //! is about, and every one that can fail differently from run to run prints the
 //! seed that reproduces it.
 
+use std::string::ToString;
 use std::vec::Vec;
 use std::{format, vec};
 
@@ -1457,56 +1458,6 @@ fn the_interface_is_given_back_on_every_path_that_took_it() {
     }
 }
 
-/// The link the probe waits for, on the three answers a boot can carry off a
-/// machine with no console: a PHY brought up onto a link, a PHY brought up onto
-/// a cable with nothing at the other end, and a part whose PHY this bring-up
-/// refuses — whose link is not this driver's to wait for.
-#[test]
-fn the_probe_waits_a_bounded_time_for_the_link_and_names_what_came() {
-    use toyos_phy::Outcome;
-
-    let raised = Nic::i219(95);
-    raised.set_link(true);
-    let mut driver = open(&raised);
-    raised.negotiation_settles();
-    assert_eq!(
-        driver.probe_outcome(),
-        Outcome::LinkAt1000Full,
-        "{}",
-        raised.because("the probe did not name the link the PHY raised")
-    );
-
-    let quiet = Nic::i219(96);
-    let mut driver = open(&quiet);
-    let started = quiet.now();
-    assert_eq!(
-        driver.probe_outcome(),
-        Outcome::BroughtUpNoLink,
-        "{}",
-        quiet.because("the probe named a link on a cable with nothing at the other end")
-    );
-    assert!(
-        quiet.now() - started >= LINK_DEADLINE_NANOS,
-        "{}",
-        quiet.because("the link was given up on before the bound it is owed")
-    );
-
-    let refused = Nic::new(97);
-    let mut driver = open(&refused);
-    let started = refused.now();
-    assert_eq!(
-        driver.probe_outcome(),
-        Outcome::NotThisRegisterMap,
-        "{}",
-        refused.because("the probe did not carry the bring-up's own refusal")
-    );
-    assert!(
-        refused.now() - started < LINK_DEADLINE_NANOS,
-        "{}",
-        refused.because("a bring-up that refused the PHY waited for its link anyway")
-    );
-}
-
 /// A window that answers ones at one offset decodes nothing there, and what it
 /// answered is not a register's value to carry: §4.5.2 gives this driver one
 /// bit of `EXTCNF_CTRL`, and a read-modify-write over ones would set every
@@ -1537,7 +1488,7 @@ fn every_probe_outcome_has_one_exit_code_that_reads_back() {
     let link = |speed, full_duplex| Link::Up { speed, full_duplex };
     let stood = |beside| Err(PhyRefusal::SoftwareFlagStood { beside, after_nanos: 1 });
     let down = Link::Down;
-    let outcomes: [(Result<Phy, PhyRefusal>, Link, Outcome); 19] = [
+    let outcomes: [(Result<Phy, PhyRefusal>, Link, Outcome); 18] = [
         (up, down, Outcome::BroughtUpNoLink),
         (up, link(Speed::Mbps10, false), Outcome::LinkAt10Half),
         (up, link(Speed::Mbps10, true), Outcome::LinkAt10Full),
@@ -1563,11 +1514,6 @@ fn every_probe_outcome_has_one_exit_code_that_reads_back() {
             Err(PhyRefusal::MdiWaiting { phy: 1, reg: 2, after_nanos: 3 }),
             down,
             Outcome::MdiWaiting,
-        ),
-        (
-            Err(PhyRefusal::PhyPoweredDown { ctrl: 1 << 24, ctrl_ext: 0 }),
-            down,
-            Outcome::PhyPoweredDown,
         ),
     ];
     // The block's base is pinned, not read off the table it is judging.
@@ -2031,312 +1977,23 @@ fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way
     );
 }
 
-use crate::crumbs::{self, before, Broken, Crumbed, Ending, Runs, Step, Trail};
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::string::{String, ToString};
-
-/// One thing a crumbed bring-up did, in the order it did it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Seen {
-    Crumb(Step),
-    Reached(Step),
-}
-
-type Seens = Rc<RefCell<Vec<Seen>>>;
-
-/// The part's own side of the order: what reached it, noted as it arrived.
-struct Tape<R> {
-    regs: R,
-    seen: Seens,
-}
-
-impl<R: Registers> Registers for Tape<R> {
-    fn bytes(&self) -> usize {
-        self.regs.bytes()
-    }
-
-    fn read(&self, reg: usize) -> u32 {
-        self.seen.borrow_mut().push(Seen::Reached(Step::Read { reg }));
-        self.regs.read(reg)
-    }
-
-    fn write(&self, reg: usize, value: u32) {
-        self.seen.borrow_mut().push(Seen::Reached(Step::Write { reg, value }));
-        self.regs.write(reg, value);
-    }
-}
-
-/// The trail's side of it.
-struct Noted(Seens);
-
-impl Trail for Noted {
-    fn crumb(&self, step: Step) {
-        self.0.borrow_mut().push(Seen::Crumb(step));
-    }
-}
-
-/// The three parts a trail is owed on: the 82574, an I219 whose PHY comes up,
-/// and an I219 that never grants the request this driver registers — the one
-/// arm whose bring-up ends in §4.5.2 and not at the PHY.
-fn crumbed_parts() -> [Nic; 3] {
-    let ungranted = Nic::with(
-        83,
-        Part::I219,
-        Permits { mdio_flag_is_a_plain_mutex: false, ..Permits::default() },
-    );
-    ungranted.engine_holds_the_interface_until(u64::MAX);
-    [Nic::new(81), Nic::i219(82), ungranted]
-}
-
-/// A bring-up over a taped part, and everything the tape and the trail saw.
-fn taped(nic: &Nic, trail: impl FnOnce(Seens) -> Option<Runs<Noted>>, every: bool) -> Vec<Seen> {
-    let seen: Seens = Rc::default();
-    let (bar, clock, grant, line) = nic.parts();
-    let tape = Tape { regs: bar, seen: Rc::clone(&seen) };
-    let opened = match (trail(Rc::clone(&seen)), every) {
-        (Some(runs), _) => {
-            I219::open(nic.part(), Crumbed::over(tape, runs), clock, grant, line).map(|_| ())
-        }
-        (None, true) => {
-            I219::open(nic.part(), Crumbed::over(tape, Noted(Rc::clone(&seen))), clock, grant, line)
-                .map(|_| ())
-        }
-        (None, false) => I219::open(nic.part(), tape, clock, grant, line).map(|_| ()),
-    };
-    opened.unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused it: {why}"))));
-    let seen = seen.borrow().clone();
-    seen
-}
-
-fn reached(seen: &[Seen]) -> Vec<Step> {
-    seen.iter().filter_map(|s| if let Seen::Reached(step) = s { Some(*step) } else { None }).collect()
-}
-
-fn crumbs_of(seen: &[Seen]) -> Vec<Step> {
-    seen.iter().filter_map(|s| if let Seen::Crumb(step) = s { Some(*step) } else { None }).collect()
-}
-
-/// The instrument's one claim: a crumb is on the trail before the access it
-/// names reaches the part, for every access of a whole bring-up.
-#[test]
-fn every_crumb_is_left_before_its_access_reaches_the_part() {
-    for nic in crumbed_parts() {
-        let seen = taped(&nic, |_| None, true);
-        assert!(seen.len() > 60, "{}", nic.because("the bring-up reached almost nothing"));
-        for pair in seen.chunks(2) {
-            match pair {
-                [Seen::Crumb(crumb), Seen::Reached(access)] if crumb == access => {}
-                other => panic!(
-                    "{}",
-                    nic.because(&format!("an access and its crumb arrived as {other:?}"))
-                ),
-            }
-        }
-    }
-    // And the same order for a step that is not a register access.
-    let seen: Seens = Rc::default();
-    let took = before(&Noted(Rc::clone(&seen)), Step::MapBar, || {
-        seen.borrow_mut().push(Seen::Reached(Step::MapBar));
-        7
-    });
-    assert_eq!(took, 7);
-    assert_eq!(*seen.borrow(), [Seen::Crumb(Step::MapBar), Seen::Reached(Step::MapBar)]);
-}
-
-/// A crumbed bring-up is the bring-up: the part is reached by the same accesses
-/// carrying the same values in the same order, whether or not a trail is kept.
-#[test]
-fn a_crumbed_bring_up_reaches_the_part_exactly_as_a_bare_one_does() {
-    for (bare, crumbed) in crumbed_parts().into_iter().zip(crumbed_parts()) {
-        let without = reached(&taped(&bare, |_| None, false));
-        let with = reached(&taped(&crumbed, |seen| Some(Runs::over(Noted(seen))), false));
-        assert!(without == with, "{}", bare.because("the trail changed what reached the part"));
-        assert_eq!(bare.now(), crumbed.now(), "{}", bare.because("the trail moved the clock"));
-    }
-}
-
-/// A poll is one crumb however long it spins, and §4.5.2's arbitration is never
-/// a poll: each access to it is a crumb of its own.
-#[test]
-fn a_run_is_one_crumb_and_the_arbitration_is_never_a_run() {
-    let [_, _, ungranted] = crumbed_parts();
-    ungranted.master_never_quiesces();
-    let seen = taped(&ungranted, |seen| Some(Runs::over(Noted(seen))), false);
-    let (crumbs, accesses) = (crumbs_of(&seen), reached(&seen));
-    let of = |steps: &[Step], want: Step| steps.iter().filter(|s| **s == want).count();
-
-    // Two of them at the very least — the reading before the request and one
-    // after it — and every one on the trail under its own line. The count is
-    // small because each is paced and never because a run was folded.
-    let arbitration = Step::Read { reg: regs::EXTCNF_CTRL };
-    assert!(of(&accesses, arbitration) > 1, "the engine never made this driver wait");
-    assert_eq!(of(&crumbs, arbitration), of(&accesses, arbitration));
-
-    let status = Step::Read { reg: regs::STATUS };
-    assert!(of(&accesses, status) > 1000, "the master quiesce never made this driver wait");
-    // The first read, the quiesce poll, the full reset's wait on
-    // LAN_INIT_DONE and the link's.
-    assert_eq!(of(&crumbs, status), 4);
-
-    let table = |s: &&Step| matches!(s, Step::Write { reg, .. } if (regs::MTA..regs::RAL0).contains(reg));
-    assert_eq!(accesses.iter().filter(table).count(), regs::MTA_DWORDS);
-    assert_eq!(crumbs.iter().filter(table).count(), 1);
-}
-
-
-#[test]
-fn the_82574s_trail_is_the_bring_up_in_the_datasheets_order() {
-    let [plain, brought_up, held] = crumbed_parts();
-    let trail = |nic: &Nic| -> Vec<String> {
-        crumbs_of(&taped(nic, |seen| Some(Runs::over(Noted(seen))), false))
-            .iter()
-            .map(|step| step.named().to_string())
-            .collect()
-    };
-    let owed: Vec<String> = crumbs::BRING_UP.iter().map(|s| s.to_string()).collect();
-    assert_eq!(trail(&plain), owed);
-    // The I219's is the same trail with the PHY's accesses and the PCH's own
-    // bits in it and nothing else moved.
-    // §8.2's power and handshake sweep is the PHY's step as much as `MDIC` is.
-    // Four of its five registers are the PHY's alone and drop out; `CTRL` is
-    // shared with the bring-up either side of it, so an access to that one is
-    // allowed to be extra and everything else has to line up exactly.
-    assert!(trail(&plain).iter().all(|step| !crumbs::is_the_pchs(step)));
-    for nic in [brought_up, held] {
-        let whole = trail(&nic);
-        for reg in ["TXDCTL1", "TARC0", "TARC1", "RFCTL", "PBECCSTS", "WUC", "GCR", "FFLT_DBG"] {
-            assert!(
-                whole.iter().any(|step| step == &format!("write {reg}")),
-                "{}",
-                nic.because(&format!("the PCH's MAC never had {reg} written"))
-            );
-        }
-        let mut owed = owed.iter();
-        let mut next = owed.next();
-        for step in whole
-            .into_iter()
-            .filter(|s| !crumbs::is_the_phys(s) && !crumbs::is_the_pchs(s))
-        {
-            if next == Some(&step) {
-                next = owed.next();
-                continue;
-            }
-            assert!(
-                crumbs::is_shared_with_the_phys(&step),
-                "{}",
-                nic.because(&format!("the PHY moved the rest of the trail at {step:?}"))
-            );
-        }
-        assert_eq!(next, None, "{}", nic.because("the bring-up lost a step"));
-    }
-}
-
-#[test]
-fn a_line_reads_back_as_it_was_written() {
-    let steps = [
-        Step::Start,
-        Step::ClaimHeld,
-        Step::Describe,
-        Step::MapBar,
-        Step::DmaAlloc,
-        Step::Read { reg: regs::EXTCNF_CTRL },
-        Step::Read { reg: 0x5b58 },
-        Step::Write { reg: regs::CTRL, value: ctrl::RST | 0x40 },
-        Step::Write { reg: regs::MTA, value: 0 },
-        Step::Opened,
-        Step::Exit { code: 69 },
-    ];
-    let mut file = String::new();
-    for (seq, step) in steps.into_iter().enumerate() {
-        let line = crumbs::Line { seq: seq as u32, at: 1_000 * seq as u64 + 7, synced: 990 * seq as u64, step };
-        file.push_str(&format!("{line}\n"));
-    }
-    let read: Vec<Step> = crumbs::lines(&file).map(|l| l.expect("a line it wrote").step).collect();
-    assert_eq!(read, steps);
-    assert!(file.contains("\n007 7007 6930 write CTRL 0x04000040\n"), "{file}");
-    assert!(file.contains(" read 0x05b58\n"), "{file}");
-}
-
-#[test]
-fn where_a_trail_stops_is_what_it_says() {
-    assert_eq!(Ending::of(""), Ok(Ending::Nothing));
-    let two = "000 10 0 start\n001 50 40 claim-held\n";
-    let Ok(Ending::In(last)) = Ending::of(two) else { panic!("{:?}", Ending::of(two)) };
-    assert_eq!((last.seq, last.step, last.at, last.synced), (1, Step::ClaimHeld, 50, 40));
-    assert!(Ending::In(last).to_string().contains("1 `claim-held` at 50 ns"));
-
-    // The write the machine ended in carries no newline, and the crumb before
-    // it is still the last one that was durable.
-    for torn in ["002 90 80 map", "002 90 80 map-bar", "0"] {
-        assert_eq!(Ending::of(&format!("{two}{torn}")), Ok(Ending::In(last)), "{torn:?}");
-    }
-    assert_eq!(Ending::of("000 10 0 sta"), Ok(Ending::Nothing));
-
-    let whole = format!("{two}002 90 80 exit 69\n");
-    let Ok(Ending::Complete { code: 69, last }) = Ending::of(&whole) else {
-        panic!("{:?}", Ending::of(&whole))
-    };
-    assert!(Ending::Complete { code: 69, last }.to_string().contains("all 3 crumbs"));
-
-    assert_eq!(
-        Ending::of("000 10 0 start\n002 90 80 map-bar\n").map_err(|why| matches!(why, Broken::Gap { wanted: 1, .. })),
-        Err(true)
-    );
-    for bad in ["000 10 0 start\nnonsense\n", "000 10 0 start\n\n", "000 10 0 read\n", "000 10 0 exit 69 70\n"] {
-        assert!(matches!(Ending::of(bad), Err(Broken::Unreadable { .. })), "{bad:?}");
-    }
-}
-
-/// A reading spells and reads back like every other crumb, and the harness's
-/// own filter takes it out of the bring-up's order — which is what lets a
-/// judge hold a trail with the PHY's readings in it to the same table.
-#[test]
-fn a_reading_is_a_crumb_the_bring_ups_order_leaves_out() {
-    let step = Step::Saw { reg: regs::MDIC, value: 0x043f6020 };
-    let line = crumbs::Line { seq: 0, at: 900, synced: 880, step };
-    assert_eq!(line.to_string(), "000 900 880 saw MDIC 0x043f6020");
-    let file = format!("{line}\n");
-    assert_eq!(
-        crumbs::lines(&file).map(|l| l.expect("the line it wrote").step).collect::<Vec<_>>(),
-        [step]
-    );
-    assert_eq!(step.named().to_string(), "saw MDIC");
-    assert!(crumbs::is_the_phys(&step.named().to_string()));
-    assert!(crumbs::is_the_phys(
-        &Step::Saw { reg: regs::EXTCNF_CTRL, value: 0 }.named().to_string()
-    ));
-    // A reading is the PHY's whatever register it names: only the PHY's own
-    // steps leave one.
-    assert!(crumbs::is_the_phys(&Step::Saw { reg: regs::CTRL, value: 0 }.named().to_string()));
-    // An *access* to `CTRL` is the one the bring-up and the power step share.
-    assert!(!crumbs::is_the_phys(&Step::Read { reg: regs::CTRL }.named().to_string()));
-    assert!(crumbs::is_shared_with_the_phys(&Step::Read { reg: regs::CTRL }.named().to_string()));
-    assert!(!crumbs::is_shared_with_the_phys(
-        &Step::Read { reg: regs::CTRL_EXT }.named().to_string()
-    ));
-    assert!(!crumbs::is_shared_with_the_phys(&Step::Read { reg: regs::MDIC }.named().to_string()));
-}
-
-/// §8.2.1's `PHYPDN` and §8.2.2's `PHYPDEN` are the two bits the PCH's own
-/// datasheet gives software over the PHY's power, and a bring-up that leaves
-/// either standing is a bring-up whose MDI cycles never run: I219 §2.2's
-/// Table 2-1 puts the interconnect in Electrical Idle while the PHY is down,
-/// and §1.2 carries every MDIO access over that interconnect.
+/// §8.2.1's `PHYPDN` is the bit the PCH's own datasheet gives software over the
+/// PHY's power while the function is driven, and a bring-up that leaves it
+/// standing is a bring-up whose MDI cycles never run: I219 §2.2's Table 2-1
+/// puts the interconnect in Electrical Idle while the PHY is down, and §1.2
+/// carries every MDIO access over that interconnect.
 ///
-/// **The model's default is a part that comes up with both set**, so this is
-/// also the negative control the rest of the PHY tests rest on: take the power
-/// step out of the bring-up and every one of them stops at
-/// [`PhyRefusal::MdiUnready`].
+/// **The model's default is a part that comes up with `PHYPDN` and §8.2.2's
+/// `PHYPDEN` both set**, so this is also the negative control the rest of the
+/// PHY tests rest on — take the power step out of the bring-up and every one of
+/// them stops at [`PhyRefusal::MdiUnready`] — and the proof that `PHYPDEN` is
+/// left as the NVM configured it and the PHY is reached anyway.
 #[test]
 fn the_power_step_is_what_lets_an_mdi_cycle_run_at_all() {
     let nic = Nic::i219(120);
     assert_ne!(nic.peek(regs::CTRL) & ctrl::PHY_POWER_DOWN, 0, "the part came up with it clear");
-    assert_ne!(
-        nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::PHY_POWER_DOWN_ENABLE,
-        0,
-        "the part came up with it clear"
-    );
+    let enabled = nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::PHY_POWER_DOWN_ENABLE;
+    assert_ne!(enabled, 0, "the part came up with it clear");
 
     let driver = open(&nic);
     let phy = driver.brought_up().phy.expect("the PHY the power step reached");
@@ -2347,34 +2004,31 @@ fn the_power_step_is_what_lets_an_mdi_cycle_run_at_all() {
         "{}",
         nic.because("§8.2.1's PHYPDN is still standing")
     );
-    assert_eq!(
-        nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::PHY_POWER_DOWN_ENABLE,
-        0,
-        "{}",
-        nic.because("§8.2.2's PHYPDEN is still standing")
-    );
+    // What the wake found and wrote is on its account, `PHYPDEN` untouched.
+    let power = woke_of(&driver, &nic).power;
+    assert!(power.before.low_power_entry_enabled() && power.after.low_power_entry_enabled());
+    assert_eq!(power.wrote, Some(power.before.ctrl & !ctrl::PHY_POWER_DOWN));
     // Nothing was written into the two registers this driver only reads.
     assert_eq!(nic.peek(regs::PHY_CTRL), power::PHY_CTRL_RESET);
     assert!(!nic.written().contains(&regs::PHY_CTRL));
     assert!(!nic.written().contains(&regs::FWSM));
 }
 
-/// A part that does not take the write is refused rather than driven on the
-/// assumption that it did — the same rule `IVAR` is read back under.
+/// A MAC that does not take the write keeps its PHY in power down, and a PHY
+/// in power down answers no cycle: the bring-up ends at the wall by name rather
+/// than being told the PHY was reached.
 #[test]
-fn a_mac_that_keeps_its_phy_down_is_refused_by_name() {
+fn a_mac_that_keeps_its_phy_down_is_a_phy_no_cycle_reaches() {
     let nic = Nic::i219(121);
     nic.refuses_writes_to(regs::CTRL);
     let (bar, clock, grant, line) = nic.parts();
     let driver = I219::open(nic.part(), bar, clock, grant, line).expect("the function opens");
     let why = driver.brought_up().phy.expect_err("a PHY held down is not brought up");
     assert!(
-        matches!(why, PhyRefusal::PhyPoweredDown { ctrl, .. } if ctrl & ctrl::PHY_POWER_DOWN != 0),
+        matches!(why, PhyRefusal::MdiUnready { .. }),
         "{}",
         nic.because(&format!("it refused with {why:?}"))
     );
-    assert_eq!(phy::Outcome::of(Err(why), Link::Down), phy::Outcome::PhyPoweredDown);
-    assert!(why.to_string().contains("PHYPDN"));
 }
 
 /// §8.2.3: "The ME/Host should not issue new MDIC transactions while this bit
@@ -2403,8 +2057,8 @@ fn an_interconnect_in_transition_is_waited_out_and_never_written_over() {
     assert_eq!(nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP, 0);
 }
 
-/// Each of §8.2's four readings decides exactly one thing, and the correction
-/// is the two bits the document makes writable and nothing else.
+/// Each of §8.2's readings decides at most one thing, and the correction is
+/// §8.2.1's one bit and nothing else.
 #[test]
 fn what_one_power_reading_decides() {
     let clear = power::Reading {
@@ -2419,33 +2073,32 @@ fn what_one_power_reading_decides() {
     assert!(!clear.low_power_entry_enabled());
     assert!(clear.firmware_ready());
     assert!(!clear.interconnect_in_transition());
-    assert!(clear.correction().nothing());
-    assert_eq!(clear.correction().to_string(), "nothing was written");
+    assert!(clear.correction().is_none());
 
     let down = power::Reading { ctrl: clear.ctrl | ctrl::PHY_POWER_DOWN, ..clear };
     assert!(down.phy_power_down());
     // The rest of the word is carried, and only bit 24 goes.
-    assert_eq!(down.correction().ctrl, Some(clear.ctrl));
-    assert_eq!(down.correction().ctrl_ext, None);
+    assert_eq!(down.correction(), Some(clear.ctrl));
     assert!(down.to_string().contains("held in §8.2.1's power down"));
 
+    // §8.2.2's bit is reported and never corrected.
     let enabled = power::Reading {
         ctrl_ext: 0x0000_0040 | regs::ctrl_ext::PHY_POWER_DOWN_ENABLE,
         ..clear
     };
     assert!(enabled.low_power_entry_enabled());
-    assert_eq!(enabled.correction().ctrl, None);
-    assert_eq!(enabled.correction().ctrl_ext, Some(0x0000_0040));
+    assert!(enabled.correction().is_none());
+    assert!(enabled.to_string().contains("a low-power entry is enabled by §8.2.2"));
 
     let mute = power::Reading { fwsm: 0, ..clear };
     assert!(!mute.firmware_ready());
     // The firmware's own report decides nothing: §8.2.9 attaches nothing to it.
-    assert!(mute.correction().nothing());
+    assert!(mute.correction().is_none());
     assert!(mute.to_string().contains("reports itself not ready"));
 
     let moving = power::Reading { mdic: regs::mdic::WAIT, ..clear };
     assert!(moving.interconnect_in_transition());
-    assert!(moving.correction().nothing());
+    assert!(moving.correction().is_none());
 
     // A window that stopped decoding is a reading no correction comes out of.
     for gone in [
@@ -2459,13 +2112,9 @@ fn what_one_power_reading_decides() {
     }
 
     let settled = power::Settled { before: down, wrote: down.correction(), after: clear };
-    assert!(settled.settled());
     assert!(settled.to_string().contains("CTRL was written"));
-    assert!(!power::Settled { after: down, ..settled }.settled());
-    assert!(
-        !power::Settled { after: enabled, ..settled }.settled(),
-        "a low-power entry left enabled is not settled either"
-    );
+    let quiet = power::Settled { before: clear, wrote: clear.correction(), after: clear };
+    assert!(quiet.to_string().contains("; nothing was written; "));
 }
 
 // --- the wake and the full reset ---
@@ -2503,13 +2152,13 @@ fn a_phy_left_out_of_reach_is_climbed_to_before_the_reset() {
             (Moment::BackOnPcie, true),
         ],
         "{}",
-        nic.because(&format!("the ladder was not climbed in the host driver's order: {woke}"))
+        nic.because(&format!("the ladder was not climbed in its order: {woke}"))
     );
     assert!(matches!(woke.asked().next(), Some((_, Answer::Silent { .. }))));
     assert_eq!(nic.power_cycles(), 1);
     assert_eq!(nic.phy_resets(), 1, "{}", nic.because("the reset did not take the PHY"));
     let reset = driver.brought_up().reset.expect("the I219's reset is the full one");
-    assert!(reset.phy_reset && reset.flag.is_ok() && reset.init_done_after_nanos.is_some());
+    assert!(reset.phy_reset && reset.flag.is_ok() && reset.configured_after_nanos.is_some());
     assert_eq!(nic.lcd(), Lcd::InStep);
     assert!(driver.brought_up().phy.is_ok(), "{}", nic.because("the bring-up missed the PHY"));
 
@@ -2543,9 +2192,9 @@ fn a_phy_in_reach_is_asked_once_and_left_powered() {
 }
 
 /// Where `FWSM` says the firmware blocks a PHY reset, neither `PHY_RST` nor a
-/// `LANPHYPC` cycle goes out — the host driver reports both "blocked by ME" on
-/// that bit — and a MAC reset alone then leaves a PHY that answered before it
-/// out of reach, which the bring-up refuses by name.
+/// `LANPHYPC` cycle goes out — the cycle is a reset of the PHY by its power
+/// pin — and a MAC reset alone then leaves a PHY that answered before it out
+/// of reach, which the bring-up refuses by name.
 #[test]
 fn a_phy_reset_the_firmware_blocks_is_never_issued() {
     let nic = Nic::with(
@@ -2577,6 +2226,136 @@ fn a_phy_reset_the_firmware_blocks_is_never_issued() {
     );
 }
 
+/// A ladder that stops on a refusal with the MAC on SMBus — here §8.2.3's
+/// `Wait`, which moving the MAC onto SMBus starts and this part never ends —
+/// still takes the MAC off SMBus before the flag goes back. The wake is taken
+/// on its own, before any reset could clear the bit and hide a MAC left there.
+#[test]
+fn a_ladder_stopped_on_smbus_leaves_the_mac_off_it() {
+    let nic = Nic::i219(107);
+    nic.transition_sticks_once_the_mac_is_on_smbus();
+    let (bar, clock, _, _) = nic.parts();
+    let woke = crate::phy::wake(&bar, &clock, None).expect("the flag is granted");
+    let asked: Vec<_> = woke.asked().collect();
+    assert!(
+        matches!(
+            asked.last(),
+            Some((Moment::SmbusForced, Answer::Refused(PhyRefusal::MdiWaiting { .. })))
+        ),
+        "{}",
+        nic.because(&format!("the ladder did not stop on SMBus with a refusal: {woke}"))
+    );
+    assert_eq!(
+        nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::MAC_ON_SMBUS,
+        0,
+        "{}",
+        nic.because("the wake left the MAC on SMBus")
+    );
+    assert_eq!(nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP, 0);
+}
+
+/// A flag the part already let go is not written again on the way out: the
+/// write would carry every other field of a register three agents share, for
+/// nothing.
+#[test]
+fn a_flag_the_part_already_let_go_is_not_written_again() {
+    let nic = Nic::with(
+        108,
+        Part::I219,
+        Permits { firmware_takes_the_mdio_interface: false, ..Permits::default() },
+    );
+    let (bar, clock, _, _) = nic.parts();
+    let mdi = crate::phy::Owned::claim(&bar, &clock, None).expect("the flag is granted");
+    nic.software_flag_let_go();
+    let before = nic.extcnf_writes();
+    drop(mdi);
+    assert_eq!(nic.extcnf_writes(), before, "{}", nic.because("a clear flag was written again"));
+}
+
+/// A word of ones inside the grant wait is a window that did not decode that
+/// read, and the request this driver registered is standing: it is withdrawn
+/// once the register answers again, before the refusal goes up.
+#[test]
+fn ones_inside_the_grant_wait_do_not_leave_the_request_standing() {
+    let nic = Nic::i219(109);
+    nic.extcnf_answers_ones_after_the_request(2);
+    let (bar, clock, _, _) = nic.parts();
+    let claimed = crate::phy::Owned::claim(&bar, &clock, None);
+    assert!(
+        matches!(claimed, Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL })),
+        "{}",
+        nic.because(&format!("the claim answered {:?}", claimed.as_ref().err()))
+    );
+    assert_eq!(
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
+        0,
+        "{}",
+        nic.because("the request was left standing")
+    );
+}
+
+/// The same on the way out: a release that reads ones reads again inside its
+/// bound, and gives the flag back once the register answers.
+#[test]
+fn ones_on_the_way_out_do_not_leave_the_flag_standing() {
+    let nic = Nic::with(
+        110,
+        Part::I219,
+        Permits { firmware_takes_the_mdio_interface: false, ..Permits::default() },
+    );
+    let (bar, clock, _, _) = nic.parts();
+    let mdi = crate::phy::Owned::claim(&bar, &clock, None).expect("the flag is granted");
+    nic.extcnf_answers_ones_for(2);
+    drop(mdi);
+    assert_eq!(
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
+        0,
+        "{}",
+        nic.because("the flag was left standing")
+    );
+}
+
+/// A release whose register answers ones through its whole bound writes
+/// nothing: the only word it could write is composed from ones, and would set
+/// every field of a register three agents share.
+#[test]
+fn ones_through_the_whole_release_bound_write_nothing() {
+    let nic = Nic::with(
+        113,
+        Part::I219,
+        Permits { firmware_takes_the_mdio_interface: false, ..Permits::default() },
+    );
+    let (bar, clock, _, _) = nic.parts();
+    let mdi = crate::phy::Owned::claim(&bar, &clock, None).expect("the flag is granted");
+    nic.extcnf_answers_ones_for(u32::MAX);
+    let before = nic.extcnf_writes();
+    drop(mdi);
+    assert_eq!(
+        nic.extcnf_writes(),
+        before,
+        "{}",
+        nic.because("a release past its bound wrote EXTCNF_CTRL")
+    );
+}
+
+/// A flag that never comes is no reason to leave the part unreset: the full
+/// reset goes out without it.
+#[test]
+fn a_flag_that_never_comes_does_not_stop_the_reset() {
+    let nic = Nic::with(
+        111,
+        Part::I219,
+        Permits { mdio_flag_is_a_plain_mutex: false, ..Permits::default() },
+    );
+    nic.engine_holds_the_interface_until(u64::MAX);
+    let driver = open(&nic);
+    let reset = driver.brought_up().reset.expect("the I219's reset is the full one");
+    assert!(reset.flag.is_err(), "{}", nic.because("the flag was granted after all"));
+    assert!(reset.phy_reset);
+    assert_eq!(nic.phy_resets(), 1, "{}", nic.because("the reset never went out"));
+}
+
+
 /// A PHY no rung reaches is refused after the reset by the wall it is, with
 /// every rung's ask beside it — and the MAC is not left on SMBus.
 #[test]
@@ -2588,7 +2367,7 @@ fn a_phy_no_rung_reaches_is_refused_after_the_reset() {
     assert_eq!(woke.asked().count(), 1 + wake::LADDER.len());
     assert!(woke.answered().is_none());
     assert!(woke.asked().all(|(_, answer)| matches!(answer, Answer::Silent { .. })));
-    assert_eq!(nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::FORCE_SMBUS, 0);
+    assert_eq!(nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::MAC_ON_SMBUS, 0);
     assert!(matches!(driver.brought_up().phy, Err(PhyRefusal::MdiUnready { .. })));
 }
 
@@ -2596,69 +2375,49 @@ fn no_arbitration_nearer_than_the_pace(nic: &Nic) -> bool {
     nic.arbitration_at().windows(2).all(|pair| pair[1] - pair[0] >= toyos_phy::ARBITRATION_PACE_NANOS)
 }
 
-/// Every ask is witnessed: its own crumb ahead of it and `MDIC`'s word behind
-/// every transaction it made, so a trail says in the part's words how each
-/// ended.
+/// Every ask the wake made carries the part's own word for how it ended — the
+/// identifier where the PHY answered, `MDIC` as the transaction left it where
+/// it did not — and the wake keeps the arbitration's pace throughout.
 #[test]
-fn every_ask_leaves_the_parts_own_answer_on_the_trail() {
-    let nic = Nic::i219(109);
-    let (bar, clock, grant, line) = nic.parts();
-    let seen: Seens = Rc::default();
-    let trail = Runs::over(Noted(Rc::clone(&seen)));
-    I219::open_trailing(Part::I219, Crumbed::over(bar, &trail), clock, grant, line, &trail)
-        .unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused: {why}"))));
-    let crumbs = crumbs_of(&seen.borrow());
-    let asks: Vec<usize> = crumbs
-        .iter()
-        .enumerate()
-        .filter(|(_, step)| matches!(step, Step::Ask { .. }))
-        .map(|(at, _)| at)
-        .collect();
-    assert_eq!(asks.len(), 4, "{}", nic.because("the ladder asked a different number of times"));
-    for at in asks {
-        let behind = crumbs[at + 1..]
-            .iter()
-            .take_while(|step| !matches!(step, Step::Ask { .. } | Step::Opened))
-            .find(|step| matches!(step, Step::Saw { reg: regs::MDIC, .. }));
-        assert!(behind.is_some(), "{}", nic.because(&format!("{} left no answer", crumbs[at])));
+fn every_ask_carries_the_parts_own_word_and_keeps_the_pace() {
+    let nic = Nic::i219(112);
+    let driver = open(&nic);
+    let woke = woke_of(&driver, &nic);
+    assert_eq!(woke.asked().count(), 4, "{}", nic.because(&format!("the ladder asked {woke}")));
+    for (moment, answer) in woke.asked() {
+        match answer {
+            Answer::Answered { id, .. } => {
+                assert_eq!(id >> 16, toyos_phy::IDENTIFIER_HIGH_INTEL as u32)
+            }
+            Answer::Silent { mdic } => assert_ne!(
+                mdic & regs::mdic::OP_READ,
+                0,
+                "{}",
+                nic.because(&format!("{moment} kept no command: {mdic:#x}"))
+            ),
+            other => panic!("{}", nic.because(&format!("{moment} answered {other}"))),
+        }
     }
-    assert!(no_arbitration_nearer_than_the_pace(&nic));
-}
-
-#[test]
-fn an_ask_spells_and_reads_back_at_every_moment() {
-    for moment in Moment::ALL {
-        let step = Step::Ask { moment };
-        let line = crumbs::Line { seq: 0, at: 5, synced: 3, step };
-        let file = format!("{line}\n");
-        assert_eq!(
-            crumbs::lines(&file).map(|l| l.expect("the line it wrote").step).collect::<Vec<_>>(),
-            [step]
-        );
-        assert!(crumbs::is_the_phys(&step.named().to_string()));
-    }
-    assert!(crumbs::is_the_phys(&Step::Write { reg: regs::FEXTNVM3, value: 0 }.named().to_string()));
-    assert!(crumbs::is_shared_with_the_phys("read STATUS"));
-    assert!(!crumbs::is_shared_with_the_phys("write STATUS"));
+    assert!(no_arbitration_nearer_than_the_pace(&nic), "{}", nic.because("the pace was not kept"));
 }
 
 /// What the wake and the full reset write, as bit arithmetic on what was read.
 #[test]
 fn what_the_wake_and_the_full_reset_write() {
-    use regs::{ctrl, ctrl_ext, fextnvm3, fwsm};
-    let held = 0x0018_0244 | ctrl::LANPHYPC_VALUE;
+    use regs::{ctrl, ctrl_ext, fwsm, lanphypc_timing};
+    let held = 0x0018_0244 | ctrl::LANPHYPC_LEVEL;
     let low = wake::lanphypc_low(held);
-    assert_eq!(low & (ctrl::LANPHYPC_OVERRIDE | ctrl::LANPHYPC_VALUE), ctrl::LANPHYPC_OVERRIDE);
-    assert_eq!(low & !(ctrl::LANPHYPC_OVERRIDE | ctrl::LANPHYPC_VALUE), 0x0018_0244);
-    assert_eq!(wake::lanphypc_released(low), 0x0018_0244, "only the override goes");
+    assert_eq!(low & (ctrl::LANPHYPC_HOST_DRIVEN | ctrl::LANPHYPC_LEVEL), ctrl::LANPHYPC_HOST_DRIVEN);
+    assert_eq!(low & !(ctrl::LANPHYPC_HOST_DRIVEN | ctrl::LANPHYPC_LEVEL), 0x0018_0244);
+    assert_eq!(wake::lanphypc_released(low), 0x0018_0244, "only the host's hand goes");
 
-    let counter = wake::phy_cfg_counter(0xFFFF_FFFF);
-    assert_eq!(counter & fextnvm3::PHY_CFG_COUNTER_MASK, fextnvm3::PHY_CFG_COUNTER_50MS);
-    assert_eq!(counter | fextnvm3::PHY_CFG_COUNTER_MASK, 0xFFFF_FFFF, "every other bit carried");
+    let counter = wake::configuration_50ms(0xFFFF_FFFF);
+    assert_eq!(counter & lanphypc_timing::CONFIGURATION_MASK, lanphypc_timing::CONFIGURATION_50MS);
+    assert_eq!(counter | lanphypc_timing::CONFIGURATION_MASK, 0xFFFF_FFFF, "every other bit carried");
 
     // The T14's own words: CTRL_EXT 0x815a1027 and FWSM 0x60000040.
     let ext = 0x815a_1027;
-    assert_eq!(wake::smbus_forced(ext), ext | ctrl_ext::FORCE_SMBUS);
+    assert_eq!(wake::smbus_forced(ext), ext | ctrl_ext::MAC_ON_SMBUS);
     assert_eq!(wake::smbus_released(wake::smbus_forced(ext)), ext);
     assert!(wake::power_cycle_done(ext), "the T14 read the cycle-done bit set");
     assert!(wake::phy_reset_allowed(0x6000_0040));
@@ -2674,68 +2433,92 @@ fn what_the_wake_and_the_full_reset_write() {
 
 // --- the PCH's own bits, host wake-up, the counts, and the lease probe ---
 
-/// The PCH's MAC is given every bit its own host driver writes before the
-/// rings, and the 82574 — whose datasheet this driver is otherwise written
-/// from — is given none of them.
+/// The PCH's MAC is given `pch`'s three registers before its rings, every
+/// other bit of each carried, and the 82574 — whose datasheet this driver is
+/// otherwise written from — is given none of them.
 #[test]
-fn the_pchs_mac_gets_its_host_drivers_bits_and_the_82574_none() {
-    use regs::{ctrl_ext, fflt_dbg, gcr, pbeccsts, rfctl, tarc, txdctl};
+fn the_pchs_mac_gets_its_three_registers_and_the_82574_none() {
+    use regs::{ctrl_ext, pcie_control, txdctl, wake_up};
     let nic = Nic::i219(130);
     let _driver = open(&nic);
     let has = |reg, bits: u32| nic.peek(reg) & bits == bits;
     assert!(has(
         regs::CTRL_EXT,
-        ctrl_ext::REQUIRED_22 | ctrl_ext::DRIVER_LOADED | ctrl_ext::RELAXED_ORDERING_DISABLE
+        ctrl_ext::STRICT_WRITE_ORDER | ctrl_ext::DRIVER_HOLDS_THE_FUNCTION
     ));
-    assert_eq!(nic.peek(regs::TXDCTL), txdctl::PCH, "{}", nic.because("the first queue"));
-    assert_eq!(nic.peek(regs::TXDCTL1), txdctl::PCH, "{}", nic.because("the second queue"));
-    assert!(has(regs::TARC0, tarc::TARC0_REQUIRED));
-    // `TCTL` as this driver writes it has Multiple Request Support clear, so
-    // `TARC1`'s bit 28 is set.
-    assert_eq!(nic.peek(regs::TCTL) & tctl::MULR, 0);
-    assert!(has(regs::TARC1, tarc::TARC1_REQUIRED | tarc::TARC1_SINGLE_REQUEST));
-    assert!(has(regs::RFCTL, rfctl::NFS_FILTERS_OFF));
-    assert!(has(regs::PBECCSTS, pbeccsts::ECC_ENABLE));
-    assert!(has(regs::CTRL, ctrl::MEHE));
-    assert!(has(regs::FFLT_DBG, fflt_dbg::DONT_GATE_WAKE_DMA_CLOCK));
-    assert_eq!(nic.peek(regs::GCR) & gcr::NO_SNOOP, 0);
-    assert_eq!(nic.peek(regs::WUC), 0);
-    for reg in [regs::WUC, regs::GCR] {
+    // The NVM's `PHYPDEN`, which the part came up with, is carried.
+    assert!(has(regs::CTRL_EXT, ctrl_ext::PHY_POWER_DOWN_ENABLE));
+    assert_eq!(nic.peek(regs::WAKE_UP) & wake_up::APM_WAKE, 0);
+    assert_eq!(nic.peek(regs::PCIE_CONTROL) & pcie_control::NO_SNOOP, 0);
+    assert_eq!(nic.peek(regs::TXDCTL), txdctl::SUGGESTED, "{}", nic.because("§4.6.6's policy"));
+    for reg in [regs::WAKE_UP, regs::PCIE_CONTROL] {
         assert!(nic.written().contains(&reg), "{}", nic.because(&format!("{reg:#x} unwritten")));
     }
 
     let nic = Nic::new(131);
     let _driver = open(&nic);
     assert_eq!(nic.peek(regs::TXDCTL), txdctl::SUGGESTED);
-    for reg in [
-        regs::TXDCTL1,
-        regs::TARC0,
-        regs::TARC1,
-        regs::RFCTL,
-        regs::PBECCSTS,
-        regs::WUC,
-        regs::GCR,
-        regs::FFLT_DBG,
-    ] {
+    for reg in [regs::CTRL_EXT, regs::WAKE_UP, regs::PCIE_CONTROL] {
         assert!(
             !nic.written().contains(&reg),
             "{}",
             nic.because(&format!("the 82574 had the PCH's {reg:#x} written"))
         );
     }
-    assert_eq!(nic.peek(regs::CTRL) & ctrl::MEHE, 0);
 }
 
-/// `TARC1`'s bit 28 follows `TCTL`'s Multiple Request Support and nothing
-/// else in the register moves.
+/// Bit 28 is the host's word to the firmware that a driver holds the function,
+/// so it goes with the driver: a dropped driver clears it and carries every
+/// other bit, a refusal after `pch::prepare` is a drop that does the same, and
+/// a refusal before it never set it. The 82574, never given the word, has
+/// nothing taken back.
 #[test]
-fn tarc1_follows_multiple_request_support() {
-    use regs::tarc;
-    let set = crate::pch::tarc1(0, 0);
-    assert_eq!(set, tarc::TARC1_REQUIRED | tarc::TARC1_SINGLE_REQUEST);
-    let cleared = crate::pch::tarc1(tarc::TARC1_SINGLE_REQUEST | 0x3, tctl::MULR);
-    assert_eq!(cleared, tarc::TARC1_REQUIRED | 0x3);
+fn the_word_to_the_firmware_goes_with_the_driver() {
+    use regs::ctrl_ext;
+    let holds = |nic: &Nic| nic.peek(regs::CTRL_EXT) & ctrl_ext::DRIVER_HOLDS_THE_FUNCTION != 0;
+
+    let nic = Nic::i219(140);
+    let driver = open(&nic);
+    assert!(holds(&nic), "{}", nic.because("the open never gave the word"));
+    drop(driver);
+    assert!(!holds(&nic), "{}", nic.because("a dropped driver left the word standing"));
+    let carried = ctrl_ext::STRICT_WRITE_ORDER | ctrl_ext::PHY_POWER_DOWN_ENABLE;
+    assert_eq!(nic.peek(regs::CTRL_EXT) & carried, carried, "{}", nic.because("a bit was lost"));
+
+    let nic = Nic::i219(141);
+    nic.refuses_writes_to(regs::RCTL);
+    let (bar, clock, grant, line) = nic.parts();
+    let refused = I219::open(nic.part(), bar, clock, grant, line);
+    assert!(matches!(refused, Err(Refusal::NotAccepted { reg: regs::RCTL, .. })));
+    assert!(!holds(&nic), "{}", nic.because("a refused open left the word standing"));
+
+    let nic = Nic::i219(142);
+    nic.without_nvm();
+    let (bar, clock, grant, line) = nic.parts();
+    let refused = I219::open(nic.part(), bar, clock, grant, line);
+    assert!(matches!(refused, Err(Refusal::NoStationAddress)));
+    assert!(!holds(&nic), "{}", nic.because("an open refused before prepare gave the word"));
+
+    let nic = Nic::new(143);
+    drop(open(&nic));
+    assert!(
+        !nic.written().contains(&regs::CTRL_EXT),
+        "{}",
+        nic.because("the 82574 had the PCH's CTRL_EXT written on the way out")
+    );
 }
+
+/// A release that reads `CTRL_EXT` as ones writes nothing: the word it would
+/// compose from them would set every field of the register.
+#[test]
+fn a_release_over_a_window_of_ones_writes_nothing() {
+    let nic = Nic::i219(144);
+    let driver = open(&nic);
+    nic.window_does_not_decode(regs::CTRL_EXT);
+    // The stub refuses, by panic, a write into an offset it does not decode.
+    drop(driver);
+}
+
 
 /// I219 §7.4: a PHY an earlier operating system armed for host wake-up keeps
 /// `Host_WU_Active` through every reset but a power cycle (§9.5.3.2), and the
@@ -2885,7 +2668,26 @@ fn a_lease_report_reads_back_as_it_was_written() {
     assert_eq!(summary.lease, Some((300, lease)), "the first lease is the one recorded");
     assert_eq!(summary.counts, Some(counts));
     assert_eq!(summary.exit, Some(lease::LEASED), "the torn line is not the exit");
-    for bad in ["x link up\n", "5 link up 10\n", "5 leased 1.2.3.4 from 1.2.3.5 router none\n", "5 exit\n"] {
+    assert!(summary.held, "the file's last word on the lease is a lease");
+
+    // A lease that was lost after it landed is not held at the end, and one
+    // that came back after the loss is.
+    let lost = Line { ms: 800, event: Event::Lost };
+    assert_eq!(lost.to_string(), "800 lost");
+    assert_eq!(Line::parse("800 lost"), Some(lost));
+    let dropped = lease::summary(&format!("{file}{lost}\n")).expect("a whole report");
+    assert!(!dropped.held, "a lease lost inside the window was read as held");
+    assert_eq!(dropped.lease, summary.lease, "the first lease is still the one recorded");
+    let back = Line { ms: 900, event: lease };
+    assert!(lease::summary(&format!("{file}{lost}\n{back}\n")).expect("a whole report").held);
+
+    for bad in [
+        "x link up\n",
+        "5 link up 10\n",
+        "5 leased 1.2.3.4 from 1.2.3.5 router none\n",
+        "5 exit\n",
+        "5 lost now\n",
+    ] {
         assert!(lease::summary(bad).is_err(), "{bad:?}");
     }
 }

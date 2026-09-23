@@ -18,8 +18,7 @@
 
 use core::cell::Cell;
 
-use crate::crumbs::{Step, Trail};
-use crate::power::{Correction, Reading, Settled};
+use crate::power::{Reading, Settled};
 use crate::regs::{self, extcnf, mdic};
 use crate::wake::{self, Action, Answer, Moment, Woke};
 use crate::{Clock, Link, Registers, Speed};
@@ -251,13 +250,6 @@ pub enum PhyRefusal {
     MdiUnready { phy: u8, reg: u8, after_nanos: u64 },
     /// §10.2.2.7's `Error` bit: the part "fails to complete an MDI read".
     MdiError { phy: u8, reg: u8 },
-    /// §8.2.1's `PHYPDN` still stood, or §8.2.2's `PHYPDEN` did, after this
-    /// driver wrote the word that clears it. **The write is read back and not
-    /// assumed**: a MAC holding its PHY in power down carries no MDIO packet
-    /// to it at all — I219 §2.2 Table 2-1 puts the interconnect in Electrical
-    /// Idle in that state — so a bring-up that went on would be polling for
-    /// the end of a cycle that was never started.
-    PhyPoweredDown { ctrl: u32, ctrl_ext: u32 },
     /// §9.5.2.3's identifier is not Intel's at either of §9.3's two PHY
     /// addresses, so nothing this driver knows the register map of answered.
     Identity { specific: u32, general: u32 },
@@ -301,12 +293,6 @@ impl core::fmt::Display for PhyRefusal {
                 f,
                 "the part reported MDIC.E on PHY {phy} register {reg}, which is a transaction \
                  it could not complete"
-            ),
-            Self::PhyPoweredDown { ctrl, ctrl_ext } => write!(
-                f,
-                "the MAC holds the PHY down after this driver wrote to clear it: CTRL reads \
-                 {ctrl:#010x} and CTRL_EXT {ctrl_ext:#010x}, so §8.2.1's PHYPDN or §8.2.2's \
-                 PHYPDEN is still standing"
             ),
             Self::Identity { specific, general } => write!(
                 f,
@@ -395,9 +381,9 @@ pub enum Outcome {
     GrantNeverCame = 76,
     MdiUnready = 77,
     /// **Out of order because a code is never reused and never renumbered**:
-    /// every code above is already on a boot log somewhere.
+    /// every code above is already on a boot log somewhere. 82 is retired: it
+    /// was a refusal this driver no longer makes.
     MdiWaiting = 81,
-    PhyPoweredDown = 82,
     MdiError = 78,
     Identity = 79,
     NotThisRegisterMap = 80,
@@ -448,7 +434,6 @@ impl Outcome {
             }
             Self::GrantNeverCame => "§4.5.2's request was never granted",
             Self::MdiWaiting => "§8.2.3's Wait bit never went, so no transaction was issued",
-            Self::PhyPoweredDown => "the MAC still holds the PHY in §8.2.1's power down",
             Self::MdiUnready => "an MDI transaction never reported §10.2.2.7's Ready",
             Self::MdiError => "the part reported §10.2.2.7's Error on a transaction",
             Self::Identity => "§9.5.2.3's identifier is not Intel's at either PHY address",
@@ -457,7 +442,7 @@ impl Outcome {
     }
 
     /// Every outcome, in exit-code order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 18] = [
         Self::BroughtUpNoLink,
         Self::LinkAt10Half,
         Self::LinkAt10Full,
@@ -476,7 +461,6 @@ impl Outcome {
         Self::Identity,
         Self::NotThisRegisterMap,
         Self::MdiWaiting,
-        Self::PhyPoweredDown,
     ];
 
     /// The outcome of a bring-up, and of the link that followed it.
@@ -506,7 +490,6 @@ impl Outcome {
             Err(PhyRefusal::MdiWaiting { .. }) => Self::MdiWaiting,
             Err(PhyRefusal::MdiUnready { .. }) => Self::MdiUnready,
             Err(PhyRefusal::MdiError { .. }) => Self::MdiError,
-            Err(PhyRefusal::PhyPoweredDown { .. }) => Self::PhyPoweredDown,
             Err(PhyRefusal::Identity { .. }) => Self::Identity,
             Err(PhyRefusal::NotThisRegisterMap) => Self::NotThisRegisterMap,
         }
@@ -534,7 +517,6 @@ impl Outcome {
             | Self::MdiWaiting
             | Self::MdiUnready
             | Self::MdiError
-            | Self::PhyPoweredDown
             | Self::Identity
             | Self::NotThisRegisterMap => None,
         }
@@ -615,7 +597,7 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
     }
 
     /// Give the processor away until `nanos` has passed since this driver's
-    /// last access — a wait the host driver owes the part after a step, which
+    /// last access — a wait the part is owed after a step, which
     /// the pace alone would not keep where it is the shorter of the two.
     fn settle(&self, nanos: u64) {
         let since = self.last.get().unwrap_or_else(|| self.clock.nanos());
@@ -628,6 +610,29 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
 
     fn write(&self, value: u32) {
         self.write_at(regs::EXTCNF_CTRL, value);
+    }
+
+    /// Take this driver's software bit out of the register, reading it again
+    /// for as long as it answers ones and at most [`ARBITRATION_DEADLINE_NANOS`]
+    /// from now: a word of ones is a window that is not decoding this read, and
+    /// a bit left standing because of one would keep every other agent off the
+    /// interface for the boot. A bit that reads clear is not written, and past
+    /// the bound nothing is written at all — a composed word would set every
+    /// field of a register this driver owns one bit of.
+    fn withdraw(&self) {
+        let started = self.clock.nanos();
+        loop {
+            let held = self.read();
+            if held != u32::MAX {
+                if held & extcnf::MDIO_SW_OWNERSHIP != 0 {
+                    self.write(held & !extcnf::MDIO_SW_OWNERSHIP);
+                }
+                return;
+            }
+            if self.clock.nanos().saturating_sub(started) >= ARBITRATION_DEADLINE_NANOS {
+                return;
+            }
+        }
     }
 }
 
@@ -677,13 +682,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// the arbitration a priority order — "manageability, software and then
     /// hardware" — which is a statement about requests that are waiting, so an
     /// interface another agent holds is one this driver asks for and never one
-    /// it declines to ask about. On the T14 the part grants it while
-    /// manageability's own bit stands: the clause's "at any given time at most
-    /// only one bit is 1b" is not what that silicon answers, and the grant is
-    /// therefore this driver's bit reading back set and never its bit alone.
-    /// **A bench fact**: one run of that request on that machine read
-    /// `EXTCNF_CTRL` as `0x00300089`, wrote `0x003000a9`, and read `0x003000a9`
-    /// back.
+    /// it declines to ask about.
     ///
     /// **The one bit that is not asked over is a software bit already set.**
     /// This driver's request is that same bit, so one registered on top of
@@ -728,8 +727,10 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
             let reading = mdio.read();
             // Ones before the bit is read out of it: every bit of that word is
             // set, and a grant read out of a window nothing decodes would put
-            // this driver on `MDIC` with no part behind it.
+            // this driver on `MDIC` with no part behind it. The request is
+            // standing, so it is withdrawn before the refusal goes up.
             if reading == u32::MAX {
+                mdio.withdraw();
                 return Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL });
             }
             if reading & extcnf::MDIO_SW_OWNERSHIP != 0 {
@@ -787,15 +788,11 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         }
     }
 
+
     /// One sweep of §8.2's five power and handshake registers, paced as every
-    /// other access under the flag is, with each reading left durable behind
-    /// the read that took it.
-    pub(crate) fn power_reading<T: Trail>(&self, trail: &T) -> Reading {
-        let seen = |reg| {
-            let value = self.mdio.read_at(reg);
-            trail.crumb(Step::Saw { reg, value });
-            value
-        };
+    /// other access under the flag is.
+    pub(crate) fn power_reading(&self) -> Reading {
+        let seen = |reg| self.mdio.read_at(reg);
         Reading {
             ctrl: seen(regs::CTRL),
             ctrl_ext: seen(regs::CTRL_EXT),
@@ -805,32 +802,27 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         }
     }
 
-    /// Put the part in the state §8.2.1 and §8.2.2 describe, and read back
-    /// what it then holds.
+    /// Put the part in the state §8.2.1 describes, and read back what it then
+    /// holds.
     ///
     /// **Three sweeps and not two would be one too many**: the reading before,
-    /// the writes the reading calls for, and the reading after. A part already
+    /// the write the reading calls for, and the reading after. A part already
     /// in that state is written nothing at all, and its two readings are then
     /// the same sweep taken twice — which is what says the state is the part's
     /// and not this driver's.
     ///
-    /// The register that is *not* written is §8.2.5's `PHY_CTRL`: every field
-    /// it has makes a link slower or takes it away, and the documents give
-    /// this driver no reason to move one.
-    pub(crate) fn settle_power<T: Trail>(&self, trail: &T) -> Result<Settled, PhyRefusal> {
-        let before = self.power_reading(trail);
+    /// The registers that are *not* written are [`crate::power`]'s header:
+    /// §8.2.2's `PHYPDEN`, §8.2.5's `PHY_CTRL` and §8.2.9's `FWSM`.
+    pub(crate) fn settle_power(&self) -> Result<Settled, PhyRefusal> {
+        let before = self.power_reading();
         if before.unrouted().is_some() {
             return Err(PhyRefusal::Unrouted { reg: regs::CTRL });
         }
         let wrote = before.correction();
-        let Correction { ctrl, ctrl_ext } = wrote;
-        if let Some(value) = ctrl {
+        if let Some(value) = wrote {
             self.mdio.write_at(regs::CTRL, value);
         }
-        if let Some(value) = ctrl_ext {
-            self.mdio.write_at(regs::CTRL_EXT, value);
-        }
-        let after = self.power_reading(trail);
+        let after = self.power_reading();
         if after.unrouted().is_some() {
             return Err(PhyRefusal::Unrouted { reg: regs::CTRL });
         }
@@ -879,39 +871,23 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         self.mdio.write_at(reg, value);
     }
 
-    /// One read of `reg` made under the pace, and what it answered left
-    /// durable behind it.
-    fn seen_paced<T: Trail>(&self, trail: &T, reg: usize) -> u32 {
-        let value = self.mdio.read_at(reg);
-        trail.crumb(Step::Saw { reg, value });
-        value
-    }
-
-    /// `MDIC` as a transaction left it, read once and left durable: the
-    /// part's own word for how the transaction ended.
-    fn seen_mdic<T: Trail>(&self, trail: &T) -> u32 {
-        let value = self.mdio.regs.read(regs::MDIC);
-        trail.crumb(Step::Saw { reg: regs::MDIC, value });
-        value
-    }
-
     /// Ask the PHY for §9.5.2.3's and §9.5.2.4's identifier, at each of §9.3's
-    /// two addresses in [`Self::identify`]'s order, with `MDIC` left durable
-    /// behind every transaction.
+    /// two addresses in [`Self::identify`]'s order, and keep `MDIC` as the last
+    /// transaction left it: the part's own word for how the ask ended.
     ///
     /// **An address that ends its cycle with nothing is left for the next; a
     /// cycle that never ends stops the ask**, because the interconnect that did
     /// not carry one transaction carries none, whatever address it names.
-    pub(crate) fn ask<T: Trail>(&self, trail: &T, moment: Moment) -> Answer {
-        trail.crumb(Step::Ask { moment });
+    pub(crate) fn ask(&self) -> Answer {
+        let mdic = || self.mdio.regs.read(regs::MDIC);
         let mut last = 0;
         for addr in [SPECIFIC, GENERAL] {
             let high = self.read(addr, reg::IDENTIFIER_HIGH);
-            last = self.seen_mdic(trail);
+            last = mdic();
             match high {
                 Ok(high) if high != u16::MAX => {
                     let low = self.read(addr, reg::IDENTIFIER_LOW);
-                    last = self.seen_mdic(trail);
+                    last = mdic();
                     match low {
                         Ok(low) if low != u16::MAX => {
                             return Answer::Answered {
@@ -934,21 +910,21 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         Answer::Failed { mdic: last }
     }
 
-    /// Cycle `LANPHYPC` the way [`crate::wake`]'s header sets out: the PHY
-    /// configuration counter first, the pin held low for one pace, the
-    /// cycle-done bit waited on, and [`wake::POWER_CYCLE_SETTLE_NANOS`] after.
-    fn power_cycle<T: Trail>(&self, trail: &T) {
-        let counter = self.seen_paced(trail, regs::FEXTNVM3);
-        self.mdio.write_at(regs::FEXTNVM3, wake::phy_cfg_counter(counter));
-        let held = self.seen_paced(trail, regs::CTRL);
+    /// Cycle `LANPHYPC` the way [`crate::wake`]'s header sets out: the PHY's
+    /// configuration time first, the pin held low for one pace, the cycle-done
+    /// bit waited on, and [`wake::POWER_CYCLE_SETTLE_NANOS`] after.
+    fn power_cycle(&self) {
+        let timing = self.mdio.read_at(regs::LANPHYPC_TIMING);
+        self.mdio.write_at(regs::LANPHYPC_TIMING, wake::configuration_50ms(timing));
+        let held = self.mdio.read_at(regs::CTRL);
         let low = wake::lanphypc_low(held);
         self.mdio.write_at(regs::CTRL, low);
         // The pace between these two writes is the hold, and it is wider than
-        // the host driver's floor by a compile-time assertion.
+        // the cycle's floor by a compile-time assertion.
         self.mdio.write_at(regs::CTRL, wake::lanphypc_released(low));
         let released_at = self.mdio.clock.nanos();
         loop {
-            let ext = self.seen_paced(trail, regs::CTRL_EXT);
+            let ext = self.mdio.read_at(regs::CTRL_EXT);
             let waited = self.mdio.clock.nanos().saturating_sub(released_at);
             if wake::power_cycle_done(ext) || waited >= wake::POWER_CYCLE_DONE_DEADLINE_NANOS {
                 break;
@@ -957,25 +933,24 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         self.mdio.settle(wake::POWER_CYCLE_SETTLE_NANOS);
     }
 
-    fn force_smbus<T: Trail>(&self, trail: &T) {
-        let ext = self.seen_paced(trail, regs::CTRL_EXT);
+    fn force_smbus(&self) {
+        let ext = self.mdio.read_at(regs::CTRL_EXT);
         self.mdio.write_at(regs::CTRL_EXT, wake::smbus_forced(ext));
         self.mdio.settle(wake::SMBUS_SETTLE_NANOS);
     }
 
-    fn release_smbus<T: Trail>(&self, trail: &T) {
-        let ext = self.seen_paced(trail, regs::CTRL_EXT);
+    fn release_smbus(&self) {
+        let ext = self.mdio.read_at(regs::CTRL_EXT);
         self.mdio.write_at(regs::CTRL_EXT, wake::smbus_released(ext));
     }
 
     /// A PHY that answered with the MAC on SMBus, taken back to PCIe at both
     /// ends: I219 §9.5.3.4's Force SMBus first, then the MAC's.
     ///
-    /// **The write that switches the PHY is not judged by its `Error`**: the
-    /// host driver for this family reports that switching the PHY's interface
-    /// always ends that write in `Error`, and the ask after this is what says
-    /// whether the PHY is on PCIe.
-    fn back_on_pcie<T: Trail>(&self, trail: &T) {
+    /// **The write that moves the PHY is not judged by its `Error`**: that
+    /// write ends in `Error` on this part whether or not the PHY took it, and
+    /// the ask after this is what says whether the PHY is on PCIe.
+    fn back_on_pcie(&self) {
         // Refused or not, the MAC's end is let go below and the ask after this
         // is the judge: a MAC left on SMBus is one no PCIe-side PHY answers.
         let _ = self.select(PAGE_PORT_CONTROL).and_then(|()| {
@@ -985,8 +960,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
                 other => other,
             }
         });
-        let _ = self.seen_mdic(trail);
-        self.release_smbus(trail);
+        self.release_smbus();
     }
 }
 
@@ -994,7 +968,9 @@ impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
     /// §4.5.2: "the controlling agent must write a 0b to its ownership bit".
     ///
     /// The bit is this driver's to clear because [`Owned::claim`] saw it clear
-    /// before it registered the request that set it.
+    /// before it registered the request that set it. A flag the part already
+    /// let go — a reset clears it — is not written again: the write would
+    /// carry every other field of a register three agents share for nothing.
     ///
     /// **After [`PhyRefusal::MdiUnready`] this releases with a transaction
     /// still in flight**, where §4.5.2 has the release follow the access's
@@ -1003,19 +979,7 @@ impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
     /// standing instead would keep every other agent off the interface for the
     /// boot.
     fn drop(&mut self) {
-        let held = self.mdio.read();
-        // Ones is a window that stopped decoding under this driver, and the
-        // write would set every field of the register it answered for.
-        if held == u32::MAX {
-            return;
-        }
-        // A flag the part already let go — a reset clears it — is not written
-        // again: the write would carry every other field of a register three
-        // agents share for nothing.
-        if held & extcnf::MDIO_SW_OWNERSHIP == 0 {
-            return;
-        }
-        self.mdio.write(held & !extcnf::MDIO_SW_OWNERSHIP);
+        self.mdio.withdraw();
     }
 }
 
@@ -1024,12 +988,11 @@ impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
 ///
 /// `reset_at` is when `CTRL.RST` was written, which §9.2's delay below is
 /// measured from.
-pub(crate) fn bring_up<R: Registers, C: Clock, T: Trail>(
+pub(crate) fn bring_up<R: Registers, C: Clock>(
     regs: &R,
     clock: &C,
     reset_at: u64,
     after: Option<u64>,
-    trail: &T,
 ) -> Result<Phy, PhyRefusal> {
     // §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
     // attempting to access MDIO registers." A wait and not a poll: the document
@@ -1041,17 +1004,9 @@ pub(crate) fn bring_up<R: Registers, C: Clock, T: Trail>(
 
     // The MDI cycle is an in-band packet to the LAN Connected Device (I219
     // §1.2, §2.2.2.1.1), so a PHY the MAC holds powered down answers no cycle
-    // at all. §8.2.1's and §8.2.2's two bits are the whole of what the
-    // documents give software over that, and this is where they are put in the
-    // state those clauses describe — under the flag §8.2.4 arbitrates the
-    // shared CSRs with, and before any transaction is issued.
-    let settled = mdi.settle_power(trail)?;
-    if !settled.settled() {
-        return Err(PhyRefusal::PhyPoweredDown {
-            ctrl: settled.after.ctrl,
-            ctrl_ext: settled.after.ctrl_ext,
-        });
-    }
+    // at all. §8.2.1's bit is where that is put right — under the flag §8.2.4
+    // arbitrates the shared CSRs with, and before any transaction is issued.
+    mdi.settle_power()?;
 
     // §9.2: "Access using MDIO should be done only when bit 10 in page 769
     // register 16 is set." The bit is itself reached over MDIO, so this one
@@ -1096,61 +1051,57 @@ pub(crate) fn bring_up<R: Registers, C: Clock, T: Trail>(
 /// the part: ask it as found, and where it does not answer, climb
 /// [`wake::LADDER`] one rung at a time with an ask after each.
 ///
-/// **Every ask is witnessed**: a [`Step::Ask`] ahead of it and the `MDIC` word
-/// behind each transaction, so a trail says in the part's own words at which
-/// rung the PHY first answered — or that it never did. A PHY that answers on
-/// SMBus is taken back to PCIe and asked once more there, because PCIe is the
-/// interface this driver's link runs on (I219 §12.1.4).
+/// **Every ask is recorded with the `MDIC` word it ended on**, so the account
+/// says in the part's own words at which rung the PHY first answered — or that
+/// it never did. A PHY that answers on SMBus is taken back to PCIe and asked
+/// once more there, because PCIe is the interface this driver's link runs on
+/// (I219 §12.1.4).
+///
+/// **The MAC is never left on SMBus.** Whatever ends the ladder — an answer, a
+/// refusal, the last rung — a MAC this wake put on SMBus is taken off it before
+/// the flag goes back.
 ///
 /// **None of this refuses the bring-up.** A PHY still out of reach after the
 /// last rung is [`bring_up`]'s to refuse by name after the reset, and the
 /// wake's own account goes beside that refusal.
-pub(crate) fn wake<R: Registers, C: Clock, T: Trail>(
+pub(crate) fn wake<R: Registers, C: Clock>(
     regs: &R,
     clock: &C,
     after: Option<u64>,
-    trail: &T,
 ) -> Result<Woke, PhyRefusal> {
     let mdi = Owned::claim(regs, clock, after)?;
-    // §8.2.1's and §8.2.2's bits first, as [`bring_up`] puts them after the
-    // reset: a MAC holding its PHY down carries no cycle to it, so every ask
-    // below would be an ask of the MAC and not of the PHY.
-    let settled = mdi.settle_power(trail)?;
-    if !settled.settled() {
-        return Err(PhyRefusal::PhyPoweredDown {
-            ctrl: settled.after.ctrl,
-            ctrl_ext: settled.after.ctrl_ext,
-        });
-    }
-    let mut woke = Woke::default();
-    let first = mdi.ask(trail, Moment::AsFound);
+    // §8.2.1's bit first, as [`bring_up`] puts it after the reset: a MAC
+    // holding its PHY down carries no cycle to it, so every ask below would be
+    // an ask of the MAC and not of the PHY.
+    let mut woke = Woke::found(mdi.settle_power()?);
+    let first = mdi.ask();
     woke.push(Moment::AsFound, first);
     if !matches!(first, Answer::Silent { .. } | Answer::Failed { .. }) {
         return Ok(woke);
     }
-    let firmware = mdi.seen_paced(trail, regs::FWSM);
+    let firmware = mdi.mdio.read_at(regs::FWSM);
     let mut on_smbus = false;
     for (action, moment) in wake::LADDER {
         if !wake::rung_allowed(action, firmware) {
             continue;
         }
         match action {
-            Action::PowerCycle => mdi.power_cycle(trail),
+            Action::PowerCycle => mdi.power_cycle(),
             Action::ForceSmbus => {
-                mdi.force_smbus(trail);
+                mdi.force_smbus();
                 on_smbus = true;
             }
             Action::ReleaseSmbus => {
-                mdi.release_smbus(trail);
+                mdi.release_smbus();
                 on_smbus = false;
             }
         }
-        let answer = mdi.ask(trail, moment);
+        let answer = mdi.ask();
         woke.push(moment, answer);
         if answer.answered() && on_smbus {
-            mdi.back_on_pcie(trail);
+            mdi.back_on_pcie();
             on_smbus = false;
-            woke.push(Moment::BackOnPcie, mdi.ask(trail, Moment::BackOnPcie));
+            woke.push(Moment::BackOnPcie, mdi.ask());
         }
         if !matches!(answer, Answer::Silent { .. } | Answer::Failed { .. }) {
             break;
@@ -1159,7 +1110,7 @@ pub(crate) fn wake<R: Registers, C: Clock, T: Trail>(
     // A ladder that stopped with the MAC still on SMBus leaves it there for
     // nobody: the bring-up after the reset asks over PCIe.
     if on_smbus {
-        mdi.release_smbus(trail);
+        mdi.release_smbus();
     }
     Ok(woke)
 }

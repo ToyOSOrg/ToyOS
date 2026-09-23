@@ -26,11 +26,10 @@
 //!
 //! **Where the I219's MAC is concerned the documents stop short**, and what
 //! this file models beyond them — the `LANPHYPC` power cycle, SMBus forcing,
-//! the reset of the MAC and PHY together — is the behaviour of Intel's own
-//! Linux host driver for this family, stated as a fact about the hardware in
-//! `crate::wake`'s header and cited there. What `CTRL.PHY_RST` does to the
-//! PHY's own registers is in neither, so it is left out: the model keeps them
-//! as the last agent left them, and the driver has to work either way.
+//! the reset of the MAC and PHY together — is the properties of the part
+//! `crate::wake`'s header states. What `CTRL.PHY_RST` does to the PHY's own
+//! registers is in none of them, so it is left out: the model keeps them as
+//! the last agent left them, and the driver has to work either way.
 //!
 //! What is deliberately *not* modelled: the 82574's own PHY registers, the
 //! NVM's access protocol, checksum offload, VLAN insertion, RSS and the second
@@ -46,7 +45,7 @@ use std::{format, vec};
 
 use crate::phy::{advertise, control, control_1000t, custom_mode, reg};
 use crate::regs::{
-    self, cause, ctrl, ctrl_ext, extcnf, fextnvm3, fwsm, mdic, rah, rctl, rx_desc, status, tctl,
+    self, cause, ctrl, ctrl_ext, extcnf, fwsm, lanphypc_timing, mdic, rah, rctl, rx_desc, status, tctl,
     tx_desc,
 };
 use crate::{phy, wake, Clock, DmaBuffers, Interrupts, Part, Registers};
@@ -175,9 +174,9 @@ pub struct Permits {
     /// default (on power on or on ULP exit)" that the agent before this driver
     /// may have set, so a power-cycled PHY may come back on SMBus.
     pub phy_comes_back_on_smbus: bool,
-    /// The host driver for this family resets the MAC and the PHY together "to
-    /// make sure the interface between MAC and the external PHY is reset", so a
-    /// reset of the MAC alone may leave the two ends of it out of step.
+    /// `CTRL.RST` alone resets the MAC's end of the interconnect and not the
+    /// PHY's (`crate::wake`'s header), so a reset of the MAC alone may leave
+    /// the two ends of it out of step.
     pub mac_reset_alone_loses_the_phy: bool,
     /// `FWSM` bit 6: the firmware allows the host to reset the PHY — what the
     /// T14's firmware reports.
@@ -325,9 +324,9 @@ pub enum Lcd {
     Off,
 }
 
-/// How many readings of `STATUS` after a full reset `LAN_INIT_DONE` stays
-/// clear for.
-const LAN_INIT_READS: u32 = 3;
+/// How many readings of `STATUS` after a full reset its PHY-configured bit
+/// stays clear for.
+const PHY_CONFIGURED_READS: u32 = 3;
 
 /// How many readings of `CTRL_EXT` after a power cycle its cycle-done bit
 /// stays clear for.
@@ -411,6 +410,20 @@ struct PhyModel {
     /// controlling agent must write a 0b to its ownership bit" — so a test
     /// can place the grant on either side of a bound.
     engine_lets_go_at: Option<u64>,
+    /// Reads of `EXTCNF_CTRL` left that answer ones. **A fault injector and
+    /// not a clause**: a window that stops decoding for a moment, which is how
+    /// a test reaches the arbitration's retry of its own release.
+    extcnf_ones: u32,
+    /// How many reads answer ones once this driver's request is written: the
+    /// same fault, placed inside the grant wait.
+    extcnf_ones_after_request: Option<u32>,
+    /// Every write this driver made to `EXTCNF_CTRL`, so a test about a write
+    /// that must not happen can say it did not.
+    extcnf_writes: u32,
+    /// Whether moving the MAC onto SMBus starts a transition that never ends.
+    /// A fault injector: it is how a test reaches a ladder that stops on a
+    /// refusal with the MAC on SMBus.
+    transition_sticks_on_smbus: bool,
 }
 
 impl PhyModel {
@@ -469,6 +482,10 @@ impl PhyModel {
             ownership_readings: Vec::new(),
             engine_cut_ins: 0,
             engine_lets_go_at: None,
+            extcnf_ones: 0,
+            extcnf_ones_after_request: None,
+            extcnf_writes: 0,
+            transition_sticks_on_smbus: false,
         }
     }
 }
@@ -561,12 +578,11 @@ struct Model {
     cycle_done_reads: u32,
     /// When the MAC was last forced onto SMBus.
     smbus_forced_at: Option<u64>,
-    /// No access is taken before this: the host driver's 20 ms after a full
-    /// reset.
+    /// No access is taken before this: the 20 ms after a full reset.
     quiet_until: Option<u64>,
-    /// Readings of `STATUS` left before `LAN_INIT_DONE` shows, and `None` where
+    /// Readings of `STATUS` left before its bit 9 shows, and `None` where
     /// no reset that reached the PHY is in progress.
-    lan_init_reads: Option<u32>,
+    phy_configured_reads: Option<u32>,
     /// When the PHY was last reset or power-cycled, and `None` for a PHY that
     /// came up long before the claim was minted — which §9.2's 10 ms before an
     /// MDIO access is measured from.
@@ -643,7 +659,7 @@ impl Model {
             cycle_done_reads: 0,
             smbus_forced_at: None,
             quiet_until: None,
-            lan_init_reads: None,
+            phy_configured_reads: None,
             lcd_reset_at: None,
             power_cycles: 0,
             phy_resets: 0,
@@ -744,8 +760,8 @@ impl Model {
             }
             value |= (speed_code & status::SPEED_MASK) << status::SPEED_SHIFT;
         }
-        if self.lan_init_reads == Some(0) {
-            value |= status::LAN_INIT_DONE;
+        if self.phy_configured_reads == Some(0) {
+            value |= status::PHY_CONFIGURED;
         }
         self.set(regs::STATUS, value);
     }
@@ -858,7 +874,7 @@ impl Model {
                 if self.cycle_done_reads > 0 {
                     self.cycle_done_reads -= 1;
                     if self.cycle_done_reads == 0 {
-                        self.set(regs::CTRL_EXT, value | ctrl_ext::LCD_POWER_CYCLE_DONE);
+                        self.set(regs::CTRL_EXT, value | ctrl_ext::LANPHYPC_CYCLE_DONE);
                     }
                 }
                 value
@@ -890,7 +906,7 @@ impl Model {
                 if self.master_reads > 0 {
                     self.master_reads -= 1;
                 }
-                if let Some(left) = self.lan_init_reads.as_mut() {
+                if let Some(left) = self.phy_configured_reads.as_mut() {
                     *left = left.saturating_sub(1);
                 }
                 self.refresh_status();
@@ -923,6 +939,10 @@ impl Model {
             regs::EXTCNF_CTRL => {
                 self.not_modelled_on_the_82574("EXTCNF_CTRL");
                 self.arbitration_at.push(self.nanos);
+                if self.phy.extcnf_ones > 0 {
+                    self.phy.extcnf_ones -= 1;
+                    return u32::MAX;
+                }
                 // §4.5.2's arbitration runs on its own: the request registered
                 // by one write is granted when the agent ahead of it lets go,
                 // and the requester learns that by reading the bit back.
@@ -1040,7 +1060,7 @@ impl Model {
                         if self.lcd == Lcd::OutOfStep {
                             self.lcd = Lcd::InStep;
                         }
-                        self.lan_init_reads = Some(LAN_INIT_READS);
+                        self.phy_configured_reads = Some(PHY_CONFIGURED_READS);
                         self.quiet_until = Some(self.nanos + wake::RESET_QUIET_NANOS);
                     } else if self.part == Part::I219
                         && self.permits.mac_reset_alone_loses_the_phy
@@ -1098,14 +1118,24 @@ impl Model {
                      write changed it from {carried:#010x}",
                     self.seed
                 );
+                self.phy.extcnf_writes += 1;
                 self.phy.sw_requested = value & extcnf::MDIO_SW_OWNERSHIP != 0;
+                if self.phy.sw_requested {
+                    if let Some(reads) = self.phy.extcnf_ones_after_request.take() {
+                        self.phy.extcnf_ones = reads;
+                    }
+                }
                 self.refresh_ownership();
             }
             regs::MDIC => self.mdi(value),
             regs::CTRL_EXT => {
                 let was = self.get(regs::CTRL_EXT);
-                if value & !was & ctrl_ext::FORCE_SMBUS != 0 {
+                if value & !was & ctrl_ext::MAC_ON_SMBUS != 0 {
                     self.smbus_forced_at = Some(self.nanos);
+                    if self.phy.transition_sticks_on_smbus {
+                        self.phy.wait_sticks = true;
+                        self.phy.wait_reads = u32::MAX;
+                    }
                 }
                 self.set(regs::CTRL_EXT, value);
             }
@@ -1127,7 +1157,7 @@ impl Model {
         }
     }
 
-    /// The host driver's 20 ms after a full reset, in which it touches nothing.
+    /// The 20 ms after a full reset, in which the part takes no access.
     fn keep_quiet(&mut self, reg: usize) {
         if let Some(until) = self.quiet_until.take() {
             assert!(
@@ -1144,19 +1174,19 @@ impl Model {
     /// once the override is let go.
     fn lanphypc(&mut self, was: u32, now: u32) {
         let low = |word: u32| {
-            word & ctrl::LANPHYPC_OVERRIDE != 0 && word & ctrl::LANPHYPC_VALUE == 0
+            word & ctrl::LANPHYPC_HOST_DRIVEN != 0 && word & ctrl::LANPHYPC_LEVEL == 0
         };
         if low(now) && !low(was) {
             assert_eq!(
-                self.get(regs::FEXTNVM3) & fextnvm3::PHY_CFG_COUNTER_MASK,
-                fextnvm3::PHY_CFG_COUNTER_50MS,
-                "seed {}: the driver drove LANPHYPC low with the PHY configuration counter not at \
+                self.get(regs::LANPHYPC_TIMING) & lanphypc_timing::CONFIGURATION_MASK,
+                lanphypc_timing::CONFIGURATION_50MS,
+                "seed {}: the driver drove LANPHYPC low with the PHY's configuration time not at \
                  50 ms",
                 self.seed
             );
             self.lanphypc_low_at = Some(self.nanos);
         }
-        if now & ctrl::LANPHYPC_OVERRIDE == 0 {
+        if now & ctrl::LANPHYPC_HOST_DRIVEN == 0 {
             if let Some(at) = self.lanphypc_low_at.take() {
                 assert!(
                     self.nanos - at >= wake::LANPHYPC_HOLD_NANOS,
@@ -1191,7 +1221,7 @@ impl Model {
         self.phy.page = None;
         self.phy.negotiated_over = None;
         self.phy.negotiating = false;
-        let ext = self.get(regs::CTRL_EXT) & !ctrl_ext::LCD_POWER_CYCLE_DONE;
+        let ext = self.get(regs::CTRL_EXT) & !ctrl_ext::LANPHYPC_CYCLE_DONE;
         self.set(regs::CTRL_EXT, ext);
         self.cycle_done_reads = CYCLE_DONE_READS;
         self.refresh_phy_link();
@@ -1290,9 +1320,9 @@ impl Model {
         //
         // **The clause's "at any given time at most only one bit is 1b" is not
         // asserted, because the part does not honour it**: on the T14 the grant
-        // came back as `0x003000a9`, this driver's bit set with manageability's
-        // own still standing. A model that demanded the bit alone would refuse
-        // the one bring-up the silicon allows.
+        // came back as `0x003000a9`, this driver's bit set with bit 7 still
+        // standing. A model that demanded the bit alone would refuse the one
+        // bring-up the silicon allows.
         assert_ne!(
             self.get(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
             0,
@@ -1328,13 +1358,13 @@ impl Model {
         // neither `Ready` nor `Error` ever comes back. **This is the wall the
         // bench boot is reading, modelled**: a driver that skipped the power
         // step gets exactly it.
-        let forced = self.get(regs::CTRL_EXT) & ctrl_ext::FORCE_SMBUS != 0;
+        let forced = self.get(regs::CTRL_EXT) & ctrl_ext::MAC_ON_SMBUS != 0;
         if forced {
             let at = self.smbus_forced_at.expect("the force was written");
             assert!(
                 self.nanos - at >= wake::SMBUS_SETTLE_NANOS,
-                "seed {}: the driver started an MDI transaction {} ns after forcing the MAC onto \
-                 SMBus, inside the 50 ms the MAC takes to finish its retries",
+                "seed {}: the driver started an MDI transaction {} ns after moving the MAC onto \
+                 SMBus, inside the 50 ms in which the MAC carries no cycle over it",
                 self.seed,
                 self.nanos - at
             );
@@ -1943,6 +1973,36 @@ impl Nic {
         self.0.borrow().phy.engine_cut_ins
     }
 
+    /// The next `reads` reads of `EXTCNF_CTRL` answer ones, from now.
+    pub fn extcnf_answers_ones_for(&self, reads: u32) {
+        self.0.borrow_mut().phy.extcnf_ones = reads;
+    }
+
+    /// The first `reads` reads of `EXTCNF_CTRL` after this driver's request is
+    /// written answer ones.
+    pub fn extcnf_answers_ones_after_the_request(&self, reads: u32) {
+        self.0.borrow_mut().phy.extcnf_ones_after_request = Some(reads);
+    }
+
+    /// How many writes this driver has made to `EXTCNF_CTRL`.
+    pub fn extcnf_writes(&self) -> u32 {
+        self.0.borrow().phy.extcnf_writes
+    }
+
+    /// The part lets this driver's software bit go on its own, as a reset
+    /// does.
+    pub fn software_flag_let_go(&self) {
+        let mut model = self.0.borrow_mut();
+        model.phy.sw_requested = false;
+        model.refresh_ownership();
+    }
+
+    /// Moving the MAC onto SMBus starts §8.2.3's transition, and it never
+    /// ends.
+    pub fn transition_sticks_once_the_mac_is_on_smbus(&self) {
+        self.0.borrow_mut().phy.transition_sticks_on_smbus = true;
+    }
+
     /// The engine holds the interface from now until the modelled clock
     /// reads `nanos`.
     pub fn engine_holds_the_interface_until(&self, nanos: u64) {
@@ -1974,11 +2034,6 @@ impl Nic {
     /// Every register offset the driver has written.
     pub fn written(&self) -> BTreeSet<usize> {
         self.0.borrow().written.clone()
-    }
-
-    /// The modelled clock, without moving it.
-    pub fn now(&self) -> u64 {
-        self.0.borrow().nanos
     }
 
     /// Nothing in the window decodes `reg`, so reads of it answer ones.

@@ -2,10 +2,11 @@
 //! file on the log volume, each flushed to the device before the process goes
 //! on.
 //!
-//! **`sync_all` is the whole claim**, as it is for `crate::crumbs`: `SYS_FSYNC`
-//! reaches the device's own cache flush, so a line this returned from is on
-//! the stick whatever the machine does next. A line that cannot be made
-//! durable ends the process: a report with a hole in it says the wrong thing.
+//! **`sync_all` is the whole claim**: `SYS_FSYNC` reaches the device's own cache
+//! flush, which is what `/system/bin/logd` rests its durability word on, so a
+//! line this returned from is on the stick whatever the machine does next. A
+//! line that cannot be made durable ends the process: a report with a hole in
+//! it says the wrong thing.
 
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
@@ -14,8 +15,9 @@ use std::time::Instant;
 
 use toyos_i219::lease::{Event, Line};
 
-/// Beside `/system/bin/logd`'s files and not one of them, for the reason
-/// `crate::crumbs::PATH` is.
+/// Beside `/system/bin/logd`'s files and not one of them:
+/// `toyos_wallclock::classify` is what logd may delete and what the metal
+/// loop reads as the boot's log, and it does not recognise this name.
 pub const PATH: &str = "/log/lease.txt";
 
 pub struct Report {
