@@ -250,6 +250,9 @@ const RUST_SKIP: &[&str] = &[
     // twenty seconds so the host can reach this machine over the cable. On a
     // shared boot it would be twenty seconds of nothing.
     "lan_hold",
+    // The same for `tests/lantalkcase`, held until the runner's bound is near
+    // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
+    "lan_talk_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -676,6 +679,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // image is that bring-up in order and whole. Records and a file; the one
     // clock in it is printed, never judged.
     ("lan_crumb_trail", Sched::Parallel, Tier::Fast),
+    // The T14's talking boot rehearsed on the same part: the record stream to a
+    // host listener while the guest boots, one command over ssh answered byte
+    // for byte, and `reboot` over ssh ending the guest. Records, bytes and a
+    // reset; its clocks are liveness guards on a guest that stopped talking.
+    ("lan_talk", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -1337,6 +1345,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         "lan_crumb_trail",
         metal::Metal::Runs { arms: LANCRUMBCASE, judge: |b| lan::trailed_on_metal(b[0]) },
     ),
+    (
+        "lan_talk",
+        metal::Metal::Runs { arms: LANTALKCASE, judge: |b| lan::talked_on_metal(b[0]) },
+    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1768,6 +1780,14 @@ const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
 /// kernel's log.
 const LANCRUMBCASE: &[metal::Arm] =
     &[metal::once(lan::CRUMB_BOOT, lan::CRUMB_CONFIG, &[], lan::JOBS)];
+
+/// The boot the host talks to over its own cable: it streams its records to
+/// the listener `--metal-listen` names, and the loop pings it, runs a command
+/// on it and tells it to reboot.
+const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
+    talk: true,
+    ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
+}];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -13639,6 +13659,7 @@ fn run_machine_test(
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
         "lan_lease_report" => lan::lan_lease_report(test_config, c_bins, rust_bins),
         "lan_crumb_trail" => lan::lan_crumb_trail(test_config, c_bins, rust_bins),
+        "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed
@@ -18785,6 +18806,7 @@ fn main() {
                 &rust_bins,
                 RUST_SKIP,
                 !nocapture && !debug_mode,
+                SUITE.value(&args, &testargs::METAL_LISTEN),
             ) {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,

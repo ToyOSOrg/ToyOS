@@ -42,8 +42,11 @@ const RETRY_EVERY: Duration = Duration::from_millis(250);
 /// netd has to claim the function, bring the link up and finish DHCP before the
 /// first SYN can go out, and none of that is bounded by anything `logd` knows.
 /// What this catches is a machine that will never have a network, and on that
-/// machine the cost of being wrong is one line in the log, late.
-const OPEN_BOUND: Duration = Duration::from_secs(30);
+/// machine the cost of being wrong is one line in the log, late. **Wider than
+/// two of netd's ten-second DHCP retries after a slow PHY's link comes up**,
+/// because a stream given up on a machine that then leases is the one boot
+/// the stream exists for.
+const OPEN_BOUND: Duration = Duration::from_secs(60);
 
 /// How often a run of drops may put a line in the log.
 ///

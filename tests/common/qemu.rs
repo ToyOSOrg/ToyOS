@@ -2556,6 +2556,19 @@ pub fn build_boot_image(
     rust_tests: &[(String, Vec<u8>)],
     kernel_params: &[&str],
 ) -> Vec<u8> {
+    build_boot_image_carrying(test_crate, c_tests, rust_tests, &[], kernel_params)
+}
+
+/// [`build_boot_image`] with files put on ROOT beside the image's own, each
+/// named by its ROOT-relative path: what [`BootOptions::extra_root_files`] does
+/// for an image the boot builds, which a staged image has to carry itself.
+pub fn build_boot_image_carrying(
+    test_crate: &Path,
+    c_tests: &[(String, Vec<u8>)],
+    rust_tests: &[(String, Vec<u8>)],
+    staged: &[(String, Vec<u8>)],
+    kernel_params: &[&str],
+) -> Vec<u8> {
     // A parameter carrying a value is one the *shipping* kernel answers to, so
     // it selects no kernel: an image built for the record stream and nothing
     // else must be the image a flashed stick would be.
@@ -2565,7 +2578,7 @@ pub fn build_boot_image(
         } else {
             toyos_build::build::TEST_KERNEL
         };
-    build_boot_image_with(test_crate, c_tests, rust_tests, &[], kernel, kernel_params, false)
+    build_boot_image_with(test_crate, c_tests, rust_tests, staged, kernel, kernel_params, false)
 }
 
 /// Refuse a staged [`BootOptions::boot_image`] that is not the image this
