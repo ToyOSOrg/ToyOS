@@ -8,6 +8,7 @@
 pub mod console;
 pub mod nested;
 pub mod read;
+pub mod recovery;
 pub mod registry;
 pub mod shard;
 #[cfg(feature = "boot-actuators")]

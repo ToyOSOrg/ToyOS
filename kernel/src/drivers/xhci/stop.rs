@@ -9,39 +9,41 @@
 //! by a controller that is still there to drive it — xHCI 1.2 §5.4.8's PORTSC.PR
 //! over §4.19.5's reset signalling — which returns the device to its Default
 //! state (USB 2.0 §7.1.7.5) and with it abandons whatever command it was
-//! inside. Bulk-Only Transport §5.3.4's own reset recovery is a class request
-//! and two CLEAR_FEATURE(HALT)s, all of them transfers on a live device: a
-//! panicked kernel can issue none of them, and a port reset clears strictly
-//! more than they do.
+//! inside.
 //!
-//! **And a port reset is not free either.** A device need not honour the
-//! obligation the class puts on it: cut in a command's data phase, one may
-//! enumerate and describe itself perfectly afterwards and answer no SCSI command
-//! again until it is physically unplugged, on a laptop whose port power control
-//! does not cut VBUS. So the first thing this path does is wait a
-//! transfer out — [`settle_transfers`], bounded, and it cuts when the bound
-//! passes, because a machine nobody can turn off is worse still.
+//! **And a port reset is not free either.** Bulk-Only Transport §5.1 makes a
+//! command three transfers and §6.7.2/§6.7.3 leave a device waiting for
+//! whichever has not arrived; §5.3.4 makes recovering from that the device's
+//! obligation, through a class request and two CLEAR_FEATURE(HALT)s that a
+//! wedged kernel cannot issue. **So this path does not finish the command**: it
+//! gives the driver a bound to close it, and then records which phase the
+//! device was left in and what the controller was doing. Finishing it would
+//! mean writing a TRB onto a ring rebuilt from published numbers, which on
+//! every path but the panic one a live driver may still be enqueuing on — for
+//! an out data phase, a second write of the block. What a cut command then
+//! costs is a question about the device and not about this path:
+//! `issues/kernel/a-cut-bulk-only-command-does-not-brick-the-benchs-stick.md`.
 //!
-//! **Registers and nothing else, because the panic path calls this.** The
-//! controllers are published into [`POINTS`] at bring-up rather than read out of
-//! `XHCI`, and what is outstanding is counted into [`IN_FLIGHT`] the same way: a
-//! panicked CPU may take no lock and allocate nothing, and the CPU it panicked
-//! on may be the one holding that lock. The orderly path takes the lock first
-//! ([`super::seal_shut`]) so that no transfer is in flight when this runs; the
-//! panic path has `halt_all_cpus`'s NMI instead, which stops every other CPU
-//! where it stood — possibly mid-transfer, which is the device this path exists
-//! to rescue.
+//! **Registers and DMA and nothing else, because the panic path calls this.**
+//! The controllers are published into [`POINTS`] at bring-up rather than read
+//! out of `XHCI`, and the command that is open is published into [`OPEN`] the
+//! same way: a panicked CPU may take no lock and allocate nothing, and the CPU
+//! it panicked on may be the one holding that lock. Nothing here reads the
+//! event ring either, which is the one structure that CPU is still the
+//! consumer of.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
-use toyos_xhci::Portsc;
+use toyos_xhci::bot::Phase;
+use toyos_xhci::{EndpointState, NotOnTheRing, Portsc, Ring};
 
 use crate::log;
-use crate::mm::Mmio;
+use crate::mm::{Dma, Mmio};
 
 use super::{OP_PORT_BASE, OP_USBCMD, OP_USBSTS, PORTSC_PP, PORT_REG_SIZE, USB_TIMEOUT_NS};
 use super::{USBCMD_HCRST, USBCMD_RS, USBSTS_CNR, USBSTS_HCH};
+use super::{TrbRing, MSC_IN_RING, MSC_OUT_RING};
 
 /// Controllers this path has room for.
 ///
@@ -160,92 +162,280 @@ impl Barrier {
     }
 }
 
-/// Bulk-Only Transport transfers this kernel has rung a doorbell for and is
-/// still waiting on, machine-wide.
+/// The one Bulk-Only command this kernel can have open, as the numbers a
+/// lock-free reader can hold.
 ///
 /// **The one thing [`before_reset`] must know and cannot ask.** Its reader takes
 /// no lock — the CPU holding `XHCI` may be the wedged one this reset is ending,
-/// which is the whole reason [`POINTS`] exists — so the count is published
-/// beside the driver rather than read out of it. One counter and not one per
-/// controller: what the stop below decides is whether to touch any register at
-/// all.
-static IN_FLIGHT: AtomicU32 = AtomicU32::new(0);
-
-/// Raised for exactly as long as this kernel is waiting on one bulk transfer.
+/// which is the whole reason [`POINTS`] exists — so the command is published
+/// beside the driver rather than read out of it.
 ///
-/// **Its lifetime is the wait's and not the device's.** A wait that ends in
-/// [`super::Quiet::Elapsed`] leaves a TRB the controller never answered, and
-/// what takes the endpoint off that is the driver's own recovery; this says only
-/// that a transfer is one the kernel still expects an answer to, which is the
-/// question the stop below asks.
-#[must_use = "the transfer counts as outstanding for exactly as long as this lives"]
-pub(in crate::drivers::xhci) struct InFlight(());
+/// **One and not one per disk.** `with_disk` holds `XHCI` across a whole round
+/// trip and the boot scan runs before any AP exists, so no two commands can be
+/// open at once; [`OpenCommand::begin`] fails fast on a second rather than
+/// overwriting the first, since a command this record did not name is exactly
+/// the device a reset would leave mid-phase.
+struct Open {
+    /// [`Phase::code`], and the release store that publishes every field
+    /// beside it: a reader that sees an open phase sees the rest.
+    phase: AtomicU8,
+    /// The device's block in its controller's DMA pool, as the address that
+    /// controller was programmed with. Both bulk rings live at fixed offsets
+    /// inside it.
+    block_device: AtomicU64,
+    /// `slot << 16 | in_dci << 8 | out_dci`.
+    endpoints: AtomicU32,
+    /// Which way the data phase moves, which is the ring it goes on.
+    data_in: AtomicBool,
+    /// Each bulk ring's next enqueue point, the in ring in the low half and
+    /// the out ring in the high one.
+    rings: AtomicU32,
+    /// The device's own context block, as one
+    /// [`Dma::addr`]/[`Dma::device_addr`] pair, and the width of one context in
+    /// it. **What the controller says**, against what the driver queued: the
+    /// endpoint state and the dequeue pointer it has reached are the only
+    /// account of what a reset found the hardware doing.
+    ctx: AtomicU64,
+    ctx_device: AtomicU64,
+    ctx_size: AtomicU32,
+}
 
-impl InFlight {
-    /// Called between the enqueue and the doorbell, so a transfer is never
-    /// visible to the controller without being counted here.
-    pub(in crate::drivers::xhci) fn rung() -> Self {
-        IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+static OPEN: Open = Open {
+    phase: AtomicU8::new(0),
+    block_device: AtomicU64::new(0),
+    endpoints: AtomicU32::new(0),
+    data_in: AtomicBool::new(false),
+    rings: AtomicU32::new(0),
+    ctx: AtomicU64::new(0),
+    ctx_device: AtomicU64::new(0),
+    ctx_size: AtomicU32::new(0),
+};
+
+/// The device one Bulk-Only round trip is about to run on, as the account has
+/// to see it. Nothing here is acted on: [`Self::ctx`] is what the *controller*
+/// says and the rest is what the driver queued, and the account is the whole
+/// use either has.
+pub(in crate::drivers::xhci) struct Device {
+    pub block: Dma<'static>,
+    pub slot: u8,
+    pub in_dci: u8,
+    pub out_dci: u8,
+    pub data_in: bool,
+    /// The device's own context block, and the width of one context in it.
+    pub ctx: Dma<'static>,
+    pub ctx_size: u32,
+}
+
+/// Raised for exactly as long as one Bulk-Only command is open on a device.
+///
+/// **Its lifetime is the command's and not a transfer's.** A device that has
+/// taken a CBW and is waiting for its data or its CSW holds no transfer this
+/// kernel is inside (BOT §5.1), and that gap — between two of the three phases —
+/// is the state a reset's account could otherwise not name at all.
+#[must_use = "the command counts as open for exactly as long as this lives"]
+pub(in crate::drivers::xhci) struct OpenCommand(());
+
+impl OpenCommand {
+    /// Publish the device this round trip runs on, with no phase reached yet.
+    ///
+    /// Called once the CBW is built and before its transfer is queued, so
+    /// nothing reaches the controller under a stale device.
+    pub(in crate::drivers::xhci) fn begin(on: Device) -> Self {
+        assert_eq!(
+            OPEN.phase.load(Ordering::Acquire),
+            Phase::Closed.code(),
+            "xHCI: a second Bulk-Only command was opened while one was still open; \
+             `with_disk` holds the controller lock across a whole round trip, so this is a \
+             driver bug and the device the record does not name is one a reset would cut"
+        );
+        OPEN.block_device.store(on.block.device_addr(), Ordering::Relaxed);
+        OPEN.endpoints.store(
+            (u32::from(on.slot) << 16) | (u32::from(on.in_dci) << 8) | u32::from(on.out_dci),
+            Ordering::Relaxed,
+        );
+        OPEN.data_in.store(on.data_in, Ordering::Relaxed);
+        OPEN.ctx.store(on.ctx.addr(), Ordering::Relaxed);
+        OPEN.ctx_device.store(on.ctx.device_addr(), Ordering::Relaxed);
+        OPEN.ctx_size.store(on.ctx_size, Ordering::Relaxed);
         Self(())
     }
-}
 
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    /// Publish where the two bulk rings now stand and which phase the round trip
+    /// has reached.
+    ///
+    /// Called after every enqueue and before its doorbell, at each gap between
+    /// two phases, and after any recovery that rebuilt a ring: a transfer is
+    /// never visible to the controller without the reset being able to see
+    /// where the ring it went on now is.
+    pub(in crate::drivers::xhci) fn at(&self, phase: Phase, in_ring: &TrbRing, out_ring: &TrbRing) {
+        OPEN.rings.store(
+            u32::from(in_ring.tail) | (u32::from(out_ring.tail) << 16),
+            Ordering::Relaxed,
+        );
+        // Last, and the release: a reader that sees this phase sees the stores
+        // above it and the ones `begin` made.
+        OPEN.phase.store(phase.code(), Ordering::Release);
     }
 }
 
-/// How long the stop waits for a transfer it rang to be answered.
-///
-/// The driver's own transfer bound and not a number of this path's: past it the
-/// transfer is one the controller was never going to answer, and no further wait
-/// buys the device anything the reset below will not have to buy it anyway.
-const IN_FLIGHT_NS: u64 = USB_TIMEOUT_NS;
+impl Drop for OpenCommand {
+    fn drop(&mut self) {
+        OPEN.phase.store(Phase::Closed.code(), Ordering::Release);
+    }
+}
 
-/// Wait out every bulk transfer this kernel is still expecting an answer to, and
-/// say what was still outstanding when the registers below were touched.
+/// The open command, as the views and numbers the account reads, or `None`
+/// where no device is inside one.
+fn inside() -> Option<Inside> {
+    let phase = Phase::of(OPEN.phase.load(Ordering::Acquire));
+    if !phase.open() {
+        return None;
+    }
+    let ctx_size = OPEN.ctx_size.load(Ordering::Relaxed) as usize;
+    // SAFETY: the two are one live `Dma<'static>`'s own `addr()` and
+    // `device_addr()`, stored by `begin` over the device context block
+    // `prepare` placed in the pool the xHCI bring-up leaked for the machine's
+    // life; a device context is 32 contexts of `ctx_size`.
+    let ctx = unsafe {
+        Dma::from_addr(
+            OPEN.ctx.load(Ordering::Relaxed),
+            OPEN.ctx_device.load(Ordering::Relaxed),
+            32 * ctx_size,
+        )
+    };
+    let endpoints = OPEN.endpoints.load(Ordering::Relaxed);
+    let rings = OPEN.rings.load(Ordering::Relaxed);
+    Some(Inside {
+        ctx,
+        ctx_size,
+        phase,
+        slot: (endpoints >> 16) as u8,
+        in_dci: (endpoints >> 8) as u8,
+        out_dci: endpoints as u8,
+        data_in: OPEN.data_in.load(Ordering::Relaxed),
+        block_device: OPEN.block_device.load(Ordering::Relaxed),
+        in_tail: rings as u16,
+        out_tail: (rings >> 16) as u16,
+    })
+}
+
+/// A device inside a command, as this path has to see it.
+#[derive(Clone, Copy)]
+struct Inside {
+    phase: Phase,
+    slot: u8,
+    in_dci: u8,
+    out_dci: u8,
+    data_in: bool,
+    /// The device's block, from which both bulk rings are a fixed offset, and
+    /// where the driver's next enqueue on each of them goes.
+    block_device: u64,
+    in_tail: u16,
+    out_tail: u16,
+    /// The device's own context block and the width of one context in it —
+    /// read for the account and never acted on.
+    ctx: Dma<'static>,
+    ctx_size: usize,
+}
+
+impl Inside {
+    /// Which endpoint the data phase is on, and the ring it went on.
+    fn data_endpoint(self) -> (u8, Ring) {
+        let (dci, at, tail) = match self.data_in {
+            true => (self.in_dci, MSC_IN_RING, self.in_tail),
+            false => (self.out_dci, MSC_OUT_RING, self.out_tail),
+        };
+        let base = self.block_device + at as u64;
+        (dci, Ring { base, trbs: super::RING_SIZE as u16, tail })
+    }
+
+    /// What the *controller* says about the data endpoint: the state it has it
+    /// in, and how many TRBs it has not reached on the ring the driver queued —
+    /// or, where its dequeue pointer is no position on that ring at all, which
+    /// of the ways it is not one.
+    ///
+    /// **The one thing in this account that is not the driver's own claim.** A
+    /// reset that finds a Running endpoint with TRBs still ahead of its dequeue
+    /// pointer landed on a controller that was moving bytes; one that finds it
+    /// Running and caught up landed on an idle bus. Those are two different
+    /// resets and the device only survives one of them.
+    fn controller_state(self) -> (EndpointState, Result<u16, NotOnTheRing>) {
+        let (dci, ring) = self.data_endpoint();
+        let at = usize::from(dci) * self.ctx_size;
+        // Volatile through `Dma`: the controller writes both of these by DMA.
+        let state = EndpointState::decode(self.ctx.read::<u32>(at));
+        let lo = u64::from(self.ctx.read::<u32>(at + 8));
+        let hi = u64::from(self.ctx.read::<u32>(at + 12));
+        (state, ring.pending((hi << 32) | lo))
+    }
+}
+
+/// How long the driver gets to close the command it has open.
 ///
-/// **A port reset in a command's data phase is not free, whatever the class
-/// says.** USB Mass Storage Bulk-Only Transport §5.3.4 makes reset recovery the
-/// device's obligation and the port reset above clears strictly more than it
-/// asks for; a device that does not honour it is one no software on a laptop
-/// with no VBUS control can clear.
+/// The driver's own transfer bound, because it is the same question — is this
+/// device still answering — and past it a longer wait changes nothing the reset
+/// then has to do.
+const BOT_NS: u64 = USB_TIMEOUT_NS;
+
+/// Give the driver its bound to close the command it has open, and say what
+/// the reset then found.
 ///
-/// So the transfer is waited out first, and the wait is bounded and cuts anyway:
-/// a machine nobody can turn off is worse than a device somebody has to replug,
-/// and the account is what says which of the two this reset was.
-fn settle_transfers(said: &mut dyn fmt::Write) {
-    let outstanding = || IN_FLIGHT.load(Ordering::Acquire);
-    let began = outstanding();
-    if began == 0 {
+/// **This path does not put a transfer on the bus.** The rings it can see are
+/// rebuilt from numbers [`OpenCommand`] published, and nothing here holds the
+/// lock that would stop the driver's own CPU from enqueuing on them — so a TRB
+/// written here could be a second write of a block the device already has,
+/// which is worse than the reset it would be avoiding. Finishing the command
+/// is not the way out the class offers either: BOT §5.3.4 makes reset recovery
+/// the device's obligation.
+///
+/// So what is left is the account: which phase the device was left in, and what
+/// the controller was doing to it. The reset follows either way — a machine
+/// nobody can turn off is worse than a device somebody has to replug.
+fn settle_commands(said: &mut dyn fmt::Write) {
+    if inside().is_none() {
         let _ = writeln!(
             said,
-            "usb-quiesce: no bulk transfer was outstanding, so this reset cuts none"
+            "usb-quiesce: no Bulk-Only command was open, so this reset cuts none"
         );
         return;
     }
-    crate::clock::settles(IN_FLIGHT_NS, || outstanding() == 0);
-    match outstanding() {
-        0 => {
-            let _ = writeln!(
-                said,
-                "usb-quiesce: {began} bulk transfer(s) were outstanding and all of them were \
-                 answered inside {} ms, so this reset cuts none",
-                IN_FLIGHT_NS / 1_000_000,
-            );
-        }
-        left => {
-            let _ = writeln!(
-                said,
-                "usb-quiesce: {began} bulk transfer(s) were outstanding and {left} still {} after \
-                 {} ms, so this reset cuts them — a device cut in its data phase may need a \
-                 physical replug before its next host can enumerate it",
-                if left == 1 { "is" } else { "are" },
-                IN_FLIGHT_NS / 1_000_000,
-            );
-        }
-    }
+    crate::clock::settles(BOT_NS, || inside().is_none());
+    // Read again rather than reusing the first: a command that walked a phase
+    // inside the wait is in the phase it is in now, not the one it was in then.
+    let Some(open) = inside() else {
+        let _ = writeln!(
+            said,
+            "usb-quiesce: the Bulk-Only command that was open was closed by its own driver \
+             inside {} ms, so this reset cuts none",
+            BOT_NS / 1_000_000,
+        );
+        return;
+    };
+    let (state, pending) = open.controller_state();
+    let _ = writeln!(
+        said,
+        "usb-quiesce: a Bulk-Only command was open in its {} phase on slot {} after {} ms, so \
+         this reset cuts it",
+        open.phase,
+        open.slot,
+        BOT_NS / 1_000_000,
+    );
+    // What the hardware was doing, as against what the driver had queued. A
+    // reset that finds TRBs still ahead of the controller landed on a bus that
+    // was moving bytes, and that is the state this account exists to name — so
+    // a dequeue pointer that is no position on the ring is said as that, never
+    // wrapped into a count a reader would take for the hardware's own word.
+    let _ = match pending {
+        Ok(pending) => writeln!(
+            said,
+            "usb-quiesce: the controller had that device's data endpoint {state} with {pending} \
+             TRB(s) it had not reached on the ring",
+        ),
+        Err(why) => writeln!(
+            said,
+            "usb-quiesce: the controller had that device's data endpoint {state} and {why}",
+        ),
+    };
 }
 
 /// Entered once for the machine's life.
@@ -432,10 +622,10 @@ fn stop_all(said: &mut dyn fmt::Write) {
     tally.flushed = FLUSHED.load(Ordering::Relaxed);
     tally.cacheless = CACHELESS.load(Ordering::Relaxed);
     let _ = writeln!(said, "{}", Barrier::of(BARRIER.load(Ordering::Relaxed)).said());
-    // Before the first register of the first controller: the count is
-    // machine-wide, and a transfer on one controller is not made safe by
+    // Before the first register of the first controller: the record is
+    // machine-wide, and a command on one controller is not made safe by
     // stopping another first.
-    settle_transfers(said);
+    settle_commands(said);
     for point in POINTS.iter() {
         if let Some(live) = point.live() {
             live.stop(&mut tally, said);

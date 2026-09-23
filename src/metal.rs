@@ -738,6 +738,18 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // register and writes no firmware state; the kernel implies `WEDGE_ARM`
     // behind it, so the boot cannot end itself before its own bound.
     (LOCKUP_ARM, Flash::Ok),
+    // **The arm that stops nothing and never stops writing**, so the reset
+    // lands on a controller that is moving bytes. Admissible for the rows
+    // above's reason and one more: every run is read first and written back
+    // byte for byte in the last eighth of the disk, once and never twice, so
+    // the medium is what it was and no partition a boot mounts is the subject;
+    // and the sweep is refused by name on a disk with no room for it.
+    (LOAD_ARM, Flash::Ok),
+    // It withholds transfers to the boot stick so the transport breaks on
+    // purpose. Admissible because it writes nothing the stick did not already
+    // hold, reaches neither the internal NVMe nor firmware state, and the worst
+    // it leaves is a stick a replug clears — the defect the arm exists to stage.
+    ("usb-transport-break", Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(
@@ -763,6 +775,24 @@ pub const WEDGE_ARM: &str = "wedge-before-reset";
 /// a second judge: what it owes a readback is exactly what [`WEDGE_ARM`] owes,
 /// and which bound sealed the page is the page's own first line to say.
 pub const LOCKUP_ARM: &str = "hard-lockup-probe";
+
+/// The arm that leaves the machine to its bound with the bus busy rather than
+/// idle: it stops no CPU and never stops writing.
+pub const LOAD_ARM: &str = "usb-reset-under-load";
+
+/// Every arm that deliberately leaves this machine to be ended by a bound.
+///
+/// **One list and not a condition spelled out at each reader.** A further such
+/// arm added to [`FLASHABLE`] and not here is an image whose boot is judged by
+/// the word a shutdown writes — which it never reaches — so the reader that
+/// forgot it reds every boot it was staged for.
+pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM, LOAD_ARM];
+
+/// Whether this image is armed to stop itself, and so owes a sealed record
+/// rather than `Rebooting.`.
+pub fn stages_a_wedge(armed: &[String]) -> bool {
+    armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_str()))
+}
 
 /// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.
 pub fn flash_ruling(name: &str) -> Option<Flash> {
@@ -798,8 +828,7 @@ pub fn judge_arms(armed: &[String]) -> Result<(), Refusal> {
     // a `--install-sudoers` that fell through into flashing an ordinary
     // `target/bootable.img`, which has no job list and no deadline at all.
     if !armed.iter().any(|name| name.starts_with(toyos_tco::DEADLINE_PARAM)) {
-        let staged = armed.iter().any(|name| name == WEDGE_ARM);
-        return Err(Refusal::NoBound { staged_a_wedge: staged });
+        return Err(Refusal::NoBound { staged_a_wedge: stages_a_wedge(armed) });
     }
     for name in armed {
         match flash_ruling(name) {
@@ -1762,7 +1791,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // it was not flashed as. *Which* bound sealed it is the page's to say
     // and not this list's — the arm says a bound was staged, and two of them
     // can reach a staged boot.
-    if armed.iter().any(|name| name == WEDGE_ARM || name == LOCKUP_ARM) {
+    if stages_a_wedge(&armed) {
         return Ok(Some(wedged_boot(&loader, &log)?));
     }
     Ok(Some(bootlog::verdict(&log).map_err(Refusal::Log)?))
@@ -2190,6 +2219,30 @@ mod tests {
         assert!(said.contains("FLASHABLE"), "{said}");
         // A refusal about the image is the loop's, never the machine's: exit 2.
         assert!(!refusal.about_the_boot());
+    }
+
+    /// **An arm that stops the machine and is judged as an ordinary boot reds
+    /// every run it is staged for**, because `Rebooting.` is the word it never
+    /// reaches. The two halves are `WEDGE_ARMS` and `FLASHABLE`, and this is
+    /// what holds them together — a name in either that the other does not know
+    /// about is the hole.
+    #[test]
+    fn every_arm_that_stops_this_machine_is_cleared_and_judged_as_one() {
+        let bound = alloc_deadline();
+        for arm in WEDGE_ARMS {
+            assert_eq!(flash_ruling(arm), Some(Flash::Ok), "{arm} reaches no stick");
+            assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(()), "{arm}");
+            assert!(stages_a_wedge(&[arm.to_string()]), "{arm}");
+            // And with no bound behind it, the sharpest refusal names it as the
+            // wedge it is rather than as a plain image.
+            assert_eq!(
+                judge_arms(&[arm.to_string()]),
+                Err(Refusal::NoBound { staged_a_wedge: true }),
+                "{arm}"
+            );
+        }
+        // The negative half: an arm that stops nothing is not judged as one.
+        assert!(!stages_a_wedge(&["watchdog".to_string(), bound]));
     }
 
     /// A row for a name the kernel no longer declares is a ruling about

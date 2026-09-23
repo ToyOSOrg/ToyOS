@@ -108,11 +108,6 @@ What is left to build:
   the surviving file was 228 bytes and the boot's own watchdog read-back was
   gone. **Exit**: a chained run whose stick carries every pass, each named by
   the pass that wrote it.
-- **A timer-anchored name's tier is decided by its price**, not by the
-  classification `FAST_CEILING_MS` states, so two of this track's names sit Fast
-  on a verdict a slower machine moves —
-  `issues/build/a-timer-anchored-names-tier-is-decided-by-its-price.md`, whose
-  exit is the owner's answer on which of the two the boundary is.
 - **The measurements owed on hardware are this loop's jobs**, by record:
   `issues/kernel/the-split-window-tlb-cost-is-unpriced.md`,
   `issues/kernel/ap-control-registers-inherit-init.md`,

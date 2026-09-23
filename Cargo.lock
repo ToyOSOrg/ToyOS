@@ -1140,6 +1140,7 @@ dependencies = [
  "toyos-sched",
  "toyos-tco",
  "toyos-wallclock",
+ "toyos-xhci",
  "uuid",
 ]
 
