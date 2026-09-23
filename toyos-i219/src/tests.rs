@@ -1364,6 +1364,14 @@ fn no_two_accesses_to_the_arbitration_are_nearer_than_the_pace() {
         arrange(&nic);
         let _ = open(&nic);
 
+        // The number itself, pinned to the bench that chose it: the run that
+        // came back paced its accesses 88 ms apart at the narrowest, and
+        // nothing has measured anything between that and the millisecond the
+        // machine did not come back from.
+        assert!(
+            toyos_phy::ARBITRATION_PACE_NANOS >= 88_000_000,
+            "the pace is narrower than the one run of it that survived"
+        );
         let at = nic.arbitration_at();
         assert!(at.len() >= 2, "{}", nic.because("this bring-up barely reached the arbitration"));
         for pair in at.windows(2) {
