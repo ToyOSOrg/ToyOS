@@ -11,8 +11,11 @@
 //! one that governs that part, and where only one of them names a field it is
 //! cited alone.
 //!
-//! Nothing here has behaviour, and a number that is not in one of those two
-//! documents does not belong in this file.
+//! **Where neither document publishes a field the PCH's MAC needs, the number is
+//! the one Intel's own Linux host driver for this family writes**, stated here
+//! as a fact about the hardware and never transcribed: each such constant says
+//! so where it stands. Nothing here has behaviour, and a number with none of
+//! those three sources does not belong in this file.
 
 /// Device Control (§10.2.2.1, `0x00000`).
 pub const CTRL: usize = 0x00000;
@@ -86,6 +89,10 @@ pub const PHY_CTRL: usize = 0x00F10;
 /// Firmware Semaphore (§8.2.9, `0x05B54`), the firmware's own report of
 /// itself. Not a register the 82574 datasheet has.
 pub const FWSM: usize = 0x05B54;
+/// Future Extended NVM 3 (`0x0003C`), which neither document publishes: its
+/// bits 27:26 are the PHY configuration counter a LANPHYPC power cycle is timed
+/// by, and Intel's host driver for this family sets it before every such cycle.
+pub const FEXTNVM3: usize = 0x0003C;
 
 /// The smallest register window this driver can be driven through: above every
 /// offset named here, and the bound the register accessor's contract rests on.
@@ -99,6 +106,7 @@ const _: () = {
     assert!(CTRL_EXT < REGISTER_BYTES);
     assert!(PHY_CTRL < REGISTER_BYTES);
     assert!(FWSM + 4 <= REGISTER_BYTES);
+    assert!(FEXTNVM3 < REGISTER_BYTES);
 };
 
 /// Device Control bits (§10.2.2.1).
@@ -118,6 +126,16 @@ pub mod ctrl {
     /// Force Speed (bit 11) and Force Duplex (bit 12).
     pub const FRCSPD: u32 = 1 << 11;
     pub const FRCDPLX: u32 = 1 << 12;
+    /// LANPHYPC Override (bit 16) and LANPHYPC Value (bit 17), which §8.2.1
+    /// calls reserved. **The host's hand on the PHY's power pin**: with the
+    /// override set, the value drives the PCH's `LANPHYPC` — the pin the PCH's
+    /// Volume 1 (635218) §19.1 says restores power to the LAN Connected Device
+    /// and I219 §6.3.1.3 calls `LAN_DISABLE_N`, "the only external signal that
+    /// can reset the PHY" (I219 §5.2). Intel's host driver for this family
+    /// power-cycles the PHY by setting the override with the value low, holding
+    /// it at least 10 µs, and clearing the override.
+    pub const LANPHYPC_OVERRIDE: u32 = 1 << 16;
+    pub const LANPHYPC_VALUE: u32 = 1 << 17;
     /// PHY Power Down (bit 24). §8.2.1: "When cleared (0b), the PHY power down
     /// setting is controlled by the internal logic of PCH." The document
     /// describes the cleared case only, so that is the state this driver puts
@@ -131,11 +149,24 @@ pub mod ctrl {
     pub const TFCE: u32 = 1 << 28;
     /// VLAN Mode Enable (bit 30). Cleared, so a VLAN tag stays in the frame.
     pub const VME: u32 = 1 << 30;
+    /// PHY Reset (bit 31), which §8.2.1 calls reserved. **On the PCH's MAC it
+    /// goes out with `RST`**: Intel's host driver for this family issues the
+    /// two together unless the firmware blocks a PHY reset, so that the
+    /// interconnect between the MAC and the PHY is reset on both ends at once.
+    pub const PHY_RST: u32 = 1 << 31;
 }
 
 /// Extended Device Control bits (§8.2.2), of which the PCH's own datasheet
 /// gives one and calls everything either side of it "Reserved".
 pub mod ctrl_ext {
+    /// LCD Power Cycle Done (bit 2), which §8.2.2 calls reserved: set by the
+    /// part once a LANPHYPC power cycle has finished, and what Intel's host
+    /// driver for this family polls after one.
+    pub const LCD_POWER_CYCLE_DONE: u32 = 1 << 2;
+    /// Force SMBus (bit 11), which §8.2.2 calls reserved: set, the MAC carries
+    /// its MDIO traffic over SMBus instead of the PCIe-based interconnect —
+    /// I219 §12.1.4's other half, the one the PHY uses outside S0.
+    pub const FORCE_SMBUS: u32 = 1 << 11;
     /// PHY Power Down Enable (bit 20). §8.2.2: "When set, this bit enables the
     /// PHY to enter a low-power state when the LAN controller is at the DMOff/
     /// D3 or with no WOL."
@@ -162,6 +193,10 @@ pub mod phy_ctrl {
 
 /// Firmware Semaphore bits (§8.2.9).
 pub mod fwsm {
+    /// Reset PHY on PCI Reset (bit 6), which §8.2.9 does not publish: clear, the
+    /// firmware blocks a host reset of the PHY, and Intel's host driver for
+    /// this family then resets the MAC alone.
+    pub const PHY_RESET_ALLOWED: u32 = 1 << 6;
     /// Firmware Valid Bit (bit 15). §8.2.9: "1 = Firmware is ready. 0 =
     /// Firmware is not ready."
     pub const FIRMWARE_VALID: u32 = 1 << 15;
@@ -172,6 +207,10 @@ pub mod status {
     pub const FD: u32 = 1 << 0;
     /// Link Up (bit 1), valid only while `CTRL.SLU` is set.
     pub const LU: u32 = 1 << 1;
+    /// LAN Init Done (bit 9), which neither document publishes for the PCH's
+    /// MAC: set once the MAC has configured the PHY after a reset that reached
+    /// it — the configuration I219 Table 5-2 gives 0.5 s (`Tr2init`).
+    pub const LAN_INIT_DONE: u32 = 1 << 9;
     /// Link speed (bits 7:6): `00b` 10 Mb/s, `01b` 100 Mb/s, `10b` and `11b`
     /// 1000 Mb/s.
     pub const SPEED_SHIFT: u32 = 6;
@@ -329,6 +368,15 @@ pub mod txdctl {
     /// descriptors. Anything larger holds a completion back until the ring
     /// fills.
     pub const SUGGESTED: u32 = GRAN | (1 << WTHRESH_SHIFT);
+}
+
+/// Future Extended NVM 3 bits: the PHY configuration counter.
+pub mod fextnvm3 {
+    /// Bits 27:26.
+    pub const PHY_CFG_COUNTER_MASK: u32 = 0b11 << 26;
+    /// `10b`, fifty milliseconds — what Intel's host driver for this family
+    /// sets before it power-cycles the PHY.
+    pub const PHY_CFG_COUNTER_50MS: u32 = 0b10 << 26;
 }
 
 /// Receive Address High bits (§10.2.5.23).

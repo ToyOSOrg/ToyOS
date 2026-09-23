@@ -24,6 +24,7 @@
 //! the pair brackets the access, and a trail that carries the `read` and not
 //! the `saw` is a machine that ended inside it.
 
+use crate::wake::Moment;
 use crate::{regs, Registers};
 
 /// Where crumbs go.
@@ -73,6 +74,10 @@ pub enum Step {
     /// What one register read answered, left *after* that read returned — the
     /// only crumb of the two orders, and never one of a run.
     Saw { reg: usize, value: u32 },
+    /// The PHY is about to be asked for its identifier, at `moment`. The
+    /// accesses that ask it follow as crumbs of their own, and the `saw MDIC`
+    /// behind them is the part's answer in its own words.
+    Ask { moment: Moment },
     /// The bring-up returned.
     Opened,
     /// The process ends with this code, which is also what gives the claim up.
@@ -85,7 +90,7 @@ fn word(text: &str) -> Option<u32> {
 }
 
 /// The registers a bring-up reaches, by the names the datasheet gives them.
-const NAMES: [(usize, &str); 35] = [
+const NAMES: [(usize, &str); 36] = [
     (regs::CTRL, "CTRL"),
     (regs::CTRL_EXT, "CTRL_EXT"),
     (regs::PHY_CTRL, "PHY_CTRL"),
@@ -120,6 +125,7 @@ const NAMES: [(usize, &str); 35] = [
     (regs::TXDCTL, "TXDCTL"),
     (regs::TADV, "TADV"),
     (regs::EXTCNF_CTRL, "EXTCNF_CTRL"),
+    (regs::FEXTNVM3, "FEXTNVM3"),
     (regs::MTA, MTA_NAME),
 ];
 
@@ -201,6 +207,7 @@ impl Step {
                 Self::Saw { reg: Register::parse(reg)?, value: word(value)? }
             }
             ("exit", Some(code), None) => Self::Exit { code: code.parse().ok()? },
+            ("ask", Some(moment), None) => Self::Ask { moment: Moment::parse(moment)? },
             _ => return None,
         };
         words.next().is_none().then_some(step)
@@ -220,6 +227,7 @@ impl core::fmt::Display for Step {
             Self::Saw { reg, value } => write!(f, "saw {} {value:#010x}", Register(*reg)),
             Self::Opened => f.write_str("opened"),
             Self::Exit { code } => write!(f, "exit {code}"),
+            Self::Ask { moment } => write!(f, "ask {moment}"),
         }
     }
 }
@@ -297,7 +305,8 @@ pub const BRING_UP: [&str; 42] = [
 ///
 /// **A reading is always the PHY's.** [`Step::Saw`] is left by the bring-up's
 /// power step and by the bench instrument and by nothing else, so a line that
-/// starts with one is the PHY's whatever register it names.
+/// starts with one is the PHY's whatever register it names — and so is
+/// [`Step::Ask`], which only the PHY's own steps leave.
 ///
 /// **`CTRL` is not here and cannot be**: §8.2.1's `PHYPDN` is a field of it,
 /// so the power step reaches the same register the bring-up reaches either
@@ -305,17 +314,21 @@ pub const BRING_UP: [&str; 42] = [
 /// `CTRL` access be extra — [`is_shared_with_the_phys`] is that rule.
 pub fn is_the_phys(named: &str) -> bool {
     named.starts_with("saw ")
+        || named.starts_with("ask ")
         || named.ends_with(" EXTCNF_CTRL")
+        || named.ends_with(" FEXTNVM3")
         || named.ends_with(" MDIC")
         || named.ends_with(" CTRL_EXT")
         || named.ends_with(" PHY_CTRL")
         || named.ends_with(" FWSM")
 }
 
-/// Whether a named step is one [`BRING_UP`] names *and* the PHY's power step
-/// reaches too, so a trail may carry more of them than the table does.
+/// Whether a named step is one [`BRING_UP`] names *and* the PHY's steps reach
+/// too, so a trail may carry more of them than the table does: `CTRL`, which
+/// carries §8.2.1's `PHYPDN` and the host's hand on `LANPHYPC`, and a read of
+/// `STATUS`, which carries the `LAN_INIT_DONE` the I219's full reset waits on.
 pub fn is_shared_with_the_phys(named: &str) -> bool {
-    named.ends_with(" CTRL")
+    named.ends_with(" CTRL") || named == "read STATUS"
 }
 
 /// A trail that takes the first access of a run and lets the rest of it by.

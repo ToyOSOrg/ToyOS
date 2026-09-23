@@ -255,7 +255,7 @@ pub fn interrogate<'a, R: Registers, C: Clock, T: Trail>(
     // transaction and takes no interface — what it answers is the register the
     // bring-up walked away from.
     let settled = seen(regs, trail, regs::MDIC);
-    let held = Owned::claim(regs, clock).map(|mdi| {
+    let held = Owned::claim(regs, clock, None).map(|mdi| {
         let under_claim = seen(regs, trail, regs::MDIC);
 
         // §9.5.2.3's identifier at §9.3's first address, read rather than

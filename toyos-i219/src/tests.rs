@@ -1831,7 +1831,10 @@ fn an_mdi_read_the_part_could_not_complete_is_refused_by_name() {
 /// register is still the one it inherited.
 #[test]
 fn a_phy_left_in_loopback_or_configured_by_hand_raises_no_link() {
+    // A PHY in reach, because a power cycle is a power-on reset (I219 Table
+    // 5-1) and would take the inherited state this test is about with it.
     let left = |loopback, autonegotiation_disabled| Permits {
+        phy_starts_out_of_reach: false,
         phy_starts_powered_down: false,
         phy_starts_in_loopback_or_resetting: loopback,
         phy_starts_with_autonegotiation_disabled: autonegotiation_disabled,
@@ -1927,7 +1930,13 @@ fn the_phy_is_found_at_whichever_address_answers_its_identifier() {
 /// that is not this one all fail it, and none of them can forge it.
 #[test]
 fn a_phy_that_is_not_the_one_this_map_describes_is_refused_by_its_identifier() {
-    let nic = Nic::i219(36);
+    // In reach, so no power cycle takes the inherited Power Down this test
+    // reads as the witness that nothing was configured.
+    let nic = Nic::with(
+        36,
+        Part::I219,
+        Permits { phy_starts_out_of_reach: false, ..Permits::default() },
+    );
     // What QEMU's `e1000e` answers for its own modelled PHY.
     nic.phy_identifies_as(0x0141);
     let driver = open(&nic);
@@ -2166,8 +2175,9 @@ fn a_run_is_one_crumb_and_the_arbitration_is_never_a_run() {
 
     let status = Step::Read { reg: regs::STATUS };
     assert!(of(&accesses, status) > 1000, "the master quiesce never made this driver wait");
-    // The first read, the quiesce poll and the link's.
-    assert_eq!(of(&crumbs, status), 3);
+    // The first read, the quiesce poll, the full reset's wait on
+    // LAN_INIT_DONE and the link's.
+    assert_eq!(of(&crumbs, status), 4);
 
     let table = |s: &&Step| matches!(s, Step::Write { reg, .. } if (regs::MTA..regs::RAL0).contains(reg));
     assert_eq!(accesses.iter().filter(table).count(), regs::MTA_DWORDS);
@@ -2408,7 +2418,11 @@ fn an_address_that_answers_is_found_where_one_ends_and_the_first_does_not() {
     let nic = Nic::with(
         94,
         Part::I219,
-        Permits { mac_comes_up_holding_the_phy_down: false, ..Permits::default() },
+        Permits {
+            mac_comes_up_holding_the_phy_down: false,
+            phy_starts_out_of_reach: false,
+            ..Permits::default()
+        },
     );
     nic.phy_is_deaf_at(toyos_phy::GENERAL);
     let wall = Err(PhyRefusal::MdiUnready {
@@ -2639,4 +2653,256 @@ fn what_one_power_reading_decides() {
         !power::Settled { after: enabled, ..settled }.settled(),
         "a low-power entry left enabled is not settled either"
     );
+}
+
+// --- the wake, the full reset, and the scout ---
+
+use crate::stub::Lcd;
+use crate::wake::{Action, Answer, Moment};
+
+fn woke_of(driver: &Driver, nic: &Nic) -> wake::Woke {
+    match driver.brought_up().woke {
+        Some(Ok(woke)) => woke,
+        other => panic!("{}", nic.because(&format!("the wake did not run: {other:?}"))),
+    }
+}
+
+fn moments(woke: &wake::Woke) -> Vec<(Moment, bool)> {
+    woke.asked().map(|(moment, answer)| (moment, answer.answered())).collect()
+}
+
+/// A PHY the agent before this driver left out of `MDIC`'s reach — powered
+/// down, and coming back on SMBus once power-cycled — is climbed to one rung
+/// at a time, each rung asked, and taken back to PCIe before the reset; and the
+/// reset that follows takes the PHY with the MAC and leaves it answering.
+#[test]
+fn a_phy_left_out_of_reach_is_climbed_to_before_the_reset() {
+    let nic = Nic::i219(101);
+    nic.set_link(true);
+    let driver = open(&nic);
+    let woke = woke_of(&driver, &nic);
+    assert_eq!(
+        moments(&woke),
+        [
+            (Moment::AsFound, false),
+            (Moment::PowerCycled, false),
+            (Moment::SmbusForced, true),
+            (Moment::BackOnPcie, true),
+        ],
+        "{}",
+        nic.because(&format!("the ladder was not climbed in the host driver's order: {woke}"))
+    );
+    assert!(matches!(woke.asked().next(), Some((_, Answer::Silent { .. }))));
+    assert_eq!(nic.power_cycles(), 1);
+    assert_eq!(nic.phy_resets(), 1, "{}", nic.because("the reset did not take the PHY"));
+    let reset = driver.brought_up().reset.expect("the I219's reset is the full one");
+    assert!(reset.phy_reset && reset.flag.is_ok() && reset.init_done_after_nanos.is_some());
+    assert_eq!(nic.lcd(), Lcd::InStep);
+    assert!(driver.brought_up().phy.is_ok(), "{}", nic.because("the bring-up missed the PHY"));
+
+    // Where the power cycle brings it back on PCIe, the ladder ends there.
+    let nic = Nic::with(
+        102,
+        Part::I219,
+        Permits { phy_comes_back_on_smbus: false, ..Permits::default() },
+    );
+    let driver = open(&nic);
+    assert_eq!(
+        moments(&woke_of(&driver, &nic)),
+        [(Moment::AsFound, false), (Moment::PowerCycled, true)]
+    );
+    assert!(driver.brought_up().phy.is_ok());
+}
+
+/// A PHY that answers as found is asked once and never power-cycled.
+#[test]
+fn a_phy_in_reach_is_asked_once_and_left_powered() {
+    let nic = Nic::with(
+        103,
+        Part::I219,
+        Permits { phy_starts_out_of_reach: false, ..Permits::default() },
+    );
+    let driver = open(&nic);
+    assert_eq!(moments(&woke_of(&driver, &nic)), [(Moment::AsFound, true)]);
+    assert_eq!(nic.power_cycles(), 0);
+    assert_eq!(nic.phy_resets(), 1);
+    assert!(driver.brought_up().phy.is_ok());
+}
+
+/// Where `FWSM` says the firmware blocks a PHY reset, neither `PHY_RST` nor a
+/// `LANPHYPC` cycle goes out — the host driver reports both "blocked by ME" on
+/// that bit — and a MAC reset alone then leaves a PHY that answered before it
+/// out of reach, which the bring-up refuses by name.
+#[test]
+fn a_phy_reset_the_firmware_blocks_is_never_issued() {
+    let nic = Nic::with(
+        104,
+        Part::I219,
+        Permits {
+            phy_starts_out_of_reach: false,
+            firmware_allows_a_phy_reset: false,
+            ..Permits::default()
+        },
+    );
+    let driver = open(&nic);
+    assert_eq!(nic.phy_resets(), 0);
+    assert_eq!(nic.power_cycles(), 0);
+    assert!(!driver.brought_up().reset.expect("the I219's reset").phy_reset);
+    assert!(matches!(driver.brought_up().phy, Err(PhyRefusal::MdiUnready { .. })));
+
+    // And out of reach as well: the rungs that need a PHY reset are skipped.
+    let nic = Nic::with(
+        105,
+        Part::I219,
+        Permits { firmware_allows_a_phy_reset: false, ..Permits::default() },
+    );
+    let driver = open(&nic);
+    assert_eq!(nic.power_cycles(), 0);
+    assert_eq!(
+        moments(&woke_of(&driver, &nic)),
+        [(Moment::AsFound, false), (Moment::SmbusForced, false), (Moment::SmbusReleased, false)]
+    );
+}
+
+/// A PHY no rung reaches is refused after the reset by the wall it is, with
+/// every rung's ask beside it — and the MAC is not left on SMBus.
+#[test]
+fn a_phy_no_rung_reaches_is_refused_after_the_reset() {
+    let nic = Nic::i219(106);
+    nic.mdi_never_ready();
+    let driver = open(&nic);
+    let woke = woke_of(&driver, &nic);
+    assert_eq!(woke.asked().count(), 1 + wake::LADDER.len());
+    assert!(woke.answered().is_none());
+    assert!(woke.asked().all(|(_, answer)| matches!(answer, Answer::Silent { .. })));
+    assert_eq!(nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::FORCE_SMBUS, 0);
+    assert!(matches!(driver.brought_up().phy, Err(PhyRefusal::MdiUnready { .. })));
+}
+
+/// The scout's question on the part the T14 is suspected to be: a PHY that
+/// answers as the firmware left it, and a reset of the MAC alone that takes it
+/// out of reach — then the bring-up, which wakes it and resets the two
+/// together, reaching it after all.
+#[test]
+fn the_scout_reads_whether_a_mac_alone_reset_loses_the_phy() {
+    for (seed, loses) in [(107, true), (108, false)] {
+        let nic = Nic::with(
+            seed,
+            Part::I219,
+            Permits {
+                phy_starts_out_of_reach: false,
+                mac_comes_up_holding_the_phy_down: false,
+                mac_reset_alone_loses_the_phy: loses,
+                ..Permits::default()
+            },
+        );
+        let (bar, clock, grant, line) = nic.parts();
+        let seen: Seens = Rc::default();
+        let trail = Runs::over(Noted(Rc::clone(&seen)));
+        let regs = Crumbed::over(bar, &trail);
+        let scouted = scout::around_the_reset(&regs, &clock, &trail);
+        assert!(
+            matches!(scouted.before, Ok(Answer::Answered { .. })),
+            "{}",
+            nic.because(&format!("the PHY in reach did not answer: {scouted}"))
+        );
+        assert_eq!(scouted.reset, Ok(()));
+        let after = scouted.after.expect("the reset finished").expect("the flag was taken");
+        assert_eq!(after.answered(), !loses, "{}", nic.because(&scouted.to_string()));
+
+        let driver = I219::open_trailing(Part::I219, regs, clock, grant, line, &trail)
+            .unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused: {why}"))));
+        assert!(driver.brought_up().phy.is_ok(), "{}", nic.because("the bring-up missed it"));
+        let asks: Vec<String> = crumbs_of(&seen.borrow())
+            .iter()
+            .filter(|step| matches!(step, Step::Ask { .. }))
+            .map(|step| step.to_string())
+            .collect();
+        assert_eq!(asks[..3], ["ask before-reset", "ask after-reset", "ask as-found"]);
+        assert!(
+            no_arbitration_nearer_than_the_pace(&nic),
+            "{}",
+            nic.because("the scout's holds and the bring-up's broke the pace between them")
+        );
+    }
+}
+
+fn no_arbitration_nearer_than_the_pace(nic: &Nic) -> bool {
+    nic.arbitration_at().windows(2).all(|pair| pair[1] - pair[0] >= toyos_phy::ARBITRATION_PACE_NANOS)
+}
+
+/// Every ask is witnessed: its own crumb ahead of it and `MDIC`'s word behind
+/// every transaction it made, so a trail says in the part's words how each
+/// ended.
+#[test]
+fn every_ask_leaves_the_parts_own_answer_on_the_trail() {
+    let nic = Nic::i219(109);
+    let (bar, clock, grant, line) = nic.parts();
+    let seen: Seens = Rc::default();
+    let trail = Runs::over(Noted(Rc::clone(&seen)));
+    I219::open_trailing(Part::I219, Crumbed::over(bar, &trail), clock, grant, line, &trail)
+        .unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused: {why}"))));
+    let crumbs = crumbs_of(&seen.borrow());
+    let asks: Vec<usize> = crumbs
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| matches!(step, Step::Ask { .. }))
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(asks.len(), 4, "{}", nic.because("the ladder asked a different number of times"));
+    for at in asks {
+        let behind = crumbs[at + 1..]
+            .iter()
+            .take_while(|step| !matches!(step, Step::Ask { .. } | Step::Opened))
+            .find(|step| matches!(step, Step::Saw { reg: regs::MDIC, .. }));
+        assert!(behind.is_some(), "{}", nic.because(&format!("{} left no answer", crumbs[at])));
+    }
+    assert!(no_arbitration_nearer_than_the_pace(&nic));
+}
+
+#[test]
+fn an_ask_spells_and_reads_back_at_every_moment() {
+    for moment in Moment::ALL {
+        let step = Step::Ask { moment };
+        let line = crumbs::Line { seq: 0, at: 5, synced: 3, step };
+        let file = format!("{line}\n");
+        assert_eq!(
+            crumbs::lines(&file).map(|l| l.expect("the line it wrote").step).collect::<Vec<_>>(),
+            [step]
+        );
+        assert!(crumbs::is_the_phys(&step.named().to_string()));
+    }
+    assert!(crumbs::is_the_phys(&Step::Write { reg: regs::FEXTNVM3, value: 0 }.named().to_string()));
+    assert!(crumbs::is_shared_with_the_phys("read STATUS"));
+    assert!(!crumbs::is_shared_with_the_phys("write STATUS"));
+}
+
+/// What the wake and the full reset write, as bit arithmetic on what was read.
+#[test]
+fn what_the_wake_and_the_full_reset_write() {
+    use regs::{ctrl, ctrl_ext, fextnvm3, fwsm};
+    let held = 0x0018_0244 | ctrl::LANPHYPC_VALUE;
+    let low = wake::lanphypc_low(held);
+    assert_eq!(low & (ctrl::LANPHYPC_OVERRIDE | ctrl::LANPHYPC_VALUE), ctrl::LANPHYPC_OVERRIDE);
+    assert_eq!(low & !(ctrl::LANPHYPC_OVERRIDE | ctrl::LANPHYPC_VALUE), 0x0018_0244);
+    assert_eq!(wake::lanphypc_released(low), 0x0018_0244, "only the override goes");
+
+    let counter = wake::phy_cfg_counter(0xFFFF_FFFF);
+    assert_eq!(counter & fextnvm3::PHY_CFG_COUNTER_MASK, fextnvm3::PHY_CFG_COUNTER_50MS);
+    assert_eq!(counter | fextnvm3::PHY_CFG_COUNTER_MASK, 0xFFFF_FFFF, "every other bit carried");
+
+    // The T14's own words: CTRL_EXT 0x815a1027 and FWSM 0x60000040.
+    let ext = 0x815a_1027;
+    assert_eq!(wake::smbus_forced(ext), ext | ctrl_ext::FORCE_SMBUS);
+    assert_eq!(wake::smbus_released(wake::smbus_forced(ext)), ext);
+    assert!(wake::power_cycle_done(ext), "the T14 read the cycle-done bit set");
+    assert!(wake::phy_reset_allowed(0x6000_0040));
+    assert_eq!(wake::reset_word(0x0018_0244, 0x6000_0040), 0x0018_0244 | ctrl::RST | ctrl::PHY_RST);
+    assert_eq!(wake::reset_word(0x0018_0244, fwsm::FIRMWARE_VALID), 0x0018_0244 | ctrl::RST);
+
+    assert!(wake::rung_allowed(Action::PowerCycle, 0x6000_0040));
+    assert!(!wake::rung_allowed(Action::PowerCycle, 0));
+    assert!(wake::rung_allowed(Action::ForceSmbus, 0));
+    assert!(wake::rung_allowed(Action::ReleaseSmbus, 0));
+    assert_eq!(wake::phy_smbus_released(0x0013), 0x0012);
 }

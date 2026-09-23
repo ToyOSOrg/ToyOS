@@ -201,8 +201,17 @@ fn granted(dev: &PciDev, trail: &impl Trail) -> Result<(Bar, Grant, Window), Ope
     Ok((bar, Grant { window: frames, device_base, _region: region }, frames))
 }
 
-/// The one line a bring-up says about itself.
+/// The one line a bring-up says about itself, and a line each for what it
+/// asked the I219's PHY before its reset and what that reset did.
 fn say_brought_up(brought_up: toyos_i219::BringUp) {
+    match brought_up.woke {
+        Some(Ok(woke)) => crate::say!("netd: I219: before the reset the PHY was asked: {woke}"),
+        Some(Err(why)) => crate::say!("netd: I219: the PHY was not asked before the reset: {why}"),
+        None => {}
+    }
+    if let Some(reset) = brought_up.reset {
+        crate::say!("netd: I219: {reset}");
+    }
     crate::say!(
         "netd: I219: {}, and the PHY {}",
         if brought_up.master_quiet {
@@ -249,9 +258,18 @@ pub fn leave_crumbs(
 ) -> Result<std::convert::Infallible, Opening> {
     let dev = Rc::new(dev);
     let (bar, grant, _frames) = granted(&dev, trail)?;
+    let bar = Crumbed::over(bar, trail);
+    // The question this boot is flashed for first: whether the PHY answers as
+    // the firmware handed it over, and whether a reset of the MAC alone takes
+    // it out of reach — asked ahead of the bring-up, which then wakes and
+    // resets the part its own way.
+    if part == toyos_i219::Part::I219 {
+        let scouted = toyos_i219::scout::around_the_reset(&bar, &Monotonic, trail);
+        crate::say!("netd: I219: {scouted}");
+    }
     let mut driver = toyos_i219::I219::open_trailing(
         part,
-        Crumbed::over(bar, trail),
+        bar,
         Monotonic,
         grant,
         Claim(Rc::clone(&dev)),

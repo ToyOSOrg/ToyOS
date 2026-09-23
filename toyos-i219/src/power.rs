@@ -35,7 +35,7 @@
 //! and §8.2.9's `FWSM` are read and never written: the first is link-speed
 //! policy and the second is the firmware's own report.
 //!
-//! **No public Intel document found for this part gives software a sequence to
+//! **No Intel document found for this part gives software a sequence to
 //! restore power to a PHY that is gated off.** The I219 datasheet §6.3.1.3 has
 //! the power-down state entered "when the LAN_DISABLE_N pin is set to zero",
 //! says "the I219 loses all functionality in this mode other than the ability
@@ -48,7 +48,10 @@
 //! Device". Neither document names a register a driver writes to move it, and
 //! I219 §6.4 leaves the Ultra Low Power mode's entry and exit "controlled by
 //! the host driver (on non ME systems) or the ME FW" without publishing the
-//! host half. So this file reads the state and refuses to guess at the rest.
+//! host half. So this file reads the state and moves only the two bits the
+//! document gives; the host's hand on the pin itself is `CTRL` bits 16 and 17,
+//! which Intel's own host driver for this family uses and no Intel document
+//! publishes, and [`crate::wake`] is where this driver takes it.
 
 use crate::regs::{ctrl, ctrl_ext, fwsm, mdic, phy_ctrl};
 

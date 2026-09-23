@@ -11,11 +11,15 @@
 //! PHY is separate silicon the Management Engine shares, reached over `MDIC`
 //! under §4.5.2's ownership arbitration — which this driver asks for, waits a
 //! bounded time on, and gives back. [`Part`] is which one this claim is, and
-//! [`phy`] is everything that follows from it. [`crumbs`] is a trail left one
-//! durable line ahead of a bring-up, and decides nothing about one.
-//! [`unready`] is a bench instrument and not a driver: it runs on one boot's
-//! question — why this part never reports the end of an MDI transaction — and
-//! is deleted when that question is answered.
+//! [`phy`] is everything that follows from it. [`wake`] is what brings that PHY
+//! within `MDIC`'s reach before the reset and what shape the reset then takes —
+//! the MAC and the PHY together — on facts no Intel document publishes and
+//! Intel's own host driver for this family acts on. [`crumbs`] is a trail left
+//! one durable line ahead of a bring-up, and decides nothing about one.
+//! [`unready`] and [`scout`] are bench instruments and not a driver: each runs
+//! on one boot's question — why this part never reports the end of an MDI
+//! transaction, and whether a reset of the MAC alone is what takes the PHY out
+//! of reach — and is deleted when that question is answered.
 //!
 //! # The boundary
 //!
@@ -76,7 +80,9 @@ pub mod crumbs;
 pub mod phy;
 pub mod power;
 pub mod regs;
+pub mod scout;
 pub mod unready;
+pub mod wake;
 
 #[cfg(test)]
 mod stub;
@@ -464,14 +470,35 @@ struct Reset {
     /// When `CTRL.RST` was written, which §10.2.2.1's two bounds and §9.2's
     /// delay before the first MDIO access are measured from.
     at: u64,
+    /// What the I219's full reset did, and `None` for a reset of the MAC alone.
+    full: Option<wake::FullReset>,
+    /// When the flag the full reset was issued under was given back, which the
+    /// next hold's pace runs from.
+    released: Option<u64>,
+}
+
+/// Which reset [`reset`] issues.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Whole {
+    /// §10.2.2.1's `RST` alone: the 82574, whose PHY is on its own die, and the
+    /// shape [`scout`] reads the I219's PHY across.
+    MacAlone,
+    /// The PCH's MAC and its PHY together, as [`wake`]'s header sets out,
+    /// under §8.2.4's flag taken no nearer than one pace to `after` — when an
+    /// earlier hold of it was given back.
+    WithThePhy { after: Option<u64> },
 }
 
 /// §4.6.1's reset, with every interrupt masked on both sides of it.
 ///
 /// **One function because two callers owe the part the same sequence**:
-/// [`I219::open`], and [`ask::after_reset`], whose reading is of the part as
-/// the bring-up would find it.
-fn reset<R: Registers, C: Clock>(regs: &R, clock: &C) -> Result<Reset, Refusal> {
+/// [`I219::open`], and [`scout::around_the_reset`], whose reading is of the
+/// part across the reset this driver used to issue.
+pub(crate) fn reset<R: Registers, C: Clock>(
+    regs: &R,
+    clock: &C,
+    whole: Whole,
+) -> Result<Reset, Refusal> {
     // A window nothing decodes answers ones on every access, and a driver
     // that went on would read a MAC address of `ff:ff:ff:ff:ff:ff` out of
     // it and never say why nothing arrived.
@@ -511,15 +538,49 @@ fn reset<R: Registers, C: Clock>(regs: &R, clock: &C) -> Result<Reset, Refusal> 
     // to 1b" — a driver that wrote a value it composed itself would clear
     // them.
     let held = regs.read(regs::CTRL);
-    regs.write(regs::CTRL, held | ctrl::RST);
-    // The write is the event §10.2.2.1's two bounds and §9.2's delay before
-    // the first MDIO access are measured from.
-    let reset_at = clock.nanos();
-    // The settle is a wait and not a poll: §10.2.2.1 owes the microsecond
-    // to "attempting to check to see if the bit has cleared or attempting
-    // to access (read or write) any other device register" alike, so there
-    // is nothing this driver may read to shorten it.
-    while clock.nanos().saturating_sub(reset_at) < RESET_SETTLE_NANOS {}
+    // Held until the reset has finished and the PHY's configuration with it:
+    // the drop is paced from the reset's own write, and the waits below are
+    // measured from that write too.
+    let mut flag = None;
+    let (reset_at, full) = match whole {
+        Whole::MacAlone => {
+            regs.write(regs::CTRL, held | ctrl::RST);
+            // The write is the event §10.2.2.1's two bounds and §9.2's delay
+            // before the first MDIO access are measured from.
+            let reset_at = clock.nanos();
+            // The settle is a wait and not a poll: §10.2.2.1 owes the
+            // microsecond to "attempting to check to see if the bit has
+            // cleared or attempting to access (read or write) any other
+            // device register" alike, so there is nothing this driver may read
+            // to shorten it.
+            while clock.nanos().saturating_sub(reset_at) < RESET_SETTLE_NANOS {}
+            (reset_at, None)
+        }
+        Whole::WithThePhy { after } => {
+            let firmware = regs.read(regs::FWSM);
+            let word = wake::reset_word(held, firmware);
+            // Under §8.2.4's flag, as the host driver for this family issues
+            // it, and a flag that would not come is no reason to leave the part
+            // unreset: that driver resets it either way. The reset clears the
+            // flag, and the drop below gives back one it left standing.
+            let claimed = phy::Owned::claim(regs, clock, after);
+            match &claimed {
+                Ok(mdi) => mdi.write_paced(regs::CTRL, word),
+                Err(_) => regs.write(regs::CTRL, word),
+            }
+            let reset_at = clock.nanos();
+            // Nothing is touched while the part resets both ends of its
+            // interconnect: the host driver's 20 ms, a wait and not a poll.
+            phy::hold(clock, reset_at, wake::RESET_QUIET_NANOS);
+            let full = wake::FullReset {
+                phy_reset: word & ctrl::PHY_RST != 0,
+                flag: claimed.as_ref().map(|_| ()).map_err(|why| *why),
+                init_done_after_nanos: None,
+            };
+            flag = Some(claimed);
+            (reset_at, Some(full))
+        }
+    };
     loop {
         if regs.read(regs::CTRL) & ctrl::RST == 0 {
             break;
@@ -529,11 +590,38 @@ fn reset<R: Registers, C: Clock>(regs: &R, clock: &C) -> Result<Reset, Refusal> 
             return Err(Refusal::ResetUnfinished { after_nanos: waited });
         }
     }
+    // The configuration the MAC gives the PHY after a reset that reached it,
+    // waited on and never refused on: I219 Table 5-2 bounds it, and the PHY's
+    // own answer to the bring-up is the test of whether it finished.
+    let full = full.map(|full| wake::FullReset {
+        init_done_after_nanos: full.phy_reset.then(|| init_done(regs, clock, reset_at)).flatten(),
+        ..full
+    });
+    let released = flag.map(|flag| {
+        drop(flag);
+        clock.nanos()
+    });
     // Again after the reset: §4.6.1 keeps them masked until the rings
     // exist, and the reset itself is an event the part may have recorded.
     regs.write(regs::IMC, u32::MAX);
     let _ = regs.read(regs::ICR);
-    Ok(Reset { master_quiet, at: reset_at })
+    Ok(Reset { master_quiet, at: reset_at, full, released })
+}
+
+/// How long after `since` `STATUS.LAN_INIT_DONE` read set, or `None` where
+/// [`wake::LAN_INIT_DEADLINE_NANOS`] ran out first.
+fn init_done<R: Registers, C: Clock>(regs: &R, clock: &C, since: u64) -> Option<u64> {
+    loop {
+        let done = regs.read(regs::STATUS) & status::LAN_INIT_DONE != 0;
+        let waited = clock.nanos().saturating_sub(since);
+        if done {
+            return Some(waited);
+        }
+        if waited >= wake::LAN_INIT_DEADLINE_NANOS {
+            return None;
+        }
+        clock.pause(wake::LAN_INIT_PACE_NANOS);
+    }
 }
 
 /// Which part the claim is on.
@@ -558,6 +646,11 @@ pub enum Part {
 pub struct BringUp {
     /// Whether §3.1.3.10's master quiesce finished before the reset was issued.
     pub master_quiet: bool,
+    /// What [`phy::wake`] asked the I219's PHY before the reset, rung by rung,
+    /// or why it could not ask; `None` on the 82574.
+    pub woke: Option<Result<wake::Woke, phy::PhyRefusal>>,
+    /// What the I219's full reset did; `None` on the 82574.
+    pub reset: Option<wake::FullReset>,
     /// What the PHY answered, or why it was not reached.
     pub phy: Result<phy::Phy, phy::PhyRefusal>,
 }
@@ -593,7 +686,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// Bring the function up in the order §4.6 fixes: reset with every
     /// interrupt masked, the station address, the multicast table, the PHY, the
     /// link, both rings, then the transmitter, then the receiver, then the
-    /// interrupt mask.
+    /// interrupt mask. On the I219 the PHY is brought within reach first and
+    /// the reset takes it with the MAC ([`wake`]).
     ///
     /// **The PHY is between the multicast table and `CTRL.SLU`**, because
     /// §4.6.3.2 makes `STATUS.LU` the MAC's report of a link "from the PHY
@@ -624,7 +718,18 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if (dma.bytes() as u64) < GRANT_BYTES {
             return Err(Refusal::Grant { given: dma.bytes(), needed: GRANT_BYTES as usize });
         }
-        let Reset { master_quiet, at: reset_at } = reset(&regs, &clock)?;
+        // The PHY is brought within reach before the reset, and the reset
+        // takes it with the MAC: [`wake`]'s header is why, on the part whose
+        // PHY is not on the MAC's own die.
+        let (woke, whole) = match part {
+            Part::I219 => {
+                let woke = phy::wake(&regs, &clock, None, trail);
+                (Some(woke), Whole::WithThePhy { after: Some(clock.nanos()) })
+            }
+            Part::E82574 => (None, Whole::MacAlone),
+        };
+        let Reset { master_quiet, at: reset_at, full, released } =
+            reset(&regs, &clock, whole)?;
 
         // §10.2.5.23: the reset reloads entry 0 from the NVM, so this is read
         // after it and not before.
@@ -655,7 +760,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // under a scheme of its own — so the sequence is refused by name on the
         // part it was not written from.
         let phy = match part {
-            Part::I219 => phy::bring_up(&regs, &clock, reset_at, trail),
+            Part::I219 => phy::bring_up(&regs, &clock, reset_at, released, trail),
             Part::E82574 => Err(phy::PhyRefusal::NotThisRegisterMap),
         };
 
@@ -669,6 +774,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         let held = regs.read(regs::CTRL);
         let wanted = (held
             & !(ctrl::GIO_MASTER_DISABLE
+                | ctrl::PHY_RST
                 | ctrl::ASDE
                 | ctrl::ILOS
                 | ctrl::FRCSPD
@@ -690,7 +796,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             dma,
             irq,
             mac,
-            brought_up: BringUp { master_quiet, phy },
+            brought_up: BringUp { master_quiet, woke, reset: full, phy },
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,

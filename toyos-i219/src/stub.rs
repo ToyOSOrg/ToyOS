@@ -24,6 +24,14 @@
 //! where its power and handshake registers are defined and where the rule that
 //! an MDI cycle runs only while the interconnect carries one comes from.
 //!
+//! **Where the I219's MAC is concerned the documents stop short**, and what
+//! this file models beyond them — the `LANPHYPC` power cycle, SMBus forcing,
+//! the reset of the MAC and PHY together — is the behaviour of Intel's own
+//! Linux host driver for this family, stated as a fact about the hardware in
+//! `crate::wake`'s header and cited there. What `CTRL.PHY_RST` does to the
+//! PHY's own registers is in neither, so it is left out: the model keeps them
+//! as the last agent left them, and the driver has to work either way.
+//!
 //! What is deliberately *not* modelled: the 82574's own PHY registers, the
 //! NVM's access protocol, checksum offload, VLAN insertion, RSS and the second
 //! queue, flow control, and every statistic counter. The driver reaches none of
@@ -37,9 +45,10 @@ use std::{format, vec};
 
 use crate::phy::{advertise, control, control_1000t, custom_mode, reg};
 use crate::regs::{
-    self, cause, ctrl, ctrl_ext, extcnf, fwsm, mdic, rah, rctl, rx_desc, status, tctl, tx_desc,
+    self, cause, ctrl, ctrl_ext, extcnf, fextnvm3, fwsm, mdic, rah, rctl, rx_desc, status, tctl,
+    tx_desc,
 };
-use crate::{phy, Clock, DmaBuffers, Interrupts, Part, Registers};
+use crate::{phy, wake, Clock, DmaBuffers, Interrupts, Part, Registers};
 
 /// Where the device reaches the grant. Not zero and not a small number: a
 /// driver that wrote a grant *offset* into a descriptor instead of a device
@@ -156,6 +165,22 @@ pub struct Permits {
     /// "the priority order is manageability, software and then hardware", so a
     /// software request registered right after that read is answered second.
     pub firmware_requests_after_a_free_read: bool,
+    /// I219 §6.4's Ultra Low Power and §12.1.4's SMBus mode are states the
+    /// agent before this driver leaves a PHY in, and in neither does the PHY
+    /// answer an MDI cycle the MAC sends over PCIe — so a claim is minted on a
+    /// PHY out of `MDIC`'s reach.
+    pub phy_starts_out_of_reach: bool,
+    /// I219 §6.4's ULP configuration register has a field "Reset to SMBus by
+    /// default (on power on or on ULP exit)" that the agent before this driver
+    /// may have set, so a power-cycled PHY may come back on SMBus.
+    pub phy_comes_back_on_smbus: bool,
+    /// The host driver for this family resets the MAC and the PHY together "to
+    /// make sure the interface between MAC and the external PHY is reset", so a
+    /// reset of the MAC alone may leave the two ends of it out of step.
+    pub mac_reset_alone_loses_the_phy: bool,
+    /// `FWSM` bit 6: the firmware allows the host to reset the PHY — what the
+    /// T14's firmware reports.
+    pub firmware_allows_a_phy_reset: bool,
 }
 
 impl Default for Permits {
@@ -180,6 +205,10 @@ impl Default for Permits {
             low_power_entry_comes_up_enabled: true,
             the_interconnect_is_in_transition: true,
             firmware_reports_itself_ready: true,
+            phy_starts_out_of_reach: true,
+            phy_comes_back_on_smbus: true,
+            mac_reset_alone_loses_the_phy: true,
+            firmware_allows_a_phy_reset: true,
         }
     }
 }
@@ -269,6 +298,28 @@ const CTRL_RESERVED_SET: u32 = (1 << 3) | (1 << 20);
 /// bits. The value is arbitrary and its only property is that this driver never
 /// wrote it.
 const EXTCNF_FIRMWARE_FIELDS: u32 = 1 << 13;
+
+/// Where the PHY stands with respect to the MAC's end of their interconnect.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lcd {
+    /// On PCIe and in step with the MAC: an MDI cycle over PCIe ends.
+    InStep,
+    /// On SMBus: a cycle ends only from a MAC forced onto SMBus too.
+    Smbus,
+    /// Its end of the interconnect out of step with the MAC's, which a reset of
+    /// both together or a power cycle puts right.
+    OutOfStep,
+    /// Powered down, or in Ultra Low Power: only a power cycle reaches it.
+    Off,
+}
+
+/// How many readings of `STATUS` after a full reset `LAN_INIT_DONE` stays
+/// clear for.
+const LAN_INIT_READS: u32 = 3;
+
+/// How many readings of `CTRL_EXT` after a power cycle its cycle-done bit
+/// stays clear for.
+const CYCLE_DONE_READS: u32 = 1;
 
 /// The PHY the *Intel Ethernet Connection I219 Datasheet* describes, as much of
 /// it as reaches this driver.
@@ -480,6 +531,26 @@ struct Model {
     /// the model notes when this driver reached the arbitration and a test
     /// holds the gaps to [`crate::phy::ARBITRATION_PACE_NANOS`].
     arbitration_at: Vec<u64>,
+    /// Where the PHY stands with respect to the MAC.
+    lcd: Lcd,
+    /// When `LANPHYPC` was last driven low, and not yet let go.
+    lanphypc_low_at: Option<u64>,
+    /// Readings of `CTRL_EXT` left before the cycle-done bit shows.
+    cycle_done_reads: u32,
+    /// When the MAC was last forced onto SMBus.
+    smbus_forced_at: Option<u64>,
+    /// No access is taken before this: the host driver's 20 ms after a full
+    /// reset.
+    quiet_until: Option<u64>,
+    /// Readings of `STATUS` left before `LAN_INIT_DONE` shows, and `None` where
+    /// no reset that reached the PHY is in progress.
+    lan_init_reads: Option<u32>,
+    /// When the PHY was last reset or power-cycled, and `None` for a PHY that
+    /// came up long before the claim was minted — which §9.2's 10 ms before an
+    /// MDIO access is measured from.
+    lcd_reset_at: Option<u64>,
+    power_cycles: u32,
+    phy_resets: u32,
 }
 
 /// Where one PHY register address lands in [`PhyModel`].
@@ -490,6 +561,8 @@ enum PhyPlace {
     Page,
     /// §9.5.3.1's Custom Mode Control, which is page 769's.
     CustomMode,
+    /// §9.5.3.4's SMBus Control, page 769's register 23.
+    SmbusControl,
     /// One of the thirty PHY addresses §9.3 places nothing at. §10.2.2.7's
     /// `PHYADD` field is five bits and this part answers two of them, so a
     /// transaction to any other ends with nothing driving the bus.
@@ -541,6 +614,15 @@ impl Model {
             written: BTreeSet::new(),
             held: false,
             arbitration_at: Vec::new(),
+            lcd: if permits.phy_starts_out_of_reach { Lcd::Off } else { Lcd::InStep },
+            lanphypc_low_at: None,
+            cycle_done_reads: 0,
+            smbus_forced_at: None,
+            quiet_until: None,
+            lan_init_reads: None,
+            lcd_reset_at: None,
+            power_cycles: 0,
+            phy_resets: 0,
         };
         model.power_on();
         model
@@ -563,6 +645,9 @@ impl Model {
             self.set(regs::PHY_CTRL, crate::power::PHY_CTRL_RESET);
             if self.permits.firmware_reports_itself_ready {
                 self.set(regs::FWSM, fwsm::FIRMWARE_VALID);
+            }
+            if self.permits.firmware_allows_a_phy_reset {
+                self.set(regs::FWSM, self.get(regs::FWSM) | fwsm::PHY_RESET_ALLOWED);
             }
             if self.permits.mac_comes_up_holding_the_phy_down {
                 self.set(regs::CTRL, self.get(regs::CTRL) | ctrl::PHY_POWER_DOWN);
@@ -634,6 +719,9 @@ impl Model {
                 value |= status::FD;
             }
             value |= (speed_code & status::SPEED_MASK) << status::SPEED_SHIFT;
+        }
+        if self.lan_init_reads == Some(0) {
+            value |= status::LAN_INIT_DONE;
         }
         self.set(regs::STATUS, value);
     }
@@ -734,12 +822,23 @@ impl Model {
             "seed {}: a {reg:#x} register read is outside the file",
             self.seed
         );
+        self.keep_quiet(reg);
         // Nothing decodes this offset, so the bus answers ones — which is a
         // value and not a register's value.
         if self.not_decoding == Some(reg) {
             return u32::MAX;
         }
         match reg {
+            regs::CTRL_EXT => {
+                let value = self.get(regs::CTRL_EXT);
+                if self.cycle_done_reads > 0 {
+                    self.cycle_done_reads -= 1;
+                    if self.cycle_done_reads == 0 {
+                        self.set(regs::CTRL_EXT, value | ctrl_ext::LCD_POWER_CYCLE_DONE);
+                    }
+                }
+                value
+            }
             regs::CTRL => {
                 if self.reset_reads > 0 {
                     assert!(
@@ -766,6 +865,9 @@ impl Model {
             regs::STATUS => {
                 if self.master_reads > 0 {
                     self.master_reads -= 1;
+                }
+                if let Some(left) = self.lan_init_reads.as_mut() {
+                    *left = left.saturating_sub(1);
                 }
                 self.refresh_status();
                 self.get(regs::STATUS)
@@ -848,6 +950,7 @@ impl Model {
             "seed {}: a {reg:#x} register write is outside the file",
             self.seed
         );
+        self.keep_quiet(reg);
         self.written.insert(reg);
         assert!(
             self.not_decoding != Some(reg),
@@ -869,6 +972,7 @@ impl Model {
                     self.seed
                 );
                 self.set(regs::CTRL, value);
+                self.lanphypc(was, value);
                 if value & !was & ctrl::GIO_MASTER_DISABLE != 0 {
                     // §3.1.3.10: the part "blocks new master requests [...] then
                     // proceeds to issue any pending requests by this function".
@@ -890,10 +994,35 @@ impl Model {
                         self.seed
                     );
                     self.reset_at = self.nanos;
+                    self.lcd_reset_at = Some(self.nanos);
+                    let with_the_phy = value & ctrl::PHY_RST != 0;
+                    if with_the_phy {
+                        assert_ne!(
+                            self.get(regs::FWSM) & fwsm::PHY_RESET_ALLOWED,
+                            0,
+                            "seed {}: the driver reset the PHY with FWSM {:#010x}, whose bit 6 \
+                             says the firmware blocks it",
+                            self.seed,
+                            self.get(regs::FWSM)
+                        );
+                        self.phy_resets += 1;
+                        if self.lcd == Lcd::OutOfStep {
+                            self.lcd = Lcd::InStep;
+                        }
+                        self.lan_init_reads = Some(LAN_INIT_READS);
+                        self.quiet_until = Some(self.nanos + wake::RESET_QUIET_NANOS);
+                    } else if self.part == Part::I219
+                        && self.permits.mac_reset_alone_loses_the_phy
+                        && self.lcd == Lcd::InStep
+                    {
+                        self.lcd = Lcd::OutOfStep;
+                    }
                     // §10.2.2.1: "a reset of the MAC function of the device".
                     // Everything but the reserved defaults and the NVM's
-                    // station address goes.
+                    // station address goes — §4.5.2's ownership bits with it.
                     self.power_on();
+                    self.phy.sw_requested = false;
+                    self.refresh_ownership();
                     self.set(regs::CTRL, self.get(regs::CTRL) | ctrl::RST);
                     self.reset_reads = RESET_READS;
                 }
@@ -942,6 +1071,13 @@ impl Model {
                 self.refresh_ownership();
             }
             regs::MDIC => self.mdi(value),
+            regs::CTRL_EXT => {
+                let was = self.get(regs::CTRL_EXT);
+                if value & !was & ctrl_ext::FORCE_SMBUS != 0 {
+                    self.smbus_forced_at = Some(self.nanos);
+                }
+                self.set(regs::CTRL_EXT, value);
+            }
             // §10.2.2.2: read-only.
             regs::STATUS => {}
             regs::RDT => {
@@ -958,6 +1094,73 @@ impl Model {
             }
             _ => self.set(reg, value),
         }
+    }
+
+    /// The host driver's 20 ms after a full reset, in which it touches nothing.
+    fn keep_quiet(&mut self, reg: usize) {
+        if let Some(until) = self.quiet_until.take() {
+            assert!(
+                self.nanos >= until,
+                "seed {}: the driver reached register {reg:#x} {} ns after a reset of the MAC and \
+                 the PHY together, inside the 20 ms nothing is touched",
+                self.seed,
+                wake::RESET_QUIET_NANOS - (until - self.nanos)
+            );
+        }
+    }
+
+    /// `CTRL`'s hand on `LANPHYPC`: driven low with the override, a power cycle
+    /// once the override is let go.
+    fn lanphypc(&mut self, was: u32, now: u32) {
+        let low = |word: u32| {
+            word & ctrl::LANPHYPC_OVERRIDE != 0 && word & ctrl::LANPHYPC_VALUE == 0
+        };
+        if low(now) && !low(was) {
+            assert_eq!(
+                self.get(regs::FEXTNVM3) & fextnvm3::PHY_CFG_COUNTER_MASK,
+                fextnvm3::PHY_CFG_COUNTER_50MS,
+                "seed {}: the driver drove LANPHYPC low with the PHY configuration counter not at \
+                 50 ms",
+                self.seed
+            );
+            self.lanphypc_low_at = Some(self.nanos);
+        }
+        if now & ctrl::LANPHYPC_OVERRIDE == 0 {
+            if let Some(at) = self.lanphypc_low_at.take() {
+                assert!(
+                    self.nanos - at >= wake::LANPHYPC_HOLD_NANOS,
+                    "seed {}: the driver held LANPHYPC low {} ns, under the 10 us a power cycle \
+                     takes",
+                    self.seed,
+                    self.nanos - at
+                );
+                self.power_cycle();
+            }
+        }
+    }
+
+    /// I219 Table 5-1's internal power-on reset: every PHY register back to
+    /// its default, and the PHY back on whichever interface it resets to.
+    ///
+    /// **The identifier is the silicon's and not a register's state**, so what
+    /// a test made the part identify as survives the power it loses.
+    fn power_cycle(&mut self) {
+        self.power_cycles += 1;
+        self.lcd = if self.permits.phy_comes_back_on_smbus { Lcd::Smbus } else { Lcd::InStep };
+        self.lcd_reset_at = Some(self.nanos);
+        let mut defaults = PhyModel::new(&self.permits.after_a_phy_reset());
+        for identifier in [reg::IDENTIFIER_HIGH, reg::IDENTIFIER_LOW] {
+            defaults.file[identifier as usize] = self.phy.file[identifier as usize];
+        }
+        self.phy.file = defaults.file;
+        self.phy.custom_mode = defaults.custom_mode;
+        self.phy.page = None;
+        self.phy.negotiated_over = None;
+        self.phy.negotiating = false;
+        let ext = self.get(regs::CTRL_EXT) & !ctrl_ext::LCD_POWER_CYCLE_DONE;
+        self.set(regs::CTRL_EXT, ext);
+        self.cycle_done_reads = CYCLE_DONE_READS;
+        self.refresh_phy_link();
     }
 
     /// §4.5.2's arbitration, answered into the register the requester reads it
@@ -1016,13 +1219,15 @@ impl Model {
         self.not_modelled_on_the_82574("MDIC");
         // §9.2: "After LCD reset to the I219 a delay of 10 ms is required
         // before attempting to access MDIO registers."
-        assert!(
-            self.nanos.saturating_sub(self.reset_at) >= crate::phy::LCD_RESET_DELAY_NANOS,
-            "seed {}: the driver started an MDI transaction {} ns after it reset the part, and \
-             §9.2 requires 10 ms",
-            self.seed,
-            self.nanos.saturating_sub(self.reset_at)
-        );
+        if let Some(at) = self.lcd_reset_at {
+            assert!(
+                self.nanos.saturating_sub(at) >= crate::phy::LCD_RESET_DELAY_NANOS,
+                "seed {}: the driver started an MDI transaction {} ns after it reset the PHY, and \
+                 §9.2 requires 10 ms",
+                self.seed,
+                self.nanos.saturating_sub(at)
+            );
+        }
         assert!(
             command & mdic::READY == 0,
             "seed {}: the driver wrote an MDI command with the Ready bit already set, and \
@@ -1089,7 +1294,21 @@ impl Model {
         // neither `Ready` nor `Error` ever comes back. **This is the wall the
         // bench boot is reading, modelled**: a driver that skipped the power
         // step gets exactly it.
-        let gated = self.get(regs::CTRL) & ctrl::PHY_POWER_DOWN != 0;
+        let forced = self.get(regs::CTRL_EXT) & ctrl_ext::FORCE_SMBUS != 0;
+        if forced {
+            let at = self.smbus_forced_at.expect("the force was written");
+            assert!(
+                self.nanos - at >= wake::SMBUS_SETTLE_NANOS,
+                "seed {}: the driver started an MDI transaction {} ns after forcing the MAC onto \
+                 SMBus, inside the 50 ms the MAC takes to finish its retries",
+                self.seed,
+                self.nanos - at
+            );
+        }
+        // The interconnect carries the cycle only where both ends are on the
+        // same interface and in step.
+        let reachable = matches!((self.lcd, forced), (Lcd::InStep, false) | (Lcd::Smbus, true));
+        let gated = self.get(regs::CTRL) & ctrl::PHY_POWER_DOWN != 0 || !reachable;
         self.phy.mdi_reads = if self.phy.never_ready || gated {
             u32::MAX
         } else if self.permits.mdi_takes_several_reads {
@@ -1106,6 +1325,13 @@ impl Model {
             // is set with it, because the same section sets that bit "at the
             // end of the MDI transaction" and a failed read is one that ended —
             // so what stands in the data field is not what the PHY said.
+            self.mdi_answer = command | mdic::ERROR | mdic::READY;
+            return;
+        }
+        // The write that moves the PHY between its two interfaces ends in
+        // `Error` by nature, whichever way it moves it.
+        if write && matches!(self.phy_at(addr, reg), PhyPlace::SmbusControl) {
+            self.phy_write(addr, reg, data);
             self.mdi_answer = command | mdic::ERROR | mdic::READY;
             return;
         }
@@ -1130,6 +1356,16 @@ impl Model {
             (phy::SPECIFIC, r) if r < FIRST_PAGED_REGISTER => PhyPlace::Ieee(r),
             (phy::GENERAL, reg::PAGE_SELECT) => PhyPlace::Page,
             (phy::GENERAL, r) if r < FIRST_PAGED_REGISTER => PhyPlace::Ieee(r),
+            (phy::GENERAL, wake::SMBUS_CONTROL) => {
+                assert_eq!(
+                    self.phy.page,
+                    Some(phy::PAGE_PORT_CONTROL),
+                    "seed {}: the driver reached §9.5.3.4's SMBus Control with page {:?} selected",
+                    self.seed,
+                    self.phy.page
+                );
+                PhyPlace::SmbusControl
+            }
             (phy::GENERAL, reg::CUSTOM_MODE) => {
                 assert_eq!(
                     self.phy.page,
@@ -1156,6 +1392,13 @@ impl Model {
             PhyPlace::Undriven => u16::MAX,
             PhyPlace::Page => self.phy.page.unwrap_or(0) << phy::PAGE_SHIFT,
             PhyPlace::CustomMode => self.phy.custom_mode,
+            PhyPlace::SmbusControl => {
+                if self.lcd == Lcd::Smbus {
+                    wake::SMBUS_CONTROL_FORCE
+                } else {
+                    0
+                }
+            }
             PhyPlace::Ieee(r) => self.phy.file[r as usize],
         }
     }
@@ -1184,6 +1427,22 @@ impl Model {
             // page. During write to the page register, the five LSBs are
             // ignored."
             PhyPlace::Page => self.phy.page = Some(data >> phy::PAGE_SHIFT),
+            PhyPlace::SmbusControl => {
+                // §9.5.3.4's other fields come up 0b, and this model leaves them
+                // there.
+                assert_eq!(
+                    data & !wake::SMBUS_CONTROL_FORCE,
+                    0,
+                    "seed {}: the driver wrote {data:#06x} to §9.5.3.4's SMBus Control, whose \
+                     other fields it read as 0b",
+                    self.seed
+                );
+                self.lcd = if data & wake::SMBUS_CONTROL_FORCE != 0 {
+                    Lcd::Smbus
+                } else {
+                    Lcd::InStep
+                };
+            }
             PhyPlace::CustomMode => {
                 self.carried("§9.5.3.1's Custom Mode Control", data, &carried::CUSTOM_MODE);
                 self.phy.custom_mode = data;
@@ -1614,6 +1873,21 @@ impl Nic {
         let mut model = self.0.borrow_mut();
         model.phy.mdio_sticks = true;
         model.phy.engine_lets_go_at = Some(nanos);
+    }
+
+    /// Where the PHY stands with respect to the MAC.
+    pub fn lcd(&self) -> Lcd {
+        self.0.borrow().lcd
+    }
+
+    /// How many times `LANPHYPC` was cycled.
+    pub fn power_cycles(&self) -> u32 {
+        self.0.borrow().power_cycles
+    }
+
+    /// How many resets carried `PHY_RST`.
+    pub fn phy_resets(&self) -> u32 {
+        self.0.borrow().phy_resets
     }
 
     /// Every register offset the driver has written.
