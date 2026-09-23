@@ -67,6 +67,12 @@ pub struct Arm {
     /// ask**: a boot whose judges read no cable would be refused for a fact
     /// none of them looks at.
     pub nic: Option<&'static str>,
+    /// **The boot is talked to over its own cable.** Its image streams its
+    /// records to the listener `--metal-listen` names and authorizes a key
+    /// minted beside it, and the loop — told `--talk` — listens, pings the
+    /// address that opens the stream, runs a command there and tells it to
+    /// reboot. `false` on every boot whose judge reads the stick alone.
+    pub talk: bool,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -80,7 +86,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], nic: None }
+    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -218,6 +224,25 @@ pub struct Readback {
 }
 
 impl Readback {
+    /// What the loop heard over the boot's own cable, and the record stream it
+    /// received — or why a boot that was to be talked to has neither.
+    ///
+    /// **Absent is a finding here, never an empty answer**: the loop writes
+    /// the conversation before anything can refuse, so a talking boot's
+    /// readback without one is a loop that was not told `--talk`.
+    pub fn talk(&self) -> Result<(toyos_build::metaltalk::Heard, Vec<String>), String> {
+        let at = self.home.join(toyos_build::metal::READBACK_TALK);
+        let text = std::fs::read_to_string(&at).map_err(|e| {
+            format!("{}: {e} — this boot's loop was not told --talk", at.display())
+        })?;
+        let heard = toyos_build::metaltalk::Conversation::parse(&text)?.ok_or_else(|| {
+            format!("{}'s loop heard nothing over the cable:\n{text}", self.label)
+        })?;
+        let at = self.home.join(toyos_build::metal::READBACK_STREAM);
+        let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        Ok((heard, stream.split_inclusive('\n').map(str::to_string).collect()))
+    }
+
     /// One file off the log volume that is neither the loader's nor `logd`'s,
     /// read out of the partition's own bytes; `None` where the volume has no
     /// such file.
@@ -470,6 +495,10 @@ struct Batch {
     links: Vec<(String, String)>,
     /// [`Arm::nic`], carried to the invocation that drives this boot.
     nic: Option<&'static str>,
+    /// [`Arm::talk`], carried to the image and to the invocation.
+    talk: bool,
+    /// `--metal-listen`, on a talking batch: where its record stream goes.
+    listen: Option<String>,
 }
 
 impl Batch {
@@ -515,6 +544,8 @@ fn batches(
                 files: boot.files.clone(),
                 links: boot.links.clone(),
                 nic: None,
+                talk: false,
+                listen: None,
             },
         );
         if was.is_some() {
@@ -532,24 +563,29 @@ fn batches(
                 files: Vec::new(),
                 links: Vec::new(),
                 nic: arm.nic,
+                talk: arm.talk,
+                listen: None,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
                 || batch.nic != arm.nic
+                || batch.talk != arm.talk
             {
                 return Err(format!(
-                    "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}) and another row rides \
-                     it as ({}, {:?}, {:?}, {:?}); one boot is one image",
+                    "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}) and another row \
+                     rides it as ({}, {:?}, {:?}, {:?}, talk={}); one boot is one image",
                     arm.boot,
                     arm.config,
                     arm.params,
                     arm.features,
                     arm.nic,
+                    arm.talk,
                     batch.config,
                     batch.params,
                     batch.features,
-                    batch.nic
+                    batch.nic,
+                    batch.talk
                 ));
             }
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
@@ -697,6 +733,29 @@ fn build(
     let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
+    // **A talking boot carries the host's half of the cable in its image**: the
+    // listener's address, which only the command line can say, and the key the
+    // loop will offer, minted beside the image so the loop finds it there.
+    let stream_param = match (batch.talk, batch.listen.as_deref()) {
+        (false, _) => None,
+        (true, None) => {
+            return Err(format!(
+                "{label} is talked to over its own cable, and its record stream needs this \
+                 host's address on the machine's network: pass --metal-listen <a.b.c.d:port>"
+            ))
+        }
+        (true, Some(at)) => {
+            let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
+            extra.push((
+                super::ssh::KEYS_ON_ROOT.to_string(),
+                identity.authorized_line().into_bytes(),
+            ));
+            Some(format!("{}{at}", toyos_logstream::PARAM))
+        }
+    };
+    if let Some(param) = &stream_param {
+        params.push(param);
+    }
     let plan = toyos_build::build::Plan::new(&config, features, &params);
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
@@ -713,7 +772,12 @@ fn fingerprint(text: &str) -> u64 {
 
 /// The invocation that turns one image into one readback. Written down in the
 /// staged request and run by [`Mode::Drive`], so the two cannot differ.
-fn invocation(image: &Path, home: &Path, nic: Option<&str>) -> Vec<String> {
+/// Where a talking boot's key lives, beside its image.
+fn talk_home(home: &Path) -> PathBuf {
+    home.join("ssh")
+}
+
+fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<String> {
     let mut words = vec![
         "run".to_string(),
         "--bin".to_string(),
@@ -732,6 +796,10 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>) -> Vec<String> {
     if let Some(nic) = nic {
         words.push("--nic".to_string());
         words.push(nic.to_string());
+    }
+    if talk {
+        words.push("--talk".to_string());
+        words.push(talk_home(home).join("id_ed25519").display().to_string());
     }
     words
 }
@@ -778,6 +846,9 @@ pub enum Verdict {
 }
 
 /// The whole metal profile: batch, build, drive, judge, report.
+// Each argument is one of the suite's own flags or tables, passed through
+// once; a struct holding them would be a second name for the command line.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     mode: Mode,
     dir: &Path,
@@ -789,6 +860,8 @@ pub fn run(
     // then put on the image.
     helpers: &[&str],
     quiet: bool,
+    // `--metal-listen`: where a talking boot streams its records.
+    listen: Option<&str>,
 ) -> Verdict {
     let root = super::compile::repo_root();
     let profile = match Profile::load(&root) {
@@ -808,13 +881,16 @@ pub fn run(
         }
     };
     let shared = shared.as_slice();
-    let batches = match batches(tests, shared, &profile) {
+    let mut batches = match batches(tests, shared, &profile) {
         Ok(batches) => batches,
         Err(why) => {
             eprintln!("[metal] {why}");
             return Verdict::Red;
         }
     };
+    for batch in batches.values_mut().filter(|b| b.talk) {
+        batch.listen = listen.map(str::to_string);
+    }
     let declared: Vec<&str> = tests
         .iter()
         .filter_map(|(name, decl)| match decl {
@@ -850,6 +926,11 @@ pub fn run(
 
     let mut images: BTreeMap<&str, PathBuf> = BTreeMap::new();
     if !judging {
+        // The key a talking boot authorizes is minted by the harness's own ssh
+        // client, which the suite builds only on its QEMU path.
+        if batches.values().any(|b| b.talk) {
+            toyos_build::build::build_host_judges(&root, quiet);
+        }
         for (label, batch) in &batches {
             match build(&root, dir, label, batch, rust_bins, helpers, quiet) {
                 Ok(image) => {
@@ -877,7 +958,7 @@ pub fn run(
             request.push_str(&format!(
                 "\n{label}\n  image: {}\n  cargo {}\n",
                 image.display(),
-                invocation(image, &at(dir, label), batches[*label].nic).join(" ")
+                invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
             ));
         }
         let path = dir.join("request.txt");
@@ -904,7 +985,7 @@ pub fn run(
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if mode == Mode::Drive {
         for (label, image) in &images {
-            let words = invocation(image, &at(dir, label), batches[*label].nic);
+            let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
             match Command::new("cargo").args(&words).current_dir(&root).status() {
                 Ok(status) if status.success() => {}

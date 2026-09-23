@@ -51,6 +51,24 @@ const NETD: &str = "netd";
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 
+/// The boot the host talks to over its own cable: the record stream, sshd, and
+/// `reboot` as the way the machine is handed back.
+pub const TALK_CONFIG: &str = "tests/lantalkcase";
+pub const TALK_BOOT: &str = "lantalkcase";
+
+/// Its one job holds the machine until the runner's bound is near, as the
+/// fallback for a host that never tells it to reboot.
+const TALK_HOLD: &str = "test_rs_lan_talk_hold";
+pub const TALK_JOBS: &[&str] = &[TALK_HOLD];
+
+/// The same boot in front of QEMU's 82574, and the key its image authorizes.
+const TALK_QEMU_CONFIG: &str = "tests/e1000talkcase";
+const TALK_KEY: &str = "lantalk";
+
+/// A liveness guard on a rehearsal guest that never opened its stream, never a
+/// verdict.
+const TALK_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// The armed boot's judge: the kernel's own records, tied to the I219's
 /// hand-over, say whether a message it raised reached a CPU — whatever the PHY
 /// did about a link. Kernel records and not netd's: on this machine a userland
@@ -519,9 +537,291 @@ pub fn lan_no_lease(
     Ok(())
 }
 
+/// The T14 talked to over its own cable, judged from the Mac's side: the
+/// record stream arrived while the machine booted and is the stick's own log
+/// in its own order, the address that opened it answered a ping and ran the
+/// command, and `reboot` handed the machine back — before its hold would have.
+pub fn talked_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let (heard, stream) = back.talk()?;
+    let mut bad: Vec<String> = Vec::new();
+    match toyos_build::metaltalk::judge(&heard, &stream) {
+        Ok(said) => said.iter().for_each(|line| eprintln!("  [talk] {line}")),
+        Err(found) => bad.extend(found),
+    }
+    // **The stick is the oracle the wire is compared with**: `logd` writes a
+    // line to `/log` and then offers it to the stream, so what arrived is the
+    // file's own lines in the file's own order, with holes only where the
+    // queue refused one — and the file came back over a different path.
+    let file: Vec<String> =
+        back.kernel().text().split_inclusive('\n').map(str::to_string).collect();
+    match super::logstream::is_subsequence_of(&stream, &file) {
+        Ok(()) => eprintln!(
+            "  [talk] the {} streamed record(s) are the stick's own, in its order ({} in the file)",
+            stream.len(),
+            file.len()
+        ),
+        Err(why) => bad.push(why),
+    }
+    // The command and not the hold ended this boot: a hold that exited 0 is a
+    // machine that waited out its own bound.
+    match back.exit_code(TALK_HOLD) {
+        Ok(0) => bad.push(format!(
+            "{TALK_HOLD} exited 0, so the boot ran to its own hold and `reboot` over ssh was \
+             not what ended it"
+        )),
+        Ok(code) => eprintln!("  [talk] {TALK_HOLD} was ended under the reboot ({code})"),
+        Err(_) => eprintln!("  [talk] {TALK_HOLD} left no exit record: the reboot ended it"),
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
+}
+
+/// The talking boot rehearsed in front of QEMU's 82574: the host's listener
+/// receives the boot's records while it boots, the same conversation the metal
+/// loop has goes through slirp's forward to sshd, and `reboot` over it ends the
+/// guest. The stream is then compared with the guest's own `/log`, read off the
+/// volume behind its back.
+///
+/// **What this cannot rehearse is the network**: slirp answers no ICMP from the
+/// host and translates the stream's peer, so the ping and the peer's address
+/// are the T14's to judge.
+pub fn lan_talk(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    use toyos_build::metaltalk::{self, Ssh};
+
+    let root = super::compile::repo_root();
+    let staged = TalkBoot::stage("lan-talk")?;
+    let (stream, scratch) = (&staged.stream, &staged.scratch);
+    let ssh_port = qemu::free_host_port();
+    let options = BootOptions { ssh_port: Some(ssh_port), ..staged.options() };
+    let mut guest = QemuInstance::boot_with_options(&staged.case, &[], &[], options);
+    let mut console = guest.boot_log().to_string();
+
+    let ssh = Ssh::at(&root, staged.identity.private().to_path_buf())?;
+    let forward = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, ssh_port));
+    let conversation =
+        metaltalk::converse(stream, &ssh, Some(forward), false, TALK_CEILING, scratch)?;
+    // `-no-reboot`: the guest's own reset ends QEMU, and its last word is
+    // the kernel's.
+    qemu::await_marker(&mut guest, &mut console, bootlog::REBOOTING, "`reboot` over ssh")?;
+    drop(guest);
+    serial::Serial::named("the talking boot", console.as_str()).must_be_clean()?;
+
+    let heard = metaltalk::Conversation::parse(&conversation.render())?
+        .ok_or("a rendered conversation names its peer")?;
+    let said = metaltalk::judge(&heard, &stream.lines())
+        .map_err(|bad| format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))?;
+    let file = super::volumes::whole_log(&staged.image, staged.start, staged.len)?;
+    super::logstream::is_subsequence_of(&stream.lines(), &file)?;
+    for line in said {
+        eprintln!("  [talk] {line}");
+    }
+    eprintln!(
+        "  [talk] the {} streamed record(s) are /log's own, in its order ({} in the file)",
+        stream.lines().len(),
+        file.len()
+    );
+    let _ = std::fs::remove_file(&staged.image);
+    Ok(())
+}
+
+/// The talking boot's image, streaming to `at` and authorizing `identity`, and
+/// where its log partition sits in it.
+fn talk_image(
+    case: &Path,
+    name: &str,
+    at: (&'static str, u16),
+    identity: &super::ssh::Identity,
+) -> Result<(std::path::PathBuf, usize, usize), String> {
+    let param = qemu::log_stream_param(at);
+    let bytes = qemu::build_boot_image_carrying(
+        case,
+        &[],
+        &[],
+        &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
+        &[&param],
+    );
+    let image = super::lane::dir().join(format!("{name}.img"));
+    std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
+    let (start, len) = super::volumes::log_extent(&bytes, &image)?;
+    Ok((image, start, len))
+}
+
+/// A talking boot in front of QEMU's 82574, staged: its listener, the key its
+/// image authorizes, and where its log partition sits in the image.
+struct TalkBoot {
+    case: std::path::PathBuf,
+    stream: toyos_build::metaltalk::Stream,
+    identity: super::ssh::Identity,
+    image: std::path::PathBuf,
+    scratch: std::path::PathBuf,
+    at: (&'static str, u16),
+    start: usize,
+    len: usize,
+}
+
+impl TalkBoot {
+    fn stage(name: &str) -> Result<Self, String> {
+        let case = super::compile::repo_root().join(TALK_QEMU_CONFIG);
+        let scratch = super::lane::dir().join(name);
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        let identity = super::ssh::Identity::mint(TALK_KEY)?;
+        let stream = toyos_build::metaltalk::Stream::listen(
+            std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            &scratch.join(toyos_build::metal::READBACK_STREAM),
+            false,
+        )?;
+        let at = (qemu::GUEST_VIEW_OF_HOST, stream.local().port());
+        let (image, start, len) = talk_image(&case, name, at, &identity)?;
+        Ok(Self { case, stream, identity, image, scratch, at, start, len })
+    }
+
+    /// The boot's options, the NIC asked of the argv rather than assumed.
+    fn options(&self) -> BootOptions {
+        let options = BootOptions {
+            profile: qemu::Profile::E1000e,
+            boot_image: Some(qemu::Staged::Written(self.image.clone())),
+            log_stream: Some(self.at),
+            ..Default::default()
+        };
+        assert!(
+            qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")),
+            "[lan] this boot needs an Intel NIC and the profile has none"
+        );
+        options
+    }
+}
+
+/// The marker a late-link boot takes its cable out at: `logd` exists and netd
+/// does not yet, so no lease can have landed.
+const LOGD_SPAWNED: &str = "spawn: /system/bin/logd ";
+
+/// How long the late-link boot's cable stays out: a stimulus's pace, never a
+/// verdict — long enough that `logd` asks through a machine with no address
+/// many times over, which is what the T14's slow PHY gives it.
+const CABLE_OUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// **The network comes up late, and the stream still opens.** The talking boot
+/// with its cable taken out before netd starts and put back seconds later. On
+/// the T14 the lease lands seconds after `logd` first asks for its stream, and
+/// a machine with no address yet answered that ask as a peer's refusal, which
+/// `logd` took as final. The premise is asked of the guest's own console — no
+/// lease before the cable goes back — and the verdict is the stream opening
+/// and carrying the boot's `Boot: complete`.
+pub fn lan_talk_late_link(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let staged = TalkBoot::stage("lan-talk-late-link")?;
+    let options = BootOptions { qmp: true, ready_marker: LOGD_SPAWNED, ..staged.options() };
+    let mut guest = QemuInstance::boot_with_options(&staged.case, &[], &[], options);
+    let mut qmp = qemu::QmpDevices::open(guest.qmp_socket());
+    qmp.set_link("net0", false);
+    let mut console = guest.boot_log().to_string();
+    console.push_str(&guest.drain_serial(CABLE_OUT));
+    if console.contains(LEASE) {
+        return Err(format!(
+            "the premise did not hold: the guest leased before its cable went out, so nothing \
+             here came up late\n{console}"
+        ));
+    }
+    if let Some(peer) = staged.stream.peer() {
+        return Err(format!("the stream opened from {peer} with the cable out"));
+    }
+    qmp.set_link("net0", true);
+    drop(qmp);
+    let opened = staged.stream.wait_connected(TALK_CEILING);
+    console.push_str(&guest.drain_serial(std::time::Duration::from_millis(500)));
+    drop(guest);
+    if opened.is_none() {
+        return Err(format!(
+            "the cable went back and the stream never opened in {} s\n{console}",
+            TALK_CEILING.as_secs()
+        ));
+    }
+    let lines = staged.stream.lines();
+    if bootlog::boot_millis(&lines.concat()).is_none() {
+        return Err(format!("the stream opened and carries no `Boot: complete`: {lines:?}"));
+    }
+    if !console.contains(LEASE) {
+        return Err(format!("the stream opened and the guest never said it leased\n{console}"));
+    }
+    serial::Serial::named("the late-link boot", console.as_str()).must_be_clean()?;
+    eprintln!(
+        "  [talk] the cable went out before netd, back {} s later, and the stream opened with {} \
+         record(s), `Boot: complete` among them",
+        CABLE_OUT.as_secs(),
+        lines.len()
+    );
+    let _ = std::fs::remove_file(&staged.image);
+    Ok(())
+}
+
 /// Where this process writes the frames one boot put on its wire.
 fn wire_dump() -> std::path::PathBuf {
     let at = std::env::temp_dir().join(format!("toyos-lan-{}.pcap", std::process::id()));
     let _ = std::fs::remove_file(&at);
     at
+}
+
+/// **The T14's first talking boot to open its stream, on the 82574**: this
+/// host accepts the boot's connection and closes it before reading a byte —
+/// what macOS's application firewall does to a binary it blocks incoming
+/// connections for. The boot goes on, and what `logd` owes is to notice: the
+/// stream it was writing into is gone, and `/log` says so.
+pub fn lan_talk_host_closes(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let case = super::compile::repo_root().join(TALK_QEMU_CONFIG);
+    let identity = super::ssh::Identity::mint(TALK_KEY)?;
+    let closer = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .map_err(|e| format!("bind the closing listener: {e}"))?;
+    let port = closer.local_addr().map_err(|e| format!("its port: {e}"))?.port();
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&accepted);
+    std::thread::spawn(move || {
+        for conn in closer.incoming() {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(conn);
+        }
+    });
+    let at = (qemu::GUEST_VIEW_OF_HOST, port);
+    let (image, start, len) = talk_image(&case, "lan-talk-host-closes", at, &identity)?;
+    let options = BootOptions {
+        profile: qemu::Profile::E1000e,
+        boot_image: Some(qemu::Staged::Written(image.clone())),
+        log_stream: Some(at),
+        ..Default::default()
+    };
+    let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
+    let mut console = guest.boot_log().to_string();
+    // A pace for records to be offered into a connection that is gone, never
+    // a verdict: the verdict is what the guest's own log says.
+    console.push_str(&guest.drain_serial(std::time::Duration::from_secs(10)));
+    drop(guest);
+    serial::Serial::named("the host-closes boot", console.as_str()).must_be_clean()?;
+    let times = accepted.load(std::sync::atomic::Ordering::SeqCst);
+    if times == 0 {
+        return Err("the boot never connected, so nothing here was closed on it".to_string());
+    }
+    let file = super::volumes::whole_log(&image, start, len)?;
+    let said = format!("the log stream to {}:{port}", qemu::GUEST_VIEW_OF_HOST);
+    let Some(line) = file.iter().find(|l| l.contains(&said)) else {
+        return Err(format!(
+            "this host closed the boot's stream {times} time(s) and /log never says so; it ends \
+             {:?}",
+            file.iter().rev().take(5).collect::<Vec<_>>()
+        ));
+    };
+    eprintln!("  [talk] this host closed the stream on accept ({times} time(s)); /log: {}", line.trim_end());
+    let _ = std::fs::remove_file(&image);
+    Ok(())
 }

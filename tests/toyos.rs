@@ -250,6 +250,9 @@ const RUST_SKIP: &[&str] = &[
     // twenty seconds so the host can reach this machine over the cable. On a
     // shared boot it would be twenty seconds of nothing.
     "lan_hold",
+    // The same for `tests/lantalkcase`, held until the runner's bound is near
+    // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
+    "lan_talk_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -671,6 +674,20 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // a link flap. Records and a file; its clocks are the flap's hold and the
     // drain that outlasts netd's window, and a slower machine moves neither.
     ("lan_lease_report", Sched::Parallel, Tier::Fast),
+    // The T14's talking boot rehearsed on the same part: the record stream to a
+    // host listener while the guest boots, one command over ssh answered byte
+    // for byte, and `reboot` over ssh ending the guest. Records, bytes and a
+    // reset; its clocks are liveness guards on a guest that stopped talking.
+    ("lan_talk", Sched::Parallel, Tier::Fast),
+    // The same boot with its cable out before netd starts and back seconds
+    // later: the stream must still open. The verdict is the stream opening
+    // and the guest's own records; its one clock paces the cable, and the
+    // premise — no lease before the cable goes back — is asked of the guest.
+    ("lan_talk_late_link", Sched::Parallel, Tier::Fast),
+    // The same boot with this host closing its stream on accept, as the T14's
+    // first talking run met it: the verdict is the guest's own `/log` saying
+    // the stream ended. Its one clock paces records into the dead connection.
+    ("lan_talk_host_closes", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -1327,6 +1344,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         "lan_lease_report",
         metal::Metal::Runs { arms: LANLEASECASE, judge: |b| lan::leased_on_metal(b[0]) },
     ),
+    (
+        "lan_talk",
+        metal::Metal::Runs { arms: LANTALKCASE, judge: |b| lan::talked_on_metal(b[0]) },
+    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1749,6 +1770,14 @@ const LANICSCASE: &[metal::Arm] = &[metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, 
 const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
     nic: Some(lan::NIC),
     ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
+}];
+
+/// The boot the host talks to over its own cable: it streams its records to
+/// the listener `--metal-listen` names, and the loop pings it, runs a command
+/// on it and tells it to reboot.
+const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
+    talk: true,
+    ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
 }];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
@@ -13620,6 +13649,9 @@ fn run_machine_test(
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
         "lan_lease_report" => lan::lan_lease_report(test_config, c_bins, rust_bins),
+        "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
+        "lan_talk_late_link" => lan::lan_talk_late_link(test_config, c_bins, rust_bins),
+        "lan_talk_host_closes" => lan::lan_talk_host_closes(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed
@@ -18766,6 +18798,7 @@ fn main() {
                 &rust_bins,
                 RUST_SKIP,
                 !nocapture && !debug_mode,
+                SUITE.value(&args, &testargs::METAL_LISTEN),
             ) {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,

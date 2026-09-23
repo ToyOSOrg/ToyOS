@@ -1049,3 +1049,43 @@ name = "boot.lanleasecase.panel_us"
 unit = "us"
 ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
+
+# `lantalkcase` is `lancase` with sshd and the record stream, talked to from the
+# host until it is told to reboot. Its one job holds the machine only as the
+# fallback for a host that never says so.
+
+[[number]]
+name = "boot.lantalkcase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.lancase.complete_ms"
+
+[[number]]
+name = "boot.lantalkcase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.lantalkcase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.lancase.stick_secs"
+
+[[number]]
+name = "list.lantalkcase.job_ms"
+unit = "ms"
+ceiling = 54000
+ceiling_from = "lan_talk_hold's end, toyos_tco::JOB_BOUND_MS less its tenth: the hold sleeps to that much boot time and no further"
+
+[[number]]
+name = "boot.lantalkcase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.lantalkcase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"

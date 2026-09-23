@@ -172,6 +172,14 @@ pub enum Refusal {
     /// `Rebooting.` is the failure and a sealed `WEDGED` record is the pass —
     /// the one boot in this loop whose verdict is not `bootlog::verdict`'s.
     Wedge { why: &'static str },
+    /// **What the boot said over its own cable is not what a talking boot
+    /// owes**: the record stream, a ping, the command's answer and `reboot`,
+    /// each finding by name. Judged after the stick's own verdict, which stays
+    /// the fallback for a boot that never reached its network.
+    Talk(Vec<String>),
+    /// This host could not set up its half of the cable before the flash: the
+    /// listener, the client or the key.
+    Listen(String),
     Usage(String),
 }
 
@@ -187,6 +195,7 @@ impl Refusal {
                 | Self::Fat32(_)
                 | Self::ReportedAndBootedNothing { .. }
                 | Self::HungWithoutARecord
+                | Self::Talk(_)
                 | Self::Wedge { .. }
         )
     }
@@ -316,6 +325,12 @@ impl fmt::Display for Refusal {
                  because nothing ran. This boot measured no test. What the pass said was: \
                  {said}"
             ),
+            Self::Talk(findings) => write!(
+                f,
+                "the boot did not say over its own cable what a talking boot owes:\n  {}",
+                findings.join("\n  ")
+            ),
+            Self::Listen(why) => write!(f, "this host's half of the cable is not ready: {why}"),
             Self::Usage(why) => write!(f, "{why}"),
         }
     }
@@ -1466,12 +1481,14 @@ declare_flags!(METAL = {
     FAT32_CHECK = "--fat32-check", None;
     NIC = "--nic", Next;
     WAIT_SECS = "--wait-secs", Next;
+    TALK = "--talk", Next;
     DRY_RUN = "--dry-run", None;
 });
 
 /// The flags that describe a boot, as against the ones that say which machine
 /// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
-const ABOUT_A_BOOT: &[&Flag] = &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS];
+const ABOUT_A_BOOT: &[&Flag] =
+    &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS, &TALK];
 
 /// What the binary was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1511,6 +1528,13 @@ pub struct Args {
     /// cost four `ssh` round trips and a boot whose judges read no cable would
     /// be refused for a fact none of them looks at.
     nic: Option<String>,
+    /// The private key the image authorizes, and the ask to talk to the boot
+    /// over its cable: listen where the image's `logstream=` says, and once
+    /// the boot opens that stream, ping it, run one command on it and tell it
+    /// to reboot. **The address is the image's and never a flag's** — an image
+    /// is asked what it is armed with, so the listener and the parameter
+    /// cannot disagree.
+    talk: Option<PathBuf>,
 }
 
 impl Args {
@@ -1541,6 +1565,7 @@ impl Args {
             readback: value(&READBACK).map(PathBuf::from),
             fat32_check: METAL.present(args, &FAT32_CHECK),
             nic: value(&NIC).map(str::to_string),
+            talk: value(&TALK).map(PathBuf::from),
         };
         if let Some(host) = value(&HOST) {
             let (user, machine) = host.split_once('@').ok_or_else(|| {
@@ -1572,7 +1597,69 @@ impl Args {
                 out.about_a_boot.join(" and ")
             )));
         }
+        // The stream is written as it arrives, and a boot that dies before
+        // the stick is read leaves nothing but that file.
+        if out.talk.is_some() && out.readback.is_none() {
+            return Err(Refusal::Usage(
+                "--talk writes the boot's record stream into the readback as it arrives; name \
+                 one with --readback"
+                    .to_string(),
+            ));
+        }
         Ok(out)
+    }
+}
+
+/// This host's half of the cable, set up before the flash.
+struct Talking {
+    stream: crate::metaltalk::Stream,
+    ssh: crate::metaltalk::Ssh,
+    scratch: PathBuf,
+}
+
+/// Where the stream is written as it arrives, beside the stick's files.
+pub const READBACK_STREAM: &str = "stream.log";
+
+impl Talking {
+    /// Bind the listener the image names, before anything is written: an image
+    /// streaming to an address this host does not hold is refused here, with
+    /// the machine untouched.
+    fn prepare(armed: &[String], key: &Path, dir: &Path) -> Result<Self, Refusal> {
+        let values: Vec<&str> =
+            armed.iter().filter_map(|p| p.strip_prefix(toyos_logstream::PARAM)).collect();
+        let [value] = values[..] else {
+            return Err(Refusal::Listen(format!(
+                "the image is armed with {} `{}` value(s), and a talking boot streams to one",
+                values.len(),
+                toyos_logstream::PARAM
+            )));
+        };
+        let (octets, port) = toyos_logstream::endpoint(value).map_err(|why| {
+            Refusal::Listen(format!("{}{value}: {}", toyos_logstream::PARAM, why.as_str()))
+        })?;
+        let at = std::net::SocketAddr::from((octets, port));
+        std::fs::create_dir_all(dir)
+            .map_err(|e| Refusal::File { path: dir.display().to_string(), why: e.to_string() })?;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let ssh = crate::metaltalk::Ssh::at(root, key.to_path_buf()).map_err(Refusal::Listen)?;
+        let stream = crate::metaltalk::Stream::listen(at, &dir.join(READBACK_STREAM), true)
+            .map_err(Refusal::Listen)?;
+        println!("listening at {at} for the boot's record stream");
+        Ok(Self { stream, ssh, scratch: dir.join("talk") })
+    }
+
+    /// Wait for the boot to open the stream, then talk to it, on a thread of
+    /// its own: the loop is meanwhile watching the machine go down and come
+    /// back, and the conversation is what makes it come back early.
+    fn start(
+        &self,
+        by: std::time::Duration,
+    ) -> std::thread::JoinHandle<Result<crate::metaltalk::Conversation, String>> {
+        let (stream, ssh, scratch) = (self.stream.clone(), self.ssh.clone(), self.scratch.clone());
+        std::thread::Builder::new()
+            .name("metal-talk".into())
+            .spawn(move || crate::metaltalk::converse(&stream, &ssh, None, true, by, &scratch))
+            .expect("the metal loop's conversation could not be started")
     }
 }
 
@@ -1687,6 +1774,12 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // image will arm, judged against the only table that has ruled on any of it.
     let armed = arms_are_admissible(asked)?;
     println!("image {}: armed with {armed:?}", image.path.display());
+    // The listener before the machine is asked anything: a boot streaming to an
+    // address this host cannot take is refused with the stick untouched.
+    let cable = match (&args.talk, &args.readback) {
+        (Some(key), Some(dir)) => Some(Talking::prepare(&armed, key, dir)?),
+        _ => None,
+    };
 
     driver.require_sudo()?;
     let policy =
@@ -1727,7 +1820,28 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         return Ok(None);
     }
 
-    let (back, replied) = driver.ride_the_reboot(args.wait_secs, wire.as_ref().map(|w| w.addr))?;
+    // The conversation runs while the loop watches the machine go and come
+    // back; its `reboot` is what brings it back before the boot's own hold does.
+    let talking = cable.as_ref().map(|cable| {
+        cable.start(std::time::Duration::from_secs(GOING_DOWN_SECS + args.wait_secs))
+    });
+    let ridden = driver.ride_the_reboot(args.wait_secs, wire.as_ref().map(|w| w.addr));
+    // **Written before anything else can refuse**: a machine that never came
+    // back, a stick that did not enumerate or a volume the outside judge
+    // complained about each return below, and what the cable heard is then
+    // the only account of the boot there is.
+    let heard = match (&cable, talking, &args.readback) {
+        (Some(cable), Some(handle), Some(dir)) => {
+            cable.stream.give_up();
+            let heard = handle
+                .join()
+                .unwrap_or_else(|_| Err("the conversation's thread panicked".to_string()));
+            write_talk(dir, &heard)?;
+            Some((heard, cable.stream.lines()))
+        }
+        _ => None,
+    };
+    let (back, replied) = ridden?;
     println!("the machine answered ssh again after {back} s");
     if let Some(wire) = &wire {
         match replied {
@@ -1791,10 +1905,54 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // it was not flashed as. *Which* bound sealed it is the page's to say
     // and not this list's — the arm says a bound was staged, and two of them
     // can reach a staged boot.
-    if stages_a_wedge(&armed) {
-        return Ok(Some(wedged_boot(&loader, &log)?));
+    let ms = if stages_a_wedge(&armed) {
+        wedged_boot(&loader, &log)?
+    } else {
+        bootlog::verdict(&log).map_err(Refusal::Log)?
+    };
+    // After the stick's own verdict, which stays the one that names a boot
+    // that never reached its network.
+    if let Some((heard, lines)) = &heard {
+        talk_verdict(heard, lines)?;
     }
-    Ok(Some(bootlog::verdict(&log).map_err(Refusal::Log)?))
+    Ok(Some(ms))
+}
+
+/// Where a conversation's facts are written, beside the stick's files.
+pub const READBACK_TALK: &str = "talk.txt";
+
+/// The key a readback carries where no boot opened the stream at all, with the
+/// reason — a human's line; a judge reads the absence of a conversation.
+const TALK_UNOPENED: &str = "talk_unopened";
+
+fn write_talk(
+    dir: &Path,
+    heard: &Result<crate::metaltalk::Conversation, String>,
+) -> Result<(), Refusal> {
+    let text = match heard {
+        Ok(conversation) => conversation.render(),
+        Err(why) => format!("{TALK_UNOPENED} {why:?}\n"),
+    };
+    let at = dir.join(READBACK_TALK);
+    std::fs::write(&at, text)
+        .map_err(|e| Refusal::File { path: at.display().to_string(), why: e.to_string() })
+}
+
+fn talk_verdict(
+    heard: &Result<crate::metaltalk::Conversation, String>,
+    lines: &[String],
+) -> Result<(), Refusal> {
+    let conversation = heard.as_ref().map_err(|why| Refusal::Talk(vec![why.clone()]))?;
+    // Judged as the readback carries it, so this verdict and the harness's are
+    // one reading of one file.
+    let heard = crate::metaltalk::Conversation::parse(&conversation.render())
+        .map_err(|why| Refusal::Talk(vec![why]))?
+        .expect("a rendered conversation names its peer");
+    let said = crate::metaltalk::judge(&heard, lines).map_err(Refusal::Talk)?;
+    for line in said {
+        println!("talk: {line}");
+    }
+    Ok(())
 }
 
 /// What an image armed to stop itself owes instead of `Rebooting.`, and the
@@ -1904,7 +2062,7 @@ pub const PING_AT_KEY: &str = "ping_at";
 /// Every file a readback directory carries, so a run that writes none of them
 /// leaves none of the last run's behind.
 pub const READBACK_FILES: &[&str] =
-    &[READBACK_LOADER, READBACK_KERNEL, READBACK_BOOT, READBACK_VOLUME];
+    &[READBACK_LOADER, READBACK_KERNEL, READBACK_BOOT, READBACK_VOLUME, READBACK_STREAM, READBACK_TALK];
 
 /// Empty a readback directory, before this run can leave any of it standing.
 ///
@@ -2170,6 +2328,7 @@ mod tests {
             vec!["--dry-run"],
             vec!["--wait-secs", "60"],
             vec!["--nic", "0000:00:1f.6"],
+            vec!["--talk", "/tmp/k"],
         ] {
             let mut words = vec!["--install-sudoers".to_string(), "/tmp/pw".to_string()];
             words.extend(flag.iter().map(|w| (*w).to_string()));
@@ -2186,6 +2345,36 @@ mod tests {
         let hosted = ["--install-sudoers", "/tmp/pw", "--host", "dev@t14", "--key", "/tmp/k"]
             .map(String::from);
         assert!(Args::parse(&hosted).is_ok());
+    }
+
+    /// **A talking boot's stream is written as it arrives**, so it needs the
+    /// readback it is written into; and the listener's address is the image's
+    /// alone — an image that streams nowhere, or to two places, is refused
+    /// before any machine is asked anything.
+    #[test]
+    fn a_talking_boot_needs_its_readback_and_one_address_in_its_image() {
+        let bare = ["--image", "x.img", "--talk", "/tmp/k"].map(String::from);
+        let refusal = Args::parse(&bare).unwrap_err();
+        assert!(refusal.to_string().contains("--readback"), "{refusal}");
+        assert!(!refusal.about_the_boot());
+
+        let dir = std::env::temp_dir().join(format!("metal-talk-{}", std::process::id()));
+        let key = std::path::Path::new("/nonexistent/id_ed25519");
+        for armed in [
+            vec!["boot-deadline=120000".to_string()],
+            vec![
+                "boot-deadline=120000".to_string(),
+                "logstream=10.0.2.2:1".to_string(),
+                "logstream=10.0.2.2:2".to_string(),
+            ],
+        ] {
+            let Err(refusal) = Talking::prepare(&armed, key, &dir) else {
+                panic!("{armed:?} was prepared");
+            };
+            assert!(refusal.to_string().contains("streams to one"), "{refusal}");
+            assert!(!refusal.about_the_boot());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **There is nothing to fall through to.** A default image was what let the

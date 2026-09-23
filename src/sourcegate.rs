@@ -615,6 +615,11 @@ const HOST_SPAWNS: &[Spawn] = &[
         sites: &[("tests/common/ssh.rs", 1)],
         why: "the harness's SSH client, russh and russh-sftp from source and not a host `ssh`",
     },
+    Spawn {
+        arg: "crate::build::ssh_client_host(&self.root)",
+        sites: &[("src/metaltalk.rs", 1)],
+        why: "the same client, driven by the metal loop at a booted T14 over its own cable",
+    },
 ];
 
 /// One package a CI image or workflow installs on a machine this project's

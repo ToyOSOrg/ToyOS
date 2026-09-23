@@ -983,6 +983,19 @@ impl NetDaemon {
             IpAddress::Ipv4(Ipv4Addr::from(req.addr)),
             req.port,
         );
+        if req.port == 0 || remote.addr.is_unspecified() {
+            msg.client.error(ERR_INVALID_INPUT);
+            return;
+        }
+        // **This machine holding no address is not a peer's refusal.** Before
+        // the lease there is no source for a SYN, and the socket's own
+        // `Unaddressable` would reach the client as `ERR_CONNECTION_REFUSED`,
+        // which says "that peer says no, give up" about a condition of this
+        // machine that clears when the lease lands.
+        if iface.ipv4_addr().is_none() {
+            msg.client.error(ERR_NOT_CONNECTED);
+            return;
+        }
         let local_port = self.alloc_port();
 
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
@@ -1184,6 +1197,15 @@ impl NetDaemon {
             // Signal EOF to client when remote has closed and all data is drained
             if !socket.may_recv() && !socket.can_recv() && conn.rx_write.is_some() {
                 conn.close_rx();
+            }
+
+            // **A connection that is over takes no more of the client's bytes.**
+            // A peer's reset leaves the socket `Closed` and `can_send` false for
+            // good, so the loop above never reads the pipe again; left open, the
+            // client's writes fill a pipe nobody drains and then block, and a
+            // writer that is never told its peer is gone cannot say so.
+            if !socket.is_open() && conn.tx_read.is_some() {
+                conn.close_tx();
             }
 
             // Detect client death: a zero-byte write is refused by name once
