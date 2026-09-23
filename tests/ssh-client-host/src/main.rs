@@ -22,6 +22,9 @@
 //! toyos_ssh put     <host> <port> <key> <local> <remote> → ok <bytes>
 //! toyos_ssh get     <host> <port> <key> <remote> <local> → ok <bytes>
 //! toyos_ssh list    <host> <port> <key> <remote> → entry <name> <size>…, ok <n>
+//! toyos_ssh swap    <host> <port> <key> <service> <binary> <sha256>
+//!                                                → accepted <path> | refused <why>
+//!                                                | unanswered <what> | no-subsystem
 //! ```
 //!
 //! A program's stdout and stderr go to files rather than to this process's own,
@@ -93,6 +96,9 @@ async fn run(args: &[String]) -> Result<(), String> {
         ["put", host, port, key, local, remote] => put(host, port, key, local, remote).await,
         ["get", host, port, key, remote, local] => get(host, port, key, remote, local).await,
         ["list", host, port, key, remote] => list(host, port, key, remote).await,
+        ["swap", host, port, key, service, binary, digest] => {
+            swap(host, port, key, service, binary, digest).await
+        }
         _ => Err(format!("not a command this client has: {words:?}")),
     }
 }
@@ -308,6 +314,79 @@ async fn fire(host: &str, port: &str, key: &str, command: &str) -> Result<(), St
     println!("{answer}");
     // Dropped rather than disconnected: the machine this was fired at may
     // already be gone, and a goodbye to it is one more wait on nothing.
+    drop(session);
+    Ok(())
+}
+
+/// How long `swap` waits for the guest's answer once the binary is sent.
+const SWAP_ANSWER: Duration = Duration::from_secs(60);
+
+/// Send `binary` as `service`'s replacement, naming `digest` for it, and
+/// report the guest's answer.
+///
+/// `digest` is the caller's and is sent as given — never computed here — so a
+/// caller can name the wrong one and see it refused. **`unanswered` is an
+/// answer too**: the service being swapped may be the one carrying this
+/// connection, and whether it went is the machine's log's to say.
+async fn swap(
+    host: &str,
+    port: &str,
+    key: &str,
+    service: &str,
+    binary: &str,
+    digest: &str,
+) -> Result<(), String> {
+    let body = std::fs::read(binary).map_err(|e| format!("reading {binary}: {e}"))?;
+    let digest = toyos_swap::parse_hex(digest)
+        .ok_or_else(|| format!("{digest:?} is not a SHA-256 in lowercase hex"))?;
+    let header =
+        toyos_swap::Header { service: service.to_string(), digest, len: body.len() as u64 };
+    let session = connect(host, port, key).await?;
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("opening a session channel: {e}"))?;
+    channel
+        .request_subsystem(true, toyos_swap::SUBSYSTEM)
+        .await
+        .map_err(|e| format!("asking for the {} subsystem: {e}", toyos_swap::SUBSYSTEM))?;
+    match channel.wait().await {
+        Some(ChannelMsg::Success) => {}
+        Some(ChannelMsg::Failure) => {
+            println!("no-subsystem");
+            drop(session);
+            return Ok(());
+        }
+        other => return Err(format!("the subsystem request was answered {other:?}")),
+    }
+    let mut sent = header.render().into_bytes();
+    sent.extend_from_slice(&body);
+    channel.data(&sent[..]).await.map_err(|e| format!("sending the binary: {e}"))?;
+    channel.eof().await.map_err(|e| format!("ending the binary: {e}"))?;
+    let (mut stdout, mut status) = (Vec::new(), None);
+    let answered = tokio::time::timeout(SWAP_ANSWER, async {
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                _ => {}
+            }
+        }
+    })
+    .await;
+    // The guest waits for this close before it stops the service that may be
+    // carrying this connection: it is this client saying it has the answer.
+    let _ = channel.close().await;
+    let said = String::from_utf8_lossy(&stdout).trim_end().to_string();
+    match (answered, status, said.split_once(' ')) {
+        (Ok(()), Some(0), Some(("accepted", _))) | (Ok(()), Some(1), Some(("refused", _))) => {
+            println!("{said}")
+        }
+        (Ok(()), _, _) => println!("unanswered the channel closed after {said:?}, status {status:?}"),
+        (Err(_), _, _) => println!("unanswered nothing in {}s after {said:?}", SWAP_ANSWER.as_secs()),
+    }
+    // Dropped rather than disconnected: the connection may be gone with the
+    // service that carried it.
     drop(session);
     Ok(())
 }

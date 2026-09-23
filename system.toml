@@ -71,8 +71,11 @@ syscap = ["rt"]
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
+# `swap` is the authority to replace a running service's binary; sshd acts on
+# it only for a client whose key it has accepted, and the build refuses it to
+# any other program (`src/build.rs`).
 [programs.sshd]
-receives = ["netd", "launcher"]
+receives = ["netd", "launcher", "swap"]
 
 [programs.filepicker]
 serves = ["filepicker"]

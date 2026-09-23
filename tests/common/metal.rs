@@ -67,6 +67,13 @@ pub struct Arm {
     /// address that opens the stream, runs a command there and tells it to
     /// reboot. `false` on every boot whose judge reads the stick alone.
     pub talk: bool,
+    /// **The boot has one of its services swapped while it runs**, with no
+    /// reboot: its image is staged as a talking boot's is, the invocation
+    /// that flashes it is not told `--talk`, and a second invocation —
+    /// `toyos-metal --swap <this service>`, started beside the first — owns the
+    /// listener, sends the build's own binary of that service and writes
+    /// [`toyos_build::metal::READBACK_SWAP`] beside the stick's files.
+    pub swap: Option<&'static str>,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -80,7 +87,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false }
+    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false, swap: None }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -238,6 +245,20 @@ impl Readback {
         let at = self.home.join(toyos_build::metal::READBACK_STREAM);
         let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
         Ok((heard, stream.split_inclusive('\n').map(str::to_string).collect()))
+    }
+
+    /// What the swap invocation beside this boot heard, and the stream it
+    /// received — or why a swapping boot has neither.
+    pub fn swap(&self) -> Result<(toyos_build::metalswap::Swapped, Vec<String>), String> {
+        let at = self.home.join(toyos_build::metal::READBACK_SWAP);
+        let text = std::fs::read_to_string(&at).map_err(|e| {
+            format!("{}: {e} — no `toyos-metal --swap` ran beside this boot", at.display())
+        })?;
+        let swapped = toyos_build::metalswap::Swapped::parse(&text)?
+            .ok_or_else(|| format!("{} names no swap:\n{text}", at.display()))?;
+        let at = self.home.join(toyos_build::metal::READBACK_SWAP_STREAM);
+        let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        Ok((swapped, stream.split_inclusive('\n').map(str::to_string).collect()))
     }
 
     /// One file off the log volume that is neither the loader's nor `logd`'s,
@@ -500,6 +521,8 @@ struct Batch {
     nic: Option<&'static str>,
     /// [`Arm::talk`], carried to the image and to the invocation.
     talk: bool,
+    /// [`Arm::swap`], carried to the image, the invocation and the second one.
+    swap: Option<&'static str>,
     /// `--metal-listen`, on a talking batch: where its record stream goes.
     listen: Option<String>,
 }
@@ -548,6 +571,7 @@ fn batches(
                 links: boot.links.clone(),
                 nic: None,
                 talk: false,
+                swap: None,
                 listen: None,
             },
         );
@@ -567,6 +591,7 @@ fn batches(
                 links: Vec::new(),
                 nic: arm.nic,
                 talk: arm.talk,
+                swap: arm.swap,
                 listen: None,
             });
             if batch.config != arm.config
@@ -574,6 +599,7 @@ fn batches(
                 || batch.features != arm.features
                 || batch.nic != arm.nic
                 || batch.talk != arm.talk
+                || batch.swap != arm.swap
             {
                 return Err(format!(
                     "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}) and another row \
@@ -739,7 +765,7 @@ fn build(
     // **A talking boot carries the host's half of the cable in its image**: the
     // listener's address, which only the command line can say, and the key the
     // loop will offer, minted beside the image so the loop finds it there.
-    let stream_param = match (batch.talk, batch.listen.as_deref()) {
+    let stream_param = match (batch.talk || batch.swap.is_some(), batch.listen.as_deref()) {
         (false, _) => None,
         (true, None) => {
             return Err(format!(
@@ -763,6 +789,11 @@ fn build(
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
     std::fs::write(&image, &bytes).map_err(|e| format!("{}: {e}", image.display()))?;
+    // The binary the second invocation sends, copied now so it is this
+    // build's and not whatever the tree holds when the machine is reached.
+    if let Some(service) = batch.swap {
+        toyos_build::build::copy_guest_program(root, service, &home.join(service))?;
+    }
     Ok(image)
 }
 
@@ -805,6 +836,30 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
         words.push(talk_home(home).join("id_ed25519").display().to_string());
     }
     words
+}
+
+/// The second invocation a swapping boot owes: started beside the one that
+/// flashes it, it listens for the boot's stream and swaps `service` for the
+/// binary [`build`] copied beside the image.
+fn swap_invocation(image: &Path, home: &Path, service: &str) -> Vec<String> {
+    [
+        "run",
+        "--bin",
+        "toyos-metal",
+        "--",
+        "--swap",
+        service,
+        "--binary",
+        &home.join(service).display().to_string(),
+        "--image",
+        &image.display().to_string(),
+        "--talk",
+        &talk_home(home).join("id_ed25519").display().to_string(),
+        "--readback",
+        &home.display().to_string(),
+    ]
+    .map(str::to_string)
+    .to_vec()
 }
 
 fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
@@ -893,7 +948,7 @@ pub fn run(
             return Verdict::Red;
         }
     };
-    for batch in batches.values_mut().filter(|b| b.talk) {
+    for batch in batches.values_mut().filter(|b| b.talk || b.swap.is_some()) {
         batch.listen = listen.map(str::to_string);
     }
     let declared: Vec<&str> = tests
@@ -933,7 +988,7 @@ pub fn run(
     if !judging {
         // The key a talking boot authorizes is minted by the harness's own ssh
         // client, which the suite builds only on its QEMU path.
-        if batches.values().any(|b| b.talk) {
+        if batches.values().any(|b| b.talk || b.swap.is_some()) {
             toyos_build::build::build_host_judges(&root, quiet);
         }
         for (label, batch) in &batches {
@@ -965,6 +1020,12 @@ pub fn run(
                 image.display(),
                 invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
             ));
+            if let Some(service) = batches[*label].swap {
+                request.push_str(&format!(
+                    "  and beside it, started first:\n  cargo {}\n",
+                    swap_invocation(image, &at(dir, label), service).join(" ")
+                ));
+            }
         }
         let path = dir.join("request.txt");
         if let Err(e) = std::fs::write(&path, &request) {
@@ -991,8 +1052,27 @@ pub fn run(
     if mode == Mode::Drive {
         for (label, image) in &images {
             let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
+            // A swapping boot's second invocation is started first: it owns
+            // the listener the boot streams to, and waits for the boot.
+            let beside = batches[*label].swap.map(|service| {
+                let words = swap_invocation(image, &at(dir, label), service);
+                eprintln!("[metal] {label}, beside it: cargo {}", words.join(" "));
+                Command::new("cargo").args(&words).current_dir(&root).spawn()
+            });
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
-            match Command::new("cargo").args(&words).current_dir(&root).status() {
+            let booted = Command::new("cargo").args(&words).current_dir(&root).status();
+            if let Some(swap) = beside {
+                match swap.and_then(|mut child| child.wait()) {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => {
+                        refused.insert(label, format!("toyos-metal --swap exited {status}"));
+                    }
+                    Err(e) => {
+                        refused.insert(label, format!("toyos-metal --swap: {e}"));
+                    }
+                }
+            }
+            match booted {
                 Ok(status) if status.success() => {}
                 Ok(status) => {
                     refused.insert(label, format!("toyos-metal exited {status}"));

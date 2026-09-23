@@ -43,6 +43,7 @@ members = [
     "toyos-sched",
     "toyos-sched/loom",
     "toyos-sched/sim",
+    "toyos-swap",
     "toyos-symbols",
     "toyos-tco",
     "toyos-untrusted",
@@ -117,6 +118,10 @@ toyos-keymap = { path = "toyos-keymap" }
 # parameter by name reads the same constant the kernel and `logd` do.
 toyos-logstream = { path = "toyos-logstream" }
 toyos-manifest = { path = "toyos-manifest" }
+# The swap port's name and the one program the image may give it to, so the
+# gate on every manifest and the host that asks for a swap read what init and
+# sshd read.
+toyos-swap = { path = "toyos-swap" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "toyos-tco" }

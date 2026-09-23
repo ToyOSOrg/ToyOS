@@ -530,7 +530,30 @@ const INIT_PROGRAM: &str = "init";
 /// declaration to come from. They travel in the manifest so init creates
 /// exactly the ports the build-time gate counted as provided — one producer,
 /// rather than a constant here and a string in init.
-const INIT_SERVED: &[&str] = &["launcher"];
+const INIT_SERVED: &[&str] = &["launcher", toyos_swap::PORT];
+
+/// Who may hold the swap port in `config`: [`toyos_swap::HOLDER`] and nothing
+/// else — no other `[programs]` row and never `[apps]`.
+///
+/// **Checked on every manifest rendered, not only on the committed configs**,
+/// because the holder of this connector can replace any service's binary, and
+/// sshd is the one program that acts on it only for a client whose key it has
+/// accepted.
+fn swap_is_sshds_alone(config: &SystemConfig) -> Result<(), String> {
+    for (name, program) in &config.programs {
+        if name != toyos_swap::HOLDER && program.receives.iter().any(|r| r == toyos_swap::PORT) {
+            return Err(format!(
+                "`{name}` receives `{}`, which only `{}` may hold",
+                toyos_swap::PORT,
+                toyos_swap::HOLDER
+            ));
+        }
+    }
+    if config.apps.receives.iter().any(|r| r == toyos_swap::PORT) {
+        return Err(format!("`[apps] receives` names `{}`, which only `{}` may hold", toyos_swap::PORT, toyos_swap::HOLDER));
+    }
+    Ok(())
+}
 
 /// The resolved config as the records `/system/bin/init` reads.
 ///
@@ -538,6 +561,9 @@ const INIT_SERVED: &[&str] = &["launcher"];
 /// round-trip test is what makes "what the build writes is what init reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {
+    if let Err(why) = swap_is_sshds_alone(config) {
+        panic!("system.toml cannot be rendered as a manifest: {why}");
+    }
     let mut names: Vec<&String> = config.programs.keys().collect();
     names.sort();
     let manifest = toyos_manifest::Manifest {
@@ -1712,6 +1738,17 @@ pub fn https_fetch_host(root: &Path) -> PathBuf {
     host_judge(root, HTTPS_FETCH)
 }
 
+/// Copy to `to` the binary the build leaves for userland workspace program
+/// `name`: the bytes a swap sends a running machine in place of the ones its
+/// image carries. Read under the artifact lock, as every image build reads it.
+pub fn copy_guest_program(root: &Path, name: &str, to: &Path) -> Result<(), String> {
+    let from = root.join(format!("userland/target/x86_64-unknown-toyos/{PROFILE}/{name}"));
+    let _artifact = buildlock::artifact(root);
+    fs::copy(&from, to)
+        .map(|_| ())
+        .map_err(|e| format!("{} to {}: {e}", from.display(), to.display()))
+}
+
 /// The harness's SSH client — the only thing in this tree that speaks the
 /// protocol from the other side of `userland/sshd`.
 pub fn ssh_client_host(root: &Path) -> PathBuf {
@@ -2606,6 +2643,7 @@ mod tests {
         "tests/netcase/system.toml",
         "tests/pkgcase/system.toml",
         "tests/sshdcase/system.toml",
+        "tests/swapcase/system.toml",
         "tests/testcases/system.toml",
     ];
 
@@ -2643,6 +2681,23 @@ mod tests {
         let bad: SystemConfig =
             toml::from_str("init = []\n[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(receives_have_providers(&bad).is_err());
+    }
+
+    /// The swap port reaches sshd and nothing else, in every committed config
+    /// and in a config that tries either other door.
+    #[test]
+    fn only_sshd_may_receive_the_swap_port() {
+        for cfg in ALL_CONFIGS {
+            swap_is_sshds_alone(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        let sshd: SystemConfig =
+            toml::from_str("[programs.sshd]\nreceives = [\"netd\", \"swap\"]\n").unwrap();
+        assert!(swap_is_sshds_alone(&sshd).is_ok());
+        let shell: SystemConfig =
+            toml::from_str("[programs.shell]\nreceives = [\"swap\"]\n").unwrap();
+        assert!(swap_is_sshds_alone(&shell).is_err());
+        let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"swap\"]\n").unwrap();
+        assert!(swap_is_sshds_alone(&apps).is_err());
     }
 
     /// `[apps] receives` is narrower than a program's: a `provides` name is one

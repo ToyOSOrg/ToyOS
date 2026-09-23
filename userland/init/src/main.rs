@@ -9,6 +9,16 @@
 //! instruction whether or not the server has reached `accept` or has even been
 //! spawned, there is no instant at which a name is not bound yet, and there is
 //! nothing anywhere to retry.
+//!
+//! **A service init starts at boot outlives any one process serving it.** init
+//! keeps each of its acceptors and endows a duplicate, so a swap
+//! ([`toyos_swap`]) can stop the process, start another binary holding the same
+//! manifest row, and leave every client's connector naming the same port — a
+//! connect made in the gap waits in that port's queue for the new process. A
+//! service that ends with no swap owning it has its kept acceptors closed at
+//! once, so a client's next connect is `ServerGone` exactly as it is for a
+//! server nothing keeps. A program started through `launcher` still gets its
+//! acceptor by move and is started once per boot.
 
 /// One line, one `write`.
 ///
@@ -30,7 +40,10 @@ macro_rules! say {
 use std::collections::BTreeMap;
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use toyos_swap::{Refusal, Request as SwapRequest, Word};
 
 use toyos_manifest::package::{self, Package};
 use toyos_manifest::{Manifest, Program};
@@ -87,13 +100,25 @@ struct Pending {
     conn: Connection,
     rx: LaunchRx,
     since: Instant,
+    /// Which of init's two ports it came in on, which decides what its frame
+    /// may ask for.
+    port: Port,
 }
 
-/// The poll token for the `launcher` acceptor. A pending connection's token is
-/// [`TOKEN_PENDING_BASE`] plus its handle, which is unique among the
-/// connections init holds at once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Port {
+    Launcher,
+    Swap,
+}
+
+/// The poll tokens for the `launcher` and `swap` acceptors, and for the one
+/// connection whose swap has been answered and whose hang-up is awaited. A
+/// pending connection's token is [`TOKEN_PENDING_BASE`] plus its handle, which
+/// is unique among the connections init holds at once.
 const TOKEN_ACCEPTOR: u64 = 0;
-const TOKEN_PENDING_BASE: u64 = 1;
+const TOKEN_SWAP_ACCEPTOR: u64 = 1;
+const TOKEN_HANGUP: u64 = 2;
+const TOKEN_PENDING_BASE: u64 = 3;
 
 fn main() {
     let syscap: SysCap = Endowments::get()
@@ -123,23 +148,26 @@ fn main() {
 
     // Kept for the machine's life: init is the only thing that can kill a
     // daemon, and there is no other way back to a process it started.
-    let mut booted: Vec<Child> = Vec::new();
+    let mut services: Vec<Service> = Vec::new();
     for name in &system.start {
         let program = system
             .program(name)
             .unwrap_or_else(|| panic!("init: [boot] start names `{name}`, which is not declared"));
-        match start(
-            Command::new(&program.path),
-            program,
-            &system,
-            &syscap,
-            &mut acceptors,
-            &connectors,
-            &[],
-        ) {
-            Ok(child) => booted.push(child),
-            Err(e) => panic!("init: cannot start {}: {e}", program.name),
+        let kept = program
+            .serves
+            .iter()
+            .map(|served| {
+                let acceptor = acceptors.remove(served.as_str()).unwrap_or_else(|| {
+                    panic!("init: `{}` has already been given the `{served}` acceptor", program.name)
+                });
+                (served.clone(), acceptor)
+            })
+            .collect();
+        let mut service = Service::new(program, kept);
+        if let Err(e) = service.spawn(&program.path, &system, &syscap, &connectors) {
+            panic!("init: cannot start {}: {e}", program.name);
         }
+        services.push(service);
     }
 
     // Nothing else holds a `serves` acceptor that has not been launched yet, so
@@ -148,124 +176,548 @@ fn main() {
     let launcher = acceptors
         .remove(LAUNCHER)
         .expect("init: the manifest declares init serves `launcher`");
-    launch_forever(&launcher, &system, &syscap, &mut acceptors, &connectors);
+    let swap = acceptors
+        .remove(toyos_swap::PORT)
+        .expect("init: the manifest declares init serves `swap`");
+    let mut init = Init { system: &system, syscap: &syscap, acceptors, connectors, services };
+    init.serve_forever(&launcher, &swap);
 }
 
-/// Serve `launcher` for the rest of the machine's life.
-///
-/// **An event loop and not an accept loop, because the rule every other server
-/// in this tree obeys binds init hardest.** A server never blocks on a client:
-/// accept and the first frame are two events, a frame is buffered until whole
-/// before anything acts on it, and a reply is one non-blocking write. init used
-/// to read the fresh connection with `recv_header`, so any process holding a
-/// `launcher` connector — the compositor, every terminal, every shell, sshd,
-/// the one thing reachable from the network — could connect, say nothing, and
-/// take the machine's only way to create a process with two syscalls, leaving
-/// init alive and looking healthy.
-fn launch_forever<'a>(
-    launcher: &Acceptor,
+/// Everything init's loop acts on, for the machine's life.
+struct Init<'a> {
     system: &'a Manifest,
-    syscap: &SysCap,
-    acceptors: &mut BTreeMap<&'a str, Acceptor>,
-    connectors: &BTreeMap<&str, Connector>,
-) -> ! {
-    let poller = Poller::new(1 + MAX_PENDING_LAUNCHES as u32);
-    let mut pending: Vec<Pending> = Vec::new();
-    let mut ready: Vec<u64> = Vec::new();
-    loop {
-        poller.watch(launcher, READABLE, TOKEN_ACCEPTOR);
-        for p in &pending {
-            poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
-        }
-        // A client that connects and then says nothing wakes nothing, so the
-        // deadline that removes it has to be a wake in its own right —
-        // otherwise a silent client is only ever timed out by some other
-        // client's traffic, and with the table full there is no other client.
-        //
-        // **What is left of the oldest one's deadline, not a fresh
-        // `HANDSHAKE_TIMEOUT`.** Any readiness at all restarts a wait, so a
-        // full timeout each round is a bound of nearly twice the number for a
-        // client that goes quiet just before some other connection wakes the
-        // loop — and a bound that is not the bound is the class this whole
-        // change is about.
-        let now = Instant::now();
-        let timeout = pending
-            .iter()
-            .map(|p| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(p.since)))
-            .min()
-            .map_or(u64::MAX, |left| left.as_nanos() as u64);
-        ready.clear();
-        poller.wait(1, timeout, |token| ready.push(token));
+    syscap: &'a SysCap,
+    /// The `serves` acceptors nobody has been started with yet, which a launch
+    /// takes by move.
+    acceptors: BTreeMap<&'a str, Acceptor>,
+    connectors: BTreeMap<&'a str, Connector>,
+    /// What `[boot] start` named, in that order.
+    services: Vec<Service<'a>>,
+}
 
-        let now = Instant::now();
-        for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
-            say!(
-                "init: launcher: dropping client {} — it never finished its launch",
-                p.conn.as_handle().0
-            );
-        }
-        pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
+/// One program init started at boot, and the ports it serves.
+struct Service<'a> {
+    program: &'a Program,
+    /// The binary the running process was started from: the row's path, or a
+    /// swap's installed one.
+    path: String,
+    /// `None` once neither binary would start.
+    child: Option<Child>,
+    kept: Arc<Mutex<Kept>>,
+}
 
-        // Accept and the request are two events. Nothing is read here.
-        if ready.contains(&TOKEN_ACCEPTOR) {
-            let conn = match launcher.accept() {
-                Ok(conn) => conn,
-                Err(e) => panic!("init: launcher acceptor refused: {e:?}"),
-            };
-            if pending.len() >= MAX_PENDING_LAUNCHES {
+/// What a service's waiter thread shares with the loop.
+struct Kept {
+    /// The acceptors of every name the service serves. Empty once the service
+    /// has ended with no swap owning it: the port is then closed for good.
+    acceptors: Vec<(String, Acceptor)>,
+    /// Counts the service's starts, so a waiter answers only for its own.
+    generation: u64,
+    /// A swap owns the service: its process ending is expected and the port
+    /// stays open for the next one.
+    swapping: bool,
+}
+
+impl<'a> Service<'a> {
+    fn new(program: &'a Program, acceptors: Vec<(String, Acceptor)>) -> Self {
+        Self {
+            program,
+            path: program.path.clone(),
+            child: None,
+            kept: Arc::new(Mutex::new(Kept { acceptors, generation: 0, swapping: false })),
+        }
+    }
+
+    /// Start `path` holding this service's manifest row, and answer its pid.
+    fn spawn(
+        &mut self,
+        path: &str,
+        system: &Manifest,
+        syscap: &SysCap,
+        connectors: &BTreeMap<&str, Connector>,
+    ) -> std::io::Result<u32> {
+        let mut kept = self.kept.lock().expect("init: a service's state is poisoned");
+        // Every start after the first follows a process of this service
+        // that init stopped or saw end.
+        let served = match kept.generation {
+            0 => Served::Keep(&kept.acceptors),
+            _ => Served::Restart(&kept.acceptors),
+        };
+        let child =
+            start(Command::new(path), self.program, system, syscap, served, connectors, &[])?;
+        kept.generation += 1;
+        if !kept.acceptors.is_empty() {
+            let process = toyos_abi::syscall::dup(toyos::RawHandle(child.as_raw_handle()))
+                .unwrap_or_else(|e| panic!("init: {}'s process handle: {e:?}", self.program.name));
+            let (shared, generation) = (Arc::clone(&self.kept), kept.generation);
+            std::thread::Builder::new()
+                .name(format!("wait-{}", self.program.name))
+                .spawn(move || close_when_it_ends(&shared, generation, process))
+                .expect("init: a service's waiter could not be started");
+        }
+        let pid = child.id();
+        self.child = Some(child);
+        self.path = path.to_string();
+        Ok(pid)
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+}
+
+/// Wait for one start of a service to end, and close its ports if nothing was
+/// expecting it to.
+///
+/// **A thread, because the kernel answers a process's end to a wait and to
+/// nothing a poll can watch.** It parks in the kernel for the process's life
+/// and costs nothing until then.
+fn close_when_it_ends(kept: &Mutex<Kept>, generation: u64, process: toyos::RawHandle) {
+    let _ = toyos_abi::syscall::process_wait(process);
+    toyos_abi::syscall::close(process);
+    let mut kept = kept.lock().expect("init: a service's state is poisoned");
+    if kept.generation == generation && !kept.swapping {
+        kept.acceptors.clear();
+    }
+}
+
+/// A swap init has answered and not finished.
+struct Flight {
+    /// Index into [`Init::services`].
+    service: usize,
+    /// The installed binary it starts.
+    path: String,
+    phase: Phase,
+}
+
+enum Phase {
+    /// Accepted and answered: the service is stopped once the requester hangs
+    /// up, or [`toyos_swap::HANGUP_MS`] after the answer.
+    Answered { conn: Connection, rx: LaunchRx, since: Instant },
+    /// The new binary runs; it is the service if it is still running at
+    /// `until`, and `previous` is started again if it is not.
+    Probation { until: Instant, previous: String },
+}
+
+impl Flight {
+    /// When this swap next has to be looked at whether or not anything wakes.
+    fn deadline(&self) -> Instant {
+        match &self.phase {
+            Phase::Answered { since, .. } => {
+                *since + Duration::from_millis(toyos_swap::HANGUP_MS)
+            }
+            Phase::Probation { until, .. } => *until,
+        }
+    }
+}
+
+impl<'a> Init<'a> {
+    /// Serve `launcher` and `swap` for the rest of the machine's life.
+    ///
+    /// **An event loop and not an accept loop, because the rule every other
+    /// server in this tree obeys binds init hardest.** A server never blocks on
+    /// a client: accept and the first frame are two events, a frame is buffered
+    /// until whole before anything acts on it, and a reply is one non-blocking
+    /// write. init used to read the fresh connection with `recv_header`, so any
+    /// process holding a `launcher` connector — the compositor, every terminal,
+    /// every shell, sshd, the one thing reachable from the network — could
+    /// connect, say nothing, and take the machine's only way to create a
+    /// process with two syscalls, leaving init alive and looking healthy.
+    ///
+    /// What a swap waits on is the loop's too: the requester's hang-up is an
+    /// event, and the ends of the hang-up bound and of probation are deadlines
+    /// the wait wakes for. The one wait init makes outside the loop is for a
+    /// service it has just killed to finish ending, which is the kernel's
+    /// teardown and no client's.
+    fn serve_forever(&mut self, launcher: &Acceptor, swap: &Acceptor) -> ! {
+        let poller = Poller::new(3 + MAX_PENDING_LAUNCHES as u32);
+        let mut pending: Vec<Pending> = Vec::new();
+        let mut flight: Option<Flight> = None;
+        let mut ready: Vec<u64> = Vec::new();
+        loop {
+            poller.watch(launcher, READABLE, TOKEN_ACCEPTOR);
+            poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
+            if let Some(Flight { phase: Phase::Answered { conn, .. }, .. }) = &flight {
+                poller.watch(conn, READABLE, TOKEN_HANGUP);
+            }
+            for p in &pending {
+                poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
+            }
+            // A client that connects and then says nothing wakes nothing, so
+            // the deadline that removes it has to be a wake in its own right —
+            // otherwise a silent client is only ever timed out by some other
+            // client's traffic, and with the table full there is no other
+            // client.
+            //
+            // **What is left of the oldest one's deadline, not a fresh
+            // `HANDSHAKE_TIMEOUT`.** Any readiness at all restarts a wait, so a
+            // full timeout each round is a bound of nearly twice the number for
+            // a client that goes quiet just before some other connection wakes
+            // the loop — and a bound that is not the bound is the class this
+            // whole change is about.
+            let now = Instant::now();
+            let timeout = pending
+                .iter()
+                .map(|p| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(p.since)))
+                .chain(flight.iter().map(|f| f.deadline().saturating_duration_since(now)))
+                .min()
+                .map_or(u64::MAX, |left| left.as_nanos() as u64);
+            ready.clear();
+            poller.wait(1, timeout, |token| ready.push(token));
+
+            let now = Instant::now();
+            for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
                 say!(
-                    "init: launcher: refusing client {} — {MAX_PENDING_LAUNCHES} connections are \
-                     already waiting to say what to start",
-                    conn.as_handle().0
+                    "init: launcher: dropping client {} — it never finished its launch",
+                    p.conn.as_handle().0
                 );
-            } else {
-                pending.push(Pending { conn, rx: LaunchRx::new(), since: Instant::now() });
             }
-        }
+            pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
-        // `remove` rather than `swap_remove`: the entries after `i` shift down,
-        // so leaving `i` alone visits each connection exactly once.
-        let mut i = 0;
-        while i < pending.len() {
-            let handle = pending[i].conn.as_handle();
-            if !ready.contains(&(TOKEN_PENDING_BASE + handle.0 as u64)) {
-                i += 1;
-                continue;
-            }
-            let step = {
-                let p = &mut pending[i];
-                p.rx.pump(&p.conn)
-            };
-            match step {
-                RxStep::Idle => i += 1,
-                // Unlogged, and the only removal here that is: a caller may
-                // connect to find out whether it holds a launcher at all and
-                // hang up, which is its business.
-                RxStep::Eof => {
-                    pending.remove(i);
+            // Accept and the request are two events. Nothing is read here.
+            for (token, acceptor, port) in [
+                (TOKEN_ACCEPTOR, launcher, Port::Launcher),
+                (TOKEN_SWAP_ACCEPTOR, swap, Port::Swap),
+            ] {
+                if !ready.contains(&token) {
+                    continue;
                 }
-                RxStep::Malformed => {
+                let conn = match acceptor.accept() {
+                    Ok(conn) => conn,
+                    Err(e) => panic!("init: an acceptor of init's own refused: {e:?}"),
+                };
+                if pending.len() >= MAX_PENDING_LAUNCHES {
                     say!(
-                        "init: launcher: dropping client {} — it sent a frame this protocol \
-                         cannot describe",
-                        handle.0
+                        "init: launcher: refusing client {} — {MAX_PENDING_LAUNCHES} connections \
+                         are already waiting to say what they want",
+                        conn.as_handle().0
                     );
-                    pending.remove(i);
+                } else {
+                    pending.push(Pending { conn, rx: LaunchRx::new(), since: Instant::now(), port });
                 }
-                RxStep::Frame { msg_type, payload_len } => {
-                    let p = pending.remove(i);
-                    serve_launch(
-                        &p.conn,
-                        msg_type,
-                        p.rx.payload(payload_len),
-                        system,
-                        syscap,
-                        acceptors,
-                        connectors,
-                    );
+            }
+
+            // `remove` rather than `swap_remove`: the entries after `i` shift
+            // down, so leaving `i` alone visits each connection exactly once.
+            let mut i = 0;
+            while i < pending.len() {
+                let handle = pending[i].conn.as_handle();
+                if !ready.contains(&(TOKEN_PENDING_BASE + handle.0 as u64)) {
+                    i += 1;
+                    continue;
                 }
+                let step = {
+                    let p = &mut pending[i];
+                    p.rx.pump(&p.conn)
+                };
+                match step {
+                    RxStep::Idle => i += 1,
+                    // Unlogged, and the only removal here that is: a caller may
+                    // connect to find out whether it holds a launcher at all
+                    // and hang up, which is its business.
+                    RxStep::Eof => {
+                        pending.remove(i);
+                    }
+                    RxStep::Malformed => {
+                        say!(
+                            "init: launcher: dropping client {} — it sent a frame this protocol \
+                             cannot describe",
+                            handle.0
+                        );
+                        pending.remove(i);
+                    }
+                    RxStep::Frame { msg_type, payload_len } => {
+                        let p = pending.remove(i);
+                        match p.port {
+                            Port::Launcher => serve_launch(
+                                &p.conn,
+                                msg_type,
+                                p.rx.payload(payload_len),
+                                self.system,
+                                self.syscap,
+                                &mut self.acceptors,
+                                &self.connectors,
+                            ),
+                            Port::Swap => {
+                                let payload = p.rx.payload(payload_len).to_vec();
+                                if let Some(accepted) =
+                                    self.accept_swap(p.conn, msg_type, &payload, flight.as_ref())
+                                {
+                                    flight = Some(accepted);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            flight = flight.and_then(|f| self.advance(f, ready.contains(&TOKEN_HANGUP)));
+        }
+    }
+
+    /// One swap request, answered: refused with the old service untouched, or
+    /// verified, installed and accepted.
+    ///
+    /// **Everything in the request is sshd's claim about what its client
+    /// sent**, and the bytes are read here and held against the digest here:
+    /// what init starts is what init verified, and nothing else's word for it.
+    fn accept_swap(
+        &self,
+        conn: Connection,
+        msg_type: u32,
+        payload: &[u8],
+        flight: Option<&Flight>,
+    ) -> Option<Flight> {
+        let refuse = |service: &str, why: Refusal| {
+            say!("{}", toyos_swap::said(service, Word::Refused, &why.to_string()));
+            let _ = conn.try_send_bytes(toyos_swap::MSG_REFUSED, why.to_string().as_bytes());
+            None
+        };
+        if msg_type != toyos_swap::MSG_SWAP {
+            return refuse("?", Refusal::Malformed(format!("message {msg_type} is no swap")));
+        }
+        let request = match SwapRequest::decode(payload) {
+            Ok(request) => request,
+            Err(why) => return refuse("?", why),
+        };
+        let name = request.service.as_str();
+        // Read and removed before anything else can refuse, so a refused
+        // request leaves nothing staged behind it.
+        let bytes = read_staged(&request.staged);
+        let _ = std::fs::remove_file(&request.staged);
+        let Some(index) = self.services.iter().position(|s| s.program.name == name) else {
+            return refuse(name, Refusal::NotAService(name.to_string()));
+        };
+        if let Some(busy) = flight {
+            return refuse(name, Refusal::Busy(self.services[busy.service].program.name.clone()));
+        }
+        let service = &self.services[index];
+        let running = service
+            .child
+            .as_ref()
+            .is_some_and(|c| toyos_abi::syscall::process_wait_nonblock(
+                toyos::RawHandle(c.as_raw_handle()),
+            ).is_err());
+        if !running {
+            return refuse(name, Refusal::NotRunning(name.to_string()));
+        }
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(why) => return refuse(name, why),
+        };
+        if let Err(why) = toyos_swap::verify(&bytes, &request.digest) {
+            return refuse(name, why);
+        }
+        let installed = toyos_swap::installed_path(name, &request.digest);
+        if installed == service.path {
+            return refuse(name, Refusal::AlreadyRuns(installed));
+        }
+        if let Err(why) = install(&installed, &request.digest, &bytes) {
+            return refuse(name, why);
+        }
+        say!(
+            "{}",
+            toyos_swap::said(
+                name,
+                Word::Accepted,
+                &format!(
+                    "{installed} ({} bytes, sha256 {}) replaces {} (pid {})",
+                    bytes.len(),
+                    toyos_swap::hex(&request.digest),
+                    service.path,
+                    service.pid().map_or(0, |p| p)
+                ),
+            )
+        );
+        // A requester that cannot take the answer has hung up, which is the go
+        // either way.
+        let _ = conn.try_send_bytes(toyos_swap::MSG_ACCEPTED, installed.as_bytes());
+        Some(Flight {
+            service: index,
+            path: installed,
+            phase: Phase::Answered { conn, rx: LaunchRx::new(), since: Instant::now() },
+        })
+    }
+
+    /// Move a swap on as far as what has happened lets it, and answer what is
+    /// left of it.
+    fn advance(&mut self, flight: Flight, woken: bool) -> Option<Flight> {
+        let now = Instant::now();
+        match flight.phase {
+            Phase::Answered { conn, mut rx, since } => {
+                let hung_up = woken && !matches!(rx.pump(&conn), RxStep::Idle);
+                if !hung_up && now < since + Duration::from_millis(toyos_swap::HANGUP_MS) {
+                    return Some(Flight { phase: Phase::Answered { conn, rx, since }, ..flight });
+                }
+                drop(conn);
+                self.cut_over(flight.service, flight.path)
+            }
+            Phase::Probation { until, previous } => {
+                if now < until {
+                    return Some(Flight { phase: Phase::Probation { until, previous }, ..flight });
+                }
+                self.end_probation(flight.service, &flight.path, &previous);
+                None
             }
         }
+    }
+
+    /// Stop the service and start the installed binary in its place.
+    fn cut_over(&mut self, index: usize, path: String) -> Option<Flight> {
+        let name = self.services[index].program.name.clone();
+        let previous = self.services[index].path.clone();
+        let service = &mut self.services[index];
+        say!(
+            "{}",
+            toyos_swap::said(
+                &name,
+                Word::Stopping,
+                &format!("pid {} ({previous})", service.pid().map_or(0, |p| p)),
+            )
+        );
+        service.kept.lock().expect("init: a service's state is poisoned").swapping = true;
+        if let Some(mut old) = service.child.take() {
+            // Killed and then waited for, because the kernel publishes a
+            // process's end only after its handle table is closed: once the
+            // wait returns, every device claim it held is back and can be
+            // minted again.
+            let _ = old.kill();
+            let _ = old.wait();
+        }
+        let started = service.spawn(&path, self.system, self.syscap, &self.connectors);
+        match started {
+            Ok(pid) => {
+                say!(
+                    "{}",
+                    toyos_swap::said(
+                        &name,
+                        Word::Started,
+                        &format!(
+                            "{path} as pid {pid}; in service if it runs {} ms",
+                            toyos_swap::PROBATION_MS
+                        ),
+                    )
+                );
+                let until = Instant::now() + Duration::from_millis(toyos_swap::PROBATION_MS);
+                Some(Flight { service: index, path, phase: Phase::Probation { until, previous } })
+            }
+            Err(e) => {
+                say!("{}", toyos_swap::said(&name, Word::Failed, &format!("{path} did not start: {e}")));
+                forget(&path);
+                self.restore(index, &previous);
+                None
+            }
+        }
+    }
+
+    /// Probation is over: the new binary is the service, or the one it
+    /// replaced is started again.
+    fn end_probation(&mut self, index: usize, path: &str, previous: &str) {
+        let service = &mut self.services[index];
+        let name = service.program.name.clone();
+        let status = {
+            // Asked under the lock the waiter takes, so an end after this
+            // answer is the waiter's to act on and an end before it is this
+            // function's.
+            let mut kept = service.kept.lock().expect("init: a service's state is poisoned");
+            let status = service.child.as_mut().map(|c| c.try_wait());
+            if matches!(status, Some(Ok(None))) {
+                kept.swapping = false;
+            }
+            status
+        };
+        match status {
+            Some(Ok(None)) => {
+                say!(
+                    "{}",
+                    toyos_swap::said(
+                        &name,
+                        Word::InService,
+                        &format!("{path} as pid {}", service.pid().map_or(0, |p| p)),
+                    )
+                );
+                if previous != path {
+                    forget(previous);
+                }
+            }
+            ended => {
+                let how = match ended {
+                    Some(Ok(Some(status))) => format!("ended ({status})"),
+                    Some(Err(e)) => format!("could not be asked whether it runs ({e})"),
+                    _ => "is not running".to_string(),
+                };
+                say!(
+                    "{}",
+                    toyos_swap::said(
+                        &name,
+                        Word::Failed,
+                        &format!("{path} {how} inside {} ms", toyos_swap::PROBATION_MS),
+                    )
+                );
+                service.child = None;
+                forget(path);
+                self.restore(index, previous);
+            }
+        }
+    }
+
+    /// Start the binary a failed swap replaced, or close the service's ports
+    /// when that will not start either.
+    fn restore(&mut self, index: usize, previous: &str) {
+        let service = &mut self.services[index];
+        let name = service.program.name.clone();
+        match service.spawn(previous, self.system, self.syscap, &self.connectors) {
+            Ok(pid) => {
+                service.kept.lock().expect("init: a service's state is poisoned").swapping = false;
+                say!("{}", toyos_swap::said(&name, Word::Restored, &format!("{previous} as pid {pid}")));
+            }
+            Err(e) => {
+                let mut kept = service.kept.lock().expect("init: a service's state is poisoned");
+                kept.swapping = false;
+                kept.acceptors.clear();
+                say!(
+                    "{}",
+                    toyos_swap::said(
+                        &name,
+                        Word::Gone,
+                        &format!("{previous} did not start either ({e}); its ports are closed"),
+                    )
+                );
+            }
+        }
+    }
+}
+
+/// A staged binary's bytes, refused past [`toyos_swap::MAX_BINARY_BYTES`]
+/// before any of it is read.
+fn read_staged(path: &str) -> Result<Vec<u8>, Refusal> {
+    let unreadable = |e: std::io::Error| Refusal::Unreadable { path: path.to_string(), why: e.to_string() };
+    let len = std::fs::metadata(path).map_err(unreadable)?.len();
+    if len > toyos_swap::MAX_BINARY_BYTES {
+        return Err(Refusal::TooLarge(len));
+    }
+    std::fs::read(path).map_err(unreadable)
+}
+
+/// Write verified bytes where a service is started from: a temporary name
+/// beside it and one rename, so the path is never a partial binary.
+fn install(path: &str, digest: &toyos_swap::Digest, bytes: &[u8]) -> Result<(), Refusal> {
+    let failed = |e: std::io::Error| Refusal::Install { path: path.to_string(), why: e.to_string() };
+    std::fs::create_dir_all(toyos_swap::installed_dir(digest)).map_err(failed)?;
+    let partial = format!("{path}.partial");
+    std::fs::write(&partial, bytes).map_err(failed)?;
+    std::fs::rename(&partial, path).map_err(failed)
+}
+
+/// Delete a binary a swap installed once nothing runs it. The image's own
+/// binaries are never touched.
+fn forget(path: &str) {
+    if !toyos_swap::is_installed(path) {
+        return;
+    }
+    let _ = std::fs::remove_file(path);
+    if let Some((dir, _)) = path.rsplit_once('/') {
+        let _ = std::fs::remove_dir(dir);
     }
 }
 
@@ -386,7 +838,8 @@ fn serve_launch<'a>(
 
     // `inherit_handle` duplicates into the child, so init's own copies go with
     // `slots` when this returns.
-    let started = start(command, program, system, syscap, acceptors, connectors, &extras);
+    let started =
+        start(command, program, system, syscap, Served::Move(acceptors), connectors, &extras);
     match started {
         Ok(child) => {
             let handle = toyos::RawHandle(child.into_raw_handle());
@@ -510,13 +963,6 @@ fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
     Resolved::Package(system.app_row(name, path))
 }
 
-/// Build one program's authority and spawn it holding exactly that.
-///
-/// `extras` are connectors a launching client transferred: names the manifest
-/// cannot know because there is one port per instance of whoever made them —
-/// a terminal's `surface`. They are added *to* the manifest's row rather than
-/// replacing it, and a caller could only transfer what it already held, so a
-/// launch confers the row and nothing beyond it.
 /// What init says about a device it could not mint a claim for.
 ///
 /// One arm per refusal the kernel distinguishes (`kernel/src/device.rs`'s
@@ -542,12 +988,42 @@ fn refused(name: &str, why: SyscallError) -> String {
     }
 }
 
+/// Where the acceptors of the names a started program serves come from.
+enum Served<'m, 'a> {
+    /// The machine-wide map a launch takes from, by move: such a program is
+    /// started once per boot.
+    Move(&'m mut BTreeMap<&'a str, Acceptor>),
+    /// A boot service's own, which init keeps and endows a duplicate of.
+    Keep(&'m [(String, Acceptor)]),
+    /// The same, for a service init has just stopped: the claims that process
+    /// held may still be on their way back.
+    Restart(&'m [(String, Acceptor)]),
+}
+
+/// How long a restart waits for the claims of the process it stopped to come
+/// back before it mints the new process's.
+///
+/// **A compromise over a kernel defect, recorded as one**: the kernel publishes
+/// a process's end before every deferred release its handles queued has run
+/// (`issues/kernel/deferred-release-outlives-its-syscall.md`), so a claim asked
+/// for the instant `wait` returns is refused as still held. Its release is one
+/// pass of the zero-handle drain; this bound is a liveness guard, and it goes
+/// when that issue closes.
+const CLAIM_RETURN: Duration = Duration::from_secs(2);
+
+/// Build one program's authority and spawn it holding exactly that.
+///
+/// `extras` are connectors a launching client transferred: names the manifest
+/// cannot know because there is one port per instance of whoever made them —
+/// a terminal's `surface`. They are added *to* the manifest's row rather than
+/// replacing it, and a caller could only transfer what it already held, so a
+/// launch confers the row and nothing beyond it.
 fn start<'a>(
     mut command: Command,
     program: &Program,
     system: &Manifest,
     syscap: &SysCap,
-    acceptors: &mut BTreeMap<&'a str, Acceptor>,
+    served: Served<'_, 'a>,
     connectors: &BTreeMap<&str, Connector>,
     extras: &[(&str, Connector)],
 ) -> std::io::Result<Child> {
@@ -586,18 +1062,39 @@ fn start<'a>(
         held.0.push(raw);
     }
 
-    for name in &program.serves {
-        // `remove_entry` and not `remove`: the key is the map's own `&'a str`,
-        // which is what lets a package's synthesized row start through here.
-        let (key, acceptor) = acceptors.remove_entry(name.as_str()).unwrap_or_else(|| {
-            // An acceptor is endowed by move, so a `serves` program can be
-            // started exactly once per boot. A second start with no acceptor
-            // left is refused by name rather than spawned with a hole where
-            // its own service should be.
-            panic!("init: `{}` has already been given the `{name}` acceptor", program.name)
-        });
-        command.endow(&format!("{SERVE_PREFIX}{name}"), acceptor.as_handle().0);
-        taken.push((key, acceptor));
+    let mut given_back = None;
+    let restart = matches!(served, Served::Restart(_));
+    match served {
+        Served::Move(acceptors) => {
+            for name in &program.serves {
+                // `remove_entry` and not `remove`: the key is the map's own
+                // `&'a str`, which is what lets a package's synthesized row
+                // start through here.
+                let (key, acceptor) = acceptors.remove_entry(name.as_str()).unwrap_or_else(|| {
+                    // An acceptor is endowed by move, so a `serves` program
+                    // started this way is started exactly once per boot. A
+                    // second start with no acceptor left is refused by name
+                    // rather than spawned with a hole where its own service
+                    // should be.
+                    panic!("init: `{}` has already been given the `{name}` acceptor", program.name)
+                });
+                command.endow(&format!("{SERVE_PREFIX}{name}"), acceptor.as_handle().0);
+                taken.push((key, acceptor));
+            }
+            given_back = Some(acceptors);
+        }
+        Served::Keep(kept) | Served::Restart(kept) => {
+            for name in &program.serves {
+                let (_, acceptor) = kept.iter().find(|(kept, _)| kept == name).ok_or_else(|| {
+                    std::io::Error::other(format!("the `{name}` port is closed for good"))
+                })?;
+                let handed = toyos_abi::syscall::dup(acceptor.as_handle()).map_err(|e| {
+                    std::io::Error::other(format!("the `{name}` acceptor did not duplicate: {e:?}"))
+                })?;
+                command.endow(&format!("{SERVE_PREFIX}{name}"), handed.0);
+                held.0.push(handed);
+            }
+        }
     }
 
     for name in &program.devices {
@@ -613,10 +1110,33 @@ fn start<'a>(
         //
         // The label is the manifest's own spelling, which is exactly what the
         // claimant looks the claim up by: one string, written once.
-        let minted = match request {
+        let mint = || match request {
             DeviceRequest::Class(class) => syscap.claim::<toyos::Device>(class),
             DeviceRequest::Pci(id) => syscap.claim_pci::<toyos::Device>(id),
         };
+        let asked = Instant::now();
+        let mut held_still = 0u32;
+        let minted = loop {
+            match mint() {
+                Err(SyscallError::AlreadyExists)
+                    if restart && asked.elapsed() < CLAIM_RETURN =>
+                {
+                    held_still += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                minted => break minted,
+            }
+        };
+        // Said, so what the kernel's deferred release costs a restart is
+        // counted wherever it is paid.
+        if held_still > 0 && minted.is_ok() {
+            say!(
+                "init: {}: {name} came back from the process it replaces after {} ms and \
+                 {held_still} refusal(s)",
+                program.name,
+                asked.elapsed().as_millis()
+            );
+        }
         match minted {
             Ok(claim) => {
                 let raw = claim.into_raw();
@@ -657,8 +1177,10 @@ fn start<'a>(
             Ok(child)
         }
         Err(e) => {
-            for (name, acceptor) in taken {
-                acceptors.insert(name, acceptor);
+            if let Some(acceptors) = given_back {
+                for (name, acceptor) in taken {
+                    acceptors.insert(name, acceptor);
+                }
             }
             Err(e)
         }

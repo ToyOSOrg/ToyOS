@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,11 @@ const EXEC_WINDOW: Duration = Duration::from_secs(30);
 const EXEC_RETRY: Duration = Duration::from_secs(1);
 
 /// The record stream, as this host receives it.
+///
+/// **One connection at a time, and another after it ends.** A boot's `logd`
+/// asks for its stream again whenever it ends — netd swapped under it, or a
+/// listener that left and came back — so the listener goes back to accepting,
+/// and every line from every connection is one sequence in arrival order.
 #[derive(Clone)]
 pub struct Stream {
     shared: Arc<Shared>,
@@ -56,19 +61,27 @@ pub struct Stream {
 
 struct Shared {
     lines: Mutex<Vec<String>>,
+    /// The latest connection's peer.
     peer: Mutex<Option<SocketAddr>>,
-    /// The peer closed the connection, which is `logd` or netd going away.
+    /// How many connections have been accepted.
+    accepted: AtomicUsize,
+    /// The latest connection has ended and no other has been accepted since.
     ended: AtomicBool,
-    /// How the connection ended and how long after it opened, once it has.
+    /// How the latest connection ended and how long after it opened, once it
+    /// has.
     end: Mutex<Option<End>>,
+    /// Lines a connection's end cut short, which are in no sequence: `logd`
+    /// writes such a line again, whole, on its next connection.
+    torn: AtomicUsize,
     /// Set to stop waiting for a peer that has not come.
     stop: AtomicBool,
 }
 
 impl Stream {
-    /// Bind `at`, before anything boots, and accept the one connection a boot
-    /// opens. Every line is appended to `file` as it arrives — a machine that
-    /// dies mid-boot leaves what it said on disk — and, with `echo`, printed.
+    /// Bind `at`, before anything boots, and accept the connections a boot
+    /// opens, one after another. Every whole line is appended to `file` as it
+    /// arrives — a machine that dies mid-boot leaves what it said on disk —
+    /// and, with `echo`, printed.
     ///
     /// **A bind that fails is this host's answer and never the boot's**: an
     /// address this host does not hold is an image staged for another listener.
@@ -87,14 +100,16 @@ impl Stream {
         let shared = Arc::new(Shared {
             lines: Mutex::new(Vec::new()),
             peer: Mutex::new(None),
+            accepted: AtomicUsize::new(0),
             ended: AtomicBool::new(false),
             end: Mutex::new(None),
+            torn: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
         });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("metal-stream".into())
-            .spawn(move || {
+            .spawn(move || loop {
                 let (conn, peer) = loop {
                     if theirs.stop.load(Ordering::SeqCst) {
                         return;
@@ -111,6 +126,8 @@ impl Stream {
                 // BSD half; the reader below blocks.
                 let _ = conn.set_nonblocking(false);
                 *theirs.peer.lock().expect("the stream's peer") = Some(peer);
+                theirs.ended.store(false, Ordering::SeqCst);
+                theirs.accepted.fetch_add(1, Ordering::SeqCst);
                 if echo {
                     println!("  stream: {peer} connected");
                 }
@@ -121,6 +138,9 @@ impl Stream {
                     match reader.read_line(&mut line) {
                         Ok(0) => break "the peer closed it".to_string(),
                         Err(e) => break e.to_string(),
+                        Ok(_) if !line.ends_with('\n') => {
+                            theirs.torn.fetch_add(1, Ordering::SeqCst);
+                        }
                         Ok(_) => {
                             let _ = out.write_all(line.as_bytes());
                             let _ = out.flush();
@@ -147,6 +167,7 @@ impl Stream {
         self.at
     }
 
+    /// The latest connection's peer.
     pub fn peer(&self) -> Option<SocketAddr> {
         *self.shared.peer.lock().expect("the stream's peer")
     }
@@ -155,11 +176,23 @@ impl Stream {
         self.shared.lines.lock().expect("the stream's lines").clone()
     }
 
+    /// How many connections this listener has accepted.
+    pub fn connections(&self) -> usize {
+        self.shared.accepted.load(Ordering::SeqCst)
+    }
+
+    /// Lines a connection's end cut short.
+    pub fn torn(&self) -> usize {
+        self.shared.torn.load(Ordering::SeqCst)
+    }
+
+    /// Whether the latest connection has ended with none accepted since.
     pub fn ended(&self) -> bool {
         self.shared.ended.load(Ordering::SeqCst)
     }
 
-    /// How the connection ended, or `None` while it is open or never opened.
+    /// How the latest connection ended, or `None` while it is open or never
+    /// opened.
     pub fn end(&self) -> Option<End> {
         self.shared.end.lock().expect("the stream's end").clone()
     }
@@ -172,10 +205,16 @@ impl Stream {
     /// The peer, once one has connected, or `None` after `by` or once the
     /// host has given up on one.
     pub fn wait_connected(&self, by: Duration) -> Option<SocketAddr> {
+        self.wait_for_connection(0, by)
+    }
+
+    /// The peer of a connection accepted after the first `seen`, or `None`
+    /// after `by` or once the host has given up.
+    pub fn wait_for_connection(&self, seen: usize, by: Duration) -> Option<SocketAddr> {
         let began = Instant::now();
         loop {
-            if let Some(peer) = self.peer() {
-                return Some(peer);
+            if self.connections() > seen {
+                return self.peer();
             }
             if began.elapsed() >= by || self.shared.stop.load(Ordering::SeqCst) {
                 return None;
@@ -183,7 +222,6 @@ impl Stream {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-
 }
 
 /// How a stream's connection ended.
@@ -269,6 +307,29 @@ impl Ssh {
     pub fn fire(&self, at: SocketAddr, command: &str) -> Result<String, String> {
         let (host, port) = (at.ip().to_string(), at.port().to_string());
         let said = self.run(&["fire", &host, &port, path_str(&self.key)?, command])?;
+        Ok(said.lines().last().unwrap_or("").to_string())
+    }
+
+    /// Send `binary` as `service`'s replacement, naming `digest` for it, and
+    /// answer the machine's word: `accepted <path>`, `refused <why>`,
+    /// `unanswered <what>` or `no-subsystem`.
+    pub fn swap(
+        &self,
+        at: SocketAddr,
+        service: &str,
+        binary: &Path,
+        digest: &toyos_swap::Digest,
+    ) -> Result<String, String> {
+        let (host, port) = (at.ip().to_string(), at.port().to_string());
+        let said = self.run(&[
+            "swap",
+            &host,
+            &port,
+            path_str(&self.key)?,
+            service,
+            path_str(binary)?,
+            &toyos_swap::hex(digest),
+        ])?;
         Ok(said.lines().last().unwrap_or("").to_string())
     }
 }

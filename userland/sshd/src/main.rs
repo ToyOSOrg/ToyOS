@@ -1,4 +1,5 @@
-//! The machine's SSH server: a shell, a command, and files both ways.
+//! The machine's SSH server: a shell, a command, files both ways, and a running
+//! service's binary swapped for another (`swap`).
 //!
 //! Two rules run through every path below. **Nothing this daemon starts
 //! outlives the connection that asked for it**: the thread feeding a program
@@ -9,6 +10,7 @@
 
 mod command;
 mod sftp;
+mod swap;
 
 use std::fs;
 use std::io::{Read, Write};
@@ -170,6 +172,7 @@ impl Server for SshServer {
             input: None,
             alive: watch::channel(()).0,
             is_pty: false,
+            answered: None,
         }
     }
 }
@@ -187,6 +190,9 @@ struct SshSession {
     /// session does — is what ends them and kills the program they serve.
     alive: watch::Sender<()>,
     is_pty: bool,
+    /// Told when the client closes a swap's channel, which it does only once
+    /// it has read the answer this daemon closed the channel behind.
+    answered: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// Which of a child's two output streams a chunk came off.
@@ -352,6 +358,68 @@ impl SshSession {
             out.exit_status(status).await.ok();
             out.eof().await.ok();
             out.close().await.ok();
+        });
+    }
+
+    /// Serve the `toyos-swap` subsystem on this channel: take one binary,
+    /// hand it to init, answer on the channel, and only then let init go —
+    /// [`swap`]'s own header is the order and why.
+    fn run_swap(&mut self) {
+        let Some(channel) = self.take_channel("subsystem request") else { return };
+        let (_, out) = channel.split();
+        let (input, mut input_rx) = mpsc::channel::<Vec<u8>>(16);
+        self.input = Some(input);
+        let (answered, taken_in) = tokio::sync::oneshot::channel();
+        self.answered = Some(answered);
+        let peer = self.peer.clone();
+
+        tokio::spawn(async move {
+            let mut buf: Vec<u8> = Vec::new();
+            let taken = loop {
+                match swap::take(&buf) {
+                    Ok(swap::Taken::More) => {}
+                    Ok(swap::Taken::Whole(header, body)) => break Ok((header, body)),
+                    Err(why) => break Err(why.to_string()),
+                }
+                match input_rx.recv().await {
+                    Some(chunk) => buf.extend_from_slice(&chunk),
+                    None => {
+                        break Err(format!(
+                            "the channel ended after {} bytes, before the request was whole",
+                            buf.len()
+                        ));
+                    }
+                }
+            };
+            drop(buf);
+            let (service, answer, init) = match taken {
+                Err(why) => (String::from("?"), Err(why), None),
+                Ok((header, body)) => {
+                    let service = header.service.clone();
+                    match tokio::task::spawn_blocking(move || swap::ask(&header, &body)).await {
+                        Ok((answer, init)) => (service, answer, init),
+                        Err(_) => (service, Err("the request task did not finish".into()), None),
+                    }
+                }
+            };
+            let (line, status) = match &answer {
+                Ok(path) => (format!("accepted {path}\n"), 0),
+                Err(why) => (format!("refused {why}\n"), 1),
+            };
+            println!("sshd: {peer}: swap {service}: {}", line.trim_end());
+            out.data(line.as_bytes()).await.ok();
+            out.exit_status(status).await.ok();
+            out.eof().await.ok();
+            out.close().await.ok();
+            // **The client's close is the proof it has the answer**: it
+            // follows this daemon's close on one ordered stream. Only then is
+            // init told to go, by this connection ending — and a client that
+            // never closes is waited for no longer than the bound.
+            if init.is_some() {
+                let bound = std::time::Duration::from_millis(toyos_swap::ANSWER_MS);
+                let _ = tokio::time::timeout(bound, taken_in).await;
+            }
+            drop(init);
         });
     }
 
@@ -574,6 +642,9 @@ impl russh::server::Handler for SshSession {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.input = None;
+        if let Some(answered) = self.answered.take() {
+            let _ = answered.send(());
+        }
         Ok(())
     }
 
@@ -639,7 +710,16 @@ impl russh::server::Handler for SshSession {
             self.run_sftp();
             return Ok(());
         }
-        println!("sshd: {}: refused the {name:?} subsystem; this daemon serves sftp", self.peer);
+        if name == toyos_swap::SUBSYSTEM {
+            session.channel_success(channel_id)?;
+            self.run_swap();
+            return Ok(());
+        }
+        println!(
+            "sshd: {}: refused the {name:?} subsystem; this daemon serves sftp and {}",
+            self.peer,
+            toyos_swap::SUBSYSTEM
+        );
         session.channel_failure(channel_id)?;
         Ok(())
     }
@@ -676,6 +756,23 @@ impl russh::server::Handler for SshSession {
     }
 }
 
+/// The listener on port 22, or `None` on a machine with no netd.
+///
+/// A machine with no netd has nothing for this daemon to offer, and
+/// `NetdNotFound` is the only error that means that — std maps it to
+/// NotConnected. Every other bind failure panics rather than exiting 0 with a
+/// line blaming hardware that is fine.
+async fn listen() -> Option<tokio::net::TcpListener> {
+    match tokio::net::TcpListener::bind("0.0.0.0:22").await {
+        Ok(listener) => Some(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
+            println!("sshd: no network on this machine, exiting");
+            None
+        }
+        Err(e) => panic!("sshd: cannot bind 0.0.0.0:22: {e}"),
+    }
+}
+
 fn main() {
     println!("sshd: starting...");
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -683,18 +780,7 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
     rt.block_on(async {
-        // A machine with no netd has nothing for this daemon to offer, and
-        // `NetdNotFound` is the only error that means that — std maps it to
-        // NotConnected. Every other bind failure panics rather than exiting 0
-        // with a line blaming hardware that is fine.
-        let listener = match tokio::net::TcpListener::bind("0.0.0.0:22").await {
-            Ok(l) => l,
-            Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
-                println!("sshd: no network on this machine, exiting");
-                return;
-            }
-            Err(e) => panic!("sshd: cannot bind 0.0.0.0:22: {e}"),
-        };
+        let Some(mut listener) = listen().await else { return };
 
         // Identity and trust are settled after the bind, so that a machine with
         // no NIC still reports the network as the reason it is leaving rather
@@ -751,8 +837,17 @@ fn main() {
                         }
                     });
                 }
+                // **A listener is a registration netd holds, and a failed
+                // accept is netd no longer holding it** — netd was swapped or
+                // is gone. Asked again, the same listener answers the same
+                // error at once and for ever, so it is dropped and bound anew:
+                // through the same port, which init keeps open across a swap.
                 Err(e) => {
-                    println!("sshd: accept error: {:?}", e);
+                    println!("sshd: the listener on port 22 failed ({e}); binding it again");
+                    drop(listener);
+                    let Some(again) = listen().await else { return };
+                    listener = again;
+                    println!("sshd: listening on port 22");
                 }
             }
         }

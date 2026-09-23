@@ -25,6 +25,7 @@ pub mod metal;
 pub mod metaldevices;
 pub mod metalimage;
 pub mod metalprofile;
+pub mod metalswap;
 pub mod metaltalk;
 pub mod pr;
 pub mod redlist;
