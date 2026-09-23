@@ -85,8 +85,11 @@ fn word(text: &str) -> Option<u32> {
 }
 
 /// The registers a bring-up reaches, by the names the datasheet gives them.
-const NAMES: [(usize, &str); 32] = [
+const NAMES: [(usize, &str); 35] = [
     (regs::CTRL, "CTRL"),
+    (regs::CTRL_EXT, "CTRL_EXT"),
+    (regs::PHY_CTRL, "PHY_CTRL"),
+    (regs::FWSM, "FWSM"),
     (regs::STATUS, "STATUS"),
     (regs::MDIC, "MDIC"),
     (regs::ICR, "ICR"),
@@ -291,8 +294,28 @@ pub const BRING_UP: [&str; 42] = [
 ];
 
 /// Whether a named step is one of the PHY's, which [`BRING_UP`] leaves out.
+///
+/// **A reading is always the PHY's.** [`Step::Saw`] is left by the bring-up's
+/// power step and by the bench instrument and by nothing else, so a line that
+/// starts with one is the PHY's whatever register it names.
+///
+/// **`CTRL` is not here and cannot be**: §8.2.1's `PHYPDN` is a field of it,
+/// so the power step reaches the same register the bring-up reaches either
+/// side of it. A reader comparing a trail with [`BRING_UP`] has to let a
+/// `CTRL` access be extra — [`is_shared_with_the_phys`] is that rule.
 pub fn is_the_phys(named: &str) -> bool {
-    named.ends_with(" EXTCNF_CTRL") || named.ends_with(" MDIC")
+    named.starts_with("saw ")
+        || named.ends_with(" EXTCNF_CTRL")
+        || named.ends_with(" MDIC")
+        || named.ends_with(" CTRL_EXT")
+        || named.ends_with(" PHY_CTRL")
+        || named.ends_with(" FWSM")
+}
+
+/// Whether a named step is one [`BRING_UP`] names *and* the PHY's power step
+/// reaches too, so a trail may carry more of them than the table does.
+pub fn is_shared_with_the_phys(named: &str) -> bool {
+    named.ends_with(" CTRL")
 }
 
 /// A trail that takes the first access of a run and lets the rest of it by.

@@ -305,18 +305,34 @@ pub fn whole_trail(text: &str, code: i32) -> Result<TrailCost, String> {
         owed.push(Step::Read { reg: regs::STATUS }.named().to_string());
     }
     owed.push(Step::Exit { code }.to_string());
+    // **A `CTRL` access is allowed to be extra.** §8.2.1's `PHYPDN` is a field
+    // of that register, so the PHY's power step reaches the one register the
+    // bring-up reaches either side of it and the table cannot leave it out —
+    // `crumbs::is_shared_with_the_phys` is that rule, and every other step has
+    // to line up exactly.
     let left: Vec<String> = lines
         .iter()
         .map(|line| line.step.named().to_string())
         .filter(|named| !crumbs::is_the_phys(named))
         .collect();
-    if left != owed {
-        let at = left.iter().zip(&owed).position(|(l, o)| l != o).unwrap_or(left.len().min(owed.len()));
+    let mut wanted = owed.iter();
+    let mut next = wanted.next();
+    for (at, named) in left.iter().enumerate() {
+        if next == Some(named) {
+            next = wanted.next();
+            continue;
+        }
+        if crumbs::is_shared_with_the_phys(named) {
+            continue;
+        }
         return Err(format!(
-            "the trail leaves the bring-up's order at crumb {at}: it says {:?} where {:?} is owed\n{text}",
-            left.get(at),
-            owed.get(at)
+            "the trail leaves the bring-up's order at crumb {at}: it says {named:?} where {:?} \
+             is owed\n{text}",
+            next
         ));
+    }
+    if let Some(missing) = next {
+        return Err(format!("the trail never reached {missing:?}\n{text}"));
     }
     let mut cost = TrailCost { crumbs: lines.len(), window_ns: 0, writing_ns: 0, slowest_ns: 0 };
     for pair in lines.windows(2) {

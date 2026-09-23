@@ -32,6 +32,13 @@
 //!    repeated with the durable poll: a write where the first two are reads,
 //!    and the only one of the three that changes anything in the PHY.
 //!
+//! **§8.2.3's `Wait` is waited out ahead of every transaction here**, as the
+//! driver's own [`Owned::transact`] waits it out: the clause says the host
+//! "should not issue new MDIC transactions while this bit is set to 1", and an
+//! instrument that broke that rule would be reading its own violation. Every
+//! `§8.` in this file is the *Intel® 500 Series Chipset Family On-Package
+//! Platform Controller Hub Datasheet, Volume 2 of 2* (631120, rev 002).
+//!
 //! [`bring_up`]: crate::phy::bring_up
 
 use crate::crumbs::{Step, Trail};
@@ -204,6 +211,15 @@ fn watch<R: Registers, C: Clock, T: Trail>(
     samples: u32,
 ) -> Ended {
     let (regs, clock) = mdi.part();
+    // §8.2.3: "The ME/Host should not issue new MDIC transactions while this
+    // bit is set to 1." Read durably, and bounded by the same count as the
+    // poll below: an instrument that waited without a bound would hang the
+    // boot it is there to read.
+    for _ in 0..samples {
+        if seen(regs, trail, regs::MDIC) & mdic::WAIT == 0 {
+            break;
+        }
+    }
     regs.write(regs::MDIC, command);
     let started = clock.nanos();
     let mut ended = Ended { last: 0, samples: 0, after_nanos: 0 };

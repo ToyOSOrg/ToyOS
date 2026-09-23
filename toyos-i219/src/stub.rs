@@ -18,7 +18,11 @@
 //! assertion by name. [`Nic::i219`] is the ThinkPad's part, and behind its
 //! `MDIC` is the PHY the *Intel Ethernet Connection I219 Datasheet* (612523,
 //! rev 2.02) describes — cited `§9.x` here, where the MAC's own clauses are
-//! `§10.x`, `§4.x` and `§3.x`.
+//! `§10.x`, `§4.x` and `§3.x`. On that part the MAC is the PCH's own, and
+//! every `§8.x` here is *Intel® 500 Series Chipset Family On-Package Platform
+//! Controller Hub Datasheet, Volume 2 of 2* (631120, rev 002) §8.2, which is
+//! where its power and handshake registers are defined and where the rule that
+//! an MDI cycle runs only while the interconnect carries one comes from.
 //!
 //! What is deliberately *not* modelled: the 82574's own PHY registers, the
 //! NVM's access protocol, checksum offload, VLAN insertion, RSS and the second
@@ -32,7 +36,9 @@ use std::vec::Vec;
 use std::{format, vec};
 
 use crate::phy::{advertise, control, control_1000t, custom_mode, reg};
-use crate::regs::{self, cause, ctrl, extcnf, mdic, rah, rctl, rx_desc, status, tctl, tx_desc};
+use crate::regs::{
+    self, cause, ctrl, ctrl_ext, extcnf, fwsm, mdic, rah, rctl, rx_desc, status, tctl, tx_desc,
+};
 use crate::{phy, Clock, DmaBuffers, Interrupts, Part, Registers};
 
 /// Where the device reaches the grant. Not zero and not a small number: a
@@ -127,6 +133,24 @@ pub struct Permits {
     /// one interface, so the model takes one or the other and a driver has to
     /// be right under either.
     pub mdio_flag_is_a_plain_mutex: bool,
+    /// §8.2.1's `PHYPDN` is a writable bit the document describes only in its
+    /// cleared state, so a part whose firmware left it set is one a driver has
+    /// to find and clear — and I219 §2.2's Table 2-1 puts the interconnect in
+    /// Electrical Idle while the PHY is down, so the MDI cycle does not run.
+    pub mac_comes_up_holding_the_phy_down: bool,
+    /// §8.2.2's `PHYPDEN` is loaded from the NVM (I219 §10.3.1.9's "PHY PD
+    /// Ena" word, "loaded to the PHY Power Down Enable bit in the Extended
+    /// Device Control (CTRL_EXT) register"), so a part comes up with it set.
+    pub low_power_entry_comes_up_enabled: bool,
+    /// §8.2.3's `Wait`: "Set to 1 by the Gigabit Ethernet Controller to
+    /// indicate that a PCI Express* to SMBus transition is taking place", and
+    /// auto-cleared afterwards — so a driver reaching the register may find one
+    /// in flight.
+    pub the_interconnect_is_in_transition: bool,
+    /// §8.2.9's `FWVAL`: "1 = Firmware is ready. 0 = Firmware is not ready."
+    /// The document attaches nothing to the cleared case, so a part that
+    /// reports it is one a driver reads and goes on from.
+    pub firmware_reports_itself_ready: bool,
     /// §4.5.2's manageability request comes whenever the engine likes — the
     /// moment after another agent has read the interface free included — and
     /// "the priority order is manageability, software and then hardware", so a
@@ -152,6 +176,10 @@ impl Default for Permits {
             extcnf_carries_firmware_fields: true,
             mdio_flag_is_a_plain_mutex: true,
             firmware_requests_after_a_free_read: true,
+            mac_comes_up_holding_the_phy_down: true,
+            low_power_entry_comes_up_enabled: true,
+            the_interconnect_is_in_transition: true,
+            firmware_reports_itself_ready: true,
         }
     }
 }
@@ -229,6 +257,10 @@ const ADVERTISE_AFTER_BATTERY_SAVER: u16 = 0x0061;
 /// How many `MDIC` reads a transaction takes before §10.2.2.7's `Ready` is set.
 const MDI_READS: u32 = 2;
 
+/// How many `MDIC` reads §8.2.3's `Wait` stands across before the interconnect
+/// transition it reports has "occurred".
+const MDI_WAIT_READS: u32 = 3;
+
 /// §10.2.2.1's two reserved `CTRL` bits, documented as "Set to 1b" (bit 3) and
 /// "must be set to 1b" (bit 20, `ADVD3WUC`).
 const CTRL_RESERVED_SET: u32 = (1 << 3) | (1 << 20);
@@ -269,6 +301,12 @@ struct PhyModel {
     negotiating: bool,
     /// Reads of `MDIC` left before the transaction in flight reports `Ready`.
     mdi_reads: u32,
+    /// Reads of `MDIC` left before §8.2.3's `Wait` auto-clears, which the
+    /// document says it does "after the transition has occurred".
+    wait_reads: u32,
+    /// Whether that transition never occurs. A fault injector and not a
+    /// clause: it is how a test reaches [`crate::phy::PhyRefusal::MdiWaiting`].
+    wait_sticks: bool,
     /// Whether §4.5.2's software request is registered — "a request for
     /// ownership is registered by writing a 1b into the respective bit", which
     /// stands until the agent writes a 0b back whether or not it was granted.
@@ -337,6 +375,8 @@ impl PhyModel {
             page: None,
             custom_mode: carried::CUSTOM_MODE.default,
             file,
+            wait_reads: if permits.the_interconnect_is_in_transition { MDI_WAIT_READS } else { 0 },
+            wait_sticks: false,
             negotiated_over: None,
             up: false,
             negotiating: false,
@@ -515,6 +555,28 @@ impl Model {
         self.set(regs::CTRL, CTRL_RESERVED_SET);
         if self.permits.extcnf_carries_firmware_fields {
             self.set(regs::EXTCNF_CTRL, EXTCNF_FIRMWARE_FIELDS);
+        }
+        // §8.2's own defaults, which exist only on the part whose MAC that
+        // document describes.
+        if self.part == Part::I219 {
+            // §8.2.5: "Default: Ch".
+            self.set(regs::PHY_CTRL, crate::power::PHY_CTRL_RESET);
+            if self.permits.firmware_reports_itself_ready {
+                self.set(regs::FWSM, fwsm::FIRMWARE_VALID);
+            }
+            if self.permits.mac_comes_up_holding_the_phy_down {
+                self.set(regs::CTRL, self.get(regs::CTRL) | ctrl::PHY_POWER_DOWN);
+            }
+            if self.permits.low_power_entry_comes_up_enabled {
+                self.set(regs::CTRL_EXT, ctrl_ext::PHY_POWER_DOWN_ENABLE);
+            }
+            self.phy.wait_reads = if self.phy.wait_sticks {
+                u32::MAX
+            } else if self.permits.the_interconnect_is_in_transition {
+                MDI_WAIT_READS
+            } else {
+                0
+            };
         }
         self.rx_head = 0;
         self.tx_head = 0;
@@ -710,6 +772,15 @@ impl Model {
             }
             regs::MDIC => {
                 self.not_modelled_on_the_82574("MDIC");
+                // §8.2.3: `Wait` is set by the controller for a PCIe-to-SMBus
+                // transition and "is auto cleared by hardware after the
+                // transition has occurred".
+                if self.phy.wait_reads > 0 {
+                    if !self.phy.wait_sticks {
+                        self.phy.wait_reads -= 1;
+                    }
+                    return self.mdi_answer | mdic::WAIT;
+                }
                 if self.phy.mdi_reads > 0 {
                     self.phy.mdi_reads -= 1;
                     // §10.2.2.7: `Ready` is set "at the end of the MDI
@@ -991,6 +1062,13 @@ impl Model {
             self.seed,
             self.get(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP
         );
+        // §8.2.3: "The ME/Host should not issue new MDIC transactions while
+        // this bit is set to 1."
+        assert_eq!(
+            self.phy.wait_reads, 0,
+            "seed {}: the driver issued an MDI transaction while §8.2.3's Wait bit was standing",
+            self.seed
+        );
         let addr = ((command >> mdic::PHYADD_SHIFT) & mdic::ADDRESS_MASK) as u8;
         let reg = ((command >> mdic::REGADD_SHIFT) & mdic::ADDRESS_MASK) as u8;
         let data = (command & mdic::DATA_MASK) as u16;
@@ -1004,13 +1082,25 @@ impl Model {
                 other >> 26
             ),
         };
-        self.phy.mdi_reads = if self.phy.never_ready {
+        // §8.2.1's PHYPDN standing is the PHY held in power down, and I219
+        // §2.2's Table 2-1 puts the interconnect in Electrical Idle for "S0 and
+        // PHY Power Down" — so the in-band MDIO packet I219 §1.2 and §2.2.2.1.1
+        // carry this transaction on goes nowhere, nothing acknowledges it, and
+        // neither `Ready` nor `Error` ever comes back. **This is the wall the
+        // bench boot is reading, modelled**: a driver that skipped the power
+        // step gets exactly it.
+        let gated = self.get(regs::CTRL) & ctrl::PHY_POWER_DOWN != 0;
+        self.phy.mdi_reads = if self.phy.never_ready || gated {
             u32::MAX
         } else if self.permits.mdi_takes_several_reads {
             MDI_READS
         } else {
             0
         };
+        if gated {
+            self.mdi_answer = command;
+            return;
+        }
         if !write && self.phy.failing == Some((addr, reg)) {
             // §10.2.2.7's `Error`: a read the part "fails to complete". `Ready`
             // is set with it, because the same section sets that bit "at the
@@ -1466,6 +1556,15 @@ impl Nic {
     }
 
     /// §10.2.2.7's `Ready` bit never comes back.
+    /// §8.2.3's `Wait` set and never auto-cleared: an interconnect transition
+    /// that does not finish, which is the one state the clause says a host may
+    /// not issue an MDIC transaction in.
+    pub fn interconnect_never_leaves_its_transition(&self) {
+        let mut model = self.0.borrow_mut();
+        model.phy.wait_sticks = true;
+        model.phy.wait_reads = u32::MAX;
+    }
+
     pub fn mdi_never_ready(&self) {
         self.0.borrow_mut().phy.never_ready = true;
     }

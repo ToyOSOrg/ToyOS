@@ -1537,7 +1537,7 @@ fn every_probe_outcome_has_one_exit_code_that_reads_back() {
     let link = |speed, full_duplex| Link::Up { speed, full_duplex };
     let stood = |beside| Err(PhyRefusal::SoftwareFlagStood { beside, after_nanos: 1 });
     let down = Link::Down;
-    let outcomes: [(Result<Phy, PhyRefusal>, Link, Outcome); 17] = [
+    let outcomes: [(Result<Phy, PhyRefusal>, Link, Outcome); 19] = [
         (up, down, Outcome::BroughtUpNoLink),
         (up, link(Speed::Mbps10, false), Outcome::LinkAt10Half),
         (up, link(Speed::Mbps10, true), Outcome::LinkAt10Full),
@@ -1559,6 +1559,16 @@ fn every_probe_outcome_has_one_exit_code_that_reads_back() {
         (Err(PhyRefusal::MdiError { phy: 2, reg: 2 }), down, Outcome::MdiError),
         (Err(PhyRefusal::Identity { specific: 0, general: 0 }), down, Outcome::Identity),
         (Err(PhyRefusal::NotThisRegisterMap), down, Outcome::NotThisRegisterMap),
+        (
+            Err(PhyRefusal::MdiWaiting { phy: 1, reg: 2, after_nanos: 3 }),
+            down,
+            Outcome::MdiWaiting,
+        ),
+        (
+            Err(PhyRefusal::PhyPoweredDown { ctrl: 1 << 24, ctrl_ext: 0 }),
+            down,
+            Outcome::PhyPoweredDown,
+        ),
     ];
     // The block's base is pinned, not read off the table it is judging.
     assert_eq!(Outcome::ALL[0].exit_code(), 64, "the block no longer starts at 64");
@@ -2178,12 +2188,25 @@ fn the_82574s_trail_is_the_bring_up_in_the_datasheets_order() {
     assert_eq!(trail(&plain), owed);
     // The I219's is the same trail with the PHY's accesses in it and nothing
     // else moved.
+    // §8.2's power and handshake sweep is the PHY's step as much as `MDIC` is.
+    // Four of its five registers are the PHY's alone and drop out; `CTRL` is
+    // shared with the bring-up either side of it, so an access to that one is
+    // allowed to be extra and everything else has to line up exactly.
     for nic in [brought_up, held] {
-        let without_the_phy: Vec<String> = trail(&nic)
-            .into_iter()
-            .filter(|s| !s.ends_with("EXTCNF_CTRL") && !s.ends_with("MDIC"))
-            .collect();
-        assert_eq!(without_the_phy, owed, "{}", nic.because("the PHY moved the rest of the trail"));
+        let mut owed = owed.iter();
+        let mut next = owed.next();
+        for step in trail(&nic).into_iter().filter(|s| !crumbs::is_the_phys(s)) {
+            if next == Some(&step) {
+                next = owed.next();
+                continue;
+            }
+            assert!(
+                crumbs::is_shared_with_the_phys(&step),
+                "{}",
+                nic.because(&format!("the PHY moved the rest of the trail at {step:?}"))
+            );
+        }
+        assert_eq!(next, None, "{}", nic.because("the bring-up lost a step"));
     }
 }
 
@@ -2196,7 +2219,7 @@ fn a_line_reads_back_as_it_was_written() {
         Step::MapBar,
         Step::DmaAlloc,
         Step::Read { reg: regs::EXTCNF_CTRL },
-        Step::Read { reg: 0x5b54 },
+        Step::Read { reg: 0x5b58 },
         Step::Write { reg: regs::CTRL, value: ctrl::RST | 0x40 },
         Step::Write { reg: regs::MTA, value: 0 },
         Step::Opened,
@@ -2210,7 +2233,7 @@ fn a_line_reads_back_as_it_was_written() {
     let read: Vec<Step> = crumbs::lines(&file).map(|l| l.expect("a line it wrote").step).collect();
     assert_eq!(read, steps);
     assert!(file.contains("\n007 7007 6930 write CTRL 0x04000040\n"), "{file}");
-    assert!(file.contains(" read 0x05b54\n"), "{file}");
+    assert!(file.contains(" read 0x05b58\n"), "{file}");
 }
 
 #[test]
@@ -2329,12 +2352,13 @@ fn a_part_that_never_reports_ready_is_read_out_one_durable_reading_at_a_time() {
         }
     }
 
-    // Two paced polls of `SAMPLES` readings each, and four single readings:
-    // the settled register, the one taken under the grant, the one after the
-    // driver's own poll gave up, and none other.
+    // Two paced polls of `SAMPLES` readings each, one §8.2.3 `Wait` reading in
+    // front of each of them, and three single readings: the settled register,
+    // the one taken under the grant, the one after the driver's own poll gave
+    // up, and none other.
     assert_eq!(
         taken.len() as u32,
-        2 * unready::SAMPLES + 3,
+        2 * unready::SAMPLES + 2 + 3,
         "{}",
         nic.because("the instrument read `MDIC` a different number of times")
     );
@@ -2378,7 +2402,14 @@ fn nothing_is_reached_where_the_bring_up_did_not_stop_at_ready() {
 /// per PHY address, and the address that answers Intel's own high word.
 #[test]
 fn an_address_that_answers_is_found_where_one_ends_and_the_first_does_not() {
-    let nic = Nic::i219(94);
+    // The instrument runs behind a bring-up that has already settled §8.2's
+    // power step, so the part it reaches is one whose PHY the MAC is not
+    // holding down — which is the only part on which a transaction ends at all.
+    let nic = Nic::with(
+        94,
+        Part::I219,
+        Permits { mac_comes_up_holding_the_phy_down: false, ..Permits::default() },
+    );
     nic.phy_is_deaf_at(toyos_phy::GENERAL);
     let wall = Err(PhyRefusal::MdiUnready {
         phy: toyos_phy::GENERAL,
@@ -2434,7 +2465,16 @@ fn a_reading_is_a_crumb_the_bring_ups_order_leaves_out() {
     assert!(crumbs::is_the_phys(
         &Step::Saw { reg: regs::EXTCNF_CTRL, value: 0 }.named().to_string()
     ));
-    assert!(!crumbs::is_the_phys(&Step::Saw { reg: regs::CTRL, value: 0 }.named().to_string()));
+    // A reading is the PHY's whatever register it names: §8.2's power step and
+    // the bench instrument are the only two that leave one.
+    assert!(crumbs::is_the_phys(&Step::Saw { reg: regs::CTRL, value: 0 }.named().to_string()));
+    // An *access* to `CTRL` is the one the bring-up and the power step share.
+    assert!(!crumbs::is_the_phys(&Step::Read { reg: regs::CTRL }.named().to_string()));
+    assert!(crumbs::is_shared_with_the_phys(&Step::Read { reg: regs::CTRL }.named().to_string()));
+    assert!(!crumbs::is_shared_with_the_phys(
+        &Step::Read { reg: regs::CTRL_EXT }.named().to_string()
+    ));
+    assert!(!crumbs::is_shared_with_the_phys(&Step::Read { reg: regs::MDIC }.named().to_string()));
 }
 
 /// §10.2.2.7 sets `Ready` "at the end of the MDI transaction" and `Error` on
@@ -2449,4 +2489,154 @@ fn a_transaction_ends_on_either_of_the_two_bits() {
     assert!(read(command | crate::regs::mdic::READY).ended());
     let errored = read(command | crate::regs::mdic::ERROR);
     assert!(errored.ended() && errored.errored() && !errored.ready());
+}
+
+/// §8.2.1's `PHYPDN` and §8.2.2's `PHYPDEN` are the two bits the PCH's own
+/// datasheet gives software over the PHY's power, and a bring-up that leaves
+/// either standing is a bring-up whose MDI cycles never run: I219 §2.2's
+/// Table 2-1 puts the interconnect in Electrical Idle while the PHY is down,
+/// and §1.2 carries every MDIO access over that interconnect.
+///
+/// **The model's default is a part that comes up with both set**, so this is
+/// also the negative control the rest of the PHY tests rest on: take the power
+/// step out of the bring-up and every one of them stops at
+/// [`PhyRefusal::MdiUnready`].
+#[test]
+fn the_power_step_is_what_lets_an_mdi_cycle_run_at_all() {
+    let nic = Nic::i219(120);
+    assert_ne!(nic.peek(regs::CTRL) & ctrl::PHY_POWER_DOWN, 0, "the part came up with it clear");
+    assert_ne!(
+        nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::PHY_POWER_DOWN_ENABLE,
+        0,
+        "the part came up with it clear"
+    );
+
+    let driver = open(&nic);
+    let phy = driver.brought_up().phy.expect("the PHY the power step reached");
+    assert_eq!(phy.id >> 16, toyos_phy::IDENTIFIER_HIGH_INTEL as u32);
+    assert_eq!(
+        nic.peek(regs::CTRL) & ctrl::PHY_POWER_DOWN,
+        0,
+        "{}",
+        nic.because("§8.2.1's PHYPDN is still standing")
+    );
+    assert_eq!(
+        nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::PHY_POWER_DOWN_ENABLE,
+        0,
+        "{}",
+        nic.because("§8.2.2's PHYPDEN is still standing")
+    );
+    // Nothing was written into the two registers this driver only reads.
+    assert_eq!(nic.peek(regs::PHY_CTRL), power::PHY_CTRL_RESET);
+    assert!(!nic.written().contains(&regs::PHY_CTRL));
+    assert!(!nic.written().contains(&regs::FWSM));
+}
+
+/// A part that does not take the write is refused rather than driven on the
+/// assumption that it did — the same rule `IVAR` is read back under.
+#[test]
+fn a_mac_that_keeps_its_phy_down_is_refused_by_name() {
+    let nic = Nic::i219(121);
+    nic.refuses_writes_to(regs::CTRL);
+    let (bar, clock, grant, line) = nic.parts();
+    let driver = I219::open(nic.part(), bar, clock, grant, line).expect("the function opens");
+    let why = driver.brought_up().phy.expect_err("a PHY held down is not brought up");
+    assert!(
+        matches!(why, PhyRefusal::PhyPoweredDown { ctrl, .. } if ctrl & ctrl::PHY_POWER_DOWN != 0),
+        "{}",
+        nic.because(&format!("it refused with {why:?}"))
+    );
+    assert_eq!(phy::Outcome::of(Err(why), Link::Down), phy::Outcome::PhyPoweredDown);
+    assert!(why.to_string().contains("PHYPDN"));
+}
+
+/// §8.2.3: "The ME/Host should not issue new MDIC transactions while this bit
+/// is set to 1. This bit is auto cleared by hardware after the transition has
+/// occurred." So it is waited out, and a part that never finishes the
+/// transition is refused with no command written into the register at all.
+#[test]
+fn an_interconnect_in_transition_is_waited_out_and_never_written_over() {
+    let settled = Nic::i219(122);
+    let driver = open(&settled);
+    assert!(driver.brought_up().phy.is_ok(), "a transition that finishes is only a wait");
+
+    let nic = Nic::i219(123);
+    nic.interconnect_never_leaves_its_transition();
+    let (bar, clock, grant, line) = nic.parts();
+    let driver = I219::open(nic.part(), bar, clock, grant, line).expect("the function opens");
+    let why = driver.brought_up().phy.expect_err("no transaction may be issued");
+    assert!(
+        matches!(why, PhyRefusal::MdiWaiting { .. }),
+        "{}",
+        nic.because(&format!("it refused with {why:?}"))
+    );
+    assert!(!nic.written().contains(&regs::MDIC), "{}", nic.because("a command was written"));
+    assert_eq!(phy::Outcome::of(Err(why), Link::Down), phy::Outcome::MdiWaiting);
+    // The interface is not kept: §4.5.2's release runs on this path too.
+    assert_eq!(nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP, 0);
+}
+
+/// Each of §8.2's four readings decides exactly one thing, and the correction
+/// is the two bits the document makes writable and nothing else.
+#[test]
+fn what_one_power_reading_decides() {
+    let clear = power::Reading {
+        ctrl: 0x0010_0008,
+        ctrl_ext: 0,
+        phy_ctrl: power::PHY_CTRL_RESET,
+        fwsm: regs::fwsm::FIRMWARE_VALID,
+        mdic: regs::mdic::READY,
+    };
+    assert_eq!(clear.unrouted(), None);
+    assert!(!clear.phy_power_down());
+    assert!(!clear.low_power_entry_enabled());
+    assert!(clear.firmware_ready());
+    assert!(!clear.interconnect_in_transition());
+    assert!(clear.correction().nothing());
+    assert_eq!(clear.correction().to_string(), "nothing was written");
+
+    let down = power::Reading { ctrl: clear.ctrl | ctrl::PHY_POWER_DOWN, ..clear };
+    assert!(down.phy_power_down());
+    // The rest of the word is carried, and only bit 24 goes.
+    assert_eq!(down.correction().ctrl, Some(clear.ctrl));
+    assert_eq!(down.correction().ctrl_ext, None);
+    assert!(down.to_string().contains("held in §8.2.1's power down"));
+
+    let enabled = power::Reading {
+        ctrl_ext: 0x0000_0040 | regs::ctrl_ext::PHY_POWER_DOWN_ENABLE,
+        ..clear
+    };
+    assert!(enabled.low_power_entry_enabled());
+    assert_eq!(enabled.correction().ctrl, None);
+    assert_eq!(enabled.correction().ctrl_ext, Some(0x0000_0040));
+
+    let mute = power::Reading { fwsm: 0, ..clear };
+    assert!(!mute.firmware_ready());
+    // The firmware's own report decides nothing: §8.2.9 attaches nothing to it.
+    assert!(mute.correction().nothing());
+    assert!(mute.to_string().contains("reports itself not ready"));
+
+    let moving = power::Reading { mdic: regs::mdic::WAIT, ..clear };
+    assert!(moving.interconnect_in_transition());
+    assert!(moving.correction().nothing());
+
+    // A window that stopped decoding is a reading no correction comes out of.
+    for gone in [
+        power::Reading { ctrl: u32::MAX, ..clear },
+        power::Reading { ctrl_ext: u32::MAX, ..clear },
+        power::Reading { phy_ctrl: u32::MAX, ..clear },
+        power::Reading { fwsm: u32::MAX, ..clear },
+        power::Reading { mdic: u32::MAX, ..clear },
+    ] {
+        assert_eq!(gone.unrouted(), Some(u32::MAX));
+    }
+
+    let settled = power::Settled { before: down, wrote: down.correction(), after: clear };
+    assert!(settled.settled());
+    assert!(settled.to_string().contains("CTRL was written"));
+    assert!(!power::Settled { after: down, ..settled }.settled());
+    assert!(
+        !power::Settled { after: enabled, ..settled }.settled(),
+        "a low-power entry left enabled is not settled either"
+    );
 }

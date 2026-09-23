@@ -1,11 +1,18 @@
-//! The register file, as the specification defines it.
+//! The register file, as the specifications define it.
 //!
-//! Every offset and every bit below is cited to the *Intel 82574 GbE
-//! Controller Family Datasheet*, order number 317694-018, revision 2.7; §10.2's
-//! Table 77 is the register summary the offsets are copied from.
+//! **Two MAC documents meet here.** Every `§10.`, `§7.`, `§4.` and `§3.` below
+//! is the *Intel 82574 GbE Controller Family Datasheet*, order number
+//! 317694-018, revision 2.7, whose §10.2 Table 77 is the register summary the
+//! offsets are copied from. Every `§8.` is the *Intel® 500 Series Chipset
+//! Family On-Package Platform Controller Hub Datasheet, Volume 2 of 2*,
+//! document 631120, revision 002, whose §8.2 is the register summary of the
+//! integrated GbE controller at `00:1f.6` — the MAC the ThinkPad's `8086:15fc`
+//! actually is. Where the two describe the same offset the `§8.` clause is the
+//! one that governs that part, and where only one of them names a field it is
+//! cited alone.
 //!
-//! Nothing here has behaviour, and a number that is not in the datasheet does
-//! not belong in this file.
+//! Nothing here has behaviour, and a number that is not in one of those two
+//! documents does not belong in this file.
 
 /// Device Control (§10.2.2.1, `0x00000`).
 pub const CTRL: usize = 0x00000;
@@ -66,8 +73,19 @@ pub const TIDV: usize = 0x03820;
 pub const TXDCTL: usize = 0x03828;
 pub const TADV: usize = 0x0382C;
 /// Extended Configuration Control (§10.2.2.15, `0x00F00`), which carries
-/// §4.5.2's arbitration for the MDIO interface.
+/// §4.5.2's arbitration for the MDIO interface — and which §8.2.4 gives one
+/// writable bit and no more.
 pub const EXTCNF_CTRL: usize = 0x00F00;
+/// Extended Device Control (§10.2.2.3, `0x00018`); §8.2.2 is the same offset
+/// on the PCH's MAC, where it carries the PHY's low-power entry.
+pub const CTRL_EXT: usize = 0x00018;
+/// PHY Control (§8.2.5, `0x00F10`), which the I219's §10.3.1.13 calls
+/// "PHY_CTRL" and loads the NVM's OEM configuration word into. Not a register
+/// the 82574 datasheet has.
+pub const PHY_CTRL: usize = 0x00F10;
+/// Firmware Semaphore (§8.2.9, `0x05B54`), the firmware's own report of
+/// itself. Not a register the 82574 datasheet has.
+pub const FWSM: usize = 0x05B54;
 
 /// The smallest register window this driver can be driven through: above every
 /// offset named here, and the bound the register accessor's contract rests on.
@@ -78,6 +96,9 @@ const _: () = {
     assert!(RAH0 < REGISTER_BYTES);
     assert!(TADV < REGISTER_BYTES);
     assert!(EXTCNF_CTRL < REGISTER_BYTES);
+    assert!(CTRL_EXT < REGISTER_BYTES);
+    assert!(PHY_CTRL < REGISTER_BYTES);
+    assert!(FWSM + 4 <= REGISTER_BYTES);
 };
 
 /// Device Control bits (§10.2.2.1).
@@ -97,6 +118,11 @@ pub mod ctrl {
     /// Force Speed (bit 11) and Force Duplex (bit 12).
     pub const FRCSPD: u32 = 1 << 11;
     pub const FRCDPLX: u32 = 1 << 12;
+    /// PHY Power Down (bit 24). §8.2.1: "When cleared (0b), the PHY power down
+    /// setting is controlled by the internal logic of PCH." The document
+    /// describes the cleared case only, so that is the state this driver puts
+    /// the register in and the set case is one it reports.
+    pub const PHY_POWER_DOWN: u32 = 1 << 24;
     /// Device Reset (bit 26). §10.2.2.1: "writing 1b initiates the reset. This
     /// bit is self-clearing."
     pub const RST: u32 = 1 << 26;
@@ -105,6 +131,40 @@ pub mod ctrl {
     pub const TFCE: u32 = 1 << 28;
     /// VLAN Mode Enable (bit 30). Cleared, so a VLAN tag stays in the frame.
     pub const VME: u32 = 1 << 30;
+}
+
+/// Extended Device Control bits (§8.2.2), of which the PCH's own datasheet
+/// gives one and calls everything either side of it "Reserved".
+pub mod ctrl_ext {
+    /// PHY Power Down Enable (bit 20). §8.2.2: "When set, this bit enables the
+    /// PHY to enter a low-power state when the LAN controller is at the DMOff/
+    /// D3 or with no WOL."
+    pub const PHY_POWER_DOWN_ENABLE: u32 = 1 << 20;
+}
+
+/// PHY Control bits (§8.2.5) — the PHY's link-speed policy, read and never
+/// written: each of them makes a link slower or takes it away.
+pub mod phy_ctrl {
+    /// Global GbE Disable (bit 6). §8.2.5: "Prevents the PHY from
+    /// auto-negotiating 1000Mb/s link in all power states."
+    pub const GLOBAL_GBE_DISABLE: u32 = 1 << 6;
+    /// GbE Disable at non D0a (bit 3). §8.2.5: the same "in all power states
+    /// except D0a. This bit must be set since GbE is not supported in Sx
+    /// states."
+    pub const GBE_DISABLE_NON_D0A: u32 = 1 << 3;
+    /// LPLU in non D0a (bit 2). §8.2.5: "Enables the PHY to negotiate for the
+    /// slowest possible link in all power states except D0a."
+    pub const LPLU_NON_D0A: u32 = 1 << 2;
+    /// LPLU in D0a (bit 1). §8.2.5: the same "in all power states. This bit
+    /// overrides bit 2."
+    pub const LPLU_D0A: u32 = 1 << 1;
+}
+
+/// Firmware Semaphore bits (§8.2.9).
+pub mod fwsm {
+    /// Firmware Valid Bit (bit 15). §8.2.9: "1 = Firmware is ready. 0 =
+    /// Firmware is not ready."
+    pub const FIRMWARE_VALID: u32 = 1 << 15;
 }
 
 /// Device Status bits (§10.2.2.2).
@@ -151,10 +211,25 @@ pub mod mdic {
     /// MDI read. Software should make sure this bit is clear (0b) before making
     /// an MDI Read or Write command."
     pub const ERROR: u32 = 1 << 30;
+    /// Wait (bit 31), which the 82574 datasheet does not have. §8.2.3: "Set to
+    /// 1 by the Gigabit Ethernet Controller to indicate that a PCI Express* to
+    /// SMBus transition is taking place. The ME/Host should not issue new MDIC
+    /// transactions while this bit is set to 1. This bit is auto cleared by
+    /// hardware after the transition has occurred."
+    pub const WAIT: u32 = 1 << 31;
 }
 
 /// Extended Configuration Control fields (§10.2.2.15): §4.5.2's three ownership
 /// bits, of which "at any given time at most only one bit is 1b".
+///
+/// **The PCH's MAC has one of these three.** §8.2.4 gives the whole register
+/// bit 5 — "Software Semaphore FLAG (SWFLAG): This bit is set by the device
+/// driver to gain access permission to shared CSR registers with the firmware
+/// and hardware" — and calls bits 31:6 and 4:0 "Reserved", read-only. So on
+/// the T14 the two bits below read as whatever a reserved field reads, the
+/// flag is a semaphore over *shared CSRs* rather than a grant of the MDIO
+/// interface, and holding it is not on its own a statement that the MDI
+/// interface will run a cycle.
 pub mod extcnf {
     /// MDIO SW Ownership (bit 5) — the software request, and the only one of
     /// the three this driver may write.

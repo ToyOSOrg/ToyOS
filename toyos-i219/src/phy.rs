@@ -9,9 +9,17 @@
 //! both are needed at once: "Refer to the PHY documentation for the
 //! initialization and link setup steps. The device driver uses the MDIC
 //! register to initialize the PHY and setup the link."
+//!
+//! **A third document governs the T14's MAC**, and every `§8.` below is it:
+//! the *Intel® 500 Series Chipset Family On-Package Platform Controller Hub
+//! Datasheet, Volume 2 of 2*, document 631120, revision 002, §8.2.
+//! [`crate::power`] is what it says about the PHY's power state and the
+//! firmware's handshake, and why a cycle on this part can fail to start.
 
 use core::cell::Cell;
 
+use crate::crumbs::{Step, Trail};
+use crate::power::{Correction, Reading, Settled};
 use crate::regs::{self, extcnf, mdic};
 use crate::{Clock, Link, Registers, Speed};
 
@@ -219,10 +227,21 @@ pub enum PhyRefusal {
     /// nobody: the last reading here may have every bit clear, which is the
     /// arbitration between two agents and not one of them holding it.
     GrantNeverCame { held_by: u32, after_nanos: u64 },
+    /// §8.2.3's `Wait` bit stood for the whole of [`MDI_DEADLINE_NANOS`], and
+    /// while it stands "the ME/Host should not issue new MDIC transactions" —
+    /// so no command was written.
+    MdiWaiting { phy: u8, reg: u8, after_nanos: u64 },
     /// §10.2.2.7's `Ready` bit never came back for one transaction.
     MdiUnready { phy: u8, reg: u8, after_nanos: u64 },
     /// §10.2.2.7's `Error` bit: the part "fails to complete an MDI read".
     MdiError { phy: u8, reg: u8 },
+    /// §8.2.1's `PHYPDN` still stood, or §8.2.2's `PHYPDEN` did, after this
+    /// driver wrote the word that clears it. **The write is read back and not
+    /// assumed**: a MAC holding its PHY in power down carries no MDIO packet
+    /// to it at all — I219 §2.2 Table 2-1 puts the interconnect in Electrical
+    /// Idle in that state — so a bring-up that went on would be polling for
+    /// the end of a cycle that was never started.
+    PhyPoweredDown { ctrl: u32, ctrl_ext: u32 },
     /// §9.5.2.3's identifier is not Intel's at either of §9.3's two PHY
     /// addresses, so nothing this driver knows the register map of answered.
     Identity { specific: u32, general: u32 },
@@ -251,6 +270,12 @@ impl core::fmt::Display for PhyRefusal {
                 "EXTCNF_CTRL read {held_by:#x} for {after_nanos} ns after this driver registered \
                  §4.5.2's request, which was never granted and has been withdrawn"
             ),
+            Self::MdiWaiting { phy, reg, after_nanos } => write!(
+                f,
+                "MDIC.Wait stood for {after_nanos} ns, so the transaction on PHY {phy} register \
+                 {reg} was never issued: §8.2.3 says the host \"should not issue new MDIC \
+                 transactions while this bit is set\""
+            ),
             Self::MdiUnready { phy, reg, after_nanos } => write!(
                 f,
                 "an MDI transaction on PHY {phy} register {reg} was still not ready \
@@ -260,6 +285,12 @@ impl core::fmt::Display for PhyRefusal {
                 f,
                 "the part reported MDIC.E on PHY {phy} register {reg}, which is a transaction \
                  it could not complete"
+            ),
+            Self::PhyPoweredDown { ctrl, ctrl_ext } => write!(
+                f,
+                "the MAC holds the PHY down after this driver wrote to clear it: CTRL reads \
+                 {ctrl:#010x} and CTRL_EXT {ctrl_ext:#010x}, so §8.2.1's PHYPDN or §8.2.2's \
+                 PHYPDEN is still standing"
             ),
             Self::Identity { specific, general } => write!(
                 f,
@@ -326,6 +357,10 @@ pub enum Outcome {
     SoftwareFlagStoodBesideBoth = 75,
     GrantNeverCame = 76,
     MdiUnready = 77,
+    /// **Out of order because a code is never reused and never renumbered**:
+    /// every code above is already on a boot log somewhere.
+    MdiWaiting = 81,
+    PhyPoweredDown = 82,
     MdiError = 78,
     Identity = 79,
     NotThisRegisterMap = 80,
@@ -375,6 +410,8 @@ impl Outcome {
                  manageability agent beside it"
             }
             Self::GrantNeverCame => "§4.5.2's request was never granted",
+            Self::MdiWaiting => "§8.2.3's Wait bit never went, so no transaction was issued",
+            Self::PhyPoweredDown => "the MAC still holds the PHY in §8.2.1's power down",
             Self::MdiUnready => "an MDI transaction never reported §10.2.2.7's Ready",
             Self::MdiError => "the part reported §10.2.2.7's Error on a transaction",
             Self::Identity => "§9.5.2.3's identifier is not Intel's at either PHY address",
@@ -383,7 +420,7 @@ impl Outcome {
     }
 
     /// Every outcome, in exit-code order.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::BroughtUpNoLink,
         Self::LinkAt10Half,
         Self::LinkAt10Full,
@@ -401,6 +438,8 @@ impl Outcome {
         Self::MdiError,
         Self::Identity,
         Self::NotThisRegisterMap,
+        Self::MdiWaiting,
+        Self::PhyPoweredDown,
     ];
 
     /// The outcome of a bring-up, and of the link that followed it.
@@ -427,8 +466,10 @@ impl Outcome {
                 Others::HardwareAndManageability => Self::SoftwareFlagStoodBesideBoth,
             },
             Err(PhyRefusal::GrantNeverCame { .. }) => Self::GrantNeverCame,
+            Err(PhyRefusal::MdiWaiting { .. }) => Self::MdiWaiting,
             Err(PhyRefusal::MdiUnready { .. }) => Self::MdiUnready,
             Err(PhyRefusal::MdiError { .. }) => Self::MdiError,
+            Err(PhyRefusal::PhyPoweredDown { .. }) => Self::PhyPoweredDown,
             Err(PhyRefusal::Identity { .. }) => Self::Identity,
             Err(PhyRefusal::NotThisRegisterMap) => Self::NotThisRegisterMap,
         }
@@ -453,8 +494,10 @@ impl Outcome {
             | Self::SoftwareFlagStoodBesideManageability
             | Self::SoftwareFlagStoodBesideBoth
             | Self::GrantNeverCame
+            | Self::MdiWaiting
             | Self::MdiUnready
             | Self::MdiError
+            | Self::PhyPoweredDown
             | Self::Identity
             | Self::NotThisRegisterMap => None,
         }
@@ -512,17 +555,32 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
         }
     }
 
-    fn read(&self) -> u32 {
+    /// One paced read of any register reached under the claim.
+    ///
+    /// **The pace is over the agents and not over one register.** §8.2.4 calls
+    /// what the flag arbitrates "shared CSR registers with the firmware and
+    /// hardware" — a set and not a word — so every access this driver makes
+    /// under the flag is paced from the same clock reading, and `MDIC`'s own
+    /// poll is the one exception (it is the transaction, not the arbitration).
+    fn read_at(&self, reg: usize) -> u32 {
         self.pace();
-        let reading = self.regs.read(regs::EXTCNF_CTRL);
+        let reading = self.regs.read(reg);
         self.last.set(Some(self.clock.nanos()));
         reading
     }
 
-    fn write(&self, value: u32) {
+    fn write_at(&self, reg: usize, value: u32) {
         self.pace();
-        self.regs.write(regs::EXTCNF_CTRL, value);
+        self.regs.write(reg, value);
         self.last.set(Some(self.clock.nanos()));
+    }
+
+    fn read(&self) -> u32 {
+        self.read_at(regs::EXTCNF_CTRL)
+    }
+
+    fn write(&self, value: u32) {
+        self.write_at(regs::EXTCNF_CTRL, value);
     }
 }
 
@@ -633,6 +691,20 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// part could not complete still ends and still sets `Ready` over a data
     /// field that is not what the PHY said.
     pub(crate) fn transact(&self, phy: u8, reg: u8, op: u32, data: u16) -> Result<u16, PhyRefusal> {
+        // §8.2.3: while `Wait` stands "the ME/Host should not issue new MDIC
+        // transactions", and the bit "is auto cleared by hardware after the
+        // transition has occurred" — so it is waited out rather than acted on,
+        // and a part that never clears it is refused with nothing written.
+        let waiting_since = self.mdio.clock.nanos();
+        loop {
+            if self.mdio.regs.read(regs::MDIC) & mdic::WAIT == 0 {
+                break;
+            }
+            let waited = self.mdio.clock.nanos().saturating_sub(waiting_since);
+            if waited >= MDI_DEADLINE_NANOS {
+                return Err(PhyRefusal::MdiWaiting { phy, reg, after_nanos: waited });
+            }
+        }
         let command = command(phy, reg, op, data);
         self.mdio.regs.write(regs::MDIC, command);
         let started = self.mdio.clock.nanos();
@@ -655,6 +727,56 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// itself, reachable for as long as the interface is this driver's.
     pub(crate) fn part(&self) -> (&'a R, &'a C) {
         (self.mdio.regs, self.mdio.clock)
+    }
+
+    /// One sweep of §8.2's five power and handshake registers, paced as every
+    /// other access under the flag is, with each reading left durable behind
+    /// the read that took it.
+    pub(crate) fn power_reading<T: Trail>(&self, trail: &T) -> Reading {
+        let seen = |reg| {
+            let value = self.mdio.read_at(reg);
+            trail.crumb(Step::Saw { reg, value });
+            value
+        };
+        Reading {
+            ctrl: seen(regs::CTRL),
+            ctrl_ext: seen(regs::CTRL_EXT),
+            phy_ctrl: seen(regs::PHY_CTRL),
+            fwsm: seen(regs::FWSM),
+            mdic: seen(regs::MDIC),
+        }
+    }
+
+    /// Put the part in the state §8.2.1 and §8.2.2 describe, and read back
+    /// what it then holds.
+    ///
+    /// **Three sweeps and not two would be one too many**: the reading before,
+    /// the writes the reading calls for, and the reading after. A part already
+    /// in that state is written nothing at all, and its two readings are then
+    /// the same sweep taken twice — which is what says the state is the part's
+    /// and not this driver's.
+    ///
+    /// The register that is *not* written is §8.2.5's `PHY_CTRL`: every field
+    /// it has makes a link slower or takes it away, and the documents give
+    /// this driver no reason to move one.
+    pub(crate) fn settle_power<T: Trail>(&self, trail: &T) -> Result<Settled, PhyRefusal> {
+        let before = self.power_reading(trail);
+        if before.unrouted().is_some() {
+            return Err(PhyRefusal::Unrouted { reg: regs::CTRL });
+        }
+        let wrote = before.correction();
+        let Correction { ctrl, ctrl_ext } = wrote;
+        if let Some(value) = ctrl {
+            self.mdio.write_at(regs::CTRL, value);
+        }
+        if let Some(value) = ctrl_ext {
+            self.mdio.write_at(regs::CTRL_EXT, value);
+        }
+        let after = self.power_reading(trail);
+        if after.unrouted().is_some() {
+            return Err(PhyRefusal::Unrouted { reg: regs::CTRL });
+        }
+        Ok(Settled { before, wrote, after })
     }
 
     fn read(&self, phy: u8, reg: u8) -> Result<u16, PhyRefusal> {
@@ -722,10 +844,11 @@ impl<R: Registers, C: Clock> Drop for Owned<'_, R, C> {
 ///
 /// `reset_at` is when `CTRL.RST` was written, which §9.2's delay below is
 /// measured from.
-pub(crate) fn bring_up<R: Registers, C: Clock>(
+pub(crate) fn bring_up<R: Registers, C: Clock, T: Trail>(
     regs: &R,
     clock: &C,
     reset_at: u64,
+    trail: &T,
 ) -> Result<Phy, PhyRefusal> {
     // §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
     // attempting to access MDIO registers." A wait and not a poll: the document
@@ -740,6 +863,20 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
     }
 
     let mdi = Owned::claim(regs, clock)?;
+
+    // The MDI cycle is an in-band packet to the LAN Connected Device (I219
+    // §1.2, §2.2.2.1.1), so a PHY the MAC holds powered down answers no cycle
+    // at all. §8.2.1's and §8.2.2's two bits are the whole of what the
+    // documents give software over that, and this is where they are put in the
+    // state those clauses describe — under the flag §8.2.4 arbitrates the
+    // shared CSRs with, and before any transaction is issued.
+    let settled = mdi.settle_power(trail)?;
+    if !settled.settled() {
+        return Err(PhyRefusal::PhyPoweredDown {
+            ctrl: settled.after.ctrl,
+            ctrl_ext: settled.after.ctrl_ext,
+        });
+    }
 
     // §9.2: "Access using MDIO should be done only when bit 10 in page 769
     // register 16 is set." The bit is itself reached over MDIO, so this one

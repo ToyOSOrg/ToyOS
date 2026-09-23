@@ -249,12 +249,13 @@ pub fn leave_crumbs(
 ) -> Result<std::convert::Infallible, Opening> {
     let dev = Rc::new(dev);
     let (bar, grant, _frames) = granted(&dev, trail)?;
-    let mut driver = toyos_i219::I219::open(
+    let mut driver = toyos_i219::I219::open_trailing(
         part,
         Crumbed::over(bar, trail),
         Monotonic,
         grant,
         Claim(Rc::clone(&dev)),
+        trail,
     )
     .map_err(Opening::Driver)?;
     trail.crumb(Step::Opened);

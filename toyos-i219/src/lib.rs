@@ -74,6 +74,7 @@ extern crate std;
 
 pub mod crumbs;
 pub mod phy;
+pub mod power;
 pub mod regs;
 pub mod unready;
 
@@ -599,6 +600,24 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// qualified with CTRL.SLU": a driver that let the MAC look before the PHY
     /// was configured would read the answer to the wrong question.
     pub fn open(part: Part, regs: R, clock: C, dma: D, irq: I) -> Result<Self, Refusal> {
+        Self::open_trailing(part, regs, clock, dma, irq, &crumbs::Silent)
+    }
+
+    /// The same, with a trail the PHY's power step leaves its readings on.
+    ///
+    /// **The trail is for the readings and nothing else.** A [`crumbs::Crumbed`]
+    /// window already leaves a durable line before every access and carries the
+    /// value of every *write*; what a read answered is a second line behind it
+    /// (`crumbs`' own header), and the bring-up's power step is the one place
+    /// where what a read answered has to survive the machine.
+    pub fn open_trailing<T: crumbs::Trail>(
+        part: Part,
+        regs: R,
+        clock: C,
+        dma: D,
+        irq: I,
+        trail: &T,
+    ) -> Result<Self, Refusal> {
         if regs.bytes() < regs::REGISTER_BYTES {
             return Err(Refusal::Window { given: regs.bytes(), needed: regs::REGISTER_BYTES });
         }
@@ -636,7 +655,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // under a scheme of its own — so the sequence is refused by name on the
         // part it was not written from.
         let phy = match part {
-            Part::I219 => phy::bring_up(&regs, &clock, reset_at),
+            Part::I219 => phy::bring_up(&regs, &clock, reset_at, trail),
             Part::E82574 => Err(phy::PhyRefusal::NotThisRegisterMap),
         };
 
