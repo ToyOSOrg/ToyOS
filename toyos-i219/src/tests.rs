@@ -2128,7 +2128,9 @@ fn every_reading_of_the_arbitration_has_one_exit_code_that_reads_back() {
     );
 }
 
-use crate::crumbs::{self, before, Broken, Crumbed, Ending, Runs, Step, Trail};
+use crate::crumbs::{
+    self, before, Broken, Crumbed, Deed, Ending, Runs, Step, Trail, Unpaired,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::string::{String, ToString};
@@ -2310,6 +2312,14 @@ fn a_line_reads_back_as_it_was_written() {
         Step::Write { reg: regs::MTA, value: 0 },
         Step::Opened,
         Step::Exit { code: 69 },
+        Step::Before { deed: Deed::Read { reg: regs::EXTCNF_CTRL, value: None } },
+        Step::After { deed: Deed::Read { reg: regs::EXTCNF_CTRL, value: Some(0x0018_0244) } },
+        Step::Before { deed: Deed::Write { reg: regs::EXTCNF_CTRL, value: 0x20 } },
+        Step::After { deed: Deed::Write { reg: regs::EXTCNF_CTRL, value: 0x20 } },
+        Step::Before { deed: Deed::Read { reg: 0x5b54, value: None } },
+        Step::After { deed: Deed::Read { reg: 0x5b54, value: Some(u32::MAX) } },
+        Step::Before { deed: Deed::Hold },
+        Step::After { deed: Deed::Hold },
     ];
     let mut file = String::new();
     for (seq, step) in steps.into_iter().enumerate() {
@@ -2320,6 +2330,10 @@ fn a_line_reads_back_as_it_was_written() {
     assert_eq!(read, steps);
     assert!(file.contains("\n007 7007 6930 write CTRL 0x04000040\n"), "{file}");
     assert!(file.contains(" read 0x05b54\n"), "{file}");
+    assert!(file.contains(" before read EXTCNF_CTRL\n"), "{file}");
+    assert!(file.contains(" after read EXTCNF_CTRL 0x00180244\n"), "{file}");
+    assert!(file.contains(" before write EXTCNF_CTRL 0x00000020\n"), "{file}");
+    assert!(file.contains(" after hold\n"), "{file}");
 }
 
 #[test]
@@ -2350,4 +2364,187 @@ fn where_a_trail_stops_is_what_it_says() {
     for bad in ["000 10 0 start\nnonsense\n", "000 10 0 start\n\n", "000 10 0 read\n", "000 10 0 exit 69 70\n"] {
         assert!(matches!(Ending::of(bad), Err(Broken::Unreadable { .. })), "{bad:?}");
     }
+}
+
+// --- the arbitration, asked with both sides of every access on the trail ---
+
+/// The ask over a taped part, with or without [`ask::after_reset_witnessed`]'s
+/// trail: the reading, and everything the tape and the trail saw in order.
+fn taped_ask(nic: &Nic, witness: bool) -> (Reading, Vec<Seen>) {
+    let seen: Seens = Rc::default();
+    let (bar, clock, _, _) = nic.parts();
+    let tape = Tape { regs: bar, seen: Rc::clone(&seen) };
+    let pause = |nanos| nic.sleep(nanos);
+    let asked = if witness {
+        ask::after_reset_witnessed(tape, &clock, pause, Runs::over(Noted(Rc::clone(&seen))))
+    } else {
+        ask::after_reset(&tape, &clock, pause)
+    };
+    let reading =
+        asked.unwrap_or_else(|why| panic!("{}", nic.because(&format!("the reset refused it: {why}"))));
+    let seen = seen.borrow().clone();
+    (reading, seen)
+}
+
+/// One shape of arbitration the ask has an answer on: the stub's seed, whether
+/// §4.5.2's flag is a plain mutex on that part, and what arranges it.
+struct Asked {
+    seed: u64,
+    mutex: bool,
+    arrange: fn(&Nic),
+}
+
+/// Every shape of it, so the pair below is compared on more than one.
+fn asked_parts() -> [Asked; 4] {
+    let asked = |seed, mutex, arrange| Asked { seed, mutex, arrange };
+    [
+        asked(140, false, |n: &Nic| n.engine_holds_the_interface_until(ask::QUICK_NANOS / 2)),
+        asked(141, false, |n: &Nic| n.engine_holds_the_interface_until(ask::QUICK_NANOS * 5)),
+        asked(142, false, |n: &Nic| n.mdio_never_granted()),
+        asked(143, true, |n: &Nic| n.mdio_never_granted()),
+    ]
+}
+
+/// **The scout arm's one claim**: a witnessed ask asks the part exactly what a
+/// bare ask asks it — the same registers, the same words, in the same order,
+/// for the same answer. The trail is a record and not a move in the handshake.
+#[test]
+fn a_witnessed_ask_asks_the_part_exactly_what_a_bare_one_does() {
+    for Asked { seed, mutex, arrange } in asked_parts() {
+        let (bare, witnessed) = (quiet_arbitration(seed, mutex), quiet_arbitration(seed, mutex));
+        arrange(&bare);
+        arrange(&witnessed);
+        let (was, bare_seen) = taped_ask(&bare, false);
+        let (now, with_seen) = taped_ask(&witnessed, true);
+        assert_eq!(was, now, "{}", bare.because("the trail changed the arbitration's answer"));
+        assert_eq!(
+            reached(&bare_seen),
+            reached(&with_seen),
+            "{}",
+            bare.because("the trail changed what reached the part")
+        );
+        assert_eq!(
+            bare.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
+            witnessed.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP,
+            "{}",
+            bare.because("the trail changed what the request was left as")
+        );
+        only_the_reset_and_the_arbitration(&witnessed);
+    }
+}
+
+/// The trail's own claim: one line before every access and one after it, the
+/// `after` line carrying the word the part answered — and the reset's accesses,
+/// which happen before the question, on neither.
+#[test]
+fn a_witnessed_ask_leaves_both_sides_of_every_access_and_of_no_other() {
+    let nic = quiet_arbitration(144, false);
+    nic.engine_holds_the_interface_until(ask::QUICK_NANOS / 2);
+    let (_, seen) = taped_ask(&nic, true);
+    let crumbs = crumbs_of(&seen);
+    let arbitration = |step: &Seen| {
+        matches!(step, Seen::Reached(Step::Read { reg } | Step::Write { reg, .. }) if *reg == regs::EXTCNF_CTRL)
+    };
+    let accesses = seen.iter().filter(|s| arbitration(s)).count();
+    assert!(accesses >= 4, "{}", nic.because("the question reached the arbitration barely at all"));
+    assert_eq!(
+        crumbs.len(),
+        2 * accesses,
+        "{}",
+        nic.because("the trail is not two lines per access of the question")
+    );
+
+    // The order, access by access: the `before` line is durable, then the part
+    // is reached, then the `after` line — and nothing of the reset is on it.
+    let witnessed: Vec<&Seen> =
+        seen.iter().filter(|s| matches!(s, Seen::Crumb(_)) || arbitration(s)).collect();
+    for pair in witnessed.chunks(3) {
+        match pair {
+            [Seen::Crumb(Step::Before { deed }), Seen::Reached(access), Seen::Crumb(Step::After { deed: back })]
+                if deed.is_the_same_deed(*back) && *access == bare_step(*deed) => {}
+            other => panic!("{}", nic.because(&format!("an access arrived as {other:?}"))),
+        }
+    }
+
+    // What the register held before the request is on the trail, and the word
+    // written is that reading with §4.5.2's software bit set and nothing else.
+    let read_back: Vec<u32> = crumbs
+        .iter()
+        .filter_map(|step| match step {
+            Step::After { deed: Deed::Read { reg, value } } if *reg == regs::EXTCNF_CTRL => *value,
+            _ => None,
+        })
+        .collect();
+    let written: Vec<u32> = crumbs
+        .iter()
+        .filter_map(|step| match step {
+            Step::Before { deed: Deed::Write { reg, value } } if *reg == regs::EXTCNF_CTRL => {
+                Some(*value)
+            }
+            _ => None,
+        })
+        .collect();
+    let before_the_request = *read_back.first().expect("the reading before the request");
+    assert_eq!(
+        written.first().copied(),
+        Some(before_the_request | extcnf::MDIO_SW_OWNERSHIP),
+        "{}",
+        nic.because("the word written is not the reading the trail carries with bit 5 set")
+    );
+}
+
+/// The step a [`Deed`] is the two sides of, which is how a witnessed line is
+/// held against what the tape saw reach the part.
+fn bare_step(deed: Deed) -> Step {
+    match deed {
+        Deed::Read { reg, .. } => Step::Read { reg },
+        Deed::Write { reg, value } => Step::Write { reg, value },
+        Deed::Hold => panic!("a hold reaches no register"),
+    }
+}
+
+/// A trail says which deed it stops inside, and refuses a file whose lines do
+/// not pair — because a `before` followed by something other than its own
+/// `after` cannot say which deed its last line is about.
+#[test]
+fn a_witnessed_trail_pairs_or_names_the_deed_it_stops_inside() {
+    let line = |seq: u32, step: Step| crumbs::Line { seq, at: 10 * seq as u64, synced: 0, step };
+    let read = Deed::Read { reg: regs::EXTCNF_CTRL, value: None };
+    let answered = Deed::Read { reg: regs::EXTCNF_CTRL, value: Some(0x0018_0244) };
+    let write = Deed::Write { reg: regs::EXTCNF_CTRL, value: 0x0018_0264 };
+
+    let whole = [
+        line(0, Step::Start),
+        line(1, Step::Before { deed: read }),
+        line(2, Step::After { deed: answered }),
+        line(3, Step::Before { deed: write }),
+        line(4, Step::After { deed: write }),
+        line(5, Step::Before { deed: Deed::Hold }),
+        line(6, Step::After { deed: Deed::Hold }),
+        line(7, Step::Exit { code: 79 }),
+    ];
+    assert_eq!(crumbs::witnessed(&whole), Ok((3, None)));
+
+    // The machine ended inside the write: the trail names it, and the reading
+    // the line before it carries is what the register held.
+    assert_eq!(crumbs::witnessed(&whole[..4]), Ok((1, Some(write))));
+    assert_eq!(crumbs::witnessed(&whole[..3]), Ok((1, None)));
+
+    // A `before` whose next line is not its own `after`.
+    let interleaved = [whole[1], whole[3], whole[2], whole[4]];
+    assert!(matches!(
+        crumbs::witnessed(&interleaved),
+        Err(Unpaired::Interrupted { before, next }) if before.seq == 1 && next.seq == 3
+    ));
+    // The same register on both sides, and not the same word written.
+    let other = [
+        line(0, Step::Before { deed: write }),
+        line(1, Step::After { deed: Deed::Write { reg: regs::EXTCNF_CTRL, value: 0 } }),
+    ];
+    assert!(matches!(crumbs::witnessed(&other), Err(Unpaired::Interrupted { .. })));
+    // An `after` with nothing in front of it.
+    assert!(matches!(
+        crumbs::witnessed(&[whole[0], whole[2]]),
+        Err(Unpaired::Stray { after }) if after.seq == 2
+    ));
 }

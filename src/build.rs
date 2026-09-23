@@ -2591,12 +2591,14 @@ mod tests {
         "tests/doomcase/system.toml",
         "tests/doommusiccase/system.toml",
         "tests/e1000askcase/system.toml",
+        "tests/e1000askcrumbcase/system.toml",
         "tests/e1000case/system.toml",
         "tests/e1000crumbcase/system.toml",
         "tests/e1000phycase/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
         "tests/lanaskcase/system.toml",
+        "tests/lanaskcrumbcase/system.toml",
         "tests/lancase/system.toml",
         "tests/lancrumbcase/system.toml",
         "tests/lanicscase/system.toml",
@@ -2768,15 +2770,21 @@ mod tests {
         assert!(one_claimant_per_device(&bad, None).is_err());
     }
 
-    /// netd's four actuators that only its Intel driver answers, spelled here
+    /// netd's five actuators that only its Intel driver answers, spelled here
     /// and held to netd's own declarations by
     /// [`netd_declares_the_flags_this_gate_spells`].
     const PROVOKE_MESSAGE: &str = "--provoke-message";
     const EXIT_WITH_PHY_OUTCOME: &str = "--exit-with-phy-outcome";
     const EXIT_WITH_MDIO_ASK: &str = "--exit-with-mdio-ask";
     const EXIT_WITH_CRUMBS: &str = "--exit-with-crumbs";
-    const INTEL_ACTUATORS: [&str; 4] =
-        [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME, EXIT_WITH_MDIO_ASK, EXIT_WITH_CRUMBS];
+    const EXIT_WITH_ASK_CRUMBS: &str = "--exit-with-ask-crumbs";
+    const INTEL_ACTUATORS: [&str; 5] = [
+        PROVOKE_MESSAGE,
+        EXIT_WITH_PHY_OUTCOME,
+        EXIT_WITH_MDIO_ASK,
+        EXIT_WITH_CRUMBS,
+        EXIT_WITH_ASK_CRUMBS,
+    ];
 
     /// netd's main module, which is where both halves of this gate's spelling
     /// live: nothing links the two crates, so the build system reads the source.
@@ -2839,11 +2847,12 @@ mod tests {
         cards
     }
 
-    /// netd's four Intel-only actuators — `--provoke-message` writes
+    /// netd's five Intel-only actuators — `--provoke-message` writes
     /// §10.2.4.4's `ICS`, `--exit-with-phy-outcome` reports a PHY bring-up,
-    /// `--exit-with-mdio-ask` asks §4.5.2's arbitration and `--exit-with-crumbs`
-    /// trails that driver's bring-up, and virtio's driver has none of the
-    /// four — so a boot config that arms one on a card netd
+    /// `--exit-with-mdio-ask` asks §4.5.2's arbitration, `--exit-with-crumbs`
+    /// trails that driver's bring-up and `--exit-with-ask-crumbs` trails that
+    /// same arbitration on both sides of every access, and virtio's driver has
+    /// none of the five — so a boot config that arms one on a card netd
     /// opens with any other driver is a boot that panics instead of answering
     /// the question it was flashed for. One that arms two on one program is
     /// refused too: a probe ends the process before the point another of them

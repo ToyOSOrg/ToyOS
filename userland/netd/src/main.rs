@@ -105,17 +105,38 @@ const ASK_EXIT_DWELL: Duration = Duration::from_millis(500);
 /// a trail, and the other two act where it never arrives.
 const EXIT_WITH_CRUMBS: &str = "--exit-with-crumbs";
 
-/// The trail [`EXIT_WITH_CRUMBS`] leaves: a poll is one crumb, and every one of
-/// them is on the device before the step it names.
+/// The probe under which this process puts [`EXIT_WITH_MDIO_ASK`]'s question to
+/// the part with a durable crumb on **both** sides of every register access it
+/// makes, and of the dwell it ends on.
+///
+/// **For a machine that dies inside one access.** [`EXIT_WITH_MDIO_ASK`]'s boot
+/// left a machine the owner had to power off and a stick whose log ends in SMP
+/// bring-up, so nothing said which access it was in; a line on the device
+/// before the access and another after it does. The question is that probe's,
+/// unchanged — same register, same bit, same order, same words — and what
+/// changes is only what is recorded around it. Armed the same way as the four
+/// above and never beside one.
+const EXIT_WITH_ASK_CRUMBS: &str = "--exit-with-ask-crumbs";
+
+/// The trail [`EXIT_WITH_CRUMBS`] and [`EXIT_WITH_ASK_CRUMBS`] leave: a poll is
+/// one crumb, and every one of them is on the device before the step it names.
+///
+/// One type under both, because a witnessed line is never folded into a run:
+/// the pair around one access is what the second arm exists for.
 type Crumbs = toyos_i219::crumbs::Runs<crumbs::Stick>;
 
 /// What the Rust runtime ends a panicking process with, which is how this one
 /// ends on a card it cannot drive.
 const PANIC_EXIT: i32 = 101;
 
-/// The four, which cannot share a boot.
-const ACTUATORS: [&str; 4] =
-    [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME, EXIT_WITH_MDIO_ASK, EXIT_WITH_CRUMBS];
+/// The five, which cannot share a boot.
+const ACTUATORS: [&str; 5] = [
+    PROVOKE_MESSAGE,
+    EXIT_WITH_PHY_OUTCOME,
+    EXIT_WITH_MDIO_ASK,
+    EXIT_WITH_CRUMBS,
+    EXIT_WITH_ASK_CRUMBS,
+];
 
 fn armed(actuator: &str) -> bool {
     std::env::args().any(|arg| arg == actuator)
@@ -124,7 +145,7 @@ fn armed(actuator: &str) -> bool {
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
-use toyos_i219::crumbs::{Step, Trail};
+use toyos_i219::crumbs::{around, before, Deed, Step, Trail};
 use toyos_i219::Part;
 use virtio_net::VirtioNet;
 
@@ -160,6 +181,25 @@ impl Card {
     /// `provoke` is [`PROVOKE_MESSAGE`], carried out once the card is up.
     fn intel(claim: toyos::PciDev, part: Part, trail: Option<&Crumbs>, provoke: bool) -> Self {
         if let Some(trail) = trail {
+            // One trail, opened for two arms: which of them is armed decides
+            // what is taken under it — the bring-up, or the question.
+            if armed(EXIT_WITH_ASK_CRUMBS) {
+                match i219::ask_with_crumbs(&claim, trail) {
+                    Ok(reading) => {
+                        let code = reading.exit_code();
+                        // The dwell is [`EXIT_WITH_MDIO_ASK`]'s own, and it is
+                        // the one stretch of this probe that reaches no
+                        // register: a trail that ends inside it says the death
+                        // is not an access at all.
+                        around(trail, Deed::Hold, || std::thread::sleep(ASK_EXIT_DWELL));
+                        before(trail, Step::Exit { code }, || std::process::exit(code))
+                    }
+                    Err(why) => {
+                        trail.crumb(Step::Exit { code: PANIC_EXIT });
+                        Self::undrivable(why)
+                    }
+                }
+            }
             match i219::leave_crumbs(claim, part, trail) {
                 Ok(never) => match never {},
                 // The refusal is a step too: a trail that stopped short of it
@@ -201,6 +241,11 @@ impl Card {
         if armed(EXIT_WITH_MDIO_ASK) {
             Self::undrivable(format_args!(
                 "{EXIT_WITH_MDIO_ASK} asks §4.5.2's MDIO arbitration, which this card has not"
+            ));
+        }
+        if armed(EXIT_WITH_ASK_CRUMBS) {
+            Self::undrivable(format_args!(
+                "{EXIT_WITH_ASK_CRUMBS} trails that same arbitration, which this card has not"
             ));
         }
         if trail.is_some() {
@@ -1411,7 +1456,8 @@ impl NetDaemon {
 fn main() {
     // Before the claim is looked for, so a trail with this line and no other
     // is a process that ended without ever holding the function.
-    let trail = armed(EXIT_WITH_CRUMBS).then(|| Crumbs::over(crumbs::Stick::open()));
+    let trail = (armed(EXIT_WITH_CRUMBS) || armed(EXIT_WITH_ASK_CRUMBS))
+        .then(|| Crumbs::over(crumbs::Stick::open()));
     if let Some(trail) = &trail {
         trail.crumb(Step::Start);
     }

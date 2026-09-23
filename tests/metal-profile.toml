@@ -1087,6 +1087,42 @@ ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
 
 [[number]]
+name = "boot.lanaskcrumbcase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.lancase.complete_ms — the same boot config with one netd argument added"
+
+[[number]]
+name = "boot.lanaskcrumbcase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.lanaskcrumbcase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.lancase.stick_secs"
+
+[[number]]
+name = "list.lanaskcrumbcase.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "as list.lancase.job_ms — the same one job"
+
+[[number]]
+name = "boot.lanaskcrumbcase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.lanaskcrumbcase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
 name = "boot.lancrumbcase.complete_ms"
 unit = "ms"
 ceiling = 60000

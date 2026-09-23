@@ -1,0 +1,20 @@
+# `tests/e1000askcase` with a trail on both sides: netd's
+# `--exit-with-ask-crumbs` puts the same question to the arbitration and leaves
+# a durable line in `/log/crumbs.txt` immediately before and immediately after
+# every register access it makes, ending with the same reading's code. Nothing
+# here receives `netd`, because there is no netd left to connect to once it has
+# answered.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:10d3"]
+args = ["--exit-with-ask-crumbs"]
+
+[programs.test-runner]
+syscap = ["logread"]

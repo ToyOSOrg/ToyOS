@@ -21,6 +21,7 @@
 //! share the block that starts at 64 and share one code in it,
 //! [`Reading::Unrouted`], which is the same sentence in both.
 
+use crate::crumbs::{Trail, Witnessed};
 use crate::phy::{self, Outcome};
 use crate::regs::{self, extcnf};
 use crate::{Clock, Refusal, Registers};
@@ -223,6 +224,38 @@ pub fn after_reset<R: Registers, C: Clock>(
     clock: &C,
     pause: impl Fn(u64),
 ) -> Result<Reading, Refusal> {
+    before_asking(regs, clock, &pause)?;
+    Ok(ask(regs, clock, &pause))
+}
+
+/// [`after_reset`] with a durable line on both sides of every access the
+/// *question* makes, which is every access from `EXTCNF_CTRL` on.
+///
+/// **The same question, recorded and not changed.** The reset and §9.2's delay
+/// are taken through the bare window exactly as [`after_reset`] takes them, and
+/// what follows is [`ask`] itself over a [`Witnessed`] view: same register,
+/// same bit, same order, same words. What the trail does move is how many
+/// samples fit inside [`BOUND_NANOS`] — every bound here is read off `clock`,
+/// so two durable writes per access buy fewer polls in the same wait and never
+/// a different one.
+pub fn after_reset_witnessed<R: Registers, C: Clock, T: Trail>(
+    regs: R,
+    clock: &C,
+    pause: impl Fn(u64),
+    trail: T,
+) -> Result<Reading, Refusal> {
+    before_asking(&regs, clock, &pause)?;
+    Ok(ask(&Witnessed::over(regs, trail), clock, &pause))
+}
+
+/// What both entry points do before the question: refuse a window the
+/// arbitration is not inside, reset the function as [`crate::I219::open`] does,
+/// and wait out §9.2's delay.
+fn before_asking<R: Registers, C: Clock>(
+    regs: &R,
+    clock: &C,
+    pause: &impl Fn(u64),
+) -> Result<(), Refusal> {
     if regs.bytes() < regs::REGISTER_BYTES {
         return Err(Refusal::Window {
             given: regs.bytes(),
@@ -238,7 +271,7 @@ pub fn after_reset<R: Registers, C: Clock>(
         }
         pause(phy::LCD_RESET_DELAY_NANOS - since);
     }
-    Ok(ask(regs, clock, &pause))
+    Ok(())
 }
 
 fn ask<R: Registers, C: Clock>(regs: &R, clock: &C, pause: &impl Fn(u64)) -> Reading {

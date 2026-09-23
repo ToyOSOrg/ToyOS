@@ -190,6 +190,30 @@ pub fn ask(dev: &PciDev) -> Result<toyos_i219::ask::Reading, Opening> {
     Ok(reading)
 }
 
+/// `crate::EXIT_WITH_ASK_CRUMBS`: [`ask`]'s question, with a durable line on
+/// both sides of every register access it makes from `EXTCNF_CTRL` on, and one
+/// before each of the two calls on the claim that come first.
+///
+/// **The reset is asked through the bare window**, exactly as [`ask`] asks it:
+/// the accesses this arm exists to name start at `EXTCNF_CTRL`, and a trail
+/// that ends at `describe` or `map-bar` already says the machine never reached
+/// the part at all.
+pub fn ask_with_crumbs(
+    dev: &PciDev,
+    trail: &impl Trail,
+) -> Result<toyos_i219::ask::Reading, Opening> {
+    let bar = registers(dev, trail)?;
+    let reading = toyos_i219::ask::after_reset_witnessed(
+        bar,
+        &Monotonic,
+        |nanos| std::thread::sleep(std::time::Duration::from_nanos(nanos)),
+        trail,
+    )
+    .map_err(Opening::Driver)?;
+    crate::say!("netd: I219: {reading}");
+    Ok(reading)
+}
+
 /// Everything the claim is asked for before the part is reached, in the order
 /// it is asked: the register window, then one grant — as the driver reaches its
 /// descriptors, and as netd reaches its frames.

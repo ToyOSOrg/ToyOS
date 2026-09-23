@@ -16,6 +16,13 @@
 //! **A crumbed part is the same part.** [`Crumbed`] forwards every access it is
 //! given, in the order it is given them, and decides nothing: the driver above
 //! it cannot tell it from the [`Registers`] underneath.
+//!
+//! **[`Witnessed`] closes the last crumb's other side.** A trail of `before`
+//! lines alone cannot separate "the machine ended inside step *n*" from "step
+//! *n* returned and crumb *n + 1* was still being written"; a line on each side
+//! of an access can, and the `after` line carries what a read answered. It
+//! costs two durable writes per access, so it is for an arm whose whole purpose
+//! is the last line and not for a bring-up.
 
 use crate::{regs, Registers};
 
@@ -45,6 +52,19 @@ pub fn before<T: Trail, A>(trail: &T, step: Step, take: impl FnOnce() -> A) -> A
     take()
 }
 
+/// Leave a durable line on each side of `deed`.
+///
+/// **The first line is durable before the deed is taken** and not after it,
+/// because the deed may be the last thing this machine does: a line written
+/// afterwards would never reach the device, and the trail would name the deed
+/// before this one. The second line is what says this deed returned.
+pub fn around<T: Trail, A>(trail: &T, deed: Deed, take: impl FnOnce() -> A) -> A {
+    trail.crumb(Step::Before { deed });
+    let took = take();
+    trail.crumb(Step::After { deed });
+    took
+}
+
 /// One thing a bring-up does that reaches the kernel's claim or the part.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Step {
@@ -67,6 +87,79 @@ pub enum Step {
     Opened,
     /// The process ends with this code, which is also what gives the claim up.
     Exit { code: i32 },
+    /// The deed named is about to be taken. **A trail that ends here says the
+    /// deed itself is what the machine did not come back from.**
+    Before { deed: Deed },
+    /// The deed named returned, with what it carried. **A trail that ends here
+    /// says the death is later than this deed.**
+    After { deed: Deed },
+}
+
+/// One thing a [`Witnessed`] trail names on both sides.
+///
+/// Separate from [`Step`]'s own `Read` and `Write` because a witnessed read
+/// carries what it answered, which the line before it cannot have.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Deed {
+    /// One register read. `value` is what it answered, so it is `None` on the
+    /// line before the access and `Some` on the line after it.
+    Read { reg: usize, value: Option<u32> },
+    /// One register write, with the word written — the same on both lines.
+    Write { reg: usize, value: u32 },
+    /// The claim kept across a wait that reaches no register. Giving the claim
+    /// up is what makes the kernel reset the function, so a trail that ends
+    /// inside this one ends with the function still this process's.
+    Hold,
+}
+
+impl Deed {
+    /// Whether these two lines are the two sides of one access: the same kind
+    /// of access to the same register carrying the same word, a read's answer
+    /// apart.
+    pub fn is_the_same_deed(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Read { reg, .. }, Self::Read { reg: was, .. }) => reg == was,
+            (Self::Write { reg, value }, Self::Write { reg: was, value: wrote }) => {
+                reg == was && value == wrote
+            }
+            (Self::Hold, Self::Hold) => true,
+            _ => false,
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        let mut words = text.split(' ');
+        let deed = match (words.next()?, words.next(), words.next()) {
+            ("hold", None, None) => Self::Hold,
+            ("read", Some(reg), None) => Self::Read { reg: Register::parse(reg)?, value: None },
+            ("read", Some(reg), Some(value)) => {
+                Self::Read { reg: Register::parse(reg)?, value: Some(word(value)?) }
+            }
+            ("write", Some(reg), Some(value)) => {
+                Self::Write { reg: Register::parse(reg)?, value: word(value)? }
+            }
+            _ => return None,
+        };
+        words.next().is_none().then_some(deed)
+    }
+}
+
+impl core::fmt::Display for Deed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Read { reg, value: None } => write!(f, "read {}", Register(*reg)),
+            Self::Read { reg, value: Some(value) } => {
+                write!(f, "read {} {value:#010x}", Register(*reg))
+            }
+            Self::Write { reg, value } => write!(f, "write {} {value:#010x}", Register(*reg)),
+            Self::Hold => f.write_str("hold"),
+        }
+    }
+}
+
+/// A 32-bit word as a crumb spells it.
+fn word(text: &str) -> Option<u32> {
+    u32::from_str_radix(text.strip_prefix("0x")?, 16).ok()
 }
 
 /// The registers a bring-up reaches, by the names the datasheet gives them.
@@ -145,7 +238,9 @@ impl Step {
     ///
     /// **Never on `EXTCNF_CTRL`**: every access to §4.5.2's arbitration is a
     /// move in a handshake another agent is party to, so each is a step of its
-    /// own.
+    /// own. **Never a [`Witnessed`] line either** — a fold there would leave
+    /// one line standing for two accesses, which is the one thing that trail
+    /// exists not to do.
     fn continues(self, last: Step) -> bool {
         let (reg, was) = match (self, last) {
             (Self::Read { reg }, Self::Read { reg: was }) => (reg, was),
@@ -166,6 +261,12 @@ impl Step {
     }
 
     fn parse(text: &str) -> Option<Self> {
+        if let Some(deed) = text.strip_prefix("before ") {
+            return Some(Self::Before { deed: Deed::parse(deed)? });
+        }
+        if let Some(deed) = text.strip_prefix("after ") {
+            return Some(Self::After { deed: Deed::parse(deed)? });
+        }
         let mut words = text.split(' ');
         let step = match (words.next()?, words.next(), words.next()) {
             ("start", None, None) => Self::Start,
@@ -175,10 +276,9 @@ impl Step {
             ("dma-alloc", None, None) => Self::DmaAlloc,
             ("opened", None, None) => Self::Opened,
             ("read", Some(reg), None) => Self::Read { reg: Register::parse(reg)? },
-            ("write", Some(reg), Some(value)) => Self::Write {
-                reg: Register::parse(reg)?,
-                value: u32::from_str_radix(value.strip_prefix("0x")?, 16).ok()?,
-            },
+            ("write", Some(reg), Some(value)) => {
+                Self::Write { reg: Register::parse(reg)?, value: word(value)? }
+            }
             ("exit", Some(code), None) => Self::Exit { code: code.parse().ok()? },
             _ => return None,
         };
@@ -198,6 +298,8 @@ impl core::fmt::Display for Step {
             Self::Write { reg, value } => write!(f, "write {} {value:#010x}", Register(*reg)),
             Self::Opened => f.write_str("opened"),
             Self::Exit { code } => write!(f, "exit {code}"),
+            Self::Before { deed } => write!(f, "before {deed}"),
+            Self::After { deed } => write!(f, "after {deed}"),
         }
     }
 }
@@ -208,8 +310,15 @@ pub struct Named(Step);
 
 impl core::fmt::Display for Named {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let side = |deed: Deed, side: &str, f: &mut core::fmt::Formatter<'_>| match deed {
+            Deed::Read { reg, .. } => write!(f, "{side} read {}", Register(reg)),
+            Deed::Write { reg, .. } => write!(f, "{side} write {}", Register(reg)),
+            Deed::Hold => write!(f, "{side} hold"),
+        };
         match self.0 {
             Step::Write { reg, .. } => write!(f, "write {}", Register(reg)),
+            Step::Before { deed } => side(deed, "before", f),
+            Step::After { deed } => side(deed, "after", f),
             step => write!(f, "{step}"),
         }
     }
@@ -325,6 +434,105 @@ impl<R: Registers, T: Trail> Registers for Crumbed<R, T> {
     fn write(&self, reg: usize, value: u32) {
         before(&self.trail, Step::Write { reg, value }, || self.regs.write(reg, value));
     }
+}
+
+/// A register window that leaves a durable crumb on **both** sides of every
+/// access it forwards, the `after` line carrying what a read answered.
+///
+/// **What it buys over [`Crumbed`]** is the one question a machine that dies
+/// mid-access leaves: a trail ending `before write <reg> <value>` names that
+/// write, and one ending `after write <reg> <value>` says the write returned
+/// and the death is later. **What it costs** is two durable writes per access,
+/// which stretches every wait this driver takes on a clock — a poll bounded by
+/// a deadline then fits fewer samples in the same bound. It moves no access, no
+/// value and no order: like [`Crumbed`], it forwards exactly what it is given.
+pub struct Witnessed<R, T> {
+    regs: R,
+    trail: T,
+}
+
+impl<R: Registers, T: Trail> Witnessed<R, T> {
+    pub fn over(regs: R, trail: T) -> Self {
+        Self { regs, trail }
+    }
+}
+
+impl<R: Registers, T: Trail> Registers for Witnessed<R, T> {
+    fn bytes(&self) -> usize {
+        self.regs.bytes()
+    }
+
+    fn read(&self, reg: usize) -> u32 {
+        // The first line is durable before the access because the access may be
+        // the last thing this machine does; the second carries the word it
+        // answered, which is what the register held at that moment.
+        self.trail.crumb(Step::Before { deed: Deed::Read { reg, value: None } });
+        let value = self.regs.read(reg);
+        self.trail.crumb(Step::After { deed: Deed::Read { reg, value: Some(value) } });
+        value
+    }
+
+    fn write(&self, reg: usize, value: u32) {
+        around(&self.trail, Deed::Write { reg, value }, || self.regs.write(reg, value));
+    }
+}
+
+/// Why a trail's witnessed lines are not pairs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unpaired {
+    /// A `before` line the next line is not the `after` of.
+    Interrupted { before: Line, next: Line },
+    /// An `after` line with no `before` of its own in front of it.
+    Stray { after: Line },
+}
+
+impl core::fmt::Display for Unpaired {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Interrupted { before, next } => write!(
+                f,
+                "crumb {} is `{}` and the line after it is `{}`, which is not that deed's other \
+                 side",
+                before.seq, before.step, next.step
+            ),
+            Self::Stray { after } => {
+                write!(f, "crumb {} is `{}` with no `before` line of its own", after.seq, after.step)
+            }
+        }
+    }
+}
+
+/// Every witnessed deed of a trail as the pair of lines around it: how many
+/// pairs closed, and the deed the trail stops inside if it stops inside one.
+///
+/// **The unclosed last deed is the reading a dead machine leaves**, so it is
+/// handed back rather than refused; a `before` followed by anything *else* is a
+/// refusal, because a trail that interleaves two deeds cannot say which one the
+/// last line is about.
+pub fn witnessed(lines: &[Line]) -> Result<(usize, Option<Deed>), Unpaired> {
+    let mut pairs = 0;
+    let mut open = None;
+    let mut at = 0;
+    while at < lines.len() {
+        let line = lines[at];
+        match line.step {
+            Step::Before { deed } => {
+                let Some(next) = lines.get(at + 1) else {
+                    open = Some(deed);
+                    break;
+                };
+                match next.step {
+                    Step::After { deed: back } if deed.is_the_same_deed(back) => at += 1,
+                    _ => return Err(Unpaired::Interrupted { before: line, next: *next }),
+                }
+                pairs += 1;
+            }
+            Step::After { .. } => return Err(Unpaired::Stray { after: line }),
+            _ => {}
+        }
+        at += 1;
+    }
+    Ok((pairs, open))
 }
 
 /// One line of the crumb file, which both ends spell through this type.

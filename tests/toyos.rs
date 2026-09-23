@@ -678,6 +678,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // image is that bring-up in order and whole. Records and a file; the one
     // clock in it is printed, never judged.
     ("lan_crumb_trail", Sched::Parallel, Tier::Fast),
+    // The same ask with a durable line on both sides of every access it makes:
+    // the reading is the one the ask gives with no trail under it, and the file
+    // read back pairs line by line. Records and a file; the one clock in it is
+    // printed, never judged.
+    ("lan_ask_crumb_trail", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -1342,6 +1347,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         "lan_crumb_trail",
         metal::Metal::Runs { arms: LANCRUMBCASE, judge: |b| lan::trailed_on_metal(b[0]) },
     ),
+    (
+        // A scout arm, deleted with `tests/lanaskcrumbcase` once the access the
+        // machine dies on is named. **This boot is expected not to come back**:
+        // what it is flashed for is the last line on the stick, and this judge
+        // is only reached on a boot that did come back.
+        "lan_ask_crumb_trail",
+        metal::Metal::Runs { arms: LANASKCRUMBCASE, judge: |b| lan::ask_trailed_on_metal(b[0]) },
+    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1784,6 +1797,12 @@ const LANASKCASE: &[metal::Arm] = &[metal::once(lan::ASK_BOOT, lan::ASK_CONFIG, 
 /// kernel's log.
 const LANCRUMBCASE: &[metal::Arm] =
     &[metal::once(lan::CRUMB_BOOT, lan::CRUMB_CONFIG, &[], lan::JOBS)];
+
+/// [`LANASKCASE`]'s question with a durable line on both sides of every access
+/// it makes: the boot whose answer is the last line of that trail on a machine
+/// that never reports one.
+const LANASKCRUMBCASE: &[metal::Arm] =
+    &[metal::once(lan::ASK_CRUMB_BOOT, lan::ASK_CRUMB_CONFIG, &[], lan::JOBS)];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -13653,6 +13672,7 @@ fn run_machine_test(
         "lan_phy_exit_code" => lan::lan_phy_exit_code(test_config, c_bins, rust_bins),
         "lan_mdio_ask_exit_code" => lan::lan_mdio_ask_exit_code(test_config, c_bins, rust_bins),
         "lan_crumb_trail" => lan::lan_crumb_trail(test_config, c_bins, rust_bins),
+        "lan_ask_crumb_trail" => lan::lan_ask_crumb_trail(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed

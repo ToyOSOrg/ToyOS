@@ -16,7 +16,8 @@ use toyos_build::lan::{
 use toyos_build::metaldevices;
 use toyos_build::metalprofile::Profile;
 use toyos_i219::ask::{Answer, Others, Reading};
-use toyos_i219::crumbs::{self, Ending, Line, Step};
+use toyos_i219::crumbs::{self, Deed, Ending, Line, Step};
+use toyos_i219::regs::{self, extcnf};
 use toyos_i219::phy::{Outcome, PhyRefusal};
 
 use super::metal;
@@ -52,6 +53,18 @@ pub const ASK_BOOT: &str = "lanaskcase";
 pub const CRUMB_CONFIG: &str = "tests/lancrumbcase";
 pub const CRUMB_BOOT: &str = "lancrumbcase";
 
+/// [`ASK_BOOT`] with netd's `--exit-with-ask-crumbs` armed instead: the same
+/// question to the same register in the same order, with a line flushed to the
+/// stick immediately before and immediately after every access it makes, and
+/// around the dwell it ends on.
+///
+/// **The boot this arm exists for is one the machine does not come back from**,
+/// and its answer is the last line on the stick, read by hand through
+/// [`trail_ending`]. What [`ask_trailed_on_metal`] judges is the other case: a
+/// boot that did come back owes a whole trail, paired line by line.
+pub const ASK_CRUMB_CONFIG: &str = "tests/lanaskcrumbcase";
+pub const ASK_CRUMB_BOOT: &str = "lanaskcrumbcase";
+
 /// The file that trail is left in, at the root of the log volume — netd's
 /// `crumbs::PATH` under `/log`.
 pub const CRUMBS_FILE: &str = "crumbs.txt";
@@ -86,6 +99,9 @@ const ASK_QEMU_CONFIG: &str = "tests/e1000askcase";
 
 /// The same, with netd's `--exit-with-crumbs` armed.
 const CRUMB_QEMU_CONFIG: &str = "tests/e1000crumbcase";
+
+/// The same, with netd's `--exit-with-ask-crumbs` armed.
+const ASK_CRUMB_QEMU_CONFIG: &str = "tests/e1000askcrumbcase";
 
 /// What QEMU's user-mode backend leases, and what it says about the network it
 /// leases on. Its own defaults, not this repository's: they are the oracle.
@@ -259,6 +275,111 @@ pub fn trailed_on_metal(trailed: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
+/// The witnessed ask boot's judge. **Only a boot that came back is judged
+/// here**: one that did owes a whole trail, every line paired with its own
+/// access, ending in the reading its `exit:` record carries. The boot the arm
+/// exists for is the one that does not come back, and its answer is the last
+/// line on the stick — [`trail_ending`] and [`ask_trail`] read that by hand.
+pub fn ask_trailed_on_metal(trailed: &metal::Readback) -> Result<(), String> {
+    let code = trailed.exit_code(NETD)?;
+    let reading = Reading::from_exit_code(code).ok_or_else(|| {
+        format!("netd exited {code} on {ASK_CRUMB_BOOT}, which is no reading the ask encodes")
+    })?;
+    let text = trailed
+        .log_volume_file(CRUMBS_FILE)?
+        .ok_or_else(|| format!("{ASK_CRUMB_BOOT}'s log volume carries no {CRUMBS_FILE}"))?;
+    let trail = whole_ask_trail(&text, code)?;
+    eprintln!("  [lan] {ASK_CRUMB_BOOT}: {reading}");
+    eprintln!("  [lan] {ASK_CRUMB_BOOT}: {trail}");
+    Ok(())
+}
+
+/// What a witnessed trail of a boot that came back is owed, and what it says.
+pub struct AskTrail {
+    pub crumbs: usize,
+    /// Accesses whose two lines are both on the device.
+    pub pairs: usize,
+    /// What `EXTCNF_CTRL` held in the reading before the request.
+    pub held: u32,
+    /// The word the request was registered with.
+    pub asked: u32,
+}
+
+impl std::fmt::Display for AskTrail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} crumbs, {} whole pairs; EXTCNF_CTRL held {:#010x} before the request and the \
+             request was written as {:#010x}",
+            self.crumbs, self.pairs, self.held, self.asked
+        )
+    }
+}
+
+/// A witnessed trail of a boot that came back: whole, ending in `code`, every
+/// `before` line closed by its own `after`, the reading the register answered
+/// before the request on it, the request written as that reading with §4.5.2's
+/// software bit set and nothing else moved, and the dwell's own pair.
+pub fn whole_ask_trail(text: &str, code: i32) -> Result<AskTrail, String> {
+    let lines: Vec<Line> = crumbs::lines(text)
+        .collect::<Result<_, _>>()
+        .map_err(|why| format!("{CRUMBS_FILE} is no trail: {why}\n{text}"))?;
+    match Ending::of(text) {
+        Ok(Ending::Complete { code: said, .. }) if said == code => {}
+        other => {
+            return Err(format!(
+                "netd exited {code} and its trail does not end in `exit {code}`: {}\n{text}",
+                other.map_or_else(|why| why.to_string(), |ending| ending.to_string())
+            ))
+        }
+    }
+    let (pairs, open) = crumbs::witnessed(&lines)
+        .map_err(|why| format!("{CRUMBS_FILE}'s lines do not pair: {why}\n{text}"))?;
+    if let Some(deed) = open {
+        return Err(format!(
+            "this boot ended with `exit {code}` and its trail stops inside `{deed}`\n{text}"
+        ));
+    }
+    let of = |pick: fn(Step) -> Option<u32>| lines.iter().find_map(|line| pick(line.step));
+    let held = of(|step| match step {
+        Step::After { deed: Deed::Read { reg, value } } if reg == regs::EXTCNF_CTRL => value,
+        _ => None,
+    })
+    .ok_or_else(|| format!("no `after read EXTCNF_CTRL` line: this boot never read it\n{text}"))?;
+    let asked = of(|step| match step {
+        Step::Before { deed: Deed::Write { reg, value } } if reg == regs::EXTCNF_CTRL => Some(value),
+        _ => None,
+    })
+    .ok_or_else(|| format!("no `before write EXTCNF_CTRL` line: nothing was asked\n{text}"))?;
+    if asked != held | extcnf::MDIO_SW_OWNERSHIP {
+        return Err(format!(
+            "the register held {held:#010x} and the request was written as {asked:#010x}, which \
+             is not that reading with §4.5.2's software bit set\n{text}"
+        ));
+    }
+    if !lines.iter().any(|line| line.step == Step::After { deed: Deed::Hold }) {
+        return Err(format!("no `after hold` line: the claim's dwell is not on the trail\n{text}"));
+    }
+    Ok(AskTrail { crumbs: lines.len(), pairs, held, asked })
+}
+
+/// What a witnessed crumb file says about the access its boot stopped in — the
+/// reading of a file copied off the stick of a machine that never came back.
+pub fn ask_trail(text: &str) -> String {
+    let lines: Vec<Line> = match crumbs::lines(text).collect::<Result<_, _>>() {
+        Ok(lines) => lines,
+        Err(why) => return format!("the file is no trail: {why}"),
+    };
+    match crumbs::witnessed(&lines) {
+        Ok((pairs, None)) => format!("{pairs} whole pair(s), and the trail stops between two"),
+        Ok((pairs, Some(deed))) => format!(
+            "{pairs} whole pair(s), and the machine ended inside `{deed}`: that access is what it \
+             did not come back from"
+        ),
+        Err(why) => format!("the lines do not pair: {why}"),
+    }
+}
+
 /// What a crumb file says about how its boot ended, in one sentence — the
 /// reading of a file copied off the stick of a machine that never came back.
 pub fn trail_ending(text: &str) -> String {
@@ -407,6 +528,79 @@ pub fn lan_crumb_trail(
     eprintln!(
         "  [lan] netd held the card for {with} ms with the trail and {without} ms without it"
     );
+    eprintln!("  [lan] {}", trail_ending(&text));
+    Ok(())
+}
+
+/// The witnessed trail, end to end, in front of QEMU's 82574 and on a USB stick
+/// like the T14's: netd armed with the flag puts the same question
+/// [`lan_mdio_ask_exit_code`] puts, for the same reading, and the file read back
+/// out of the image is a line before and a line after every access it made —
+/// paired, whole, and ending in the code the kernel's `exit:` record carries.
+///
+/// **This is the instrument's own check, on the one machine that comes back.**
+/// The boot this arm exists for is the T14's, whose answer is the last line on
+/// the stick and never a verdict here; what this arm can show is that the lines
+/// are on the device in the order that makes that reading mean anything, and
+/// that the question underneath them is the ask's own.
+pub fn lan_ask_crumb_trail(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let case = super::compile::repo_root().join(ASK_CRUMB_QEMU_CONFIG);
+    let image_path = super::lane::dir().join("lan-ask-crumb-trail.img");
+    let image = qemu::build_boot_image(&case, &[], &[], &[]);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = super::volumes::log_extent(&image, &image_path)?;
+
+    let options = BootOptions {
+        profile: qemu::Profile::E1000e,
+        boot_image: Some(qemu::Staged::Written(image_path.clone())),
+        ..Default::default()
+    };
+    let (code, console) = netd_exit_with(&case, options)?;
+    let log = serial::Serial::named("the lan ask crumb boot", console.as_str());
+    log.must_be_clean()?;
+    // The reading `lan_mdio_ask_exit_code` reads off this part without a trail:
+    // a trail that moved the question would move this.
+    let owed = Reading::Asked {
+        before: Others::Nobody,
+        answer: Answer::GrantedQuickly,
+        after: Others::Nobody,
+    };
+    match Reading::from_exit_code(code) {
+        Some(reading) if reading == owed => {}
+        other => {
+            return Err(format!(
+                "netd exited {code} on the 82574 with a witnessed trail, which the table reads \
+                 as {other:?} and not {owed:?} — the reading the same question gives with no \
+                 trail under it"
+            ))
+        }
+    }
+
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    let volume = after.get(start..start + len).ok_or("the image shrank under the log partition")?;
+    let text = super::volumes::read_files(volume, &[CRUMBS_FILE])?
+        .pop()
+        .flatten()
+        .ok_or_else(|| format!("the log volume carries no {CRUMBS_FILE}"))?;
+    let text = String::from_utf8(text).map_err(|e| format!("{CRUMBS_FILE}: {e}"))?;
+    let trail = whole_ask_trail(&text, code)?;
+    let complaints = toyos_fat32_check::check(volume);
+    if !complaints.is_empty() {
+        return Err(format!(
+            "the trail gave the checker something to say about the log volume:\n{}",
+            toyos_fat32_check::describe(&complaints)
+        ));
+    }
+    let _ = std::fs::remove_file(&image_path);
+
+    eprintln!("  [lan] netd exited {code}: {owed}");
+    eprintln!("  [lan] {trail}");
+    eprintln!("  [lan] netd held the card for {} ms with it", held_ms(&console)?);
+    eprintln!("  [lan] {}", ask_trail(&text));
     eprintln!("  [lan] {}", trail_ending(&text));
     Ok(())
 }
