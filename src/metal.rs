@@ -1798,8 +1798,7 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     }
     let judged = crate::metalswap::judge(&swapped, crate::metalswap::Expect::InService);
     // Whichever way it was judged: a boot held for this host is handed back
-    // either way. `exec` and not `fire`, so sshd does not end the reboot for a
-    // client that left (`issues/build/fire-can-end-the-reboot-it-asked-for.md`).
+    // either way, over a connection held until the machine drops it.
     if args.hand_back {
         let at = match cable.stream.peer() {
             Some(std::net::SocketAddr::V4(peer)) => std::net::SocketAddr::from((*peer.ip(), crate::metaltalk::SSH_PORT)),

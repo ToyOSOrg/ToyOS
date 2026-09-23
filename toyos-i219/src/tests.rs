@@ -2709,7 +2709,7 @@ fn quiesce_stops_what_a_previous_holder_left_running() {
             self.0.borrow_mut().insert(reg, value);
         }
     }
-    let regs = Regs(Default::default());
+    let regs = Regs(core::cell::RefCell::default());
     let rctl = crate::regs::rctl::EN | crate::regs::rctl::BAM;
     let tctl = crate::regs::tctl::EN | crate::regs::tctl::PSP;
     crate::Registers::write(&regs, crate::regs::RCTL, rctl);

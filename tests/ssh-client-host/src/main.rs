@@ -286,8 +286,9 @@ async fn abandon(host: &str, port: &str, key: &str, command: &str) -> Result<(),
 const FIRE_ANSWER: Duration = Duration::from_secs(20);
 
 /// Ask for a program and report the guest's answer to the request, without
-/// waiting for the program: **a command that ends the machine never exits**, so
-/// its status is not a thing any client can collect.
+/// collecting the program's status: **a command that ends the machine never
+/// exits**, so its status is not a thing any client can collect. An accepted
+/// request's connection is held until the guest drops it, or [`FIRE_ANSWER`].
 ///
 /// `closed` and `silent` are answers too — a machine that went down under the
 /// request drops the connection with or without a goodbye, and what the caller
@@ -311,6 +312,16 @@ async fn fire(host: &str, port: &str, key: &str, command: &str) -> Result<(), St
     })
     .await
     .unwrap_or("silent");
+    // **Held until the machine drops it**, or the bound: sshd ends a program
+    // whose connection is gone, so a client that left the moment the request
+    // was accepted could end the very `reboot` it asked for before it reached
+    // its syscall.
+    if answer == "accepted" {
+        let _ = tokio::time::timeout(FIRE_ANSWER, async {
+            while !matches!(channel.wait().await, Some(ChannelMsg::Close) | None) {}
+        })
+        .await;
+    }
     println!("{answer}");
     // Dropped rather than disconnected: the machine this was fired at may
     // already be gone, and a goodbye to it is one more wait on nothing.
