@@ -16,6 +16,13 @@
 //! **A crumbed part is the same part.** [`Crumbed`] forwards every access it is
 //! given, in the order it is given them, and decides nothing: the driver above
 //! it cannot tell it from the [`Registers`] underneath.
+//!
+//! **[`Step::Saw`] is the one crumb left after its access, and it is the only
+//! one that carries what a read answered.** A read's own [`Step::Read`] says
+//! which register is about to be reached and cannot say what came back, so a
+//! reading that has to survive the machine is a second line behind the first:
+//! the pair brackets the access, and a trail that carries the `read` and not
+//! the `saw` is a machine that ended inside it.
 
 use crate::{regs, Registers};
 
@@ -63,6 +70,9 @@ pub enum Step {
     Read { reg: usize },
     /// One register write, or the first of a run of them.
     Write { reg: usize, value: u32 },
+    /// What one register read answered, left *after* that read returned — the
+    /// only crumb of the two orders, and never one of a run.
+    Saw { reg: usize, value: u32 },
     /// The bring-up returned.
     Opened,
     /// The process ends with this code, which is also what gives the claim up.
@@ -150,7 +160,8 @@ impl Step {
     ///
     /// **Never on `EXTCNF_CTRL`**: every access to §4.5.2's arbitration is a
     /// move in a handshake another agent is party to, so each is a step of its
-    /// own.
+    /// own. **Never on [`Step::Saw`]** either: a reading is not an access, and
+    /// two of them are two answers the part gave and not one step repeated.
     fn continues(self, last: Step) -> bool {
         let (reg, was) = match (self, last) {
             (Self::Read { reg }, Self::Read { reg: was }) => (reg, was),
@@ -164,8 +175,8 @@ impl Step {
         same && reg != regs::EXTCNF_CTRL
     }
 
-    /// The step with a write's value left off: what two trails of one bring-up
-    /// agree on whatever the part's registers held.
+    /// The step with a written or read value left off: what two trails of one
+    /// bring-up agree on whatever the part's registers held.
     pub fn named(&self) -> Named {
         Named(*self)
     }
@@ -182,6 +193,9 @@ impl Step {
             ("read", Some(reg), None) => Self::Read { reg: Register::parse(reg)? },
             ("write", Some(reg), Some(value)) => {
                 Self::Write { reg: Register::parse(reg)?, value: word(value)? }
+            }
+            ("saw", Some(reg), Some(value)) => {
+                Self::Saw { reg: Register::parse(reg)?, value: word(value)? }
             }
             ("exit", Some(code), None) => Self::Exit { code: code.parse().ok()? },
             _ => return None,
@@ -200,6 +214,7 @@ impl core::fmt::Display for Step {
             Self::DmaAlloc => f.write_str("dma-alloc"),
             Self::Read { reg } => write!(f, "read {}", Register(*reg)),
             Self::Write { reg, value } => write!(f, "write {} {value:#010x}", Register(*reg)),
+            Self::Saw { reg, value } => write!(f, "saw {} {value:#010x}", Register(*reg)),
             Self::Opened => f.write_str("opened"),
             Self::Exit { code } => write!(f, "exit {code}"),
         }
@@ -214,6 +229,7 @@ impl core::fmt::Display for Named {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self.0 {
             Step::Write { reg, .. } => write!(f, "write {}", Register(reg)),
+            Step::Saw { reg, .. } => write!(f, "saw {}", Register(reg)),
             step => write!(f, "{step}"),
         }
     }

@@ -481,7 +481,7 @@ impl Outcome {
 /// **The pace is the whole of what this adds.** The register is one word two
 /// other agents read and write too, and [`ARBITRATION_PACE_NANOS`] is how much
 /// of it this driver leaves them between two accesses of its own.
-struct Arbitration<'a, R: Registers, C: Clock> {
+pub(crate) struct Arbitration<'a, R: Registers, C: Clock> {
     regs: &'a R,
     clock: &'a C,
     /// When this driver last reached the register, and `None` before its first
@@ -526,6 +526,16 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
     }
 }
 
+/// §10.2.2.7's command word: the data, the five-bit register address, the
+/// five-bit PHY address and the op-code, and `Ready` clear — "it should be
+/// reset to 0b by software at the same time the command is written".
+pub(crate) fn command(phy: u8, reg: u8, op: u32, data: u16) -> u32 {
+    (data as u32 & mdic::DATA_MASK)
+        | ((reg as u32 & mdic::ADDRESS_MASK) << mdic::REGADD_SHIFT)
+        | ((phy as u32 & mdic::ADDRESS_MASK) << mdic::PHYADD_SHIFT)
+        | op
+}
+
 /// The MDIO interface, held under §4.5.2's software ownership for as long as
 /// this value lives.
 ///
@@ -534,7 +544,7 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
 /// enable accesses by the other agents", and a bring-up that returned early
 /// from any of the transactions below would otherwise leave the Management
 /// Engine locked out for the boot. Every `?` in [`bring_up`] is such a return.
-struct Owned<'a, R: Registers, C: Clock> {
+pub(crate) struct Owned<'a, R: Registers, C: Clock> {
     mdio: Arbitration<'a, R, C>,
 }
 
@@ -560,7 +570,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// This driver's request is that same bit, so one registered on top of
     /// another software agent's could not be told from its grant, and the
     /// release would clear a flag this driver never set.
-    fn claim(regs: &'a R, clock: &'a C) -> Result<Self, PhyRefusal> {
+    pub(crate) fn claim(regs: &'a R, clock: &'a C) -> Result<Self, PhyRefusal> {
         let mdio = Arbitration::over(regs, clock);
         // §4.5.2 arbitrates three bits of this register, so one bit is the whole
         // of what this driver writes in it and the rest is read and carried.
@@ -622,11 +632,8 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// the MDI transaction". `Error` is read first, because a transaction the
     /// part could not complete still ends and still sets `Ready` over a data
     /// field that is not what the PHY said.
-    fn transact(&self, phy: u8, reg: u8, op: u32, data: u16) -> Result<u16, PhyRefusal> {
-        let command = (data as u32 & mdic::DATA_MASK)
-            | ((reg as u32 & mdic::ADDRESS_MASK) << mdic::REGADD_SHIFT)
-            | ((phy as u32 & mdic::ADDRESS_MASK) << mdic::PHYADD_SHIFT)
-            | op;
+    pub(crate) fn transact(&self, phy: u8, reg: u8, op: u32, data: u16) -> Result<u16, PhyRefusal> {
+        let command = command(phy, reg, op, data);
         self.mdio.regs.write(regs::MDIC, command);
         let started = self.mdio.clock.nanos();
         loop {
@@ -642,6 +649,12 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
                 return Err(PhyRefusal::MdiUnready { phy, reg, after_nanos: waited });
             }
         }
+    }
+
+    /// The register file and the clock this hold was taken with — the part
+    /// itself, reachable for as long as the interface is this driver's.
+    pub(crate) fn part(&self) -> (&'a R, &'a C) {
+        (self.mdio.regs, self.mdio.clock)
     }
 
     fn read(&self, phy: u8, reg: u8) -> Result<u16, PhyRefusal> {

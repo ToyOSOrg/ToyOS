@@ -13,6 +13,9 @@
 //! bounded time on, and gives back. [`Part`] is which one this claim is, and
 //! [`phy`] is everything that follows from it. [`crumbs`] is a trail left one
 //! durable line ahead of a bring-up, and decides nothing about one.
+//! [`unready`] is a bench instrument and not a driver: it runs on one boot's
+//! question — why this part never reports the end of an MDI transaction — and
+//! is deleted when that question is answered.
 //!
 //! # The boundary
 //!
@@ -72,6 +75,7 @@ extern crate std;
 pub mod crumbs;
 pub mod phy;
 pub mod regs;
+pub mod unready;
 
 #[cfg(test)]
 mod stub;
@@ -804,6 +808,16 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// no link has to say about why.
     pub fn brought_up(&self) -> BringUp {
         self.brought_up
+    }
+
+    /// The register file this driver was opened on.
+    ///
+    /// **For [`unready`] and for nothing on the serving path.** A caller that
+    /// reached the part through this would be driving it beside the driver
+    /// that owns it; the one caller there is asks the part a question about
+    /// itself on a boot that ends right after.
+    pub fn registers(&self) -> &R {
+        &self.regs
     }
 
     pub fn counters(&self) -> Counters {

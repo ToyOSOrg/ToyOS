@@ -450,6 +450,10 @@ enum PhyPlace {
     Page,
     /// §9.5.3.1's Custom Mode Control, which is page 769's.
     CustomMode,
+    /// One of the thirty PHY addresses §9.3 places nothing at. §10.2.2.7's
+    /// `PHYADD` field is five bits and this part answers two of them, so a
+    /// transaction to any other ends with nothing driving the bus.
+    Undriven,
 }
 
 /// A tiny seeded generator. Not cryptography and not a distribution: a way to
@@ -1048,6 +1052,7 @@ impl Model {
                 );
                 PhyPlace::CustomMode
             }
+            (a, _) if a != phy::GENERAL && a != phy::SPECIFIC => PhyPlace::Undriven,
             _ => panic!(
                 "seed {}: the driver reached PHY address {addr:02} register {reg}, which \
                  Table 9-1 of the I219's document does not place and this model does not have",
@@ -1058,6 +1063,7 @@ impl Model {
 
     fn phy_read(&mut self, addr: u8, reg: u8) -> u16 {
         match self.phy_at(addr, reg) {
+            PhyPlace::Undriven => u16::MAX,
             PhyPlace::Page => self.phy.page.unwrap_or(0) << phy::PAGE_SHIFT,
             PhyPlace::CustomMode => self.phy.custom_mode,
             PhyPlace::Ieee(r) => self.phy.file[r as usize],
@@ -1082,6 +1088,8 @@ impl Model {
 
     fn phy_write(&mut self, addr: u8, reg: u8, data: u16) {
         match self.phy_at(addr, reg) {
+            // Nothing takes it, and the transaction still ends.
+            PhyPlace::Undriven => {}
             // §9.3: "only the 11 MSBs of register 31 are used for defining the
             // page. During write to the page register, the five LSBs are
             // ignored."

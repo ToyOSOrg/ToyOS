@@ -2242,3 +2242,197 @@ fn where_a_trail_stops_is_what_it_says() {
         assert!(matches!(Ending::of(bad), Err(Broken::Unreadable { .. })), "{bad:?}");
     }
 }
+
+/// One interrogation over a taped, crumbed part, as netd makes it: one trail
+/// behind both the register window's own crumbs and the instrument's readings,
+/// which is what keeps a run of reads from folding over a reading.
+fn interrogated(nic: &Nic, wall: Result<Phy, PhyRefusal>) -> (Vec<Seen>, Option<unready::Asked>) {
+    let seen: Seens = Rc::default();
+    let (bar, clock, _, _) = nic.parts();
+    let runs = Runs::over(Noted(Rc::clone(&seen)));
+    let window = Crumbed::over(Tape { regs: bar, seen: Rc::clone(&seen) }, &runs);
+    let asked = unready::interrogate(&window, &clock, &&runs, wall);
+    let seen = seen.borrow().clone();
+    (seen, asked)
+}
+
+/// Every reading the instrument takes off the part, in order.
+fn readings(seen: &[Seen]) -> Vec<(usize, u32)> {
+    crumbs_of(seen)
+        .into_iter()
+        .filter_map(|step| match step {
+            Step::Saw { reg, value } => Some((reg, value)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The instrument's whole claim on a part that never reports §10.2.2.7's
+/// `Ready`: every reading of `MDIC` is on the trail with the word the part
+/// answered, the paced poll is given its full count of readings, the driver's
+/// own poll refuses beside it, and nothing outside §4.5.2's register and
+/// `MDIC` is reached at all.
+#[test]
+fn a_part_that_never_reports_ready_is_read_out_one_durable_reading_at_a_time() {
+    let nic = Nic::i219(91);
+    nic.mdi_never_ready();
+    let driver = open(&nic);
+    assert!(
+        matches!(driver.brought_up().phy, Err(PhyRefusal::MdiUnready { .. })),
+        "{}",
+        nic.because("this part was meant to stop the bring-up at Ready")
+    );
+
+    let (seen, asked) = interrogated(&nic, driver.brought_up().phy);
+    let asked = asked.expect("the wall is the question this instrument is for");
+    let held = asked.held.expect("the part grants the interface");
+
+    assert_eq!(held.paced.samples, unready::SAMPLES);
+    assert!(!held.paced.ready() && !held.paced.errored());
+    assert_eq!(held.written.samples, unready::SAMPLES);
+    assert!(!held.written.ready() && !held.written.errored());
+    assert!(matches!(held.unpaced, Err(PhyRefusal::MdiUnready { .. })));
+    assert_eq!(held.sweep, None, "nothing ended, so no address was worth asking");
+
+    // Every access is §4.5.2's arbitration or `MDIC`, which is what lets a
+    // reader take this instrument out of a trail by the register it names.
+    for step in reached(&seen) {
+        let reg = match step {
+            Step::Read { reg } | Step::Write { reg, .. } | Step::Saw { reg, .. } => reg,
+            other => panic!("{}", nic.because(&format!("the instrument took step {other:?}"))),
+        };
+        assert!(
+            reg == regs::MDIC || reg == regs::EXTCNF_CTRL,
+            "{}",
+            nic.because(&format!("the instrument reached {reg:#x}"))
+        );
+    }
+
+    // Every reading is the word the part answered the read in front of it.
+    let taken = readings(&seen);
+    let mut in_order = taken.iter();
+    let mut last: Option<(usize, u32)> = None;
+    for step in &seen {
+        match step {
+            Seen::Reached(Step::Read { reg }) => last = Some((*reg, 0)),
+            Seen::Crumb(Step::Saw { reg, value }) => {
+                let (was, _) = last.expect("a reading with no read in front of it");
+                assert_eq!(was, *reg, "{}", nic.because("a reading names another register"));
+                assert_eq!(
+                    in_order.next(),
+                    Some(&(*reg, *value)),
+                    "{}",
+                    nic.because("a reading is not the one the trail carries")
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // Two paced polls of `SAMPLES` readings each, and four single readings:
+    // the settled register, the one taken under the grant, the one after the
+    // driver's own poll gave up, and none other.
+    assert_eq!(
+        taken.len() as u32,
+        2 * unready::SAMPLES + 3,
+        "{}",
+        nic.because("the instrument read `MDIC` a different number of times")
+    );
+    assert_eq!(
+        nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
+        0,
+        "{}",
+        nic.because("the instrument kept the interface it was granted")
+    );
+}
+
+/// The instrument asks nothing at all where the bring-up did not stop at
+/// §10.2.2.7's `Ready` — which is every other part, the 82574 QEMU models
+/// among them, and is why a trail left on one is the bring-up's and nothing
+/// else.
+#[test]
+fn nothing_is_reached_where_the_bring_up_did_not_stop_at_ready() {
+    let walls = [
+        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_0000 }),
+        Err(PhyRefusal::NotThisRegisterMap),
+        Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL }),
+        Err(PhyRefusal::MdiError { phy: 1, reg: 2 }),
+        Err(PhyRefusal::Identity { specific: 0, general: 0 }),
+        Err(PhyRefusal::GrantNeverCame { held_by: 0, after_nanos: 0 }),
+        Err(PhyRefusal::SoftwareFlagStood { beside: Others::Manageability, after_nanos: 0 }),
+    ];
+    // The 82574's model panics on an `MDIC` access, so a part this instrument
+    // reached would fail here rather than answer.
+    for (seed, part) in [(92, Part::E82574), (93, Part::I219)] {
+        for wall in walls {
+            let nic = Nic::with(seed, part, Permits::default());
+            let (seen, asked) = interrogated(&nic, wall);
+            assert_eq!(asked, None, "{}", nic.because(&format!("{wall:?} was taken as the wall")));
+            assert!(seen.is_empty(), "{}", nic.because(&format!("{wall:?} reached the part")));
+        }
+    }
+}
+
+/// Where a transaction ends but §9.3's first address answers no identifier,
+/// the sweep is what the other three transactions cannot settle: one reading
+/// per PHY address, and the address that answers Intel's own high word.
+#[test]
+fn an_address_that_answers_is_found_where_one_ends_and_the_first_does_not() {
+    let nic = Nic::i219(94);
+    nic.phy_is_deaf_at(toyos_phy::GENERAL);
+    let wall = Err(PhyRefusal::MdiUnready {
+        phy: toyos_phy::GENERAL,
+        reg: toyos_phy::reg::PAGE_SELECT,
+        after_nanos: toyos_phy::MDI_DEADLINE_NANOS,
+    });
+    let (_, asked) = interrogated(&nic, wall);
+    let held = asked.expect("the wall").held.expect("the part grants the interface");
+
+    assert!(held.paced.ready(), "a transaction on a driven bus ends");
+    assert_eq!(
+        (held.paced.last & crate::regs::mdic::DATA_MASK) as u16,
+        u16::MAX,
+        "{}",
+        nic.because("an address nothing drives answered something")
+    );
+    let sweep = held.sweep.expect("the identifier did not answer at the first address");
+    assert_eq!(sweep.len(), unready::ADDRESSES);
+    let answered: Vec<usize> = sweep
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| {
+            (**word & crate::regs::mdic::DATA_MASK) as u16 == toyos_phy::IDENTIFIER_HIGH_INTEL
+        })
+        .map(|(addr, _)| addr)
+        .collect();
+    assert_eq!(
+        answered,
+        [toyos_phy::SPECIFIC as usize],
+        "{}",
+        nic.because("the sweep did not find the PHY where this part answers it")
+    );
+    for word in sweep {
+        assert_ne!(word & crate::regs::mdic::READY, 0, "every transaction on this part ends");
+    }
+}
+
+/// A reading spells and reads back like every other crumb, and the harness's
+/// own filter takes it out of the bring-up's order — which is what lets a
+/// judge hold a trail with this instrument in it to the same table.
+#[test]
+fn a_reading_is_a_crumb_the_bring_ups_order_leaves_out() {
+    let step = Step::Saw { reg: regs::MDIC, value: 0x043f6020 };
+    let line = crumbs::Line { seq: 0, at: 900, synced: 880, step };
+    assert_eq!(line.to_string(), "000 900 880 saw MDIC 0x043f6020");
+    let file = format!("{line}\n");
+    assert_eq!(
+        crumbs::lines(&file).map(|l| l.expect("the line it wrote").step).collect::<Vec<_>>(),
+        [step]
+    );
+    assert_eq!(step.named().to_string(), "saw MDIC");
+    assert!(crumbs::is_the_phys(&step.named().to_string()));
+    assert!(crumbs::is_the_phys(
+        &Step::Saw { reg: regs::EXTCNF_CTRL, value: 0 }.named().to_string()
+    ));
+    assert!(!crumbs::is_the_phys(&Step::Saw { reg: regs::CTRL, value: 0 }.named().to_string()));
+}

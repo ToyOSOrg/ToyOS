@@ -259,6 +259,17 @@ pub fn leave_crumbs(
     .map_err(Opening::Driver)?;
     trail.crumb(Step::Opened);
     say_brought_up(driver.brought_up());
+    // The question this boot is flashed for, asked only where the bring-up hit
+    // §10.2.2.7's wall, and answered on the stick rather than here: on this
+    // machine a userland write reaches no channel the volume carries.
+    if let Some(asked) = toyos_i219::unready::interrogate(
+        driver.registers(),
+        &Monotonic,
+        trail,
+        driver.brought_up().phy,
+    ) {
+        crate::say!("netd: I219: {asked}");
+    }
     // The link's own wait is behind this crumb, so a trail that ends in the run
     // of `STATUS` reads says the machine ended waiting for a link and not
     // inside the bring-up.
