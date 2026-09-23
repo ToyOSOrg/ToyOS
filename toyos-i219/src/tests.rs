@@ -2436,3 +2436,17 @@ fn a_reading_is_a_crumb_the_bring_ups_order_leaves_out() {
     ));
     assert!(!crumbs::is_the_phys(&Step::Saw { reg: regs::CTRL, value: 0 }.named().to_string()));
 }
+
+/// §10.2.2.7 sets `Ready` "at the end of the MDI transaction" and `Error` on
+/// one the part "fails to complete", and says nothing about silicon that sets
+/// the second without the first — so the instrument reads either as a cycle
+/// the interface ran, and only a register carrying neither as one it did not.
+#[test]
+fn a_transaction_ends_on_either_of_the_two_bits() {
+    let read = |last| unready::Ended { last, samples: 1, after_nanos: 0 };
+    let command = crate::phy::command(1, 2, crate::regs::mdic::OP_READ, 0);
+    assert!(!read(command).ended(), "a command word alone is a cycle that never finished");
+    assert!(read(command | crate::regs::mdic::READY).ended());
+    let errored = read(command | crate::regs::mdic::ERROR);
+    assert!(errored.ended() && errored.errored() && !errored.ready());
+}

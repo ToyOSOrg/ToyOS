@@ -84,6 +84,17 @@ impl Ended {
     pub fn errored(self) -> bool {
         self.last & mdic::ERROR != 0
     }
+
+    /// Whether the MAC finished its own cycle at all, however it finished it.
+    ///
+    /// **Both bits and not `Ready` alone.** §10.2.2.7 sets `Ready` "at the end
+    /// of the MDI transaction" and `Error` on one it "fails to complete", and
+    /// this crate's model of the part sets both together — but the document
+    /// does not say the silicon must, and a transaction that reported `Error`
+    /// alone is still one the interface ran.
+    pub fn ended(self) -> bool {
+        self.ready() || self.errored()
+    }
 }
 
 impl core::fmt::Display for Ended {
@@ -120,8 +131,9 @@ pub struct Held {
     /// The page-select write the bring-up died on, repeated.
     pub written: Ended,
     /// One `MDIC` word per PHY address, asked only where some transaction on
-    /// this part ended and the identifier did not answer at §9.3's first
-    /// address — the one question the other three cannot settle between them.
+    /// this part ended — `Ready` or `Error` — and the identifier did not
+    /// answer at §9.3's first address: the one question the other three
+    /// cannot settle between them.
     pub sweep: Option<[u32; ADDRESSES]>,
 }
 
@@ -198,7 +210,7 @@ fn watch<R: Registers, C: Clock, T: Trail>(
     while ended.samples < samples {
         ended.last = seen(regs, trail, regs::MDIC);
         ended.samples += 1;
-        if ended.ready() || ended.errored() {
+        if ended.ended() {
             break;
         }
     }
@@ -249,7 +261,7 @@ pub fn interrogate<'a, R: Registers, C: Clock, T: Trail>(
         let written = watch(&mdi, trail, page, SAMPLES);
 
         let answered = (paced.last & mdic::DATA_MASK) as u16;
-        let sweep = ((paced.ready() || written.ready())
+        let sweep = ((paced.ended() || written.ended())
             && answered != phy::IDENTIFIER_HIGH_INTEL)
             .then(|| {
                 let mut asked = [0u32; ADDRESSES];
