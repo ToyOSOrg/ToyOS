@@ -82,9 +82,10 @@ pub fn log_census() {
     );
 }
 
-/// Set above `USB_TIMEOUT_NS`, xHCI's longest `IF`-clear device spin, so no
-/// legitimate wait trips it.
-const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
+/// Set above xHCI's `CALL_AFTER_BREAK`, the longest a disk call spins with `IF`
+/// clear once its transport has broken, so no legitimate wait trips it; that
+/// constant's own assertion holds the order.
+pub(crate) const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(5),
     "above the longest IF-clear device spin a target can be inside",
 );

@@ -407,6 +407,7 @@ usb_disk_index_stable 6267
 usb_flush_optional 18056
 usb_pool_exhausted 5237
 usb_refused_disk_first 7260
+usb_reset_records_the_phase_it_cut 64260
 usb_reset_hands_devices_back 49057
 usb_short_read 8150
 usb_storage_gate 14200

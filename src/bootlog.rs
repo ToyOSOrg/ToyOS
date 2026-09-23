@@ -44,6 +44,35 @@ pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends t
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
 
+/// What the USB wedge arms say before the write they stop the machine inside,
+/// in `kernel/src/usb_gate.rs`; the phase and the traffic behind it follow on
+/// the same line.
+///
+/// The witness that the boot the deadline then ended was one holding a device
+/// inside a Bulk-Only command, which is the whole of what those controls stage —
+/// a wedge taken anywhere else is `WEDGE_STAGED`'s boot with a longer log.
+pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
+
+/// What the same arms say if every write ran to completion, which means no CPU
+/// was stopped inside one.
+///
+/// **A control that stages nothing passes for the wrong reason**: without this
+/// line the boot would still wedge — at the shutdown, with no device inside
+/// anything — and read back exactly like the arm that proves the point.
+pub const USB_WEDGE_MISSED: &str = "usb-wedge: the write completed";
+
+/// What the `usb-reset-under-load` arm says once it is streaming, and the three
+/// ways it says it is not, in `kernel/src/usb_gate.rs`.
+///
+/// **The witness that the reset landed on a busy bus.** A boot whose page
+/// carries the first line and none of the other three is one whose reset found
+/// a controller still moving bytes; any of the other three is the idle case
+/// under this arm's name.
+pub const USB_LOAD_RUNNING: &str = "usb-load: sweeping disk 0";
+pub const USB_LOAD_REFUSED: &str = "usb-load: refused";
+pub const USB_LOAD_STOPPED: &str = "usb-load: the disk stopped answering";
+pub const USB_LOAD_SWEPT: &str = "usb-load: the sweep reached the end of the disk";
+
 /// What one CPU's own NMI writes into the black box when that CPU has taken no
 /// interrupt for its bound, in `kernel/src/hardlockup/mod.rs`.
 ///
@@ -508,6 +537,12 @@ mod tests {
             ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
             ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
+            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_STAGED: &str = \"{USB_WEDGE_STAGED}\"")),
+            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_MISSED: &str = \"{USB_WEDGE_MISSED}\"")),
+            ("kernel/src/usb_gate.rs", format!("LOAD_RUNNING: &str = \"{USB_LOAD_RUNNING}\"")),
+            ("kernel/src/usb_gate.rs", format!("LOAD_REFUSED: &str = \"{USB_LOAD_REFUSED}\"")),
+            ("kernel/src/usb_gate.rs", format!("LOAD_STOPPED: &str = \"{USB_LOAD_STOPPED}\"")),
+            ("kernel/src/usb_gate.rs", format!("LOAD_SWEPT: &str = \"{USB_LOAD_SWEPT}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
             (
                 "kernel/src/hardlockup/probe.rs",
