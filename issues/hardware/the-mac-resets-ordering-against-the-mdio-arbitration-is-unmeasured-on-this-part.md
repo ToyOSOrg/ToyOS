@@ -39,8 +39,8 @@ The I219 bring-up's author, and after it the network track.
 
 ## What would close it
 
-A trail of the full reset from the T14 that comes back, beside the scout's
-MAC-alone reset on the same boot (`toyos-i219/src/scout.rs`), and a boot that
-reads `CTRL` inside the 20 ms and comes back or does not. An answer that rests
+A boot that reads `CTRL` inside the 20 ms and comes back or does not. The
+first half this finding asked for — a T14 trail of the full reset that comes
+back, beside a MAC-alone reset on the same boot — is metal run 112's. An answer that rests
 on one boot is one boot, and the failure mode it would be wrong about is the
 machine not coming back.

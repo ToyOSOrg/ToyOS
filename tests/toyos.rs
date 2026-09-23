@@ -665,10 +665,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // is known field by field. The verdicts are records and a lease's fields;
     // no clock in it.
     ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
-    // The PHY probe's channel on the same boot: netd exits with the bring-up's
-    // outcome as its code, the kernel's `exit:` record carries it, and the
-    // driver crate's table reads it back. Records only; no clock in it.
-    ("lan_phy_exit_code", Sched::Parallel, Tier::Fast),
+    // The lease probe on the same part: netd serves its window, exits with the
+    // lease's verdict, and the report it leaves on the log volume names the
+    // backend's lease with frames counted both ways. Records and a file; its
+    // one clock is the drain that outlasts netd's window, and a slower machine
+    // does not move it.
+    ("lan_lease_report", Sched::Parallel, Tier::Fast),
     // The crumb trail on the same part and on a USB stick: netd leaves a durable
     // line before every step of the bring-up, and the file read back out of the
     // image is that bring-up in order and whole. Records and a file; the one
@@ -1325,9 +1327,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs { arms: LANICSCASE, judge: |b| lan::provoked_on_metal(b[0]) },
     ),
     (
-        // Deleted with `tests/lanphycase` once the PHY is brought up on the T14.
-        "lan_phy_outcome",
-        metal::Metal::Runs { arms: LANPHYCASE, judge: |b| lan::probed_on_metal(b[0]) },
+        // The first byte: a lease from the bench's own router, read off the
+        // stick, while the host pings the address this machine had before.
+        "lan_lease_report",
+        metal::Metal::Runs { arms: LANLEASECASE, judge: |b| lan::leased_on_metal(b[0]) },
     ),
     (
         // A scout arm, deleted with `tests/lancrumbcase` once the step is named.
@@ -1695,12 +1698,6 @@ const METAL_ONLY: &[(&str, &str)] = &[
          remapping is a fact of that part and that path; QEMU's e1000e is another part behind \
          another path",
     ),
-    (
-        "lan_phy_outcome",
-        "whether the I219's PHY comes up is a fact of that part and of the firmware sharing its \
-         MDIO interface; QEMU's 82574 has no such PHY and answers `lan_phy_exit_code` with its \
-         own refusal of the register map",
-    ),
 ];
 
 /// The boot most of the first tranche rides: the plain `tests/testcases` shape
@@ -1758,9 +1755,14 @@ const LANCASE: &[metal::Arm] =
 /// asks the cable nothing.
 const LANICSCASE: &[metal::Arm] = &[metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS)];
 
-/// The cable's boot with netd's PHY probe armed: netd's exit code is the
-/// bring-up's outcome, read out of the kernel's own `exit:` record.
-const LANPHYCASE: &[metal::Arm] = &[metal::once(lan::PHY_BOOT, lan::PHY_CONFIG, &[], lan::JOBS)];
+/// The cable's boot with netd's lease probe armed: netd's exit code is the
+/// lease's verdict, read out of the kernel's own `exit:` record, and its report
+/// is on the log volume. It names the I219 for the loop to ping over the cable,
+/// as [`LANCASE`] does.
+const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
+    nic: Some(lan::NIC),
+    ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
+}];
 
 /// [`LANPHYCASE`] with a crumb trail, read out of the log volume beside the
 /// kernel's log.
@@ -13635,7 +13637,7 @@ fn run_machine_test(
             Ok(())
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
-        "lan_phy_exit_code" => lan::lan_phy_exit_code(test_config, c_bins, rust_bins),
+        "lan_lease_report" => lan::lan_lease_report(test_config, c_bins, rust_bins),
         "lan_crumb_trail" => lan::lan_crumb_trail(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),

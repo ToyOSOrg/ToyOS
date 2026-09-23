@@ -6,9 +6,10 @@ opened: 2026-09-21
 
 # `tests/lancrumbcase` is a scout arm, and it is owed a deletion once the step that ends the T14 is named
 
-`tests/lancrumbcase` is `tests/lanphycase` with a different `args` row — netd's
-`--exit-with-crumbs`, under which netd brings the I219 up exactly as
-`--exit-with-phy-outcome` does and ends with the same code, and before every
+`tests/lancrumbcase` is `tests/lancase` with one `args` row — netd's
+`--exit-with-crumbs`, under which netd brings the I219 up exactly as a shipping
+netd does, waits a bounded time for the link and ends with
+`toyos_i219::phy::Outcome`'s code for the two, and before every
 call on the claim and every register access appends one line to
 `/log/crumbs.txt` and `fsync`s it to the stick. It exists because boots of the
 T14 that hand the I219 to netd leave the machine powered off about half the

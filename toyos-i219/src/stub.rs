@@ -34,8 +34,9 @@
 //!
 //! What is deliberately *not* modelled: the 82574's own PHY registers, the
 //! NVM's access protocol, checksum offload, VLAN insertion, RSS and the second
-//! queue, flow control, and every statistic counter. The driver reaches none of
-//! them.
+//! queue, flow control, and every statistic counter but the good and total
+//! frames each way, which count what this model moves. The driver reaches none
+//! of the rest.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, VecDeque};
@@ -181,6 +182,12 @@ pub struct Permits {
     /// `FWSM` bit 6: the firmware allows the host to reset the PHY — what the
     /// T14's firmware reports.
     pub firmware_allows_a_phy_reset: bool,
+    /// I219 §7.4: the operating system before this driver may have armed the
+    /// PHY for host wake-up — `MACPD_enable` and then `Host_WU_Active` in
+    /// §9.5.3.2's Port General Configuration — and §9.5.3.2 has that bit
+    /// "reset by power on reset only", so it survives every reset but a power
+    /// cycle.
+    pub phy_wake_left_armed: bool,
 }
 
 impl Default for Permits {
@@ -209,6 +216,7 @@ impl Default for Permits {
             phy_comes_back_on_smbus: true,
             mac_reset_alone_loses_the_phy: true,
             firmware_allows_a_phy_reset: true,
+            phy_wake_left_armed: true,
         }
     }
 }
@@ -267,6 +275,10 @@ mod carried {
     pub const CUSTOM_MODE: Carried =
         Carried { mask: !custom_mode::REDUCED_MDIO_FREQUENCY, default: 0x2180 };
 }
+
+/// §9.5.3.2's defaults: reserved bit 5 `1b` and Tx Gate Wait IFS `00111b` at
+/// bits 15:11, every other field `0b`.
+const PORT_GENERAL_DEFAULT: u16 = (1 << 5) | (0b00111 << 11);
 
 /// How many `STATUS` reads §3.1.3.10's master enable stays set for.
 const MASTER_QUIESCE_READS: u32 = 3;
@@ -336,6 +348,9 @@ struct PhyModel {
     page: Option<u16>,
     /// §9.5.3.1's Custom Mode Control, PHY address 01 page 769 register 16.
     custom_mode: u16,
+    /// §9.5.3.2's Port General Configuration, register 17 of the same page,
+    /// which only a power-on reset returns to its defaults.
+    port_general: u16,
     /// PHY address 02's registers 0 through 15, which §9.3 says "are identical
     /// in all the pages and are the IEEE defined registers".
     file: [u16; 16],
@@ -425,6 +440,13 @@ impl PhyModel {
         Self {
             page: None,
             custom_mode: carried::CUSTOM_MODE.default,
+            port_general: if permits.phy_wake_left_armed {
+                PORT_GENERAL_DEFAULT
+                    | phy::port_general::MACPD_ENABLE
+                    | phy::port_general::HOST_WAKE_UP_ACTIVE
+            } else {
+                PORT_GENERAL_DEFAULT
+            },
             file,
             wait_reads: if permits.the_interconnect_is_in_transition { MDI_WAIT_READS } else { 0 },
             wait_sticks: false,
@@ -563,6 +585,8 @@ enum PhyPlace {
     CustomMode,
     /// §9.5.3.4's SMBus Control, page 769's register 23.
     SmbusControl,
+    /// §9.5.3.2's Port General Configuration, page 769's register 17.
+    PortGeneral,
     /// One of the thirty PHY addresses §9.3 places nothing at. §10.2.2.7's
     /// `PHYADD` field is five bits and this part answers two of them, so a
     /// transaction to any other ends with nothing driving the bus.
@@ -937,6 +961,13 @@ impl Model {
             // §10.2.4.6 and §10.2.4.4: write-only, and a read of one answers
             // nothing.
             regs::IMC | regs::ICS => 0,
+            // The statistics the driver reads: each read takes the count and
+            // clears it.
+            regs::GPTC | regs::GPRC | regs::TPR | regs::MPC | regs::CRCERRS => {
+                let count = self.get(reg);
+                self.set(reg, 0);
+                count
+            }
             _ => self.get(reg),
         }
     }
@@ -1154,6 +1185,9 @@ impl Model {
         }
         self.phy.file = defaults.file;
         self.phy.custom_mode = defaults.custom_mode;
+        // §9.5.3.2: "This bit is reset by power on reset only" — and a power
+        // cycle is one.
+        self.phy.port_general = PORT_GENERAL_DEFAULT;
         self.phy.page = None;
         self.phy.negotiated_over = None;
         self.phy.negotiating = false;
@@ -1366,6 +1400,17 @@ impl Model {
                 );
                 PhyPlace::SmbusControl
             }
+            (phy::GENERAL, reg::PORT_GENERAL) => {
+                assert_eq!(
+                    self.phy.page,
+                    Some(phy::PAGE_PORT_CONTROL),
+                    "seed {}: the driver reached §9.5.3.2's Port General Configuration with page \
+                     {:?} selected",
+                    self.seed,
+                    self.phy.page
+                );
+                PhyPlace::PortGeneral
+            }
             (phy::GENERAL, reg::CUSTOM_MODE) => {
                 assert_eq!(
                     self.phy.page,
@@ -1392,6 +1437,7 @@ impl Model {
             PhyPlace::Undriven => u16::MAX,
             PhyPlace::Page => self.phy.page.unwrap_or(0) << phy::PAGE_SHIFT,
             PhyPlace::CustomMode => self.phy.custom_mode,
+            PhyPlace::PortGeneral => self.phy.port_general,
             PhyPlace::SmbusControl => {
                 if self.lcd == Lcd::Smbus {
                     wake::SMBUS_CONTROL_FORCE
@@ -1442,6 +1488,24 @@ impl Model {
                 } else {
                     Lcd::InStep
                 };
+            }
+            PhyPlace::PortGeneral => {
+                let wake = phy::port_general::HOST_WAKE_UP_ACTIVE;
+                assert_eq!(
+                    data & !wake,
+                    self.phy.port_general & !wake,
+                    "seed {}: the driver wrote {data:#06x} to §9.5.3.2's Port General \
+                     Configuration, which held {:#06x}: §9.1 has every field it does not mean \
+                     to move loaded with what is there",
+                    self.seed,
+                    self.phy.port_general
+                );
+                // §9.5.3.2: `Host_WU_Active` "is not blocked for writes" only
+                // while `MACPD_enable` is set.
+                let movable = self.phy.port_general & phy::port_general::MACPD_ENABLE != 0;
+                if movable {
+                    self.phy.port_general = data;
+                }
             }
             PhyPlace::CustomMode => {
                 self.carried("§9.5.3.1's Custom Mode Control", data, &carried::CUSTOM_MODE);
@@ -1593,6 +1657,12 @@ impl Model {
         }
     }
 
+    /// One more in a statistics register.
+    fn count(&mut self, reg: usize) {
+        let held = self.get(reg);
+        self.set(reg, held.saturating_add(1));
+    }
+
     /// Place frames into descriptors, up to what `RDT` made available.
     fn receive(&mut self) {
         if self.get(regs::RCTL) & rctl::EN == 0 {
@@ -1607,6 +1677,7 @@ impl Model {
         let strip_crc = self.get(regs::RCTL) & rctl::SECRC != 0;
         while self.rx_head != tail {
             let Some(frame) = self.inbound.pop_front() else { return };
+            self.count(regs::TPR);
             let at = ring + self.rx_head * rx_desc::BYTES;
             let buffer = self.desc_read(at);
             // §7.1.7.2: a null data address is stored into and written back
@@ -1618,6 +1689,9 @@ impl Model {
                 let word = (rx_desc::status::DD as u64) << rx_desc::STATUS_SHIFT;
                 self.rx_holding.push((self.rx_head, word, Vec::new()));
                 self.rx_head = (self.rx_head + 1) % count;
+                // Not a frame the MAC took yet: it is still waiting.
+                let seen = self.get(regs::TPR);
+                self.set(regs::TPR, seen - 1);
                 self.inbound.push_front(frame);
                 continue;
             }
@@ -1643,6 +1717,7 @@ impl Model {
             let word = (stored as u64 & rx_desc::LENGTH_MASK)
                 | ((rx_desc::status::DD | rx_desc::status::EOP) as u64)
                     << rx_desc::STATUS_SHIFT;
+            self.count(regs::GPRC);
             self.rx_holding.push((self.rx_head, word, frame));
             self.rx_head = (self.rx_head + 1) % count;
         }
@@ -1729,6 +1804,7 @@ impl Model {
             let len = (word & tx_desc::LENGTH_MASK) as usize;
             let from = self.resolve(buffer);
             self.sent.push(self.memory[from..from + len].to_vec());
+            self.count(regs::GPTC);
             if command & tx_desc::cmd::RS != 0 {
                 self.tx_holding.push(self.tx_head);
             }
@@ -1883,6 +1959,11 @@ impl Nic {
     /// How many times `LANPHYPC` was cycled.
     pub fn power_cycles(&self) -> u32 {
         self.0.borrow().power_cycles
+    }
+
+    /// §9.5.3.2's Port General Configuration as the PHY holds it now.
+    pub fn phy_port_general(&self) -> u16 {
+        self.0.borrow().phy.port_general
     }
 
     /// How many resets carried `PHY_RST`.

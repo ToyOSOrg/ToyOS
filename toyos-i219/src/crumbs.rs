@@ -90,7 +90,7 @@ fn word(text: &str) -> Option<u32> {
 }
 
 /// The registers a bring-up reaches, by the names the datasheet gives them.
-const NAMES: [(usize, &str); 36] = [
+const NAMES: [(usize, &str); 44] = [
     (regs::CTRL, "CTRL"),
     (regs::CTRL_EXT, "CTRL_EXT"),
     (regs::PHY_CTRL, "PHY_CTRL"),
@@ -127,7 +127,21 @@ const NAMES: [(usize, &str); 36] = [
     (regs::EXTCNF_CTRL, "EXTCNF_CTRL"),
     (regs::FEXTNVM3, "FEXTNVM3"),
     (regs::MTA, MTA_NAME),
+    (regs::PBECCSTS, "PBECCSTS"),
+    (regs::TXDCTL1, "TXDCTL1"),
+    (regs::TARC0, "TARC0"),
+    (regs::TARC1, "TARC1"),
+    (regs::RFCTL, "RFCTL"),
+    (regs::WUC, "WUC"),
+    (regs::GCR, "GCR"),
+    (regs::FFLT_DBG, "FFLT_DBG"),
 ];
+
+/// The registers only the PCH's MAC is written through, by `crate::pch`: a
+/// trail of the 82574 carries none of them and a trail of the I219 carries
+/// each, and [`BRING_UP`] leaves them out as it leaves the PHY's steps out.
+const PCH_ONLY: [&str; 8] =
+    ["PBECCSTS", "TXDCTL1", "TARC0", "TARC1", "RFCTL", "WUC", "GCR", "FFLT_DBG"];
 
 /// Every one of §10.2.5.21's 128 entries, which a bring-up writes as one run.
 const MTA_NAME: &str = "MTA";
@@ -303,10 +317,10 @@ pub const BRING_UP: [&str; 42] = [
 
 /// Whether a named step is one of the PHY's, which [`BRING_UP`] leaves out.
 ///
-/// **A reading is always the PHY's.** [`Step::Saw`] is left by the bring-up's
-/// power step and by the bench instrument and by nothing else, so a line that
-/// starts with one is the PHY's whatever register it names — and so is
-/// [`Step::Ask`], which only the PHY's own steps leave.
+/// **A reading is always the PHY's.** [`Step::Saw`] is left by the PHY's power
+/// step, its wake and its asks and by nothing else, so a line that starts with
+/// one is the PHY's whatever register it names — and so is [`Step::Ask`],
+/// which only the PHY's own steps leave.
 ///
 /// **`CTRL` is not here and cannot be**: §8.2.1's `PHYPDN` is a field of it,
 /// so the power step reaches the same register the bring-up reaches either
@@ -321,6 +335,12 @@ pub fn is_the_phys(named: &str) -> bool {
         || named.ends_with(" CTRL_EXT")
         || named.ends_with(" PHY_CTRL")
         || named.ends_with(" FWSM")
+}
+
+/// Whether a named step is one of the PCH's MAC's own, which [`BRING_UP`]
+/// leaves out: an access to a register only that part is written through.
+pub fn is_the_pchs(named: &str) -> bool {
+    named.rsplit(' ').next().is_some_and(|reg| PCH_ONLY.contains(&reg))
 }
 
 /// Whether a named step is one [`BRING_UP`] names *and* the PHY's steps reach

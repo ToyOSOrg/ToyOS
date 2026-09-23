@@ -1064,8 +1064,8 @@ fn the_phy_is_brought_up_and_the_mac_sees_the_link_it_raises() {
     let mut driver = open(&nic);
 
     assert_eq!(
-        driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+        driver.brought_up().phy.map(|phy| (phy.addr, phy.id)),
+        Ok((toyos_phy::SPECIFIC, 0x0154_00a1)),
         "{}",
         nic.because("the PHY did not answer §9.5.2.3 as its own document says")
     );
@@ -1187,8 +1187,8 @@ fn a_part_that_grants_over_the_engines_standing_bit_is_brought_up() {
     let mut driver = open(&nic);
 
     assert_eq!(
-        driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+        driver.brought_up().phy.map(|phy| (phy.addr, phy.id)),
+        Ok((toyos_phy::SPECIFIC, 0x0154_00a1)),
         "{}",
         nic.because("the bring-up did not take an interface the part offered it")
     );
@@ -1332,8 +1332,8 @@ fn a_request_registered_while_the_engine_holds_it_is_still_granted() {
             nic.because("the engine was not on the interface when this driver asked")
         );
         assert_eq!(
-            driver.brought_up().phy,
-            Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+            driver.brought_up().phy.map(|phy| (phy.addr, phy.id)),
+            Ok((toyos_phy::SPECIFIC, 0x0154_00a1)),
             "{}",
             nic.because("the bring-up did not wait the engine out and reach the PHY")
         );
@@ -1368,8 +1368,8 @@ fn a_grant_that_comes_late_inside_the_bound_is_taken() {
     let mut driver = open(&nic);
 
     assert_eq!(
-        driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+        driver.brought_up().phy.map(|phy| (phy.addr, phy.id)),
+        Ok((toyos_phy::SPECIFIC, 0x0154_00a1)),
         "{}",
         nic.because("a grant that came late inside the bound was not taken")
     );
@@ -1533,7 +1533,7 @@ fn a_register_nothing_decodes_is_refused_and_never_written() {
 #[test]
 fn every_probe_outcome_has_one_exit_code_that_reads_back() {
     use toyos_phy::Outcome;
-    let up = Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 });
+    let up = Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1, port_general: 0 });
     let link = |speed, full_duplex| Link::Up { speed, full_duplex };
     let stood = |beside| Err(PhyRefusal::SoftwareFlagStood { beside, after_nanos: 1 });
     let down = Link::Down;
@@ -1915,8 +1915,8 @@ fn the_phy_is_found_at_whichever_address_answers_its_identifier() {
     let mut driver = open(&nic);
 
     assert_eq!(
-        driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::GENERAL, id: 0x0154_00a1 }),
+        driver.brought_up().phy.map(|phy| (phy.addr, phy.id)),
+        Ok((toyos_phy::GENERAL, 0x0154_00a1)),
         "{}",
         nic.because("the bring-up did not look past the address Table 9-1 names")
     );
@@ -2014,8 +2014,8 @@ fn a_part_that_takes_none_of_the_datasheets_latitudes_is_brought_up_the_same_way
     let mut driver = open(&nic);
 
     assert_eq!(
-        driver.brought_up().phy,
-        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+        driver.brought_up().phy.map(|phy| (phy.addr, phy.id)),
+        Ok((toyos_phy::SPECIFIC, 0x0154_00a1)),
         "{}",
         nic.because("the bring-up did not reach the PHY on a part that made it easy")
     );
@@ -2196,16 +2196,28 @@ fn the_82574s_trail_is_the_bring_up_in_the_datasheets_order() {
     };
     let owed: Vec<String> = crumbs::BRING_UP.iter().map(|s| s.to_string()).collect();
     assert_eq!(trail(&plain), owed);
-    // The I219's is the same trail with the PHY's accesses in it and nothing
-    // else moved.
+    // The I219's is the same trail with the PHY's accesses and the PCH's own
+    // bits in it and nothing else moved.
     // §8.2's power and handshake sweep is the PHY's step as much as `MDIC` is.
     // Four of its five registers are the PHY's alone and drop out; `CTRL` is
     // shared with the bring-up either side of it, so an access to that one is
     // allowed to be extra and everything else has to line up exactly.
+    assert!(trail(&plain).iter().all(|step| !crumbs::is_the_pchs(step)));
     for nic in [brought_up, held] {
+        let whole = trail(&nic);
+        for reg in ["TXDCTL1", "TARC0", "TARC1", "RFCTL", "PBECCSTS", "WUC", "GCR", "FFLT_DBG"] {
+            assert!(
+                whole.iter().any(|step| step == &format!("write {reg}")),
+                "{}",
+                nic.because(&format!("the PCH's MAC never had {reg} written"))
+            );
+        }
         let mut owed = owed.iter();
         let mut next = owed.next();
-        for step in trail(&nic).into_iter().filter(|s| !crumbs::is_the_phys(s)) {
+        for step in whole
+            .into_iter()
+            .filter(|s| !crumbs::is_the_phys(s) && !crumbs::is_the_pchs(s))
+        {
             if next == Some(&step) {
                 next = owed.next();
                 continue;
@@ -2276,194 +2288,9 @@ fn where_a_trail_stops_is_what_it_says() {
     }
 }
 
-/// One interrogation over a taped, crumbed part, as netd makes it: one trail
-/// behind both the register window's own crumbs and the instrument's readings,
-/// which is what keeps a run of reads from folding over a reading.
-fn interrogated(nic: &Nic, wall: Result<Phy, PhyRefusal>) -> (Vec<Seen>, Option<unready::Asked>) {
-    let seen: Seens = Rc::default();
-    let (bar, clock, _, _) = nic.parts();
-    let runs = Runs::over(Noted(Rc::clone(&seen)));
-    let window = Crumbed::over(Tape { regs: bar, seen: Rc::clone(&seen) }, &runs);
-    let asked = unready::interrogate(&window, &clock, &&runs, wall);
-    let seen = seen.borrow().clone();
-    (seen, asked)
-}
-
-/// Every reading the instrument takes off the part, in order.
-fn readings(seen: &[Seen]) -> Vec<(usize, u32)> {
-    crumbs_of(seen)
-        .into_iter()
-        .filter_map(|step| match step {
-            Step::Saw { reg, value } => Some((reg, value)),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The instrument's whole claim on a part that never reports §10.2.2.7's
-/// `Ready`: every reading of `MDIC` is on the trail with the word the part
-/// answered, the paced poll is given its full count of readings, the driver's
-/// own poll refuses beside it, and nothing outside §4.5.2's register and
-/// `MDIC` is reached at all.
-#[test]
-fn a_part_that_never_reports_ready_is_read_out_one_durable_reading_at_a_time() {
-    let nic = Nic::i219(91);
-    nic.mdi_never_ready();
-    let driver = open(&nic);
-    assert!(
-        matches!(driver.brought_up().phy, Err(PhyRefusal::MdiUnready { .. })),
-        "{}",
-        nic.because("this part was meant to stop the bring-up at Ready")
-    );
-
-    let (seen, asked) = interrogated(&nic, driver.brought_up().phy);
-    let asked = asked.expect("the wall is the question this instrument is for");
-    let held = asked.held.expect("the part grants the interface");
-
-    assert_eq!(held.paced.samples, unready::SAMPLES);
-    assert!(!held.paced.ready() && !held.paced.errored());
-    assert_eq!(held.written.samples, unready::SAMPLES);
-    assert!(!held.written.ready() && !held.written.errored());
-    assert!(matches!(held.unpaced, Err(PhyRefusal::MdiUnready { .. })));
-    assert_eq!(held.sweep, None, "nothing ended, so no address was worth asking");
-
-    // Every access is §4.5.2's arbitration or `MDIC`, which is what lets a
-    // reader take this instrument out of a trail by the register it names.
-    for step in reached(&seen) {
-        let reg = match step {
-            Step::Read { reg } | Step::Write { reg, .. } | Step::Saw { reg, .. } => reg,
-            other => panic!("{}", nic.because(&format!("the instrument took step {other:?}"))),
-        };
-        assert!(
-            reg == regs::MDIC || reg == regs::EXTCNF_CTRL,
-            "{}",
-            nic.because(&format!("the instrument reached {reg:#x}"))
-        );
-    }
-
-    // Every reading is the word the part answered the read in front of it.
-    let taken = readings(&seen);
-    let mut in_order = taken.iter();
-    let mut last: Option<(usize, u32)> = None;
-    for step in &seen {
-        match step {
-            Seen::Reached(Step::Read { reg }) => last = Some((*reg, 0)),
-            Seen::Crumb(Step::Saw { reg, value }) => {
-                let (was, _) = last.expect("a reading with no read in front of it");
-                assert_eq!(was, *reg, "{}", nic.because("a reading names another register"));
-                assert_eq!(
-                    in_order.next(),
-                    Some(&(*reg, *value)),
-                    "{}",
-                    nic.because("a reading is not the one the trail carries")
-                );
-            }
-            _ => {}
-        }
-    }
-
-    // Two paced polls of `SAMPLES` readings each, one §8.2.3 `Wait` reading in
-    // front of each of them, and three single readings: the settled register,
-    // the one taken under the grant, the one after the driver's own poll gave
-    // up, and none other.
-    assert_eq!(
-        taken.len() as u32,
-        2 * unready::SAMPLES + 2 + 3,
-        "{}",
-        nic.because("the instrument read `MDIC` a different number of times")
-    );
-    assert_eq!(
-        nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
-        0,
-        "{}",
-        nic.because("the instrument kept the interface it was granted")
-    );
-}
-
-/// The instrument asks nothing at all where the bring-up did not stop at
-/// §10.2.2.7's `Ready` — which is every other part, the 82574 QEMU models
-/// among them, and is why a trail left on one is the bring-up's and nothing
-/// else.
-#[test]
-fn nothing_is_reached_where_the_bring_up_did_not_stop_at_ready() {
-    let walls = [
-        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_0000 }),
-        Err(PhyRefusal::NotThisRegisterMap),
-        Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL }),
-        Err(PhyRefusal::MdiError { phy: 1, reg: 2 }),
-        Err(PhyRefusal::Identity { specific: 0, general: 0 }),
-        Err(PhyRefusal::GrantNeverCame { held_by: 0, after_nanos: 0 }),
-        Err(PhyRefusal::SoftwareFlagStood { beside: Others::Manageability, after_nanos: 0 }),
-    ];
-    // The 82574's model panics on an `MDIC` access, so a part this instrument
-    // reached would fail here rather than answer.
-    for (seed, part) in [(92, Part::E82574), (93, Part::I219)] {
-        for wall in walls {
-            let nic = Nic::with(seed, part, Permits::default());
-            let (seen, asked) = interrogated(&nic, wall);
-            assert_eq!(asked, None, "{}", nic.because(&format!("{wall:?} was taken as the wall")));
-            assert!(seen.is_empty(), "{}", nic.because(&format!("{wall:?} reached the part")));
-        }
-    }
-}
-
-/// Where a transaction ends but §9.3's first address answers no identifier,
-/// the sweep is what the other three transactions cannot settle: one reading
-/// per PHY address, and the address that answers Intel's own high word.
-#[test]
-fn an_address_that_answers_is_found_where_one_ends_and_the_first_does_not() {
-    // The instrument runs behind a bring-up that has already settled §8.2's
-    // power step, so the part it reaches is one whose PHY the MAC is not
-    // holding down — which is the only part on which a transaction ends at all.
-    let nic = Nic::with(
-        94,
-        Part::I219,
-        Permits {
-            mac_comes_up_holding_the_phy_down: false,
-            phy_starts_out_of_reach: false,
-            ..Permits::default()
-        },
-    );
-    nic.phy_is_deaf_at(toyos_phy::GENERAL);
-    let wall = Err(PhyRefusal::MdiUnready {
-        phy: toyos_phy::GENERAL,
-        reg: toyos_phy::reg::PAGE_SELECT,
-        after_nanos: toyos_phy::MDI_DEADLINE_NANOS,
-    });
-    let (_, asked) = interrogated(&nic, wall);
-    let held = asked.expect("the wall").held.expect("the part grants the interface");
-
-    assert!(held.paced.ready(), "a transaction on a driven bus ends");
-    assert_eq!(
-        (held.paced.last & crate::regs::mdic::DATA_MASK) as u16,
-        u16::MAX,
-        "{}",
-        nic.because("an address nothing drives answered something")
-    );
-    let sweep = held.sweep.expect("the identifier did not answer at the first address");
-    assert_eq!(sweep.len(), unready::ADDRESSES);
-    let answered: Vec<usize> = sweep
-        .iter()
-        .enumerate()
-        .filter(|(_, word)| {
-            (**word & crate::regs::mdic::DATA_MASK) as u16 == toyos_phy::IDENTIFIER_HIGH_INTEL
-        })
-        .map(|(addr, _)| addr)
-        .collect();
-    assert_eq!(
-        answered,
-        [toyos_phy::SPECIFIC as usize],
-        "{}",
-        nic.because("the sweep did not find the PHY where this part answers it")
-    );
-    for word in sweep {
-        assert_ne!(word & crate::regs::mdic::READY, 0, "every transaction on this part ends");
-    }
-}
-
 /// A reading spells and reads back like every other crumb, and the harness's
 /// own filter takes it out of the bring-up's order — which is what lets a
-/// judge hold a trail with this instrument in it to the same table.
+/// judge hold a trail with the PHY's readings in it to the same table.
 #[test]
 fn a_reading_is_a_crumb_the_bring_ups_order_leaves_out() {
     let step = Step::Saw { reg: regs::MDIC, value: 0x043f6020 };
@@ -2479,8 +2306,8 @@ fn a_reading_is_a_crumb_the_bring_ups_order_leaves_out() {
     assert!(crumbs::is_the_phys(
         &Step::Saw { reg: regs::EXTCNF_CTRL, value: 0 }.named().to_string()
     ));
-    // A reading is the PHY's whatever register it names: §8.2's power step and
-    // the bench instrument are the only two that leave one.
+    // A reading is the PHY's whatever register it names: only the PHY's own
+    // steps leave one.
     assert!(crumbs::is_the_phys(&Step::Saw { reg: regs::CTRL, value: 0 }.named().to_string()));
     // An *access* to `CTRL` is the one the bring-up and the power step share.
     assert!(!crumbs::is_the_phys(&Step::Read { reg: regs::CTRL }.named().to_string()));
@@ -2489,20 +2316,6 @@ fn a_reading_is_a_crumb_the_bring_ups_order_leaves_out() {
         &Step::Read { reg: regs::CTRL_EXT }.named().to_string()
     ));
     assert!(!crumbs::is_shared_with_the_phys(&Step::Read { reg: regs::MDIC }.named().to_string()));
-}
-
-/// §10.2.2.7 sets `Ready` "at the end of the MDI transaction" and `Error` on
-/// one the part "fails to complete", and says nothing about silicon that sets
-/// the second without the first — so the instrument reads either as a cycle
-/// the interface ran, and only a register carrying neither as one it did not.
-#[test]
-fn a_transaction_ends_on_either_of_the_two_bits() {
-    let read = |last| unready::Ended { last, samples: 1, after_nanos: 0 };
-    let command = crate::phy::command(1, 2, crate::regs::mdic::OP_READ, 0);
-    assert!(!read(command).ended(), "a command word alone is a cycle that never finished");
-    assert!(read(command | crate::regs::mdic::READY).ended());
-    let errored = read(command | crate::regs::mdic::ERROR);
-    assert!(errored.ended() && errored.errored() && !errored.ready());
 }
 
 /// §8.2.1's `PHYPDN` and §8.2.2's `PHYPDEN` are the two bits the PCH's own
@@ -2655,7 +2468,7 @@ fn what_one_power_reading_decides() {
     );
 }
 
-// --- the wake, the full reset, and the scout ---
+// --- the wake and the full reset ---
 
 use crate::stub::Lcd;
 use crate::wake::{Action, Answer, Moment};
@@ -2779,54 +2592,6 @@ fn a_phy_no_rung_reaches_is_refused_after_the_reset() {
     assert!(matches!(driver.brought_up().phy, Err(PhyRefusal::MdiUnready { .. })));
 }
 
-/// The scout's question on the part the T14 is suspected to be: a PHY that
-/// answers as the firmware left it, and a reset of the MAC alone that takes it
-/// out of reach — then the bring-up, which wakes it and resets the two
-/// together, reaching it after all.
-#[test]
-fn the_scout_reads_whether_a_mac_alone_reset_loses_the_phy() {
-    for (seed, loses) in [(107, true), (108, false)] {
-        let nic = Nic::with(
-            seed,
-            Part::I219,
-            Permits {
-                phy_starts_out_of_reach: false,
-                mac_comes_up_holding_the_phy_down: false,
-                mac_reset_alone_loses_the_phy: loses,
-                ..Permits::default()
-            },
-        );
-        let (bar, clock, grant, line) = nic.parts();
-        let seen: Seens = Rc::default();
-        let trail = Runs::over(Noted(Rc::clone(&seen)));
-        let regs = Crumbed::over(bar, &trail);
-        let scouted = scout::around_the_reset(&regs, &clock, &trail);
-        assert!(
-            matches!(scouted.before, Ok(Answer::Answered { .. })),
-            "{}",
-            nic.because(&format!("the PHY in reach did not answer: {scouted}"))
-        );
-        assert_eq!(scouted.reset, Ok(()));
-        let after = scouted.after.expect("the reset finished").expect("the flag was taken");
-        assert_eq!(after.answered(), !loses, "{}", nic.because(&scouted.to_string()));
-
-        let driver = I219::open_trailing(Part::I219, regs, clock, grant, line, &trail)
-            .unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused: {why}"))));
-        assert!(driver.brought_up().phy.is_ok(), "{}", nic.because("the bring-up missed it"));
-        let asks: Vec<String> = crumbs_of(&seen.borrow())
-            .iter()
-            .filter(|step| matches!(step, Step::Ask { .. }))
-            .map(|step| step.to_string())
-            .collect();
-        assert_eq!(asks[..3], ["ask before-reset", "ask after-reset", "ask as-found"]);
-        assert!(
-            no_arbitration_nearer_than_the_pace(&nic),
-            "{}",
-            nic.because("the scout's holds and the bring-up's broke the pace between them")
-        );
-    }
-}
-
 fn no_arbitration_nearer_than_the_pace(nic: &Nic) -> bool {
     nic.arbitration_at().windows(2).all(|pair| pair[1] - pair[0] >= toyos_phy::ARBITRATION_PACE_NANOS)
 }
@@ -2905,4 +2670,222 @@ fn what_the_wake_and_the_full_reset_write() {
     assert!(wake::rung_allowed(Action::ForceSmbus, 0));
     assert!(wake::rung_allowed(Action::ReleaseSmbus, 0));
     assert_eq!(wake::phy_smbus_released(0x0013), 0x0012);
+}
+
+// --- the PCH's own bits, host wake-up, the counts, and the lease probe ---
+
+/// The PCH's MAC is given every bit its own host driver writes before the
+/// rings, and the 82574 — whose datasheet this driver is otherwise written
+/// from — is given none of them.
+#[test]
+fn the_pchs_mac_gets_its_host_drivers_bits_and_the_82574_none() {
+    use regs::{ctrl_ext, fflt_dbg, gcr, pbeccsts, rfctl, tarc, txdctl};
+    let nic = Nic::i219(130);
+    let _driver = open(&nic);
+    let has = |reg, bits: u32| nic.peek(reg) & bits == bits;
+    assert!(has(
+        regs::CTRL_EXT,
+        ctrl_ext::REQUIRED_22 | ctrl_ext::DRIVER_LOADED | ctrl_ext::RELAXED_ORDERING_DISABLE
+    ));
+    assert_eq!(nic.peek(regs::TXDCTL), txdctl::PCH, "{}", nic.because("the first queue"));
+    assert_eq!(nic.peek(regs::TXDCTL1), txdctl::PCH, "{}", nic.because("the second queue"));
+    assert!(has(regs::TARC0, tarc::TARC0_REQUIRED));
+    // `TCTL` as this driver writes it has Multiple Request Support clear, so
+    // `TARC1`'s bit 28 is set.
+    assert_eq!(nic.peek(regs::TCTL) & tctl::MULR, 0);
+    assert!(has(regs::TARC1, tarc::TARC1_REQUIRED | tarc::TARC1_SINGLE_REQUEST));
+    assert!(has(regs::RFCTL, rfctl::NFS_FILTERS_OFF));
+    assert!(has(regs::PBECCSTS, pbeccsts::ECC_ENABLE));
+    assert!(has(regs::CTRL, ctrl::MEHE));
+    assert!(has(regs::FFLT_DBG, fflt_dbg::DONT_GATE_WAKE_DMA_CLOCK));
+    assert_eq!(nic.peek(regs::GCR) & gcr::NO_SNOOP, 0);
+    assert_eq!(nic.peek(regs::WUC), 0);
+    for reg in [regs::WUC, regs::GCR] {
+        assert!(nic.written().contains(&reg), "{}", nic.because(&format!("{reg:#x} unwritten")));
+    }
+
+    let nic = Nic::new(131);
+    let _driver = open(&nic);
+    assert_eq!(nic.peek(regs::TXDCTL), txdctl::SUGGESTED);
+    for reg in [
+        regs::TXDCTL1,
+        regs::TARC0,
+        regs::TARC1,
+        regs::RFCTL,
+        regs::PBECCSTS,
+        regs::WUC,
+        regs::GCR,
+        regs::FFLT_DBG,
+    ] {
+        assert!(
+            !nic.written().contains(&reg),
+            "{}",
+            nic.because(&format!("the 82574 had the PCH's {reg:#x} written"))
+        );
+    }
+    assert_eq!(nic.peek(regs::CTRL) & ctrl::MEHE, 0);
+}
+
+/// `TARC1`'s bit 28 follows `TCTL`'s Multiple Request Support and nothing
+/// else in the register moves.
+#[test]
+fn tarc1_follows_multiple_request_support() {
+    use regs::tarc;
+    let set = crate::pch::tarc1(0, 0);
+    assert_eq!(set, tarc::TARC1_REQUIRED | tarc::TARC1_SINGLE_REQUEST);
+    let cleared = crate::pch::tarc1(tarc::TARC1_SINGLE_REQUEST | 0x3, tctl::MULR);
+    assert_eq!(cleared, tarc::TARC1_REQUIRED | 0x3);
+}
+
+/// I219 §7.4: a PHY an earlier operating system armed for host wake-up keeps
+/// `Host_WU_Active` through every reset but a power cycle (§9.5.3.2), and the
+/// host clears it behind the LCD reset. The bring-up says what it found.
+#[test]
+fn host_wake_up_left_armed_is_cleared_behind_the_reset() {
+    use toyos_phy::port_general;
+    // In reach as found, so nothing power-cycles it and the bit survives to
+    // the bring-up.
+    let nic = Nic::with(
+        132,
+        Part::I219,
+        Permits { phy_starts_out_of_reach: false, ..Permits::default() },
+    );
+    let driver = open(&nic);
+    let phy = driver.brought_up().phy.expect("the PHY in reach");
+    assert_ne!(phy.port_general & port_general::HOST_WAKE_UP_ACTIVE, 0, "found armed");
+    assert_eq!(
+        nic.phy_port_general() & port_general::HOST_WAKE_UP_ACTIVE,
+        0,
+        "{}",
+        nic.because("host wake-up was left armed")
+    );
+    assert_eq!(
+        nic.phy_port_general() | port_general::HOST_WAKE_UP_ACTIVE,
+        phy.port_general,
+        "{}",
+        nic.because("another field of the register moved")
+    );
+    assert!(phy.to_string().contains("was cleared"), "{phy}");
+
+    // A power cycle is a power-on reset, and then there is nothing to clear.
+    let nic = Nic::i219(133);
+    let driver = open(&nic);
+    assert_eq!(nic.power_cycles(), 1);
+    let phy = driver.brought_up().phy.expect("the PHY the ladder reached");
+    assert_eq!(phy.port_general & port_general::HOST_WAKE_UP_ACTIVE, 0);
+    assert!(!phy.to_string().contains("was cleared"), "{phy}");
+}
+
+/// What the driver counts and what the MAC's own statistics count agree on a
+/// part that moves every frame it is given, and the statistics — cleared by
+/// every read — add up across calls.
+#[test]
+fn the_driver_and_the_macs_statistics_count_the_same_frames() {
+    let nic = Nic::new(134);
+    let mut driver = open(&nic);
+    nic.set_link(true);
+    for tag in 1..=3u8 {
+        let payload = frame(tag, 100);
+        let slot = driver.tx_reserve(payload.len()).expect("a free transmit descriptor");
+        nic.put_bytes(slot.at, &payload);
+        driver.tx_commit(slot);
+    }
+    nic.run();
+    assert_eq!(nic.sent().len(), 3);
+    nic.deliver(&frame(9, 64));
+    nic.deliver(&frame(10, 64));
+    one_pass(&mut driver);
+    nic.run();
+    let got = drain(&nic, &mut driver);
+    assert_eq!(got.len(), 2);
+    driver.reclaim();
+    let counters = driver.counters();
+    assert_eq!((counters.sent, counters.received), (3, 2), "{}", nic.because("the driver's count"));
+    assert_eq!(counters.anomalies(), Counters::default(), "a working part is no anomaly");
+    let wire = driver.wire();
+    assert_eq!(
+        (wire.sent, wire.received, wire.seen, wire.missed, wire.crc_errors),
+        (3, 2, 2, 0, 0),
+        "{}",
+        nic.because("the MAC's count")
+    );
+    // Read to clear: a second reading adds nothing that did not happen.
+    assert_eq!(driver.wire(), wire);
+    nic.deliver(&frame(11, 64));
+    nic.run();
+    assert_eq!(driver.wire().seen, 3);
+}
+
+/// Every verdict the lease probe can exit with reads back to itself, and none
+/// of them is a code a panicking netd or an ordinary exit ends with.
+#[test]
+fn every_lease_verdict_has_one_exit_code_that_reads_back() {
+    use crate::lease::{Verdict, LEASED};
+    use toyos_phy::Outcome;
+    assert_eq!(Verdict::Leased.exit_code(), LEASED);
+    let mut codes = vec![LEASED];
+    for outcome in Outcome::ALL {
+        let verdict = Verdict::NotLeased(outcome);
+        assert_eq!(Verdict::from_exit_code(verdict.exit_code()), Some(verdict));
+        codes.push(verdict.exit_code());
+    }
+    assert_eq!(Verdict::from_exit_code(LEASED), Some(Verdict::Leased));
+    codes.sort_unstable();
+    codes.dedup();
+    assert_eq!(codes.len(), Outcome::ALL.len() + 1, "two verdicts share a code");
+    for foreign in [0, 1, 101, 139] {
+        assert_eq!(Verdict::from_exit_code(foreign), None, "{foreign}");
+    }
+}
+
+/// The report's lines spell and read back, and a file of them sums up to the
+/// lease, the last counts and the exit — with a torn last line left out.
+#[test]
+fn a_lease_report_reads_back_as_it_was_written() {
+    use crate::lease::{self, Counts, Event, Line};
+    use core::net::Ipv4Addr;
+    let lease = Event::Leased {
+        address: Ipv4Addr::new(192, 168, 1, 46),
+        prefix: 24,
+        server: Ipv4Addr::new(192, 168, 1, 1),
+        router: Some(Ipv4Addr::new(192, 168, 1, 1)),
+    };
+    let counts = Counts {
+        sent: 4,
+        received: 9,
+        wire: Wire { sent: 4, received: 9, seen: 12, missed: 1, crc_errors: 0 },
+    };
+    let events = [
+        Event::BroughtUp("the MAC and the PHY were reset together"),
+        Event::Link(Link::Up { speed: Speed::Mbps10, full_duplex: true }),
+        Event::Link(Link::Down),
+        lease,
+        Event::Leased {
+            address: Ipv4Addr::new(10, 0, 2, 15),
+            prefix: 24,
+            server: Ipv4Addr::new(10, 0, 2, 2),
+            router: None,
+        },
+        Event::Counts(counts),
+        Event::Exit { code: lease::LEASED },
+    ];
+    let mut file = std::string::String::new();
+    for (ms, event) in events.iter().enumerate() {
+        let line = Line { ms: ms as u64 * 100, event: *event };
+        let text = line.to_string();
+        assert_eq!(Line::parse(&text), Some(line), "{text}");
+        file.push_str(&text);
+        file.push('\n');
+    }
+    assert_eq!(
+        Line { ms: 300, event: lease }.to_string(),
+        "300 leased 192.168.1.46/24 from 192.168.1.1 router 192.168.1.1"
+    );
+    let summary = lease::summary(&format!("{file}700 exit 6")).expect("a whole report");
+    assert_eq!(summary.lease, Some((300, lease)), "the first lease is the one recorded");
+    assert_eq!(summary.counts, Some(counts));
+    assert_eq!(summary.exit, Some(lease::LEASED), "the torn line is not the exit");
+    for bad in ["x link up\n", "5 link up 10\n", "5 leased 1.2.3.4 from 1.2.3.5 router none\n", "5 exit\n"] {
+        assert!(lease::summary(bad).is_err(), "{bad:?}");
+    }
 }

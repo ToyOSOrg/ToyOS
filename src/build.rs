@@ -2592,13 +2592,13 @@ mod tests {
         "tests/doommusiccase/system.toml",
         "tests/e1000case/system.toml",
         "tests/e1000crumbcase/system.toml",
-        "tests/e1000phycase/system.toml",
+        "tests/e1000leasecase/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
         "tests/lancase/system.toml",
         "tests/lancrumbcase/system.toml",
         "tests/lanicscase/system.toml",
-        "tests/lanphycase/system.toml",
+        "tests/lanleasecase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/metalcase/system.toml",
@@ -2770,10 +2770,10 @@ mod tests {
     /// and held to netd's own declarations by
     /// [`netd_declares_the_flags_this_gate_spells`].
     const PROVOKE_MESSAGE: &str = "--provoke-message";
-    const EXIT_WITH_PHY_OUTCOME: &str = "--exit-with-phy-outcome";
+    const EXIT_WITH_LEASE: &str = "--exit-with-lease";
     const EXIT_WITH_CRUMBS: &str = "--exit-with-crumbs";
     const INTEL_ACTUATORS: [&str; 3] =
-        [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME, EXIT_WITH_CRUMBS];
+        [PROVOKE_MESSAGE, EXIT_WITH_LEASE, EXIT_WITH_CRUMBS];
 
     /// netd's main module, which is where both halves of this gate's spelling
     /// live: nothing links the two crates, so the build system reads the source.
@@ -2837,9 +2837,9 @@ mod tests {
     }
 
     /// netd's three Intel-only actuators — `--provoke-message` writes
-    /// §10.2.4.4's `ICS`, `--exit-with-phy-outcome` reports a PHY bring-up and
-    /// the link after it, and `--exit-with-crumbs` trails that same bring-up —
-    /// and virtio's driver has none of the three, so a boot config that arms
+    /// §10.2.4.4's `ICS`, `--exit-with-lease` reports the Intel driver's
+    /// bring-up beside the lease, and `--exit-with-crumbs` trails that same
+    /// bring-up — and virtio's driver has none of the three, so a boot config that arms
     /// one on a card netd opens with any other driver is a boot that panics
     /// instead of answering the question it was flashed for. One that arms two
     /// on one program is refused too: a probe ends the process before the point

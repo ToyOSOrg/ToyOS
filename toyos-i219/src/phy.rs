@@ -90,8 +90,23 @@ pub(crate) mod reg {
     pub const CONTROL_1000T: u8 = 9;
     /// Custom Mode Control (§9.5.3.1), PHY address 01, page 769.
     pub const CUSTOM_MODE: u8 = 16;
+    /// Port General Configuration (§9.5.3.2), PHY address 01, page 769.
+    pub const PORT_GENERAL: u8 = 17;
     /// §9.3: "Register 31 is the page register in all pages of PHY address 01."
     pub const PAGE_SELECT: u8 = 31;
+}
+
+/// Port General Configuration bits (§9.5.3.2).
+pub mod port_general {
+    /// MACPD_enable (bit 2). §9.5.3.2: "When set to 1b, pages 800 and 801 are
+    /// enabled for configuration and Host_WU_Active is not blocked for
+    /// writes."
+    pub const MACPD_ENABLE: u16 = 1 << 2;
+    /// Host_WU_Active (bit 4). §9.5.3.2: "Enables host wake up from the I219.
+    /// This bit is reset by power on reset only" — so a PHY an earlier
+    /// operating system armed for wake-up keeps it through every reset this
+    /// driver issues but a power cycle.
+    pub const HOST_WAKE_UP_ACTIVE: u16 = 1 << 4;
 }
 
 /// The page §9.5.3's port control registers live in.
@@ -316,6 +331,27 @@ pub struct Phy {
     pub addr: u8,
     /// §9.5.2.3 and §9.5.2.4's two registers, the high one first.
     pub id: u32,
+    /// §9.5.3.2's Port General Configuration as the bring-up found it, before
+    /// it cleared `Host_WU_Active` out of it.
+    pub port_general: u16,
+}
+
+impl core::fmt::Display for Phy {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "answers at PHY address {:02} as {:#010x}, its Port General Configuration read \
+             {:#06x}{}",
+            self.addr,
+            self.id,
+            self.port_general,
+            if self.port_general & port_general::HOST_WAKE_UP_ACTIVE != 0 {
+                " with host wake-up left armed, which was cleared"
+            } else {
+                ""
+            }
+        )
+    }
 }
 
 /// What one probe boot answers, with every field dropped: the bring-up's
@@ -751,12 +787,6 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         }
     }
 
-    /// The register file and the clock this hold was taken with — the part
-    /// itself, reachable for as long as the interface is this driver's.
-    pub(crate) fn part(&self) -> (&'a R, &'a C) {
-        (self.mdio.regs, self.mdio.clock)
-    }
-
     /// One sweep of §8.2's five power and handshake registers, paced as every
     /// other access under the flag is, with each reading left durable behind
     /// the read that took it.
@@ -1031,6 +1061,15 @@ pub(crate) fn bring_up<R: Registers, C: Clock, T: Trail>(
     let custom = mdi.read(GENERAL, reg::CUSTOM_MODE)?;
     mdi.write(GENERAL, reg::CUSTOM_MODE, custom | custom_mode::REDUCED_MDIO_FREQUENCY)?;
 
+    // §7.4, step 6 of arming the PHY for wake-up: the host "should issue a LCD
+    // reset to the I219 before clearing the Host_WU_Active bit" — which is
+    // where this is, behind the reset that reached the PHY. A read-modify-write
+    // for §9.1's sake, and no write at all where the bit is already clear.
+    let port = mdi.read(GENERAL, reg::PORT_GENERAL)?;
+    if port & port_general::HOST_WAKE_UP_ACTIVE != 0 {
+        mdi.write(GENERAL, reg::PORT_GENERAL, port & !port_general::HOST_WAKE_UP_ACTIVE)?;
+    }
+
     let (addr, id) = mdi.identify()?;
 
     // §9.5.2.5: "any write to the Auto-Negotiation Advertisement register,
@@ -1050,7 +1089,7 @@ pub(crate) fn bring_up<R: Registers, C: Clock, T: Trail>(
         | control::RESTART_AUTONEG;
     mdi.write(addr, reg::CONTROL, wanted)?;
 
-    Ok(Phy { addr, id })
+    Ok(Phy { addr, id, port_general: port })
 }
 
 /// Bring the PHY within reach of `MDIC` before [`crate::I219::open`] resets

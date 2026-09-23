@@ -33,6 +33,7 @@ mod crumbs;
 mod device;
 mod dhcp;
 mod i219;
+mod report;
 mod virtio_net;
 
 /// The cards this program can drive, named by what identifies one rather than
@@ -64,27 +65,37 @@ const CARDS: [(PciId, fn(toyos::PciDev, Option<&Crumbs>, bool) -> Card); 3] = [
 /// one.
 const PROVOKE_MESSAGE: &str = "--provoke-message";
 
-/// The probe under which this process waits a bounded time for the link and
-/// then ends, with what the bring-up and that wait answered as its exit code.
+/// The probe under which this process brings the card up and serves exactly as
+/// it always does for [`LEASE_WINDOW`], leaves what happened on the log volume
+/// one durable line at a time (`report::PATH`), and then ends with
+/// `toyos_i219::lease::Verdict`'s code: whether an address was leased, and
+/// where none was, what the bring-up and the link said.
 ///
-/// **The one word of a process that crosses on a machine whose console reaches
-/// nobody** is the kernel's `exit:` record, and `toyos_i219::phy::Outcome` is
-/// the table both ends read the code through — which says the speed and duplex
-/// a link came up at, and says so apart from a PHY that came up onto a cable
-/// with nothing at the other end. Armed the same way as [`PROVOKE_MESSAGE`],
-/// and never beside it: the message that one asks for is taken by a pass this
-/// process would not live to make.
-const EXIT_WITH_PHY_OUTCOME: &str = "--exit-with-phy-outcome";
+/// **A lease is a frame out and a frame in, answered by a server this machine
+/// does not control**, which is the claim the probe is flashed for; the lines
+/// beside it say what the driver and the MAC counted each way, and so which
+/// half went missing on a boot that got none. Armed the same way as
+/// [`PROVOKE_MESSAGE`] and never beside it.
+const EXIT_WITH_LEASE: &str = "--exit-with-lease";
+
+/// How long [`EXIT_WITH_LEASE`] serves before it ends, counted from this
+/// process's start.
+///
+/// **It ends inside the job that holds its boot open**: `test_rs_lan_hold`
+/// sleeps `toyos_tco::LEASE_BOUND_MS` from a start after this process's, so
+/// the exit record and the report's last line land before the runner reboots,
+/// with two seconds to spare. Every moment of it after the lease is a moment
+/// the machine answers the host's ping at the leased address.
+const LEASE_WINDOW: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS - 2_000);
 
 /// The probe under which this process leaves a durable crumb on the log volume
-/// before every step that reaches the claim or the card, and ends where
-/// [`EXIT_WITH_PHY_OUTCOME`] does, with the same code.
+/// before every step that reaches the claim or the card, waits a bounded time
+/// for the link, and ends with `toyos_i219::phy::Outcome`'s code for the two.
 ///
 /// **For a machine that ends without a record**: a power-off seals no black box
 /// and outruns `/system/bin/logd`, so the last line of `crumbs::PATH` is the only
 /// thing left that says how far this process got. Armed the same way as the
-/// two above and never beside one: it is [`EXIT_WITH_PHY_OUTCOME`]'s boot with
-/// a trail.
+/// two above and never beside one.
 const EXIT_WITH_CRUMBS: &str = "--exit-with-crumbs";
 
 /// The trail [`EXIT_WITH_CRUMBS`] leaves: a poll is one crumb, and every one of
@@ -96,7 +107,7 @@ type Crumbs = toyos_i219::crumbs::Runs<crumbs::Stick>;
 const PANIC_EXIT: i32 = 101;
 
 /// The three, which cannot share a boot.
-const ACTUATORS: [&str; 3] = [PROVOKE_MESSAGE, EXIT_WITH_PHY_OUTCOME, EXIT_WITH_CRUMBS];
+const ACTUATORS: [&str; 3] = [PROVOKE_MESSAGE, EXIT_WITH_LEASE, EXIT_WITH_CRUMBS];
 
 fn armed(actuator: &str) -> bool {
     std::env::args().any(|arg| arg == actuator)
@@ -106,6 +117,7 @@ use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
 use toyos_i219::crumbs::{Step, Trail};
+use toyos_i219::lease::{Event, Verdict};
 use toyos_i219::Part;
 use virtio_net::VirtioNet;
 
@@ -194,15 +206,15 @@ impl Card {
         }
     }
 
-    /// [`EXIT_WITH_PHY_OUTCOME`]'s answer, from the driver that has a PHY
-    /// behind `MDIC`: what the bring-up did with it, and the link that came
-    /// after it.
-    fn phy_outcome(&self) -> toyos_i219::phy::Outcome {
+    /// The Intel driver, for [`EXIT_WITH_LEASE`]: the bring-up it reports
+    /// beside the lease is that driver's.
+    fn intel_driver(&self) -> &i219::Nic {
         match self {
             Self::Virtio(_) => Self::undrivable(format_args!(
-                "{EXIT_WITH_PHY_OUTCOME} reports a PHY bring-up, which this card has not"
+                "{EXIT_WITH_LEASE} reports the Intel driver's bring-up beside the lease, which \
+                 this card has not"
             )),
-            Self::Intel(nic) => nic.probe_outcome(),
+            Self::Intel(nic) => nic,
         }
     }
 
@@ -218,14 +230,15 @@ impl Card {
     /// function's bus mastering is gone. Every frame from here on is one that
     /// silently never arrives, so this dies where it can be read — once, for
     /// whichever driver is running.
-    fn begin_pass(&self) {
+    ///
+    /// Answers the link where the pass found it changed; virtio reports none.
+    fn begin_pass(&self) -> Option<toyos_i219::Link> {
         let answered = match self {
-            Self::Virtio(nic) => nic.take_interrupt().map(|_| ()),
+            Self::Virtio(nic) => nic.take_interrupt().map(|_| None),
             Self::Intel(nic) => nic.begin_pass(),
         };
-        if let Err(why) = answered {
-            panic!("netd: this NIC's claim refused an interrupt read: {why:?}");
-        }
+        answered
+            .unwrap_or_else(|why| panic!("netd: this NIC's claim refused an interrupt read: {why:?}"))
     }
 
     fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
@@ -1374,7 +1387,21 @@ impl NetDaemon {
     }
 }
 
+/// [`EXIT_WITH_LEASE`]'s last two lines, and the exit they announce.
+fn end_the_lease_probe(report: &report::Report, nic: &i219::Nic, leased: bool) -> ! {
+    report.say(Event::Counts(nic.counts()));
+    let verdict = if leased {
+        Verdict::Leased
+    } else {
+        Verdict::NotLeased(toyos_i219::phy::Outcome::of(nic.brought_up().phy, nic.link()))
+    };
+    let code = verdict.exit_code();
+    report.say(Event::Exit { code });
+    std::process::exit(code)
+}
+
 fn main() {
+    let started = Instant::now();
     // Before the claim is looked for, so a trail with this line and no other
     // is a process that ended without ever holding the function.
     let trail = armed(EXIT_WITH_CRUMBS).then(|| Crumbs::over(crumbs::Stick::open()));
@@ -1412,9 +1439,16 @@ fn main() {
         trail.crumb(Step::ClaimHeld);
     }
     let nic = open(claim, trail.as_ref(), armed(PROVOKE_MESSAGE));
-    if armed(EXIT_WITH_PHY_OUTCOME) {
-        std::process::exit(nic.phy_outcome().exit_code());
-    }
+    let report = armed(EXIT_WITH_LEASE).then(|| {
+        let report = report::Report::open(started);
+        let intel = nic.intel_driver();
+        for words in i219::brought_up_words(intel.brought_up()) {
+            report.say(Event::BroughtUp(&words));
+        }
+        report.say(Event::Link(intel.link()));
+        report
+    });
+    let mut leased = false;
     let mac = nic.mac();
     let mut device = DmaNic { nic };
 
@@ -1458,7 +1492,15 @@ fn main() {
     loop {
         // Before `iface.poll`, because it is what makes the interrupt taken and
         // what gives a driver with a per-pass receive budget that budget back.
-        device.nic.begin_pass();
+        if let Some(link) = device.nic.begin_pass() {
+            if let Some(report) = &report {
+                report.say(Event::Link(link));
+            }
+            // Before the poll below, so the DISCOVER goes out on this pass.
+            if link.is_up() {
+                dhcp::restart(socket_set.get_mut::<dhcpv4::Socket>(dhcp_handle));
+            }
+        }
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
         while iface.poll(now, &mut device, &mut socket_set) != PollResult::None {}
 
@@ -1467,6 +1509,17 @@ fn main() {
         // answered before it was applied would be answered on a machine that is
         // on no network.
         let change = dhcp::Change::of(socket_set.get_mut::<dhcpv4::Socket>(dhcp_handle));
+        if let (Some(report), Some((address, router, server))) =
+            (&report, change.as_ref().and_then(dhcp::Change::lease))
+        {
+            report.say(Event::Leased {
+                address: address.address(),
+                prefix: address.prefix_len(),
+                server,
+                router,
+            });
+            leased = true;
+        }
         if dhcp.pass(change, &mut iface, socket_set.get_mut::<dns::Socket>(dns_handle)) {
             say!(
                 "netd: ready, at most {max_piped} piped connections \
@@ -1522,6 +1575,18 @@ fn main() {
         let timeout = match timeout_nanos {
             None => u64::MAX,
             Some(n) => n,
+        };
+        // The probe's window is a wake of its own: an idle machine would
+        // otherwise sleep through the moment it owes its answer.
+        let timeout = match &report {
+            Some(report) => {
+                let left = LEASE_WINDOW.saturating_sub(started.elapsed());
+                if left.is_zero() {
+                    end_the_lease_probe(report, device.nic.intel_driver(), leased);
+                }
+                timeout.min(left.as_nanos() as u64)
+            }
+            None => timeout,
         };
         // A client that connects and then says nothing wakes nothing, so the
         // deadline that removes it has to be a wake in its own right: without

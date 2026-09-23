@@ -1,10 +1,11 @@
-# `tests/lanphycase` with a trail: netd's `--exit-with-crumbs` brings the card
-# up exactly as that boot does and ends with the same code, and before every
-# step that reaches the claim or the card it appends one line to
-# `/log/crumbs.txt` and flushes it to the stick. On a machine that ends without
-# a record, the last line of that file is how far netd got. Like
-# `tests/lancase`, nothing here reaches the internal NVMe: no `[disks]` row, and
-# the only device any program claims is the PCI function named below.
+# `tests/lancase` with a trail: netd's `--exit-with-crumbs` brings the card up
+# exactly as that boot does, waits a bounded time for the link and ends with
+# the PHY's outcome as its code, and before every step that reaches the claim
+# or the card it appends one line to `/log/crumbs.txt` and flushes it to the
+# stick. On a machine that ends without a record, the last line of that file
+# is how far netd got. Like `tests/lancase`, nothing here reaches the internal
+# NVMe: no `[disks]` row, and the only device any program claims is the PCI
+# function named below.
 
 [boot]
 start = ["logd", "netd", "test-runner"]

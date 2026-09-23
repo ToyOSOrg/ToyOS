@@ -45,10 +45,19 @@ const LEASE_BOUND: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS);
 
 /// The DHCP client socket this machine runs, asking for a lease under
 /// [`HOSTNAME`].
+///
+/// **Its discovery restarts when the link comes up** (`restart`): the
+/// client's own retry is ten seconds apart, so a DISCOVER sent into a link
+/// still negotiating would otherwise cost the lease that long.
 pub fn socket() -> dhcpv4::Socket<'static> {
     let mut socket = dhcpv4::Socket::new();
     socket.set_outgoing_options(&OUTGOING);
     socket
+}
+
+/// Ask again from the start, now: the link has just come up.
+pub fn restart(client: &mut dhcpv4::Socket) {
+    client.reset();
 }
 
 /// What the client decided, owned: the resolver this lease writes lives in the
@@ -70,6 +79,15 @@ impl Change {
                 dns: config.dns_servers.to_vec(),
             }),
             dhcpv4::Event::Deconfigured => Some(Self::Lost),
+        }
+    }
+
+    /// The address, the router and the server that leased them, where this
+    /// change is a lease.
+    pub fn lease(&self) -> Option<(Ipv4Cidr, Option<Ipv4Address>, Ipv4Address)> {
+        match self {
+            Self::Leased { address, router, server, .. } => Some((*address, *router, *server)),
+            Self::Lost => None,
         }
     }
 }

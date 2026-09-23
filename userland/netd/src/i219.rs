@@ -201,31 +201,37 @@ fn granted(dev: &PciDev, trail: &impl Trail) -> Result<(Bar, Grant, Window), Ope
     Ok((bar, Grant { window: frames, device_base, _region: region }, frames))
 }
 
-/// The one line a bring-up says about itself, and a line each for what it
-/// asked the I219's PHY before its reset and what that reset did.
-fn say_brought_up(brought_up: toyos_i219::BringUp) {
+/// What a bring-up says about itself: a sentence each for what it asked the
+/// I219's PHY before its reset and what that reset did, and one for the rest.
+pub fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
+    let mut words = Vec::new();
     match brought_up.woke {
-        Some(Ok(woke)) => crate::say!("netd: I219: before the reset the PHY was asked: {woke}"),
-        Some(Err(why)) => crate::say!("netd: I219: the PHY was not asked before the reset: {why}"),
+        Some(Ok(woke)) => words.push(format!("before the reset the PHY was asked: {woke}")),
+        Some(Err(why)) => words.push(format!("the PHY was not asked before the reset: {why}")),
         None => {}
     }
     if let Some(reset) = brought_up.reset {
-        crate::say!("netd: I219: {reset}");
+        words.push(reset.to_string());
     }
-    crate::say!(
-        "netd: I219: {}, and the PHY {}",
+    words.push(format!(
+        "{}, and the PHY {}",
         if brought_up.master_quiet {
             "the function stopped mastering before it was reset"
         } else {
             "the function was still mastering when it was reset"
         },
         match brought_up.phy {
-            Ok(phy) => {
-                format!("answers at PHY address {:02} as {:#010x}", phy.addr, phy.id)
-            }
+            Ok(phy) => phy.to_string(),
             Err(why) => format!("was not brought up: {why}"),
         },
-    );
+    ));
+    words
+}
+
+fn say_brought_up(brought_up: toyos_i219::BringUp) {
+    for words in brought_up_words(brought_up) {
+        crate::say!("netd: I219: {words}");
+    }
 }
 
 /// The one line a probe says about the link it waited for.
@@ -245,8 +251,8 @@ fn say_link(link: toyos_i219::Link) {
 
 /// `crate::EXIT_WITH_CRUMBS`: [`Nic::open`]'s bring-up with a crumb on `trail`
 /// before every call on the claim and every register access, its link waited
-/// for as `crate::EXIT_WITH_PHY_OUTCOME` waits for one, ended where that probe
-/// ends it and with the same code.
+/// for a bounded time, and the process ended with
+/// `toyos_i219::phy::Outcome`'s code for the two.
 ///
 /// **Nothing is given back before the exit.** The process ending is what gives
 /// the claim up on the boot this one is compared with, so the last crumb is
@@ -259,14 +265,6 @@ pub fn leave_crumbs(
     let dev = Rc::new(dev);
     let (bar, grant, _frames) = granted(&dev, trail)?;
     let bar = Crumbed::over(bar, trail);
-    // The question this boot is flashed for first: whether the PHY answers as
-    // the firmware handed it over, and whether a reset of the MAC alone takes
-    // it out of reach — asked ahead of the bring-up, which then wakes and
-    // resets the part its own way.
-    if part == toyos_i219::Part::I219 {
-        let scouted = toyos_i219::scout::around_the_reset(&bar, &Monotonic, trail);
-        crate::say!("netd: I219: {scouted}");
-    }
     let mut driver = toyos_i219::I219::open_trailing(
         part,
         bar,
@@ -278,17 +276,6 @@ pub fn leave_crumbs(
     .map_err(Opening::Driver)?;
     trail.crumb(Step::Opened);
     say_brought_up(driver.brought_up());
-    // The question this boot is flashed for, asked only where the bring-up hit
-    // §10.2.2.7's wall, and answered on the stick rather than here: on this
-    // machine a userland write reaches no channel the volume carries.
-    if let Some(asked) = toyos_i219::unready::interrogate(
-        driver.registers(),
-        &Monotonic,
-        trail,
-        driver.brought_up().phy,
-    ) {
-        crate::say!("netd: I219: {asked}");
-    }
     // The link's own wait is behind this crumb, so a trail that ends in the run
     // of `STATUS` reads says the machine ended waiting for a link and not
     // inside the bring-up.
@@ -332,21 +319,30 @@ impl Nic {
         self.driver.borrow().provoke_message();
     }
 
-    /// `crate::EXIT_WITH_PHY_OUTCOME`'s answer: what the bring-up did with the
-    /// PHY, and — where it brought one up — the link that came inside the
-    /// driver's bound. **This waits**, which is why nothing on the serving path
-    /// calls it.
-    pub fn probe_outcome(&self) -> toyos_i219::phy::Outcome {
-        let outcome = self.driver.borrow_mut().probe_outcome();
-        say_link(self.driver.borrow().link());
-        outcome
+    /// What the bring-up found.
+    pub fn brought_up(&self) -> toyos_i219::BringUp {
+        self.driver.borrow().brought_up()
     }
 
-    /// Take the interrupt, acknowledge its causes and refresh the link.
-    pub fn begin_pass(&self) -> Result<(), SyscallError> {
-        self.driver.borrow_mut().begin_pass()?;
+    pub fn link(&self) -> toyos_i219::Link {
+        self.driver.borrow().link()
+    }
+
+    /// What the driver and the MAC have counted so far, the transmit ring
+    /// reclaimed first so a frame that has left is counted as sent.
+    pub fn counts(&self) -> toyos_i219::lease::Counts {
+        let mut driver = self.driver.borrow_mut();
+        driver.reclaim();
+        let wire = driver.wire();
+        toyos_i219::lease::Counts::of(driver.counters(), wire)
+    }
+
+    /// Take the interrupt, acknowledge its causes and refresh the link — and
+    /// answer the link where this pass found it changed.
+    pub fn begin_pass(&self) -> Result<Option<toyos_i219::Link>, SyscallError> {
+        let pass = self.driver.borrow_mut().begin_pass()?;
         self.report();
-        Ok(())
+        Ok(pass.link_changed.then(|| self.link()))
     }
 
     pub fn poll_rx(&self) -> Option<toyos_i219::Frame> {

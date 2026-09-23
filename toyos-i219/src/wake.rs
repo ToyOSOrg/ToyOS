@@ -90,10 +90,6 @@ pub const SMBUS_CONTROL_FORCE: u16 = 1 << 0;
 /// Where in one boot the PHY is asked for its identifier.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Moment {
-    /// Before anything of this boot's has touched the part.
-    BeforeReset,
-    /// After a reset of the MAC alone.
-    AfterReset,
     /// The first ask of [`crate::I219::open`], before its reset.
     AsFound,
     /// After `LANPHYPC` was cycled.
@@ -109,9 +105,7 @@ pub enum Moment {
 }
 
 impl Moment {
-    pub const ALL: [Self; 8] = [
-        Self::BeforeReset,
-        Self::AfterReset,
+    pub const ALL: [Self; 6] = [
         Self::AsFound,
         Self::PowerCycled,
         Self::SmbusForced,
@@ -122,8 +116,6 @@ impl Moment {
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::BeforeReset => "before-reset",
-            Self::AfterReset => "after-reset",
             Self::AsFound => "as-found",
             Self::PowerCycled => "power-cycled",
             Self::SmbusForced => "smbus-forced",

@@ -14,12 +14,11 @@
 //! [`phy`] is everything that follows from it. [`wake`] is what brings that PHY
 //! within `MDIC`'s reach before the reset and what shape the reset then takes —
 //! the MAC and the PHY together — on facts no Intel document publishes and
-//! Intel's own host driver for this family acts on. [`crumbs`] is a trail left
-//! one durable line ahead of a bring-up, and decides nothing about one.
-//! [`unready`] and [`scout`] are bench instruments and not a driver: each runs
-//! on one boot's question — why this part never reports the end of an MDI
-//! transaction, and whether a reset of the MAC alone is what takes the PHY out
-//! of reach — and is deleted when that question is answered.
+//! Intel's own host driver for this family acts on, and `pch` is what that
+//! driver writes into the PCH's MAC before its rings. [`crumbs`] is a trail
+//! left one durable line ahead of a bring-up, and decides nothing about one;
+//! [`lease`] is the one table a lease probe's answer crosses a machine with no
+//! console through.
 //!
 //! # The boundary
 //!
@@ -77,11 +76,11 @@
 extern crate std;
 
 pub mod crumbs;
+pub mod lease;
+mod pch;
 pub mod phy;
 pub mod power;
 pub mod regs;
-pub mod scout;
-pub mod unready;
 pub mod wake;
 
 #[cfg(test)]
@@ -415,15 +414,48 @@ pub struct Counters {
     /// Messages that arrived with no cause set in `ICR` — §7.4.5's spurious
     /// interrupt. It costs a pass and nothing else.
     pub spurious: u32,
+    /// Frames the part took off the transmit ring and wrote `DD` back for.
+    pub sent: u32,
+    /// Frames the part filled a receive descriptor with and this driver handed
+    /// up.
+    pub received: u32,
 }
 
 impl Counters {
-    /// The counts that are worth a line, which is every one but [`Self::spurious`].
-    ///
-    /// A spurious message is ordinary and its count moves on its own, so a
-    /// diagnostic keyed on it would print on nothing having happened.
+    /// The counts that are worth a line: every one but [`Self::spurious`],
+    /// [`Self::sent`] and [`Self::received`], which move on their own on a
+    /// working card, so a diagnostic keyed on them would print on nothing
+    /// having gone wrong.
     pub fn anomalies(&self) -> Self {
-        Self { spurious: 0, ..*self }
+        Self { spurious: 0, sent: 0, received: 0, ..*self }
+    }
+}
+
+/// What the MAC's own statistics registers counted, as [`I219::wire`] adds
+/// them up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Wire {
+    /// Good packets transmitted: frames the MAC put on the wire.
+    pub sent: u64,
+    /// Good packets received: frames that passed its filters.
+    pub received: u64,
+    /// Total packets received: every frame the MAC saw arrive.
+    pub seen: u64,
+    /// Frames it had no room for.
+    pub missed: u64,
+    /// Frames that arrived with a bad CRC.
+    pub crc_errors: u64,
+}
+
+impl Wire {
+    fn plus(self, more: Self) -> Self {
+        Self {
+            sent: self.sent.saturating_add(more.sent),
+            received: self.received.saturating_add(more.received),
+            seen: self.seen.saturating_add(more.seen),
+            missed: self.missed.saturating_add(more.missed),
+            crc_errors: self.crc_errors.saturating_add(more.crc_errors),
+        }
     }
 }
 
@@ -463,6 +495,11 @@ pub const LINK_PACE_NANOS: u64 = 10_000_000;
 /// the PCIe Master Enable Status bit is not cleared within a given time".
 const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
 
+/// The transmit control [`I219::open`] writes: §4.6.6's suggested values with
+/// the transmitter enabled — and what [`pch`] decides `TARC1` against before it
+/// is.
+pub(crate) const TX_CONTROL: u32 = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX;
+
 /// What [`reset`] leaves its caller.
 struct Reset {
     /// Whether §3.1.3.10's master quiesce finished before the reset was issued.
@@ -480,8 +517,7 @@ struct Reset {
 /// Which reset [`reset`] issues.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Whole {
-    /// §10.2.2.1's `RST` alone: the 82574, whose PHY is on its own die, and the
-    /// shape [`scout`] reads the I219's PHY across.
+    /// §10.2.2.1's `RST` alone: the 82574, whose PHY is on its own die.
     MacAlone,
     /// The PCH's MAC and its PHY together, as [`wake`]'s header sets out,
     /// under §8.2.4's flag taken no nearer than one pace to `after` — when an
@@ -490,11 +526,7 @@ pub(crate) enum Whole {
 }
 
 /// §4.6.1's reset, with every interrupt masked on both sides of it.
-///
-/// **One function because two callers owe the part the same sequence**:
-/// [`I219::open`], and [`scout::around_the_reset`], whose reading is of the
-/// part across the reset this driver used to issue.
-pub(crate) fn reset<R: Registers, C: Clock>(
+fn reset<R: Registers, C: Clock>(
     regs: &R,
     clock: &C,
     whole: Whole,
@@ -680,6 +712,8 @@ pub struct I219<R, C, D, I> {
     /// Next transmit descriptor to reclaim.
     tx_clean: usize,
     counters: Counters,
+    /// What [`Self::wire`] has read out of the statistics registers so far.
+    wire: Wire,
 }
 
 impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
@@ -730,6 +764,11 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         };
         let Reset { master_quiet, at: reset_at, full, released } =
             reset(&regs, &clock, whole)?;
+        // What the host driver for the PCH's MAC writes into it after every
+        // reset and before anything else: [`pch`]'s header.
+        if part == Part::I219 {
+            pch::prepare(&regs);
+        }
 
         // §10.2.5.23: the reset reloads entry 0 from the NVM, so this is read
         // after it and not before.
@@ -806,6 +845,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             tx_next: 0,
             tx_clean: 0,
             counters: Counters::default(),
+            wire: Wire::default(),
         };
 
         // §10.2.4.9: `IVAR` allocates every cause to no vector at reset, so a
@@ -830,12 +870,16 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.arm_tx_ring();
 
         // §4.6.6, in its order: the write-back policy, the gap, then the
-        // transmitter.
-        nic.regs.write(regs::TXDCTL, txdctl::SUGGESTED);
+        // transmitter. The PCH's MAC gets the policy its own host driver gives
+        // it, which [`pch`] gave the second queue already.
+        let policy = match part {
+            Part::I219 => txdctl::PCH,
+            Part::E82574 => txdctl::SUGGESTED,
+        };
+        nic.regs.write(regs::TXDCTL, policy);
         nic.regs.write(regs::TIPG, regs::TIPG_DEFAULT);
-        let tx = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX;
-        nic.regs.write(regs::TCTL, tx);
-        nic.accepted(regs::TCTL, tx)?;
+        nic.regs.write(regs::TCTL, TX_CONTROL);
+        nic.accepted(regs::TCTL, TX_CONTROL)?;
 
         // §4.6.5.1: the receiver last, "only after all other setup is
         // accomplished".
@@ -935,18 +979,31 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         self.brought_up
     }
 
-    /// The register file this driver was opened on.
-    ///
-    /// **For [`unready`] and for nothing on the serving path.** A caller that
-    /// reached the part through this would be driving it beside the driver
-    /// that owns it; the one caller there is asks the part a question about
-    /// itself on a boot that ends right after.
-    pub fn registers(&self) -> &R {
-        &self.regs
-    }
-
     pub fn counters(&self) -> Counters {
         self.counters
+    }
+
+    /// What the MAC's own statistics registers have counted since the function
+    /// was opened: each read clears the register it takes, so every call adds
+    /// what it read to what the calls before it did.
+    ///
+    /// **The part's count and not this driver's.** [`Counters::sent`] is a
+    /// descriptor the part wrote back and [`Counters::received`] one it filled;
+    /// these are frames at the MAC's own end of the wire — including the ones
+    /// its filters dropped and the ones it had no descriptor for — which is
+    /// what separates "nothing arrived" from "something arrived and went
+    /// nowhere" on a boot with no other record.
+    pub fn wire(&mut self) -> Wire {
+        let take = |reg| u64::from(self.regs.read(reg));
+        let read = Wire {
+            sent: take(regs::GPTC),
+            received: take(regs::GPRC),
+            seen: take(regs::TPR),
+            missed: take(regs::MPC),
+            crc_errors: take(regs::CRCERRS),
+        };
+        self.wire = self.wire.plus(read);
+        self.wire
     }
 
     /// Nanoseconds between the function coming up and its link doing so, once
@@ -1084,7 +1141,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             self.rx_budget -= 1;
             match parse_rx(word) {
                 Ok(len) => {
-                    return Some(Frame { index, at: OFF_RX_BUFS + index * RX_BUF_BYTES, len })
+                    self.counters.received = self.counters.received.saturating_add(1);
+                    return Some(Frame { index, at: OFF_RX_BUFS + index * RX_BUF_BYTES, len });
                 }
                 Err(why) => {
                     match why {
@@ -1208,7 +1266,16 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             }
             self.dma.observe();
             self.tx_clean = (self.tx_clean + 1) % TX_RING;
+            self.counters.sent = self.counters.sent.saturating_add(1);
         }
+    }
+
+    /// Take back every transmit descriptor the part has finished with, so
+    /// [`Counters::sent`] says what has left and not only what was handed
+    /// over — for a caller about to report it, since the ring is otherwise
+    /// reclaimed only when the next frame needs a slot.
+    pub fn reclaim(&mut self) {
+        self.reclaim_tx();
     }
 }
 
