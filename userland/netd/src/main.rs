@@ -1235,6 +1235,15 @@ impl NetDaemon {
                 conn.close_rx();
             }
 
+            // **A connection that is over takes no more of the client's bytes.**
+            // A peer's reset leaves the socket `Closed` and `can_send` false for
+            // good, so the loop above never reads the pipe again; left open, the
+            // client's writes fill a pipe nobody drains and then block, and a
+            // writer that is never told its peer is gone cannot say so.
+            if !socket.is_open() && conn.tx_read.is_some() {
+                conn.close_tx();
+            }
+
             // Detect client death: a zero-byte write is refused by name once
             // the pipe has no reader — the kernel's fact, not the client's.
             if let Some(ref pipe) = conn.rx_write {

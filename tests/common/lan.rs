@@ -791,6 +791,28 @@ pub fn lan_talk(
     Ok(())
 }
 
+/// The talking boot's image, streaming to `at` and authorizing `identity`, and
+/// where its log partition sits in it.
+fn talk_image(
+    case: &Path,
+    name: &str,
+    at: (&'static str, u16),
+    identity: &super::ssh::Identity,
+) -> Result<(std::path::PathBuf, usize, usize), String> {
+    let param = qemu::log_stream_param(at);
+    let bytes = qemu::build_boot_image_carrying(
+        case,
+        &[],
+        &[],
+        &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
+        &[&param],
+    );
+    let image = super::lane::dir().join(format!("{name}.img"));
+    std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
+    let (start, len) = super::volumes::log_extent(&bytes, &image)?;
+    Ok((image, start, len))
+}
+
 /// A talking boot in front of QEMU's 82574, staged: its listener, the key its
 /// image authorizes, and where its log partition sits in the image.
 struct TalkBoot {
@@ -816,17 +838,7 @@ impl TalkBoot {
             false,
         )?;
         let at = (qemu::GUEST_VIEW_OF_HOST, stream.local().port());
-        let param = qemu::log_stream_param(at);
-        let bytes = qemu::build_boot_image_carrying(
-            &case,
-            &[],
-            &[],
-            &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
-            &[&param],
-        );
-        let image = super::lane::dir().join(format!("{name}.img"));
-        std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
-        let (start, len) = super::volumes::log_extent(&bytes, &image)?;
+        let (image, start, len) = talk_image(&case, name, at, &identity)?;
         Ok(Self { case, stream, identity, image, scratch, at, start, len })
     }
 
@@ -917,4 +929,60 @@ fn wire_dump() -> std::path::PathBuf {
     let at = std::env::temp_dir().join(format!("toyos-lan-{}.pcap", std::process::id()));
     let _ = std::fs::remove_file(&at);
     at
+}
+
+/// **The T14's first talking boot to open its stream, on the 82574**: this
+/// host accepts the boot's connection and closes it before reading a byte —
+/// what macOS's application firewall does to a binary it blocks incoming
+/// connections for. The boot goes on, and what `logd` owes is to notice: the
+/// stream it was writing into is gone, and `/log` says so.
+pub fn lan_talk_host_closes(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let case = super::compile::repo_root().join(TALK_QEMU_CONFIG);
+    let identity = super::ssh::Identity::mint(TALK_KEY)?;
+    let closer = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .map_err(|e| format!("bind the closing listener: {e}"))?;
+    let port = closer.local_addr().map_err(|e| format!("its port: {e}"))?.port();
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&accepted);
+    std::thread::spawn(move || {
+        for conn in closer.incoming() {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(conn);
+        }
+    });
+    let at = (qemu::GUEST_VIEW_OF_HOST, port);
+    let (image, start, len) = talk_image(&case, "lan-talk-host-closes", at, &identity)?;
+    let options = BootOptions {
+        profile: qemu::Profile::E1000e,
+        boot_image: Some(qemu::Staged::Written(image.clone())),
+        log_stream: Some(at),
+        ..Default::default()
+    };
+    let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
+    let mut console = guest.boot_log().to_string();
+    // A pace for records to be offered into a connection that is gone, never
+    // a verdict: the verdict is what the guest's own log says.
+    console.push_str(&guest.drain_serial(std::time::Duration::from_secs(10)));
+    drop(guest);
+    serial::Serial::named("the host-closes boot", console.as_str()).must_be_clean()?;
+    let times = accepted.load(std::sync::atomic::Ordering::SeqCst);
+    if times == 0 {
+        return Err("the boot never connected, so nothing here was closed on it".to_string());
+    }
+    let file = super::volumes::whole_log(&image, start, len)?;
+    let said = format!("the log stream to {}:{port}", qemu::GUEST_VIEW_OF_HOST);
+    let Some(line) = file.iter().find(|l| l.contains(&said)) else {
+        return Err(format!(
+            "this host closed the boot's stream {times} time(s) and /log never says so; it ends \
+             {:?}",
+            file.iter().rev().take(5).collect::<Vec<_>>()
+        ));
+    };
+    eprintln!("  [talk] this host closed the stream on accept ({times} time(s)); /log: {}", line.trim_end());
+    let _ = std::fs::remove_file(&image);
+    Ok(())
 }

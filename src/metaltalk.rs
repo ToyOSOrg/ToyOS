@@ -59,6 +59,8 @@ struct Shared {
     peer: Mutex<Option<SocketAddr>>,
     /// The peer closed the connection, which is `logd` or netd going away.
     ended: AtomicBool,
+    /// How the connection ended and how long after it opened, once it has.
+    end: Mutex<Option<End>>,
     /// Set to stop waiting for a peer that has not come.
     stop: AtomicBool,
 }
@@ -86,6 +88,7 @@ impl Stream {
             lines: Mutex::new(Vec::new()),
             peer: Mutex::new(None),
             ended: AtomicBool::new(false),
+            end: Mutex::new(None),
             stop: AtomicBool::new(false),
         });
         let theirs = Arc::clone(&shared);
@@ -111,11 +114,13 @@ impl Stream {
                 if echo {
                     println!("  stream: {peer} connected");
                 }
+                let opened = Instant::now();
                 let mut reader = BufReader::new(conn);
-                loop {
+                let how = loop {
                     let mut line = String::new();
                     match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => break,
+                        Ok(0) => break "the peer closed it".to_string(),
+                        Err(e) => break e.to_string(),
                         Ok(_) => {
                             let _ = out.write_all(line.as_bytes());
                             let _ = out.flush();
@@ -126,11 +131,13 @@ impl Stream {
                             theirs.lines.lock().expect("the stream's lines").push(line);
                         }
                     }
-                }
-                theirs.ended.store(true, Ordering::SeqCst);
+                };
+                let end = End { after_ms: opened.elapsed().as_millis() as u64, how };
                 if echo {
-                    println!("  stream: {peer} closed");
+                    println!("  stream: {peer} ended {} ms after it opened: {}", end.after_ms, end.how);
                 }
+                *theirs.end.lock().expect("the stream's end") = Some(end);
+                theirs.ended.store(true, Ordering::SeqCst);
             })
             .map_err(|e| format!("the stream's reader could not be started: {e}"))?;
         Ok(Self { shared, at })
@@ -150,6 +157,11 @@ impl Stream {
 
     pub fn ended(&self) -> bool {
         self.shared.ended.load(Ordering::SeqCst)
+    }
+
+    /// How the connection ended, or `None` while it is open or never opened.
+    pub fn end(&self) -> Option<End> {
+        self.shared.end.lock().expect("the stream's end").clone()
     }
 
     /// Stop waiting for a peer. A connection already accepted is read on.
@@ -172,6 +184,15 @@ impl Stream {
         }
     }
 
+}
+
+/// How a stream's connection ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct End {
+    /// Milliseconds from the accept to the end, on this host's clock.
+    pub after_ms: u64,
+    /// The peer's close, or the error the read ended on.
+    pub how: String,
 }
 
 /// What one exchange with the machine's sshd came back with.
@@ -270,6 +291,9 @@ pub struct Conversation {
     pub reboot: Result<String, String>,
     /// From the stream opening to the command's answer, on this host's clock.
     pub exec_ms: u64,
+    /// How the stream's connection had ended when the conversation did, or
+    /// `None` for one still open.
+    pub stream_end: Option<End>,
 }
 
 /// The command asked, spelled once for the asker and the judge.
@@ -348,7 +372,7 @@ pub fn converse(
 
     let reboot = ssh.fire(ssh_at, REBOOT);
     println!("  talk: `{REBOOT}` {reboot:?}");
-    Ok(Conversation { peer, ping, exec, reboot, exec_ms })
+    Ok(Conversation { peer, ping, exec, reboot, exec_ms, stream_end: stream.end() })
 }
 
 /// The keys a conversation is written under, one `<key> <value>` per line, in
@@ -361,6 +385,7 @@ const EXEC_REFUSED: &str = "talk_exec_refused";
 const EXEC_MS: &str = "talk_exec_ms";
 const REBOOTED: &str = "talk_reboot";
 const REBOOT_REFUSED: &str = "talk_reboot_refused";
+const STREAM_END: &str = "talk_stream_end";
 
 /// A value on one line, whatever it carried: Rust's own escaping, read back by
 /// comparison with the same rendering rather than parsed.
@@ -390,6 +415,10 @@ impl Conversation {
             Err(why) => out.push_str(&format!("{EXEC_REFUSED} {}\n", one_line(why))),
         }
         out.push_str(&format!("{EXEC_MS} {}\n", self.exec_ms));
+        match &self.stream_end {
+            Some(end) => out.push_str(&format!("{STREAM_END} {} {}\n", end.after_ms, one_line(&end.how))),
+            None => out.push_str(&format!("{STREAM_END} open\n")),
+        }
         match &self.reboot {
             Ok(word) => out.push_str(&format!("{REBOOTED} {word}\n")),
             Err(why) => out.push_str(&format!("{REBOOT_REFUSED} {}\n", one_line(why))),
@@ -427,7 +456,17 @@ impl Conversation {
         let exec_ms = word(EXEC_MS)
             .and_then(|ms| ms.parse().ok())
             .ok_or_else(|| format!("the boot file names no {EXEC_MS}"))?;
-        Ok(Some(Heard { peer, ping, exec, reboot, exec_ms }))
+        let stream_end = match word(STREAM_END).as_deref() {
+            Some("open") => None,
+            Some(said) => {
+                let (ms, how) = said.split_once(' ').unwrap_or((said, ""));
+                let after_ms =
+                    ms.parse().map_err(|_| format!("{STREAM_END} reads {said:?}"))?;
+                Some(End { after_ms, how: how.to_string() })
+            }
+            None => return Err(format!("the boot file names no {STREAM_END}:\n{text}")),
+        };
+        Ok(Some(Heard { peer, ping, exec, reboot, exec_ms, stream_end }))
     }
 }
 
@@ -441,6 +480,9 @@ pub struct Heard {
     pub exec: Result<(String, String), String>,
     pub reboot: Result<String, String>,
     pub exec_ms: u64,
+    /// How the stream had ended when the conversation did, its reason as
+    /// rendered; `None` for one still open.
+    pub stream_end: Option<End>,
 }
 
 impl Heard {
@@ -496,6 +538,20 @@ pub fn judge(heard: &Heard, stream: &[String]) -> Result<Vec<String>, Vec<String
             stream.len()
         )),
     }
+    // **A connection this host accepted and then lost before a byte is this
+    // host's own doing as often as the peer's**: macOS's application firewall
+    // lets the handshake finish and then closes the socket of a binary it
+    // blocks incoming connections for, which is what the T14's first talking
+    // boot to open its stream met.
+    if let (true, Some(end)) = (stream.is_empty(), &heard.stream_end) {
+        bad.push(format!(
+            "the connection from {} ended {} ms after this host accepted it, {}, before a byte \
+             arrived: a host firewall that blocks this binary's incoming connections ends \
+             one exactly so (on macOS: `/usr/libexec/ApplicationFirewall/socketfilterfw \
+             --getappblocked <this binary>`)",
+            heard.peer, end.after_ms, end.how
+        ));
+    }
     match heard.ping {
         Some(true) => said.push(format!("{} answered a ping", heard.peer)),
         Some(false) => bad.push(format!("{} answered no ping in {PING_TRIES} tries", heard.peer)),
@@ -531,6 +587,7 @@ mod tests {
             exec,
             reboot,
             exec_ms: 812,
+            stream_end: None,
         };
         Conversation::parse(&format!("back_secs 60\n{}stick_secs 0\n", said.render()))
             .expect("a rendered conversation reads back")
@@ -590,6 +647,43 @@ mod tests {
         assert_eq!(bad.len(), 3, "{bad:?}");
     }
 
+    /// **The T14's run 116 at the socket**: the peer is accepted, and the
+    /// connection ends before a byte — which the stream records with how and
+    /// when, and which the judge names as the host firewall's shape rather
+    /// than as a boot that said nothing.
+    #[test]
+    fn a_connection_that_ends_before_a_byte_is_named_and_not_read_as_silence() {
+        let dir = std::env::temp_dir().join(format!("metaltalk-cut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stream = Stream::listen("127.0.0.1:0".parse().unwrap(), &dir.join("s.log"), false)
+            .expect("a loopback listener");
+        drop(std::net::TcpStream::connect(stream.local()).unwrap());
+        let began = Instant::now();
+        while stream.end().is_none() && began.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let end = stream.end().expect("the end is recorded");
+        assert_eq!(end.how, "the peer closed it");
+        assert!(stream.lines().is_empty());
+
+        let mut cut = heard(Ok(Exec { stdout: owed(), status: Some(0) }), Ok("accepted".into()));
+        let said = Conversation {
+            peer: cut.peer,
+            ping: Some(true),
+            exec: Ok(Exec { stdout: owed(), status: Some(0) }),
+            reboot: Ok("accepted".into()),
+            exec_ms: 457,
+            stream_end: Some(end),
+        };
+        cut = Conversation::parse(&said.render()).unwrap().unwrap();
+        let bad = judge(&cut, &[]).unwrap_err();
+        assert!(bad.iter().any(|b| b.contains("host firewall")), "{bad:?}");
+        // A stream that carried records and then ended is no such finding.
+        let lines = vec!["[---------- -------- 1.216 cpu0] Boot: complete (1216ms)\n".to_string()];
+        assert!(judge(&cut, &lines).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A boot file with no conversation is a boot that had none, and one with
     /// half of one is refused rather than read as either.
     #[test]
@@ -631,6 +725,29 @@ mod tests {
             assert_eq!(*line, format!("[kernel 0.{i:03} cpu0] line {i}\n"));
         }
         assert_eq!(std::fs::read_to_string(&file).unwrap(), lines.concat());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A peer that connects and says nothing yet is a stream, not an end.**
+    /// A booting machine opens the connection before its next record exists;
+    /// the reader waits for it rather than reading the silence as a close.
+    #[test]
+    fn a_peer_quiet_after_connecting_is_still_read() {
+        let dir = std::env::temp_dir().join(format!("metaltalk-quiet-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stream = Stream::listen("127.0.0.1:0".parse().unwrap(), &dir.join("s.log"), false)
+            .expect("a loopback listener");
+        let mut conn = std::net::TcpStream::connect(stream.local()).unwrap();
+        stream.wait_connected(Duration::from_secs(5)).expect("the peer");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!stream.ended(), "a quiet peer was read as a closed one");
+        writeln!(conn, "[kernel 1.216 cpu0] Boot: complete (1216ms)").unwrap();
+        drop(conn);
+        let began = Instant::now();
+        while !stream.ended() && began.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(stream.lines(), vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
