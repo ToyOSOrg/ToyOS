@@ -1388,7 +1388,9 @@ fn a_grant_that_comes_late_inside_the_bound_is_taken() {
 /// §4.5.2's arbitration are never nearer each other than
 /// [`toyos_phy::ARBITRATION_PACE_NANOS`]: on the T14 the same request put to
 /// the same register about a millisecond apart left a machine that had to be
-/// powered off, and the run that paced it came back and answered.
+/// powered off, and the run that paced it came back and answered. **What this
+/// test is about is that the pace is kept**; the floor under the number itself
+/// is a `const` assertion beside it, so a narrower one does not compile.
 #[test]
 fn no_two_accesses_to_the_arbitration_are_nearer_than_the_pace() {
     for (seed, arrange) in [
@@ -1401,14 +1403,6 @@ fn no_two_accesses_to_the_arbitration_are_nearer_than_the_pace() {
         arrange(&nic);
         let _ = open(&nic);
 
-        // The number itself, pinned to the bench that chose it: the run that
-        // came back paced its accesses 88 ms apart at the narrowest, and
-        // nothing has measured anything between that and the millisecond the
-        // machine did not come back from.
-        assert!(
-            toyos_phy::ARBITRATION_PACE_NANOS >= 88_000_000,
-            "the pace is narrower than the one run of it that survived"
-        );
         let at = nic.arbitration_at();
         assert!(at.len() >= 2, "{}", nic.because("this bring-up barely reached the arbitration"));
         for pair in at.windows(2) {

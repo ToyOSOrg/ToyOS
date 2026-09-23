@@ -42,7 +42,15 @@ pub(crate) const ARBITRATION_DEADLINE_NANOS: u64 = 500_000_000;
 /// powered off by hand; the run that put it with 88 to 133 ms between accesses
 /// came back and answered. One run each, and the cause is unmeasured: this is
 /// the wider of the two paces, and it stands until something measures why.
-pub(crate) const ARBITRATION_PACE_NANOS: u64 = 100_000_000;
+pub const ARBITRATION_PACE_NANOS: u64 = 100_000_000;
+
+const _: () = {
+    // The narrowest gap between two accesses of the run that came back was
+    // 88 ms, and nothing has been measured between that and the millisecond the
+    // machine did not come back from. A pace under it is a number no reading of
+    // that machine supports, so it does not compile.
+    assert!(ARBITRATION_PACE_NANOS >= 88_000_000);
+};
 
 /// §9.2: "After LCD reset to the I219 a delay of 10 ms is required before
 /// attempting to access MDIO registers."
