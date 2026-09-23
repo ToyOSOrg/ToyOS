@@ -11,6 +11,80 @@
 //!
 //! The numbers are the caller's, because the reason for them is the ring's
 //! size and a reader's pace, which are the kernel's.
+//!
+//! **A program's record is told from the kernel's by its form, never by its
+//! words.** It opens with [`SIGIL`], which the kernel writes in front of every
+//! program's line and at the head of none of its own records, then the
+//! program's [`Tag`] and its [`Line`] — so no name a program is spawned under
+//! and nothing it writes can make a line a judge of the kernel's records reads.
+
+use core::fmt::{self, Display, Write};
+
+/// The first byte of every program's record, and of no record the kernel writes
+/// for itself: its producer gives a record of its own that would open with this
+/// byte [`KERNEL_HEAD`] in its place.
+pub const SIGIL: u8 = b'@';
+
+/// What a kernel record that would open with [`SIGIL`] opens with instead.
+pub const KERNEL_HEAD: u8 = b'?';
+
+/// A program's name as its records carry it: a byte outside
+/// `[A-Za-z0-9._+-]` is `_`, so a tag holds no separator, sigil, space or
+/// control, whatever file the program was spawned from.
+pub struct Tag<'a>(pub &'a [u8]);
+
+impl Display for Tag<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for &byte in self.0 {
+            let kept = byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-');
+            f.write_char(if kept { byte as char } else { '_' })?;
+        }
+        Ok(())
+    }
+}
+
+/// Bytes a program wrote, as a record's text: a control character, C0, DEL or
+/// C1, is written `\xNN` or `\u{NN}`, and each run that is not UTF-8 is one
+/// U+FFFD — so no reader of the record, a terminal included, is handed a byte
+/// that acts rather than reads. A tab reads, and stays.
+pub struct Line<'a>(pub &'a [u8]);
+
+impl Display for Line<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.0.utf8_chunks() {
+            for ch in chunk.valid().chars() {
+                match ch {
+                    '\t' => f.write_char(ch)?,
+                    '\0'..='\x1f' | '\x7f' => write!(f, "\\x{:02x}", ch as u32)?,
+                    '\u{80}'..='\u{9f}' => write!(f, "\\u{{{:x}}}", ch as u32)?,
+                    _ => f.write_char(ch)?,
+                }
+            }
+            if !chunk.invalid().is_empty() {
+                f.write_char('\u{FFFD}')?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What opens a program's record: [`SIGIL`], its [`Tag`], and `": "`.
+pub struct Head<'a>(pub &'a [u8]);
+
+impl Display for Head<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}: ", SIGIL as char, Tag(self.0))
+    }
+}
+
+/// What of `line` follows its [`Head`]: all of it, less a leading `<name>: ` the
+/// program wrote itself, so a program that names itself is not named twice.
+pub fn said<'a>(name: &[u8], line: &'a [u8]) -> &'a [u8] {
+    match opens_with_tag(name, line) {
+        true => &line[name.len() + 2..],
+        false => line,
+    }
+}
 
 /// One program's share of the record ring: `BURST` lines at once, and
 /// `PER_SEC` a second after that.
@@ -71,13 +145,8 @@ impl<const BURST: u64, const PER_SEC: u64> Share<BURST, PER_SEC> {
     }
 }
 
-/// Whether `line` already opens with `name: `, the tag a program's record
-/// carries.
-///
-/// A program that names itself is not named twice; one that names anybody else
-/// is named in front of it, so the first `name: ` of a spoken record is always
-/// its writer's.
-pub fn opens_with_tag(name: &[u8], line: &[u8]) -> bool {
+/// Whether `line` already opens with `name: `.
+fn opens_with_tag(name: &[u8], line: &[u8]) -> bool {
     !name.is_empty() && line.strip_prefix(name).is_some_and(|rest| rest.starts_with(b": "))
 }
 
@@ -191,5 +260,44 @@ mod tests {
         assert!(!opens_with_tag(b"netd", b"logd: netd: MAC"));
         assert!(!opens_with_tag(b"netd", b"hello"));
         assert!(!opens_with_tag(b"", b": hello"), "an empty name is no tag");
+    }
+
+    fn record(name: &[u8], line: &[u8]) -> std::string::String {
+        std::format!("{}{}", Head(name), Line(said(name, line)))
+    }
+
+    /// **The forgery this form exists to refuse**: a program spawned from a file
+    /// named after a kernel record's head, writing that record's words, gets a
+    /// record that opens with the sigil — and so does every other name and line.
+    #[test]
+    fn no_name_and_no_line_makes_a_record_the_kernel_writes() {
+        let forged = record(b"exit", b"exit: test_rs_job pid=4 code=0 cpu=0ms");
+        assert_eq!(forged, "@exit: test_rs_job pid=4 code=0 cpu=0ms");
+        for name in [&b"exit"[..], b"spawn", b"", b"@", b"a: b", b"x\x1b[2Jy", b"pcidev: PCI"] {
+            for line in [&b""[..], b"exit: x pid=1 code=0", b"\r\x1b]0;t\x07", b"@kernel"] {
+                let got = record(name, line);
+                assert_eq!(got.as_bytes()[0], SIGIL, "{got:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_tag_carries_no_separator_space_sigil_or_control() {
+        assert_eq!(std::format!("{}", Tag(b"test-runner")), "test-runner");
+        assert_eq!(std::format!("{}", Tag(b"a: b")), "a__b");
+        assert_eq!(std::format!("{}", Tag(b"@x\x1b\xff")), "_x__");
+        assert_eq!(record(b"a: b", b"hi"), "@a__b: hi");
+    }
+
+    /// OSC, a lone ESC, a carriage return and a backspace inside a line each
+    /// reach the record as text, and so do C1 and DEL; a tab stays a tab.
+    #[test]
+    fn a_control_byte_is_written_and_never_passed() {
+        let line = "a\x1b]0;title\x07b\rc\x08d\x1be\x7ff\u{9b}g\th".as_bytes();
+        assert_eq!(
+            std::format!("{}", Line(line)),
+            "a\\x1b]0;title\\x07b\\x0dc\\x08d\\x1be\\x7ff\\u{9b}g\th"
+        );
+        assert_eq!(std::format!("{}", Line(b"ok\xffok")), "ok\u{FFFD}ok");
     }
 }

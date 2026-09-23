@@ -49,7 +49,7 @@ fn round_trip(len: usize) {
     unsafe { shard.commit(seq, &want, Origin::Kernel, &guard) };
     drop(guard);
 
-    let got = shard.read(seq).expect("the record just committed must be readable");
+    let got = shard.read(seq).map(|(record, _)| record).expect("the record just committed must be readable");
     assert_eq!(got.seq, want.seq, "seq");
     assert_eq!(got.at_ns, want.at_ns, "at_ns");
     assert_eq!(got.pid, want.pid, "pid");
@@ -96,7 +96,7 @@ fn a_shorter_record_does_not_inherit_the_longer_one_it_replaced() {
     unsafe { shard.commit(second, &short, Origin::Kernel, &guard) };
     drop(guard);
 
-    let got = shard.read(second).expect("the second record is readable");
+    let got = shard.read(second).map(|(record, _)| record).expect("the second record is readable");
     assert_eq!(got.message(), "xyz");
     assert_eq!(got.len, 3);
 }

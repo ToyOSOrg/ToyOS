@@ -19,8 +19,9 @@
 //! reaches no reader would ship in every program.
 //!
 //! The other decision is whose lines a record may carry at all: [`spoken`]
-//! bounds what one program's console puts in the kernel's record ring, and the
-//! kernel's console object is its one caller.
+//! bounds what one program's console puts in the kernel's record ring and
+//! gives each such record the form no kernel record takes; the kernel's
+//! console object and its record producer are its callers.
 //!
 //! Pure: `core::fmt` and nothing else — no allocation, no `unsafe`, and no
 //! record. [`Elided`]'s one caller is `toyos-symbols`, which spends the budget

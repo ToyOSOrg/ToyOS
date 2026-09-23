@@ -104,7 +104,7 @@ const ACCOUNTED_RECORDS: usize = 16;
 pub fn account_for_durability(seen: Durability) {
     struct Count(usize);
     impl read::RecordSink for Count {
-        fn put(&mut self, _record: &LogRecord) -> bool {
+        fn put(&mut self, _record: &LogRecord, _origin: Origin) -> bool {
             self.0 += 1;
             true
         }
@@ -114,7 +114,7 @@ pub fn account_for_durability(seen: Durability) {
         left: usize,
     }
     impl read::RecordSink for Tail<'_> {
-        fn put(&mut self, record: &LogRecord) -> bool {
+        fn put(&mut self, record: &LogRecord, _origin: Origin) -> bool {
             // No prefix of its own: the loader that prints this page puts one
             // on every line it reads back.
             let _ = writeln!(self.out, "log-tail: {record}");
@@ -261,6 +261,11 @@ fn commit(level: Level, origin: Origin, args: core::fmt::Arguments) {
     let _ = core::fmt::Write::write_fmt(&mut message, args);
     record.len = message.len as u16;
     record.elided = message.elided.min(u16::MAX as usize) as u16;
+    // The sigil opens a program's record and no other, whatever the kernel's
+    // own text opened with — a name it quotes first included.
+    if origin == Origin::Kernel && record.msg[0] == toyos_elide::spoken::SIGIL {
+        record.msg[0] = toyos_elide::spoken::KERNEL_HEAD;
+    }
 
     let guard = crate::arch::LogCommitGuard::close();
     // Stamped inside the bracket: outside it, ordering by seq and by at_ns
@@ -281,7 +286,7 @@ fn commit(level: Level, origin: Origin, args: core::fmt::Arguments) {
 
     // After the commit and before the wake below, so the pass that wake starts
     // finds the panel owed a record it can already read.
-    if origin == Origin::Spoken {
+    if origin == Origin::Spoken && crate::drivers::panic_console::shows_the_log() {
         console::panel_owed();
     }
 

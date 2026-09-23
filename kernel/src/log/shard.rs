@@ -242,13 +242,8 @@ impl Shard {
         Some(at_ns)
     }
 
-    /// Copy record `seq` out, or `None` if this shard cannot answer for it.
-    pub fn read(&self, seq: u64) -> Option<LogRecord> {
-        self.read_as(seq).map(|(record, _)| record)
-    }
-
-    /// [`Shard::read`], with who wrote the record, under the same validity test.
-    pub fn read_as(&self, seq: u64) -> Option<(LogRecord, Origin)> {
+    /// Copy record `seq` out with who wrote it, or `None` if this shard cannot answer for it.
+    pub fn read(&self, seq: u64) -> Option<(LogRecord, Origin)> {
         // Both bounds needed: `head` alone counts reservations, so `seq < head` admits a slot not yet committed.
         if seq < self.oldest_readable() || seq >= self.head() {
             return None;

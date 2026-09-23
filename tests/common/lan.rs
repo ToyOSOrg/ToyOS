@@ -112,8 +112,9 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         }),
     }
 
-    // netd's own records, by the name the kernel tags each of its lines with.
-    let netd = toyos_build::lan::netd_records(text);
+    // netd's own records, in the form the kernel gives a program's, under netd's tag.
+    let log = back.log();
+    let netd = toyos_build::lan::netd_records(log.text());
     for owed in [MAC, LINK_UP, READY] {
         if !netd.contains(owed) {
             bad.push(format!("no {owed:?} record"));
@@ -169,7 +170,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
             // The bracket first: a reply from the operating system on the other
             // side of the reset is not this boot's reading, and a ceiling may
             // only be tightened against a reading this boot answered.
-            match bootlog::host_second_inside_this_boot(text, cable.skew, LEASE, reply.at) {
+            match bootlog::host_second_inside_this_boot(log.text(), cable.skew, LEASE, reply.at) {
                 Ok(()) => {
                     if let Err(why) =
                         profile.judge(&format!("boot.{}.ping_secs", back.label), reply.secs)

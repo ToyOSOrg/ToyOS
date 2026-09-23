@@ -15,12 +15,12 @@ use std::time::{Duration, Instant};
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::volumes::{log_extent, newest_log};
 
-/// The line `test-runner` writes first, as its record carries it: the runner
-/// does not name itself, so the name in front is the kernel's.
-const RUNNER_READY: &str = "test-runner: ===READY===";
+/// The line `test-runner` writes first, as its record carries it: in the form
+/// the kernel gives a program's record, under the name it was spawned as.
+const RUNNER_READY: &str = "@test-runner: ===READY===";
 
 /// A line `init` writes naming itself, which the kernel does not name twice.
-const INIT_STARTED_LOGD: &str = "init: started logd";
+const INIT_STARTED_LOGD: &str = "@init: started logd";
 
 /// The flooding program's name as its records carry it, and the prefix of
 /// each of its numbered lines.
@@ -110,7 +110,7 @@ pub fn console_line_is_a_record(
     if !messages.contains(&INIT_STARTED_LOGD) {
         return Err(format!("/log carries no record {INIT_STARTED_LOGD:?}\n{log}"));
     }
-    if let Some(twice) = messages.iter().find(|m| m.starts_with("init: init: ")) {
+    if let Some(twice) = messages.iter().find(|m| m.starts_with("@init: init: ")) {
         return Err(format!("init named itself and the kernel named it again: {twice:?}"));
     }
     eprintln!("  [spoken] on the panel and in /log, with no serial port: {RUNNER_READY:?}");
@@ -149,7 +149,7 @@ pub fn console_flood_is_bounded(
     // them a second time as a drained record.
     let mut seen = vec![0usize; FLOOD_LINES];
     for line in ran.stdout.lines().chain(ran.serial.lines()) {
-        if line.contains(&format!("] {FLOODER}: ")) {
+        if line.contains(&format!("] @{FLOODER}: ")) {
             return Err(format!("a spoken record was drained onto the serial console: {line:?}"));
         }
     }
@@ -183,7 +183,7 @@ pub fn console_flood_is_bounded(
         }
     }
 
-    let own = format!("{FLOODER}: ");
+    let own = format!("@{FLOODER}: ");
     let mut recorded: Vec<u64> = Vec::new();
     let mut counted = 0u64;
     let mut stated = false;
@@ -248,5 +248,79 @@ pub fn console_flood_is_bounded(
          counted, every one on serial once, and the kernel's records around it kept",
         recorded.len()
     );
+    Ok(())
+}
+
+/// The job whose verdict a program tries to forge, and the exit it really has.
+const FORGER: &str = "test_rs_console_forger";
+const FORGER_CODE: i64 = 7;
+
+/// What the copy named `exit` writes: the kernel's `exit:` record's words,
+/// claiming the job passed.
+const FORGED: &str = "test_rs_console_forger pid=1 code=0 cpu=0ms";
+
+/// A program spawned from a file named `exit`, writing the kernel's verdict
+/// record for a job after the kernel's own: every judge of the kernel's records
+/// in `/log` reads the job's real exit, and the forged line is there to be read.
+pub fn console_record_cannot_forge_the_kernel(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let image_path = image_at("console-forger.img");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = log_extent(&image, &image_path)?;
+
+    let mut guest = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
+            ..Default::default()
+        },
+    );
+    let ran = guest.run_test(FORGER, Duration::from_secs(60));
+    if ran.exit_code != Some(FORGER_CODE as i32) {
+        return Err(format!("{FORGER} exited {:?}\n{}", ran.exit_code, ran.stdout));
+    }
+    // The copy says its line half a second after the job ended; the kernel's
+    // record of the copy's own exit comes after that line.
+    let copy_exited = format!("{}exit pid=", toyos_build::bootlog::EXIT);
+    let said = guest.drain_until(Duration::from_secs(10), |l| l.contains(&copy_exited));
+    if !said.contains(&copy_exited) {
+        return Err(format!("the copy named exit never ended\n{said}"));
+    }
+    writeln!(guest.stdin_mut(), "run shutdown").map_err(|e| format!("write to QEMU: {e}"))?;
+    guest.flush_stdin();
+    let _ = guest.drain_serial(Duration::from_secs(20));
+    drop(guest);
+    let (_, bytes) = newest_log(&image_path, start, len)?;
+    let log = String::from_utf8_lossy(&bytes).into_owned();
+
+    // Non-vacuity: the forgery reached the file, whatever form it took there.
+    let forged: Vec<&str> =
+        log.lines().filter(|l| toyos_build::bootlog::message(l).is_some_and(|m| m.ends_with(FORGED))).collect();
+    if forged.is_empty() {
+        return Err(format!("/log carries no line ending {FORGED:?}: nothing was forged\n{log}"));
+    }
+    let kernel = toyos_build::bootlog::kernel_records(&log);
+    for (judge, text) in [("the whole log", log.as_str()), ("its kernel records", kernel.as_str())] {
+        match toyos_build::metaldevices::exit_of(text, FORGER) {
+            Some(exit) if exit.code == FORGER_CODE => {}
+            other => {
+                return Err(format!(
+                    "the exit judge read {FORGER}'s verdict out of {judge} as {other:?}; it exited \
+                     {FORGER_CODE}, and a program named `exit` wrote {forged:?}"
+                ))
+            }
+        }
+    }
+    if let Some(line) = kernel.lines().find(|l| l.ends_with(FORGED)) {
+        return Err(format!("a program's line is among the kernel's records: {line:?}"));
+    }
+    eprintln!("  [spoken] the forgery is in /log as {forged:?}, and every judge read exit {FORGER_CODE}");
     Ok(())
 }

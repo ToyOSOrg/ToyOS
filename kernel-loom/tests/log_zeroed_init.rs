@@ -58,7 +58,7 @@ fn a_zero_allocated_ap_shard_issues_first_seq_first() {
     // the same guard.
     unsafe { shard.commit(first, &record, Origin::Kernel, &guard) };
     let read_back = shard
-        .read(first)
+        .read(first).map(|(record, _)| record)
         .expect("an AP's first record must be readable");
     assert_eq!(read_back.seq, first);
     assert_eq!(&read_back.msg[..read_back.len as usize], b"A");

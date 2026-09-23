@@ -1,11 +1,16 @@
 //! A program's console lines, as records.
 //!
 //! Every unit a console object emits — a whole line, or the piece of one it had
-//! to let go — is also one record in the ring, tagged with the name its holder
-//! was spawned under, so the line reaches `/log`, the log stream and the panel
-//! on a machine whose serial console reaches nothing. The serial console keeps
-//! the raw line it always had; the drain skips the record
-//! ([`Origin::Spoken`](super::Origin::Spoken)).
+//! to let go — is also one record in the ring, so the line reaches `/log`, the
+//! log stream and the panel on a machine whose serial console reaches nothing.
+//! The serial console keeps the raw line it always had; the drain skips the
+//! record ([`Origin::Spoken`](super::Origin::Spoken)).
+//!
+//! **A program's record opens with the form only the kernel writes for one**
+//! (`toyos_elide::spoken`'s `Head`): the sigil, the name its holder was spawned
+//! under with every byte that could read as structure replaced, and `: `. The
+//! kernel's own records never open with the sigil (`log::commit`), so no name
+//! and no line makes a record a judge of the kernel's would read.
 //!
 //! **A program's share of the ring is bounded** ([`PROGRAM_BURST`],
 //! [`PROGRAM_PER_SEC`]), so no console holder can lap the kernel's own records
@@ -13,7 +18,7 @@
 //! serial console and is counted; the count is recorded before the next line
 //! that is, and when the console goes away.
 
-use toyos_elide::spoken::{opens_with_tag, Share, Verdict};
+use toyos_elide::spoken::{said, Head, Line, Share, Verdict};
 
 use crate::process::THREAD_NAME_LEN;
 
@@ -26,9 +31,8 @@ const _: () = assert!(PROGRAM_BURST * 4 <= SHARD_RECORDS as u64);
 
 /// Slow enough that one program needs ten seconds or more to write the rest of
 /// a shard after its burst, orders of magnitude past how long `logd` waits
-/// between reads when nothing wakes it (its `IDLE_NANOS`). The ring's bound is
-/// this rate times the number of console holders, and a holder can spawn more:
-/// a program that spawns speakers multiplies it.
+/// between reads when nothing wakes it (its `IDLE_NANOS`). Per console holder,
+/// and each spawn mints a holder with a full burst.
 const PROGRAM_PER_SEC: u64 = 16;
 const _: () = assert!((SHARD_RECORDS as u64 - PROGRAM_BURST) / PROGRAM_PER_SEC >= 10);
 
@@ -61,11 +65,7 @@ impl Speaker {
             self.withheld(withheld);
         }
         let name = self.name();
-        if opens_with_tag(name, line) {
-            super::emit_spoken(format_args!("{}", Text(line)));
-        } else {
-            super::emit_spoken(format_args!("{}: {}", Text(name), Text(line)));
-        }
+        super::emit_spoken(format_args!("{}{}", Head(name), Line(said(name, line))));
     }
 
     /// The console is going away: what it withheld has no later line to ride on.
@@ -78,24 +78,8 @@ impl Speaker {
 
     fn withheld(&self, count: u64) {
         super::emit_spoken(format_args!(
-            "{}: ...[{count} line(s) past this program's share of the log were not recorded]",
-            Text(self.name())
+            "{}...[{count} line(s) past this program's share of the log were not recorded]",
+            Head(self.name())
         ));
-    }
-}
-
-/// Bytes a program wrote, as text: what is not UTF-8 is one U+FFFD per
-/// undecodable run, so a record never carries a byte its readers cannot render.
-struct Text<'a>(&'a [u8]);
-
-impl core::fmt::Display for Text<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for chunk in self.0.utf8_chunks() {
-            f.write_str(chunk.valid())?;
-            if !chunk.invalid().is_empty() {
-                f.write_str("\u{FFFD}")?;
-            }
-        }
-        Ok(())
     }
 }

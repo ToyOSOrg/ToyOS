@@ -222,6 +222,14 @@ const RUST_SKIP: &[&str] = &[
     // Its verdict is a count of what reached `/log`, which only a boot of its own
     // holds. `console_flood_is_bounded` runs it.
     "console_flood",
+    // Its verdict is which `exit:` record a judge of `/log` reads, off a boot of
+    // its own. `console_record_cannot_forge_the_kernel` runs it.
+    "console_forger",
+    // It halts the machine. `screen_fatal_behind_a_painter` runs it.
+    "fatal_while_talking",
+    // It talks for as long as a Ctrl+Alt+D hold lasts; its verdict is the panel's.
+    // `screen_held_dump_while_talking` runs it.
+    "console_talk",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -497,6 +505,13 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_panic_muted", Sched::Parallel, Tier::Fast),
     ("screen_console_panic", Sched::Parallel, Tier::Fast),
     ("screen_fatal_halt", Sched::Parallel, Tier::Fast),
+    // The same fatal path while a program's repaint holds the panel and will not
+    // let it go: the report has to take the screen anyway.
+    ("screen_fatal_behind_a_painter", Sched::Parallel, Tier::Fast),
+    // Ctrl+Alt+D with no compositor while a program talks: the hold is
+    // guest-timed and sampled across seconds, so it is timer-anchored as
+    // `screen_blocked_dump` is.
+    ("screen_held_dump_while_talking", Sched::Parallel, Tier::Nightly),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in and the one no screen
     // test covered: `screen_fatal_halt` boots a config with no compositor, and
@@ -1171,6 +1186,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // program's share of the ring under a flood. Both read `/log` off the image.
     ("console_line_is_a_record", Sched::Parallel, Tier::Fast),
     ("console_flood_is_bounded", Sched::Parallel, Tier::Fast),
+    // A program spawned as `exit`, writing the kernel's verdict record for a job:
+    // every judge of `/log` reads the job's own exit.
+    ("console_record_cannot_forge_the_kernel", Sched::Parallel, Tier::Fast),
     // Serial: its verdict is a cadence — heartbeats against a 250 ms period —
     // and a guest sharing the host with eleven others reaches its idle loop
     // late for reasons that are not the defect.
@@ -1305,12 +1323,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// grouping is what the suite's cost is; the boot is *named* by an arm rather
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
-///
-/// **Every predicate here reads the kernel's records, never a program's line.** A
-/// userland `println!` reaches the T14's stick only as a record inside its
-/// program's share of the log, so `===TEST_END <name> exit=N===` is not a verdict
-/// there: a job's verdict crosses as the kernel's own `exit: <name> pid=N code=N
-/// cpu=Nms`, which no share bounds.
 const METAL: &[(&str, metal::Metal)] = &[
     (
         // The device list: the T14's own xHCI, stick, i8042, HDA, framebuffer
@@ -5838,6 +5850,140 @@ fn run_screen_test(
             }
             Ok(())
         }
+        "screen_fatal_behind_a_painter" => {
+            // `screen_fatal_halt` with a program's repaint holding the panel's
+            // latch and never giving it back — which is what klogd is when the
+            // halt IPI lands mid-paint, or a preemption parks it there. The
+            // actuator spins a repaint inside the latch, and the fatal halt
+            // waits until one is; the report must take the screen regardless,
+            // and its CPU must go on to watch the reset bound, which is what
+            // the paging proves.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    profile: qemu::Profile::Gop,
+                    qmp: true,
+                    kernel_params: &["panel-painter-stalls"],
+                    ..Default::default()
+                },
+            );
+            let from = qemu.console_stream().mark();
+            if !qemu.command_until(
+                "run test_rs_fatal_while_talking",
+                FATAL_HALT_NONCE,
+                Duration::from_secs(30),
+            ) {
+                return Err(format!("{FATAL_HALT_NONCE:?} never reached the console"));
+            }
+            // The premise: the fatal path met a painter inside the latch.
+            let said = qemu.console_stream().since(from);
+            const HELD: &str = "panel: a repaint is holding the latch and not painting";
+            let (Some(held), Some(nonce)) = (said.find(HELD), said.find(FATAL_HALT_NONCE)) else {
+                return Err(format!("no {HELD:?} before the halt: the premise never held\n{said}"));
+            };
+            if held > nonce {
+                return Err(format!("{HELD:?} came after the halt\n{said}"));
+            }
+            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
+            let text = dump.text();
+            print_screen(name, &text);
+            if !text.contains(FATAL_HALT_NONCE) || dump.fill() != FILL_FATAL {
+                return Err(format!(
+                    "a fatal halt behind a stalled painter left the panel at fill {:?} without \
+                     {FATAL_HALT_NONCE:?}: the report never took the screen\ndecoded screen:\n{text}",
+                    dump.fill()
+                ));
+            }
+            // The pager runs only on the CPU that claimed the panel, and it is
+            // the loop that watches the reset bound: a second page is its proof.
+            let paged = qemu.screendump_while(Duration::from_secs(20), Duration::from_millis(200), |d| {
+                d.rows().iter().any(|r| r.contains("[page ")) && d.text() != text
+            });
+            if paged.text() == text {
+                return Err(format!(
+                    "the report never paged, so no CPU is watching the reset bound\ndecoded \
+                     screen:\n{text}"
+                ));
+            }
+            Ok(())
+        }
+        "screen_held_dump_while_talking" => {
+            // Ctrl+Alt+D with no compositor — the T14's boot — while a program
+            // talks. The report holds the panel for its whole hold: a program's
+            // repaint waits for the hold to end, so there is no flicker between
+            // the two and no stream of put-backs, and the lines it deferred are
+            // painted once the hold is over.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() },
+            );
+            writeln!(qemu.stdin_mut(), "run test_rs_console_talk").map_err(|e| format!("{e}"))?;
+            qemu.flush_stdin();
+            const TALK: &str = "@test_rs_console_talk: talk ";
+            let talking = qemu.screendump_until(TALK, Duration::from_secs(30));
+            if !talking.text().contains(TALK) {
+                return Err(format!("the talker never reached the panel\n{}", talking.text()));
+            }
+            let from = qemu.console_stream().mark();
+            const DUMP_TRIES: usize = 10;
+            let mut dump = talking;
+            for _ in 0..DUMP_TRIES {
+                if report_is_photographable(&dump, "").is_ok() {
+                    break;
+                }
+                {
+                    let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+                    input.keys(&[
+                        ("ctrl", true),
+                        ("alt", true),
+                        ("d", true),
+                        ("d", false),
+                        ("alt", false),
+                        ("ctrl", false),
+                    ]);
+                }
+                dump = qemu.screendump_while(Duration::from_secs(4), Duration::from_millis(100), |d| {
+                    report_is_photographable(d, "").is_ok()
+                });
+            }
+            report_is_photographable(&dump, "the report the keystroke painted")?;
+            // Sampled well inside the guest-timed 15 s hold, for as long as it
+            // takes the talker's lines to be owed a dozen repaints.
+            let until = Instant::now() + Duration::from_secs(3);
+            let mut samples = 0;
+            while Instant::now() < until {
+                let seen = qemu.screendump();
+                report_is_photographable(&seen, "the panel inside the report's hold")?;
+                samples += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let said = qemu.console_stream().since(from);
+            const PUT_BACK: &str = "the panel was drawn over, putting the report back";
+            let put_back = said.lines().filter(|l| l.contains(PUT_BACK)).count();
+            if put_back > 0 {
+                return Err(format!(
+                    "{put_back} put-back record(s) inside the hold: something painted over the \
+                     report\n{said}"
+                ));
+            }
+            // The hold ends and the deferred lines are painted: a talk line on
+            // a panel that is no longer the report.
+            let after = qemu.screendump_while(Duration::from_secs(40), Duration::from_millis(250), |d| {
+                d.text().contains(TALK) && report_is_photographable(d, "").is_err()
+            });
+            if !(after.text().contains(TALK) && report_is_photographable(&after, "").is_err()) {
+                return Err(format!(
+                    "the talker's lines never came back after the hold\ndecoded screen:\n{}",
+                    after.text()
+                ));
+            }
+            print_screen(name, &format!("{samples} samples inside the hold carried the report"));
+            Ok(())
+        }
         "screen_fatal_halt_composited" => {
             // **Can a fatal panic reach the panel once a compositor owns the
             // scanout?** Three investigations into the T14 have rested on the
@@ -6184,11 +6330,11 @@ fn run_screen_test(
             // The negative of screen_fatal_halt: a panic the kernel recovers
             // from must not paint its report over a live display. Action 0
             // panics in syscall context, which the handler recovers from, so it
-            // never reaches halt_all_cpus. **The fill, not the pixels**: the
-            // runner's and the child's lines repaint the panel between the two
-            // endpoints, and a report's paint keeps the panel for good
-            // (`render` never gives the painter latch back), so a fatal fill
-            // after the recovery is the paint this test refuses.
+            // never reaches halt_all_cpus. **Every screen across the recovery,
+            // not two endpoints**: a program's line repaints the panel within a
+            // tenth of a second, so a report painted and then painted over is
+            // gone by any endpoint — the fatal fill is looked for on each dump
+            // from the command until well after the child is reaped.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -6205,35 +6351,51 @@ fn run_screen_test(
                 },
             );
             let before = qemu.screendump();
-            let result = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
-            // The premise, not a formality: a timeout returns exit_code None,
-            // which the old `!= Some(0)` check accepted — so a panic that
-            // never fired left two identical screendumps and a green test.
-            if let Some(err) = &result.error {
-                return Err(format!("the recoverable panic never completed: {err}"));
+            let from = qemu.console_stream().mark();
+            writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child").map_err(|e| format!("{e}"))?;
+            qemu.flush_stdin();
+            const ENDED: &str = "===TEST_END test_rs_test_panic_child exit=";
+            // Past the child's end by this much, for the repaint its end owes.
+            const AFTER_END: Duration = Duration::from_millis(1500);
+            let deadline = Instant::now() + qemu.budget(Duration::from_secs(15));
+            let mut ended_at: Option<Instant> = None;
+            let mut dumps = 0usize;
+            loop {
+                let dump = qemu.screendump();
+                dumps += 1;
+                if dump.fill() == FILL_FATAL {
+                    return Err(format!(
+                        "recovering panic painted its report over the display, on dump {dumps} \
+                         across the recovery\ndecoded screen:\n{}",
+                        dump.text()
+                    ));
+                }
+                if ended_at.is_none() && qemu.console_stream().since(from).contains(ENDED) {
+                    ended_at = Some(Instant::now());
+                }
+                if ended_at.is_some_and(|at| at.elapsed() >= AFTER_END) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "the recoverable panic never completed\nserial:\n{}",
+                        qemu.console_stream().since(from)
+                    ));
+                }
             }
-            if result.exit_code == Some(0) {
+            // The premise, not a formality: a child that never panicked leaves
+            // every dump boot-filled and this test green.
+            let said = qemu.console_stream().since(from);
+            if !said.contains("SYS_DEBUG: kernel panic triggered by userspace") {
+                return Err(format!("no kernel panic in the child's output\nserial:\n{said}"));
+            }
+            if said.contains(&format!("{ENDED}0===")) {
                 return Err("recoverable panic did not kill the child".to_string());
-            }
-            if !result.serial.contains("SYS_DEBUG: kernel panic triggered by userspace") {
-                return Err(format!(
-                    "no kernel panic in the child's output\nserial:\n{}",
-                    result.serial
-                ));
-            }
-            let after = qemu.screendump();
-            if after.fill() != FILL_BOOT {
-                return Err(format!(
-                    "recovering panic painted over the display: the fill is {:?}, not the boot \
-                     panel's {FILL_BOOT:?}\ndecoded screen:\n{}",
-                    after.fill(),
-                    after.text()
-                ));
             }
             // A screen that was blank to begin with would pass the fill for
             // the wrong reason.
             let text = before.text();
-            print_screen(name, &text);
+            print_screen(name, &format!("{dumps} dumps across the recovery, none fatal\n{text}"));
             if !text.contains("Boot: complete") {
                 return Err(format!("nothing on screen to preserve\ndecoded screen:\n{text}"));
             }
@@ -9800,6 +9962,9 @@ fn run_machine_test(
         }
         "console_flood_is_bounded" => {
             common::spoken::console_flood_is_bounded(test_config, c_bins, rust_bins)
+        }
+        "console_record_cannot_forge_the_kernel" => {
+            common::spoken::console_record_cannot_forge_the_kernel(test_config, c_bins, rust_bins)
         }
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.

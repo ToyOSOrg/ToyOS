@@ -12,13 +12,6 @@
 //! tests, and one boot is about a minute of the machine's time — so the boot is
 //! something an arm names rather than something derived, because sharing is not
 //! always safe and only the author knows.
-//!
-//! **What reaches the stick is not what reaches a QEMU console.** A userland
-//! `println!` reaches the stick only as a record inside its program's share of
-//! the log, so `===TEST_END <name> exit=N===` is not a verdict here: a job's
-//! verdict crosses as the kernel's own `exit: <name> pid=N code=N cpu=Nms`
-//! record, which no share bounds. Every predicate below reads the kernel's
-//! records, never a program's line.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -200,7 +193,10 @@ pub struct Readback {
     /// The directory the loop wrote this boot's files into.
     home: PathBuf,
     loader: String,
+    /// The kernel's own records of every `logd` file this boot wrote.
     kernel: String,
+    /// Every record of those files, the programs' included.
+    log: String,
     /// `Boot: complete (Nms)`, or `None` on a boot that never got there.
     pub boot_ms: Option<u64>,
     /// What the machine spent getting back to `sshd`.
@@ -237,9 +233,15 @@ impl Readback {
             .transpose()
     }
 
-    /// Every `logd` file this boot wrote, as one text.
+    /// Every `logd` file this boot wrote, as one text, less every program's
+    /// record ([`bootlog::kernel_records`]): no program's line is read as the kernel's.
     pub fn kernel(&self) -> Serial {
         Serial::named(&format!("{}'s kernel log", self.label), self.kernel.as_str())
+    }
+
+    /// The same files whole, the programs' records included.
+    pub fn log(&self) -> Serial {
+        Serial::named(&format!("{}'s log", self.label), self.log.as_str())
     }
 
     /// `loader.log`, both passes: the one before the kernel handoff and, under
@@ -370,7 +372,7 @@ impl Readback {
         let name = bootlog::recorded_name(binary);
         let head = format!("{}{name} pid=", bootlog::EXIT);
         let mut family: Vec<(u64, i32)> = Vec::new();
-        for line in self.kernel.lines().filter(|l| l.contains(&head)) {
+        for line in self.kernel.lines().filter_map(bootlog::message).filter(|m| m.starts_with(&head)) {
             let field = |label: &str| -> Option<&str> {
                 line.split_once(label).and_then(|(_, rest)| rest.split_whitespace().next())
             };
@@ -746,7 +748,8 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         })
     };
     let loader = read(toyos_build::metal::READBACK_LOADER)?;
-    let kernel = read(toyos_build::metal::READBACK_KERNEL)?;
+    let log = read(toyos_build::metal::READBACK_KERNEL)?;
+    let kernel = bootlog::kernel_records(&log);
     let boot = read(toyos_build::metal::READBACK_BOOT)?;
     let back_secs = toyos_build::metal::back_secs(&boot)
         .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
@@ -759,6 +762,7 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         boot_ms: bootlog::boot_millis(&kernel),
         loader,
         kernel,
+        log,
         back_secs,
         stick_secs,
         cable,

@@ -230,11 +230,7 @@ struct Wire<'a> {
 }
 
 impl RecordSink for Wire<'_> {
-    fn put(&mut self, record: &LogRecord) -> bool {
-        self.put_from(record, Origin::Kernel)
-    }
-
-    fn put_from(&mut self, record: &LogRecord, origin: Origin) -> bool {
+    fn put(&mut self, record: &LogRecord, origin: Origin) -> bool {
         // A skipped record counts too: reading it is time under the guard.
         if self.records >= self.budget {
             return false;
@@ -253,7 +249,7 @@ impl RecordSink for Wire<'_> {
 struct Discard;
 
 impl RecordSink for Discard {
-    fn put(&mut self, _record: &LogRecord) -> bool {
+    fn put(&mut self, _record: &LogRecord, _origin: Origin) -> bool {
         true
     }
 }
@@ -262,16 +258,13 @@ impl RecordSink for Discard {
 struct Raw;
 
 impl RecordSink for Raw {
-    fn put(&mut self, record: &LogRecord) -> bool {
-        write_line(record, serial::panic_raw);
-        true
-    }
-
-    fn put_from(&mut self, record: &LogRecord, origin: Origin) -> bool {
+    fn put(&mut self, record: &LogRecord, origin: Origin) -> bool {
         match origin {
-            Origin::Kernel => self.put(record),
-            Origin::Spoken => true,
+            Origin::Kernel => write_line(record, serial::panic_raw),
+            // As on [`Wire`]: the program's line is already on the wire.
+            Origin::Spoken => {}
         }
+        true
     }
 }
 
@@ -296,8 +289,10 @@ struct Panel {
 }
 
 impl Panel {
+    /// Never inside a held Ctrl+Alt+D report, which a program's line does not paint over.
     fn next_at(&self) -> u64 {
-        self.painted_at.saturating_add(PANEL_CADENCE.nanos())
+        let paced = self.painted_at.saturating_add(PANEL_CADENCE.nanos());
+        paced.max(crate::drivers::panic_console::report_held_until())
     }
 
     /// Whether a paint is owed and may happen at `now`.
@@ -312,7 +307,9 @@ impl Panel {
         // A swap, so every record committed before a later `panel_owed` is either
         // in this paint or leaves the flag set for the next one.
         PANEL_OWED.swap(false, Ordering::AcqRel);
-        crate::drivers::panic_console::spoken_checkpoint();
+        if crate::drivers::panic_console::spoken_checkpoint() {
+            PANEL_OWED.store(true, Ordering::Release);
+        }
         self.painted_at = crate::clock::nanos_since_boot();
     }
 

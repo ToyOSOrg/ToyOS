@@ -251,11 +251,13 @@ pub struct Exit {
 /// still running when the machine reset.
 ///
 /// The **last** such record, because a name could in principle run twice and
-/// the boot's answer is the one it ended with.
+/// the boot's answer is the one it ended with. The record's whole message and
+/// not a substring of a line, so a program's record — which opens with
+/// [`bootlog::SPOKEN`] — is never one.
 pub fn exit_of(log: &str, name: &str) -> Option<Exit> {
-    let head = format!("exit: {name} pid=");
+    let head = format!("{}{name} pid=", crate::bootlog::EXIT);
     log.lines().rev().find_map(|line| {
-        let rest = line.split(&head).nth(1)?;
+        let rest = crate::bootlog::message(line)?.strip_prefix(&head)?;
         let code = field(rest, "code=")?.parse().ok()?;
         let cpu = field(rest, "cpu=")?;
         let cpu_ms = cpu.strip_suffix("ms")?.parse().ok()?;
@@ -432,6 +434,13 @@ mod tests {
         // The last of two, because that is the answer the boot ended with.
         let twice = format!("{log}{}", line("4.0", "exit: usbread pid=11 code=99 cpu=1ms"));
         assert_eq!(exit_of(&twice, "usbread"), Some(Exit { code: 99, cpu_ms: 1 }));
+        // A program spawned as `exit` writing the record's words, after it.
+        let forged = format!(
+            "{twice}{}{}",
+            line("5.0", "@exit: usbread pid=11 code=0 cpu=0ms"),
+            line("5.1", "@evil: exit: usbread pid=11 code=0 cpu=0ms"),
+        );
+        assert_eq!(exit_of(&forged, "usbread"), Some(Exit { code: 99, cpu_ms: 1 }));
     }
 
     #[test]

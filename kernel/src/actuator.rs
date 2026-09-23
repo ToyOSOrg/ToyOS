@@ -481,6 +481,10 @@ actuators! {
 
     /// Shorten the panicked kernel's own reboot bound from a minute to seconds, so a guest reaches the reset.
     panic_reboot_fast = "panic-reboot-fast";
+
+    /// Have a program's repaint spin inside the panel's latch, and `SYS_DEBUG`'s
+    /// fatal halt wait for one to: a fatal path meeting a painter that will not let go.
+    panel_painter_stalls = "panel-painter-stalls";
 }
 
 #[cfg(feature = "boot-actuators")]
