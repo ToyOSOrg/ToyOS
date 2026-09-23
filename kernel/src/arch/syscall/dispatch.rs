@@ -209,7 +209,9 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(bytes) => bytes,
                 Err(e) => return e.to_u64(),
             };
-            let pending = match process::build_child_handles(&slot_map, &endow, &labels) {
+            // `sys_spawn`'s own reading of argv: its first word is the path the child runs.
+            let program = text.split('\0').find(|s| !s.is_empty()).unwrap_or("");
+            let pending = match process::build_child_handles(&slot_map, &endow, &labels, program) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };

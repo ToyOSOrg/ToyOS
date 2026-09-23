@@ -219,6 +219,9 @@ const RUST_SKIP: &[&str] = &[
     // its own can hold: in the shared boot every other binary's output is in the
     // same stream. `console_line_atomicity` runs it.
     "console_line_atomicity",
+    // Its verdict is a count of what reached `/log`, which only a boot of its own
+    // holds. `console_flood_is_bounded` runs it.
+    "console_flood",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -1158,6 +1161,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_flush_retry", Sched::Parallel, Tier::Nightly),
     ("toybox_cp_volume", Sched::Parallel, Tier::Nightly),
     ("kernel_log_file", Sched::Parallel, Tier::Nightly),
+    // A program's line as a record on the machine with no serial port, and one
+    // program's share of the ring under a flood. Both read `/log` off the image.
+    ("console_line_is_a_record", Sched::Parallel, Tier::Fast),
+    ("console_flood_is_bounded", Sched::Parallel, Tier::Fast),
     // Serial: its verdict is a cadence — heartbeats against a 250 ms period —
     // and a guest sharing the host with eleven others reaches its idle loop
     // late for reasons that are not the defect.
@@ -1293,10 +1300,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
 ///
-/// **Every predicate here reads records, never console text.** A userland
-/// `println!` ends at `Backend::None` on a machine with no serial port, so
-/// `===TEST_END <name> exit=N===` does not exist on the T14: a job's verdict
-/// crosses as the kernel's own `exit: <name> pid=N code=N cpu=Nms`.
+/// **Every predicate here reads the kernel's records, never a program's line.** A
+/// userland `println!` reaches the T14's stick only as a record inside its
+/// program's share of the log, so `===TEST_END <name> exit=N===` is not a verdict
+/// there: a job's verdict crosses as the kernel's own `exit: <name> pid=N code=N
+/// cpu=Nms`, which no share bounds.
 const METAL: &[(&str, metal::Metal)] = &[
     (
         // The device list: the T14's own xHCI, stick, i8042, HDA, framebuffer
@@ -1662,7 +1670,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::QemuOnly(
             "its subject is soundd's null sink, and whether the T14's own HDA controller binds \
              is unmeasured; both halves of the verdict — soundd's counters and a host-timed \
-             drain — are console text and a host clock, neither of which the stick carries",
+             drain — are read against a host clock, which the stick does not carry",
         ),
     ),
 ];
@@ -9758,6 +9766,13 @@ fn run_machine_test(
         // Body in `tests/common/toybox.rs`, same reason.
         "toybox_cp_volume" => common::toybox::cp_volume(test_config, c_bins, rust_bins),
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),
+        // Bodies in `tests/common/spoken.rs`.
+        "console_line_is_a_record" => {
+            common::spoken::console_line_is_a_record(test_config, c_bins, rust_bins)
+        }
+        "console_flood_is_bounded" => {
+            common::spoken::console_flood_is_bounded(test_config, c_bins, rust_bins)
+        }
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
         "writeback_durability" => common::volumes::writeback_durability(test_config, c_bins, rust_bins),

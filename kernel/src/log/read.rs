@@ -5,11 +5,18 @@
 
 use toyos_abi::log::{LogRecord, MAX_LOG_SHARDS};
 
-use super::shard::{Shard, FIRST_SEQ};
+use super::shard::{Origin, Shard, FIRST_SEQ};
 
 /// Accepts one record; `false` means it was not taken and ends the walk.
 pub trait RecordSink {
     fn put(&mut self, record: &LogRecord) -> bool;
+
+    /// [`RecordSink::put`], told who wrote the record; only a sink that treats
+    /// a program's line differently from the kernel's answers this itself.
+    fn put_from(&mut self, record: &LogRecord, origin: Origin) -> bool {
+        let _ = origin;
+        self.put(record)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -173,9 +180,9 @@ pub fn drain_ordered(cursor: &mut Cursor, out: &mut impl RecordSink) -> usize {
 
         // `match`, not `if let`: the empty arm explains itself below.
         #[allow(clippy::single_match)]
-        match shard.read(cursor.next[i]) {
-            Some(record) => {
-                if !out.put(&record) {
+        match shard.read_as(cursor.next[i]) {
+            Some((record, origin)) => {
+                if !out.put_from(&record, origin) {
                     return emitted;
                 }
                 emitted += 1;

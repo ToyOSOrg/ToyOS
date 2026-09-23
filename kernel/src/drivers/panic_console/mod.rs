@@ -743,6 +743,11 @@ pub fn boot_checkpoint() {
     repaint();
 }
 
+/// Repaint for a program's line; `klogd` paces the calls, and a claimed screen is not painted.
+pub fn spoken_checkpoint() {
+    repaint();
+}
+
 /// Repaint after a record, while the first boot phase is still ahead.
 pub fn early_checkpoint() {
     if EARLY.load(Ordering::Relaxed) && crate::params::early_panel() {

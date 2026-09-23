@@ -215,8 +215,9 @@ pub fn panel_census(log: &str) -> Option<Panel> {
 /// The kernel's record for a process that ended, in `kernel/src/process.rs`.
 ///
 /// **The one channel a guest binary's verdict crosses on a machine with no
-/// serial port**: its output reaches `Backend::None`, and this is a log record,
-/// so `logd` writes it to the stick.
+/// serial port that no program's share of the log bounds**: its own output
+/// reaches the stick only as records inside its share, and this is the kernel's
+/// record, so `logd` writes it to the stick whatever the program said.
 pub const EXIT: &str = "exit: ";
 
 /// The kernel's record for a process that started, in `kernel/src/process.rs`.

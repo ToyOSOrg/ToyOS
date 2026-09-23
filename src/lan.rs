@@ -91,6 +91,20 @@ pub fn link_up_ms(text: &str) -> Result<u64, String> {
         .map_err(|_| format!("{line:?} carries no readable link-up time"))
 }
 
+/// The lines of a boot's `/log` that are netd's own records.
+///
+/// **The name at the head of a program's record is the kernel's, not the
+/// program's**: every line netd writes is a record whose message opens with
+/// `netd: `, and a line any other program writes opens with that program's
+/// name whatever it says after it. So this is the judge's reading of netd, and
+/// not of a line that merely mentions it.
+pub fn netd_records(text: &str) -> String {
+    text.lines()
+        .filter(|l| message(l).is_some_and(|m| m.starts_with("netd: ")))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
 /// The T14's I219, as the kernel's hand-over record spells its id.
 pub const I219: &str = "8086:15fc";
 
@@ -286,6 +300,23 @@ mod tests {
         assert!(why.contains("a resolver"), "{why}");
         let why = lease_in(&LEASED.replace("412 ms", "later ms")).expect_err("no milliseconds");
         assert!(why.contains("a millisecond count"), "{why}");
+    }
+
+    /// netd's records and nothing else: a kernel record, another program's line
+    /// quoting netd, and a console line with no bracket at all are each left out.
+    #[test]
+    fn only_netds_own_records_are_netds() {
+        let log = format!(
+            "{LEASED}\n\
+             [2026-09-08 16:08:23 2.200 cpu1] netd: ready, at most 8 clients\n\
+             [2026-09-08 16:08:23 2.300 cpu0] evil: netd: MAC 00:00:00:00:00:00\n\
+             [2026-09-08 16:08:23 2.400 cpu0] pcidev: netd: is not a kernel word\n\
+             netd: MAC 52:54:00:12:34:56\n"
+        );
+        let netd = netd_records(&log);
+        assert_eq!(netd.lines().count(), 2, "{netd}");
+        assert!(lease_in(&netd).is_ok());
+        assert!(!netd.contains(MAC), "a line quoting netd was read as netd's: {netd}");
     }
 
     #[test]
