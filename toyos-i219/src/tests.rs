@@ -1347,6 +1347,43 @@ fn a_request_registered_while_the_engine_holds_it_is_still_granted() {
     }
 }
 
+/// **What [`toyos_phy::ARBITRATION_DEADLINE_NANOS`] is for.** A grant that comes
+/// after several paces and still inside the bound is one this driver takes: the
+/// engine holds the interface past the first readings of the request and lets
+/// go inside the wait, and the bring-up goes on to the PHY. A narrower bound
+/// would refuse a part that was answering.
+#[test]
+fn a_grant_that_comes_late_inside_the_bound_is_taken() {
+    // Far enough past the request — registered about §9.2's 10 ms after the
+    // reset — to be several paces late, and well inside the bound.
+    let lets_go = 3 * toyos_phy::ARBITRATION_PACE_NANOS;
+    assert!(lets_go + toyos_phy::LCD_RESET_DELAY_NANOS < toyos_phy::ARBITRATION_DEADLINE_NANOS);
+    let nic = Nic::with(
+        84,
+        Part::I219,
+        Permits { mdio_flag_is_a_plain_mutex: false, ..Permits::default() },
+    );
+    nic.engine_holds_the_interface_until(lets_go);
+    nic.set_link(true);
+    let mut driver = open(&nic);
+
+    assert_eq!(
+        driver.brought_up().phy,
+        Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1 }),
+        "{}",
+        nic.because("a grant that came late inside the bound was not taken")
+    );
+    // The premise: it really was late, and the bring-up really did wait.
+    assert!(
+        nic.arbitration_at().iter().filter(|at| **at < lets_go).count() >= 2,
+        "{}",
+        nic.because("the engine let go before this driver had to wait for it")
+    );
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert!(driver.link().is_up(), "{}", nic.because("STATUS.LU did not follow the PHY's link"));
+}
+
 /// **The pace, which is a bench fact and not a clause.** Two accesses to
 /// §4.5.2's arbitration are never nearer each other than
 /// [`toyos_phy::ARBITRATION_PACE_NANOS`]: on the T14 the same request put to
