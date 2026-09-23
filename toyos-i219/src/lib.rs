@@ -1,13 +1,22 @@
 //! The Intel I219's driver — every decision it makes, and none of the
 //! instructions that carry them out.
 //!
-//! The part is the T14's onboard `8086:15fc` at `00:1f.6`. Its register file is
-//! the one the *Intel 82574 GbE Controller Family Datasheet* (317694-018, rev
-//! 2.7) defines, which QEMU's `e1000e` model — `8086:10d3`, the 82574L itself —
-//! implements too; that is why one driver drives both, and why the datasheet
-//! this file cites throughout is the 82574's rather than the I219's own, which
-//! describes the part and not the register set. Every `§` below is a section of
-//! it.
+//! The part is the T14's onboard `8086:15fc` at `00:1f.6`, or the `8086:10d3`
+//! that QEMU's `e1000e` models. Every `§` in this file and in [`regs`] is a
+//! section of the *Intel 82574 GbE Controller Family Datasheet* (317694-018,
+//! rev 2.7).
+//!
+//! **Below the register file the two parts are not one.** §3.2.1 puts the
+//! 82574's PHY on the controller's own die; the T14's is a MAC in the PCH whose
+//! PHY is separate silicon the Management Engine shares, reached over `MDIC`
+//! under §4.5.2's ownership arbitration — which this driver asks for, waits a
+//! bounded time on, and gives back. [`Part`] is which one this claim is, and
+//! [`phy`] is everything that follows from it. [`wake`] is what brings that PHY
+//! within `MDIC`'s reach before the reset and what shape the reset then takes —
+//! the MAC and the PHY together — on properties of the part no Intel document
+//! publishes, and `pch` is what the PCH's MAC is given before its rings.
+//! [`lease`] is the one table a lease probe's answer crosses a machine with no
+//! console through.
 //!
 //! # The boundary
 //!
@@ -64,7 +73,12 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod lease;
+mod pch;
+pub mod phy;
+pub mod power;
 pub mod regs;
+pub mod wake;
 
 #[cfg(test)]
 mod stub;
@@ -89,9 +103,17 @@ pub trait Registers {
     fn write(&self, reg: usize, value: u32);
 }
 
-/// One counter read: nanoseconds on a clock that does not go backwards.
+/// The clock, and the one way this driver gives the processor away.
 pub trait Clock {
+    /// One counter read: nanoseconds on a clock that does not go backwards.
     fn nanos(&self) -> u64;
+    /// Give the processor away for about `nanos`.
+    ///
+    /// **It decides nothing**: every bound and every pace in this crate is read
+    /// off [`Self::nanos`], so a pause that returns early or late moves when a
+    /// register is next reached and never what a reading of one means. A
+    /// substrate with nothing to yield to may return at once.
+    fn pause(&self, nanos: u64);
 }
 
 /// The memory this process and the device both reach.
@@ -267,12 +289,56 @@ pub(crate) enum RxRefusal {
 }
 
 /// What the link is doing, as `STATUS` last answered.
+///
+/// **Speed and duplex live inside the up arm**, because §10.2.2.2 makes them a
+/// resolution and a link that is down resolved nothing: a driver that carried
+/// the last speed across a link going away would report a number the part is no
+/// longer standing behind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Link {
-    pub up: bool,
-    /// Megabits per second, from `STATUS.SPEED` (§10.2.2.2); 0 while down.
-    pub speed_mbps: u16,
-    pub full_duplex: bool,
+pub enum Link {
+    #[default]
+    Down,
+    Up {
+        speed: Speed,
+        full_duplex: bool,
+    },
+}
+
+impl Link {
+    pub fn is_up(self) -> bool {
+        matches!(self, Self::Up { .. })
+    }
+}
+
+/// What §10.2.2.2's `STATUS.SPEED` resolved to.
+///
+/// **Three of them and not a number**: the field is two bits and `11b` is
+/// 1000 Mb/s as well, so every value it can hold is one of these and nothing
+/// downstream has an "unknown speed" arm to write.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Speed {
+    Mbps10,
+    Mbps100,
+    #[default]
+    Mbps1000,
+}
+
+impl Speed {
+    fn in_status(status: u32) -> Self {
+        match (status >> status::SPEED_SHIFT) & status::SPEED_MASK {
+            0b00 => Self::Mbps10,
+            0b01 => Self::Mbps100,
+            _ => Self::Mbps1000,
+        }
+    }
+
+    pub fn mbps(self) -> u16 {
+        match self {
+            Self::Mbps10 => 10,
+            Self::Mbps100 => 100,
+            Self::Mbps1000 => 1000,
+        }
+    }
 }
 
 /// One received frame, and the receipt for the buffer it arrived in.
@@ -345,15 +411,48 @@ pub struct Counters {
     /// Messages that arrived with no cause set in `ICR` — §7.4.5's spurious
     /// interrupt. It costs a pass and nothing else.
     pub spurious: u32,
+    /// Frames the part took off the transmit ring and wrote `DD` back for.
+    pub sent: u32,
+    /// Frames the part filled a receive descriptor with and this driver handed
+    /// up.
+    pub received: u32,
 }
 
 impl Counters {
-    /// The counts that are worth a line, which is every one but [`Self::spurious`].
-    ///
-    /// A spurious message is ordinary and its count moves on its own, so a
-    /// diagnostic keyed on it would print on nothing having happened.
+    /// The counts that are worth a line: every one but [`Self::spurious`],
+    /// [`Self::sent`] and [`Self::received`], which move on their own on a
+    /// working card, so a diagnostic keyed on them would print on nothing
+    /// having gone wrong.
     pub fn anomalies(&self) -> Self {
-        Self { spurious: 0, ..*self }
+        Self { spurious: 0, sent: 0, received: 0, ..*self }
+    }
+}
+
+/// What the MAC's own statistics registers counted, as [`I219::wire`] adds
+/// them up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Wire {
+    /// Good packets transmitted: frames the MAC put on the wire.
+    pub sent: u64,
+    /// Good packets received: frames that passed its filters.
+    pub received: u64,
+    /// Total packets received: every frame the MAC saw arrive.
+    pub seen: u64,
+    /// Frames it had no room for.
+    pub missed: u64,
+    /// Frames that arrived with a bad CRC.
+    pub crc_errors: u64,
+}
+
+impl Wire {
+    fn plus(self, more: Self) -> Self {
+        Self {
+            sent: self.sent.saturating_add(more.sent),
+            received: self.received.saturating_add(more.received),
+            seen: self.seen.saturating_add(more.seen),
+            missed: self.missed.saturating_add(more.missed),
+            crc_errors: self.crc_errors.saturating_add(more.crc_errors),
+        }
     }
 }
 
@@ -365,13 +464,225 @@ impl Counters {
 /// register file it is not refuses rather than spinning for the boot.
 const RESET_DEADLINE_NANOS: u64 = 100_000_000;
 
+/// How long [`I219::open`] leaves `CTRL.RST` alone after writing it.
+///
+/// §10.2.2.1: "designers must wait approximately 1 µs after resetting before
+/// attempting to check to see if the bit has cleared or attempting to access
+/// (read or write) any other device register."
+const RESET_SETTLE_NANOS: u64 = 1_000;
+
+/// How long [`I219::open`] waits for §3.1.3.10's master quiesce.
+///
+/// **A driver-chosen bound, not a datasheet one**: §3.1.3.10 describes the
+/// handshake and says only that "the software device driver might time out if
+/// the PCIe Master Enable Status bit is not cleared within a given time".
+const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
+
+/// The transmit control [`I219::open`] writes: §4.6.6's suggested values with
+/// the transmitter enabled.
+const TX_CONTROL: u32 = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX;
+
+/// What [`reset`] leaves its caller.
+struct Reset {
+    /// Whether §3.1.3.10's master quiesce finished before the reset was issued.
+    master_quiet: bool,
+    /// When `CTRL.RST` was written, which §10.2.2.1's two bounds and §9.2's
+    /// delay before the first MDIO access are measured from.
+    at: u64,
+    /// What the I219's full reset did, and `None` for a reset of the MAC alone.
+    full: Option<wake::FullReset>,
+    /// When the flag the full reset was issued under was given back, which the
+    /// next hold's pace runs from.
+    released: Option<u64>,
+}
+
+/// Which reset [`reset`] issues.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Whole {
+    /// §10.2.2.1's `RST` alone: the 82574, whose PHY is on its own die.
+    MacAlone,
+    /// The PCH's MAC and its PHY together, as [`wake`]'s header sets out,
+    /// under §8.2.4's flag taken no nearer than one pace to `after` — when an
+    /// earlier hold of it was given back.
+    WithThePhy { after: Option<u64> },
+}
+
+/// §4.6.1's reset, with every interrupt masked on both sides of it.
+fn reset<R: Registers, C: Clock>(
+    regs: &R,
+    clock: &C,
+    whole: Whole,
+) -> Result<Reset, Refusal> {
+    // A window nothing decodes answers ones on every access, and a driver
+    // that went on would read a MAC address of `ff:ff:ff:ff:ff:ff` out of
+    // it and never say why nothing arrived.
+    if regs.read(regs::STATUS) == u32::MAX {
+        return Err(Refusal::Dead);
+    }
+
+    // §4.6.1: interrupts are masked before the reset, so nothing arrives
+    // while the register file is being rebuilt. `ICR` is read afterwards
+    // because §10.2.4.1's case 1 — mask all — is the one arm that clears
+    // it unconditionally.
+    regs.write(regs::IMC, u32::MAX);
+    let _ = regs.read(regs::ICR);
+
+    // §10.2.2.1: "Before issuing this reset, software has to insure that Tx
+    // and Rx processes are stopped by following the procedure described in
+    // Section 3.1.3.10" — §3.1.3.10's master disable, which is how a
+    // function firmware left driving stops reaching memory before its rings
+    // are rebuilt under it. The expiry is not a refusal because the same
+    // section sanctions it: "the software device driver might time out if
+    // the PCIe Master Enable Status bit is not cleared within a given
+    // time", and the reset clears the bit either way.
+    let held = regs.read(regs::CTRL);
+    regs.write(regs::CTRL, held | ctrl::GIO_MASTER_DISABLE);
+    let started = clock.nanos();
+    let master_quiet = loop {
+        if regs.read(regs::STATUS) & status::GIO_MASTER_ENABLE == 0 {
+            break true;
+        }
+        if clock.nanos().saturating_sub(started) >= MASTER_QUIESCE_DEADLINE_NANOS {
+            break false;
+        }
+    };
+
+    // §10.2.2.1: a read-modify-write, because two of this register's
+    // reserved bits are documented as "Set to 1b" and one as "must be set
+    // to 1b" — a driver that wrote a value it composed itself would clear
+    // them.
+    let held = regs.read(regs::CTRL);
+    // Held until the reset has finished and the PHY's configuration with it:
+    // the drop is paced from the reset's own write, and the waits below are
+    // measured from that write too.
+    let mut flag = None;
+    let (reset_at, full) = match whole {
+        Whole::MacAlone => {
+            regs.write(regs::CTRL, held | ctrl::RST);
+            // The write is the event §10.2.2.1's two bounds and §9.2's delay
+            // before the first MDIO access are measured from.
+            let reset_at = clock.nanos();
+            // The settle is a wait and not a poll: §10.2.2.1 owes the
+            // microsecond to "attempting to check to see if the bit has
+            // cleared or attempting to access (read or write) any other
+            // device register" alike, so there is nothing this driver may read
+            // to shorten it.
+            while clock.nanos().saturating_sub(reset_at) < RESET_SETTLE_NANOS {}
+            (reset_at, None)
+        }
+        Whole::WithThePhy { after } => {
+            let firmware = regs.read(regs::FWSM);
+            let word = wake::reset_word(held, firmware);
+            // Under §8.2.4's flag, which arbitrates the CSRs this MAC shares
+            // with its firmware — and a flag that would not come is no reason
+            // to leave the part unreset, so the write goes out either way. The reset
+            // clears the flag, and the drop below gives back one it left
+            // standing.
+            let claimed = phy::Owned::claim(regs, clock, after);
+            match &claimed {
+                Ok(mdi) => mdi.write_paced(regs::CTRL, word),
+                Err(_) => regs.write(regs::CTRL, word),
+            }
+            let reset_at = clock.nanos();
+            // Nothing is touched while the part resets both ends of its
+            // interconnect ([`wake`]'s header): a wait and not a poll.
+            phy::hold(clock, reset_at, wake::RESET_QUIET_NANOS);
+            let full = wake::FullReset {
+                phy_reset: word & ctrl::PHY_RST != 0,
+                flag: claimed.as_ref().map(|_| ()).map_err(|why| *why),
+                configured_after_nanos: None,
+            };
+            flag = Some(claimed);
+            (reset_at, Some(full))
+        }
+    };
+    loop {
+        if regs.read(regs::CTRL) & ctrl::RST == 0 {
+            break;
+        }
+        let waited = clock.nanos().saturating_sub(reset_at);
+        if waited >= RESET_DEADLINE_NANOS {
+            return Err(Refusal::ResetUnfinished { after_nanos: waited });
+        }
+    }
+    // The configuration the MAC gives the PHY after a reset that reached it,
+    // waited on and never refused on: I219 Table 5-2 bounds it, and the PHY's
+    // own answer to the bring-up is the test of whether it finished.
+    let full = full.map(|full| wake::FullReset {
+        configured_after_nanos: full.phy_reset.then(|| phy_configured(regs, clock, reset_at)).flatten(),
+        ..full
+    });
+    let released = flag.map(|flag| {
+        drop(flag);
+        clock.nanos()
+    });
+    // Again after the reset: §4.6.1 keeps them masked until the rings
+    // exist, and the reset itself is an event the part may have recorded.
+    regs.write(regs::IMC, u32::MAX);
+    let _ = regs.read(regs::ICR);
+    Ok(Reset { master_quiet, at: reset_at, full, released })
+}
+
+/// How long after `since` `STATUS` said the PHY was configured, or `None`
+/// where [`wake::PHY_CONFIGURED_DEADLINE_NANOS`] ran out first.
+fn phy_configured<R: Registers, C: Clock>(regs: &R, clock: &C, since: u64) -> Option<u64> {
+    loop {
+        let done = regs.read(regs::STATUS) & status::PHY_CONFIGURED != 0;
+        let waited = clock.nanos().saturating_sub(since);
+        if done {
+            return Some(waited);
+        }
+        if waited >= wake::PHY_CONFIGURED_DEADLINE_NANOS {
+            return None;
+        }
+        clock.pause(wake::PHY_CONFIGURED_PACE_NANOS);
+    }
+}
+
+/// Which part the claim is on.
+///
+/// **The parent's answer and never a probe**: `/system/bin/init` moved a claim
+/// on a declared vendor and device into this process, and a driver that read
+/// the register file to work out which part it was on would be guessing at the
+/// registers it does not yet trust.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Part {
+    /// The 82574, whose PHY §3.2.1 puts on the controller's own die.
+    E82574,
+    /// The ThinkPad T14's `8086:15fc`: a MAC in the PCH whose PHY is the
+    /// separate silicon the *Intel Ethernet Connection I219 Datasheet*
+    /// describes and the Management Engine shares.
+    I219,
+}
+
+/// What [`I219::open`] found on the way up, for the one line a caller prints
+/// about a function that raised no link.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BringUp {
+    /// Whether §3.1.3.10's master quiesce finished before the reset was issued.
+    pub master_quiet: bool,
+    /// What [`phy::wake`] asked the I219's PHY before the reset, rung by rung,
+    /// or why it could not ask; `None` on the 82574.
+    pub woke: Option<Result<wake::Woke, phy::PhyRefusal>>,
+    /// What the I219's full reset did; `None` on the 82574.
+    pub reset: Option<wake::FullReset>,
+    /// What the PHY answered, or why it was not reached.
+    pub phy: Result<phy::Phy, phy::PhyRefusal>,
+}
+
 /// The function, brought up and driving.
-pub struct I219<R, C, D, I> {
+///
+/// **Dropping it lets the function go**: on the I219, [`pch::release`] takes
+/// back the word [`pch::prepare`] gave the firmware, on every way a holder
+/// leaves that runs its destructors.
+pub struct I219<R: Registers, C, D, I> {
+    part: Part,
     regs: R,
     clock: C,
     dma: D,
     irq: I,
     mac: [u8; 6],
+    brought_up: BringUp,
     link: Link,
     /// When [`Self::open`] returned, and when the link first came up — the two
     /// the caller subtracts to get a link-up time.
@@ -389,54 +700,48 @@ pub struct I219<R, C, D, I> {
     /// Next transmit descriptor to reclaim.
     tx_clean: usize,
     counters: Counters,
+    /// What [`Self::wire`] has read out of the statistics registers so far.
+    wire: Wire,
+}
+
+impl<R: Registers, C, D, I> Drop for I219<R, C, D, I> {
+    fn drop(&mut self) {
+        if self.part == Part::I219 {
+            pch::release(&self.regs);
+        }
+    }
 }
 
 impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// Bring the function up in the order §4.6 fixes: reset with every
-    /// interrupt masked, the station address, the multicast table, the link,
-    /// both rings, then the transmitter, then the receiver, then the interrupt
-    /// mask.
-    pub fn open(regs: R, clock: C, dma: D, irq: I) -> Result<Self, Refusal> {
+    /// interrupt masked, the station address, the multicast table, the PHY, the
+    /// link, both rings, then the transmitter, then the receiver, then the
+    /// interrupt mask. On the I219 the PHY is brought within reach first and
+    /// the reset takes it with the MAC ([`wake`]).
+    ///
+    /// **The PHY is between the multicast table and `CTRL.SLU`**, because
+    /// §4.6.3.2 makes `STATUS.LU` the MAC's report of a link "from the PHY
+    /// qualified with CTRL.SLU": a driver that let the MAC look before the PHY
+    /// was configured would read the answer to the wrong question.
+    pub fn open(part: Part, regs: R, clock: C, dma: D, irq: I) -> Result<Self, Refusal> {
         if regs.bytes() < regs::REGISTER_BYTES {
             return Err(Refusal::Window { given: regs.bytes(), needed: regs::REGISTER_BYTES });
         }
         if (dma.bytes() as u64) < GRANT_BYTES {
             return Err(Refusal::Grant { given: dma.bytes(), needed: GRANT_BYTES as usize });
         }
-        // A window nothing decodes answers ones on every access, and a driver
-        // that went on would read a MAC address of `ff:ff:ff:ff:ff:ff` out of
-        // it and never say why nothing arrived.
-        if regs.read(regs::STATUS) == u32::MAX {
-            return Err(Refusal::Dead);
-        }
-
-        // §4.6.1: interrupts are masked before the reset, so nothing arrives
-        // while the register file is being rebuilt. `ICR` is read afterwards
-        // because §10.2.4.1's case 1 — mask all — is the one arm that clears
-        // it unconditionally.
-        regs.write(regs::IMC, u32::MAX);
-        let _ = regs.read(regs::ICR);
-
-        // §10.2.2.1: a read-modify-write, because two of this register's
-        // reserved bits are documented as "Set to 1b" and one as "must be set
-        // to 1b" — a driver that wrote a value it composed itself would clear
-        // them.
-        let held = regs.read(regs::CTRL);
-        regs.write(regs::CTRL, held | ctrl::RST);
-        let started = clock.nanos();
-        loop {
-            if regs.read(regs::CTRL) & ctrl::RST == 0 {
-                break;
+        // The PHY is brought within reach before the reset, and the reset
+        // takes it with the MAC: [`wake`]'s header is why, on the part whose
+        // PHY is not on the MAC's own die.
+        let (woke, whole) = match part {
+            Part::I219 => {
+                let woke = phy::wake(&regs, &clock, None);
+                (Some(woke), Whole::WithThePhy { after: Some(clock.nanos()) })
             }
-            let waited = clock.nanos().saturating_sub(started);
-            if waited >= RESET_DEADLINE_NANOS {
-                return Err(Refusal::ResetUnfinished { after_nanos: waited });
-            }
-        }
-        // Again after the reset: §4.6.1 keeps them masked until the rings
-        // exist, and the reset itself is an event the part may have recorded.
-        regs.write(regs::IMC, u32::MAX);
-        let _ = regs.read(regs::ICR);
+            Part::E82574 => (None, Whole::MacAlone),
+        };
+        let Reset { master_quiet, at: reset_at, full, released } =
+            reset(&regs, &clock, whole)?;
 
         // §10.2.5.23: the reset reloads entry 0 from the NVM, so this is read
         // after it and not before.
@@ -454,19 +759,47 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             (high >> 8) as u8,
         ];
 
+        // What the PCH's MAC is given after its reset and before its rings:
+        // [`pch`]'s header. After the last refusal that comes before `Self`
+        // exists, so every refusal after it is a drop that lets the function go.
+        if part == Part::I219 {
+            pch::prepare(&regs);
+        }
+
         // §4.6.5: "Set up the Multicast Table Array (MTA) per software. This
         // generally means zeroing all entries initially."
         for entry in 0..regs::MTA_DWORDS {
             regs.write(regs::MTA + entry * 4, 0);
         }
 
+        // §4.6.3.1: "Refer to the PHY documentation for the initialization and
+        // link setup steps. The device driver uses the MDIC register to
+        // initialize the PHY and setup the link." The PHY documentation this
+        // driver has is the I219's, and §10.2.2.7 addresses the 82574's own PHY
+        // under a scheme of its own — so the sequence is refused by name on the
+        // part it was not written from.
+        let phy = match part {
+            Part::I219 => phy::bring_up(&regs, &clock, reset_at, released),
+            Part::E82574 => Err(phy::PhyRefusal::NotThisRegisterMap),
+        };
+
         // §10.2.2.1: `SLU` is what lets the MAC see the PHY's link at all;
         // `ASDE` must be zero on this family; forcing speed or duplex would
         // override what auto-negotiation resolved; and this driver negotiates
-        // no flow control and strips no VLAN tag.
+        // no flow control and strips no VLAN tag. §3.1.3.10's master disable
+        // goes with them and is not preserved: a part that came out of the
+        // reset still blocking master requests would fetch no descriptor and
+        // write back no frame, and nothing else in this bring-up would say so.
         let held = regs.read(regs::CTRL);
         let wanted = (held
-            & !(ctrl::ASDE | ctrl::ILOS | ctrl::FRCSPD | ctrl::FRCDPLX | ctrl::RFCE | ctrl::TFCE
+            & !(ctrl::GIO_MASTER_DISABLE
+                | ctrl::PHY_RST
+                | ctrl::ASDE
+                | ctrl::ILOS
+                | ctrl::FRCSPD
+                | ctrl::FRCDPLX
+                | ctrl::RFCE
+                | ctrl::TFCE
                 | ctrl::VME))
             | ctrl::SLU;
         regs.write(regs::CTRL, wanted);
@@ -477,11 +810,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         regs.write(regs::EIAC, 0);
 
         let mut nic = Self {
+            part,
             regs,
             clock,
             dma,
             irq,
             mac,
+            brought_up: BringUp { master_quiet, woke, reset: full, phy },
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,
@@ -491,6 +826,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             tx_next: 0,
             tx_clean: 0,
             counters: Counters::default(),
+            wire: Wire::default(),
         };
 
         // §10.2.4.9: `IVAR` allocates every cause to no vector at reset, so a
@@ -518,9 +854,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // transmitter.
         nic.regs.write(regs::TXDCTL, txdctl::SUGGESTED);
         nic.regs.write(regs::TIPG, regs::TIPG_DEFAULT);
-        let tx = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX;
-        nic.regs.write(regs::TCTL, tx);
-        nic.accepted(regs::TCTL, tx)?;
+        nic.regs.write(regs::TCTL, TX_CONTROL);
+        nic.accepted(regs::TCTL, TX_CONTROL)?;
 
         // §4.6.5.1: the receiver last, "only after all other setup is
         // accomplished".
@@ -614,8 +949,37 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         self.link
     }
 
+    /// What the bring-up found, which is the whole of what a boot that raised
+    /// no link has to say about why.
+    pub fn brought_up(&self) -> BringUp {
+        self.brought_up
+    }
+
     pub fn counters(&self) -> Counters {
         self.counters
+    }
+
+    /// What the MAC's own statistics registers have counted since the function
+    /// was opened: each read clears the register it takes, so every call adds
+    /// what it read to what the calls before it did.
+    ///
+    /// **The part's count and not this driver's.** [`Counters::sent`] is a
+    /// descriptor the part wrote back and [`Counters::received`] one it filled;
+    /// these are frames at the MAC's own end of the wire — including the ones
+    /// its filters dropped and the ones it had no descriptor for — which is
+    /// what separates "nothing arrived" from "something arrived and went
+    /// nowhere" on a boot with no other record.
+    pub fn wire(&mut self) -> Wire {
+        let take = |reg| u64::from(self.regs.read(reg));
+        let read = Wire {
+            sent: take(regs::GPTC),
+            received: take(regs::GPRC),
+            seen: take(regs::TPR),
+            missed: take(regs::MPC),
+            crc_errors: take(regs::CRCERRS),
+        };
+        self.wire = self.wire.plus(read);
+        self.wire
     }
 
     /// Nanoseconds between the function coming up and its link doing so, once
@@ -667,7 +1031,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // also come up before the mask was written, and then no `LSC` is ever
         // delivered for it.
         let before = self.link;
-        if causes & cause::LSC != 0 || !self.link.up {
+        if causes & cause::LSC != 0 || !self.link.is_up() {
             self.refresh_link();
         }
         Ok(Pass { messages, causes, link_changed: self.link != before })
@@ -676,20 +1040,15 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// Re-read `STATUS` and take what it says about the link.
     fn refresh_link(&mut self) {
         let status = self.regs.read(regs::STATUS);
-        let up = status & status::LU != 0;
-        // §10.2.2.2: `11b` is 1000 Mb/s too, so this is not a lookup that can
-        // answer "unknown".
-        let speed = match (status >> status::SPEED_SHIFT) & status::SPEED_MASK {
-            0b00 => 10,
-            0b01 => 100,
-            _ => 1000,
+        self.link = if status & status::LU != 0 {
+            Link::Up {
+                speed: Speed::in_status(status),
+                full_duplex: status & status::FD != 0,
+            }
+        } else {
+            Link::Down
         };
-        self.link = Link {
-            up,
-            speed_mbps: if up { speed } else { 0 },
-            full_duplex: status & status::FD != 0,
-        };
-        if up && self.link_up_at.is_none() {
+        if self.link.is_up() && self.link_up_at.is_none() {
             self.link_up_at = Some(self.clock.nanos());
         }
     }
@@ -720,7 +1079,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             self.rx_budget -= 1;
             match parse_rx(word) {
                 Ok(len) => {
-                    return Some(Frame { index, at: OFF_RX_BUFS + index * RX_BUF_BYTES, len })
+                    self.counters.received = self.counters.received.saturating_add(1);
+                    return Some(Frame { index, at: OFF_RX_BUFS + index * RX_BUF_BYTES, len });
                 }
                 Err(why) => {
                     match why {
@@ -844,7 +1204,16 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             }
             self.dma.observe();
             self.tx_clean = (self.tx_clean + 1) % TX_RING;
+            self.counters.sent = self.counters.sent.saturating_add(1);
         }
+    }
+
+    /// Take back every transmit descriptor the part has finished with, so
+    /// [`Counters::sent`] says what has left and not only what was handed
+    /// over — for a caller about to report it, since the ring is otherwise
+    /// reclaimed only when the next frame needs a slot.
+    pub fn reclaim(&mut self) {
+        self.reclaim_tx();
     }
 }
 

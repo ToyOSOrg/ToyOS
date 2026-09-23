@@ -197,6 +197,8 @@ pub enum Metal {
 /// What one boot left on the stick, and what the host clock saw of it.
 pub struct Readback {
     pub label: String,
+    /// The directory the loop wrote this boot's files into.
+    home: PathBuf,
     loader: String,
     kernel: String,
     /// `Boot: complete (Nms)`, or `None` on a boot that never got there.
@@ -217,6 +219,24 @@ pub struct Readback {
 }
 
 impl Readback {
+    /// One file off the log volume that is neither the loader's nor `logd`'s,
+    /// read out of the partition's own bytes; `None` where the volume has no
+    /// such file.
+    ///
+    /// **The loop copies two kinds of file off the mount and this is neither**,
+    /// so it comes out of `metal::READBACK_VOLUME` — which the loop keeps on
+    /// every boot that came back, because the outside judge runs on every one.
+    pub fn log_volume_file(&self, name: &str) -> Result<Option<String>, String> {
+        let at = self.home.join(toyos_build::metal::READBACK_VOLUME);
+        let volume = std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        let found = super::volumes::read_files(&volume, &[name])?.pop().flatten();
+        found
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|e| format!("{}'s {name}: {e}", self.label))
+            })
+            .transpose()
+    }
+
     /// Every `logd` file this boot wrote, as one text.
     pub fn kernel(&self) -> Serial {
         Serial::named(&format!("{}'s kernel log", self.label), self.kernel.as_str())
@@ -735,6 +755,7 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
     let cable = toyos_build::metal::cable(&boot).map_err(|why| format!("{label}: {why}"))?;
     Ok(Readback {
         label: label.to_string(),
+        home,
         boot_ms: bootlog::boot_millis(&kernel),
         loader,
         kernel,
