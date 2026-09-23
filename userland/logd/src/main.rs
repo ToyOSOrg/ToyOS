@@ -242,9 +242,10 @@ fn main() {
         // What the stream owed at the end of the last round — a connection it
         // could not open, or the count of what a peer slower than this machine
         // cost. It goes in the file, because the file is where this boot's log
-        // is: a `say!` reaches the console and no record, so a stream that
-        // failed silently on the one channel that survives the machine would be
-        // a failure only somebody watching the wire could see.
+        // is: a `say!` reaches it only as a record inside this program's share of
+        // the log, which a stream failing every round could spend, and a stream
+        // that failed without a line in the file would be a failure only somebody
+        // watching the wire could see.
         // **Dropped as the file takes them, one by one**: a refused write
         // leaves the rest owed rather than losing the line that says what the
         // stream cost, and leaves none of them to be written a second time.

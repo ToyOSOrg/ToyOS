@@ -385,6 +385,7 @@ toyos-dma = { path = "../toyos-dma" }
 toyos-blackbox = { path = "../toyos-blackbox" }
 toyos-fat32 = { path = "../toyos-fat32" }
 toyos-elf = { path = "../toyos-elf" }
+toyos-elide = { path = "../toyos-elide" }
 toyos-gpt = { path = "../toyos-gpt" }
 toyos-hda = { path = "../toyos-hda" }
 toyos-logstream = { path = "../toyos-logstream" }

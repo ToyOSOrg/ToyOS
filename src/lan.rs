@@ -9,6 +9,8 @@
 
 use std::net::Ipv4Addr;
 
+use crate::bootlog::message;
+
 /// The records both arms are written against, spelled once.
 pub const MAC: &str = "netd: MAC ";
 pub const LEASE: &str = "netd: DHCP: lease ";
@@ -91,6 +93,11 @@ pub fn link_up_ms(text: &str) -> Result<u64, String> {
         .map_err(|_| format!("{line:?} carries no readable link-up time"))
 }
 
+/// The lines of a boot's `/log` that are netd's own records.
+pub fn netd_records(text: &str) -> String {
+    crate::bootlog::records_of(text, "netd")
+}
+
 /// The T14's I219, as the kernel's hand-over record spells its id.
 pub const I219: &str = "8086:15fc";
 
@@ -101,12 +108,6 @@ pub struct Delivery {
     pub vector: u8,
     pub handed: String,
     pub took: String,
-}
-
-/// One record's message: what follows the bracket every writer opens a line
-/// with.
-fn message(line: &str) -> Option<&str> {
-    line.strip_prefix('[')?.split_once("] ").map(|(_, message)| message)
 }
 
 /// Whether a message the I219 raised reached a CPU, out of the kernel's own
@@ -286,6 +287,26 @@ mod tests {
         assert!(why.contains("a resolver"), "{why}");
         let why = lease_in(&LEASED.replace("412 ms", "later ms")).expect_err("no milliseconds");
         assert!(why.contains("a millisecond count"), "{why}");
+    }
+
+    /// netd's records and nothing else: a kernel record, one spelled like netd's
+    /// included, another program's line quoting netd, and a console line with no
+    /// bracket at all are each left out.
+    #[test]
+    fn only_netds_own_records_are_netds() {
+        let log = format!(
+            "{}\n\
+             [2026-09-08 16:08:23 2.200 cpu1] @netd: ready, at most 8 clients\n\
+             [2026-09-08 16:08:23 2.300 cpu0] @evil: netd: MAC 00:00:00:00:00:00\n\
+             [2026-09-08 16:08:23 2.400 cpu0] netd: MAC 00:00:00:00:00:01\n\
+             [2026-09-08 16:08:23 2.500 cpu0] pcidev: netd: is not a kernel word\n\
+             netd: MAC 52:54:00:12:34:56\n",
+            LEASED.replacen("] netd: ", "] @netd: ", 1)
+        );
+        let netd = netd_records(&log);
+        assert_eq!(netd.lines().count(), 2, "{netd}");
+        assert!(lease_in(&netd).is_ok());
+        assert!(!netd.contains(MAC), "a line quoting netd was read as netd's: {netd}");
     }
 
     #[test]

@@ -41,7 +41,7 @@
 
 #![cfg(feature = "loom")]
 
-use kernel_loom::log_shard::{Shard, FIRST_SEQ, SHARD_RECORDS};
+use kernel_loom::log_shard::{Origin, Shard, FIRST_SEQ, SHARD_RECORDS};
 use loom::sync::Arc;
 use toyos_abi::log::{LogRecord, MAX_RECORD_MESSAGE};
 
@@ -52,7 +52,7 @@ fn commit_one(shard: &Shard) -> u64 {
     // real witness additionally prevents that producer being preempted between
     // these two operations.
     let seq = unsafe { shard.reserve(&guard) };
-    unsafe { shard.commit(seq, &record(seq), &guard) };
+    unsafe { shard.commit(seq, &record(seq), Origin::Kernel, &guard) };
     seq
 }
 
@@ -109,16 +109,16 @@ fn a_committed_record_is_whole_or_absent() {
             let guard = kernel_loom::arch::LogCommitGuard::close();
             let seq = unsafe { writer.reserve(&guard) };
             let r = record(seq);
-            unsafe { writer.commit(seq, &r, &guard) };
+            unsafe { writer.commit(seq, &r, Origin::Kernel, &guard) };
         });
 
         // The reader races the writer and must see nothing or everything.
-        if let Some(got) = shard.read(FIRST_SEQ) {
+        if let Some(got) = shard.read(FIRST_SEQ).map(|(record, _)| record) {
             assert_whole(&got, FIRST_SEQ);
         }
 
         w.join().unwrap();
-        let got = shard.read(FIRST_SEQ).expect("committed once the writer has joined");
+        let got = shard.read(FIRST_SEQ).map(|(record, _)| record).expect("committed once the writer has joined");
         assert_whole(&got, FIRST_SEQ);
     });
 }
@@ -147,7 +147,7 @@ fn the_readable_window_is_exactly_the_last_shard_records() {
         assert_eq!(head, FIRST_SEQ + total);
         assert!(shard.read(head).is_none(), "a number that was never issued answered");
         for seq in FIRST_SEQ..head {
-            match shard.read(seq) {
+            match shard.read(seq).map(|(record, _)| record) {
                 Some(got) => {
                     assert!(seq >= shard.oldest_readable(), "{seq} is past the window");
                     assert_whole(&got, seq);
@@ -182,7 +182,7 @@ fn a_recycled_slot_does_not_answer_for_the_record_it_replaced() {
         for _ in 0..SHARD_RECORDS {
             commit_one(&shard);
         }
-        assert_whole(&shard.read(FIRST_SEQ).expect("the first record is still in the window"), FIRST_SEQ);
+        assert_whole(&shard.read(FIRST_SEQ).map(|(record, _)| record).expect("the first record is still in the window"), FIRST_SEQ);
 
         // The next reservation lands on the same slot. It is out of the window
         // from the moment `head` moves, before a byte of its body is written —
@@ -197,8 +197,8 @@ fn a_recycled_slot_does_not_answer_for_the_record_it_replaced() {
         );
 
         // SAFETY: the number came from this shard and is used once.
-        unsafe { shard.commit(recycling, &record(recycling), &guard) };
-        assert_whole(&shard.read(recycling).expect("the new record is readable"), recycling);
+        unsafe { shard.commit(recycling, &record(recycling), Origin::Kernel, &guard) };
+        assert_whole(&shard.read(recycling).map(|(record, _)| record).expect("the new record is readable"), recycling);
         assert!(shard.read(FIRST_SEQ).is_none(), "the replaced record came back");
     });
 }
@@ -253,11 +253,11 @@ fn a_reader_racing_a_recycle_gets_nothing_rather_than_a_mixture() {
             let guard = kernel_loom::arch::LogCommitGuard::close();
             let seq = unsafe { writer.reserve(&guard) };
             let r = record(seq);
-            unsafe { writer.commit(seq, &r, &guard) };
+            unsafe { writer.commit(seq, &r, Origin::Kernel, &guard) };
         });
 
         // The old generation: gone, or entirely itself.
-        if let Some(got) = shard.read(FIRST_SEQ) {
+        if let Some(got) = shard.read(FIRST_SEQ).map(|(record, _)| record) {
             assert_whole(&got, FIRST_SEQ);
         }
         // Its key is the same question asked of the second reader.
@@ -272,7 +272,59 @@ fn a_reader_racing_a_recycle_gets_nothing_rather_than_a_mixture() {
         w.join().unwrap();
         assert!(shard.read(FIRST_SEQ).is_none(), "the replaced record came back");
         let recycled = FIRST_SEQ + SHARD_RECORDS as u64;
-        assert_whole(&shard.read(recycled).expect("the new record is readable"), recycled);
+        assert_whole(&shard.read(recycled).map(|(record, _)| record).expect("the new record is readable"), recycled);
+    });
+}
+
+/// **Who wrote a record is one more body word, and it recycles with the rest.**
+///
+/// [`a_reader_racing_a_recycle_gets_nothing_rather_than_a_mixture`] with the
+/// lapped record spoken and the recycling one the kernel's: a reader that gets
+/// either record gets the origin it was committed with, never the other
+/// generation's. The serial drain skips a spoken record, so the failure this
+/// refuses is a kernel record silently dropped from the wire, or a program's line
+/// said on it twice. The word holds the sequence number rather than a flag, which
+/// is what makes a stale mark unable to answer for the new generation.
+///
+/// Red with the mark stored ahead of the `WRITING` store: the reader then takes
+/// the old generation's body under the new generation's origin.
+#[test]
+fn a_record_keeps_its_own_origin_across_a_recycle() {
+    loom::model(|| {
+        let shard = Arc::new(Shard::new());
+        {
+            let guard = kernel_loom::arch::LogCommitGuard::close();
+            for i in 0..SHARD_RECORDS {
+                // SAFETY: this model's sole producer, before any other thread exists.
+                let seq = unsafe { shard.reserve(&guard) };
+                let origin = if i == 0 { Origin::Spoken } else { Origin::Kernel };
+                unsafe { shard.commit(seq, &record(seq), origin, &guard) };
+            }
+        }
+        assert_eq!(shard.read(FIRST_SEQ).map(|(_, o)| o), Some(Origin::Spoken));
+
+        let writer = shard.clone();
+        let w = loom::thread::spawn(move || {
+            // SAFETY: this thread is the shard's sole writer.
+            let guard = kernel_loom::arch::LogCommitGuard::close();
+            let seq = unsafe { writer.reserve(&guard) };
+            unsafe { writer.commit(seq, &record(seq), Origin::Kernel, &guard) };
+        });
+
+        if let Some((got, origin)) = shard.read(FIRST_SEQ) {
+            assert_whole(&got, FIRST_SEQ);
+            assert_eq!(origin, Origin::Spoken, "the lapped record read as the kernel's");
+        }
+        let recycled = FIRST_SEQ + SHARD_RECORDS as u64;
+        if let Some((got, origin)) = shard.read(recycled) {
+            assert_whole(&got, recycled);
+            assert_eq!(origin, Origin::Kernel, "the new record carried the old one's mark");
+        }
+
+        w.join().unwrap();
+        let (got, origin) = shard.read(recycled).expect("the new record is readable");
+        assert_whole(&got, recycled);
+        assert_eq!(origin, Origin::Kernel);
     });
 }
 
@@ -347,7 +399,7 @@ fn a_key_and_the_record_it_names_come_from_one_generation() {
             let guard = kernel_loom::arch::LogCommitGuard::close();
             let seq = unsafe { writer.reserve(&guard) };
             let r = record(seq);
-            unsafe { writer.commit(seq, &r, &guard) };
+            unsafe { writer.commit(seq, &r, Origin::Kernel, &guard) };
         });
 
         // Racing the recycle: nothing, or this generation's own key.
@@ -363,7 +415,7 @@ fn a_key_and_the_record_it_names_come_from_one_generation() {
         assert_eq!(shard.at_ns(target), Some(record(target).at_ns));
         // And the key the merge orders by is the one the copy it then makes
         // carries, which is the property the two readers exist to share.
-        let got = shard.read(target).expect("committed once the writer has joined");
+        let got = shard.read(target).map(|(record, _)| record).expect("committed once the writer has joined");
         assert_eq!(shard.at_ns(target), Some(got.at_ns));
     });
 }

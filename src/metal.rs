@@ -1969,7 +1969,7 @@ fn talk_verdict(
 /// failure for exactly that reason — this judge knew one line and the page
 /// carried the other.
 fn wedged_boot(loader: &str, log: &str) -> Result<u64, Refusal> {
-    if log.contains(bootlog::REBOOTING) {
+    if bootlog::kernel_records(log).contains(bootlog::REBOOTING) {
         return Err(Refusal::Wedge {
             why: "it reached the shutdown's own last word, so nothing about it was wedged",
         });

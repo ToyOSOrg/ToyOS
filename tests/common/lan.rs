@@ -1,9 +1,10 @@
 //! The cable: netd taking this machine's address from the network, and the T14
 //! answering the development host on it.
 //!
-//! Every line read here is a record. On the T14 a userland `println!` reaches
-//! `Backend::None`, so what crosses to the stick is the kernel's log — and the
-//! one file netd leaves beside it, the lease probe's report.
+//! Every line read here is a record, or the one file netd leaves beside them, the
+//! lease probe's report. On the T14 a userland `println!` reaches no serial
+//! port and crosses to the stick as a record in the form only a program's line
+//! takes; the judge reads netd's by that form and no other program's.
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -71,8 +72,7 @@ const TALK_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// The armed boot's judge: the kernel's own records, tied to the I219's
 /// hand-over, say whether a message it raised reached a CPU — whatever the PHY
-/// did about a link. Kernel records and not netd's: on this machine a userland
-/// write reaches no channel the stick carries.
+/// did about a link.
 pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
     let got = toyos_build::lan::delivered(back.kernel().text())?;
     eprintln!("  [lan] {}", got.handed.trim());
@@ -130,14 +130,17 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         }),
     }
 
+    // netd's own records, in the form the kernel gives a program's, under netd's tag.
+    let log = back.log();
+    let netd = toyos_build::lan::netd_records(log.text());
     for owed in [MAC, LINK_UP, READY] {
-        if !text.contains(owed) {
+        if !netd.contains(owed) {
             bad.push(format!("no {owed:?} record"));
         }
     }
 
     let mac = format!("{MAC}{}", cable.mac);
-    if !text.contains(&mac) {
+    if !netd.contains(&mac) {
         bad.push(format!(
             "no {mac:?} record: the card this boot brought up is not the one that held {} \
              before it",
@@ -145,7 +148,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         ));
     }
 
-    match link_up_ms(text) {
+    match link_up_ms(&netd) {
         Ok(ms) => {
             eprintln!("  [lan] the link came up {ms} ms after the driver did");
             if let Err(why) = profile.judge(&format!("lan.{}.link_up_ms", back.label), ms) {
@@ -155,7 +158,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         Err(why) => bad.push(why),
     }
 
-    match lease_in(text) {
+    match lease_in(&netd) {
         Ok(lease) => {
             eprintln!(
                 "  [lan] leased {}/{} from {} in {} ms, gateway {}, dns {:?}",
@@ -185,7 +188,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
             // The bracket first: a reply from the operating system on the other
             // side of the reset is not this boot's reading, and a ceiling may
             // only be tightened against a reading this boot answered.
-            match bootlog::host_second_inside_this_boot(text, cable.skew, LEASE, reply.at) {
+            match bootlog::host_second_inside_this_boot(log.text(), cable.skew, LEASE, reply.at) {
                 Ok(()) => {
                     if let Err(why) =
                         profile.judge(&format!("boot.{}.ping_secs", back.label), reply.secs)

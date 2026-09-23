@@ -1,6 +1,7 @@
 //! The kernel's only log producer: `log!`, `alert!` and `boot_phase!` all
-//! expand to [`emit`], the only entry point, which takes only `fmt::Arguments`;
-//! there is no byte-oriented entry point, so a partial record is untypeable.
+//! expand to [`emit`], and a program's console line reaches the ring through
+//! [`spoken`]'s [`emit_spoken`]. Both take only `fmt::Arguments`; there is no
+//! byte-oriented entry point, so a partial record is untypeable.
 
 // `-D warnings` in CI clippy makes an undocumented `unsafe` block here an error.
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -11,6 +12,7 @@ pub mod read;
 pub mod recovery;
 pub mod registry;
 pub mod shard;
+pub mod spoken;
 #[cfg(feature = "boot-actuators")]
 pub mod storm;
 pub mod user;
@@ -20,7 +22,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use toyos_abi::log::{LogRecord, FLAG_EARLY, MAX_LOG_SHARDS, MAX_RECORD_MESSAGE};
 use crate::time::{Budget, Duration};
 
-pub use shard::Shard;
+pub use shard::{Origin, Shard};
 pub use toyos_abi::log::Level;
 
 /// Set once GS base is valid; before that, reading `gs:` faults.
@@ -102,7 +104,7 @@ const ACCOUNTED_RECORDS: usize = 16;
 pub fn account_for_durability(seen: Durability) {
     struct Count(usize);
     impl read::RecordSink for Count {
-        fn put(&mut self, _record: &LogRecord) -> bool {
+        fn put(&mut self, _record: &LogRecord, _origin: Origin) -> bool {
             self.0 += 1;
             true
         }
@@ -112,7 +114,7 @@ pub fn account_for_durability(seen: Durability) {
         left: usize,
     }
     impl read::RecordSink for Tail<'_> {
-        fn put(&mut self, record: &LogRecord) -> bool {
+        fn put(&mut self, record: &LogRecord, _origin: Origin) -> bool {
             // No prefix of its own: the loader that prints this page puts one
             // on every line it reads back.
             let _ = writeln!(self.out, "log-tail: {record}");
@@ -202,7 +204,7 @@ impl core::fmt::Write for Message<'_> {
 }
 
 /// Where this record goes and who is writing it.
-struct Origin {
+struct Reservation {
     shard: &'static Shard,
     cpu: u16,
     tid: u32,
@@ -215,18 +217,18 @@ struct Origin {
 /// the `xadd` is atomic against a same-CPU interrupt only, not against another
 /// CPU, so this holds only while the CPU keeps ownership of the shard across
 /// the whole bracket, since work stealing is enabled.
-fn reserve(guard: &crate::arch::LogCommitGuard) -> (Origin, u64) {
+fn reserve(guard: &crate::arch::LogCommitGuard) -> (Reservation, u64) {
     if !PERCPU_READY.load(Ordering::Relaxed) {
         // SAFETY: nothing else is running, so this CPU owns the boot shard.
         let seq = unsafe { BOOT_SHARD.reserve(guard) };
-        let origin = Origin { shard: &BOOT_SHARD, cpu: 0, tid: 0, pid: 0, flags: FLAG_EARLY };
-        return (origin, seq);
+        let at = Reservation { shard: &BOOT_SHARD, cpu: 0, tid: 0, pid: 0, flags: FLAG_EARLY };
+        return (at, seq);
     }
 
     let (shard, seq, cpu, tid, pid) = crate::arch::percpu::reserve_log_slot(guard);
     // SAFETY: this CPU's own `PerCpu` pointer, valid before the CPU takes an instruction.
     let shard: &'static Shard = unsafe { &*shard };
-    (Origin { shard, cpu: cpu as u16, tid: on_a_thread(tid), pid: on_a_thread(pid), flags: 0 }, seq)
+    (Reservation { shard, cpu: cpu as u16, tid: on_a_thread(tid), pid: on_a_thread(pid), flags: 0 }, seq)
 }
 
 /// `0` means "no thread"; `PerCpu`'s own sentinel is `u32::MAX`, translated at
@@ -240,8 +242,18 @@ fn on_a_thread(id: u32) -> u32 {
     if id == u32::MAX { 0 } else { id }
 }
 
-/// The only producer: formats, then stamps, reserves and publishes under one bracket.
+/// The kernel's producer: formats, then stamps, reserves and publishes under one bracket.
 pub fn emit(level: Level, args: core::fmt::Arguments) {
+    commit(level, Origin::Kernel, args);
+}
+
+/// A program's console line as a record; the serial drain skips it, because
+/// the line reached the serial console when the program wrote it.
+fn emit_spoken(args: core::fmt::Arguments) {
+    commit(Level::Info, Origin::Spoken, args);
+}
+
+fn commit(level: Level, origin: Origin, args: core::fmt::Arguments) {
     let mut record = LogRecord { level: level as u8, ..LogRecord::EMPTY };
 
     // Formatting runs outside every critical section: no lock, device or gs: access.
@@ -249,6 +261,11 @@ pub fn emit(level: Level, args: core::fmt::Arguments) {
     let _ = core::fmt::Write::write_fmt(&mut message, args);
     record.len = message.len as u16;
     record.elided = message.elided.min(u16::MAX as usize) as u16;
+    // The sigil opens a program's record and no other, whatever the kernel's
+    // own text opened with — a name it quotes first included.
+    if origin == Origin::Kernel && record.msg[0] == toyos_elide::spoken::SIGIL {
+        record.msg[0] = toyos_elide::spoken::KERNEL_HEAD;
+    }
 
     let guard = crate::arch::LogCommitGuard::close();
     // Stamped inside the bracket: outside it, ordering by seq and by at_ns
@@ -256,16 +273,22 @@ pub fn emit(level: Level, args: core::fmt::Arguments) {
     // returning, which is what closes the two paths IF/TF masking alone
     // cannot.
     record.at_ns = crate::clock::nanos_since_boot();
-    let (origin, seq) = reserve(&guard);
+    let (at, seq) = reserve(&guard);
     record.seq = seq;
-    record.pid = origin.pid;
-    record.tid = origin.tid;
-    record.cpu = origin.cpu;
-    record.flags = origin.flags;
+    record.pid = at.pid;
+    record.tid = at.tid;
+    record.cpu = at.cpu;
+    record.flags = at.flags;
 
     // SAFETY: seq came from this shard's own reserve, committed exactly once under this guard.
-    unsafe { origin.shard.commit(seq, &record, &guard) };
+    unsafe { at.shard.commit(seq, &record, origin, &guard) };
     drop(guard);
+
+    // After the commit and before the wake below, so the pass that wake starts
+    // finds the panel owed a record it can already read.
+    if origin == Origin::Spoken && crate::drivers::panic_console::shows_the_log() {
+        console::panel_owed();
+    }
 
     // The two `Drain` modes are boot phases, not interchangeable fallbacks,
     // and `console::mode` is the single word read for it rather than a flag
