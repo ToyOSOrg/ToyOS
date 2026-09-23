@@ -326,7 +326,7 @@ pub enum Lcd {
 
 /// How many readings of `STATUS` after a full reset its PHY-configured bit
 /// stays clear for.
-const LAN_INIT_READS: u32 = 3;
+const PHY_CONFIGURED_READS: u32 = 3;
 
 /// How many readings of `CTRL_EXT` after a power cycle its cycle-done bit
 /// stays clear for.
@@ -582,7 +582,7 @@ struct Model {
     quiet_until: Option<u64>,
     /// Readings of `STATUS` left before its bit 9 shows, and `None` where
     /// no reset that reached the PHY is in progress.
-    lan_init_reads: Option<u32>,
+    phy_configured_reads: Option<u32>,
     /// When the PHY was last reset or power-cycled, and `None` for a PHY that
     /// came up long before the claim was minted — which §9.2's 10 ms before an
     /// MDIO access is measured from.
@@ -659,7 +659,7 @@ impl Model {
             cycle_done_reads: 0,
             smbus_forced_at: None,
             quiet_until: None,
-            lan_init_reads: None,
+            phy_configured_reads: None,
             lcd_reset_at: None,
             power_cycles: 0,
             phy_resets: 0,
@@ -760,7 +760,7 @@ impl Model {
             }
             value |= (speed_code & status::SPEED_MASK) << status::SPEED_SHIFT;
         }
-        if self.lan_init_reads == Some(0) {
+        if self.phy_configured_reads == Some(0) {
             value |= status::PHY_CONFIGURED;
         }
         self.set(regs::STATUS, value);
@@ -906,7 +906,7 @@ impl Model {
                 if self.master_reads > 0 {
                     self.master_reads -= 1;
                 }
-                if let Some(left) = self.lan_init_reads.as_mut() {
+                if let Some(left) = self.phy_configured_reads.as_mut() {
                     *left = left.saturating_sub(1);
                 }
                 self.refresh_status();
@@ -1060,7 +1060,7 @@ impl Model {
                         if self.lcd == Lcd::OutOfStep {
                             self.lcd = Lcd::InStep;
                         }
-                        self.lan_init_reads = Some(LAN_INIT_READS);
+                        self.phy_configured_reads = Some(PHY_CONFIGURED_READS);
                         self.quiet_until = Some(self.nanos + wake::RESET_QUIET_NANOS);
                     } else if self.part == Part::I219
                         && self.permits.mac_reset_alone_loses_the_phy

@@ -2007,7 +2007,7 @@ fn the_power_step_is_what_lets_an_mdi_cycle_run_at_all() {
     // What the wake found and wrote is on its account, `PHYPDEN` untouched.
     let power = woke_of(&driver, &nic).power;
     assert!(power.before.low_power_entry_enabled() && power.after.low_power_entry_enabled());
-    assert_eq!(power.wrote.ctrl, Some(power.before.ctrl & !ctrl::PHY_POWER_DOWN));
+    assert_eq!(power.wrote, Some(power.before.ctrl & !ctrl::PHY_POWER_DOWN));
     // Nothing was written into the two registers this driver only reads.
     assert_eq!(nic.peek(regs::PHY_CTRL), power::PHY_CTRL_RESET);
     assert!(!nic.written().contains(&regs::PHY_CTRL));
@@ -2073,13 +2073,12 @@ fn what_one_power_reading_decides() {
     assert!(!clear.low_power_entry_enabled());
     assert!(clear.firmware_ready());
     assert!(!clear.interconnect_in_transition());
-    assert!(clear.correction().nothing());
-    assert_eq!(clear.correction().to_string(), "nothing was written");
+    assert!(clear.correction().is_none());
 
     let down = power::Reading { ctrl: clear.ctrl | ctrl::PHY_POWER_DOWN, ..clear };
     assert!(down.phy_power_down());
     // The rest of the word is carried, and only bit 24 goes.
-    assert_eq!(down.correction().ctrl, Some(clear.ctrl));
+    assert_eq!(down.correction(), Some(clear.ctrl));
     assert!(down.to_string().contains("held in §8.2.1's power down"));
 
     // §8.2.2's bit is reported and never corrected.
@@ -2088,18 +2087,18 @@ fn what_one_power_reading_decides() {
         ..clear
     };
     assert!(enabled.low_power_entry_enabled());
-    assert!(enabled.correction().nothing());
+    assert!(enabled.correction().is_none());
     assert!(enabled.to_string().contains("a low-power entry is enabled by §8.2.2"));
 
     let mute = power::Reading { fwsm: 0, ..clear };
     assert!(!mute.firmware_ready());
     // The firmware's own report decides nothing: §8.2.9 attaches nothing to it.
-    assert!(mute.correction().nothing());
+    assert!(mute.correction().is_none());
     assert!(mute.to_string().contains("reports itself not ready"));
 
     let moving = power::Reading { mdic: regs::mdic::WAIT, ..clear };
     assert!(moving.interconnect_in_transition());
-    assert!(moving.correction().nothing());
+    assert!(moving.correction().is_none());
 
     // A window that stopped decoding is a reading no correction comes out of.
     for gone in [
@@ -2114,6 +2113,8 @@ fn what_one_power_reading_decides() {
 
     let settled = power::Settled { before: down, wrote: down.correction(), after: clear };
     assert!(settled.to_string().contains("CTRL was written"));
+    let quiet = power::Settled { before: clear, wrote: clear.correction(), after: clear };
+    assert!(quiet.to_string().contains("; nothing was written; "));
 }
 
 // --- the wake and the full reset ---
@@ -2157,7 +2158,7 @@ fn a_phy_left_out_of_reach_is_climbed_to_before_the_reset() {
     assert_eq!(nic.power_cycles(), 1);
     assert_eq!(nic.phy_resets(), 1, "{}", nic.because("the reset did not take the PHY"));
     let reset = driver.brought_up().reset.expect("the I219's reset is the full one");
-    assert!(reset.phy_reset && reset.flag.is_ok() && reset.init_done_after_nanos.is_some());
+    assert!(reset.phy_reset && reset.flag.is_ok() && reset.configured_after_nanos.is_some());
     assert_eq!(nic.lcd(), Lcd::InStep);
     assert!(driver.brought_up().phy.is_ok(), "{}", nic.because("the bring-up missed the PHY"));
 
@@ -2314,6 +2315,29 @@ fn ones_on_the_way_out_do_not_leave_the_flag_standing() {
     );
 }
 
+/// A release whose register answers ones through its whole bound writes
+/// nothing: the only word it could write is composed from ones, and would set
+/// every field of a register three agents share.
+#[test]
+fn ones_through_the_whole_release_bound_write_nothing() {
+    let nic = Nic::with(
+        113,
+        Part::I219,
+        Permits { firmware_takes_the_mdio_interface: false, ..Permits::default() },
+    );
+    let (bar, clock, _, _) = nic.parts();
+    let mdi = crate::phy::Owned::claim(&bar, &clock, None).expect("the flag is granted");
+    nic.extcnf_answers_ones_for(u32::MAX);
+    let before = nic.extcnf_writes();
+    drop(mdi);
+    assert_eq!(
+        nic.extcnf_writes(),
+        before,
+        "{}",
+        nic.because("a release past its bound wrote EXTCNF_CTRL")
+    );
+}
+
 /// A flag that never comes is no reason to leave the part unreset: the full
 /// reset goes out without it.
 #[test]
@@ -2441,6 +2465,58 @@ fn the_pchs_mac_gets_its_three_registers_and_the_82574_none() {
             nic.because(&format!("the 82574 had the PCH's {reg:#x} written"))
         );
     }
+}
+
+/// Bit 28 is the host's word to the firmware that a driver holds the function,
+/// so it goes with the driver: a dropped driver clears it and carries every
+/// other bit, a refusal after `pch::prepare` is a drop that does the same, and
+/// a refusal before it never set it. The 82574, never given the word, has
+/// nothing taken back.
+#[test]
+fn the_word_to_the_firmware_goes_with_the_driver() {
+    use regs::ctrl_ext;
+    let holds = |nic: &Nic| nic.peek(regs::CTRL_EXT) & ctrl_ext::DRIVER_HOLDS_THE_FUNCTION != 0;
+
+    let nic = Nic::i219(140);
+    let driver = open(&nic);
+    assert!(holds(&nic), "{}", nic.because("the open never gave the word"));
+    drop(driver);
+    assert!(!holds(&nic), "{}", nic.because("a dropped driver left the word standing"));
+    let carried = ctrl_ext::STRICT_WRITE_ORDER | ctrl_ext::PHY_POWER_DOWN_ENABLE;
+    assert_eq!(nic.peek(regs::CTRL_EXT) & carried, carried, "{}", nic.because("a bit was lost"));
+
+    let nic = Nic::i219(141);
+    nic.refuses_writes_to(regs::RCTL);
+    let (bar, clock, grant, line) = nic.parts();
+    let refused = I219::open(nic.part(), bar, clock, grant, line);
+    assert!(matches!(refused, Err(Refusal::NotAccepted { reg: regs::RCTL, .. })));
+    assert!(!holds(&nic), "{}", nic.because("a refused open left the word standing"));
+
+    let nic = Nic::i219(142);
+    nic.without_nvm();
+    let (bar, clock, grant, line) = nic.parts();
+    let refused = I219::open(nic.part(), bar, clock, grant, line);
+    assert!(matches!(refused, Err(Refusal::NoStationAddress)));
+    assert!(!holds(&nic), "{}", nic.because("an open refused before prepare gave the word"));
+
+    let nic = Nic::new(143);
+    drop(open(&nic));
+    assert!(
+        !nic.written().contains(&regs::CTRL_EXT),
+        "{}",
+        nic.because("the 82574 had the PCH's CTRL_EXT written on the way out")
+    );
+}
+
+/// A release that reads `CTRL_EXT` as ones writes nothing: the word it would
+/// compose from them would set every field of the register.
+#[test]
+fn a_release_over_a_window_of_ones_writes_nothing() {
+    let nic = Nic::i219(144);
+    let driver = open(&nic);
+    nic.window_does_not_decode(regs::CTRL_EXT);
+    // The stub refuses, by panic, a write into an offset it does not decode.
+    drop(driver);
 }
 
 

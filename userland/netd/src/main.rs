@@ -1354,13 +1354,18 @@ impl NetDaemon {
 /// [`EXIT_WITH_LEASE`]'s last two lines, and the exit they announce. `held` is
 /// whether a leased address is held now, at the end of the window — a lease
 /// that landed and was then lost inside it is not one.
-fn end_the_lease_probe(report: &report::Report, nic: &i219::Nic, held: bool) -> ! {
+///
+/// **The card is taken and dropped before the exit**, which runs no destructor:
+/// dropping the driver is what lets the function go.
+fn end_the_lease_probe(report: &report::Report, card: Card, held: bool) -> ! {
+    let nic = card.intel_driver();
     report.say(Event::Counts(nic.counts()));
     let verdict = if held {
         Verdict::Leased
     } else {
         Verdict::NotLeased(toyos_i219::phy::Outcome::of(nic.brought_up().phy, nic.link()))
     };
+    drop(card);
     let code = verdict.exit_code();
     report.say(Event::Exit { code });
     std::process::exit(code)
@@ -1552,7 +1557,7 @@ fn main() {
             Some(report) => {
                 let left = LEASE_WINDOW.saturating_sub(started.elapsed());
                 if left.is_zero() {
-                    end_the_lease_probe(report, device.nic.intel_driver(), dhcp.leased());
+                    end_the_lease_probe(report, device.nic, dhcp.leased());
                 }
                 timeout.min(left.as_nanos() as u64)
             }

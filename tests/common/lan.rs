@@ -272,9 +272,9 @@ pub fn leased_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// `set_link` is addressed to.
 const FLAP_NETDEV: &str = "net0";
 
-/// How long the link stays away. Long enough for netd to take the change on a
-/// pass of its own before it comes back.
-const FLAP_DOWN: std::time::Duration = std::time::Duration::from_millis(1_500);
+/// netd's own line for a pass that found the link gone, which the link is
+/// kept away until: the pass that says it is the one that records the down.
+const LINK_DOWN: &str = "netd: I219: link down";
 
 /// The report of a boot whose link was taken away after its lease: the link
 /// goes down and comes back up after the first lease, and neither a `lost` nor
@@ -344,13 +344,17 @@ pub fn lan_lease_report(
     qemu::await_marker(&mut guest, &mut console, READY, "netd to take its lease")?;
     {
         let mut monitor = qemu::QmpMonitor::open(guest.qmp_socket());
-        for (state, then) in [("off", FLAP_DOWN), ("on", std::time::Duration::ZERO)] {
+        let mut set_link = |state: &str| {
             let said = monitor.human(&format!("set_link {FLAP_NETDEV} {state}"));
-            if !said.trim().is_empty() {
-                return Err(format!("QEMU's monitor refused `set_link {state}`: {said}"));
+            match said.trim().is_empty() {
+                true => Ok(()),
+                false => Err(format!("QEMU's monitor refused `set_link {state}`: {said}")),
             }
-            std::thread::sleep(then);
-        }
+        };
+        let from = console.len();
+        set_link("off")?;
+        qemu::await_marker_new(&mut guest, &mut console, LINK_DOWN, from, "netd to see the link go down")?;
+        set_link("on")?;
     }
     // Drained rather than waited on: once the lease lands netd says nothing
     // until its window ends, and every wait in this harness reads a quiet guest

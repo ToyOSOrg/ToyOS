@@ -77,10 +77,10 @@ pub const RESET_QUIET_NANOS: u64 = 20_000_000;
 /// complete indication", at most 0.5 s. **Not a refusal when it runs out**: the
 /// reading is what the boot has to say, and the PHY's own answer after it is
 /// the test of whether the configuration finished.
-pub const LAN_INIT_DEADLINE_NANOS: u64 = 500_000_000;
+pub const PHY_CONFIGURED_DEADLINE_NANOS: u64 = 500_000_000;
 
 /// How long passes between two readings of `STATUS` inside that wait.
-pub const LAN_INIT_PACE_NANOS: u64 = 100_000;
+pub const PHY_CONFIGURED_PACE_NANOS: u64 = 100_000;
 
 const _: () = {
     // Every access of the power cycle is paced from the last, so the hold is
@@ -295,9 +295,9 @@ pub struct FullReset {
     /// Whether §8.2.4's flag was held across the write, and why not.
     pub flag: Result<(), PhyRefusal>,
     /// How long after the write `STATUS` bit 9 read set, or `None`
-    /// where [`LAN_INIT_DEADLINE_NANOS`] ran out first. Not waited on at all
+    /// where [`PHY_CONFIGURED_DEADLINE_NANOS`] ran out first. Not waited on at all
     /// where no PHY reset went out.
-    pub init_done_after_nanos: Option<u64>,
+    pub configured_after_nanos: Option<u64>,
 }
 
 impl core::fmt::Display for FullReset {
@@ -311,7 +311,7 @@ impl core::fmt::Display for FullReset {
             Ok(()) => f.write_str(" under the software flag")?,
             Err(why) => write!(f, " without the software flag ({why})")?,
         }
-        match (self.phy_reset, self.init_done_after_nanos) {
+        match (self.phy_reset, self.configured_after_nanos) {
             (false, _) => Ok(()),
             (true, Some(nanos)) => {
                 write!(f, ", the PHY configured {} us after", nanos / 1_000)
@@ -319,7 +319,7 @@ impl core::fmt::Display for FullReset {
             (true, None) => write!(
                 f,
                 ", and STATUS never said the PHY was configured inside {} ms",
-                LAN_INIT_DEADLINE_NANOS / 1_000_000
+                PHY_CONFIGURED_DEADLINE_NANOS / 1_000_000
             ),
         }
     }

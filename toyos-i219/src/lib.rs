@@ -590,7 +590,7 @@ fn reset<R: Registers, C: Clock>(
             let full = wake::FullReset {
                 phy_reset: word & ctrl::PHY_RST != 0,
                 flag: claimed.as_ref().map(|_| ()).map_err(|why| *why),
-                init_done_after_nanos: None,
+                configured_after_nanos: None,
             };
             flag = Some(claimed);
             (reset_at, Some(full))
@@ -609,7 +609,7 @@ fn reset<R: Registers, C: Clock>(
     // waited on and never refused on: I219 Table 5-2 bounds it, and the PHY's
     // own answer to the bring-up is the test of whether it finished.
     let full = full.map(|full| wake::FullReset {
-        init_done_after_nanos: full.phy_reset.then(|| init_done(regs, clock, reset_at)).flatten(),
+        configured_after_nanos: full.phy_reset.then(|| phy_configured(regs, clock, reset_at)).flatten(),
         ..full
     });
     let released = flag.map(|flag| {
@@ -624,18 +624,18 @@ fn reset<R: Registers, C: Clock>(
 }
 
 /// How long after `since` `STATUS` said the PHY was configured, or `None`
-/// where [`wake::LAN_INIT_DEADLINE_NANOS`] ran out first.
-fn init_done<R: Registers, C: Clock>(regs: &R, clock: &C, since: u64) -> Option<u64> {
+/// where [`wake::PHY_CONFIGURED_DEADLINE_NANOS`] ran out first.
+fn phy_configured<R: Registers, C: Clock>(regs: &R, clock: &C, since: u64) -> Option<u64> {
     loop {
         let done = regs.read(regs::STATUS) & status::PHY_CONFIGURED != 0;
         let waited = clock.nanos().saturating_sub(since);
         if done {
             return Some(waited);
         }
-        if waited >= wake::LAN_INIT_DEADLINE_NANOS {
+        if waited >= wake::PHY_CONFIGURED_DEADLINE_NANOS {
             return None;
         }
-        clock.pause(wake::LAN_INIT_PACE_NANOS);
+        clock.pause(wake::PHY_CONFIGURED_PACE_NANOS);
     }
 }
 
@@ -671,7 +671,12 @@ pub struct BringUp {
 }
 
 /// The function, brought up and driving.
-pub struct I219<R, C, D, I> {
+///
+/// **Dropping it lets the function go**: on the I219, [`pch::release`] takes
+/// back the word [`pch::prepare`] gave the firmware, on every way a holder
+/// leaves that runs its destructors.
+pub struct I219<R: Registers, C, D, I> {
+    part: Part,
     regs: R,
     clock: C,
     dma: D,
@@ -697,6 +702,14 @@ pub struct I219<R, C, D, I> {
     counters: Counters,
     /// What [`Self::wire`] has read out of the statistics registers so far.
     wire: Wire,
+}
+
+impl<R: Registers, C, D, I> Drop for I219<R, C, D, I> {
+    fn drop(&mut self) {
+        if self.part == Part::I219 {
+            pch::release(&self.regs);
+        }
+    }
 }
 
 impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
@@ -729,11 +742,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         };
         let Reset { master_quiet, at: reset_at, full, released } =
             reset(&regs, &clock, whole)?;
-        // What the PCH's MAC is given after its reset and before its rings:
-        // [`pch`]'s header.
-        if part == Part::I219 {
-            pch::prepare(&regs);
-        }
 
         // §10.2.5.23: the reset reloads entry 0 from the NVM, so this is read
         // after it and not before.
@@ -750,6 +758,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             high as u8,
             (high >> 8) as u8,
         ];
+
+        // What the PCH's MAC is given after its reset and before its rings:
+        // [`pch`]'s header. After the last refusal that comes before `Self`
+        // exists, so every refusal after it is a drop that lets the function go.
+        if part == Part::I219 {
+            pch::prepare(&regs);
+        }
 
         // §4.6.5: "Set up the Multicast Table Array (MTA) per software. This
         // generally means zeroing all entries initially."
@@ -795,6 +810,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         regs.write(regs::EIAC, 0);
 
         let mut nic = Self {
+            part,
             regs,
             clock,
             dma,

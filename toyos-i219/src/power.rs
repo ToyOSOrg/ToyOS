@@ -31,7 +31,7 @@
 //!
 //! Five readings and one bit. §8.2.1's `CTRL` bit 24 is the one bit the
 //! document gives software over the PHY's power while the function is driven,
-//! and [`Correction`] is the whole of what this driver writes.
+//! and [`Reading::correction`] is the whole of what this driver writes.
 //!
 //! **§8.2.2's `CTRL_EXT` bit 20 is read and never written.** The document ties
 //! it to a low-power entry "at the DMOff/ D3 or with no WOL", which a function
@@ -135,8 +135,11 @@ impl Reading {
     /// with the firmware and the part's own hardware — §8.2.4 calls them
     /// "shared CSR registers" — so a write nobody needs is one more way to lose
     /// what another agent put in the word between the read and it.
-    pub fn correction(self) -> Correction {
-        Correction { ctrl: self.phy_power_down().then_some(self.ctrl & !ctrl::PHY_POWER_DOWN) }
+    ///
+    /// The word §8.2.1's register is to be left holding, and `None` for one
+    /// already holding it.
+    pub fn correction(self) -> Option<u32> {
+        self.phy_power_down().then_some(self.ctrl & !ctrl::PHY_POWER_DOWN)
     }
 }
 
@@ -172,42 +175,24 @@ impl core::fmt::Display for Reading {
     }
 }
 
-/// The word §8.2.1's register is to be left holding, and `None` for one
-/// already holding it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Correction {
-    pub ctrl: Option<u32>,
-}
-
-impl Correction {
-    /// Whether the part was already in the state the document describes, so
-    /// this driver writes nothing at all.
-    pub fn nothing(self) -> bool {
-        self.ctrl.is_none()
-    }
-}
-
-impl core::fmt::Display for Correction {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.ctrl {
-            None => f.write_str("nothing was written"),
-            Some(ctrl) => write!(f, "CTRL was written {ctrl:#010x}"),
-        }
-    }
-}
-
 /// One boot's whole account of the power step: the state the part was in, what
 /// this driver wrote into it, and the state it was in afterwards.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Settled {
     pub before: Reading,
-    pub wrote: Correction,
+    /// The `CTRL` word this driver wrote, and `None` where it wrote nothing.
+    pub wrote: Option<u32>,
     pub after: Reading,
 }
 
 impl core::fmt::Display for Settled {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "before it: {}; {}; after it: {}", self.before, self.wrote, self.after)
+        write!(f, "before it: {}; ", self.before)?;
+        match self.wrote {
+            None => f.write_str("nothing was written")?,
+            Some(ctrl) => write!(f, "CTRL was written {ctrl:#010x}")?,
+        }
+        write!(f, "; after it: {}", self.after)
     }
 }
 

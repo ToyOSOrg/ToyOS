@@ -9,7 +9,9 @@
 //!   not reached.
 //! - `CTRL_EXT` bit 28 (`regs::ctrl_ext::DRIVER_HOLDS_THE_FUNCTION`): the
 //!   firmware on this part shares the PHY with the host, and this bit is the
-//!   host's word to it that a driver holds the function.
+//!   host's word to it that a driver holds the function. Set here and cleared by
+//!   [`release`] when the driver is dropped, so the word is never left standing
+//!   for a function nobody holds.
 //! - §8.2.8's APM wake-up enable (the register's one writable bit) cleared:
 //!   this driver arms no wake, and one the agent before it armed would
 //!   otherwise stand while the function is driven.
@@ -43,4 +45,17 @@ pub(crate) fn prepare<R: Registers>(regs: &R) {
     );
     modify(regs, regs::WAKE_UP, 0, wake_up::APM_WAKE);
     modify(regs, regs::PCIE_CONTROL, 0, pcie_control::NO_SNOOP);
+}
+
+/// What [`prepare`] told the firmware, taken back: bit 28 cleared and every
+/// other bit of `CTRL_EXT` carried.
+///
+/// **A word of ones is not written back**: it is a window that did not decode
+/// the read, and the word composed from it would set every field of the
+/// register.
+pub(crate) fn release<R: Registers>(regs: &R) {
+    let held = regs.read(regs::CTRL_EXT);
+    if held != u32::MAX {
+        regs.write(regs::CTRL_EXT, held & !ctrl_ext::DRIVER_HOLDS_THE_FUNCTION);
+    }
 }

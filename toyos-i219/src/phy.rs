@@ -18,7 +18,7 @@
 
 use core::cell::Cell;
 
-use crate::power::{Correction, Reading, Settled};
+use crate::power::{Reading, Settled};
 use crate::regs::{self, extcnf, mdic};
 use crate::wake::{self, Action, Answer, Moment, Woke};
 use crate::{Clock, Link, Registers, Speed};
@@ -819,8 +819,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
             return Err(PhyRefusal::Unrouted { reg: regs::CTRL });
         }
         let wrote = before.correction();
-        let Correction { ctrl } = wrote;
-        if let Some(value) = ctrl {
+        if let Some(value) = wrote {
             self.mdio.write_at(regs::CTRL, value);
         }
         let after = self.power_reading();
