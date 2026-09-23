@@ -11,11 +11,11 @@
 //! one that governs that part, and where only one of them names a field it is
 //! cited alone.
 //!
-//! **Where neither document publishes a field the PCH's MAC needs, the number is
-//! the one Intel's own Linux host driver for this family writes**, stated here
-//! as a fact about the hardware and never transcribed: each such constant says
-//! so where it stands. Nothing here has behaviour, and a number with none of
-//! those three sources does not belong in this file.
+//! **Where neither document publishes a field the PCH's MAC needs, the field is
+//! stated as a property of that part** and named by what it does; each such
+//! constant says so where it stands. Nothing here has behaviour, and a number
+//! that is neither in a document nor a stated property of the part does not
+//! belong in this file.
 
 /// Device Control (§10.2.2.1, `0x00000`).
 pub const CTRL: usize = 0x00000;
@@ -89,29 +89,25 @@ pub const PHY_CTRL: usize = 0x00F10;
 /// Firmware Semaphore (§8.2.9, `0x05B54`), the firmware's own report of
 /// itself. Not a register the 82574 datasheet has.
 pub const FWSM: usize = 0x05B54;
-/// Future Extended NVM 3 (`0x0003C`), which neither document publishes: its
-/// bits 27:26 are the PHY configuration counter a LANPHYPC power cycle is timed
-/// by, and Intel's host driver for this family sets it before every such cycle.
-pub const FEXTNVM3: usize = 0x0003C;
+/// The register at `0x0003C`, which neither document publishes: its bits 27:26
+/// set how long the PHY's configuration is given after a `LANPHYPC` power
+/// cycle, so it is named for the cycle it times.
+pub const LANPHYPC_TIMING: usize = 0x0003C;
 
-/// The PCH's MAC's registers that neither document publishes and Intel's host
-/// driver for this family writes on every initialisation before the rings:
-/// Packet Buffer ECC Status, the second queue's Transmit Descriptor Control,
-/// the two Transmit Arbitration Controls, Receive Filter Control, Wake Up
-/// Control, PCIe Control and a debug register. [`crate::pch`] is what goes
-/// into each and why.
-pub const PBECCSTS: usize = 0x0100C;
-pub const TXDCTL1: usize = 0x03928;
-pub const TARC0: usize = 0x03840;
-pub const TARC1: usize = 0x03940;
-pub const RFCTL: usize = 0x05008;
-pub const WUC: usize = 0x05800;
-pub const GCR: usize = 0x05B00;
-pub const FFLT_DBG: usize = 0x05F04;
+/// §8.2.8's `GBECSR_5800` at `5800h`, whose one writable field is the APM
+/// wake-up enable.
+pub const WAKE_UP: usize = 0x05800;
+
+/// The PCH's MAC's PCIe control at `0x05B00`, which neither document publishes
+/// for this part: bits 5:0 ask for PCIe's no-snoop attribute on the part's own
+/// DMA, one bit for each of receive data, receive descriptor write-back,
+/// receive descriptor fetch, and the same three for transmit.
+pub const PCIE_CONTROL: usize = 0x05B00;
 
 /// The MAC's own statistics, each a count the part keeps of frames at its end
-/// of the wire and each cleared by the read that takes it — the offsets and
-/// that behaviour as Intel's host driver for this family reads them: CRC Error
+/// of the wire and each cleared by the read that takes it — offsets and
+/// behaviour stated as properties of the part, and which QEMU's model answers
+/// at the same offsets: CRC Error
 /// Count, Missed Packet Count (frames the part had no room for), Good Packets
 /// Received and Transmitted, and Total Packets Received (every frame the MAC
 /// saw, whatever its filters then did with it).
@@ -133,8 +129,8 @@ const _: () = {
     assert!(CTRL_EXT < REGISTER_BYTES);
     assert!(PHY_CTRL < REGISTER_BYTES);
     assert!(FWSM + 4 <= REGISTER_BYTES);
-    assert!(FEXTNVM3 < REGISTER_BYTES);
-    assert!(FFLT_DBG + 4 <= REGISTER_BYTES);
+    assert!(LANPHYPC_TIMING < REGISTER_BYTES);
+    assert!(PCIE_CONTROL < REGISTER_BYTES);
     assert!(TPR < REGISTER_BYTES);
 };
 
@@ -155,20 +151,15 @@ pub mod ctrl {
     /// Force Speed (bit 11) and Force Duplex (bit 12).
     pub const FRCSPD: u32 = 1 << 11;
     pub const FRCDPLX: u32 = 1 << 12;
-    /// LANPHYPC Override (bit 16) and LANPHYPC Value (bit 17), which §8.2.1
-    /// calls reserved. **The host's hand on the PHY's power pin**: with the
-    /// override set, the value drives the PCH's `LANPHYPC` — the pin the PCH's
-    /// Volume 1 (635218) §19.1 says restores power to the LAN Connected Device
-    /// and I219 §6.3.1.3 calls `LAN_DISABLE_N`, "the only external signal that
-    /// can reset the PHY" (I219 §5.2). Intel's host driver for this family
-    /// power-cycles the PHY by setting the override with the value low, holding
-    /// it at least 10 µs, and clearing the override.
-    pub const LANPHYPC_OVERRIDE: u32 = 1 << 16;
-    pub const LANPHYPC_VALUE: u32 = 1 << 17;
-    /// Memory Error Handling Enable (bit 19), which §8.2.1 calls reserved:
-    /// Intel's host driver for this family sets it beside the packet buffer's
-    /// ECC ([`super::pbeccsts::ECC_ENABLE`]) on this generation of the PCH.
-    pub const MEHE: u32 = 1 << 19;
+    /// Bits 16 and 17, which §8.2.1 calls reserved. **The host's hand on the
+    /// PHY's power pin**: with bit 16 set, bit 17 is the level the PCH drives
+    /// on `LANPHYPC` — the pin the PCH's Volume 1 (635218) §19.1 says restores
+    /// power to the LAN Connected Device and I219 §6.3.1.3 calls
+    /// `LAN_DISABLE_N`, "the only external signal that can reset the PHY" (I219
+    /// §5.2). Driven low for at least 10 µs and then given back to the PCH, the
+    /// pin takes the PHY's power away and restores it.
+    pub const LANPHYPC_HOST_DRIVEN: u32 = 1 << 16;
+    pub const LANPHYPC_LEVEL: u32 = 1 << 17;
     /// PHY Power Down (bit 24). §8.2.1: "When cleared (0b), the PHY power down
     /// setting is controlled by the internal logic of PCH." The document
     /// describes the cleared case only, so that is the state this driver puts
@@ -183,80 +174,49 @@ pub mod ctrl {
     /// VLAN Mode Enable (bit 30). Cleared, so a VLAN tag stays in the frame.
     pub const VME: u32 = 1 << 30;
     /// PHY Reset (bit 31), which §8.2.1 calls reserved. **On the PCH's MAC it
-    /// goes out with `RST`**: Intel's host driver for this family issues the
-    /// two together unless the firmware blocks a PHY reset, so that the
-    /// interconnect between the MAC and the PHY is reset on both ends at once.
+    /// goes out with `RST`**: written together, the two start both ends of the
+    /// interconnect between the MAC and the PHY over at once, which a reset of
+    /// the MAC alone does not.
     pub const PHY_RST: u32 = 1 << 31;
 }
 
 /// Extended Device Control bits (§8.2.2), of which the PCH's own datasheet
 /// gives one and calls everything either side of it "Reserved".
 pub mod ctrl_ext {
-    /// LCD Power Cycle Done (bit 2), which §8.2.2 calls reserved: set by the
-    /// part once a LANPHYPC power cycle has finished, and what Intel's host
-    /// driver for this family polls after one.
-    pub const LCD_POWER_CYCLE_DONE: u32 = 1 << 2;
-    /// Force SMBus (bit 11), which §8.2.2 calls reserved: set, the MAC carries
-    /// its MDIO traffic over SMBus instead of the PCIe-based interconnect —
-    /// I219 §12.1.4's other half, the one the PHY uses outside S0.
-    pub const FORCE_SMBUS: u32 = 1 << 11;
-    /// Relaxed Ordering Disable (bit 17), which §8.2.2 calls reserved: set, the
-    /// part asks for strict ordering on every write it makes to memory — so a
-    /// descriptor's `DD` cannot land ahead of the frame it describes. Intel's
-    /// host driver for this family sets it on every initialisation.
-    pub const RELAXED_ORDERING_DISABLE: u32 = 1 << 17;
+    /// Bit 2, which §8.2.2 calls reserved: set by the part once a `LANPHYPC`
+    /// power cycle has finished.
+    pub const LANPHYPC_CYCLE_DONE: u32 = 1 << 2;
+    /// Bit 11, which §8.2.2 calls reserved: set, the MAC carries its MDIO
+    /// traffic over SMBus instead of the PCIe-based interconnect — I219
+    /// §12.1.4's other half, the one the PHY uses outside S0.
+    pub const MAC_ON_SMBUS: u32 = 1 << 11;
+    /// Bit 17, which §8.2.2 calls reserved: set, the part leaves PCIe's
+    /// relaxed-ordering attribute off every write it makes to memory, so its
+    /// writes land in the order it made them and a descriptor's `DD` cannot
+    /// land ahead of the frame it describes.
+    pub const STRICT_WRITE_ORDER: u32 = 1 << 17;
     /// PHY Power Down Enable (bit 20). §8.2.2: "When set, this bit enables the
     /// PHY to enter a low-power state when the LAN controller is at the DMOff/
     /// D3 or with no WOL."
     pub const PHY_POWER_DOWN_ENABLE: u32 = 1 << 20;
-    /// Bit 22, which §8.2.2 calls reserved and Intel's host driver for this
-    /// family sets among the bits it calls required for transmit and receive.
-    pub const REQUIRED_22: u32 = 1 << 22;
-    /// Driver Loaded (bit 28), which §8.2.2 calls reserved: the host driver's
-    /// word to the part's firmware that a driver now holds the function.
-    pub const DRIVER_LOADED: u32 = 1 << 28;
+    /// Bit 28, which §8.2.2 calls reserved: the host's word to the part's
+    /// firmware that a driver holds the function.
+    pub const DRIVER_HOLDS_THE_FUNCTION: u32 = 1 << 28;
 }
 
-/// Packet Buffer ECC Status bits.
-pub mod pbeccsts {
-    /// ECC Enable (bit 16).
-    pub const ECC_ENABLE: u32 = 1 << 16;
+/// §8.2.8's wake-up register.
+pub mod wake_up {
+    /// Bit 0. §8.2.8: "Advanced Power Management Enable (APME): 1 = APM
+    /// Wakeup is enabled 0 = APM Wakeup is disabled".
+    pub const APM_WAKE: u32 = 1 << 0;
 }
 
-/// Transmit Arbitration Control bits, of which no document in hand names one.
-pub mod tarc {
-    /// What Intel's host driver for this family sets in `TARC0` on every
-    /// initialisation: bits 23, 24, 26 and 27.
-    pub const TARC0_REQUIRED: u32 = (1 << 23) | (1 << 24) | (1 << 26) | (1 << 27);
-    /// What it sets in `TARC1`: bits 24, 26 and 30 always, and bit 28
-    /// ([`TARC1_SINGLE_REQUEST`]) exactly where `TCTL`'s Multiple Request
-    /// Support is clear.
-    pub const TARC1_REQUIRED: u32 = (1 << 24) | (1 << 26) | (1 << 30);
-    pub const TARC1_SINGLE_REQUEST: u32 = 1 << 28;
-}
-
-/// Receive Filter Control bits.
-pub mod rfctl {
-    /// NFS Write and NFS Read filtering disabled (bits 6 and 7): the host
-    /// driver for this family turns the part's NFS filter off on every
-    /// initialisation, against a descriptor corruption it attributes to it.
-    pub const NFS_FILTERS_OFF: u32 = (1 << 6) | (1 << 7);
-}
-
-/// PCIe Control bits.
-pub mod gcr {
-    /// The six no-snoop requests (bits 5:0) — receive data, receive
-    /// descriptor write, receive descriptor read, and the same three for
-    /// transmit. Clear, every DMA the part makes is snooped, which is what the
-    /// host driver for this family asks of every part of it but the first.
+/// PCIe control bits.
+pub mod pcie_control {
+    /// The six no-snoop requests (bits 5:0). Clear, every DMA the part makes
+    /// is snooped, so what it reads and writes is coherent with the
+    /// processor's caches.
     pub const NO_SNOOP: u32 = 0x3F;
-}
-
-/// The debug register's one bit this driver writes.
-pub mod fflt_dbg {
-    /// Bit 12: the DMA clock is not gated from the modPHY block. Intel's host
-    /// driver sets it on this PCH generation and later, against lost packets.
-    pub const DONT_GATE_WAKE_DMA_CLOCK: u32 = 1 << 12;
 }
 
 /// PHY Control bits (§8.2.5) — the PHY's link-speed policy, read and never
@@ -279,9 +239,9 @@ pub mod phy_ctrl {
 
 /// Firmware Semaphore bits (§8.2.9).
 pub mod fwsm {
-    /// Reset PHY on PCI Reset (bit 6), which §8.2.9 does not publish: clear, the
-    /// firmware blocks a host reset of the PHY, and Intel's host driver for
-    /// this family then resets the MAC alone.
+    /// Bit 6, which §8.2.9 does not publish: clear, the firmware forbids the
+    /// host to reset the PHY — by `CTRL`'s PHY reset and by its power pin alike
+    /// — and a reset of the part is a reset of the MAC alone.
     pub const PHY_RESET_ALLOWED: u32 = 1 << 6;
     /// Firmware Valid Bit (bit 15). §8.2.9: "1 = Firmware is ready. 0 =
     /// Firmware is not ready."
@@ -293,10 +253,10 @@ pub mod status {
     pub const FD: u32 = 1 << 0;
     /// Link Up (bit 1), valid only while `CTRL.SLU` is set.
     pub const LU: u32 = 1 << 1;
-    /// LAN Init Done (bit 9), which neither document publishes for the PCH's
-    /// MAC: set once the MAC has configured the PHY after a reset that reached
-    /// it — the configuration I219 Table 5-2 gives 0.5 s (`Tr2init`).
-    pub const LAN_INIT_DONE: u32 = 1 << 9;
+    /// Bit 9, which neither document publishes for the PCH's MAC: set once the
+    /// MAC has configured the PHY after a reset that reached it — the
+    /// configuration I219 Table 5-2 gives 0.5 s (`Tr2init`).
+    pub const PHY_CONFIGURED: u32 = 1 << 9;
     /// Link speed (bits 7:6): `00b` 10 Mb/s, `01b` 100 Mb/s, `10b` and `11b`
     /// 1000 Mb/s.
     pub const SPEED_SHIFT: u32 = 6;
@@ -440,9 +400,6 @@ pub mod tctl {
     /// Collision Distance (bits 21:12). §4.6.6: full duplex is `63`.
     pub const COLD_SHIFT: u32 = 12;
     pub const COLD_FULL_DUPLEX: u32 = 0x3F << COLD_SHIFT;
-    /// Multiple Request Support (bit 28), which this driver never sets and
-    /// Intel's host driver for this family reads to decide `TARC1`'s bit 28.
-    pub const MULR: u32 = 1 << 28;
 }
 
 /// The inter-packet gap §4.6.6 names: `IPGT = 8`, `IPGR1 = 2`, `IPGR2 = 10`,
@@ -457,24 +414,15 @@ pub mod txdctl {
     /// descriptors. Anything larger holds a completion back until the ring
     /// fills.
     pub const SUGGESTED: u32 = GRAN | (1 << WTHRESH_SHIFT);
-    /// Prefetch Threshold (bits 5:0) at its widest, and bit 22 — neither of
-    /// which [`SUGGESTED`] carries.
-    pub const PTHRESH_MAX: u32 = 0x1F;
-    pub const COUNT_DESCRIPTORS: u32 = 1 << 22;
-    /// What Intel's host driver for this family writes into both queues'
-    /// `TXDCTL` on the PCH's MAC: the same write-back of one descriptor, a
-    /// prefetch threshold of 31, and bit 22, which it counts among the bits
-    /// transmit and receive require.
-    pub const PCH: u32 = SUGGESTED | PTHRESH_MAX | COUNT_DESCRIPTORS;
 }
 
-/// Future Extended NVM 3 bits: the PHY configuration counter.
-pub mod fextnvm3 {
-    /// Bits 27:26.
-    pub const PHY_CFG_COUNTER_MASK: u32 = 0b11 << 26;
-    /// `10b`, fifty milliseconds — what Intel's host driver for this family
-    /// sets before it power-cycles the PHY.
-    pub const PHY_CFG_COUNTER_50MS: u32 = 0b10 << 26;
+/// [`super::LANPHYPC_TIMING`]'s one field this driver sets.
+pub mod lanphypc_timing {
+    /// Bits 27:26: how long the PHY's configuration is given after a power
+    /// cycle.
+    pub const CONFIGURATION_MASK: u32 = 0b11 << 26;
+    /// `10b`, fifty milliseconds: the setting a power cycle is made under.
+    pub const CONFIGURATION_50MS: u32 = 0b10 << 26;
 }
 
 /// Receive Address High bits (§10.2.5.23).

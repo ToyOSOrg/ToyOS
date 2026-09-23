@@ -3,7 +3,7 @@
 //!
 //! Every line read here is a record. On the T14 a userland `println!` reaches
 //! `Backend::None`, so what crosses to the stick is the kernel's log — and the
-//! one file netd leaves beside it, the crumb trail.
+//! one file netd leaves beside it, the lease probe's report.
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -15,10 +15,8 @@ use toyos_build::lan::{
 };
 use toyos_build::metaldevices;
 use toyos_build::metalprofile::Profile;
-use toyos_i219::crumbs::{self, Ending, Line, Step};
 use toyos_i219::lease::{self, Event, Verdict};
-use toyos_i219::phy::{Outcome, PhyRefusal};
-use toyos_i219::regs;
+use toyos_i219::phy::PhyRefusal;
 
 use super::metal;
 use super::qemu::{self, BootOptions, QemuInstance};
@@ -47,16 +45,6 @@ pub const LEASE_BOOT: &str = "lanleasecase";
 /// `report::PATH` under `/log`.
 pub const LEASE_FILE: &str = "lease.txt";
 
-/// The same boot with netd's `--exit-with-crumbs` armed instead: a line on the
-/// log volume, flushed to the stick, before every step of the bring-up, and
-/// the PHY's outcome as the exit code.
-pub const CRUMB_CONFIG: &str = "tests/lancrumbcase";
-pub const CRUMB_BOOT: &str = "lancrumbcase";
-
-/// The file that trail is left in, at the root of the log volume — netd's
-/// `crumbs::PATH` under `/log`.
-pub const CRUMBS_FILE: &str = "crumbs.txt";
-
 /// netd, as the kernel's `exit:` record names it.
 const NETD: &str = "netd";
 
@@ -81,9 +69,6 @@ const QEMU_CONFIG: &str = "tests/e1000case";
 
 /// The same, with netd's `--exit-with-lease` armed.
 const LEASE_QEMU_CONFIG: &str = "tests/e1000leasecase";
-
-/// The same, with netd's `--exit-with-crumbs` armed.
-const CRUMB_QEMU_CONFIG: &str = "tests/e1000crumbcase";
 
 /// What QEMU's user-mode backend leases, and what it says about the network it
 /// leases on. Its own defaults, not this repository's: they are the oracle.
@@ -283,199 +268,36 @@ pub fn leased_on_metal(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// The trail boot's judge. **Only a boot that came back is judged here**, and
-/// a boot that came back owes a whole trail ending in the code its `exit:`
-/// record carries; the boot the arm exists for is the one that does not come
-/// back, whose file is read off the stick by hand and through [`trail_ending`].
-pub fn trailed_on_metal(trailed: &metal::Readback) -> Result<(), String> {
-    let code = trailed.exit_code(NETD)?;
-    let text = trailed
-        .log_volume_file(CRUMBS_FILE)?
-        .ok_or_else(|| format!("{CRUMB_BOOT}'s log volume carries no {CRUMBS_FILE}"))?;
-    let cost = whole_trail(&text, code)?;
-    eprintln!("  [lan] {CRUMB_BOOT}: {cost}");
-    Ok(())
-}
+/// The netdev QEMU's `e1000e` profile names its backend, which the monitor's
+/// `set_link` is addressed to.
+const FLAP_NETDEV: &str = "net0";
 
-/// What a crumb file says about how its boot ended, in one sentence — the
-/// reading of a file copied off the stick of a machine that never came back.
-pub fn trail_ending(text: &str) -> String {
-    match Ending::of(text) {
-        Ok(ending) => ending.to_string(),
-        Err(why) => format!("the file is no trail: {why}"),
-    }
-}
+/// How long the link stays away. Long enough for netd to take the change on a
+/// pass of its own before it comes back.
+const FLAP_DOWN: std::time::Duration = std::time::Duration::from_millis(1_500);
 
-/// What a trail cost the boot it was left on.
-pub struct TrailCost {
-    pub crumbs: usize,
-    /// From the first crumb being handed to the device to the last one.
-    pub window_ns: u64,
-    /// Of that, what was spent between a crumb going to the device and coming
-    /// back durable. The last crumb's is not in it: nothing after it says when
-    /// it came back.
-    pub writing_ns: u64,
-    pub slowest_ns: u64,
-}
-
-impl std::fmt::Display for TrailCost {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} crumbs over {} us, {} us of it writing them ({} us each on average, {} us the slowest)",
-            self.crumbs,
-            self.window_ns / 1_000,
-            self.writing_ns / 1_000,
-            self.writing_ns / 1_000 / (self.crumbs as u64 - 1).max(1),
-            self.slowest_ns / 1_000,
-        )
-    }
-}
-
-/// A trail of a boot that came back: whole, ending in `code`, its clocks in
-/// order, and between `dma-alloc` and `opened` exactly the bring-up the driver
-/// crate says a trail owes, the PHY's own accesses apart.
-pub fn whole_trail(text: &str, code: i32) -> Result<TrailCost, String> {
-    let lines: Vec<Line> = crumbs::lines(text)
-        .collect::<Result<_, _>>()
-        .map_err(|why| format!("{CRUMBS_FILE} is no trail: {why}\n{text}"))?;
-    match Ending::of(text) {
-        Ok(Ending::Complete { code: said, .. }) if said == code => {}
-        other => {
-            return Err(format!(
-                "netd exited {code} and its trail does not end in `exit {code}`: {}\n{text}",
-                other.map_or_else(|why| why.to_string(), |ending| ending.to_string())
-            ))
-        }
-    }
-    let mut owed: Vec<String> =
-        [Step::Start, Step::ClaimHeld, Step::Describe, Step::MapBar, Step::DmaAlloc]
-            .iter()
-            .map(|step| step.to_string())
-            .collect();
-    owed.extend(crumbs::BRING_UP.iter().map(|step| step.to_string()));
-    owed.push(Step::Opened.to_string());
-    // The probe's own wait for the link is a run of `STATUS` reads and one
-    // crumb, and it is taken only where the bring-up brought a PHY up — which
-    // the code says. The bring-up's own table does not carry it, because that
-    // wait is netd's and not `I219::open`'s.
-    if Outcome::from_exit_code(code).is_some_and(Outcome::came_up) {
-        owed.push(Step::Read { reg: regs::STATUS }.named().to_string());
-    }
-    owed.push(Step::Exit { code }.to_string());
-    // **A `CTRL` access is allowed to be extra.** §8.2.1's `PHYPDN` is a field
-    // of that register, so the PHY's power step reaches the one register the
-    // bring-up reaches either side of it and the table cannot leave it out —
-    // `crumbs::is_shared_with_the_phys` is that rule, and every other step has
-    // to line up exactly.
-    let left: Vec<String> = lines
+/// The report of a boot whose link was taken away after its lease: the link
+/// goes down and comes back up after the first lease, and no `lost` line
+/// follows that lease — the address was never given up.
+fn flap_kept_the_lease(text: &str) -> Result<(), String> {
+    let events: Vec<Event> =
+        text.lines().filter_map(lease::Line::parse).map(|line| line.event).collect();
+    let leased = events
         .iter()
-        .map(|line| line.step.named().to_string())
-        .filter(|named| !crumbs::is_the_phys(named) && !crumbs::is_the_pchs(named))
-        .collect();
-    let mut wanted = owed.iter();
-    let mut next = wanted.next();
-    for (at, named) in left.iter().enumerate() {
-        if next == Some(named) {
-            next = wanted.next();
-            continue;
-        }
-        if crumbs::is_shared_with_the_phys(named) {
-            continue;
-        }
-        return Err(format!(
-            "the trail leaves the bring-up's order at crumb {at}: it says {named:?} where {:?} \
-             is owed\n{text}",
-            next
-        ));
+        .position(|event| matches!(event, Event::Leased { .. }))
+        .ok_or_else(|| format!("the report records no lease:\n{text}"))?;
+    let after = &events[leased..];
+    let down = after
+        .iter()
+        .position(|event| *event == Event::Link(toyos_i219::Link::Down))
+        .ok_or_else(|| format!("the report never saw the link go down after its lease:\n{text}"))?;
+    if !after[down..].iter().any(|event| matches!(event, Event::Link(toyos_i219::Link::Up { .. }))) {
+        return Err(format!("the report never saw the link come back:\n{text}"));
     }
-    if let Some(missing) = next {
-        return Err(format!("the trail never reached {missing:?}\n{text}"));
+    if after.contains(&Event::Lost) {
+        return Err(format!("the lease was given up across the flap:\n{text}"));
     }
-    let mut cost = TrailCost { crumbs: lines.len(), window_ns: 0, writing_ns: 0, slowest_ns: 0 };
-    for pair in lines.windows(2) {
-        let (this, next) = (pair[0], pair[1]);
-        if next.synced < this.at || next.at < next.synced {
-            return Err(format!(
-                "crumb {} went to the device at {} ns, and crumb {} says it came back at {} ns and was itself written at {} ns\n{text}",
-                this.seq, this.at, next.seq, next.synced, next.at
-            ));
-        }
-        let took = next.synced - this.at;
-        cost.writing_ns += took;
-        cost.slowest_ns = cost.slowest_ns.max(took);
-    }
-    cost.window_ns = lines[lines.len() - 1].at - lines[0].at;
-    Ok(cost)
-}
-
-/// The trail, end to end, in front of QEMU's 82574 and on a USB stick like the
-/// T14's: netd armed with the flag leaves `crumbs.txt` on the log volume, the
-/// file is read back out of the image by the host's own FAT implementation, and
-/// it is the whole bring-up in the driver crate's order, ending in the code the
-/// kernel's `exit:` record carries. The outside checker has nothing to say
-/// about the volume the file was left on.
-///
-pub fn lan_crumb_trail(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let case = super::compile::repo_root().join(CRUMB_QEMU_CONFIG);
-    let image_path = super::lane::dir().join("lan-crumb-trail.img");
-    let image = qemu::build_boot_image(&case, &[], &[], &[]);
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = super::volumes::log_extent(&image, &image_path)?;
-
-    let options = BootOptions {
-        profile: qemu::Profile::E1000e,
-        boot_image: Some(qemu::Staged::Written(image_path.clone())),
-        ..Default::default()
-    };
-    let (code, console) = netd_exit_with(&case, options)?;
-    let log = serial::Serial::named("the lan crumb boot", console.as_str());
-    log.must_be_clean()?;
-    if Outcome::from_exit_code(code) != Some(Outcome::NotThisRegisterMap) {
-        return Err(format!(
-            "netd exited {code} on the 82574 with a trail, which is not NotThisRegisterMap's code"
-        ));
-    }
-
-    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
-    let volume = after.get(start..start + len).ok_or("the image shrank under the log partition")?;
-    let text = super::volumes::read_files(volume, &[CRUMBS_FILE])?
-        .pop()
-        .flatten()
-        .ok_or_else(|| format!("the log volume carries no {CRUMBS_FILE}"))?;
-    let text = String::from_utf8(text).map_err(|e| format!("{CRUMBS_FILE}: {e}"))?;
-    let cost = whole_trail(&text, code)?;
-    let complaints = toyos_fat32_check::check(volume);
-    if !complaints.is_empty() {
-        return Err(format!(
-            "the trail gave the checker something to say about the log volume:\n{}",
-            toyos_fat32_check::describe(&complaints)
-        ));
-    }
-    let _ = std::fs::remove_file(&image_path);
-
-    eprintln!("  [lan] {cost}");
-    eprintln!("  [lan] netd held the card for {} ms with the trail", held_ms(&console)?);
-    eprintln!("  [lan] {}", trail_ending(&text));
     Ok(())
-}
-
-/// Milliseconds between the kernel handing the function over and netd's exit
-/// record, which is the window a trail stretches.
-fn held_ms(console: &str) -> Result<u64, String> {
-    let at = |needle: &str| {
-        console
-            .lines()
-            .find(|line| line.contains(needle))
-            .and_then(bootlog::record_millis)
-            .ok_or_else(|| format!("no timed `{needle}` record:\n{console}"))
-    };
-    let exited = format!("{}{NETD} pid=", bootlog::EXIT);
-    Ok(at(&exited)?.saturating_sub(at("handed over on slot")?))
 }
 
 /// The lease probe, end to end, in front of QEMU's 82574 and its user-mode
@@ -484,6 +306,11 @@ fn held_ms(console: &str) -> Result<u64, String> {
 /// implementation names the lease that server hands out, field by field, with
 /// frames counted both ways by the driver and by the MAC's statistics —
 /// which QEMU's model keeps, and not this repository.
+///
+/// **The link is taken away and given back once the lease has landed**, from
+/// QEMU's own monitor, and the lease has to outlive it: the report says the
+/// link went down and came up after the lease, never that the lease was lost,
+/// and the verdict is a lease held at the end of the window.
 pub fn lan_lease_report(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -498,6 +325,7 @@ pub fn lan_lease_report(
     let options = BootOptions {
         profile: qemu::Profile::E1000e,
         boot_image: Some(qemu::Staged::Written(image_path.clone())),
+        qmp: true,
         ..Default::default()
     };
     if !qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")) {
@@ -505,6 +333,19 @@ pub fn lan_lease_report(
     }
     let mut guest = QemuInstance::boot_with_options(&case, &[], &[], options);
     let mut console = guest.boot_log().to_string();
+    // netd says it is ready once the lease is applied, which is when a flap is
+    // one a bound lease has to survive.
+    qemu::await_marker(&mut guest, &mut console, READY, "netd to take its lease")?;
+    {
+        let mut monitor = qemu::QmpMonitor::open(guest.qmp_socket());
+        for (state, then) in [("off", FLAP_DOWN), ("on", std::time::Duration::ZERO)] {
+            let said = monitor.human(&format!("set_link {FLAP_NETDEV} {state}"));
+            if !said.trim().is_empty() {
+                return Err(format!("QEMU's monitor refused `set_link {state}`: {said}"));
+            }
+            std::thread::sleep(then);
+        }
+    }
     // Drained rather than waited on: once the lease lands netd says nothing
     // until its window ends, and every wait in this harness reads a quiet guest
     // as one that stopped. The window ends inside this drain.
@@ -563,27 +404,15 @@ pub fn lan_lease_report(
     if !text.lines().any(|line| line.ends_with(" link up 1000 full")) {
         return Err(format!("the report never says the emulated link came up:\n{text}"));
     }
+    flap_kept_the_lease(&text)?;
+    if !summary.held {
+        return Err(format!("netd exited leased and its report ends without a lease:\n{text}"));
+    }
     eprintln!("  [lan] netd exited {code}, a lease; its report:");
     for line in text.lines() {
         eprintln!("  [lan]   {line}");
     }
     Ok(())
-}
-
-fn netd_exit_with(case: &Path, options: BootOptions) -> Result<(i32, String), String> {
-    if !qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")) {
-        return Err("this test needs an Intel NIC and the profile has none".to_string());
-    }
-    let mut guest = QemuInstance::boot_with_options(case, &[], &[], options);
-    let mut console = guest.boot_log().to_string();
-    let exited = format!("{}{NETD} pid=", bootlog::EXIT);
-    qemu::await_marker(&mut guest, &mut console, &exited, "netd to exit with its probe's code")?;
-    drop(guest);
-    let exit = metaldevices::exit_of(&console, NETD)
-        .ok_or_else(|| format!("no readable `{exited}` record:\n{console}"))?;
-    let code = i32::try_from(exit.code)
-        .map_err(|_| format!("netd's exit record carries {}, which is no i32", exit.code))?;
-    Ok((code, console))
 }
 
 /// The QEMU arm: the client, against a DHCP server this repository did not

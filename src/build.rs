@@ -2591,12 +2591,10 @@ mod tests {
         "tests/doomcase/system.toml",
         "tests/doommusiccase/system.toml",
         "tests/e1000case/system.toml",
-        "tests/e1000crumbcase/system.toml",
         "tests/e1000leasecase/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
         "tests/lancase/system.toml",
-        "tests/lancrumbcase/system.toml",
         "tests/lanicscase/system.toml",
         "tests/lanleasecase/system.toml",
         "tests/latencycase/system.toml",
@@ -2766,14 +2764,12 @@ mod tests {
         assert!(one_claimant_per_device(&bad, None).is_err());
     }
 
-    /// netd's three actuators that only its Intel driver answers, spelled here
+    /// netd's two actuators that only its Intel driver answers, spelled here
     /// and held to netd's own declarations by
     /// [`netd_declares_the_flags_this_gate_spells`].
     const PROVOKE_MESSAGE: &str = "--provoke-message";
     const EXIT_WITH_LEASE: &str = "--exit-with-lease";
-    const EXIT_WITH_CRUMBS: &str = "--exit-with-crumbs";
-    const INTEL_ACTUATORS: [&str; 3] =
-        [PROVOKE_MESSAGE, EXIT_WITH_LEASE, EXIT_WITH_CRUMBS];
+    const INTEL_ACTUATORS: [&str; 2] = [PROVOKE_MESSAGE, EXIT_WITH_LEASE];
 
     /// netd's main module, which is where both halves of this gate's spelling
     /// live: nothing links the two crates, so the build system reads the source.
@@ -2836,14 +2832,13 @@ mod tests {
         cards
     }
 
-    /// netd's three Intel-only actuators — `--provoke-message` writes
-    /// §10.2.4.4's `ICS`, `--exit-with-lease` reports the Intel driver's
-    /// bring-up beside the lease, and `--exit-with-crumbs` trails that same
-    /// bring-up — and virtio's driver has none of the three, so a boot config that arms
-    /// one on a card netd opens with any other driver is a boot that panics
-    /// instead of answering the question it was flashed for. One that arms two
-    /// on one program is refused too: a probe ends the process before the point
-    /// another of them acts at.
+    /// netd's two Intel-only actuators — `--provoke-message` writes
+    /// §10.2.4.4's `ICS`, and `--exit-with-lease` reports the Intel driver's
+    /// bring-up beside the lease — and virtio's driver has neither, so a boot
+    /// config that arms one on a card netd opens with any other driver is a boot
+    /// that panics instead of answering the question it was flashed for. One
+    /// that arms both on one program is refused too: the probe ends the process
+    /// before the point the other acts at.
     fn an_armed_intel_actuator_claims_a_card_the_driver_opens(
         cfg: &SystemConfig,
         cards: &[String],

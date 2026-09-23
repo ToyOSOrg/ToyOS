@@ -667,15 +667,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("lan_dhcp_lease", Sched::Parallel, Tier::Fast),
     // The lease probe on the same part: netd serves its window, exits with the
     // lease's verdict, and the report it leaves on the log volume names the
-    // backend's lease with frames counted both ways. Records and a file; its
-    // one clock is the drain that outlasts netd's window, and a slower machine
-    // does not move it.
+    // backend's lease with frames counted both ways and the lease kept across
+    // a link flap. Records and a file; its clocks are the flap's hold and the
+    // drain that outlasts netd's window, and a slower machine moves neither.
     ("lan_lease_report", Sched::Parallel, Tier::Fast),
-    // The crumb trail on the same part and on a USB stick: netd leaves a durable
-    // line before every step of the bring-up, and the file read back out of the
-    // image is that bring-up in order and whole. Records and a file; the one
-    // clock in it is printed, never judged.
-    ("lan_crumb_trail", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -1332,11 +1327,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         "lan_lease_report",
         metal::Metal::Runs { arms: LANLEASECASE, judge: |b| lan::leased_on_metal(b[0]) },
     ),
-    (
-        // A scout arm, deleted with `tests/lancrumbcase` once the step is named.
-        "lan_crumb_trail",
-        metal::Metal::Runs { arms: LANCRUMBCASE, judge: |b| lan::trailed_on_metal(b[0]) },
-    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1691,14 +1681,11 @@ const METAL: &[(&str, metal::Metal)] = &[
 
 /// **The [`METAL`] rows no QEMU registration answers for**, each with why none
 /// can: a verdict under a name only the T14 reports.
-const METAL_ONLY: &[(&str, &str)] = &[
-    (
-        "lan_message_delivery",
-        "whether the T14's own I219 delivers a message through that machine's interrupt \
-         remapping is a fact of that part and that path; QEMU's e1000e is another part behind \
-         another path",
-    ),
-];
+const METAL_ONLY: &[(&str, &str)] = &[(
+    "lan_message_delivery",
+    "whether the T14's own I219 delivers a message through that machine's interrupt remapping \
+     is a fact of that part and that path; QEMU's e1000e is another part behind another path",
+)];
 
 /// The boot most of the first tranche rides: the plain `tests/testcases` shape
 /// with a job list that ends it.
@@ -1763,11 +1750,6 @@ const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
     nic: Some(lan::NIC),
     ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
 }];
-
-/// [`LANPHYCASE`] with a crumb trail, read out of the log volume beside the
-/// kernel's log.
-const LANCRUMBCASE: &[metal::Arm] =
-    &[metal::once(lan::CRUMB_BOOT, lan::CRUMB_CONFIG, &[], lan::JOBS)];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
@@ -13638,7 +13620,6 @@ fn run_machine_test(
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
         "lan_lease_report" => lan::lan_lease_report(test_config, c_bins, rust_bins),
-        "lan_crumb_trail" => lan::lan_crumb_trail(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed

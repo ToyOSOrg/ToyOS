@@ -16,44 +16,51 @@
 //! The documents are the *Intel Ethernet Connection I219 Datasheet* (612523,
 //! rev 2.02) and the *Intel® 500 Series Chipset Family On-Package Platform
 //! Controller Hub Datasheet, Volume 2* (631120, rev 002), whose §8.2 calls every
-//! bit this file writes "Reserved". **The rest is the behaviour of Intel's own
-//! Linux host driver for this family, stated as fact about the hardware**:
+//! bit this file writes "Reserved". **The rest is properties of the part that
+//! neither document publishes**, stated as such:
 //!
 //! - `CTRL` bits 16 and 17 put `LANPHYPC` — I219 §5.2's `LAN_DISABLE_N`, "the
 //!   only external signal that can reset the PHY" — in the host's hand, and
-//!   holding it low for at least 10 µs power-cycles the PHY; `FEXTNVM3`'s PHY
-//!   configuration counter is set to 50 ms first, `CTRL_EXT` bit 2 reports the
-//!   cycle done, and 30 ms more pass before the PHY is asked anything.
-//! - `CTRL_EXT` bit 11 forces the MAC onto SMBus, and 50 ms pass after it
-//!   before a cycle, for the MAC to finish retrying what it was doing; a PHY
-//!   reached that way is taken back to PCIe by clearing I219 §9.5.3.4's Force
-//!   SMBus bit and then the MAC's, and the write that switches the PHY ends in
-//!   `MDIC.Error` by nature.
-//! - That driver power-cycles the PHY on every load where the firmware reports
-//!   itself not valid, and forces SMBus and cycles again where the identifier
-//!   still does not answer.
-//! - Its full reset writes `CTRL.RST` and `CTRL.PHY_RST` together whenever
-//!   `FWSM` bit 6 allows a PHY reset, "to make sure the interface between MAC
-//!   and the external PHY is reset", touches no register for 20 ms after it,
-//!   and then waits on `STATUS.LAN_INIT_DONE`.
+//!   holding it low for at least 10 µs takes the PHY's power away and restores
+//!   it; the PHY's configuration time after that cycle is set to 50 ms first
+//!   (`regs::LANPHYPC_TIMING`), `CTRL_EXT` bit 2 reports the cycle done, and
+//!   the PHY is given 30 ms more before it is asked anything.
+//! - `CTRL_EXT` bit 11 moves the MAC's end of the interconnect onto SMBus, and
+//!   the MAC carries no cycle over it for 50 ms after; a PHY reached that way
+//!   is moved back to PCIe by clearing I219 §9.5.3.4's Force SMBus bit and then
+//!   the MAC's, and the write that moves the PHY ends in `MDIC.Error` whether
+//!   or not the PHY took it.
+//! - `CTRL.RST` and `CTRL.PHY_RST` written together start both ends of the
+//!   interconnect over at once, where `FWSM` bit 6 allows a PHY reset; the
+//!   part takes no register access for 20 ms after that write, and then sets
+//!   `STATUS` bit 9 once the MAC has configured the PHY.
 //!
-//! **The pace these accesses are made at is [`crate::phy::ARBITRATION_PACE_NANOS`]
-//! and not the host driver's**, because every one of them is under §8.2.4's
-//! flag and the T14 is the one machine whose answer to a faster pace was a
-//! power-off. The pace is wider than every floor above, and the constants
-//! below assert it.
+//! **What this driver does with them is its own.** The PHY is asked as found,
+//! and only where it does not answer does [`LADDER`] climb: the power pin
+//! first, because it is the one reach I219 §5.2 and §6.3.1.3 give to a PHY
+//! that is powered down, and §9.5.7.1's ULP configuration ties Ultra Low
+//! Power to the same pin ("Enable ULP on LAN disable (LANPHYPC)"); then SMBus,
+//! because the same register can have the PHY come back "on power on or on ULP
+//! exit" on SMBus, where no cycle over PCIe reaches it; then a cycle with the
+//! MAC already on SMBus; then PCIe again. It stops at the first answer.
+//!
+//! **The pace these accesses are made at is
+//! [`crate::phy::ARBITRATION_PACE_NANOS`]**, because every one of them is under
+//! §8.2.4's flag and the T14 is the one machine whose answer to a faster pace
+//! was a power-off. The pace is wider than every floor above, and the
+//! constants below assert it.
 
 use crate::phy::PhyRefusal;
-use crate::regs::{ctrl, ctrl_ext, fextnvm3, fwsm};
+use crate::power::Settled;
+use crate::regs::{ctrl, ctrl_ext, fwsm, lanphypc_timing};
 
-/// How long `LANPHYPC` is held low before the override is let go: the host
-/// driver's floor.
+/// How long `LANPHYPC` is held low before it is given back: the floor a power
+/// cycle takes.
 pub const LANPHYPC_HOLD_NANOS: u64 = 10_000;
 
-/// How long `CTRL_EXT`'s cycle-done bit is waited on: the host driver's twenty
-/// readings five milliseconds apart. **Not a refusal when it runs out** — that
-/// driver goes on either way, and so does this one: whether the PHY answers is
-/// the question the next ask settles.
+/// How long `CTRL_EXT`'s cycle-done bit is waited on, a driver-chosen bound.
+/// **Not a refusal when it runs out**: whether the PHY answers is the question
+/// the next ask settles.
 pub const POWER_CYCLE_DONE_DEADLINE_NANOS: u64 = 100_000_000;
 
 /// How long passes after the cycle is done before the PHY is asked anything.
@@ -65,7 +72,7 @@ pub const SMBUS_SETTLE_NANOS: u64 = 50_000_000;
 /// How long nothing in the register file is touched after a full reset.
 pub const RESET_QUIET_NANOS: u64 = 20_000_000;
 
-/// How long `STATUS.LAN_INIT_DONE` is waited on after a full reset: I219
+/// How long `STATUS` bit 9 is waited on after a full reset: I219
 /// Table 5-2's `Tr2init`, "completing a PHY configuration following a reset
 /// complete indication", at most 0.5 s. **Not a refusal when it runs out**: the
 /// reading is what the boot has to say, and the PHY's own answer after it is
@@ -105,15 +112,6 @@ pub enum Moment {
 }
 
 impl Moment {
-    pub const ALL: [Self; 6] = [
-        Self::AsFound,
-        Self::PowerCycled,
-        Self::SmbusForced,
-        Self::PowerCycledOnSmbus,
-        Self::SmbusReleased,
-        Self::BackOnPcie,
-    ];
-
     pub fn name(self) -> &'static str {
         match self {
             Self::AsFound => "as-found",
@@ -123,10 +121,6 @@ impl Moment {
             Self::SmbusReleased => "smbus-released",
             Self::BackOnPcie => "back-on-pcie",
         }
-    }
-
-    pub fn parse(word: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|moment| moment.name() == word)
     }
 }
 
@@ -144,8 +138,8 @@ pub enum Action {
     ReleaseSmbus,
 }
 
-/// The host driver's order, each rung followed by one ask: a cycle, SMBus, a
-/// cycle on SMBus, and PCIe again. The ladder stops at the first answer.
+/// Each rung followed by one ask: a cycle, SMBus, a cycle on SMBus, and PCIe
+/// again. The ladder stops at the first answer.
 pub const LADDER: [(Action, Moment); 4] = [
     (Action::PowerCycle, Moment::PowerCycled),
     (Action::ForceSmbus, Moment::SmbusForced),
@@ -191,9 +185,12 @@ impl core::fmt::Display for Answer {
     }
 }
 
-/// Every ask one wake made, in order.
+/// What one wake found the part's power registers holding, and every ask it
+/// made, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Woke {
+    /// §8.2's power step as the wake took it, before any ask.
+    pub power: Settled,
     asked: [Option<(Moment, Answer)>; ASKS],
 }
 
@@ -201,13 +198,12 @@ pub struct Woke {
 /// that answered on SMBus back to PCIe.
 pub const ASKS: usize = 1 + LADDER.len() + 1;
 
-impl Default for Woke {
-    fn default() -> Self {
-        Self { asked: [None; ASKS] }
-    }
-}
-
 impl Woke {
+    /// A wake that has taken its power step and asked nothing yet.
+    pub(crate) fn found(power: Settled) -> Self {
+        Self { power, asked: [None; ASKS] }
+    }
+
     pub(crate) fn push(&mut self, moment: Moment, answer: Answer) {
         let slot = self.asked.iter_mut().find(|slot| slot.is_none());
         *slot.expect("a wake makes at most ASKS asks") = Some((moment, answer));
@@ -226,43 +222,41 @@ impl Woke {
 
 impl core::fmt::Display for Woke {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for (at, (moment, answer)) in self.asked().enumerate() {
-            if at > 0 {
-                f.write_str("; ")?;
-            }
-            write!(f, "{moment}: {answer}")?;
+        write!(f, "the power step, {}", self.power)?;
+        for (moment, answer) in self.asked() {
+            write!(f, "; {moment}: {answer}")?;
         }
         Ok(())
     }
 }
 
-/// `FEXTNVM3` with its PHY configuration counter at fifty milliseconds and
-/// every other bit carried.
-pub fn phy_cfg_counter(fextnvm3: u32) -> u32 {
-    (fextnvm3 & !fextnvm3::PHY_CFG_COUNTER_MASK) | fextnvm3::PHY_CFG_COUNTER_50MS
+/// `regs::LANPHYPC_TIMING` with the PHY's configuration time at fifty
+/// milliseconds and every other bit carried.
+pub fn configuration_50ms(timing: u32) -> u32 {
+    (timing & !lanphypc_timing::CONFIGURATION_MASK) | lanphypc_timing::CONFIGURATION_50MS
 }
 
 /// `CTRL` with `LANPHYPC` in the host's hand and driven low.
 pub fn lanphypc_low(ctrl: u32) -> u32 {
-    (ctrl | ctrl::LANPHYPC_OVERRIDE) & !ctrl::LANPHYPC_VALUE
+    (ctrl | ctrl::LANPHYPC_HOST_DRIVEN) & !ctrl::LANPHYPC_LEVEL
 }
 
 /// `CTRL` with `LANPHYPC` given back to the PCH.
 pub fn lanphypc_released(ctrl: u32) -> u32 {
-    ctrl & !ctrl::LANPHYPC_OVERRIDE
+    ctrl & !ctrl::LANPHYPC_HOST_DRIVEN
 }
 
 pub fn smbus_forced(ctrl_ext: u32) -> u32 {
-    ctrl_ext | ctrl_ext::FORCE_SMBUS
+    ctrl_ext | ctrl_ext::MAC_ON_SMBUS
 }
 
 pub fn smbus_released(ctrl_ext: u32) -> u32 {
-    ctrl_ext & !ctrl_ext::FORCE_SMBUS
+    ctrl_ext & !ctrl_ext::MAC_ON_SMBUS
 }
 
 /// Whether the part says the power cycle is done.
 pub fn power_cycle_done(ctrl_ext: u32) -> bool {
-    ctrl_ext & ctrl_ext::LCD_POWER_CYCLE_DONE != 0
+    ctrl_ext & ctrl_ext::LANPHYPC_CYCLE_DONE != 0
 }
 
 /// I219 §9.5.3.4's register with Force SMBus cleared and every other field
@@ -278,9 +272,8 @@ pub fn reset_word(ctrl: u32, fwsm: u32) -> u32 {
     ctrl | ctrl::RST | phy
 }
 
-/// Whether the firmware lets the host reset the PHY — and with it, cycle
-/// `LANPHYPC`: the host driver for this family reports a cycle "blocked by ME"
-/// on the same bit and does not make it.
+/// Whether the firmware lets the host reset the PHY. A `LANPHYPC` cycle is a
+/// reset of the PHY by its power pin, so the same bit forbids that too.
 pub fn phy_reset_allowed(fwsm: u32) -> bool {
     fwsm & fwsm::PHY_RESET_ALLOWED != 0
 }
@@ -301,7 +294,7 @@ pub struct FullReset {
     pub phy_reset: bool,
     /// Whether §8.2.4's flag was held across the write, and why not.
     pub flag: Result<(), PhyRefusal>,
-    /// How long after the write `STATUS.LAN_INIT_DONE` read set, or `None`
+    /// How long after the write `STATUS` bit 9 read set, or `None`
     /// where [`LAN_INIT_DEADLINE_NANOS`] ran out first. Not waited on at all
     /// where no PHY reset went out.
     pub init_done_after_nanos: Option<u64>,
@@ -320,10 +313,12 @@ impl core::fmt::Display for FullReset {
         }
         match (self.phy_reset, self.init_done_after_nanos) {
             (false, _) => Ok(()),
-            (true, Some(nanos)) => write!(f, ", LAN_INIT_DONE {} us after", nanos / 1_000),
+            (true, Some(nanos)) => {
+                write!(f, ", the PHY configured {} us after", nanos / 1_000)
+            }
             (true, None) => write!(
                 f,
-                ", and LAN_INIT_DONE never read set inside {} ms",
+                ", and STATUS never said the PHY was configured inside {} ms",
                 LAN_INIT_DEADLINE_NANOS / 1_000_000
             ),
         }

@@ -6,14 +6,14 @@ opened: 2026-09-16
 
 # The MAC reset's ordering against the MDIO arbitration is unmeasured on this part
 
-`toyos-i219/src/lib.rs`'s `open` now resets the I219 the way Intel's own
-Linux host driver for this family does (`toyos-i219/src/wake.rs`'s header):
-`CTRL.RST` with `CTRL.PHY_RST` beside it where `FWSM` bit 6 allows, written
-under the software flag, then 20 ms with no register access, then a bounded
-wait on `STATUS.LAN_INIT_DONE`. The 82574 path is unchanged: `RST` alone,
-§10.2.2.1's microsecond, a poll. Two questions stay open for the part in the
-PCH, because the host driver's behaviour is one implementation's and not a
-document:
+`toyos-i219/src/lib.rs`'s `open` now resets the I219 on the properties
+`toyos-i219/src/wake.rs`'s header states, which Intel's host driver for this
+family acts on: `CTRL.RST` with `CTRL.PHY_RST` beside it where `FWSM` bit 6
+allows, written under the software flag, then 20 ms with no register access,
+then a bounded wait on `STATUS` bit 9, the PHY configured. The 82574 path is
+unchanged: `RST` alone, §10.2.2.1's microsecond, a poll. Two questions stay
+open for the part in the PCH, because the host driver's behaviour is one
+implementation's and not a document:
 
 1. whether the reset has to be issued under the software flag, or the flag is
    only that driver's habit;
