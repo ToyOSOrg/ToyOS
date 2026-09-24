@@ -14,7 +14,7 @@
 //!   log ([`toyos_logstream::SERVICE`]) and draws the boot so far above the
 //!   first prompt — the kernel's records and every program's output — and
 //!   every program's line after as it is written, each under its program's
-//!   name (`Log::draw`).
+//!   name, between the shell's lines (`Log::take`).
 //! - **A fatal panic still takes the screen back.** `render` ignores
 //!   `SCREEN_OWNED_BY_USERLAND` entirely — only boot checkpoints honour it —
 //!   so the report paints over whatever this program drew.
@@ -68,9 +68,13 @@ struct Log {
     /// When this program asked, in milliseconds since boot: a kernel record
     /// stamped before it is the boot so far, however late `logd` read it.
     asked_ms: u64,
-    /// Whether the last kernel record was drawn, which its continuation lines
+    /// Whether the last kernel record was kept, which its continuation lines
     /// follow.
     drawing: bool,
+    /// Lines kept and not yet drawn: they wait while the shell is part of the
+    /// way through a line, so a line of the log never lands inside a prompt
+    /// and what is being typed at it.
+    held: Vec<u8>,
 }
 
 impl Log {
@@ -89,18 +93,18 @@ impl Log {
         // SAFETY: the kernel moved this handle into this table with the frame
         // that names it, and nothing else answers for it.
         let pipe = unsafe { Pipe::from_raw(raw) };
-        Ok(Self { pipe, lines: Lines::new(), handed, asked_ms, drawing: true })
+        Ok(Self { pipe, lines: Lines::new(), handed, asked_ms, drawing: true, held: Vec::new() })
     }
 
-    /// Draw every whole line in `bytes` that goes on the screen.
+    /// Take every whole line in `bytes` that goes on the screen.
     ///
     /// **Every program's line but this program's own**, which it has already
     /// drawn, and **the kernel's records of the boot before this program
     /// asked** — the boot so far, as the panel it took over would have shown
     /// it. A record after that is not drawn: it would put a `spawn:` and an
     /// `exit:` beside every command typed.
-    fn draw(&mut self, bytes: &[u8], console: &mut Console) {
-        let (asked_ms, drawing) = (self.asked_ms, &mut self.drawing);
+    fn take(&mut self, bytes: &[u8]) {
+        let (asked_ms, drawing, held) = (self.asked_ms, &mut self.drawing, &mut self.held);
         self.lines.push(bytes, |line| {
             let text = std::str::from_utf8(line).ok();
             let keep = match text.and_then(toyos_logstream::program_line) {
@@ -113,10 +117,20 @@ impl Log {
                 }
             };
             if keep {
-                console.write_bytes(line);
-                console.write_bytes(b"\n");
+                held.extend_from_slice(line);
+                held.push(b'\n');
             }
         });
+    }
+
+    /// Draw what is held; whether there was any.
+    fn draw(&mut self, console: &mut Console) -> bool {
+        if self.held.is_empty() {
+            return false;
+        }
+        console.write_bytes(&self.held);
+        self.held.clear();
+        true
     }
 }
 
@@ -194,6 +208,9 @@ fn main() {
     const TOKEN_CLIENT: u64 = 4;
     const TOKEN_LOG: u64 = 5;
 
+    // Whether the shell's last byte left a line unfinished — a prompt, or what
+    // is being typed at it.
+    let mut mid_line = false;
     loop {
         poller.watch_raw(toyos::RawHandle(shell.stdout.as_raw_fd() as u32), READABLE, TOKEN_STDOUT);
         poller.watch_raw(toyos::RawHandle(shell.stderr.as_raw_fd() as u32), READABLE, TOKEN_STDERR);
@@ -225,11 +242,13 @@ fn main() {
                     // is an ordinary thing to type.
                     shell.restart(&connector);
                     console.write_bytes(b"\n[console] the shell exited; a new one is running\n");
+                    mid_line = false;
                     painted = true;
                 }
                 n => {
                     console.write_bytes(&buf[..n]);
                     std::io::stdout().lock().write_all(&buf[..n]).ok();
+                    mid_line = buf[n - 1] != b'\n';
                     painted = true;
                 }
             }
@@ -241,6 +260,7 @@ fn main() {
             if n > 0 {
                 console.write_bytes(&buf[..n]);
                 std::io::stdout().lock().write_all(&buf[..n]).ok();
+                mid_line = buf[n - 1] != b'\n';
                 painted = true;
             }
         }
@@ -253,12 +273,16 @@ fn main() {
                         console.write_bytes(b"\n[console] logd stopped writing the log\n");
                         log = Err("logd stopped".to_string());
                     }
-                    Ok(n) => reader.draw(&buf[..n], &mut console),
+                    Ok(n) => reader.take(&buf[..n]),
                     Err(SyscallError::WouldBlock) => {}
                     Err(e) => panic!("console: the log's pipe refused a read: {e:?}"),
                 }
-                painted = true;
             }
+        }
+        // Between the shell's lines only, and a line the shell ends lets what
+        // waited through it be drawn.
+        if let (false, Ok(reader)) = (mid_line, &mut log) {
+            painted |= reader.draw(&mut console);
         }
 
         if ready[TOKEN_LISTEN as usize] {
@@ -353,7 +377,8 @@ fn seed(log: &mut Log, console: &mut Console) -> usize {
         }
     }
     let tail = seed_tail(&boot);
-    log.draw(tail, console);
+    log.take(tail);
+    log.draw(console);
     tail.len()
 }
 

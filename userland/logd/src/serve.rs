@@ -96,7 +96,7 @@ fn serve_network(shared: &Arc<Shared>) {
                 return;
             }
         };
-        admit(shared, format!("{peer}"), stream);
+        admit(shared, format!("{peer}"), Announce::Yes, stream);
     }
 }
 
@@ -113,7 +113,7 @@ fn serve_local(shared: &Arc<Shared>, acceptor: &Acceptor) {
         };
         let end = shared.replay.lock().expect("logd: the replay is poisoned").end();
         let Some(pipe) = hand_over(&conn, end) else { continue };
-        admit(shared, format!("local reader {}", conn.as_handle().0), PipeSink(pipe));
+        admit(shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink(pipe));
     }
 }
 
@@ -136,19 +136,33 @@ fn hand_over(conn: &Connection, end: u64) -> Option<Pipe> {
     }
 }
 
+/// Whether a reader's coming and going is a line in the log: a peer on the
+/// network is somebody the machine's owner may want named, and a reader on
+/// this machine is the console, which would draw the line about itself
+/// beside its own prompt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Announce {
+    Yes,
+    No,
+}
+
 /// A reader thread, where the count allows one.
-fn admit(shared: &Arc<Shared>, who: String, sink: impl Write + Send + 'static) {
+fn admit(shared: &Arc<Shared>, who: String, announce: Announce, sink: impl Write + Send + 'static) {
     if shared.readers.fetch_add(1, Ordering::SeqCst) >= MAX_READERS {
         shared.readers.fetch_sub(1, Ordering::SeqCst);
         say!("logd: refusing {who}: {MAX_READERS} readers are already served");
         return;
     }
-    say!("logd: serving this boot's log to {who}");
+    if announce == Announce::Yes {
+        say!("logd: serving this boot's log to {who}");
+    }
     let theirs = Arc::clone(shared);
     let spawned = std::thread::Builder::new().name("log-reader".into()).spawn(move || {
         let sent = feed(&theirs, sink);
         theirs.readers.fetch_sub(1, Ordering::SeqCst);
-        say!("logd: {who} stopped reading after {sent} bytes");
+        if announce == Announce::Yes {
+            say!("logd: {who} stopped reading after {sent} bytes");
+        }
     });
     if let Err(e) = spawned {
         shared.readers.fetch_sub(1, Ordering::SeqCst);
