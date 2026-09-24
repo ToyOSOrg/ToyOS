@@ -1146,7 +1146,128 @@ fn the_advertised_abilities_are_what_the_link_resolves_to() {
     }
 }
 
-/// The premise of the test above: this model really does refuse a link to a PHY
+/// The model's PHY arrives with I219 §9.5.8.2's Low Power Link Up and 1000
+/// Mb/s disabled in effect, and every reset that reaches it has the MAC load
+/// them again from `PHY_CTRL`'s outside-D0a bits — so a bring-up that
+/// restarts auto-negotiation through §9.5.2.1 alone links at §8.1's lowest
+/// common speed, 10 full, against a partner offering a gigabit. The bring-up
+/// writes the platform's D0a policy with the register's own restart, and the
+/// link is the best the two share.
+#[test]
+fn a_phy_left_in_low_power_link_up_links_at_a_gigabit() {
+    use toyos_phy::oem_bits::{GIGABIT_DISABLED, LOW_POWER_LINK_UP, RESTART_AUTONEG};
+    let speed_bits = LOW_POWER_LINK_UP | GIGABIT_DISABLED;
+    let nic = Nic::i219(47);
+    nic.set_link(true);
+    let mut driver = open(&nic);
+
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert_eq!(
+        driver.link(),
+        Link::Up { speed: Speed::Mbps1000, full_duplex: true },
+        "{}",
+        nic.because("a partner offering 1000 full did not get it from a PHY in D0")
+    );
+
+    let oem = driver.brought_up().phy.map(|phy| phy.oem).unwrap_or_else(|why| {
+        panic!("{}", nic.because(&format!("the PHY was not brought up: {why}")))
+    });
+    assert_eq!(
+        oem.found & speed_bits,
+        speed_bits,
+        "{}",
+        nic.because("the premise: the PHY was not found in low-power link-up with gigabit off")
+    );
+    assert_eq!(oem.wrote, (oem.found & !speed_bits) | RESTART_AUTONEG, "{}", nic.because("wrote"));
+    assert_eq!(oem.after & (speed_bits | RESTART_AUTONEG), 0, "{}", nic.because("after"));
+}
+
+/// The other half of the D0a policy: a platform whose `PHY_CTRL` asks for low
+/// power link-up in D0a (PCH Vol 2 §8.2.5's bit 1) gets it, and against a
+/// partner offering everything §8.1's Table 8-1 resolves 10 full first — which
+/// is also the premise the test above rests on, that this model's low-power
+/// link-up really does resolve low.
+#[test]
+fn a_platform_that_asks_for_low_power_link_up_in_d0a_gets_it() {
+    use crate::regs::phy_ctrl::LPLU_D0A;
+    let nic = Nic::i219(48);
+    nic.platform_policy(crate::power::PHY_CTRL_RESET | LPLU_D0A);
+    nic.set_link(true);
+    let mut driver = open(&nic);
+
+    nic.negotiation_settles();
+    one_pass(&mut driver);
+    assert_eq!(
+        driver.link(),
+        Link::Up { speed: Speed::Mbps10, full_duplex: true },
+        "{}",
+        nic.because("the platform's D0a low-power link-up was not carried into the PHY")
+    );
+}
+
+/// [`toyos_phy::oem_bits_in_d0`], row by row: PCH Vol 2 §8.2.5's two D0a bits
+/// are what reach the PHY, its two outside-D0a bits never do, every other field
+/// of §9.5.8.2's register is carried, and the restart goes with it exactly
+/// where `FWSM` allows a PHY reset.
+#[test]
+fn the_oem_bits_carry_the_platforms_d0a_policy_and_nothing_else() {
+    use crate::regs::phy_ctrl::{GBE_DISABLE_NON_D0A, GLOBAL_GBE_DISABLE, LPLU_D0A, LPLU_NON_D0A};
+    use crate::regs::fwsm::PHY_RESET_ALLOWED;
+    use toyos_phy::oem_bits::{GIGABIT_DISABLED, LOW_POWER_LINK_UP, RESTART_AUTONEG};
+    let outside_d0a = GBE_DISABLE_NON_D0A | LPLU_NON_D0A;
+    let carried = 0b1011_1000_0011_1011 & !(LOW_POWER_LINK_UP | GIGABIT_DISABLED | RESTART_AUTONEG);
+    for (found, phy_ctrl, wanted) in [
+        (0, 0, RESTART_AUTONEG),
+        (LOW_POWER_LINK_UP | GIGABIT_DISABLED, outside_d0a, RESTART_AUTONEG),
+        (carried | LOW_POWER_LINK_UP, outside_d0a, carried | RESTART_AUTONEG),
+        (0, outside_d0a | LPLU_D0A, LOW_POWER_LINK_UP | RESTART_AUTONEG),
+        (0, outside_d0a | GLOBAL_GBE_DISABLE, GIGABIT_DISABLED | RESTART_AUTONEG),
+        (
+            carried,
+            LPLU_D0A | GLOBAL_GBE_DISABLE,
+            carried | LOW_POWER_LINK_UP | GIGABIT_DISABLED | RESTART_AUTONEG,
+        ),
+    ] {
+        assert_eq!(
+            toyos_phy::oem_bits_in_d0(found, phy_ctrl, PHY_RESET_ALLOWED),
+            wanted,
+            "OEM Bits {found:#06x} under PHY_CTRL {phy_ctrl:#x}"
+        );
+        assert_eq!(
+            toyos_phy::oem_bits_in_d0(found, phy_ctrl, !PHY_RESET_ALLOWED),
+            wanted & !RESTART_AUTONEG,
+            "OEM Bits {found:#06x} under PHY_CTRL {phy_ctrl:#x}, the firmware blocking a PHY reset"
+        );
+    }
+}
+
+/// The bring-up's two restarts: §9.5.2.1's first and §9.5.8.2's `Aneg_now`
+/// after it where `FWSM` allows a PHY reset, and §9.5.2.1's alone where the
+/// firmware blocks one.
+#[test]
+fn the_oem_bits_restart_follows_the_control_restart_where_a_phy_reset_is_allowed() {
+    use crate::stub::Restart;
+    let nic = Nic::i219(52);
+    open(&nic);
+    assert_eq!(nic.restarts(), [Restart::Control, Restart::OemBits], "{}", nic.because("allowed"));
+
+    let nic = Nic::with(
+        53,
+        Part::I219,
+        Permits {
+            phy_starts_out_of_reach: false,
+            mac_reset_alone_loses_the_phy: false,
+            firmware_allows_a_phy_reset: false,
+            ..Permits::default()
+        },
+    );
+    let driver = open(&nic);
+    assert!(driver.brought_up().phy.is_ok(), "{}", nic.because("the PHY was not brought up"));
+    assert_eq!(nic.restarts(), [Restart::Control], "{}", nic.because("blocked"));
+}
+
+/// The premise of [`the_advertised_abilities_are_what_the_link_resolves_to`]: this model really does refuse a link to a PHY
 /// nothing configured, so a green there is not a model that raises one for a
 /// partner alone. The driver reaches no PHY register at all here, because
 /// §4.5.2's arbitration never grants its request on this reading of the clause.
@@ -1484,7 +1605,8 @@ fn a_register_nothing_decodes_is_refused_and_never_written() {
 #[test]
 fn every_probe_outcome_has_one_exit_code_that_reads_back() {
     use toyos_phy::Outcome;
-    let up = Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1, port_general: 0 });
+    let oem = toyos_phy::Oem { found: 0, wrote: 0, after: 0 };
+    let up = Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1, port_general: 0, oem });
     let link = |speed, full_duplex| Link::Up { speed, full_duplex };
     let stood = |beside| Err(PhyRefusal::SoftwareFlagStood { beside, after_nanos: 1 });
     let down = Link::Down;
