@@ -979,10 +979,11 @@ pub fn dump_nmi_probe(
 /// meets its request twice, with the clear a pass makes on entry between the
 /// meetings, as a task woken behind it that blocks again would.
 ///
-/// One CPU, so no sibling's pass serves what a pass left: under
-/// `test_rs_dump_stage_load` every task leaves the CPU before a quantum ends and
-/// one is always ready, so no tick and no idle loop comes, and the only pass
-/// entered at zero is the one the leaving CPU owes itself. The bound is the
+/// One CPU, so no sibling's pass serves what a pass left. The stages arm at the
+/// SMP release, so one may fire under the boot's own load; one that has not,
+/// `test_rs_dump_stage_load` fires: every task leaves the CPU before a quantum
+/// ends and one is always ready, so no tick and no idle loop comes, and the only
+/// pass entered at zero is the one the leaving CPU owes itself. The bound is the
 /// construction's own and not a duration: `need_resched` is set by every pass
 /// that leaves a request, and the Ring 3 exit check runs a pass entered at zero
 /// while it is set — so zero returns to Ring 3 with the request pending.
