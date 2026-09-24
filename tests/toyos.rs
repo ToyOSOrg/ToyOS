@@ -12302,20 +12302,11 @@ fn run_machine_test(
             // overflowing a 64-slot cache during the format and never
             // reaching it. Measured: 0 block-cache evictions on Headless.
             //
-            // And it has to be an *unformatted* namespace, which is not what a
-            // full run leaves behind: the image is named by device size and
-            // reused within a lane, so a `nvme_large_device` that ran in this
-            // one formatted it and this boot would then only mount — a handful
-            // of metadata blocks and no eviction at all. Measured exactly that
-            // way: green alone, red in the suite. Removing it restores the
-            // precondition whichever lane this landed in, and duplicating the
-            // harness's naming here is safe in the only direction that matters:
-            // if that name ever drifts, the boot mounts instead of formatting
-            // and the turnover assertion below goes red rather than vacuously
-            // green.
-            let stale = common::lane::dir()
-                .join(format!("test-nvme-{}.img", qemu::NVME_T14_BYTES));
-            let _ = fs::remove_file(&stale);
+            // And it has to be an *unformatted* namespace, which the harness
+            // gives every boot that names no image: a mount of one an earlier
+            // boot formatted reads a handful of metadata blocks and evicts
+            // nothing, and the turnover assertion below goes red on that
+            // rather than vacuously green.
 
             // `nvme-spent-budget` and `nvme-command-silent` ride this boot
             // rather than buying registered names of their own: each needs the

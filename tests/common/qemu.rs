@@ -2853,33 +2853,32 @@ impl QemuInstance {
             }
         };
 
-        // Named by size, so two profiles that disagree about the device do
-        // not hand each other a filesystem formatted for the wrong one. Reused
-        // across the boots of one lane and shared with no other — which is what
-        // `super::lane` is for, and why this is not a per-boot name.
+        // **Every boot that names no image gets a blank DATA volume**, so what
+        // one boot leaves under `/home` — sshd's host identity, a package, a
+        // cache — is never the premise of whatever test the lane runs next. A
+        // boot that reads what an earlier one wrote passes that image as
+        // `nvme_image`. The lane's one file is remade rather than a file per
+        // boot, so a test can still read the device after its guest is gone.
         //
         // One live guest per image, claimed here rather than discovered from
         // QEMU's stderr after the second process has already exited — see
-        // [`NvmeClaim`].
+        // [`NvmeClaim`] — and claimed before the remaking, which truncates.
         let nvme_bytes = options.profile.shape().nvme_bytes;
-        let nvme_image = match &options.nvme_image {
-            Some(path) => path.clone(),
+        let (nvme_image, blank) = match &options.nvme_image {
+            Some(path) => (path.clone(), false),
             // A profile with no controller gets no backing file either; the
             // path is never passed to QEMU.
-            None if nvme_bytes == 0 => test_dir.join("no-nvme"),
-            None => {
-                let path = test_dir.join(format!("test-nvme-{nvme_bytes}.img"));
-                if !path.exists() {
-                    toyos_build::build::create_sparse(&path, nvme_bytes);
-                }
-                path
-            }
+            None if nvme_bytes == 0 => (test_dir.join("no-nvme"), false),
+            None => (test_dir.join(format!("test-nvme-{nvme_bytes}.img")), true),
         };
         let nvme = if nvme_bytes == 0 {
             NvmeClaim::unattached(&nvme_image)
         } else {
             NvmeClaim::take(&nvme_image).unwrap_or_else(|why| panic!("[qemu] {why}"))
         };
+        if blank {
+            toyos_build::build::create_sparse(nvme.path(), nvme_bytes);
+        }
 
         // Named by size and block size for the same reason the namespace is:
         // a stamped image is stamped for one geometry, and handing it to a
