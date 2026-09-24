@@ -2702,6 +2702,7 @@ mod tests {
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logrotatecase/system.toml",
+        "tests/logstallcase/system.toml",
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",

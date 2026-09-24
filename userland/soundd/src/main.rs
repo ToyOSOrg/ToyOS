@@ -7,7 +7,7 @@
 //! They are pure, they are host-tested, and `toyos-mixer/fixtures/mix-corpus.txt`
 //! holds the answer this program used to compute inline, byte for byte. What is
 //! left here is the effects: devices, handles, shared memory, timers, threads
-//! and the console.
+//! and the log.
 //!
 //! The split is `userland/compositor/`'s, against `toyos-desktop/`. Everything
 //! under `src/` is one half of soundd's own machinery:
@@ -19,6 +19,8 @@
 //! | [`command`] | the ring the control thread hands the mix thread |
 //! | [`control`] | the connections, the framing, and what a client may ask for |
 //! | [`mix`] | the two loops — a device's, and the null sink's |
+//! | [`ring`] | the lock-free ring every hand-off to or from the mix thread is |
+//! | [`say`] | the one thread that writes soundd's output, so no other waits on it |
 //! | [`hda`], [`virtio`] | the two drivers |
 //!
 //! This file is the fourth thing: which of them the machine gets. A sound card
@@ -35,29 +37,13 @@ use toyos_mixer::{period_frames, ramp_frames};
 
 use std::sync::Arc;
 
-/// One line, one `write`.
-///
-/// **`eprintln!` is not one write and `println!` is not either.** Stderr is
-/// unbuffered by design, so `write_fmt` issues a syscall per format fragment;
-/// stdout's `LineWriter` makes it two, one flushing what it had buffered and
-/// one for the rest. Every gap between two of those is somewhere the kernel's
-/// own log can land, because on this machine the console and the log ring are
-/// one stream — and `soundd: client ` came back with four `exit:` accounting
-/// lines inside it and `1 removed` under them, on CI run `31271983043`. The
-/// collision is systematic and not unlucky: this daemon prints a client's
-/// removal exactly when the kernel is printing that client's exit.
-///
-/// **Another writer can no longer land inside a line**: this daemon's output is
-/// a pipe of its own to `logd`, which ends a line at its newline, and the
-/// kernel's records never enter that pipe. What this macro still buys is one
-/// `write` per line, which keeps a line whole against this daemon's own other
-/// threads.
+/// One line, handed to the one thread that writes soundd's output, and never a
+/// wait: [`say`] is why, and what happens to a line that finds no room.
 macro_rules! say {
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
         let mut line = format!($($arg)*);
         line.push('\n');
-        let _ = std::io::stderr().write_all(line.as_bytes());
+        $crate::say::said(line);
     }};
 }
 
@@ -67,6 +53,8 @@ mod command;
 mod control;
 mod hda;
 mod mix;
+mod ring;
+mod say;
 mod virtio;
 
 use backend::{Backend, HdaBackend, VirtioBackend};
@@ -88,6 +76,7 @@ const NULL_SINK_PERIOD_FRAMES: usize = 128;
 pub(crate) const NULL_SINK_BUFFERS: usize = 8;
 
 fn main() {
+    say::start(say::Voice::Mix);
     let acceptor = endow::acceptor("soundd")
         .expect("the manifest declares this program serves `soundd`");
 
@@ -193,6 +182,7 @@ fn run_with_device(
     std::thread::Builder::new()
         .name("soundd-ctrl".into())
         .spawn(move || {
+            say::speak_as(say::Voice::Control);
             control_thread(
                 acceptor,
                 &cmd_ring2,
@@ -239,6 +229,7 @@ fn run_null_sink(acceptor: Acceptor) {
     std::thread::Builder::new()
         .name("soundd-ctrl".into())
         .spawn(move || {
+            say::speak_as(say::Voice::Control);
             control_thread(
                 acceptor,
                 &cmd_ring2,

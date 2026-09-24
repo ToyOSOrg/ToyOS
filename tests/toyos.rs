@@ -333,6 +333,10 @@ const RUST_SKIP: &[&str] = &[
     // other config should pay 19 MiB of ROOT for. `doom_music` runs it on
     // `tests/doommusiccase`.
     "doom_music",
+    // Needs a `logd` that leaves soundd's pipe unread until it says so, and a
+    // capture of the tone it plays into that. `soundd_log_stall` runs it on
+    // `tests/logstallcase`.
+    "soundd_log_stall",
     // Its failure mode is a CPU that never runs anything again, so on the
     // shared boot it would be reported against whichever test came next — and
     // every one after that. `short_sleep_livelock` gives it a boot of its own.
@@ -647,6 +651,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // floor on audio recorded in real time, not a fraction of the capture and
     // not compute-bound: timer-anchored, and Nightly for that reason.
     ("doom_music", Sched::Parallel, Tier::Nightly),
+    // A tone played while soundd's pipe to a stalled log is full. The verdicts
+    // are the capture's gaps and a count of lines; the clocks are liveness
+    // guards. Nightly for the two megabytes of refusals the log reads back
+    // through a TCG guest's volume.
+    ("soundd_log_stall", Sched::Serial, Tier::Nightly),
     // ureq and rustls from crates.io, fetching over TLS 1.3 from a host this
     // test mints a CA for. Every verdict is a printed line or a digest; the
     // only clock is `run_test`'s ceiling.
@@ -10429,6 +10438,7 @@ fn run_machine_test(
         "null_sink_shipped_client" => audio::null_sink_shipped_client(test_config, c_bins, rust_bins),
         "doom_sound_flood" => audio::doom_sound_flood(rust_bins),
         "doom_music" => doom_music(rust_bins),
+        "soundd_log_stall" => audio::soundd_log_stall(rust_bins),
         "metal_sim_compositor" => {
             metal_sim_compositor(group_boot(held, METAL_SIM_DESKTOP, || {
                 boot_metal_sim_desktop(rust_bins)

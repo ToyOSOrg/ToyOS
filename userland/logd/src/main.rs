@@ -188,6 +188,7 @@ fn main() {
     } else {
         MAX_LOG_BYTES
     };
+    let mut stall = Stall::from_args();
 
     // The wall clock, read once. The kernel reads the RTC once too, so a second
     // reading later in the boot would answer out of the same anchor and tell
@@ -232,7 +233,11 @@ fn main() {
         poller.watch(&cap, READABLE, KERNEL_TOKEN);
         poller.watch(&from_init, READABLE, ORIGINS_TOKEN);
         for (i, origin) in origins.iter().enumerate() {
-            poller.watch(&origin.pipe, READABLE, ORIGIN_BASE + i as u64);
+            // A pipe this round will not read is not armed either: it stays
+            // readable, and a watch on it would never let this loop park.
+            if !Stall::holds(&stall, origin) {
+                poller.watch(&origin.pipe, READABLE, ORIGIN_BASE + i as u64);
+            }
         }
         let mut spent = false;
         poller.wait(0, 0, |_| spent = true);
@@ -266,7 +271,7 @@ fn main() {
         let joined = registered(&from_init, &mut from_init_rx, &mut origins);
         let mut round = Round { lines: Vec::new(), console: Vec::new() };
         if waiting.is_empty() {
-            read_origins(&mut origins, boot_local, &mut round);
+            read_origins(&mut origins, boot_local, &mut round, &mut stall);
             waiting.append(&mut round.lines);
         }
         for record in batch {
@@ -469,26 +474,97 @@ fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut V
 /// records have passed the stamp, and reads no pipe while it holds any — so a
 /// reader behind the kernel's ring cannot put a program's line ahead of the
 /// records that came before it, and what it holds is one read per origin.
-fn read_origins(origins: &mut Vec<Origin>, boot_local: Option<u64>, round: &mut Round) {
+fn read_origins(
+    origins: &mut Vec<Origin>,
+    boot_local: Option<u64>,
+    round: &mut Round,
+    stall: &mut Option<Stall>,
+) {
     let mut chunk = vec![0u8; READ_BYTES];
+    let mut released = false;
     origins.retain_mut(|origin| {
+        if Stall::holds(stall, origin) {
+            return true;
+        }
         let at_ns = toyos_abi::syscall::clock_nanos();
         let tag = origin.tag.as_str();
+        let mut said = |line: &[u8], ended| {
+            released |= stall.as_ref().is_some_and(|s| s.until.as_bytes() == line);
+            said_by(tag, at_ns, line, ended, boot_local, round)
+        };
         match origin.pipe.read_nonblock(&mut chunk) {
             Ok(0) => {
-                origin.lines.finish(|line, ended| said_by(tag, at_ns, line, ended, boot_local, round));
+                origin.lines.finish(&mut said);
                 false
             }
             Ok(n) => {
-                origin
-                    .lines
-                    .push(&chunk[..n], |line, ended| said_by(tag, at_ns, line, ended, boot_local, round));
+                origin.lines.push(&chunk[..n], &mut said);
                 true
             }
             Err(SyscallError::WouldBlock) => true,
             Err(e) => panic!("logd: {tag}'s pipe refused a read: {e:?}"),
         }
     });
+    if released {
+        let held = stall.take().expect("released only while one is armed");
+        // Everything the stall left waiting, in one read, so the line below
+        // says how full the pipe was when it ended.
+        let mut waiting = vec![0u8; STALL_READ_BYTES];
+        let mut read = 0;
+        if let Some(Origin { tag, pipe, lines }) = origins.iter_mut().find(|o| o.tag == held.origin) {
+            let at_ns = toyos_abi::syscall::clock_nanos();
+            match pipe.read_nonblock(&mut waiting) {
+                Ok(n) => {
+                    read = n;
+                    lines.push(&waiting[..n], |line, ended| {
+                        said_by(tag, at_ns, line, ended, boot_local, round)
+                    });
+                }
+                Err(SyscallError::WouldBlock) => {}
+                Err(e) => panic!("logd: {tag}'s pipe refused a read: {e:?}"),
+            }
+        }
+        say!(
+            "logd: reading {} again, as `--stall-until` asked, with {read} bytes waiting",
+            held.origin
+        );
+    }
+}
+
+/// Larger than any pipe: the kernel's is one 2 MiB page.
+const STALL_READ_BYTES: usize = 4 << 20;
+
+/// A test's actuator, armed by nothing but a boot config's `args`: the origin
+/// this program leaves unread (`--stall=<name>`), and the exact line, from any
+/// program, that ends that (`--stall-until=<line>`).
+///
+/// It is how a boot stages a `logd` that stops reading one program while the
+/// rest of the log — the test's own lines among them — still flows: that
+/// program's pipe fills and its next write waits, which is the state a writer
+/// that must never wait on logging is tested in. Its end takes the whole pipe
+/// in one read, past [`READ_BYTES`]'s bound on a round, so the line that says it
+/// ended can say how full the pipe was.
+struct Stall {
+    origin: String,
+    until: String,
+}
+
+impl Stall {
+    fn from_args() -> Option<Stall> {
+        let arg = |key: &str| std::env::args().find_map(|a| a.strip_prefix(key).map(str::to_string));
+        match (arg("--stall="), arg("--stall-until=")) {
+            (Some(origin), Some(until)) => Some(Stall { origin, until }),
+            (None, None) => None,
+            (origin, until) => panic!(
+                "logd: `--stall` and `--stall-until` are armed together or not at all, and this \
+                 boot gave {origin:?} and {until:?}"
+            ),
+        }
+    }
+
+    fn holds(stall: &Option<Stall>, origin: &Origin) -> bool {
+        stall.as_ref().is_some_and(|s| s.origin == origin.tag)
+    }
 }
 
 /// One program's line, into this round: its form in the log, a line of its
