@@ -91,6 +91,8 @@ pub(crate) mod reg {
     pub const CUSTOM_MODE: u8 = 16;
     /// Port General Configuration (§9.5.3.2), PHY address 01, page 769.
     pub const PORT_GENERAL: u8 = 17;
+    /// OEM Bits (§9.5.8.2), PHY address 01, page 0.
+    pub const OEM_BITS: u8 = 25;
     /// §9.3: "Register 31 is the page register in all pages of PHY address 01."
     pub const PAGE_SELECT: u8 = 31;
 }
@@ -110,6 +112,58 @@ pub mod port_general {
 
 /// The page §9.5.3's port control registers live in.
 pub(crate) const PAGE_PORT_CONTROL: u16 = 769;
+
+/// The page §9.5.8's general registers live in: §9.5.8.2's heading and §8.1's
+/// "PHY address 1, page 0, register 25" agree on it.
+pub(crate) const PAGE_GENERAL: u16 = 0;
+
+/// OEM Bits (§9.5.8.2): the two bits that decide which speed auto-negotiation
+/// may resolve to, and the restart that makes them take effect.
+///
+/// **A write alone changes nothing on the wire.** §8.1: bits 2 and 6 "will not
+/// take effect unless" a software reset (§9.5.2.1's bit 15) or this register's
+/// own restart occurs — §9.5.2.1's Restart Auto-Negotiation is not one of the
+/// two — and "the latest occurring event (signal toggling or register write)
+/// will determine the values in the registers", so the MAC's own load of them
+/// from `PHY_CTRL` and a driver's write replace each other.
+pub mod oem_bits {
+    /// `rev_aneg`, bit 2: Low Power Link Up. §8.1's Table 8-1 then resolves
+    /// "10 full-duplex" first and "1000 full-duplex" last.
+    pub const LOW_POWER_LINK_UP: u16 = 1 << 2;
+    /// `a1000_dis`, bit 6: "When set to 1b, 1000 Mb/s speed is disabled." Its
+    /// footnote: "When PE_RST_N goes low (switches to SMBus), its value becomes
+    /// 1b."
+    pub const GIGABIT_DISABLED: u16 = 1 << 6;
+    /// `Aneg_now`, bit 10: "Restart auto-negotiation. This bit is self
+    /// clearing."
+    pub const RESTART_AUTONEG: u16 = 1 << 10;
+}
+
+/// The OEM Bits a function in D0 is owed, from what the register held and
+/// what the MAC's `PHY_CTRL` says the platform allows.
+///
+/// **The platform's D0a policy and nothing else.** PCH Vol 2 §8.2.5 gives
+/// `PHY_CTRL` two bits that hold in D0a — "Global GbE Disable", bit 6, "in all
+/// power states", and "LPLU in D0a", bit 1 — and two that hold only outside it,
+/// bits 3 and 2, which the NVM sets by default because "GbE is not supported in
+/// Sx states". A driver in D0 carries the first two into the PHY and clears
+/// what the second two left there. Every other field of the register is
+/// carried, as §9.1 asks, and the register's own restart goes with the write
+/// only where `fwsm` allows a PHY reset, the condition the reset reads.
+pub fn oem_bits_in_d0(found: u16, phy_ctrl: u32, fwsm: u32) -> u16 {
+    use crate::regs::phy_ctrl;
+    let mut wanted = found & !(oem_bits::LOW_POWER_LINK_UP | oem_bits::GIGABIT_DISABLED);
+    if phy_ctrl & phy_ctrl::LPLU_D0A != 0 {
+        wanted |= oem_bits::LOW_POWER_LINK_UP;
+    }
+    if phy_ctrl & phy_ctrl::GLOBAL_GBE_DISABLE != 0 {
+        wanted |= oem_bits::GIGABIT_DISABLED;
+    }
+    if wake::phy_reset_allowed(fwsm) {
+        wanted |= oem_bits::RESTART_AUTONEG;
+    }
+    wanted
+}
 
 /// §9.3: "Setting the page is done by writing page_num x 32 to Register 31.
 /// This is because only the 11 MSBs of register 31 are used for defining the
@@ -320,6 +374,46 @@ pub struct Phy {
     /// §9.5.3.2's Port General Configuration as the bring-up found it, before
     /// it cleared `Host_WU_Active` out of it.
     pub port_general: u16,
+    /// §9.5.8.2's OEM Bits: as found, as written, and as read back after.
+    pub oem: Oem,
+}
+
+/// One bring-up's account of §9.5.8.2's OEM Bits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Oem {
+    pub found: u16,
+    pub wrote: u16,
+    /// Read straight after the write: `Aneg_now` has cleared itself or is still
+    /// running, and the two speed bits say whether anything replaced them.
+    pub after: u16,
+}
+
+impl Oem {
+    fn words(bits: u16) -> &'static str {
+        match (
+            bits & oem_bits::LOW_POWER_LINK_UP != 0,
+            bits & oem_bits::GIGABIT_DISABLED != 0,
+        ) {
+            (false, false) => "no low-power link-up, gigabit allowed",
+            (true, false) => "low-power link-up, gigabit allowed",
+            (false, true) => "no low-power link-up, gigabit disabled",
+            (true, true) => "low-power link-up, gigabit disabled",
+        }
+    }
+}
+
+impl core::fmt::Display for Oem {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "its OEM Bits read {:#06x} ({}), were written {:#06x} and read {:#06x} after ({})",
+            self.found,
+            Oem::words(self.found),
+            self.wrote,
+            self.after,
+            Oem::words(self.after)
+        )
+    }
 }
 
 impl core::fmt::Display for Phy {
@@ -327,7 +421,7 @@ impl core::fmt::Display for Phy {
         write!(
             f,
             "answers at PHY address {:02} as {:#010x}, its Port General Configuration read \
-             {:#06x}{}",
+             {:#06x}{}; {}",
             self.addr,
             self.id,
             self.port_general,
@@ -335,7 +429,8 @@ impl core::fmt::Display for Phy {
                 " with host wake-up left armed, which was cleared"
             } else {
                 ""
-            }
+            },
+            self.oem
         )
     }
 }
@@ -1006,7 +1101,7 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
     // §1.2, §2.2.2.1.1), so a PHY the MAC holds powered down answers no cycle
     // at all. §8.2.1's bit is where that is put right — under the flag §8.2.4
     // arbitrates the shared CSRs with, and before any transaction is issued.
-    mdi.settle_power()?;
+    let power = mdi.settle_power()?;
 
     // §9.2: "Access using MDIO should be done only when bit 10 in page 769
     // register 16 is set." The bit is itself reached over MDIO, so this one
@@ -1044,7 +1139,16 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
         | control::RESTART_AUTONEG;
     mdi.write(addr, reg::CONTROL, wanted)?;
 
-    Ok(Phy { addr, id, port_general: port })
+    // Two restarts: the OEM Bits' own is what makes their speed bits take
+    // effect (§8.1), and the Control register's above covers the firmware that
+    // blocks a PHY reset, where the OEM Bits' is not written.
+    mdi.select(PAGE_GENERAL)?;
+    let found = mdi.read(GENERAL, reg::OEM_BITS)?;
+    let wrote = oem_bits_in_d0(found, power.after.phy_ctrl, power.after.fwsm);
+    mdi.write(GENERAL, reg::OEM_BITS, wrote)?;
+    let after = mdi.read(GENERAL, reg::OEM_BITS)?;
+
+    Ok(Phy { addr, id, port_general: port, oem: Oem { found, wrote, after } })
 }
 
 /// Bring the PHY within reach of `MDIC` before [`crate::I219::open`] resets

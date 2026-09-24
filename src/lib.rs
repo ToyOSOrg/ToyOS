@@ -7,7 +7,6 @@ pub mod build;
 pub mod buildlock;
 pub mod ci;
 pub mod clippy;
-pub mod durations;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
 pub mod flags;
@@ -28,6 +27,7 @@ pub mod metalprofile;
 pub mod metaltalk;
 pub mod pr;
 pub mod redlist;
+pub mod release;
 pub mod sdkversion;
 pub mod soundfont;
 /// Nothing outside its own gates reads this, so it is not compiled into the
