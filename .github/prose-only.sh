@@ -28,6 +28,13 @@ git fetch --quiet origin "+refs/heads/main:refs/remotes/origin/main"
 # to `main` as touching nothing at all.
 files=$(git diff --name-only origin/main...HEAD)
 
+# A deleted or renamed document can be one `src/redlist.rs` cites, and only
+# the host suite checks that every cited issue file exists.
+if [ -n "$(git diff --name-only --diff-filter=DR origin/main...HEAD)" ]; then
+  echo no
+  exit 0
+fi
+
 for f in $files; do
   case "$f" in
     *.md | issues/* | .claude/*) ;;
