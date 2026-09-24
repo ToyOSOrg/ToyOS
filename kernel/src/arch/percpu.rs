@@ -103,6 +103,9 @@ pub struct PerCpu {
     nmi_active: u32,
     /// The token of the attempt that booted this AP; the AP echoes it into `AP_STARTED` so a stale AP cannot answer for a later attempt. Zero on the BSP.
     ap_token: u32,
+    /// `nmi_gate::hold`'s word: the storm asks in it from another CPU, and `arch::syscall`'s entry acknowledges and spins on it inside its window, through [`OFF_NMI_HOLD`].
+    #[cfg(feature = "boot-actuators")]
+    nmi_hold: AtomicU64,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so growing `SLOTS` moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::SLOTS],
 }
@@ -199,6 +202,9 @@ pub(crate) const OFF_FAULT_STATE: u32 = offset_of!(PerCpu, fault_state) as u32;
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 /// The AP's bring-up token, read by `ap_entry` to answer for its own attempt.
 const OFF_AP_TOKEN: u32 = offset_of!(PerCpu, ap_token) as u32;
+/// Spun on by `arch::syscall`'s entry from inside its window, with nothing pushed.
+#[cfg(feature = "boot-actuators")]
+pub(crate) const OFF_NMI_HOLD: u32 = offset_of!(PerCpu, nmi_hold) as u32;
 /// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
@@ -363,6 +369,8 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 log_shard: alloc_log_shard(cpu_id),
                 nmi_active: 0,
                 ap_token: 0,
+                #[cfg(feature = "boot-actuators")]
+                nmi_hold: AtomicU64::new(0),
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
             },
         );
@@ -374,6 +382,8 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     percpu.init_tss_descriptor();
     // Published before the CPU it belongs to runs an instruction — no window where the census misses it.
     crate::irq_census::publish(cpu_id, percpu.irq_counts.as_ptr());
+    #[cfg(feature = "boot-actuators")]
+    crate::nmi_gate::publish(cpu_id, &raw const percpu.nmi_hold, &raw const percpu.user_rsp);
     ptr
 }
 
