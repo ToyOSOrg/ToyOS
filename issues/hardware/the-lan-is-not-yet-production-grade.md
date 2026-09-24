@@ -32,8 +32,7 @@ why, and the boot still leases.
 
 ## 2. A gigabit driver that holds
 
-- **1000 Mb/s.** The part links at 10 full where Ubuntu gets 1000 full on the
-  same cable; its mechanism is filed with the PHY branch, PR #453.
+- **1000 Mb/s.** Done: bench run 124 linked at 1000 full.
 - **Link events** arrive by interrupt and are recovered from without a restart:
   cable pulled and replugged, the partner rebooting, a flapping link.
 - **Throughput** is measured against Ubuntu on the same machine and cable, with
