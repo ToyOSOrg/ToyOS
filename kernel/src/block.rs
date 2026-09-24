@@ -256,7 +256,7 @@ impl Handle {
     /// The device itself, with its queue serialised for as long as the guard
     /// lives, for a writer that holds no view of it.
     pub fn lock(&self) -> Locked<'_> {
-        Locked { dev: self.0.dev.lock(), device: &*self.0, writer: Writer::Unspanned }
+        Locked { dev: self.0.dev.lock(), device: &self.0, writer: Writer::Unspanned }
     }
 }
 
