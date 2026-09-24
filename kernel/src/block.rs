@@ -3,7 +3,7 @@
 //!
 //! **A block has one holder.** Every view is made by [`Partition::of`], which
 //! refuses a span any live view holds a block of, and the view's hold goes
-//! with the last clone of it. The kernel's mounts hold their partitions this
+//! with the last clone of it (`toyos_blockhold` decides both). The kernel's mounts hold their partitions this
 //! way ([`Holder::Kernel`]), and so does a process's partition claim
 //! ([`Holder::Claim`]): a mounted partition cannot be claimed, a claimed one
 //! cannot be mounted or claimed twice, and no kernel cache ever holds a block
@@ -12,11 +12,11 @@
 //!
 //! **A flush answers for its writer's own writes.** A device's flush is the
 //! whole device's, but every write and flush goes through a [`Locked`] device
-//! that knows whose it is: each holder keeps an account of the writes it had
-//! reported since its last flush, against the disk's loss count
-//! ([`BlockDevice::losses`]), and a flush fails for exactly the holders whose
-//! writes were reported before a loss — at each one's own next flush, once,
-//! whoever flushes first.
+//! that knows whose it is, and `toyos_blockhold` keeps each writer's account
+//! against the disk's loss count ([`BlockDevice::losses`]): a flush fails for
+//! exactly the writers whose writes were reported before a loss — at each
+//! one's own next flush, once, whoever flushes first — and a loss a released
+//! span owed is told to the next holder of its blocks.
 //!
 //! Lock order: a consumer's own lock, then [`Handle::lock`]; never the reverse,
 //! and never two devices at once. [`DEVICES`] is a leaf taken alone, and a
@@ -25,12 +25,12 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 use crate::mm::PAGE_SIZE;
 use crate::scheduler::Operation;
 use crate::sync::{Lock, LockGuard};
 use crate::time::{Budget, Cadence, Deadline, Duration};
+use toyos_blockhold::{Holds, Lost, Writer};
 
 /// Unique identifier for a block device; [`register`] issues each at most once.
 pub type DeviceId = u32;
@@ -152,56 +152,7 @@ struct Device {
     id: DeviceId,
     blocks: u64,
     dev: Lock<Box<dyn BlockDevice>>,
-    holds: Lock<Holds>,
-}
-
-/// Every span a [`Partition`] view holds, and every writer's account.
-struct Holds {
-    spans: Vec<Span>,
-    /// The writes made through [`Handle::lock`], which names no span.
-    unspanned: Account,
-}
-
-/// One writer's writes on a device since its last flush, for the flush that
-/// answers it.
-#[derive(Clone, Copy, Default)]
-struct Account {
-    /// The disk's loss count when this writer's writes since its last flush
-    /// that succeeded were reported; `None` for none.
-    unflushed: Option<u64>,
-    /// Writes of this writer's were reported before the disk lost them.
-    lost: bool,
-}
-
-impl Account {
-    /// A write reported complete while the disk's count was `losses`.
-    fn wrote(&mut self, losses: u64) {
-        if self.unflushed.is_some_and(|at| at < losses) {
-            self.lost = true;
-        }
-        self.unflushed = Some(losses);
-    }
-
-    /// A flush of the device succeeded while its count was `losses`: every
-    /// write reported before it is durable, except one reported before a loss.
-    fn flushed(&mut self, losses: u64) {
-        if self.unflushed.take().is_some_and(|at| at < losses) {
-            self.lost = true;
-        }
-    }
-
-    /// Whether this writer's flush fails for a loss: once.
-    fn told(&mut self) -> bool {
-        core::mem::take(&mut self.lost)
-    }
-}
-
-/// Whose writes a [`Locked`] device carries.
-#[derive(Clone, Copy)]
-enum Writer {
-    /// The view whose span begins at this device block.
-    View(u64),
-    Unspanned,
+    holds: Lock<Holds<Holder>>,
 }
 
 /// A shared handle; there is never a second object for one [`DeviceId`].
@@ -226,7 +177,7 @@ pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
         );
         return None;
     }
-    let holds = Holds { spans: Vec::new(), unspanned: Account::default() };
+    let holds = Holds::new();
     let handle =
         Handle(Arc::new(Device { id, blocks, dev: Lock::new(dev), holds: Lock::new(holds) }));
     devices.insert(id, handle.clone());
@@ -239,7 +190,7 @@ pub fn open(id: DeviceId) -> Option<Handle> {
 }
 
 #[cfg(feature = "boot-actuators")]
-pub fn registered() -> Vec<Handle> {
+pub fn registered() -> alloc::vec::Vec<Handle> {
     DEVICES.lock().values().cloned().collect()
 }
 
@@ -258,6 +209,13 @@ impl Handle {
     pub fn lock(&self) -> Locked<'_> {
         Locked { dev: self.0.dev.lock(), device: &self.0, writer: Writer::Unspanned }
     }
+
+    /// Whether writes this device's disk lost by the count `losses` are
+    /// reported to no writer yet: what a flush from below the block layer asks
+    /// before it calls the disk flushed.
+    pub fn untold(&self, losses: u64) -> bool {
+        self.0.holds.lock().untold(losses)
+    }
 }
 
 /// A device with its queue serialised, whose writes and flushes are one
@@ -267,25 +225,6 @@ pub struct Locked<'a> {
     dev: LockGuard<'a, Box<dyn BlockDevice>>,
     device: &'a Device,
     writer: Writer,
-}
-
-impl Locked<'_> {
-    /// `f` over this writer's account, under the device's holds.
-    fn account<R>(&self, f: impl FnOnce(&mut Account, Option<Holder>) -> R) -> R {
-        let mut holds = self.device.holds.lock();
-        match self.writer {
-            Writer::Unspanned => f(&mut holds.unspanned, None),
-            Writer::View(first) => {
-                let span = holds
-                    .spans
-                    .iter_mut()
-                    .find(|span| span.first == first)
-                    .expect("a live view's span is held until its last clone drops");
-                let holder = span.holder;
-                f(&mut span.account, Some(holder))
-            }
-        }
-    }
 }
 
 impl BlockDevice for Locked<'_> {
@@ -305,7 +244,7 @@ impl BlockDevice for Locked<'_> {
         let done = self.dev.write_blocks(lba, count, buf);
         if done.is_ok() {
             let losses = self.dev.losses();
-            self.account(|account, _| account.wrote(losses));
+            self.device.holds.lock().wrote(self.writer, losses);
         }
         done
     }
@@ -313,14 +252,7 @@ impl BlockDevice for Locked<'_> {
     fn flush(&mut self) -> BlockResult {
         self.dev.flush()?;
         let losses = self.dev.losses();
-        {
-            let mut holds = self.device.holds.lock();
-            holds.unspanned.flushed(losses);
-            for span in &mut holds.spans {
-                span.account.flushed(losses);
-            }
-        }
-        let Some(holder) = self.account(|account, holder| account.told().then_some(holder)) else {
+        let Err(Lost { holder }) = self.device.holds.lock().flushed(self.writer, losses) else {
             return Ok(());
         };
         let whose = match holder {
@@ -378,15 +310,6 @@ impl core::fmt::Display for Holder {
     }
 }
 
-/// One held span, `first..end` in device blocks, never empty, and its
-/// holder's account of its writes.
-struct Span {
-    first: u64,
-    end: u64,
-    holder: Holder,
-    account: Account,
-}
-
 /// A span's hold, shared by every clone of the view that took it: a transfer
 /// in flight on a clone keeps the span held after the view it was cloned from
 /// has gone.
@@ -397,8 +320,7 @@ struct Hold {
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        // `first` names one span, since no two overlap and none is empty.
-        self.device.holds.lock().spans.retain(|span| span.first != self.first);
+        self.device.holds.lock().release(self.first);
     }
 }
 
@@ -435,15 +357,7 @@ impl Partition {
             .checked_add(blocks)
             .filter(|&end| blocks != 0 && end <= handle.block_count())
             .ok_or(ViewRefused::OffDevice)?;
-        let mut holds = handle.0.holds.lock();
-        if let Some(held) =
-            holds.spans.iter().find(|span| span.first < end && first_block < span.end)
-        {
-            return Err(ViewRefused::Held(held.holder));
-        }
-        let account = Account::default();
-        holds.spans.push(Span { first: first_block, end, holder, account });
-        drop(holds);
+        handle.0.holds.lock().hold(first_block, end, holder).map_err(ViewRefused::Held)?;
         let hold = Arc::new(Hold { device: handle.0.clone(), first: first_block });
         Ok(Self { handle, first_block, blocks, _hold: hold })
     }
@@ -477,7 +391,7 @@ impl Partition {
     /// view's own.
     pub fn lock(&self) -> Locked<'_> {
         let device = &*self.handle.0;
-        Locked { dev: device.dev.lock(), device, writer: Writer::View(self.first_block) }
+        Locked { dev: device.dev.lock(), device, writer: Writer::Span(self.first_block) }
     }
 
     /// The device block `block` names, or a refusal past the view's end.

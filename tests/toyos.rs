@@ -759,8 +759,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Two boots: a disk that does not answer a read of its table, and every
     // attempt refused until the deadman.
     ("partition_claim_gives_up", Sched::Parallel, Tier::Fast),
-    // A USB stick's device leaves owing one claim's write and comes back on
-    // another port: each claim's fsync answers for its own writes.
+    // Three boots, a USB stick's device leaving owing one claim's write and
+    // coming back on another port each time: each partition's fsync answers
+    // for its own writes, across a close, after another's flush, and at the
+    // shutdown when nobody asked.
     ("partition_claim_departure", Sched::Parallel, Tier::Fast),
     // F9's negative control: a budget-refused /home fsync retried to durable,
     // its bytes then read off the NVMe image by the host's own bcachefs

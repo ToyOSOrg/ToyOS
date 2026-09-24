@@ -1610,25 +1610,38 @@ pub fn flush_disks() {
     // itself, the way every other caller does.
     for index in 0..storage_count() {
         let _op = crate::block::begin_operation();
-        // The loss count is nobody's to answer here: the machine resets next.
-        let outcome = storage_flush(index, &mut 0);
+        let mut losses = 0;
+        let outcome = storage_flush(index, &mut losses);
+        // A disk that lost writes no writer was told of is not flushed, whatever
+        // its cache says now: this line is the last that can say so.
+        let untold = crate::drivers::usb_storage::untold(index, losses);
         // Read after the flush, because the flush is what sets it on a device
         // that had not been asked before.
         let no_cache = outcome.is_ok() && storage_has_no_cache(index);
         disks += 1;
-        flushed += u32::from(outcome.is_ok());
-        cacheless += u32::from(no_cache);
-        match no_cache {
-            true => log!(
+        flushed += u32::from(outcome.is_ok() && !untold);
+        cacheless += u32::from(no_cache && !untold);
+        match (untold, no_cache) {
+            (true, _) => log!(
+                "usb-quiesce: disk {index} SYNCHRONIZE CACHE {}, but {UNTOLD}",
+                Flushed(outcome)
+            ),
+            (false, true) => log!(
                 "usb-quiesce: disk {index} implements no SYNCHRONIZE CACHE, so it owed none"
             ),
-            false => log!("usb-quiesce: disk {index} SYNCHRONIZE CACHE {}", Flushed(outcome)),
+            (false, false) => {
+                log!("usb-quiesce: disk {index} SYNCHRONIZE CACHE {}", Flushed(outcome))
+            }
         }
     }
     // Not logged here: the summary belongs beside what the register stop did,
     // and that is written into the black box from below the boot's last word.
     stop::flushed(disks, flushed, cacheless);
 }
+
+/// What the shutdown says of a disk that lost writes no writer was told of.
+const UNTOLD: &str = "writes its device reported complete before it left owing a flush were \
+    lost and no writer's flush has said so; the disk is not counted flushed";
 
 /// How long the shutdown waits for the controller lock before going on without
 /// it.

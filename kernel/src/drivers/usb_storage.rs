@@ -39,6 +39,13 @@ pub fn handle(index: usize) -> Option<(Handle, u32)> {
     Some((handle, geometry.logical_block_bytes))
 }
 
+/// Whether the `index`-th disk lost writes by the count `losses` that no
+/// writer's flush has reported (`block::Handle::untold`). A disk the block
+/// layer never registered had no writer to tell.
+pub fn untold(index: usize, losses: u64) -> bool {
+    block::open(USB_DEVICE_ID_BASE + index as DeviceId).is_some_and(|disk| disk.untold(losses))
+}
+
 /// Whether the controller will still speak to the disk, distinct from a failed
 /// transfer — unlike geometry, which outlives recovery giving up on it.
 #[cfg(feature = "boot-actuators")]

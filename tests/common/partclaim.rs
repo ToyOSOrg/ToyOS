@@ -8,7 +8,7 @@
 //!
 //! - every byte of the NVMe disk outside the target and DATA is the byte this
 //!   file wrote: the primary and backup tables, both neighbours, the granted,
-//!   misaligned and twin partitions, and the gaps;
+//!   two misaligned and the twin partitions, and the gaps;
 //! - both neighbours are FAT32 volumes `toyos-fat32-check` (fatgen103's rules)
 //!   has nothing to say about — the neighbour after the target begins at the
 //!   block after its last, so a write one past the end lands in its boot
@@ -34,13 +34,16 @@ const TARGET: &str = "7B1D4A3C-2E5F-4C8A-9D6B-0A1F2E3D4C5B";
 const GRANTED: &str = "A94F0E6D-3B2C-4E1A-8C7D-6E5F4A3B2C1D";
 /// Mirrored: a partition whose length is not whole 4 KiB blocks.
 const MISALIGNED: &str = "3E8A1C5F-7D2B-4F60-9A1E-5C4B3D2E1F07";
+/// Mirrored: a partition of whole 4 KiB blocks that begins inside one.
+const MISSTART: &str = "5A7C9E1B-3D5F-4B71-8C2E-4F6A8B0C2D35";
 /// Mirrored: the unique GUID the NVMe disk and the USB stick both carry.
 const TWIN: &str = "6D2F9B41-8C3E-4A57-B1D0-2E4F6A8C0B13";
 /// Mirrored: DATA, which the kernel mounts at `/home`.
 const DATA: &str = "E3A7C5D9-1B2F-4E6A-8D0C-9F7B5A3E1C24";
-/// Mirrored: the two partitions of the stick whose device leaves.
+/// Mirrored: the partitions of the stick whose device leaves.
 const DEPARTING: &str = "1F3E5D7C-9B2A-4C6E-8F01-A3B5C7D9E2F4";
 const STAYING: &str = "2A4C6E80-1B3D-4F57-9E6A-C8D0B2F4A6E1";
+const EARLIER: &str = "4C6E8A02-3D5F-4179-A0B2-D4F6A8C0E2B4";
 
 /// The two FAT32 neighbours' type, and every other test partition's.
 const NEIGHBOUR_TYPE: &str = "5C3E8F21-9A4B-4D7E-8F10-2B3C4D5E6F70";
@@ -54,10 +57,11 @@ const HOME_FILE: &str = "home/partclaim-interleaved.bin";
 const HOME_CHUNK: usize = 32 * 1024;
 const PAST_END: &[u8; 16] = b"TOYOS-PAST-END\0\0";
 /// The claims the guest expects refused: four mounted partitions, the one init
-/// granted test-runner, a twin, a misaligned one, an absent GUID, the zero GUID, three
+/// granted test-runner, a twin, one whose length and one whose start is not whole
+/// blocks, an absent GUID, the zero GUID, three
 /// claims carrying selector words their class does not read, the target a
 /// second time, and the target while a child holds it.
-const REFUSALS: usize = 14;
+const REFUSALS: usize = 15;
 /// The ESP, the log partition, ROOT and DATA.
 const MOUNTED: usize = 4;
 const BLOCK: u64 = 4096;
@@ -106,6 +110,7 @@ struct Layout {
     before: Span,
     target: Span,
     after: Span,
+    misstart: Span,
     data: Span,
 }
 
@@ -134,6 +139,9 @@ pub fn partition_claim(
         return Err(format!("the neighbours do not touch the target: {:?}", (
             layout.before, layout.target, layout.after
         )));
+    }
+    if layout.misstart.start % BLOCK == 0 || layout.misstart.len % BLOCK != 0 {
+        return Err(format!("the misaligned start is not one: {:?}", layout.misstart));
     }
     if layout.target.len != TARGET_BLOCKS * BLOCK {
         return Err(format!("the target is {} bytes, not {TARGET_BLOCKS} blocks", layout.target.len));
@@ -271,30 +279,87 @@ pub fn partition_claim_gives_up(
     Ok(())
 }
 
-/// Two claims on a USB stick whose device leaves owing a flush of one of
-/// theirs and is moved to another port by the host, as a reset moved T14 run
-/// 79's stick: each claim's fsync answers for its own writes.
+/// Claims on a USB stick whose device leaves owing a flush of one claim's
+/// write and is moved to another port by the host, as a reset moved T14 run
+/// 79's stick: each fsync answers for its own partition's writes. Three boots,
+/// one departure each (`usb-transport-break-owed` breaks the first write that
+/// goes out owing a flush):
 ///
-/// The machine boots off NVMe, so the stick's only writer is the guest and the
-/// write `usb-transport-break-owed` breaks is the guest's second write to
-/// `DEPARTING` — the first owed one. The flush asked first after the return is
-/// `STAYING`'s, which lost nothing; the one after it is `DEPARTING`'s, which
-/// did.
+/// - `departure`: the claim that lost the write writes again after the return,
+///   then is closed and claimed again, and that claim's fsync is told;
+/// - `silent`: the claim that lost it never writes again and another claim
+///   flushes first — `logd`'s `/log` — and a claim whose write a flush made
+///   durable before the departure is not told;
+/// - `untold`: nobody asks, and the shutdown's flush of the disk says so.
+///
+/// The machine boots off NVMe, so the stick's only writer is the guest.
 pub fn partition_claim_departure(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
+    const TOLD: &str = "writes a process's partition claim made before its disk came back owing \
+        a flush may not have survived";
+    const FLUSHED: &str = "usb-quiesce: disk 0 SYNCHRONIZE CACHE ok";
+    const UNTOLD: &str = "no writer's flush has said so; the disk is not counted flushed";
+    for (role, told) in [("departure", 1), ("silent", 1), ("untold", 0)] {
+        let (kernel, tail, spans) = departed(test_config, c_bins, rust_bins, role, told)?;
+        let count = kernel.matches(TOLD).count();
+        if count != told {
+            return Err(format!("{role}: {count} flushes were told of the loss, not {told}:\n{kernel}"));
+        }
+        // The untold line begins as the flushed one does, so a flushed disk is
+        // a flushed line without it.
+        let untold = tail.contains(UNTOLD);
+        let clean = tail.lines().any(|l| l.contains(FLUSHED) && !l.contains(UNTOLD));
+        let said = if told == 0 { UNTOLD } else { FLUSHED };
+        if untold == clean || untold != (told == 0) {
+            return Err(format!("{role}: the shutdown did not say {said:?} alone:\n{tail}"));
+        }
+        if role == "departure" {
+            let [departing, staying, _] = [spans[0], spans[1], spans[2]];
+            let stick = super::lane::dir().join("partclaim-departure.img");
+            let got = read_span(&stick, Span { start: departing.start, len: 2 * BLOCK })?;
+            if got != [departure_block(b'D', 0), departure_block(b'D', 1)].concat() {
+                return Err("the departing partition does not hold the blocks written again".into());
+            }
+            if read_span(&stick, Span { start: staying.start, len: BLOCK })?
+                != departure_block(b'S', 0)
+            {
+                return Err("the staying partition does not hold its block".into());
+            }
+        }
+        let line = tail.lines().find(|l| l.contains(said)).unwrap_or_default();
+        eprintln!("  [partclaim] {role}: {count} told; {}", line.trim());
+    }
+    let _ = std::fs::remove_file(super::lane::dir().join("partclaim-departure.img"));
+    eprintln!(
+        "  [partclaim] the stick left owing a claim's write and came back on port 3 three times: \
+         the claim that wrote it was told once — after a close and a re-claim, and after another \
+         claim flushed first — no other claim was, and a loss nobody asked about kept the \
+         shutdown from calling the disk flushed"
+    );
+    Ok(())
+}
+
+/// One departure boot running the guest's `role`, which says `refusals`
+/// refusals: the kernel's log while it ran, what the shutdown said, and the
+/// stick's partitions — `DEPARTING`, `STAYING`, `EARLIER`.
+fn departed(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    role: &str,
+    refusals: usize,
+) -> Result<(String, String, Vec<Span>), String> {
     const MOVE_NOW: &str = "usb-reset-moves: move the device now";
     const PARAMS: &[&str] = &["usb-transport-break-owed", "usb-reset-moves"];
     const CAME_BACK: &str = "usb-storage: disk 0 came back on port 3 slot ";
-    const TOLD: &str = "writes a process's partition claim made before its disk came back owing \
-        a flush may not have survived";
     let profile = qemu::Profile::NvmeBootUsbDisk;
     let (bytes, _) = profile.usb_disk().expect("NvmeBootUsbDisk declares a disk");
     let stick = super::lane::dir().join("partclaim-departure.img");
-    let spans =
-        craft_stick(&stick, bytes, &[("departing", MIB, DEPARTING), ("staying", MIB, STAYING)])?;
+    let parts = [("departing", MIB, DEPARTING), ("staying", MIB, STAYING), ("earlier", MIB, EARLIER)];
+    let spans = craft_stick(&stick, bytes, &parts)?;
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
@@ -309,10 +374,10 @@ pub fn partition_claim_departure(
         },
     );
     let boot = qemu.boot_log().to_string();
-    no_panic("booting off NVMe beside the stick", &boot)?;
+    no_panic(role, &boot)?;
     let moved = stick.clone();
     let result = qemu.run_test_hooked(
-        "test_rs_partition_claimant departure",
+        &format!("test_rs_partition_claimant {role}"),
         Duration::from_secs(240),
         MOVE_NOW,
         move |socket| {
@@ -327,34 +392,15 @@ pub fn partition_claim_departure(
             );
         },
     );
-    let kernel = guest_verdict(&result, 1)?;
-    for want in [MOVE_NOW, CAME_BACK, TOLD] {
+    let kernel = guest_verdict(&result, refusals).map_err(|e| format!("{role}: {e}"))?;
+    for want in [MOVE_NOW, CAME_BACK] {
         if !kernel.contains(want) {
-            return Err(format!("the kernel never said {want:?}:\n{kernel}"));
+            return Err(format!("{role}: the kernel never said {want:?}:\n{kernel}"));
         }
     }
-    let told = kernel.matches(TOLD).count();
-    if told != 1 {
-        return Err(format!("{told} flushes were told of the loss, and one claim wrote it:\n{kernel}"));
-    }
     let tail = shut_down(qemu);
-    no_panic("on the way down", &tail)?;
-
-    let [departing, staying] = [spans[0], spans[1]];
-    let got = read_span(&stick, Span { start: departing.start, len: 2 * BLOCK })?;
-    if got != [departure_block(b'D', 0), departure_block(b'D', 1)].concat() {
-        return Err("the departing partition does not hold the blocks written again".into());
-    }
-    if read_span(&stick, Span { start: staying.start, len: BLOCK })? != departure_block(b'S', 0) {
-        return Err("the staying partition does not hold its block".into());
-    }
-    let _ = std::fs::remove_file(&stick);
-    eprintln!(
-        "  [partclaim] the stick left owing the departing claim's write and came back on port 3; \
-         the staying claim's fsync answered Ok, the departing claim's Io once and Ok after, and \
-         the stick holds both claims' blocks"
-    );
-    Ok(())
+    no_panic(role, &tail)?;
+    Ok((kernel, tail, spans))
 }
 
 /// What the guest said: exit 0, `refusals` refusals said by name — an exit
@@ -379,7 +425,7 @@ fn guest_verdict(result: &qemu::TestResult, refusals: usize) -> Result<String, S
 }
 
 /// The kernel's own account of the main run: its hold named once for each
-/// mounted partition refused, the twin and the misaligned partition refused
+/// mounted partition refused, the twin and both misaligned partitions refused
 /// by name, and not one line for a transfer refused past the end — a caller
 /// can ask at syscall rate.
 fn main_kernel_lines(kernel: &str) -> Result<(), String> {
@@ -389,8 +435,11 @@ fn main_kernel_lines(kernel: &str) -> Result<(), String> {
             "the kernel named its own hold {held} times for {MOUNTED} mounted partitions:\n{kernel}"
         ));
     }
-    for want in [format!("partclaim: {TWIN} is on device "), format!("partclaim: {MISALIGNED} is at ")]
-    {
+    for want in [
+        format!("partclaim: {TWIN} is on device "),
+        format!("partclaim: {MISALIGNED} is at "),
+        format!("partclaim: {MISSTART} is at "),
+    ] {
         if !kernel.contains(&want) {
             return Err(format!("the kernel never said {want:?}:\n{kernel}"));
         }
@@ -547,11 +596,14 @@ fn read_span(path: &Path, span: Span) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// One partition a crafted table carries: its name, length in bytes, type and
-/// unique GUID.
-type Part = (&'static str, u64, &'static str, &'static str);
+/// One partition a crafted table carries: its name, length in bytes, type,
+/// unique GUID, and the boundary it begins on in 512-byte LBAs.
+type Part = (&'static str, u64, &'static str, &'static str, u64);
 
-/// A disk of `bytes` at `path` holding `parts` in order, each on a 1 MiB
+/// Where every partition but one begins.
+const ALIGNED: u64 = MIB / 512;
+
+/// A disk of `bytes` at `path` holding `parts` in order, each on its own
 /// boundary, with the `gpt` crate writing both copies of the table; the disk,
 /// and each partition's span in the same order.
 fn table(path: &Path, bytes: u64, parts: &[Part]) -> Result<(Box<dyn gpt::DiskDevice>, Vec<Span>), String> {
@@ -575,15 +627,15 @@ fn table(path: &Path, bytes: u64, parts: &[Part]) -> Result<(Box<dyn gpt::DiskDe
         .update_partitions(std::collections::BTreeMap::new())
         .map_err(|e| format!("initialise the table: {e}"))?;
     let mut ids = Vec::new();
-    for &(name, len, guid, _) in parts {
+    for &(name, len, guid, _, align) in parts {
         let ty = gpt::partition_types::Type { guid, os: gpt::partition_types::OperatingSystem::None };
-        let id = gdisk.add_partition(name, len, ty, 0, Some(MIB / 512));
+        let id = gdisk.add_partition(name, len, ty, 0, Some(align));
         ids.push(id.map_err(|e| format!("add {name}: {e}"))?);
     }
     // Each unique GUID fixed where the table is written, so the `part:` row or
     // the guest constant that names it names this partition and no other.
     let mut fixed = gdisk.partitions().clone();
-    for (id, &(name, _, _, unique)) in ids.iter().zip(parts) {
+    for (id, &(name, _, _, unique, _)) in ids.iter().zip(parts) {
         let part = fixed.get_mut(id).ok_or_else(|| format!("{name} was just added"))?;
         part.part_guid = uuid::Uuid::parse_str(unique).map_err(|e| format!("{unique}: {e}"))?;
     }
@@ -603,22 +655,31 @@ fn table(path: &Path, bytes: u64, parts: &[Part]) -> Result<(Box<dyn gpt::DiskDe
 
 /// The NVMe disk: a FAT32 neighbour, the idle ROOT slot, a FAT32 neighbour
 /// touching it, the partition init grants, a partition that is not whole
-/// blocks, the twin, and a DATA the kernel formats and mounts at `/home`.
+/// blocks, one that begins inside a block, the twin, and a DATA the kernel formats and mounts at `/home`.
 fn craft_nvme(path: &Path) -> Result<Layout, String> {
     const FAT_BYTES: u64 = 34 * MIB;
     const DATA_BYTES: u64 = 96 * MIB;
-    let parts: [Part; 7] = [
-        ("neighbour before", FAT_BYTES, NEIGHBOUR_TYPE, "11111111-2222-4333-8444-555555555501"),
-        ("idle ROOT slot", TARGET_BLOCKS * BLOCK, toyos_gpt::Guid::TOYOS_ROOT_TEXT, TARGET),
-        ("neighbour after", FAT_BYTES, NEIGHBOUR_TYPE, "11111111-2222-4333-8444-555555555502"),
-        ("granted", GRANTED_BLOCKS * BLOCK, PLAIN_TYPE, GRANTED),
-        ("misaligned", MIB + 512, PLAIN_TYPE, MISALIGNED),
-        ("twin", MIB, PLAIN_TYPE, TWIN),
-        ("ToyOS data", DATA_BYTES, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA),
+    let parts: [Part; 8] = [
+        ("neighbour before", FAT_BYTES, NEIGHBOUR_TYPE, "11111111-2222-4333-8444-555555555501", ALIGNED),
+        ("idle ROOT slot", TARGET_BLOCKS * BLOCK, toyos_gpt::Guid::TOYOS_ROOT_TEXT, TARGET, ALIGNED),
+        ("neighbour after", FAT_BYTES, NEIGHBOUR_TYPE, "11111111-2222-4333-8444-555555555502", ALIGNED),
+        ("granted", GRANTED_BLOCKS * BLOCK, PLAIN_TYPE, GRANTED, ALIGNED),
+        ("misaligned", MIB + 512, PLAIN_TYPE, MISALIGNED, ALIGNED),
+        // Right after the one above, at the first LBA past its odd length: whole
+        // blocks long, and beginning 512 bytes into one.
+        ("misaligned start", MIB, PLAIN_TYPE, MISSTART, 1),
+        ("twin", MIB, PLAIN_TYPE, TWIN, ALIGNED),
+        ("ToyOS data", DATA_BYTES, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA, ALIGNED),
     ];
     let total = MIB + parts.iter().map(|p| p.1.next_multiple_of(MIB)).sum::<u64>() + 2 * MIB;
     let (mut device, spans) = table(path, total, &parts)?;
-    let layout = Layout { before: spans[0], target: spans[1], after: spans[2], data: spans[6] };
+    let layout = Layout {
+        before: spans[0],
+        target: spans[1],
+        after: spans[2],
+        misstart: spans[5],
+        data: spans[7],
+    };
     for (label, span) in [("PC-BEFORE", layout.before), ("PC-AFTER", layout.after)] {
         let volume = fat32(span.len as usize, label)?;
         device.seek(SeekFrom::Start(span.start)).map_err(|e| format!("seek: {e}"))?;
@@ -643,7 +704,7 @@ fn craft_stick(
     parts: &[(&'static str, u64, &'static str)],
 ) -> Result<Vec<Span>, String> {
     let parts: Vec<Part> =
-        parts.iter().map(|&(name, len, unique)| (name, len, PLAIN_TYPE, unique)).collect();
+        parts.iter().map(|&(name, len, unique)| (name, len, PLAIN_TYPE, unique, ALIGNED)).collect();
     let (mut device, spans) = table(path, bytes, &parts)?;
     device.flush().map_err(|e| format!("flush the stick: {e}"))?;
     Ok(spans)

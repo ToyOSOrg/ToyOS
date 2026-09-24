@@ -14,7 +14,7 @@
 //! and a flush is the whole disk's, so the first flush after the loss answers
 //! for nobody in particular; the block layer holds each writer's own writes
 //! against the count and fails the flush of each writer whose writes were
-//! reported before it moved (`kernel/src/block.rs`).
+//! reported before it moved (`toyos-blockhold`).
 
 /// One device instance's flush debt and the disk's loss count;
 /// [`Self::NONE`] for a disk first bound.
