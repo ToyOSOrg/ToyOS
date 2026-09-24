@@ -121,8 +121,11 @@ const KERNEL_TOKEN: u64 = 0;
 const ORIGINS_TOKEN: u64 = 1;
 const ORIGIN_BASE: u64 = 2;
 
-/// What one pipe read may take.
-const READ_BYTES: usize = 16 * 1024;
+/// What one origin's pipe gives a round at most: one read. **A bound on the
+/// round, not on the program** — what is left is read the next round, and a
+/// writer that outruns this waits on its full pipe — so a program that never
+/// stops writing cannot keep this loop from the kernel's records or the file.
+const READ_BYTES: usize = 64 * 1024;
 
 /// How much of this boot a reader who connects late can be handed: as much as
 /// the volume keeps, so the stream is never the shorter of the two.
@@ -433,20 +436,23 @@ fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut V
     }
 }
 
-/// Read every origin's pipe until it would block, into `round`. An origin whose
-/// writers are all gone says what it left unfinished and is dropped.
+/// One read of every origin's pipe, into `round`. An origin whose writers are
+/// all gone says what it left unfinished and is dropped.
 fn read_origins(origins: &mut Vec<Origin>, boot_local: Option<u64>, round: &mut Round) {
     let mut chunk = vec![0u8; READ_BYTES];
-    origins.retain_mut(|origin| loop {
+    origins.retain_mut(|origin| {
         let at_ns = toyos_abi::syscall::clock_nanos();
         let tag = origin.tag.as_str();
         match origin.pipe.read_nonblock(&mut chunk) {
             Ok(0) => {
                 origin.lines.finish(|line| said_by(tag, at_ns, line, boot_local, round));
-                break false;
+                false
             }
-            Ok(n) => origin.lines.push(&chunk[..n], |line| said_by(tag, at_ns, line, boot_local, round)),
-            Err(SyscallError::WouldBlock) => break true,
+            Ok(n) => {
+                origin.lines.push(&chunk[..n], |line| said_by(tag, at_ns, line, boot_local, round));
+                true
+            }
+            Err(SyscallError::WouldBlock) => true,
             Err(e) => panic!("logd: {tag}'s pipe refused a read: {e:?}"),
         }
     });
