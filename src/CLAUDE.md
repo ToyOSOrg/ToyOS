@@ -13,9 +13,9 @@ Loads when you read a file under `src/` — the root cargo project, package name
 ## Other entry points
 
 - `cargo run -- --check-forks` names every lockfile pin behind the fork branch its manifest consumes. **On demand only: it asks the network**, so it is in neither `cargo test` nor the landing gate.
-- `cargo run -- --merge-durations <dir>` merges a sharded CI run's duration files into `tests/test-durations`, refusing anything that is not one whole run; committing the result is the deliberate act.
-- **`.github/qemu-version` is the QEMU every guest is measured with, declared once**; `.github/instrument.sh` runs in every gate-workflow job that boots a guest and reds on a disagreement. `cargo test --lib` refuses a gate workflow that installs QEMU without naming its instrument (`src/ci.rs`).
+- **`.github/qemu-version` is the QEMU every guest is measured with, declared once**; every guest job's first step (`src/ci.rs`'s `instrument`) reds on a disagreement. `cargo test --lib` refuses a workflow that installs QEMU without naming its instrument (`src/sourcegate.rs`).
 - `system.toml` defines which programs to build and the init sequence.
+- **A workflow step runs `cargo run -- --ci <job>` and nothing else; logic in YAML is a defect.**
 
 ## The host's locks and slots
 
@@ -34,6 +34,6 @@ Loads when you read a file under `src/` — the root cargo project, package name
 ## Caveats that bite every agent
 
 - **Documentation carries no gates** — `src/redlist.rs` resolves doc paths only because it gates a Rust table, not a corpus.
-- **Every CI lane is GitHub-hosted and no workflow may name a self-hosted label** — a `runs-on:` naming one queues until it times out rather than failing, so `src/ci.rs`'s `no_workflow_asks_for_a_runner_this_project_does_not_have` refuses it; a measurement owed on hardware goes to the metal loop, not to a runner.
+- **Every CI lane is GitHub-hosted and no workflow may name a self-hosted label** — a `runs-on:` naming one queues until it times out rather than failing, so `src/ci.rs`'s `workflows_run_against_main_on_hosted_runners` refuses it; a measurement owed on hardware goes to the metal loop, not to a runner.
 - **A workflow job that runs in a container adds `safe.directory` itself** — `actions/checkout` sets it into a temporary global config it discards when its step ends, so the first git command a container step runs after checkout dies on a dubiously-owned repository.
 - **A red build may be the build system — re-run in isolation before believing any single red.** A `stage1-std/<target>/dist/deps` temp-dir error means a concurrent build, never a broken checkout; never repair or force-rebuild the toolchain. A refusal that your worktree and the shared sysroot disagree about `toyos-abi/src` is correct — the build it stops links against another checkout's struct layouts and no test catches that.

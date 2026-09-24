@@ -3,10 +3,15 @@
 //! verdict.
 //!
 //! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
-//! the merge queue and boots no guest: its `host` job runs [`Job::Host`],
-//! [`Job::AbiSplit`] and [`Job::GateStage`]. `nightly.yml` runs everything that
-//! boots a guest, the rest of the host checks, and portability. `publish.yml`
-//! puts a landing's crates on crates.io.
+//! the merge queue and boots no guest, split so each half reads only the event
+//! it needs: [`Job::AbiSplit`] runs as its own job on the pull request, where
+//! the branch's own commits are; [`Job::Host`] and then [`Job::GateStage`] run
+//! as `host`, only in the merge queue, where every branch has already been
+//! judged as a pull request. A required check a workflow skips on the other
+//! event still reports, and a skip counts as passing — that is how each half
+//! enters the queue it does not itself run in. `nightly.yml` runs everything
+//! that boots a guest, the rest of the host checks (`host-full`), and
+//! portability. `publish.yml` puts a landing's crates on crates.io.
 //!
 //! A host job runs every step and reds if any failed; a guest job stops at the
 //! first failure, because what follows a wrong instrument or a missing
@@ -29,16 +34,16 @@ use crate::{flags, pr, release, sdkversion};
 /// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
 /// a minimum, never an equality, so a name GitHub requires and this does not
 /// is reported rather than refused.
-pub(crate) const REQUIRED_CHECKS: &[&str] = &["host"];
+pub(crate) const REQUIRED_CHECKS: &[&str] = &["host", "abi-split"];
 
 /// The one issue a red nightly files or comments on, found by title.
 const NIGHTLY_RED: &str = "nightly is red";
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
-  host              cargo test --lib and every host-workspace suite (ci.yml)
+  host              cargo test --lib, every host-workspace suite and clippy (ci.yml)
   abi-split         the ABI-first rule and the published crates' versions (ci.yml)
   gate-stage        what protects main, read back from GitHub (ci.yml)
-  host-full         host, plus clippy, the model controls, userland and the SDK (nightly)
+  host-full         host, plus the model controls, userland and the SDK (nightly)
   toolchain         publish this tree's toolchain if nobody has (nightly)
   guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
   tcg               one test on an emulated CPU (nightly)
@@ -200,15 +205,41 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
 
 // --- The host jobs -------------------------------------------------------------
 
-/// The pull request's whole gate: the build system's own tests, and every
-/// member of the host workspace.
+/// The merge queue's whole gate: the build system's own tests, every member of
+/// the host workspace, and clippy with warnings denied. None of the three
+/// needs the ToyOS toolchain nightly.yml alone builds — the kernel and the
+/// bootloader clippy against `x86_64-unknown-none`/`x86_64-unknown-uefi`,
+/// targets any rustup installs, and `x86_64-unknown-toyos` (the one target
+/// that does need the fork) is userland's alone, and userland carries no
+/// clippy shape (`src/clippy.rs`).
 fn host(root: &Path) -> Vec<Step> {
-    vec![
+    let mut steps = vec![
         step("the build system", || cargo(root, &["test", "--lib"])),
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
-    ]
+    ];
+    steps.push(step("clippy and the bare targets", || {
+        for args in [
+            &["component", "add", "clippy"][..],
+            &["target", "add", "x86_64-unknown-none", "x86_64-unknown-uefi"],
+        ] {
+            let status = Command::new("rustup").args(args).status().map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("rustup {} exited {status}", args.join(" ")));
+            }
+        }
+        Ok("installed".into())
+    }));
+    steps.push(step("clippy, warnings denied", || {
+        let failed = crate::clippy::run(root);
+        if failed.is_empty() {
+            Ok("clean".into())
+        } else {
+            Err(failed.join("; "))
+        }
+    }));
+    steps
 }
 
 /// What a model of the kernel's concurrency is shown able to catch: a feature
@@ -370,28 +401,8 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 const USERLAND_HOST_CRATES: &[&str] = &["sshd", "calc", "soundd", "logd", "pkg"];
 
 fn host_full(root: &Path) -> Vec<Step> {
-    let host = crate::toolchain::host_triple();
-    let mut steps = vec![step("clippy and the bare targets", || {
-        for args in [
-            &["component", "add", "clippy"][..],
-            &["target", "add", "x86_64-unknown-none", "x86_64-unknown-uefi"],
-        ] {
-            let status = Command::new("rustup").args(args).status().map_err(|e| e.to_string())?;
-            if !status.success() {
-                return Err(format!("rustup {} exited {status}", args.join(" ")));
-            }
-        }
-        Ok("installed".into())
-    })];
-    steps.push(step("clippy, warnings denied", || {
-        let failed = crate::clippy::run(root);
-        if failed.is_empty() {
-            Ok("clean".into())
-        } else {
-            Err(failed.join("; "))
-        }
-    }));
-    steps.extend(self::host(root));
+    let host_triple = crate::toolchain::host_triple();
+    let mut steps = self::host(root);
     // `log_zeroed_init` and `log_body_words` are gated `cfg(not(feature =
     // "loom"))`, so the default invocation runs nothing from either.
     steps.push(step("kernel-loom without loom", || {
@@ -412,23 +423,22 @@ fn host_full(root: &Path) -> Vec<Step> {
     for name in USERLAND_HOST_CRATES {
         let manifest = format!("userland/{name}/Cargo.toml");
         steps.push(step(&format!("userland/{name}"), || {
-            cargo(root, &["test", "--manifest-path", &manifest, "--target", &host])
+            cargo(root, &["test", "--manifest-path", &manifest, "--target", &host_triple])
         }));
     }
     // The SDK compiles against the ToyOS sysroot everywhere but here, and this
     // build links no syscall.
     steps.push(step("the toyos SDK", || {
-        cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host])
+        cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
     steps
 }
 
-/// A pull request against `main`; a merge group passes, since its commits are
-/// several branches' and each was judged alone.
+/// A pull request against `main`, run as its own `ci.yml` job because it reads
+/// the branch's own commits — a merge group's are several branches' and each
+/// was already judged this way as a pull request, which is why `abi-split` is
+/// not a job there at all.
 fn abi_split(root: &Path) -> Result<String, String> {
-    if std::env::var("GITHUB_EVENT_NAME").is_ok_and(|e| e == "merge_group") {
-        return Ok("a merge group: each branch in it was judged as a pull request".into());
-    }
     pr::git(root, &["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])?;
     pr::abi_lands_alone(root, "origin/main")?;
     let sdk = sdkversion::judge(root, "origin/main")?;
