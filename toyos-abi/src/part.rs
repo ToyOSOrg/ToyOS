@@ -153,6 +153,16 @@ pub struct PartitionInfo {
 const _: () = assert!(core::mem::size_of::<PartitionInfo>() == 8 + 16 + 16);
 
 impl PartitionInfo {
+    /// The partition's unique GUID, as a claim by `part:` would name it.
+    pub const fn unique(&self) -> PartGuid {
+        PartGuid(self.unique_guid)
+    }
+
+    /// Its type GUID, as a claim by `part-type:` would name it.
+    pub const fn of_type(&self) -> PartGuid {
+        PartGuid(self.type_guid)
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         // SAFETY: `self` is a valid `&Self`, readable for `size_of::<Self>()`
         // bytes, and the const assert above proves the `repr(C)` layout has no
