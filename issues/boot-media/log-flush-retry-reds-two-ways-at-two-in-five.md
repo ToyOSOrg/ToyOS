@@ -75,3 +75,17 @@ Three points, each run alone: `main` 71ed50cf red, `metal-suite` 7f16914d red,
 change on it. That the same name now reds in three different places, one of them
 before userland, is against reading any of them as the arm's own staged refusal
 arriving early.
+
+## A third way, red on `main` both times it ran
+
+`origin/main` at `7a5a98d3`, in a worktree of its own, one `--nightly
+log_flush_retry` run: red, and the harness's re-run red again, on the volume
+checker —
+
+    /2026-09-24-210445.log: DIR_FileSize is 77758 bytes, which needs 152 clusters, and the chain holds 159
+
+— clusters chained past the file's size, with `FSI_Free_Count` off by the
+same kind of amount in the logd branch's runs. The logd branch at `583f21e5`
+was red the same way in 4 runs of 4 (two nightlies' worth, each re-run). One
+`main` run is not a rate, but it is this sentence on a tree without the
+branch.
