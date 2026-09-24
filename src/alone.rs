@@ -14,7 +14,11 @@
 //! **The limit that rule carries**: a reading rendered without one of [`UNITS`]
 //! beside it — an address, a percentage, a bare count, `bytes` spelled out —
 //! reads as an identity, so one assertion printing two of them is reported as
-//! two failures, which is the direction this rule errs in on purpose.
+//! two failures, which is the direction this rule errs in on purpose. A byte
+//! count is the one unit this tree also uses to *name* a size class rather
+//! than report one (`"blocks of 512 B"`, `"sectors of 4096 B"`): the word `of`
+//! immediately before it is what tells "sized in units of N" from "N was
+//! measured", so that shape stays an identity too.
 
 /// The units that make digits a reading, each one a spelling an assertion in
 /// this tree prints; the test names the site per unit.
@@ -39,9 +43,17 @@ fn skeleton(text: &str) -> String {
             out.push_str(&rest[..time]);
             out.push('#');
             i += end;
-        } else if let Some(digits) = reading(rest) {
-            out.push('#');
-            i += digits;
+        } else if let Some(n) = numeral(rest) {
+            // The whole numeral moves at once, classified once: a byte count
+            // ruled out by `of` still has its own later digits, and re-asking
+            // from inside them would find no `of` right behind and take them
+            // for a reading `512` never was.
+            if is_reading(rest, n, &text[..i]) {
+                out.push('#');
+            } else {
+                out.push_str(&rest[..n]);
+            }
+            i += n;
         } else {
             out.push(c);
             i += c.len_utf8();
@@ -69,9 +81,10 @@ fn stamp(text: &str) -> Option<(usize, usize)> {
     stamped.then_some((at, at + time.len()))
 }
 
-/// The length of the numeric literal at the head of `text`, if a unit follows
-/// it — which is the whole of what makes digits a reading.
-fn reading(text: &str) -> Option<usize> {
+/// The length of the numeral at the head of `text` — digits, and the fraction
+/// behind a `.` with digits on both sides so `0.303` is one numeral and not
+/// two — whether or not it turns out to be a reading.
+fn numeral(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     if !bytes.first().is_some_and(u8::is_ascii_digit) {
         return None;
@@ -80,25 +93,39 @@ fn reading(text: &str) -> Option<usize> {
     while n < bytes.len() && bytes[n].is_ascii_digit() {
         n += 1;
     }
-    // The fraction digits behind a `.` with digits on both sides: `0.303` is one
-    // reading and not two.
     while bytes.get(n) == Some(&b'.') && bytes.get(n + 1).is_some_and(u8::is_ascii_digit) {
         n += 1;
         while n < bytes.len() && bytes[n].is_ascii_digit() {
             n += 1;
         }
     }
+    Some(n)
+}
+
+/// Whether the numeral `text[..n]` is a reading: a unit follows it, and —
+/// for a byte count — `before`, everything already read, does not put it
+/// after the word `of`.
+fn is_reading(text: &str, n: usize, before: &str) -> bool {
     let after = &text[n..];
     let after = after.strip_prefix(' ').unwrap_or(after);
     // A whole unit and not the head of a longer word: `2 sticks` counts nothing.
-    UNITS
-        .iter()
-        .any(|unit| {
-            after
-                .strip_prefix(unit)
-                .is_some_and(|tail| !tail.starts_with(|c: char| c.is_ascii_alphanumeric()))
-        })
-        .then_some(n)
+    let Some(unit) = UNITS.iter().find(|unit| {
+        after
+            .strip_prefix(**unit)
+            .is_some_and(|tail| !tail.starts_with(|c: char| c.is_ascii_alphanumeric()))
+    }) else {
+        return false;
+    };
+    *unit != "B" || !names_a_size_class(before)
+}
+
+/// Whether `before` ends on the word `of`, which is how this tree writes "each
+/// one sized N bytes" (`"blocks of 512 B"`, `"sectors of 4096 B"`) rather than
+/// a byte count it measured — the two words this checks for a boundary around
+/// so `"roof 512 B"` does not read as one.
+fn names_a_size_class(before: &str) -> bool {
+    let head = before.trim_end_matches(' ');
+    head.ends_with("of") && head[..head.len() - 2].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric())
 }
 
 #[cfg(test)]
@@ -257,6 +284,18 @@ mod tests {
         assert!(!same_failure(&stops_at(40960), &stops_at(45056)));
     }
 
+    /// `tests/common/usb.rs`'s `check_geometry` prints the sector size a driver
+    /// reported as `"blocks of {lba} B"`: 512 and 4096 are different driver
+    /// defects (the default-geometry path against the 4Kn one), not two
+    /// readings of one assertion, so they must stay two failures.
+    #[test]
+    fn a_size_class_is_not_a_reading() {
+        assert!(!same_failure(
+            "the driver did not report \"blocks of 512 B\"",
+            "the driver did not report \"blocks of 4096 B\""
+        ));
+    }
+
     /// Every unit in [`UNITS`] is a spelling an assertion in this tree prints. A
     /// unit with no such site only widens a merge that must err toward
     /// "different", so the list and this table are one thing.
@@ -272,7 +311,7 @@ mod tests {
             ("GiB", "tests/toyos-rust-tests/src/bin/abuse_pipe_ring.rs's ring-header cases"),
             ("MB", "kernel/src/process.rs's per-process peak, quoted into a headline"),
             ("GB", "tests/toyos-rust-tests/src/bin/allocator_stress.rs's memory-total range"),
-            ("B", "tests/common/usb.rs's block-size report"),
+            ("B", "tests/common/usb.rs's usbmon-capture-file-size check"),
         ];
         assert_eq!(printed_by.len(), UNITS.len(), "a unit in the list that nothing here cites");
         for (unit, site) in printed_by {
@@ -294,5 +333,14 @@ mod tests {
         // not a record's stamp is not one either.
         assert_eq!(skeleton("2 sticks in 4 seconds"), "2 sticks in 4 seconds");
         assert_eq!(skeleton("[budget 0.075 left]"), "[budget 0.075 left]");
+        // "of" names a size class, not a reading — but only ahead of `B`: the
+        // driver did not report how many *seconds* something is sized in.
+        assert_eq!(skeleton("blocks of 512 B"), "blocks of 512 B");
+        assert_eq!(skeleton("sectors of 4096 B, 12 MiB delivered"), "sectors of 4096 B, # MiB delivered");
+        assert_eq!(skeleton("waited a multiple of 5 s"), "waited a multiple of # s");
+        // "of" is a whole word: a byte count after "roof" or "thereof" is read
+        // exactly as it would be with no word before it at all.
+        assert_eq!(skeleton("roof 512 B"), "roof # B");
+        assert_eq!(skeleton("thereof 512 B"), "thereof # B");
     }
 }
