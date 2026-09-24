@@ -366,12 +366,24 @@ pub fn swapped_on_metal(back: &super::metal::Readback) -> Result<(), String> {
 /// before its first grant, and does nothing else.
 const IDLE: &str = "swap_claim_idle";
 
+/// Its line once the part is mastering, which opens the window.
+const HOLDING: &str = "swap_claim_idle: holding the NIC mastering";
+
+/// Connects to the forward that slirp's listener completed inside the window,
+/// each one a SYN slirp sends the guest's address: the window closes on the
+/// last of them.
+const KNOCKS: usize = 25;
+
+/// A liveness guard on those connects, never a verdict.
+const KNOCKS_WITHIN: Duration = Duration::from_secs(30);
+
 /// **The part keeps running across a release, and the next holder stops it
 /// before its first grant.** netd on QEMU's 82574 is swapped for a program that
 /// takes the function, reports the receive and transmit enables it inherited,
 /// runs `toyos_i219::quiesce` — netd's own first act — and then masters with
-/// one grant, while this host sends the guest frames through slirp. The verdict
-/// is the kernel's console saying the unit saw no DMA fault.
+/// one grant, and holds it until it is killed. This host then sends the guest
+/// [`KNOCKS`] SYNs through slirp. The verdict is the kernel's console saying
+/// the unit saw no DMA fault.
 ///
 /// **The kernel's reset is not this test's subject**: the 82574 advertises
 /// the D3hot round trip and QEMU does not reset it on one — measured, the
@@ -383,54 +395,64 @@ pub fn swap_quiets_the_function(
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     let mut rig = Rig::boot("swap-quiet", super::lan::TALK_BENCH)?;
-    let (_, idle) = rust_bins
-        .iter()
-        .find(|(name, _)| name == IDLE)
-        .ok_or_else(|| format!("no `{IDLE}` among the test binaries"))?;
+    let idle = test_binary(rust_bins, IDLE)?;
     let binary = rig.staged.scratch.join(IDLE);
     std::fs::write(&binary, idle).map_err(|e| format!("{}: {e}", binary.display()))?;
-    let digest = toyos_swap::digest(idle);
-
-    let answer = rig.swap_once_sshd_answers(&binary, &digest)?;
-    // Frames at the guest for as long as the replacement holds the part, from
-    // the answer on — before it, they would be sshd's: every connect to the
-    // forward is a SYN slirp sends the guest's address.
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(idle))?;
+    eprintln!("  [swap] the swap was answered {answer:?}");
+    if let Err(why) = init_accepted(&answer) {
+        return Err(rig.fail(why));
+    }
+    let held = qemu::await_marker(&mut rig.guest, &mut rig.console, HOLDING, "the replacement holding the part mastering");
+    if let Err(why) = held {
+        return Err(rig.fail(why));
+    }
+    // From the holding line on, so every frame is the replacement's to stop.
+    let (stop, taken) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
     let knocking = {
-        let (stop, at) = (std::sync::Arc::clone(&stop), rig.forward);
+        let (stop, taken, at) = (Arc::clone(&stop), Arc::clone(&taken), rig.forward);
         std::thread::spawn(move || {
-            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = std::net::TcpStream::connect_timeout(&at, Duration::from_millis(200));
+            while !stop.load(Ordering::SeqCst) {
+                if std::net::TcpStream::connect_timeout(&at, Duration::from_millis(200)).is_ok() {
+                    taken.fetch_add(1, Ordering::SeqCst);
+                }
                 std::thread::sleep(Duration::from_millis(20));
             }
         })
     };
-    let held = qemu::await_marker(
-        &mut rig.guest,
-        &mut rig.console,
-        "swap_claim_idle: done",
-        "the replacement holding the part mastering",
-    );
-    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let asked = std::time::Instant::now();
+    let knocked = qemu::await_guest(&mut rig.guest, &mut rig.console, "the host's frames at the part", |_| {
+        taken.load(Ordering::SeqCst) >= KNOCKS || asked.elapsed() > KNOCKS_WITHIN
+    });
+    stop.store(true, Ordering::SeqCst);
     let _ = knocking.join();
-    eprintln!("  [swap] the swap was answered {answer:?}");
-    if let Err(why) = held {
+    if let Err(why) = knocked {
         return Err(rig.fail(why));
     }
-    rig.console.push_str(&rig.guest.drain_serial(Duration::from_secs(1)));
+    let taken = taken.load(Ordering::SeqCst);
+    if taken < KNOCKS {
+        return Err(rig.fail(format!(
+            "slirp took {taken} of {KNOCKS} connects in {KNOCKS_WITHIN:?}, so the window held too few \
+             frames for a clean console to mean the part was stopped"
+        )));
+    }
     let text = rig.console.clone();
     let console = serial::Serial::named("the quieting boot", text.as_str());
     let released = console.must_say("released from slot 0; reset by")?.to_string();
-    console.must_say("swap_claim_idle: holding the NIC mastering")?;
     let inherited = console.must_say("swap_claim_idle: inherited")?.to_string();
     if let Err(why) = console.must_be_clean() {
         return Err(rig.fail(format!("{why}\n  the release said: {}", released.trim_end())));
     }
     eprintln!(
-        "  [swap] {}; {}; the next holder stopped it, mastered it, and the unit saw no fault",
+        "  [swap] {}; {}; the next holder stopped it, mastered it through {taken} SYNs in {:?}, and \
+         the unit saw no fault",
         released.trim_end(),
-        inherited.trim_end()
+        inherited.trim_end(),
+        asked.elapsed()
     );
     drop(rig.guest);
     let _ = std::fs::remove_file(&rig.staged.image);
@@ -495,7 +517,6 @@ pub fn swap_resets_the_function(
     if let Err(why) = held {
         return Err(rig.fail(why));
     }
-    rig.console.push_str(&rig.guest.drain_serial(Duration::from_secs(1)));
     let text = rig.console.clone();
     let judged = (|| {
         let console = serial::Serial::named("the resetting boot", text.as_str());
@@ -528,6 +549,10 @@ pub fn swap_resets_the_function(
 /// MSI-X table's.
 const BAR_LOST: &[&str] = &["pcidev-bar-lost-on-reset"];
 
+/// The actuator that puts a reset function's BAR 0 back one BAR's size above
+/// the window it was cut, inside it.
+const BAR_MOVED: &[&str] = &["pcidev-bar-moved-on-reset"];
+
 /// **A replacement refused a device the process it replaces held fails the
 /// swap.** netd holds the 82574 and QEMU's `igb`; the `igb` resets on release,
 /// and the actuator leaves its register window where the reset put it, so the
@@ -540,7 +565,25 @@ pub fn swap_refused_device_fails(
     _c_bins: &[(String, Vec<u8>)],
     _rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let mut rig = Rig::boot_armed("swap-refused-device", IGB_BENCH, BAR_LOST)?;
+    refused_device_fails("swap-refused-device", BAR_LOST)
+}
+
+/// [`swap_refused_device_fails`] with the `igb`'s BAR 0 holding a decodable
+/// address that is not its cut: the kernel reads the register's address, not
+/// only whether it holds one.
+pub fn swap_moved_device_fails(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    refused_device_fails("swap-moved-device", BAR_MOVED)
+}
+
+/// The `igb`'s next claim refused under `actuators`, and init's swap failing
+/// on it and closing netd for it: the `gone` names the `igb`, so a claim init
+/// kept from the refused start and could not mint again ends it otherwise.
+fn refused_device_fails(name: &str, actuators: &'static [&'static str]) -> Result<(), String> {
+    let mut rig = Rig::boot_armed(name, IGB_BENCH, actuators)?;
     let binary = rebuilt("netd", &rig.staged.scratch)?;
     let digest = toyos_swap::digest(&std::fs::read(&binary).map_err(|e| e.to_string())?);
     let answer = rig.swap_once_sshd_answers(&binary, &digest)?;
@@ -550,10 +593,11 @@ pub fn swap_refused_device_fails(
     }
     // The service carrying the stream is the one swapped, so init's words are
     // read off the console: its last one on this swap, whichever it is.
-    let [gone, in_service, started, failed] =
-        [Word::Gone, Word::InService, Word::Started, Word::Failed].map(|w| toyos_swap::said("netd", w, ""));
+    let [gone, in_service, restored, started, failed] =
+        [Word::Gone, Word::InService, Word::Restored, Word::Started, Word::Failed]
+            .map(|w| toyos_swap::said("netd", w, ""));
     let ended = qemu::await_guest(&mut rig.guest, &mut rig.console, "init's last word on the swap", |c| {
-        c.contains(&gone) || c.contains(&in_service)
+        c.contains(&gone) || c.contains(&in_service) || c.contains(&restored)
     });
     if let Err(why) = ended {
         return Err(rig.fail(why));
@@ -565,11 +609,11 @@ pub fn swap_refused_device_fails(
         if !released.contains("reset by a function level reset (Express)") {
             return Err(format!("the premise: the igb was not released by an Express FLR — {released}"));
         }
-        for word in [&in_service, &started] {
+        for word in [&in_service, &started, &restored] {
             if let Some(line) = text.lines().find(|l| l.contains(word.as_str())) {
                 return Err(format!(
-                    "init started netd's replacement though the igb the one it replaced held lost its \
-                     window to its reset: {line}"
+                    "init started a netd though the igb the one it replaced held lost its window to \
+                     its reset: {line}"
                 ));
             }
         }
@@ -582,6 +626,9 @@ pub fn swap_refused_device_fails(
             return Err(format!("init's `failed` does not name the device it could not give: {said}"));
         }
         let closed = console.must_say(&gone)?;
+        if !closed.contains("pci:8086:10c9") {
+            return Err(format!("init's `gone` does not name the igb the binary it replaced was refused: {closed}"));
+        }
         console.must_be_clean()?;
         eprintln!("  [swap] {}; {}; {}", refused.trim_end(), said.trim_end(), closed.trim_end());
         Ok(())

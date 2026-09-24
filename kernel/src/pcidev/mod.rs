@@ -1004,6 +1004,30 @@ fn settle_after_reset(pci: &PciDevice) {
         wait_until(crate::clock::nanos_since_boot() + pm::TRANSITION_NANOS);
     }
     kept.restore(pci);
+    if crate::actuator::pcidev_bar_moved_on_reset() && matches!(resetting, Resetting::Flr { .. }) {
+        move_inside_its_window(pci);
+    }
+}
+
+/// [`crate::actuator::pcidev_bar_moved_on_reset`]: BAR 0 one BAR's size above
+/// the window it was cut, so the register decodes an address that is not the
+/// cut and that nothing else decodes.
+fn move_inside_its_window(pci: &PciDevice) {
+    let (at, span) = {
+        let who = requester(pci);
+        let machine = MACHINE.lock();
+        let &(_, _, at, span) = machine
+            .windows
+            .iter()
+            .find(|(w, i, _, _)| *w == who && *i == 0)
+            .expect("pcidev-bar-moved-on-reset: BAR 0 of a reset function was never cut");
+        (at, span)
+    };
+    let size = pci.bar_size(0).expect("pcidev-bar-moved-on-reset: BAR 0 does not size");
+    assert!(size < span, "pcidev-bar-moved-on-reset: BAR 0 fills its window, so no address inside it is not the cut");
+    let low = pci.read_config_u32(bar::BASE);
+    assert_eq!(u64::from(low & !0xf), at & 0xffff_ffff, "pcidev-bar-moved-on-reset: BAR 0 was not restored to its cut");
+    pci.write_config_u32(bar::BASE, low + size as u32);
 }
 
 fn wait_until(at: u64) {

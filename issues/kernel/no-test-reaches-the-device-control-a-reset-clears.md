@@ -18,8 +18,6 @@ Nothing the harness runs can fail on it.
   their defaults, so the reset changes nothing a restore could put back.
 - The mutation that deletes the restore builds, and `swap_resets_the_function`
   passes on it.
-- The T14's I219 has no Express capability, and the 82574 and virtio-net
-  functions reset by the D3hot round trip or not at all.
 
 Owner: the swap's author, who added the restore. Exit condition: a boot that
 releases and re-claims a function which has a reset and whose Device Control

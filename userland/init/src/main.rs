@@ -1198,11 +1198,6 @@ fn start<'a>(
     }
     // Nothing was spawned, so everything minted goes back with `held`.
     if let Some(unpaid) = unpaid {
-        if let Some(acceptors) = given_back {
-            for (name, acceptor) in taken {
-                acceptors.insert(name, acceptor);
-            }
-        }
         return Err(unpaid);
     }
 
