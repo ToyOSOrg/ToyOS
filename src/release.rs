@@ -196,13 +196,14 @@ fn published(root: &Path, tag: &str) -> bool {
 /// building it if nobody has; on `main`, also move the `sdk-<version>` alias a
 /// consumer pins onto it.
 pub fn ensure_published(root: &Path) -> Result<String, String> {
+    let tag = tag(root)?;
+    println!("this tree's toolchain: {tag}");
     if !(cfg!(target_os = "linux") && cfg!(target_arch = "x86_64")) {
         return Err(format!(
             "the release is {HOST}'s and this host is not one; a tarball built here would \
              install nowhere"
         ));
     }
-    let tag = tag(root)?;
     let tmp = std::env::temp_dir();
     let manifest = manifest(root, &tag)?;
     let notes = notes(root, &tag, &manifest)?;
