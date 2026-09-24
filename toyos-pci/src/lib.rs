@@ -28,6 +28,7 @@
 extern crate std;
 
 pub mod aperture;
+pub mod af;
 pub mod bar;
 pub mod bridge;
 pub mod caps;
@@ -35,4 +36,5 @@ pub mod express;
 pub mod msi;
 pub mod msix;
 pub mod placement;
+pub mod pm;
 pub mod probe;

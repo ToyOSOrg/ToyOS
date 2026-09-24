@@ -13,6 +13,8 @@ russh = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos", default-f
 russh-sftp = "2.4"
 rand = "0.10"
 tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "fs"] }
+# The swap subsystem's name and header, which sshd reads with the same code.
+toyos-swap = { path = "../../toyos-swap" }
 
 [lints.rust]
 warnings = "deny"

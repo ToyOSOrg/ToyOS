@@ -227,6 +227,18 @@ const RUST_SKIP: &[&str] = &[
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
     "gsbase_probe",
     "test_panic_child",
+    // A binary that panics at once, sent over ssh as a service's replacement;
+    // `swap_crash_rolls_back` stages it from the host and never runs it as a job.
+    "swap_crash",
+    // The swap DMA control's replacement netd: it claims the 82574, stops it
+    // and masters it. `swap_quiets_the_function` stages it.
+    "swap_claim_idle",
+    // The reset control's replacement netd: it claims the `igb` an Express
+    // function level reset released. `swap_resets_the_function` stages it.
+    "swap_flr_probe",
+    // Run over ssh undeclared, it says whether it inherited the swap port.
+    // `swap_not_inherited` uploads it.
+    "swap_probe",
     "i8042_keyboard",
     "i8042_mouse",
     "input_events",
@@ -252,6 +264,9 @@ const RUST_SKIP: &[&str] = &[
     // The same for `tests/lantalkcase`, held until the runner's bound is near
     // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
     "lan_talk_hold",
+    // The swapping boot's hold: it lasts until the host's `reboot` over ssh,
+    // and the runner's bound is the fallback. `lan_swap` rides it.
+    "lan_swap_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -702,6 +717,35 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // first talking run met it: the verdict is the guest's own `/log` saying
     // the stream ended. Its one clock paces records into the dead connection.
     ("lan_talk_host_closes", Sched::Parallel, Tier::Fast),
+    // A running service's binary replaced with no reboot: netd swapped for its
+    // rebuild over ssh while the stream runs, on virtio-net and on the 82574
+    // the T14's I219 shares a register file with; a wrong digest and a
+    // stranger's key refused with netd untouched; a replacement that panics at
+    // once answered by the old binary running again. Records, bytes and the
+    // guest's own `/log`; every clock is a liveness guard on a guest that
+    // stopped talking, and probation is init's.
+    ("swap_netd", Sched::Parallel, Tier::Fast),
+    ("lan_swap", Sched::Parallel, Tier::Fast),
+    ("swap_refusals", Sched::Parallel, Tier::Fast),
+    ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
+    // The 82574 swapped to a holder that stops it and masters it while the
+    // host sends it frames. The verdict is the kernel's console; its clocks
+    // are liveness guards.
+    ("swap_quiets_the_function", Sched::Parallel, Tier::Fast),
+    // An `igb` netd held, released by an Express function level reset and
+    // claimed again by netd's replacement, which reads it through the window
+    // its claim maps. The verdict is what the function answers there.
+    ("swap_resets_the_function", Sched::Parallel, Tier::Fast),
+    // The same `igb`, its window left where its reset put it: the replacement
+    // is refused it, and the verdict is init failing the swap by the
+    // device's name rather than putting netd in service without it.
+    ("swap_refused_device_fails", Sched::Parallel, Tier::Fast),
+    // The same, its window moved inside the cut rather than lost: the kernel
+    // reads the address the register holds, not only that it holds one.
+    ("swap_moved_device_fails", Sched::Parallel, Tier::Fast),
+    // A program sshd runs undeclared asks for the swap port. The verdict is
+    // the program's own exit: the port is not in the namespace it inherited.
+    ("swap_not_inherited", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -1374,6 +1418,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         "lan_talk",
         metal::Metal::Runs { arms: LANTALKCASE, judge: |b| lan::talked_on_metal(b[0]) },
     ),
+    (
+        // netd swapped for the build's own binary while the boot runs, by a
+        // second `toyos-metal --swap` beside the flashing one; the stick's
+        // `/log` is the oracle that nothing rebooted between the two netds.
+        "lan_swap",
+        metal::Metal::Runs { arms: LANSWAPCASE, judge: |b| common::swap::swapped_on_metal(b[0]) },
+    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1804,6 +1855,16 @@ const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
 const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
     talk: true,
     ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
+}];
+
+/// The talking boot's config with netd swapped while it runs: the image
+/// streams and authorizes a key as the talking boot's does, and the loop that
+/// flashes it is not told `--talk` — the `--swap` invocation beside it owns the
+/// listener. Its one job holds the machine until that invocation hands it back
+/// with `reboot`, the runner's bound standing behind it.
+const LANSWAPCASE: &[metal::Arm] = &[metal::Arm {
+    swap: Some("netd"),
+    ..metal::once("lanswapcase", lan::TALK_CONFIG, &[], common::swap::HOLD_JOBS)
 }];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
@@ -12265,20 +12326,11 @@ fn run_machine_test(
             // overflowing a 64-slot cache during the format and never
             // reaching it. Measured: 0 block-cache evictions on Headless.
             //
-            // And it has to be an *unformatted* namespace, which is not what a
-            // full run leaves behind: the image is named by device size and
-            // reused within a lane, so a `nvme_large_device` that ran in this
-            // one formatted it and this boot would then only mount — a handful
-            // of metadata blocks and no eviction at all. Measured exactly that
-            // way: green alone, red in the suite. Removing it restores the
-            // precondition whichever lane this landed in, and duplicating the
-            // harness's naming here is safe in the only direction that matters:
-            // if that name ever drifts, the boot mounts instead of formatting
-            // and the turnover assertion below goes red rather than vacuously
-            // green.
-            let stale = common::lane::dir()
-                .join(format!("test-nvme-{}.img", qemu::NVME_T14_BYTES));
-            let _ = fs::remove_file(&stale);
+            // And it has to be an *unformatted* namespace, which the harness
+            // gives every boot that names no image: a mount of one an earlier
+            // boot formatted reads a handful of metadata blocks and evicts
+            // nothing, and the turnover assertion below goes red on that
+            // rather than vacuously green.
 
             // `nvme-spent-budget` and `nvme-command-silent` ride this boot
             // rather than buying registered names of their own: each needs the
@@ -13843,6 +13895,23 @@ fn run_machine_test(
         "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
         "lan_talk_late_link" => lan::lan_talk_late_link(test_config, c_bins, rust_bins),
         "lan_talk_host_closes" => lan::lan_talk_host_closes(test_config, c_bins, rust_bins),
+        "swap_netd" => common::swap::swap_netd(test_config, c_bins, rust_bins),
+        "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
+        "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),
+        "swap_crash_rolls_back" => common::swap::swap_crash_rolls_back(test_config, c_bins, rust_bins),
+        "swap_quiets_the_function" => {
+            common::swap::swap_quiets_the_function(test_config, c_bins, rust_bins)
+        }
+        "swap_resets_the_function" => {
+            common::swap::swap_resets_the_function(test_config, c_bins, rust_bins)
+        }
+        "swap_refused_device_fails" => {
+            common::swap::swap_refused_device_fails(test_config, c_bins, rust_bins)
+        }
+        "swap_moved_device_fails" => {
+            common::swap::swap_moved_device_fails(test_config, c_bins, rust_bins)
+        }
+        "swap_not_inherited" => common::swap::swap_not_inherited(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed

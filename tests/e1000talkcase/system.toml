@@ -16,8 +16,9 @@ receives = ["netd"]
 serves = ["netd"]
 devices = ["pci:8086:10d3"]
 
+# `swap` too: the host replaces netd on this boot without rebooting it.
 [programs.sshd]
-receives = ["netd", "launcher"]
+receives = ["netd", "launcher", "swap"]
 
 [programs.test-runner]
 syscap = ["logread"]

@@ -296,6 +296,12 @@ actuators! {
     /// End the capability list of the function a claim is bringing up at a link the spec forbids, one link past its MSI capability: a claimed function publishing an MSI-X table no walk may reach.
     pcidev_caps_truncated = "pcidev-caps-truncated";
 
+    /// Put back none of a reset function's BARs but its MSI-X table's, so a function the reset returned to its defaults comes to its next claim no longer decoding the window it was cut: what a reset nobody restored looks like.
+    pcidev_bar_lost_on_reset = "pcidev-bar-lost-on-reset";
+
+    /// Put a function a level reset returned to its defaults back with BAR 0 one BAR's size above the window it was cut, inside that window: a register holding a decodable address that is not the cut.
+    pcidev_bar_moved_on_reset = "pcidev-bar-moved-on-reset";
+
     /// Raise the local APIC's spurious vector on this CPU once.
     lapic_spurious_selftest = "lapic-spurious-selftest";
 

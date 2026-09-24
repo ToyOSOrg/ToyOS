@@ -257,3 +257,30 @@ return through.
 The track carries this as **wall 4**, with the three shapes the owner has to
 choose between. Nothing here should be built before that choice, because all
 three of them move this queue.
+
+## A fourth witness: a device claim, and init waiting it out
+
+A service swap (`toyos-swap`, `/system/bin/init`) kills a service, `wait`s for
+it, and mints the service's device claims again for the binary that replaces
+it. `Device` is a `deferred` row, so the `wait` returning is not the claim
+being back. Measured on `wt/toyos-swap`, `tests/swapcase` (virtio-net, two
+CPUs, TCG), one run of four, three guests at once on the dev host:
+
+```
+init: swap netd: stopping: pid 5 (/system/bin/netd)
+init: netd: pci:1af4:1041 is already claimed
+[kernel 1.162 cpu0] exit: netd pid=5 code=137 cpu=117ms
+[kernel 1.163 cpu1] pcidev: PCI 00:03.0 [1af4:1041] released from slot 0
+```
+
+The claim was asked for, and refused as held, before the release record — and
+the release ran on the other CPU. The replacement netd started with no NIC and
+exited, which init's probation caught and answered by restarting the old
+binary five seconds later, when the claim was long back.
+
+**The compromise, recorded here as the rule asks:** `userland/init`'s
+`CLAIM_RETURN` retries a claim refused as `AlreadyExists` for a service init
+has just stopped, for at most two seconds, one millisecond apart. Owner: the
+swap's author. Exit condition: this issue closes — the kernel publishes a
+process's end only once its deferred releases have run — and `CLAIM_RETURN`
+is deleted with it.

@@ -14,10 +14,18 @@
 //! queue fills, and lines are refused — counted, and said out loud in one line
 //! that goes into the file and is never offered back to the queue.
 //!
-//! What it cannot do at all it says once, in the boot's own log. Nothing short
-//! of netd's absence ends the attempt before [`OPEN_BOUND`]: a machine with no
-//! lease yet is netd's `ERR_NOT_CONNECTED`, and a peer's refusal is said at
+//! What it cannot do at all it says in the boot's own log. Nothing short of
+//! netd's absence ends the first attempt before [`OPEN_BOUND`]: a machine with
+//! no lease yet is netd's `ERR_NOT_CONNECTED`, and a peer's refusal is said at
 //! once and asked again, because a listener that is not up yet refuses too.
+//!
+//! **A stream that has opened once is asked for again whenever it ends, with
+//! no bound**: the listener leaving and coming back and netd being swapped
+//! under the connection are both ends of one, and the boot asked for a stream
+//! for as long as it runs. Each end and each reopening is one line in the log.
+//! A line whose write failed is written again, whole, first on the next
+//! connection; what netd had taken and not yet sent when it went is lost to
+//! the stream and nowhere else.
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -73,9 +81,9 @@ struct Shared {
     backlog: Mutex<Backlog>,
     /// Woken by [`Stream::round`]; waited on by the writer.
     ready: Condvar,
-    /// What the stream could not do, waiting to be written into the log. Said
-    /// once per episode and then taken.
-    trouble: Mutex<Option<String>>,
+    /// What the stream has to say about itself, waiting to be written into the
+    /// log. Said once per episode and then taken.
+    trouble: Mutex<Vec<String>>,
 }
 
 impl Stream {
@@ -91,7 +99,7 @@ impl Stream {
         let shared = Arc::new(Shared {
             backlog: Mutex::new(Backlog::new()),
             ready: Condvar::new(),
-            trouble: Mutex::new(None),
+            trouble: Mutex::new(Vec::new()),
         });
         match toyos_logstream::endpoint(value) {
             Ok((addr, port)) => {
@@ -140,9 +148,7 @@ impl Stream {
         self.shared.ready.notify_one();
 
         let mut owed = Vec::new();
-        if let Some(said) = self.shared.trouble.lock().expect("a mutex is poisoned").take() {
-            owed.push(said);
-        }
+        owed.append(&mut self.shared.trouble.lock().expect("a mutex is poisoned"));
         if let Some(said) = report {
             *said_at = Some(Instant::now());
             owed.push(said);
@@ -153,44 +159,77 @@ impl Stream {
 
 /// Open the connection and write the queue into it, for the life of the
 /// process.
+///
+/// **One end, one line.** A connection that ends before it carried a line is
+/// the same episode as the end before it — a listener that accepts and closes
+/// at once is asked again once a second, and the log says so once — so the
+/// end is said for the first connection and for one that delivered, and the
+/// reopening once a reopened connection has delivered.
 fn run(shared: &Shared, addr: [u8; 4], port: u16) {
-    let conn = match open(shared, addr, port) {
-        Some(conn) => conn,
-        None => return,
-    };
+    let at = format!("{}.{}.{}.{}:{port}", addr[0], addr[1], addr[2], addr[3]);
+    let Some(mut conn) = open(shared, &at, addr, port, Some(OPEN_BOUND)) else { return };
+    // What a failed write left unsent, which the next connection takes first.
+    let mut unsent: Vec<String> = Vec::new();
+    let (mut first, mut delivered, mut reopened) = (true, false, false);
     loop {
-        let batch = {
+        let mut batch = std::mem::take(&mut unsent);
+        {
             let mut backlog = shared.backlog.lock().expect("the log stream's queue is poisoned");
-            while backlog.is_empty() {
+            while batch.is_empty() && backlog.is_empty() {
                 // The lock is given up here and taken again with something in
                 // the queue; `round` never waits behind this thread.
                 backlog =
                     shared.ready.wait(backlog).expect("the log stream's queue is poisoned");
             }
-            backlog.drain()
-        };
-        for line in batch {
+            batch.extend(backlog.drain());
+        }
+        let mut sent = 0;
+        let mut ended = None;
+        for line in &batch {
             // **Blocking, and on purpose.** A full pipe is netd holding a
             // closed TCP window, which is the listener asking this machine to
             // slow down; waiting here is what turns that into a bounded queue
             // and a counted drop instead of an unbounded one.
             if let Err(why) = write_all(&conn, line.as_bytes()) {
-                say(shared, format!(
-                    "logd: the log stream to {}.{}.{}.{}:{port} ended ({why}) - this boot's log \
-                     continues on /log only",
-                    addr[0], addr[1], addr[2], addr[3]
-                ));
-                return;
+                ended = Some(why);
+                break;
             }
+            sent += 1;
         }
+        if sent > 0 && reopened {
+            say(shared, format!("logd: the log stream to {at} is open again"));
+            reopened = false;
+        }
+        delivered |= sent > 0;
+        let Some(why) = ended else { continue };
+        unsent = batch.split_off(sent);
+        if first || delivered {
+            say(shared, format!(
+                "logd: the log stream to {at} ended ({why}) - asking for it again; /log has \
+                 every record"
+            ));
+        }
+        drop(conn);
+        (first, delivered, reopened) = (false, false, true);
+        std::thread::sleep(REFUSED_RETRY_EVERY);
+        conn = match open(shared, &at, addr, port, None) {
+            Some(conn) => conn,
+            None => return,
+        };
     }
 }
 
-/// The connection, or `None` once this machine has been given long enough to
-/// have one.
-fn open(shared: &Shared, addr: [u8; 4], port: u16) -> Option<TcpConnection> {
+/// The connection, or `None` once this machine has been given `bound` to have
+/// one, or has no netd at all. `None` for `bound` asks until it opens.
+fn open(
+    shared: &Shared,
+    at: &str,
+    addr: [u8; 4],
+    port: u16,
+    bound: Option<Duration>,
+) -> Option<TcpConnection> {
     let began = Instant::now();
-    let at = format!("{}.{}.{}.{}:{port}", addr[0], addr[1], addr[2], addr[3]);
+    let spent = || bound.is_some_and(|bound| began.elapsed() >= bound);
     let mut refused = 0u32;
     loop {
         match net::tcp_connect(addr, port, CONNECT_TIMEOUT_MS) {
@@ -209,19 +248,23 @@ fn open(shared: &Shared, addr: [u8; 4], port: u16) -> Option<TcpConnection> {
             // pace a peer that keeps refusing is not flooded by.
             Err(NetError::ConnectionRefused) => {
                 if refused == 0 {
+                    let until = match bound {
+                        Some(bound) => format!("until {bound:?} after logd started"),
+                        None => format!("every {REFUSED_RETRY_EVERY:?}"),
+                    };
                     say(shared, format!(
                         "logd: nothing is listening at {at} for this boot's log stream - asking \
-                         again until {OPEN_BOUND:?} after logd started; /log has every record"
+                         again {until}; /log has every record"
                     ));
                 }
                 refused += 1;
-                if began.elapsed() >= OPEN_BOUND {
+                if spent() {
                     return None;
                 }
                 std::thread::sleep(REFUSED_RETRY_EVERY);
             }
-            // The manifest gave this program no `netd`, so there is no network
-            // to wait for either.
+            // The manifest gave this program no `netd`, or the one it named
+            // has ended for good, so there is no network to wait for either.
             Err(NetError::NetdNotFound) => {
                 say(shared, format!(
                     "logd: this machine has no netd to reach {at} through - this boot's log \
@@ -230,11 +273,11 @@ fn open(shared: &Shared, addr: [u8; 4], port: u16) -> Option<TcpConnection> {
                 return None;
             }
             Err(e) => {
-                if began.elapsed() >= OPEN_BOUND {
+                if spent() {
                     say(shared, format!(
                         "logd: {at} did not answer in {:?} ({e:?}) - this boot's log is on \
                          /log only",
-                        OPEN_BOUND
+                        began.elapsed()
                     ));
                     return None;
                 }
@@ -260,9 +303,7 @@ fn write_all(conn: &TcpConnection, mut bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Leave one line for the log. The writer says at most one thing in its life —
-/// it either fails to open or fails to write, and returns either way — and a
-/// stream that never started one says its refusal from `start`.
+/// Leave a line for the log, which `logd`'s next round takes.
 fn say(shared: &Shared, line: String) {
-    *shared.trouble.lock().expect("a mutex is poisoned") = Some(line);
+    shared.trouble.lock().expect("a mutex is poisoned").push(line);
 }
