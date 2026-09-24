@@ -536,9 +536,7 @@ const INIT_SERVED: &[&str] = &["launcher", toyos_swap::PORT];
 /// else — no other `[programs]` row and never `[apps]`.
 ///
 /// **Checked on every manifest rendered, not only on the committed configs**,
-/// because the holder of this connector can replace any service's binary, and
-/// sshd is the one program that acts on it only for a client whose key it has
-/// accepted.
+/// because the holder of this connector can replace any service's binary.
 fn swap_is_sshds_alone(config: &SystemConfig) -> Result<(), String> {
     for (name, program) in &config.programs {
         if name != toyos_swap::HOLDER && program.receives.iter().any(|r| r == toyos_swap::PORT) {
@@ -2630,6 +2628,7 @@ mod tests {
         "tests/e1000case/system.toml",
         "tests/e1000leasecase/system.toml",
         "tests/e1000talkcase/system.toml",
+        "tests/flrswapcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
         "tests/lancase/system.toml",

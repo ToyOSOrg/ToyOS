@@ -51,6 +51,27 @@ struct Rig {
 }
 
 impl Rig {
+    /// `binary` sent as netd's replacement once sshd answers, and the
+    /// machine's word on it: a boot's stream opens when netd leases, and sshd
+    /// may still be binding then.
+    fn swap_once_sshd_answers(
+        &self,
+        binary: &Path,
+        digest: &toyos_swap::Digest,
+    ) -> Result<Result<String, String>, String> {
+        self.staged.stream.wait_connected(CEILING).ok_or("the boot never opened its stream")?;
+        let asked = std::time::Instant::now();
+        loop {
+            match self.ssh.swap(self.forward, "netd", binary, digest) {
+                Err(why) if asked.elapsed() < Duration::from_secs(30) => {
+                    eprintln!("  [swap] not taken yet: {why}");
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                answered => return Ok(answered),
+            }
+        }
+    }
+
     fn boot(name: &str, bench: Bench) -> Result<Self, String> {
         let staged = TalkBoot::stage_on(name, bench)?;
         let ssh_port = qemu::free_host_port();
@@ -347,12 +368,11 @@ const IDLE: &str = "swap_claim_idle";
 /// one grant, while this host sends the guest frames through slirp. The verdict
 /// is the kernel's console saying the unit saw no DMA fault.
 ///
-/// **The kernel's reset cannot be this test's subject**: the 82574 advertises
+/// **The kernel's reset is not this test's subject**: the 82574 advertises
 /// the D3hot round trip and QEMU does not reset it on one — measured, the
-/// inherited `RCTL` still has receive enabled — and no NIC in reach both resets
-/// and can be claimed. So a holder that skipped the quiesce faults here (the
-/// negative control), and the kernel's reset is the T14's to measure, through
-/// netd's own `inherited RCTL` line.
+/// inherited `RCTL` still has receive enabled. So a holder that skipped the
+/// quiesce faults here (the negative control); [`swap_resets_the_function`] is
+/// the reset's.
 pub fn swap_quiets_the_function(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -367,19 +387,7 @@ pub fn swap_quiets_the_function(
     std::fs::write(&binary, idle).map_err(|e| format!("{}: {e}", binary.display()))?;
     let digest = toyos_swap::digest(idle);
 
-    // Asked once sshd answers: a boot's stream opens when netd leases, and sshd
-    // may still be binding then.
-    rig.staged.stream.wait_connected(CEILING).ok_or("the boot never opened its stream")?;
-    let asked = std::time::Instant::now();
-    let answer = loop {
-        match rig.ssh.swap(rig.forward, "netd", &binary, &digest) {
-            Err(why) if asked.elapsed() < Duration::from_secs(30) => {
-                eprintln!("  [swap] not taken yet: {why}");
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            answered => break answered,
-        }
-    };
+    let answer = rig.swap_once_sshd_answers(&binary, &digest)?;
     // Frames at the guest for as long as the replacement holds the part, from
     // the answer on — before it, they would be sshd's: every connect to the
     // forward is a SYN slirp sends the guest's address.
@@ -421,5 +429,124 @@ pub fn swap_quiets_the_function(
     );
     drop(rig.guest);
     let _ = std::fs::remove_file(&rig.staged.image);
+    Ok(())
+}
+
+/// `name` among the build's test binaries.
+fn test_binary<'a>(rust_bins: &'a [(String, Vec<u8>)], name: &str) -> Result<&'a [u8], String> {
+    rust_bins
+        .iter()
+        .find(|(bin, _)| bin == name)
+        .map(|(_, bytes)| bytes.as_slice())
+        .ok_or_else(|| format!("no `{name}` among the test binaries"))
+}
+
+/// The machine with QEMU's `igb` beside the 82574, netd holding both.
+const IGB_BENCH: Bench =
+    Bench { profile: qemu::Profile::E1000eBesideIgb, config: "tests/flrswapcase", device: "igb" };
+
+/// The replacement that reads the `igb` through its claim's window.
+const FLR_PROBE: &str = "swap_flr_probe";
+
+/// **A function reset on release decodes where its next holder maps it.** netd
+/// holds QEMU's `igb`, which resets by an Express function level reset — every
+/// BAR back to 0 (PCIe §6.6.2). Swapping netd releases it, and the replacement
+/// claims it and reads dword 0 through the window its claim maps: the dword the
+/// kernel settled that window against when it first placed it, so all-zeroes
+/// or all-ones there is a window the function does not decode.
+///
+/// The premise is asked of the kernel's own release record, so a function that
+/// stopped resetting cannot pass this vacuously.
+pub fn swap_resets_the_function(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut rig = Rig::boot("swap-reset", IGB_BENCH)?;
+    let probe = test_binary(rust_bins, FLR_PROBE)?;
+    let binary = rig.staged.scratch.join(FLR_PROBE);
+    std::fs::write(&binary, probe).map_err(|e| format!("{}: {e}", binary.display()))?;
+    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(probe))?;
+    eprintln!("  [swap] the swap was answered {answer:?}");
+    let held = qemu::await_marker(
+        &mut rig.guest,
+        &mut rig.console,
+        "swap_flr_probe: done",
+        "the replacement reading the igb",
+    );
+    if let Err(why) = held {
+        return Err(rig.fail(why));
+    }
+    rig.console.push_str(&rig.guest.drain_serial(Duration::from_secs(1)));
+    let text = rig.console.clone();
+    let judged = (|| {
+        let console = serial::Serial::named("the resetting boot", text.as_str());
+        let released = console.must_say("[8086:10c9] released from slot")?;
+        if !released.contains("reset by a function level reset (Express)") {
+            return Err(format!("the premise: the igb was not released by an Express FLR — {released}"));
+        }
+        let read = console.must_say("swap_flr_probe: igb BAR")?;
+        let dword = read
+            .rsplit("answers 0x")
+            .next()
+            .and_then(|hex| u32::from_str_radix(hex.trim(), 16).ok())
+            .ok_or_else(|| format!("the probe's line carries no dword: {read:?}"))?;
+        if dword == 0 || dword == u32::MAX {
+            return Err(format!("the reset igb does not decode where its claim maps it: {read}"));
+        }
+        console.must_be_clean()?;
+        eprintln!("  [swap] {}; {}", released.trim_end(), read.trim_end());
+        Ok(())
+    })();
+    if let Err(why) = judged {
+        return Err(rig.fail(why));
+    }
+    drop(rig.guest);
+    let _ = std::fs::remove_file(&rig.staged.image);
+    Ok(())
+}
+
+/// The program [`swap_not_inherited`] runs undeclared.
+const PROBE: &str = "swap_probe";
+
+/// **The swap port is not inherited by what sshd runs.** A program the manifest
+/// does not declare is uploaded over sftp and run over ssh, so std spawns it
+/// holding a duplicate of sshd's namespace; it asks that namespace for `netd`
+/// — the premise that it inherited one at all — and for the swap port, and
+/// sends init a frame that is no swap request if it gets one. Its exit is the
+/// verdict: 0 is the port out of reach, 1 is init reached.
+pub fn swap_not_inherited(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let rig = Rig::boot("swap-not-inherited", VIRTIO)?;
+    let probe = test_binary(rust_bins, PROBE)?;
+    let remote = format!("/tmp/{PROBE}");
+    let (host, port) = (super::ssh::HOST, rig.forward.port());
+    rig.staged.stream.wait_connected(CEILING).ok_or("the boot never opened its stream")?;
+    let asked = std::time::Instant::now();
+    loop {
+        match super::ssh::ssh_put(host, port, &rig.staged.identity, &remote, probe) {
+            Err(why) if asked.elapsed() < Duration::from_secs(30) => {
+                eprintln!("  [swap] not taken yet: {why}");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(why) => return Err(rig.fail(why)),
+            Ok(()) => break,
+        }
+    }
+    let command = format!("{remote} {} {} {}", toyos_swap::PORT, toyos_swap::LABEL, toyos_swap::MSG_SWAP);
+    let ran = match super::ssh::ssh_exec(host, port, &rig.staged.identity, &command) {
+        Ok(ran) => ran,
+        Err(why) => return Err(rig.fail(why)),
+    };
+    let said = format!("{}{}", ran.stdout_text(), ran.stderr_text());
+    if ran.status != Some(0) || !said.contains("is not in the namespace it inherited") {
+        return Err(rig.fail(format!("{PROBE} ended {:?} saying {said:?}", ran.status)));
+    }
+    eprintln!("  [swap] {}", said.trim_end());
+    let (_, _, staged) = rig.finish(None)?;
+    let _ = std::fs::remove_file(&staged.image);
     Ok(())
 }

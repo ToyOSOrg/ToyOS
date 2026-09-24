@@ -11,8 +11,11 @@
 //! answer, so it is not stopped until the answer has arrived.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
+use toyos::endow::Endowments;
 use toyos::ipc::Connection;
+use toyos::namespace::Namespace;
 use toyos_swap::{Header, Refusal, Request};
 
 /// What the channel's input has amounted to so far.
@@ -44,6 +47,14 @@ pub fn take(buf: &[u8]) -> Result<Taken, Refusal> {
     Ok(Taken::Whole(header, body.to_vec()))
 }
 
+/// The swap port's own namespace, taken out of the endowment table on first
+/// use and held by this process alone: init never puts the port in `svc`,
+/// which is what a program this daemon runs is given ([`toyos_swap::LABEL`]).
+fn authority() -> Option<&'static Namespace> {
+    static HELD: OnceLock<Option<Namespace>> = OnceLock::new();
+    HELD.get_or_init(|| Endowments::get().take::<Namespace>(toyos_swap::LABEL)).as_ref()
+}
+
 /// Every stage this daemon makes has a name of its own, so two sessions never
 /// write into one file.
 static STAGED: AtomicU64 = AtomicU64::new(0);
@@ -53,9 +64,12 @@ static STAGED: AtomicU64 = AtomicU64::new(0);
 ///
 /// Blocking: a file write and one exchange with init, which answers at once.
 pub fn ask(header: &Header, body: &[u8]) -> (Result<String, String>, Option<Connection>) {
-    let init = match toyos::endow::service(toyos_swap::PORT) {
+    let Some(held) = authority() else {
+        return (Err(Refusal::NoAuthority.to_string()), None);
+    };
+    let init = match held.open(toyos_swap::PORT) {
         Ok(conn) => conn,
-        Err(_) => return (Err(Refusal::NoAuthority.to_string()), None),
+        Err(e) => return (Err(format!("init's swap port did not answer: {e:?}")), None),
     };
     let staged = toyos_swap::staged_path(&header.service, STAGED.fetch_add(1, Ordering::Relaxed));
     let written = std::fs::create_dir_all(toyos_swap::STAGING)

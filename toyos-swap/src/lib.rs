@@ -35,6 +35,12 @@ use sha2::{Digest as _, Sha256};
 /// `launcher`.
 pub const PORT: &str = "swap";
 
+/// The endowment label [`PORT`] reaches its holder under: a namespace holding
+/// that one name, and never an entry of the holder's `svc` namespace — which
+/// std hands, duplicated, to every program the holder spawns directly, so a
+/// name in it is a name whatever the holder runs undeclared would hold too.
+pub const LABEL: &str = "swap";
+
 /// The one program a build may let receive [`PORT`]: it serves the request
 /// only on a channel whose key it has already accepted.
 pub const HOLDER: &str = "sshd";

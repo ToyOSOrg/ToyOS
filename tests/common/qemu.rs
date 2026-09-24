@@ -1099,6 +1099,10 @@ pub enum Profile {
     /// restrict, so no profile that has one can ask what a boot does on a
     /// network that never replies.
     E1000eNoServer,
+    /// [`Profile::E1000e`] with QEMU's `igb` beside the 82574: a claimable
+    /// function that performs an Express function level reset, which neither
+    /// the 82574 nor any virtio function does.
+    E1000eBesideIgb,
     Gop,
     /// A virtio-gpu function and no VGA: the owner's own desktop, and the one
     /// machine where a mode change can succeed rather than answering
@@ -1490,6 +1494,8 @@ enum Nic {
     /// brings up and puts frames onto, with no host, router or server at the
     /// other end.
     E1000eNoServer,
+    /// [`Nic::E1000e`], and an `igb` (`8086:10c9`) on no network at all.
+    E1000eBesideIgb,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -1680,6 +1686,7 @@ impl Profile {
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::E1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::E1000eNoServer => Shape { nic: Nic::E1000eNoServer, ..Self::Headless.shape() },
+            Self::E1000eBesideIgb => Shape { nic: Nic::E1000eBesideIgb, ..Self::Headless.shape() },
             Self::VirtioNetNoMsix => Shape {
                 vga: "none",
                 panel: None,
@@ -4273,6 +4280,14 @@ fn qemu_command(
                 .arg(format!("user,id=net0{forward}"))
                 .arg("-device")
                 .arg("e1000e,netdev=net0");
+        }
+        Nic::E1000eBesideIgb => {
+            qemu.arg("-netdev")
+                .arg(format!("user,id=net0{forward}"))
+                .arg("-device")
+                .arg("e1000e,netdev=net0")
+                .arg("-device")
+                .arg("igb");
         }
         Nic::E1000eNoServer => {
             // The hub is not slirp and takes no `hostfwd`, so a boot asking for

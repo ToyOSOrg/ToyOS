@@ -242,9 +242,15 @@ const RUST_SKIP: &[&str] = &[
     // A binary that panics at once, sent over ssh as a service's replacement;
     // `swap_crash_rolls_back` stages it from the host and never runs it as a job.
     "swap_crash",
-    // The swap DMA control's replacement netd: it claims the 82574 and masters
-    // with the registers untouched. `swap_quiets_the_function` stages it.
+    // The swap DMA control's replacement netd: it claims the 82574, stops it
+    // and masters it. `swap_quiets_the_function` stages it.
     "swap_claim_idle",
+    // The reset control's replacement netd: it claims the `igb` an Express
+    // function level reset released. `swap_resets_the_function` stages it.
+    "swap_flr_probe",
+    // Run over ssh undeclared, it says whether it inherited the swap port.
+    // `swap_not_inherited` uploads it.
+    "swap_probe",
     "i8042_keyboard",
     "i8042_mouse",
     "input_events",
@@ -726,10 +732,17 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("lan_swap", Sched::Parallel, Tier::Fast),
     ("swap_refusals", Sched::Parallel, Tier::Fast),
     ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
-    // The 82574 swapped to a holder that masters it with its registers
-    // untouched while the host sends it frames: the release must have reset
-    // it. The verdict is the kernel's console; its clocks are liveness guards.
+    // The 82574 swapped to a holder that stops it and masters it while the
+    // host sends it frames. The verdict is the kernel's console; its clocks
+    // are liveness guards.
     ("swap_quiets_the_function", Sched::Parallel, Tier::Fast),
+    // An `igb` netd held, released by an Express function level reset and
+    // claimed again by netd's replacement, which reads it through the window
+    // its claim maps. The verdict is what the function answers there.
+    ("swap_resets_the_function", Sched::Parallel, Tier::Fast),
+    // A program sshd runs undeclared asks for the swap port. The verdict is
+    // the program's own exit: the port is not in the namespace it inherited.
+    ("swap_not_inherited", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -13878,6 +13891,10 @@ fn run_machine_test(
         "swap_quiets_the_function" => {
             common::swap::swap_quiets_the_function(test_config, c_bins, rust_bins)
         }
+        "swap_resets_the_function" => {
+            common::swap::swap_resets_the_function(test_config, c_bins, rust_bins)
+        }
+        "swap_not_inherited" => common::swap::swap_not_inherited(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed

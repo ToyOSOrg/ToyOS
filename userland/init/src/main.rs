@@ -1056,6 +1056,11 @@ fn start<'a>(
         command.endow(SVC_LABEL, raw.0);
         held.0.push(raw);
     }
+    if let Some(ns) = swap_namespace(program, connectors) {
+        let raw = ns.into_raw();
+        command.endow(toyos_swap::LABEL, raw.0);
+        held.0.push(raw);
+    }
 
     // The namespace answers with connections, so a child holding `surface`
     // only there could never hand `surface` to a child of its own — which is
@@ -1198,7 +1203,7 @@ fn start<'a>(
     }
 }
 
-/// The namespace this program's `receives` names.
+/// The namespace this program's `receives` names, [`toyos_swap::PORT`] apart.
 ///
 /// A name some program *provides* rather than serves is not init's to give: it
 /// is one port per instance, made by whoever spawns the holder, and it reaches
@@ -1213,11 +1218,14 @@ fn build_namespace(
     connectors: &BTreeMap<&str, Connector>,
     extras: &[(&str, Connector)],
 ) -> std::io::Result<Option<Namespace>> {
-    if program.receives.is_empty() && extras.is_empty() {
+    // Never the swap port: [`swap_namespace`] says why.
+    let receives: Vec<&String> =
+        program.receives.iter().filter(|name| *name != toyos_swap::PORT).collect();
+    if receives.is_empty() && extras.is_empty() {
         return Ok(None);
     }
     let mut builder = namespace::build();
-    for name in &program.receives {
+    for name in receives {
         match connectors.get(name.as_str()) {
             Some(connector) => builder = builder.add(name, connector),
             None => assert!(
@@ -1239,4 +1247,25 @@ fn build_namespace(
         }
         Err(e) => Err(std::io::Error::other(format!("a provided connector was refused: {e:?}"))),
     }
+}
+
+/// [`toyos_swap::PORT`] in a namespace of its own, for a program whose row
+/// receives it, endowed under [`toyos_swap::LABEL`].
+///
+/// **Not an entry of `svc`**, because std gives a duplicate of `svc` to every
+/// program its holder spawns directly — sshd running one the manifest does not
+/// declare — and to their descendants. A label other than `svc` is not
+/// inherited, so the port stays with the one process init endowed.
+fn swap_namespace(program: &Program, connectors: &BTreeMap<&str, Connector>) -> Option<Namespace> {
+    if !program.receives.iter().any(|name| name == toyos_swap::PORT) {
+        return None;
+    }
+    let connector = connectors
+        .get(toyos_swap::PORT)
+        .expect("init: the manifest declares init serves `swap`");
+    let ns = namespace::build()
+        .add(toyos_swap::PORT, connector)
+        .finish()
+        .unwrap_or_else(|e| panic!("init: no swap namespace for {}: {e:?}", program.name));
+    Some(ns)
 }

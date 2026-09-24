@@ -16,8 +16,7 @@ receives = ["netd"]
 serves = ["netd"]
 devices = ["pci:8086:10d3"]
 
-# `swap` too: the host replaces netd on this boot without rebooting it, and
-# sshd acts on it only for a client whose key it has accepted.
+# `swap` too: the host replaces netd on this boot without rebooting it.
 [programs.sshd]
 receives = ["netd", "launcher", "swap"]
 

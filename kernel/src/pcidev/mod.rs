@@ -51,16 +51,12 @@
 //! no longer maps them, so bus mastering is not started at hand-over: it starts
 //! on the claim's first grant, after that grant is in the function's domain.
 //!
-//! **That is not enough on its own, and the reset is what closes it.** A
-//! function keeps its queues across a cleared bus-master bit, so the next
-//! holder's first grant is the instant it resumes writing into the previous
-//! holder's descriptors — the T14's I219 did exactly that to a swapped netd.
-//! So [`release`] clears mastering, then resets the function by the first
-//! mechanism it advertises ([`reset`]: Express FLR, AF FLR, the D3hot round
-//! trip) while the old grants are still mapped, and the next claim of the slot
-//! waits the reset out before it unmaps them or touches the function. A
-//! function that advertises no reset is said to on release, and its next
-//! holder has to stop its queues before its first grant.
+//! **A reset returns a function's configuration to its defaults, BARs
+//! included, and the next claim puts back what it needs.** [`release`] resets
+//! the function by the first mechanism it advertises ([`reset`]) while the old
+//! grants are still mapped; the next claim of the slot waits the reset out and
+//! writes back what the reset cleared and [`bring_up`] does not write itself
+//! ([`Kept`]) before it reads a register of the function.
 
 /// No `crate::` reference, so `kernel-loom` compiles it and models the
 /// interleaving no guest test lands on.
@@ -229,10 +225,11 @@ struct Machine {
     /// die its way through the whole span. Taken once and reused, which is
     /// [`SPACE`]'s treatment for the same reason.
     windows: Vec<(u16, u8, u64, u64)>,
-    /// Functions this module has reset, and when each may be touched again
-    /// (PCIe §6.6.2). One entry per function ever released, so a re-claim
-    /// cannot start reading a register the reset has not finished with.
-    resetting: Vec<(u16, Resetting)>,
+    /// Functions this module has reset, when each may be touched again (PCIe
+    /// §6.6.2), and what the reset cleared that the next claim puts back. One
+    /// entry per function ever released, so a re-claim cannot start reading a
+    /// register the reset has not finished with.
+    resetting: Vec<(u16, Resetting, Kept)>,
 }
 
 static MACHINE: Lock<Machine> = Lock::new(Machine {
@@ -484,6 +481,8 @@ enum Refusal {
     BarUnsizable(u8),
     BarUnplaceable(u8),
     BarResized(u8),
+    /// The BAR no longer holds the window this module cut for it.
+    BarMoved(u8),
     /// Firmware assigned this BAR no address, so the function answers nowhere
     /// and there is nothing to hold a candidate's answer against.
     BarUnassigned(u8),
@@ -546,6 +545,11 @@ impl core::fmt::Display for Refusal {
                 f,
                 "BAR {i} answers a different size than the window it already holds was cut for, \
                  so the function changed under this kernel"
+            ),
+            Self::BarMoved(i) => write!(
+                f,
+                "BAR {i} no longer holds the window it was cut for, so the function does not \
+                 decode where its holder would map it"
             ),
             Self::BarUnassigned(i) => write!(
                 f,
@@ -787,6 +791,61 @@ fn slot_space(slot: usize) -> Result<DeviceSpace, IommuError> {
     }
 }
 
+/// What a reset returns to its default that the next hand-over needs back and
+/// does not write itself, read off the function before its reset.
+///
+/// An FLR returns every register of the function to its initial value except
+/// the sticky and hardware-initialised ones (PCIe base spec 6.0 §6.6.2), and a
+/// D3hot → D0 transition without `No_Soft_Reset` does the same (PCI PM 1.2
+/// §5.4). Of what that clears, [`bring_up`] writes the Command register's
+/// decode and mastering bits, MSI or MSI-X, and — through [`place_bar`] only
+/// on a claim's first cut — the BARs it moves. So this keeps:
+///
+/// - **every BAR**: the ones this module moved, which [`cut_already`] answers
+///   with an address the function would otherwise no longer decode; and the
+///   ones it left where firmware put them, the MSI-X table's among them, which
+///   [`PciDevice::enable_msix`] reads its table's address out of.
+/// - **Device Control, and Device Control 2 where the structure has one**:
+///   Max_Payload_Size has to agree with the link partner's (§7.5.3.4), and the
+///   rest is what firmware configured the hierarchy with (§7.5.3.16).
+#[derive(Clone, Copy)]
+struct Kept {
+    bars: [u32; BARS],
+    slots: u8,
+    control: Option<(u16, Option<u16>)>,
+}
+
+impl Kept {
+    fn read(pci: &PciDevice) -> Self {
+        let slots = pci.bar_slots();
+        let mut bars = [0u32; BARS];
+        for (index, bar) in bars.iter_mut().enumerate().take(slots as usize) {
+            *bar = pci.read_config_u32(bar::BASE + index as u64 * 4);
+        }
+        let control = pci.capability(express::CAP_ID).ok().map(|cap| {
+            let second = express::has_control_2(cap.read_u16(express::CAPABILITIES))
+                .then(|| cap.read_u16(express::DEVICE_CONTROL_2));
+            (cap.read_u16(express::DEVICE_CONTROL), second)
+        });
+        Self { bars, slots, control }
+    }
+
+    /// Put it back, with memory decode off so nothing reads through a BAR that
+    /// is half-written. [`bring_up`] turns decode on again.
+    fn restore(&self, pci: &PciDevice) {
+        pci.set_memory_decode(false);
+        for (index, bar) in self.bars.iter().enumerate().take(self.slots as usize) {
+            pci.write_config_u32(bar::BASE + index as u64 * 4, *bar);
+        }
+        if let (Some((control, second)), Ok(cap)) = (self.control, pci.capability(express::CAP_ID)) {
+            cap.write_u16(express::DEVICE_CONTROL, express::restored(control));
+            if let Some(second) = second {
+                cap.write_u16(express::DEVICE_CONTROL_2, second);
+            }
+        }
+    }
+}
+
 /// How a released function is being put back into its reset state, and when
 /// it may be touched again.
 #[derive(Clone, Copy)]
@@ -808,52 +867,114 @@ impl Resetting {
     }
 }
 
+/// Why one of the three mechanisms did not reset a function.
+#[derive(Clone, Copy)]
+enum Declined {
+    /// The walk reached the list's terminator without the capability.
+    Absent,
+    /// The walk ended at a link the spec forbids before finding it.
+    Unread,
+    /// The capability is there and does not advertise a function level reset.
+    NoFlr,
+    /// The PM capability says `No_Soft_Reset`: D3hot → D0 keeps its state.
+    NoSoftReset,
+    /// The function is not in D0, so a round trip from it is not one this
+    /// kernel knows the timing of.
+    NotInD0,
+}
+
+impl core::fmt::Display for Declined {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Absent => "no capability",
+            Self::Unread => "the capability list ends at a forbidden link before it",
+            Self::NoFlr => "no function level reset advertised",
+            Self::NoSoftReset => "No_Soft_Reset set",
+            Self::NotInD0 => "not in D0",
+        })
+    }
+}
+
+impl From<NoCapability> for Declined {
+    fn from(why: NoCapability) -> Self {
+        match why {
+            NoCapability::Absent => Self::Absent,
+            NoCapability::Truncated => Self::Unread,
+        }
+    }
+}
+
+/// Which reset a release started, or why none of the three could be.
+enum How {
+    Express,
+    Af { pending: bool },
+    D3hot,
+    Nothing { express: Declined, af: Declined, pm: Declined },
+}
+
+impl core::fmt::Display for How {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Express => f.write_str("a function level reset (Express)"),
+            Self::Af { pending: false } => f.write_str("a function level reset (AF)"),
+            Self::Af { pending: true } => {
+                f.write_str("a function level reset (AF), with transactions still pending")
+            }
+            Self::D3hot => f.write_str("the D3hot round trip"),
+            Self::Nothing { express, af, pm } => write!(
+                f,
+                "nothing (Express: {express}; AF: {af}; PM: {pm}), so its queues are the next \
+                 holder's to stop"
+            ),
+        }
+    }
+}
+
 /// Start this function's reset, by the first of the three mechanisms it
 /// advertises, and answer which and how long it takes.
-///
-/// **The reset is what makes a re-claim safe, and a function that advertises
-/// none has its queues handed to the next holder.** Clearing bus mastering
-/// stops new transactions and forgets nothing: a NIC keeps its ring bases and
-/// its receive enable across it, and the next holder's first grant — which
-/// starts mastering again — is the instant it resumes writing into the old
-/// holder's descriptors. That is what the T14's second netd met.
 ///
 /// The Express reset first, then the AF one a conventional function publishes
 /// in its place, then the D3hot round trip, which resets any function that
 /// does not say `No_Soft_Reset`.
-fn reset(pci: &PciDevice) -> (&'static str, Option<Resetting>) {
+fn reset(pci: &PciDevice) -> (How, Option<Resetting>) {
     let now = crate::clock::nanos_since_boot();
-    if let Ok(cap) = pci.capability(express::CAP_ID) {
-        if express::resets(cap.read_u32(express::DEVICE_CAPABILITIES)) {
+    let express = match pci.capability(express::CAP_ID) {
+        Ok(cap) if express::resets(cap.read_u32(express::DEVICE_CAPABILITIES)) => {
             let control = cap.read_u16(express::DEVICE_CONTROL);
             cap.write_u16(express::DEVICE_CONTROL, express::initiate(control));
-            return ("a function level reset (Express)", Some(Resetting::Flr { at: now + express::SETTLE_NANOS }));
+            return (How::Express, Some(Resetting::Flr { at: now + express::SETTLE_NANOS }));
         }
-    }
-    if let Ok(cap) = pci.capability(af::CAP_ID) {
-        if af::resets(cap.read_u8(af::AF_CAPABILITIES)) {
+        Ok(_) => Declined::NoFlr,
+        Err(why) => why.into(),
+    };
+    let af = match pci.capability(af::CAP_ID) {
+        Ok(cap) if af::resets(cap.read_u8(af::AF_CAPABILITIES)) => {
             let pending = af::pending(cap.read_u8(af::AF_STATUS));
             cap.write_u8(af::AF_CONTROL, af::INITIATE_FLR);
-            let how = if pending {
-                "a function level reset (AF), with transactions still pending"
+            return (How::Af { pending }, Some(Resetting::Flr { at: now + af::SETTLE_NANOS }));
+        }
+        Ok(_) => Declined::NoFlr,
+        Err(why) => why.into(),
+    };
+    let pm = match pci.capability(pm::CAP_ID) {
+        Ok(cap) => {
+            let pmcsr = cap.read_u16(pm::PMCSR);
+            if !pm::resets(pmcsr) {
+                Declined::NoSoftReset
+            } else if pm::state(pmcsr) != pm::D0 {
+                Declined::NotInD0
             } else {
-                "a function level reset (AF)"
-            };
-            return (how, Some(Resetting::Flr { at: now + af::SETTLE_NANOS }));
+                cap.write_u16(pm::PMCSR, pm::to(pmcsr, pm::D3HOT));
+                return (How::D3hot, Some(Resetting::D3hot { at: now + pm::TRANSITION_NANOS }));
+            }
         }
-    }
-    if let Ok(cap) = pci.capability(pm::CAP_ID) {
-        let pmcsr = cap.read_u16(pm::PMCSR);
-        if pm::resets(pmcsr) && pm::state(pmcsr) == pm::D0 {
-            cap.write_u16(pm::PMCSR, pm::to(pmcsr, pm::D3HOT));
-            return ("the D3hot round trip", Some(Resetting::D3hot { at: now + pm::TRANSITION_NANOS }));
-        }
-    }
-    ("nothing: it advertises no reset, so its queues are the next holder's to stop", None)
+        Err(why) => why.into(),
+    };
+    (How::Nothing { express, af, pm }, None)
 }
 
 /// Finish whatever is left of a reset this kernel started on this function,
-/// before a register of it is read.
+/// and put back what it cleared, before a register of it is read.
 ///
 /// Spent here rather than in [`release`], where the process is already dying
 /// and the drain that runs its teardown may be the idle loop's: a re-claim is
@@ -862,10 +983,10 @@ fn settle_after_reset(pci: &PciDevice) {
     let who = requester(pci);
     let pending = {
         let mut machine = MACHINE.lock();
-        let at = machine.resetting.iter().position(|(id, _)| *id == who);
-        at.map(|at| machine.resetting.swap_remove(at).1)
+        let at = machine.resetting.iter().position(|(id, _, _)| *id == who);
+        at.map(|at| machine.resetting.swap_remove(at))
     };
-    let Some(resetting) = pending else { return };
+    let Some((_, resetting, kept)) = pending else { return };
     wait_until(resetting.quiet_at());
     if let Resetting::D3hot { .. } = resetting {
         if let Ok(cap) = pci.capability(pm::CAP_ID) {
@@ -874,6 +995,7 @@ fn settle_after_reset(pci: &PciDevice) {
         }
         wait_until(crate::clock::nanos_since_boot() + pm::TRANSITION_NANOS);
     }
+    kept.restore(pci);
 }
 
 fn wait_until(at: u64) {
@@ -960,7 +1082,12 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64) -> Result<u64, Re
     let high = pci.read_config_u32(offset + 4);
     let span = align_2m(size as usize) as u64;
     if let Some(at) = cut_already(pci, index, span)? {
-        return Ok(at);
+        // The register is the proof and the record is not: a function that
+        // lost its address since the cut decodes nowhere its holder maps.
+        return match pci.memory_bar(index) {
+            Ok(memory) if memory.address() == at => Ok(at),
+            _ => Err(Refusal::BarMoved(index)),
+        };
     }
     let restore = || {
         pci.set_memory_decode(false);
@@ -1165,6 +1292,8 @@ fn tear_down(slot: usize, mut bound: Bound) {
     // stay mapped until it is quiet, so nothing it had already issued lands in
     // a page the allocator has handed on. The wait is the next claim's, never
     // this teardown's: it can run on the idle loop's drain.
+    // Read before the reset returns it to its defaults.
+    let kept = Kept::read(&bound.pci);
     let (how, resetting) = reset(&bound.pci);
     let grants = core::mem::take(&mut bound.grants);
     match resetting {
@@ -1172,9 +1301,9 @@ fn tear_down(slot: usize, mut bound: Bound) {
             let who = requester(&bound.pci);
             {
                 let mut machine = MACHINE.lock();
-                match machine.resetting.iter_mut().find(|(id, _)| *id == who) {
-                    Some(entry) => entry.1 = resetting,
-                    None => machine.resetting.push((who, resetting)),
+                match machine.resetting.iter_mut().find(|(id, _, _)| *id == who) {
+                    Some(entry) => *entry = (who, resetting, kept),
+                    None => machine.resetting.push((who, resetting, kept)),
                 }
             }
             let parked = Retired { space: bound.space, grants, quiet_at: resetting.quiet_at() };
