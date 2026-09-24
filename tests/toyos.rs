@@ -1157,6 +1157,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("usb_storage_write_error", Sched::Parallel, Tier::Fast),
     ("usb_flush_optional", Sched::Parallel, Tier::Nightly),
     ("xhci_deaf_registers", Sched::Parallel, Tier::Nightly),
+    // The window is anchored on the controller's own port-power stamp now, not
+    // boot, so a slow boot no longer eats it — but the bound is still a fixed
+    // span of the guest's own TSC clock (`SLOW_CONNECT_NS`/`DEBOUNCE_NS`), and
+    // a host running several other guests can still stall this one's vCPU past
+    // that span for reasons that are not the defect.
     ("xhci_slow_connect", Sched::Serial, Tier::Nightly),
     ("xhci_portsc_rw1c", Sched::Parallel, Tier::Fast),
     // One staged break and no other, which puts the driver's recovery finishing
@@ -1218,11 +1223,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
     ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),
     ("wall_clock_zone", Sched::Parallel, Tier::Nightly),
-    // `xhci_slow_connect`'s shape against the disk's port: its port is held empty
-    // until the boot scan rather than for a duration, so what it stages is an
-    // ordering, and the settle it has to end by is the machine-wide wall-clock
-    // debounce.
-    ("late_storage_connect", Sched::Serial, Tier::Nightly),
+    // `xhci_slow_connect`'s shape against the disk's port, but its actuator
+    // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
+    // so what it stages is an ordering with no wall-clock margin on either
+    // side: nothing here needs the serial tail.
+    ("late_storage_connect", Sched::Parallel, Tier::Nightly),
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
