@@ -34,11 +34,17 @@ impl Machine {
         });
     }
 
-    /// `sched::dump::serve`, without the read a pass with nothing pending pays instead.
-    fn serve(&self) {
+    /// `sched::dump::serve`, without the read a pass with nothing pending pays instead: whether it took one.
+    fn serve(&self) -> bool {
         if !self.request.take() {
-            return;
+            return false;
         }
+        self.report_until_nothing_pending();
+        true
+    }
+
+    /// `sched::dump::report_until_nothing_pending`, once the caller took the request.
+    fn report_until_nothing_pending(&self) {
         loop {
             self.report();
             if !self.request.end_report() {
@@ -101,6 +107,27 @@ fn one_request_is_taken_once() {
         other.join().unwrap();
 
         assert!(!machine.request.pending(), "the request outlived both passes");
+        assert_eq!(machine.reports(), 1, "one request was reported other than once");
+    });
+}
+
+/// The stop asks while a sibling's pass may serve: filed and taken in one exchange, the request is never
+/// pending for the sibling to take, and the one report is the asker's.
+#[test]
+fn the_asker_owns_the_report_it_asks_for() {
+    loom::model(|| {
+        let machine = Machine::new();
+
+        let sibling = {
+            let machine = machine.clone();
+            loom::thread::spawn(move || machine.serve())
+        };
+        assert!(machine.request.file_and_take(), "no report ran, and the asker did not take its own request");
+        machine.report_until_nothing_pending();
+        let sibling_took = sibling.join().unwrap();
+
+        assert!(!sibling_took, "a sibling's pass took the request the asker filed");
+        assert!(!machine.request.pending(), "the request outlived its report");
         assert_eq!(machine.reports(), 1, "one request was reported other than once");
     });
 }

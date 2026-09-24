@@ -171,19 +171,11 @@ pub fn metal_job_reboot(
 }
 
 /// **`Rebooting.` is the last record, and it is last by construction.**
-///
-/// `quiesce-late-word` is armed for the reason `usb_reset_hands_devices_back`'s
-/// deadline arm arms it: QEMU has no window between the boot's last word and
-/// the reset and hardware does, so without it the order judge below is green
-/// whether or not anything was stopped.
 pub fn quiesce_stops_the_machine(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let config = super::compile::repo_root().join("tests/quiescecase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-
     // The one binary this config's job list names: every other one staged
     // beside it is image the boot pays to write and never reads.
     const JOB: &str = "quiesce_writers";
@@ -194,61 +186,8 @@ pub fn quiesce_stops_the_machine(
     // `test-runner`'s main and deadline threads. `logd` holds the log and is
     // carved out uncounted; the job's own main thread is the caller.
     const OTHERS: u32 = 3;
-    let bins: Vec<(String, Vec<u8>)> =
-        rust_bins.iter().filter(|(name, _)| name == JOB).cloned().collect();
-    if bins.len() != 1 {
-        return Err(format!("the suite built {} copies of {JOB:?}", bins.len()));
-    }
-
-    let mut qemu = QemuInstance::boot_with_options(
-        case,
-        &[],
-        &bins,
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            qmp: true,
-            kernel_params: &["quiesce-late-word"],
-            ..Default::default()
-        },
-    );
-    serial::Serial::boot(&qemu).must_be_clean()?;
-    let booted = qemu.boot_log().to_string();
-
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
-    let reason = stop.reason();
-    let tail = qemu.drain_serial(WAIT);
-    let whole = format!("{booted}{tail}");
-
-    serial::Serial::named("quiesce drain", tail.as_str()).must_be_clean()?;
-    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
-
-    let lines: Vec<&str> = whole.lines().collect();
-    // The word's presence is asserted before what follows it: a boot that never
-    // wrote it has nothing after it either, and would pass vacuously.
-    let last_word = lines
-        .iter()
-        .position(|line| line.contains(REBOOTING))
-        .ok_or_else(|| format!("this boot never wrote {REBOOTING:?}\n{whole}"))?;
-
-    // **The defect itself, and the rest are the mechanism.** The whole change
-    // reverted reds here, on the record a writer thread put under the boot's
-    // own last word.
-    let after: Vec<&str> =
-        lines[last_word + 1..].iter().copied().filter(|line| !line.trim().is_empty()).collect();
-    if !after.is_empty() {
-        return Err(format!(
-            "{} line(s) reached the console after the boot's last word:\n  {}",
-            after.len(),
-            after.join("\n  "),
-        ));
-    }
-
-    let said = whole
-        .lines()
-        .find(|line| line.contains(toyos_quiesce::STOPPED))
-        .ok_or_else(|| format!("the kernel wrote no stop record\n{whole}"))?;
-    let record = toyos_quiesce::Record::parse(said)
-        .ok_or_else(|| format!("the kernel's stop record did not read back as one:\n  {said}"))?;
+    let (whole, record) =
+        stopped_boot("tests/quiescecase/system.toml", JOB, &[LATE_WORD], rust_bins)?;
     if record.in_flight != 0 {
         return Err(format!(
             "the block layer still had {} operation(s) open on a thread this stop had stopped, so \
@@ -276,12 +215,6 @@ pub fn quiesce_stops_the_machine(
             WRITERS + OTHERS,
         ));
     }
-    if !record.stopped_the_machine() {
-        return Err(format!(
-            "the stop gave up on {} thread(s) that never reached a safe point:\n  {record}",
-            record.sweep.running,
-        ));
-    }
     woken_by_its_threads(&record)?;
 
     eprintln!("  [power] the machine stopped before it claimed anything: {record}");
@@ -303,6 +236,12 @@ fn woken_by_its_threads(record: &toyos_quiesce::Record) -> Result<(), String> {
     Ok(())
 }
 
+/// Every [`stopped_boot`] arms it, for the reason `usb_reset_hands_devices_back`'s
+/// deadline arm does: QEMU has no window between the boot's last word and the
+/// reset and hardware does, so without it the last-word judge is green whether
+/// or not anything was stopped.
+const LATE_WORD: &str = "quiesce-late-word";
+
 /// One boot of `config` whose one job reboots it, with `params` armed, judged
 /// on what every boot that ends through the stop owes: a clean console, a
 /// return to firmware, nothing under the boot's last word, and a stop that
@@ -313,6 +252,12 @@ fn stopped_boot(
     params: &'static [&'static str],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(String, toyos_quiesce::Record), String> {
+    if !params.contains(&LATE_WORD) {
+        return Err(format!(
+            "a stopped boot armed with {params:?} and not {LATE_WORD:?} has no window under its \
+             last word, so the judge of that word would be green over any machine"
+        ));
+    }
     let config = super::compile::repo_root().join(config);
     let case = config.parent().expect("system.toml has a directory");
     let bins: Vec<(String, Vec<u8>)> =
@@ -341,10 +286,14 @@ fn stopped_boot(
     returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
 
     let lines: Vec<&str> = whole.lines().collect();
+    // The word's presence is asserted before what follows it: a boot that never
+    // wrote it has nothing after it either, and would pass vacuously.
     let last_word = lines
         .iter()
         .position(|line| line.contains(REBOOTING))
         .ok_or_else(|| format!("this boot never wrote {REBOOTING:?}\n{whole}"))?;
+    // **The defect itself, and the rest are the mechanism**: a record a thread
+    // put under the boot's own last word.
     let after: Vec<&str> =
         lines[last_word + 1..].iter().copied().filter(|line| !line.trim().is_empty()).collect();
     if !after.is_empty() {
@@ -378,7 +327,7 @@ pub fn quiesce_wakes_on_the_last_park(
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-park"], rust_bins)
+    woken_by_the_held_thread(&["quiesce-last-park", LATE_WORD], rust_bins)
 }
 
 /// **An exit that is the stop's last transition wakes it.** The same, with
@@ -388,12 +337,12 @@ pub fn quiesce_wakes_on_the_last_exit(
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-exit"], rust_bins)
+    woken_by_the_held_thread(&["quiesce-last-exit", LATE_WORD], rust_bins)
 }
 
-/// One of the two `quiesce-last-*` boots, with that one actuator armed.
+/// One of the two `quiesce-last-*` boots: its actuator first, the late word beside it.
 fn woken_by_the_held_thread(
-    armed: &'static [&'static str; 1],
+    armed: &'static [&'static str; 2],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let actuator = armed[0];
@@ -443,7 +392,7 @@ pub fn quiesce_dump_holds_the_stopped(
     let (whole, record) = stopped_boot(
         "tests/quiescecase/system.toml",
         "quiesce_writers",
-        &["quiesce-dump"],
+        &["quiesce-dump", LATE_WORD],
         rust_bins,
     )?;
     let lines: Vec<&str> = whole.lines().collect();
@@ -490,6 +439,15 @@ pub fn quiesce_dump_holds_the_stopped(
         return Err(format!(
             "the report found no stopped thread on any cpu, so it says nothing about how it \
              counts one:\n{}",
+            report.join("\n"),
+        ));
+    }
+    // And the count is the threads it names: this stop bands fewer than one
+    // cpu's line cap, so each one it counts is a line of its own.
+    let named = report.iter().filter(|line| line.contains("stopped (the machine is stopping)")).count();
+    if named != stopped as usize {
+        return Err(format!(
+            "the report counted {stopped} stopped thread(s) and named {named}:\n{}",
             report.join("\n"),
         ));
     }

@@ -181,8 +181,12 @@ pub fn file_request() {
 #[cfg(feature = "boot-actuators")]
 pub fn serve_for_the_stop() {
     let _nothing_under_it = crate::scheduler::Parkable::at_entry();
-    REQUEST.file();
-    serve(&UnderNothing(()));
+    // Filed and taken in one exchange: a sibling's pass entered at zero would take a request filed alone.
+    assert!(
+        REQUEST.file_and_take(),
+        "quiesce-dump: a report was already running when the stop asked for its own"
+    );
+    report_until_nothing_pending(&UnderNothing(()));
 }
 
 /// Ctrl+Alt+D's request, from `drain_irqs` on every pass.
@@ -203,6 +207,11 @@ fn serve(proof: &UnderNothing) {
     if !REQUEST.pending() || !REQUEST.take() {
         return;
     }
+    report_until_nothing_pending(proof);
+}
+
+/// The caller took the request: report until a report ends with nothing filed during it.
+fn report_until_nothing_pending(proof: &UnderNothing) {
     loop {
         report(proof);
         if !REQUEST.end_report() {
