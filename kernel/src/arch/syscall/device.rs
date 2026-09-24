@@ -117,9 +117,9 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
 /// Mints a device claim, gated on a `SysCap` carrying [`Rights::DEVICE`].
 ///
 /// `selector` says which device where the class alone does not — a PCI
-/// function's vendor and device id — and is ignored by every class that names
-/// at most one device on the machine.
-pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: u64) -> u64 {
+/// function's vendor and device id, a partition's GUID — and is ignored by
+/// every class that names at most one device on the machine.
+pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]) -> u64 {
     let Some(class) = device::DeviceType::from_raw(class) else {
         return SyscallError::InvalidArgument.to_u64();
     };

@@ -72,6 +72,7 @@ from_handle! {
     crate::Mouse => |h| crate::Mouse(Device(h)),
     crate::FramebufferDev => |h| crate::FramebufferDev(Device(h)),
     crate::PciDev => |h| crate::PciDev(Device(h)),
+    crate::PartitionDev => |h| crate::PartitionDev(Device(h)),
     crate::HdaDev => |h| crate::HdaDev(Device(h)),
     crate::VirtioSoundDev => |h| crate::VirtioSoundDev(Device(h)),
 }
@@ -205,6 +206,14 @@ pub fn device<T: FromHandle>(class: DeviceType) -> Option<T> {
 pub fn pci_function<T: FromHandle>(id: toyos_abi::syscall::PciId) -> Option<T> {
     let mut buf = [0u8; DeviceRequest::MAX_NAME];
     let name = DeviceRequest::Pci(id).write_name(&mut buf);
+    with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
+}
+
+/// The claim for one partition the manifest says this program gets, looked up
+/// by the entry's own spelling exactly as [`pci_function`] is.
+pub fn partition<T: FromHandle>(name: toyos_abi::part::PartitionName) -> Option<T> {
+    let mut buf = [0u8; DeviceRequest::MAX_NAME];
+    let name = DeviceRequest::Partition(name).write_name(&mut buf);
     with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
 }
 

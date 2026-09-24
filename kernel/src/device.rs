@@ -112,9 +112,10 @@ pub enum ClaimError {
 /// `Claim` lives on this stack frame until the returned object takes it, so a
 /// failure after `acquire` cannot leave a device held by nobody.
 ///
-/// `selector` says *which* device where the class alone does not — today that
-/// is a PCI function's vendor and device id, and every other class ignores it.
-pub fn try_claim(class: DeviceType, selector: u64) -> Result<Arc<DeviceClaim>, ClaimError> {
+/// `selector` says *which* device where the class alone does not — a PCI
+/// function's vendor and device id in its first word, a partition's GUID in
+/// both — and every other class ignores it.
+pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
         DeviceType::Keyboard => {
@@ -143,13 +144,17 @@ pub fn try_claim(class: DeviceType, selector: u64) -> Result<Arc<DeviceClaim>, C
             Ok(DeviceClaim::new(class, framebuffer_info(screen), claim))
         }
         DeviceType::PciFunction => {
-            let id = toyos_abi::syscall::PciId::from_wire(selector)
+            let id = toyos_abi::syscall::PciId::from_wire(selector[0])
                 .ok_or(ClaimError::Absent)?;
             // The slot's own guard, taken inside: a PCI claim's exclusivity is
             // per function rather than per class, so there is no flag here to
             // acquire first.
             let (info, slot, claim) = crate::pcidev::claim(id)?;
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info, slot), claim))
+        }
+        DeviceType::Partition | DeviceType::PartitionOfType => {
+            log!("partclaim: this kernel does not hand out partition claims yet — {} refused", class.class_name());
+            Err(ClaimError::Unusable)
         }
         DeviceType::HdaAudio => {
             let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;

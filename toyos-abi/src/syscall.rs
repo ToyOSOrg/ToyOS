@@ -288,6 +288,12 @@ pub const SYS_DEVICE_BAR_MAP: u64 = 117;
 /// [`device_dma_alloc`].
 pub const SYS_DEVICE_DMA_ALLOC: u64 = 118;
 
+/// Read blocks of a claimed partition. See [`partition_read`].
+pub const SYS_PARTITION_READ: u64 = 119;
+
+/// Write blocks of a claimed partition. See [`partition_write`].
+pub const SYS_PARTITION_WRITE: u64 = 120;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
@@ -300,7 +306,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_DEVICE_DMA_ALLOC < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_PARTITION_WRITE < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -970,7 +976,9 @@ pub fn fstat(handle: RawHandle) -> Result<Stat, SyscallError> {
     Ok(stat)
 }
 
-/// Flush a file handle to disk.
+/// Flush a file handle to disk, or a partition claim's writes out of its
+/// device's cache ([`crate::part`]): `Ok` is the device's own word that every
+/// write the claim returned from before this call is durable.
 pub fn fsync(handle: RawHandle) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_FSYNC, handle.0 as u64, 0, 0, 0))
 }
@@ -1188,6 +1196,16 @@ device_classes! {
     /// `pci:<vendor>:<device>` names which function, and [`DeviceRequest`] is
     /// the one parser of that spelling.
     PciFunction = 7 => "pci",
+    /// One GPT partition, named by its unique partition GUID: the holder reads
+    /// and writes its blocks and no other's ([`crate::part`]).
+    ///
+    /// Like `pci`, a class whose name is not the whole of the entry —
+    /// `part:<GUID>` — and [`DeviceRequest`] is the one parser.
+    Partition = 8 => "part",
+    /// The same claim, naming the partition as the one partition on the machine
+    /// of a type GUID: `part-type:<GUID>`. The claim is the same object; the
+    /// class says how the selector is to be read.
+    PartitionOfType = 9 => "part-type",
 }
 
 /// A PCI function named by what identifies the *card*, not the slot firmware
@@ -1245,7 +1263,8 @@ fn hex16(text: &str) -> Option<u16> {
 }
 
 /// What one `devices` entry asks for: a class, and for
-/// [`DeviceType::PciFunction`] which function.
+/// [`DeviceType::PciFunction`] which function, and for a partition which
+/// partition.
 ///
 /// One parser, because four places read the same spelling — the build system's
 /// gate, `/system/bin/init`'s mint, the kernel's claim and the claimant's own
@@ -1255,36 +1274,60 @@ fn hex16(text: &str) -> Option<u16> {
 pub enum DeviceRequest {
     Class(DeviceType),
     Pci(PciId),
+    Partition(crate::part::PartitionName),
 }
 
 impl DeviceRequest {
     /// The spelling that carries a function id after the class name.
     pub const PCI_PREFIX: &'static str = "pci:";
 
-    /// The longest a `devices` entry, and so a `dev:` label's tail, can be.
-    pub const MAX_NAME: usize = 16;
+    /// The spelling that carries a unique partition GUID.
+    pub const PART_PREFIX: &'static str = "part:";
+
+    /// The spelling that carries a partition type GUID.
+    pub const PART_TYPE_PREFIX: &'static str = "part-type:";
+
+    /// The longest a `devices` entry, and so a `dev:` label's tail, can be:
+    /// `part-type:` and a GUID, rounded up to a multiple of eight.
+    pub const MAX_NAME: usize = 48;
 
     pub fn parse(name: &str) -> Option<Self> {
-        match name.strip_prefix(Self::PCI_PREFIX) {
-            Some(id) => PciId::parse(id).map(Self::Pci),
-            // A bare `pci` names no function, and `from_class_name` would
-            // otherwise accept it and leave the selector at zero.
-            None if name == DeviceType::PciFunction.class_name() => None,
-            None => DeviceType::from_class_name(name).map(Self::Class),
+        use crate::part::{PartGuid, PartitionName};
+        if let Some(id) = name.strip_prefix(Self::PCI_PREFIX) {
+            return PciId::parse(id).map(Self::Pci);
+        }
+        if let Some(guid) = name.strip_prefix(Self::PART_PREFIX) {
+            return PartGuid::parse(guid).map(|g| Self::Partition(PartitionName::Unique(g)));
+        }
+        if let Some(guid) = name.strip_prefix(Self::PART_TYPE_PREFIX) {
+            return PartGuid::parse(guid).map(|g| Self::Partition(PartitionName::OfType(g)));
+        }
+        let class = DeviceType::from_class_name(name)?;
+        match class {
+            // A bare `pci`, `part` or `part-type` names no device, and would
+            // otherwise leave the selector at zero.
+            DeviceType::PciFunction | DeviceType::Partition | DeviceType::PartitionOfType => None,
+            _ => Some(Self::Class(class)),
         }
     }
 
     pub const fn class(self) -> DeviceType {
+        use crate::part::PartitionName;
         match self {
             Self::Class(class) => class,
             Self::Pci(_) => DeviceType::PciFunction,
+            Self::Partition(PartitionName::Unique(_)) => DeviceType::Partition,
+            Self::Partition(PartitionName::OfType(_)) => DeviceType::PartitionOfType,
         }
     }
 
-    pub const fn selector(self) -> u64 {
+    /// The two selector words [`device_claim`] carries; a class that names at
+    /// most one device on the machine carries none.
+    pub fn selector(self) -> [u64; 2] {
         match self {
-            Self::Class(_) => 0,
-            Self::Pci(id) => id.wire(),
+            Self::Class(_) => [0, 0],
+            Self::Pci(id) => [id.wire(), 0],
+            Self::Partition(name) => name.guid().wire(),
         }
     }
 
@@ -1292,11 +1335,25 @@ impl DeviceRequest {
     /// [`Self::MAX_NAME`] bounds. The name is also the tail of the `dev:` label
     /// the claim arrives under, and it is composed here so the two cannot drift.
     pub fn write_name(self, buf: &mut [u8; Self::MAX_NAME]) -> &str {
+        use crate::part::{PartitionName, GUID_TEXT_LEN};
         let id = match self {
             Self::Class(class) => {
                 let name = class.class_name();
                 buf[..name.len()].copy_from_slice(name.as_bytes());
                 return core::str::from_utf8(&buf[..name.len()]).expect("a class name is ASCII");
+            }
+            Self::Partition(name) => {
+                let prefix = match name {
+                    PartitionName::Unique(_) => Self::PART_PREFIX,
+                    PartitionName::OfType(_) => Self::PART_TYPE_PREFIX,
+                };
+                let at = prefix.len();
+                buf[..at].copy_from_slice(prefix.as_bytes());
+                let mut text = [0u8; GUID_TEXT_LEN];
+                name.guid().write_text(&mut text);
+                buf[at..at + GUID_TEXT_LEN].copy_from_slice(&text);
+                return core::str::from_utf8(&buf[..at + GUID_TEXT_LEN])
+                    .expect("a prefix and a GUID's text are ASCII");
             }
             Self::Pci(id) => id,
         };
@@ -1321,10 +1378,12 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Mint a device claim for `request`, presenting a `SysCap` handle that carries
 /// [`Rights::DEVICE`]. `NotFound` for a class no driver registered, or a PCI
-/// function this machine does not have — init endows what exists and logs what
-/// it did not. `AlreadyExists` names one already claimed; a PCI request
-/// matching more than one function answers `InvalidArgument`, because an
-/// ambiguous name is refused rather than resolved to the first match.
+/// function or partition this machine does not have — init endows what exists
+/// and logs what it did not. `AlreadyExists` names one already claimed, and
+/// `PermissionDenied` one the kernel drives itself — for a partition, one it
+/// has mounted. A request matching more than one function or partition answers
+/// `InvalidArgument`, because an ambiguous name is refused rather than resolved
+/// to the first match.
 ///
 /// The claim comes back **without** [`Rights::DUP`], so it can only be moved,
 /// which is what makes endowing one to a child a provable hand-off.
@@ -1332,14 +1391,49 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
 /// [`Rights::DUP`]: crate::handle::Rights::DUP
 pub fn device_claim(syscap: RawHandle, request: DeviceRequest) -> Result<RawHandle, SyscallError> {
-    check(syscall(
-        SYS_DEVICE_CLAIM,
-        syscap.0 as u64,
-        request.class() as u64,
-        request.selector(),
-        0,
+    let [lo, hi] = request.selector();
+    check(syscall(SYS_DEVICE_CLAIM, syscap.0 as u64, request.class() as u64, lo, hi))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// Read `buf.len()` blocks of the partition `claim` holds, from its block
+/// `first` — the partition's own number, from 0.
+///
+/// `InvalidArgument` for a run that does not end inside the partition or is
+/// longer than [`crate::part::MAX_BLOCKS_PER_CALL`], `Io` for a device that
+/// did not do it, and `Gone` for a claim whose last handle has been let go.
+pub fn partition_read(
+    claim: RawHandle,
+    first: u64,
+    buf: &mut [crate::part::Block],
+) -> Result<(), SyscallError> {
+    check_unit(syscall(
+        SYS_PARTITION_READ,
+        claim.0 as u64,
+        first,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
     ))
-    .map(|v| RawHandle(v as u32))
+}
+
+/// Write `buf.len()` blocks to the partition `claim` holds, from its block
+/// `first`, refused as [`partition_read`] is.
+///
+/// `Ok` is the device having taken the blocks, and **not** their being
+/// durable: that is [`fsync`] on the claim, which a writer that must survive a
+/// power cut calls before it tells anyone the write happened.
+pub fn partition_write(
+    claim: RawHandle,
+    first: u64,
+    buf: &[crate::part::Block],
+) -> Result<(), SyscallError> {
+    check_unit(syscall(
+        SYS_PARTITION_WRITE,
+        claim.0 as u64,
+        first,
+        buf.as_ptr() as u64,
+        buf.len() as u64,
+    ))
 }
 
 /// Enter the real-time scheduling band, presenting a `SysCap` handle that
@@ -2148,12 +2242,12 @@ mod tests {
         let want = DeviceRequest::Pci(PciId { vendor: 0x1af4, device: 0x1041 });
         assert_eq!(DeviceRequest::parse("pci:1af4:1041"), Some(want));
         assert_eq!(want.class(), DeviceType::PciFunction);
-        assert_eq!(want.selector(), 0x1af4_1041);
+        assert_eq!(want.selector(), [0x1af4_1041, 0]);
         assert_eq!(
             DeviceRequest::parse("framebuffer"),
             Some(DeviceRequest::Class(DeviceType::Framebuffer))
         );
-        assert_eq!(DeviceRequest::Class(DeviceType::Framebuffer).selector(), 0);
+        assert_eq!(DeviceRequest::Class(DeviceType::Framebuffer).selector(), [0, 0]);
         // Every one of these is a name a config could plausibly write and the
         // kernel must not resolve to a function.
         for bad in [
@@ -2162,6 +2256,10 @@ mod tests {
             "pci:1af4",
             "nic",  // the retired class the NIC used to be claimed as
             "gpu",  // a class name this table has never had
+            "part", // a bare partition class names no partition
+            "part-type",
+            "part:",
+            "part-type:c12a7328-f81f-11d2-ba4b-00a0c93ec93b", // one spelling: uppercase
             "",
         ] {
             assert_eq!(DeviceRequest::parse(bad), None, "{bad:?} parsed");
@@ -2173,11 +2271,36 @@ mod tests {
     /// holder cannot look up.
     #[test]
     fn a_request_writes_back_the_name_it_parsed() {
-        for name in ["pci:1af4:1041", "pci:8086:15fc", "pci:0000:0000", "hda-audio", "mouse"] {
+        for name in [
+            "pci:1af4:1041",
+            "pci:8086:15fc",
+            "pci:0000:0000",
+            "hda-audio",
+            "mouse",
+            "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+            // The longest entry there is, which is what `MAX_NAME` is for.
+            "part-type:C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+        ] {
             let request = DeviceRequest::parse(name).expect("a name this table has");
             let mut buf = [0u8; DeviceRequest::MAX_NAME];
             assert_eq!(request.write_name(&mut buf), name);
         }
+    }
+
+    /// The two partition spellings are two classes over one GUID, so a type
+    /// row can never be read as the partition whose unique GUID it happens to
+    /// spell, nor the reverse.
+    #[test]
+    fn a_partition_entry_says_which_of_its_guids_it_names() {
+        use crate::part::{PartGuid, PartitionName};
+        let esp = PartGuid::parse("C12A7328-F81F-11D2-BA4B-00A0C93EC93B").expect("the ESP type");
+        let by_type = DeviceRequest::parse("part-type:C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
+        let by_unique = DeviceRequest::parse("part:C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
+        assert_eq!(by_type, Some(DeviceRequest::Partition(PartitionName::OfType(esp))));
+        assert_eq!(by_unique, Some(DeviceRequest::Partition(PartitionName::Unique(esp))));
+        assert_eq!(by_type.map(DeviceRequest::class), Some(DeviceType::PartitionOfType));
+        assert_eq!(by_unique.map(DeviceRequest::class), Some(DeviceType::Partition));
+        assert_eq!(by_type.map(DeviceRequest::selector), Some(esp.wire()));
     }
 
     /// The selector is one word on the wire and the kernel decodes it back;
