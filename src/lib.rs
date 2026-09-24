@@ -11,6 +11,7 @@ pub mod clippy;
 pub mod fingerprint;
 pub mod flags;
 pub mod forkcheck;
+pub mod heartbeat;
 pub mod hostws;
 pub mod icmp;
 pub mod image;
