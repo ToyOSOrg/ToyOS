@@ -1143,6 +1143,7 @@ dependencies = [
  "toyos-logstream",
  "toyos-manifest",
  "toyos-sched",
+ "toyos-swap",
  "toyos-symbols",
  "toyos-tco",
  "toyos-userbound",
@@ -1278,6 +1279,14 @@ version = "0.1.0"
 dependencies = [
  "rand",
  "toyos-sched",
+]
+
+[[package]]
+name = "toyos-swap"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "toyos-manifest",
 ]
 
 [[package]]
