@@ -1218,6 +1218,38 @@ pub fn declared_actuators(root: &Path) -> Vec<String> {
     names
 }
 
+/// Refuse a kernel that does not carry exactly the `names` its feature set
+/// says it does: none of them in the shipping kernel, all of them in the one
+/// built `with`, and no opinion about any other build.
+///
+/// **Both directions, because one of them is a spelling of `true`.** The
+/// kernel that must carry every name is what says the search can find one.
+/// `what` names them in the refusal and `why` is the sentence under it.
+fn assert_names_match_features<S: AsRef<str> + std::fmt::Debug>(
+    features: &str,
+    kernel: &[u8],
+    with: &[&str],
+    names: &[S],
+    what: &str,
+    why: &str,
+) {
+    let want = match features {
+        "" => false,
+        f if f == with.join(",") => true,
+        _ => return,
+    };
+    let named = |name: &&S| contains_subslice(kernel, name.as_ref().as_bytes());
+    let wrong: Vec<&S> = names.iter().filter(|n| named(n) != want).collect();
+    assert!(
+        wrong.is_empty(),
+        "the {} kernel {} {} of the {} {what}: {wrong:?}.\n{why}",
+        if want { with.join(",") } else { "shipping".to_string() },
+        if want { "is missing" } else { "names" },
+        wrong.len(),
+        names.len(),
+    );
+}
+
 /// Refuse to write an image whose kernel does not carry exactly the actuators
 /// its feature set says it does.
 ///
@@ -1226,35 +1258,157 @@ pub fn declared_actuators(root: &Path) -> Vec<String> {
 /// becoming one build with test hooks in it is the failure mode this exists
 /// for, and a convention nothing enforces is not a bar.
 ///
-/// **Both directions, because one of them is a spelling of `true`.** A shipping
-/// kernel must name none of them; the test kernel must name all of them, which
-/// is what says the search works at all — measured on the two binaries this
-/// build produced when the tree declared 47 of them: 0 of 47 at 3,829,440 bytes
-/// and 47 of 47 at 4,247,272. The count below is read off the file, so adding
-/// one moves the assertion and not this sentence.
+/// A shipping kernel must name none of them; the test kernel must name all of
+/// them — measured on the two binaries this build produced when the tree
+/// declared 47 of them: 0 of 47 at 3,829,440 bytes and 47 of 47 at 4,247,272.
+/// The count is read off the file, so adding one moves the assertion and not
+/// this sentence.
 ///
 /// A kernel built with no features is the shipping one, because that is what
 /// "shipping" means here: `--kernel-feature`, `--kernel-param` and `--debug`
 /// each say out loud that this image is not one.
 fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
-    let want = match features {
+    assert_names_match_features(
+        features,
+        kernel,
+        TEST_KERNEL,
+        &declared_actuators(root),
+        "actuators `kernel/src/actuator.rs` declares",
+        "Everything under that file belongs to a kernel built with `boot-actuators`, and an \
+         image that ships must not be able to be told to break.",
+    );
+}
+
+/// The labels `arch::syscall::gate` defines inside `syscall_entry` for
+/// `nmi_gate`, which `toyos-ld` carries into `.strtab`.
+const ENTRY_LABELS: [&str; 3] =
+    ["syscall_entry_hold_spin", "syscall_entry_hold_end", "syscall_entry_end"];
+
+/// Refuse a test kernel whose entry lacks a label `nmi_gate` reads, and a
+/// shipping one that names any. What the shipping entry *does* is
+/// [`assert_entry_window_matches_features`]'s to judge: a label is a spelling,
+/// and a hold can be spelled without one.
+fn assert_entry_labels_match_features(features: &str, kernel: &[u8]) {
+    assert_names_match_features(
+        features,
+        kernel,
+        TEST_KERNEL,
+        &ENTRY_LABELS,
+        "labels `arch::syscall::gate` puts inside `syscall_entry`",
+        "They bound what `nmi_gate` holds and counts, and belong to a kernel built with \
+         `boot-actuators`.",
+    );
+}
+
+/// `arch::syscall::gate::syscall_entry`'s v0-mangled path, less the crate
+/// disambiguator that stands in front of it.
+const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch7syscall4gate13syscall_entry";
+
+/// `cld`, which `arch::entry::ring3_naked_asm` puts first in every Ring 0 entry.
+const CLD: u8 = 0xfc;
+/// `mov gs:[disp32], rsp` less its displacement: the `gs` override, `REX.W`,
+/// the opcode, and the ModRM/SIB pair that says `rsp` against an absolute
+/// `disp32`.
+const SAVE_RSP_TO_GS: [u8; 5] = [0x65, 0x48, 0x89, 0x24, 0x25];
+/// `mov rsp, gs:[disp32]` less its displacement.
+const LOAD_RSP_FROM_GS: [u8; 5] = [0x65, 0x48, 0x8b, 0x24, 0x25];
+/// Bytes either `mov` occupies, displacement included.
+const MOV_RSP_GS_LEN: usize = 9;
+
+/// A kernel's `syscall_entry` from its first instruction to the end of the
+/// segment it is in, found at its symbol.
+fn syscall_entry_bytes(kernel: &[u8]) -> Result<&[u8], String> {
+    use toyos_elf::header::{ProgramHeader, PT_LOAD};
+
+    let (syms, strs) =
+        toyos_symbols::locate(kernel).ok_or("the kernel has no readable `.symtab`")?;
+    let table = toyos_elf::SymTab::new(syms, strs);
+    let mut entries = table.defined().filter(|&(i, sym)| {
+        sym.kind() == toyos_elf::sym::STT_FUNC && table.name(i).ends_with(SYSCALL_ENTRY_SYMBOL)
+    });
+    let (Some((_, entry)), None) = (entries.next(), entries.next()) else {
+        return Err(format!(
+            "the kernel's `.symtab` does not name exactly one function `…{SYSCALL_ENTRY_SYMBOL}`"
+        ));
+    };
+    let header = toyos_elf::FileHeader::parse(kernel).map_err(|e| format!("{e:?}"))?;
+    let segments = header.program_headers(kernel).map_err(|e| format!("{e:?}"))?;
+    (0..header.phnum as usize)
+        .filter_map(|i| ProgramHeader::parse(segments, i))
+        .filter(|segment| segment.kind == PT_LOAD)
+        .find_map(|segment| {
+            let within = entry.value.checked_sub(segment.vaddr)?;
+            let left = segment.filesz.checked_sub(within).filter(|&left| left != 0)?;
+            toyos_symbols::file_range(kernel, segment.offset.checked_add(within)?, left)
+        })
+        .ok_or_else(|| format!("no `PT_LOAD` holds `syscall_entry` at {:#x} in the file", entry.value))
+}
+
+/// Whether an entry switches to the kernel's `rsp` in the instruction after it
+/// saves the user's, and the bytes that stand between the two where it does
+/// not.
+///
+/// An entry that does not open `cld`, save is one this cannot read, and is
+/// refused for both kernels rather than passed for either.
+fn entry_window(entry: &[u8]) -> Result<Result<(), &[u8]>, String> {
+    let after_save = 1 + MOV_RSP_GS_LEN;
+    if entry.first() != Some(&CLD) || !entry.get(1..).is_some_and(|e| e.starts_with(&SAVE_RSP_TO_GS))
+    {
+        return Err(format!(
+            "`syscall_entry` does not open `cld`, `mov gs:[…], rsp`: it opens {:02x?}",
+            &entry[..entry.len().min(after_save)],
+        ));
+    }
+    let rest = entry.get(after_save..).unwrap_or_default();
+    if rest.starts_with(&LOAD_RSP_FROM_GS) {
+        return Ok(Ok(()));
+    }
+    // Up to the switch where one follows within what a hold could take, and a fixed span where none does.
+    let between = rest
+        .windows(LOAD_RSP_FROM_GS.len())
+        .take(256)
+        .position(|w| w == LOAD_RSP_FROM_GS)
+        .unwrap_or(rest.len().min(64));
+    Ok(Err(&rest[..between]))
+}
+
+/// Refuse to write a shipping image whose `syscall_entry` does anything between
+/// saving the user's `rsp` and switching to the kernel's.
+///
+/// The instructions, not their names: [`assert_entry_labels_match_features`]
+/// closes the two spellings `window_hold!` uses, and a hold respelled through
+/// local labels passes it with the whole spin in the entry. Read at the entry's
+/// own symbol, the shipping kernel's first three instructions are `cld`, the
+/// save and the switch, with nothing between. Both directions, for
+/// [`assert_names_match_features`]'s reason: the test kernel's entry has to
+/// have something between them, which is what says this can tell.
+fn judge_entry_window(features: &str, kernel: &[u8]) -> Result<(), String> {
+    let want_hold = match features {
         "" => false,
         f if f == TEST_KERNEL.join(",") => true,
-        _ => return,
+        _ => return Ok(()),
     };
-    let names = declared_actuators(root);
-    let named = |name: &String| contains_subslice(kernel, name.as_bytes());
-    let wrong: Vec<&String> = names.iter().filter(|n| named(n) != want).collect();
-    assert!(
-        wrong.is_empty(),
-        "the {} kernel {} {} of the {} actuators `kernel/src/actuator.rs` declares: {wrong:?}.\n\
-         Everything under that file belongs to a kernel built with `boot-actuators`, and an \
-         image that ships must not be able to be told to break.",
-        if want { "test" } else { "shipping" },
-        if want { "is missing" } else { "names" },
-        wrong.len(),
-        names.len(),
-    );
+    match (entry_window(syscall_entry_bytes(kernel)?)?, want_hold) {
+        (Ok(()), false) | (Err(_), true) => Ok(()),
+        (Ok(()), true) => Err(format!(
+            "the {} kernel's `syscall_entry` switches to the kernel's `rsp` in the instruction \
+             after it saves the user's, so `nmi_gate`'s hold is not in it and every test that \
+             arranges an arrival inside the window arranges nothing.",
+            TEST_KERNEL.join(","),
+        )),
+        (Err(between), false) => Err(format!(
+            "the shipping kernel's `syscall_entry` does not switch to the kernel's `rsp` in the \
+             instruction after it saves the user's; between them stand {between:02x?}.\nEvery \
+             instruction there runs at CPL 0 on a user's stack, and an image that ships must \
+             not be able to be asked to stop there."
+        )),
+    }
+}
+
+fn assert_entry_window_matches_features(features: &str, kernel: &[u8]) {
+    if let Err(refusal) = judge_entry_window(features, kernel) {
+        panic!("{refusal}");
+    }
 }
 
 /// The scheduler core's `feature = "check"` instruments, by their own text, and
@@ -1282,10 +1436,7 @@ const SCHED_CHECK_LITERALS: [&str; 3] = [
 ///
 /// [`assert_actuators_match_features`]'s shape and its reason: the property is
 /// about the artifact, so the artifact is what is asked, and a convention
-/// nothing enforces is not a bar. **Both directions, because one of them is a
-/// spelling of `true`** — a shipping kernel must carry none of these, and the
-/// `sched-check` kernel must carry all of them, which is what says the search
-/// works at all.
+/// nothing enforces is not a bar.
 ///
 /// This is the half of the check-build gate that a booted guest cannot supply.
 /// A guest proves the asserts did not *fire* and the report was published; a
@@ -1293,23 +1444,15 @@ const SCHED_CHECK_LITERALS: [&str; 3] = [
 /// rather more easily. Measured on the two binaries this build produces: 0 of 3
 /// in the shipping kernel, 3 of 3 in the `sched-check` one.
 fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
-    let want = match features {
-        "" => false,
-        f if f == SCHED_CHECK_KERNEL.join(",") => true,
-        _ => return,
-    };
-    let named = |needle: &&str| contains_subslice(kernel, needle.as_bytes());
-    let wrong: Vec<&&str> = SCHED_CHECK_LITERALS.iter().filter(|a| named(a) != want).collect();
-    assert!(
-        wrong.is_empty(),
-        "the {} kernel {} {} of the {} scheduler check instruments: {wrong:?}.\n\
-         `sched-check` forwards to `toyos-sched/check`, so a build that carries the feature \
-         and not the instruments is a check build in name only — which is what a green \
+    assert_names_match_features(
+        features,
+        kernel,
+        SCHED_CHECK_KERNEL,
+        &SCHED_CHECK_LITERALS,
+        "scheduler check instruments",
+        "`sched-check` forwards to `toyos-sched/check`, so a build that carries the feature and \
+         not the instruments is a check build in name only — which is what a green \
          `sched_check_build` would then be certifying.",
-        if want { "sched-check" } else { "shipping" },
-        if want { "is missing" } else { "names" },
-        wrong.len(),
-        SCHED_CHECK_LITERALS.len(),
     );
 }
 
@@ -1334,6 +1477,8 @@ fn stage_and_certify_kernel(root: &Path, features: &str, path_env: &str) -> Vec<
     let bytes = fs::read(&staged).expect("Failed to read staged kernel");
     assert_overflow_checked("kernel", &bytes);
     assert_actuators_match_features(root, features, &bytes);
+    assert_entry_window_matches_features(features, &bytes);
+    assert_entry_labels_match_features(features, &bytes);
     assert_sched_check_matches_features(features, &bytes);
     assert_kernel_is_softfloat(path_env);
     bytes
@@ -3060,5 +3205,136 @@ mod tests {
         let mut expected: Vec<String> = ALL_CONFIGS.iter().map(|s| s.to_string()).collect();
         expected.sort();
         assert_eq!(found, expected);
+    }
+
+    /// `cld`, then `mov gs:[0x18], rsp`: how every entry judged here opens.
+    const ENTRY_OPENS: [u8; 10] = [0xfc, 0x65, 0x48, 0x89, 0x24, 0x25, 0x18, 0, 0, 0];
+    /// `mov rsp, gs:[0x10]`.
+    const SWITCH: [u8; 9] = [0x65, 0x48, 0x8b, 0x24, 0x25, 0x10, 0, 0, 0];
+    /// `window_hold!` as a shipping build with its cfgs taken off emits it: the
+    /// two global labels make each jump a near one.
+    const LABELLED_HOLD: [u8; 84] = [
+        0x65, 0x48, 0xf7, 0x04, 0x25, 0x18, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x84,
+        0x41, 0x00, 0x00, 0x00, 0x65, 0xf0, 0x48, 0x83, 0x0c, 0x25, 0x18, 0x01, 0x00, 0x00, 0x02,
+        0xf3, 0x90, 0x65, 0x48, 0xf7, 0x04, 0x25, 0x18, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x0f, 0x84, 0x21, 0x00, 0x00, 0x00, 0x65, 0xf0, 0x48, 0x81, 0x2c, 0x25, 0x18, 0x01, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x0f, 0x83, 0xd7, 0xff, 0xff, 0xff, 0x65, 0x48, 0xc7, 0x04,
+        0x25, 0x18, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+    ];
+    /// The same hold respelled through the local labels `77:` and `78:`, which
+    /// put no name in `.strtab` and make each jump a short one.
+    const LOCAL_LABEL_HOLD: [u8; 72] = [
+        0x65, 0x48, 0xf7, 0x04, 0x25, 0x18, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x74, 0x39,
+        0x65, 0xf0, 0x48, 0x83, 0x0c, 0x25, 0x18, 0x01, 0x00, 0x00, 0x02, 0xf3, 0x90, 0x65, 0x48,
+        0xf7, 0x04, 0x25, 0x18, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x74, 0x1d, 0x65, 0xf0,
+        0x48, 0x81, 0x2c, 0x25, 0x18, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x73, 0xdf, 0x65,
+        0x48, 0xc7, 0x04, 0x25, 0x18, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+    ];
+
+    /// A PIE of one `PT_LOAD` over the whole file, whose `.symtab` names one
+    /// function per `names` entry, each at `entry`'s address.
+    fn kernel_with_entry(names: &[&str], entry: &[u8]) -> Vec<u8> {
+        const TEXT: u64 = 0x200;
+        let mut strtab = vec![0u8];
+        let mut symtab = vec![0u8; 24];
+        for name in names {
+            symtab.extend((strtab.len() as u32).to_le_bytes());
+            // `STB_GLOBAL`, `STT_FUNC`; `st_other`; defined in section 1.
+            symtab.extend([0x12, 0, 1, 0]);
+            symtab.extend(TEXT.to_le_bytes());
+            symtab.extend((entry.len() as u64).to_le_bytes());
+            strtab.extend(name.as_bytes());
+            strtab.push(0);
+        }
+        let mut file = vec![0u8; TEXT as usize];
+        file.extend(entry);
+        let symtab_at = file.len() as u64;
+        file.extend(&symtab);
+        let strtab_at = file.len() as u64;
+        file.extend(&strtab);
+        let shoff = file.len() as u64;
+
+        let put = |file: &mut Vec<u8>, at: usize, bytes: &[u8]| {
+            file[at..at + bytes.len()].copy_from_slice(bytes)
+        };
+        // `e_ident`, `ET_DYN`, `EM_X86_64`, then the two tables.
+        put(&mut file, 0, &[0x7f, b'E', b'L', b'F', 2, 1, 1]);
+        put(&mut file, 16, &3u16.to_le_bytes());
+        put(&mut file, 18, &62u16.to_le_bytes());
+        put(&mut file, 32, &64u64.to_le_bytes());
+        put(&mut file, 40, &shoff.to_le_bytes());
+        put(&mut file, 54, &56u16.to_le_bytes());
+        put(&mut file, 56, &1u16.to_le_bytes());
+        put(&mut file, 58, &64u16.to_le_bytes());
+        put(&mut file, 60, &3u16.to_le_bytes());
+        // The `PT_LOAD`: file offset 0 at address 0, up to the section headers.
+        put(&mut file, 64, &1u32.to_le_bytes());
+        put(&mut file, 64 + 32, &shoff.to_le_bytes());
+        put(&mut file, 64 + 40, &shoff.to_le_bytes());
+
+        // The null section, `.symtab` linked to section 2, and its `.strtab`.
+        let mut sections = vec![0u8; 3 * 64];
+        for (index, kind, at, len, link) in [
+            (1usize, 2u32, symtab_at, symtab.len() as u64, 2u32),
+            (2, 3, strtab_at, strtab.len() as u64, 0),
+        ] {
+            let base = index * 64;
+            sections[base + 4..base + 8].copy_from_slice(&kind.to_le_bytes());
+            sections[base + 24..base + 32].copy_from_slice(&at.to_le_bytes());
+            sections[base + 32..base + 40].copy_from_slice(&len.to_le_bytes());
+            sections[base + 40..base + 44].copy_from_slice(&link.to_le_bytes());
+            sections[base + 56..base + 64].copy_from_slice(&24u64.to_le_bytes());
+        }
+        file.extend(sections);
+        file
+    }
+
+    const ENTRY_NAME: &str = "_RNvNtNtNtCs2TF9wDo3GXK_6kernel4arch7syscall4gate13syscall_entry";
+
+    fn entry_with(between: &[u8]) -> Vec<u8> {
+        [&ENTRY_OPENS[..], between, &SWITCH[..], &[0x90; 32][..]].concat()
+    }
+
+    #[test]
+    fn a_clean_entry_is_the_shipping_kernels_and_not_the_test_kernels() {
+        let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(&[]));
+        assert_eq!(judge_entry_window("", &kernel), Ok(()));
+        let refusal = judge_entry_window(&TEST_KERNEL.join(","), &kernel).unwrap_err();
+        assert!(refusal.contains("`nmi_gate`'s hold is not in it"), "{refusal}");
+    }
+
+    #[test]
+    fn a_hold_is_refused_in_a_shipping_entry_however_its_labels_are_spelled() {
+        for hold in [&LABELLED_HOLD[..], &LOCAL_LABEL_HOLD[..]] {
+            let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(hold));
+            let refusal = judge_entry_window("", &kernel).unwrap_err();
+            assert!(refusal.contains(&format!("between them stand {hold:02x?}")), "{refusal}");
+            assert_eq!(judge_entry_window(&TEST_KERNEL.join(","), &kernel), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_hold_in_front_of_the_save_is_an_entry_the_judge_refuses_to_read() {
+        let entry = [&[0xfc, 0xf3, 0x90][..], &ENTRY_OPENS[1..], &SWITCH[..]].concat();
+        let kernel = kernel_with_entry(&[ENTRY_NAME], &entry);
+        for features in ["".to_string(), TEST_KERNEL.join(",")] {
+            let refusal = judge_entry_window(&features, &kernel).unwrap_err();
+            assert!(refusal.contains("does not open `cld`"), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_kernel_that_does_not_name_exactly_one_entry_is_refused() {
+        let clean = entry_with(&[]);
+        for names in [&["_RNvCs1_6kernel4main"][..], &[ENTRY_NAME, ENTRY_NAME][..]] {
+            let refusal = judge_entry_window("", &kernel_with_entry(names, &clean)).unwrap_err();
+            assert!(refusal.contains("does not name exactly one function"), "{refusal}");
+        }
+        assert!(judge_entry_window("", b"not an ELF").unwrap_err().contains("`.symtab`"));
+    }
+
+    #[test]
+    fn a_kernel_of_any_other_feature_set_is_not_judged() {
+        assert_eq!(judge_entry_window(&SCHED_CHECK_KERNEL.join(","), b"not an ELF"), Ok(()));
     }
 }

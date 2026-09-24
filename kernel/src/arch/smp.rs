@@ -137,6 +137,8 @@ macro_rules! asm_label_addr {
         addr as *const u8
     }};
 }
+#[cfg(feature = "boot-actuators")]
+pub(crate) use asm_label_addr;
 
 /// Copies the trampoline blob to physical page 0x8000 via the direct map; there is no identity map this early.
 fn copy_trampoline() {

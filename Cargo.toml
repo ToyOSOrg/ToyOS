@@ -106,6 +106,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcachefs = { path = "bcachefs" }
 toyos-abi = { path = "toyos-abi" }
+# What `build::syscall_entry_bytes` finds a staged kernel's entry with: its
+# segments, and its symbol table where the kernel's own backtrace finds it.
+toyos-elf = { path = "toyos-elf" }
+toyos-symbols = { path = "toyos-symbols" }
 toyos-fat32 = { path = "toyos-fat32" }
 # The two readers `image::certify` judges every published image with. They are
 # dependencies of the build rather than of its tests because a flash target is
@@ -135,6 +139,9 @@ sha2 = "0.10"
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
 toyos-ld = { path = "toyos-ld" }
+# `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
+# checks every user pointer against and not against a second copy of it.
+toyos-userbound = { path = "toyos-userbound" }
 # The I219 driver's own words and its PHY probe's exit-code table, so the
 # harness judging netd's `exit:` record off the T14 and netd writing it read one
 # declaration. Pure and `no_std`, so it compiles for the host as it does for
