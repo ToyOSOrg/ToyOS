@@ -14,7 +14,7 @@ from before `sync_all` until after `log!("Rebooting.")`, and
 `quiesce::stop(Stage::All)` takes it at the far end of that window. **Nothing
 bounds what it does inside it.**
 
-## The two things the writer can still do
+## The three things the writer can still do
 
 **Write pages no sync reaches.** `logd`'s durability is its own: it writes a
 batch, `fsync`s it, and publishes the timestamp only after that call returns
@@ -30,6 +30,11 @@ second sync below the last word would not reach them either.
 inside runs to its end. `kernel/src/object/ops.rs`'s `fsync` retry loop logs
 `fsync: … durable on attempt N` on every attempt past the first, so a `/log`
 slow in exactly this window writes a kernel record beneath `Rebooting.`.
+
+**Ask for a second shutdown.** `quiesce` refuses a second `SYS_REBOOT` or
+`SYS_SHUTDOWN` caller at its claim and logs `power: this machine is already
+stopping` as it does, so a holder that asks after `log!("{last}")` writes that
+kernel record beneath `Rebooting.` too.
 
 ## The carve-out is the capability, which is wider than the wait
 
