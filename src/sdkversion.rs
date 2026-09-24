@@ -15,12 +15,11 @@
 //! the fork naming the version still resolves, and silently gets the old code.
 //!
 //! [`PUBLISHED`]'s order is a dependency order, and it is the order
-//! `.github/workflows/publish.yml` takes: a crate cannot go up before the index
+//! `cargo run -- --ci publish` takes: a crate cannot go up before the index
 //! holds every version it names.
 
 use std::path::Path;
 
-use crate::flags;
 use crate::pr::git;
 
 /// One published crate: where its manifest is, and which of the five it names
@@ -56,32 +55,20 @@ pub const PUBLISHED: &[Crate] = &[
     },
 ];
 
-/// `<name> <version> <manifest path>` for each of [`PUBLISHED`], in order —
-/// what `cargo run -- --sdk-versions` prints and the publish workflow reads.
-///
-/// The workflow asks this rather than parsing a manifest in shell, so the set
-/// of published crates and their order live here and nowhere else.
-pub fn dispatch_versions(root: &Path) {
-    for krate in PUBLISHED {
-        let manifest = format!("{}/Cargo.toml", krate.dir);
-        let text = std::fs::read_to_string(root.join(&manifest))
-            .unwrap_or_else(|e| panic!("read {manifest}: {e}"));
-        let version = package_version(&text)
-            .unwrap_or_else(|| panic!("{manifest} declares no [package] version"));
-        println!("{} {version} {manifest}", krate.name);
-    }
-}
-
-/// `cargo run -- --sdk-version-check [--base <ref>]`.
-pub fn dispatch_check(root: &Path, args: &[String]) {
-    let base = flags::CARGO_RUN.value(args, &flags::BASE).unwrap_or("origin/main");
-    match judge(root, base) {
-        Ok(line) => println!("[sdk] {line}"),
-        Err(refusal) => {
-            eprintln!("{refusal}");
-            std::process::exit(1);
-        }
-    }
+/// `(name, version, manifest path)` for each of [`PUBLISHED`], in order — what
+/// the publisher takes and the toolchain release's manifest names.
+pub fn versions(root: &Path) -> Vec<(&'static str, String, String)> {
+    PUBLISHED
+        .iter()
+        .map(|krate| {
+            let manifest = format!("{}/Cargo.toml", krate.dir);
+            let text = std::fs::read_to_string(root.join(&manifest))
+                .unwrap_or_else(|e| panic!("read {manifest}: {e}"));
+            let version = package_version(&text)
+                .unwrap_or_else(|| panic!("{manifest} declares no [package] version"));
+            (krate.name, version, manifest)
+        })
+        .collect()
 }
 
 /// The `version = "…"` of the `[package]` table. A hand walk and not a parse:

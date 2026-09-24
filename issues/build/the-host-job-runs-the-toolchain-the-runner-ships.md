@@ -62,12 +62,9 @@ default 1.97.1 after the fix.
 
 ## The decision this tree has not made for the compiler the way it made it for everything else that moves
 
-`issues/build/the-published-ci-image-is-pulled-by-no-job.md` (still open)
-already names the pattern: `ci-image.yml` prints a digest for a consumer
-to pin, never the tag, because "a rebuild must not be able to change the QEMU
-or Rust a recorded number was taken on" — a moving input under every verdict is
-a supply-chain decision, not a convenience. Every guest lane's container image
-is pinned that way now; the host job's `macos-latest` toolchain is not. The
+A moving input under every verdict is a supply-chain decision, not a
+convenience, and every guest lane's container image is pinned by digest, never
+by tag; the host job's `macos-latest` toolchain is not. The
 `CLAUDE.md` principle for
 `rust/`, this project's own compiler fork, is "kept current with upstream" — a
 deliberate track-stable choice, stated and owned. The host job's ambient
