@@ -27,7 +27,7 @@ use super::HANDLE_LEN;
 use super::debug::{canary, debug_heap_alloc, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH, LOCK_ACROSS_SWITCH_ARMED};
 use super::device::{
     holds_claim, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc,
-    sys_device_reg, sys_gpu_reset_scanout,
+    sys_device_reg, sys_gpu_reset_scanout, sys_partition_transfer, Transfer,
 };
 use super::fs::{
     sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink, sys_rename,
@@ -423,10 +423,27 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_endowments(&mut buf)
         }
         SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2, [a3, a4]),
-        // Numbered in the ABI and not yet served: a caller is told which call it made.
+        // The count is bounded before it becomes a window, and a transfer of
+        // nothing is refused rather than sent to a device as a zero-length command.
         SYS_PARTITION_READ | SYS_PARTITION_WRITE => {
-            crate::log!("syscall {num} (a partition transfer) is not implemented in this kernel");
-            SyscallError::NotSupported.to_u64()
+            let Ok(count) = Untrusted::new(a4).at_most(toyos_abi::part::MAX_BLOCKS_PER_CALL as u64)
+            else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
+            if count == 0 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let len = count * toyos_abi::part::BLOCK_BYTES as u64;
+            let handle = RawHandle(a1 as u32);
+            if num == SYS_PARTITION_READ {
+                let Some(mut into) = ctx.user_bytes_mut(UserAddr::new(a3), len) else {
+                    return bad_addr;
+                };
+                sys_partition_transfer(handle, a2, count as u32, Transfer::Read(&mut into))
+            } else {
+                let Some(from) = ctx.user_bytes(UserAddr::new(a3), len) else { return bad_addr };
+                sys_partition_transfer(handle, a2, count as u32, Transfer::Write(&from))
+            }
         }
         SYS_RT_ENTER => sys_rt_enter(RawHandle(a1 as u32)),
         SYS_LOG_READ => {

@@ -36,6 +36,8 @@ pub mod metal;
 #[allow(dead_code)]
 pub mod origin;
 #[allow(dead_code)]
+pub mod partclaim;
+#[allow(dead_code)]
 pub mod passcost;
 #[allow(dead_code)]
 pub mod pkg;
