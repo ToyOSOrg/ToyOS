@@ -164,14 +164,19 @@ fn feed(shared: &Shared, mut sink: impl Write) -> u64 {
         let chunk = {
             let mut replay = shared.replay.lock().expect("logd: the replay is poisoned");
             loop {
-                match replay.next(at, CHUNK) {
-                    Next::Bytes(bytes) => break bytes.to_vec(),
-                    Next::CaughtUp => {
-                        replay = shared.grew.wait(replay).expect("logd: the replay is poisoned");
-                    }
-                    Next::Evicted { lost, at: resume } => {
+                let next = match replay.next(at, CHUNK) {
+                    Next::Bytes(bytes) => Some(Ok(bytes.to_vec())),
+                    Next::Evicted { lost, at: resume } => Some(Err((lost, resume))),
+                    Next::CaughtUp => None,
+                };
+                match next {
+                    Some(Ok(bytes)) => break bytes,
+                    Some(Err((lost, resume))) => {
                         at = resume;
                         break evicted(shared.boot_local, lost);
+                    }
+                    None => {
+                        replay = shared.grew.wait(replay).expect("logd: the replay is poisoned");
                     }
                 }
             }

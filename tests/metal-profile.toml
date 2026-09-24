@@ -1050,7 +1050,7 @@ unit = "us"
 ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
 
-# `lantalkcase` is `lancase` with sshd and the record stream, talked to from the
+# `lantalkcase` is `lancase` with sshd and its log served, talked to from the
 # host until it is told to reboot. Its one job holds the machine only as the
 # fallback for a host that never says so.
 

@@ -173,13 +173,13 @@ pub enum Refusal {
     /// the one boot in this loop whose verdict is not `bootlog::verdict`'s.
     Wedge { why: &'static str },
     /// **What the boot said over its own cable is not what a talking boot
-    /// owes**: the record stream, a ping, the command's answer and `reboot`,
+    /// owes**: the log it serves, a ping, the command's answer and `reboot`,
     /// each finding by name. Judged after the stick's own verdict, which stays
     /// the fallback for a boot that never reached its network.
     Talk(Vec<String>),
-    /// This host could not set up its half of the cable before the flash: the
-    /// listener, the client or the key.
-    Listen(String),
+    /// This host could not set up its half of the cable: the client, the key,
+    /// or the reader of the log the boot serves.
+    Cable(String),
     Usage(String),
 }
 
@@ -330,7 +330,7 @@ impl fmt::Display for Refusal {
                 "the boot did not say over its own cable what a talking boot owes:\n  {}",
                 findings.join("\n  ")
             ),
-            Self::Listen(why) => write!(f, "this host's half of the cable is not ready: {why}"),
+            Self::Cable(why) => write!(f, "this host's half of the cable is not ready: {why}"),
             Self::Usage(why) => write!(f, "{why}"),
         }
     }
@@ -1603,7 +1603,7 @@ impl Args {
         // the stick is read leaves nothing but that file.
         if out.talk.is_some() && out.readback.is_none() {
             return Err(Refusal::Usage(
-                "--talk writes the boot's record stream into the readback as it arrives; name \
+                "--talk writes the log the boot serves into the readback as it arrives; name \
                  one with --readback"
                     .to_string(),
             ));
@@ -1629,7 +1629,7 @@ impl Talking {
         std::fs::create_dir_all(dir)
             .map_err(|e| Refusal::File { path: dir.display().to_string(), why: e.to_string() })?;
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let ssh = crate::metaltalk::Ssh::at(root, key.to_path_buf()).map_err(Refusal::Listen)?;
+        let ssh = crate::metaltalk::Ssh::at(root, key.to_path_buf()).map_err(Refusal::Cable)?;
         Ok(Self { ssh, dir: dir.to_path_buf() })
     }
 
@@ -1654,7 +1654,7 @@ impl Talking {
         println!("asking for {peer:?}'s log");
         let stream =
             crate::metaltalk::Stream::connect(peer, &self.dir.join(READBACK_STREAM), true, by)
-                .map_err(Refusal::Listen)?;
+                .map_err(Refusal::Cable)?;
         let (theirs, ssh, scratch) = (stream.clone(), self.ssh.clone(), self.dir.join("talk"));
         let talking = std::thread::Builder::new()
             .name("metal-talk".into())
@@ -1841,7 +1841,13 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
             write_talk(dir, &heard)?;
             Some((heard, stream.lines()))
         }
-        (Some(Err(refused)), _) => return Err(refused),
+        // A reader that could not be started is a conversation that never
+        // opened, recorded like one, and the stick is still read.
+        (Some(Err(refused)), Some(dir)) => {
+            let heard = Err(refused.to_string());
+            write_talk(dir, &heard)?;
+            Some((heard, Vec::new()))
+        }
         _ => None,
     };
     let (back, replied) = ridden?;

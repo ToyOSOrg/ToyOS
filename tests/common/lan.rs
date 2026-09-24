@@ -52,7 +52,7 @@ const NETD: &str = "netd";
 /// The one job on that boot: it holds the machine up while the host pings it.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 
-/// The boot the host talks to over its own cable: the record stream, sshd, and
+/// The boot the host talks to over its own cable: the log it serves, sshd, and
 /// `reboot` as the way the machine is handed back.
 pub const TALK_CONFIG: &str = "tests/lantalkcase";
 pub const TALK_BOOT: &str = "lantalkcase";

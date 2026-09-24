@@ -727,7 +727,8 @@ fn start<'a>(
         }
         Some(log) => {
             let log: &Log = log;
-            let (read, write) = toyos::pipe_pair()?;
+            let (read, write) = toyos::pipe_pair()
+                .map_err(|e| std::io::Error::other(format!("no pipe for its output: {e:?}")))?;
             command.stdout(Stdio::null()).stderr(Stdio::null());
             command.inherit_handle(1, write.as_handle().0);
             command.inherit_handle(2, write.as_handle().0);
