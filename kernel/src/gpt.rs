@@ -17,7 +17,7 @@ use crate::block::{DeviceId, Handle};
 use crate::device::ClaimError;
 use crate::sync::Lock;
 use toyos_abi::boot::KernelArgs;
-use toyos_abi::part::PartitionName;
+use toyos_abi::part::PartGuid;
 use toyos_gpt::{GptError, Guid, Partition, Sectors};
 
 /// The partition firmware loaded the bootloader from, in firmware's terms.
@@ -271,24 +271,23 @@ fn collect(
     }
 }
 
-/// One partition a claim may hold: where it is, and both its GUIDs.
+/// One partition a claim may hold: where it is, and its unique GUID.
 #[derive(Clone, Copy, Debug)]
 pub struct Claimable {
     pub volume: Volume,
     pub unique: Guid,
-    pub ty: Guid,
 }
 
-/// The one partition on this machine `name` names, past the range and overlap
-/// checks `toyos_gpt::locate` makes (UEFI 2.10 §5.3.3).
+/// The one partition on this machine whose unique GUID is `guid`, past the
+/// range and overlap checks `toyos_gpt::locate` makes (UEFI 2.10 §5.3.3).
 ///
 /// Read off the disks when asked and never cached: a table is outside every
 /// partition, so no claim can write one. `Absent` for a GUID no table carries
 /// and for the zero GUID, which GPT gives every unused entry; `Ambiguous` for
 /// one carried twice, on one disk or across two; `Unusable` for a disk that
 /// did not answer, since then neither "none" nor "one" is known.
-pub fn claimable(name: PartitionName) -> Result<Claimable, ClaimError> {
-    let target = Guid(name.guid().0);
+pub fn claimable(guid: PartGuid) -> Result<Claimable, ClaimError> {
+    let target = Guid(guid.0);
     if target.is_zero() {
         return Err(ClaimError::Absent);
     }
@@ -296,71 +295,39 @@ pub fn claimable(name: PartitionName) -> Result<Claimable, ClaimError> {
     let mut found: Option<Claimable> = None;
     for (handle, lba_bytes) in &disks {
         let id = handle.device_id();
-        let mut sectors = DeviceSectors::new(handle, *lba_bytes);
-        let mut here = [BLANK; 2];
-        let listed = match name {
-            PartitionName::Unique(_) => match toyos_gpt::locate(&mut sectors, target) {
-                Ok(located) => {
-                    here[0] = located.partition;
-                    1
-                }
-                Err(e) => table_refused(id, target, e)?,
-            },
-            PartitionName::OfType(_) => {
-                match toyos_gpt::locate_type(&mut sectors, target, &mut here) {
-                    Ok(scan) if scan.matched > 1 => {
-                        log!(
-                            "partclaim: device {id} carries {} partitions of type {target}, so \
-                             the type names none",
-                            scan.matched
-                        );
-                        return Err(ClaimError::Ambiguous);
-                    }
-                    Ok(scan) => scan.listed,
-                    Err(e) => table_refused(id, target, e)?,
-                }
+        let part = match toyos_gpt::locate(&mut DeviceSectors::new(handle, *lba_bytes), target) {
+            Ok(located) => located.partition,
+            Err(e) => {
+                table_refused(id, target, e)?;
+                continue;
             }
         };
-        for candidate in &here[..listed] {
-            // By its own unique GUID, for the range and overlap checks a type
-            // scan does not make.
-            let part = match toyos_gpt::locate(&mut sectors, candidate.unique_guid) {
-                Ok(located) => located.partition,
-                Err(e) => {
-                    log!(
-                        "partclaim: device {id} names {} and its own table refuses it: {e:?}",
-                        candidate.unique_guid
-                    );
-                    return Err(ClaimError::Unusable);
-                }
-            };
-            if let Some(first) = found {
-                log!(
-                    "partclaim: {target} is on device {} and on device {id}, so it names no one \
-                     partition",
-                    first.volume.device
-                );
-                return Err(ClaimError::Ambiguous);
-            }
-            found = Some(Claimable {
-                volume: Volume {
-                    device: id,
-                    lba_bytes: *lba_bytes,
-                    start_lba: part.first_lba,
-                    blocks: part.lba_count(),
-                },
-                unique: part.unique_guid,
-                ty: part.type_guid,
-            });
+        if let Some(first) = found {
+            log!(
+                "partclaim: {target} is on device {} and on device {id}, so it names no one \
+                 partition",
+                first.volume.device
+            );
+            return Err(ClaimError::Ambiguous);
         }
+        found = Some(Claimable {
+            volume: Volume {
+                device: id,
+                lba_bytes: *lba_bytes,
+                start_lba: part.first_lba,
+                blocks: part.lba_count(),
+            },
+            unique: part.unique_guid,
+        });
     }
     found.ok_or(ClaimError::Absent)
 }
 
-/// What a table's refusal means for a claim: nothing here, or no answer.
-fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<usize, ClaimError> {
+/// What a table's refusal means for a claim: `Ok` for a disk that does not
+/// carry the partition, or the claim's refusal.
+fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<(), ClaimError> {
     match e {
-        GptError::NotFound { .. } => Ok(0),
+        GptError::NotFound { .. } => Ok(()),
         GptError::ReadFailed(lba) => {
             log!("partclaim: device {id} did not answer a read of LBA {lba} while looking for {target}");
             Err(ClaimError::Unusable)
@@ -389,7 +356,7 @@ fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<usize, Claim
         | GptError::EntryArrayTooBig { .. }
         | GptError::EntryArrayMisplaced { .. }
         | GptError::EntryArrayCrc { .. }
-        | GptError::UsableRangeCoversBackup { .. } => Ok(0),
+        | GptError::UsableRangeCoversBackup { .. } => Ok(()),
     }
 }
 

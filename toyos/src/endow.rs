@@ -211,9 +211,9 @@ pub fn pci_function<T: FromHandle>(id: toyos_abi::syscall::PciId) -> Option<T> {
 
 /// The claim for one partition the manifest says this program gets, looked up
 /// by the entry's own spelling exactly as [`pci_function`] is.
-pub fn partition<T: FromHandle>(name: toyos_abi::part::PartitionName) -> Option<T> {
+pub fn partition<T: FromHandle>(guid: toyos_abi::part::PartGuid) -> Option<T> {
     let mut buf = [0u8; DeviceRequest::MAX_NAME];
-    let name = DeviceRequest::Partition(name).write_name(&mut buf);
+    let name = DeviceRequest::Partition(guid).write_name(&mut buf);
     with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
 }
 

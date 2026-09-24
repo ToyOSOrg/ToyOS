@@ -126,7 +126,7 @@ pub enum ClaimError {
 ///
 /// `selector` says *which* device where the class alone does not — a PCI
 /// function's vendor and device id in its first word, a partition's GUID in
-/// both — and every other class ignores it.
+/// both — and the syscall has refused a word the class does not read.
 pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
@@ -164,18 +164,12 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let (info, slot, claim) = crate::pcidev::claim(id)?;
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info, slot), claim))
         }
-        DeviceType::Partition | DeviceType::PartitionOfType => {
-            let guid = toyos_abi::part::PartGuid::from_wire(selector);
-            let name = match class {
-                DeviceType::Partition => toyos_abi::part::PartitionName::Unique(guid),
-                _ => toyos_abi::part::PartitionName::OfType(guid),
-            };
-            let found = crate::gpt::claimable(name)?;
+        DeviceType::Partition => {
+            let found = crate::gpt::claimable(toyos_abi::part::PartGuid::from_wire(selector))?;
             let view = partition_view(&found)?;
             let info = toyos_abi::part::PartitionInfo {
                 blocks: view.block_count(),
                 unique_guid: found.unique.0,
-                type_guid: found.ty.0,
             };
             let claim = Claim { what: Claimed::Partition(view) };
             Ok(DeviceClaim::new(class, DeviceInfo::Partition(info), claim))

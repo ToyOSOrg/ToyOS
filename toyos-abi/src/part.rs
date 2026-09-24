@@ -24,9 +24,7 @@ pub const BLOCK_BYTES: usize = 4096;
 /// spelling.
 pub type Block = [u8; BLOCK_BYTES];
 
-/// The most blocks one transfer call carries: the run the kernel's own page
-/// cache writes back in, so a claimant holds its disk no longer per call than
-/// the kernel does.
+/// The most blocks one transfer call carries.
 pub const MAX_BLOCKS_PER_CALL: usize = 32;
 
 /// A GUID as the sixteen bytes a GPT entry stores (UEFI 2.10 §5.3.3), which is
@@ -116,28 +114,7 @@ impl PartGuid {
     }
 }
 
-/// Which partition a claim names: by its unique partition GUID, or as **the**
-/// partition of a type GUID — the one partition of that type on the machine,
-/// since a type that more than one entry carries names no partition and the
-/// claim is refused rather than resolved to the first.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PartitionName {
-    Unique(PartGuid),
-    OfType(PartGuid),
-}
-
-impl PartitionName {
-    pub const fn guid(self) -> PartGuid {
-        match self {
-            Self::Unique(guid) | Self::OfType(guid) => guid,
-        }
-    }
-}
-
 /// The partition a claim holds, as its holder reads it once off the claim.
-///
-/// Both GUIDs, because a claim named by type has to be able to say which
-/// partition it got, and a claim named by partition to say what it holds.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PartitionInfo {
@@ -145,22 +122,16 @@ pub struct PartitionInfo {
     /// `0..blocks` are the whole of what the claim addresses.
     pub blocks: u64,
     pub unique_guid: [u8; 16],
-    pub type_guid: [u8; 16],
 }
 
 /// Every byte belongs to a field: this crosses the boundary through
 /// `as_bytes`, so a gap would publish whatever the kernel stack held.
-const _: () = assert!(core::mem::size_of::<PartitionInfo>() == 8 + 16 + 16);
+const _: () = assert!(core::mem::size_of::<PartitionInfo>() == 8 + 16);
 
 impl PartitionInfo {
-    /// The partition's unique GUID, as a claim by `part:` would name it.
+    /// The partition's unique GUID, as its `part:` entry names it.
     pub const fn unique(&self) -> PartGuid {
         PartGuid(self.unique_guid)
-    }
-
-    /// Its type GUID, as a claim by `part-type:` would name it.
-    pub const fn of_type(&self) -> PartGuid {
-        PartGuid(self.type_guid)
     }
 
     pub fn as_bytes(&self) -> &[u8] {

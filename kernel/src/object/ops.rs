@@ -239,8 +239,7 @@ pub fn read_source(object: &KObjectRef) -> Option<Source> {
             device_registry::DeviceType::VirtioSound => Some(Source::VirtioSound),
             device_registry::DeviceType::Framebuffer => None,
             // A partition answers its description and has nothing to wait for.
-            device_registry::DeviceType::Partition
-            | device_registry::DeviceType::PartitionOfType => None,
+            device_registry::DeviceType::Partition => None,
         },
         // Named unconditionally: the source alone cannot enforce rights.
         KObjectRef::SysCap(_) => Some(Source::Log),
@@ -337,8 +336,7 @@ pub fn read_device(
         device_registry::DeviceType::Framebuffer => Some(claim.describe(table, buf)),
         // Every read is the description: a partition's bytes move through
         // `SYS_PARTITION_READ`, never through a read of the claim.
-        device_registry::DeviceType::Partition
-        | device_registry::DeviceType::PartitionOfType => Some(claim.describe(table, buf)),
+        device_registry::DeviceType::Partition => Some(claim.describe(table, buf)),
         // The description first and interrupts after, the shape the HDA stub
         // has: a driver reads what it is driving once, and everything it reads
         // afterwards is what its device has been doing.
@@ -550,8 +548,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             device_registry::DeviceType::PciFunction => FileType::Unknown,
             device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound => FileType::Unknown,
-            device_registry::DeviceType::Partition
-            | device_registry::DeviceType::PartitionOfType => FileType::Unknown,
+            device_registry::DeviceType::Partition => FileType::Unknown,
         }),
     }
 }
@@ -636,10 +633,7 @@ pub fn fsync(object: &KObjectRef) -> u64 {
 /// whole device's, which settles none of the kernel's own debts on it — each
 /// mount flushes again for its own.
 fn partition_fsync(claim: &DeviceClaim) -> u64 {
-    if !matches!(
-        claim.class(),
-        device_registry::DeviceType::Partition | device_registry::DeviceType::PartitionOfType
-    ) {
+    if !matches!(claim.class(), device_registry::DeviceType::Partition) {
         return SyscallError::PermissionDenied.to_u64();
     }
     let mut gone = false;
@@ -708,8 +702,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
                 !d.info_read() || d.pci_slot().is_some_and(crate::pcidev::has_irq)
             }
             device_registry::DeviceType::Framebuffer => true,
-            device_registry::DeviceType::Partition
-            | device_registry::DeviceType::PartitionOfType => true,
+            device_registry::DeviceType::Partition => true,
             device_registry::DeviceType::HdaAudio => {
                 !d.info_read() || crate::drivers::hda::has_pending()
             }

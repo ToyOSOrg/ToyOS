@@ -117,12 +117,25 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
 /// Mints a device claim, gated on a `SysCap` carrying [`Rights::DEVICE`].
 ///
 /// `selector` says which device where the class alone does not — a PCI
-/// function's vendor and device id, a partition's GUID — and is ignored by
-/// every class that names at most one device on the machine.
+/// function's vendor and device id, a partition's GUID — and a word the class
+/// does not read is refused, never dropped: whoever set it meant a device this
+/// claim would not name.
 pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]) -> u64 {
     let Some(class) = device::DeviceType::from_raw(class) else {
         return SyscallError::InvalidArgument.to_u64();
     };
+    let read = match class {
+        device::DeviceType::Keyboard
+        | device::DeviceType::Mouse
+        | device::DeviceType::Framebuffer
+        | device::DeviceType::HdaAudio
+        | device::DeviceType::VirtioSound => 0,
+        device::DeviceType::PciFunction => 1,
+        device::DeviceType::Partition => 2,
+    };
+    if selector[read..].iter().any(|&word| word != 0) {
+        return SyscallError::InvalidArgument.to_u64();
+    }
     if let Err(e) = demand_syscap(syscap, Rights::DEVICE) {
         return e.refuse();
     }
@@ -318,7 +331,7 @@ pub(super) fn sys_partition_transfer(
         Err(e) => return e.refuse(),
     };
     let class = claim.class();
-    if !matches!(class, device::DeviceType::Partition | device::DeviceType::PartitionOfType) {
+    if !matches!(class, device::DeviceType::Partition) {
         drop(claim);
         return crate::object::HandleError::WrongType {
             held: class.class_name(),
