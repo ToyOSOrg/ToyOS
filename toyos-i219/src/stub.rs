@@ -28,8 +28,9 @@
 //! this file models beyond them — the `LANPHYPC` power cycle, SMBus forcing,
 //! the reset of the MAC and PHY together — is the properties of the part
 //! `crate::wake`'s header states. What `CTRL.PHY_RST` does to the PHY's own
-//! registers is in none of them, so it is left out: the model keeps them as
-//! the last agent left them, and the driver has to work either way.
+//! registers is in none of them beyond I219 §10.3.1.12's load of the OEM Bits
+//! from `PHY_CTRL`, so the rest is left out: the model keeps them as the last
+//! agent left them, and the driver has to work either way.
 //!
 //! What is deliberately *not* modelled: the 82574's own PHY registers, the
 //! NVM's access protocol, checksum offload, VLAN insertion, RSS and the second
@@ -43,10 +44,10 @@ use std::rc::Rc;
 use std::vec::Vec;
 use std::{format, vec};
 
-use crate::phy::{advertise, control, control_1000t, custom_mode, reg};
+use crate::phy::{advertise, control, control_1000t, custom_mode, oem_bits, reg};
 use crate::regs::{
-    self, cause, ctrl, ctrl_ext, extcnf, fwsm, lanphypc_timing, mdic, rah, rctl, rx_desc, status, tctl,
-    tx_desc,
+    self, cause, ctrl, ctrl_ext, extcnf, fwsm, lanphypc_timing, mdic, phy_ctrl, rah, rctl, rx_desc,
+    status, tctl, tx_desc,
 };
 use crate::{phy, wake, Clock, DmaBuffers, Interrupts, Part, Registers};
 
@@ -187,6 +188,13 @@ pub struct Permits {
     /// "reset by power on reset only", so it survives every reset but a power
     /// cycle.
     pub phy_wake_left_armed: bool,
+    /// I219 §8.1: §9.5.8.2's Low Power Link Up and 1000 Mb/s disabled "can be
+    /// changed via signal toggling or via MDIO write access", and §10.3.1.12's
+    /// OEM Write Enable has the MAC load them from `PHY_CTRL` — whose reset
+    /// value (PCH Vol 2 §8.2.5, `Ch`) sets both for every state but D0a. So a
+    /// PHY is found with both in effect, and each reset that reaches it has the
+    /// MAC load them again from `PHY_CTRL`'s outside-D0a bits.
+    pub phy_left_in_low_power_link_up: bool,
 }
 
 impl Default for Permits {
@@ -216,6 +224,7 @@ impl Default for Permits {
             mac_reset_alone_loses_the_phy: true,
             firmware_allows_a_phy_reset: true,
             phy_wake_left_armed: true,
+            phy_left_in_low_power_link_up: true,
         }
     }
 }
@@ -279,6 +288,14 @@ mod carried {
 /// bits 15:11, every other field `0b`.
 const PORT_GENERAL_DEFAULT: u16 = (1 << 5) | (0b00111 << 11);
 
+/// §9.5.8.2's reserved bits 5:3, the one field of OEM Bits whose default the
+/// table leaves unprinted: set here, so a driver that composed the register
+/// instead of carrying it is caught clearing it.
+const OEM_BITS_UNPRINTED: u16 = 1 << 3;
+
+/// The two bits of OEM Bits that decide a speed.
+const OEM_SPEED_BITS: u16 = oem_bits::LOW_POWER_LINK_UP | oem_bits::GIGABIT_DISABLED;
+
 /// How many `STATUS` reads §3.1.3.10's master enable stays set for.
 const MASTER_QUIESCE_READS: u32 = 3;
 
@@ -309,6 +326,15 @@ const CTRL_RESERVED_SET: u32 = (1 << 3) | (1 << 20);
 /// bits. The value is arbitrary and its only property is that this driver never
 /// wrote it.
 const EXTCNF_FIRMWARE_FIELDS: u32 = 1 << 13;
+
+/// The register a restart of auto-negotiation was written to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Restart {
+    /// §9.5.2.1's Restart Auto-Negotiation.
+    Control,
+    /// §9.5.8.2's `Aneg_now`.
+    OemBits,
+}
 
 /// Where the PHY stands with respect to the MAC's end of their interconnect.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -350,6 +376,14 @@ struct PhyModel {
     /// §9.5.3.2's Port General Configuration, register 17 of the same page,
     /// which only a power-on reset returns to its defaults.
     port_general: u16,
+    /// §9.5.8.2's OEM Bits, PHY address 01 page 0 register 25, as the register
+    /// holds them.
+    oem_bits: u16,
+    /// Its two speed bits as they last took effect. §8.1: they "will not take
+    /// effect unless" a software reset or the register's own restart occurs,
+    /// so what the register holds and what the negotiation obeys are two
+    /// things.
+    oem_in_effect: u16,
     /// PHY address 02's registers 0 through 15, which §9.3 says "are identical
     /// in all the pages and are the IEEE defined registers".
     file: [u16; 16],
@@ -450,6 +484,7 @@ impl PhyModel {
         } else {
             ADVERTISE_DEFAULT
         };
+        let oem_left = if permits.phy_left_in_low_power_link_up { OEM_SPEED_BITS } else { 0 };
         Self {
             page: None,
             custom_mode: carried::CUSTOM_MODE.default,
@@ -461,6 +496,8 @@ impl PhyModel {
                 PORT_GENERAL_DEFAULT
             },
             file,
+            oem_bits: OEM_BITS_UNPRINTED | oem_left,
+            oem_in_effect: oem_left,
             wait_reads: if permits.the_interconnect_is_in_transition { MDI_WAIT_READS } else { 0 },
             wait_sticks: false,
             negotiated_over: None,
@@ -520,6 +557,11 @@ struct Model {
     /// Whether the modelled NVM answers, and therefore whether `RAH0.AV` is
     /// set after a reset (§10.2.5.23).
     has_nvm: bool,
+    /// What a reset loads into `PHY_CTRL`: I219 §10.3.1.13's NVM word 0x17,
+    /// "the OEM fields for the PHY power management parameters loaded to the
+    /// PHY Control (PHY_CTRL) register" — PCH Vol 2 §8.2.5's `Ch` unless a test
+    /// gives the platform another policy.
+    nvm_phy_ctrl: u32,
     /// One register this part does not take a write to. **A fault injector and
     /// not a modelled behaviour**: it is how a test reaches
     /// [`crate::Refusal::NotAccepted`].
@@ -556,6 +598,9 @@ struct Model {
     /// Every register offset the driver has written, so a test about what a
     /// path does *not* write can say so.
     written: BTreeSet<usize>,
+    /// Every restart of auto-negotiation the driver wrote, by the register it
+    /// wrote it to, in order.
+    restarts: Vec<Restart>,
     /// Whether the device does its work when a tail register is written.
     ///
     /// **Nothing in the datasheet says *when* the hardware acts** — a fetch
@@ -603,6 +648,8 @@ enum PhyPlace {
     SmbusControl,
     /// §9.5.3.2's Port General Configuration, page 769's register 17.
     PortGeneral,
+    /// §9.5.8.2's OEM Bits, page 0's register 25.
+    OemBits,
     /// One of the thirty PHY addresses §9.3 places nothing at. §10.2.2.7's
     /// `PHYADD` field is five bits and this part answers two of them, so a
     /// transaction to any other ends with nothing driving the bus.
@@ -638,6 +685,7 @@ impl Model {
             nanos: 0,
             reset_reads: 0,
             has_nvm: true,
+            nvm_phy_ctrl: crate::power::PHY_CTRL_RESET,
             refusing: None,
             reset_sticks: false,
             claim_gone: false,
@@ -652,6 +700,7 @@ impl Model {
             messages: 0,
             not_decoding: None,
             written: BTreeSet::new(),
+            restarts: Vec::new(),
             held: false,
             arbitration_at: Vec::new(),
             lcd: if permits.phy_starts_out_of_reach { Lcd::Off } else { Lcd::InStep },
@@ -681,8 +730,7 @@ impl Model {
         // §8.2's own defaults, which exist only on the part whose MAC that
         // document describes.
         if self.part == Part::I219 {
-            // §8.2.5: "Default: Ch".
-            self.set(regs::PHY_CTRL, crate::power::PHY_CTRL_RESET);
+            self.set(regs::PHY_CTRL, self.nvm_phy_ctrl);
             if self.permits.firmware_reports_itself_ready {
                 self.set(regs::FWSM, fwsm::FIRMWARE_VALID);
             }
@@ -779,21 +827,34 @@ impl Model {
             return None;
         }
         let (partner, partner_1000t) = self.partner;
-        if mine_1000t & partner_1000t & control_1000t::FULL != 0 {
+        // §9.5.8.2's two speed bits, as they last took effect.
+        let reverse = self.phy.oem_in_effect & oem_bits::LOW_POWER_LINK_UP != 0;
+        let gigabit = self.phy.oem_in_effect & oem_bits::GIGABIT_DISABLED == 0
+            && mine_1000t & partner_1000t & control_1000t::FULL != 0;
+        let common = mine & partner;
+        let first_common = |abilities: [(u16, u32, bool); 4]| {
+            abilities.into_iter().find(|(ability, _, _)| common & ability != 0).map(|(_, s, f)| (s, f))
+        };
+        if reverse {
+            // §8.1's Table 8-1: "10 full-duplex" first, "1000 full-duplex"
+            // last — the lowest speed the two ends have in common.
+            return first_common([
+                (advertise::FULL_10, 0b00, true),
+                (advertise::HALF_10, 0b00, false),
+                (advertise::FULL_100, 0b01, true),
+                (advertise::HALF_100, 0b01, false),
+            ])
+            .or(gigabit.then_some((0b10, true)));
+        }
+        if gigabit {
             return Some((0b10, true));
         }
-        let common = mine & partner;
-        for (ability, speed, full) in [
+        first_common([
             (advertise::FULL_100, 0b01, true),
             (advertise::HALF_100, 0b01, false),
             (advertise::FULL_10, 0b00, true),
             (advertise::HALF_10, 0b00, false),
-        ] {
-            if common & ability != 0 {
-                return Some((speed, full));
-            }
-        }
-        None
+        ])
     }
 
     /// §9 clause by clause: the first thing the PHY needs and has not been
@@ -1072,6 +1133,9 @@ impl Model {
                     // Everything but the reserved defaults and the NVM's
                     // station address goes — §4.5.2's ownership bits with it.
                     self.power_on();
+                    if with_the_phy {
+                        self.mac_loads_oem_bits();
+                    }
                     self.phy.sw_requested = false;
                     self.refresh_ownership();
                     self.set(regs::CTRL, self.get(regs::CTRL) | ctrl::RST);
@@ -1218,6 +1282,10 @@ impl Model {
         // §9.5.3.2: "This bit is reset by power on reset only" — and a power
         // cycle is one.
         self.phy.port_general = PORT_GENERAL_DEFAULT;
+        // §9.5.8.2: "0b is the default value after power on reset", and then
+        // the MAC loads its own.
+        self.phy.oem_bits = OEM_BITS_UNPRINTED;
+        self.mac_loads_oem_bits();
         self.phy.page = None;
         self.phy.negotiated_over = None;
         self.phy.negotiating = false;
@@ -1225,6 +1293,31 @@ impl Model {
         self.set(regs::CTRL_EXT, ext);
         self.cycle_done_reads = CYCLE_DONE_READS;
         self.refresh_phy_link();
+    }
+
+    /// §10.3.1.12's OEM Write Enable: the MAC loads §9.5.8.2's speed bits from
+    /// `PHY_CTRL` into a PHY a reset or power cycle reached, and they take
+    /// effect with that reset. Under [`Permits::phy_left_in_low_power_link_up`]
+    /// it loads them as for a state other than D0a; otherwise as for D0a.
+    fn mac_loads_oem_bits(&mut self) {
+        let held = self.get(regs::PHY_CTRL);
+        let (lplu, off) = if self.permits.phy_left_in_low_power_link_up {
+            (
+                phy_ctrl::LPLU_D0A | phy_ctrl::LPLU_NON_D0A,
+                phy_ctrl::GLOBAL_GBE_DISABLE | phy_ctrl::GBE_DISABLE_NON_D0A,
+            )
+        } else {
+            (phy_ctrl::LPLU_D0A, phy_ctrl::GLOBAL_GBE_DISABLE)
+        };
+        let mut bits = 0;
+        if held & lplu != 0 {
+            bits |= oem_bits::LOW_POWER_LINK_UP;
+        }
+        if held & off != 0 {
+            bits |= oem_bits::GIGABIT_DISABLED;
+        }
+        self.phy.oem_bits = (self.phy.oem_bits & !OEM_SPEED_BITS) | bits;
+        self.phy.oem_in_effect = bits;
     }
 
     /// §4.5.2's arbitration, answered into the register the requester reads it
@@ -1441,6 +1534,17 @@ impl Model {
                 );
                 PhyPlace::PortGeneral
             }
+            (phy::GENERAL, reg::OEM_BITS) => {
+                assert_eq!(
+                    self.phy.page,
+                    Some(phy::PAGE_GENERAL),
+                    "seed {}: the driver reached §9.5.8.2's OEM Bits with page {:?} selected, and \
+                     §9.5.8.2 and §8.1 both place them at page 0",
+                    self.seed,
+                    self.phy.page
+                );
+                PhyPlace::OemBits
+            }
             (phy::GENERAL, reg::CUSTOM_MODE) => {
                 assert_eq!(
                     self.phy.page,
@@ -1468,6 +1572,7 @@ impl Model {
             PhyPlace::Page => self.phy.page.unwrap_or(0) << phy::PAGE_SHIFT,
             PhyPlace::CustomMode => self.phy.custom_mode,
             PhyPlace::PortGeneral => self.phy.port_general,
+            PhyPlace::OemBits => self.phy.oem_bits,
             PhyPlace::SmbusControl => {
                 if self.lcd == Lcd::Smbus {
                     wake::SMBUS_CONTROL_FORCE
@@ -1537,6 +1642,31 @@ impl Model {
                     self.phy.port_general = data;
                 }
             }
+            PhyPlace::OemBits => {
+                assert_eq!(
+                    data & !(OEM_SPEED_BITS | oem_bits::RESTART_AUTONEG),
+                    self.phy.oem_bits & !OEM_SPEED_BITS,
+                    "seed {}: the driver wrote {data:#06x} to §9.5.8.2's OEM Bits, which held \
+                     {:#06x}: §9.1 has every field it does not mean to move loaded with what is \
+                     there",
+                    self.seed,
+                    self.phy.oem_bits
+                );
+                // `Aneg_now` is "self clearing".
+                self.phy.oem_bits = data & !oem_bits::RESTART_AUTONEG;
+                if data & oem_bits::RESTART_AUTONEG != 0 {
+                    self.restarts.push(Restart::OemBits);
+                    // §8.1: the restart is one of the two events that put the
+                    // speed bits into effect, and it is a restart.
+                    self.phy.oem_in_effect = self.phy.oem_bits & OEM_SPEED_BITS;
+                    self.phy.negotiated_over = Some((
+                        self.phy.file[reg::ADVERTISE as usize],
+                        self.phy.file[reg::CONTROL_1000T as usize],
+                    ));
+                    self.phy.negotiating = true;
+                }
+                self.refresh_phy_link();
+            }
             PhyPlace::CustomMode => {
                 self.carried("§9.5.3.1's Custom Mode Control", data, &carried::CUSTOM_MODE);
                 self.phy.custom_mode = data;
@@ -1565,6 +1695,9 @@ impl Model {
                     self.phy.custom_mode = defaults.custom_mode;
                     self.phy.negotiated_over = None;
                     self.phy.negotiating = false;
+                    // §8.1: the software reset is the other event that puts
+                    // OEM Bits' speed bits into effect.
+                    self.phy.oem_in_effect = self.phy.oem_bits & OEM_SPEED_BITS;
                     self.refresh_phy_link();
                     return;
                 }
@@ -1584,6 +1717,7 @@ impl Model {
                     self.phy.negotiating = true;
                 }
                 if r == reg::CONTROL && data & control::RESTART_AUTONEG != 0 {
+                    self.restarts.push(Restart::Control);
                     self.phy.negotiated_over = Some(abilities(&self.phy));
                     self.phy.negotiating = true;
                     // §9.5.2.1: the bit is `RW/SC`.
@@ -2031,6 +2165,11 @@ impl Nic {
         self.0.borrow().phy_resets
     }
 
+    /// Every restart of auto-negotiation the driver wrote, in order.
+    pub fn restarts(&self) -> Vec<Restart> {
+        self.0.borrow().restarts.clone()
+    }
+
     /// Every register offset the driver has written.
     pub fn written(&self) -> BTreeSet<usize> {
         self.0.borrow().written.clone()
@@ -2122,6 +2261,12 @@ impl Nic {
     /// link change behind it.
     pub fn cause(&self, causes: u32) {
         self.0.borrow_mut().raise(causes);
+    }
+
+    /// A platform whose NVM gives `PHY_CTRL` another policy, from the next
+    /// reset on.
+    pub fn platform_policy(&self, phy_ctrl: u32) {
+        self.0.borrow_mut().nvm_phy_ctrl = phy_ctrl;
     }
 
     /// This part has no NVM, so §10.2.5.23's "if no NVM is present" arm is
