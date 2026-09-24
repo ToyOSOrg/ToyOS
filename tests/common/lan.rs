@@ -615,10 +615,16 @@ pub fn lan_talk(
     std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
     let (start, len) = super::volumes::log_extent(&bytes, &image)?;
 
+    // **Its own disk.** sshd mints its identity under `/home`, and the lane's
+    // shared image would hand that identity to the next boot of the lane,
+    // which `sshd_fail_closed` asserts it mints itself.
+    let data = super::lane::dir().join("lan-talk-data.img");
+    toyos_build::build::create_sparse(&data, qemu::NVME_SMALL);
     let (ssh_port, log_port) = (qemu::free_host_port(), qemu::free_host_port());
     let options = BootOptions {
         profile: qemu::Profile::E1000e,
         boot_image: Some(qemu::Staged::Written(image.clone())),
+        nvme_image: Some(data.clone()),
         ssh_port: Some(ssh_port),
         log_port: Some(log_port),
         ..Default::default()
@@ -661,6 +667,7 @@ pub fn lan_talk(
         file.len()
     );
     let _ = std::fs::remove_file(&image);
+    let _ = std::fs::remove_file(&data);
     Ok(())
 }
 
