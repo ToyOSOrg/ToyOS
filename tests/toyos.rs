@@ -18,7 +18,7 @@ use common::{
 use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::redlist::{self, Quarantined};
-use toyos_build::tiers::Tier;
+use toyos_build::tiers::{self, Tier};
 
 struct TestDef {
     name: String,
@@ -18758,8 +18758,32 @@ fn the_metal_gates_refuse_what_they_name() -> Result<(), String> {
     Ok(())
 }
 
+/// Every `tiers::SMOKE_TESTS` name is a registered [`Tier::Fast`] test.
+///
+/// The smoke job's whole selection is that fixed list, read with no other
+/// check on it — a name renamed, moved to [`Tier::Nightly`], or misspelled in
+/// `src/tiers.rs` would otherwise run one test fewer with nothing red to say
+/// so, since `--smoke` never reports "no tests match" the way a filter does
+/// (an empty `SMOKE_TESTS` would still select every other name correctly).
+fn check_smoke_tests() {
+    let fast: BTreeSet<&str> = MACHINE_TESTS
+        .iter()
+        .chain(SCREEN_TESTS)
+        .filter(|(_, _, tier)| *tier == Tier::Fast)
+        .map(|(n, _, _)| *n)
+        .collect();
+    for name in tiers::SMOKE_TESTS {
+        assert!(
+            fast.contains(name),
+            "tiers::SMOKE_TESTS names {name:?}, which is not a registered Tier::Fast test — \
+             the smoke job would silently run one fewer test than it claims to"
+        );
+    }
+}
+
 fn check_registration() {
     check_metal_registration();
+    check_smoke_tests();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for name in MACHINE_TESTS
         .iter()
@@ -18854,6 +18878,10 @@ fn main() {
     // reason: an env var is invisible in the command line and easy to leave set,
     // and the whole point of the split is that a run says what it ran.
     let nightly = SUITE.present(&args, &testargs::NIGHTLY);
+    // The pull-request and merge-queue tier: `tiers::SMOKE_TESTS` and nothing
+    // else. `testargs::parse` has already refused this alongside a filter, a
+    // nightly widening, gate A or the metal profile.
+    let smoke_mode = SUITE.present(&args, &testargs::SMOKE);
     // The metal profile, and where its images and readbacks live. Naming the
     // directory means the machine is not touched — see `common::metal::Mode`.
     let metal_mode = SUITE.present(&args, &testargs::METAL);
@@ -19095,7 +19123,12 @@ fn main() {
         std::process::exit(1);
     }
 
-    let keep = |name: &str| filter.is_none_or(|f| name.contains(f));
+    // `--smoke` replaces the name filter outright rather than narrowing it:
+    // `testargs::parse` already refuses the two together, so `filter` is
+    // always `None` here when `smoke_mode` is set.
+    let keep = |name: &str| {
+        if smoke_mode { tiers::SMOKE_TESTS.contains(&name) } else { filter.is_none_or(|f| name.contains(f)) }
+    };
     // The tier filter, and it is not conditional on the name filter: a rule with
     // an exception for filtered runs is two rules, and the second one is the one
     // nobody remembers. `cargo test -- desktop_window_child` refuses below and

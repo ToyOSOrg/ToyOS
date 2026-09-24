@@ -158,6 +158,10 @@ declare_flags!(pub SUITE = {
     pub SHARD = "--shard", Next;
     pub SLOW_USB = "--slow-usb", None;
     pub NIGHTLY = "--nightly", None;
+    /// The pull-request and merge-queue tier: exactly
+    /// `toyos_build::tiers::SMOKE_TESTS`, in place of any filter — [`parse`]
+    /// refuses combining the two rather than silently picking one.
+    pub SMOKE = "--smoke", None;
     /// The metal profile: the registrations that run on the T14, batched into
     /// images and judged off the log the stick came back with.
     pub METAL = "--metal", None;
@@ -245,6 +249,24 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
              tier at a time"
                 .to_string(),
         );
+    }
+    if has(&SMOKE) {
+        if filter.is_some() {
+            return Err(
+                "--smoke and a filter both name what runs, and the filter would be dropped in \
+                 silence; --smoke always runs exactly toyos_build::tiers::SMOKE_TESTS"
+                    .to_string(),
+            );
+        }
+        for (other, name) in [(has(&NIGHTLY), "--nightly"), (has(&AUDIO_GATE), "--audio-gate"), (has(&METAL), "--metal")]
+        {
+            if other {
+                return Err(format!(
+                    "--smoke and {name} are separate tiers and cannot be combined; run one \
+                     tier at a time"
+                ));
+            }
+        }
     }
     Ok(filter)
 }
@@ -511,8 +533,28 @@ mod tests {
             vec!["--metal"],
             vec!["--metal", "--metal-readback", "target/metal"],
             vec!["--metal", "--nightly"],
+            vec!["--smoke"],
         ] {
             assert!(parse_owned(&argv).is_ok(), "{argv:?}");
+        }
+    }
+
+    /// `--smoke` is the whole selection: a filter beside it would be dropped in
+    /// silence, and it names a tier of its own, not a shorthand for another one.
+    #[test]
+    fn smoke_takes_no_filter_and_combines_with_no_other_tier() {
+        let refusal = parse_owned(&["--smoke", "lan_talk"]).unwrap_err();
+        assert!(refusal.contains("--smoke"), "{refusal}");
+        assert!(refusal.contains("dropped in silence"), "{refusal}");
+
+        for other in [
+            vec!["--smoke", "--nightly"],
+            vec!["--smoke", "--audio-gate", "30"],
+            vec!["--smoke", "--metal"],
+        ] {
+            let refusal = parse_owned(&other).unwrap_err();
+            assert!(refusal.contains("--smoke"), "{other:?}: {refusal}");
+            assert!(refusal.contains("cannot be combined"), "{other:?}: {refusal}");
         }
     }
 

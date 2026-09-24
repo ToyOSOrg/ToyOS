@@ -5,13 +5,16 @@
 //! does not compile, and the shared boot's discovered tests share one. Moving a
 //! test between tiers is editing that one word.
 //!
-//! The fast tier is what every `cargo test` and every pull request runs; the
-//! nightly tier is `--nightly`, run by `.github/workflows/ci.yml`'s schedule.
-//! [`FAST_CEILING_MS`] is the line between them, and it refuses nothing: every
-//! sharded run's `durations` job prints, as warnings, which Fast names measured
-//! over it and which Nightly names measured under it ([`off_the_line`]). A name
-//! that is Nightly because its verdict is anchored to real time, or because it
-//! shares a boot with one that is slow, stays where it is whatever it measures.
+//! The fast tier is what every plain `cargo test` runs, and an agent runs it
+//! locally before a pull request is marked ready; the nightly tier is
+//! `--nightly`, run by `.github/workflows/ci.yml`'s schedule and by a manual
+//! `workflow_dispatch`, and neither runs on a pull request or in the merge
+//! queue — [`SMOKE_TESTS`] does, instead. [`FAST_CEILING_MS`] is the line
+//! between fast and nightly, and it refuses nothing: every sharded run's
+//! `durations` job prints, as warnings, which Fast names measured over it and
+//! which Nightly names measured under it ([`off_the_line`]). A name that is
+//! Nightly because its verdict is anchored to real time, or because it shares a
+//! boot with one that is slow, stays where it is whatever it measures.
 
 /// The line the fast tier is defined by, in milliseconds, measured on CI's
 /// hosted shards. A test at exactly the line is fast.
@@ -39,6 +42,27 @@ impl Tier {
         [Tier::Fast, Tier::Nightly].into_iter().find(|t| t.token() == token)
     }
 }
+
+/// The pull-request and merge-queue guest job's whole selection: `--smoke`
+/// runs exactly these names and nothing else, in one unsharded boot rather
+/// than the twelve-shard partition [`Tier::Fast`] otherwise runs in.
+///
+/// **A handful, not a sample.** Each name here proves one thing the owner
+/// named as what makes `main` usable, and the list is short enough to read at
+/// the site that needs the reason: a boot that reaches the shipped `init`
+/// list and every program's namespace, a real command typed at a shell and
+/// read back, a write under two paths landing on one filesystem, and a
+/// machine that takes a DHCP lease, answers a command over the network and
+/// reboots cleanly. `tests/toyos.rs`'s `check_smoke_tests` asserts every name
+/// here is a registered [`Tier::Fast`] test — this list moving a test to
+/// [`Tier::Nightly`], or misspelling one, cannot silently stop proving
+/// anything.
+pub const SMOKE_TESTS: &[&str] = &[
+    "shipped_config_boots",
+    "screen_console_shell",
+    "apps_and_home_are_one_filesystem",
+    "lan_talk",
+];
 
 /// One sentence per measurement on the wrong side of [`FAST_CEILING_MS`] for
 /// the tier it ran in. Information for whoever moves a test, never a refusal.

@@ -1,19 +1,26 @@
 name: ci
 
-# The guest suite: twelve KVM shards on GitHub-hosted Linux x86_64. They own one
-# booted kernel at a time and run exactly the Fast tier as a partition — every
-# Fast test runs exactly once per run. `ci/**` is where throwaway probe branches
-# live; they trigger their own workflows and not this one.
+# The full guest suite — twelve KVM shards on GitHub-hosted Linux x86_64,
+# owning one booted kernel at a time and running exactly the Fast tier as a
+# partition — moved to nightly-only (the owner's ruling: approved pull
+# requests sat in the merge queue for hours while every runner was busy
+# running twelve shards for a one-line change). A pull request or a merge
+# group instead runs `smoke`: one unsharded job on `toyos_build::tiers::
+# SMOKE_TESTS`, a handful of Fast names that boot the shipped image and prove
+# main is usable — boot, a shell command, the filesystem, the network — in a
+# few minutes rather than the full partition's. `ci/**` is where throwaway
+# probe branches live; they trigger their own workflows and not this one.
 #
-# `main` moves only through a merged pull request, so a branch push and the pull
-# request on it are two runs of the same guest partition. `main`'s own run is what
-# `landing.yml`'s `gate-stage` reads, and its `actions/cache` entries are the
-# only ones every branch can restore.
+# `main` moves only through a merged pull request, so a branch push and the
+# pull request on it are two runs of the same smoke job. `main`'s own run is
+# what `landing.yml`'s `gate-stage` reads, and its `actions/cache` entries are
+# the only ones every branch can restore.
 #
-# `schedule` runs the tier the fast shards withhold by widening
-# `SUITE_TIER_ARGS`, the same way `workflow_dispatch` already could. `schedule`
-# always runs the default branch's copy of this file against its own tip, so a
-# nightly red is about `main`, never about a branch.
+# `schedule` runs the full partition the way it always did, widening to the
+# tier the fast shards withhold with `--nightly`, the same way
+# `workflow_dispatch` already could. `schedule` always runs the default
+# branch's copy of this file against its own tip, so a nightly red is about
+# `main`, never about a branch.
 
 on:
   push:
@@ -44,14 +51,16 @@ jobs:
   # prose only (`*.md` anywhere, `issues/**`, `.claude/**`) needs no toolchain
   # and boots no guest — `toyos-build` never touched a file that changes what
   # it does. A draft pull request needs the same lift for a different reason:
-  # nothing here is a required check until the author asks for review.
+  # nothing here is a required check until the author asks for review. The
+  # name is `skip_guest` from before `smoke` existed; it lifts `smoke` on a
+  # pull request or merge group exactly as it used to lift the full partition.
   #
   # Silent for every other trigger (`push`, `schedule`, `workflow_dispatch`):
   # `skip_guest` is empty there, which every `if:` below reads the same as
   # `false`, so a push to `main` and a nightly run are untouched by this job —
-  # `push`'s own exemption from the guest matrix (below) is a separate rule,
-  # since a code change to `main` still needs the toolchain built for
-  # `cache-writer`.
+  # `push`'s own exemption from `smoke` and the nightly matrix's own scoping to
+  # `schedule`/`workflow_dispatch` (both below) are separate rules, since a
+  # code change to `main` still needs the toolchain built for `cache-writer`.
   scope:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -155,14 +164,13 @@ jobs:
           echo "::error::$tag was not published within two hours."
           exit 1
 
+  # The full twelve-shard partition, nightly-only: `smoke` (below) is what a
+  # pull request and a merge group run instead, and the merge queue already
+  # ran `smoke` on this exact composition before a push reaches `main`, so a
+  # push boots no shard either.
   guest:
     needs: [scope, toolchain-ready]
-    # `scope`'s lift for a prose-only diff or a draft pull request, and one
-    # more of its own: the merge queue already ran this exact composition
-    # before a push reaches `main`, so a push boots no shard a second time —
-    # `cache-writer` below is what a push still needs, and it does not read
-    # this flag.
-    if: needs.scope.outputs.skip_guest != 'true' && github.event_name != 'push'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     # A wedge guard, not a budget: the harness answers a dead shared boot with
     # a new one, so a shard that cannot finish inside this ceiling measures
@@ -305,16 +313,14 @@ jobs:
       # unmetered.
       #
       # `--nightly` widens the selection to the withheld tier, on the schedule
-      # and on a manual dispatch alike, without putting it back into every
-      # pull request.
+      # and on a manual dispatch alike — the only two triggers this job's own
+      # `if:` runs it on.
       - name: suite
-        env:
-          SUITE_TIER_ARGS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--nightly' || '' }}
         run: |
           set -o pipefail
           cargo test --test toyos-build -- \
             --shard ${{ matrix.shard }}/12 --jobs 1 --host-slots 0 \
-            $SUITE_TIER_ARGS 2>&1 \
+            --nightly 2>&1 \
             | tee /tmp/suite.log
 
       # `cargo test` runs several binaries and each prints a `test result:`
@@ -375,6 +381,131 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: shard-${{ matrix.shard }}-serial
+          path: /tmp/toyos-tests-*/**/uart-*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The pull-request and merge-queue guest job: one unsharded boot running
+  # `toyos_build::tiers::SMOKE_TESTS`, the fixed handful of Fast names that
+  # boot the shipped image, run a shell command, touch the filesystem and
+  # talk over the network — a few minutes rather than the full partition's.
+  # Same container, same KVM accelerator and the same instrument as `guest`,
+  # since a smoke verdict has to be comparable with the nightly one it stands
+  # in for.
+  smoke:
+    needs: [scope, toolchain-ready]
+    if: needs.scope.outputs.skip_guest != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: debian:sid-20260824@sha256:c1acdb109bacb5adf0f2078892ac177ee2e2ce6f88e96c5b743998b5489d36a9
+      options: --device=/dev/kvm
+    steps:
+      - name: deps
+        run: |
+          echo 'deb http://snapshot.debian.org/archive/debian/20260824T000000Z sid main' \
+            > /etc/apt/sources.list
+          rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.list
+          got=no
+          for attempt in 1 2 3; do
+            if apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
+               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                    git curl ca-certificates jq zstd xz-utils build-essential \
+                    qemu-system-x86 >> /tmp/apt.log 2>&1; then
+              got=yes
+              break
+            fi
+            echo "apt attempt $attempt failed"
+            [ "$attempt" = 3 ] || sleep 20
+          done
+          if [ "$got" != yes ]; then
+            echo "::error::apt failed three times. What the last attempt said:"
+            cat /tmp/apt.log
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: the instrument
+        run: .github/instrument.sh
+
+      - id: key
+        name: the toolchain this tree needs
+        run: |
+          git config --global --add safe.directory "$PWD"
+          echo "tag=toolchain-linux-x86_64-$(git rev-parse HEAD:rust HEAD:toyos-abi/src \
+                HEAD:toyos/src HEAD:userland/libc/src HEAD:toyos-ld/src \
+                HEAD:toyos-ld/Cargo.toml HEAD:.github/workflows/toolchain.yml \
+                | sha256sum | cut -c1-16)" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: rust
+        run: |
+          # To a file first, never `curl | sh` — `guest`'s own `rust` step says
+          # why.
+          curl --proto '=https' --tlsv1.2 -sSf -o "$RUNNER_TEMP/rustup-init.sh" https://sh.rustup.rs
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: install the toolchain
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.key.outputs.tag }}
+        run: .github/install-toolchain.sh
+
+      # Reads the same cache `cache-writer` writes: a smoke run and a shard
+      # build the identical tree, so nothing here needs its own key.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            kernel/target
+            bootloader/target
+            userland/target
+            tests/target
+            tests/toyos-rust-tests/*/target
+            tests/https-fetch-host/target
+            tests/https-server-host/target
+          key: guest-${{ steps.key.outputs.tag }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: guest-${{ steps.key.outputs.tag }}-
+
+      # `--smoke` selects exactly `toyos_build::tiers::SMOKE_TESTS` — no
+      # `--shard`, since it is one job and not a partition. `--jobs 1`, as
+      # `guest`'s own shards run: this container is alone on its runner, same
+      # as a shard is on its own.
+      - name: smoke
+        run: |
+          set -o pipefail
+          cargo test --test toyos-build -- \
+            --smoke --jobs 1 --host-slots 0 2>&1 \
+            | tee /tmp/smoke.log
+
+      - name: smoke summary
+        if: always()
+        run: |
+          line=$(grep 'test result:' /tmp/smoke.log | grep ' total (' | tail -1)
+          echo "- smoke: ${line:-no suite result line}" >> "$GITHUB_STEP_SUMMARY"
+          verdicts=$(grep -E '^(FAIL|XFAIL) |^ +(STALL|INVL|ALONE) |is quarantined for something else' /tmp/smoke.log || true)
+          if [ -n "$verdicts" ]; then
+            {
+              echo "<details><summary>smoke: what it said</summary>"
+              echo ""
+              echo '```'
+              echo "$verdicts"
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: failure logs
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-serial
           path: /tmp/toyos-tests-*/**/uart-*.log
           if-no-files-found: warn
           retention-days: 7
@@ -600,9 +731,11 @@ jobs:
   # both ran — because that is a test the suite ran twice and another it may
   # have run nowhere.
   #
-  # `guest`'s `SUITE_TIER_ARGS` widens its shards to the nightly tier on a
-  # nightly run, so their `test-durations.shard-*` files carry Nightly
-  # measurements the same way an ordinary run's carry Fast ones.
+  # `guest` runs nightly-only now and always passes `--nightly`, so its
+  # shards' `test-durations.shard-*` files carry Nightly measurements the same
+  # way an ordinary run's used to carry Fast ones. `smoke` writes no duration
+  # artifact — this job finds none on a pull request or merge group and warns
+  # rather than failing, the same as it always has for a short set.
   durations:
     needs: [guest]
     if: always()
@@ -673,33 +806,37 @@ jobs:
           retention-days: 7
 
   guest-suite:
-    needs: [toolchain-ready, guest, durations, cache-writer]
+    needs: [toolchain-ready, guest, smoke, durations, cache-writer]
     if: always()
     runs-on: ubuntu-latest
     steps:
       # `toolchain-ready` is named here as well as in the shards' `needs:`,
       # since a skipped `guest` says nothing about why it was skipped and this
-      # is the name a reader of the merge button sees.
+      # is the name a reader of the merge button sees. The check name itself
+      # stays `guest-suite` so the branch protection ruleset (unchanged) is
+      # satisfied by whichever of `guest` (nightly) or `smoke` (pull request,
+      # merge group) this event actually ran.
       #
       # This is the required check's own name, so it must conclude fast and
       # green whenever `scope` lifted the rest of the run — a prose-only diff,
-      # a draft pull request, or (a separate case, `guest` alone) a push to
-      # `main` the merge queue already validated. `toolchain-ready`'s result
-      # is the one signal read for the first two: `scope` skips it, and
-      # nothing below it runs either, so a skipped `toolchain-ready` is
-      # believed outright rather than re-deriving `scope`'s verdict here.
+      # or a draft pull request. `toolchain-ready`'s result is the one signal
+      # read for that: `scope` skips it, and nothing below it runs either, so
+      # a skipped `toolchain-ready` is believed outright rather than
+      # re-deriving `scope`'s verdict here.
       - name: aggregate
         run: |
           echo "toolchain: ${{ needs.toolchain-ready.result }}"
-          echo "guest partition: ${{ needs.guest.result }}"
+          echo "guest partition (nightly): ${{ needs.guest.result }}"
+          echo "smoke (pull request / merge queue): ${{ needs.smoke.result }}"
           echo "duration profile: ${{ needs.durations.result }}"
           echo "cache writer: ${{ needs.cache-writer.result }}"
 
           if [ "${{ needs.toolchain-ready.result }}" = skipped ]; then
-            if [ "${{ needs.guest.result }}" != skipped ] || [ "${{ needs.cache-writer.result }}" != skipped ] \
+            if [ "${{ needs.guest.result }}" != skipped ] || [ "${{ needs.smoke.result }}" != skipped ] \
+               || [ "${{ needs.cache-writer.result }}" != skipped ] \
                || [ "${{ needs.durations.result }}" != success ]; then
               echo "::error::toolchain-ready was skipped but guest(${{ needs.guest.result }}),"
-              echo "::error::cache-writer(${{ needs.cache-writer.result }}) or"
+              echo "::error::smoke(${{ needs.smoke.result }}), cache-writer(${{ needs.cache-writer.result }}) or"
               echo "::error::durations(${{ needs.durations.result }}) was not the shape scope's"
               echo "::error::lift produces — a job's own \`if:\` drifted from scope's."
               exit 1
@@ -712,15 +849,53 @@ jobs:
             exit 1
           fi
 
-          if [ "${{ needs.guest.result }}" = skipped ] && [ "${{ github.event_name }}" = push ]; then
-            echo "guest was skipped: a push to main is already validated by the merge queue" \
-              "on the exact composition that landed."
-          elif [ "${{ needs.guest.result }}" != success ]; then
-            echo "::error::a guest shard reported ${{ needs.guest.result }}. The run summary"
-            echo "::error::names the shard, the test and whether it survived being re-run"
-            echo "::error::alone; \`cargo run -- --known-red <test>\` says whether it is quarantined."
-            exit 1
-          fi
+          # Exactly one of `guest` (the nightly partition) and `smoke` (a
+          # pull request or merge group) runs for a given event; a push runs
+          # neither, since the merge queue already validated this exact
+          # composition with `smoke` moments earlier.
+          case "${{ github.event_name }}" in
+            pull_request|merge_group)
+              if [ "${{ needs.guest.result }}" != skipped ]; then
+                echo "::error::guest ran on a ${{ github.event_name }}; it is nightly-only now — a"
+                echo "::error::job's \`if:\` drifted from the event split this aggregate expects."
+                exit 1
+              fi
+              if [ "${{ needs.smoke.result }}" != success ]; then
+                echo "::error::smoke reported ${{ needs.smoke.result }}. The run summary names"
+                echo "::error::the test and whether it survived being re-run alone;"
+                echo "::error::\`cargo run -- --known-red <test>\` says whether it is quarantined."
+                exit 1
+              fi
+              ;;
+            schedule|workflow_dispatch)
+              if [ "${{ needs.smoke.result }}" != skipped ]; then
+                echo "::error::smoke ran on a ${{ github.event_name }}; it is for pull requests and"
+                echo "::error::merge groups only — a job's \`if:\` drifted from this aggregate's split."
+                exit 1
+              fi
+              if [ "${{ needs.guest.result }}" != success ]; then
+                echo "::error::a guest shard reported ${{ needs.guest.result }}. The run summary"
+                echo "::error::names the shard, the test and whether it survived being re-run"
+                echo "::error::alone; \`cargo run -- --known-red <test>\` says whether it is quarantined."
+                exit 1
+              fi
+              ;;
+            push)
+              if [ "${{ needs.guest.result }}" != skipped ] || [ "${{ needs.smoke.result }}" != skipped ]; then
+                echo "::error::guest(${{ needs.guest.result }}) or smoke(${{ needs.smoke.result }}) ran"
+                echo "::error::on a push to main; the merge queue already validated this exact"
+                echo "::error::composition with smoke moments earlier."
+                exit 1
+              fi
+              echo "guest and smoke were both skipped: a push to main is already validated by" \
+                "the merge queue on the exact composition that landed."
+              ;;
+            *)
+              echo "::error::guest-suite's aggregate has no case for ${{ github.event_name }}"
+              exit 1
+              ;;
+          esac
+
           if [ "${{ needs.durations.result }}" != success ]; then
             echo "::error::the \`durations\` job reported ${{ needs.durations.result }}; its own log says why."
             exit 1
