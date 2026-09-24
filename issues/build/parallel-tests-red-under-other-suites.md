@@ -492,6 +492,12 @@ mechanism for it. `src/redlist.rs` carries the sighting.
   says is no longer waited for. Under a loaded host the second line did not
   arrive, so the revision that retirement rests on is not unconditional.
 
+  Second sighting, the logd branch's fast tier at `eef19bd1`, on a dev host
+  running two other worktrees' suites: the same words at `[kernel 5.865 cpu0]
+  ... 2 interrupts and 4 bytes, nothing decoded`, the one red of 357, and
+  `ALONE i8042_undecoded_bytes: GREEN`. That branch touches neither the i8042
+  driver nor this test, and the test was green in its previous fast-tier run.
+
   Owner: the i8042 tally. **Exit condition**: the verdict revising itself in a
   parallel run — a loaded full fast tier in which `i8042_undecoded_bytes`'
   first mute line names nothing and its second names the sequence, or the
