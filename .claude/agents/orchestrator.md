@@ -48,3 +48,8 @@ You alone run the T14. Before every flash, save the stick's log partition: the f
 previous boot's only record. Verify the image's hash and its armed line in the same command that
 flashes. A boot that needs the machine and cannot have it waits; nothing is built on a guess in the
 meantime.
+
+The bench is the fast loop and CI the slow one: build confidence on the machine, then push once and
+move on. Ubuntu on the T14 is recovery, not a tool. Every question the bench raises — a log, the
+link, a device, an update — is answered on ToyOS, and one ToyOS cannot answer yet is a feature to
+build, because the bench's needs are a user's needs.
