@@ -248,6 +248,10 @@ fn main() {
             lost = tail.lost();
         }
 
+        // The newest *record* this round writes, and never a program's line: it
+        // is what `publish_durable` promises the kernel is on the device, and a
+        // program's later stamp would promise records this round never read.
+        let newest = batch.last().map_or(0, |r| r.at_ns);
         registered(&from_init, &mut from_init_rx, &mut origins);
         let mut round = Round { lines: Vec::new(), console: Vec::new() };
         read_origins(&mut origins, boot_local, &mut round);
@@ -275,7 +279,6 @@ fn main() {
         // One order for the file and every reader: the time each line was
         // stamped at, the kernel's own merge kept among its records.
         round.lines.sort_by_key(|(at_ns, _)| *at_ns);
-        let newest = round.lines.iter().map(|(at_ns, _)| *at_ns).max().unwrap_or(0);
         let text: String = round.lines.into_iter().map(|(_, line)| line).collect();
 
         let Some(v) = volume.as_mut() else {
