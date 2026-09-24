@@ -552,7 +552,10 @@ pub fn swap_refused_device_fails(
         }
         for word in [&in_service, &started] {
             if let Some(line) = text.lines().find(|l| l.contains(word.as_str())) {
-                return Err(format!("init started a netd without the igb the one it replaced held: {line}"));
+                return Err(format!(
+                    "init started netd's replacement though the igb the one it replaced held lost its \
+                     window to its reset: {line}"
+                ));
             }
         }
         let refused = console.must_say("no longer holds the window it was cut for")?;
