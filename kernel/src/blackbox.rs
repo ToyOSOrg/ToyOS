@@ -96,6 +96,7 @@ pub fn record_panic(records: &[u8]) {
         // its tail alone is a report with the crash missing: the panel's newest
         // lines are the ones written after it.
         crate::panic::first_words(&mut report);
+        crate::log::recovery::seal_into(&mut report);
         report.tail(records, toyos_blackbox::RECORD_OPENS_WITH);
         report.seal(State::Panic, stamp, identity);
     });
@@ -123,7 +124,22 @@ pub fn record_done() {
 /// regardless: a boot whose loader claimed no page, and a page holding a
 /// [`State::Fault`], whose text is a fixed-layout register dump and not text —
 /// a crash is worth more than the account of the reset that followed it.
+///
+/// The account is taken a line at a time and sealed as each one closes
+/// ([`toyos_blackbox::Account`]), because its lines are separated by bounded
+/// waits on devices that may not answer.
 pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
+    reopened(|lines| account(lines))
+}
+
+/// Append the recovery section to what this boot already sealed: a boot that
+/// hands the machine back says what its transport went through as a boot that
+/// dies does, because the stick that would carry the log may be what broke.
+pub fn append_recovery() -> bool {
+    reopened(|lines| lines.block(crate::log::recovery::seal_into))
+}
+
+fn reopened(account: impl FnOnce(&mut toyos_blackbox::Account<'_, &mut dyn FnMut()>)) -> bool {
     let mut appended = false;
     // **The envelope is the one already on the page**, state, stamp and
     // identity alike, and not what `with_page` would put there: this extends a
@@ -137,9 +153,16 @@ pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
             Some((State::Armed | State::Fault, ..)) | None => None,
         };
         let Some((state, stamp, identity, at)) = opened else { return };
-        let mut report = toyos_blackbox::Report::reopened(page, at);
-        account(&mut report);
-        report.seal(state, stamp, identity);
+        let page_at = PAGE.load(Relaxed);
+        let mut wrote_back = || flush(page_at);
+        let mut lines = toyos_blackbox::Account::new(
+            toyos_blackbox::Report::reopened(page, at),
+            state,
+            stamp,
+            identity,
+            &mut wrote_back as &mut dyn FnMut(),
+        );
+        account(&mut lines);
         appended = true;
     });
     appended
@@ -158,6 +181,10 @@ pub fn record_wedge(said: core::fmt::Arguments, records: &[u8]) {
         // Why first, then as much of the tail as is left: a report cut to its
         // tail alone does not say what ended the machine.
         let _ = core::fmt::Write::write_fmt(&mut report, said);
+        // Above the tail and not in it: on a boot that outlived its transport's
+        // break the tail is everything written since, and the cut takes the
+        // break first.
+        crate::log::recovery::seal_into(&mut report);
         report.tail(records, toyos_blackbox::RECORD_OPENS_WITH);
         report.seal(State::Wedged, stamp, identity);
     });

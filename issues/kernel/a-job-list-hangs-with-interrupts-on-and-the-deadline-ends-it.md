@@ -31,5 +31,12 @@ phase and left the stick unenumerable, so there was no readback at all. The stop
 now waits a transfer out first (`xhci/stop.rs`'s `settle_transfers`), so the
 next occurrence should leave a stick the driver can read.
 
+**Run 55 does not bear on this.** Its `lancase` boot ran no job list — the
+ring tail records `spawn: /system/bin/test-runner: ELF: fewer bytes than a
+file header` — and its subject is a storage transport dying
+(`issues/kernel/a-120000-ms-boot-deadline-fired-132859-ms-late-on-the-t14.md`),
+not a job list hanging with interrupts on; this file's exit condition is
+still unmet.
+
 **Exit condition**: a `loader.log` from a T14 boot that ran to its deadline,
 with the ring tail naming what the machine was doing when it stopped.

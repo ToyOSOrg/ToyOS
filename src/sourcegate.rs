@@ -1,8 +1,8 @@
 //! Identifiers a tree may not name, and the exceptions that are named instead.
 //!
-//! **Clippy runs now, and these scans are what it cannot say.** The `host` job
-//! in `.github/workflows/host-tests.yml` runs default clippy with warnings
-//! denied over three trees on every pull request — the host workspace
+//! **Clippy runs now, and these scans are what it cannot say.** `cargo run --
+//! --ci host-full` runs default clippy with warnings denied over three trees
+//! every night — the host workspace
 //! (`--workspace --all-targets`), the kernel (`--target x86_64-unknown-none`)
 //! and the bootloader (`--target x86_64-unknown-uefi`) — so a `clippy.toml` is
 //! no longer a wall with nothing behind it.
@@ -59,8 +59,7 @@
 //!
 //! The eighth and ninth are the same bar over `.github/`: one cuts every
 //! workflow, script and container recipe into shell commands and refuses a
-//! package no row declares, the other reads `uses:`. `src/ci.rs` reads these
-//! files for one package's provenance; these hold the whole set.
+//! package no row declares, the other reads `uses:`.
 //!
 //! **What none of them reaches is filed rather than implied**, and each table's
 //! own doc names its half: the entries under `issues/build/` say so.
@@ -548,8 +547,33 @@ const HOST_SPAWNS: &[Spawn] = &[
     Spawn {
         arg: "\"gh\"",
         sites: &[],
-        why: "GitHub's CLI, read-only, in `--merge-health` alone. Outside the bar and \
-              declared by nothing else: no build, boot or gate reaches it",
+        why: "GitHub's CLI, outside the bar: CI's release, protection and nightly-red jobs \
+              (src/ci.rs, src/release.rs) ask GitHub with it. Nothing that builds or boots \
+              reaches it",
+    },
+    Spawn {
+        arg: "\"curl\"",
+        sites: &[],
+        why: "outside the bar, and declared by nothing else: the release download a guest \
+              runner installs its toolchain from, and the crates.io index the publisher asks",
+    },
+    Spawn {
+        arg: "\"tar\"",
+        sites: &[],
+        why: "outside the bar: packs and unpacks the toolchain release (src/release.rs), on a \
+              runner only",
+    },
+    Spawn {
+        arg: "\"zstd\"",
+        sites: &[],
+        why: "outside the bar: the toolchain release's compression (src/release.rs), on a \
+              runner only",
+    },
+    Spawn {
+        arg: "stage2.join(\"bin/rustc\")",
+        sites: &[("src/release.rs", 1)],
+        why: "the toolchain a runner just installed, asked its version before anything builds \
+              with it",
     },
     Spawn {
         arg: "\"ssh\"",
@@ -621,6 +645,11 @@ const HOST_SPAWNS: &[Spawn] = &[
         sites: &[("tests/common/ssh.rs", 1)],
         why: "the harness's SSH client, russh and russh-sftp from source and not a host `ssh`",
     },
+    Spawn {
+        arg: "crate::build::ssh_client_host(&self.root)",
+        sites: &[("src/metaltalk.rs", 1)],
+        why: "the same client, driven by the metal loop at a booted T14 over its own cable",
+    },
 ];
 
 /// One package a CI image or workflow installs on a machine this project's
@@ -641,8 +670,7 @@ struct Package {
 /// **What this closes is a spelling**, and each form it walks past is a case in
 /// `the_package_scan_reads_the_install_command_and_not_the_shell` asserting that
 /// it does, so widening the scan reds that test instead of growing a regex
-/// quietly. Walked past: a YAML **folded scalar** (`run: >-`, which
-/// `.github/workflows/ci-image.yml:34` is today), whose lines YAML joins where
+/// quietly. Walked past: a YAML **folded scalar** (`run: >-`), whose lines YAML joins where
 /// this joins only on a trailing `\`; an install behind an **interpreter head
 /// word** — `bash -c`, `sh -c`, `python3 -m pip` — because the command's first
 /// word is then the interpreter and not a manager; a **manager [`INSTALLERS`]
@@ -652,7 +680,7 @@ struct Package {
 /// `cc::Build`'s host `ar` is in, which the Rust scan does not reach either.
 ///
 /// A name a shell variable holds is *not* on that list: `$PKG` is a token like
-/// any other and reds under its own spelling, which is why `qemu@$want` is a row.
+/// any other and reds under its own spelling.
 const CI_PACKAGES: &[Package] = &[
     Package {
         name: "build-essential",
@@ -662,64 +690,29 @@ const CI_PACKAGES: &[Package] = &[
     },
     Package {
         name: "ca-certificates",
-        why: "the trust store `apt` and `curl` verify the snapshot archive and sh.rustup.rs \
-              against. It carries no binary anything here runs",
-    },
-    Package {
-        name: "cmake",
-        why: "outside the bar: upstream bootstrap's build dependency for LLVM, in \
-              toolchain.yml alone. Not our code and not in any guest's path",
+        why: "the trust store `curl` verifies sh.rustup.rs and GitHub's API against. It carries \
+              no binary anything here runs",
     },
     Package {
         name: "curl",
-        why: "outside the bar, and declared by nothing else: it fetches rustup-init.sh and \
-              the toolchain release asset (.github/install-toolchain.sh)",
+        why: "outside the bar, and declared by nothing else: it fetches rustup-init.sh, and \
+              src/release.rs and src/ci.rs ask GitHub and the crates.io index with it",
     },
     Package {
         name: "git",
         why: "the version control this repository is, and `REQUIRED` in src/main.rs",
     },
     Package {
-        name: "jq",
-        why: "outside the bar: it reads GitHub's JSON in landing.yml's protection readback and \
-              in .github/install-toolchain.sh. A JSON reader is our job by CLAUDE.md's crate \
-              rule, and nothing in-tree does it",
-    },
-    Package {
-        name: "libssl-dev",
-        why: "outside the bar: upstream bootstrap links against it, in toolchain.yml alone",
-    },
-    Package {
-        name: "ninja-build",
-        why: "outside the bar: upstream bootstrap's LLVM generator, in toolchain.yml alone",
-    },
-    Package {
-        name: "ovmf",
-        why: "the UEFI firmware a QEMU guest boots. This tree commits its own under ovmf/ \
-              (NOTICE names them); toolchain.yml installs the package and asserts \
-              /usr/share/OVMF exists for `check_prerequisites`",
-    },
-    Package {
-        name: "pkg-config",
-        why: "outside the bar: how upstream bootstrap finds libssl, in toolchain.yml alone",
-    },
-    Package {
         name: "python3",
         why: "the Python standing failure CLAUDE.md:56 declares, wearing a package name — \
               `rust/x` searches for one. issues/build/python-and-cc-are-declared.md is the \
-              entry, and portability.yml is the one workflow that names it as a package",
+              entry, and nightly.yml's portability-linux is the one job that names it",
     },
     Package {
         name: "qemu",
-        why: "QEMU, the other half of the bar, under Homebrew's unpinned formula. \
-              portability.yml's macOS job falls back to it because homebrew-core keeps no \
-              versioned formula, and prints what it resolved to rather than assuming",
-    },
-    Package {
-        name: "qemu@$want",
-        why: "the same, pinned to `.github/qemu-version` where brew can honor it. The version \
-              is a shell expansion, so this row declares the attempt and not a version — \
-              src/ci.rs is what holds the instrument itself",
+        why: "QEMU, the other half of the bar, under Homebrew's unpinned formula: \
+              homebrew-core keeps no versioned one, and `cargo run` notes a version other than \
+              the declared",
     },
     Package {
         name: "qemu-system-x86",
@@ -733,8 +726,8 @@ const CI_PACKAGES: &[Package] = &[
     },
     Package {
         name: "zstd",
-        why: "outside the bar: the compression the cached toolchain release asset is built and \
-              unpacked with (toolchain.yml, .github/install-toolchain.sh)",
+        why: "outside the bar: the compression the toolchain release asset is built and \
+              unpacked with (src/release.rs)",
     },
 ];
 
@@ -774,13 +767,9 @@ const CI_ACTIONS: &[Action] = &[
         why: "GitHub's own checkout: how every job gets this tree at all (v4.4.0)",
     },
     Action {
-        name: "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
-        why: "GitHub's own cache: the cargo registry and target trees the hosted lanes reuse \
-              (v4.3.0)",
-    },
-    Action {
         name: "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830",
-        why: "the read half of the same action, so the same commit",
+        why: "GitHub's own cache, read half: the cargo registry and target trees the hosted \
+              lanes reuse (v4.3.0)",
     },
     Action {
         name: "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830",
@@ -788,12 +777,7 @@ const CI_ACTIONS: &[Action] = &[
     },
     Action {
         name: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-        why: "how a shard hands its duration files and boot logs to the job that reads them \
-              (v4.6.2)",
-    },
-    Action {
-        name: "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
-        why: "the other end of that hand-off, in the job that merges the shards (v4.3.0)",
+        why: "how a red guest job keeps its boots' serial logs (v4.6.2)",
     },
 ];
 
@@ -1953,16 +1937,12 @@ mod tests {
     }
 
     /// **The dependency bar at the other place a host binary arrives.**
-    /// `src/ci.rs` reads these files for one package's provenance; this holds
-    /// the whole *set*, so a ninth package in the image reds by name.
+    /// This holds the whole *set*, so a package arriving in a workflow reds by
+    /// name.
     #[test]
     fn every_package_ci_installs_is_declared() {
         let root = repo_root();
         let files = ci_install_files(&root);
-        assert!(
-            files.iter().any(|p| rel(&root, p) == ".github/ci-image/Dockerfile"),
-            "the walk did not reach the hosted guests' container recipe"
-        );
         assert!(
             files.iter().any(|p| rel(&root, p) == ".github/workflows/ci.yml"),
             "the walk did not reach ci.yml, so it is reading no workflow"
@@ -1977,8 +1957,8 @@ mod tests {
         }
         assert!(
             found.iter().any(|(name, file, _)| name == "qemu-system-x86"
-                && file == ".github/ci-image/Dockerfile"),
-            "the walk read the image without finding the QEMU it installs, so it is parsing \
+                && file == ".github/workflows/nightly.yml"),
+            "the walk read nightly.yml without finding the QEMU it installs, so it is parsing \
              no install line at all"
         );
 

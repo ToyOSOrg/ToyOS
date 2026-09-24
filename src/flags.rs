@@ -57,17 +57,9 @@ declare_flags!(pub CARGO_RUN = {
     pub PR = "--pr", None;
     pub GATES_AFTER_MERGE = "--gates-after-merge", None;
     pub SYNC = "--sync", None;
-    pub ABI_SPLIT_CHECK = "--abi-split-check", None;
-    pub SDK_VERSION_CHECK = "--sdk-version-check", None;
-    pub BASE = "--base", Next;
-    pub SDK_VERSIONS = "--sdk-versions", None;
-    pub MERGE_DURATIONS = "--merge-durations", Next;
-    pub TIER_BASE = "--tier-base", Next;
+    pub CI = "--ci", Rest;
     pub CLIPPY = "--clippy", None;
     pub KNOWN_RED = "--known-red", Optional;
-    pub MERGE_HEALTH = "--merge-health", None;
-    pub SINCE = "--since", Next;
-    pub DAYS = "--days", Next;
     pub ABI_CALLERS = "--abi-callers", Next;
     pub DEBUG = "--debug", None;
     pub BUILD_ONLY = "--build-only", None;
@@ -578,7 +570,7 @@ mod tests {
     #[test]
     fn the_scan_reads_this_binarys_command_lines_and_no_others() {
         let text = "\
-            base_arg=\"--tier-base $TIER_BASE\"\n\
+            base_arg=\"--gop $GOP\"\n\
             ARGS=$ARGS --build-only\n\
             run: cargo run -- --diag-boot $base_arg $ARGS `--clippy`\n\
             //! cargo run -- --console-boot\n\
@@ -589,7 +581,7 @@ mod tests {
             cargo run -- --debug=1\n";
         assert_eq!(
             flags_passed_to_cargo_run(text),
-            ["--build-only", "--clippy", "--console-boot", "--debug", "--diag-boot", "--tier-base"]
+            ["--build-only", "--clippy", "--console-boot", "--debug", "--diag-boot", "--gop"]
                 .map(String::from)
                 .into_iter()
                 .collect::<BTreeSet<String>>()

@@ -2,7 +2,7 @@
 
 use alloc::vec;
 
-use crate::block::Handle;
+use crate::block::{BlockDevice, Handle};
 use crate::scheduler::Operation;
 use crate::time::Deadline;
 

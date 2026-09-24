@@ -43,7 +43,7 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 **Syscall ABI** — `toyos-abi/`: struct layouts, syscall numbers, typed wrappers; completely unstable, read the code. Never add or change a syscall without discussion; a deleted syscall's number is retired, never reused. `toyos/` builds on it with typed handles, IPC framing, ports, namespaces and `surface` — userland uses `toyos`, the kernel uses `toyos-abi` only.
 
-**Capabilities** — a process holds exactly what its parent moved into it, and among kernel objects there is nothing it can name to get more. No registry, no connect-by-name, no pid-as-authority: `/system/bin/init` builds every program's namespace and device claims from `system.toml` before spawning it, and a handle a process does not hold is a bug in that process — the kernel ends it rather than answering a word it can ignore. **The filesystem is the declared exception** (owner ruling): paths are ambient, `/boot`'s mount guard is the one restriction the ambient space carries, and the full intentional ambient set is the capability end-state track's committed answer.
+**Capabilities** — a process holds exactly what its parent moved into it, and among kernel objects there is nothing it can name to get more. No registry, no connect-by-name, no pid-as-authority: `/system/bin/init` builds every program's namespace and device claims from `system.toml` before spawning it, and a handle a process does not hold is a bug in that process — the kernel ends it rather than answering a word it can ignore. **Isolation is non-negotiable, and the filesystem is inside it**: a process names only the paths in the view its parent built for it, the unit of isolation is the program, and a user is the part of the tree a session was handed.
 
 **CPU state** — a CPU's control registers come from one declaration, applied by the BSP and by every AP and asserted on each; no read-modify-write decides what either holds.
 
@@ -54,6 +54,8 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 ## Dependencies
 
 Only **Rust** and **QEMU** (for development). The rules: no binary outside those two — a macOS binary is a hard no, and "only for tests" does not soften it; only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; no Python; a fork is the sanctioned form of every third-party source. The north star is **self-hosting**: nothing — build, test, or verification — rests on a host binary. Ask of anything new: could this ever run inside ToyOS?
+
+Vendor firmware a device verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`, and loaded only by that device's own driver through its IOMMU domain; it never executes on the CPU.
 
 The bar is not yet the tree. The standing failures are declared rather than removed — Python via `rust/x`, `cc` for every host link, four macOS FAT tools. `NOTICE` names every committed third-party file with its hash, upstream and licence; an image carrying `DOOM1.WAD` may not be sold.
 
@@ -94,6 +96,7 @@ toyos-hda/         HDA codec decoding and output-path selection, pure
 toyos-mixer/       The mixer's decisions — samples, gain, dither, quantize — pure, corpus-certified
 toyos-pci/         MSI and MSI-X capability decoding, pure
 toyos-dma/         Every bound and alignment a DMA view checks — pure, forbid(unsafe_code)
+toyos-blockhold/   Who holds each span of a block device, and whose flush answers for the writes its disk lost — pure
 toyos-desktop/     Every decision the compositor makes, pure
 toyos-ld/          Custom linker
 toyos-cc/          Custom C compiler

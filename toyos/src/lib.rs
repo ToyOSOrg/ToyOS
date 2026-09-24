@@ -31,7 +31,7 @@ pub mod system;
 
 pub use ipc::Connection;
 pub use device::{
-    DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PciDev, VirtioSoundDev,
+    DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PartitionDev, PciDev, VirtioSoundDev,
 };
 
 pub use toyos_abi::RawHandle;

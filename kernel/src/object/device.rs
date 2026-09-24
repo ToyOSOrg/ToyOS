@@ -25,6 +25,9 @@ pub enum DeviceInfo {
     PciFunction(toyos_abi::pci::PciFunctionInfo, u8),
     Hda(toyos_abi::hda::HdaInfo, Arc<SharedMemObject>),
     VirtioSound(toyos_abi::virtio_sound::VirtioSoundInfo, Arc<SharedMemObject>),
+    /// Which partition, how long, and both its GUIDs; the view it moves blocks
+    /// through is the claim's own (`device::Claim::partition`).
+    Partition(toyos_abi::part::PartitionInfo),
 }
 
 /// The two scanout buffers and the cursor plane.
@@ -67,6 +70,7 @@ impl DeviceInfo {
             // Nothing to install: every address in it is a size, and the memory
             // is what `SYS_DEVICE_DMA_ALLOC` answers later.
             Self::PciFunction(info, _) => info.as_bytes().into(),
+            Self::Partition(info) => info.as_bytes().into(),
             Self::Hda(info, pcm) => {
                 let mut info = *info;
                 info.pcm = install_buffers(table, &[pcm])?[0];
@@ -128,6 +132,16 @@ impl DeviceClaim {
     /// authority and the slot is what it names.
     pub fn pci_slot(&self) -> Option<usize> {
         self.pci_slot.map(usize::from)
+    }
+
+    /// The view a partition claim transfers through: `None` for a claim on
+    /// anything else, and once the last handle has let the partition go.
+    ///
+    /// A clone, and a clone holds the partition for as long as it lives — so
+    /// one is kept across a device operation and never across a wait, where a
+    /// killed thread's stack could strand it.
+    pub fn partition_view(&self) -> Option<crate::block::Partition> {
+        self.reference.with(|claim| claim.partition().cloned()).flatten()
     }
 
     pub fn info_read(&self) -> bool {
@@ -205,7 +219,8 @@ impl ZeroHandles for DeviceClaim {
     }
 }
 
-/// One holder's view of the machine's serial console — each holder gets its own, never a shared handle.
+/// One holder's view of the machine's console — each holder gets its own, never a shared handle.
+/// A line it writes reaches the serial console and is a record tagged with the holder's name.
 pub struct ConsoleObject {
     pub(super) core: ObjectCore,
     // Lock order process_data -> line -> BackendGuard; taking them in reverse deadlocks.
@@ -213,10 +228,13 @@ pub struct ConsoleObject {
 }
 
 impl ConsoleObject {
-    pub fn new() -> Arc<Self> {
+    /// `name` is what the holder's records are tagged with: its process table name.
+    pub fn new(name: [u8; crate::process::THREAD_NAME_LEN]) -> Arc<Self> {
         Arc::new(Self {
             core: Self::new_core(),
-            line: crate::sync::Lock::new(crate::drivers::serial::ConsoleLine::new()),
+            line: crate::sync::Lock::new(crate::drivers::serial::ConsoleLine::new(Some(
+                crate::log::spoken::Speaker::new(name),
+            ))),
         })
     }
 
