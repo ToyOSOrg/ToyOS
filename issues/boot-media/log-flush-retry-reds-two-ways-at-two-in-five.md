@@ -86,6 +86,7 @@ checker —
 
 — clusters chained past the file's size, with `FSI_Free_Count` off by the
 same kind of amount in the logd branch's runs. The logd branch at `583f21e5`
-was red the same way in 4 runs of 4 (two nightlies' worth, each re-run). One
+was red the same way in both of its runs, each re-run red too; at `eef19bd1`
+it had been green. One
 `main` run is not a rate, but it is this sentence on a tree without the
 branch.
