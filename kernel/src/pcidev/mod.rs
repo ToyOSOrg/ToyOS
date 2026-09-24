@@ -1287,11 +1287,10 @@ fn tear_down(slot: usize, mut bound: Bound) {
     }
     crate::iommu::note_user_owned(bound.pci.bus, bound.pci.dev, bound.pci.func, None);
     // **The reset before the domain gives anything back.** With mastering off
-    // the function starts nothing new, and the reset is what makes it forget
-    // the queues it would resume on the next holder's first grant; its grants
-    // stay mapped until it is quiet, so nothing it had already issued lands in
-    // a page the allocator has handed on. The wait is the next claim's, never
-    // this teardown's: it can run on the idle loop's drain.
+    // the function starts nothing new; its grants stay mapped until it is
+    // quiet, so nothing it had already issued lands in a page the allocator
+    // has handed on. The wait is the next claim's, never this teardown's: it
+    // can run on the idle loop's drain.
     // Read before the reset returns it to its defaults.
     let kept = Kept::read(&bound.pci);
     let (how, resetting) = reset(&bound.pci);
