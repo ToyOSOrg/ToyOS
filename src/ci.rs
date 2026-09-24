@@ -1,33 +1,609 @@
-//! The instrument every guest in this project is measured with, declared once.
+//! `cargo run -- --ci <job>`: every CI job's logic, so a workflow is a
+//! checkout, a cache and one line, and this host runs the same job to the same
+//! verdict.
 //!
-//! The measurement this exists for: on one runner image, one commit and one
-//! accelerator, `desktop_typing_damage` is red on
-//! QEMU 8.2.2 and green on 11.0.3, and `usb_storage_shapes` with it. So the
-//! QEMU version is not a detail of the environment — it decides verdicts, and
-//! a job that does not say which one it ran produces a number nobody can
-//! compare with another.
+//! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
+//! the merge queue and boots no guest: its `host` job runs [`Job::Host`],
+//! [`Job::AbiSplit`] and [`Job::GateStage`]. `nightly.yml` runs everything that
+//! boots a guest, the rest of the host checks, and portability. `publish.yml`
+//! puts a landing's crates on crates.io.
 //!
-//! `.github/qemu-version` is that declaration. CI reads it from
-//! `.github/instrument.sh` and **reds** on a disagreement, because `debian:sid`
-//! is a rolling release and the alternative is an instrument that moves out
-//! from under every recorded measurement in silence. What stops it moving is a
-//! date: a job's container image and the apt archive it installs from name one,
-//! and dating either alone is a pin that apt refuses rather than honours. This
-//! host reads it and
-//! **notes** a disagreement, because brew moves QEMU when it feels like it and
-//! a build must not stop for that — but the dev host is where
-//! `tests/audio-baseline.toml` was recorded, so it drifting is the same fact
-//! about the same comparison and has to be visible.
+//! A host job runs every step and reds if any failed; a guest job stops at the
+//! first failure, because what follows a wrong instrument or a missing
+//! toolchain measures nothing. Each step's verdict goes to
+//! `$GITHUB_STEP_SUMMARY` where a runner provides one.
+//!
+//! **The instrument is declared once.** `.github/qemu-version` is the QEMU
+//! every guest is measured with — the version has been measured to decide
+//! verdicts (`desktop_typing_damage` and `usb_storage_shapes` are red on 8.2.2
+//! and green on 11.0.3, same image, same commit, same accelerator). A guest job
+//! reds on a disagreement, and on a `/dev/kvm` that is present and does not
+//! open; `cargo run` only notes one, because a build must not stop for brew.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::Command;
 
+use crate::{flags, pr, release, sdkversion};
+
+/// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
+/// a minimum, never an equality, so a name GitHub requires and this does not
+/// is reported rather than refused.
+pub(crate) const REQUIRED_CHECKS: &[&str] = &["host"];
+
+/// The one issue a red nightly files or comments on, found by title.
+const NIGHTLY_RED: &str = "nightly is red";
+
+const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
+  host              cargo test --lib and every host-workspace suite (ci.yml)
+  abi-split         the ABI-first rule and the published crates' versions (ci.yml)
+  gate-stage        what protects main, read back from GitHub (ci.yml)
+  host-full         host, plus clippy, the model controls, userland and the SDK (nightly)
+  toolchain         publish this tree's toolchain if nobody has (nightly)
+  guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
+  tcg               one test on an emulated CPU (nightly)
+  audio <i>/<n>     one shard of gate A (nightly)
+  nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
+  publish           put main's SDK crates on crates.io (publish.yml)";
+
+#[derive(Debug, PartialEq, Eq)]
+enum Job {
+    Host,
+    AbiSplit,
+    GateStage,
+    HostFull,
+    Toolchain,
+    Guest(String),
+    Tcg,
+    Audio(String),
+    NightlyRed,
+    Publish,
+}
+
+fn parse(words: &[String]) -> Result<Job, String> {
+    let shard = |spec: Option<&String>| -> Result<String, String> {
+        let spec = spec.ok_or("that job takes a shard, <index>/<count>")?;
+        crate::testargs::parse_shard(&["--shard".to_string(), spec.clone()])?;
+        Ok(spec.clone())
+    };
+    let job = match words.first().map(String::as_str) {
+        Some("host") => Job::Host,
+        Some("abi-split") => Job::AbiSplit,
+        Some("gate-stage") => Job::GateStage,
+        Some("host-full") => Job::HostFull,
+        Some("toolchain") => Job::Toolchain,
+        Some("guest") => Job::Guest(shard(words.get(1))?),
+        Some("tcg") => Job::Tcg,
+        Some("audio") => Job::Audio(shard(words.get(1))?),
+        Some("nightly-red") => Job::NightlyRed,
+        Some("publish") => Job::Publish,
+        Some(other) => return Err(format!("no CI job is called {other:?}")),
+        None => return Err("which job?".to_string()),
+    };
+    let takes = usize::from(matches!(job, Job::Guest(_) | Job::Audio(_))) + 1;
+    if words.len() > takes {
+        return Err(format!("{:?} takes nothing after it: {:?}", words[0], &words[takes..]));
+    }
+    Ok(job)
+}
+
+pub fn dispatch(root: &Path, args: &[String]) {
+    let job = parse(flags::CARGO_RUN.rest(args, &flags::CI)).unwrap_or_else(|refusal| {
+        eprintln!("Error: {refusal}\n{USAGE}");
+        std::process::exit(2);
+    });
+    let steps = match &job {
+        Job::Host => host(root),
+        Job::AbiSplit => {
+            vec![step("the ABI-first rule and the published crates", || abi_split(root))]
+        }
+        Job::GateStage => vec![step("what protects main", || gate_stage(root))],
+        Job::HostFull => host_full(root),
+        Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
+        Job::Guest(shard) => {
+            guest(root, &suite_args(&["--shard", shard, "--jobs", "1", "--nightly"]))
+        }
+        Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
+        Job::Audio(shard) => guest(root, &suite_args(&["--audio-gate", "30", "--shard", shard])),
+        Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
+        Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
+    };
+    let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();
+    summary(&steps.iter().map(Step::line).collect::<Vec<_>>().join("\n"));
+    if failed.is_empty() {
+        println!("[ci] {job:?}: {} step(s), all green", steps.len());
+    } else {
+        eprintln!("[ci] {job:?}: {} of {} step(s) red:", failed.len(), steps.len());
+        for s in failed {
+            eprintln!("  {}", s.line());
+        }
+        std::process::exit(1);
+    }
+}
+
+/// One step's verdict: a sentence on green, the refusal on red.
+struct Step {
+    label: String,
+    verdict: Result<String, String>,
+}
+
+impl Step {
+    fn line(&self) -> String {
+        match &self.verdict {
+            Ok(said) => format!("- green: {} ({said})", self.label),
+            Err(why) => format!("- RED: {}: {why}", self.label),
+        }
+    }
+}
+
+fn step(label: &str, f: impl FnOnce() -> Result<String, String>) -> Step {
+    println!("\n=== [ci] {label}");
+    let verdict = f();
+    if let Err(why) = &verdict {
+        eprintln!("[ci] {label}: {why}");
+    }
+    Step { label: label.to_string(), verdict }
+}
+
+fn on_runner() -> bool {
+    std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
+}
+
+/// Append to the runner's job summary; nowhere off a runner.
+fn summary(text: &str) {
+    let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") else { return };
+    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+        let _ = writeln!(file, "{text}");
+    }
+}
+
+/// `cargo <args>` in `dir`, its output passed straight through.
+fn cargo(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let status = Command::new("cargo")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .map_err(|e| format!("cargo: {e}"))?;
+    let line = format!("cargo {}", args.join(" "));
+    if status.success() {
+        Ok(line)
+    } else {
+        Err(format!("{line} exited {status}"))
+    }
+}
+
+/// `cargo <args>` in `dir`, its output passed through and also kept, both
+/// streams in the order they were written: a verdict read off the log needs the
+/// whole of it.
+fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
+    let (reader, writer) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
+    let mut child = Command::new("cargo")
+        .args(args)
+        .current_dir(dir)
+        .stdout(writer.try_clone().map_err(|e| format!("pipe: {e}"))?)
+        .stderr(writer)
+        .spawn()
+        .map_err(|e| format!("cargo: {e}"))?;
+    let mut log = String::new();
+    let mut out = std::io::stdout();
+    for line in BufReader::new(reader).split(b'\n') {
+        let line = line.map_err(|e| format!("reading cargo: {e}"))?;
+        let line = String::from_utf8_lossy(&line);
+        let _ = writeln!(out, "{line}");
+        log.push_str(&line);
+        log.push('\n');
+    }
+    let status = child.wait().map_err(|e| format!("cargo: {e}"))?;
+    Ok((status.success(), log))
+}
+
+// --- The host jobs -------------------------------------------------------------
+
+/// The pull request's whole gate: the build system's own tests, and every
+/// member of the host workspace.
+fn host(root: &Path) -> Vec<Step> {
+    vec![
+        step("the build system", || cargo(root, &["test", "--lib"])),
+        step("the host workspace", || {
+            cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
+        }),
+    ]
+}
+
+/// What a model of the kernel's concurrency is shown able to catch: a feature
+/// that takes away the one edge the model's property rests on, and the verdict
+/// lines the model must then print.
+pub(crate) struct Control {
+    /// `cargo test` arguments that select the model's crate.
+    krate: &'static [&'static str],
+    pub(crate) feature: &'static str,
+    test: Option<&'static str>,
+    /// `false` is a case that catches its own panic and asserts on it: its
+    /// teeth are a green run.
+    must_red: bool,
+    /// Every one must be in the output. An exit code alone would read a compile
+    /// error as the model having teeth.
+    verdicts: &'static [&'static str],
+}
+
+const KERNEL_LOOM: &[&str] = &["--manifest-path", "kernel-loom/Cargo.toml"];
+const SCHED_LOOM: &[&str] = &["-p", "toyos-sched-loom"];
+const SCHED_SIM: &[&str] = &["-p", "toyos-sched-sim"];
+const PROCLIFE: &[&str] = &["-p", "toyos-proclife"];
+
+const fn red(
+    krate: &'static [&'static str],
+    feature: &'static str,
+    test: Option<&'static str>,
+    verdicts: &'static [&'static str],
+) -> Control {
+    Control { krate, feature, test, must_red: true, verdicts }
+}
+
+/// Every negative control a model crate declares; `src/build.rs`'s
+/// `every_model_control_is_run` holds this against the manifests.
+pub(crate) const CONTROLS: &[Control] = &[
+    red(KERNEL_LOOM, "wake-fence-off", Some("log_wake"), &[
+        "a_commit_and_an_arm_cannot_both_miss ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "lock-acquire-off", Some("ticket_lock"), &[
+        "try_lock_observes_the_previous_owners_writes ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "poison-overwrite", Some("poison_set"), &[
+        "a_second_death_banks_beside_the_first ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "reap-raise-relaxed", Some("reap_gate"), &[
+        "a_claim_sees_the_enrolled_work ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "shootdown-serve-relaxed", Some("tlb_shootdown"), &[
+        "an_acknowledged_flush_postdates_the_page_table_write ... FAILED",
+        "one_serve_answers_two_concurrent_shootdowns ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "roster-commit-relaxed", Some("smp_bringup"), &[
+        "a_committed_count_never_outruns_its_slot ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "smp-ready-split", Some("smp_bringup"), &[
+        "a_released_machine_is_answering ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "log-commit-release-off", Some("log_record"), &[
+        "a_committed_record_is_whole_or_absent ... FAILED",
+        "a_key_and_the_record_it_names_come_from_one_generation ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "shard-publish-relaxed", Some("log_publish"), &[
+        "a_reader_that_finds_a_shard_finds_it_built ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "inbox-release-off", Some("inbox"), &[
+        "a_record_reaches_its_taker_intact ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "inbox-signal-as-post", Some("inbox"), &[
+        "two_unlocked_producers_are_a_race_and_a_signal_is_not ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "sleeplock-acquire-off", Some("sleep_lock"), &[
+        "a_parking_contender_observes_the_holders_writes ... FAILED",
+        "two_holders_never_overlap ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "durability-settle-blind", Some("durability"), &[
+        "a_page_marked_clean_is_on_the_device ... FAILED",
+        "a_settled_commit_covers_only_flushed_writes ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
+        "every_message_is_counted_once ... FAILED",
+        "one_message_is_one_wake ... FAILED",
+    ]),
+    Control {
+        krate: SCHED_LOOM,
+        feature: "no-preempt-guard",
+        test: Some("loom_mailbox"),
+        must_red: false,
+        verdicts: &["preempted_producer_strands_suffix ... ok"],
+    },
+    // A double panic aborts before the harness prints a `FAILED` line, so the
+    // verdict is the first panic's own message.
+    red(SCHED_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[
+        "halted with 2 of 2 messages queued and no IPI in flight",
+    ]),
+    red(SCHED_LOOM, "push-fence-relaxed", Some("loom_push"), &["published and no push behind it"]),
+    // Reproduces an open defect
+    // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
+    // proving a lie is caught, and goes with its fix.
+    Control {
+        krate: SCHED_LOOM,
+        feature: "victim-retires-mid-probe",
+        test: Some("loom_mailbox"),
+        must_red: false,
+        verdicts: &[
+            "caught the verdict: the victim retired with a probe still linked in its queue",
+        ],
+    },
+    red(PROCLIFE, "mutate-spawn-skips-the-insert-recheck", None, &[
+        "a_published_exit_leaves_no_unretired_thread ... FAILED",
+        "a_kill_racing_a_spawn_leaves_no_unretired_thread ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
+        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+    ]),
+    red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
+        "a_stopped_cpu_stops_taking_work ... FAILED",
+    ]),
+];
+
+/// Whether a control's run showed its teeth.
+fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<String, String> {
+    if control.must_red && exited_green {
+        return Err(format!("passed with `{}`: the model has no teeth", control.feature));
+    }
+    if !control.must_red && !exited_green {
+        return Err(format!(
+            "`{}` failed, so the case's own catch did not hold or something else broke",
+            control.feature
+        ));
+    }
+    let missing: Vec<&str> =
+        control.verdicts.iter().copied().filter(|v| !log.contains(v)).collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "no verdict {missing:?}: this proved nothing, and whatever stopped the model is \
+             what to fix"
+        ));
+    }
+    Ok(format!("{} verdict(s) reached", control.verdicts.len()))
+}
+
+fn run_control(root: &Path, control: &Control) -> Result<String, String> {
+    let mut args = vec!["test"];
+    args.extend(control.krate);
+    args.extend(["--features", control.feature]);
+    if let Some(test) = control.test {
+        args.extend(["--test", test]);
+    }
+    if !control.must_red {
+        args.extend(["--", "--nocapture"]);
+    }
+    let (green, log) = cargo_logged(root, &args)?;
+    judge_control(control, green, &log)
+}
+
+/// The userland crates whose decisions are testable on the host. They name the
+/// host triple because `userland/.cargo/config.toml` cross-compiles by default,
+/// which is also why they cannot be host-workspace members.
+const USERLAND_HOST_CRATES: &[&str] = &["sshd", "calc", "soundd", "logd", "pkg"];
+
+fn host_full(root: &Path) -> Vec<Step> {
+    let host = crate::toolchain::host_triple();
+    let mut steps = vec![step("clippy and the bare targets", || {
+        for args in [
+            &["component", "add", "clippy"][..],
+            &["target", "add", "x86_64-unknown-none", "x86_64-unknown-uefi"],
+        ] {
+            let status = Command::new("rustup").args(args).status().map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("rustup {} exited {status}", args.join(" ")));
+            }
+        }
+        Ok("installed".into())
+    })];
+    steps.push(step("clippy, warnings denied", || {
+        let failed = crate::clippy::run(root);
+        if failed.is_empty() {
+            Ok("clean".into())
+        } else {
+            Err(failed.join("; "))
+        }
+    }));
+    steps.extend(self::host(root));
+    // `log_zeroed_init` and `log_body_words` are gated `cfg(not(feature =
+    // "loom"))`, so the default invocation runs nothing from either.
+    steps.push(step("kernel-loom without loom", || {
+        cargo(root, &[
+            "test",
+            "--manifest-path",
+            "kernel-loom/Cargo.toml",
+            "--no-default-features",
+            "--test",
+            "log_zeroed_init",
+            "--test",
+            "log_body_words",
+        ])
+    }));
+    for control in CONTROLS {
+        steps.push(step(&format!("control `{}`", control.feature), || run_control(root, control)));
+    }
+    for name in USERLAND_HOST_CRATES {
+        let manifest = format!("userland/{name}/Cargo.toml");
+        steps.push(step(&format!("userland/{name}"), || {
+            cargo(root, &["test", "--manifest-path", &manifest, "--target", &host])
+        }));
+    }
+    // The SDK compiles against the ToyOS sysroot everywhere but here, and this
+    // build links no syscall.
+    steps.push(step("the toyos SDK", || {
+        cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host])
+    }));
+    steps
+}
+
+/// A pull request against `main`; a merge group passes, since its commits are
+/// several branches' and each was judged alone.
+fn abi_split(root: &Path) -> Result<String, String> {
+    if std::env::var("GITHUB_EVENT_NAME").is_ok_and(|e| e == "merge_group") {
+        return Ok("a merge group: each branch in it was judged as a pull request".into());
+    }
+    pr::git(root, &["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])?;
+    pr::abi_lands_alone(root, "origin/main")?;
+    let sdk = sdkversion::judge(root, "origin/main")?;
+    Ok(format!("the sysroot's sources are not mixed with work that depends on them; {sdk}"))
+}
+
+/// What protects `main` is configured outside the repository, so it is read
+/// back: every [`REQUIRED_CHECKS`] name required, deletion and force-push
+/// refused, and merge the only method.
+fn gate_stage(root: &Path) -> Result<String, String> {
+    let out = Command::new("gh")
+        .args(["api", "repos/{owner}/{repo}/rules/branches/main"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("gh: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("gh api: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let rules: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("GitHub's rules: {e}"))?;
+    let (bad, said) = protection(&rules);
+    summary(&format!("### what protects main\n\n{}", said.join("\n")));
+    println!("{}", said.join("\n"));
+    if bad.is_empty() {
+        Ok("main is protected".into())
+    } else {
+        Err(bad.join("; "))
+    }
+}
+
+/// The refusals and the report, from `rules/branches/main`'s JSON.
+fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
+    let all = rules.as_array().map(Vec::as_slice).unwrap_or_default();
+    let of = |kind: &'static str| all.iter().filter(move |r| r["type"] == kind);
+    let types: Vec<&str> = all.iter().filter_map(|r| r["type"].as_str()).collect();
+    let live: Vec<&str> = of("required_status_checks")
+        .flat_map(|r| r["parameters"]["required_status_checks"].as_array().into_iter().flatten())
+        .filter_map(|c| c["context"].as_str())
+        .collect();
+    let mut methods: Vec<&str> = of("pull_request")
+        .flat_map(|r| r["parameters"]["allowed_merge_methods"].as_array().into_iter().flatten())
+        .filter_map(|m| m.as_str())
+        .collect();
+    methods.sort_unstable();
+
+    let mut bad = Vec::new();
+    for want in REQUIRED_CHECKS {
+        if !live.contains(want) {
+            bad.push(format!("main does not require the check `{want}`"));
+        }
+    }
+    for want in ["deletion", "non_fast_forward", "pull_request", "required_status_checks"] {
+        if !types.contains(&want) {
+            bad.push(format!("main has no `{want}` rule"));
+        }
+    }
+    if methods != ["merge"] {
+        bad.push(format!("main allows merge methods {methods:?}, not merge alone"));
+    }
+    let mut said = vec![
+        format!("- rules: `{}`", types.join(" ")),
+        format!("- required checks: `{}`", live.join(" ")),
+        format!(
+            "- merge queue: `{}`, merge methods: `{}`",
+            types.contains(&"merge_queue"),
+            methods.join(",")
+        ),
+    ];
+    for extra in live.iter().filter(|c| !REQUIRED_CHECKS.contains(c)) {
+        said.push(format!("- `{extra}` is required at GitHub and not named in src/ci.rs"));
+    }
+    (bad, said)
+}
+
+// --- The guest jobs ------------------------------------------------------------
+
+/// The harness's arguments for a CI lane: a runner is a whole host with one
+/// suite on it, so the host's guest slots arbitrate nothing there.
+fn suite_args(args: &[&str]) -> Vec<String> {
+    let mut all = vec!["test", "--test", "toyos-build", "--"];
+    all.extend(args);
+    if on_runner() {
+        all.extend(["--host-slots", "0"]);
+    }
+    all.into_iter().map(String::from).collect()
+}
+
+fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
+    let mut steps = vec![step("the instrument", || instrument(root))];
+    if steps.iter().all(|s| s.verdict.is_ok()) {
+        steps.push(step("the toolchain", || release::install(root)));
+    }
+    if steps.iter().all(|s| s.verdict.is_ok()) {
+        steps.push(step("the suite", || {
+            let args: Vec<&str> = suite.iter().map(String::as_str).collect();
+            let (green, log) = cargo_logged(root, &args)?;
+            let said = verdicts(&log);
+            if green {
+                Ok(said)
+            } else {
+                Err(said)
+            }
+        }));
+    }
+    steps
+}
+
+/// The suite's own count line and every line naming a verdict worth reading
+/// without the log: a failure, whether it survived being run alone, and a
+/// quarantined name that failed for something else.
+fn verdicts(log: &str) -> String {
+    let total = log
+        .lines()
+        .filter(|l| l.contains("test result:") && l.contains(" total ("))
+        .last()
+        .unwrap_or("no suite result line");
+    let named: Vec<&str> = log
+        .lines()
+        .filter(|l| {
+            l.starts_with("FAIL ")
+                || l.starts_with("XFAIL ")
+                || (l.starts_with(' ')
+                    && ["STALL ", "INVL ", "ALONE "].iter().any(|v| l.trim_start().starts_with(v)))
+                || l.contains("is quarantined for something else")
+        })
+        .collect();
+    if named.is_empty() {
+        total.to_string()
+    } else {
+        format!("{total}\n```\n{}\n```", named.join("\n"))
+    }
+}
+
+/// The QEMU on `PATH` against `.github/qemu-version`, and whether `/dev/kvm`
+/// opens where it is present — the two things a guest verdict must be read
+/// against.
+fn instrument(root: &Path) -> Result<String, String> {
+    let want = declared_qemu_version(root).ok_or(".github/qemu-version declares no version")?;
+    let out = Command::new("qemu-system-x86_64")
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("qemu-system-x86_64: {e}"))?;
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    let have = parse_qemu_version(&said).ok_or_else(|| format!("QEMU said {said:?}"))?;
+    let node = Path::new("/dev/kvm").exists();
+    let accel = match (node, crate::kvm_usable()) {
+        (true, true) => "/dev/kvm opens",
+        (true, false) => "/dev/kvm is present and does not open",
+        (false, _) => "no /dev/kvm: emulated",
+    };
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("model name"))
+                .map(|l| l.trim_start_matches([' ', '\t', ':']).to_string())
+        })
+        .unwrap_or_else(|| "an unnamed CPU".to_string());
+    let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
+    let line = format!("QEMU {have}, {accel}, {cpu}, {cores} core(s)");
+    if have != want {
+        return Err(format!(
+            "{line}: this runs QEMU {have} and .github/qemu-version declares {want}. The \
+             container image's digest is what pins it, so moving it is a commit that says the \
+             instrument moved"
+        ));
+    }
+    if node && !crate::kvm_usable() {
+        return Err(format!("{line}: every boot would fall back to emulation in silence"));
+    }
+    Ok(line)
+}
+
 /// The QEMU every guest in CI runs, and the one this project's recorded numbers
-/// were taken on.
-///
-/// Comment lines and blanks are stripped, so the file can explain itself to the
-/// next reader; `.github/instrument.sh` strips the same two things with `grep`
-/// and `tr`.
+/// were taken on. Comment lines and blanks are stripped, so the file can explain
+/// itself.
 pub fn declared_qemu_version(root: &Path) -> Option<String> {
     let text = std::fs::read_to_string(root.join(".github/qemu-version")).ok()?;
     let version: String = text
@@ -38,31 +614,6 @@ pub fn declared_qemu_version(root: &Path) -> Option<String> {
         .split_whitespace()
         .collect();
     (!version.is_empty()).then_some(version)
-}
-
-/// The dated Debian archive the hosted guests install from, so a rolling
-/// release cannot move the instrument between two runs of the same tree.
-pub fn declared_apt_snapshot(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(root.join(".github/apt-snapshot")).ok()?;
-    let stamp: String = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("")
-        .split_whitespace()
-        .collect();
-    (!stamp.is_empty()).then_some(stamp)
-}
-
-/// What `qemu-system-x86_64 --version` says, or `None` where it did not answer
-/// in the shape this reads.
-///
-/// One `--version` run and not a package query: the binary on `PATH` is the one
-/// a boot will use, and no packaging system on any of the three hosts this runs
-/// on answers for that.
-pub fn host_qemu_version() -> Option<String> {
-    let out = Command::new("qemu-system-x86_64").arg("--version").output().ok()?;
-    parse_qemu_version(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// `QEMU emulator version 11.0.3 (Debian 1:11.0.3+ds-1)` → `11.0.3`.
@@ -77,16 +628,146 @@ fn parse_qemu_version(text: &str) -> Option<String> {
 /// project's numbers were taken on, and nothing at all when it is.
 pub fn qemu_version_note(root: &Path) -> Option<String> {
     let want = declared_qemu_version(root)?;
-    let have = host_qemu_version()?;
+    let out = Command::new("qemu-system-x86_64").arg("--version").output().ok()?;
+    let have = parse_qemu_version(&String::from_utf8_lossy(&out.stdout))?;
     (have != want).then(|| {
         format!(
             "Note: this host runs QEMU {have} and .github/qemu-version declares {want} — \
              CI's guests and tests/audio-baseline.toml are on {want}, and the QEMU version \
-             has been measured to decide test outcomes (`desktop_typing_damage` and \
-             `usb_storage_shapes` are red on 8.2.2 and green on 11.0.3, same image, same \
-             commit, same accelerator). Nothing here is broken; a comparison across the two is."
+             has been measured to decide test outcomes. Nothing here is broken; a comparison \
+             across the two is."
         )
     })
+}
+
+// --- The nightly's alarm and the publisher -------------------------------------
+
+/// The jobs `$NEEDS` (`toJSON(needs)`) says did not succeed, as `name(result)`.
+fn failed_jobs(needs: &serde_json::Value) -> Vec<String> {
+    let Some(jobs) = needs.as_object() else {
+        return vec!["NEEDS is not an object".into()];
+    };
+    jobs.iter()
+        .filter_map(|(name, job)| {
+            let result = job["result"].as_str().unwrap_or("unknown");
+            (result != "success").then(|| format!("{name}({result})"))
+        })
+        .collect()
+}
+
+/// One standing issue for a red nightly, found by title and commented on
+/// rather than filed twice. Every red is adjudicated into a fix, a
+/// `src/redlist.rs` row or a tier move; the issue is the alarm, not the record.
+fn nightly_red() -> Result<String, String> {
+    let needs = std::env::var("NEEDS").map_err(|_| "NEEDS carries no job results".to_string())?;
+    let needs: serde_json::Value =
+        serde_json::from_str(&needs).map_err(|e| format!("NEEDS is not JSON: {e}"))?;
+    let failed = failed_jobs(&needs);
+    if failed.is_empty() {
+        return Ok("every job was green".into());
+    }
+    let var = |k: &str| std::env::var(k).unwrap_or_default();
+    let body = format!(
+        "Run: {}/{}/actions/runs/{}\nFailed jobs: {}",
+        var("GITHUB_SERVER_URL"),
+        var("GITHUB_REPOSITORY"),
+        var("GITHUB_RUN_ID"),
+        failed.join(" ")
+    );
+    let found = Command::new("gh")
+        .args(["issue", "list", "--state", "open", "--limit", "30", "--json", "number,title"])
+        .args(["--search", &format!("in:title \"{NIGHTLY_RED}\"")])
+        .output()
+        .map_err(|e| format!("gh: {e}"))?;
+    if !found.status.success() {
+        // An unanswered search read as "none open" would file a duplicate.
+        return Err(format!("gh issue list: {}", String::from_utf8_lossy(&found.stderr).trim()));
+    }
+    let open: serde_json::Value =
+        serde_json::from_slice(&found.stdout).map_err(|e| format!("gh issue list: {e}"))?;
+    let number = open
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|i| i["title"] == NIGHTLY_RED)
+        .and_then(|i| i["number"].as_u64());
+    let mut gh = Command::new("gh");
+    match number {
+        Some(n) => gh.args(["issue", "comment", &n.to_string(), "--body", &body]),
+        None => gh.args(["issue", "create", "--title", NIGHTLY_RED, "--body", &body]),
+    };
+    let status = gh.status().map_err(|e| format!("gh: {e}"))?;
+    if !status.success() {
+        return Err(format!("gh exited {status}"));
+    }
+    Ok(format!("reported {}", failed.join(" ")))
+}
+
+/// Each of the SDK crates the index does not already hold, in dependency
+/// order, waiting for each to be readable before the next resolves it. Only
+/// `main` publishes: a version is a name taken once.
+fn publish(root: &Path) -> Result<String, String> {
+    if on_runner() {
+        if std::env::var("GITHUB_REF").ok().as_deref() != Some("refs/heads/main") {
+            return Err("only a push to main publishes".into());
+        }
+    } else {
+        pr::git(root, &["fetch", "--quiet", "origin"])?;
+        if pr::git(root, &["rev-parse", "HEAD"])? != pr::git(root, &["rev-parse", "origin/main"])? {
+            return Err("this checkout is not origin/main, and only main publishes".into());
+        }
+    }
+    if std::env::var("CARGO_REGISTRY_TOKEN").map_or(true, |t| t.is_empty()) {
+        return Err(
+            "CARGO_REGISTRY_TOKEN is not set; the owner adds it under Settings → Secrets".into()
+        );
+    }
+    let mut said = Vec::new();
+    for (name, version, manifest) in sdkversion::versions(root) {
+        if on_index(name, &version)? {
+            said.push(format!("{name} {version} was there"));
+            continue;
+        }
+        cargo(root, &["publish", "--manifest-path", &manifest])?;
+        let mut seen = false;
+        for _ in 0..60 {
+            if on_index(name, &version)? {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+        if !seen {
+            return Err(format!("{name} {version} was published and the index did not show it"));
+        }
+        said.push(format!("{name} {version} published"));
+    }
+    Ok(said.join(", "))
+}
+
+/// Whether the crates.io sparse index holds `name` at `version`, unyanked. A
+/// 404 is a crate never published.
+fn on_index(name: &str, version: &str) -> Result<bool, String> {
+    let url = format!("https://index.crates.io/{}/{}/{name}", &name[..2], &name[2..4]);
+    let out = Command::new("curl")
+        .args(["-sS", "-w", "\n%{http_code}", &url])
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", ""));
+    match code {
+        "404" => Ok(false),
+        "200" => Ok(indexed(body, version)),
+        other => Err(format!("the crates.io index answered {other:?} for {name}")),
+    }
+}
+
+/// Whether one crate's index file holds `version`, unyanked: one JSON object a
+/// line.
+fn indexed(body: &str, version: &str) -> bool {
+    body.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .any(|v| v["vers"] == version && v["yanked"] != true)
 }
 
 #[cfg(test)]
@@ -98,519 +779,163 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 
-    /// The workflows whose verdict somebody acts on. `probe-*.yml` are
-    /// throwaway measurement branches and are not
-    /// on this list; `toolchain.yml` installs QEMU for `check_prerequisites`
-    /// and boots nothing.
-    const GATES: &[&str] = &["ci.yml", "gate-a.yml"];
-
-    /// Every `<job>:` block of a workflow, crudely and on purpose.
-    ///
-    /// Deliberately not a YAML parser: the shape is fixed — two spaces, a
-    /// name, a colon, end of line — and anything else is a file to name
-    /// rather than a shape to accommodate.
-    fn jobs(text: &str) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = Vec::new();
-        let mut in_jobs = false;
-        for line in text.lines() {
-            if line == "jobs:" {
-                in_jobs = true;
-                continue;
-            }
-            if !in_jobs {
-                continue;
-            }
-            let is_header = line.starts_with("  ")
-                && !line.starts_with("   ")
-                && line.ends_with(':')
-                && line[2..line.len() - 1].chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
-            if is_header {
-                out.push((line[2..line.len() - 1].to_string(), String::new()));
-            } else if let Some(last) = out.last_mut() {
-                last.1.push_str(line);
-                last.1.push('\n');
-            }
-        }
-        out
-    }
-
-    /// A job that installs QEMU is a job that boots a guest, and one that boots
-    /// a guest without naming its instrument produces a verdict nobody can
-    /// compare with another.
-    ///
-    /// The rule is here rather than in one workflow's review because the way
-    /// this hides is that a workflow reads perfectly well and never says what
-    /// it is comparing against — gate A ran QEMU 8.2.2 against every other
-    /// guest in CI on 11.0.3 for as long as that file existed.
-    fn nameless(text: &str) -> Vec<String> {
-        jobs(text)
-            .into_iter()
-            .filter(|(_, body)| body.contains("qemu-system-x86"))
-            .filter(|(_, body)| !body.contains("instrument.sh"))
-            .map(|(name, _)| name)
-            .collect()
+    fn words(line: &str) -> Vec<String> {
+        line.split_whitespace().map(String::from).collect()
     }
 
     #[test]
-    fn every_gate_that_boots_a_guest_names_its_instrument() {
-        let root = repo_root();
-        let mut bad = Vec::new();
-        for file in GATES {
-            let path = root.join(".github/workflows").join(file);
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("{} is a gate and is not readable: {e}", path.display()));
-            // A scan that found no job at all would report every gate clean,
-            // which is the shape this rule exists to refuse.
-            let booting = jobs(&text).into_iter().filter(|(_, b)| b.contains("qemu-system-x86"));
-            assert!(
-                booting.count() > 0,
-                "{file} is on the list because it boots guests, and the job scan found none — \
-                 the scan is wrong, or the file no longer belongs on it"
-            );
-            for job in nameless(&text) {
-                bad.push(format!("{file}: `{job}` installs QEMU and never runs instrument.sh"));
-            }
-        }
-        assert!(
-            bad.is_empty(),
-            "a job that boots a guest without declaring its QEMU is a third instrument, \
-             and that is invisible in a diff:\n  {}",
-            bad.join("\n  ")
-        );
+    fn a_job_is_named_and_a_shard_is_a_shard() {
+        assert_eq!(parse(&words("host")), Ok(Job::Host));
+        assert_eq!(parse(&words("guest 3/12")), Ok(Job::Guest("3/12".into())));
+        assert!(parse(&words("guest")).is_err());
+        assert!(parse(&words("guest 13/12")).is_err());
+        assert!(parse(&words("host extra")).is_err());
+        assert!(parse(&words("smoke")).is_err());
+        assert!(parse(&[]).is_err());
     }
 
-    const SNAPSHOT_MARK: &str = "snapshot.debian.org/archive/debian/";
-
-    /// Every snapshot-archive timestamp `text` installs from, in source order.
-    ///
-    /// A `$`-prefixed one is not one: the Dockerfile builds the URL from the
-    /// declaration it copies in, so it carries no literal date.
-    fn snapshot_stamps(text: &str) -> Vec<String> {
-        text.lines()
-            .filter_map(|l| l.split(SNAPSHOT_MARK).nth(1))
-            .filter(|rest| !rest.starts_with('$'))
-            .map(|rest| rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect())
-            .collect()
-    }
-
-    /// Every `.github` file that reaches the snapshot archive names the one
-    /// date `.github/apt-snapshot` declares.
-    ///
-    /// The date cannot live in one place: `deps` runs before the checkout,
-    /// because `actions/checkout` wants git and the image has none, so each
-    /// step carries its own copy of the URL and there is nothing for them to
-    /// read it from. Copies of a date drift silently — two shards measuring
-    /// two instruments reads exactly like a flaky test — so the copies are
-    /// held here instead.
+    /// Teeth for the controls' judge: a green negative control, a control that
+    /// never reached its verdict, and a self-catching case that failed are all
+    /// red.
     #[test]
-    fn every_snapshot_url_names_the_declared_date() {
-        let root = repo_root();
-        let want = declared_apt_snapshot(&root).expect(".github/apt-snapshot declares no date");
-        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(root.join(".github/workflows"))
-            .expect(".github/workflows is not readable")
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
-        files.push(root.join(".github/ci-image/Dockerfile"));
-        files.sort();
+    fn a_control_is_judged_by_its_verdict_and_not_its_exit_alone() {
+        let must_red = &CONTROLS[0];
+        let verdict = must_red.verdicts[0];
+        assert!(judge_control(must_red, false, &format!("test {verdict}\n")).is_ok());
+        assert!(judge_control(must_red, true, verdict).unwrap_err().contains("no teeth"));
+        assert!(judge_control(must_red, false, "error[E0425]: cannot find value")
+            .unwrap_err()
+            .contains("proved nothing"));
 
-        let mut seen = 0usize;
-        let mut bad = Vec::new();
-        for path in files {
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            for stamp in snapshot_stamps(&text) {
-                seen += 1;
-                if stamp != want {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    bad.push(format!("{name}: {stamp}"));
-                }
-            }
-        }
-        assert!(
-            seen > 0,
-            "no file reaches the snapshot archive, so either the pin is gone and the hosted \
-             guests are back on sid-as-it-stands, or this scan no longer finds it"
-        );
-        assert!(
-            bad.is_empty(),
-            "these install from a date .github/apt-snapshot does not declare ({want}):\n  {}",
-            bad.join("\n  ")
-        );
+        let catches = CONTROLS.iter().find(|c| !c.must_red).expect("a self-catching case");
+        assert!(judge_control(catches, true, catches.verdicts[0]).is_ok());
+        assert!(judge_control(catches, false, catches.verdicts[0]).is_err());
+        assert!(judge_control(catches, true, "").is_err());
     }
 
-    /// The date half of a midnight snapshot stamp — `20260824T000000Z` →
-    /// `20260824` — and `None` for any other stamp.
-    ///
-    /// Midnight is not a formality. A dated `debian:sid-YYYYMMDD` image is
-    /// debuerreotype's build of `<YYYYMMDD>T000000Z` and of nothing else, so
-    /// only a midnight stamp has an image that is the same archive.
-    fn snapshot_date(stamp: &str) -> Option<&str> {
-        let (date, rest) = stamp.split_at(stamp.find('T')?);
-        (date.len() == 8 && date.chars().all(|c| c.is_ascii_digit()) && rest == "T000000Z")
-            .then_some(date)
-    }
-
-    /// Every `image:` value in `text`, in source order — the key and not the
-    /// prose around it, the same crude shape [`runs_on`] reads.
-    fn images(text: &str) -> Vec<String> {
-        text.lines()
-            .filter_map(|l| l.trim_start().strip_prefix("image:"))
-            .map(|v| v.trim().to_string())
-            .collect()
-    }
-
-    /// The tag of a `debian:` image reference and whether it pins a digest:
-    /// `debian:sid-20260824@sha256:<64 hex>` → `("sid-20260824", true)`.
-    /// `None` for any other image, which this rule says nothing about.
-    fn debian_ref(image: &str) -> Option<(&str, bool)> {
-        let rest = image.strip_prefix("debian:")?;
-        let Some((tag, digest)) = rest.split_once('@') else { return Some((rest, false)) };
-        let pinned = digest
-            .strip_prefix("sha256:")
-            .is_some_and(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()));
-        Some((tag, pinned))
-    }
-
-    /// The jobs in `text` whose container image and apt archive are not one
-    /// decision, given the tag the declared snapshot date asks for.
-    fn drifted(text: &str, want_tag: &str) -> Vec<String> {
-        let mut bad = Vec::new();
-        for (job, body) in jobs(text) {
-            let dated_archive = !snapshot_stamps(&body).is_empty();
-            for image in images(&body) {
-                let Some((tag, digest)) = debian_ref(&image) else { continue };
-                if tag == "sid" {
-                    if dated_archive {
-                        bad.push(format!(
-                            "`{job}` installs from the dated archive into a rolling debian:sid"
-                        ));
-                    }
-                    continue;
-                }
-                if tag != want_tag {
-                    bad.push(format!("`{job}` runs debian:{tag} and the archive is {want_tag}"));
-                }
-                if !digest {
-                    bad.push(format!("`{job}` names debian:{tag} by tag and pins no digest"));
-                }
-                if !dated_archive {
-                    bad.push(format!(
-                        "`{job}` runs debian:{tag} and installs from sid as it stands"
-                    ));
-                }
-            }
-        }
-        bad
-    }
-
-    /// **A job's container image and the archive it installs from are one
-    /// date.** Dating the packages alone is half a pin: the image rolls past
-    /// the archive, carries a package newer than the one the archive's
-    /// dependencies name, and apt refuses the install rather than downgrading
-    /// back — every guest shard of every pull request, at `deps`, with nothing
-    /// about the tree behind it.
-    ///
-    /// Both directions are refused, since both are silent. A dated archive
-    /// under a rolling image is the failure above; a dated image over
-    /// sid-as-it-stands is the same drift pointing the other way, and a dated
-    /// tag with no digest is a tag, which this repository does not pin to.
+    /// The rules as `gh api repos/ToyOSOrg/ToyOS/rules/branches/main` answered,
+    /// and the same with the protections this reads taken away.
     #[test]
-    fn every_dated_image_and_the_archive_under_it_name_one_date() {
-        let root = repo_root();
-        let stamp = declared_apt_snapshot(&root).expect(".github/apt-snapshot declares no date");
-        let date = snapshot_date(&stamp).unwrap_or_else(|| {
-            panic!("{stamp} is not a midnight stamp, so no dated debian image is that archive")
+    fn protection_is_read_back_and_a_loosened_rule_is_refused() {
+        let live = r#"[{"type":"deletion"},{"type":"non_fast_forward"},
+            {"type":"pull_request","parameters":{"allowed_merge_methods":["merge"]}},
+            {"type":"required_status_checks","parameters":{"required_status_checks":[
+              {"context":"host"},{"context":"abi-split"},{"context":"gate-stage"},
+              {"context":"guest-suite"},{"context":"build"}]}},
+            {"type":"merge_queue","parameters":{}}]"#;
+        let (bad, said) = protection(&serde_json::from_str(live).unwrap());
+        assert!(bad.is_empty(), "{bad:?}");
+        assert!(said.iter().any(|l| l.contains("`guest-suite` is required at GitHub")), "{said:?}");
+
+        let loose = r#"[{"type":"pull_request","parameters":{"allowed_merge_methods":["merge","squash"]}},
+            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}]"#;
+        let (bad, _) = protection(&serde_json::from_str(loose).unwrap());
+        assert!(bad.iter().any(|b| b.contains("does not require the check `host`")), "{bad:?}");
+        assert!(bad.iter().any(|b| b.contains("no `deletion` rule")), "{bad:?}");
+        assert!(bad.iter().any(|b| b.contains("merge methods")), "{bad:?}");
+        let (bad, _) = protection(&serde_json::json!({"message": "Not Found"}));
+        assert!(!bad.is_empty());
+    }
+
+    #[test]
+    fn the_nightly_names_every_job_that_did_not_succeed() {
+        let needs = serde_json::json!({
+            "host": {"result": "success", "outputs": {}},
+            "guest": {"result": "failure", "outputs": {}},
+            "tcg": {"result": "skipped", "outputs": {}},
         });
-        let want_tag = format!("sid-{date}");
+        assert_eq!(failed_jobs(&needs), ["guest(failure)", "tcg(skipped)"]);
+        assert!(failed_jobs(&serde_json::json!({"host": {"result": "success"}})).is_empty());
+    }
 
-        let dir = root.join(".github/workflows");
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .expect(".github/workflows is not readable")
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "yml"))
-            .collect();
-        files.sort();
+    #[test]
+    fn the_summary_keeps_the_count_and_the_verdicts() {
+        let log = "test result: ok. 3 passed\n\
+                   FAIL rs::lan_talk: no exit code\n  ALONE lan_talk: GREEN\nnoise\n\
+                   test result: FAILED. 40 passed; 1 failed, 41 total (300 s)\n";
+        let said = verdicts(log);
+        assert!(said.starts_with("test result: FAILED. 40 passed; 1 failed, 41 total"), "{said}");
+        assert!(said.contains("FAIL rs::lan_talk") && said.contains("ALONE lan_talk"), "{said}");
+        assert!(!said.contains("noise"), "{said}");
+        assert_eq!(verdicts(""), "no suite result line");
+    }
 
-        let mut seen = 0usize;
-        let mut bad = Vec::new();
-        for path in &files {
-            let text = std::fs::read_to_string(path)
-                .unwrap_or_else(|e| panic!("{} decides where CI runs: {e}", path.display()));
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-            seen += images(&text).iter().filter(|i| debian_ref(i).is_some()).count();
-            bad.extend(drifted(&text, &want_tag).into_iter().map(|w| format!("{name}: {w}")));
+    #[test]
+    fn the_index_holds_a_version_only_unyanked() {
+        let body = "{\"name\":\"toyos-abi\",\"vers\":\"0.7.0\",\"yanked\":false}\n\
+                    {\"name\":\"toyos-abi\",\"vers\":\"0.8.0\",\"yanked\":true}\n";
+        assert!(indexed(body, "0.7.0"));
+        assert!(!indexed(body, "0.8.0"));
+        assert!(!indexed(body, "0.9.0"));
+    }
+
+    /// Every name `gate-stage` holds the ruleset to is a job `ci.yml` runs on a
+    /// pull request and in the merge queue, so a required check always has
+    /// something reporting it.
+    #[test]
+    fn every_required_check_is_a_job_on_every_pull_request() {
+        let text = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
+            .expect("ci.yml is readable");
+        assert!(text.contains("\n  pull_request:\n") && text.contains("\n  merge_group:"));
+        for name in REQUIRED_CHECKS {
+            assert!(text.contains(&format!("\n  {name}:")), "ci.yml runs no job `{name}`");
         }
-
-        // The published image's base, whose archive is the declaration itself
-        // (`$stamp`) rather than a literal date, so it is read here instead.
-        let path = root.join(".github/ci-image/Dockerfile");
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{} is what that image is: {e}", path.display()));
-        let from = text
-            .lines()
-            .find_map(|l| l.strip_prefix("FROM "))
-            .expect("the Dockerfile names no base image");
-        let (tag, digest) = debian_ref(from).expect("the published image is built on debian");
-        seen += 1;
-        if tag != want_tag || !digest {
-            bad.push(format!(
-                "Dockerfile: FROM debian:{tag}, and it installs from {stamp}, which wants \
-                 debian:{want_tag} by digest"
-            ));
-        }
-
-        assert!(
-            seen > 0,
-            "no job names a debian image, so either the guest lanes moved off it or this scan \
-             no longer reads the key"
-        );
-        assert!(
-            bad.is_empty(),
-            "an image and the archive under it that are two decisions drift, and apt names the \
-             drift as a dependency conflict nobody can act on:\n  {}",
-            bad.join("\n  ")
-        );
     }
 
-    /// Teeth, run rather than argued: the tree cannot contain the half pin
-    /// this rule is written against, so the rule is shown to refuse one.
+    /// Every workflow's `pull_request:` trigger names `main` alone, and none
+    /// asks for a runner this project does not have — a self-hosted label
+    /// queues until it times out, silently.
     #[test]
-    fn the_image_scan_refuses_half_a_pin() {
-        assert_eq!(snapshot_date("20260824T000000Z"), Some("20260824"));
-        assert_eq!(snapshot_date("20260824T145707Z"), None);
-        assert_eq!(snapshot_date("sid"), None);
-
-        let digest = "c".repeat(64);
-        assert_eq!(debian_ref("debian:sid"), Some(("sid", false)));
-        assert_eq!(debian_ref("ubuntu:24.04"), None);
-        assert_eq!(
-            debian_ref(&format!("debian:sid-20260824@sha256:{digest}")),
-            Some(("sid-20260824", true))
-        );
-        assert_eq!(debian_ref("debian:sid-20260824@sha256:c0ffee"), Some(("sid-20260824", false)));
-
-        let job = |image: &str, archive: &str| {
-            format!(
-                "jobs:\n  a:\n    container:\n      image: {image}\n    steps:\n      \
-                 - run: echo 'deb http://{SNAPSHOT_MARK}{archive} sid main'\n"
-            )
-        };
-        let pinned = job(&format!("debian:sid-20260824@sha256:{digest}"), "20260824T000000Z");
-        assert!(drifted(&pinned, "sid-20260824").is_empty());
-
-        // What every guest shard of every pull request ran into: the archive
-        // dated, the image not.
-        assert_eq!(
-            drifted(&job("debian:sid", "20260824T000000Z"), "sid-20260824"),
-            ["`a` installs from the dated archive into a rolling debian:sid"]
-        );
-        // The same drift pointing the other way, and the tag with no digest.
-        let stale = "jobs:\n  a:\n    container:\n      image: debian:sid-20260803\n";
-        assert_eq!(
-            drifted(stale, "sid-20260824"),
-            [
-                "`a` runs debian:sid-20260803 and the archive is sid-20260824",
-                "`a` names debian:sid-20260803 by tag and pins no digest",
-                "`a` runs debian:sid-20260803 and installs from sid as it stands",
-            ]
-        );
-        // A job on sid as it stands, image and archive both, is one decision
-        // and not a drift — `portability.yml`'s premise is a fresh machine.
-        assert!(drifted("jobs:\n  a:\n    container:\n      image: debian:sid\n", "sid-20260824")
-            .is_empty());
-    }
-
-    /// A gate job that boots a guest installs QEMU from the pinned archive.
-    ///
-    /// Naming the instrument and then taking whatever the mirror shipped that
-    /// afternoon is the failure this pairs with: `instrument.sh` would refuse
-    /// the run, correctly, and the tree would be told nothing about why.
-    #[test]
-    fn every_gate_that_boots_a_guest_installs_from_the_snapshot() {
-        let root = repo_root();
-        let mut bad = Vec::new();
-        for file in GATES {
-            let path = root.join(".github/workflows").join(file);
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("{} is a gate and is not readable: {e}", path.display()));
-            for (name, body) in jobs(&text) {
-                let installs_qemu =
-                    body.contains("apt-get install") && body.contains("qemu-system-x86");
-                if installs_qemu && !body.contains("snapshot.debian.org") {
-                    bad.push(format!("{file}: `{name}` installs QEMU from sid as it stands"));
-                }
-            }
-        }
-        assert!(
-            bad.is_empty(),
-            "a rolling release decides what these measure with:\n  {}",
-            bad.join("\n  ")
-        );
-    }
-
-    /// Teeth, run rather than argued: the tree cannot contain the workflow this
-    /// rule is written against, so the rule is shown to refuse one.
-    #[test]
-    fn the_job_scan_refuses_a_job_that_boots_without_saying_what_with() {
-        let good = concat!(
-            "jobs:\n",
-            "  a:\n    steps:\n",
-            "      - run: apt-get install qemu-system-x86\n",
-            "      - run: .github/instrument.sh\n",
-        );
-        assert!(nameless(good).is_empty());
-
-        let bad = concat!(
-            "jobs:\n",
-            "  a:\n    steps:\n      - run: .github/instrument.sh\n",
-            "  b:\n    steps:\n      - run: apt-get install qemu-system-x86\n",
-        );
-        assert_eq!(nameless(bad), ["b"]);
-
-        assert_eq!(jobs(bad).iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a", "b"]);
-    }
-
-    /// Every `runs-on:` value a workflow declares, in source order.
-    ///
-    /// Not a YAML parser, for the reason [`jobs`] is not one: the shape is
-    /// fixed — a `runs-on:` key and the rest of its line, a bare label or a
-    /// flow sequence — and anything else is a file to name rather than a shape
-    /// to accommodate. What this closes is that one spelling; a block sequence
-    /// under `runs-on:` is the form it walks past, and
-    /// [`the_runner_scan_reads_the_key_and_not_the_prose_around_it`] asserts
-    /// that it does.
-    fn runs_on(text: &str) -> Vec<String> {
-        text.lines()
-            .filter_map(|l| l.trim_start().strip_prefix("runs-on:"))
-            .map(|v| v.trim().to_string())
-            .collect()
-    }
-
-    /// **No workflow names a self-hosted label.** The owner decommissioned the
-    /// T14 as a runner, so every lane is GitHub-hosted and there is no machine
-    /// behind `self-hosted` or `toyos` to answer one — a job that named either
-    /// would queue until it timed out, silently, since a label nothing offers
-    /// is not an error to Actions.
-    #[test]
-    fn no_workflow_asks_for_a_runner_this_project_does_not_have() {
+    fn workflows_run_against_main_on_hosted_runners() {
         let dir = repo_root().join(".github/workflows");
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .expect(".github/workflows is not readable")
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "yml"))
-            .collect();
-        files.sort();
-        assert!(!files.is_empty(), "the workflow scan found no workflow, so it is wrong");
-
-        let mut bad = Vec::new();
-        for path in &files {
-            let text = std::fs::read_to_string(path)
-                .unwrap_or_else(|e| panic!("{} decides where CI runs: {e}", path.display()));
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-            for label in self_hosted(&text) {
-                bad.push(format!("{name}: runs-on: {label}"));
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
+            let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            seen += 1;
+            if let Some((_, after)) = text.split_once("\n  pull_request:\n") {
+                let branches = after.lines().next().unwrap_or("").trim();
+                assert_eq!(branches, "branches: [main]", "{name}");
             }
-        }
-        assert!(
-            bad.is_empty(),
-            "every lane is GitHub-hosted and these name a runner nothing offers, so they \
-             would queue until they timed out:\n  {}",
-            bad.join("\n  ")
-        );
-    }
-
-    /// The `runs-on:` values naming a runner this project does not have.
-    fn self_hosted(text: &str) -> Vec<String> {
-        runs_on(text)
-            .into_iter()
-            .filter(|v| v.contains("self-hosted") || v.contains("toyos"))
-            .collect()
-    }
-
-    /// The scan, shown refusing the shape it is written against, and shown
-    /// walking past the block sequence it does not read.
-    #[test]
-    fn the_runner_scan_reads_the_key_and_not_the_prose_around_it() {
-        let good = concat!(
-            "jobs:\n",
-            "  # runs-on: [self-hosted, toyos] is a comment and not a key\n",
-            "  a:\n    runs-on: ubuntu-24.04\n",
-            "  b:\n    runs-on: macos-latest\n",
-        );
-        assert_eq!(runs_on(good), ["ubuntu-24.04", "macos-latest"]);
-        assert!(self_hosted(good).is_empty());
-
-        let bad = concat!("jobs:\n", "  a:\n    runs-on: [self-hosted, Linux, X64, toyos]\n");
-        assert_eq!(self_hosted(bad), ["[self-hosted, Linux, X64, toyos]"]);
-
-        // The form this spelling does not reach, asserted so that widening the
-        // scan reds here instead of leaving this sentence unchecked.
-        let walked = concat!("jobs:\n", "  a:\n    runs-on:\n      - self-hosted\n      - toyos\n");
-        assert!(self_hosted(walked).is_empty());
-    }
-
-    /// A workflow's top-level `pull_request:` trigger and the `branches:`
-    /// line immediately beneath it, if any — the same crude shape [`jobs`]
-    /// and [`runs_on`] read rather than a YAML parser. `None` means the file
-    /// has no `pull_request:` trigger at all.
-    fn pull_request_branches(text: &str) -> Option<String> {
-        let mut lines = text.lines();
-        while let Some(line) = lines.next() {
-            if line == "  pull_request:" {
-                return Some(
-                    lines
-                        .next()
-                        .and_then(|l| l.trim_start().strip_prefix("branches:"))
-                        .map(|v| v.trim().to_string())
-                        .unwrap_or_default(),
+            for runner in text.lines().filter_map(|l| l.trim_start().strip_prefix("runs-on:")) {
+                assert!(
+                    !runner.contains("self-hosted") && !runner.contains("toyos"),
+                    "{name}: runs-on:{runner}"
                 );
             }
         }
-        None
+        assert_eq!(seen, 3, "ci.yml, nightly.yml and publish.yml");
     }
 
-    /// Integration branches develop locally and fast; CI starts only once
-    /// the work reaches the pull request to `main`. A `pull_request:`
-    /// trigger with no `branches:` filter runs its whole job list on a pull
-    /// request whatever its base.
+    /// Exactly one job writes each cache, on the nightly, so what a pull request
+    /// restores is one run's tree and never a race between two writers.
     #[test]
-    fn every_pull_request_trigger_runs_only_against_main() {
+    fn each_cache_has_one_writer() {
         let dir = repo_root().join(".github/workflows");
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .expect(".github/workflows is not readable")
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "yml"))
-            .collect();
-        files.sort();
-        assert!(!files.is_empty(), "the workflow scan found no workflow, so it is wrong");
-
-        let mut seen = 0usize;
-        let mut bad = Vec::new();
-        for path in &files {
-            let text = std::fs::read_to_string(path)
-                .unwrap_or_else(|e| panic!("{} decides where CI runs: {e}", path.display()));
-            let Some(branches) = pull_request_branches(&text) else { continue };
-            seen += 1;
-            if branches != "[main]" {
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                bad.push(format!("{name}: branches: {branches:?}"));
+        let mut writers = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
+            let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(!text.contains("actions/cache@"), "{name}: the combined action saves too");
+            let lines: Vec<&str> = text.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                if line.contains("actions/cache/save@") {
+                    let key = lines[at..]
+                        .iter()
+                        .find_map(|l| l.trim_start().strip_prefix("key: "))
+                        .expect("a save names its key");
+                    writers.push((name.clone(), key.split('$').next().unwrap_or("").to_string()));
+                }
             }
         }
-        assert_eq!(
-            seen, 4,
-            "ci.yml, host-tests.yml, landing.yml and toolchain.yml are the four workflows this \
-             rule was written for; the scan found a different count, so a workflow gained or \
-             lost a `pull_request:` trigger and this count needs to move with it"
-        );
-        assert!(
-            bad.is_empty(),
-            "a draft PR against an integration branch runs the whole workflow before the work \
-             is ready for main:\n  {}",
-            bad.join("\n  ")
-        );
+        assert!(!writers.is_empty(), "no job writes a cache, so every restore is cold");
+        writers.sort();
+        let mut prefixes: Vec<&String> = writers.iter().map(|(_, p)| p).collect();
+        prefixes.dedup();
+        assert_eq!(prefixes.len(), writers.len(), "a cache with two writers: {writers:?}");
+        assert!(writers.iter().all(|(f, _)| f == "nightly.yml"), "{writers:?}");
     }
 
-    /// The declaration is read by a shell and by this crate, so both have to
-    /// agree that it holds one version and nothing else.
     #[test]
     fn the_declared_version_is_a_version() {
         let declared =
@@ -623,110 +948,12 @@ mod tests {
     }
 
     #[test]
-    fn the_script_that_reads_it_is_runnable() {
-        let path = repo_root().join(".github/instrument.sh");
-        let meta = std::fs::metadata(&path).expect(".github/instrument.sh is there");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert!(
-                meta.permissions().mode() & 0o111 != 0,
-                "every guest job invokes it by path, so a lost exec bit reds all thirteen"
-            );
-        }
-        let _ = meta;
-    }
-
-    /// Every file that computes the toolchain release tag. `toolchain.yml`
-    /// mints it; the rest ask for the one it minted.
-    const KEY_SITES: [&str; 5] = [
-        ".github/install-toolchain.sh",
-        ".github/workflows/ci.yml",
-        ".github/workflows/gate-a.yml",
-        ".github/workflows/probe-green.yml",
-        ".github/workflows/toolchain.yml",
-    ];
-
-    /// The `HEAD:<path>` list of every `git rev-parse … | sha256sum` in `text`.
-    ///
-    /// **The spelling this closes** is the pipe written within 300 characters of
-    /// the `rev-parse`, which is every copy the tree has; a `rev-parse HEAD:`
-    /// used for anything else — `toolchain.yml`'s manifest reads `HEAD:rust` on
-    /// its own — is not a key and is not matched.
-    fn key_paths(text: &str) -> Vec<Vec<&str>> {
-        let mut out = Vec::new();
-        for (at, _) in text.match_indices("git rev-parse HEAD:") {
-            let rest = &text[at..];
-            let window = &rest[..rest.len().min(300)];
-            let Some(end) = window.find("sha256sum") else { continue };
-            out.push(
-                window[..end].split_whitespace().filter_map(|t| t.strip_prefix("HEAD:")).collect(),
-            );
-        }
-        out
-    }
-
-    /// **A copy of the key that names other trees asks for a tag nothing
-    /// published**, and every job in CI installs its toolchain by that tag. The
-    /// expression cannot live in one place — `install-toolchain.sh` runs before
-    /// there is anything to read it from — so the copies are held here.
-    #[test]
-    fn every_toolchain_key_names_the_same_trees() {
-        let root = repo_root();
-        let publisher = std::fs::read_to_string(root.join(".github/workflows/toolchain.yml"))
-            .expect("toolchain.yml is what mints the tag and is not readable");
-        let minted = key_paths(&publisher);
-        assert_eq!(minted.len(), 1, "toolchain.yml computes the tag once: {minted:?}");
-        let want = &minted[0];
-        assert!(
-            want.contains(&"toyos-ld/src") && want.contains(&".github/workflows/toolchain.yml"),
-            "the tag is the hash of everything the tarball's bytes depend on, and this names \
-             neither the linker nor the packaging: {want:?}"
-        );
-
-        for site in KEY_SITES {
-            let text = std::fs::read_to_string(root.join(site))
-                .unwrap_or_else(|e| panic!("{site} computes the tag and is not readable: {e}"));
-            let found = key_paths(&text);
-            assert!(!found.is_empty(), "{site} is on the list and computes no tag");
-            for paths in found {
-                assert_eq!(&paths, want, "{site} names other trees than toolchain.yml does");
-            }
-        }
-
-        // A copy elsewhere in `.github` is the same drift, so the list has to be
-        // the whole of it.
-        let mut elsewhere = Vec::new();
-        let mut stack = vec![root.join(".github")];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                let rel = path.strip_prefix(&root).unwrap().to_string_lossy().to_string();
-                if !key_paths(&std::fs::read_to_string(&path).unwrap_or_default()).is_empty()
-                    && !KEY_SITES.contains(&rel.as_str())
-                {
-                    elsewhere.push(rel);
-                }
-            }
-        }
-        assert!(elsewhere.is_empty(), "these compute the tag and are not on KEY_SITES: {elsewhere:?}");
-    }
-
-    #[test]
     fn the_version_parser_takes_what_qemu_prints_and_refuses_the_rest() {
         assert_eq!(
             parse_qemu_version("QEMU emulator version 11.0.3 (Debian 1:11.0.3+ds-1)\n").as_deref(),
             Some("11.0.3")
         );
-        assert_eq!(
-            parse_qemu_version("QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.11)\n")
-                .as_deref(),
-            Some("8.2.2")
-        );
+        assert_eq!(parse_qemu_version("QEMU emulator version 11.1.0\n").as_deref(), Some("11.1.0"));
         assert_eq!(parse_qemu_version("qemu-system-x86_64: no such option\n"), None);
         assert_eq!(parse_qemu_version(""), None);
     }

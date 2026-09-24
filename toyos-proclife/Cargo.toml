@@ -24,10 +24,10 @@ license = "MIT OR Apache-2.0"
 [features]
 # Declared, never enabled here, and never enabled by any kernel build: each
 # reverts one decision to the form this kernel really had, so the host model
-# that refuses it is shown able to red at all. `host-tests.yml` runs each and
+# that refuses it is shown able to red at all. `src/ci.rs`'s `CONTROLS` runs each and
 # demands the named test's own FAILED line; `src/build.rs`'s
-# `every_model_control_is_wired_into_host_tests` reds on a control declared
-# with no step behind it.
+# `every_model_control_is_run` reds on a control declared with no row behind
+# it.
 #
 # `teardown::claim_teardown` stops being exclusive: every arrival wins. An exit
 # and a kill then both tear one process down, both retire its threads and both
