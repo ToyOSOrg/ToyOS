@@ -34,6 +34,8 @@ pub mod logread;
 pub mod logstream;
 pub mod metal;
 #[allow(dead_code)]
+pub mod partclaim;
+#[allow(dead_code)]
 pub mod passcost;
 #[allow(dead_code)]
 pub mod pkg;

@@ -1192,6 +1192,16 @@ pub enum Profile {
     /// one boot shows the error channel carrying a failure and not carrying a
     /// success.
     UsbDiskReadOnly,
+    /// The boot volume on NVMe, as [`Profile::MetalNoUsb`] has it, and one USB
+    /// stick on an xHCI beside it with a serial number of its own.
+    ///
+    /// The one machine on which a USB disk's only writer is the guest: every
+    /// other USB profile boots off the stick, so `/log` is on the bus and
+    /// logd's first batch is the first write `usb-transport-break-owed` can
+    /// break. Here the guest decides which write its device leaves under, and
+    /// the stated serial number is what lets the host move it to another port
+    /// and have it taken back as itself.
+    NvmeBootUsbDisk,
     /// [`Profile::UsbDiskHuge`] with the 3 TB disk attached *ahead* of the boot
     /// stick, so the controller enumerates the disk the driver refuses first.
     ///
@@ -1593,6 +1603,12 @@ pub struct UsbDisk {
     /// pool block of a failed bind to the next disk is only observable when the
     /// failure is first.
     before_boot_stick: bool,
+    /// The bus it is on, where that is not [`Shape::storage_bus`]: a machine
+    /// that boots off NVMe has no storage bus.
+    bus: Option<&'static str>,
+    /// Its serial number string, where QEMU's default — built from the port it
+    /// is on — would make the same stick another unit on another port.
+    pub serial: Option<&'static str>,
 }
 
 impl UsbDisk {
@@ -1603,6 +1619,8 @@ impl UsbDisk {
         lba_bytes: 512,
         readonly: false,
         before_boot_stick: false,
+        bus: None,
+        serial: None,
     };
     /// A 3 TB external disk, which this driver has to refuse by name rather
     /// than serve the first 2 TiB of.
@@ -1634,6 +1652,10 @@ pub const BOOT_STICK_ID: &str = "bootstick";
 /// plugged into another port would read as another unit — which is exactly
 /// what a test moving it has to be able to say is not so.
 pub const BOOT_STICK_SERIAL: &str = "TOYOS0BOOTSTICK1";
+
+/// The serial number of [`Profile::NvmeBootUsbDisk`]'s stick, for the same
+/// reason the boot stick states one.
+pub const DATA_STICK_SERIAL: &str = "TOYOS0DATASTICK1";
 
 /// What every profile but [`Profile::MetalDisk`] gives the guest. Large
 /// enough for a filesystem, small enough that a boot formats it quickly.
@@ -1915,6 +1937,15 @@ impl Profile {
                 usb_disks: &[UsbDisk { before_boot_stick: true, ..UsbDisk::HUGE }],
                 hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
+            },
+            Self::NvmeBootUsbDisk => Shape {
+                xhci: &[XHCI_DEFAULT],
+                usb_disks: &[UsbDisk {
+                    bus: Some("xhci.0"),
+                    serial: Some(DATA_STICK_SERIAL),
+                    ..UsbDisk::DATA
+                }],
+                ..Self::MetalNoUsb.shape()
             },
             Self::UsbDiskReadOnly => Shape {
                 vga: "std",
@@ -4086,7 +4117,7 @@ fn qemu_command(
     // A data stick declared onto no bus is emitted with an empty `bus=`, which
     // QEMU puts on whichever controller it likes.
     assert!(
-        !shape.storage_bus.is_empty() || shape.usb_disks.is_empty(),
+        shape.usb_disks.iter().all(|disk| !disk.bus.unwrap_or(shape.storage_bus).is_empty()),
         "a USB disk needs a bus to be on"
     );
 
@@ -4140,11 +4171,12 @@ fn qemu_command(
                 "-device".to_string(),
                 format!(
                     "usb-storage,bus={1},drive={2},id={3},logical_block_size={0},\
-                     physical_block_size={0}{pcap}",
+                     physical_block_size={0}{pcap}{serial}",
                     disk.lba_bytes,
-                    shape.storage_bus,
+                    disk.bus.unwrap_or(shape.storage_bus),
                     usb_drive_id(i),
                     usb_device_id(i),
+                    serial = disk.serial.map(|s| format!(",serial={s}")).unwrap_or_default(),
                 ),
             ]
         })
@@ -4519,10 +4551,7 @@ fn wait_for_ready(
     // agents building: two boots exceeded the flat ten seconds, one of them in a
     // phase running a single guest.
     //
-    // A wedge costs that much longer to report and nothing else. No test asserts
-    // on how long a boot took by *this* clock: `i8042_absent` and
-    // `xhci_slow_connect` do assert on boot timing and read the guest's own
-    // stamps, and both are in the serial tail.
+    // A wedge costs that much longer to report and nothing else.
     //
     // Scaled by the host too, and the first boot of a run is the one that
     // cannot be: nothing has been measured yet, so it gets the flat number and

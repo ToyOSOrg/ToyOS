@@ -207,10 +207,13 @@ actuators! {
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
-    /// Run `SYS_FSYNC`'s first attempt under an operation that is already over.
+    /// Run the first attempt of every block operation `object::ops::until_answered`
+    /// retries — `SYS_FSYNC`, a partition transfer — under an operation that is
+    /// already over.
     fsync_budget_spent = "fsync-budget-spent";
 
-    /// Make `SYS_FSYNC`'s deadman already expired.
+    /// Make the deadman of every run `object::ops::until_answered` makes already
+    /// expired.
     fsync_deadman_now = "fsync-deadman-now";
 
     /// Skip one NVMe completion wait so a submitted command goes unanswered.
@@ -246,6 +249,9 @@ actuators! {
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
+    /// On one CPU, file Ctrl+Alt+D's request inside each kind of pass that may not serve it and inside a report, and count the Ring 3 returns each is left pending across.
+    dump_in_blocking_pass = "dump-in-blocking-pass";
+
     /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
     /// and never gives back: the negative control on `crate::hardlockup`, and a
     /// machine nothing else in this tree ends. Where CPUID states no
@@ -263,10 +269,10 @@ actuators! {
     /// Return from the NMI handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";
 
-    /// Report an empty root hub for the first 300ms of boot.
+    /// Report an empty root hub for the xHCI driver's `SLOW_CONNECT_NS` after a controller powers its ports.
     xhci_slow_connect = "xhci-slow-connect";
 
-    /// Report the first root-hub port empty for the same window, the rest normal — distinct from hiding the whole bus, since settle waits only for a non-empty settled set.
+    /// Report the first root-hub port empty until the boot scan has run, the rest normal — distinct from hiding the whole bus, since settle waits only for a non-empty settled set.
     xhci_slow_storage_connect = "xhci-slow-storage-connect";
 
     /// Give PORTSC's PED bit the RW1CS meaning xHCI 1.2 §5.4.8 gives it.
@@ -466,6 +472,12 @@ actuators! {
 
     /// Wrap the metadata cache's device in a read-fault injector and run the un-index control after mount.
     pc_unbind_selftest = "pc-unbind-selftest";
+
+    /// Refuse every read of device block 0 of each NVMe disk — its protective
+    /// MBR and GPT header — once every mount has been made, so a partition
+    /// claim meets a disk that does not answer a read of its table. Judged by
+    /// `partition_claim_gives_up`.
+    partclaim_table_unanswered = "partclaim-table-unanswered";
 
     /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";

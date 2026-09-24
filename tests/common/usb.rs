@@ -1255,31 +1255,22 @@ pub fn xhci_slow_connect(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     const PARAMS: &[&str] = &["usb-storage-gate", "xhci-slow-connect"];
-    /// Mirrors `xhci/mod.rs`'s `SLOW_CONNECT_NS` and `PORT_DEBOUNCE_NS`. These
-    /// are one wire format with the kernel's in the same sense the gate's stamp
-    /// is: a change to either without the other shows up as a failed assertion,
-    /// not as a silent pass.
-    const HELD_EMPTY_S: f64 = 0.300;
-    const DEBOUNCE_S: f64 = 0.100;
-    /// The earliest instant the driver can name a port. The register reads empty
-    /// until `SLOW_CONNECT_NS` of *boot*, and `await_connect_settle` then wants
-    /// `PORT_DEBOUNCE_NS` of a connect set that has held still and is non-empty.
-    const FIRST_CONNECT_S: f64 = HELD_EMPTY_S + DEBOUNCE_S;
-    /// How much later than that the first port line may be.
-    ///
-    /// The shape it exists to catch is a settle that leaves by `EMPTY_BUS_NS`
-    /// instead of on the device appearing — one second after port power, so
-    /// ~1.1 s of boot — which would enumerate the same two sticks and leave
-    /// every other assertion here green.
-    ///
-    /// 150 ms because the connect becomes visible at a fixed instant on the
-    /// guest's own clock and the settle re-reads it every `PORT_POLL_NS`, so the
-    /// spread is a millisecond of polling and not a share of the host. Six runs
-    /// here — three sequential, three with four concurrent test processes on the
-    /// machine — put the first port line at 0.400-0.402 s, and `issues/`
-    /// records one at 0.413 under five-agent load. 13 ms of worst observed
-    /// excursion against 150 of slack, and 700 of clearance to the shape above.
-    const SETTLE_SLACK_S: f64 = 0.150;
+    // The driver's own durations, from where the driver reads them: each is
+    // declared once in `toyos-xhci` and `use`d by `kernel/src/drivers/xhci`, so
+    // neither bound below can be a copy that drifted.
+    use toyos_xhci::port::{DEBOUNCE_NS, EMPTY_BUS_NS, SLOW_CONNECT_NS};
+    /// Nanoseconds per second, to put those in the units the log's stamps are in.
+    const PER_S: f64 = 1_000_000_000.0;
+    /// How long after port power the driver can first name a port. The register
+    /// reads empty for `SLOW_CONNECT_NS` after this controller powered its
+    /// ports, and `await_connect_settle` then wants `DEBOUNCE_NS` of a connect
+    /// set that has held still and is non-empty.
+    const FIRST_CONNECT_S: f64 = (SLOW_CONNECT_NS + DEBOUNCE_NS) as f64 / PER_S;
+    /// How late the first port line may be: halfway between the two settles this
+    /// test tells apart, so one that ends on the device appearing cannot reach
+    /// it and one that ends at `EMPTY_BUS_NS` cannot stay under it.
+    const SETTLE_CEILING_S: f64 =
+        FIRST_CONNECT_S + (EMPTY_BUS_NS as f64 / PER_S - FIRST_CONNECT_S) / 2.0;
 
     let (bytes, lba) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
     let image = test_dir().join("usb-slow-connect.img");
@@ -1301,58 +1292,47 @@ pub fn xhci_slow_connect(
     // would be green on a driver that never waits and a QEMU that answers
     // instantly, which is exactly the pair that shipped.
     //
-    // Both instants below are read on the guest's own boot clock, because that
-    // is the clock the injection is written in — `read_portsc` hides the
-    // register while `nanos_since_boot() < SLOW_CONNECT_NS`. Timing the wait as
-    // a delta from `controller started` instead compared a delta against an
-    // absolute window, which silently required the boot to reach its controller
-    // within `PORT_DEBOUNCE_NS`: a budget it has since grown out of, and four
-    // red runs and an afternoon in the driver (`issues/`).
+    // `powered_at` is not logged; the two lines that bracket it are.
+    // `controller started` is taken before it, so it is the anchor that can only
+    // make the floor generous; the port-power line is printed after it, so it is
+    // the anchor that can only make the ceiling generous. Neither bound can be
+    // false because of where in the bracket the instant actually fell.
     let started = stamp_of(&log, "xHCI: controller started")?;
+    let powered = stamp_of(&log, "root-hub ports powered")?;
     // The first line this driver prints about any port at all. Every other
     // per-port line is preceded by that port's connect line, so the first match
     // is the first connect whichever port register it lands on — which the
     // profile does not fix, since a SuperSpeed stick appears on a high one.
     let first_seen = stamp_of(&log, "xHCI: port ")?;
 
-    // Non-vacuity, and it comes first because the floor below rests on it: a
-    // driver that only reached its ports after the window closed read a
-    // populated bus on its first look, and the wait it then did was the ordinary
-    // debounce every boot does.
-    //
-    // **This is the one bound in the file that a faster boot cannot break and a
-    // slower one can, so what it has is clearance rather than slack**, and the
-    // clearance is measured rather than assumed. It was 4 ms once — the
-    // controller started at 0.296-0.311 s on a quiet host in 2026-08, so ten
-    // milliseconds of movement anywhere in the boot decided this verdict, which
-    // is how a log-ring regression no other gate in the suite noticed was caught
-    // here. Four boots alone on the dev host on 2026-08-24 put it at 0.109,
-    // 0.117, 0.122 and 0.227 s, i.e. 73-191 ms, at 2.31x-4.45x measured host
-    // width. Re-measure before believing either number; the failure's own
-    // message names the fix, and it is not this gate.
-    if started >= HELD_EMPTY_S {
+    // What makes the bracket the settle's own: `await_connect_settle` anchors on
+    // the greatest `powered_at` across controllers, which on a second controller
+    // is not the instant these two lines bracket.
+    if !log.contains("xHCI: 1 controller(s),") {
         return Err(format!(
-            "the controller started at {started:.3} s, past the {HELD_EMPTY_S} s the ports are \
-             held empty for, so nothing in this boot read a hidden port. The boot has outgrown \
-             the injection window: widen SLOW_CONNECT_NS, not this gate\n{log}"
+            "this profile grew a second controller, so the settle no longer anchors on the \
+             `powered_at` these lines bracket\n{log}"
         ));
     }
-    // The floor. Nothing can name a port before the register stops lying and the
-    // debounce behind it has elapsed, so an earlier line is a driver that did
-    // not wait or an injection that did not land.
-    if first_seen < FIRST_CONNECT_S {
+    // The floor, and the non-vacuity with it: a driver that did not wait, or an
+    // injection that did not land, names a port within a millisecond of the scan
+    // rather than after the held-empty window and the debounce behind it.
+    let after_start = first_seen - started;
+    if after_start < FIRST_CONNECT_S {
         return Err(format!(
-            "the first port was named at {first_seen:.3} s, before the {FIRST_CONNECT_S} s the \
-             held-empty window and the debounce behind it come to — the injection did not reach \
-             the driver\n{log}"
+            "the first port was named {after_start:.3} s after the controller started, inside the \
+             {FIRST_CONNECT_S} s the held-empty window and the debounce behind it come to — the \
+             injection did not reach the driver\n{log}"
         ));
     }
     // The ceiling.
-    if first_seen > FIRST_CONNECT_S + SETTLE_SLACK_S {
+    let after_power = first_seen - powered;
+    if after_power > SETTLE_CEILING_S {
         return Err(format!(
-            "the first port was named at {first_seen:.3} s, {:.3} s after the connect became \
-             visible — the settle did not end on the device appearing\n{log}",
-            first_seen - FIRST_CONNECT_S
+            "the first port was named {after_power:.3} s after the ports were powered, {:.3} s \
+             after the connect became visible — the settle did not end on the device \
+             appearing\n{log}",
+            after_power - FIRST_CONNECT_S
         ));
     }
 
@@ -1393,9 +1373,10 @@ pub fn xhci_slow_connect(
     let _ = std::fs::remove_file(&image);
 
     eprintln!(
-        "  [usb] controller started at {started:.3} s and the ports read empty to \
-         {HELD_EMPTY_S} s; first port named at {first_seen:.3} s, both sticks bound, host bytes \
-         verified host-side; Boot: complete at {boot_ms} ms"
+        "  [usb] controller started at {started:.3} s and powered its ports at {powered:.3} s; \
+         first port named at {first_seen:.3} s, {after_start:.3} s after the start and \
+         {after_power:.3} s after the power, both sticks bound, host bytes verified host-side; \
+         Boot: complete at {boot_ms} ms"
     );
     Ok(())
 }
@@ -1900,8 +1881,8 @@ enum Moved {
     SlowStick,
     /// The stick itself, broken by `usb-transport-break-owed` on a write that
     /// went out while an earlier one was reported complete and not flushed: it
-    /// is taken back, and its next flush fails, since a device that comes back
-    /// is not known to have kept its cache.
+    /// is taken back, and the flush of the writer whose write that was fails,
+    /// since a device that comes back is not known to have kept its cache.
     OwedFlush,
     /// The stick itself, broken by `usb-transport-break-flushed` on the first
     /// write after a flush that succeeded over the one before it: it is taken
@@ -1939,9 +1920,13 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
     const MOVE_NOW: &str = "usb-reset-moves: move the device now";
     const STALLED: &str = "answers slowly (usb-slow-return): its bind is stalled";
-    const OWED: &str = ", and it left owing a flush of writes it had reported complete, so its \
-        next flush fails";
-    const FLUSH_LOST: &str = "flush failed: its device came back from leaving its port owing a flush";
+    const OWED: &str = ", and it left owing a flush of writes it had reported complete, so the \
+        flush of each writer whose writes they were fails";
+    const FLUSH_LOST: &str =
+        "made before its disk came back owing a flush may not have survived, and its flush says so";
+    // The stick's one writer at the break is `/log`: logd's first batch is
+    // the first WRITE(10) that goes out owing a flush.
+    const LOG_TOLD: &str = "writes the kernel (log) made before its disk came back owing a flush";
     const STILL_HELD: &str = "is still held when this call may wait no longer";
     const AFTER_A_FLUSH: &str = "breaks next (usb-transport-break-flushed)";
     const SILENT: &str = "answers nothing on the operation sent again on it (usb-return-silent)";
@@ -2154,7 +2139,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             let mut want = left.to_vec();
             want.extend(back.iter().cloned());
             want.push(OWED.to_string());
-            want.push(format!("usb-storage: disk 0 {FLUSH_LOST}"));
+            want.push(LOG_TOLD.to_string());
             in_order(&want)?;
             for never in [" did not come back within ", "disk 1 ready", " is not disk 0 come back"] {
                 if let Some(line) = log.lines().find(|l| l.contains(never)) {
@@ -2162,8 +2147,8 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                 }
             }
             eprintln!(
-                "  [usb] a stick that left owing a flush was taken back as disk 0, and its next \
-                 flush failed by name"
+                "  [usb] a stick that left owing a flush was taken back as disk 0, and the flush of \
+                 /log, whose write it lost, failed by name"
             );
         }
         Moved::SilentReturn => {

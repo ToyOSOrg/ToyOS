@@ -2193,6 +2193,9 @@ mod tests {
                 // be indistinguishable from a broken reader without this.
                 "df-witness-mutate",
                 // Costs no kernel build, for `wake-fence-off`'s reason: only
+                // `kernel-loom` turns it on, and `dump_request` must red under it.
+                "dump-report-relaxed",
+                // Costs no kernel build, for `wake-fence-off`'s reason: only
                 // `kernel-loom` turns it on, and `durability` must red under it.
                 "durability-settle-blind",
                 // The kernel this tree had before `arch::entry`'s `cld`: the
@@ -2626,6 +2629,7 @@ mod tests {
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",
+        "tests/partclaimcase/system.toml",
         "tests/pkgcase/system.toml",
         "tests/sshdcase/system.toml",
         "tests/swapcase/system.toml",

@@ -40,6 +40,7 @@ dependencies = [
  "toyos-abi",
  "toyos-acpi",
  "toyos-blackbox",
+ "toyos-blockhold",
  "toyos-dma",
  "toyos-elf",
  "toyos-elide",
@@ -74,7 +75,7 @@ checksum = "b50b8869d9fc858ce7266cce0194bd74df58b9d0e3f6df3a9fc8eb470d95c09d"
 
 [[package]]
 name = "toyos-abi"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "toyos-acpi"
@@ -85,6 +86,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-blackbox"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blockhold"
 version = "0.1.0"
 
 [[package]]

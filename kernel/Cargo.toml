@@ -55,6 +55,9 @@ durability-settle-blind = []
 # be owed twice, and `device_irq` reds. That pair *is* the record's design, so
 # turning it off reverts the whole of what the model claims.
 device-irq-lossy = []
+# `src/sched/dump_request.rs`'s `take` and `end_report` go `Relaxed`, so the next report
+# is unordered against the last one's writes, and `dump_request` reds.
+dump-report-relaxed = []
 # The same arrangement for the sleep lock's acquire edge, and it is the first
 # *contended*-acquire model this tree has: `src/sleeplock.rs`'s two loads of
 # `now` — the ones that decide whose turn it is — go `Relaxed`, so the previous
@@ -383,6 +386,7 @@ toyos-abi = { path = "../toyos-abi" }
 toyos-acpi = { path = "../toyos-acpi" }
 toyos-dma = { path = "../toyos-dma" }
 toyos-blackbox = { path = "../toyos-blackbox" }
+toyos-blockhold = { path = "../toyos-blockhold" }
 toyos-fat32 = { path = "../toyos-fat32" }
 toyos-elf = { path = "../toyos-elf" }
 toyos-elide = { path = "../toyos-elide" }
