@@ -189,9 +189,12 @@ pub fn flood(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> R
     let mut next = 0usize;
     let mut done = None;
     for line in said.lines() {
-        if let Some(rest) = line.strip_prefix("flood ") {
+        // First: the last line opens with `flood ` too.
+        if line.starts_with(FLOOD_DONE) {
+            done = Some(line.to_string());
+        } else if let Some(rest) = line.strip_prefix("flood ") {
             let Some(n) = rest.split(' ').next().and_then(|n| n.parse::<usize>().ok()) else {
-                continue;
+                return Err(format!("/log carries a flood line with no number: {line:?}"));
             };
             if n != next {
                 return Err(format!(
@@ -200,8 +203,6 @@ pub fn flood(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> R
                 ));
             }
             next += 1;
-        } else if line.starts_with(FLOOD_DONE) {
-            done = Some(line.to_string());
         }
     }
     if next != FLOOD_LINES {
