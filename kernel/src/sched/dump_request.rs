@@ -9,6 +9,13 @@ use core::sync::atomic::{AtomicU8, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicU8, Ordering};
 
+/// The report's handoff: what one report wrote, the next to take the word reads. `dump-report-relaxed` makes
+/// it `Relaxed` so `kernel-loom` can prove the edge is load-bearing; no kernel build turns it on.
+#[cfg(not(feature = "dump-report-relaxed"))]
+const HANDOFF: (Ordering, Ordering) = (Ordering::AcqRel, Ordering::Acquire);
+#[cfg(feature = "dump-report-relaxed")]
+const HANDOFF: (Ordering, Ordering) = (Ordering::Relaxed, Ordering::Relaxed);
+
 /// The bits that say what is pending.
 const PENDING: u8 = 0b011;
 const NONE: u8 = 0;
@@ -86,7 +93,7 @@ impl DumpRequest {
 
     /// Take a pending request and begin its report, unless a report runs: that report's end takes it.
     pub fn take(&self) -> bool {
-        self.update(Ordering::AcqRel, Ordering::Acquire, |word| {
+        self.update(HANDOFF.0, HANDOFF.1, |word| {
             (word & PENDING != NONE && word & REPORTING == 0).then_some(REPORTING)
         })
         .is_ok()
@@ -94,7 +101,7 @@ impl DumpRequest {
 
     /// The report ended. `true` if a request was filed during it: this took it, and the caller reports again.
     pub fn end_report(&self) -> bool {
-        let ended = self.update(Ordering::AcqRel, Ordering::Acquire, |word| {
+        let ended = self.update(HANDOFF.0, HANDOFF.1, |word| {
             Some(if word & PENDING == NONE { NONE } else { REPORTING })
         });
         let (Ok(was) | Err(was)) = ended;

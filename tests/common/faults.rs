@@ -1005,10 +1005,13 @@ pub fn dump_left_pending_is_owed(
             ..Default::default()
         },
     );
-    // Nothing is staged before this line, and the boot log that precedes it is
-    // not read here: the job is asked for once the stage's lines land in what is.
+    // Nothing is staged before this line, which the release prints at the first
+    // pass after it: in the boot log, or after it on a boot that outran that pass.
     const ARMED: &str = "dump-in-blocking-pass: armed";
-    let armed = qemu.drain_until(Duration::from_secs(20), |line| line.contains(ARMED));
+    let mut armed = qemu.boot_log().to_string();
+    if !armed.contains(ARMED) {
+        armed.push_str(&qemu.drain_until(Duration::from_secs(20), |line| line.contains(ARMED)));
+    }
     if !armed.contains(ARMED) {
         return Err(format!("the actuator never armed — is `dump-in-blocking-pass` on?\n{armed}"));
     }
@@ -1020,8 +1023,8 @@ pub fn dump_left_pending_is_owed(
     if let Some(line) = panic.next() {
         return Err(format!(
             "a `PANIC` line is in the log: `{} {}`\n{log}",
-            line.trim(),
-            panic.next().unwrap_or("").trim()
+            unstamped(line),
+            unstamped(panic.next().unwrap_or(""))
         ));
     }
     // A request is filed only once the one before it is accounted for, so the
@@ -1080,7 +1083,7 @@ pub fn dump_left_pending_is_owed(
             .iter()
             .find(|line| line.contains(FROM) && !line.contains("reports from a pass entered at preempt depth 0"))
         {
-            return Err(format!("a pass that may not serve ran a report: `{}`\n{log}", line.trim()));
+            return Err(format!("a pass that may not serve ran a report: `{}`\n{log}", unstamped(line)));
         }
         if count(FROM) != reports {
             return Err(format!("{} of {reports} report(s) said where they ran after {filed}\n{log}", count(FROM)));
@@ -1095,7 +1098,7 @@ pub fn dump_left_pending_is_owed(
         {
             return Err(format!(
                 "a cpu that left a request went back to Ring 3 without serving it: `{}`\n{log}",
-                line.trim()
+                unstamped(line)
             ));
         }
     }
@@ -1106,4 +1109,11 @@ pub fn dump_left_pending_is_owed(
         ));
     }
     Ok(())
+}
+
+/// A kernel line without its `[kernel <seconds> cpuN] ` stamp, which differs on every boot: a
+/// quoted line that kept it would make every red of a rerun a different one.
+fn unstamped(line: &str) -> &str {
+    let line = line.trim();
+    line.strip_prefix("[kernel ").and_then(|rest| rest.split_once("] ")).map_or(line, |(_, said)| said)
 }

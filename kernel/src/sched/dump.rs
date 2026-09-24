@@ -39,10 +39,6 @@ const ANSWER_BUDGET: Budget = Budget::of(
 /// The depth [`request`] runs at from a pass entered at zero: the pass's own level.
 const SERVING_DEPTH: u32 = 1;
 
-/// Late enough that the machine is up and every CPU has joined.
-#[cfg(feature = "boot-actuators")]
-const ARM_AT_NS: u64 = 3_000_000_000;
-
 /// Cap on ordinary parked lines per CPU; anomaly lines are never truncated.
 const LINES_PER_CPU: u32 = 16;
 
@@ -332,6 +328,8 @@ fn probe_silent(asked: &[bool; MAX_CPUS], cpus: usize) {
 /// short enough that the guest still shuts down cleanly.
 #[cfg(feature = "boot-actuators")]
 pub(super) fn deaf_window() {
+    /// Late enough that the machine is up and every CPU has joined.
+    const ARM_AT_NS: u64 = 3_000_000_000;
     /// Comfortably past [`ANSWER_BUDGET`], so silence isn't a race, and
     /// bounded so the guest still shuts down.
     const DEAF_NS: u64 = 400_000_000;
@@ -413,7 +411,7 @@ pub(super) fn deaf_window() {
 pub mod staged {
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use super::{Entered, UnderNothing, ARM_AT_NS, REQUEST};
+    use super::{Entered, UnderNothing, REQUEST};
     use crate::arch::percpu;
 
     /// This many passes in a row with a task on the CPU: a load that does not idle, so nothing but the pass a
@@ -465,7 +463,8 @@ pub mod staged {
             }
         };
         if !ARMED.load(Ordering::Acquire) {
-            if crate::clock::nanos_since_boot() >= ARM_AT_NS && !ARMED.swap(true, Ordering::AcqRel) {
+            // The release: every CPU has joined, so the count above is the machine's.
+            if crate::arch::smp::is_ready() && !ARMED.swap(true, Ordering::AcqRel) {
                 log!("dump-in-blocking-pass: armed");
             }
             return;

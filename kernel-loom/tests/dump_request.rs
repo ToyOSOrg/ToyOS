@@ -4,6 +4,13 @@
 //! reports until a report ends with nothing filed during it, as
 //! `sched::dump::serve` does; one that may not leaves it. The report's own state
 //! is a cell, so two reports at once are loom's `Concurrent write accesses`.
+//!
+//! The negative control relaxes the report's handoff in the real word, and this file must red:
+//!
+//! ```text
+//! cargo test --manifest-path kernel-loom/Cargo.toml --features dump-report-relaxed \
+//!   --test dump_request
+//! ```
 #![cfg(feature = "loom")]
 
 use kernel_loom::dump_request::{DumpRequest, Left};
