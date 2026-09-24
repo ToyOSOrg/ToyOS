@@ -52,11 +52,16 @@ impl Hub {
             readers: AtomicUsize::new(0),
             boot_local,
         });
-        let network = Arc::clone(&shared);
-        std::thread::Builder::new()
-            .name("log-serve-net".into())
-            .spawn(move || serve_network(&network))
-            .expect("logd: the network server's thread could not be started");
+        // A row with no `receives` gives this program no namespace, so no netd,
+        // and no thread to learn so on: its exit would be a kernel record at a
+        // time nothing orders, after a shutdown's last word included.
+        if toyos::endow::namespace().is_some() {
+            let network = Arc::clone(&shared);
+            std::thread::Builder::new()
+                .name("log-serve-net".into())
+                .spawn(move || serve_network(&network))
+                .expect("logd: the network server's thread could not be started");
+        }
         if let Some(acceptor) = local {
             let here = Arc::clone(&shared);
             std::thread::Builder::new()
@@ -77,7 +82,8 @@ impl Hub {
 /// Accept readers on [`PORT`] for the life of the process.
 ///
 /// A machine whose manifest gives this program no netd serves nothing on the
-/// network, and says nothing about it: the row is the decision.
+/// network, and says nothing about it: the row is the decision. A namespace
+/// without netd in it ends this thread at once.
 fn serve_network(shared: &Arc<Shared>) {
     let listener = match std::net::TcpListener::bind(("0.0.0.0", PORT)) {
         Ok(listener) => listener,
