@@ -3,6 +3,13 @@ name: ci
 # A pull request and the merge queue: the host tests, and no guest. Each step
 # is `cargo run -- --ci <job>` (src/ci.rs), which runs the same on a dev host;
 # nightly.yml boots the guests.
+#
+# The two required checks read different events, and neither is absent on the
+# other — it is skipped, which a required check counts as passing: `abi-split`
+# runs on the pull request alone, where the branch's own commits are; `host`
+# runs only in the merge queue, where every branch has already been judged as
+# a pull request. That is how each half enters the queue it does not itself
+# run in.
 
 on:
   pull_request:
@@ -14,17 +21,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # macOS, because `toyos-fat32`'s fixtures are formatted with `newfs_msdos`
-  # and `hdiutil`.
-  host:
-    runs-on: macos-latest
-    timeout-minutes: 45
+  # The ABI-first rule and the published crates' versions, read from the
+  # branch's own commits — a merge group's commits were each already judged
+  # this way as a pull request, so this does not run there.
+  abi-split:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      # Full history: `abi-split` reads the branch's own commits, and the
-      # tracker's citation gate reads deleted slugs out of `git log`.
+      # Full history: `abi_lands_alone` walks `origin/main..HEAD`.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+
+      - run: cargo run -- --ci abi-split
+
+  # macOS, because `toyos-fat32`'s fixtures are formatted with `newfs_msdos`
+  # and `hdiutil`. Only in the merge queue: `abi-split` already ran this
+  # branch as a pull request, and this is the one place every queued branch
+  # meets before `main` moves.
+  host:
+    if: github.event_name == 'merge_group'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # nightly.yml's `host` is the one writer; the paths are the cache's
       # version, so they are the writer's list.
@@ -45,23 +66,6 @@ jobs:
       - run: cargo run -- --ci host
 
       - if: ${{ !cancelled() }}
-        run: cargo run -- --ci abi-split
-
-      - if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: cargo run -- --ci gate-stage
-
-  # `main`'s ruleset still requires these four names, and none of them is a
-  # check any more: the toolchain and every guest are nightly.yml's, and
-  # abi-split and gate-stage are steps of `host`. Each reports green, so
-  # `host` alone decides a merge; they go when the ruleset requires `host`
-  # alone.
-  build: &placeholder
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - run: echo "a name the ruleset requires with nothing behind it; host is the gate"
-  guest-suite: *placeholder
-  abi-split: *placeholder
-  gate-stage: *placeholder
