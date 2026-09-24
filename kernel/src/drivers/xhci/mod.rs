@@ -615,6 +615,9 @@ struct Awaited {
     returns_by: u64,
     /// It left owing a flush (`msc::MscDevice::owes_a_flush`).
     owed_flush: bool,
+    /// The disk's loss count it handed on, this departure counted
+    /// (`msc::MscDevice::losses_left`).
+    losses: u64,
 }
 
 /// Where the machine's `index`-th disk is, for an operation that found it
@@ -1368,6 +1371,7 @@ impl XhciController {
             port_idx,
             returns_by,
             owed_flush: disk.dev.owes_a_flush(),
+            losses: disk.dev.losses_left(),
         });
         log!(
             "usb-storage: disk {} left port {} ({why}) after this driver reset it; it is held {} ms \
@@ -1378,10 +1382,10 @@ impl XhciController {
         );
     }
 
-    /// The number of a disk held for its device, if the device that bound as `identity` on `port_idx` is it, and whether it left owing a flush; the record is spent when it matches. Every held disk it is not says why.
+    /// The number of a disk held for its device, if the device that bound as `identity` on `port_idx` is it, the loss count it handed on and whether it left owing a flush; the record is spent when it matches. Every held disk it is not says why.
     ///
     /// Asked at the end of a bind, and every record still here is one the enumeration that began it was inside the window of ([`Self::forget_the_unreturned`]): a device's own bind is not what makes it late.
-    fn adopt(&mut self, identity: &toyos_xhci::identity::Identity, port_idx: u8) -> Option<(usize, bool)> {
+    fn adopt(&mut self, identity: &toyos_xhci::identity::Identity, port_idx: u8) -> Option<(usize, u64, bool)> {
         let mut adopted = None;
         self.awaited.retain(|held| {
             if adopted.is_some() {
@@ -1389,7 +1393,7 @@ impl XhciController {
             }
             match toyos_xhci::identity::same(&held.identity, identity) {
                 Ok(()) => {
-                    adopted = Some((held.index, held.owed_flush));
+                    adopted = Some((held.index, held.losses, held.owed_flush));
                     false
                 }
                 Err(why) => {
@@ -1606,24 +1610,38 @@ pub fn flush_disks() {
     // itself, the way every other caller does.
     for index in 0..storage_count() {
         let _op = crate::block::begin_operation();
-        let outcome = storage_flush(index);
+        let mut losses = 0;
+        let outcome = storage_flush(index, &mut losses);
+        // A disk that lost writes no writer was told of is not flushed, whatever
+        // its cache says now: this line is the last that can say so.
+        let untold = crate::drivers::usb_storage::untold(index, losses);
         // Read after the flush, because the flush is what sets it on a device
         // that had not been asked before.
         let no_cache = outcome.is_ok() && storage_has_no_cache(index);
         disks += 1;
-        flushed += u32::from(outcome.is_ok());
-        cacheless += u32::from(no_cache);
-        match no_cache {
-            true => log!(
+        flushed += u32::from(outcome.is_ok() && !untold);
+        cacheless += u32::from(no_cache && !untold);
+        match (untold, no_cache) {
+            (true, _) => log!(
+                "usb-quiesce: disk {index} SYNCHRONIZE CACHE {}, but {UNTOLD}",
+                Flushed(outcome)
+            ),
+            (false, true) => log!(
                 "usb-quiesce: disk {index} implements no SYNCHRONIZE CACHE, so it owed none"
             ),
-            false => log!("usb-quiesce: disk {index} SYNCHRONIZE CACHE {}", Flushed(outcome)),
+            (false, false) => {
+                log!("usb-quiesce: disk {index} SYNCHRONIZE CACHE {}", Flushed(outcome))
+            }
         }
     }
     // Not logged here: the summary belongs beside what the register stop did,
     // and that is written into the black box from below the boot's last word.
     stop::flushed(disks, flushed, cacheless);
 }
+
+/// What the shutdown says of a disk that lost writes no writer was told of.
+const UNTOLD: &str = "writes its device reported complete before it left owing a flush were \
+    lost and no writer's flush has said so; the disk is not counted flushed";
 
 /// How long the shutdown waits for the controller lock before going on without
 /// it.

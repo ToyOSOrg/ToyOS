@@ -8,7 +8,7 @@
 
 use alloc::vec;
 
-use crate::block::Handle;
+use crate::block::{BlockDevice, Handle};
 use crate::drivers::usb_storage;
 
 /// 16 bytes so the block count behind it stays 8-byte aligned.
@@ -150,7 +150,8 @@ fn check(index: usize, disk: &Handle) {
     // budget= separates `BudgetExpired` from `BlockError::Device`.
     let spent = {
         let _op = crate::scheduler::Operation::begin(crate::time::Deadline::passed());
-        crate::drivers::xhci::storage_read(index, at(blocks, HOST_BLOCKS[0]), 1, &mut buf)
+        // Past the block layer, which is the point; a read answers no writer's flush.
+        crate::drivers::xhci::storage_read(index, at(blocks, HOST_BLOCKS[0]), 1, &mut buf, &mut 0)
     };
     log!("usb-gate: read with a spent budget refused={} budget={}",
         spent.is_err(),

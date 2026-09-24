@@ -587,6 +587,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
             None => log!("pc-unbind-selftest: FAIL (this boot has no metadata page cache)"),
         }
     }
+    #[cfg(feature = "boot-actuators")]
+    if actuator::partclaim_table_unanswered() {
+        page_cache::refuse_table_reads();
+    }
     // After every driver has registered: the number under test is one a real device holds.
     #[cfg(feature = "boot-actuators")]
     if actuator::block_duplicate_id() {

@@ -1900,8 +1900,8 @@ enum Moved {
     SlowStick,
     /// The stick itself, broken by `usb-transport-break-owed` on a write that
     /// went out while an earlier one was reported complete and not flushed: it
-    /// is taken back, and its next flush fails, since a device that comes back
-    /// is not known to have kept its cache.
+    /// is taken back, and the flush of the writer whose write that was fails,
+    /// since a device that comes back is not known to have kept its cache.
     OwedFlush,
     /// The stick itself, broken by `usb-transport-break-flushed` on the first
     /// write after a flush that succeeded over the one before it: it is taken
@@ -1939,9 +1939,13 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
     const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
     const MOVE_NOW: &str = "usb-reset-moves: move the device now";
     const STALLED: &str = "answers slowly (usb-slow-return): its bind is stalled";
-    const OWED: &str = ", and it left owing a flush of writes it had reported complete, so its \
-        next flush fails";
-    const FLUSH_LOST: &str = "flush failed: its device came back from leaving its port owing a flush";
+    const OWED: &str = ", and it left owing a flush of writes it had reported complete, so the \
+        flush of each writer whose writes they were fails";
+    const FLUSH_LOST: &str =
+        "made before its disk came back owing a flush may not have survived, and its flush says so";
+    // The stick's one writer at the break is `/log`: logd's first batch is
+    // the first WRITE(10) that goes out owing a flush.
+    const LOG_TOLD: &str = "writes the kernel (log) made before its disk came back owing a flush";
     const STILL_HELD: &str = "is still held when this call may wait no longer";
     const AFTER_A_FLUSH: &str = "breaks next (usb-transport-break-flushed)";
     const SILENT: &str = "answers nothing on the operation sent again on it (usb-return-silent)";
@@ -2154,7 +2158,7 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
             let mut want = left.to_vec();
             want.extend(back.iter().cloned());
             want.push(OWED.to_string());
-            want.push(format!("usb-storage: disk 0 {FLUSH_LOST}"));
+            want.push(LOG_TOLD.to_string());
             in_order(&want)?;
             for never in [" did not come back within ", "disk 1 ready", " is not disk 0 come back"] {
                 if let Some(line) = log.lines().find(|l| l.contains(never)) {
@@ -2162,8 +2166,8 @@ fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
                 }
             }
             eprintln!(
-                "  [usb] a stick that left owing a flush was taken back as disk 0, and its next \
-                 flush failed by name"
+                "  [usb] a stick that left owing a flush was taken back as disk 0, and the flush of \
+                 /log, whose write it lost, failed by name"
             );
         }
         Moved::SilentReturn => {

@@ -2590,6 +2590,7 @@ mod tests {
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",
+        "tests/partclaimcase/system.toml",
         "tests/pkgcase/system.toml",
         "tests/sshdcase/system.toml",
         "tests/testcases/system.toml",

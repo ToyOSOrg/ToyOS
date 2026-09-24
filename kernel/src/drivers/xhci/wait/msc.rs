@@ -27,7 +27,7 @@ use super::super::device::Endpoint;
 use toyos_xhci::bot::Phase;
 use toyos_xhci::call::{AfterBreak, NotIssued};
 use toyos_xhci::configure::{self, BulkEndpoint};
-use toyos_xhci::flush::{Debt, Flush};
+use toyos_xhci::flush::Debt;
 use toyos_xhci::identity::{self, Identity, Serial, UsbId};
 use toyos_xhci::ladder::{self, AfterReset, Left, PortStep, Rung};
 use toyos_xhci::port;
@@ -114,8 +114,8 @@ pub struct MscDevice {
     /// Set once the device refuses SYNCHRONIZE CACHE; logged once, not per
     /// flush — a log line would itself be pending content the next flush drains.
     no_write_cache: bool,
-    /// The flush this instance owes: its own writes, and whatever it took the
-    /// disk back owing ([`Self::owes_a_flush`]).
+    /// The flush this instance owes for its own writes, and how many devices
+    /// serving this disk left owing one ([`Self::owes_a_flush`]).
     debt: Debt,
     /// What the device says it is, which a device that binds after this one
     /// left must match to take its number.
@@ -168,10 +168,16 @@ impl MscDevice {
     }
 
     /// Whether a device that left now could take writes reported complete with
-    /// it: its own, held in a volatile cache no flush has emptied since, or a
-    /// debt it took the disk back with (`toyos_xhci::flush`).
+    /// it: held in a volatile cache no flush has emptied since
+    /// (`toyos_xhci::flush`).
     pub(in crate::drivers::xhci) fn owes_a_flush(&self) -> bool {
         self.debt.owed(self.no_write_cache)
+    }
+
+    /// The disk's loss count this device hands the one that takes the disk
+    /// back, were it to leave now.
+    pub(in crate::drivers::xhci) fn losses_left(&self) -> u64 {
+        self.debt.left(self.no_write_cache)
     }
 
     /// The device reported a transfer complete, whole or in part; `write` is
@@ -935,12 +941,6 @@ impl XhciController {
             let number = disk.index;
             let dev = &mut disk.dev;
             if dev.failed {
-                return Err(BlockError::Device);
-            }
-            if dev.debt.flush() == Flush::Lost {
-                log!("usb-storage: disk {number} flush failed: its device came back from leaving \
-                     its port owing a flush, so writes it reported complete before then may not \
-                     have survived, and no flush now can say they are durable");
                 return Err(BlockError::Device);
             }
             // **The latch decides before the command is built, not after it is
@@ -2181,8 +2181,8 @@ pub(in crate::drivers::xhci) fn bind(
     // holds for life, so it must not move when another controller binds or
     // loses a disk — and a device that is a disk this driver's reset lost
     // takes that disk's back.
-    if let Some((index, owed)) = ctrl.adopt(&dev.identity, port_idx) {
-        dev.debt = Debt::adopted(owed);
+    if let Some((index, losses, owed)) = ctrl.adopt(&dev.identity, port_idx) {
+        dev.debt = Debt::adopted(losses);
         log!("usb-storage: disk {index} came back on port {} slot {slot_id} as the same device \
              (USB {:04x}:{:04x}, serial number {}, {} blocks of {} B), msc_block +{:#x}; its \
              volume carries on{}",
@@ -2207,7 +2207,7 @@ pub(in crate::drivers::xhci) fn bind(
 
 /// What the adopting line adds for a disk whose device came back owing a flush.
 const OWED_A_FLUSH: &str = ", and it left owing a flush of writes it had reported complete, so \
-    its next flush fails";
+    the flush of each writer whose writes they were fails";
 
 /// A bind stalled while another disk is held for its device: what it says it
 /// is doing, and for how long.
@@ -2463,16 +2463,32 @@ impl core::fmt::Display for Printable<'_> {
 /// ([`crate::block::begin_operation`]); a call with no budget established
 /// above it is refused by name. [`BlockError::BudgetExpired`] is that
 /// refusal; [`BlockError::Device`] is everything else.
-pub fn storage_read(index: usize, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
-    served(index, |ctrl, local| ctrl.msc_read(local, lba, count, buf))
+///
+/// `losses` is set to the disk's loss count as the device that ran the
+/// operation counts it (`crate::block::BlockDevice::losses`), here and in
+/// [`storage_write`] and [`storage_flush`].
+pub fn storage_read(
+    index: usize,
+    lba: u64,
+    count: u32,
+    buf: &mut [u8],
+    losses: &mut u64,
+) -> BlockResult {
+    served(index, losses, |ctrl, local| ctrl.msc_read(local, lba, count, buf))
 }
 
-pub fn storage_write(index: usize, lba: u64, count: u32, buf: &[u8]) -> BlockResult {
-    served(index, |ctrl, local| ctrl.msc_write(local, lba, count, buf))
+pub fn storage_write(
+    index: usize,
+    lba: u64,
+    count: u32,
+    buf: &[u8],
+    losses: &mut u64,
+) -> BlockResult {
+    served(index, losses, |ctrl, local| ctrl.msc_write(local, lba, count, buf))
 }
 
-pub fn storage_flush(index: usize) -> BlockResult {
-    served(index, |ctrl, local| ctrl.msc_flush(local))
+pub fn storage_flush(index: usize, losses: &mut u64) -> BlockResult {
+    served(index, losses, |ctrl, local| ctrl.msc_flush(local))
 }
 
 /// One operation on the machine's `index`-th disk, issued again, whole, on the
@@ -2485,8 +2501,9 @@ pub fn storage_flush(index: usize) -> BlockResult {
 /// command is issued again from the caller's own buffer, whole: every CDB here
 /// is idempotent, so blocks of it the device took before it left are written
 /// with the same bytes, and a block it took half of is written whole. A device
-/// that left owing a flush comes back with its next flush failing
-/// ([`MscDevice::owes_a_flush`]).
+/// that left owing a flush comes back counting the loss on the disk
+/// ([`MscDevice::owes_a_flush`]), read into `losses` under the lock the
+/// operation ran under, so the count is the one of the device that ran it.
 ///
 /// **The operation is one call, and its bound is the call's**
 /// (`toyos_xhci::call`): opened by the first break or by finding the disk
@@ -2500,7 +2517,11 @@ pub fn storage_flush(index: usize) -> BlockResult {
 /// `block::OPERATION`; or where the call's bound says, both of which answer
 /// `BudgetExpired`: nothing was issued while it waited, and the caller asks
 /// again above every lock.
-fn served(index: usize, mut op: impl FnMut(&mut XhciController, usize) -> BlockResult) -> BlockResult {
+fn served(
+    index: usize,
+    losses: &mut u64,
+    mut op: impl FnMut(&mut XhciController, usize) -> BlockResult,
+) -> BlockResult {
     let until = Operation::deadline();
     let mut call = AfterBreak::CLOSED;
     // Once the disk was found held: until when this call may wait for it, which
@@ -2518,6 +2539,9 @@ fn served(index: usize, mut op: impl FnMut(&mut XhciController, usize) -> BlockR
                 return_silent::end();
             }
             call = core::mem::replace(&mut ctrl.after_break, AfterBreak::CLOSED);
+            if let Some(disk) = &ctrl.msc[at].disk {
+                *losses = disk.dev.debt.losses();
+            }
             (done, ctrl.msc[at].disk.is_none())
         });
         let (done, held) = match ran {
