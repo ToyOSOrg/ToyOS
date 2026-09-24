@@ -16813,6 +16813,10 @@ fn quarantined_for_something_else(row: &Quarantined) -> String {
 /// one twice; it is a different and larger one, and the line now says which it
 /// was.
 ///
+/// Which of the two it is is not a text comparison — an assertion that prints
+/// what it measured writes a different sentence every time it fires, so
+/// `toyos_build::alone::same_failure` decides it and both readings are quoted.
+///
 /// The green arms are untouched. They are a classification the issue files are
 /// written against, and nothing about them was wrong.
 ///
@@ -16843,9 +16847,14 @@ fn alone_line(name: &str, wide: &str, shared_the_host: bool, alone: Option<&Outc
         ),
         Verdict::Fail(_) | Verdict::Quarantined(_) => {
             let said = headline(outcome.reason.as_deref());
-            if said == wide {
-                format!("  ALONE {name}: red again, the same failure both times — the defect \
-                         is real. {said}")
+            // One decision and one classifier: byte equality is the case
+            // `same_failure` already answers, so asking it first would be a
+            // second rule nothing tests.
+            if toyos_build::alone::same_failure(&said, wide) {
+                format!(
+                    "  ALONE {name}: red again, the same failure both times — the defect is \
+                     real.\n      wide:  {wide}\n      alone: {said}"
+                )
             } else {
                 format!(
                     "  ALONE {name}: red again on a DIFFERENT failure — it failed twice, on two \
@@ -16911,6 +16920,25 @@ fn alone_line_reports_the_alone_run() -> Result<(), String> {
     }
     if same.contains("[kernel 2.639") {
         return Err(format!("the line pasted the whole capture into the summary:\n{same}"));
+    }
+
+    // One assertion at two readings: still a reproduction, and it quotes both
+    // rather than picking one.
+    const MEASURED: &str = "the controller started at 0.303 s, past the 0.3 s the ports are held \
+                            empty for";
+    const AGAIN: &str = "the controller started at 0.300 s, past the 0.3 s the ports are held \
+                         empty for";
+    let twice = alone_line("a_test", MEASURED, false, Some(&red(AGAIN)));
+    if !twice.contains("red again, the same failure both times") {
+        return Err(format!("one assertion at two readings reads as two assertions:\n{twice}"));
+    }
+    // The labels are the whole content of the line: two sentences under swapped
+    // labels is the mis-attribution this gate exists to stop, said in the other
+    // direction.
+    for (label, sentence) in [("wide:  ", MEASURED), ("alone: ", AGAIN)] {
+        if !twice.contains(&format!("{label}{sentence}")) {
+            return Err(format!("{sentence:?} is not the line's {label:?} run:\n{twice}"));
+        }
     }
 
     // And the case the old line could not tell apart from it.
