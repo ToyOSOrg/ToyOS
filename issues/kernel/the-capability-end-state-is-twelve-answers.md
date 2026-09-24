@@ -68,7 +68,11 @@ own arm — `Rights::NONE` where the handle alone is the authority
 unstated is a right each call site invents" (`toyos-abi/src/handle.rs:53`). The
 qualification is question 5's ambient set.
 
-## 2. Is every authority ultimately derived from a handle/capability? — RULED 2026-08-20
+## 2. Is every authority ultimately derived from a handle/capability? — RULED 2026-08-20, REVERSED 2026-09-24
+
+**Reversed by the owner: isolation is non-negotiable, and the filesystem
+comes inside the model.** `issues/isolation/every-program-sees-only-the-files-it-was-given.md` holds it. The 2026-08-20 ruling below is kept
+as the record of what the tree still does until that track lands.
 
 **The owner ruled: the filesystem is deliberately outside the capability
 model, and the exception is declared** — the root `CLAUDE.md`'s Capabilities

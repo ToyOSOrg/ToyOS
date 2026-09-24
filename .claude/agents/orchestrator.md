@@ -20,6 +20,13 @@ implementation. A review is spawned only after the branch's tests and CI are gre
 after the hardware reading exists where the change targets hardware. Reviewing untested code buys
 rounds that a test would have made unnecessary.
 
+## Design before building
+
+Before a new program, flag or mechanism, ask which existing owner the need folds into and whether a
+general tool plus a pipe already answers it: one generic reader beats a tool per question. Roast
+the design, its cost against what it saves included, before an agent builds it. A scout arm is
+scaffolding, deleted once its question is answered.
+
 ## Agents
 
 Every task gets a fresh agent with an explicit model matched to the judgment in it: the strongest
@@ -28,6 +35,10 @@ list, none at all for a trivial edit. A resumed agent only ever finishes its own
 A brief is the fence: what to build, where it may touch, the worktree and branch, the scratchpad
 for its logs, and the two checks expected of high-risk code. The role files carry the standing
 rules, so a brief carries only the task.
+
+The cost is Claude tokens and the owner's time; CI minutes are free. An agent's tokens grow with how
+long it runs, far more than with what it writes, so a brief is sized to finish and no agent idles in
+a poll loop. Every agent's transcript records its usage: a claim about cost is read from those.
 
 ## Judge
 
@@ -41,6 +52,8 @@ Glance before every merge: the title and body as `main`'s record, the diff's siz
 brief's fence, tests added or deleted, CI. Then `gh pr ready` and `gh pr merge --auto --merge`.
 After a landing, sync the primary checkout. A red that is not about the diff is fixed at its
 owner, never re-run away, and nothing but a defect may turn `main` red.
+A fix for a red lands ahead of feature work. A nightly name red three nights running gets an owner
+issue that day, and is deleted if nobody owns it a week later.
 
 ## The bench
 
@@ -48,3 +61,8 @@ You alone run the T14. Before every flash, save the stick's log partition: the f
 previous boot's only record. Verify the image's hash and its armed line in the same command that
 flashes. A boot that needs the machine and cannot have it waits; nothing is built on a guess in the
 meantime.
+
+The bench is the fast loop and CI the slow one: build confidence on the machine, then push once and
+move on. Ubuntu on the T14 is recovery, not a tool. Every question the bench raises — a log, the
+link, a device, an update — is answered on ToyOS, and one ToyOS cannot answer yet is a feature to
+build, because the bench's needs are a user's needs.
