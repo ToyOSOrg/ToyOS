@@ -19,9 +19,9 @@ into it, and a program launched inside the session holds what the session's
 launcher row grants it. Until this lands there is one implicit user and a
 package writes under `/apps/<name>/` only.
 
-Blocked on nothing: the mount protocol and real bcachefs change what backs
-`/home`, not what a user is. Constraints a builder would otherwise re-derive: paths are ambient by the
-owner's ruling (`issues/kernel/the-capability-end-state-is-twelve-answers.md`),
-so a per-user home is a convention plus a handle, not a permission check; the
+Stage 3 of `issues/isolation/every-program-sees-only-the-files-it-was-given.md`, and blocked on its first two stages: a user is isolated only
+once a session's view is all it can name. The mount protocol and real bcachefs
+change what backs `/home`, not what a user is. Constraints a builder would
+otherwise re-derive: the
 sshd key path already has the login-row shape and is the first consumer; the
 ROOT image stays immutable, so the user list lives on DATA.

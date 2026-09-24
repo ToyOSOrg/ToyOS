@@ -97,10 +97,10 @@ shape if wanted.
 ## Paths
 
 No drive letters, no `/usr`, `/var`, `/opt`, `/dev`, `/proc` or `/sys`:
-devices and processes are capabilities and syscalls here, not files. Paths are
-ambient by the owner's ruling
-(`issues/kernel/the-capability-end-state-is-twelve-answers.md`), so the
-hierarchy is a convention, and `/boot`'s mount guard is the one restriction.
+devices and processes are capabilities and syscalls here, not files. Each
+process sees the part of this hierarchy its parent gave it
+(`issues/isolation/every-program-sees-only-the-files-it-was-given.md`); today paths are still ambient and `/boot`'s mount guard is the one
+restriction.
 
 - `/boot` — bootloader, kernel, kernel arguments.
 - `/system` — the OS image, read-only, versioned: today's `bin`, `lib`, `share`

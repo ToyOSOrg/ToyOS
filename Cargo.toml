@@ -20,6 +20,7 @@ members = [
     "toyos-abi",
     "toyos-acpi",
     "toyos-blackbox",
+    "toyos-blockhold",
     "toyos-bootmap",
     "toyos-cc",
     "toyos-desktop",
@@ -70,10 +71,9 @@ exclude = [
     # The userland SDK. It compiles against the ToyOS sysroot and is a path
     # dependency of `rust/library/std`, so it keeps its own resolution and
     # cannot be a member. It is host-tested all the same — its `lib.rs` is
-    # `cfg_attr(not(test), no_std)` and `host-tests.yml`'s `toyos SDK host
-    # tests` step runs `cargo test` in it against the host triple. Every crate
-    # in `exclude` that has host tests is named in that workflow; nothing here
-    # reaches them.
+    # `cfg_attr(not(test), no_std)` and `cargo run -- --ci host-full` runs
+    # `cargo test` in it against the host triple. Every crate in `exclude` that
+    # has host tests is named in `src/ci.rs`; nothing here reaches them.
     "toyos",
     # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
     # its own directory. The harness's own integration test lives here too
@@ -96,7 +96,9 @@ fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
 # `statvfs` for `worktree::free_bytes`; `getloadavg` and the libproc pair
-# (`proc_listallpids`/`proc_pidpath`) for gate A's host-conditions line.
+# (`proc_listallpids`/`proc_pidpath`) for gate A's host-conditions line; and the
+# unprivileged ICMP datagram socket `icmp::echo` asks a metal boot over, which
+# is the platform call that replaces a `ping` binary.
 libc = "0.2"
 toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
@@ -133,6 +135,11 @@ sha2 = "0.10"
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
 toyos-ld = { path = "toyos-ld" }
+# The I219 driver's own words and its PHY probe's exit-code table, so the
+# harness judging netd's `exit:` record off the T14 and netd writing it read one
+# declaration. Pure and `no_std`, so it compiles for the host as it does for
+# the guest.
+toyos-i219 = { path = "toyos-i219" }
 # The scheduler core, for the one type the check build publishes and the
 # harness judges: `cpu::PassCostReport` is the wire form of the pass-cost
 # distribution, and its `Display`/`parse` pair is what keeps the kernel that
@@ -149,7 +156,9 @@ toyos-sched = { path = "toyos-sched", features = ["check"] }
 # The root-hub port machine, for the three durations `xhci_slow_connect` derives
 # its bounds from: `DEBOUNCE_NS`, `EMPTY_BUS_NS` and `SLOW_CONNECT_NS` are
 # declared once there and `use`d by the driver, so the window the harness
-# certifies and the one the driver holds cannot drift apart.
+# certifies and the one the driver holds cannot drift apart. Also the Bulk-Only
+# phases, so the harness judging a wedge reads the word `toyos_xhci::bot::Phase`
+# declares instead of spelling it a second time.
 toyos-xhci = { path = "toyos-xhci" }
 # The second reader `pkg_install_gbae` is judged against: what is read back off
 # the guest's volume is compared with a third party's decoding of the committed

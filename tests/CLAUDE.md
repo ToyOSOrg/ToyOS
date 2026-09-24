@@ -1,6 +1,6 @@
 # Tests
 
-The mechanics live where the work is: profiles and shapes in `tests/common/`, registration, tiers and `EXPECTED_FAILURES` in `tests/toyos.rs`, instruments and known reds in `src/redlist.rs`, the relegation record in `src/tiers.rs` — read those, not this file, for how the harness works.
+The mechanics live where the work is: profiles and shapes in `tests/common/`, registration and tiers in `tests/toyos.rs`, known reds in `src/redlist.rs`'s `QUARANTINE`, the fast tier's line in `src/tiers.rs` — read those, not this file, for how the harness works.
 
 ## Caveats that bite every agent
 
@@ -16,13 +16,12 @@ The mechanics live where the work is: profiles and shapes in `tests/common/`, re
 - **A boot's capture has two pieces** — `boot_log()` ends at the ready marker, `run_test`'s capture begins at `===TEST_START===`, and the lines between land in `TestResult::before`; a test reading a daemon's boot line appends it.
 - **A file's last close does not flush it synchronously** — a test that reads the backing device behind the kernel's back first lets `iod` drain; a spawn or `dlopen` of a just-closed file needs no drain (`Vfs::open_backing` settles the queue itself).
 - **Every guest this host boots is TCG** — anything vendor-dependent is gated only by CI's KVM shards, and TCG prices an uncontended atomic read-modify-write unlike hardware.
-- **CI's `guest` lane is two different machines** — hosted shards for pull requests, pushes and queue refs, the T14 for `workflow_dispatch` and non-`ci.yml` schedules — and a duration measured on one does not transfer: `tests/test-durations` is hosted, and only a hosted run renders the tier verdict.
+- **CI's `guest` lane is GitHub-hosted shards, never the T14** — the T14 is the orchestrator's own metal loop (`src/metal.rs`), reached by nothing in `.github/workflows/`; `tests/test-durations` is hosted, and a duration measured on the T14 does not transfer.
 - **The dev host's guests boot `-cpu qemu64`, which has no PCID** — every `INVPCID` path is dead locally, so a change gated on a CPUID feature is unverified by a green local suite.
 - **A liveness ceiling scales by two host facts** — boot-derived host speed *and* the guest's own `vcpus/cores` oversubscription. Widen a *liveness* guard for this, never a correctness bound.
 - **A wedge verdict needs both the budget spent and the guest gone quiet** — a healthy idle guest can be silent for minutes, and a guest still talking past its budget is slow, not stuck; only a far backstop stands behind a guest that keeps talking.
-- **A new registered name costs two CI cycles** — `UNMEASURED` buys one measured run and a re-tier buys a second; a name is Fast only under `FAST_COMMIT_MS`; a landing renders the price verdict only for the names it registered or re-tiered; a Rust guest test's registration is its file under `tests/toyos-rust-tests/src/bin/`.
 - **A measured bound is asserted against the derivation, never against the measurement** — a bound that has to be widened to pass is a finding. A test asserting a kernel `Budget` never expires asserts a bound the kernel does not promise; the red is only the outcome that is neither the answer nor the declared degradation.
-- **A test named as evidence may itself be declared expected-red** — check `EXPECTED_FAILURES` before quoting a test's name; and an entry's `says` list matches a *message*, not a cause, so read the capture, never the declaration.
+- **A test named as evidence may itself be quarantined** — ask `cargo run -- --known-red <name>` before quoting it; a row's `says` matches a *message*, not a cause, so read the capture, never the row.
 - **A crafted-input test asserts the harm before the return value, and never Debug-prints a refused value** — an unrefused one is as large as the input asked for.
 - **A stimulus sent through a channel that can silently lose it is verified before its effect is asserted** — QEMU's PS/2 queue drops the seventeenth byte, so typed input paces against the guest's report (`shell_type_once`); a guest's console reaches the host as whole lines only, so a partial line exists on no channel.
 - **A harness field that can be silently inert is this suite's worst defect class** — where two options can describe the same guest they refuse each other by name, and an image is asked what it is armed with.

@@ -22,7 +22,7 @@
 //! `Causality violation: Concurrent write accesses to UnsafeCell`, which is the
 //! defect stated exactly. Verified 2026-08-16 and again 2026-08-19 after the
 //! merge with `main`, both ways round; the step that runs it is
-//! `host-tests.yml`'s "kernel-loom inbox publication has teeth", which demands
+//! `src/ci.rs`'s `CONTROLS`, which demands
 //! `a_record_reaches_its_taker_intact ... FAILED` by name.
 //!
 //! **Invariant W's own teeth are a mutation rather than a feature**, because
@@ -276,7 +276,7 @@ fn an_overflow_is_reported_once_and_then_cleared() {
 /// puts the producers back on `post`: loom then answers **`Causality
 /// violation: Concurrent write accesses to UnsafeCell`**, which is the defect
 /// stated exactly. Verified 2026-08-19, both ways round, and run by
-/// `host-tests.yml`'s "kernel-loom lock-free post has teeth", which demands
+/// `src/ci.rs`'s `CONTROLS`, which demands
 /// this test's own `... FAILED` line.
 #[test]
 fn two_unlocked_producers_are_a_race_and_a_signal_is_not() {

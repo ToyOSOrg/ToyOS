@@ -245,7 +245,7 @@ changes.
 
 - **`console_locale_detect`** — added 2026-08-20, first push-triggered `main`
   sighting: `ci` run `32314166262`, `guest (9)`, headSha `eba06ad6`, found
-  auditing the merge-health backfill (`issues/build/the-eased-merge-law-carries-a-threshold.md`).
+  auditing the merge-health backfill.
   `STALLED: waiting for the wizard to ask for a key under /system/bin/console — the
   console did not lend it the keyboard — it never stopped talking and never got
   there`, `ALONE … GREEN` on the harness's own re-run. Same shape as

@@ -8,16 +8,27 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod bot;
+pub mod call;
+pub mod configure;
 pub mod enumerate;
+pub mod flush;
+pub mod identity;
 pub mod invariants;
 pub mod job;
+pub mod late;
+pub mod ladder;
 pub mod port;
 pub mod protocol;
 pub mod portsc;
 pub mod recovery;
+pub mod reset_recovery;
+pub mod ring;
+pub mod scan;
 
 pub use job::{Await, Outcome, Outstanding};
 pub use port::{Effect, Gone, Nanos, PortState, Step};
 pub use portsc::{LinkState, Portsc};
 pub use protocol::{Protocol, Protocols};
 pub use recovery::{EndpointState, Recovery};
+pub use ring::{NotOnTheRing, Ring};

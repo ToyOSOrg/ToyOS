@@ -97,6 +97,24 @@ pub const CACHE_LINE: usize = 64;
 /// the tail of a panel is the crash and the head is how the boot went.
 pub const TEXT_BYTES: usize = BYTES - HEADER;
 
+/// Room no report may spend, kept for the account [`Report::reopened`] writes
+/// under it.
+///
+/// **Two writers, one page, and the second runs after the first has filled it.**
+/// A report ends with [`Report::tail`], which takes every byte left; the reset
+/// that follows then has an account of its own — what it did to the machine's
+/// devices — and `reopened` on a full page writes it into no bytes at all and
+/// says nothing about having done so. That account is the only evidence there
+/// is about the reset, and a boot whose log ring overflowed the page is exactly
+/// the boot whose reset is worth reading about, so the reserve comes off the
+/// records rather than off the account.
+///
+/// An eighth of the page.
+pub const ACCOUNT_BYTES: usize = 2048;
+
+/// What a report's own head and tail may spend: [`TEXT_BYTES`] less the reserve.
+pub const REPORT_BYTES: usize = TEXT_BYTES - ACCOUNT_BYTES;
+
 /// What the last boot got as far as saying.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
@@ -242,11 +260,15 @@ fn seal_len(page: &mut [u8; BYTES], state: State, stamp: u64, identity: Identity
 pub struct Report<'a> {
     page: &'a mut [u8; BYTES],
     at: usize,
+    /// What this writer may fill to. [`REPORT_BYTES`] for a report, the whole
+    /// of [`TEXT_BYTES`] for the account that reopens one — the reserve exists
+    /// for the second and is spent by nobody else.
+    limit: usize,
 }
 
 impl<'a> Report<'a> {
     pub fn new(page: &'a mut [u8; BYTES]) -> Self {
-        Self { page, at: 0 }
+        Self { page, at: 0, limit: REPORT_BYTES }
     }
 
     /// Carry on writing a report already sealed into this page, `kept` bytes long.
@@ -258,13 +280,13 @@ impl<'a> Report<'a> {
     /// than over it. `kept` is [`recover`]'s own answer for this page; a longer
     /// one is cut to what the text area holds, so nothing here indexes past it.
     pub fn reopened(page: &'a mut [u8; BYTES], kept: usize) -> Self {
-        Self { page, at: kept.min(TEXT_BYTES) }
+        Self { page, at: kept.min(TEXT_BYTES), limit: TEXT_BYTES }
     }
 
     /// Append, dropping whatever does not fit. Nothing here indexes or unwraps:
     /// the caller may not panic.
     pub fn write(&mut self, bytes: &[u8]) {
-        let room = TEXT_BYTES.saturating_sub(self.at);
+        let room = self.limit.saturating_sub(self.at);
         let take = bytes.get(..room.min(bytes.len())).unwrap_or(&[]);
         let from = HEADER.saturating_add(self.at);
         if let Some(slot) = self.page.get_mut(from..from.saturating_add(take.len())) {
@@ -290,7 +312,7 @@ impl<'a> Report<'a> {
     /// room comes off the records to pay for it, so saying it can never be what
     /// runs the page over.
     pub fn tail(&mut self, records: &[u8], opens_a_record: &[u8]) {
-        let room = TEXT_BYTES.saturating_sub(self.at);
+        let room = self.limit.saturating_sub(self.at);
         if records.len() <= room {
             return self.write(records);
         }
@@ -321,17 +343,314 @@ impl<'a> Report<'a> {
         }
     }
 
+    /// Close the envelope over what is written **so far**, leaving this writer
+    /// able to write more.
+    ///
+    /// **For a writer that may not reach its own last statement.** The account
+    /// under a sealed report is made from the reset path, whose every step is a
+    /// bounded wait on a device; a machine that ends inside one of them leaves
+    /// every byte already written covered by no length and no checksum, so the
+    /// next boot reads the report and none of the account and nothing says a
+    /// word. Committing each line costs one pass of the checksum over the page
+    /// and makes the record say how far the reset got.
+    fn commit(&mut self, state: State, stamp: u64, identity: Identity) -> usize {
+        seal_len(self.page, state, stamp, identity, self.at);
+        self.at
+    }
+
     /// Close the envelope over what was written.
-    pub fn seal(self, state: State, stamp: u64, identity: Identity) -> usize {
-        let at = self.at;
-        seal_len(self.page, state, stamp, identity, at);
-        at
+    pub fn seal(mut self, state: State, stamp: u64, identity: Identity) -> usize {
+        self.commit(state, stamp, identity)
     }
 }
 
 impl core::fmt::Write for Report<'_> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.write(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// A writer that closes the envelope over every whole **line** it takes.
+///
+/// **Per line and not per fragment.** One `writeln!` reaches a writer as
+/// several [`core::fmt::Write::write_str`] calls — the pieces around each
+/// argument — so a writer that committed on every one of them would cover a
+/// torn line with a valid checksum, and the next boot would read half a
+/// sentence as a complete account. Nothing is covered until the newline that
+/// ends it arrives; bytes written past the last one are on the page, outside
+/// the length, and invisible to [`recover`].
+///
+/// `wrote_back` runs after each commit, because a page sealed into write-back
+/// memory and then reset over never reached DRAM ([`CACHE_LINE`]); the
+/// instruction that writes it back is the caller's, since this crate forbids
+/// unsafe code.
+pub struct Account<'a, F: FnMut()> {
+    report: Report<'a>,
+    state: State,
+    stamp: u64,
+    identity: Identity,
+    wrote_back: F,
+}
+
+impl<'a, F: FnMut()> Account<'a, F> {
+    /// Write under the report `report` was reopened on, keeping its envelope:
+    /// this extends a record rather than writing one, so the state, the stamp
+    /// and the identity are the ones already on the page.
+    pub fn new(
+        report: Report<'a>,
+        state: State,
+        stamp: u64,
+        identity: Identity,
+        wrote_back: F,
+    ) -> Self {
+        Self { report, state, stamp, identity, wrote_back }
+    }
+}
+
+impl<F: FnMut()> core::fmt::Write for Account<'_, F> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        if s.is_empty() {
+            return Ok(());
+        }
+        self.report.write(s.as_bytes());
+        if s.ends_with('\n') {
+            self.report.commit(self.state, self.stamp, self.identity);
+            (self.wrote_back)();
+        }
+        Ok(())
+    }
+}
+
+impl<'a, F: FnMut()> Account<'a, F> {
+    /// Let `write` put a block under the report in one piece, then close the
+    /// envelope over it: for a writer that places bytes rather than appending
+    /// them, which a per-line commit would cover half-placed.
+    pub fn block(&mut self, write: impl FnOnce(&mut Report<'a>)) {
+        write(&mut self.report);
+        self.report.commit(self.state, self.stamp, self.identity);
+        (self.wrote_back)();
+    }
+}
+
+/// What every line of a record's recovery section opens with: the USB stack's
+/// own records from the boot's first transport break on, oldest first.
+///
+/// **Apart from the tail, because the tail is the newest records and a break is
+/// not.** A boot that outlives its transport's break by a minute has a minute
+/// of other records above it, and the cut that fits them to the page takes the
+/// break first — which is the record that says what happened to the device.
+/// Never a record's own opening ([`RECORD_OPENS_WITH`]), so the loader prints
+/// these as head and a reader can tell the section from the tail under it.
+pub const RECOVERY_OPENS_WITH: &str = "usb-recovery: ";
+
+/// The line that stands for the section on a boot whose ring holds no break,
+/// so a record without the section is told from one written before it existed.
+pub const RECOVERY_NONE: &str = "usb-recovery: the log ring holds no transport break";
+
+/// The most the section's records may spend: a quarter of the box, off the tail
+/// and never off [`ACCOUNT_BYTES`].
+pub const RECOVERY_BYTES: usize = 4096;
+
+const RECOVERY_KEPT_OF: &str = " of the ";
+const RECOVERY_COUNTED: &str =
+    " record(s) the USB stack wrote from its first transport break on, oldest first";
+
+/// Room kept ahead of the section's records for the line that counts them, at
+/// the widest two `u64`s can make it: the counts are known only once the
+/// records are placed, and the line goes above them.
+const RECOVERY_HEAD_BYTES: usize =
+    RECOVERY_OPENS_WITH.len() + 20 + RECOVERY_KEPT_OF.len() + 20 + RECOVERY_COUNTED.len() + 1;
+
+/// The heads the USB stack's drivers write their records under.
+const USB_HEADS: [&str; 2] = ["usb-storage: ", "xHCI: "];
+
+/// What a transport break's record says, in both spellings the driver has:
+/// `transport broke on SCSI …` and `broke on TEST UNIT READY`.
+const BREAK_SAYS: &str = " broke on ";
+
+/// Whether the USB stack wrote this record.
+pub fn usb_wrote(message: &str) -> bool {
+    USB_HEADS.iter().any(|head| message.starts_with(head))
+}
+
+/// Whether this record is a transport break's.
+pub fn says_a_break(message: &str) -> bool {
+    usb_wrote(message) && message.contains(BREAK_SAYS)
+}
+
+/// What one record's line costs in the section.
+fn recovery_line_bytes(line: &impl core::fmt::Display) -> usize {
+    struct Count(usize);
+    impl core::fmt::Write for Count {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            self.0 = self.0.saturating_add(s.len());
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    let _ = core::fmt::write(&mut count, format_args!("{RECOVERY_OPENS_WITH}{line}\n"));
+    count.0
+}
+
+/// The first of the section's two walks over the log ring, **newest record
+/// first**: where the boot's first break is, and what every USB record from it
+/// on would cost.
+///
+/// Newest first because that is the only order the ring's lock-free reader has,
+/// and the seals this serves run where no other reader may. The oldest break is
+/// therefore the last one seen, and the sums taken at it are the section's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recovery {
+    /// The oldest break's stamp, or `None` while none has been seen.
+    from: Option<u64>,
+    /// USB records, and their lines' bytes, from the newest down to the record
+    /// last seen.
+    seen: (u64, usize),
+    /// The same two down to the oldest break: the section, were it kept whole.
+    whole: (u64, usize),
+}
+
+impl Recovery {
+    pub const fn new() -> Self {
+        Self { from: None, seen: (0, 0), whole: (0, 0) }
+    }
+
+    /// One record of the walk: its stamp, its message, and what renders it.
+    pub fn saw(&mut self, at_ns: u64, message: &str, line: &impl core::fmt::Display) {
+        if !usb_wrote(message) {
+            return;
+        }
+        self.seen = (
+            self.seen.0.saturating_add(1),
+            self.seen.1.saturating_add(recovery_line_bytes(line)),
+        );
+        if says_a_break(message) {
+            self.from = Some(self.from.map_or(at_ns, |from| from.min(at_ns)));
+            self.whole = self.seen;
+        }
+    }
+
+    /// The stamp the second walk starts from, or `None` on a boot with no break.
+    pub fn from(&self) -> Option<u64> {
+        self.from
+    }
+}
+
+impl Default for Recovery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The section being placed into a report by its second walk, **newest record
+/// first** again, over the records stamped from [`Recovery::from`] on.
+///
+/// **The oldest that fit are the ones kept**, because the break and the
+/// recovery that answered it are what the section is for and the newest records
+/// are the tail's already. Each record goes straight to where it ends up —
+/// `measured` says how many bytes lie below it — so nothing is buffered, and a
+/// walk that finds the ring moved since it was measured leaves a gap
+/// [`Self::close`] takes out rather than a line out of place.
+pub struct Kept<'r, 'a> {
+    report: &'r mut Report<'a>,
+    measured: Recovery,
+    /// Text offset of the records' region, past the head's reserve.
+    lo: usize,
+    /// What the region holds.
+    room: usize,
+    /// Measured bytes not yet walked past: the offset in the region the record
+    /// being looked at ends at, were the section whole.
+    left: usize,
+    /// The region's written span, or an empty one at zero.
+    placed: (usize, usize),
+    kept: u64,
+}
+
+impl<'a> Report<'a> {
+    /// Open the recovery section at this report's end.
+    pub fn recovery<'r>(&'r mut self, measured: Recovery) -> Kept<'r, 'a> {
+        let lo = self.at.saturating_add(RECOVERY_HEAD_BYTES);
+        // Against `REPORT_BYTES` whatever this writer's own limit is: the
+        // account's reserve is the reset's, and a reopened report may spend it.
+        let room = REPORT_BYTES.saturating_sub(lo).min(RECOVERY_BYTES);
+        Kept { report: self, measured, lo, room, left: measured.whole.1, placed: (0, 0), kept: 0 }
+    }
+}
+
+impl Kept<'_, '_> {
+    /// The stamp the walk starts from, or `None` where there is nothing to walk.
+    pub fn from(&self) -> Option<u64> {
+        self.measured.from
+    }
+
+    /// One record of the walk. `false` ends it: the ring holds more from the
+    /// break on than was measured, and what lies below has nowhere to go.
+    pub fn put(&mut self, message: &str, line: &impl core::fmt::Display) -> bool {
+        if !usb_wrote(message) {
+            return true;
+        }
+        let Some(below) = self.left.checked_sub(recovery_line_bytes(line)) else {
+            return false;
+        };
+        let ends_at = core::mem::replace(&mut self.left, below);
+        // Newer than the oldest that fit.
+        if ends_at > self.room {
+            return true;
+        }
+        let from = HEADER.saturating_add(self.lo);
+        let slot = self.report.page.get_mut(from.saturating_add(below)..from.saturating_add(ends_at));
+        let Some(slot) = slot else { return true };
+        let mut slot = Slot { out: slot, at: 0 };
+        let _ = core::fmt::write(&mut slot, format_args!("{RECOVERY_OPENS_WITH}{line}\n"));
+        if self.kept == 0 {
+            self.placed.1 = ends_at;
+        }
+        self.placed.0 = below;
+        self.kept = self.kept.saturating_add(1);
+        true
+    }
+
+    /// Write the line that counts the section above what was placed, and move
+    /// the records up against it.
+    pub fn close(self) {
+        let Self { report, measured, lo, placed, kept, .. } = self;
+        if measured.from.is_none() {
+            let _ = core::fmt::Write::write_fmt(report, format_args!("{RECOVERY_NONE}\n"));
+            return;
+        }
+        let _ = core::fmt::Write::write_fmt(
+            report,
+            format_args!(
+                "{RECOVERY_OPENS_WITH}{kept}{RECOVERY_KEPT_OF}{}{RECOVERY_COUNTED}\n",
+                measured.whole.0
+            ),
+        );
+        let from = HEADER.saturating_add(lo);
+        let (begins, ends) = (from.saturating_add(placed.0), from.saturating_add(placed.1));
+        let to = HEADER.saturating_add(report.at);
+        // The head is no wider than its reserve, so the records only ever move
+        // down; a page that could not take the move keeps the head alone.
+        if begins < ends && to <= begins && ends <= HEADER.saturating_add(REPORT_BYTES) {
+            report.page.copy_within(begins..ends, to);
+            report.at = report.at.saturating_add(ends - begins);
+        }
+    }
+}
+
+/// A `fmt::Write` over one placed line, which drops what its slot cannot hold.
+struct Slot<'s> {
+    out: &'s mut [u8],
+    at: usize,
+}
+
+impl core::fmt::Write for Slot<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let end = self.at.saturating_add(s.len());
+        if let Some(slot) = self.out.get_mut(self.at..end) {
+            slot.copy_from_slice(s.as_bytes());
+            self.at = end;
+        }
         Ok(())
     }
 }
@@ -556,6 +875,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use core::fmt::Write;
     use std::{format, vec};
 
     use super::*;
@@ -751,6 +1071,119 @@ mod tests {
         }
     }
 
+    /// **The account gets its room whatever the report did with the page.**
+    /// A report that filled every byte left `reopened` nothing, and `reopened`
+    /// writes into no bytes without saying so.
+    #[test]
+    fn a_report_that_fills_the_page_still_leaves_the_account_its_room() {
+        // A size of its own and never `ACCOUNT_BYTES`, or the reserve would be
+        // asserting against itself and a reserve of nothing would pass.
+        const WIDEST_ACCOUNT: usize = 1024;
+        let mut records = std::string::String::new();
+        let mut n = 0usize;
+        while records.len() < TEXT_BYTES * 2 {
+            records.push_str(&format!("[{n:04}] {}\n", "x".repeat(60)));
+            n += 1;
+        }
+        let mut page = blank();
+        let filled = seal(&mut page, State::Wedged, STAMP, STICK, records.as_bytes());
+        assert!(
+            filled <= TEXT_BYTES - WIDEST_ACCOUNT,
+            "a report ran to {filled}, leaving under {WIDEST_ACCOUNT} B for the account"
+        );
+
+        // And the account then fits under it, whole.
+        let account = "a".repeat(WIDEST_ACCOUNT);
+        let (_, _, _, text) = recover(&page).expect("a sealed report");
+        let kept = text.len();
+        let mut report = Report::reopened(&mut page, kept);
+        report.write(account.as_bytes());
+        let len = report.seal(State::Wedged, STAMP, STICK);
+        assert_eq!(len, kept + WIDEST_ACCOUNT, "the account was cut");
+        let (state, _, _, text) = recover(&page).expect("the reopened report is still sealed");
+        assert_eq!(state, State::Wedged, "reopening changed what ended the boot");
+        assert!(
+            std::str::from_utf8(text).expect("text").ends_with(&account),
+            "the account is not the last thing on the page"
+        );
+    }
+
+    /// **An account the machine ends in the middle of is readable to where it
+    /// got, and never past it.** Every line of it is a bounded wait on a device
+    /// away from the next, and the reset follows either way.
+    ///
+    /// The two mutations this is the control on: committing on every fragment
+    /// instead of every line seals the torn last line, and committing on
+    /// neither leaves the whole account covered by nothing.
+    #[test]
+    fn an_account_cut_off_mid_line_is_readable_to_the_last_whole_line() {
+        let mut page = blank();
+        let kept = seal(&mut page, State::Wedged, STAMP, STICK, b"[0000] why\n");
+        let mut wrote_back = 0usize;
+        {
+            let mut account = Account::new(
+                Report::reopened(&mut page, kept),
+                State::Wedged,
+                STAMP,
+                STICK,
+                || wrote_back += 1,
+            );
+            // Three fragments and one newline: the pieces either side of the
+            // argument, then the argument itself.
+            let ports = 5;
+            writeln!(account, "usb-quiesce: {ports} port(s) reset")
+                .expect("a writer that cannot fail");
+            // The machine ends here, between two fragments of one line: what is
+            // written reaches the page and the newline that would cover it
+            // never arrives.
+            let bus = "00:14.0";
+            write!(account, "usb-quiesce: xHCI {bus} halted=")
+                .expect("a writer that cannot fail");
+        }
+
+        let (state, _, _, text) = recover(&page).expect("a page committed line by line");
+        assert_eq!(state, State::Wedged, "extending the record changed what ended the boot");
+        let text = std::str::from_utf8(text).expect("text");
+        assert!(text.ends_with("usb-quiesce: 5 port(s) reset\n"), "{text:?}");
+        assert!(
+            !text.contains("halted="),
+            "a line the machine was cut off inside sealed as a complete account: {text:?}"
+        );
+        // One line, one seal — not one per fragment, which is the whole of what
+        // separates a record that says how far the reset got from one that
+        // certifies half a sentence.
+        assert_eq!(wrote_back, 1);
+    }
+
+    /// The other half: a line finished later is sealed then, so an account that
+    /// runs to its end is whole on the page.
+    #[test]
+    fn every_line_is_covered_once_its_last_fragment_arrives() {
+        let mut page = blank();
+        let kept = seal(&mut page, State::Wedged, STAMP, STICK, b"[0000] why\n");
+        let mut wrote_back = 0usize;
+        {
+            let mut account = Account::new(
+                Report::reopened(&mut page, kept),
+                State::Wedged,
+                STAMP,
+                STICK,
+                || wrote_back += 1,
+            );
+            for port in 0..3 {
+                writeln!(account, "usb-quiesce: port {port} reset")
+                    .expect("a writer that cannot fail");
+            }
+        }
+
+        let (_, _, _, text) = recover(&page).expect("a sealed account");
+        let text = std::str::from_utf8(text).expect("text");
+        for port in 0..3 {
+            assert!(text.contains(&format!("usb-quiesce: port {port} reset\n")), "{text:?}");
+        }
+        assert_eq!(wrote_back, 3);
+    }
+
     /// A head goes in before the tail and survives it: the crash's own message
     /// is what a report is for, and the records after it are context.
     #[test]
@@ -805,6 +1238,217 @@ mod tests {
 
 
     /// ARMED carries no text at all, and that is not the same as no page.
+    /// A log ring as the section's walks see it: `(stamp, message)`, and the
+    /// order is the reader's — newest first.
+    type Ring = std::vec::Vec<(u64, std::string::String)>;
+
+    fn rendered(at_ns: u64, message: &str) -> std::string::String {
+        format!("[{}.{:03} cpu5] {message}", at_ns / 1_000, at_ns % 1_000)
+    }
+
+    /// Both walks over `measured_on` and `placed_from`, which differ only where
+    /// a test moves the ring between them.
+    fn section(report: &mut Report<'_>, measured_on: &Ring, placed_from: &Ring) {
+        let mut measured = Recovery::new();
+        for (at_ns, message) in measured_on {
+            measured.saw(*at_ns, message, &rendered(*at_ns, message));
+        }
+        let mut kept = report.recovery(measured);
+        if let Some(from) = kept.from() {
+            for (at_ns, message) in placed_from.iter().filter(|(at_ns, _)| *at_ns >= from) {
+                if !kept.put(message, &rendered(*at_ns, message)) {
+                    break;
+                }
+            }
+        }
+        kept.close();
+    }
+
+    fn newest_first(oldest_first: &[(u64, &str)]) -> Ring {
+        oldest_first.iter().rev().map(|(at, message)| (*at, (*message).into())).collect()
+    }
+
+    fn sealed_text(page: &[u8; BYTES]) -> std::string::String {
+        let (_, _, _, text) = recover(page).expect("a sealed report");
+        std::str::from_utf8(text).expect("text").into()
+    }
+
+    /// The boot this exists for: enumeration, then a break and its recovery,
+    /// then a minute of somebody else's records.
+    const A_BREAK_AND_ITS_RECOVERY: &[(u64, &str)] = &[
+        (595, "xHCI: port 13 connected"),
+        (596, "usb-storage: disk 0 ready on slot 5, 7507812 blocks of 512 B"),
+        (3_412, "usb-storage: 00:14.0 slot 5 transport broke on SCSI 0x2a: a staged break; break 1 of 3 running"),
+        (3_412, "xHCI: 00:14.0 slot 5 endpoint 3 is Running, recovering"),
+        (3_413, "sched: cpu=4 ready=0 dying=0 parked=1"),
+        (3_420, "usb-storage: 00:14.0 slot 5 Reset Recovery took"),
+        (3_421, "usb-storage: 00:14.0 slot 5 SCSI 0x2a completed after 1 break(s) running"),
+        (11_182, "PMM: 62/16038MB used"),
+    ];
+
+    #[test]
+    fn the_section_is_the_usb_stacks_records_from_the_first_break_on_oldest_first() {
+        let ring = newest_first(A_BREAK_AND_ITS_RECOVERY);
+        let mut page = blank();
+        let mut report = Report::new(&mut page);
+        section(&mut report, &ring, &ring);
+        report.seal(State::Wedged, STAMP, STICK);
+        let want = format!(
+            "{RECOVERY_OPENS_WITH}4 of the 4{RECOVERY_COUNTED}\n\
+             {RECOVERY_OPENS_WITH}{}\n{RECOVERY_OPENS_WITH}{}\n{RECOVERY_OPENS_WITH}{}\n\
+             {RECOVERY_OPENS_WITH}{}\n",
+            rendered(3_412, A_BREAK_AND_ITS_RECOVERY[2].1),
+            rendered(3_412, A_BREAK_AND_ITS_RECOVERY[3].1),
+            rendered(3_420, A_BREAK_AND_ITS_RECOVERY[5].1),
+            rendered(3_421, A_BREAK_AND_ITS_RECOVERY[6].1),
+        );
+        assert_eq!(sealed_text(&page), want);
+    }
+
+    /// Both of the driver's spellings open a section, and nothing else does: a
+    /// disk that gave up says `broke 3 times running`, after a break that
+    /// already opened it.
+    #[test]
+    fn a_break_is_told_by_what_the_driver_says_and_by_who_said_it() {
+        assert!(says_a_break("usb-storage: 00:14.0 slot 5 transport broke on SCSI 0x28: status"));
+        assert!(says_a_break("usb-storage: slot 5 broke on TEST UNIT READY: no answer"));
+        assert!(!says_a_break("usb-storage: 00:14.0 slot 5 SCSI 0x2a broke 3 times running"));
+        assert!(!says_a_break("root: the transport broke on SCSI 0x28"));
+        assert!(usb_wrote("xHCI: Stop Endpoint timed out after 2000 ms"));
+        assert!(!usb_wrote("usb-quiesce: xHCI 00:14.0 halted=true"));
+        assert!(!usb_wrote("[3.412 cpu5] xHCI: nested"));
+    }
+
+    /// Nothing links this crate to the driver whose records it picks out, so
+    /// the two spellings are held to the driver's own source.
+    #[test]
+    fn the_driver_says_a_break_the_way_the_section_finds_one() {
+        let at = concat!(env!("CARGO_MANIFEST_DIR"), "/../kernel/src/drivers/xhci/wait/msc.rs");
+        let source = std::fs::read_to_string(at).expect("the mass-storage driver");
+        for said in [
+            "log!(\"usb-storage: {slot} transport broke on SCSI {opcode:#04x}: {broke}; \\",
+            "log!(\"usb-storage: slot {} broke on TEST UNIT READY: {broke}\"",
+        ] {
+            assert!(source.contains(said), "{at} does not write {said:?}");
+            let message = said.trim_start_matches("log!(\"");
+            assert!(says_a_break(message), "{message:?} opens no section");
+        }
+    }
+
+    #[test]
+    fn a_boot_with_no_break_says_so_in_one_line() {
+        let ring = newest_first(&A_BREAK_AND_ITS_RECOVERY[..2]);
+        let mut page = blank();
+        let mut report = Report::new(&mut page);
+        section(&mut report, &ring, &ring);
+        report.seal(State::Done, STAMP, STICK);
+        assert_eq!(sealed_text(&page), format!("{RECOVERY_NONE}\n"));
+    }
+
+    /// A transport that storms: far more than the section holds. The break that
+    /// opened it and the records after it are kept, the newest are counted, and
+    /// the tail and the account under the section still have their room.
+    #[test]
+    fn a_storm_keeps_the_first_break_and_counts_what_it_dropped() {
+        let mut storm: std::vec::Vec<(u64, std::string::String)> = std::vec::Vec::new();
+        for n in 0..400u64 {
+            let code = if n % 2 == 0 { 3 } else { 4 };
+            storm.push((
+                3_471 + n,
+                format!("usb-storage: 00:14.0 slot 5 transport broke on SCSI 0x28: phase completion code {code}, n={n}"),
+            ));
+        }
+        let ring: Ring = storm.iter().rev().cloned().collect();
+        let mut page = blank();
+        let mut report = Report::new(&mut page);
+        report.write(b"the boot deadline expired\n");
+        section(&mut report, &ring, &ring);
+        let after_the_section = report.at;
+        report.tail(b"[120.000 cpu4] the newest record\n", RECORD_OPENS_WITH);
+        report.seal(State::Wedged, STAMP, STICK);
+
+        let text = sealed_text(&page);
+        let lines: std::vec::Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "the boot deadline expired");
+        let head = lines[1].strip_prefix(RECOVERY_OPENS_WITH).expect("the section's head");
+        let kept: usize = head.split(' ').next().expect("a count").parse().expect("a number");
+        assert!(head.starts_with(&format!("{kept} of the 400 ")), "{head}");
+        assert!(kept > 16 && kept < 400, "kept {kept}");
+        // The oldest, in order, every one whole.
+        for (n, line) in lines[2..2 + kept].iter().enumerate() {
+            assert_eq!(*line, format!("{RECOVERY_OPENS_WITH}{}", rendered(storm[n].0, &storm[n].1)));
+        }
+        assert_eq!(lines[2 + kept], "[120.000 cpu4] the newest record");
+        assert!(
+            after_the_section <= "the boot deadline expired\n".len() + RECOVERY_HEAD_BYTES + RECOVERY_BYTES,
+            "the section ran to {after_the_section}"
+        );
+        assert!(text.len() <= REPORT_BYTES);
+    }
+
+    /// The ring is live under both walks: a record the first walk measured can
+    /// be gone by the second, and one it never saw can be there. Either way
+    /// every line on the page is a whole one, in order, under a head that
+    /// counts what is there.
+    #[test]
+    fn a_ring_that_moved_between_the_walks_leaves_no_line_out_of_place() {
+        let whole = newest_first(A_BREAK_AND_ITS_RECOVERY);
+        let recycled: Ring =
+            whole.iter().filter(|(_, m)| !m.contains("Reset Recovery took")).cloned().collect();
+        let mut later = whole.clone();
+        later.insert(0, (3_500, "xHCI: 00:14.0 slot 5 endpoint 4 is Halted, recovering".into()));
+
+        for placed_from in [&recycled, &later] {
+            let mut page = blank();
+            let mut report = Report::new(&mut page);
+            section(&mut report, &whole, placed_from);
+            report.write(b"under the section\n");
+            report.seal(State::Wedged, STAMP, STICK);
+            let text = sealed_text(&page);
+            let lines: std::vec::Vec<&str> = text.lines().collect();
+            let head = lines[0].strip_prefix(RECOVERY_OPENS_WITH).expect("the section's head");
+            let kept: usize = head.split(' ').next().expect("a count").parse().expect("a number");
+            assert!(kept >= 3, "{text}");
+            assert_eq!(lines.len(), 1 + kept + 1, "{text}");
+            // Each a whole record of the ring it was placed from, oldest first.
+            let mut at = placed_from.len();
+            for line in &lines[1..=kept] {
+                let found = placed_from[..at]
+                    .iter()
+                    .rposition(|(stamp, m)| **line == format!("{RECOVERY_OPENS_WITH}{}", rendered(*stamp, m)));
+                at = found.unwrap_or_else(|| panic!("{line:?} is no record, or is out of order\n{text}"));
+            }
+            assert_eq!(lines[1 + kept], "under the section");
+        }
+    }
+
+    /// Under a sealed report, where the reset's own account follows it: the
+    /// section is covered by the envelope as one piece and never spends the
+    /// account's reserve on records.
+    #[test]
+    fn the_section_under_a_sealed_report_leaves_the_account_its_reserve() {
+        let ring = newest_first(A_BREAK_AND_ITS_RECOVERY);
+        let mut page = blank();
+        seal(&mut page, State::Done, STAMP, STICK, &[b'x'; REPORT_BYTES - 64]);
+        let mut flushed = 0;
+        let mut account = Account::new(
+            Report::reopened(&mut page, REPORT_BYTES - 64),
+            State::Done,
+            STAMP,
+            STICK,
+            || flushed += 1,
+        );
+        account.block(|report| section(report, &ring, &ring));
+        let _ = writeln!(account, "usb-quiesce: the account");
+        assert_eq!(flushed, 2);
+        let text = sealed_text(&page);
+        let under = &text[REPORT_BYTES - 64..];
+        assert_eq!(
+            under,
+            format!("{RECOVERY_OPENS_WITH}0 of the 4{RECOVERY_COUNTED}\nusb-quiesce: the account\n")
+        );
+    }
+
     #[test]
     fn an_armed_page_with_nothing_in_it_is_still_a_state() {
         let mut page = blank();
