@@ -226,13 +226,16 @@ fn main() {
         // **Armed before anything is read**, in the shape every reader of an
         // edge needs: what arrives after a read and before the park has a
         // registration waiting for it. `min_complete` 0 with no timeout
-        // submits the entries and returns.
+        // submits the entries and returns. A watch is one-shot, so one that
+        // answered here is spent: its source is read below and no longer
+        // armed, and this round may not park on it.
         poller.watch(&cap, READABLE, KERNEL_TOKEN);
         poller.watch(&from_init, READABLE, ORIGINS_TOKEN);
         for (i, origin) in origins.iter().enumerate() {
             poller.watch(&origin.pipe, READABLE, ORIGIN_BASE + i as u64);
         }
-        poller.wait(0, 0, |_| {});
+        let mut spent = false;
+        poller.wait(0, 0, |_| spent = true);
 
         let batch = match tail.read(&cap, &mut buf) {
             Ok(batch) => batch,
@@ -260,7 +263,7 @@ fn main() {
         let newest = batch.last().map_or(0, |r| r.at_ns);
         // A short batch is a ring this reader has caught up with.
         let caught_up = batch.len() < BATCH;
-        registered(&from_init, &mut from_init_rx, &mut origins);
+        let joined = registered(&from_init, &mut from_init_rx, &mut origins);
         let mut round = Round { lines: Vec::new(), console: Vec::new() };
         if waiting.is_empty() {
             read_origins(&mut origins, boot_local, &mut round);
@@ -282,7 +285,13 @@ fn main() {
             // Every source was armed before it was read, so what lands after
             // the reads is a completion this wait takes, and nothing else is
             // worth waking for: `klogd` posts after each drain, and a pipe with
-            // bytes in it or a writer gone is readable.
+            // bytes in it or a writer gone is readable. A watch spent at the
+            // arm, or a pipe that joined this round, is not armed, so the
+            // round goes again instead: a program's line written in pieces
+            // lands its later pieces on exactly that source.
+            if spent || joined {
+                continue;
+            }
             poller.wait(1, u64::MAX, |_| {});
             continue;
         }
@@ -419,15 +428,17 @@ fn main() {
 }
 
 /// Take every `REGISTER` init has sent: a program's name and the read end of
-/// its output pipe.
+/// its output pipe. Whether any came: a pipe taken here was not armed before
+/// this round's reads, so the caller may not park on it.
 ///
 /// **init is the only peer this connection has**, so a frame that is not one,
 /// or a name that is no tag, is init's bug and a loud end: init checks the
 /// name before it sends.
-fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut Vec<Origin>) {
+fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut Vec<Origin>) -> bool {
+    let mut came = false;
     loop {
         match rx.pump(conn) {
-            RxStep::Idle => return,
+            RxStep::Idle => return came,
             RxStep::Eof => panic!("logd: init closed the origins connection"),
             RxStep::Malformed => panic!("logd: init sent a frame the origins protocol cannot carry"),
             RxStep::Frame { msg_type, payload_len } => {
@@ -444,6 +455,7 @@ fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut V
                 // frame that names it, and nothing else answers for it.
                 let pipe = unsafe { Pipe::from_raw(raw) };
                 origins.push(Origin { tag: name.as_str().to_string(), pipe, lines: Lines::new() });
+                came = true;
             }
         }
     }
