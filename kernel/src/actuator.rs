@@ -100,6 +100,21 @@ actuators! {
     /// Refuse the first two FAT-1 mirror writes of a write-back drain flush; two, not one, because the retry ladder parks only at attempt 2.
     fat_mirror_write_refuse = "fat-mirror-write-refuse";
 
+    /// Refuse the FAT-1 mirror write of a write-back drain flush as a budget expiry on the thread running the shutdown, which parks it in `block::between_attempts`; armed beside `writeback-stall`, which is what leaves a closed file's flush for that drain to find.
+    quiesce_drain_refuse = "quiesce-drain-refuse";
+
+    /// Refuse the active-FAT write of a `SYS_FSYNC` flush as a budget expiry once the machine is stopping, after its mirror is written, so the stop's second stage reaches a caller parked in `block::between_attempts` over two FATs that disagree.
+    quiesce_fsync_refuse = "quiesce-fsync-refuse";
+
+    /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
+    quiesce_last_park = "quiesce-last-park";
+
+    /// The same inside `SYS_THREAD_EXIT`: its exit is then the stop's last transition.
+    quiesce_last_exit = "quiesce-last-exit";
+
+    /// Serve a blocked-task dump from the shutdown once its first stage has stopped the machine: the report Ctrl+Alt+D gives on a shutdown stuck in its stop.
+    quiesce_dump = "quiesce-dump";
+
     /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
     fat_flush_meta_refuse = "fat-flush-meta-refuse";
 
@@ -346,10 +361,9 @@ actuators! {
     test_hash_before_seed = "test-hash-before-seed";
 
     /// Hold the shutdown open for a tenth of a second after the boot's last
-    /// word, yielding, so a userland thread still on a run queue gets a pass
-    /// there. **The window hardware has and QEMU does not**: `quiesce` spends
-    /// real time between `Rebooting.` and the reset, which is enough for the
-    /// test runner's loop to spawn another job into the log after its last line.
+    /// word, yielding: the window hardware has between `Rebooting.` and the
+    /// reset and QEMU does not. A boot that writes a record into it is one the
+    /// stop did not stop.
     quiesce_late_word = "quiesce-late-word";
 
     /// Make the shutdown's bounded acquisitions of the xHCI controller lock

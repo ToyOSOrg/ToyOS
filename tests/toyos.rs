@@ -207,6 +207,17 @@ const RUST_SKIP: &[&str] = &[
     // its own can hold: in the shared boot every other binary's output is in the
     // same stream. `console_line_atomicity` runs it.
     "console_line_atomicity",
+    // **It reboots the machine**, so in the shared block it would end the boot
+    // under whichever member came next; and its verdict is the order of the
+    // console after that reset, which only its own boot holds.
+    // `quiesce_stops_the_machine` runs it.
+    "quiesce_writers",
+    // The same, and its verdict is where one kernel line lands among others.
+    // `quiesce_refuses_a_second_shutdown` runs it.
+    "quiesce_twice",
+    // The same, and its verdict is the stop record of a boot staged around it.
+    // `quiesce_wakes_on_the_last_park` and `quiesce_wakes_on_the_last_exit` run it.
+    "quiesce_last",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
     // holds. `console_flood_is_bounded` runs it.
     "console_flood",
@@ -828,6 +839,21 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("metal_device_probe", Sched::Parallel, Tier::Fast),
     // Its verdict waits out a staged window.
     ("job_deadline_reboots", Sched::Parallel, Tier::Fast),
+    // Its own boot, and its verdict waits out the same staged window.
+    ("quiesce_stops_the_machine", Sched::Parallel, Tier::Fast),
+    // Its own boot: it ends the machine, and its verdict is the order of
+    // kernel lines.
+    ("quiesce_refuses_a_second_shutdown", Sched::Parallel, Tier::Fast),
+    // Its own boot: it ends the machine, and its verdict is the volume that
+    // boot leaves.
+    ("quiesce_leaves_the_volume_whole", Sched::Parallel, Tier::Fast),
+    // Its own boot each: it ends the machine, and its verdict is the stop
+    // record that boot writes.
+    ("quiesce_wakes_on_the_last_park", Sched::Parallel, Tier::Fast),
+    ("quiesce_wakes_on_the_last_exit", Sched::Parallel, Tier::Fast),
+    // Its own boot: it ends the machine, and its verdict is a dump served
+    // inside that boot's stop.
+    ("quiesce_dump_holds_the_stopped", Sched::Parallel, Tier::Fast),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
     // changes the verdict.
     ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
@@ -9999,6 +10025,11 @@ fn run_machine_test(
         "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
         "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
         "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
+        "quiesce_stops_the_machine" => power::quiesce_stops_the_machine(test_config, c_bins, rust_bins),
+        "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
+        "quiesce_wakes_on_the_last_park" => power::quiesce_wakes_on_the_last_park(test_config, c_bins, rust_bins),
+        "quiesce_wakes_on_the_last_exit" => power::quiesce_wakes_on_the_last_exit(test_config, c_bins, rust_bins),
+        "quiesce_dump_holds_the_stopped" => power::quiesce_dump_holds_the_stopped(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
@@ -10099,6 +10130,7 @@ fn run_machine_test(
         "ftruncate_flush_race" => common::volumes::ftruncate_flush_race(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
+        "quiesce_leaves_the_volume_whole" => common::volumes::quiesce_leaves_the_volume_whole(test_config, c_bins, rust_bins),
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.
@@ -16249,10 +16281,10 @@ fn idle_is_spinning(serial: &str) -> Option<(u32, u64)> {
 /// names is violated, not just that it still passes when it is not.
 fn idle_trip_verdict() -> Result<(), String> {
     let healthy = "\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 parked=0 current=None trips=1\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 parked=0 current=None trips=1\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 parked=0 current=None trips=3\n\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 parked=0 current=None trips=2\n";
+[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
+[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
+[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=3\n\
+[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=2\n";
     if let Some((cpu, delta)) = idle_is_spinning(healthy) {
         return Err(format!("a healthy trace was refused: cpu{cpu} moved by {delta}"));
     }
@@ -16260,10 +16292,10 @@ fn idle_trip_verdict() -> Result<(), String> {
     // The regression's own shape: one CPU quarantines cleanly and stays
     // quiet, the other's undrained ring never lets it halt.
     let spinning = "\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 parked=0 current=None trips=1\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 parked=0 current=None trips=4\n\
-[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 parked=0 current=None trips=2\n\
-[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 parked=0 current=None trips=2685004\n";
+[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=1\n\
+[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=4\n\
+[kernel 0.1 cpu0] sched: cpu=0 ready=0 dying=0 stopped=0 parked=0 current=None trips=2\n\
+[kernel 0.1 cpu1] sched: cpu=1 ready=0 dying=0 stopped=0 parked=0 current=None trips=2685004\n";
     match idle_is_spinning(spinning) {
         Some((1, delta)) if delta > MAX_IDLE_TRIP_DELTA => {}
         Some((cpu, delta)) => {

@@ -74,10 +74,9 @@ beside the same print after a cold boot.
 
 ## What would answer it
 
-Either `quiesce` tears down every live claim before the register — the
-general stop of the machine
-`issues/kernel/quiesce-runs-while-userland-still-does-io.md` asks for, for a
-different reason (in-flight I/O rather than device state) — or the reset path
+Either `quiesce` tears down every live claim before the register — its stop
+(`kernel/src/quiesce.rs`) halts every userland thread at a safe point and
+tears down nothing those threads hold — or the reset path
 does for each bound function what it already does for xHCI through
 `stop::before_reset`: the register half of `tear_down`, bus mastering off and
 the vector masked, written with no lock taken so the two bound-driven paths

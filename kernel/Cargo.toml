@@ -398,6 +398,7 @@ toyos-pcid = { path = "../toyos-pcid" }
 toyos-tco = { path = "../toyos-tco" }
 toyos-proclife = { path = "../toyos-proclife" }
 toyos-ps2 = { path = "../toyos-ps2" }
+toyos-quiesce = { path = "../toyos-quiesce" }
 toyos-sched = { path = "../toyos-sched" }
 toyos-symbols = { path = "../toyos-symbols" }
 toyos-untrusted = { path = "../toyos-untrusted" }

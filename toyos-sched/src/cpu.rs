@@ -244,6 +244,18 @@ pub struct CpuSched<X: SchedPayload> {
     /// so the bound above would be false for k > 1, which is the only k that
     /// makes it a bound at all.
     dying: VecDeque<Corpse<X>>,
+    /// Tasks carrying [`TaskShared::stop_pending`], which no pick serves.
+    ///
+    /// **A band and not a queue**: nothing is ever taken out of it, so its
+    /// order carries no decision. It exists so that a task the machine has
+    /// stopped still has somewhere to *be* — invariant I1 wants every task
+    /// value in exactly one container, and a stopped task still owns a kernel
+    /// stack and an address space that only a reset will release.
+    ///
+    /// Counted into its share exactly as [`Self::dying`] is, because the state
+    /// word of everything in here reads `Ready`; excluded from the published
+    /// load, because nothing queues behind work that will never run.
+    stopped: VecDeque<ReadyTask<X>>,
     /// The task that exited on this CPU, freed by the NEXT pass — a pass
     /// cannot free the stack it is running on.
     zombie: Option<DeadTask<X>>,
@@ -329,6 +341,7 @@ impl<X: SchedPayload> CpuSched<X> {
             rq: RunQueue::new(),
             parked: BTreeMap::new(),
             dying: VecDeque::new(),
+            stopped: VecDeque::new(),
             zombie: None,
             mailbox,
             steal_probe: MailboxNode::new(),
@@ -387,6 +400,14 @@ impl<X: SchedPayload> CpuSched<X> {
 
     pub fn dying_len(&self) -> usize {
         self.dying.len()
+    }
+
+    pub fn stopped(&self) -> impl Iterator<Item = &ReadyTask<X>> + '_ {
+        self.stopped.iter()
+    }
+
+    pub fn stopped_len(&self) -> usize {
+        self.stopped.len()
     }
 
     pub fn zombie_key(&self) -> Option<TaskKey> {
@@ -533,6 +554,7 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, rq), "rq (the ready band: rt deque, fair map, insert_seq)"),
                 (core::mem::offset_of!(Self, parked), "parked (the park map)"),
                 (core::mem::offset_of!(Self, dying), "dying"),
+                (core::mem::offset_of!(Self, stopped), "stopped"),
                 (core::mem::offset_of!(Self, zombie), "zombie"),
                 (core::mem::offset_of!(Self, mailbox), "mailbox"),
                 (core::mem::offset_of!(Self, steal_probe), "steal_probe (excluded: a sibling writes it)"),
@@ -948,6 +970,16 @@ impl<X: SchedPayload> CpuSched<X> {
         env: Env<'_, H, P>,
         now: Nanos,
     ) {
+        // **Ahead of the RT forward and of the kill check, because it outranks
+        // both.** This is the one route by which a stopped task can be offered
+        // to a CPU again — a wake, an adopt, or a retire that claimed it out of
+        // `parked` — and the band it goes to is the whole of the guarantee that
+        // it takes no further instruction. Forwarding it to a sibling or
+        // dispatching it to unwind would each undo that.
+        if task.shared().stop_pending() {
+            self.begin_stopped(task, env);
+            return;
+        }
         // **The RT forward is decided first, and the kill check stays inside
         // `hand_off`.** Both orders keep a killed task off another CPU, but
         // only this one leaves `hand_off`'s check on the path a wake-forward
@@ -994,6 +1026,26 @@ impl<X: SchedPayload> CpuSched<X> {
     fn keep_dying(&mut self, mut task: ReadyTask<X>, now: Nanos) {
         task.end_lend();
         self.dying.push_back(Corpse { since: now, task });
+    }
+
+    /// Band a task that reached this CPU already stopped, counting it into its
+    /// share exactly as [`Self::begin_dying`] does and for the same reason: the
+    /// word reads `Ready`, so a task that skipped `enter_runnable` would
+    /// desynchronise the per-share count.
+    fn begin_stopped<H: Hw<Payload = X>, P: PreemptGuard>(
+        &mut self,
+        task: ReadyTask<X>,
+        env: Env<'_, H, P>,
+    ) {
+        let _vruntime = task.share().enter_runnable(env.frontier);
+        self.keep_stopped(task);
+    }
+
+    /// The same, for a task that is already counted — the running task at its
+    /// own safe point, which never left the runnable set.
+    fn keep_stopped(&mut self, mut task: ReadyTask<X>) {
+        task.end_lend();
+        self.stopped.push_back(task);
     }
 
     fn handle_wake<H: Hw<Payload = X>, P: PreemptGuard>(
@@ -1091,7 +1143,7 @@ impl<X: SchedPayload> CpuSched<X> {
             // * `WaitTicket::commit` still refuses to park a killed task, which
             //   is what keeps it *running* rather than parked where no wake is
             //   coming;
-            // * and `kernel::scheduler::exit_if_killed` at the return to Ring 3
+            // * and `kernel::scheduler::leave_ring3_if_due` at the return to Ring 3
             //   is the backstop for a thread that never parks again, with an
             //   empty kernel stack by construction.
             //
@@ -1604,6 +1656,26 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         );
         self.cpu
             .trace(self.env, self.now, TraceKind::ParkCommit { task: key });
+        self.dispose()
+    }
+
+    /// The current task has reached the point it may never run past, and is
+    /// banded where no pick will find it. Does not return to the task.
+    ///
+    /// **The mark is taken here and nowhere else for a running task.** A task
+    /// that is running may be holding a kernel lock anywhere below this frame;
+    /// only the caller knows it is standing somewhere it holds nothing, and
+    /// this is where that knowledge is spent. Everything else a stopped task
+    /// meets — a wake, an adopt, a retire — reads the bit in `place`.
+    pub fn dispose_stop(self) -> SchedPass<'c, 'e, H, P, Disposed> {
+        let current = self
+            .cpu
+            .running
+            .take()
+            .expect("dispose_stop without a running task");
+        let task = current.preempt(self.cpu.id, self.now);
+        task.shared().mark_stop();
+        self.cpu.keep_stopped(task);
         self.dispose()
     }
 
@@ -2838,6 +2910,157 @@ mod tests {
 
         assert_eq!(shared.state(), TaskState::Dead);
         assert_eq!(w.released(), std::vec![key]);
+    }
+
+    /// A task banded at its safe point is never dispatched again, however many
+    /// passes the CPU takes.
+    ///
+    /// **The second task is what makes this a statement and not a tautology.**
+    /// With one task on the CPU, "nothing is running" reads the same whether
+    /// the band is skipped or empty; a second one keeps the pick working, so
+    /// the question asked is *which* task it serves.
+    #[test]
+    fn a_stopped_task_is_never_picked_again() {
+        let mut w = World::new(1);
+        let (stopped, stopped_shared) = w.spawn(C0);
+        w.run_a_pass(C0);
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(stopped));
+        let (other, _) = w.spawn(C0);
+
+        {
+            let (cpus, env) = w.split();
+            let pass = SchedPass::begin(&mut cpus[0], env, NOW);
+            let _ = pass.dispose_stop().finish();
+        }
+
+        assert!(stopped_shared.stop_pending(), "the safe point takes the mark");
+        assert_eq!(w.cpus[0].stopped_len(), 1);
+        assert_eq!(w.cpus[0].stopped[0].key(), stopped);
+        assert_eq!(
+            w.cpus[0].running().map(|t| t.key()),
+            Some(other),
+            "the CPU keeps working; only the stopped task is out",
+        );
+        assert_eq!(w.cpus[0].dying_len(), 0, "stopping is not dying");
+
+        // Every later pass, including ones where the CPU has nothing else.
+        w.run_a_pass_at(C0, Nanos(NOW.0 + QUANTUM_NS + 1));
+        w.run_a_pass_at(C0, Nanos(NOW.0 + 4 * QUANTUM_NS));
+        assert_ne!(
+            w.cpus[0].running().map(|t| t.key()),
+            Some(stopped),
+            "no pick serves the band",
+        );
+        assert_eq!(w.cpus[0].stopped_len(), 1);
+        w.abandon();
+    }
+
+    /// **The wake is the hole the band exists to close.** A userland thread
+    /// blocked in a syscall when the machine is stopped is marked where it
+    /// stands; what must never happen is that its deadline or a device wake
+    /// puts it back in the run queue, where a pick would dispatch it to finish
+    /// that syscall — and log — after the boot's last word.
+    ///
+    /// Deleting `place`'s stop arm leaves it in `rq`, running on the next pass,
+    /// which is exactly what this asserts against.
+    #[test]
+    fn a_wake_for_a_stopped_task_lands_in_the_band_and_not_the_run_queue() {
+        let q = queue();
+        let mut w = World::new(1);
+        let (parked, parked_shared) = w.spawn(C0);
+        w.run_a_pass(C0);
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(parked));
+        w.park_running(C0, &q);
+        assert_eq!(parked_shared.state(), TaskState::Blocked(C0));
+
+        assert!(parked_shared.stop_if_blocked(), "a parked task takes the mark");
+        assert!(parked_shared.stop_if_blocked(), "and idempotently");
+
+        // The waker comes after, as it does on a machine being stopped: a
+        // deadline or a device wake finding a thread the park already marked.
+        assert_eq!(parked_shared.claim_wake(), Claim::Parked(C0));
+        assert!(
+            parked_shared.stop_pending(),
+            "the claim preserves the sticky mark",
+        );
+        w.post_claimed_wake(C0, &parked_shared, WakeReason::Woken);
+        w.run_a_pass(C0);
+
+        assert_eq!(w.cpus[0].stopped_len(), 1, "the wake reached the band");
+        assert_eq!(w.cpus[0].stopped[0].key(), parked);
+        assert!(w.cpus[0].rq.is_empty(), "and never the run queue");
+        assert!(
+            w.cpus[0].running().is_none(),
+            "so no pick could dispatch it",
+        );
+        w.abandon();
+    }
+
+    /// A task that is *running* may hold a kernel lock anywhere below its
+    /// current frame, so the parked mark refuses it: it reaches the band
+    /// through its own safe point or not at all.
+    #[test]
+    fn a_running_task_refuses_the_parked_mark() {
+        let mut w = World::new(1);
+        let (key, shared) = w.spawn(C0);
+        assert_eq!(shared.state(), TaskState::Ready(C0));
+        assert!(!shared.stop_if_blocked(), "ready is not parked");
+        w.run_a_pass(C0);
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(key));
+        assert!(!shared.stop_if_blocked(), "and neither is running");
+        assert!(!shared.stop_pending(), "nothing was marked");
+        w.abandon();
+    }
+
+    /// A task carrying both marks goes to the band and not the dying list.
+    /// Dispatching it to unwind is what the stop exists to prevent: the unwind
+    /// is what writes the `exit:` record this whole path is about.
+    #[test]
+    fn stopping_outranks_killing() {
+        let q = queue();
+        let mut w = World::new(1);
+        let (key, shared) = w.spawn(C0);
+        w.run_a_pass(C0);
+        w.park_running(C0, &q);
+        assert!(shared.stop_if_blocked());
+        shared.mark_kill();
+
+        assert_eq!(shared.claim_wake(), Claim::Parked(C0));
+        w.post_claimed_wake(C0, &shared, WakeReason::Woken);
+        w.run_a_pass(C0);
+
+        assert_eq!(w.cpus[0].stopped_len(), 1);
+        assert_eq!(w.cpus[0].stopped[0].key(), key);
+        assert_eq!(w.cpus[0].dying_len(), 0, "never dispatched to unwind");
+        assert!(w.cpus[0].running().is_none());
+        w.abandon();
+    }
+
+    /// The published load is what a spawn would queue behind, and nothing
+    /// queues behind a task that will never run.
+    #[test]
+    fn a_stopped_task_is_not_published_as_load() {
+        let mut w = World::new(1);
+        let (_, _shared) = w.spawn(C0);
+        w.run_a_pass(C0);
+        assert_eq!(w.handles.get(C0).load(), 0, "the running task is not load");
+        let (_, _other) = w.spawn(C0);
+        w.run_a_pass(C0);
+        assert_eq!(w.handles.get(C0).load(), 1, "the queued one is");
+
+        {
+            let (cpus, env) = w.split();
+            let pass = SchedPass::begin(&mut cpus[0], env, NOW);
+            let _ = pass.dispose_stop().finish();
+        }
+        assert_eq!(w.cpus[0].stopped_len(), 1);
+        assert_eq!(
+            w.handles.get(C0).load(),
+            0,
+            "and the stopped one is neither load nor surplus",
+        );
+        assert_eq!(w.handles.get(C0).surplus(), 0);
+        w.abandon();
     }
 
     /// A killed task that expires its quantum mid-unwind must not land anywhere

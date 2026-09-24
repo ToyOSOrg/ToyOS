@@ -138,6 +138,16 @@ pub fn kick_cpu(cpu_id: u32) {
     Reg::Icr.write(((apic_id as u64) << 32) | 0x4000 | TIMER_VECTOR as u64);
 }
 
+// Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the next scheduler pass.
+pub fn kick_all_but_self() {
+    let me = percpu::cpu_id();
+    for cpu in 0..crate::arch::smp::cpu_count() {
+        if cpu != me {
+            kick_cpu(cpu);
+        }
+    }
+}
+
 /// Send a non-maskable interrupt to one CPU — for a CPU that failed to answer `kick_cpu`, since IF cannot mask NMI.
 // Diagnostic only: an NMI can land inside any critical section, which this kernel cannot make NMI-safe.
 pub fn send_nmi(cpu_id: u32) {
@@ -199,13 +209,7 @@ fn wait_for_log_file() {
         return;
     }
     // Wake siblings first: one may be halted in `sti; hlt` with no timer armed to wake it otherwise.
-    let cpus = crate::arch::smp::cpu_count();
-    let me = percpu::cpu_id();
-    for cpu in 0..cpus {
-        if cpu != me {
-            kick_cpu(cpu);
-        }
-    }
+    kick_all_but_self();
     let deadline = crate::clock::now() + LOG_FILE_DRAIN.duration();
     while owed(want) {
         if crate::clock::now() >= deadline {

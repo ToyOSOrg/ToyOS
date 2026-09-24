@@ -242,16 +242,8 @@ pub const EXPIRED: &str = "the boot deadline expired";
 pub fn stage_a_wedge() -> ! {
     log!("{WEDGE_STAGED}: every CPU stops taking scheduler passes from here");
     STAGED.store(true, Relaxed);
-    // Kicked, and not left to arrive on their own: a CPU halted in the idle path
-    // has stopped its own timer, so nothing would bring it to the pass this
-    // wedge is taken at, and a core still asleep is not a core this control has
-    // wedged.
-    let me = crate::arch::percpu::cpu_id();
-    for cpu in 0..crate::arch::smp::cpu_count() {
-        if cpu != me {
-            crate::arch::apic::kick_cpu(cpu);
-        }
-    }
+    // A core still asleep is not a core this control has wedged.
+    crate::arch::apic::kick_all_but_self();
     this_cpu()
 }
 

@@ -461,6 +461,9 @@ pub enum Dispose {
     None,
     Yield,
     Exit,
+    /// The machine is stopping and this task is standing at the one boundary
+    /// it may never cross again. Does not come back.
+    Stop,
 }
 
 /// The environment every pass runs against.
@@ -511,6 +514,7 @@ pub fn pass(dispose: Dispose) {
     maybe_sweep(now);
     #[cfg(feature = "pass-spin")]
     maybe_hold(now);
+    let stops = matches!(dispose, Dispose::Stop);
     let action = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
         if let Some(current) = pass.cpu().running() {
@@ -521,6 +525,7 @@ pub fn pass(dispose: Dispose) {
             Dispose::None => pass.dispose_none(),
             Dispose::Yield => pass.dispose_yield(),
             Dispose::Exit => pass.dispose_exit(),
+            Dispose::Stop => pass.dispose_stop(),
         };
         disposed.finish()
     });
@@ -534,6 +539,10 @@ pub fn pass(dispose: Dispose) {
     // while idling, so `pass_block` need not be a second one.
     #[cfg(feature = "sched-check")]
     report_pass_costs(now);
+    // After the band, before the switch: the running task is still this one.
+    if stops {
+        crate::quiesce::note_progress();
+    }
     execute(action);
     crate::preempt::enable_no_resched();
 }
@@ -602,6 +611,10 @@ pub fn pass_block(ticket: Ticket<'_>, deadline: Option<Nanos>) {
             current.ext().handle.publish(current.acct(), Some(now));
         }
     });
+    // After the commit, before the switch: the running task is still this one.
+    if registration.is_some() {
+        crate::quiesce::note_progress();
+    }
     execute(action);
     crate::preempt::enable_no_resched();
     if let Some(registration) = registration {
@@ -766,6 +779,11 @@ pub fn current_symbols() -> Option<Arc<crate::symbols::SymbolTable>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().symbols.clone())).flatten()
 }
 
+/// What the running task's marks say it does instead of returning to Ring 3 — one load, no clone, since an `Arc` refcount here is too costly on this path.
+pub fn current_safe_point(stopping: bool) -> Option<toyos_sched::task::SafePoint> {
+    try_with_cpu(|cpu| cpu.running().and_then(|t| t.shared().at_safe_point(stopping))).flatten()
+}
+
 /// Whether the running task has been killed — one relaxed load, no clone, since an `Arc` refcount here is too costly on this path.
 pub fn current_kill_pending() -> bool {
     try_with_cpu(|cpu| cpu.running().is_some_and(|t| t.shared().kill_pending())).unwrap_or(false)
@@ -811,6 +829,21 @@ pub fn parked_len() -> usize {
 /// The dump's fourth container — without it a dying task is invisible to `unheld = claimed − scheduled`.
 pub fn dying_len() -> usize {
     try_with_cpu(|cpu| cpu.dying_len()).unwrap_or(0)
+}
+
+/// Threads on this CPU the machine's stop banded; no pick serves them again.
+pub fn stopped_len() -> usize {
+    try_with_cpu(|cpu| cpu.stopped_len()).unwrap_or(0)
+}
+
+/// Every thread on this CPU the machine's stop banded.
+pub fn for_each_stopped(mut f: impl FnMut(TaskId)) -> bool {
+    try_with_cpu(|cpu| {
+        for task in cpu.stopped() {
+            f(task.ext().id);
+        }
+    })
+    .is_some()
 }
 
 /// Every dying thread on this CPU, in the order the pick will take them.

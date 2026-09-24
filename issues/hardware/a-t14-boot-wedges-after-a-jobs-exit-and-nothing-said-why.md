@@ -50,8 +50,7 @@ file shows:
   gap is.
 - `quiesce`'s `flush_disks` and `hand_back`, which landed at `88841f56` a few
   minutes before the first hang; `hand_back` takes `XHCI` while `logd`'s own
-  write to the same stick may still be in flight
-  (`issues/kernel/quiesce-runs-while-userland-still-does-io.md`).
+  write to the same stick may still be in flight.
 - `log::wait_for_durable` itself.
 
 Nothing on the stick can separate them, and the black-box page was lost to the

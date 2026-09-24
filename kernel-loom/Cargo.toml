@@ -214,3 +214,9 @@ path = "src/lib.rs"
 # The models are the test targets; loom atomics outside a `loom::model` panic,
 # so this crate exposes no unit tests of its own.
 test = false
+
+# The kernel's actuator build: a shared file compiles a method for it that no
+# model's feature turns on. A `cfg` name and not a feature, since a feature
+# here is a model control.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("boot-actuators"))'] }

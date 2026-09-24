@@ -74,6 +74,13 @@ impl DumpRequest {
         });
     }
 
+    /// Ask and begin the report in one update, unless a report runs: no pass can take the request between
+    /// its filing and its taking, so the asker owns the report it asked for, and it serves anything pending.
+    #[cfg(any(feature = "boot-actuators", feature = "loom"))]
+    pub fn file_and_take(&self) -> bool {
+        self.update(HANDOFF.0, HANDOFF.1, |word| (word & REPORTING == 0).then_some(REPORTING)).is_ok()
+    }
+
     /// Whether a request is pending. A read, for the pass that has nothing to take.
     pub fn pending(&self) -> bool {
         self.word.load(Ordering::Relaxed) & PENDING != NONE

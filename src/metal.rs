@@ -783,6 +783,20 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
         ),
     ),
     (
+        "quiesce-drain-refuse",
+        Flash::Never(
+            "it refuses the shutdown's own drain of a closed file's flush, so an image armed \
+             with it stages a stall inside the one sync a metal verdict rests on",
+        ),
+    ),
+    (
+        "quiesce-fsync-refuse",
+        Flash::Never(
+            "it refuses `/system/bin/logd`'s own flush for longer than the shutdown waits for \
+             it, so an image armed with it never makes its last word durable",
+        ),
+    ),
+    (
         "xhci-lock-wedged",
         Flash::Never(
             "it makes the shutdown skip the disk-cache flush, so the boot's own log may never \
@@ -2163,6 +2177,17 @@ pub fn deadline_lateness_ms(loader: &str) -> Option<u64> {
     let (bound, rest) = rest.split_once(" ms, reached at ")?;
     let (reached, _) = rest.split_once(" ms,")?;
     reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
+}
+
+/// What the kernel's stop wrote about itself in this boot's own kernel log.
+///
+/// `None` on a boot that wrote none, which is every boot that reset without
+/// going through `quiesce`.
+pub fn park(kernel: &str) -> Option<toyos_quiesce::Record> {
+    kernel
+        .lines()
+        .find(|line| line.contains(toyos_quiesce::STOPPED))
+        .and_then(toyos_quiesce::Record::parse)
 }
 
 /// The same for the other bound: how far past its own bound the hard-lockup
