@@ -37,8 +37,7 @@
 //! loom answers `Causality violation: Concurrent write accesses to UnsafeCell`,
 //! which is a lock handing out data it did not synchronize, stated exactly.
 //! Verified 2026-08-19, both ways round: all four models red under the feature
-//! and all four pass without it. The step that runs it is `host-tests.yml`'s
-//! "kernel-loom sleep lock's acquire edge has teeth", which demands
+//! and all four pass without it. `src/ci.rs`'s `CONTROLS` runs it and demands
 //! `a_parking_contender_observes_the_holders_writes` and
 //! `two_holders_never_overlap` by name — the contended park and mutual
 //! exclusion, the two the *ordering* breaks rather than the arithmetic.

@@ -1,15 +1,17 @@
-//! The `host` job's clippy, runnable here.
+//! Default clippy with warnings denied, over the three trees this host lints.
 //!
-//! `cargo run -- --clippy` is the five invocations CI's `host` job denies
-//! warnings on, so a branch verifies before a push the claim that gate checks
-//! rather than a narrower `cargo clippy -p <crate>`. The list lives here once;
-//! a gate below holds it against `.github/workflows/host-tests.yml` so neither
-//! the workflow nor this command can move without the other.
+//! `cargo run -- --clippy` runs [`SHAPES`] alone; `cargo run -- --ci
+//! host-full` runs the same list as one of its steps, so the local command and
+//! the nightly gate cannot verify different sets.
+//!
+//! Userland is not here: `x86_64-unknown-toyos` is a custom target, and the
+//! fork's `toyos` toolchain ships no clippy.
 
 use std::path::Path;
 use std::process::Command;
 
-/// The pedantic/nursery lints the workflow names in `$ADOPTED`, in its order.
+/// The pedantic/nursery lints adopted one at a time, each on a measured finding
+/// (`issues/build/clippy-stage-two-is-lints-one-at-a-time.md`).
 const ADOPTED: &[&str] = &[
     "clippy::checked_conversions",
     "clippy::default_trait_access",
@@ -19,15 +21,21 @@ const ADOPTED: &[&str] = &[
     "clippy::unnecessary_semicolon",
 ];
 
-/// One `cargo clippy` the `host` job runs. `dir` is relative to the repository
-/// root and empty for the root itself; a `$ADOPTED` token in `after` splices
-/// [`ADOPTED`] where the workflow's variable expands.
+/// One `cargo clippy`. `dir` is relative to the repository root and empty for
+/// the root itself — `.cargo/config.toml` is found from the working directory,
+/// so the kernel and bootloader run from their own; a `$ADOPTED` token in
+/// `after` splices [`ADOPTED`] there.
 struct Shape {
     dir: &'static str,
     before: &'static [&'static str],
     after: &'static [&'static str],
 }
 
+/// `--all-targets` on the host workspace only: on the bootloader and kernel a
+/// test target links `std`, whose `panic_impl` collides with theirs. The second
+/// kernel shape is the feature set every guest boots, whose `cfg`s the default
+/// set never sees. `undocumented_unsafe_blocks` is adopted per area as each
+/// area's justifications land.
 const SHAPES: &[Shape] = &[
     Shape {
         dir: "",
@@ -56,16 +64,8 @@ const SHAPES: &[Shape] = &[
     },
 ];
 
-/// `$ADOPTED`'s value, spelled as the workflow writes it. Only the gate reads
-/// it; what runs splices [`ADOPTED`] token by token in [`Shape::args`].
-#[cfg(test)]
-fn adopted() -> String {
-    ADOPTED.iter().map(|l| format!("-W {l}")).collect::<Vec<_>>().join(" ")
-}
-
 impl Shape {
-    /// The command as the workflow writes it, `$ADOPTED` unexpanded — the string
-    /// the gate holds the workflow against.
+    /// The command as a reader writes it, `$ADOPTED` unexpanded.
     fn line(&self) -> String {
         let mut parts = vec!["cargo clippy".to_string()];
         parts.extend(self.before.iter().map(|s| (*s).to_string()));
@@ -93,9 +93,9 @@ impl Shape {
     }
 }
 
-/// Run every shape; exit non-zero if any clippy reports a finding or fails to
-/// run, so the whole set is one green/red answer.
-pub fn dispatch(root: &Path) {
+/// Run every shape, keeping going across them, and name the ones that found
+/// warnings or failed to run.
+pub fn run(root: &Path) -> Vec<String> {
     let mut failed = Vec::new();
     for shape in SHAPES {
         let scope = if shape.dir.is_empty() { "workspace root" } else { shape.dir };
@@ -110,6 +110,13 @@ pub fn dispatch(root: &Path) {
             failed.push(shape.line());
         }
     }
+    failed
+}
+
+/// `cargo run -- --clippy`: exit non-zero if any shape reports a finding, so the
+/// whole set is one green/red answer.
+pub fn dispatch(root: &Path) {
+    let failed = run(root);
     if !failed.is_empty() {
         eprintln!("clippy: {} of {} invocation(s) found warnings:", failed.len(), SHAPES.len());
         for line in &failed {
@@ -123,85 +130,8 @@ pub fn dispatch(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-    }
-
-    /// The workflow's executable text with comment lines dropped, continuation
-    /// backslashes removed and whitespace collapsed, so a command the YAML
-    /// splits across lines is one substring and prose that merely names a
-    /// command is not counted as one. No clippy command starts with `#` or
-    /// carries a backslash, so both removals are safe.
-    fn flatten(text: &str) -> String {
-        text.lines()
-            .filter(|line| !line.trim_start().starts_with('#'))
-            .collect::<Vec<_>>()
-            .join(" ")
-            .replace('\\', " ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    /// Every way the workflow and [`SHAPES`] disagree, one line each. A pure
-    /// function of the flattened text so the negative control can stage a
-    /// workflow that is not on disk.
-    fn drift(flat: &str) -> Vec<String> {
-        let mut bad = Vec::new();
-        let decl = format!("ADOPTED=\"{}\"", adopted());
-        if !flat.contains(&decl) {
-            bad.push(format!("the workflow's $ADOPTED is no longer `{decl}`"));
-        }
-        for shape in SHAPES {
-            if !flat.contains(&shape.line()) {
-                bad.push(format!("the workflow no longer runs `{}`", shape.line()));
-            }
-        }
-        let count = flat.matches("cargo clippy").count();
-        if count != SHAPES.len() {
-            bad.push(format!(
-                "the workflow runs `cargo clippy` {count} time(s); this file lists {}",
-                SHAPES.len()
-            ));
-        }
-        bad
-    }
-
-    /// `cargo run -- --clippy` runs exactly the `host` job's clippy — the gap
-    /// this file closed was a local run that verified a narrower claim than CI.
-    #[test]
-    fn the_local_clippy_is_the_host_jobs_clippy() {
-        let path = repo_root().join(".github/workflows/host-tests.yml");
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{} carries the clippy step: {e}", path.display()));
-        let bad = drift(&flatten(&text));
-        assert!(
-            bad.is_empty(),
-            "`cargo run -- --clippy` and the `host` job's clippy have drifted, so the local half \
-             verifies a different claim than the gate:\n  {}",
-            bad.join("\n  ")
-        );
-    }
-
-    /// Teeth: the scan refuses each shape of drift it exists to catch.
-    #[test]
-    fn the_drift_scan_refuses_a_workflow_that_moved() {
-        let real =
-            flatten(&std::fs::read_to_string(repo_root().join(".github/workflows/host-tests.yml"))
-                .unwrap());
-        assert!(drift(&real).is_empty());
-        // A flag dropped from an invocation: CI now denies a different set.
-        assert!(!drift(&real.replace("--all-targets", "")).is_empty());
-        // A sixth invocation the local command would not run.
-        assert!(!drift(&format!("{real} cargo clippy --workspace")).is_empty());
-        // An adopted lint swapped — the class of the #283 miss.
-        assert!(!drift(&real.replace("manual_midpoint", "manual_is_multiple_of")).is_empty());
-    }
-
-    /// `$ADOPTED` is spliced where the token sits and nowhere else, so what runs
-    /// is what the workflow expands.
+    /// `$ADOPTED` is spliced where the token sits and nowhere else.
     #[test]
     fn the_adopted_set_expands_into_the_shapes_that_name_it() {
         let workspace = &SHAPES[0];
