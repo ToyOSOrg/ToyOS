@@ -19,8 +19,9 @@
 //! answer: the service being swapped may be the one carrying it, and is not
 //! stopped before it has arrived. Then init stops the old
 //! process, starts the new binary, and holds it on probation for
-//! [`PROBATION_MS`]. A binary that does not spawn, or ends inside probation, is
-//! [`Word::Failed`], and init starts the binary it replaced again.
+//! [`PROBATION_MS`]. A binary that does not spawn, is refused a device the
+//! process it replaces held, or ends inside probation, is [`Word::Failed`], and
+//! init starts the binary it replaced again — owed the same devices.
 //!
 //! **A swap lasts one boot.** The root volume is the image and is read-only;
 //! a replaced binary lives in the per-boot tmpfs and a reboot runs the image's
@@ -321,7 +322,8 @@ pub enum Word {
     Started,
     /// Probation passed: the new binary is the service.
     InService,
-    /// The new binary did not spawn or ended on probation.
+    /// The new binary did not spawn, was refused a device the process it
+    /// replaces held, or ended on probation.
     Failed,
     /// The binary it replaced is running again.
     Restored,

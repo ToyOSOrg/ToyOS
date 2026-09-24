@@ -727,6 +727,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // claimed again by netd's replacement, which reads it through the window
     // its claim maps. The verdict is what the function answers there.
     ("swap_resets_the_function", Sched::Parallel, Tier::Fast),
+    // The same `igb`, its window left where its reset put it: the replacement
+    // is refused it, and the verdict is init failing the swap by the
+    // device's name rather than putting netd in service without it.
+    ("swap_refused_device_fails", Sched::Parallel, Tier::Fast),
     // A program sshd runs undeclared asks for the swap port. The verdict is
     // the program's own exit: the port is not in the namespace it inherited.
     ("swap_not_inherited", Sched::Parallel, Tier::Fast),
@@ -13880,6 +13884,9 @@ fn run_machine_test(
         }
         "swap_resets_the_function" => {
             common::swap::swap_resets_the_function(test_config, c_bins, rust_bins)
+        }
+        "swap_refused_device_fails" => {
+            common::swap::swap_refused_device_fails(test_config, c_bins, rust_bins)
         }
         "swap_not_inherited" => common::swap::swap_not_inherited(test_config, c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),

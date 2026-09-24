@@ -164,7 +164,7 @@ fn main() {
             })
             .collect();
         let mut service = Service::new(program, kept);
-        if let Err(e) = service.spawn(&program.path, &system, &syscap, &connectors) {
+        if let Err(e) = service.spawn(&program.path, &[], &system, &syscap, &connectors) {
             panic!("init: cannot start {}: {e}", program.name);
         }
         services.push(service);
@@ -203,6 +203,9 @@ struct Service<'a> {
     path: String,
     /// `None` once neither binary would start.
     child: Option<Child>,
+    /// The row's devices the running process was endowed: what a process
+    /// started in its place is owed.
+    devices: Vec<String>,
     kept: Arc<Mutex<Kept>>,
 }
 
@@ -224,14 +227,19 @@ impl<'a> Service<'a> {
             program,
             path: program.path.clone(),
             child: None,
+            devices: Vec::new(),
             kept: Arc::new(Mutex::new(Kept { acceptors, generation: 0, swapping: false })),
         }
     }
 
     /// Start `path` holding this service's manifest row, and answer its pid.
+    ///
+    /// `owed` is what the process this start follows held: a start refused any
+    /// of it is no start, so a service never runs on without a device it had.
     fn spawn(
         &mut self,
         path: &str,
+        owed: &[String],
         system: &Manifest,
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
@@ -252,9 +260,9 @@ impl<'a> Service<'a> {
         // that init stopped or saw end.
         let served = match kept.generation {
             0 => Served::Keep(&kept.acceptors),
-            _ => Served::Restart(&kept.acceptors),
+            _ => Served::Restart { acceptors: &kept.acceptors, owed },
         };
-        let child =
+        let (child, devices) =
             start(Command::new(path), self.program, system, syscap, served, connectors, &[])?;
         kept.generation += 1;
         if !kept.acceptors.is_empty() {
@@ -269,6 +277,7 @@ impl<'a> Service<'a> {
         let pid = child.id();
         self.child = Some(child);
         self.path = path.to_string();
+        self.devices = devices;
         Ok(pid)
     }
 
@@ -307,7 +316,7 @@ enum Phase {
     Answered { conn: Connection, rx: LaunchRx, since: Instant },
     /// The new binary runs; it is the service if it is still running at
     /// `until`, and `previous` is started again if it is not.
-    Probation { until: Instant, previous: String },
+    Probation { until: Instant, previous: String, owed: Vec<String> },
 }
 
 impl Flight {
@@ -563,11 +572,11 @@ impl<'a> Init<'a> {
                 drop(conn);
                 self.cut_over(flight.service, flight.path)
             }
-            Phase::Probation { until, previous } => {
+            Phase::Probation { until, previous, owed } => {
                 if now < until {
-                    return Some(Flight { phase: Phase::Probation { until, previous }, ..flight });
+                    return Some(Flight { phase: Phase::Probation { until, previous, owed }, ..flight });
                 }
-                self.end_probation(flight.service, &flight.path, &previous);
+                self.end_probation(flight.service, &flight.path, &previous, &owed);
                 None
             }
         }
@@ -577,6 +586,9 @@ impl<'a> Init<'a> {
     fn cut_over(&mut self, index: usize, path: String) -> Option<Flight> {
         let name = self.services[index].program.name.clone();
         let previous = self.services[index].path.clone();
+        // What the process being stopped holds, which its replacement and the
+        // binary a failed swap starts again are each owed.
+        let owed = self.services[index].devices.clone();
         let service = &mut self.services[index];
         say!(
             "{}",
@@ -595,7 +607,7 @@ impl<'a> Init<'a> {
             let _ = old.kill();
             let _ = old.wait();
         }
-        let started = service.spawn(&path, self.system, self.syscap, &self.connectors);
+        let started = service.spawn(&path, &owed, self.system, self.syscap, &self.connectors);
         match started {
             Ok(pid) => {
                 say!(
@@ -610,12 +622,12 @@ impl<'a> Init<'a> {
                     )
                 );
                 let until = Instant::now() + Duration::from_millis(toyos_swap::PROBATION_MS);
-                Some(Flight { service: index, path, phase: Phase::Probation { until, previous } })
+                Some(Flight { service: index, path, phase: Phase::Probation { until, previous, owed } })
             }
             Err(e) => {
                 say!("{}", toyos_swap::said(&name, Word::Failed, &format!("{path} did not start: {e}")));
                 forget(&path);
-                self.restore(index, &previous);
+                self.restore(index, &previous, &owed);
                 None
             }
         }
@@ -623,7 +635,7 @@ impl<'a> Init<'a> {
 
     /// Probation is over: the new binary is the service, or the one it
     /// replaced is started again.
-    fn end_probation(&mut self, index: usize, path: &str, previous: &str) {
+    fn end_probation(&mut self, index: usize, path: &str, previous: &str, owed: &[String]) {
         let service = &mut self.services[index];
         let name = service.program.name.clone();
         let status = {
@@ -667,17 +679,17 @@ impl<'a> Init<'a> {
                 );
                 service.child = None;
                 forget(path);
-                self.restore(index, previous);
+                self.restore(index, previous, owed);
             }
         }
     }
 
     /// Start the binary a failed swap replaced, or close the service's ports
     /// when that will not start either.
-    fn restore(&mut self, index: usize, previous: &str) {
+    fn restore(&mut self, index: usize, previous: &str, owed: &[String]) {
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, self.system, self.syscap, &self.connectors) {
+        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors) {
             Ok(pid) => {
                 service.kept.lock().expect("init: a service's state is poisoned").swapping = false;
                 say!("{}", toyos_swap::said(&name, Word::Restored, &format!("{previous} as pid {pid}")));
@@ -852,7 +864,7 @@ fn serve_launch<'a>(
     let started =
         start(command, program, system, syscap, Served::Move(acceptors), connectors, &extras);
     match started {
-        Ok(child) => {
+        Ok((child, _)) => {
             let handle = toyos::RawHandle(child.into_raw_handle());
             // **Which side owns the handle is the whole of what the two arms
             // differ by.** A refused `handle_send` leaves it in init's table
@@ -1007,8 +1019,10 @@ enum Served<'m, 'a> {
     /// A boot service's own, which init keeps and endows a duplicate of.
     Keep(&'m [(String, Acceptor)]),
     /// The same, for a service init has just stopped: the claims that process
-    /// held may still be on their way back.
-    Restart(&'m [(String, Acceptor)]),
+    /// held may still be on their way back, and `owed` names them. A start
+    /// that cannot mint one of them is refused, never a service running on
+    /// without a device the process before it held.
+    Restart { acceptors: &'m [(String, Acceptor)], owed: &'m [String] },
 }
 
 /// How long a restart waits for the claims of the process it stopped to come
@@ -1029,6 +1043,8 @@ const CLAIM_RETURN: Duration = Duration::from_secs(2);
 /// a terminal's `surface`. They are added *to* the manifest's row rather than
 /// replacing it, and a caller could only transfer what it already held, so a
 /// launch confers the row and nothing beyond it.
+///
+/// Answers the child and the devices of its row it was endowed.
 fn start<'a>(
     mut command: Command,
     program: &Program,
@@ -1037,7 +1053,7 @@ fn start<'a>(
     served: Served<'_, 'a>,
     connectors: &BTreeMap<&str, Connector>,
     extras: &[(&str, Connector)],
-) -> std::io::Result<Child> {
+) -> std::io::Result<(Child, Vec<String>)> {
     command.args(&program.args);
 
     // **Everything endowed stays owned until the spawn that moves it
@@ -1079,7 +1095,10 @@ fn start<'a>(
     }
 
     let mut given_back = None;
-    let restart = matches!(served, Served::Restart(_));
+    let (restart, owed): (bool, &[String]) = match &served {
+        Served::Restart { owed, .. } => (true, owed),
+        Served::Move(_) | Served::Keep(_) => (false, &[]),
+    };
     match served {
         Served::Move(acceptors) => {
             for name in &program.serves {
@@ -1099,7 +1118,7 @@ fn start<'a>(
             }
             given_back = Some(acceptors);
         }
-        Served::Keep(kept) | Served::Restart(kept) => {
+        Served::Keep(kept) | Served::Restart { acceptors: kept, .. } => {
             for name in &program.serves {
                 let (_, acceptor) = kept.iter().find(|(kept, _)| kept == name).ok_or_else(|| {
                     std::io::Error::other(format!("the `{name}` port is closed for good"))
@@ -1113,6 +1132,8 @@ fn start<'a>(
         }
     }
 
+    let mut endowed: Vec<String> = Vec::new();
+    let mut unpaid = None;
     for name in &program.devices {
         // The build system already refused a config this cannot parse
         // (`names_only_real_capabilities`), so a failure here is an image built
@@ -1159,6 +1180,14 @@ fn start<'a>(
                 let raw = claim.into_raw();
                 command.endow(&format!("{DEV_PREFIX}{name}"), raw.0);
                 held.0.push(raw);
+                endowed.push(name.clone());
+            }
+            Err(e) if owed.contains(name) => {
+                unpaid = Some(std::io::Error::other(format!(
+                    "{}, and the process it replaces held it",
+                    refused(name, e)
+                )));
+                break;
             }
             // Each refusal keeps the word the kernel gave it. "This machine
             // has none" is a configuration and every other answer is a fault,
@@ -1166,6 +1195,15 @@ fn start<'a>(
             // in the wrong place.
             Err(e) => say!("init: {}: {}", program.name, refused(name, e)),
         }
+    }
+    // Nothing was spawned, so everything minted goes back with `held`.
+    if let Some(unpaid) = unpaid {
+        if let Some(acceptors) = given_back {
+            for (name, acceptor) in taken {
+                acceptors.insert(name, acceptor);
+            }
+        }
+        return Err(unpaid);
     }
 
     if !program.syscap.is_empty() {
@@ -1191,7 +1229,7 @@ fn start<'a>(
                 let _ = acceptor.into_raw();
             }
             say!("init: started {}", program.name);
-            Ok(child)
+            Ok((child, endowed))
         }
         Err(e) => {
             if let Some(acceptors) = given_back {

@@ -741,7 +741,11 @@ fn place_bars(
         let low = pci.read_config_u32(bar::BASE + index as u64 * 4);
         let wide = matches!(bar::decode(index, low), Ok(bar::Width::Wide(_)));
         let step = if wide { 2 } else { 1 };
-        if pci.memory_bar(index).is_err() || Some(index) == table_bar {
+        // A BAR this module cut a window for is [`place_bar`]'s to judge
+        // whatever its register holds now: one a reset returned to zero reads
+        // as unassigned, and it is the window that moved, not a BAR that is
+        // not there.
+        if Some(index) == table_bar || (pci.memory_bar(index).is_err() && !was_cut(pci, index)) {
             index += step;
             continue;
         }
@@ -834,7 +838,11 @@ impl Kept {
     /// is half-written. [`bring_up`] turns decode on again.
     fn restore(&self, pci: &PciDevice) {
         pci.set_memory_decode(false);
+        let lost = crate::actuator::pcidev_bar_lost_on_reset().then(|| msix_bar(pci));
         for (index, bar) in self.bars.iter().enumerate().take(self.slots as usize) {
+            if lost.is_some_and(|table| table != Some(index as u8)) {
+                continue;
+            }
             pci.write_config_u32(bar::BASE + index as u64 * 4, *bar);
         }
         if let (Some((control, second)), Ok(cap)) = (self.control, pci.capability(express::CAP_ID)) {
@@ -1216,6 +1224,12 @@ fn cut_already(pci: &PciDevice, index: u8, span: u64) -> Result<Option<u64>, Ref
     } else {
         Err(Refusal::BarResized(index))
     }
+}
+
+/// Whether this module has cut a window for BAR `index` of this function.
+fn was_cut(pci: &PciDevice, index: u8) -> bool {
+    let who = requester(pci);
+    MACHINE.lock().windows.iter().any(|(w, i, _, _)| *w == who && *i == index)
 }
 
 /// Record `at .. at + span` as this BAR's for the life of the boot.

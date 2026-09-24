@@ -633,21 +633,25 @@ pub fn lan_talk(
     Ok(())
 }
 
-/// The talking boot's image, streaming to `at` and authorizing `identity`, and
-/// where its log partition sits in it.
+/// The talking boot's image, streaming to `at`, authorizing `identity` and
+/// arming `actuators`, and where its log partition sits in it.
 fn talk_image(
     case: &Path,
     name: &str,
     at: (&'static str, u16),
     identity: &super::ssh::Identity,
+    actuators: &[&str],
 ) -> Result<(std::path::PathBuf, usize, usize), String> {
     let param = qemu::log_stream_param(at);
+    // In `BootOptions::params`'s order, which the staged image is held to.
+    let mut params: Vec<&str> = actuators.to_vec();
+    params.push(&param);
     let bytes = qemu::build_boot_image_carrying(
         case,
         &[],
         &[],
         &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
-        &[&param],
+        &params,
     );
     let image = super::lane::dir().join(format!("{name}.img"));
     std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
@@ -665,6 +669,7 @@ pub(super) struct TalkBoot {
     pub(super) scratch: std::path::PathBuf,
     at: (&'static str, u16),
     bench: super::logstream::Bench,
+    actuators: &'static [&'static str],
     pub(super) start: usize,
     pub(super) len: usize,
 }
@@ -685,6 +690,15 @@ impl TalkBoot {
     /// `bench.config`'s boot staged to stream to a listener of this host's and
     /// to authorize the lane's talking key.
     pub(super) fn stage_on(name: &str, bench: super::logstream::Bench) -> Result<Self, String> {
+        Self::stage_armed(name, bench, &[])
+    }
+
+    /// [`TalkBoot::stage_on`] on the test kernel, with `actuators` armed.
+    pub(super) fn stage_armed(
+        name: &str,
+        bench: super::logstream::Bench,
+        actuators: &'static [&'static str],
+    ) -> Result<Self, String> {
         let case = super::compile::repo_root().join(bench.config);
         let scratch = super::lane::dir().join(name);
         std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
@@ -695,8 +709,8 @@ impl TalkBoot {
             false,
         )?;
         let at = (qemu::GUEST_VIEW_OF_HOST, stream.local().port());
-        let (image, start, len) = talk_image(&case, name, at, &identity)?;
-        Ok(Self { case, stream, identity, image, scratch, at, bench, start, len })
+        let (image, start, len) = talk_image(&case, name, at, &identity, actuators)?;
+        Ok(Self { case, stream, identity, image, scratch, at, bench, actuators, start, len })
     }
 
     /// The boot's options, the NIC asked of the argv rather than assumed.
@@ -705,6 +719,7 @@ impl TalkBoot {
             profile: self.bench.profile,
             boot_image: Some(qemu::Staged::Written(self.image.clone())),
             log_stream: Some(self.at),
+            kernel_params: self.actuators,
             ..Default::default()
         };
         assert!(
@@ -813,7 +828,7 @@ pub fn lan_talk_host_closes(
         }
     });
     let at = (qemu::GUEST_VIEW_OF_HOST, port);
-    let (image, start, len) = talk_image(&case, "lan-talk-host-closes", at, &identity)?;
+    let (image, start, len) = talk_image(&case, "lan-talk-host-closes", at, &identity, &[])?;
     let options = BootOptions {
         profile: qemu::Profile::E1000e,
         boot_image: Some(qemu::Staged::Written(image.clone())),

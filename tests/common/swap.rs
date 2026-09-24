@@ -73,7 +73,12 @@ impl Rig {
     }
 
     fn boot(name: &str, bench: Bench) -> Result<Self, String> {
-        let staged = TalkBoot::stage_on(name, bench)?;
+        Self::boot_armed(name, bench, &[])
+    }
+
+    /// [`Rig::boot`] on the test kernel, with `actuators` armed.
+    fn boot_armed(name: &str, bench: Bench, actuators: &'static [&'static str]) -> Result<Self, String> {
+        let staged = TalkBoot::stage_armed(name, bench, actuators)?;
         let ssh_port = qemu::free_host_port();
         let options = BootOptions { ssh_port: Some(ssh_port), ..staged.options() };
         let guest = QemuInstance::boot_with_options(&staged.case, &[], &[], options);
@@ -497,6 +502,70 @@ pub fn swap_resets_the_function(
         }
         console.must_be_clean()?;
         eprintln!("  [swap] {}; {}", released.trim_end(), read.trim_end());
+        Ok(())
+    })();
+    if let Err(why) = judged {
+        return Err(rig.fail(why));
+    }
+    drop(rig.guest);
+    let _ = std::fs::remove_file(&rig.staged.image);
+    Ok(())
+}
+
+/// The actuator that puts back none of a reset function's windows but its
+/// MSI-X table's.
+const BAR_LOST: &[&str] = &["pcidev-bar-lost-on-reset"];
+
+/// **A replacement refused a device the process it replaces held fails the
+/// swap.** netd holds the 82574 and QEMU's `igb`; the `igb` resets on release,
+/// and the actuator leaves its register window where the reset put it, so the
+/// kernel refuses the next claim of it by name. netd's own rebuild is sent:
+/// init must answer `failed` naming the `igb` rather than start a netd without
+/// it, find the binary it replaced refused the same device, and close the
+/// service — never `in service` over a netd running on the 82574 alone.
+pub fn swap_refused_device_fails(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut rig = Rig::boot_armed("swap-refused-device", IGB_BENCH, BAR_LOST)?;
+    let binary = rebuilt("netd", &rig.staged.scratch)?;
+    let digest = toyos_swap::digest(&std::fs::read(&binary).map_err(|e| e.to_string())?);
+    let answer = rig.swap_once_sshd_answers(&binary, &digest)?;
+    eprintln!("  [swap] the swap was answered {answer:?}");
+    // The service carrying the stream is the one swapped, so init's words are
+    // read off the console: its last one on this swap, whichever it is.
+    let [gone, in_service, started, failed] =
+        [Word::Gone, Word::InService, Word::Started, Word::Failed].map(|w| toyos_swap::said("netd", w, ""));
+    let ended = qemu::await_guest(&mut rig.guest, &mut rig.console, "init's last word on the swap", |c| {
+        c.contains(&gone) || c.contains(&in_service)
+    });
+    if let Err(why) = ended {
+        return Err(rig.fail(why));
+    }
+    let text = rig.console.clone();
+    let judged = (|| {
+        let console = serial::Serial::named("the refusing boot", text.as_str());
+        let released = console.must_say("[8086:10c9] released from slot")?;
+        if !released.contains("reset by a function level reset (Express)") {
+            return Err(format!("the premise: the igb was not released by an Express FLR — {released}"));
+        }
+        for word in [&in_service, &started] {
+            if let Some(line) = text.lines().find(|l| l.contains(word.as_str())) {
+                return Err(format!("init started a netd without the igb the one it replaced held: {line}"));
+            }
+        }
+        let refused = console.must_say("no longer holds the window it was cut for")?;
+        if !refused.contains("NOT HANDED OVER") {
+            return Err(format!("the kernel's refusal is not a refused hand-over: {refused}"));
+        }
+        let said = console.must_say(&failed)?;
+        if !said.contains("pci:8086:10c9") || !said.contains("the process it replaces held it") {
+            return Err(format!("init's `failed` does not name the device it could not give: {said}"));
+        }
+        let closed = console.must_say(&gone)?;
+        console.must_be_clean()?;
+        eprintln!("  [swap] {}; {}; {}", refused.trim_end(), said.trim_end(), closed.trim_end());
         Ok(())
     })();
     if let Err(why) = judged {
