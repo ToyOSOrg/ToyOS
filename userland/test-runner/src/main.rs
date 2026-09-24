@@ -120,8 +120,9 @@ fn main() {
                 // job's does — `process::exit_process` logs one — so a host
                 // reading a stick can judge it; a builtin runs inside this
                 // process and its code is console text, which on a machine with
-                // no serial port is nothing at all. So a failing builtin ends
-                // the boot: the missing `Rebooting.` is the only channel it has.
+                // no serial port reaches the stick only as this program's record,
+                // inside its share of the log. So a failing builtin ends the
+                // boot: the missing `Rebooting.` is the channel no share bounds.
                 Ran::Builtin(code) if code != 0 => give_the_machine_back(
                     &format!("the builtin {job:?} exited {code}"),
                     cap.as_ref(),
@@ -146,10 +147,10 @@ fn main() {
 /// Watch the job list for `bound_ms` measured from boot, which is the only
 /// bound over a kernel that is alive while a job never finishes.
 ///
-/// **The line below is console output and reaches no log record**: a userland
-/// `println!` is a write to a `ConsoleObject` and `logd` never sees it, so on a
-/// machine with no serial port the evidence that this fired is the kernel's own
-/// reboot line and the boot's elapsed time, not this.
+/// **The line below is console output**, which reaches the log only as this
+/// program's record inside its share of it; so on a machine with no serial port
+/// the evidence a judge reads that this fired is the kernel's own reboot line
+/// and the boot's elapsed time, which no share bounds.
 fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
     let Some(power) = cap.and_then(|cap| cap.duplicate().ok()) else {
         // A boot list with no way back to the firmware would sit here forever

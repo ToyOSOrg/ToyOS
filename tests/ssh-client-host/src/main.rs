@@ -17,6 +17,8 @@
 //! toyos_ssh feed    <host> <port> <key> <out> <err> <stdin> <command…>
 //!                                                → env <refused|accepted>, exit <n>
 //! toyos_ssh abandon <host> <port> <key> <command…>       → ok <bytes>
+//! toyos_ssh fire    <host> <port> <key> <command…>
+//!                                                → accepted | refused | closed | silent
 //! toyos_ssh put     <host> <port> <key> <local> <remote> → ok <bytes>
 //! toyos_ssh get     <host> <port> <key> <remote> <local> → ok <bytes>
 //! toyos_ssh list    <host> <port> <key> <remote> → entry <name> <size>…, ok <n>
@@ -87,6 +89,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         ["abandon", host, port, key, command @ ..] => {
             abandon(host, port, key, &command.join(" ")).await
         }
+        ["fire", host, port, key, command @ ..] => fire(host, port, key, &command.join(" ")).await,
         ["put", host, port, key, local, remote] => put(host, port, key, local, remote).await,
         ["get", host, port, key, remote, local] => get(host, port, key, remote, local).await,
         ["list", host, port, key, remote] => list(host, port, key, remote).await,
@@ -269,6 +272,42 @@ async fn abandon(host: &str, port: &str, key: &str, command: &str) -> Result<(),
     println!("ok {seen}");
     // Dropped rather than disconnected: the guest is owed no goodbye, and a
     // client that died would send none.
+    drop(session);
+    Ok(())
+}
+
+/// How long `fire` waits for the guest's answer to its request.
+const FIRE_ANSWER: Duration = Duration::from_secs(20);
+
+/// Ask for a program and report the guest's answer to the request, without
+/// waiting for the program: **a command that ends the machine never exits**, so
+/// its status is not a thing any client can collect.
+///
+/// `closed` and `silent` are answers too — a machine that went down under the
+/// request drops the connection with or without a goodbye, and what the caller
+/// makes of that is the caller's, against its own evidence that it went down.
+async fn fire(host: &str, port: &str, key: &str, command: &str) -> Result<(), String> {
+    let session = connect(host, port, key).await?;
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("opening a session channel: {e}"))?;
+    channel.exec(true, command).await.map_err(|e| format!("asking for {command:?}: {e}"))?;
+    let answer = tokio::time::timeout(FIRE_ANSWER, async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => return "accepted",
+                Some(ChannelMsg::Failure) => return "refused",
+                Some(ChannelMsg::Close) | Some(ChannelMsg::Eof) | None => return "closed",
+                Some(_) => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or("silent");
+    println!("{answer}");
+    // Dropped rather than disconnected: the machine this was fired at may
+    // already be gone, and a goodbye to it is one more wait on nothing.
     drop(session);
     Ok(())
 }

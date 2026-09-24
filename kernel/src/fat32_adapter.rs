@@ -1136,12 +1136,24 @@ pub fn mount(role: Role) -> Option<FatFs> {
         return None;
     }
     let device_bytes = handle.block_count().checked_mul(BLOCK)?;
-    let Some(part) = block::Partition::of(handle, start / BLOCK, len / BLOCK) else {
-        log!(
-            "{role}-volume: the table puts the partition at {start}+{len} on a device of \
-             {device_bytes} bytes — refusing to mount past the end of it"
-        );
-        return None;
+    let part = match block::Partition::of(
+        handle,
+        start / BLOCK,
+        len / BLOCK,
+        block::Holder::Kernel(role.mount()),
+    ) {
+        Ok(part) => part,
+        Err(block::ViewRefused::OffDevice) => {
+            log!(
+                "{role}-volume: the table puts the partition at {start}+{len} on a device of \
+                 {device_bytes} bytes — refusing to mount past the end of it"
+            );
+            return None;
+        }
+        Err(block::ViewRefused::Held(by)) => {
+            log!("{role}-volume: the partition is held by {by} — refusing to mount it");
+            return None;
+        }
     };
 
     *device(role).lock() = Some(FatDevice {

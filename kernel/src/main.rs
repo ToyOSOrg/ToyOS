@@ -134,7 +134,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         // Off the record like the report above it: the log path is what just panicked here.
         let bound = panic_reboot::arm(false);
         // No capture(): the outer panic's snapshot is the one worth showing.
-        // render() is safe by construction here: a fault inside the renderer itself would find PAINTING already held, and return without touching a pixel.
+        // render() is safe by construction here: a fault inside the renderer itself would find the fatal panel already claimed, and return without touching a pixel.
         // Only the CPU that took the panel watches the bound; a reentry inside the pager finds it held and halts.
         if drivers::panic_console::render() {
             drivers::panic_console::hold_the_panel(bound);
@@ -587,6 +587,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
             Some(cache) => page_cache::unbind_selftest(cache),
             None => log!("pc-unbind-selftest: FAIL (this boot has no metadata page cache)"),
         }
+    }
+    #[cfg(feature = "boot-actuators")]
+    if actuator::partclaim_table_unanswered() {
+        page_cache::refuse_table_reads();
     }
     // After every driver has registered: the number under test is one a real device holds.
     #[cfg(feature = "boot-actuators")]

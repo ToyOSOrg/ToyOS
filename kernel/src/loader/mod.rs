@@ -877,7 +877,8 @@ pub const INIT_PATH: &str = "/system/bin/init";
 /// Panics on failure: a boot that cannot start init has nowhere to report to.
 pub fn spawn_init() -> Pid {
     let mut handles = HandleTable::new();
-    let console = KObjectRef::Console(crate::object::device::ConsoleObject::new());
+    let console =
+        KObjectRef::Console(crate::object::device::ConsoleObject::new(start::make_name(INIT_PATH)));
     for slot in 0..3 {
         let entry = crate::object::HandleEntry::new(
             console.clone(),

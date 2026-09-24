@@ -457,6 +457,67 @@ ceiling = 2000
 ceiling_from = "twice the sample period `kernel/src/hardlockup`'s SAMPLE_NS states, 1000 ms: a CPU is found stuck at the first sample after its bound, so one period is the lateness and a second is the widest a delayed one costs"
 measured = 0
 
+# --- the boot that is never idle ---
+# `usbload` stops no CPU. It sweeps the last eighth of the stick once, reading
+# each run and writing it back, until the deadline takes the machine out from
+# under it — so the reset lands on a controller that is moving bytes rather than
+# on one idle for two minutes. `stick_secs` is the bench's own answer about its
+# own stick.
+
+[[number]]
+name = "boot.usbload.complete_ms"
+unit = "ms"
+ceiling = 120000
+ceiling_from = "as boot.deadlinewedge.complete_ms, toyos_tco::WEDGE_BOUND_MS — the same bound ends this machine and the runner never reaches its own. Not toyos_tco::HARD_LOCKUP_BOUND_MS, which is half of it: the sweep keeps its CPU taking interrupts so that this bound and not that one is what ends the boot, and the judge refuses a page that names the other"
+measured = 1204
+
+[[number]]
+name = "boot.usbload.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "as boot.deadlinewedge.back_secs, toyos_build::metal::return_secs — this boot ends itself at the same bound and then costs the same firmware, loader and Ubuntu as any other"
+measured = 219
+
+[[number]]
+name = "boot.usbload.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.deadlinewedge.stick_secs. On this arm the reset is written while the controller is mid-transfer, which is the state a stick the next host cannot enumerate would be left by"
+measured = 0
+
+[[number]]
+name = "boot.usbload.deadline_lateness_ms"
+unit = "ms"
+ceiling = 10000
+ceiling_from = "as boot.deadlinewedge.deadline_lateness_ms — the poll's own cadence, read on every timer interrupt, so the lateness is one timer period whichever CPU reaches the bound first"
+measured = 66
+
+# --- the boot whose stick has one transfer abandoned under it ---
+# `usbbreak` is `jobcase` with the first WRITE(10) the boot stick takes abandoned
+# mid-flight, so the class's Reset Recovery runs against the bench's own device
+# on the bench's own controller. A recovery that takes ends like `jobcase`, by
+# its deliberate reboot; one that does not takes the root offline, and what then
+# ends the boot is the runner's bound. `stick_secs` is the row that says what
+# either left the stick in.
+
+[[number]]
+name = "boot.usbbreak.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.usbbreak.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.usbbreak.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.jobcase.stick_secs. On this arm the stick was sent a Bulk-Only Mass Storage Reset while it may still have been inside a WRITE(10), and then either came back or was left at its Default state by a port reset"
+
 # --- what one member of a job list may cost this machine ---
 # **The number the suite sizes its lists by, and judges them against.** The
 # runner's bound (`toyos_tco::JOB_BOUND_MS`) runs from boot and ends the whole
@@ -575,6 +636,18 @@ unit = "ms"
 ceiling = 1400
 ceiling_from = "as list.deadlinewedge.job_ms"
 
+[[number]]
+name = "list.usbload.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.deadlinewedge.job_ms — the same list, and what ends this boot is the kernel's own deadline rather than the runner's"
+
+[[number]]
+name = "list.usbbreak.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.jobcase.job_ms — the same list"
+
 # --- the boots the split above adds ---
 
 [[number]]
@@ -612,6 +685,83 @@ name = "boot.ccorpus-2.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+
+# --- the cable: the boot that runs netd in front of the T14's own I219 ---
+
+[[number]]
+name = "boot.lancase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+measured = 1208
+
+[[number]]
+name = "boot.lancase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+measured = 82
+
+[[number]]
+name = "boot.lancase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+measured = 0
+
+# No `measured`: the one ping this row has been offered was answered by the
+# operating system on the other side of the reset, which the judge refuses, so
+# no boot has yet given this number a reading.
+[[number]]
+name = "boot.lancase.ping_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, which bounds the window a reply can fall in"
+
+[[number]]
+name = "list.lancase.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "toyos_tco::LEASE_BOUND_MS, which is lan_hold's whole sleep, plus two seconds for the spawn and the exit record around it"
+
+[[number]]
+name = "lan.lancase.link_up_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "toyos_tco::LEASE_BOUND_MS: a link that comes up later than lan_hold sleeps is a link this boot never had, because the machine has already handed itself back"
+
+[[number]]
+name = "lan.lancase.lease_ms"
+unit = "ms"
+ceiling = 20000
+ceiling_from = "as lan.lancase.link_up_ms, which is netd's own dhcp::LEASE_BOUND: a boot with no lease by then has already said so in its log"
+
+# `lanicscase` is `lancase` with one argument added to netd's manifest row, so
+# every bound it is under is that boot's.
+
+[[number]]
+name = "boot.lanicscase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.lancase.complete_ms — the same boot config with one netd argument added"
+
+[[number]]
+name = "boot.lanicscase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.lanicscase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.lancase.stick_secs"
+
+[[number]]
+name = "list.lanicscase.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "as list.lancase.job_ms — the same one job"
 
 # --- what the on-screen panel cost each boot ---
 # **The one window a person has into a machine that stopped.** Two numbers,
@@ -725,6 +875,24 @@ unit = "us"
 ceiling = 16667
 ceiling_from = "as boot.deadlinewedge.panel_max_us"
 measured = 3890
+
+[[number]]
+name = "boot.usbbreak.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.lancase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.lanicscase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
 
 [[number]]
 name = "boot.testcases.panel_us"
@@ -930,3 +1098,96 @@ name = "boot.foreignrecord.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"
+[[number]]
+name = "boot.usbbreak.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.lancase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.lanicscase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.lanleasecase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.lancase.complete_ms — the same boot config with one netd argument added"
+
+[[number]]
+name = "boot.lanleasecase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.lanleasecase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.lancase.stick_secs"
+
+[[number]]
+name = "list.lanleasecase.job_ms"
+unit = "ms"
+ceiling = 22000
+ceiling_from = "as list.lancase.job_ms — the same one job"
+
+[[number]]
+name = "boot.lanleasecase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.lanleasecase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+# `lantalkcase` is `lancase` with sshd and the record stream, talked to from the
+# host until it is told to reboot. Its one job holds the machine only as the
+# fallback for a host that never says so.
+
+[[number]]
+name = "boot.lantalkcase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.lancase.complete_ms"
+
+[[number]]
+name = "boot.lantalkcase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.lantalkcase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.lancase.stick_secs"
+
+[[number]]
+name = "list.lantalkcase.job_ms"
+unit = "ms"
+ceiling = 54000
+ceiling_from = "lan_talk_hold's end, toyos_tco::JOB_BOUND_MS less its tenth: the hold sleeps to that much boot time and no further"
+
+[[number]]
+name = "boot.lantalkcase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.lantalkcase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"

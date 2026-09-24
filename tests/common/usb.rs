@@ -1255,31 +1255,22 @@ pub fn xhci_slow_connect(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     const PARAMS: &[&str] = &["usb-storage-gate", "xhci-slow-connect"];
-    /// Mirrors `xhci/mod.rs`'s `SLOW_CONNECT_NS` and `PORT_DEBOUNCE_NS`. These
-    /// are one wire format with the kernel's in the same sense the gate's stamp
-    /// is: a change to either without the other shows up as a failed assertion,
-    /// not as a silent pass.
-    const HELD_EMPTY_S: f64 = 0.300;
-    const DEBOUNCE_S: f64 = 0.100;
-    /// The earliest instant the driver can name a port. The register reads empty
-    /// until `SLOW_CONNECT_NS` of *boot*, and `await_connect_settle` then wants
-    /// `PORT_DEBOUNCE_NS` of a connect set that has held still and is non-empty.
-    const FIRST_CONNECT_S: f64 = HELD_EMPTY_S + DEBOUNCE_S;
-    /// How much later than that the first port line may be.
-    ///
-    /// The shape it exists to catch is a settle that leaves by `EMPTY_BUS_NS`
-    /// instead of on the device appearing — one second after port power, so
-    /// ~1.1 s of boot — which would enumerate the same two sticks and leave
-    /// every other assertion here green.
-    ///
-    /// 150 ms because the connect becomes visible at a fixed instant on the
-    /// guest's own clock and the settle re-reads it every `PORT_POLL_NS`, so the
-    /// spread is a millisecond of polling and not a share of the host. Six runs
-    /// here — three sequential, three with four concurrent test processes on the
-    /// machine — put the first port line at 0.400-0.402 s, and `issues/`
-    /// records one at 0.413 under five-agent load. 13 ms of worst observed
-    /// excursion against 150 of slack, and 700 of clearance to the shape above.
-    const SETTLE_SLACK_S: f64 = 0.150;
+    // The driver's own durations, from where the driver reads them: each is
+    // declared once in `toyos-xhci` and `use`d by `kernel/src/drivers/xhci`, so
+    // neither bound below can be a copy that drifted.
+    use toyos_xhci::port::{DEBOUNCE_NS, EMPTY_BUS_NS, SLOW_CONNECT_NS};
+    /// Nanoseconds per second, to put those in the units the log's stamps are in.
+    const PER_S: f64 = 1_000_000_000.0;
+    /// How long after port power the driver can first name a port. The register
+    /// reads empty for `SLOW_CONNECT_NS` after this controller powered its
+    /// ports, and `await_connect_settle` then wants `DEBOUNCE_NS` of a connect
+    /// set that has held still and is non-empty.
+    const FIRST_CONNECT_S: f64 = (SLOW_CONNECT_NS + DEBOUNCE_NS) as f64 / PER_S;
+    /// How late the first port line may be: halfway between the two settles this
+    /// test tells apart, so one that ends on the device appearing cannot reach
+    /// it and one that ends at `EMPTY_BUS_NS` cannot stay under it.
+    const SETTLE_CEILING_S: f64 =
+        FIRST_CONNECT_S + (EMPTY_BUS_NS as f64 / PER_S - FIRST_CONNECT_S) / 2.0;
 
     let (bytes, lba) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
     let image = test_dir().join("usb-slow-connect.img");
@@ -1301,58 +1292,47 @@ pub fn xhci_slow_connect(
     // would be green on a driver that never waits and a QEMU that answers
     // instantly, which is exactly the pair that shipped.
     //
-    // Both instants below are read on the guest's own boot clock, because that
-    // is the clock the injection is written in — `read_portsc` hides the
-    // register while `nanos_since_boot() < SLOW_CONNECT_NS`. Timing the wait as
-    // a delta from `controller started` instead compared a delta against an
-    // absolute window, which silently required the boot to reach its controller
-    // within `PORT_DEBOUNCE_NS`: a budget it has since grown out of, and four
-    // red runs and an afternoon in the driver (`issues/`).
+    // `powered_at` is not logged; the two lines that bracket it are.
+    // `controller started` is taken before it, so it is the anchor that can only
+    // make the floor generous; the port-power line is printed after it, so it is
+    // the anchor that can only make the ceiling generous. Neither bound can be
+    // false because of where in the bracket the instant actually fell.
     let started = stamp_of(&log, "xHCI: controller started")?;
+    let powered = stamp_of(&log, "root-hub ports powered")?;
     // The first line this driver prints about any port at all. Every other
     // per-port line is preceded by that port's connect line, so the first match
     // is the first connect whichever port register it lands on — which the
     // profile does not fix, since a SuperSpeed stick appears on a high one.
     let first_seen = stamp_of(&log, "xHCI: port ")?;
 
-    // Non-vacuity, and it comes first because the floor below rests on it: a
-    // driver that only reached its ports after the window closed read a
-    // populated bus on its first look, and the wait it then did was the ordinary
-    // debounce every boot does.
-    //
-    // **This is the one bound in the file that a faster boot cannot break and a
-    // slower one can, so what it has is clearance rather than slack**, and the
-    // clearance is measured rather than assumed. It was 4 ms once — the
-    // controller started at 0.296-0.311 s on a quiet host in 2026-08, so ten
-    // milliseconds of movement anywhere in the boot decided this verdict, which
-    // is how a log-ring regression no other gate in the suite noticed was caught
-    // here. Four boots alone on the dev host on 2026-08-24 put it at 0.109,
-    // 0.117, 0.122 and 0.227 s, i.e. 73-191 ms, at 2.31x-4.45x measured host
-    // width. Re-measure before believing either number; the failure's own
-    // message names the fix, and it is not this gate.
-    if started >= HELD_EMPTY_S {
+    // What makes the bracket the settle's own: `await_connect_settle` anchors on
+    // the greatest `powered_at` across controllers, which on a second controller
+    // is not the instant these two lines bracket.
+    if !log.contains("xHCI: 1 controller(s),") {
         return Err(format!(
-            "the controller started at {started:.3} s, past the {HELD_EMPTY_S} s the ports are \
-             held empty for, so nothing in this boot read a hidden port. The boot has outgrown \
-             the injection window: widen SLOW_CONNECT_NS, not this gate\n{log}"
+            "this profile grew a second controller, so the settle no longer anchors on the \
+             `powered_at` these lines bracket\n{log}"
         ));
     }
-    // The floor. Nothing can name a port before the register stops lying and the
-    // debounce behind it has elapsed, so an earlier line is a driver that did
-    // not wait or an injection that did not land.
-    if first_seen < FIRST_CONNECT_S {
+    // The floor, and the non-vacuity with it: a driver that did not wait, or an
+    // injection that did not land, names a port within a millisecond of the scan
+    // rather than after the held-empty window and the debounce behind it.
+    let after_start = first_seen - started;
+    if after_start < FIRST_CONNECT_S {
         return Err(format!(
-            "the first port was named at {first_seen:.3} s, before the {FIRST_CONNECT_S} s the \
-             held-empty window and the debounce behind it come to — the injection did not reach \
-             the driver\n{log}"
+            "the first port was named {after_start:.3} s after the controller started, inside the \
+             {FIRST_CONNECT_S} s the held-empty window and the debounce behind it come to — the \
+             injection did not reach the driver\n{log}"
         ));
     }
     // The ceiling.
-    if first_seen > FIRST_CONNECT_S + SETTLE_SLACK_S {
+    let after_power = first_seen - powered;
+    if after_power > SETTLE_CEILING_S {
         return Err(format!(
-            "the first port was named at {first_seen:.3} s, {:.3} s after the connect became \
-             visible — the settle did not end on the device appearing\n{log}",
-            first_seen - FIRST_CONNECT_S
+            "the first port was named {after_power:.3} s after the ports were powered, {:.3} s \
+             after the connect became visible — the settle did not end on the device \
+             appearing\n{log}",
+            after_power - FIRST_CONNECT_S
         ));
     }
 
@@ -1393,9 +1373,10 @@ pub fn xhci_slow_connect(
     let _ = std::fs::remove_file(&image);
 
     eprintln!(
-        "  [usb] controller started at {started:.3} s and the ports read empty to \
-         {HELD_EMPTY_S} s; first port named at {first_seen:.3} s, both sticks bound, host bytes \
-         verified host-side; Boot: complete at {boot_ms} ms"
+        "  [usb] controller started at {started:.3} s and powered its ports at {powered:.3} s; \
+         first port named at {first_seen:.3} s, {after_start:.3} s after the start and \
+         {after_power:.3} s after the power, both sticks bound, host bytes verified host-side; \
+         Boot: complete at {boot_ms} ms"
     );
     Ok(())
 }
@@ -1550,13 +1531,11 @@ pub fn xhci_portsc_rw1c(
 /// recovery under test runs against a real endpoint state rather than a flag.
 ///
 /// **One injection is one abandoned transfer, and not one broken transfer.** The
-/// device answers that transfer after the driver has stopped listening, and
-/// where that answer lands relative to the Bulk-Only Reset decides whether the
-/// reset holds: the guest wins the race under KVM and loses it under TCG, so
-/// this boot produces one break on the dev host and two on CI, off the same
-/// tree. Counting breaks is therefore a count of who won a race. What the driver
-/// owes either way is that the caller's write survives, and that is what is
-/// asserted here.
+/// device may answer that transfer after the driver has stopped listening, so
+/// counting breaks is a count of who won a race. What the driver owes either way
+/// is what is asserted here: the device, owed a WRITE's data, is sent no class
+/// reset and no command block before its port has been reset, it answers under
+/// its own tag after that, and the caller's write survives.
 ///
 /// The assertion that decides it is host-side and is about bytes: **every** block
 /// the guest was told to write is byte-correct in the backing file, the broken
@@ -1569,11 +1548,14 @@ pub fn usb_transport_break(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    const PARAMS: &[&str] = &["usb-storage-gate", "usb-transport-break"];
+    const PARAMS: &[&str] =
+        &["usb-storage-gate", "usb-transport-break", "usb-port-gone", "usb-serial-short"];
 
     let (bytes, lba) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
     let image = test_dir().join("usb-transport-break.img");
     let nonce = stage(&image, bytes);
+    let pcap = test_dir().join("usb-transport-break.pcap");
+    let _ = std::fs::remove_file(&pcap);
 
     let log = boot_and_shutdown(
         test_config,
@@ -1583,11 +1565,13 @@ pub fn usb_transport_break(
             profile: Profile::UsbDisk,
             kernel_params: PARAMS,
             usb_images: vec![image.clone()],
+            usb_pcap: Some(pcap.clone()),
             ..Default::default()
         },
     )?;
     gate_ran(&log, 2)?;
     check_geometry(&log, bytes, lba)?;
+    serial_short_is_not_read(&log)?;
 
     // The injection reached the driver, and the driver said *what* broke. Both
     // halves are assertions: without the first this is a boot with nothing
@@ -1636,8 +1620,11 @@ pub fn usb_transport_break(
     // fault itself, and the recovery the device's late answer to the abandoned
     // transfer can undo — so a third that also breaks is the transport failing
     // to come back rather than this test's doing.
+    // A counted break reads `break N of M running`; the read the gate stages
+    // with its port gone is a break the driver does not count, judged below.
     let mine = format!("usb-storage: {under_test} transport broke");
-    let breaks = log.matches(mine.as_str()).count();
+    let breaks =
+        log.lines().filter(|l| l.contains(mine.as_str()) && l.ends_with(" running")).count();
     if breaks > 2 {
         let all: Vec<&str> = log.lines().filter(|l| l.contains("transport broke")).collect();
         return Err(format!(
@@ -1659,7 +1646,8 @@ pub fn usb_transport_break(
     // Scoped to the disk under test for the same reason the count is: another
     // device's endpoint being found Running says nothing about this one's.
     let recovered = format!("xHCI: {under_test} endpoint");
-    let states: Vec<&str> = log.lines().filter(|l| l.contains(", recovering")).collect();
+    let looked = |l: &&str| l.contains(", recovering") || l.contains(", stopping it before its port is reset");
+    let states: Vec<&str> = log.lines().filter(looked).collect();
     if !states.iter().any(|l| l.contains(recovered.as_str()) && l.contains("is Running,")) {
         return Err(format!(
             "no endpoint of {under_test} was found Running after the break, so this is not the \
@@ -1667,19 +1655,65 @@ pub fn usb_transport_break(
         ));
     }
 
-    // `run_command` logs only failures, so each of these lines is the
-    // controller refusing a command the driver should not have sent — which is
-    // exactly what the T14 printed twice.
-    for illegal in [
-        "Reset Endpoint failed",
-        "Stop Endpoint failed",
-        "Set TR Dequeue failed",
-        "reset recovery failed; disk is offline",
+    no_command_was_refused(&log)?;
+
+    // **A device owed a WRITE's data is asked nothing on the Bulk-Out until its
+    // port has been reset.** The break left it holding a command block and
+    // waiting for bytes, where the class reset's own TEST UNIT READY would be
+    // 31 of them: the ladder enters at the port reset, says why, and the
+    // device's answer after it is what lets the write go out again.
+    let entered = format!(
+        "usb-storage: {under_test} is owed the data of the command that broke, so nothing can be \
+         asked of it on the Bulk-Out: its port is reset with no class reset before it"
+    );
+    let Some((_, climb)) = log.split_once(entered.as_str()) else {
+        return Err(format!("the driver never said {entered:?}\n{log}"));
+    };
+    let mut rest = climb;
+    for (needle, also) in [
+        ("reset while recovering (warm on a USB3 port)", ": reset, and the port is enabled"),
+        ("bulk pair added again: endpoint", " is Running, endpoint "),
+        ("the port reset took: addressed and configured again, the device answered TEST UNIT READY under its own tag", ""),
+        ("SCSI 0x2a completed after ", " break(s) running"),
     ] {
-        if log.contains(illegal) {
+        let Some(line) = rest.lines().find(|l| l.contains(needle) && l.contains(also)) else {
+            return Err(format!("after the break, no line reads {needle:?} and {also:?}, in order\n{log}"));
+        };
+        rest = rest.split_once(line).expect("the line came from this text").1;
+    }
+    // On the wire: the abandoned WRITE's command block is followed by no
+    // Bulk-Only reset and no other command block until the device has been
+    // configured again, and the first one after that is a TEST UNIT READY.
+    let requests = control_requests(&pcap)?;
+    let blocks = command_blocks(&pcap)?;
+    let rungs = every_port_reset_is_followed_by_a_test_unit_ready(&requests, &blocks)?;
+    if rungs == 0 {
+        return Err(format!("the disk was never configured again: {requests:02x?}\n{log}"));
+    }
+    let Some(abandoned) = blocks.iter().position(|(_, opcode)| *opcode == 0x2A) else {
+        return Err(format!("no WRITE(10) reached the wire: {blocks:02x?}\n{log}"));
+    };
+    let (sent_before, _) = blocks[abandoned];
+    let Some(configured_again) = requests
+        .iter()
+        .enumerate()
+        .skip(sent_before)
+        .find(|(i, _)| is_a_rungs_configuration(&requests, *i))
+        .map(|(i, _)| i)
+    else {
+        return Err(format!("no port reset's SET_CONFIGURATION follows the abandoned WRITE\n{log}"));
+    };
+    if let Some(reset) = requests[sent_before..configured_again].iter().find(|r| r[..2] == [0x21, 0xFF]) {
+        return Err(format!(
+            "{reset:02x?}: a Bulk-Only reset was sent at a device owed Data-Out bytes\n{log}"
+        ));
+    }
+    match blocks.get(abandoned + 1) {
+        Some((before, 0x00)) if *before > configured_again => {}
+        next => {
             return Err(format!(
-                "{illegal:?}: the recovery did not pick a command the endpoint's state \
-                 permits\n{log}"
+                "the abandoned WRITE's command block was followed by {next:02x?}, want a TEST \
+                 UNIT READY after request {configured_again}; every block: {blocks:02x?}\n{log}"
             ));
         }
     }
@@ -1699,15 +1733,1307 @@ pub fn usb_transport_break(
     if !log.contains("Boot: complete") {
         return Err(format!("the boot did not finish after the break\n{log}"));
     }
+    port_gone_is_left_to_the_teardown(&log, under_test)?;
     serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
-    let _ = std::fs::remove_file(&image);
+    for file in [&image, &pcap] {
+        let _ = std::fs::remove_file(file);
+    }
 
     eprintln!(
         "  [usb] a bulk transfer abandoned mid-flight on {under_test}: the endpoint was found \
-         Running and stopped rather than reset, that device's transport came back in {breaks} \
-         break(s) of the {} this boot, and every block the guest was told to write verified \
-         host-side",
+         Running and stopped rather than reset, no class reset and no command block reached a \
+         device owed data, the port reset brought its transport back in {breaks} break(s) of \
+         the {} this boot, and every block the guest was told to write verified host-side",
         log.matches("transport broke").count()
+    );
+
+    a_read_whose_first_wait_spent_its_budget_goes_out_again(test_config, c_bins, rust_bins)?;
+    transport_gives_up(test_config, c_bins, rust_bins)?;
+    abandoned_write_is_taken_offline(test_config, c_bins, rust_bins)?;
+    a_stick_its_reset_moved_carries_on(Moved::SameStick)?;
+    a_stick_its_reset_moved_carries_on(Moved::AnotherStick)?;
+    a_stick_its_reset_moved_carries_on(Moved::SlowStick)?;
+    a_stick_its_reset_moved_carries_on(Moved::OwedFlush)?;
+    a_stick_its_reset_moved_carries_on(Moved::FlushedStick)?;
+    a_stick_its_reset_moved_carries_on(Moved::SilentReturn)?;
+    super::power::transport_break_chain()
+}
+
+/// What the boot scan says of a device on a link something before this kernel
+/// trained, before it asks the device anything.
+const INHERITED: &str =
+    "link already trained before this kernel ran; warm resetting it before its device is asked \
+     anything";
+
+/// A READ whose first wait spends its operation's whole budget, then a class
+/// reset the device answers out of step, then a port reset that takes: the
+/// READ goes out again on what the call has left and returns the host's bytes.
+fn a_read_whose_first_wait_spent_its_budget_goes_out_again(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["usb-storage-gate", "usb-first-wait-spent"];
+    let (bytes, _) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
+    let image = test_dir().join("usb-first-wait-spent.img");
+    let nonce = stage(&image, bytes);
+    let log = boot_and_shutdown(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::UsbDisk,
+            kernel_params: PARAMS,
+            usb_images: vec![image.clone()],
+            ..Default::default()
+        },
+    )?;
+    gate_ran(&log, 2)?;
+    let want = "usb-gate: a first wait that spent the operation's budget, a recovery out of step \
+                and a port reset: read refused=false matched=true untaken=0 probes_untaken=0 \
+                healthy=true";
+    if !log.contains(want) {
+        let got = log.lines().find(|l| l.contains("a first wait that spent"));
+        return Err(format!("the gate read {got:?}, want {want:?}\n{log}"));
+    }
+    let broke = line_with(&log, "transport broke on SCSI 0x28: no answer in the ")?;
+    let under_test = broke_on(broke)?;
+    // The staged wait really spent the operation's two seconds.
+    let waited = elapsed_before(&log, broke)?;
+    if waited < 1.9 {
+        return Err(format!(
+            "{broke:?} came {waited:.3} s after the record before it: the staged wait did not \
+             spend the operation's budget\n{log}"
+        ));
+    }
+    let (_, after) = log.split_once(broke).expect("the line came from this text");
+    let mut rest = after;
+    for needle in [
+        format!("usb-storage: {under_test} transport broke on the class reset's TEST UNIT READY"),
+        format!("usb-storage: {under_test} the port reset took"),
+        format!("usb-storage: {under_test} SCSI 0x28 completed after 2 break(s) running"),
+    ] {
+        let Some(line) = rest.lines().find(|l| l.contains(needle.as_str())) else {
+            return Err(format!("after the break, no line reads {needle:?}, in order\n{log}"));
+        };
+        rest = rest.split_once(line).expect("the line came from this text").1;
+    }
+    if let Some(line) = after.lines().find(|l| l.contains(" not issued")) {
+        return Err(format!("{line:?}: the command the recovery was for was not sent again\n{log}"));
+    }
+    verify(&image, bytes, nonce)?;
+    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+    let _ = std::fs::remove_file(&image);
+    eprintln!(
+        "  [usb] {under_test}: a READ whose wait spent {waited:.3} s went out again after the port \
+         reset took, and returned the host's bytes"
+    );
+    Ok(())
+}
+
+/// `usb-serial-short` asks each disk for its serial number string in 8 bytes,
+/// fewer than QEMU's string carries: the bytes past what was delivered are the
+/// zeroed buffer, and a driver that read them would take a string the device
+/// never sent whole for the unit's name. Every disk this boot binds says it
+/// could not read one.
+fn serial_short_is_not_read(log: &str) -> Result<(), String> {
+    let said: Vec<&str> =
+        log.lines().filter(|l| l.contains("usb-storage: slot ") && l.contains(" serial number ")).collect();
+    if said.is_empty() {
+        return Err(format!("no disk said what its serial number was\n{log}"));
+    }
+    if let Some(read) = said.iter().find(|l| !l.ends_with(" serial number named and not read")) {
+        return Err(format!("{read:?}: a serial number that arrived short was read\n{log}"));
+    }
+    Ok(())
+}
+
+/// The CPU a kernel record was written on.
+fn cpu_of(line: &str) -> Result<u32, String> {
+    line.split_once("[kernel ")
+        .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+        .and_then(|cpu| cpu.trim_end_matches(']').strip_prefix("cpu"))
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| format!("{line:?} names no CPU"))
+}
+
+/// The one line carrying `needle`, as the log wrote it.
+fn line_with<'a>(log: &'a str, needle: &str) -> Result<&'a str, String> {
+    log.lines().find(|l| l.contains(needle)).ok_or_else(|| format!("no line reads {needle:?}\n{log}"))
+}
+
+/// What the host plugs in on another port once the port rung's reset has
+/// emptied the boot stick's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Moved {
+    /// The same backing under the same serial number: the stick itself, as a
+    /// reset can move a stick from the USB2 half of its receptacle to the USB3
+    /// half.
+    SameStick,
+    /// The same backing under another serial number, which is everything a
+    /// second unit of the same model shares with the first — INQUIRY,
+    /// capacity, USB ids — and the negative control: it must not be adopted.
+    AnotherStick,
+    /// The stick itself, whose bind `usb-slow-return` stalls past both the
+    /// write's operation budget and the disk's window: the call held for it
+    /// ends on its own bound on its own CPU, the bind runs on another, and the
+    /// disk is still taken back, since the enumeration began inside its window.
+    SlowStick,
+    /// The stick itself, broken by `usb-transport-break-owed` on a write that
+    /// went out while an earlier one was reported complete and not flushed: it
+    /// is taken back, and the flush of the writer whose write that was fails,
+    /// since a device that comes back is not known to have kept its cache.
+    OwedFlush,
+    /// The stick itself, broken by `usb-transport-break-flushed` on the first
+    /// write after a flush that succeeded over the one before it: it is taken
+    /// back owing nothing, since that flush emptied the cache it left with.
+    FlushedStick,
+    /// The stick itself, which `usb-return-silent` has come back late in the
+    /// held call and answer nothing on the operation sent again on it: every
+    /// wait of it spins to its end, and the call still ends inside its bound,
+    /// timed from the break.
+    SilentReturn,
+}
+
+/// What one disk call may spin for from the wait its transport broke on, in
+/// seconds: the bound `toyos_xhci::call` keeps every path of a call inside.
+fn call_after_break_secs() -> f64 {
+    toyos_xhci::call::AFTER_BREAK.whole() as f64 / 1e9
+}
+
+/// The boot stick's first WRITE(10) is abandoned, the ladder resets its port,
+/// and the device leaves that port and binds on another. **QEMU cannot move a device on a reset**, so `usb-reset-moves`
+/// holds the port rung's reset until the port reads empty and the host makes
+/// the move: `device_del` of the stick, then the same backing file plugged in
+/// on port 3 with the serial number the move says.
+///
+/// The same stick takes its disk number back, the write that broke goes out
+/// again on it and completes, and the job the root volume carries runs to its
+/// reset with nothing failed on disk 0. Another stick is refused by name, bound
+/// as a new disk, and disk 0 is lost when its window ends — as every disk whose
+/// device left was before.
+///
+/// **The call held for the stick only waits.** It spins with `IF` clear, so
+/// the bind is another CPU's, and the call ends inside [`call_after_break_secs`] of
+/// the break however slow the bind is — both read off the kernel's own stamps.
+fn a_stick_its_reset_moved_carries_on(moved: Moved) -> Result<(), String> {
+    const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
+    const MOVE_NOW: &str = "usb-reset-moves: move the device now";
+    const STALLED: &str = "answers slowly (usb-slow-return): its bind is stalled";
+    const OWED: &str = ", and it left owing a flush of writes it had reported complete, so the \
+        flush of each writer whose writes they were fails";
+    const FLUSH_LOST: &str =
+        "made before its disk came back owing a flush may not have survived, and its flush says so";
+    // The stick's one writer at the break is `/log`: logd's first batch is
+    // the first WRITE(10) that goes out owing a flush.
+    const LOG_TOLD: &str = "writes the kernel (log) made before its disk came back owing a flush";
+    const STILL_HELD: &str = "is still held when this call may wait no longer";
+    const AFTER_A_FLUSH: &str = "breaks next (usb-transport-break-flushed)";
+    const SILENT: &str = "answers nothing on the operation sent again on it (usb-return-silent)";
+    const LATE: &str = "comes back late (usb-return-silent): its bind is stalled";
+    const WENT_OUT_AGAIN: &str = "usb-storage: disk 0 is back, and the operation it was asked went \
+        out again on it";
+    let params: &'static [&'static str] = match moved {
+        Moved::SameStick | Moved::AnotherStick => &["usb-transport-break", "usb-reset-moves"],
+        Moved::SlowStick => &["usb-transport-break", "usb-reset-moves", "usb-slow-return"],
+        Moved::OwedFlush => &["usb-transport-break-owed", "usb-reset-moves"],
+        Moved::FlushedStick => &["usb-transport-break-flushed", "usb-reset-moves"],
+        Moved::SilentReturn => &["usb-transport-break", "usb-reset-moves", "usb-return-silent"],
+    };
+    let case = super::compile::repo_root().join("tests/jobcase");
+    let (name, serial) = match moved {
+        Moved::SameStick => ("usb-reset-moves-same.img", qemu::BOOT_STICK_SERIAL),
+        Moved::AnotherStick => ("usb-reset-moves-another.img", "TOYOS0OTHERSTICK"),
+        Moved::SlowStick => ("usb-reset-moves-slow.img", qemu::BOOT_STICK_SERIAL),
+        Moved::OwedFlush => ("usb-reset-moves-owed.img", qemu::BOOT_STICK_SERIAL),
+        Moved::FlushedStick => ("usb-reset-moves-flushed.img", qemu::BOOT_STICK_SERIAL),
+        Moved::SilentReturn => ("usb-reset-moves-silent.img", qemu::BOOT_STICK_SERIAL),
+    };
+    let image = test_dir().join(name);
+    std::fs::write(&image, qemu::build_boot_image(&case, &[], &[], params))
+        .map_err(|e| format!("write {}: {e}", image.display()))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        &case,
+        &[],
+        &[],
+        BootOptions {
+            profile: Profile::Metal,
+            qmp: true,
+            kernel_params: params,
+            // The held call sees the stick back, and the job resets after it,
+            // only if a CPU in no call on the held disk binds it: these boots
+            // put two CPUs in calls on it.
+            smp: if matches!(moved, Moved::SilentReturn | Moved::FlushedStick) { 4 } else { 2 },
+            boot_image: Some(qemu::Staged::Written(image.clone())),
+            ready_marker: toyos_build::bootlog::LOADER_LAST_LINE,
+            ..Default::default()
+        },
+    );
+    let mut log = qemu.boot_log().to_string();
+    // On the cue the staging writes to the console itself: the record above it
+    // waits for `klogd`, which may not run while the rung holds its CPU.
+    log.push_str(&qemu.drain_until(Duration::from_secs(60), |l| l.contains(MOVE_NOW)));
+    if !log.contains(MOVE_NOW) {
+        return Err(format!("{moved:?}: the port rung's reset was never held for the move\n{log}"));
+    }
+    let mut devices = qemu::QmpDevices::open(qemu.qmp_socket());
+    devices.del(qemu::BOOT_STICK_ID);
+    devices.blockdev_add_again("moved", &image);
+    devices.add("usb-storage", "xhci.0", "movedstick", &[("drive", "moved"), ("port", "3"), ("serial", serial)]);
+    drop(devices);
+    let ends = |l: &str| match moved {
+        Moved::SameStick | Moved::SlowStick | Moved::FlushedStick => {
+            l.contains(toyos_build::bootlog::REBOOTING)
+        }
+        Moved::AnotherStick => l.contains(" did not come back within "),
+        Moved::OwedFlush => l.contains(FLUSH_LOST),
+        Moved::SilentReturn => l.contains(WENT_OUT_AGAIN) || l.contains(STILL_HELD),
+    };
+    log.push_str(&qemu.drain_until(Duration::from_secs(60), ends));
+    // The rest of the boot: the job's reset, or the lost disk's failures.
+    log.push_str(&qemu.drain_serial(Duration::from_secs(5)));
+    drop(qemu);
+    let _ = std::fs::remove_file(&image);
+
+    let staged = log
+        .lines()
+        .find(|l| l.contains("transport broke on SCSI 0x2a: a staged break skipped the data phase wait"))
+        .ok_or_else(|| format!("{moved:?}: the staged break never happened\n{log}"))?;
+    let under_test = broke_on(staged)?;
+    let (_, after) = log.split_once(staged).expect("the line came from this text");
+    let in_order = |needles: &[String]| -> Result<(), String> {
+        let mut rest = after;
+        for needle in needles {
+            let Some((_, tail)) = rest.split_once(needle.as_str()) else {
+                return Err(format!("{moved:?}: after the break, no line reads {needle:?}, in order\n{log}"));
+            };
+            rest = tail;
+        }
+        Ok(())
+    };
+    let left = [
+        format!("usb-storage: {under_test} is owed the data of the command that broke"),
+        HELD.to_string(),
+        // Its port read empty inside the rung, or — when the host's move came
+        // after the rung's bound and the reset verified — disconnected at the
+        // next look: run 79's shape and run 74's, both a device that left
+        // under a reset of this driver's.
+        "usb-storage: disk 0 left port 1 (".to_string(),
+        " after this driver reset it; it is held ".to_string(),
+    ];
+    let inside_the_rung = log.contains("usb-storage: disk 0 left port 1 (its port read empty)");
+    let back = [
+        "xHCI: port 3 connected".to_string(),
+        format!(" serial number \"{serial}\""),
+        "usb-storage: disk 0 came back on port 3 slot ".to_string(),
+        "its volume carries on".to_string(),
+    ];
+    // The call its transport broke in: the first line on the break's CPU that
+    // ends a held call on disk 0 — a call on another CPU may find the disk
+    // held too, and ends its own.
+    let staged_cpu = cpu_of(staged)?;
+    let held_end = after
+        .lines()
+        .find(|l| {
+            (l.contains(WENT_OUT_AGAIN) || l.contains(STILL_HELD))
+                && cpu_of(l).is_ok_and(|cpu| cpu == staged_cpu)
+        })
+        .ok_or_else(|| format!("{moved:?}: the call held on cpu{staged_cpu} never ended\n{log}"))?;
+    // Where it ended, and when. A bind while it held ran on another CPU; one
+    // after it ended may run on any.
+    let held_call = |bind: &str| -> Result<f64, String> {
+        let line = held_end;
+        let ended = stamp_of(line, "[kernel ")?;
+        let took = ended - stamp_of(&log, staged)?;
+        let bound = call_after_break_secs();
+        if took > bound {
+            return Err(format!(
+                "{moved:?}: the call its transport broke in ended {took:.3} s after the break, past \
+                 the {bound} s a call may spin for\n{log}"
+            ));
+        }
+        let (call_cpu, bind_cpu) = (cpu_of(line)?, cpu_of(line_with(&log, bind)?)?);
+        let during = stamp_of(&log, bind)? <= ended;
+        if during && call_cpu == bind_cpu {
+            return Err(format!(
+                "{moved:?}: the stick was bound on cpu{bind_cpu} while the call held for it spun \
+                 there with IF clear\n{log}"
+            ));
+        }
+        eprintln!(
+            "  [usb] {moved:?}: the held call ended {took:.3} s after the break on cpu{call_cpu}; \
+             the stick was bound on cpu{bind_cpu}, {} it ended",
+            if during { "before" } else { "after" }
+        );
+        Ok(took)
+    };
+    let came_back = "usb-storage: disk 0 came back on port 3 slot ";
+    match moved {
+        Moved::SameStick | Moved::SlowStick | Moved::FlushedStick => {
+            if moved == Moved::FlushedStick {
+                let flushed = line_with(&log, AFTER_A_FLUSH)?;
+                if !log.split_once(staged).is_some_and(|(before, _)| before.contains(flushed)) {
+                    return Err(format!("{moved:?}: the break was not the one after a flush\n{log}"));
+                }
+            }
+            // First, and the debt first of all, so a debt the stick came back
+            // with is named as one.
+            for never in [
+                OWED,
+                FLUSH_LOST,
+                " failed on disk 0",
+                " did not come back within ",
+                "disk 1 ready",
+                " is not disk 0 come back",
+            ] {
+                if let Some(line) = log.lines().find(|l| l.contains(never)) {
+                    return Err(format!("{moved:?}: {line:?} of a stick that came back as itself\n{log}"));
+                }
+            }
+            let mut want = left.to_vec();
+            want.push(back[0].clone());
+            if moved == Moved::SlowStick {
+                want.push(STALLED.to_string());
+            }
+            want.extend(back[1..].iter().cloned());
+            want.push(toyos_build::bootlog::REBOOTING.to_string());
+            in_order(&want)?;
+            // Two shapes, both the ruling's: the held call saw the stick bound
+            // and sent its write again; or it ended on its bound first — the
+            // stall, or every CPU inside a call on the held disk, so no CPU
+            // took the pass that binds — and the write was asked again.
+            let shape = if moved != Moved::SlowStick && held_end.ends_with(": it completed") {
+                in_order(&[left[3].clone(), came_back.to_string(), held_end.to_string()])?;
+                held_call(came_back)?;
+                "the write that waited went out again on it"
+            } else if held_end.contains(STILL_HELD) {
+                in_order(&[left[3].clone(), held_end.to_string()])?;
+                held_call(if moved == Moved::SlowStick { STALLED } else { came_back })?;
+                "the call that waited ended on its bound and the write was asked again"
+            } else {
+                return Err(format!("{moved:?}: {held_end:?} of a stick that came back as itself\n{log}"));
+            };
+            if !log.contains("Boot: complete") {
+                return Err(format!("{moved:?}: the boot never completed\n{log}"));
+            }
+            serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+            eprintln!(
+                "  [usb] {under_test}'s port reset moved the boot stick to port 3 ({}); it bound \
+                 as disk 0 again on its serial number, {shape}, and the job on the root volume it \
+                 carries ran to its reset{}",
+                if inside_the_rung {
+                    "inside the rung"
+                } else {
+                    "after the rung's reset verified"
+                },
+                match moved {
+                    Moved::SlowStick => ", though its bind was stalled past the window",
+                    Moved::FlushedStick => {
+                        ", owing no flush: it broke after a flush that succeeded over its last write"
+                    }
+                    _ => "",
+                }
+            );
+        }
+        Moved::OwedFlush => {
+            let mut want = left.to_vec();
+            want.extend(back.iter().cloned());
+            want.push(OWED.to_string());
+            want.push(LOG_TOLD.to_string());
+            in_order(&want)?;
+            for never in [" did not come back within ", "disk 1 ready", " is not disk 0 come back"] {
+                if let Some(line) = log.lines().find(|l| l.contains(never)) {
+                    return Err(format!("{moved:?}: {line:?}\n{log}"));
+                }
+            }
+            eprintln!(
+                "  [usb] a stick that left owing a flush was taken back as disk 0, and the flush of \
+                 /log, whose write it lost, failed by name"
+            );
+        }
+        Moved::SilentReturn => {
+            let mut want = left.to_vec();
+            want.push(back[0].clone());
+            want.push(LATE.to_string());
+            want.extend(back[1..].iter().cloned());
+            want.extend([
+                format!("usb-storage: disk 0 {SILENT}"),
+                " is offline: both bulk endpoints Stopped=".to_string(),
+                format!("{WENT_OUT_AGAIN}: it failed"),
+            ]);
+            in_order(&want)?;
+            // The stick came back late enough that the operation sent again on
+            // a bound of its own would run past the call's: on the call's,
+            // its waits reach where the last rung begins, and no further.
+            if !held_end.contains(&format!("{WENT_OUT_AGAIN}: it failed")) {
+                return Err(format!(
+                    "{moved:?}: {held_end:?}: the call held on cpu{staged_cpu} did not send its \
+                     operation again on the stick that came back\n{log}"
+                ));
+            }
+            let took = held_call(came_back)?;
+            let bounds = toyos_xhci::call::AFTER_BREAK;
+            let spun = (bounds.whole() - bounds.offline) as f64 / 1e9;
+            if took < spun {
+                return Err(format!(
+                    "{moved:?}: the call ended {took:.3} s after the break, before the {spun} s its \
+                     waits may reach: the operation sent again did not spend what the call had \
+                     left\n{log}"
+                ));
+            }
+            eprintln!(
+                "  [usb] a stick that came back and answered nothing on the operation sent again \
+                 on it spun what the held call had left, went offline on the last rung, and the \
+                 call ended {took:.3} s after the break"
+            );
+        }
+        Moved::AnotherStick => {
+            let mut refused = left.to_vec();
+            refused.extend([
+                "usb-storage: the device on port 3 is not disk 0 come back: its serial number differs"
+                    .to_string(),
+                "usb-storage: disk 1 ready on slot ".to_string(),
+                "usb-storage: disk 0 did not come back within 2000 ms of its port reset; it is \
+                 offline"
+                    .to_string(),
+            ]);
+            in_order(&refused)?;
+            for never in ["usb-storage: disk 0 came back", "usb-storage: disk 0 is back"] {
+                if let Some(line) = log.lines().find(|l| l.contains(never)) {
+                    return Err(format!("{line:?}: another stick was taken for disk 0\n{log}"));
+                }
+            }
+            eprintln!(
+                "  [usb] a stick with another serial number arrived on port 3 while disk 0 was \
+                 held: it bound as disk 1, and disk 0 was lost when its window ended"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The ladder's last rung, with the rung before it spent:
+/// `usb-transport-offline` leaves every rung's TEST UNIT READY unsent and
+/// unanswered for the whole of that rung's bound. The port reset — every step
+/// of it answered — may not say it took, the write is never re-issued, and the
+/// last rung still runs whole: both endpoints stopped, the port reset and
+/// waited for, the controller told, the slot back.
+///
+/// **T14 run 77 is this boot with one budget for all of it**: two waits of the
+/// whole timeout left the give-up nothing, so it stopped no endpoint and waited
+/// for no reset. The clock is read here so the staging is known to have spent
+/// what it claims.
+fn abandoned_write_is_taken_offline(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["usb-storage-gate", "usb-transport-break", "usb-transport-offline"];
+    let (bytes, _) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
+    let image = test_dir().join("usb-transport-offline.img");
+    stage(&image, bytes);
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::UsbDisk,
+            kernel_params: PARAMS,
+            usb_images: vec![image.clone()],
+            ..Default::default()
+        },
+    );
+    let mut log = qemu.boot_log().to_string();
+    // The slot goes back from the poll, which the boot log may end before.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline
+        && !log.split_once(" is offline: ").is_some_and(|(_, after)| after.contains(" disabled"))
+    {
+        log.push_str(&qemu.drain_serial(Duration::from_millis(250)));
+    }
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    log.push_str(&qemu.drain_serial(Duration::from_secs(20)));
+    drop(qemu);
+
+    let staged = log
+        .lines()
+        .find(|l| l.contains("transport broke on SCSI 0x2a: a staged break skipped the data phase wait"))
+        .ok_or_else(|| format!("the staged break never happened\n{log}"))?;
+    let under_test = broke_on(staged)?;
+    let spent = "the bound on this part of the call ran out during the status phase";
+    let rungs: Vec<String> = [("port reset", 2)]
+        .iter()
+        .map(|(rung, next)| {
+            format!(
+                "usb-storage: {under_test} transport broke on the {rung}'s TEST UNIT READY: \
+                 {spent}; break {next} of 3 running"
+            )
+        })
+        .collect();
+    let mut rest = log.as_str();
+    for rung in &rungs {
+        let Some((_, after)) = rest.split_once(rung.as_str()) else {
+            return Err(format!("no line reads {rung:?}, in that order\n{log}"));
+        };
+        rest = after;
+    }
+    for never in [
+        format!("usb-storage: {under_test} Reset Recovery took"),
+        format!("usb-storage: {under_test} the port reset took"),
+        format!("usb-storage: {under_test} SCSI 0x2a completed"),
+        format!("xHCI: {under_test} bulk pair dropped and added"),
+    ] {
+        if log.contains(never.as_str()) {
+            return Err(format!("{never:?} of a device that never answered a rung\n{log}"));
+        }
+    }
+
+    // The last rung, after both of those: the reset waited for and seen, the
+    // controller told, the slot back — and no step of it refused for want of
+    // anything to spend.
+    let last_reset = format!("xHCI: {under_test} port ");
+    let Some(reset) = rest.lines().find(|l| {
+        l.contains(last_reset.as_str()) && l.contains("reset while taking it offline (warm on a USB3 port)")
+    }) else {
+        return Err(format!("the last rung reset no port\n{log}"));
+    };
+    if !reset.ends_with(": reset, and the port is enabled") {
+        return Err(format!("{reset:?}: the last rung's reset was not seen to complete\n{log}"));
+    }
+    let offline = format!(
+        "usb-storage: {under_test} is offline: both bulk endpoints Stopped=true, port "
+    );
+    let said = rest
+        .lines()
+        .find(|l| l.contains(offline.as_str()))
+        .ok_or_else(|| format!("no {offline:?} line after the rungs: the disk was left online\n{log}"))?;
+    for did in ["reset=true and nothing sent after it, Reset Device=true", "its slot goes back"] {
+        if !said.contains(did) {
+            return Err(format!("{said:?} does not read {did:?}\n{log}"));
+        }
+    }
+    let (_, since_the_break) = log.split_once(staged).expect("the line came from this text");
+    for starved in [" not issued: ", "not sent: ", " not issued again: "] {
+        if let Some(line) = since_the_break.lines().find(|l| l.contains(starved)) {
+            return Err(format!("{line:?}: a step was refused for want of a bound to run on\n{log}"));
+        }
+    }
+    // Nothing reaches the device after the reset that ends it.
+    let (_, after_offline) = rest.split_once(said).expect("the line came from this text");
+    for sent in [format!("xHCI: {under_test} endpoint"), format!("usb-storage: {under_test} transport broke")] {
+        if after_offline.contains(sent.as_str()) {
+            return Err(format!("{sent:?} after {under_test} was taken offline\n{log}"));
+        }
+    }
+    let slot = under_test.rsplit(' ').next().expect("a slot id ends the name");
+    if !after_offline.contains(&format!("xHCI: slot {slot} disabled")) {
+        return Err(format!("slot {slot} never went back after the give-up\n{log}"));
+    }
+
+    // The clock, against the staging's claim: each rung really spent its bound
+    // before the next began, so the last one ran with the others' all gone.
+    let stamp = |l: &str| -> Option<f64> {
+        l.split_once("[kernel ")?.1.split_whitespace().next()?.parse().ok()
+    };
+    let at = |needle: &str| log.lines().find(|l| l.contains(needle)).and_then(stamp);
+    let (Some(broke), Some(unverified), Some(ended)) =
+        (stamp(staged), at(rungs[0].as_str()), stamp(said))
+    else {
+        return Err(format!("a rung's record carries no kernel timestamp\n{log}"));
+    };
+    if unverified - broke < 1.4 {
+        return Err(format!(
+            "the port reset's rung took {:.3} s, so the staging did not spend its bound and the \
+             last rung was not starved of anything\n{log}",
+            unverified - broke
+        ));
+    }
+    if ended - broke >= 2.75 {
+        return Err(format!(
+            "the ladder took {:.3} s from the break to the offline line; the two bounds it \
+             ran on sum to 2 s\n{log}",
+            ended - broke
+        ));
+    }
+    no_command_was_refused(&log)?;
+    if !log.contains("Boot: complete") {
+        return Err(format!("the boot did not finish after the give-up\n{log}"));
+    }
+    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+    let _ = std::fs::remove_file(&image);
+    eprintln!(
+        "  [usb] {under_test}: a port reset that spent {:.3} s and never verified left the last \
+         rung whole: {}",
+        unverified - broke,
+        said.split_once("is offline: ").map_or("", |(_, rest)| rest)
+    );
+    Ok(())
+}
+
+/// `run_command` logs only failures, so each of these lines is the controller
+/// refusing a command the driver should not have sent, or a recovery that
+/// could not be completed.
+fn no_command_was_refused(log: &str) -> Result<(), String> {
+    for illegal in [
+        "Reset Endpoint failed",
+        "Stop Endpoint failed",
+        "Set TR Dequeue failed",
+        "Configure Endpoint (the bulk pair dropped and added) failed",
+        "Configure Endpoint (the bulk pair added after the port reset) failed",
+        "Reset Device failed",
+        "Address Device (after the port reset) failed",
+        " was not answered; break ",
+    ] {
+        if log.contains(illegal) {
+            return Err(format!(
+                "{illegal:?}: the recovery did not pick a command the endpoint's state \
+                 permits\n{log}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The staged break on a real stick: the transfer abandoned on the boot stick's
+/// first WRITE(10) is recovered, the write completes, the disk stays online,
+/// and the boot goes on to the deliberate reboot that ends its chain.
+///
+/// Which rung brought it back is the stick's to decide — one that does not
+/// honour the class reset is brought back by the port reset — so that one of
+/// them verified is asserted, and which is printed.
+pub fn transport_break_on_metal(
+    kernel: &serial::Serial,
+    after: &serial::Serial,
+) -> Result<(), String> {
+    let staged = kernel.must_say(
+        "transport broke on SCSI 0x2a: a staged break skipped the data phase wait; break 1 of ",
+    )?;
+    let under_test = broke_on(staged)?;
+    // T14 runs 74 and 79: the port reset can move the stick to the other half
+    // of its receptacle. Then no rung verifies on the old slot, and what says
+    // the volume carried on is the same device taking its disk number back and
+    // the command that broke completing on it.
+    if let Ok(left) = kernel.must_say(" after this driver reset it; it is held ") {
+        eprintln!("  [usb] {left}");
+        let back = kernel.must_say(" as the same device (USB ")?;
+        eprintln!("  [usb] {back}");
+        kernel.must_say("is back, and the operation it was asked went out again on it: it completed")?;
+        kernel.must_not_say(" did not come back within ")?;
+        return super::power::done_chain(after);
+    }
+    let rungs = [
+        format!("usb-storage: {under_test} Reset Recovery took"),
+        format!("usb-storage: {under_test} the port reset took"),
+    ];
+    let took = rungs
+        .iter()
+        .find_map(|rung| kernel.must_say(rung).ok())
+        .ok_or_else(|| format!("neither {:?} nor {:?}: no rung verified", rungs[0], rungs[1]))?;
+    eprintln!("  [usb] {took}");
+    kernel.must_say(&format!("usb-storage: {under_test} SCSI 0x2a completed after "))?;
+    kernel.must_not_say(&format!("usb-storage: {under_test} is offline"))?;
+    super::power::done_chain(after)
+}
+
+/// A read whose port reads gone is a break the driver does not recover: no
+/// command, no class reset and no port reset is aimed at a device that is not
+/// on the bus, and the disk is left to the teardown its port owes.
+///
+/// Staged, because a real pull lands on a transfer in flight only by timing:
+/// the gate's last read ends as `wait_transfer` ends one whose port read
+/// disconnected, with nothing queued.
+fn port_gone_is_left_to_the_teardown(log: &str, under_test: &str) -> Result<(), String> {
+    let gone = format!(
+        "usb-storage: {under_test} transport broke on SCSI 0x28: the port disconnected during \
+         the command phase; its port's teardown takes it from here"
+    );
+    let Some((_, after)) = log.split_once(gone.as_str()) else {
+        return Err(format!("the driver never said {gone:?}; did the staging run?\n{log}"));
+    };
+    for acted in [
+        format!("xHCI: {under_test} endpoint"),
+        format!("usb-storage: {under_test} is offline"),
+        format!("usb-storage: {under_test} Reset Recovery"),
+    ] {
+        if after.contains(acted.as_str()) {
+            return Err(format!("{acted:?} after the port read gone: the driver acted on it\n{log}"));
+        }
+    }
+    let read = "usb-gate: a read whose port reads gone: refused=true untaken=0 healthy=false";
+    if !log.contains(read) {
+        let got = log.lines().find(|l| l.contains("a read whose port reads gone"));
+        return Err(format!("the gate read {got:?}, want {read:?}\n{log}"));
+    }
+    Ok(())
+}
+
+/// Every control request the capture's device was sent, as its eight setup
+/// bytes, in the order the bus carried them.
+///
+/// The file is QEMU's own record (`hw/usb/pcap.c`): a pcap of link type 220,
+/// each packet led by usbmon's 64-byte header, little-endian as the host wrote
+/// it. A submission (`'S'`) on a control endpoint (transfer type 2) whose
+/// `flag_setup` is zero carries its setup packet at byte 40.
+fn control_requests(pcap: &Path) -> Result<Vec<[u8; 8]>, String> {
+    let bytes = std::fs::read(pcap).map_err(|e| format!("{}: {e}", pcap.display()))?;
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+    if bytes.len() < 24 || word(0) != 0xA1B2_C3D4 || word(20) != 220 {
+        return Err(format!("{} is not a usbmon capture ({} B)", pcap.display(), bytes.len()));
+    }
+    let mut requests = Vec::new();
+    let mut at = 24;
+    while at + 16 <= bytes.len() {
+        let captured = word(at + 8) as usize;
+        let packet = at + 16;
+        if packet + captured > bytes.len() {
+            return Err(format!("{}: a packet at {at} runs off the file", pcap.display()));
+        }
+        if captured >= 48 && bytes[packet + 8] == b'S' && bytes[packet + 9] == 2 && bytes[packet + 14] == 0
+        {
+            requests.push(bytes[packet + 40..packet + 48].try_into().expect("eight bytes"));
+        }
+        at = packet + captured;
+    }
+    Ok(requests)
+}
+
+/// The opcode of every command block the capture's device was sent, each with
+/// how many control requests the bus had carried before it.
+///
+/// A submission on a bulk endpoint (transfer type 3) going out, 31 bytes long
+/// and opening with the CBW signature (BOT 1.0 §5.1); the opcode is the first
+/// byte of the command block, at byte 15.
+fn command_blocks(pcap: &Path) -> Result<Vec<(usize, u8)>, String> {
+    let bytes = std::fs::read(pcap).map_err(|e| format!("{}: {e}", pcap.display()))?;
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+    let mut blocks = Vec::new();
+    let mut requests = 0;
+    let mut at = 24;
+    while at + 16 <= bytes.len() {
+        let captured = word(at + 8) as usize;
+        let packet = at + 16;
+        if packet + captured > bytes.len() {
+            return Err(format!("{}: a packet at {at} runs off the file", pcap.display()));
+        }
+        if captured >= 64 && bytes[packet + 8] == b'S' {
+            let data = &bytes[packet + 64..packet + captured];
+            match bytes[packet + 9] {
+                2 if bytes[packet + 14] == 0 => requests += 1,
+                3 if bytes[packet + 10] & 0x80 == 0 && data.len() == 31 && data[..4] == *b"USBC" => {
+                    blocks.push((requests, data[15]));
+                }
+                _ => {}
+            }
+        }
+        at = packet + captured;
+    }
+    Ok(blocks)
+}
+
+/// The recovery's own question, on the wire: the first command block the disk
+/// is sent after every Bulk-Only reset and its two clears is a TEST UNIT READY,
+/// so no command with a buffer reaches a device that has not answered one.
+fn every_reset_is_followed_by_a_test_unit_ready(
+    requests: &[[u8; 8]],
+    blocks: &[(usize, u8)],
+) -> Result<(), String> {
+    for (i, request) in requests.iter().enumerate() {
+        if request[..2] != [0x21, 0xFF] {
+            continue;
+        }
+        // The reset is request `i`, so its clears are `i + 1` and `i + 2` and
+        // a block sent after them has `i + 3` requests before it.
+        match blocks.iter().find(|(before, _)| *before >= i + 3) {
+            Some((_, 0x00)) => {}
+            next => {
+                return Err(format!(
+                    "the Bulk-Only reset at request {i} was followed by the command block \
+                     {next:02x?}, want a TEST UNIT READY; every block: {blocks:02x?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether request `i` is a port rung's SET_CONFIGURATION: an enumeration
+/// reads the configuration descriptor it chooses the value from after the
+/// configuration before it, and a rung reads none — string reads, the
+/// firmware's or a bind's, can stand between either and its request.
+fn is_a_rungs_configuration(requests: &[[u8; 8]], i: usize) -> bool {
+    const SET_CONFIGURATION: [u8; 2] = [0x00, 0x09];
+    const GET_CONFIGURATION_DESCRIPTOR: [u8; 4] = [0x80, 0x06, 0x00, 0x02];
+    requests[i][..2] == SET_CONFIGURATION
+        && !requests[..i]
+            .iter()
+            .rev()
+            .take_while(|r| r[..2] != SET_CONFIGURATION)
+            .any(|r| r[..4] == GET_CONFIGURATION_DESCRIPTOR)
+}
+
+/// The port reset's own question, on the wire: the first command block the
+/// disk is sent after every SET_CONFIGURATION the ladder's second rung sent it
+/// is a TEST UNIT READY. Answers how many there were.
+///
+/// The capture opens with the firmware's own enumeration of the disk, and an
+/// enumeration's SET_CONFIGURATION is told from a rung's by
+/// [`is_a_rungs_configuration`].
+fn every_port_reset_is_followed_by_a_test_unit_ready(
+    requests: &[[u8; 8]],
+    blocks: &[(usize, u8)],
+) -> Result<usize, String> {
+    let mut rungs = 0;
+    for i in 0..requests.len() {
+        if !is_a_rungs_configuration(requests, i) {
+            continue;
+        }
+        rungs += 1;
+        match blocks.iter().find(|(before, _)| *before > i) {
+            Some((_, 0x00)) => {}
+            next => {
+                return Err(format!(
+                    "the port reset's SET_CONFIGURATION at request {i} was followed by the \
+                     command block {next:02x?}, want a TEST UNIT READY; every block: {blocks:02x?}"
+                ));
+            }
+        }
+    }
+    Ok(rungs)
+}
+
+/// BOT 1.0 §5.3.4 on the wire: every Bulk-Only Mass Storage Reset the disk was
+/// sent is followed, with nothing between, by a ClearFeature(ENDPOINT_HALT) to
+/// an IN endpoint and then one to an OUT endpoint. Answers how many.
+fn every_reset_is_followed_by_both_clears(requests: &[[u8; 8]]) -> Result<usize, String> {
+    const CLASS_RESET: [u8; 2] = [0x21, 0xFF];
+    let halt_cleared = |r: &[u8; 8]| (r[..4] == [0x02, 0x01, 0x00, 0x00]).then_some(r[4]);
+    let mut resets = 0;
+    for (i, request) in requests.iter().enumerate() {
+        if request[..2] != CLASS_RESET {
+            continue;
+        }
+        resets += 1;
+        let cleared = [requests.get(i + 1), requests.get(i + 2)].map(|r| r.and_then(halt_cleared));
+        match cleared {
+            [Some(first), Some(second)] if first & 0x80 != 0 && second & 0x80 == 0 => {}
+            other => {
+                return Err(format!(
+                    "Bulk-Only reset {resets} was followed by clears of {other:02x?}, want the \
+                     Bulk-In then the Bulk-Out; every control request the disk was sent: \
+                     {requests:02x?}"
+                ));
+            }
+        }
+    }
+    Ok(resets)
+}
+
+/// The transport's recovery judged on what it does and not on what it plans:
+/// runs of breaks it brings a disk back from, a run it gives up on, and the
+/// same give-up inside a bind.
+///
+/// The gate stages, on a disk that answers every well-formed command: one
+/// break short of the budget by a CBW the device refuses, which QEMU's
+/// `usb-storage` answers with a STALL of the Bulk-Out — Bulk-In Running,
+/// Bulk-Out Halted; the same count by a data phase with no CBW before it, which
+/// it answers with a STALL of the Bulk-In — the pair the other way round; then
+/// one refused CBW whose class reset's own TEST UNIT READY is refused too, a
+/// rung the device answered without being in step after it; then the whole
+/// budget. Every run's second break climbs to the port reset, which addresses
+/// and configures the disk again under the number it has, and the third takes
+/// it offline behind one more reset. The second run only passes if the read
+/// that ended the first cleared the count. Then a disk is plugged in whose
+/// INQUIRY is refused the whole budget over, so it climbs the same ladder with
+/// its port not yet told which slot it holds.
+///
+/// **What judges the recovery is outside the kernel where it can be.** The
+/// three requests, the SET_CONFIGURATION of every port reset, and the TEST UNIT
+/// READY that is the first command block after either, are read off QEMU's own
+/// capture of the disk's traffic, so a driver that clears only the pipe its
+/// controller halted, or sends a command with a buffer to a device that has
+/// not answered one without, reds on the wire whatever it prints.
+/// The Drop and Add are a command and reach no wire: their
+/// judge is the controller's output context, which calls both endpoints Running
+/// with no doorbell rung — a state only an Add leaves. QEMU models no data
+/// toggle, no sequence number and no device that is a phase ahead of its host,
+/// so that the clears *resynchronise* a device is not judged here at all.
+fn transport_gives_up(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["usb-storage-gate", "usb-transport-faults"];
+    /// What the driver says of a CBW the device stalled; the code is the
+    /// controller's own word for it (xHCI 1.2 Table 6-90).
+    const STALLED_CBW: &str = "command phase completion code 6 (Stall Error)";
+    const STALLED_CSW: &str = "status phase completion code 6 (Stall Error)";
+
+    let (bytes, lba) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
+    let image = test_dir().join("usb-transport-faults.img");
+    let nonce = stage(&image, bytes);
+    let late = test_dir().join("usb-transport-faults-late.img");
+    drop(sparse(&late, 64 * 1024 * 1024));
+    let pcap = test_dir().join("usb-transport-faults.pcap");
+    let _ = std::fs::remove_file(&pcap);
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::UsbDisk,
+            kernel_params: PARAMS,
+            usb_images: vec![image.clone()],
+            usb_pcap: Some(pcap.clone()),
+            qmp: true,
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    let mut plugged = String::new();
+    let wait_for = |qemu: &mut QemuInstance, plugged: &mut String, line: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < deadline && !plugged.contains(line) {
+            plugged.push_str(&qemu.drain_serial(Duration::from_millis(250)));
+        }
+    };
+    // The offline disk's slot goes back from the poll, which the boot log may
+    // end before: it is waited for, so the pull below is not what gave it back.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let gone_back = |text: &str| {
+        text.split_once(" is offline: ").is_some_and(|(_, after)| after.contains(" disabled"))
+    };
+    while std::time::Instant::now() < deadline && !gone_back(&format!("{boot}{plugged}")) {
+        plugged.push_str(&qemu.drain_serial(Duration::from_millis(250)));
+    }
+    // It is pulled before the next disk is plugged, so the plug's port and
+    // slot are the late disk's alone.
+    let mut devices = qemu::QmpDevices::open(qemu.qmp_socket());
+    devices.del(&qemu::usb_device_id(0));
+    drop(devices);
+    wait_for(&mut qemu, &mut plugged, "it is offline");
+    let mut devices = qemu::QmpDevices::open(qemu.qmp_socket());
+    devices.blockdev_add("latedisk", &late);
+    devices.add("usb-storage", "xhci.0", "latedisk0", &[("drive", "latedisk")]);
+    drop(devices);
+    // The bind breaks on stalls, which cost no timeout; what is waited for is
+    // the line that ends it.
+    wait_for(&mut qemu, &mut plugged, "would not answer INQUIRY");
+    // And the poll after it, which is where the refused slot goes back.
+    plugged.push_str(&qemu.drain_serial(Duration::from_millis(1200)));
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let log = format!("{boot}{plugged}{}", qemu.drain_serial(Duration::from_secs(20)));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if log.contains(bad) {
+            return Err(format!("{bad:?} during the USB gate boot\n{log}"));
+        }
+    }
+    gate_ran(&boot, 2)?;
+    check_geometry(&boot, bytes, lba)?;
+
+    // The budget is the kernel's declaration, read off the gate's own line.
+    let Some(budget) = boot
+        .lines()
+        .find_map(|l| l.split_once(" bad CBW signatures in a row of a budget of ")?.1.split(':').next())
+        .and_then(|n| n.parse::<usize>().ok())
+    else {
+        return Err(format!("the gate never said what the transport's budget is\n{log}"));
+    };
+    let short = budget - 1;
+
+    // The two runs the recovery brings back: the read returned the host's
+    // bytes, and the disk is healthy after each.
+    for shape in ["bad CBW signatures", "withheld CBWs"] {
+        let want = format!(
+            "usb-gate: {short} {shape} in a row of a budget of {budget}: read refused=false \
+             matched=true untaken=0 healthy=true"
+        );
+        if !boot.contains(&want) {
+            let got = boot.lines().find(|l| l.contains(shape) && l.contains("read refused="));
+            return Err(format!("the gate read {got:?}, want {want:?}\n{log}"));
+        }
+    }
+
+    // The run whose first recovery the device answered without being in step:
+    // the read still returned the host's bytes, and both stagings were taken.
+    let want = "usb-gate: a bad CBW signature and then a recovery out of step: read refused=false \
+                matched=true untaken=0 probes_untaken=0 healthy=true";
+    if !boot.contains(want) {
+        let got = boot.lines().find(|l| l.contains("a recovery out of step"));
+        return Err(format!("the gate read {got:?}, want {want:?}\n{log}"));
+    }
+
+    // Every staged fault reached the device and the device answered as staged,
+    // on one disk, each break counted as the driver's running count says: two
+    // runs that stop one short, the one whose recovery was out of step, and one
+    // that spends the budget.
+    let broke: Vec<&str> = boot
+        .lines()
+        .filter(|l| l.contains("transport broke on SCSI 0x28") && l.ends_with(" running"))
+        .collect();
+    let want_counts: Vec<usize> =
+        (1..=short).chain(1..=short).chain(1..=1).chain(1..=budget).collect();
+    if broke.len() != want_counts.len() {
+        return Err(format!(
+            "{} counted break(s), want the {} the gate staged; did it run?\n{log}",
+            broke.len(),
+            want_counts.len()
+        ));
+    }
+    let under_test = broke_on(broke[0])?;
+    for (i, (line, count)) in broke.iter().zip(&want_counts).enumerate() {
+        if broke_on(line)? != under_test {
+            return Err(format!("a staged fault landed on another device: {line:?}\n{log}"));
+        }
+        let stall = if (short..2 * short).contains(&i) { STALLED_CSW } else { STALLED_CBW };
+        let counted = format!("break {count} of {budget} running");
+        if !line.contains(stall) || !line.contains(&counted) {
+            return Err(format!("{line:?} does not read {stall:?} and {counted:?}\n{log}"));
+        }
+    }
+    // The recovery that was out of step is the break between the read's one
+    // and the read's completion: counted, said in the recovery's own words, and
+    // followed by a recovery that took.
+    let out_of_step = format!(
+        "usb-storage: {under_test} transport broke on the class reset's TEST UNIT READY: \
+         {STALLED_CBW}; break 2 of {budget} running"
+    );
+    if boot.matches(out_of_step.as_str()).count() != 1 {
+        return Err(format!("want {out_of_step:?} once\n{log}"));
+    }
+    let came_back = |breaks: usize| {
+        format!(
+            "usb-storage: {under_test} SCSI 0x28 completed after {breaks} break(s) running; the \
+             transport came back and the count is cleared"
+        )
+    };
+    // Twice after `short` breaks, once per shape, and once after the two of the
+    // run that was out of step — which is the same line where `short` is two.
+    let mut want_back = vec![(short, 2)];
+    match want_back.iter_mut().find(|(breaks, _)| *breaks == 2) {
+        Some((_, times)) => *times += 1,
+        None => want_back.push((2, 1)),
+    }
+    for (breaks, times) in want_back {
+        let line = came_back(breaks);
+        if boot.matches(line.as_str()).count() != times {
+            return Err(format!("want {line:?} {times} time(s)\n{log}"));
+        }
+    }
+
+    // The pair each break left, Bulk-In first as the driver prints them, read
+    // off the two lines the driver's look at it printed next: both shapes were
+    // really staged, neither a repeat of the other.
+    let looked = format!("xHCI: {under_test} endpoint");
+    let lines: Vec<&str> = boot.lines().collect();
+    for (i, line) in broke.iter().enumerate() {
+        let at = lines.iter().position(|l| l == line).expect("the line came from this text");
+        let pair: Vec<&str> = lines[at + 1..]
+            .iter()
+            .filter(|l| l.contains(looked.as_str()))
+            .take(2)
+            .filter_map(|l| l.split_once(" is ")?.1.split(',').next())
+            .collect();
+        let want =
+            if (short..2 * short).contains(&i) { ["Halted", "Running"] } else { ["Running", "Halted"] };
+        if pair != want {
+            return Err(format!("{line:?} left the bulk pair {pair:?}, want {want:?}\n{log}"));
+        }
+    }
+    // Four runs, and each climbed both rungs once: the two that came back
+    // after `short` breaks, the one whose class reset was out of step, and the
+    // one that spent the budget.
+    let runs = 4;
+    if short != 2 {
+        return Err(format!("the ladder has {budget} rungs and this gate counts its climbs for 3"));
+    }
+    // The Drop and Add of every class reset and the Add of every port reset,
+    // in the controller's word: both endpoints Running with no doorbell rung.
+    for (did, want) in [("dropped and added", runs), ("added again", runs)] {
+        let made = format!("xHCI: {under_test} bulk pair {did}: endpoint");
+        let running = boot
+            .lines()
+            .filter(|l| l.contains(made.as_str()) && l.matches(" is Running").count() == 2)
+            .count();
+        if running != want {
+            return Err(format!("{running} time(s) the pair was {did} and left Running, want {want}\n{log}"));
+        }
+    }
+    // Every rung says it took only after the device's own answer: every class
+    // reset but the one staged out of step, and every port reset.
+    for (took, want) in [
+        (format!("usb-storage: {under_test} Reset Recovery took: the device answered TEST UNIT READY"), runs - 1),
+        (format!("usb-storage: {under_test} the port reset took: addressed and configured again, the device answered TEST UNIT READY"), runs),
+    ] {
+        if boot.matches(took.as_str()).count() != want {
+            return Err(format!("want {took:?} {want} times\n{log}"));
+        }
+    }
+
+    // The three requests of every class reset and the configuration of every
+    // port reset, on the wire, each followed by the rung's question.
+    let requests = control_requests(&pcap)?;
+    let blocks = command_blocks(&pcap)?;
+    let resets = every_reset_is_followed_by_both_clears(&requests)?;
+    every_reset_is_followed_by_a_test_unit_ready(&requests, &blocks)?;
+    if resets != runs {
+        return Err(format!(
+            "the disk was sent {resets} Bulk-Only reset(s), want {runs}: {requests:02x?}\n{log}"
+        ));
+    }
+    let configured = every_port_reset_is_followed_by_a_test_unit_ready(&requests, &blocks)?;
+    if configured != runs {
+        return Err(format!(
+            "the disk was configured again {configured} time(s), want {runs} port resets': \
+             {requests:02x?}\n{log}"
+        ));
+    }
+
+    // The give-up, what it did to the device, and that nothing reached the
+    // device after it.
+    let gave_up = format!(
+        "usb-storage: {under_test} broke {budget} times running; its port reset did not bring \
+         the transport back"
+    );
+    let Some((_, after)) = boot.split_once(gave_up.as_str()) else {
+        return Err(format!("the driver never said {gave_up:?}\n{log}"));
+    };
+    let offline = format!("usb-storage: {under_test} is offline: ");
+    let Some(said) = after.lines().find(|l| l.contains(offline.as_str())) else {
+        return Err(format!("no {offline:?} line after the give-up: the disk was left online\n{log}"));
+    };
+    // The disk under test trains SuperSpeed, so the most its port has is a
+    // warm reset.
+    let last_reset = format!("xHCI: {under_test} port ");
+    if !after.lines().any(|l| {
+        l.contains(last_reset.as_str())
+            && l.contains("reset while taking it offline (warm on a USB3 port)")
+            && l.ends_with(": reset, and the port is enabled")
+    }) {
+        return Err(format!("the last rung's reset was not seen to complete\n{log}"));
+    }
+    for did in [
+        "both bulk endpoints Stopped=true",
+        "reset=true and nothing sent after it, Reset Device=true",
+        "its slot goes back",
+    ] {
+        if !said.contains(did) {
+            return Err(format!("{said:?} does not read {did:?}\n{log}"));
+        }
+    }
+    let (_, after_offline) = after.split_once(said).expect("the line came from this text");
+    let asked_again = format!("usb-storage: {under_test} transport broke");
+    if after_offline.contains(asked_again.as_str()) || after_offline.contains(looked.as_str()) {
+        return Err(format!("a command reached {under_test} after it was taken offline\n{log}"));
+    }
+    let read = format!(
+        "usb-gate: {budget} bad CBW signatures in a row of a budget of {budget}: read \
+         refused=true untaken=0 the read after it refused=true healthy=false"
+    );
+    if !boot.contains(&read) {
+        let got = boot.lines().find(|l| l.contains("the read after it"));
+        return Err(format!("the gate read {got:?}, want {read:?}\n{log}"));
+    }
+    if !boot.contains("usb-gate: disk done reads=ok writes=ok refusal=true wr_err=0 healthy=false") {
+        return Err(format!("the gate's sweep before the faults did not survive them\n{log}"));
+    }
+
+    // The same budget spent inside a bind. The port is the one the plug named,
+    // the slot is given back once — by the enumeration that fails — and the
+    // controller is never asked for a slot it already has back.
+    let inquiries: Vec<&str> = plugged
+        .lines()
+        .filter(|l| l.contains("transport broke on SCSI 0x12") && l.contains(STALLED_CBW))
+        .collect();
+    if inquiries.len() != budget {
+        return Err(format!(
+            "the plugged disk's INQUIRY broke {} time(s), want {budget}\n{log}",
+            inquiries.len()
+        ));
+    }
+    let binding = broke_on(inquiries[0])?;
+    let Some(port) = plugged
+        .lines()
+        .filter(|l| l.contains(" connected"))
+        .find_map(|l| l.split_once("xHCI: port ")?.1.split([' ', ',']).next())
+    else {
+        return Err(format!("no port said the plugged disk connected\n{log}"));
+    };
+    let offline = format!(
+        "usb-storage: {binding} is offline: both bulk endpoints Stopped=true, port {port} \
+         reset=true"
+    );
+    if !plugged.contains(&offline) {
+        let got = plugged.lines().find(|l| l.contains("is offline: "));
+        return Err(format!("the bind's give-up read {got:?}, want {offline:?}\n{log}"));
+    }
+    // One more than the budget was staged, so the bind's own disarm has one to
+    // take back and say so.
+    let staged = format!("bound under {} staged INQUIRY fault(s): untaken=1", budget + 1);
+    if !plugged.contains(&staged) {
+        let got = plugged.lines().find(|l| l.contains("staged INQUIRY fault(s)"));
+        return Err(format!("the bind's staging read {got:?}, want {staged:?}\n{log}"));
+    }
+    let Some(gate_port) = said.split_once(", port ").and_then(|(_, rest)| rest.split(' ').next())
+    else {
+        return Err(format!("{said:?} does not name the port it reset\n{log}"));
+    };
+    // Two slots went back in this boot, each once, and the controller hands a
+    // freed slot id out again, so they are told apart by order. The gate's
+    // disk gave its own back while it was still plugged in: before its port
+    // said it had gone, which is the only time an unplug's teardown could have
+    // done it instead.
+    let slot_of = |name: &str| name.rsplit(' ').next().expect("a slot id ends the name").to_string();
+    let want = [slot_of(under_test), slot_of(binding)].map(|slot| format!("xHCI: slot {slot} disabled"));
+    let pulled = format!("xHCI: port {gate_port} disconnected");
+    match (log.find(want[0].as_str()), log.find(&pulled)) {
+        (Some(given_back), Some(gone)) if given_back < gone => {}
+        (given_back, gone) => {
+            return Err(format!(
+                "{:?} at {given_back:?} and {pulled:?} at {gone:?}: the offline disk's slot did \
+                 not go back while it was still plugged in\n{log}",
+                want[0]
+            ));
+        }
+    }
+    let disabled: Vec<&str> = log
+        .lines()
+        .filter_map(|l| l.find("xHCI: slot ").map(|at| &l[at..]))
+        .filter(|l| l.ends_with(" disabled"))
+        .collect();
+    let bind_gave_up = log.find(&offline).expect("found above");
+    if disabled != want || log.rfind(want[1].as_str()).is_none_or(|at| at < bind_gave_up) {
+        return Err(format!(
+            "the slots given back read {disabled:?}, want {want:?} with the last after the \
+             bind's give-up\n{log}"
+        ));
+    }
+    if log.contains("Disable Slot failed") {
+        return Err(format!("a slot was given back twice, or over a running endpoint\n{log}"));
+    }
+    no_command_was_refused(&log)?;
+
+    // Every byte the gate wrote before the give-up is on the image, and the
+    // machine went on: the boot stick beside the disk is the one it runs from.
+    verify(&image, bytes, nonce)?;
+    if !log.contains("Boot: complete") {
+        return Err(format!("the boot did not finish after the give-up\n{log}"));
+    }
+    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+    for file in [&image, &late, &pcap] {
+        let _ = std::fs::remove_file(file);
+    }
+
+    eprintln!(
+        "  [usb] {under_test}: {short} refused CBWs and {short} withheld ones each came back by \
+         the port reset (the wire carried {resets} Bulk-Only resets, each followed by both \
+         clears and a TEST UNIT READY, and {configured} SET_CONFIGURATIONs, each followed by \
+         one), one class reset out of step counted as a break, {budget} taken offline behind a \
+         last reset with its slot given back; {binding} broke {budget} times inside its bind \
+         on port {port} and its slot went back once"
     );
     Ok(())
 }
@@ -1773,8 +3099,9 @@ fn broke_on(line: &str) -> Result<&str, String> {
 /// against a controller's own bytes. It has no link training and no Inactive
 /// state, so the warm-reset recovery is unreachable and is certified by the
 /// host model instead (`toyos-xhci/sim/tests/superspeed.rs`). This says: the
-/// driver read the split correctly and stopped resetting the ports that did not
-/// need it. It says nothing about what happens when a link falls over.
+/// driver read the split correctly, hot resets no trained link, and warm resets
+/// the one the firmware trained before enumerating its device. It says nothing
+/// about what happens when a link falls over.
 pub fn xhci_superspeed_ports(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -1798,7 +3125,8 @@ pub fn xhci_superspeed_ports(
 
     // The boot stick is the only SuperSpeed device this profile attaches, so it
     // takes a USB3 register and every HID takes a USB2 one. Exactly one port
-    // must therefore have been brought up with no reset at all.
+    // must therefore have been found on a trained link — and, the firmware
+    // having trained it, warm reset before its device is asked anything.
     let trained: Vec<&str> = log.lines().filter(|l| l.contains("link already trained")).collect();
     if trained.len() != 1 {
         return Err(format!(
@@ -1807,15 +3135,18 @@ pub fn xhci_superspeed_ports(
             trained.len()
         ));
     }
+    if !trained[0].contains(INHERITED) {
+        return Err(format!("{:?} does not read {INHERITED:?}\n{log}", trained[0]));
+    }
 
-    // And every device still reached Enabled, so not resetting cost nothing.
+    // And every device still reached Enabled.
     let enabled = log.matches("enabled, speed=").count();
     if enabled != devices {
         return Err(format!(
             "{enabled} port(s) reached Enabled, {devices} devices on the bus\n{log}"
         ));
     }
-    for wrong in ["never finished its reset", "would not train", "warm reset"] {
+    for wrong in ["never finished its reset", "would not train", "failed its hot reset", "did not take a hot reset"] {
         if let Some(line) = log.lines().find(|l| l.contains(wrong)) {
             return Err(format!("{line:?} on a bus where every link is healthy\n{log}"));
         }
@@ -2949,6 +4280,95 @@ pub fn usb_refused_disk_first(
         "  [usb] a {huge} B disk refused on slot 1, enumerated first: the boot stick behind it \
          binds at msc_block +0x20000, not the refused disk's block — and once the refused disk \
          is unplugged a {REPLACEMENT_BYTES} B one binds at +0x10000, which is that block back"
+    );
+    Ok(())
+}
+
+/// **The boot scan hands the next port a free operation slot, whatever its own
+/// bound says.**
+///
+/// T14 runs 103 and 104 panicked in `toyos_xhci::job::Outstanding::submit` — "a
+/// second operation was submitted over an outstanding one" — with nothing wrong
+/// but a stick whose first `READ CAPACITY(10)` went unanswered. The scan's
+/// blocking bind spent the whole of the scan's silence bound inside
+/// `advance_outstanding`; the refusal at the end of it submitted a Disable Slot
+/// into the controller's one slot; and the scan, whose bound had expired two
+/// seconds before that submit, returned with the slot still occupied. The next
+/// port to connect then reached `device::begin`, which submits its Enable Slot
+/// unasked — and the kernel died of what a device did.
+///
+/// `usb-bind-spends-the-scan` stages that one thing: the boot's first bind
+/// spends longer than the bound and is then refused. Everything else is
+/// `UsbDiskRefusedFirst`'s own doing — QEMU hands out ports in device-creation
+/// order, so a data disk created before the boot stick *is* "the port that
+/// enumerates first", and the boot stick behind it is "another device arriving".
+///
+/// The assertion is that the scan waited: it never says it heard nothing, and
+/// the disk behind the refused one binds. With the fix reverted this boot
+/// panics at the line above rather than failing an assertion.
+pub fn xhci_scan_hands_over_a_free_slot(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    // No gate: what this boot has to show is which ports were enumerated, and
+    // a sweep of the bytes on them would only make it slower.
+    const PARAMS: &[&str] = &["usb-bind-spends-the-scan"];
+    /// What `msc::bind_spends_the_scan::WHY` prints. Two halves of one wire
+    /// format, as everything else in this file is: a rename shows up here as a
+    /// failed assertion and not as a test that quietly stopped staging anything.
+    const STAGED: &str = "answers nothing for the boot scan's whole bound \
+        (usb-bind-spends-the-scan) and is then refused";
+
+    let options = BootOptions {
+        profile: Profile::UsbDiskRefusedFirst,
+        kernel_params: PARAMS,
+        ..Default::default()
+    };
+    // The ordering is the injection, and argv is the only place it is visible.
+    let argv = qemu::profile_argv(&options);
+    let sticks: Vec<&String> = argv.iter().filter(|a| a.starts_with("usb-storage,")).collect();
+    match sticks.as_slice() {
+        [first, second] if first.contains("drive=usbdisk") && second.contains("drive=stick") => {}
+        other => {
+            return Err(format!("want the data disk created before the boot stick, got {other:?}"))
+        }
+    }
+
+    let log = boot_and_shutdown(test_config, c_bins, rust_bins, options)?;
+
+    if !log.contains(STAGED) {
+        return Err(format!("the bind that spends the scan's bound never ran\n{log}"));
+    }
+    // The finding. The scan may only leave while its slot is free, so a bound
+    // that expired inside the bind is not a reason to leave at all: the Disable
+    // Slot the refusal submitted is waited for, on its own deadline.
+    if log.contains("the boot scan heard nothing") {
+        return Err(format!(
+            "the scan gave up with the refusal's Disable Slot still outstanding; the next port's \
+             Enable Slot goes into that slot\n{log}"
+        ));
+    }
+    // It waited for the answer and then acted on it: the slot the refusal asked
+    // for goes back. A scan that abandoned the operation would leave this line
+    // out and the slot enabled for the life of the boot.
+    if !log.contains("xHCI: slot 1 disabled") {
+        return Err(format!("the refused disk's slot never came back\n{log}"));
+    }
+    // And the port behind the refused disk was enumerated rather than skipped:
+    // the boot stick is on it, so nothing else here would run if it were not.
+    if !log.contains("usb-storage: 1 device(s)") {
+        return Err(format!("the boot stick did not bind behind the refused disk\n{log}"));
+    }
+    if !log.contains("Boot: complete") {
+        return Err(format!("the boot did not finish\n{log}"));
+    }
+    serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+
+    eprintln!(
+        "  [usb] a bind that spent the boot scan's whole bound and was then refused: the scan \
+         waited out the Disable Slot it submitted, the boot stick behind it enumerated into a \
+         free slot, and the machine came up"
     );
     Ok(())
 }

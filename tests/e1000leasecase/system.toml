@@ -1,0 +1,18 @@
+# `tests/e1000case` with netd's lease probe armed: netd serves the 82574 QEMU
+# models for its window, leaves its report on the log volume, and ends with the
+# lease's verdict as its exit code. Nothing here receives `netd`, because the
+# netd a client would connect to ends inside the boot.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:10d3"]
+args = ["--exit-with-lease"]
+
+[programs.test-runner]
+syscap = ["logread"]

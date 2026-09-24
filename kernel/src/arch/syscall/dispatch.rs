@@ -27,7 +27,7 @@ use super::HANDLE_LEN;
 use super::debug::{canary, debug_heap_alloc, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH, LOCK_ACROSS_SWITCH_ARMED};
 use super::device::{
     holds_claim, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc,
-    sys_device_reg, sys_gpu_reset_scanout,
+    sys_device_reg, sys_gpu_reset_scanout, sys_partition_transfer, Transfer,
 };
 use super::fs::{
     sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink, sys_rename,
@@ -209,7 +209,10 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(bytes) => bytes,
                 Err(e) => return e.to_u64(),
             };
-            let pending = match process::build_child_handles(&slot_map, &endow, &labels) {
+            // Read once: its first word is the path the child runs, and the name its consoles speak under.
+            let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
+            let program = argv.first().copied().unwrap_or("");
+            let pending = match process::build_child_handles(&slot_map, &endow, &labels, program) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
@@ -226,7 +229,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             } else {
                 alloc::vec::Vec::new()
             };
-            sys_spawn(&text, pending, env)
+            sys_spawn(&argv, pending, env)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {
@@ -422,7 +425,29 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
             sys_endowments(&mut buf)
         }
-        SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2, a3),
+        SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2, [a3, a4]),
+        // The count is bounded before it becomes a window, and a transfer of
+        // nothing is refused rather than sent to a device as a zero-length command.
+        SYS_PARTITION_READ | SYS_PARTITION_WRITE => {
+            let Ok(count) = Untrusted::new(a4).at_most(toyos_abi::part::MAX_BLOCKS_PER_CALL as u64)
+            else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
+            if count == 0 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let len = count * toyos_abi::part::BLOCK_BYTES as u64;
+            let handle = RawHandle(a1 as u32);
+            if num == SYS_PARTITION_READ {
+                let Some(mut into) = ctx.user_bytes_mut(UserAddr::new(a3), len) else {
+                    return bad_addr;
+                };
+                sys_partition_transfer(handle, a2, count as u32, Transfer::Read(&mut into))
+            } else {
+                let Some(from) = ctx.user_bytes(UserAddr::new(a3), len) else { return bad_addr };
+                sys_partition_transfer(handle, a2, count as u32, Transfer::Write(&from))
+            }
+        }
         SYS_RT_ENTER => sys_rt_enter(RawHandle(a1 as u32)),
         SYS_LOG_READ => {
             // checked_mul before mapping: a product that doesn't fit is a bad argument,
@@ -504,7 +529,12 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             // Unlike every other action, this costs the machine, not just the caller's
             // process: one call is already a permanent halt.
-            DA::FATAL_HALT => { log!("{}", FATAL_HALT_NONCE); crate::arch::apic::halt_all_cpus(); }
+            DA::FATAL_HALT => {
+                #[cfg(feature = "boot-actuators")]
+                super::debug::await_stalled_painter();
+                log!("{}", FATAL_HALT_NONCE);
+                crate::arch::apic::halt_all_cpus();
+            }
             // A real #DF, not simulated: pushing to a non-canonical rsp raises #SS,
             // and delivering that needs another push to the same rsp — the #DF condition.
             // Non-canonical rather than unmapped: on a bigger machine an unmapped

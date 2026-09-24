@@ -21,6 +21,21 @@ pub type Nanos = u64;
 /// calls `HUB_DEBOUNCE_STABLE`.
 pub const DEBOUNCE_NS: Nanos = 100_000_000;
 
+/// How long a scan on which *nothing at all* has connected keeps looking, from
+/// the instant the ports were powered.
+///
+/// Debounce alone can't tell an empty bus from a device still connecting: both
+/// read as already-settled until something changes.
+pub const EMPTY_BUS_NS: Nanos = 1_000_000_000;
+
+/// How long the slow-connect injection reports an empty root hub, from that same
+/// port power.
+///
+/// Here beside the two bounds it is staged between, because the harness derives
+/// the window it certifies from all three: a second copy of any of them bounds a
+/// driver nobody runs.
+pub const SLOW_CONNECT_NS: Nanos = 300_000_000;
+
 /// How long a reset may take before the port is given up on.
 ///
 /// Policy, and the caller's transfer budget: a register bit the controller sets
@@ -31,10 +46,9 @@ pub const RESET_DEADLINE_NS: Nanos = 2_000_000_000;
 /// Which reset a connected port needs before anything can be enumerated on it,
 /// or `None` when its link is already up and there is nothing to do.
 ///
-/// **The one place that question is answered**, because the boot scan and the
-/// hot-plug machine must answer it the same way: the laptop's stick is in the
-/// port when the machine boots, so a fix that only reached the hot-plug path
-/// would not reach the machine it is for.
+/// **The one place that question is answered**: the hot-plug machine acts on
+/// this answer, and the boot scan acts on the same one through
+/// [`inherited_reset`], which only says what its `None` costs at bring-up.
 pub fn reset_needed(protocol: Option<Protocol>, portsc: Portsc) -> Option<Reset> {
     if protocol != Some(Protocol::Usb3) {
         // USB2, or a port the controller did not describe. A reset is how a
@@ -53,11 +67,44 @@ pub fn reset_needed(protocol: Option<Protocol>, portsc: Portsc) -> Option<Reset>
     Some(if portsc.link_state() == LinkState::Inactive { Reset::Warm } else { Reset::Hot })
 }
 
-/// The PORTSC write that performs `reset`.
+/// Which reset a device already connected when this kernel brings its
+/// controller up needs, given [`reset_needed`]'s answer for its port:
+/// **always one**, and on a link that reads trained the warm one.
+///
+/// Such a device is whatever the firmware's driver left it: addressed,
+/// configured, possibly inside a Bulk-Only command. HCRST drives no reset on the
+/// bus (xHCI 1.2 §5.4.1), so the controller's own reset tells the device
+/// nothing; SET_ADDRESS to a device in the Configured state is not specified
+/// (USB 2.0 §9.4.6), and every enumeration the USB specification describes
+/// begins with a port reset (USB 2.0 §9.1.2). So nothing is asked of it until
+/// its port has been reset and this kernel has enumerated it from its Default
+/// state. A trained link gets [`Reset::Warm`] because its link state is as
+/// unknown as its protocol state, and a warm reset does everything a hot one
+/// does and also retrains the link (§4.19.5.1). A link this kernel watched
+/// train is not this question: its device came up from power-on, and the
+/// hot-plug machine acts on [`reset_needed`] unchanged.
+pub fn inherited_reset(needed: Option<Reset>) -> Reset {
+    needed.unwrap_or(Reset::Warm)
+}
+
+/// The reset a device gets from a class driver its own recovery did not bring
+/// back ([`crate::ladder`]): the most the port has. A warm reset does everything
+/// a hot one does and also takes the link through Rx.Detect (§4.19.5.1), and
+/// only a USB3 port has one.
+pub fn offline_reset(protocol: Option<Protocol>) -> Reset {
+    match protocol {
+        Some(Protocol::Usb3) => Reset::Warm,
+        Some(Protocol::Usb2) | None => Reset::Hot,
+    }
+}
+
+/// The PORTSC write that performs `reset`, clearing any reset-finished flag an
+/// earlier reset left, so the one that comes up next is this reset's.
 pub fn reset_write(reset: Reset, portsc: Portsc) -> portsc::Write {
+    let ack = portsc.neutral().acknowledging_reset(portsc);
     match reset {
-        Reset::Hot => portsc.neutral().resetting(),
-        Reset::Warm => portsc.neutral().warm_resetting(),
+        Reset::Hot => ack.resetting(),
+        Reset::Warm => ack.warm_resetting(),
     }
 }
 
@@ -380,7 +427,7 @@ impl PortState {
         // Before any change flag is cleared, because PRC is the one this state
         // is waiting for.
         if let Work::Resetting { until, kind } = self.work {
-            if portsc.reset_changed() {
+            if portsc.reset_finished() {
                 match reset_outcome(kind, self.protocol, portsc) {
                     ResetOutcome::Enumerate => {
                         return Step::Enumerate { after: Some(kind), pending: Pending(self) };
@@ -479,5 +526,72 @@ impl PortState {
         };
         self.work = Work::Resetting { until: now + RESET_DEADLINE_NS, kind };
         Step::Reset(kind, reset_write(kind, portsc))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PORTSC with CCS and PP set, PED as given, and `pls` as the link state.
+    fn connected(enabled: bool, pls: u32) -> Portsc {
+        Portsc::from_raw(1 | (u32::from(enabled) << 1) | (pls << 5) | (1 << 9) | (4 << 10))
+    }
+
+    /// What the boot scan does with a port it finds connected: one
+    /// [`reset_needed`], read through [`inherited_reset`].
+    fn inherited(protocol: Option<Protocol>, portsc: Portsc) -> Reset {
+        inherited_reset(reset_needed(protocol, portsc))
+    }
+
+    /// A warm reset judged in the millisecond it was asked for — a word with PR
+    /// still set beside a PRC nobody had cleared — reads on hardware as a link
+    /// that would not train. The write clears such a flag, that word is not a
+    /// finished reset, and the completion word that follows it is.
+    #[test]
+    fn a_warm_reset_is_finished_only_once_the_controller_has_cleared_pr() {
+        const PR: u32 = 1 << 4;
+        const PRC: u32 = 1 << 21;
+        const WRC: u32 = 1 << 19;
+        const WPR: u32 = 1 << 31;
+        // Trained, with a reset-finished flag left by whatever ran before.
+        let before = Portsc::from_raw(0x0020_1203);
+        assert_eq!(inherited(Some(Protocol::Usb3), before), Reset::Warm);
+        let write = reset_write(Reset::Warm, before).raw();
+        assert_eq!(write & (WPR | PRC), WPR | PRC, "{write:#010x}: the stale flag is cleared with it");
+        assert_eq!(write & (1 << 1), 0, "{write:#010x} would disable the port");
+
+        // The word read in the millisecond the reset was asked for.
+        let during = Portsc::from_raw(0x0022_12b1);
+        assert_eq!(during.raw() & (PR | PRC), PR | PRC);
+        assert!(!during.reset_finished(), "PR is still set: the reset is on the wire");
+
+        // The word after the warm reset finished: PR clear, PRC and WRC set, enabled.
+        let after = Portsc::from_raw(0x0028_1203);
+        assert_eq!(after.raw() & (PR | PRC | WRC), PRC | WRC);
+        assert!(after.reset_finished());
+        assert_eq!(reset_outcome(Reset::Warm, Some(Protocol::Usb3), after), ResetOutcome::Enumerate);
+    }
+
+    #[test]
+    fn a_device_found_at_bring_up_is_never_enumerated_without_a_reset() {
+        let trained = connected(true, 0);
+        assert_eq!(reset_needed(Some(Protocol::Usb3), trained), None, "a link watched training");
+        assert_eq!(inherited(Some(Protocol::Usb3), trained), Reset::Warm);
+        // Everything else is answered as it always was: the question is only
+        // whether a reset is skipped.
+        assert_eq!(inherited(Some(Protocol::Usb3), connected(false, 7)), Reset::Hot);
+        assert_eq!(inherited(Some(Protocol::Usb3), connected(false, 6)), Reset::Warm);
+        assert_eq!(inherited(Some(Protocol::Usb2), connected(true, 0)), Reset::Hot);
+        assert_eq!(inherited(None, trained), Reset::Hot);
+    }
+
+    #[test]
+    fn a_device_its_class_reset_did_not_bring_back_gets_the_most_reset_its_port_has() {
+        assert_eq!(offline_reset(Some(Protocol::Usb3)), Reset::Warm);
+        // WPR is RsvdZ on a USB2 protocol port (§4.19.5.1's note), and a port
+        // the controller did not describe is driven the USB2 way everywhere.
+        assert_eq!(offline_reset(Some(Protocol::Usb2)), Reset::Hot);
+        assert_eq!(offline_reset(None), Reset::Hot);
     }
 }

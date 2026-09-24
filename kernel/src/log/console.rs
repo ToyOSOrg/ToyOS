@@ -1,5 +1,7 @@
 //! The kernel's console sink: two drain phases (inline boot, then `klogd`'s
 //! thread) and the `klogd` thread itself.
+//! `klogd` also puts a program's lines on the panel ([`Panel`]): a spoken record is
+//! never drained to the wire, and the panel is otherwise repainted only at a boot phase.
 //! `klogd`'s row in `sched::kthread` is [`OnPanic::Halt`]: it is the only
 //! console drainer, and its death must not go silent.
 //! Records keep committing to their shards regardless of `klogd`; only the
@@ -7,7 +9,7 @@
 //! [`Drain::Inline`] and [`Drain::Thread`] are phases, not fallbacks: exactly
 //! one is active, and `Drain::Inline` *is* [`KLOGD`] being null.
 
-use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, Ordering};
 
 use alloc::sync::Arc;
 
@@ -22,9 +24,10 @@ use crate::sched::kthread::{self, OnPanic};
 use crate::completion;
 use crate::sched::payload::{KShared, TaskHandle};
 use crate::scheduler;
+use crate::time::{Cadence, Deadline, Duration, Instant};
 
 use super::read::{drain_ordered, Published, RecordSink};
-use super::shard;
+use super::shard::{self, Origin};
 
 // klogd, not logd: `/system/bin/logd` is a separate userland process; one name for both would collide in a dump report.
 const NAME: &str = "klogd";
@@ -42,7 +45,8 @@ pub enum Drain {
     /// Nothing else runs yet: no thread exists before `klogd`'s spawn, and no CPU takes a scheduler pass this early.
     Inline,
     /// `klogd`, woken at the commit of the record it will drain.
-    /// Only a commit wakes it — no idle loop, no timer — and `i8042_no_spurious_wake` depends on that.
+    /// Only a commit wakes it — no idle loop, no timer but the panel's, which runs only while a
+    /// program's line is owed to it — and `i8042_no_spurious_wake` depends on that.
     Thread,
 }
 
@@ -226,11 +230,16 @@ struct Wire<'a> {
 }
 
 impl RecordSink for Wire<'_> {
-    fn put(&mut self, record: &LogRecord) -> bool {
+    fn put(&mut self, record: &LogRecord, origin: Origin) -> bool {
+        // A skipped record counts too: reading it is time under the guard.
         if self.records >= self.budget {
             return false;
         }
-        write_line(record, |bytes| self.out.write_raw(bytes));
+        match origin {
+            Origin::Kernel => write_line(record, |bytes| self.out.write_raw(bytes)),
+            // A spoken line reached the wire when its program wrote it; taken, and not said again.
+            Origin::Spoken => {}
+        }
         self.records += 1;
         true
     }
@@ -240,7 +249,7 @@ impl RecordSink for Wire<'_> {
 struct Discard;
 
 impl RecordSink for Discard {
-    fn put(&mut self, _record: &LogRecord) -> bool {
+    fn put(&mut self, _record: &LogRecord, _origin: Origin) -> bool {
         true
     }
 }
@@ -249,9 +258,68 @@ impl RecordSink for Discard {
 struct Raw;
 
 impl RecordSink for Raw {
-    fn put(&mut self, record: &LogRecord) -> bool {
-        write_line(record, serial::panic_raw);
+    fn put(&mut self, record: &LogRecord, origin: Origin) -> bool {
+        match origin {
+            Origin::Kernel => write_line(record, serial::panic_raw),
+            // As on [`Wire`]: the program's line is already on the wire.
+            Origin::Spoken => {}
+        }
         true
+    }
+}
+
+/// Set by a spoken record's commit, before its wake; taken by the `klogd` pass that paints it.
+static PANEL_OWED: AtomicBool = AtomicBool::new(false);
+
+/// A program wrote a line the panel does not show yet.
+pub fn panel_owed() {
+    PANEL_OWED.store(true, Ordering::Release);
+}
+
+/// How often a program's lines may repaint the panel.
+const PANEL_CADENCE: Cadence = Cadence::every(
+    Duration::from_millis(100),
+    "a scroll rewrites most of the panel's cells, and a chatty program must not buy one per line",
+);
+
+/// `klogd`'s side of the panel: when it last painted a program's lines.
+/// Until a compositor claims the screen, a spoken line is on the panel within one [`PANEL_CADENCE`].
+struct Panel {
+    painted_at: u64,
+}
+
+impl Panel {
+    /// Never inside a held Ctrl+Alt+D report, which a program's line does not paint over.
+    fn next_at(&self) -> u64 {
+        let paced = self.painted_at.saturating_add(PANEL_CADENCE.nanos());
+        paced.max(crate::drivers::panic_console::report_held_until())
+    }
+
+    /// Whether a paint is owed and may happen at `now`.
+    fn due(&self, now: u64) -> bool {
+        PANEL_OWED.load(Ordering::Acquire) && now >= self.next_at()
+    }
+
+    fn paint_if_due(&mut self) {
+        if !self.due(crate::clock::nanos_since_boot()) {
+            return;
+        }
+        // A swap, so every record committed before a later `panel_owed` is either
+        // in this paint or leaves the flag set for the next one.
+        PANEL_OWED.swap(false, Ordering::AcqRel);
+        if crate::drivers::panic_console::spoken_checkpoint() {
+            PANEL_OWED.store(true, Ordering::Release);
+        }
+        self.painted_at = crate::clock::nanos_since_boot();
+    }
+
+    /// When the park must end: the next paint an owed line may have, or never.
+    fn deadline(&self) -> Deadline {
+        if PANEL_OWED.load(Ordering::Acquire) {
+            Deadline::at(Instant::from_nanos_since_boot(self.next_at()))
+        } else {
+            Deadline::never()
+        }
     }
 }
 
@@ -270,6 +338,7 @@ extern "C" fn body(_arg: u64) -> ! {
             as *mut _,
         Ordering::Release,
     );
+    let mut panel = Panel { painted_at: 0 };
     loop {
         // Bounded per chunk so interrupts stay off for at most `CHUNK_RECORDS` lines; `discard_pending` covers machines with no backend.
         if serial::has_console() {
@@ -282,6 +351,8 @@ extern "C" fn body(_arg: u64) -> ! {
         // Outside `drain_inline`: that function's other callers (a producer mid-`emit`, the panic path) may not touch `INBOXES`.
         super::user::post_readiness();
 
+        panel.paint_if_due();
+
         // A completion post cannot drop a wake: it stores the record before claiming, so a miss here is caught by `wait`'s own recheck.
         let Some(armed) = completion::arm(
             completion::Subject::of(handle.watch()),
@@ -291,13 +362,15 @@ extern "C" fn body(_arg: u64) -> ! {
             continue;
         };
         // Safe with no backend because `discard_pending` still advances the position each pass.
-        if shard::arm_waiter(shard::log_waiter(), || DRAINED.any_pending()) {
+        if shard::arm_waiter(shard::log_waiter(), || {
+            DRAINED.any_pending() || panel.due(crate::clock::nanos_since_boot())
+        }) {
             continue;
         }
-        // No deadline: a spurious wake costs a re-drain; a missing one is what W3's fences prevent.
+        // No deadline but the panel's: a spurious wake costs a re-drain; a missing one is what W3's fences prevent.
         PARKS.fetch_add(1, Ordering::Relaxed);
         // `klogd` is never killed, so this cancel arm is unreachable.
-        let _ = completion::wait(&parkable, &armed, crate::time::Deadline::never());
+        let _ = completion::wait(&parkable, &armed, panel.deadline());
     }
 }
 

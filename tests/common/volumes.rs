@@ -2581,8 +2581,8 @@ pub fn log_partition_layout(
 }
 
 /// A disk image in 512-byte LBAs, for the kernel's own GPT parser.
-struct ImageSectors<'a> {
-    bytes: &'a [u8],
+pub struct ImageSectors<'a> {
+    pub bytes: &'a [u8],
 }
 
 impl toyos_gpt::Sectors for ImageSectors<'_> {
@@ -2823,10 +2823,10 @@ pub fn log_partition_identity(
 ///    now a device word, exactly as it would for an error status.
 /// 3. **A failed reset escalation is the second.** `usb-transport-break`
 ///    abandons the first WRITE(10)'s data phase and `usb-reset-break` makes
-///    the Reset Recovery meet a device that answers nothing on EP0 — a truly
-///    hung device, which QEMU cannot otherwise be. The recovery must report
-///    failure, the disk must go offline, and the boot's log ends on the
-///    console — while the machine itself stays up and clean.
+///    the recovery ladder meet a device that answers nothing on EP0 — a truly
+///    hung device, which QEMU cannot otherwise be. The port reset may not say
+///    it took, the disk must go offline, and the boot's log ends on the console
+///    — while the machine itself stays up and clean.
 pub fn log_flush_retry(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3027,7 +3027,11 @@ pub fn log_flush_retry(
     }
     drop(qemu);
     serial::Serial::named("hung boot console", log.as_str()).must_be_clean()?;
-    for needed in ["transport broke on SCSI", "reset recovery failed; disk is offline"] {
+    for needed in [
+        "transport broke on SCSI",
+        "the port reset was not answered; break 2 of 3 running",
+        " is offline: ",
+    ] {
         if !log.contains(needed) {
             return Err(format!(
                 "no {needed:?} in the log, so the staged hung device never met its \
@@ -3038,7 +3042,7 @@ pub fn log_flush_retry(
     }
     let offline = log
         .lines()
-        .find(|l| l.contains("reset recovery failed; disk is offline"))
+        .find(|l| l.contains(" is offline: "))
         .map(str::trim)
         .unwrap_or_default()
         .to_string();

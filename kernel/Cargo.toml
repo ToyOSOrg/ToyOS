@@ -387,8 +387,10 @@ toyos-abi = { path = "../toyos-abi" }
 toyos-acpi = { path = "../toyos-acpi" }
 toyos-dma = { path = "../toyos-dma" }
 toyos-blackbox = { path = "../toyos-blackbox" }
+toyos-blockhold = { path = "../toyos-blockhold" }
 toyos-fat32 = { path = "../toyos-fat32" }
 toyos-elf = { path = "../toyos-elf" }
+toyos-elide = { path = "../toyos-elide" }
 toyos-gpt = { path = "../toyos-gpt" }
 toyos-hda = { path = "../toyos-hda" }
 toyos-logstream = { path = "../toyos-logstream" }

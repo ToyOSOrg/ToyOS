@@ -165,6 +165,12 @@ declare_flags!(pub SUITE = {
     /// machine is not touched**: the run builds the images and writes down what
     /// to run on them, or judges readbacks a driver already left there.
     pub METAL_READBACK = "--metal-readback", Next;
+    /// Where a talking boot's `logd` streams its records: this host's own
+    /// address on the machine's network and a port, `a.b.c.d:port`, baked into
+    /// the image as `logstream=`. **Named rather than found**: the address a
+    /// machine can reach this host on is a fact about the network between them,
+    /// and no guess from this side of it is one.
+    pub METAL_LISTEN = "--metal-listen", Next;
 });
 
 /// Validate the harness's argv and return the run's filter.
@@ -213,6 +219,18 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
              decides nothing on its own; add --metal"
                 .to_string(),
         );
+    }
+    if has(&METAL_LISTEN) && !has(&METAL) {
+        return Err(
+            "--metal-listen names where a talking metal boot streams its records and decides \
+             nothing on its own; add --metal"
+                .to_string(),
+        );
+    }
+    if let Some(at) = SUITE.value(args, &METAL_LISTEN) {
+        toyos_logstream::endpoint(at).map_err(|why| {
+            format!("--metal-listen {at}: {}; it wants a.b.c.d:port", why.as_str())
+        })?;
     }
     if has(&METAL) && has(&AUDIO_GATE) {
         return Err(
@@ -507,5 +525,18 @@ mod tests {
         assert!(refusal.contains("add --metal"), "{refusal}");
         let refusal = parse_owned(&["--metal", "--audio-gate", "30"]).unwrap_err();
         assert!(refusal.contains("cannot be combined"), "{refusal}");
+    }
+
+    /// A listener address is the metal profile's alone, and one that is not an
+    /// address is refused before an image is baked with it.
+    #[test]
+    fn a_listener_address_is_the_metal_profiles_and_is_one() {
+        assert!(parse_owned(&["--metal", "--metal-listen", "192.168.1.47:41337"]).is_ok());
+        let refusal = parse_owned(&["--metal-listen", "192.168.1.47:41337"]).unwrap_err();
+        assert!(refusal.contains("add --metal"), "{refusal}");
+        for bad in ["192.168.1.47", "mac:41337", "192.168.1.47:0"] {
+            let refusal = parse_owned(&["--metal", "--metal-listen", bad]).unwrap_err();
+            assert!(refusal.contains("a.b.c.d:port"), "{bad}: {refusal}");
+        }
     }
 }

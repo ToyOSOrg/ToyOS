@@ -127,16 +127,99 @@ actuators! {
     /// Abandon the boot's first WRITE(10) data phase without waiting for it.
     usb_transport_break = "usb-transport-break";
 
-    /// Skip the waits of the next Reset Recovery's control transfers, once.
+    /// Leave the TEST UNIT READY every rung of the recovery ladder ends on
+    /// unsent and unanswered for the whole of that rung's bound, so no rung is
+    /// ever in step, each spends all it may, and a disk whose transport breaks
+    /// once is taken offline: the one way to the last rung on a device that
+    /// answers, and with the rungs before it spent.
+    usb_transport_offline = "usb-transport-offline";
+
+    /// Skip the waits of every transfer of the next climb of the recovery
+    /// ladder, once: a device that answers nothing on any rung.
     usb_reset_break = "usb-reset-break";
+
+    /// Hold the port rung's first reset, once, until the port reads empty, so
+    /// the host can move the device to another port as a reset moved T14 run
+    /// 79's stick. See `xhci::msc::reset_moves`; judged by
+    /// `usb_transport_break`.
+    usb_reset_moves = "usb-reset-moves";
+
+    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
+    /// while its device holds a write it reported complete and no flush has
+    /// emptied: a device that leaves then may have lost it. Judged by
+    /// `usb_transport_break`.
+    usb_transport_break_owed = "usb-transport-break-owed";
+
+    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
+    /// after a write was reported complete and a SYNCHRONIZE CACHE then
+    /// succeeded, with no write since: a device that leaves then owes nothing.
+    /// Judged by `usb_transport_break`.
+    usb_transport_break_flushed = "usb-transport-break-flushed";
+
+    /// Stall the bind of a disk that arrives while another is held for its
+    /// device, for less than `usb-slow-return` does, and leave every transfer
+    /// of the operation the held call sends again on it unanswered, once, each
+    /// waited for to the end of what the call may spend. See
+    /// `xhci::msc::return_silent`; judged by `usb_transport_break`.
+    usb_return_silent = "usb-return-silent";
+
+    /// Stall the bind of a disk that arrives while another is held for its
+    /// device, before its first command, as a stick slow to answer after a
+    /// reset: the wait held for it is not where it binds. Judged by
+    /// `usb_transport_break`.
+    usb_slow_return = "usb-slow-return";
+
+    /// Ask for a disk's serial number string in fewer bytes than it carries, as
+    /// a device that delivered part of its descriptor. Judged by
+    /// `usb_transport_break`.
+    usb_serial_short = "usb-serial-short";
+
+    /// Have the first disk the boot scan binds answer nothing for longer than
+    /// the scan's whole silence bound and then be refused, as T14 run 103's
+    /// stick was: the refusal's Disable Slot is submitted into the scan's one
+    /// operation slot after the scan has stopped listening, and the next port
+    /// to connect enumerates on top of it. See
+    /// `xhci::msc::bind_spends_the_scan`; judged by
+    /// `xhci_scan_hands_over_a_free_slot`.
+    usb_bind_spends_the_scan = "usb-bind-spends-the-scan";
+
+    /// Leave one READ(10) the gate stages it on unanswered for the whole of
+    /// its wait, and the class reset's TEST UNIT READY out of step, so a port
+    /// reset that takes comes after a wait that spent the operation's budget.
+    /// Judged by `usb_transport_break`.
+    usb_first_wait_spent = "usb-first-wait-spent";
+
+    /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
+    /// device holding the CBW and nothing queued for its data phase, so the
+    /// bound that ends the machine ends a device inside a Bulk-Only command.
+    /// See `usb_gate::wedge_inside_a_write`; judged by
+    /// `usb_reset_records_the_phase_it_cut`.
+    usb_wedge_data_owed = "usb-wedge-data-owed";
+
+    /// The same, stopped one step later: the data phase's TRB is on the ring
+    /// and its doorbell has not been rung.
+    usb_wedge_in_data = "usb-wedge-in-data";
+
+    /// The same, stopped after the data phase completed and before anything has
+    /// asked for the CSW.
+    usb_wedge_before_status = "usb-wedge-before-status";
+
+    /// Sweep the boot stick from the shutdown syscall so the reset lands on a
+    /// controller that is moving bytes rather than on a bus idle since the
+    /// wedge. See `usb_gate::sweep_under_load`; judged by
+    /// `usb_reset_records_the_phase_it_cut`.
+    usb_reset_under_load = "usb-reset-under-load";
 
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
-    /// Run `SYS_FSYNC`'s first attempt under an operation that is already over.
+    /// Run the first attempt of every block operation `object::ops::until_answered`
+    /// retries — `SYS_FSYNC`, a partition transfer — under an operation that is
+    /// already over.
     fsync_budget_spent = "fsync-budget-spent";
 
-    /// Make `SYS_FSYNC`'s deadman already expired.
+    /// Make the deadman of every run `object::ops::until_answered` makes already
+    /// expired.
     fsync_deadman_now = "fsync-deadman-now";
 
     /// Skip one NVMe completion wait so a submitted command goes unanswered.
@@ -144,6 +227,15 @@ actuators! {
 
     /// Under-deliver one READ(10) data phase so the byte counts disagree.
     usb_short_read = "usb-short-read";
+
+    /// Have the gate stage runs of transport faults on its disk: runs the
+    /// recovery brings back, then one as long as the transport's whole budget,
+    /// then one on the next disk to bind.
+    usb_transport_faults = "usb-transport-faults";
+
+    /// Have the gate's last read end as one whose port read disconnected
+    /// mid-wait does.
+    usb_port_gone = "usb-port-gone";
 
     /// Hold every mass-storage bulk completion back 2ms before the driver may see it.
     usb_slow_device = "usb-slow-device";
@@ -180,10 +272,10 @@ actuators! {
     /// Return from the NMI handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";
 
-    /// Report an empty root hub for the first 300ms of boot.
+    /// Report an empty root hub for the xHCI driver's `SLOW_CONNECT_NS` after a controller powers its ports.
     xhci_slow_connect = "xhci-slow-connect";
 
-    /// Report the first root-hub port empty for the same window, the rest normal — distinct from hiding the whole bus, since settle waits only for a non-empty settled set.
+    /// Report the first root-hub port empty until the boot scan has run, the rest normal — distinct from hiding the whole bus, since settle waits only for a non-empty settled set.
     xhci_slow_storage_connect = "xhci-slow-storage-connect";
 
     /// Give PORTSC's PED bit the RW1CS meaning xHCI 1.2 §5.4.8 gives it.
@@ -201,8 +293,11 @@ actuators! {
     /// Run `Virtqueue::poll_used` over eleven crafted used-ring elements at init.
     virtio_used_selftest = "virtio-used-selftest";
 
-    /// Walk the PCI capability list, window check and parse over thirteen crafted config-space layouts at init.
+    /// Walk the PCI capability list, window check and parse over crafted config-space layouts at init.
     pci_cap_selftest = "pci-cap-selftest";
+
+    /// End the capability list of the function a claim is bringing up at a link the spec forbids, one link past its MSI capability: a claimed function publishing an MSI-X table no walk may reach.
+    pcidev_caps_truncated = "pcidev-caps-truncated";
 
     /// Raise the local APIC's spurious vector on this CPU once.
     lapic_spurious_selftest = "lapic-spurious-selftest";
@@ -377,6 +472,12 @@ actuators! {
     /// Wrap the metadata cache's device in a read-fault injector and run the un-index control after mount.
     pc_unbind_selftest = "pc-unbind-selftest";
 
+    /// Refuse every read of device block 0 of each NVMe disk — its protective
+    /// MBR and GPT header — once every mount has been made, so a partition
+    /// claim meets a disk that does not answer a read of its table. Judged by
+    /// `partition_claim_gives_up`.
+    partclaim_table_unanswered = "partclaim-table-unanswered";
+
     /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 
@@ -394,12 +495,19 @@ actuators! {
 
     /// Shorten the panicked kernel's own reboot bound from a minute to seconds, so a guest reaches the reset.
     panic_reboot_fast = "panic-reboot-fast";
+
+    /// Have a program's repaint spin inside the panel's latch, and `SYS_DEBUG`'s
+    /// fatal halt wait for one to: a fatal path meeting a painter that will not let go.
+    panel_painter_stalls = "panel-painter-stalls";
 }
 
 #[cfg(feature = "boot-actuators")]
 const IMPLIES: &[(&str, &[&str])] = &[
     ("i8042-trace", &["i8042-fast-health", "i8042-edge-race"]),
     ("usb-short-read", &["usb-storage-gate"]),
+    ("usb-transport-faults", &["usb-storage-gate"]),
+    ("usb-port-gone", &["usb-storage-gate"]),
+    ("usb-first-wait-spent", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),

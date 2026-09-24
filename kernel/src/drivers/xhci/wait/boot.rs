@@ -27,12 +27,10 @@ use super::settles;
 use toyos_xhci::port::{self, GaveUp, Reset, ResetOutcome};
 use toyos_xhci::Protocol;
 
-/// How long a machine on which *nothing at all* has connected keeps looking.
-///
-/// Debounce alone can't tell an empty bus from a device still connecting: both
-/// read as already-settled until something changes.
+/// How long a machine on which *nothing at all* has connected keeps looking,
+/// as [`port::EMPTY_BUS_NS`] declares it.
 const EMPTY_BUS: Budget = Budget::of(
-    Duration::from_secs(1),
+    Duration::from_nanos(port::EMPTY_BUS_NS),
     "the scan reports the bus as empty and the boot goes on without whatever was slow",
 );
 
@@ -98,7 +96,7 @@ fn await_connect_settle(controllers: &[XhciController]) {
 // `None` must stay a refusal, never a degradation: there is no polled mode, and
 // every event-ring read depends on `irq_ring`, which only the ISR sets.
 fn arm_interrupt(pci_dev: &PciDevice) -> Option<&'static str> {
-    if pci_dev.enable_msix(XHCI_VECTOR).is_some() {
+    if pci_dev.enable_msix(XHCI_VECTOR).is_ok() {
         return Some("MSI-X");
     }
     pci_dev.enable_msi(XHCI_VECTOR).then_some("MSI")
@@ -434,6 +432,7 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         event_phase: true,
         devices: Vec::new(),
         msc: [MscBlock::FREE; MSC_BLOCKS],
+        awaited: Vec::new(),
         ports: (0..max_ports)
             .map(|p| {
                 let mut port = PortState::EMPTY;
@@ -445,18 +444,25 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         outstanding: Outstanding::EMPTY,
         software_disabled: [0u64; 4],
         held_event: None,
+        after_break: toyos_xhci::call::AfterBreak::CLOSED,
+        bulk_began: 0,
+        stopped: None,
     })
 }
-/// Initialize and configure one USB device on a port, waiting for each step.
+/// Initialize and configure one USB device found connected at bring-up,
+/// waiting for each step.
 ///
-/// The reset kind is [`port::reset_needed`]'s answer alone, and what a
-/// completion meant is [`port::reset_outcome`]'s: this path also runs during
-/// boot, so a fix reaching only hot-plug would miss it.
+/// The reset kind is one [`port::reset_needed`] read through
+/// [`port::inherited_reset`] — every device here was left by whatever ran
+/// before this kernel, so none is enumerated without a reset — and what a
+/// completion meant is [`port::reset_outcome`]'s.
 pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Protocol>) {
-    let Some(mut kind) = port::reset_needed(protocol, ctrl.read_portsc(port_idx)) else {
-        log!("xHCI: port {} link already trained, no reset needed", port_idx + 1);
-        return configure(ctrl, port_idx, None);
-    };
+    let needed = port::reset_needed(protocol, ctrl.read_portsc(port_idx));
+    if needed.is_none() {
+        log!("xHCI: port {} link already trained before this kernel ran; warm resetting it \
+             before its device is asked anything", port_idx + 1);
+    }
+    let mut kind = port::inherited_reset(needed);
     reset_port(ctrl, port_idx, kind);
     // At most two rounds: §4.19.5.1 has one escalation, hot to warm, and both
     // failure shapes below leave `kind` warm, from which neither retries.

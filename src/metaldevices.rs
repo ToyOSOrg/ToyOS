@@ -146,10 +146,10 @@ pub const NVME_NO_WRITES: &[&str] = &["write=0", "io-other=0"];
 pub const LOADER_RECORDS: &[Record] = &[
     Record { about: "chain", needle: "the last boot read DONE", presence: Says },
     Record { about: "usb-quiesce", needle: QUIESCE_HEAD, presence: Says },
-    // What the stop did about transfers still outstanding when it ran. On this
-    // machine that is the difference between a stick the next boot reads and one
-    // somebody has to walk over and replug.
-    Record { about: "usb-inflight", needle: "bulk transfer", presence: Says },
+    // What the stop did about the command a device was inside when it ran. On
+    // this machine that is the difference between a stick the next boot reads
+    // and one somebody has to walk over and replug.
+    Record { about: "usb-open-command", needle: QUIESCE_COMMAND, presence: Says },
     // A kernel that died on the way to the reset seals ARMED, not DONE.
     Record { about: "no-death", needle: "died without reaching", presence: NeverSays },
 ];
@@ -157,6 +157,14 @@ pub const LOADER_RECORDS: &[Record] = &[
 /// The head of the reset's own account, as `kernel/src/drivers/xhci/stop.rs`
 /// spells it.
 pub const QUIESCE_HEAD: &str = "usb-quiesce:";
+
+/// What the stop calls the thing it settles before it touches a port. Every
+/// reset says this once, whether a device was inside one or not.
+pub const QUIESCE_COMMAND: &str = "Bulk-Only command";
+
+/// What the stop says about the endpoint the controller had when it ran — the
+/// one line in the account that is the hardware's word and not the driver's.
+pub const QUIESCE_ENDPOINT: &str = "the controller had that device's data endpoint";
 
 /// What the shutdown did, out of its summary line.
 ///
@@ -243,11 +251,13 @@ pub struct Exit {
 /// still running when the machine reset.
 ///
 /// The **last** such record, because a name could in principle run twice and
-/// the boot's answer is the one it ended with.
+/// the boot's answer is the one it ended with. The record's whole message and
+/// not a substring of a line, so a program's record — which opens with
+/// [`bootlog::SPOKEN`] — is never one.
 pub fn exit_of(log: &str, name: &str) -> Option<Exit> {
-    let head = format!("exit: {name} pid=");
+    let head = format!("{}{name} pid=", crate::bootlog::EXIT);
     log.lines().rev().find_map(|line| {
-        let rest = line.split(&head).nth(1)?;
+        let rest = crate::bootlog::message(line)?.strip_prefix(&head)?;
         let code = field(rest, "code=")?.parse().ok()?;
         let cpu = field(rest, "cpu=")?;
         let cpu_ms = cpu.strip_suffix("ms")?.parse().ok()?;
@@ -405,7 +415,7 @@ mod tests {
         "ToyOS Bootloader 1.0\n\
          Black box: the last boot read DONE, so it handed the machine back on purpose and this \
          chain ends here\n\
-         | usb-quiesce: no bulk transfer was outstanding, so this reset cuts none\n\
+         | usb-quiesce: no Bulk-Only command was open, so this reset cuts none\n\
          | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
          | usb-quiesce: 2/2 disk cache(s) flushed, 1 with no cache to flush, \
          5/5 connected port(s) reset, 2/2 controller(s) halted, 2 reset, \
@@ -424,6 +434,13 @@ mod tests {
         // The last of two, because that is the answer the boot ended with.
         let twice = format!("{log}{}", line("4.0", "exit: usbread pid=11 code=99 cpu=1ms"));
         assert_eq!(exit_of(&twice, "usbread"), Some(Exit { code: 99, cpu_ms: 1 }));
+        // A program spawned as `exit` writing the record's words, after it.
+        let forged = format!(
+            "{twice}{}{}",
+            line("5.0", "@exit: usbread pid=11 code=0 cpu=0ms"),
+            line("5.1", "@evil: exit: usbread pid=11 code=0 cpu=0ms"),
+        );
+        assert_eq!(exit_of(&forged, "usbread"), Some(Exit { code: 99, cpu_ms: 1 }));
     }
 
     #[test]
@@ -500,17 +517,17 @@ mod tests {
             .join("\n");
         assert_eq!(
             about(unmet(&no_quiesce, &a_good_boot())),
-            ["usb-quiesce", "usb-inflight", "usb-quiesce"]
+            ["usb-quiesce", "usb-open-command", "usb-quiesce"]
         );
-        // A stop that touched the registers without waiting out what it had
-        // rung: every other line of the account is unchanged, and this is the
-        // one that says whether a device was cut mid-command.
+        // A stop that touched the registers without settling the command a
+        // device was inside: every other line of the account is unchanged, and
+        // this is the one that says whether a device was cut mid-command.
         let cut = a_good_loader()
             .lines()
-            .filter(|l| !l.contains("bulk transfer"))
+            .filter(|l| !l.contains(QUIESCE_COMMAND))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(about(unmet(&cut, &a_good_boot())), ["usb-inflight"]);
+        assert_eq!(about(unmet(&cut, &a_good_boot())), ["usb-open-command"]);
         let left = a_good_loader().replace("2/2 disk", "1/2 disk");
         assert_eq!(about(unmet(&left, &a_good_boot())), ["usb-quiesce"]);
         let died = a_good_loader().replace(
@@ -555,5 +572,43 @@ mod tests {
             .filter(|line| line.contains(" = -"))
             .count();
         assert_eq!(arms, Refused::ALL.len(), "{} declares {arms} refusals", path.display());
+    }
+
+    /// **The lines this crate judges a reset by are the kernel's own**, and
+    /// nothing links the two: a reword at the site that did not come here would
+    /// leave every metal readback passing on a predicate that matches nothing.
+    #[test]
+    fn the_kernel_writes_the_quiesce_lines_the_host_reads() {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("kernel/src/drivers/xhci/stop.rs");
+        let source = std::fs::read_to_string(&at).expect("the reset path");
+        let written = code_of(&source);
+        for needle in [QUIESCE_HEAD, QUIESCE_COMMAND, QUIESCE_ENDPOINT] {
+            assert!(written.contains(needle), "{} does not write {needle:?}", at.display());
+        }
+    }
+
+    /// A line the kernel only *talks* about is not a line the kernel writes:
+    /// every needle above appears in that file's own prose as well, so a scan
+    /// over the raw source passes on a kernel that emits none of them.
+    #[test]
+    fn a_needle_that_only_appears_in_a_comment_is_not_found() {
+        assert_eq!(code_of("    //! a Bulk-Only command was open\n"), "");
+        assert_eq!(code_of("    /// no Bulk-Only command was open\n"), "");
+        assert_eq!(code_of("    // no Bulk-Only command was open\n"), "");
+        assert!(code_of("    writeln!(said, \"no Bulk-Only command was open\");\n")
+            .contains(QUIESCE_COMMAND));
+    }
+
+    /// `source` with its whole-line comments taken out, which is every form
+    /// this tree's prose takes: a doc comment, a module header, a note above a
+    /// statement. A trailing comment after code is left, and cannot carry one
+    /// of these needles without the code above it on the same line.
+    fn code_of(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

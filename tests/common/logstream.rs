@@ -379,7 +379,7 @@ fn refused_in(file: &[String]) -> Result<(u64, usize), String> {
 /// last** — a line short of the file's is a byte the stream consumed and did
 /// not deliver, which is the failure this comparison exists to catch, and no
 /// position in the stream is a place it may happen.
-fn is_subsequence_of(received: &[String], file: &[String]) -> Result<(), String> {
+pub fn is_subsequence_of(received: &[String], file: &[String]) -> Result<(), String> {
     let mut at = 0usize;
     for line in received {
         match file[at..].iter().position(|theirs| theirs == line) {

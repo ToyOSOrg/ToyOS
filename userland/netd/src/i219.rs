@@ -48,12 +48,18 @@ impl Registers for Bar {
 }
 
 /// The machine's monotonic clock: one syscall, which the kernel serves from an
-/// anchor plus the timestamp counter.
+/// anchor plus the timestamp counter — and the thread's own sleep, which is how
+/// this process gives the processor away between two accesses to a register
+/// another agent is also reading.
 pub struct Monotonic;
 
 impl Clock for Monotonic {
     fn nanos(&self) -> u64 {
         toyos_abi::syscall::clock_nanos()
+    }
+
+    fn pause(&self, nanos: u64) {
+        std::thread::sleep(std::time::Duration::from_nanos(nanos));
     }
 }
 
@@ -142,60 +148,103 @@ pub struct Nic {
     reported: Latch<(toyos_i219::Counters, toyos_i219::Link)>,
 }
 
+/// The claim's register window, mapped.
+fn registers(dev: &PciDev) -> Result<Bar, Opening> {
+    let info = dev
+        .describe()
+        .map_err(KernelRefused::on("the claim's description"))
+        .map_err(Opening::Kernel)?;
+    // The lowest BAR wide enough, rather than BAR 0 by name: the kernel
+    // reports 0 bytes for a BAR it keeps back, and the MSI-X table's is one
+    // it keeps.
+    let (bar, bytes) = info
+        .bar_bytes
+        .iter()
+        .enumerate()
+        .find(|(_, bytes)| **bytes >= toyos_i219::regs::REGISTER_BYTES as u64)
+        .map(|(index, bytes)| (index as u32, *bytes))
+        .ok_or(Opening::NoWindow)?;
+    let mapped = dev
+        .map_bar(bar, bytes)
+        .map_err(KernelRefused::on("the BAR"))
+        .map_err(Opening::Kernel)?;
+    crate::say!(
+        "netd: I219: PCI {:02x}:{:02x}.{} registers in BAR {bar} ({bytes:#x} bytes)",
+        info.bus,
+        info.dev,
+        info.func,
+    );
+    // SAFETY: `map_bar` answered `bytes` bytes of live mapping, and
+    // `mapped` is moved into the `Bar` that carries the window.
+    let window = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
+    Ok(Bar { window, _mapped: mapped })
+}
+
+/// Everything the claim is asked for before the part is reached, in the order
+/// it is asked: the register window, then one grant — as the driver reaches its
+/// descriptors, and as netd reaches its frames.
+fn granted(dev: &PciDev) -> Result<(Bar, Grant, Window), Opening> {
+    let bar = registers(dev)?;
+    let region = dev
+        .dma_alloc(toyos_i219::GRANT_BYTES)
+        .map_err(KernelRefused::on("a DMA grant"))
+        .map_err(Opening::Kernel)?;
+    let device_base = region.device_addr;
+    // SAFETY: `dma_alloc` answered `GRANT_BYTES` bytes of live mapping, and
+    // `region` is moved into the `Grant`, which its caller keeps for as long
+    // as it keeps either window.
+    let frames =
+        unsafe { Window::new(region.memory.as_ptr(), toyos_i219::GRANT_BYTES as usize) };
+    Ok((bar, Grant { window: frames, device_base, _region: region }, frames))
+}
+
+/// What a bring-up says about itself: a sentence each for what it asked the
+/// I219's PHY before its reset and what that reset did, and one for the rest.
+pub fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
+    let mut words = Vec::new();
+    match brought_up.woke {
+        Some(Ok(woke)) => words.push(format!("before the reset the PHY was asked: {woke}")),
+        Some(Err(why)) => words.push(format!("the PHY was not asked before the reset: {why}")),
+        None => {}
+    }
+    if let Some(reset) = brought_up.reset {
+        words.push(reset.to_string());
+    }
+    words.push(format!(
+        "{}, and the PHY {}",
+        if brought_up.master_quiet {
+            "the function stopped mastering before it was reset"
+        } else {
+            "the function was still mastering when it was reset"
+        },
+        match brought_up.phy {
+            Ok(phy) => phy.to_string(),
+            Err(why) => format!("was not brought up: {why}"),
+        },
+    ));
+    words
+}
+
+fn say_brought_up(brought_up: toyos_i219::BringUp) {
+    for words in brought_up_words(brought_up) {
+        crate::say!("netd: I219: {words}");
+    }
+}
+
 impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
-    pub fn open(dev: PciDev) -> Result<Self, Opening> {
+    pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
         let dev = Rc::new(dev);
-        let info = dev
-            .describe()
-            .map_err(KernelRefused::on("the claim's description"))
-            .map_err(Opening::Kernel)?;
-        // The register file is in BAR 0 on every part of this family; the
-        // lowest BAR the claim will map is taken rather than assumed, because
-        // the kernel reports 0 bytes for one it keeps — the MSI-X table's.
-        let (bar, bytes) = info
-            .bar_bytes
-            .iter()
-            .enumerate()
-            .find(|(_, bytes)| **bytes >= toyos_i219::regs::REGISTER_BYTES as u64)
-            .map(|(index, bytes)| (index as u32, *bytes))
-            .ok_or(Opening::NoWindow)?;
-        let mapped = dev
-            .map_bar(bar, bytes)
-            .map_err(KernelRefused::on("the BAR"))
-            .map_err(Opening::Kernel)?;
-        crate::say!(
-            "netd: I219: PCI {:02x}:{:02x}.{} registers in BAR {bar} ({bytes:#x} bytes)",
-            info.bus,
-            info.dev,
-            info.func,
-        );
-
-        let region = dev
-            .dma_alloc(toyos_i219::GRANT_BYTES)
-            .map_err(KernelRefused::on("a DMA grant"))
-            .map_err(Opening::Kernel)?;
-        let device_base = region.device_addr;
-        // SAFETY: `dma_alloc` answered `GRANT_BYTES` bytes of live mapping, and
-        // `region` is moved into the `Grant` this `Nic` owns for its own life.
-        let grant = unsafe {
-            Window::new(region.memory.as_ptr(), toyos_i219::GRANT_BYTES as usize)
-        };
-
-        // SAFETY: the same mapping, and `mapped` is moved into the `Bar` below.
-        let registers = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
-        let driver = toyos_i219::I219::open(
-            Bar { window: registers, _mapped: mapped },
-            Monotonic,
-            Grant { window: grant, device_base, _region: region },
-            Claim(Rc::clone(&dev)),
-        )
-        .map_err(Opening::Driver)?;
+        let (bar, grant, frames) = granted(&dev)?;
+        let driver =
+            toyos_i219::I219::open(part, bar, Monotonic, grant, Claim(Rc::clone(&dev)))
+                .map_err(Opening::Driver)?;
         let mac = driver.mac();
+        say_brought_up(driver.brought_up());
         Ok(Self {
             driver: RefCell::new(driver),
             claim: dev,
-            frames: grant,
+            frames,
             dropped: RefCell::new(vec![0; toyos_i219::TX_BUF_BYTES]),
             mac,
             reported: Latch::default(),
@@ -211,11 +260,35 @@ impl Nic {
         &self.claim
     }
 
-    /// Take the interrupt, acknowledge its causes and refresh the link.
-    pub fn begin_pass(&self) -> Result<(), SyscallError> {
-        self.driver.borrow_mut().begin_pass()?;
+    /// `crate::PROVOKE_MESSAGE`: raise one enabled cause on purpose.
+    pub fn provoke_message(&self) {
+        self.driver.borrow().provoke_message();
+    }
+
+    /// What the bring-up found.
+    pub fn brought_up(&self) -> toyos_i219::BringUp {
+        self.driver.borrow().brought_up()
+    }
+
+    pub fn link(&self) -> toyos_i219::Link {
+        self.driver.borrow().link()
+    }
+
+    /// What the driver and the MAC have counted so far, the transmit ring
+    /// reclaimed first so a frame that has left is counted as sent.
+    pub fn counts(&self) -> toyos_i219::lease::Counts {
+        let mut driver = self.driver.borrow_mut();
+        driver.reclaim();
+        let wire = driver.wire();
+        toyos_i219::lease::Counts::of(driver.counters(), wire)
+    }
+
+    /// Take the interrupt, acknowledge its causes and refresh the link — and
+    /// answer the link where this pass found it changed.
+    pub fn begin_pass(&self) -> Result<Option<toyos_i219::Link>, SyscallError> {
+        let pass = self.driver.borrow_mut().begin_pass()?;
         self.report();
-        Ok(())
+        Ok(pass.link_changed.then(|| self.link()))
     }
 
     pub fn poll_rx(&self) -> Option<toyos_i219::Frame> {
@@ -277,18 +350,17 @@ impl Nic {
             return;
         };
         if link != was_link {
-            if link.up {
-                crate::say!(
+            match link {
+                toyos_i219::Link::Up { speed, full_duplex } => crate::say!(
                     "netd: I219: link up at {} Mb/s {}{}",
-                    link.speed_mbps,
-                    if link.full_duplex { "full duplex" } else { "half duplex" },
+                    speed.mbps(),
+                    if full_duplex { "full duplex" } else { "half duplex" },
                     match driver.link_up_after_nanos() {
                         Some(nanos) => format!(", {} ms after the driver came up", nanos / 1_000_000),
                         None => String::new(),
                     },
-                );
-            } else {
-                crate::say!("netd: I219: link down");
+                ),
+                toyos_i219::Link::Down => crate::say!("netd: I219: link down"),
             }
         }
         if counters.anomalies() != was_counters {
