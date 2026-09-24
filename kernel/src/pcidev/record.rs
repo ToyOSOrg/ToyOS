@@ -74,6 +74,13 @@ pub struct Interrupt {
     /// refuses from here on: its bus mastering is gone, so a driver that kept
     /// going would be driving nothing.
     faulted: AtomicBool,
+    /// True until this slot's first message has been announced.
+    ///
+    /// **A count of zero at the end of a boot is two facts**: a device that was
+    /// never made to speak, and a message that never reached a CPU. Only the
+    /// arrival of a first one tells them apart, and a census that can count
+    /// cannot say when.
+    unannounced: AtomicBool,
 }
 
 impl Interrupt {
@@ -84,6 +91,7 @@ impl Interrupt {
             count: AtomicU32::new(0),
             pending: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
+            unannounced: AtomicBool::new(true),
         }
     }
 
@@ -95,6 +103,7 @@ impl Interrupt {
             count: AtomicU32::new(0),
             pending: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
+            unannounced: AtomicBool::new(true),
         }
     }
 
@@ -134,6 +143,15 @@ impl Interrupt {
         take_word!(self.pending, false)
     }
 
+    /// Whether this is the first message this slot has taken. Answers `true`
+    /// once per claim and `false` ever after, so a caller may log on it.
+    ///
+    /// `swap` for [`Self::take_pending`]'s reason: two passes that both loaded
+    /// `true` would both announce one message.
+    pub fn take_unannounced(&self) -> bool {
+        take_word!(self.unannounced, false)
+    }
+
     /// The unit refused this function an access. Called from the fault handler,
     /// which takes no lock: one store, and every call the claim answers refuses
     /// from here on.
@@ -151,5 +169,6 @@ impl Interrupt {
         self.count.store(0, ORDER);
         self.pending.store(false, ORDER);
         self.faulted.store(false, ORDER);
+        self.unannounced.store(true, ORDER);
     }
 }

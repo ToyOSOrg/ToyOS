@@ -51,3 +51,28 @@ pub(super) mod canary {
         [WORDS[0].load(Ordering::Relaxed), WORDS[1].load(Ordering::Relaxed)] != VALUE
     }
 }
+
+/// `panel-painter-stalls`' other half: the fatal halt waits, bounded, until a
+/// program's repaint is spinning inside the panel's latch, and says whether it
+/// found one. Asleep between looks, so the painter it waits for gets a CPU.
+#[cfg(feature = "boot-actuators")]
+pub(super) fn await_stalled_painter() {
+    use crate::drivers::panic_console::stall;
+    use crate::time::{Budget, Duration};
+    if !crate::actuator::panel_painter_stalls() {
+        return;
+    }
+    const WAIT: Budget = Budget::of(
+        Duration::from_secs(10),
+        "the fatal halt goes on without a stalled painter, and says so",
+    );
+    let until = crate::clock::nanos_since_boot().saturating_add(WAIT.nanos());
+    while crate::clock::nanos_since_boot() < until {
+        if stall::stalled() {
+            crate::log!("{}", stall::HELD);
+            return;
+        }
+        super::proc::sys_nanosleep(1_000_000);
+    }
+    crate::log!("panel: no repaint stalled inside the latch in {} ms", WAIT.nanos() / 1_000_000);
+}

@@ -1,0 +1,33 @@
+# `tests/lantalkcase` in front of QEMU's 82574L, the part whose register file
+# the T14's I219 has: the rehearsal of that boot on the one machine in reach
+# that runs netd's Intel driver. The host reaches it through slirp's forward
+# and its listener on the host's loopback; everything else is that boot's.
+
+[boot]
+start = ["logd", "netd", "sshd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+# The record stream's authority: the address on the parameter line is
+# information, and this row is the whole of what can act on it.
+receives = ["netd"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:10d3"]
+
+[programs.sshd]
+receives = ["netd", "launcher"]
+
+[programs.test-runner]
+syscap = ["logread"]
+
+# What `exec` is asked for over the cable. `power` because `reboot` is this
+# binary under another name and it is the host's way of handing the machine
+# back; `echo` is the command whose answer the host compares.
+[programs.toybox]
+syscap = ["power"]
+
+[symlinks]
+"bin/echo" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"

@@ -37,9 +37,6 @@ Constraints a reader would otherwise pay to re-derive:
 - **Addressing is DHCP with a hostname**, resolved through the router's DNS. The
   T14's MAC is the same under ToyOS and Ubuntu, so the lease is the one `t14`
   already resolves to. Wi-Fi is out — the AX210 needs a firmware image.
-- The I219 has **32-bit BARs**, and `pcidev`'s window allocator has only ever
-  placed a 64-bit one: `Refusal::NoWindow` on that machine means nothing was
-  found above everything firmware described and below the platform's fixed MMIO.
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
   ground reddened every netd registration at once. So a re-claim is made safe by

@@ -18,8 +18,13 @@
 //! needs it — and `toyos-abi` is a dependency of `std`, so a formatter that
 //! reaches no reader would ship in every program.
 //!
+//! The other decision is whose lines a record may carry at all: [`spoken`]
+//! bounds what one program's console puts in the kernel's record ring and
+//! gives each such record the form no kernel record takes; the kernel's
+//! console object and its record producer are its callers.
+//!
 //! Pure: `core::fmt` and nothing else — no allocation, no `unsafe`, and no
-//! record. The one caller is `toyos-symbols`, which spends the budget
+//! record. [`Elided`]'s one caller is `toyos-symbols`, which spends the budget
 //! `MAX_RECORD_MESSAGE` leaves a backtrace frame on behalf of
 //! `kernel/src/symbols.rs`, and everything it decides is
 //! checked here on the host, where a seam falling inside a four-byte character
@@ -32,6 +37,8 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+
+pub mod spoken;
 
 #[cfg(test)]
 extern crate std;

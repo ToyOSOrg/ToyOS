@@ -236,10 +236,265 @@ fn check(index: usize, disk: &Handle) {
         }
     }
 
+    // A READ whose first wait spends its operation's whole budget, then a class
+    // reset the device answers out of step, then a port reset that takes: the
+    // READ goes out again on what the call has left and returns the host's
+    // bytes.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_first_wait_spent() {
+        use crate::drivers::xhci::{disarm_probe_faults, disarm_transport_faults};
+        use crate::drivers::xhci::{stage_probe_faults, stage_transport_faults, StagedFault};
+        let block = at(blocks, HOST_BLOCKS[0]);
+        buf.fill(0);
+        stage_transport_faults(1, StagedFault::Unanswered);
+        stage_probe_faults(1);
+        let refused = read(block, 1, &mut buf).is_err();
+        let (untaken, probes_untaken) = (disarm_transport_faults(), disarm_probe_faults());
+        let matched = !refused && first_bad(&buf, nonce, block).is_none();
+        log!(
+            "usb-gate: a first wait that spent the operation's budget, a recovery out of step and \
+             a port reset: read refused={refused} matched={matched} untaken={untaken} \
+             probes_untaken={probes_untaken} healthy={}",
+            usb_storage::healthy(index)
+        );
+    }
+
+    // Runs of transport faults, each staged immediately before the read it is
+    // taken inside. One short of the budget, in each of the two shapes a break
+    // leaves the bulk pair in, is a run the recovery brings back: the read
+    // returns the host's bytes, and because a completed read ends the run the
+    // second shape starts its own count. Then one fault whose recovery the
+    // device answers without being in step after it. A run as long as the
+    // whole budget is what the driver owes a give-up for. Last, because the disk is offline
+    // after it and every line above would read differently.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_transport_faults() {
+        use crate::drivers::xhci::{max_transport_breaks, stage_transport_faults, StagedFault};
+        use crate::drivers::xhci::disarm_transport_faults as disarm;
+        let block = at(blocks, HOST_BLOCKS[0]);
+        let budget = max_transport_breaks();
+        for (fault, shape) in [
+            (StagedFault::BadSignature, "bad CBW signatures"),
+            (StagedFault::NoCbw, "withheld CBWs"),
+        ] {
+            buf.fill(0);
+            stage_transport_faults(budget - 1, fault);
+            let refused = read(block, 1, &mut buf).is_err();
+            let untaken = disarm();
+            let matched = !refused && first_bad(&buf, nonce, block).is_none();
+            log!(
+                "usb-gate: {} {shape} in a row of a budget of {budget}: read refused={refused} \
+                 matched={matched} untaken={untaken} healthy={}",
+                budget - 1,
+                usb_storage::healthy(index)
+            );
+        }
+        // A recovery the device answers and is not in step after: the read's
+        // CBW is refused, and so is the TEST UNIT READY the recovery closes
+        // with, so that recovery has not taken and is the run's second break.
+        {
+            use crate::drivers::xhci::{disarm_probe_faults, stage_probe_faults};
+            buf.fill(0);
+            stage_transport_faults(1, StagedFault::BadSignature);
+            stage_probe_faults(1);
+            let refused = read(block, 1, &mut buf).is_err();
+            let untaken = disarm();
+            let probes_untaken = disarm_probe_faults();
+            let matched = !refused && first_bad(&buf, nonce, block).is_none();
+            log!(
+                "usb-gate: a bad CBW signature and then a recovery out of step: read \
+                 refused={refused} matched={matched} untaken={untaken} \
+                 probes_untaken={probes_untaken} healthy={}",
+                usb_storage::healthy(index)
+            );
+        }
+        stage_transport_faults(budget, StagedFault::BadSignature);
+        let read_refused = read(block, 1, &mut buf).is_err();
+        let untaken = disarm();
+        let next_refused = read(block, 1, &mut buf).is_err();
+        log!(
+            "usb-gate: {budget} bad CBW signatures in a row of a budget of {budget}: read \
+             refused={read_refused} untaken={untaken} the read after it refused={next_refused} \
+             healthy={}",
+            usb_storage::healthy(index)
+        );
+        // And the same budget spent inside a bind: the next disk to enumerate
+        // has its INQUIRY — the first command `bring_up` issues through the
+        // recovering path — refused as many times. The bind stages and disarms
+        // them itself, since no operation of this gate spans one; one more than
+        // the budget, so what it takes back is not nothing.
+        crate::drivers::xhci::stage_bind_faults(budget + 1);
+    }
+
     log!(
         "usb-gate: disk done reads={} writes={} refusal={past_end} wr_err={write_errors} healthy={}",
         if reads_ok { "ok" } else { "bad" },
         if writes_ok { "ok" } else { "bad" },
         usb_storage::healthy(index)
     );
+
+    // After the account above, which it would otherwise change: a read whose
+    // port reads gone is not a transport to recover, and the disk is left to
+    // the teardown its port owes.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_port_gone() {
+        use crate::drivers::xhci::{stage_transport_faults, StagedFault};
+        stage_transport_faults(1, StagedFault::PortGone);
+        let refused = read(at(blocks, HOST_BLOCKS[0]), 1, &mut buf).is_err();
+        let untaken = crate::drivers::xhci::disarm_transport_faults();
+        log!(
+            "usb-gate: a read whose port reads gone: refused={refused} untaken={untaken} \
+             healthy={}",
+            usb_storage::healthy(index)
+        );
+    }
 }
+
+/// Blocks per read-and-write-back pair — eight of this driver's largest SCSI
+/// command, so each pair is several commands and not one.
+#[cfg(feature = "boot-actuators")]
+const WEDGE_CHUNK: u32 = 64;
+
+/// Pairs before the wedge, so the wedge is not the first thing this command's
+/// device saw.
+#[cfg(feature = "boot-actuators")]
+const WEDGE_CHUNKS: u32 = 16;
+
+/// Leave this machine wedged inside one Bulk-Only command, at the phase `at`
+/// names, with megabytes of writes behind it.
+///
+/// **The stimulus for a state no ordinary boot reaches.** A shutdown reaches
+/// its sync with nothing dirty on most boots, so the traffic and the command
+/// the wedge is taken inside are both issued here rather than waited for.
+///
+/// **Every block is read first and written back byte for byte**, so the medium
+/// is what it was however much of a write either reset completes; and at the
+/// disk's own end, because a fixed offset is inside a partition this kernel
+/// mounts on the smaller disks the same actuator boots on.
+#[cfg(feature = "boot-actuators")]
+pub fn wedge_inside_a_write(at: toyos_xhci::bot::Phase) {
+    let Some((disk, _)) = usb_storage::handle(0) else {
+        log!("usb-wedge: no USB disk on this machine, so there is no command to wedge inside");
+        return;
+    };
+    let span = u64::from(WEDGE_CHUNK) * u64::from(WEDGE_CHUNKS);
+    let Some(first) = disk.block_count().checked_sub(span) else {
+        log!("usb-wedge: disk 0 holds {} blocks, fewer than the {span} this wedge writes",
+            disk.block_count());
+        return;
+    };
+    let mut buf = vec![0u8; WEDGE_CHUNK as usize * BLOCK];
+    // The last pair carries the wedge, so every pair before it is traffic the
+    // device has already taken.
+    for chunk in 0..WEDGE_CHUNKS {
+        let block = first + u64::from(chunk) * u64::from(WEDGE_CHUNK);
+        if disk.lock().read_blocks(block, WEDGE_CHUNK, &mut buf).is_err() {
+            log!("usb-wedge: disk 0 would not give up block {block}, so no write is staged from it");
+            return;
+        }
+        if chunk + 1 == WEDGE_CHUNKS {
+            log!("{USB_WEDGE_STAGED} {at} phase, after {} KiB rewritten with the bytes just read \
+                 from it", u64::from(WEDGE_CHUNK) * u64::from(chunk) * BLOCK as u64 / 1024);
+            crate::drivers::xhci::arm_mid_write_wedge(at);
+        }
+        if disk.lock().write_blocks(block, WEDGE_CHUNK, &buf).is_err() {
+            log!("usb-wedge: disk 0 refused the write at block {block}");
+            return;
+        }
+    }
+    log!("{USB_WEDGE_MISSED} — every write completed, so no CPU was stopped inside one and this \
+         boot ends itself the ordinary way");
+}
+
+/// What the wedge says before the write it is taken inside, and what it says if
+/// that write ran to completion instead. Judged by the harness, so both are
+/// constants (`src/bootlog.rs`).
+#[cfg(feature = "boot-actuators")]
+pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
+#[cfg(feature = "boot-actuators")]
+pub const USB_WEDGE_MISSED: &str = "usb-wedge: the write completed";
+
+/// The smallest disk this load will sweep: a gibibyte in 4 KiB blocks.
+///
+/// **A refusal and not a smaller sweep.** The sweep takes the last eighth of
+/// the disk, which on anything smaller is inside a partition this kernel
+/// mounts; a disk with no room for it is one this control cannot be staged on,
+/// and saying so is the answer.
+#[cfg(feature = "boot-actuators")]
+const SWEEP_FLOOR: u64 = 262_144;
+
+/// Stream writes to the stick until something else ends the machine, so the
+/// reset lands on a controller that is moving bytes and a device that is
+/// programming flash.
+///
+/// **The last eighth once and never twice.** Every run is read first and
+/// written back byte for byte, so the medium is what it was however much of a
+/// run either reset completes; and the sweep stops at the end of that span
+/// rather than wrapping, so no block on the owner's stick is programmed twice
+/// in a boot. A sweep that reaches the end says so by name, because a bus that
+/// went idle before the reset is the idle case again under this arm's name.
+#[cfg(feature = "boot-actuators")]
+pub fn sweep_under_load() {
+    let Some((disk, _)) = usb_storage::handle(0) else {
+        log!("{LOAD_REFUSED}: no USB disk on this machine");
+        return;
+    };
+    let blocks = disk.block_count();
+    if blocks < SWEEP_FLOOR {
+        log!("{LOAD_REFUSED}: disk 0 holds {blocks} blocks and this load sweeps the last \
+             eighth of a disk of at least {SWEEP_FLOOR}");
+        return;
+    }
+    let first = blocks - blocks / 8;
+    log!("{LOAD_RUNNING} from block {first} to {blocks}, rewriting each run with the bytes \
+         just read from it, until this machine is reset out from under it");
+    // `IF` on and preemption off: the bound that has to end this machine is the
+    // boot deadline, polled from the timer entry, and a CPU that takes no
+    // interrupt at all is a hard lockup ended half a bound earlier by a
+    // different mechanism under this arm's name.
+    //
+    // Read before the `sti`, which is the one fact here about the caller rather
+    // than about this function.
+    let interrupts_were_on = crate::arch::cpu::interrupts_enabled();
+    crate::preempt::disable();
+    crate::arch::apic::arm_within(toyos_sched::fair::QUANTUM_NS);
+    crate::arch::cpu::enable_interrupts();
+    let mut buf = vec![0u8; WEDGE_CHUNK as usize * BLOCK];
+    let mut at = first;
+    let mut stopped = false;
+    while at + u64::from(WEDGE_CHUNK) <= blocks {
+        if disk.lock().read_blocks(at, WEDGE_CHUNK, &mut buf).is_err()
+            || disk.lock().write_blocks(at, WEDGE_CHUNK, &buf).is_err()
+        {
+            log!("{LOAD_STOPPED} at block {at}");
+            stopped = true;
+            break;
+        }
+        at += u64::from(WEDGE_CHUNK);
+    }
+    if !stopped {
+        log!("{LOAD_SWEPT} at block {at}, so the bus is idle for the rest of this boot");
+    }
+    // Put back on the one path out of here, because the caller goes on to drain
+    // write-back, sync every filesystem, flush every disk and wait for the log
+    // to be durable, and none of that may run under a preempt count or an `IF`
+    // this left behind. Not `preempt::enable`: the request stays set and the
+    // caller's own next preemption point serves it, rather than a scheduler pass
+    // taken from inside the shutdown syscall.
+    if !interrupts_were_on {
+        crate::arch::cpu::disable_interrupts();
+    }
+    crate::preempt::enable_no_resched();
+}
+
+/// What the load says when it starts, when it cannot, when the disk stopped
+/// answering it, and when it reached the end of its one pass. Judged by the
+/// harness, so all four are constants (`src/bootlog.rs`).
+#[cfg(feature = "boot-actuators")]
+pub const LOAD_RUNNING: &str = "usb-load: sweeping disk 0";
+#[cfg(feature = "boot-actuators")]
+pub const LOAD_REFUSED: &str = "usb-load: refused";
+#[cfg(feature = "boot-actuators")]
+pub const LOAD_STOPPED: &str = "usb-load: the disk stopped answering";
+#[cfg(feature = "boot-actuators")]
+pub const LOAD_SWEPT: &str = "usb-load: the sweep reached the end of the disk";

@@ -96,7 +96,9 @@ fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
 # `statvfs` for `worktree::free_bytes`; `getloadavg` and the libproc pair
-# (`proc_listallpids`/`proc_pidpath`) for gate A's host-conditions line.
+# (`proc_listallpids`/`proc_pidpath`) for gate A's host-conditions line; and the
+# unprivileged ICMP datagram socket `icmp::echo` asks a metal boot over, which
+# is the platform call that replaces a `ping` binary.
 libc = "0.2"
 toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
@@ -133,6 +135,11 @@ sha2 = "0.10"
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
 toyos-ld = { path = "toyos-ld" }
+# The I219 driver's own words and its PHY probe's exit-code table, so the
+# harness judging netd's `exit:` record off the T14 and netd writing it read one
+# declaration. Pure and `no_std`, so it compiles for the host as it does for
+# the guest.
+toyos-i219 = { path = "toyos-i219" }
 # The scheduler core, for the one type the check build publishes and the
 # harness judges: `cpu::PassCostReport` is the wire form of the pass-cost
 # distribution, and its `Display`/`parse` pair is what keeps the kernel that
@@ -146,6 +153,9 @@ toyos-ld = { path = "toyos-ld" }
 # from this workspace with its own lockfile, so nothing here reaches the kernel's
 # resolution of the same crate.
 toyos-sched = { path = "toyos-sched", features = ["check"] }
+# The Bulk-Only phases, so the harness judging a wedge reads the word
+# `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
+toyos-xhci = { path = "toyos-xhci" }
 # The second reader `pkg_install_gbae` is judged against: what is read back off
 # the guest's volume is compared with a third party's decoding of the committed
 # archive, never with `userland/pkg`'s own. The archive itself is committed

@@ -1,8 +1,8 @@
 //! The images the metal profile builds: one committed boot config, armed one
 //! way, carrying a job list that ends the boot.
 //!
-//! **A T14 boot has to end itself.** Nothing is on the console — a userland
-//! write reaches `Backend::None` on a machine with no serial port — so the
+//! **A T14 boot has to end itself.** Nobody is on the console — a machine with
+//! no serial port has nothing at the other end to type a job — so the
 //! stdin path every `tests/*case` but `jobcase` leaves the runner on parks
 //! forever, and the loop refuses after `metal::return_secs`. What ends a boot
 //! is `[programs.test-runner] args`: one binary name per job, then `reboot`.

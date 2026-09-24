@@ -209,7 +209,10 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(bytes) => bytes,
                 Err(e) => return e.to_u64(),
             };
-            let pending = match process::build_child_handles(&slot_map, &endow, &labels) {
+            // Read once: its first word is the path the child runs, and the name its consoles speak under.
+            let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
+            let program = argv.first().copied().unwrap_or("");
+            let pending = match process::build_child_handles(&slot_map, &endow, &labels, program) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
@@ -226,7 +229,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             } else {
                 alloc::vec::Vec::new()
             };
-            sys_spawn(&text, pending, env)
+            sys_spawn(&argv, pending, env)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {
@@ -504,7 +507,12 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             // Unlike every other action, this costs the machine, not just the caller's
             // process: one call is already a permanent halt.
-            DA::FATAL_HALT => { log!("{}", FATAL_HALT_NONCE); crate::arch::apic::halt_all_cpus(); }
+            DA::FATAL_HALT => {
+                #[cfg(feature = "boot-actuators")]
+                super::debug::await_stalled_painter();
+                log!("{}", FATAL_HALT_NONCE);
+                crate::arch::apic::halt_all_cpus();
+            }
             // A real #DF, not simulated: pushing to a non-canonical rsp raises #SS,
             // and delivering that needs another push to the same rsp — the #DF condition.
             // Non-canonical rather than unmapped: on a bigger machine an unmapped
@@ -544,8 +552,6 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             DA::CANARY_ADDR => canary::address(),
             DA::CANARY_CHANGED => canary::changed() as u64,
-            // Arms the last CPU a shootdown waits for to answer a2ns late; the arming
-            // outlives the call so the caller can then time a syscall's own shootdown path.
             DA::TLB_ACK_DELAY_ARM => crate::arch::tlb::debug_arm_ack_delay(a2),
             DA::TLB_ACK_DELAY_DISARM => crate::arch::tlb::debug_disarm_ack_delay(),
             // The two leaks this object model accepts — a stranded Arc, the cross-pair

@@ -12,12 +12,6 @@
 //! tests, and one boot is about a minute of the machine's time — so the boot is
 //! something an arm names rather than something derived, because sharing is not
 //! always safe and only the author knows.
-//!
-//! **What reaches the stick is not what reaches a QEMU console.** A userland
-//! `println!` ends at `Backend::None` on a machine with no serial port, so
-//! `===TEST_END <name> exit=N===` does not exist here: a job's verdict crosses
-//! as the kernel's own `exit: <name> pid=N code=N cpu=Nms` record. Every
-//! predicate below reads records, never console text.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -62,6 +56,17 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
+    /// The PCI function this boot's image claims, where the loop reaches the
+    /// boot over its cable while it runs. **`None` on every boot that does not
+    /// ask**: a boot whose judges read no cable would be refused for a fact
+    /// none of them looks at.
+    pub nic: Option<&'static str>,
+    /// **The boot is talked to over its own cable.** Its image streams its
+    /// records to the listener `--metal-listen` names and authorizes a key
+    /// minted beside it, and the loop — told `--talk` — listens, pings the
+    /// address that opens the stream, runs a command there and tells it to
+    /// reboot. `false` on every boot whose judge reads the stick alone.
+    pub talk: bool,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -75,7 +80,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[] }
+    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -191,8 +196,13 @@ pub enum Metal {
 /// What one boot left on the stick, and what the host clock saw of it.
 pub struct Readback {
     pub label: String,
+    /// The directory the loop wrote this boot's files into.
+    home: PathBuf,
     loader: String,
+    /// The kernel's own records of every `logd` file this boot wrote.
     kernel: String,
+    /// Every record of those files, the programs' included.
+    log: String,
     /// `Boot: complete (Nms)`, or `None` on a boot that never got there.
     pub boot_ms: Option<u64>,
     /// What the machine spent getting back to `sshd`.
@@ -204,12 +214,59 @@ pub struct Readback {
     /// this machine holds, and it is a row rather than the reason a mount
     /// happened to work.
     pub stick_secs: u64,
+    /// What the host asked the cable while the machine was between its two
+    /// operating systems, and `None` on every boot that named no function to
+    /// ask over.
+    pub cable: Option<toyos_build::metal::Cable>,
 }
 
 impl Readback {
-    /// Every `logd` file this boot wrote, as one text.
+    /// What the loop heard over the boot's own cable, and the record stream it
+    /// received — or why a boot that was to be talked to has neither.
+    ///
+    /// **Absent is a finding here, never an empty answer**: the loop writes
+    /// the conversation before anything can refuse, so a talking boot's
+    /// readback without one is a loop that was not told `--talk`.
+    pub fn talk(&self) -> Result<(toyos_build::metaltalk::Heard, Vec<String>), String> {
+        let at = self.home.join(toyos_build::metal::READBACK_TALK);
+        let text = std::fs::read_to_string(&at).map_err(|e| {
+            format!("{}: {e} — this boot's loop was not told --talk", at.display())
+        })?;
+        let heard = toyos_build::metaltalk::Conversation::parse(&text)?.ok_or_else(|| {
+            format!("{}'s loop heard nothing over the cable:\n{text}", self.label)
+        })?;
+        let at = self.home.join(toyos_build::metal::READBACK_STREAM);
+        let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        Ok((heard, stream.split_inclusive('\n').map(str::to_string).collect()))
+    }
+
+    /// One file off the log volume that is neither the loader's nor `logd`'s,
+    /// read out of the partition's own bytes; `None` where the volume has no
+    /// such file.
+    ///
+    /// **The loop copies two kinds of file off the mount and this is neither**,
+    /// so it comes out of `metal::READBACK_VOLUME` — which the loop keeps on
+    /// every boot that came back, because the outside judge runs on every one.
+    pub fn log_volume_file(&self, name: &str) -> Result<Option<String>, String> {
+        let at = self.home.join(toyos_build::metal::READBACK_VOLUME);
+        let volume = std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        let found = super::volumes::read_files(&volume, &[name])?.pop().flatten();
+        found
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|e| format!("{}'s {name}: {e}", self.label))
+            })
+            .transpose()
+    }
+
+    /// Every `logd` file this boot wrote, as one text, less every program's
+    /// record ([`bootlog::kernel_records`]): no program's line is read as the kernel's.
     pub fn kernel(&self) -> Serial {
         Serial::named(&format!("{}'s kernel log", self.label), self.kernel.as_str())
+    }
+
+    /// The same files whole, the programs' records included.
+    pub fn log(&self) -> Serial {
+        Serial::named(&format!("{}'s log", self.label), self.log.as_str())
     }
 
     /// `loader.log`, both passes: the one before the kernel handoff and, under
@@ -275,6 +332,21 @@ impl Readback {
         toyos_build::metal::deadline_lateness_ms(&self.loader)
     }
 
+    /// What the on-screen panel cost this boot, off the kernel's own census.
+    ///
+    /// **Two channels, because the panel outlives one of them.** A boot that
+    /// hands the machine back writes the census as an ordinary record and
+    /// `logd` files it; a boot a bound ended has no `logd` left, and its
+    /// kernel seals the same line into the black-box page the loader prints
+    /// back after the reset. The page from *this* boot is the one after the
+    /// separator: an earlier chain's report can sit in the pass before it.
+    pub fn panel(&self) -> Option<bootlog::Panel> {
+        bootlog::panel_census(&self.kernel).or_else(|| {
+            let after = self.after_the_reset().ok()?;
+            bootlog::panel_census(after.text())
+        })
+    }
+
     /// The same for the other bound: how far past its own bound a hard-lockup
     /// sample was when it found a cpu stuck, or `None` on a boot no cpu locked
     /// up on. Read out of the same channel and for the same reason.
@@ -325,7 +397,7 @@ impl Readback {
         let name = bootlog::recorded_name(binary);
         let head = format!("{}{name} pid=", bootlog::EXIT);
         let mut family: Vec<(u64, i32)> = Vec::new();
-        for line in self.kernel.lines().filter(|l| l.contains(&head)) {
+        for line in self.kernel.lines().filter_map(bootlog::message).filter(|m| m.starts_with(&head)) {
             let field = |label: &str| -> Option<&str> {
                 line.split_once(label).and_then(|(_, rest)| rest.split_whitespace().next())
             };
@@ -424,6 +496,12 @@ struct Batch {
     jobs: Vec<String>,
     files: Vec<(String, Vec<u8>)>,
     links: Vec<(String, String)>,
+    /// [`Arm::nic`], carried to the invocation that drives this boot.
+    nic: Option<&'static str>,
+    /// [`Arm::talk`], carried to the image and to the invocation.
+    talk: bool,
+    /// `--metal-listen`, on a talking batch: where its record stream goes.
+    listen: Option<String>,
 }
 
 impl Batch {
@@ -468,6 +546,9 @@ fn batches(
                 jobs: boot.jobs.clone(),
                 files: boot.files.clone(),
                 links: boot.links.clone(),
+                nic: None,
+                talk: false,
+                listen: None,
             },
         );
         if was.is_some() {
@@ -484,21 +565,30 @@ fn batches(
                 jobs: Vec::new(),
                 files: Vec::new(),
                 links: Vec::new(),
+                nic: arm.nic,
+                talk: arm.talk,
+                listen: None,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
+                || batch.nic != arm.nic
+                || batch.talk != arm.talk
             {
                 return Err(format!(
-                    "{name} rides the boot {:?} as ({}, {:?}, {:?}) and another row rides it \
-                     as ({}, {:?}, {:?}); one boot is one image",
+                    "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}) and another row \
+                     rides it as ({}, {:?}, {:?}, {:?}, talk={}); one boot is one image",
                     arm.boot,
                     arm.config,
                     arm.params,
                     arm.features,
+                    arm.nic,
+                    arm.talk,
                     batch.config,
                     batch.params,
-                    batch.features
+                    batch.features,
+                    batch.nic,
+                    batch.talk
                 ));
             }
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
@@ -646,6 +736,29 @@ fn build(
     let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
+    // **A talking boot carries the host's half of the cable in its image**: the
+    // listener's address, which only the command line can say, and the key the
+    // loop will offer, minted beside the image so the loop finds it there.
+    let stream_param = match (batch.talk, batch.listen.as_deref()) {
+        (false, _) => None,
+        (true, None) => {
+            return Err(format!(
+                "{label} is talked to over its own cable, and its record stream needs this \
+                 host's address on the machine's network: pass --metal-listen <a.b.c.d:port>"
+            ))
+        }
+        (true, Some(at)) => {
+            let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
+            extra.push((
+                super::ssh::KEYS_ON_ROOT.to_string(),
+                identity.authorized_line().into_bytes(),
+            ));
+            Some(format!("{}{at}", toyos_logstream::PARAM))
+        }
+    };
+    if let Some(param) = &stream_param {
+        params.push(param);
+    }
     let plan = toyos_build::build::Plan::new(&config, features, &params);
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
@@ -662,8 +775,13 @@ fn fingerprint(text: &str) -> u64 {
 
 /// The invocation that turns one image into one readback. Written down in the
 /// staged request and run by [`Mode::Drive`], so the two cannot differ.
-fn invocation(image: &Path, home: &Path) -> Vec<String> {
-    vec![
+/// Where a talking boot's key lives, beside its image.
+fn talk_home(home: &Path) -> PathBuf {
+    home.join("ssh")
+}
+
+fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<String> {
+    let mut words = vec![
         "run".to_string(),
         "--bin".to_string(),
         "toyos-metal".to_string(),
@@ -677,7 +795,16 @@ fn invocation(image: &Path, home: &Path) -> Vec<String> {
         // `/log` has no reader of those bytes that is not the family of code
         // that wrote them.
         "--fat32-check".to_string(),
-    ]
+    ];
+    if let Some(nic) = nic {
+        words.push("--nic".to_string());
+        words.push(nic.to_string());
+    }
+    if talk {
+        words.push("--talk".to_string());
+        words.push(talk_home(home).join("id_ed25519").display().to_string());
+    }
+    words
 }
 
 fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
@@ -689,19 +816,24 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         })
     };
     let loader = read(toyos_build::metal::READBACK_LOADER)?;
-    let kernel = read(toyos_build::metal::READBACK_KERNEL)?;
+    let log = read(toyos_build::metal::READBACK_KERNEL)?;
+    let kernel = bootlog::kernel_records(&log);
     let boot = read(toyos_build::metal::READBACK_BOOT)?;
     let back_secs = toyos_build::metal::back_secs(&boot)
         .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
     let stick_secs = toyos_build::metal::stick_secs(&boot)
         .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
+    let cable = toyos_build::metal::cable(&boot).map_err(|why| format!("{label}: {why}"))?;
     Ok(Readback {
         label: label.to_string(),
+        home,
         boot_ms: bootlog::boot_millis(&kernel),
         loader,
         kernel,
+        log,
         back_secs,
         stick_secs,
+        cable,
     })
 }
 
@@ -719,6 +851,9 @@ pub enum Verdict {
 }
 
 /// The whole metal profile: batch, build, drive, judge, report.
+// Each argument is one of the suite's own flags or tables, passed through
+// once; a struct holding them would be a second name for the command line.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     mode: Mode,
     dir: &Path,
@@ -730,6 +865,8 @@ pub fn run(
     // then put on the image.
     helpers: &[&str],
     quiet: bool,
+    // `--metal-listen`: where a talking boot streams its records.
+    listen: Option<&str>,
 ) -> Verdict {
     let root = super::compile::repo_root();
     let profile = match Profile::load(&root) {
@@ -749,13 +886,16 @@ pub fn run(
         }
     };
     let shared = shared.as_slice();
-    let batches = match batches(tests, shared, &profile) {
+    let mut batches = match batches(tests, shared, &profile) {
         Ok(batches) => batches,
         Err(why) => {
             eprintln!("[metal] {why}");
             return Verdict::Red;
         }
     };
+    for batch in batches.values_mut().filter(|b| b.talk) {
+        batch.listen = listen.map(str::to_string);
+    }
     let declared: Vec<&str> = tests
         .iter()
         .filter_map(|(name, decl)| match decl {
@@ -791,6 +931,11 @@ pub fn run(
 
     let mut images: BTreeMap<&str, PathBuf> = BTreeMap::new();
     if !judging {
+        // The key a talking boot authorizes is minted by the harness's own ssh
+        // client, which the suite builds only on its QEMU path.
+        if batches.values().any(|b| b.talk) {
+            toyos_build::build::build_host_judges(&root, quiet);
+        }
         for (label, batch) in &batches {
             match build(&root, dir, label, batch, rust_bins, helpers, quiet) {
                 Ok(image) => {
@@ -818,7 +963,7 @@ pub fn run(
             request.push_str(&format!(
                 "\n{label}\n  image: {}\n  cargo {}\n",
                 image.display(),
-                invocation(image, &at(dir, label)).join(" ")
+                invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
             ));
         }
         let path = dir.join("request.txt");
@@ -845,7 +990,7 @@ pub fn run(
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if mode == Mode::Drive {
         for (label, image) in &images {
-            let words = invocation(image, &at(dir, label));
+            let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
             match Command::new("cargo").args(&words).current_dir(&root).status() {
                 Ok(status) if status.success() => {}
@@ -884,6 +1029,15 @@ pub fn run(
                      after that",
                     back.back_secs, back.stick_secs
                 );
+                let panel = back.panel();
+                // Evidence beside the two numbers that are priced: what a
+                // reader needs to tell a slower paint from more of them.
+                if let Some(panel) = panel {
+                    eprintln!(
+                        "    the panel painted {} time(s) and put {} px on the glass",
+                        panel.paints, panel.pixels
+                    );
+                }
                 // **The profile's row is what a boot owes, and the boot's own
                 // record is what it paid.** The two lateness fields are `None`
                 // on every boot but the one armed to stop itself, and at most
@@ -898,6 +1052,8 @@ pub fn run(
                     ("stick_secs", Some(back.stick_secs)),
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
+                    ("panel_max_us", panel.map(|panel| panel.max_micros)),
+                    ("panel_us", panel.map(|panel| panel.micros)),
                 ] {
                     let name = format!("boot.{label}.{field}");
                     let priced = profile.row(&name).is_some();
