@@ -1158,17 +1158,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("usb_storage_write_error", Sched::Parallel, Tier::Fast),
     ("usb_flush_optional", Sched::Parallel, Tier::Nightly),
     ("xhci_deaf_registers", Sched::Parallel, Tier::Nightly),
-    // Mirrors the kernel's `SLOW_CONNECT_NS` as a constant of its own and
-    // bounds the first port line from *both* sides. Both instants are the
-    // guest's own, and it is still serial: the *injection window* is 300 ms of
-    // guest **boot** time, so a guest that lost its share of the host reaches
-    // its controller after the ports have stopped lying and the gate refuses to
-    // certify — `the controller started at 0.366 s, past the 0.3 s the ports are
-    // held empty for`, measured at width 4 with four other worktrees' suites up.
-    // That is the test declining to measure nothing, which is correct, and a red
-    // all the same. The fix it asks for is the kernel's: anchor the window on
-    // the controller's own reset rather than on boot, which is where a real root
-    // hub's detection delay starts anyway.
+    // The window is anchored on the controller's own port-power stamp now, not
+    // boot, so a slow boot no longer eats it — but the bound is still a fixed
+    // span of the guest's own TSC clock (`SLOW_CONNECT_NS`/`DEBOUNCE_NS`), and
+    // a host running several other guests can still stall this one's vCPU past
+    // that span for reasons that are not the defect.
     ("xhci_slow_connect", Sched::Serial, Tier::Nightly),
     ("xhci_portsc_rw1c", Sched::Parallel, Tier::Fast),
     // One staged break and no other, which puts the driver's recovery finishing
@@ -1230,12 +1224,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
     ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),
     ("wall_clock_zone", Sched::Parallel, Tier::Nightly),
-    // `xhci_slow_connect`'s shape against the disk's port, and serial for the
-    // same reason and not by association: it shares `SLOW_CONNECT_NS`, so a boot
-    // that outgrows the window binds the disk in the port scan and it reports
-    // `the boot scan bound a disk, so the port was not held empty`. Same
-    // measurement, same afternoon.
-    ("late_storage_connect", Sched::Serial, Tier::Nightly),
+    // `xhci_slow_connect`'s shape against the disk's port, but its actuator
+    // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
+    // so what it stages is an ordering with no wall-clock margin on either
+    // side: nothing here needs the serial tail.
+    ("late_storage_connect", Sched::Parallel, Tier::Nightly),
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),

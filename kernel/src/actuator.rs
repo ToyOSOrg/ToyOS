@@ -266,10 +266,10 @@ actuators! {
     /// Return from the NMI handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";
 
-    /// Report an empty root hub for the first 300ms of boot.
+    /// Report an empty root hub for the xHCI driver's `SLOW_CONNECT_NS` after a controller powers its ports.
     xhci_slow_connect = "xhci-slow-connect";
 
-    /// Report the first root-hub port empty for the same window, the rest normal — distinct from hiding the whole bus, since settle waits only for a non-empty settled set.
+    /// Report the first root-hub port empty until the boot scan has run, the rest normal — distinct from hiding the whole bus, since settle waits only for a non-empty settled set.
     xhci_slow_storage_connect = "xhci-slow-storage-connect";
 
     /// Give PORTSC's PED bit the RW1CS meaning xHCI 1.2 §5.4.8 gives it.
