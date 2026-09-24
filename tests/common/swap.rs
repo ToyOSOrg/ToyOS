@@ -272,7 +272,17 @@ pub fn swap_crash_rolls_back(
     let (file, _, staged) = rig.finish(Some(CRASH_PANIC))?;
     let restored = after(&file, 0, &toyos_swap::said("netd", Word::Restored, "/system/bin/netd as pid"))
         .ok_or("/log has no `restored` of the image's netd")?;
-    after(&file, restored, toyos_build::lan::LEASE)
+    let pid = file[restored]
+        .rsplit("as pid ")
+        .next()
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        .ok_or_else(|| format!("init's `restored` names no pid: {:?}", file[restored]))?;
+    // The lease is looked for after the kernel's spawn of the restored process
+    // and not after init's word on it: init speaks once the spawn returns, and
+    // a netd that leases first puts its lease above that word.
+    let spawned = after(&file, 0, &format!("spawn: /system/bin/netd pid={pid} "))
+        .ok_or_else(|| format!("/log has no `spawn:` of the restored netd, pid {pid}"))?;
+    after(&file, spawned, toyos_build::lan::LEASE)
         .ok_or("/log has no lease from the restored netd")?;
     let _ = std::fs::remove_file(&staged.image);
     Ok(())
