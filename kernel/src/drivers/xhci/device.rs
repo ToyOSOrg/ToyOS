@@ -6,7 +6,9 @@ use toyos_xhci::enumerate::{
 };
 use toyos_xhci::job::{Await, Outcome, Stages};
 use toyos_xhci::port::{self, Reset};
+use toyos_xhci::identity::UsbId;
 use toyos_xhci::recovery;
+use toyos_xhci::reset_recovery::SlotGoes;
 use super::{deadline, Answer, Trb, TrbRing, What, XhciController, PAGE};
 use super::{OFF_INPUT_CTX, OFF_DATA_BUF};
 use super::{DEV_INT_RING, DEV_EP0_RING, DEV_OUT_CTX, DEV_REPORT, EP0_DCI};
@@ -14,7 +16,7 @@ use super::{TRB_ENABLE_SLOT, TRB_ADDRESS_DEVICE, TRB_CONFIGURE_EP, TRB_EVALUATE_
 use super::{enqueue_control, CC_SUCCESS};
 
 use super::hid::{HidType, HidRole, HidDevice};
-use super::msc::{MscInterface, MscRings};
+use super::msc::{Bind, MscInterface, MscRings};
 
 // `wTotalLength` is clamped to this size; the scratch page is four times it.
 const MAX_CONFIG_DESC: usize = 256;
@@ -229,7 +231,7 @@ pub fn reset_port(ctrl: &mut XhciController, port_idx: u8, kind: Reset) {
 
 /// Whether the port has finished the reset it was asked for.
 pub fn reset_done(ctrl: &XhciController, port_idx: u8) -> bool {
-    super::port_answers() && ctrl.read_portsc(port_idx).reset_changed()
+    super::port_answers() && ctrl.read_portsc(port_idx).reset_finished()
 }
 
 /// One device's enumeration: the state an answer needs, carried because the pass that asked gave up its stack.
@@ -247,6 +249,9 @@ pub(super) struct Enumerating {
     issued: Act,
     /// The configuration value and the function the descriptor named.
     parsed: Option<(u8, Function)>,
+    /// What the device descriptor says the device is, and the index of the
+    /// string that names its serial number (0 for none): a disk's identity.
+    described: Option<(UsbId, u8)>,
     // Carried, not rebuilt: a second `TrbRing::init` would zero memory the controller is already reading.
     rings: Option<Rings>,
 }
@@ -264,6 +269,10 @@ enum Rings {
 /// `after` is the reset this enumeration follows, and what the acknowledge is a
 /// function of; `port::enumeration_ack` is that function, and the simulator's
 /// enumerate step calls the same one.
+///
+/// **The caller owes a free operation slot**: the Enable Slot below goes into
+/// it unasked. The poll's `service_port` defers on `outstanding.wake_at`, and
+/// the boot scan's `settle_outstanding` returns only with the slot empty.
 pub(super) fn begin(ctrl: &mut XhciController, port_idx: u8, after: Option<Reset>) {
     let portsc = ctrl.read_portsc(port_idx);
     ctrl.write_portsc(port_idx, port::enumeration_ack(after, portsc));
@@ -324,6 +333,7 @@ pub(super) fn slot_answered(
         seq,
         issued: Act::Command(enumerate::Command::EnableSlot),
         parsed: None,
+        described: None,
         rings: None,
     };
     advance(ctrl, state, Learnt::Nothing);
@@ -401,6 +411,11 @@ fn perform(ctrl: &mut XhciController, mut state: Enumerating, act: Act) {
         Act::Request(request) => Some(control(ctrl, &mut state, request)),
     };
     let Some((on, stages)) = submitted else {
+        // A Configure Endpoint is refused only for want of a pool block, which
+        // a held disk's teardown may be about to give back.
+        if act == Act::Command(enumerate::Command::ConfigureEndpoint) {
+            return refuse_for_now(ctrl, state.port_idx, state.slot_id);
+        }
         return refuse(ctrl, state.port_idx, state.slot_id);
     };
     ctrl.outstanding.submit(What::Enumerating(state), on, stages, deadline());
@@ -515,6 +530,12 @@ fn read_back(
             let descriptor = &scratch[..18];
             log!("xHCI: device class={:#x} vendor={:04x} product={:04x}",
                 descriptor[4], le16(descriptor, 8), le16(descriptor, 10));
+            let usb = UsbId {
+                vendor: le16(descriptor, 8),
+                product: le16(descriptor, 10),
+                release: le16(descriptor, 12),
+            };
+            state.described = Some((usb, descriptor[16]));
             Ok(Learnt::Nothing)
         }
         // Nine bytes is the header holding `wTotalLength`; the parser is bounded by what arrived, not what was asked.
@@ -674,15 +695,32 @@ fn bind(ctrl: &mut XhciController, state: Enumerating) {
     let (_, function) = state.parsed.expect("a configuration named a function");
     let rings = state.rings.expect("Configure Endpoint named this device's rings");
     // Whether a device came of it decides who keeps the slot; a refusal here would leak it.
-    let bound = match (function, rings) {
+    let keeps_slot = match (function, rings) {
         (Function::Msc(info), Rings::Msc(msc)) => {
-            super::msc::bind(ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info)
+            let (configuration, _) = state.parsed.expect("a configuration named a function");
+            let enumerated = super::msc::Enumerated {
+                speed: state.speed,
+                ep0_packet: state.packet,
+                configuration,
+            };
+            // The full descriptor is read before the configuration is, so a
+            // device that reached here gave one.
+            let described = state.described.expect("the device descriptor was read before its configuration");
+            match super::msc::bind(
+                ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info, enumerated, described,
+            ) {
+                Bind::Bound => true,
+                Bind::NotReady => return refuse_for_now(ctrl, state.port_idx, state.slot_id),
+                Bind::Refused(SlotGoes::Back) => false,
+                // No device came of it, and its bulk pair could not be Stopped: Disable Slot is not defined over it (xHCI 1.2 §4.6.4's note), so the port holds the slot and its teardown gives it back.
+                Bind::Refused(SlotGoes::WithTheUnplug) => true,
+            }
         }
         (Function::Hid(info), Rings::Hid(int_ring)) => bind_hid(ctrl, &state, &info, int_ring),
         // Rings are built from the function two acts earlier; nothing between can change it.
         _ => unreachable!("the rings were built for another function"),
     };
-    if bound {
+    if keeps_slot {
         finish(ctrl, state.port_idx, Some(state.slot_id));
     } else {
         refuse(ctrl, state.port_idx, state.slot_id);
@@ -756,6 +794,16 @@ pub(super) fn refuse(ctrl: &mut XhciController, port_idx: u8, slot_id: u8) {
     ctrl.acknowledge_port_read(port_idx);
     // Released here, not at unplug: a refused device left plugged in would otherwise hold a slot for the rest of the boot.
     ctrl.submit_disable_slot(slot_id, super::AfterSlot::Refused);
+}
+
+/// [`refuse`], for a disk refused for a reason a later look may not find: while a disk on this controller is held for its device, the one refused may be that device, so its port is enumerated again once its slot is back (`AfterSlot::Again`). Bounded by the held disk's window, after which a refusal is [`refuse`]'s.
+fn refuse_for_now(ctrl: &mut XhciController, port_idx: u8, slot_id: u8) {
+    if !ctrl.awaits_a_device() {
+        return refuse(ctrl, port_idx, slot_id);
+    }
+    ctrl.ports[port_idx as usize].enumerated(None);
+    ctrl.acknowledge_port_read(port_idx);
+    ctrl.submit_disable_slot(slot_id, super::AfterSlot::Again(port_idx));
 }
 
 /// Drops the outstanding enumeration for a port whose device has gone; the slot passes to the port for teardown.

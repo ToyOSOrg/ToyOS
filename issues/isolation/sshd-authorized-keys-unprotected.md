@@ -26,3 +26,6 @@ authorizes nothing (the options are the restrictions, and honouring the key
 without them grants more than the file says), and a host key that exists but
 does not parse is refused rather than replaced, because minting over it would
 change the identity every client has pinned.
+
+Stage 3 of `issues/isolation/every-program-sees-only-the-files-it-was-given.md`
+closes this: the key list lies in the login authority's view alone.

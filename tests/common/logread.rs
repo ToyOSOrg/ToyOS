@@ -64,7 +64,7 @@ struct Contaminated {
 /// CPU and a machine with eight are different subjects rather than one subject
 /// measured three times: `--smp 1` is where the reader and the one producer
 /// share a CPU, `--smp 4` and `--smp 8` are where they do not. One name over
-/// all three boots measured 17,112 ms in CI — over `FAST_CEILING_MS`, and the
+/// all three boots measured 17,112 ms in CI — over the fast tier's 10 s line, and the
 /// gate the whole design turns on may not sit in the nightly tier — while each
 /// boot on its own is comfortably under it.
 fn conservation(

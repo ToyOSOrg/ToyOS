@@ -27,7 +27,7 @@ Four fields, three required, no defaults.
 |---|---|---|
 | `status` | `open` | it is work, and nobody is holding it |
 | | `assigned` | it is work, and somebody is — the body says who or which task |
-| | `expected-red` | a test fails on this today and `EXPECTED_FAILURES` names it |
+| | `expected-red` | a test fails on this today and `src/redlist.rs` quarantines it |
 | | `owner` | it is the owner's to decide, and nobody else may |
 | | `none` | nothing is owed |
 | `kind` | `defect` | real, reproducible, someone should fix it |
@@ -144,9 +144,7 @@ non-sysroot rest is empty, or an `Abi-Inseparable:` trailer declaring a split
 that genuinely cannot be made). The gate reads commits and not the tree, so a
 later revert does not undo the refusal — and an edit there also claims the
 machine-wide sysroot until it lands, so every sibling worktree waits on it.
-One in `src/redlist.rs` is a `source` that must both resolve and name its test,
-so retire the row against whatever closed the issue rather than leaving it
-pointing at nothing.
+One in `src/redlist.rs` is a quarantine row's `issue`: the row goes with the file.
 
 ## Two area notes, carried over from the file this replaced
 

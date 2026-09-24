@@ -299,7 +299,7 @@ pub fn host_speed() -> (Option<u32>, u32, u32, u32) {
 /// The host cores this process may run on, read once.
 ///
 /// [`std::thread::available_parallelism`] is the Rust-native reading of what
-/// `.github/instrument.sh` prints as `N core(s)`: it needs no host binary and
+/// `cargo run -- --ci`'s instrument line prints as `N core(s)`: it needs no host binary and
 /// respects any affinity the runner imposed. The CI `guest` shard is a
 /// four-core AMD EPYC; the dev host has fourteen, and that gap is the whole of
 /// why the oversubscription factor below widens a ceiling on the runner and is
@@ -815,8 +815,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     }
 
     // 3. A guest that merely stopped, with no panic of either kind, still
-    //    reports as a stall — the classification the whole redlist is written
-    //    against.
+    //    reports as a stall.
     let Some(stall) = ceiling_verdict(None, CEILING + Duration::from_secs(1), CEILING, quiet, 40)
     else {
         return Err(String::from("an expired guard on a silent guest returned no verdict at all"));
@@ -1093,6 +1092,13 @@ pub enum Profile {
     /// NIC, and everything else — console, sound, disks — unchanged. The only
     /// machine in reach on which netd's Intel driver runs at all.
     E1000e,
+    /// [`Profile::E1000e`] with its cable plugged into nothing.
+    ///
+    /// The one machine in this suite on which a DHCP client gets no answer:
+    /// the user-mode backend serves a lease whatever else it is told to
+    /// restrict, so no profile that has one can ask what a boot does on a
+    /// network that never replies.
+    E1000eNoServer,
     Gop,
     /// A virtio-gpu function and no VGA: the owner's own desktop, and the one
     /// machine where a mode change can succeed rather than answering
@@ -1182,6 +1188,16 @@ pub enum Profile {
     /// one boot shows the error channel carrying a failure and not carrying a
     /// success.
     UsbDiskReadOnly,
+    /// The boot volume on NVMe, as [`Profile::MetalNoUsb`] has it, and one USB
+    /// stick on an xHCI beside it with a serial number of its own.
+    ///
+    /// The one machine on which a USB disk's only writer is the guest: every
+    /// other USB profile boots off the stick, so `/log` is on the bus and
+    /// logd's first batch is the first write `usb-transport-break-owed` can
+    /// break. Here the guest decides which write its device leaves under, and
+    /// the stated serial number is what lets the host move it to another port
+    /// and have it taken back as itself.
+    NvmeBootUsbDisk,
     /// [`Profile::UsbDiskHuge`] with the 3 TB disk attached *ahead* of the boot
     /// stick, so the controller enumerates the disk the driver refuses first.
     ///
@@ -1480,6 +1496,10 @@ enum Nic {
     /// QEMU's `e1000e`, which is the 82574L at `8086:10d3`: the same register
     /// file the ThinkPad T14's onboard I219 has.
     E1000e,
+    /// The same card on a hub nothing else is plugged into: a link the guest
+    /// brings up and puts frames onto, with no host, router or server at the
+    /// other end.
+    E1000eNoServer,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -1577,6 +1597,12 @@ pub struct UsbDisk {
     /// pool block of a failed bind to the next disk is only observable when the
     /// failure is first.
     before_boot_stick: bool,
+    /// The bus it is on, where that is not [`Shape::storage_bus`]: a machine
+    /// that boots off NVMe has no storage bus.
+    bus: Option<&'static str>,
+    /// Its serial number string, where QEMU's default — built from the port it
+    /// is on — would make the same stick another unit on another port.
+    pub serial: Option<&'static str>,
 }
 
 impl UsbDisk {
@@ -1587,6 +1613,8 @@ impl UsbDisk {
         lba_bytes: 512,
         readonly: false,
         before_boot_stick: false,
+        bus: None,
+        serial: None,
     };
     /// A 3 TB external disk, which this driver has to refuse by name rather
     /// than serve the first 2 TiB of.
@@ -1612,6 +1640,16 @@ pub fn usb_device_id(i: usize) -> String {
 /// takes `/boot` and `/log` with it was the one the host could not name — which
 /// is the removal the owner's machine dies on.
 pub const BOOT_STICK_ID: &str = "bootstick";
+
+/// The boot stick's serial number string. Stated rather than left to QEMU,
+/// whose default is built from the port the device is on, so the same stick
+/// plugged into another port would read as another unit — which is exactly
+/// what a test moving it has to be able to say is not so.
+pub const BOOT_STICK_SERIAL: &str = "TOYOS0BOOTSTICK1";
+
+/// The serial number of [`Profile::NvmeBootUsbDisk`]'s stick, for the same
+/// reason the boot stick states one.
+pub const DATA_STICK_SERIAL: &str = "TOYOS0DATASTICK1";
 
 /// What every profile but [`Profile::MetalDisk`] gives the guest. Large
 /// enough for a filesystem, small enough that a boot formats it quickly.
@@ -1663,6 +1701,7 @@ impl Profile {
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::E1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
+            Self::E1000eNoServer => Shape { nic: Nic::E1000eNoServer, ..Self::Headless.shape() },
             Self::VirtioNetNoMsix => Shape {
                 vga: "none",
                 panel: None,
@@ -1891,6 +1930,15 @@ impl Profile {
                 usb_disks: &[UsbDisk { before_boot_stick: true, ..UsbDisk::HUGE }],
                 hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
+            },
+            Self::NvmeBootUsbDisk => Shape {
+                xhci: &[XHCI_DEFAULT],
+                usb_disks: &[UsbDisk {
+                    bus: Some("xhci.0"),
+                    serial: Some(DATA_STICK_SERIAL),
+                    ..UsbDisk::DATA
+                }],
+                ..Self::MetalNoUsb.shape()
             },
             Self::UsbDiskReadOnly => Shape {
                 vga: "std",
@@ -2272,6 +2320,11 @@ pub struct BootOptions {
     /// than discover it. Short lists are allowed: the disks past the end get
     /// the blank image their size would have given them anyway.
     pub usb_images: Vec<PathBuf>,
+    /// Have QEMU write every packet the first data disk is sent to this file
+    /// (`usb-storage`'s `pcap=`, usbmon's format): the bus's own record of what
+    /// a driver put on it, which no line the guest prints can be. Refused by
+    /// name on a profile with no data disk, where it would record nothing.
+    pub usb_pcap: Option<PathBuf>,
     /// What the emulated RTC reads when the machine starts, as
     /// `YYYY-MM-DDTHH:MM:SS`.
     ///
@@ -2302,9 +2355,12 @@ pub struct BootOptions {
     /// Forward this host port to the guest's TCP 22. **slirp is one-way
     /// without it**: nothing on the host can open a connection into the guest
     /// unless QEMU is told which port to translate. A profile with no NIC
-    /// carries no `-netdev` for it to reach, which [`ssh_forward_argv`] is
-    /// what a test refuses before it boots.
+    /// carries no `-netdev` for it to reach.
     pub ssh_port: Option<u16>,
+    /// Write every frame this machine's NIC sends or receives to this file, in
+    /// pcap. **The only way to read what the guest asked for**: a request the
+    /// server ignores reaches no log on either side.
+    pub wire_dump: Option<PathBuf>,
 }
 
 /// Where the guest sees the host under QEMU's user-mode networking, and where
@@ -2383,10 +2439,12 @@ impl Default for BootOptions {
             nvme_image: None,
             boot_image: None,
             usb_images: Vec::new(),
+            usb_pcap: None,
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_stream: None,
             ssh_port: None,
+            wire_dump: None,
         }
     }
 }
@@ -2529,6 +2587,19 @@ pub fn build_boot_image(
     rust_tests: &[(String, Vec<u8>)],
     kernel_params: &[&str],
 ) -> Vec<u8> {
+    build_boot_image_carrying(test_crate, c_tests, rust_tests, &[], kernel_params)
+}
+
+/// [`build_boot_image`] with files put on ROOT beside the image's own, each
+/// named by its ROOT-relative path: what [`BootOptions::extra_root_files`] does
+/// for an image the boot builds, which a staged image has to carry itself.
+pub fn build_boot_image_carrying(
+    test_crate: &Path,
+    c_tests: &[(String, Vec<u8>)],
+    rust_tests: &[(String, Vec<u8>)],
+    staged: &[(String, Vec<u8>)],
+    kernel_params: &[&str],
+) -> Vec<u8> {
     // A parameter carrying a value is one the *shipping* kernel answers to, so
     // it selects no kernel: an image built for the record stream and nothing
     // else must be the image a flashed stick would be.
@@ -2538,7 +2609,7 @@ pub fn build_boot_image(
         } else {
             toyos_build::build::TEST_KERNEL
         };
-    build_boot_image_with(test_crate, c_tests, rust_tests, &[], kernel, kernel_params, false)
+    build_boot_image_with(test_crate, c_tests, rust_tests, staged, kernel, kernel_params, false)
 }
 
 /// Refuse a staged [`BootOptions::boot_image`] that is not the image this
@@ -3900,9 +3971,30 @@ impl QmpDevices {
         self.0.execute(&format!("{{\"execute\":\"device_add\",\"arguments\":{{{args}}}}}"));
     }
 
+    /// Take the cable out of `netdev`, or put it back: the NIC reports its link
+    /// down and nothing crosses, which is a network that comes up late.
+    pub fn set_link(&mut self, netdev: &str, up: bool) {
+        self.0.execute(&format!(
+            "{{\"execute\":\"set_link\",\"arguments\":{{\"name\":\"{netdev}\",\"up\":{up}}}}}"
+        ));
+    }
+
     pub fn del(&mut self, id: &str) {
         self.0
             .execute(&format!("{{\"execute\":\"device_del\",\"arguments\":{{\"id\":\"{id}\"}}}}"));
+    }
+
+    /// [`Self::blockdev_add`] for a file a drive may still hold open: the
+    /// unplugged device's own, which QEMU may not have let go of yet. Taken
+    /// without the image lock that would refuse it; both read and write the one
+    /// file, so what the first wrote is what the second reads.
+    pub fn blockdev_add_again(&mut self, node: &str, image: &Path) {
+        self.0.execute(&format!(
+            "{{\"execute\":\"blockdev-add\",\"arguments\":{{\"node-name\":\"{node}\",\
+             \"driver\":\"raw\",\"file\":{{\"driver\":\"file\",\"locking\":\"off\",\
+             \"filename\":\"{}\"}}}}}}",
+            image.display()
+        ));
     }
 
     /// Give QEMU an image to back a device that is not on the machine yet, so
@@ -4019,7 +4111,7 @@ fn qemu_command(
     // A data stick declared onto no bus is emitted with an empty `bus=`, which
     // QEMU puts on whichever controller it likes.
     assert!(
-        !shape.storage_bus.is_empty() || shape.usb_disks.is_empty(),
+        shape.usb_disks.iter().all(|disk| !disk.bus.unwrap_or(shape.storage_bus).is_empty()),
         "a USB disk needs a bus to be on"
     );
 
@@ -4049,11 +4141,19 @@ fn qemu_command(
     // is the only thing that decides which disk the guest enumerates first.
     // Each carries a device id as well as a drive id, because a test that
     // unplugs one over QMP has to be able to name it.
+    assert!(
+        options.usb_pcap.is_none() || !shape.usb_disks.is_empty(),
+        "usb_pcap records the first data disk's traffic and this profile has no data disk"
+    );
     let data_sticks: Vec<Vec<String>> = shape
         .usb_disks
         .iter()
         .enumerate()
         .map(|(i, disk)| {
+            let pcap = match &options.usb_pcap {
+                Some(path) if i == 0 => format!(",pcap={}", path.display()),
+                _ => String::new(),
+            };
             vec![
                 "-drive".to_string(),
                 format!(
@@ -4065,11 +4165,12 @@ fn qemu_command(
                 "-device".to_string(),
                 format!(
                     "usb-storage,bus={1},drive={2},id={3},logical_block_size={0},\
-                     physical_block_size={0}",
+                     physical_block_size={0}{pcap}{serial}",
                     disk.lba_bytes,
-                    shape.storage_bus,
+                    disk.bus.unwrap_or(shape.storage_bus),
                     usb_drive_id(i),
                     usb_device_id(i),
+                    serial = disk.serial.map(|s| format!(",serial={s}")).unwrap_or_default(),
                 ),
             ]
         })
@@ -4090,7 +4191,8 @@ fn qemu_command(
                   physical_block_size=512");
     } else {
         qemu.arg("-device").arg(format!(
-            "usb-storage,bus={},drive=stick,id={BOOT_STICK_ID},bootindex=0",
+            "usb-storage,bus={},drive=stick,id={BOOT_STICK_ID},serial={BOOT_STICK_SERIAL},\
+             bootindex=0",
             shape.storage_bus
         ));
     }
@@ -4205,6 +4307,26 @@ fn qemu_command(
                 .arg("-device")
                 .arg("e1000e,netdev=net0");
         }
+        Nic::E1000eNoServer => {
+            // The hub is not slirp and takes no `hostfwd`, so a boot asking for
+            // one here is refused rather than booted without a forward.
+            assert!(
+                options.ssh_port.is_none(),
+                "this profile's cable is plugged into nothing, so no host port reaches the guest"
+            );
+            qemu.arg("-netdev")
+                .arg("hubport,id=net0,hubid=0")
+                .arg("-device")
+                .arg("e1000e,netdev=net0");
+        }
+    }
+    if let Some(at) = &options.wire_dump {
+        assert!(
+            !matches!(shape.nic, Nic::Absent),
+            "this profile carries no NIC, so there is no `net0` to dump frames off"
+        );
+        qemu.arg("-object")
+            .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
     }
 
     if shape.virtio.present() {
