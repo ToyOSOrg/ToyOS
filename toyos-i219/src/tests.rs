@@ -1267,7 +1267,7 @@ fn the_oem_bits_restart_follows_the_control_restart_where_a_phy_reset_is_allowed
     assert_eq!(nic.restarts(), [Restart::Control], "{}", nic.because("blocked"));
 }
 
-/// The premise of the test above: this model really does refuse a link to a PHY
+/// The premise of [`the_advertised_abilities_are_what_the_link_resolves_to`]: this model really does refuse a link to a PHY
 /// nothing configured, so a green there is not a model that raises one for a
 /// partner alone. The driver reaches no PHY register at all here, because
 /// §4.5.2's arbitration never grants its request on this reading of the clause.
