@@ -158,7 +158,7 @@ fn writer(s: Option<usize>) -> Writer {
 
 impl Model {
     fn live(&self, s: Option<usize>) -> bool {
-        s.map_or(true, |s| self.held[s])
+        s.is_none_or(|s| self.held[s])
     }
 
     fn step(&mut self, step: Step, trace: &[Step]) -> bool {

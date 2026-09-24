@@ -375,7 +375,7 @@ fn departed(
     );
     let boot = qemu.boot_log().to_string();
     no_panic(role, &boot)?;
-    let moved = stick.clone();
+    let moved = stick;
     let result = qemu.run_test_hooked(
         &format!("test_rs_partition_claimant {role}"),
         Duration::from_secs(240),
