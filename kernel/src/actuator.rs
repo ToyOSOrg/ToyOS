@@ -106,6 +106,15 @@ actuators! {
     /// Refuse the active-FAT write of a `SYS_FSYNC` flush as a budget expiry once the machine is stopping, after its mirror is written, so the stop's second stage reaches a caller parked in `block::between_attempts` over two FATs that disagree.
     quiesce_fsync_refuse = "quiesce-fsync-refuse";
 
+    /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
+    quiesce_last_park = "quiesce-last-park";
+
+    /// The same inside `SYS_THREAD_EXIT`: its exit is then the stop's last transition.
+    quiesce_last_exit = "quiesce-last-exit";
+
+    /// Serve a blocked-task dump from the shutdown once its first stage has stopped the machine: the report Ctrl+Alt+D gives on a shutdown stuck in its stop.
+    quiesce_dump = "quiesce-dump";
+
     /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
     fat_flush_meta_refuse = "fat-flush-meta-refuse";
 

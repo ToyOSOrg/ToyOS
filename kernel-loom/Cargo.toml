@@ -180,17 +180,6 @@ durability-settle-blind = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 device-irq-lossy = []
-# The negative control for the one-shutdown claim. It makes `quiesce/claim.rs`'s
-# exchange a load and a store, so two callers racing it are both let in, and
-# `shutdown_claim.rs` must red:
-#
-#   cargo test --manifest-path kernel-loom/Cargo.toml --features shutdown-claim-split \
-#     --test shutdown_claim
-#
-# Never on by default and never reachable from a kernel build, which declares
-# the same name only so `cfg` checking knows it.
-shutdown-claim-split = []
-
 # The negative control for the blocked-task dump's report handoff. It makes
 # `dump_request.rs`'s `take` and `end_report` `Relaxed`, so a report is
 # unordered against the one before it, and `dump_request.rs` must red:

@@ -2028,7 +2028,7 @@ pub fn deadline_lateness_ms(loader: &str) -> Option<u64> {
 /// What the kernel's stop wrote about itself in this boot's own kernel log.
 ///
 /// `None` on a boot that wrote none, which is every boot that reset without
-/// going through `quiesce` — `deadlinewedge` and `hardlockup` are the two.
+/// going through `quiesce`.
 pub fn park(kernel: &str) -> Option<toyos_quiesce::Record> {
     kernel
         .lines()

@@ -1472,6 +1472,10 @@ name = "toyos-keymap"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-quiesce"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-rust-tests"
 version = "0.1.0"
 dependencies = [
@@ -1483,6 +1487,7 @@ dependencies = [
  "sha2",
  "toyos 0.9.0",
  "toyos-abi 0.8.0",
+ "toyos-quiesce",
  "toyos-tco",
  "toyos-window",
  "ureq",

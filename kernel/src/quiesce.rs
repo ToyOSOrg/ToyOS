@@ -40,7 +40,8 @@
 //! Lock order: [`process::PROCESS_TABLE`] alone.
 
 use core::sync::atomic::{
-    AtomicU32, AtomicU8, Ordering::Acquire, Ordering::Relaxed, Ordering::Release,
+    AtomicBool, AtomicU32, AtomicU8, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
+    Ordering::Release,
 };
 
 use toyos_quiesce::{Record, Stage, Sweep, Thread, ThreadId};
@@ -52,8 +53,6 @@ use crate::process;
 use crate::scheduler::TaskId;
 use crate::time::{Budget, Deadline, Duration};
 
-mod claim;
-
 /// How long the machine gets to stop.
 ///
 /// **A budget, and not a bound the kernel can prove.** One `QUANTUM_NS` is
@@ -63,7 +62,6 @@ mod claim;
 /// parking between them inside a `block::OpenUpdate` this stop waits out, and
 /// `block::DEADMAN` is what bounds that sequence. A thread can therefore
 /// outlast this, which is why its expiry is a clause in the record.
-/// `tests/common/power.rs`'s `quiesce_stops_the_machine` spells it again.
 const PARK: Budget = Budget::of(
     Duration::from_nanos(toyos_sched::fair::QUANTUM_NS + crate::block::OPERATION.nanos()),
     "the reset lands wherever the threads that never reached a safe point are, and \
@@ -119,10 +117,11 @@ pub fn stops_this_thread() -> bool {
 /// Whether this thread is the one shutdown this boot gets: a second caller's
 /// sweep would band the first where it parks inside its own sync.
 pub fn claim_the_shutdown() -> bool {
-    CLAIMED.take()
+    // One exchange: a read and a write that can come apart let two callers in.
+    !CLAIMED.swap(true, AcqRel)
 }
 
-static CLAIMED: claim::Claim = claim::Claim::new();
+static CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// What the stop's caller parks on between two sweeps.
 static PROGRESS: Watch = Watch::new();
@@ -198,6 +197,8 @@ pub fn stop(stage: Stage) -> Record {
     loop {
         let swept = sweep(stage, caller);
         sweeps += 1;
+        #[cfg(feature = "boot-actuators")]
+        last::note_sweep(swept);
         let elapsed = (crate::clock::now() - began).nanos();
         if swept.keep_waiting(elapsed, PARK.nanos()) {
             // Uncancellable: the claim is taken, and a caller that left here
@@ -213,6 +214,7 @@ pub fn stop(stage: Stage) -> Record {
         return Record {
             sweep: swept,
             elapsed_ms: elapsed / 1_000_000,
+            budget_ms: PARK.nanos() / 1_000_000,
             sweeps,
             cpus,
             in_flight,
@@ -245,14 +247,9 @@ fn sweep(stage: Stage, caller: ThreadId) -> Sweep {
             if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
                 continue;
             }
-            // Counted as running and not skipped: a thread between its table
-            // insert and its task mint has no task to mark, and a sweep that
-            // passed over it would report a machine stopped with a thread still
-            // to be dispatched.
-            let Some(sched) = thread.sched() else {
-                out.running += 1;
-                continue;
-            };
+            let sched = thread
+                .sched()
+                .expect("quiesce::sweep: a live thread in the table with no task");
             // `stop_if_blocked` refuses a running thread and one parked inside
             // a `block::OpenUpdate`: each has to reach its own safe point, and
             // until it does it is what this sweep is waiting for.
@@ -264,4 +261,130 @@ fn sweep(stage: Stage, caller: ThreadId) -> Sweep {
         }
     }
     out
+}
+
+/// `quiesce-last-park` and `quiesce-last-exit`: one thread, named
+/// [`toyos_quiesce::LAST_THREAD`], held inside its syscall until the stop's
+/// latest sweep counts it as the one thread still running, so the park or the
+/// exit it makes next is the last transition the stop sees. Without them no
+/// boot can tell whether that transition's post is what wakes the stop.
+#[cfg(feature = "boot-actuators")]
+pub mod last {
+    use core::sync::atomic::{
+        AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Acquire, Ordering::Release,
+    };
+
+    use toyos_quiesce::Sweep;
+    use toyos_sched::task::WaitClass;
+
+    use crate::completion::{self, Outcome, Subject, Token, Watch};
+    use crate::time::{Budget, Deadline, Duration};
+
+    /// The transition the held thread makes once it is released.
+    #[derive(Clone, Copy)]
+    pub enum Last {
+        Park,
+        Exit,
+    }
+
+    impl Last {
+        fn armed(self) -> bool {
+            match self {
+                Last::Park => crate::actuator::quiesce_last_park(),
+                Last::Exit => crate::actuator::quiesce_last_exit(),
+            }
+        }
+
+        fn name(self) -> &'static str {
+            match self {
+                Last::Park => "quiesce-last-park",
+                Last::Exit => "quiesce-last-exit",
+            }
+        }
+    }
+
+    /// How long either side waits for the other before the boot dies by name.
+    const STAGED: Budget = Budget::of(
+        Duration::from_secs(10),
+        "the boot panics naming the side of the staging that never arrived",
+    );
+
+    /// No sweep yet.
+    const UNSWEPT: u32 = u32::MAX;
+
+    /// The latest sweep's running count.
+    static RUNNING: AtomicU32 = AtomicU32::new(UNSWEPT);
+    static HELD: AtomicBool = AtomicBool::new(false);
+    /// What the shutdown's caller parks on until a thread is held.
+    static ARRIVED: Watch = Watch::new();
+
+    pub(super) fn note_sweep(swept: Sweep) {
+        RUNNING.store(swept.running, Release);
+    }
+
+    fn armed() -> Option<Last> {
+        [Last::Park, Last::Exit].into_iter().find(|last| last.armed())
+    }
+
+    /// Hold the running thread here if it is the one `last` stages.
+    pub fn hold(last: Last) {
+        if !last.armed() || !is_the_named_thread() || HELD.swap(true, AcqRel) {
+            return;
+        }
+        crate::log!(
+            "{}: {} is held until the stop waits on it alone",
+            last.name(),
+            toyos_quiesce::LAST_THREAD,
+        );
+        completion::post(Subject::of(&ARRIVED), Outcome::Ready);
+        let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
+        // Yields and never parks: a park is the transition this hold exists to
+        // place, and a sweep would stop this thread at the first one.
+        while RUNNING.load(Acquire) != 1 {
+            assert!(
+                !deadline.reached(crate::clock::now()),
+                "{}: the stop never came down to this thread alone in {} ms",
+                last.name(),
+                STAGED.nanos() / 1_000_000,
+            );
+            crate::scheduler::yield_now();
+        }
+    }
+
+    /// Called by the shutdown before it stops anything: the stop is staged
+    /// only once the thread it is staged around is inside its syscall.
+    pub fn await_the_held_thread() {
+        let Some(last) = armed() else { return };
+        let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
+        let parkable = crate::scheduler::Parkable::at_entry();
+        let _ = completion::wait_until(
+            &parkable,
+            Subject::of(&ARRIVED),
+            Token::new(0),
+            WaitClass::Other,
+            deadline,
+            || HELD.load(Acquire),
+        );
+        assert!(
+            HELD.load(Acquire),
+            "{}: no thread named {} reached its syscall in {} ms",
+            last.name(),
+            toyos_quiesce::LAST_THREAD,
+            STAGED.nanos() / 1_000_000,
+        );
+    }
+
+    fn is_the_named_thread() -> bool {
+        let (Some(pid), Some(tid)) =
+            (crate::arch::percpu::current_pid(), crate::arch::percpu::current_tid())
+        else {
+            return false;
+        };
+        let guard = crate::process::PROCESS_TABLE.lock();
+        guard
+            .as_ref()
+            .and_then(|table| table.get(pid))
+            .and_then(|proc| proc.threads().get(tid))
+            .is_some_and(|thread| thread.name_str() == toyos_quiesce::LAST_THREAD)
+    }
 }

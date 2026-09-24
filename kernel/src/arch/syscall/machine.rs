@@ -94,7 +94,13 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     // nothing will flush. The log's holders run on until `wait_for_durable`
     // below returns, and what they put on the volume in between is made
     // durable by the `fsync` they publish after.
+    #[cfg(feature = "boot-actuators")]
+    crate::quiesce::last::await_the_held_thread();
     let stopped = crate::quiesce::stop(toyos_quiesce::Stage::ExceptLog);
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::quiesce_dump() {
+        crate::sched::dump::serve_for_the_stop();
+    }
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
     crate::writeback::drain_all();

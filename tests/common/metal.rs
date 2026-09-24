@@ -362,9 +362,8 @@ impl Readback {
     }
 
     /// Block-device operations still open where this boot's stop ended.
-    /// `None` on a boot that reset without going through `quiesce` —
-    /// `deadlinewedge` and `hardlockup` are the two. It is the block layer's
-    /// own count, so it is what the stop can be wrong against.
+    /// `None` on a boot that reset without going through `quiesce`. It is the
+    /// block layer's own count, so it is what the stop can be wrong against.
     pub fn park_open_operations(&self) -> Option<u64> {
         toyos_build::metal::park(&self.kernel).map(|park| u64::from(park.in_flight))
     }

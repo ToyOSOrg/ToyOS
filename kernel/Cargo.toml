@@ -75,10 +75,6 @@ roster-commit-relaxed = []
 # second store back, so a shootdown can see the machine released while it is not
 # yet answering, and `kernel-loom/tests/smp_bringup.rs` reds.
 smp-ready-split = []
-# The same for the one-shutdown claim: `src/quiesce/claim.rs`'s exchange becomes
-# a load and a store, so two callers can both be let in, and
-# `kernel-loom/tests/shutdown_claim.rs` reds.
-shutdown-claim-split = []
 # **Every actuator, and which one is armed comes from the boot parameter.**
 # `kernel/src/actuator.rs` declares every one of them with the claim each rests on; this
 # name is the whole of what a build decides about them. A kernel without it has

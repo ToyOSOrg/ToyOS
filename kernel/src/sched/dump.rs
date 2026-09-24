@@ -75,6 +75,9 @@ mod tally {
     /// Killed threads unwinding; counted separately since the census reads
     /// their state word as `Ready`.
     pub static DYING: AtomicU32 = AtomicU32::new(0);
+    /// Threads the machine's stop banded; counted separately for the same
+    /// reason, since no pick serves them and their state word reads `Ready`.
+    pub static STOPPED: AtomicU32 = AtomicU32::new(0);
     pub static RUNNING: AtomicU32 = AtomicU32::new(0);
     pub static NO_DEADLINE: AtomicU32 = AtomicU32::new(0);
     pub static PENDING: AtomicU32 = AtomicU32::new(0);
@@ -82,10 +85,11 @@ mod tally {
     pub static ABSURD: AtomicU32 = AtomicU32::new(0);
     pub static UNPRINTED: AtomicU32 = AtomicU32::new(0);
 
-    pub const ALL: [&AtomicU32; 9] = [
+    pub const ALL: [&AtomicU32; 10] = [
         &PARKED,
         &READY,
         &DYING,
+        &STOPPED,
         &RUNNING,
         &NO_DEADLINE,
         &PENDING,
@@ -168,6 +172,17 @@ struct UnderNothing(());
 /// Ctrl+Alt+D pressed. Recorded, not run: the caller holds its driver's guard.
 pub fn file_request() {
     REQUEST.file();
+}
+
+/// `quiesce-dump`: the report a keystroke asks for, served by the thread
+/// running the shutdown once its stop holds every thread it named. That
+/// thread is at its syscall's entry depth with no lock under it, which is
+/// what a pass entered at zero proves and what `Parkable::at_entry` asserts.
+#[cfg(feature = "boot-actuators")]
+pub fn serve_for_the_stop() {
+    let _nothing_under_it = crate::scheduler::Parkable::at_entry();
+    REQUEST.file();
+    serve(&UnderNothing(()));
 }
 
 /// Ctrl+Alt+D's request, from `drain_irqs` on every pass.
@@ -590,6 +605,20 @@ fn report_this_cpu() {
         log!("  cpu{cpu} !! a pass owns its scheduler state; nothing read from it");
     }
 
+    let mut stopped = 0u32;
+    let read_stopped = driver::for_each_stopped(|id| {
+        tally::STOPPED.fetch_add(1, Ordering::Relaxed);
+        stopped += 1;
+        if stopped > LINES_PER_CPU {
+            tally::UNPRINTED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        log!("  cpu{cpu} pid={} tid={} stopped (the machine is stopping)", id.0.raw(), id.1.raw());
+    });
+    if !read_stopped {
+        log!("  cpu{cpu} !! a pass owns its scheduler state; nothing read from it");
+    }
+
     let mut ordinary = 0u32;
     let read = driver::for_each_parked(|task| {
         tally::PARKED.fetch_add(1, Ordering::Relaxed);
@@ -714,10 +743,11 @@ fn summary(cpus: usize, silent: u32, c: Census) {
     }
     log!(
         "== sched: {answered}/{cpus} cpu(s) answered — {} running, {} queued, {} unwinding, \
-         {} parked",
+         {} stopped, {} parked",
         tally::RUNNING.load(Ordering::Relaxed),
         tally::READY.load(Ordering::Relaxed),
         tally::DYING.load(Ordering::Relaxed),
+        tally::STOPPED.load(Ordering::Relaxed),
         tally::PARKED.load(Ordering::Relaxed),
     );
     log!(
@@ -732,10 +762,11 @@ fn summary(cpus: usize, silent: u32, c: Census) {
     let overdue = tally::OVERDUE.load(Ordering::Relaxed);
     let absurd = tally::ABSURD.load(Ordering::Relaxed);
     if c.read {
-        // `DYING` is summed with `READY`: the census counts those threads as ready too.
+        // `DYING` and `STOPPED` are summed with `READY`: the census counts those threads as ready too.
         let scheduled = tally::PARKED.load(Ordering::Relaxed)
             + tally::READY.load(Ordering::Relaxed)
             + tally::DYING.load(Ordering::Relaxed)
+            + tally::STOPPED.load(Ordering::Relaxed)
             + tally::RUNNING.load(Ordering::Relaxed);
         let claimed = c.running + c.ready + c.blocked;
         log!(
@@ -755,7 +786,7 @@ fn summary(cpus: usize, silent: u32, c: Census) {
     log!("== klogd: {drained} record(s) drained, {lost} lost, {parks} park(s)");
     let unprinted = tally::UNPRINTED.load(Ordering::Relaxed);
     if unprinted > 0 {
-        log!("== {unprinted} ordinary parked task(s) not listed; every anomaly is");
+        log!("== {unprinted} ordinary parked or stopped task(s) not listed; every anomaly is");
     }
     log!("=== end of dump ===");
 }

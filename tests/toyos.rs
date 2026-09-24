@@ -215,6 +215,9 @@ const RUST_SKIP: &[&str] = &[
     // The same, and its verdict is where one kernel line lands among others.
     // `quiesce_refuses_a_second_shutdown` runs it.
     "quiesce_twice",
+    // The same, and its verdict is the stop record of a boot staged around it.
+    // `quiesce_wakes_on_the_last_park` and `quiesce_wakes_on_the_last_exit` run it.
+    "quiesce_last",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
     // holds. `console_flood_is_bounded` runs it.
     "console_flood",
@@ -800,6 +803,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot: it ends the machine, and its verdict is the volume that
     // boot leaves.
     ("quiesce_leaves_the_volume_whole", Sched::Parallel, Tier::Fast),
+    // Its own boot each: it ends the machine, and its verdict is the stop
+    // record that boot writes.
+    ("quiesce_wakes_on_the_last_park", Sched::Parallel, Tier::Fast),
+    ("quiesce_wakes_on_the_last_exit", Sched::Parallel, Tier::Fast),
+    // Its own boot: it ends the machine, and its verdict is a dump served
+    // inside that boot's stop.
+    ("quiesce_dump_holds_the_stopped", Sched::Parallel, Tier::Fast),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
     // changes the verdict.
     ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
@@ -9956,6 +9966,9 @@ fn run_machine_test(
         "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
         "quiesce_stops_the_machine" => power::quiesce_stops_the_machine(test_config, c_bins, rust_bins),
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
+        "quiesce_wakes_on_the_last_park" => power::quiesce_wakes_on_the_last_park(test_config, c_bins, rust_bins),
+        "quiesce_wakes_on_the_last_exit" => power::quiesce_wakes_on_the_last_exit(test_config, c_bins, rust_bins),
+        "quiesce_dump_holds_the_stopped" => power::quiesce_dump_holds_the_stopped(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),

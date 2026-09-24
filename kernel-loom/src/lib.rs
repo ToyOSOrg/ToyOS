@@ -187,9 +187,6 @@ pub mod log_registry;
 #[path = "../../kernel/src/sched/reap_gate.rs"]
 pub mod reap_gate;
 
-#[path = "../../kernel/src/quiesce/claim.rs"]
-pub mod shutdown_claim;
-
 /// Ctrl+Alt+D's request word. Pure atomics, so it compiles here unshimmed.
 #[path = "../../kernel/src/sched/dump_request.rs"]
 pub mod dump_request;
