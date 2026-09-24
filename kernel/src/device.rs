@@ -41,10 +41,12 @@ pub struct Claim {
 
 /// What one claim holds. A class is at most one device on this machine and a
 /// per-class flag says whether it is taken; a PCI function is one of several,
-/// so what it gives back is its `pcidev` slot.
+/// so what it gives back is its `pcidev` slot; a partition's exclusivity is its
+/// view's own hold on the blocks (`block::Partition::of`).
 enum Claimed {
     Class(DeviceType),
     PciFunction(usize),
+    Partition(crate::block::Partition),
 }
 
 impl Claim {
@@ -64,6 +66,14 @@ impl Claim {
     pub(crate) fn pci(slot: usize) -> Self {
         Self { what: Claimed::PciFunction(slot) }
     }
+
+    /// The view a partition claim transfers through, or `None` for any other.
+    pub(crate) fn partition(&self) -> Option<&crate::block::Partition> {
+        match &self.what {
+            Claimed::Partition(view) => Some(view),
+            Claimed::Class(_) | Claimed::PciFunction(_) => None,
+        }
+    }
 }
 
 impl Drop for Claim {
@@ -73,6 +83,8 @@ impl Drop for Claim {
             // Bus mastering off, then the domain, then the pages: `release`
             // owns that order, and this is where a dying process reaches it.
             Claimed::PciFunction(slot) => crate::pcidev::release(slot),
+            // The view drops with this, and its hold with the last clone of it.
+            Claimed::Partition(_) => {}
         }
     }
 }
@@ -153,8 +165,20 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info, slot), claim))
         }
         DeviceType::Partition | DeviceType::PartitionOfType => {
-            log!("partclaim: this kernel does not hand out partition claims yet — {} refused", class.class_name());
-            Err(ClaimError::Unusable)
+            let guid = toyos_abi::part::PartGuid::from_wire(selector);
+            let name = match class {
+                DeviceType::Partition => toyos_abi::part::PartitionName::Unique(guid),
+                _ => toyos_abi::part::PartitionName::OfType(guid),
+            };
+            let found = crate::gpt::claimable(name)?;
+            let view = partition_view(&found)?;
+            let info = toyos_abi::part::PartitionInfo {
+                blocks: view.block_count(),
+                unique_guid: found.unique.0,
+                type_guid: found.ty.0,
+            };
+            let claim = Claim { what: Claimed::Partition(view) };
+            Ok(DeviceClaim::new(class, DeviceInfo::Partition(info), claim))
         }
         DeviceType::HdaAudio => {
             let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;
@@ -165,6 +189,50 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let (info, dma) = crate::drivers::virtio_sound::info().ok_or(ClaimError::Absent)?;
             let claim = Claim::acquire(class)?;
             Ok(DeviceClaim::new(class, DeviceInfo::VirtioSound(info, shm(dma)), claim))
+        }
+    }
+}
+
+/// The unit a claim transfers in is the block layer's, so a partition that is
+/// whole blocks of one is whole blocks of the other.
+const _: () = assert!(toyos_abi::part::BLOCK_BYTES as u64 == crate::mm::PAGE_SIZE);
+
+/// The claim's view of `found`, held against every other holder of any of its
+/// blocks. A partition the kernel mounted is the kernel's, one another claim
+/// holds is that claim's, and one that begins or ends inside a block would
+/// share that block with its neighbour, so it is not claimable at all.
+fn partition_view(found: &crate::gpt::Claimable) -> Result<crate::block::Partition, ClaimError> {
+    use crate::block::{Holder, ViewRefused};
+    let volume = found.volume;
+    let guid = found.unique;
+    let handle = crate::block::open(volume.device).ok_or(ClaimError::Absent)?;
+    let unit = toyos_abi::part::BLOCK_BYTES as u64;
+    let lba = volume.lba_bytes as u64;
+    let (Some(start), Some(len)) =
+        (volume.start_lba.checked_mul(lba), volume.blocks.checked_mul(lba))
+    else {
+        log!("partclaim: {guid} claims LBA {}+{} of {lba} bytes, which is no byte range",
+            volume.start_lba, volume.blocks);
+        return Err(ClaimError::Unusable);
+    };
+    if start % unit != 0 || len % unit != 0 {
+        log!(
+            "partclaim: {guid} is at {start}+{len} bytes on device {}, which is not whole \
+             {unit}-byte blocks — a transfer would share one with its neighbour",
+            volume.device
+        );
+        return Err(ClaimError::Unusable);
+    }
+    match crate::block::Partition::of(handle, start / unit, len / unit, Holder::Claim) {
+        Ok(view) => Ok(view),
+        Err(ViewRefused::Held(Holder::Kernel(what))) => {
+            log!("partclaim: {guid} is held by the kernel ({what}) and cannot be claimed");
+            Err(ClaimError::KernelDriven)
+        }
+        Err(ViewRefused::Held(Holder::Claim)) => Err(ClaimError::Owned),
+        Err(ViewRefused::OffDevice) => {
+            log!("partclaim: {guid} is at {start}+{len} bytes, off device {}", volume.device);
+            Err(ClaimError::Unusable)
         }
     }
 }

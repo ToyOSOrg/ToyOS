@@ -42,6 +42,11 @@ impl<T> Held<T> {
         let taken = self.0.lock().take();
         drop(taken);
     }
+
+    /// `f` over what is held, under the lock, or `None` after the release.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        self.0.lock().as_ref().map(f)
+    }
 }
 
 impl<T: Clone> Held<T> {

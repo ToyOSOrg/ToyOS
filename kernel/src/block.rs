@@ -1,13 +1,22 @@
 //! One device object per physical device; a consumer takes a [`Handle`] and a
 //! [`Partition`] over it and can name no block outside its span.
 //!
+//! **A block has one holder.** Every view is made by [`Partition::of`], which
+//! refuses a span any live view holds a block of, and the view's hold goes
+//! with the last clone of it. The kernel's mounts hold their partitions this
+//! way ([`Holder::Kernel`]), and so does a process's partition claim
+//! ([`Holder::Claim`]): a mounted partition cannot be claimed, a claimed one
+//! cannot be mounted or claimed twice, and no kernel cache ever holds a block
+//! a claim writes — so a claim's transfers need no invalidation and read the
+//! device.
+//!
 //! Lock order: a consumer's own lock, then [`Handle::lock`]; never the reverse,
-//! and never two devices at once. [`DEVICES`] is a leaf taken alone.
+//! and never two devices at once. [`DEVICES`] is a leaf taken alone, and so is
+//! a device's span list.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-#[cfg(feature = "boot-actuators")]
 use alloc::vec::Vec;
 
 use crate::mm::PAGE_SIZE;
@@ -78,6 +87,34 @@ pub(crate) fn between_attempts(attempt: u32) {
     );
 }
 
+/// `op` run to an answer, for a caller holding nothing: retried on a fresh
+/// budget while the budget is all that refused it, `Device` once [`DEADMAN`]
+/// is spent, and `BudgetExpired` only for a caller being killed.
+pub fn to_completion(what: &str, mut op: impl FnMut() -> BlockResult) -> BlockResult {
+    let began = crate::clock::now();
+    let deadman = Deadline::at(began + DEADMAN.duration());
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match op() {
+            Err(BlockError::BudgetExpired) => {
+                if crate::sched::driver::current_kill_pending() {
+                    return Err(BlockError::BudgetExpired);
+                }
+                if deadman.reached(crate::clock::now()) {
+                    log!(
+                        "block: {what} still refused after {attempt} attempt(s) in {} — {DEADMAN}",
+                        crate::clock::now() - began,
+                    );
+                    return Err(BlockError::Device);
+                }
+                between_attempts(attempt);
+            }
+            done => return done,
+        }
+    }
+}
+
 /// Declares the running context inside one block-device operation, bounded by `OPERATION`, until the guard drops.
 // An absolute deadline, not a relative duration: it crosses into a driver that loops, and re-basing per command would bound each command instead of the whole operation.
 #[must_use = "the operation lasts exactly as long as this guard"]
@@ -128,6 +165,8 @@ struct Device {
     id: DeviceId,
     blocks: u64,
     dev: Lock<Box<dyn BlockDevice>>,
+    /// Every span a [`Partition`] view holds.
+    spans: Lock<Vec<Span>>,
 }
 
 /// A shared handle; there is never a second object for one [`DeviceId`].
@@ -152,7 +191,8 @@ pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
         );
         return None;
     }
-    let handle = Handle(Arc::new(Device { id, blocks, dev: Lock::new(dev) }));
+    let handle =
+        Handle(Arc::new(Device { id, blocks, dev: Lock::new(dev), spans: Lock::new(Vec::new()) }));
     devices.insert(id, handle.clone());
     log!("block: device {id} registered, {blocks} blocks");
     Some(handle)
@@ -203,6 +243,56 @@ impl BlockKey {
     }
 }
 
+/// Who holds a span of a device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Holder {
+    /// Something in this kernel — a mount, a probe — named for the log.
+    Kernel(&'static str),
+    /// A process, through a partition claim.
+    Claim,
+}
+
+impl core::fmt::Display for Holder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Kernel(what) => write!(f, "the kernel ({what})"),
+            Self::Claim => f.write_str("a process's partition claim"),
+        }
+    }
+}
+
+/// One held span, `first..end` in device blocks, never empty.
+#[derive(Clone, Copy)]
+struct Span {
+    first: u64,
+    end: u64,
+    holder: Holder,
+}
+
+/// A span's hold, shared by every clone of the view that took it: a transfer
+/// in flight on a clone keeps the span held after the view it was cloned from
+/// has gone.
+struct Hold {
+    device: Arc<Device>,
+    first: u64,
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        // `first` names one span, since no two overlap and none is empty.
+        self.device.spans.lock().retain(|span| span.first != self.first);
+    }
+}
+
+/// Why [`Partition::of`] made no view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewRefused {
+    /// The span is empty or runs off the device.
+    OffDevice,
+    /// A block of it is already held.
+    Held(Holder),
+}
+
 /// One consumer's view of one span of a device, in whole [`BlockDevice`] blocks:
 /// a read at `block_count()` is refused by name, never served from past its end.
 #[derive(Clone)]
@@ -210,13 +300,31 @@ pub struct Partition {
     handle: Handle,
     first_block: u64,
     blocks: u64,
+    _hold: Arc<Hold>,
 }
 
 impl Partition {
-    /// `blocks` blocks from `first_block`, or `None` when that span is off the device.
-    pub fn of(handle: Handle, first_block: u64, blocks: u64) -> Option<Self> {
-        let end = first_block.checked_add(blocks)?;
-        (end <= handle.block_count()).then_some(Self { handle, first_block, blocks })
+    /// `blocks` blocks from `first_block`, held for `holder` until the last
+    /// clone of the view drops — or refused when the span is empty, off the
+    /// device, or overlaps a span another view holds.
+    pub fn of(
+        handle: Handle,
+        first_block: u64,
+        blocks: u64,
+        holder: Holder,
+    ) -> Result<Self, ViewRefused> {
+        let end = first_block
+            .checked_add(blocks)
+            .filter(|&end| blocks != 0 && end <= handle.block_count())
+            .ok_or(ViewRefused::OffDevice)?;
+        let mut spans = handle.0.spans.lock();
+        if let Some(held) = spans.iter().find(|span| span.first < end && first_block < span.end) {
+            return Err(ViewRefused::Held(held.holder));
+        }
+        spans.push(Span { first: first_block, end, holder });
+        drop(spans);
+        let hold = Arc::new(Hold { device: handle.0.clone(), first: first_block });
+        Ok(Self { handle, first_block, blocks, _hold: hold })
     }
 
     pub fn device_id(&self) -> DeviceId {

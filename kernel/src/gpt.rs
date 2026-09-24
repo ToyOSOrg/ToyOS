@@ -7,13 +7,17 @@
 //! to carry the boot partition, since its GUID names a file on that volume.
 //! A ROOT or DATA candidate is selected by partition *type* and nothing more —
 //! which of them is a role's filesystem is answered against each one's own
-//! superblock, by `rootfs` and by `bcachefs_adapter::probe`. Nothing here writes.
+//! superblock, by `rootfs` and by `bcachefs_adapter::probe`. A partition a
+//! process claims is found by [`claimable`], on the disks [`probe`] read.
+//! Nothing here writes.
 
 use alloc::vec::Vec;
 
 use crate::block::{DeviceId, Handle};
+use crate::device::ClaimError;
 use crate::sync::Lock;
 use toyos_abi::boot::KernelArgs;
+use toyos_abi::part::PartitionName;
 use toyos_gpt::{GptError, Guid, Partition, Sectors};
 
 /// The partition firmware loaded the bootloader from, in firmware's terms.
@@ -57,6 +61,9 @@ static LOG_GUID: Lock<Option<Guid>> = Lock::new(None);
 static RESOLVED: Lock<Resolution> = Lock::new(Resolution::Unknown);
 static ROOTS: Lock<Vec<Candidate>> = Lock::new(Vec::new());
 static DATA: Lock<Vec<Candidate>> = Lock::new(Vec::new());
+/// Every device [`probe`] read, with its logical block size: the disks a
+/// partition claim is looked for on. Taken alone.
+static DISKS: Lock<Vec<(Handle, u32)>> = Lock::new(Vec::new());
 
 /// How many partitions of one ToyOS type one device may offer this kernel.
 ///
@@ -126,6 +133,12 @@ pub fn data_candidates() -> Vec<Candidate> {
 /// always, and the boot partition when firmware named one.
 pub fn probe(handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();
+    {
+        let mut disks = DISKS.lock();
+        if !disks.iter().any(|(held, _)| held.device_id() == id) {
+            disks.push((handle.clone(), lba_bytes));
+        }
+    }
     let mut sectors = DeviceSectors::new(handle, lba_bytes);
     collect(&mut sectors, id, lba_bytes, "ROOT", Guid::TOYOS_ROOT, &ROOTS);
     collect(&mut sectors, id, lba_bytes, "DATA", Guid::TOYOS_DATA, &DATA);
@@ -255,6 +268,128 @@ fn collect(
             },
             guid: checked.unique_guid,
         });
+    }
+}
+
+/// One partition a claim may hold: where it is, and both its GUIDs.
+#[derive(Clone, Copy, Debug)]
+pub struct Claimable {
+    pub volume: Volume,
+    pub unique: Guid,
+    pub ty: Guid,
+}
+
+/// The one partition on this machine `name` names, past the range and overlap
+/// checks `toyos_gpt::locate` makes (UEFI 2.10 §5.3.3).
+///
+/// Read off the disks when asked and never cached: a table is outside every
+/// partition, so no claim can write one. `Absent` for a GUID no table carries
+/// and for the zero GUID, which GPT gives every unused entry; `Ambiguous` for
+/// one carried twice, on one disk or across two; `Unusable` for a disk that
+/// did not answer, since then neither "none" nor "one" is known.
+pub fn claimable(name: PartitionName) -> Result<Claimable, ClaimError> {
+    let target = Guid(name.guid().0);
+    if target.is_zero() {
+        return Err(ClaimError::Absent);
+    }
+    let disks = DISKS.lock().clone();
+    let mut found: Option<Claimable> = None;
+    for (handle, lba_bytes) in &disks {
+        let id = handle.device_id();
+        let mut sectors = DeviceSectors::new(handle, *lba_bytes);
+        let mut here = [BLANK; 2];
+        let listed = match name {
+            PartitionName::Unique(_) => match toyos_gpt::locate(&mut sectors, target) {
+                Ok(located) => {
+                    here[0] = located.partition;
+                    1
+                }
+                Err(e) => table_refused(id, target, e)?,
+            },
+            PartitionName::OfType(_) => {
+                match toyos_gpt::locate_type(&mut sectors, target, &mut here) {
+                    Ok(scan) if scan.matched > 1 => {
+                        log!(
+                            "partclaim: device {id} carries {} partitions of type {target}, so \
+                             the type names none",
+                            scan.matched
+                        );
+                        return Err(ClaimError::Ambiguous);
+                    }
+                    Ok(scan) => scan.listed,
+                    Err(e) => table_refused(id, target, e)?,
+                }
+            }
+        };
+        for candidate in &here[..listed] {
+            // By its own unique GUID, for the range and overlap checks a type
+            // scan does not make.
+            let part = match toyos_gpt::locate(&mut sectors, candidate.unique_guid) {
+                Ok(located) => located.partition,
+                Err(e) => {
+                    log!(
+                        "partclaim: device {id} names {} and its own table refuses it: {e:?}",
+                        candidate.unique_guid
+                    );
+                    return Err(ClaimError::Unusable);
+                }
+            };
+            if let Some(first) = found {
+                log!(
+                    "partclaim: {target} is on device {} and on device {id}, so it names no one \
+                     partition",
+                    first.volume.device
+                );
+                return Err(ClaimError::Ambiguous);
+            }
+            found = Some(Claimable {
+                volume: Volume {
+                    device: id,
+                    lba_bytes: *lba_bytes,
+                    start_lba: part.first_lba,
+                    blocks: part.lba_count(),
+                },
+                unique: part.unique_guid,
+                ty: part.type_guid,
+            });
+        }
+    }
+    found.ok_or(ClaimError::Absent)
+}
+
+/// What a table's refusal means for a claim: nothing here, or no answer.
+fn table_refused(id: DeviceId, target: Guid, e: GptError) -> Result<usize, ClaimError> {
+    match e {
+        GptError::NotFound { .. } => Ok(0),
+        GptError::ReadFailed(lba) => {
+            log!("partclaim: device {id} did not answer a read of LBA {lba} while looking for {target}");
+            Err(ClaimError::Unusable)
+        }
+        GptError::DuplicateUniqueGuid { first, second } => {
+            log!("partclaim: device {id} carries {target} in entries {first} and {second}");
+            Err(ClaimError::Ambiguous)
+        }
+        GptError::PartitionRange { .. } | GptError::PartitionOverlap { .. } => {
+            log!("partclaim: device {id} names {target} and its own table refuses it: {e:?}");
+            Err(ClaimError::Unusable)
+        }
+        // No table this kernel parses: a disk that carries no partition, which
+        // is what `probe` concluded of it too.
+        GptError::UnsupportedLbaSize(_)
+        | GptError::DeviceTooSmall(_)
+        | GptError::NoProtectiveMbr
+        | GptError::NoHeader
+        | GptError::UnsupportedRevision(_)
+        | GptError::HeaderSize(_)
+        | GptError::HeaderReserved(_)
+        | GptError::HeaderMisplaced(_)
+        | GptError::HeaderCrc { .. }
+        | GptError::UsableRange { .. }
+        | GptError::EntrySize(_)
+        | GptError::EntryArrayTooBig { .. }
+        | GptError::EntryArrayMisplaced { .. }
+        | GptError::EntryArrayCrc { .. }
+        | GptError::UsableRangeCoversBackup { .. } => Ok(0),
     }
 }
 

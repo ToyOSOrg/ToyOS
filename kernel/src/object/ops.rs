@@ -560,8 +560,10 @@ pub fn fstat(object: &KObjectRef) -> Stat {
 ///
 /// The device-commit step is not optional: `/system/bin/logd` publishes `LOG_DURABLE_NS` off `fsync`'s result, so a flush that stopped at the page cache would make that durability contract a claim about nothing.
 pub fn fsync(object: &KObjectRef) -> u64 {
-    let KObjectRef::File(file) = object else {
-        return SyscallError::PermissionDenied.to_u64();
+    let file = match object {
+        KObjectRef::File(file) => file,
+        KObjectRef::Device(claim) => return partition_fsync(claim),
+        _ => return SyscallError::PermissionDenied.to_u64(),
     };
     let (path, file_id, mtime) =
         file.with(|state| (state.path.clone(), state.file_id, state.mtime));
@@ -626,6 +628,41 @@ pub fn fsync(object: &KObjectRef) -> u64 {
             // The device's own word (an error status, or a recovery that gave up) is passed through unchanged.
             Err(e) => return e.to_u64(),
         }
+    }
+}
+
+/// `SYS_FSYNC` on a partition claim: the device's write cache flushed, so every
+/// write the claim returned from before this call is durable. The flush is the
+/// whole device's, which settles none of the kernel's own debts on it — each
+/// mount flushes again for its own.
+fn partition_fsync(claim: &DeviceClaim) -> u64 {
+    if !matches!(
+        claim.class(),
+        device_registry::DeviceType::Partition | device_registry::DeviceType::PartitionOfType
+    ) {
+        return SyscallError::PermissionDenied.to_u64();
+    }
+    let mut gone = false;
+    let done = crate::block::to_completion("a partition flush", || match claim.partition_view() {
+        Some(view) => view.flush(),
+        None => {
+            gone = true;
+            Ok(())
+        }
+    });
+    if gone {
+        return SyscallError::Gone.to_u64();
+    }
+    completed_word(done)
+}
+
+/// What [`crate::block::to_completion`] answered, as the word a syscall returns.
+pub(crate) fn completed_word(done: crate::block::BlockResult) -> u64 {
+    match done {
+        Ok(()) => 0,
+        Err(crate::block::BlockError::Device) => SyscallError::Io.to_u64(),
+        // Given back on a budget only to a caller being killed.
+        Err(crate::block::BlockError::BudgetExpired) => SyscallError::WouldBlock.to_u64(),
     }
 }
 

@@ -50,7 +50,10 @@ const PAGE: u64 = PAGE_BYTES as u64;
 /// A cache over the partition `candidate` names, or `None` with the reason
 /// logged under `what`. Every number below is one the disk chose, so each
 /// refusal says which; nothing here decides what the volume holds.
-pub fn over_candidate(candidate: &crate::gpt::Candidate, what: &str) -> Option<Arc<Cached>> {
+pub fn over_candidate(
+    candidate: &crate::gpt::Candidate,
+    what: &'static str,
+) -> Option<Arc<Cached>> {
     let volume = candidate.volume;
     let guid = candidate.guid;
     let Some(handle) = block::open(volume.device) else {
@@ -80,13 +83,20 @@ pub fn over_candidate(candidate: &crate::gpt::Candidate, what: &str) -> Option<A
         return None;
     }
     let device_blocks = handle.block_count();
-    let Some(part) = Partition::of(handle, start / PAGE, len / PAGE) else {
-        log!(
-            "{what}: candidate {guid} is at {start}+{len} on a device of {} bytes — refusing to \
-             read past the end of it",
-            device_blocks.saturating_mul(PAGE)
-        );
-        return None;
+    let part = match Partition::of(handle, start / PAGE, len / PAGE, block::Holder::Kernel(what)) {
+        Ok(part) => part,
+        Err(block::ViewRefused::OffDevice) => {
+            log!(
+                "{what}: candidate {guid} is at {start}+{len} on a device of {} bytes — refusing \
+                 to read past the end of it",
+                device_blocks.saturating_mul(PAGE)
+            );
+            return None;
+        }
+        Err(block::ViewRefused::Held(by)) => {
+            log!("{what}: candidate {guid} is held by {by} — refusing to open it a second time");
+            return None;
+        }
     };
     Some(init(part))
 }
@@ -518,9 +528,13 @@ pub fn unbind_selftest(cached: &Cached) {
 /// the view, so only the key the slot was filled under could have offset it.
 #[cfg(feature = "boot-actuators")]
 pub fn partition_offset_selftest(handle: &block::Handle) {
-    let Some(part) = block::Partition::of(handle.clone(), offset_probe::FIRST, offset_probe::BLOCKS)
-    else {
-        log!("pc-partition-offset: FAIL (the view does not fit on device {})", handle.device_id());
+    let Ok(part) = block::Partition::of(
+        handle.clone(),
+        offset_probe::FIRST,
+        offset_probe::BLOCKS,
+        block::Holder::Kernel("pc-partition-offset probe"),
+    ) else {
+        log!("pc-partition-offset: FAIL (no view over device {})", handle.device_id());
         return;
     };
     let cached = init(part);
