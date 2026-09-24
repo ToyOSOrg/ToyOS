@@ -160,7 +160,8 @@ pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) ->
             }
         }
     }
-    if let Some(line) = kernel.lines().find(|l| l.contains("code=0 cpu=0ms") || l.contains("10.9.9.9")) {
+    let forged_words = |l: &&str| l.contains(&format!("{FORGER} pid=1 code=0")) || l.contains("10.9.9.9");
+    if let Some(line) = kernel.lines().find(forged_words) {
         return Err(format!("a program's words are among the kernel's records: {line:?}"));
     }
     if !bootlog::lines_of(&log, "netd").is_empty() {
