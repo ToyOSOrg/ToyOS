@@ -406,7 +406,7 @@ impl SshSession {
                 Ok(path) => (format!("accepted {path}\n"), 0),
                 Err(why) => (format!("refused {why}\n"), 1),
             };
-            println!("sshd: {peer}: swap {service}: {}", line.trim_end());
+            println!("{}", toyos_swap::sshd_said(&peer, &service, line.trim_end()));
             out.data(line.as_bytes()).await.ok();
             out.exit_status(status).await.ok();
             out.eof().await.ok();

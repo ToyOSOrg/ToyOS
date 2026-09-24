@@ -357,6 +357,22 @@ pub fn said(service: &str, word: Word, detail: &str) -> String {
     format!("init: swap {service}: {}: {detail}", word.as_str())
 }
 
+/// sshd's own line about one ask, before or instead of asking init:
+/// `sshd: <peer>: swap <service>: <answer>` — `<service>` is `?` while sshd has
+/// not yet read the request's header. What sshd prints (`userland/sshd`) and
+/// what [`sshd_refused`] reads back are the same spelling.
+pub fn sshd_said(peer: &str, service: &str, answer: &str) -> String {
+    format!("sshd: {peer}: swap {service}: {answer}")
+}
+
+/// sshd's own refusal inside `line` — [`sshd_said`]'s form, for whichever peer
+/// and service it named, in any form the log renders it — or `None`.
+pub fn sshd_refused(line: &str) -> Option<&str> {
+    let (_, rest) = line.split_once(": swap ")?;
+    let (_, answer) = rest.split_once(": ")?;
+    answer.trim_end_matches(['\n', '\r']).strip_prefix("refused ")
+}
+
 /// init's line about `service` inside `line` — a console line or a record in
 /// any of the forms the log renders one in — as `(word, detail)`.
 pub fn heard<'a>(line: &'a str, service: &str) -> Option<(Word, &'a str)> {
@@ -504,6 +520,20 @@ mod tests {
         );
         for word in [Word::Accepted, Word::Stopping, Word::Started, Word::Failed] {
             assert!(!word.is_final());
+        }
+    }
+
+    #[test]
+    fn sshd_refused_reads_back_what_sshd_said() {
+        let line = sshd_said("10.0.2.2:60872", "?", "refused x");
+        assert_eq!(line, "sshd: 10.0.2.2:60872: swap ?: refused x");
+        assert_eq!(sshd_refused(&line), Some("x"));
+        let accepted = sshd_said("10.0.2.2:60872", "netd", "accepted /tmp/swap/abc/netd");
+        assert_eq!(sshd_refused(&accepted), None);
+        for rendered in
+            [format!("{line}\n"), format!("[2026-09-24 22:01:36 2.612 cpu0] @{line}\n")]
+        {
+            assert_eq!(sshd_refused(&rendered), Some("x"), "{rendered:?}");
         }
     }
 

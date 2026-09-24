@@ -42,6 +42,10 @@ pub struct Swapped {
     pub words: Vec<(Word, String)>,
     /// The service's own lines on the stream after the ask.
     pub said: Vec<String>,
+    /// sshd's own refusal of the ask, read off the stream before init ever
+    /// heard of it — `Malformed`, `NoAuthority`, a connection that died
+    /// mid-upload, or any other refusal init is never asked about.
+    pub sshd_refused: Option<String>,
     /// `echo` asked after init's verdict, through whatever carries the
     /// network then.
     pub again: Result<Exec, String>,
@@ -67,6 +71,35 @@ pub struct Ask<'a> {
     /// The digest sent in place of the binary's own, for a caller whose subject
     /// is the refusal.
     pub named: Option<toyos_swap::Digest>,
+}
+
+/// What ended the wait for one ask's outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Settled {
+    /// init said its final word.
+    Outcome,
+    /// sshd refused the ask itself, before init ever heard of it.
+    SshdRefused(String),
+}
+
+/// Whether the wait for `service`'s outcome is over, reading `lines[mark..]`:
+/// init's final word about it, or sshd's own refused line — named for
+/// `service`, or (before sshd has read the request's header) `?` — whichever
+/// is first on the stream. `sshd`'s line settles the wait even where init is
+/// never asked and so never speaks.
+fn settled(lines: &[String], mark: usize, service: &str) -> Option<Settled> {
+    for line in &lines[mark.min(lines.len())..] {
+        if toyos_swap::heard(line, service).is_some_and(|(word, _)| word.is_final()) {
+            return Some(Settled::Outcome);
+        }
+        let named = line.contains(&format!(": swap {service}: refused ")) || line.contains(": swap ?: refused ");
+        if named {
+            if let Some(why) = toyos_swap::sshd_refused(line) {
+                return Some(Settled::SshdRefused(why.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// Ask the machine that opens `stream` to replace a service's binary, and
@@ -127,13 +160,20 @@ pub fn swap(
         _ => None,
     };
     let mut outcome_ms = None;
+    let mut sshd_refused = None;
     if let Some(until) = until {
         while began.elapsed() < until {
-            if heard(&stream.lines()).iter().any(|(word, _)| word.is_final()) {
-                outcome_ms = Some(began.elapsed().as_millis() as u64);
-                break;
+            match settled(&stream.lines(), mark, service) {
+                Some(Settled::Outcome) => {
+                    outcome_ms = Some(began.elapsed().as_millis() as u64);
+                    break;
+                }
+                Some(Settled::SshdRefused(why)) => {
+                    sshd_refused = Some(why);
+                    break;
+                }
+                None => std::thread::sleep(Duration::from_millis(100)),
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
     }
     let again_at = match (ssh_at, stream.peer()) {
@@ -167,6 +207,7 @@ pub fn swap(
             .filter(|line| line.contains(&marker))
             .cloned()
             .collect(),
+        sshd_refused,
         again,
         connections: (before, stream.connections()),
         answer_ms,
@@ -222,6 +263,10 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
         (Expect::Restored, Some((Word::Restored, detail))) if word(Word::Failed) => {
             said.push(format!("init: the new {service} failed and {detail} is back"))
         }
+        (_, None) if heard.sshd_refused.is_some() => bad.push(format!(
+            "sshd refused the ask before init heard it: {}",
+            heard.sshd_refused.as_deref().unwrap_or("")
+        )),
         (Expect::Refused, _) if !word(Word::Stopping) => said.push(format!(
             "init stopped nothing: {:?}",
             heard.words.iter().map(|(w, d)| format!("{}: {d}", w.as_str())).collect::<Vec<_>>()
@@ -257,6 +302,7 @@ const ANSWER: &str = "swap_answer";
 const ANSWER_FAILED: &str = "swap_answer_failed";
 const WORD: &str = "swap_word";
 const SAID: &str = "swap_said";
+const SSHD_REFUSED: &str = "swap_sshd_refused";
 const AGAIN_STATUS: &str = "swap_again_status";
 const AGAIN_STDOUT: &str = "swap_again_stdout";
 const AGAIN_FAILED: &str = "swap_again_failed";
@@ -313,6 +359,9 @@ impl Swapped {
         for line in &self.said {
             out.push_str(&format!("{SAID} {}\n", quote(line)));
         }
+        if let Some(why) = &self.sshd_refused {
+            out.push_str(&format!("{SSHD_REFUSED} {}\n", quote(why)));
+        }
         match &self.again {
             Ok(exec) => {
                 match exec.status {
@@ -353,6 +402,7 @@ impl Swapped {
             words.push((word, detail.to_string()));
         }
         let said = all(SAID).into_iter().map(unquote).collect::<Result<_, _>>()?;
+        let sshd_refused = one(SSHD_REFUSED).map(unquote).transpose()?;
         let again = match (one(AGAIN_STATUS), one(AGAIN_STDOUT), one(AGAIN_FAILED)) {
             (Some(status), Some(stdout), None) => Ok(Exec {
                 status: match status {
@@ -385,6 +435,7 @@ impl Swapped {
             answer,
             words,
             said,
+            sshd_refused,
             again,
             connections: (before as usize, after as usize),
             answer_ms,
@@ -431,6 +482,7 @@ mod tests {
             answer: Ok(answer),
             words,
             said: vec!["[1.0 cpu0] @netd: DHCP: lease 10.0.2.15/24 from 10.0.2.2, \"x\"\n".into()],
+            sshd_refused: None,
             again: Ok(Exec { stdout: metaltalk::owed(), status: Some(0) }),
             connections: (1, 2),
             answer_ms: 900,
@@ -469,6 +521,52 @@ mod tests {
         let mut elsewhere = heard(Expect::InService);
         elsewhere.words.last_mut().unwrap().1 = "/tmp/swap/other/netd as pid 12".into();
         assert!(judge(&elsewhere, Expect::InService).is_err());
+    }
+
+    /// The recorded stream from a swap sshd refused before init ever heard of
+    /// it: an upload's connection died mid-transfer
+    /// (issues/build/a-two-megabyte-ssh-upload-ended-in-a-decryption-error.md),
+    /// and sshd's own line — naming `?`, since it had not read the header —
+    /// is the only word the machine ever says about it.
+    #[test]
+    fn settled_ends_on_sshds_own_refusal_before_init_ever_heard_it() {
+        let lines: Vec<String> = [
+            "[2026-09-24 22:01:36 2.433 cpu0] pcidev: PCI 00:03.0 BAR 0 (0x20000 bytes) placed at 0xc0200000",
+            "[2026-09-24 22:01:36 2.939 cpu0] pcidev: slot 0 took its first message on vector 0x28",
+            "@sshd: 10.0.2.2:60872: swap ?: refused the channel ended after 2080768 bytes, before the request was whole",
+            "sshd: session error: DecryptionError",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            settled(&lines, 0, "netd"),
+            Some(Settled::SshdRefused(
+                "the channel ended after 2080768 bytes, before the request was whole".into()
+            ))
+        );
+        let mut without = lines;
+        without.remove(2);
+        assert_eq!(settled(&without, 0, "netd"), None);
+    }
+
+    /// sshd's refusal is only past `mark`, and only for this service or `?`.
+    #[test]
+    fn settled_ignores_a_refusal_before_mark_or_for_another_service() {
+        let refusal = toyos_swap::sshd_said("10.0.2.2:1", "?", "refused x");
+        assert_eq!(settled(&[refusal], 1, "netd"), None, "before mark");
+        let other = toyos_swap::sshd_said("10.0.2.2:1", "soundd", "refused x");
+        assert_eq!(settled(&[other], 0, "netd"), None, "another service");
+    }
+
+    /// `Swapped` carries sshd's own refusal, and `render`/`parse` round-trip it.
+    #[test]
+    fn sshd_refused_reads_back_as_it_was_written() {
+        let mut swapped = heard(Expect::InService);
+        swapped.sshd_refused =
+            Some("the channel ended after 2080768 bytes, before the request was whole".into());
+        let back = Swapped::parse(&swapped.render()).expect("it parses").expect("it is one");
+        assert_eq!(back, swapped);
     }
 
     #[test]

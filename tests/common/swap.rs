@@ -612,8 +612,8 @@ fn refused_device_fails(name: &str, actuators: &'static [&'static str]) -> Resul
         for word in [&in_service, &started, &restored] {
             if let Some(line) = text.lines().find(|l| l.contains(word.as_str())) {
                 return Err(format!(
-                    "init started a netd though the igb the one it replaced held lost its window to \
-                     its reset: {line}"
+                    "init started a netd though the igb the one it replaced held no longer holds \
+                     the window it was cut for: {line}"
                 ));
             }
         }
