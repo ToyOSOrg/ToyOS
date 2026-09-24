@@ -16,6 +16,7 @@ use common::{
     stats, storage, usb,
 };
 use toyos_build::bootlog::{self, boot_millis};
+use toyos_build::heartbeat;
 use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::redlist::{self, Quarantined};
 use toyos_build::tiers::Tier;
@@ -308,6 +309,10 @@ const RUST_SKIP: &[&str] = &[
     // have somewhere to land, and on its own it asserts nothing and costs ten
     // seconds. `syscall_window_nmi` runs it on the kernel that storms it.
     "nmi_window_spin",
+    // A victim, not a test: the load `dump-in-blocking-pass` files Ctrl+Alt+D
+    // inside, and on its own it asserts nothing. `dump_left_pending_is_owed` runs
+    // it on the kernel that stages it.
+    "dump_stage_load",
     // Driven, not run: `screen_console_clear` types its name at a console it is
     // watching, and on its own it asks the kernel to paint over a panel nobody
     // is reading and exits 0. A verdict its own exit code cannot carry — the
@@ -846,7 +851,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // name below.
     ("syscall_window_nmi", Sched::Parallel, Tier::Fast),
     // The two controls on the name above: the kernel with vector 2's IST index
-    // taken off, which must double fault at the entry with `cr2 = rsp - 8`, and
+    // taken off, which must double fault at the entry on the NMI aimed at the
+    // CPU the storm holds inside it, with `cr2 = rsp - 8` at the held `rsp`, and
     // the one nested NMI an early `iretq` can stage, which must take the loud
     // path. Both boots end in a halted machine that has to be drained past its
     // own report, which is where the price is. Nothing in either verdict is a
@@ -864,6 +870,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // same run and three times after it. Serial by the default rule — a
     // verdict that is a duration does not go in the parallel phase.
     ("dump_nmi_probe", Sched::Serial, Tier::Nightly),
+    // The same dump asked for inside the passes that may not serve it, on one
+    // CPU. Parallel: every verdict is a line the guest prints or a count the guest
+    // keeps, and no duration is in any of them.
+    ("dump_left_pending_is_owed", Sched::Parallel, Tier::Fast),
     ("diskless_boot", Sched::Parallel, Tier::Fast),
     // Every verdict is a line of text or a device property, and no clock is in
     // any of them.
@@ -1155,17 +1165,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("usb_storage_write_error", Sched::Parallel, Tier::Fast),
     ("usb_flush_optional", Sched::Parallel, Tier::Nightly),
     ("xhci_deaf_registers", Sched::Parallel, Tier::Nightly),
-    // Mirrors the kernel's `SLOW_CONNECT_NS` as a constant of its own and
-    // bounds the first port line from *both* sides. Both instants are the
-    // guest's own, and it is still serial: the *injection window* is 300 ms of
-    // guest **boot** time, so a guest that lost its share of the host reaches
-    // its controller after the ports have stopped lying and the gate refuses to
-    // certify — `the controller started at 0.366 s, past the 0.3 s the ports are
-    // held empty for`, measured at width 4 with four other worktrees' suites up.
-    // That is the test declining to measure nothing, which is correct, and a red
-    // all the same. The fix it asks for is the kernel's: anchor the window on
-    // the controller's own reset rather than on boot, which is where a real root
-    // hub's detection delay starts anyway.
+    // The window is anchored on the controller's own port-power stamp now, not
+    // boot, so a slow boot no longer eats it — but the bound is still a fixed
+    // span of the guest's own TSC clock (`SLOW_CONNECT_NS`/`DEBOUNCE_NS`), and
+    // a host running several other guests can still stall this one's vCPU past
+    // that span for reasons that are not the defect.
     ("xhci_slow_connect", Sched::Serial, Tier::Nightly),
     ("xhci_portsc_rw1c", Sched::Parallel, Tier::Fast),
     // One staged break and no other, which puts the driver's recovery finishing
@@ -1220,12 +1224,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
     ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),
     ("wall_clock_zone", Sched::Parallel, Tier::Nightly),
-    // `xhci_slow_connect`'s shape against the disk's port, and serial for the
-    // same reason and not by association: it shares `SLOW_CONNECT_NS`, so a boot
-    // that outgrows the window binds the disk in the port scan and it reports
-    // `the boot scan bound a disk, so the port was not held empty`. Same
-    // measurement, same afternoon.
-    ("late_storage_connect", Sched::Serial, Tier::Nightly),
+    // `xhci_slow_connect`'s shape against the disk's port, but its actuator
+    // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
+    // so what it stages is an ordering with no wall-clock margin on either
+    // side: nothing here needs the serial tail.
+    ("late_storage_connect", Sched::Parallel, Tier::Nightly),
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
@@ -10024,10 +10027,6 @@ fn run_machine_test(
                 kernel_params: &["heartbeat"],
                 ..Default::default()
             };
-            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-            let mut log = qemu.boot_log().to_string();
-            log.push_str(&qemu.drain_serial(Duration::from_secs(3)));
-
             // **A heartbeat and the `i8042: line` under it are one reading**,
             // and `heartbeat::poll` emits them as two `log!`s — so a capture can
             // end between them. Run `31273373928` on `main` did: twelve beats,
@@ -10036,27 +10035,64 @@ fn run_machine_test(
             // whose state was unreadable, which is the one thing this pairing
             // exists to detect. So the unit is the pair, and a beat with nothing
             // after it at all is a reading this capture does not hold.
-            let captured: Vec<&str> = log.lines().collect();
-            let at: Vec<usize> = captured
-                .iter()
-                .enumerate()
-                .filter(|(_, l)| l.contains("heartbeat: t="))
-                .map(|(i, _)| i)
-                .collect();
-            let torn = at.last().is_some_and(|&i| i + 1 == captured.len());
-            let at = &at[..at.len() - usize::from(torn)];
-            let beats: Vec<&str> = at.iter().map(|&i| captured[i]).collect();
-            // Three seconds of drain at a 250 ms period is twelve; a guest that
-            // spends some of it booting produces fewer. Four is "the machine
-            // kept saying it was alive" with room, and zero or one is the
-            // failure this exists to make impossible.
-            if beats.len() < 4 {
+            fn whole(log: &str) -> (Vec<&str>, Vec<usize>) {
+                let captured: Vec<&str> = log.lines().collect();
+                let at: Vec<usize> = captured
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.contains("heartbeat: t="))
+                    .map(|(i, _)| i)
+                    .collect();
+                let torn = at.last().is_some_and(|&i| i + 1 == captured.len());
+                let kept = captured.len() - usize::from(torn);
+                (captured[..kept].to_vec(), at[..at.len() - usize::from(torn)].to_vec())
+            }
+
+            // The mask is a claim only about a settled machine that is running,
+            // and `toyos_build::heartbeat` is where that is decided — including
+            // which line each `[boot] start` program says it has finished
+            // starting with, held there against this config's own list.
+            let said = heartbeat::done_lines(&toyos_build::build::boot_start(
+                &config.join("system.toml"),
+            ))?;
+
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+            let mut log = qemu.boot_log().to_string();
+            // **The capture follows the window, not the clock.** How long the
+            // started programs take is the loaded host's to decide, and a
+            // capture cut a fixed span after `===READY===` hands the predicate
+            // whatever start-up left over — so a slow boot reds the test on the
+            // predicate's own refusal. The drain ends when the window holds
+            // `CAPTURE_BEATS`, which at a 250 ms period is under two seconds of
+            // settled machine; the bound is the liveness ceiling and not the
+            // capture's length, and it is counted in *steps* rather than
+            // measured in wall time, because a guest that has exited
+            // disconnects the reader and a step then returns at once.
+            const DRAIN_STEP: Duration = Duration::from_millis(500);
+            const DRAIN_STEPS: u32 = 40;
+            let drained = Instant::now();
+            let mut held = 0;
+            for _ in 0..DRAIN_STEPS {
+                log.push_str(&qemu.drain_serial(DRAIN_STEP));
+                held = heartbeat::window_beats(&whole(&log).0, &said);
+                if held >= heartbeat::CAPTURE_BEATS {
+                    break;
+                }
+            }
+            if held < heartbeat::CAPTURE_BEATS {
                 return Err(format!(
-                    "{} whole heartbeat line(s) in ~3 s at a 250 ms period — the instrument does \
-                     not keep reporting, so a log that stops says nothing\n{log}",
-                    beats.len()
+                    "{held} heartbeat(s) with a whole period after the boot's start-up against \
+                     the {} a verdict is taken from, after {} drains of {} ms at a 250 ms period \
+                     ({:.1}s) — the instrument has to keep reporting past the start-up, and a log \
+                     that stops, or a boot that never finishes starting, says nothing\n{log}",
+                    heartbeat::CAPTURE_BEATS,
+                    DRAIN_STEPS,
+                    DRAIN_STEP.as_millis(),
+                    drained.elapsed().as_secs_f64(),
                 ));
             }
+            let (captured, at) = whole(&log);
+            let beats: Vec<&str> = at.iter().map(|&i| captured[i]).collect();
             // Each pair, positionally: `report_line` is the statement after the
             // heartbeat's `log!`, and another CPU's line may land between the
             // two commits, so what is asserted is one pin reading before the
@@ -10080,126 +10116,77 @@ fn run_machine_test(
                     unpaired.iter().take(4).cloned().collect::<Vec<_>>().join("\n"),
                 ));
             }
-            // **What a clear bit has to mean is "that CPU stopped", and what
-            // makes that readable is that it does not come back.** `diag-tick`
-            // caps a sleep at 100 ms against a 250 ms line, so a healthy CPU
-            // contributes two or three passes to every one; a CPU absent from
-            // two consecutive lines has missed five wakes and is the shape the
-            // T14 produces — the mask thins CPU by CPU and stays thin, 56 lines
-            // naming a silent CPU and one silent for 2.811 s. A single line a
-            // CPU is missing from and is back on is the other thing entirely,
-            // and this guest has eight vCPUs on a runner's four cores: run
-            // `31283095698` rep 2 reported `cpu6 last reached one 0.349s ago`
-            // once, between eight lines of `8/8` either side of it. That is the
-            // host declining to run a halted thread, which no instrument in this
-            // guest claims anything about.
-            //
-            // **The boot is excluded for the same reason and needs a second
-            // rule.** `boot_with_options` returns on this config's ready marker
-            // with userland still spawning, and eight vCPUs on four cores do not
-            // all run while the guest is busy — run `31280428519` shard 5 had
-            // `alive=7/8` at 1.373 s with `cpu1 has never reached a scheduler
-            // pass` and `5/8` at 1.624 s, and run `31283095698` rep 2 had cpu0
-            // missing from two consecutive lines. So the window opens at the
-            // first full mask.
-            //
-            // Neither rule lets the tick-less control through, and that was run
-            // rather than argued: `heartbeat = []` in `kernel/Cargo.toml` reds
-            // this on six of the eight CPUs.
-            let Some(settled) = beats.iter().position(|l| l.contains("alive=8/8")) else {
-                return Err(format!(
-                    "no heartbeat in the whole capture reported every CPU alive, so the machine \
-                     never reached the state the mask is a claim about\n{log}"
-                ));
+            let settled = match heartbeat::settle(&captured, &said) {
+                Ok(settled) => settled,
+                Err(heartbeat::Refused::Unreadable(line)) => {
+                    return Err(format!(
+                        "a heartbeat carries no readable t=, alive=, mask=, ran= or gap= — the \
+                         fields that say which CPU stopped and whether the machine ran: \
+                         {line}\n{log}"
+                    ));
+                }
+                Err(heartbeat::Refused::BootUnfinished(line)) => {
+                    return Err(format!(
+                        "the boot never finished starting: nothing said {line:?}, so every \
+                         heartbeat is inside the start-up and none is a claim about a settled \
+                         machine\n{log}"
+                    ));
+                }
+                Err(heartbeat::Refused::Unsettled { settled, beats }) => {
+                    return Err(format!(
+                        "too few heartbeats have a whole period after the last `[boot] start` \
+                         program finished starting — the machine did not settle inside this \
+                         capture, and a clear bit before it settles says nothing\n\
+                         {settled} of {beats}\n{log}"
+                    ));
+                }
+                Err(heartbeat::Refused::NotRunning { beat, held }) => {
+                    return Err(format!(
+                        "the machine was not running: a settled heartbeat came late or dispatched \
+                         nothing — a guest its host did not schedule, and what a CPU did in a \
+                         period the machine did not run is unreadable\n\
+                         t={}.{:03}s gap={}.{:03}s ran={} against a {} ms period, after {held} \
+                         settled heartbeat(s) it ran through\n{}\n{log}",
+                        beat.t_ms / 1000,
+                        beat.t_ms % 1000,
+                        beat.gap_ms / 1000,
+                        beat.gap_ms % 1000,
+                        beat.ran,
+                        heartbeat::PERIOD_MS,
+                        captured[beat.line],
+                    ));
+                }
+                Err(heartbeat::Refused::CpuMissing { cpus, settled, opened }) => {
+                    return Err(format!(
+                        "cpu{cpus:?} missing from {} consecutive heartbeats on a settled guest \
+                         that was running — a CPU that misses two lines has missed five \
+                         `diag-tick` wakes, so a clear bit does not mean that CPU stopped, which \
+                         is the whole of the field\n{settled} settled heartbeats\n{}\n{log}",
+                        heartbeat::STOPPED_BEATS,
+                        captured[opened..]
+                            .iter()
+                            .filter(|l| l.contains("heartbeat: "))
+                            .take(16)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ));
+                }
             };
-            let quiet = &beats[settled..];
-            if quiet.len() < 4 {
-                return Err(format!(
-                    "the mask was full for only the last {} of {} heartbeats — the machine did not \
-                     settle inside this capture, and a clear bit before it settles says nothing\n\
-                     {log}",
-                    quiet.len(),
-                    beats.len()
-                ));
-            }
-            const CPUS: usize = 8;
-            let masks: Vec<u64> = quiet
-                .iter()
-                .filter_map(|l| l.split("mask=0x").nth(1))
-                .filter_map(|m| u64::from_str_radix(m.split_whitespace().next()?, 16).ok())
-                .collect();
-            if masks.len() != quiet.len() {
-                return Err(format!(
-                    "{} of {} heartbeats carry no readable mask=0x — the field that says which CPU \
-                     stopped\n{log}",
-                    quiet.len() - masks.len(),
-                    quiet.len()
-                ));
-            }
-            let absent = |c: usize, m: &u64| m & (1 << c) == 0;
-            let stopped: Vec<usize> = (0..CPUS)
-                .filter(|&c| masks.windows(2).any(|w| absent(c, &w[0]) && absent(c, &w[1])))
-                .collect();
-            let named: Vec<&str> = captured[at[settled]..]
-                .iter()
-                .filter(|l| l.contains("heartbeat: cpu"))
-                .copied()
-                .collect();
-            if !stopped.is_empty() {
-                return Err(format!(
-                    "cpu{stopped:?} missing from two consecutive heartbeats of {}, on a settled \
-                     guest where every CPU is healthy — a CPU that misses two lines has missed \
-                     five `diag-tick` wakes, so a clear bit does not mean that CPU stopped, which \
-                     is the whole of the field\n{}\n{}\n{log}",
-                    quiet.len(),
-                    quiet.join("\n"),
-                    named.iter().take(8).cloned().collect::<Vec<_>>().join("\n"),
-                ));
-            }
-            let blips = masks.iter().filter(|m| **m != (1 << CPUS) - 1).count();
+            let quiet = &settled.beats;
+            let blips = settled.blips;
             // And no window between two lines may be wide enough to hide a
             // death. The metal boots this exists for went quiet for between 14 s
             // and 102 s; four times the period is far below any of them and far
             // above anything a loaded host does to a 250 ms cadence.
-            const MAX_GAP_S: f64 = 1.0;
-            let gaps: Vec<f64> = beats
-                .iter()
-                .filter_map(|l| l.split("gap=").nth(1))
-                .filter_map(|g| g.trim_end_matches('s').split_whitespace().next()?.parse().ok())
-                .collect();
-            if gaps.len() != beats.len() {
+            const MAX_GAP_MS: u64 = 1000;
+            let worst = settled.widest_gap_ms;
+            if worst > MAX_GAP_MS {
                 return Err(format!(
-                    "{} of {} heartbeats carry no readable gap= — the field a reader uses to tell \
-                     a machine that went quiet from one that died\n{log}",
-                    beats.len() - gaps.len(),
-                    beats.len()
-                ));
-            }
-            let worst = gaps.iter().copied().fold(0.0f64, f64::max);
-            if worst > MAX_GAP_S {
-                return Err(format!(
-                    "the widest window between two heartbeats was {worst:.3}s against a 250 ms \
-                     period — the machine stopped reporting for long enough to have died in\n{log}"
-                ));
-            }
-            // `ran=` has to be a reading too, and its failure mode is the
-            // opposite of the mask's: a counter that never moves reports a
-            // machine that schedules and runs nothing, which is the second
-            // freeze signature and the one `alive=` cannot carry. This guest
-            // composites, so some window must be nonzero.
-            let rans: Vec<u64> = beats
-                .iter()
-                .filter_map(|l| l.split("ran=").nth(1))
-                .filter_map(|r| r.split_whitespace().next()?.parse().ok())
-                .collect();
-            let moved = rans.iter().filter(|&&r| r > 0).count();
-            if rans.len() != beats.len() || moved == 0 {
-                return Err(format!(
-                    "{} of {} heartbeats carry a readable ran= and {moved} of them are nonzero — \
-                     a counter that never moves cannot tell a machine that stopped scheduling \
-                     from one that schedules and runs nothing\n{log}",
-                    rans.len(),
-                    beats.len(),
+                    "the widest window between two heartbeats was {}.{:03}s against a 250 ms \
+                     period — the machine stopped reporting for long enough to have died in\n{log}",
+                    worst / 1000,
+                    worst % 1000,
                 ));
             }
             // And the clock in the line advances, or the timestamp cannot
@@ -10283,13 +10270,17 @@ fn run_machine_test(
                 ));
             }
             eprintln!(
-                "  [heartbeat] {} whole lines in ~3 s, each with its own pin reading, {settled} \
+                "  [heartbeat] {} whole lines in {:.1}s, each with its own pin reading, {} \
                  before the machine settled and {} after, {blips} of those missing a CPU for one \
-                 line and none for two, {moved} with ran>0, widest gap {worst:.3}s, t={} → t={}; \
+                 line and none for two, widest gap {}.{:03}s, t={} → t={}; \
                  {} i8042 line reading(s), vec 0x{vector} on gsi {kbd_gsi}, none masked, none with \
                  OBF set",
                 beats.len(),
+                drained.elapsed().as_secs_f64(),
+                beats.len() - quiet.len(),
                 quiet.len(),
+                worst / 1000,
+                worst % 1000,
                 stamps.first().unwrap_or(&"?"),
                 stamps.last().unwrap_or(&"?"),
                 lines.len(),
@@ -10427,6 +10418,9 @@ fn run_machine_test(
         }
         "idle_stack_guard" => faults::idle_stack_guard(test_config, c_bins, rust_bins),
         "dump_nmi_probe" => faults::dump_nmi_probe(test_config, c_bins, rust_bins),
+        "dump_left_pending_is_owed" => {
+            faults::dump_left_pending_is_owed(test_config, c_bins, rust_bins)
+        }
         "diskless_boot" => faults::diskless_boot(test_config, c_bins, rust_bins),
         "virtio_net_no_msix" => faults::virtio_net_no_msix(),
         "pci_claim_caps_truncated" => faults::claim_caps_truncated(),
@@ -16729,6 +16723,10 @@ fn quarantined_for_something_else(row: &Quarantined) -> String {
 /// one twice; it is a different and larger one, and the line now says which it
 /// was.
 ///
+/// Which of the two it is is not a text comparison — an assertion that prints
+/// what it measured writes a different sentence every time it fires, so
+/// `toyos_build::alone::same_failure` decides it and both readings are quoted.
+///
 /// The green arms are untouched. They are a classification the issue files are
 /// written against, and nothing about them was wrong.
 ///
@@ -16759,9 +16757,14 @@ fn alone_line(name: &str, wide: &str, shared_the_host: bool, alone: Option<&Outc
         ),
         Verdict::Fail(_) | Verdict::Quarantined(_) => {
             let said = headline(outcome.reason.as_deref());
-            if said == wide {
-                format!("  ALONE {name}: red again, the same failure both times — the defect \
-                         is real. {said}")
+            // One decision and one classifier: byte equality is the case
+            // `same_failure` already answers, so asking it first would be a
+            // second rule nothing tests.
+            if toyos_build::alone::same_failure(&said, wide) {
+                format!(
+                    "  ALONE {name}: red again, the same failure both times — the defect is \
+                     real.\n      wide:  {wide}\n      alone: {said}"
+                )
             } else {
                 format!(
                     "  ALONE {name}: red again on a DIFFERENT failure — it failed twice, on two \
@@ -16827,6 +16830,25 @@ fn alone_line_reports_the_alone_run() -> Result<(), String> {
     }
     if same.contains("[kernel 2.639") {
         return Err(format!("the line pasted the whole capture into the summary:\n{same}"));
+    }
+
+    // One assertion at two readings: still a reproduction, and it quotes both
+    // rather than picking one.
+    const MEASURED: &str = "the controller started at 0.303 s, past the 0.3 s the ports are held \
+                            empty for";
+    const AGAIN: &str = "the controller started at 0.300 s, past the 0.3 s the ports are held \
+                         empty for";
+    let twice = alone_line("a_test", MEASURED, false, Some(&red(AGAIN)));
+    if !twice.contains("red again, the same failure both times") {
+        return Err(format!("one assertion at two readings reads as two assertions:\n{twice}"));
+    }
+    // The labels are the whole content of the line: two sentences under swapped
+    // labels is the mis-attribution this gate exists to stop, said in the other
+    // direction.
+    for (label, sentence) in [("wide:  ", MEASURED), ("alone: ", AGAIN)] {
+        if !twice.contains(&format!("{label}{sentence}")) {
+            return Err(format!("{sentence:?} is not the line's {label:?} run:\n{twice}"));
+        }
     }
 
     // And the case the old line could not tell apart from it.

@@ -482,6 +482,99 @@ const SPIN_SECS: u32 = 10;
 /// every per-CPU line and the symbolized `rip` under it already.
 const NMI_REPORT: &str = "syscall-window-nmi: sent=";
 
+/// The storm's own word, before it sends, that it holds the victim inside the
+/// entry: which CPU, the `rsp` it is held at, and where the entry spins.
+const HELD: &str = "syscall-window-nmi: held cpu=";
+
+/// The storm's word that it found nobody to hold, before it sprays.
+const HELD_NOBODY: &str = "syscall-window-nmi: held nobody";
+
+/// The storm's word that the hold is over: an arrival under this line is a
+/// sprayed one.
+const RELEASED: &str = "syscall-window-nmi: released cpu=";
+
+/// A held CPU's word that its entry spent the ask's whole budget and left the
+/// window with nobody having released it.
+const HOLD_EXPIRED: &str = "syscall-window-nmi: hold expired cpu=";
+
+/// The storm's word that the victim it released made no syscall before the
+/// spray went out.
+const NO_SYSCALL_AFTER_RELEASE: &str = "of its release, so the spray's first samples may be";
+
+/// What the storm said of the hold it arranged.
+struct Hold {
+    cpu: u64,
+    /// The user `rsp` the victim was held at.
+    rsp: u64,
+    /// Where the entry spins while held.
+    spin: std::ops::Range<u64>,
+}
+
+/// The premise both arms rest on, read off the capture: the CPU the storm held
+/// inside the entry's window and the `rsp` it held it at, which has to be the
+/// user's or the hold was not the window.
+fn held_in_window(capture: &str) -> Result<Hold, String> {
+    let Some(line) = capture.lines().find(|l| l.contains(HELD)) else {
+        return Err(if capture.contains(HELD_NOBODY) {
+            format!(
+                "the storm says it held nobody, so the premise every verdict rests on was not \
+                 arranged and this run says nothing about vector 2's IST\n{capture}"
+            )
+        } else {
+            format!("the capture has no `{HELD}` line and no `{HELD_NOBODY}` line\n{capture}")
+        });
+    };
+    let cpu = field(line, "cpu=")?;
+    let part = |name: &str| hex(line, name).ok_or_else(|| format!("no {name}0x… field in {line:?}"));
+    let (rsp, spin) = (part("rsp=")?, part("spin=")?..part("end=")?);
+    if rsp >= toyos_userbound::USER_TOP {
+        return Err(format!(
+            "cpu{cpu} was held at rsp={rsp:#x}, which is not a user address: a hold on a kernel \
+             stack is not the window, and an NMI there finds a stack the CPU may push \
+             on\n{capture}"
+        ));
+    }
+    Ok(Hold { cpu, rsp, spin })
+}
+
+/// Refuses a capture in which the kernel says a hold ended by the entry's own
+/// bound: nobody released that CPU, so nothing under the line is the run the
+/// storm arranges.
+fn hold_expired(capture: &str) -> Result<(), String> {
+    match capture.lines().find(|l| l.contains(HOLD_EXPIRED)) {
+        Some(line) => Err(format!(
+            "the kernel says a hold ended by the entry's own bound and not by the storm's \
+             release: `{}`\n{capture}",
+            line.trim(),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// A held CPU with neither end of its hold in the capture: what is absent, and
+/// no reason for it.
+fn never_released(hold: &Hold, capture: &str) -> String {
+    format!(
+        "cpu{} was held inside the entry and the capture has no `{RELEASED}` line and no \
+         `{HOLD_EXPIRED}` line\n{capture}",
+        hold.cpu,
+    )
+}
+
+/// The `name`N field of a key=value report line, by name and not position.
+fn field(line: &str, name: &str) -> Result<u64, String> {
+    line.split_whitespace()
+        .find_map(|w| w.strip_prefix(name)?.parse::<u64>().ok())
+        .ok_or_else(|| format!("no {name}N field in {line:?}"))
+}
+
+/// The `field`0x… value on `line`, up to sixteen hex digits.
+fn hex(line: &str, field: &str) -> Option<u64> {
+    let rest = line.split(field).nth(1)?;
+    let digits: String = rest.trim_start_matches("0x").chars().take(16).collect();
+    u64::from_str_radix(&digits, 16).ok()
+}
+
 /// An NMI delivered where CPL is 0 and `rsp` is still the user's, and a machine
 /// that carries on.
 ///
@@ -500,14 +593,25 @@ const NMI_REPORT: &str = "syscall-window-nmi: sent=";
 /// the machine takes a `#DF`. `arch::idt`'s IST2 row is the fix and this is what
 /// says the row is load-bearing.
 ///
-/// **Where an NMI lands is the accelerator's answer, and on KVM it is the
-/// host's.** Under TCG, QEMU checks for a pending interrupt between translation
+/// **The first arrival is arranged; where the sprayed ones land is the
+/// accelerator's answer, and on KVM it is the host's.** Before it sprays, the
+/// storm holds the victim inside the entry — `nmi_gate::hold`'s word, which the
+/// entry acknowledges and spins on at CPL 0 on the user's stack — and aims one
+/// NMI at it there. That arrival is every host's, and is asserted on every
+/// host: the `held cpu=… rsp=…` line the storm prints before the send, with an
+/// `rsp` in the user half, and a `held` count in its report that the held CPU
+/// itself keeps — a window arrival taken while its own word still had both
+/// bits — whose frame stands at the held `rsp` with a `rip` inside the entry's
+/// spin. The spray's landings are not.
+///
+/// Under TCG, QEMU checks for a pending interrupt between translation
 /// blocks and `syscall` ends one, so a pending NMI is delivered at
 /// `syscall_entry+0`: the dev host reads 36 to 58 arrivals per 3,000, run after
 /// run. Under KVM an NMI to a running vCPU is a host kick, a VM exit and an
 /// injection at the next VM entry — and **which instruction that entry is
 /// depends on where the kick's exit landed**, which is a property of the host
-/// and not of the guest. Both extremes are measured on the hosted lane:
+/// and not of the guest. Both extremes are measured on the hosted lane, on the
+/// spray alone:
 ///
 /// - **0 of 6,000** (run 32584121311, two boots, with 2,451 and 438 of the same
 ///   NMIs arriving in Ring 3, so the aim was right and the injection point was
@@ -517,47 +621,53 @@ const NMI_REPORT: &str = "syscall-window-nmi: sent=";
 ///   first instruction every time, so the storm ended at `ENOUGH` after 64
 ///   deliveries).
 ///
-/// So an in-window count asserted on KVM would be asserting about the host, in
-/// either direction: a floor reds the first host and a ceiling reds the second.
-/// CI's guest lane is KVM only (`tests/CLAUDE.md`), and the accelerator is read
-/// off the argv this boot was built from — the same `-accel kvm` decision
-/// `qemu_command` made, not a re-derivation of it:
+/// So a sprayed in-window count asserted on KVM would be asserting about the
+/// host, in either direction: a floor reds the first host and a ceiling reds
+/// the second. CI's guest lane is KVM only (`tests/CLAUDE.md`), and the
+/// accelerator is read off the argv this boot was built from — the same
+/// `-accel kvm` decision `qemu_command` made, not a re-derivation of it:
 ///
-/// - **under TCG** the derived count is asserted as [`SAME_ORDER`] below — on
-///   a run whose victim was running when sampled (victim-located arrivals at
-///   or under its own traversals); a parked victim is the declared
-///   degradation at that check, printed and not judged;
-/// - **under KVM** the counts are printed as the instrument's verdict, and what
-///   is asserted is what every host witnesses: nine of ten aimed NMIs delivered,
-///   at least one of them arriving somewhere only the victim can be — in Ring 3
-///   *or* in the window — and no `#DF`.
+/// - **under TCG** the derived count is asserted as [`SAME_ORDER`] below, with
+///   the held arrival taken out of it first — on a run whose victim was running
+///   when sampled (victim-located arrivals at or under its own traversals); a
+///   parked victim is the declared degradation at that check, printed and not
+///   judged;
+/// - **under KVM** the sprayed counts are printed as the instrument's verdict,
+///   and what is asserted is what every host witnesses: the held arrival, nine
+///   of ten aimed NMIs delivered, at least one of them arriving somewhere only
+///   the victim can be — in Ring 3 *or* in the window — no window arrival with
+///   a `rip` outside the entry, and no `#DF`.
 ///
 /// The window itself is gated on both by `syscall_window_nmi_controls`, whose
-/// `nmi-without-ist` arm double faults at `syscall_entry` with `cr2 = rsp - 8`
-/// wherever it runs. `wake_storm_cost` is the shape this follows: whether an
-/// instrument can read the thing is the instrument's verdict, printed, and the
-/// derived assertion is made only on a run that can read it.
+/// `nmi-without-ist` arm double faults at `syscall_entry` on the held arrival,
+/// with `cr2 = rsp - 8` at the `rsp` it was held at. `wake_storm_cost` is the
+/// shape this follows: whether an instrument can read the thing is the
+/// instrument's verdict, printed, and the derived assertion is made only on a
+/// run that can read it.
 ///
 /// **The derivation, where it applies.** Every iteration of the spinner's loop
 /// passes through the window exactly once and through Ring 3 exactly once, so
 /// the two counts differ only by how many points an NMI can be delivered at
-/// inside each. The spinner's user loop is four instructions — `mov`, `syscall`,
-/// `dec`, `jnz` — and the window is four more: `cld`, the `rsp` save, the
-/// switch, and the exit's gap between `pop rsp` and `sysretq`. Four against four
-/// under a delivery model uniform over instructions; under TCG the window
-/// contributes one block boundary and the user side two or three. Both readings
-/// say one traversal each within a small factor, and [`SAME_ORDER`] is the
-/// bound: an order of magnitude, which no reading of the delivery model reaches
-/// and a classification that has stopped tracking the loop fails at once.
+/// inside each: a few instructions either side under a delivery model uniform
+/// over instructions, and under TCG one block boundary in the window against
+/// two or three on the user side. Both readings say one traversal each within a
+/// small factor, and [`SAME_ORDER`] is the bound: an order of magnitude, which
+/// no reading of the delivery model reaches and a classification that has
+/// stopped tracking the loop fails at once. The held arrival is not a sample of
+/// the spray and is subtracted before the ratio.
 ///
 /// Measured, dev host, TCG, `-smp 4`, 3,000 NMIs sent: **47 window arrivals
 /// against 136 in Ring 3** aimed, **36 against 122** while the storm still
 /// sprayed every sibling.
 ///
 /// The bound is not the teeth on its own. What says the count means the window
-/// is the first arrival's own `rip`, symbolized by the kernel and asserted
-/// against `syscall_entry` — `dump_nmi_probe`'s rule, that a probe naming the
-/// wrong instruction is worse than one naming none.
+/// is every counted arrival's own `rip`: the kernel holds each against
+/// `syscall_entry`'s extent and the report's `outside` has to be zero, on both
+/// accelerators. Under TCG the first *sprayed* one is also symbolized by the
+/// kernel and asserted against `syscall_entry`: `dump_nmi_probe`'s rule, that a
+/// probe naming the wrong instruction is worse than one naming none, read off
+/// the symbol table rather than off the labels `outside` is judged by. The held
+/// arrival cannot say either — it is inside the entry by arrangement.
 pub fn syscall_window_nmi(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -567,7 +677,7 @@ pub fn syscall_window_nmi(
     const SAME_ORDER: u64 = 10;
 
     let survived = storm(test_config, c_bins, rust_bins, &["syscall-window-nmi"], SPIN_SECS, |l| {
-        l.contains(NMI_REPORT)
+        l.contains(NMI_REPORT) || l.contains(HOLD_EXPIRED)
     })?;
     if survived.contains("DOUBLE FAULT") {
         return Err(format!(
@@ -575,23 +685,81 @@ pub fn syscall_window_nmi(
              is not doing what the table says\n{survived}"
         ));
     }
-    let report = survived
-        .lines()
-        .find(|l| l.contains(NMI_REPORT))
-        .ok_or_else(|| format!("the storm never reported — is `syscall-window-nmi` on?\n{survived}"))?;
-    let field = |name: &str| -> Result<u64, String> {
-        report
-            .split_whitespace()
-            .find_map(|w| w.strip_prefix(name)?.parse::<u64>().ok())
-            .ok_or_else(|| format!("no {name}N field in {report:?}"))
+    hold_expired(&survived)?;
+    let Some(report) = survived.lines().find(|l| l.contains(NMI_REPORT)) else {
+        return Err(match held_in_window(&survived) {
+            Ok(hold) if !survived.contains(RELEASED) => never_released(&hold, &survived),
+            _ => format!("the storm never reported — is `syscall-window-nmi` on?\n{survived}"),
+        });
     };
-    let (sent, seen) = (field("sent=")?, field("seen=")?);
-    let (window, ring3) = (field("window=")?, field("ring3=")?);
-    let spun = field("spun=")?;
+    // The premise before any verdict: the storm's own word that it held the
+    // victim inside the entry at the user's `rsp`, and the held CPU's own count
+    // of the arrival it took there.
+    let hold = held_in_window(&survived)?;
+    if let Some(line) = survived.lines().find(|l| l.contains(NO_SYSCALL_AFTER_RELEASE)) {
+        return Err(format!(
+            "the storm sprayed without waiting out the hold's end, so a window arrival of this \
+             run may be the released victim still inside the entry, which vouches for any \
+             classifier: `{}`\n{survived}",
+            line.trim(),
+        ));
+    }
+    let (sent, seen) = (field(report, "sent=")?, field(report, "seen=")?);
+    let (window, ring3) = (field(report, "window=")?, field(report, "ring3=")?);
+    let (spun, held) = (field(report, "spun=")?, field(report, "held=")?);
+    let outside = field(report, "outside=")?;
+    let Some(released) = survived.lines().find(|l| l.contains(RELEASED)) else {
+        return Err(never_released(&hold, &survived));
+    };
+    // Printed and not judged: how much of the entry's budget a hold takes is
+    // the host's pace.
+    let (turns, budget) = (field(released, "turns=")?, field(released, "budget=")?);
     eprintln!(
-        "  [nmi-window] {sent} sent, {seen} taken, {window} in the window, {ring3} in Ring 3, \
-         {spun} syscalls made under the storm"
+        "  [nmi-window] cpu{} held at rsp={:#x} for {turns} of the entry's {budget} turns; {sent} \
+         sent, {seen} taken, {window} in the window with {held} of them the held arrival and \
+         {outside} outside the entry, {ring3} in Ring 3, {spun} syscalls made under the storm",
+        hold.cpu, hold.rsp,
     );
+    // Every arrival and every accelerator: the kernel holds each `window`
+    // frame's `rip` against the entry's own extent, which is the only code that
+    // runs at CPL 0 on a user's `rsp`.
+    if outside != 0 {
+        return Err(format!(
+            "{outside} of {window} window arrivals had a `rip` outside `syscall_entry`: either the \
+             classifier counts Ring 0 frames that are not the window, or there is a second place \
+             this kernel runs at CPL 0 on a user's `rsp`\n{survived}"
+        ));
+    }
+    if held == 0 {
+        return Err(format!(
+            "cpu{} was held inside the entry at rsp={:#x} and took no window arrival while its \
+             hold word had both bits — either the NMI aimed at it was not delivered inside the \
+             hold, or a Ring 0 frame with a user `rsp` is classified as something else; either \
+             way the premise is missing and nothing below is a verdict on the window\n{survived}",
+            hold.cpu, hold.rsp,
+        ));
+    }
+    if window < held {
+        return Err(format!(
+            "the report counts the held arrival in the window and {window} window arrivals in \
+             all — one counter did not read the other's decision\n{survived}"
+        ));
+    }
+    // The held arrival's own frame, which the kernel keeps apart from the
+    // sprayed ones': at the `rsp` the storm read before it sent, and inside the
+    // spin the entry was held in.
+    let Some(arrival) = survived.lines().find(|l| l.contains("the held arrival had rip=")) else {
+        return Err(format!("the report counts a held arrival and names no frame for it\n{survived}"));
+    };
+    let (rip, rsp) = (hex(arrival, "rip="), hex(arrival, "rsp="));
+    if rsp != Some(hold.rsp) || !rip.is_some_and(|rip| hold.spin.contains(&rip)) {
+        return Err(format!(
+            "the held arrival's frame is rip={rip:#x?} rsp={rsp:#x?}, and cpu{} was held at \
+             rsp={:#x} spinning in {:#x?}: the arrival counted as the held one is not the one \
+             the hold arranged\n{survived}",
+            hold.cpu, hold.rsp, hold.spin,
+        ));
+    }
 
     // **A low delivery ratio is the host, not the kernel — unless the victim
     // also made no progress.** A victim that an NMI *ended* takes the machine
@@ -646,10 +814,11 @@ pub fn syscall_window_nmi(
         // What the victim's liveness rests on is the arrival counts above and
         // the delivery ratio, which are the same on every host.
         eprintln!(
-            "  [nmi-window] KVM delivered {window} of {seen} into the window and {ring3} in \
-             Ring 3, with {spun} syscalls made under the storm: where this accelerator injects \
-             is the host's business, so what this run gates is that the machine took {sent} \
-             aimed NMIs with IST2 in place and went on working"
+            "  [nmi-window] KVM delivered {} of {seen} sprayed NMIs into the window and {ring3} \
+             in Ring 3, with {spun} syscalls made under the storm: where this accelerator \
+             injects is the host's business, so what this run gates is the held arrival and \
+             that the machine took {sent} aimed NMIs with IST2 in place and went on working",
+            window - held,
         );
         return Ok(());
     }
@@ -689,33 +858,37 @@ pub fn syscall_window_nmi(
         return Ok(());
     }
 
-    if window == 0 {
+    // The spray alone: the held arrival was aimed, not sampled.
+    let sprayed = window - held;
+    if sprayed == 0 {
         return Err(format!(
-            "{sent} NMIs were sent and {seen} taken under TCG, and not one landed in the \
-             syscall window — this accelerator delivers at translation-block boundaries and \
-             `syscall` ends one, so the instrument proved nothing about the stack the CPU \
-             pushes on\n{survived}"
+            "{sent} NMIs were sent and {seen} taken under TCG, and not one sprayed NMI landed \
+             in the syscall window — this accelerator delivers at translation-block boundaries \
+             and `syscall` ends one, so the spray proved nothing about the stack the CPU pushes \
+             on\n{survived}"
         ));
     }
-    if window * SAME_ORDER < ring3 {
+    if sprayed * SAME_ORDER < ring3 {
         return Err(format!(
-            "{window} window arrivals against {ring3} in Ring 3. Every iteration passes through \
-             both exactly once, so they are of one order; a {SAME_ORDER}x shortfall says the \
-             arrivals are not being classified where they land\n{survived}"
+            "{sprayed} sprayed window arrivals against {ring3} in Ring 3. Every iteration passes \
+             through both exactly once, so they are of one order; a {SAME_ORDER}x shortfall \
+             says the arrivals are not being classified where they land\n{survived}"
         ));
     }
     // What makes the count a claim about the window rather than about some
-    // other Ring 0 frame with a low `rsp`: the kernel symbolizes the first one
-    // it saw, and it has to be the entry.
-    let Some(rest) = survived.split("the first window arrival was here:\n").nth(1) else {
-        return Err(format!("the report named no rip for the first window arrival\n{survived}"));
+    // other Ring 0 frame with a low `rsp`: the kernel symbolizes the first
+    // sprayed one it saw, and it has to be the entry.
+    let Some(rest) = survived.split("the first sprayed window arrival was here:\n").nth(1) else {
+        return Err(format!(
+            "the report named no rip for the first sprayed window arrival\n{survived}"
+        ));
     };
     let named = rest.lines().next().unwrap_or("");
     if !named.contains("syscall_entry") {
         return Err(format!(
-            "the first window arrival resolved to `{}`, not to the syscall entry — a Ring 0 \
-             frame with a user `rsp` somewhere else is a different finding, and this test is \
-             not measuring it\n{survived}",
+            "the first sprayed window arrival resolved to `{}`, not to the syscall entry — a \
+             Ring 0 frame with a user `rsp` somewhere else is a different finding, and this test \
+             is not measuring it\n{survived}",
             named.trim(),
         ));
     }
@@ -739,9 +912,9 @@ fn kvm_accelerated() -> bool {
 /// The two negative controls on [`syscall_window_nmi`], which is where the
 /// property is asserted and this is where it is shown not to be vacuous.
 ///
-/// **Nightly.** Two Metal boots of 3,000
-/// NMIs, and both end in a halted machine that has to be drained past its own
-/// report — which is what the price is. A control is a claim about the
+/// **Nightly.** Two Metal boots, and both end in a halted machine that has to be
+/// drained past its own report — which is what the price is. A control is a
+/// claim about the
 /// instrument rather than about the kernel under review: it says the same test,
 /// run against a kernel with the defect, reds. That does not change per pull
 /// request, and the fixed arm reds per pull request if the kernel does.
@@ -755,8 +928,8 @@ pub fn syscall_window_nmi_controls(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     // The first control: the same boot with vector 2's IST index taken off.
-    // Everything else — the handler, the gate, the storm, the spinner — is the
-    // same, so what the `#DF` below measures is the one byte.
+    // Everything else — the handler, the gate, the storm, the hold, the spinner
+    // — is the same, so what the `#DF` below measures is the one byte.
     // Drained past the header, not to it: `double_fault_handler` prints the
     // address that started the chain, then the registers, then the backtrace
     // that carries the symbol every assertion below reads, and only then this.
@@ -766,40 +939,80 @@ pub fn syscall_window_nmi_controls(
         rust_bins,
         &["syscall-window-nmi", "nmi-without-ist"],
         SPIN_SECS,
-        |l| l.contains("Scanning kernel stack"),
+        |l| l.contains("Scanning kernel stack") || l.contains(HOLD_EXPIRED),
     )?;
-    let Some(df) = unfixed.lines().find(|l| l.contains("DOUBLE FAULT")) else {
+    hold_expired(&unfixed)?;
+    // The premise before the consequence: a control whose stimulus missed can
+    // only say what an absent defect says, and this one says which it was.
+    let hold = held_in_window(&unfixed)?;
+    let line_of = |what: &str| unfixed.lines().position(|l| l.contains(what));
+    let Some(df_at) = line_of("DOUBLE FAULT") else {
+        if line_of(RELEASED).is_none() {
+            return Err(never_released(&hold, &unfixed));
+        }
         return Err(format!(
-            "with no IST on vector 2 the machine survived the whole storm — the control stages \
-             nothing, so `syscall_window_nmi` proves nothing either\n{unfixed}"
+            "cpu{} was held inside the entry at rsp={:#x} with no IST on vector 2 and an NMI \
+             aimed at it, and the machine survived — the CPU took that NMI at CPL 0 on a user \
+             page without the stack IST2 provides and nothing refused the frame, so on this \
+             machine the row is not what stands between the window and a #DF\n{unfixed}",
+            hold.cpu, hold.rsp,
         ));
     };
+    // The held arrival's `#DF` and not a sprayed one's: the storm says when the
+    // hold ended, and the death has to be above that line or the victim was
+    // already out of the hold when it died.
+    if line_of(RELEASED).is_some_and(|released| released < df_at) {
+        return Err(format!(
+            "the storm released cpu{} before the #DF: the NMI aimed at the hold did not take the \
+             machine down, and the one that did was sprayed at a CPU nobody held\n{unfixed}",
+            hold.cpu,
+        ));
+    }
+    let df = unfixed.lines().nth(df_at).unwrap_or_default();
     eprintln!("  [nmi-window] without IST2: {}", df.trim());
+    let df_cpu = df
+        .split("on CPU ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next()?.parse::<u64>().ok());
+    if df_cpu != Some(hold.cpu) {
+        return Err(format!(
+            "the double fault was on CPU {df_cpu:?}, not on cpu{} the storm held — a #DF on any \
+             other CPU is a different death\n{unfixed}",
+            hold.cpu,
+        ));
+    }
     if !unfixed.contains("syscall_entry") {
         return Err(format!(
             "the control double faulted somewhere other than the syscall entry\n{unfixed}"
         ));
     }
     // **The exact signature, and the reason this is a control and not a
-    // coincidence**: the address the CPU faulted on is the first qword of the
-    // frame it was trying to push, one below the `rsp` it was pushing at. A #DF
-    // for any other reason does not put `cr2` there.
-    let hex = |line: &str, field: &str| -> Option<u64> {
-        let rest = line.split(field).nth(1)?;
-        let digits: String = rest.trim_start_matches("0x").chars().take(16).collect();
-        u64::from_str_radix(&digits, 16).ok()
-    };
-    let cr2 = unfixed.lines().find_map(|l| hex(l, "cr2="));
-    let rsp = unfixed.lines().find_map(|l| hex(l, "rsp="));
-    match (cr2, rsp) {
-        (Some(cr2), Some(rsp)) if cr2 == rsp.wrapping_sub(8) => {
-            eprintln!("  [nmi-window] without IST2: cr2={cr2:#x} is rsp-8, the frame's first qword");
+    // coincidence**: the `#DF` stands inside the spin the victim was held in,
+    // at the `rsp` it was held at, and the address the CPU faulted on is the
+    // first qword of the frame it was trying to push there, one below it. A #DF
+    // for any other reason does not put `cr2` there, one on any other stack is
+    // not the held one, and a sprayed arrival's is at the entry's first
+    // instruction and not in the spin.
+    let report: Vec<&str> = unfixed.lines().skip(df_at).collect();
+    let cr2 = report.iter().find_map(|l| hex(l, "cr2="));
+    let rip = report.iter().find_map(|l| hex(l, "rip="));
+    let rsp = report.iter().find_map(|l| hex(l, "rsp="));
+    match (cr2, rip, rsp) {
+        (Some(cr2), Some(rip), Some(rsp))
+            if rsp == hold.rsp && cr2 == rsp.wrapping_sub(8) && hold.spin.contains(&rip) =>
+        {
+            eprintln!(
+                "  [nmi-window] without IST2: the #DF stands at the held rsp={rsp:#x} with \
+                 rip={rip:#x} inside the spin, and cr2={cr2:#x} is rsp-8, the frame's first qword"
+            );
         }
-        (cr2, rsp) => {
+        (cr2, rip, rsp) => {
             return Err(format!(
-                "the control's #DF reports cr2={cr2:#x?} against rsp={rsp:#x?}; the fault this \
-                 stages is the frame's own first qword at rsp-8, so this is a different \
-                 death\n{unfixed}"
+                "the control's #DF reports cr2={cr2:#x?} rip={rip:#x?} rsp={rsp:#x?}, with the \
+                 victim held at rsp={:#x} spinning in {:#x?}; the fault this stages is the \
+                 frame's own first qword at the held rsp-8 from inside that spin, so this is a \
+                 different death\n{unfixed}",
+                hold.rsp, hold.spin,
             ));
         }
     }
@@ -970,4 +1183,151 @@ pub fn dump_nmi_probe(
         ));
     }
     Ok(())
+}
+
+/// The blocked-task dump asked for where it may not be served, on one CPU:
+/// `dump-in-blocking-pass` files one request in a kernel thread's blocking pass,
+/// one in a user thread's, one in a pass entered above zero — which a thread
+/// exiting from its syscall drives — and one during a report. Each staged pass
+/// meets its request twice, with the clear a pass makes on entry between the
+/// meetings, as a task woken behind it that blocks again would.
+///
+/// One CPU, so no sibling's pass serves what a pass left. The stages arm at the
+/// SMP release, so one may fire under the boot's own load; one that has not,
+/// `test_rs_dump_stage_load` fires: every task leaves the CPU before a quantum
+/// ends and one is always ready, so no tick and no idle loop comes, and the only
+/// pass entered at zero is the one the leaving CPU owes itself. The bound is the
+/// construction's own and not a duration: `need_resched` is set by every pass
+/// that leaves a request, and the Ring 3 exit check runs a pass entered at zero
+/// while it is set — so zero returns to Ring 3 with the request pending.
+///
+/// Judged per request: it was left and that was said once, every report ran from
+/// a pass entered at zero and none began inside another, the request filed during
+/// a report got a report of its own, and the job finished clean.
+pub fn dump_left_pending_is_owed(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            kernel_params: &["dump-in-blocking-pass"],
+            smp: 1,
+            ..Default::default()
+        },
+    );
+    // Nothing is staged before this line, which the release prints at the first
+    // pass after it: in the boot log, or after it on a boot that outran that pass.
+    const ARMED: &str = "dump-in-blocking-pass: armed";
+    let mut armed = qemu.boot_log().to_string();
+    if !armed.contains(ARMED) {
+        armed.push_str(&qemu.drain_until(Duration::from_secs(20), |line| line.contains(ARMED)));
+    }
+    if !armed.contains(ARMED) {
+        return Err(format!("the actuator never armed — is `dump-in-blocking-pass` on?\n{armed}"));
+    }
+    let result = qemu.run_test("test_rs_dump_stage_load", Duration::from_secs(60));
+    let log = format!("{armed}{}{}{}", result.before, result.serial, result.stdout);
+
+    // A panic's message is the line after the one that says where.
+    let mut panic = log.lines().skip_while(|line| !line.contains("PANIC")).take(2);
+    if let Some(line) = panic.next() {
+        return Err(format!(
+            "a `PANIC` line is in the log: `{} {}`\n{log}",
+            unstamped(line),
+            unstamped(panic.next().unwrap_or(""))
+        ));
+    }
+    // A request is filed only once the one before it is accounted for, so the
+    // lines from one filing to the next are that request's.
+    const FILED: &str = "files a request in ";
+    let lines: Vec<&str> = log.lines().collect();
+    let starts: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].contains(FILED)).collect();
+    // What the filing line says, what the pass that left it says, and how many
+    // reports follow: the user thread's blocking pass hosts the request filed
+    // during a report.
+    const STAGES: [(&str, &str, usize); 3] = [
+        ("a blocking pass of a kernel thread", "met the request in a blocking pass", 1),
+        ("a blocking pass of a user thread", "met the request in a blocking pass", 2),
+        ("a pass entered at preempt depth", "met the request in a pass entered at preempt depth", 1),
+    ];
+    if starts.len() != STAGES.len() {
+        return Err(format!("{} request(s) filed in a pass, not {}\n{log}", starts.len(), STAGES.len()));
+    }
+    for (filed, left, reports) in STAGES {
+        let Some(at) = starts.iter().position(|&i| lines[i].contains(&format!("{FILED}{filed}"))) else {
+            return Err(format!("no request was filed in {filed}\n{log}"));
+        };
+        let end = starts.get(at + 1).copied().unwrap_or(lines.len());
+        let own = &lines[starts[at]..end];
+        let count = |needle: &str| own.iter().filter(|line| line.contains(needle)).count();
+
+        // Once per request: a line per meeting is two, and a line never re-armed
+        // is none for the requests after the first.
+        if count(left) != 1 || count("met the request in ") != 1 {
+            return Err(format!(
+                "the request filed in {filed} was left and that was said {} time(s), not once\n{log}",
+                count("met the request in ")
+            ));
+        }
+        let mut open = false;
+        for line in own {
+            if line.contains("=== blocked-task dump:") {
+                if open {
+                    return Err(format!("a report began inside another, after {filed}\n{log}"));
+                }
+                open = true;
+            } else if line.contains("=== end of dump ===") {
+                open = false;
+            }
+        }
+        if count("=== end of dump ===") != reports || count("files a request during a report") != reports - 1 {
+            return Err(format!(
+                "{} complete report(s) and {} request(s) filed during one after {filed}, not {reports} and {}\n{log}",
+                count("=== end of dump ==="),
+                count("files a request during a report"),
+                reports - 1,
+            ));
+        }
+        const FROM: &str = " reports from ";
+        if let Some(line) = own
+            .iter()
+            .find(|line| line.contains(FROM) && !line.contains("reports from a pass entered at preempt depth 0"))
+        {
+            return Err(format!("a pass that may not serve ran a report: `{}`\n{log}", unstamped(line)));
+        }
+        if count(FROM) != reports {
+            return Err(format!("{} of {reports} report(s) said where they ran after {filed}\n{log}", count(FROM)));
+        }
+        const OWED: &str = " time(s) with its request pending";
+        if count(OWED) != 1 {
+            return Err(format!("the request filed in {filed} was accounted for {} time(s)\n{log}", count(OWED)));
+        }
+        if let Some(line) = own
+            .iter()
+            .find(|line| line.contains(OWED) && !line.contains("returned to Ring 3 0 time(s)"))
+        {
+            return Err(format!(
+                "a cpu that left a request went back to Ring 3 without serving it: `{}`\n{log}",
+                unstamped(line)
+            ));
+        }
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "the job whose passes were staged did not finish clean: exit {:?}\n{log}",
+            result.exit_code
+        ));
+    }
+    Ok(())
+}
+
+/// A kernel line without its `[kernel <seconds> cpuN] ` stamp, which differs on every boot: a
+/// quoted line that kept it would make every red of a rerun a different one.
+fn unstamped(line: &str) -> &str {
+    let line = line.trim();
+    line.strip_prefix("[kernel ").and_then(|rest| rest.split_once("] ")).map_or(line, |(_, said)| said)
 }

@@ -29,15 +29,6 @@ static INBOX_WATCHERS: Lock<Vec<InboxId>> = Lock::new(Vec::new());
 /// How many transitions the kernel holds for a reader that is not reading; the oldest is dropped on overflow.
 pub const MAX_QUEUED_EVENTS: usize = 512;
 
-/// Ctrl+Alt+D is recorded here, not acted on; the scheduler pass consumes it with no driver lock held.
-static DUMP_REQUESTED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// Consume a pending Ctrl+Alt+D. Called from `drain_irqs` and nowhere else.
-pub fn take_dump_request() -> bool {
-    DUMP_REQUESTED.swap(false, core::sync::atomic::Ordering::Relaxed)
-}
-
 /// Which HID usages are down, one bit each, across every keyboard; keyed by usage, so releasing one keyboard's modifier drops it even if another still holds it.
 static HELD: Lock<[u64; 4]> = Lock::new([0; 4]);
 
@@ -96,7 +87,7 @@ pub fn handle_key(usage: u8, pressed: bool) -> bool {
 
     // Ctrl+Alt+D: keyed by HID usage so it is the same three keys under every layout; recorded, not run, since the caller holds its driver's guard.
     if pressed && modifiers & MOD_CTRL != 0 && modifiers & MOD_ALT != 0 && usage == 0x07 {
-        DUMP_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
+        crate::sched::dump::file_request();
         return false;
     }
 

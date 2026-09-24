@@ -1,6 +1,9 @@
 /// The actuator-state coupling gate, read by nothing but its own tests.
 #[cfg(test)]
 pub mod actuatorstate;
+/// What the suite's isolated re-run is allowed to call one failure; read by
+/// `tests/toyos.rs` and by its own tests.
+pub mod alone;
 pub mod assets;
 pub mod bootlog;
 pub mod build;
@@ -11,6 +14,7 @@ pub mod clippy;
 pub mod fingerprint;
 pub mod flags;
 pub mod forkcheck;
+pub mod heartbeat;
 pub mod hostws;
 pub mod icmp;
 pub mod image;
