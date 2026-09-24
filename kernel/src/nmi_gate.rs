@@ -61,7 +61,7 @@ pub mod hold {
     /// Turns an ask grants. A count and not a time, because the entry can read no clock without a register; a bound, not a measurement.
     pub const TURNS: u64 = 1 << 25;
     /// What the storm stores to ask.
-    pub const ASK: u64 = ASKED | TURNS * SPIN;
+    pub const ASK: u64 = ASKED | (TURNS * SPIN);
 }
 
 /// Each CPU's hold word and the slot its entry parks the user `rsp` in, as addresses; published by `percpu::alloc_percpu` before that CPU runs, `irq_census`'s way.
