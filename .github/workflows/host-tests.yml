@@ -34,7 +34,41 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # `ci.yml`'s `scope` job, restated: a pull request or merge group whose diff
+  # is prose only (`*.md` anywhere, `issues/**`, `.claude/**`) needs no
+  # clippy pass and no host suite — the tree behind either is unchanged.
+  # Unlike `ci.yml`'s flag this carries no draft exemption: a draft still
+  # wants its host checks, per the owner's ruling that only the guest suite
+  # waits for `ready_for_review`.
+  #
+  # Silent for every other trigger, for `ci.yml`'s own reason: `prose_only` is
+  # empty on `push`, `schedule` and `workflow_dispatch`, and every `if:` below
+  # reads that the same as `false`.
+  scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      prose_only: ${{ steps.judge.outputs.prose_only }}
+    steps:
+      # Full history: `.github/prose-only.sh`'s merge-base with `origin/main`
+      # does not resolve over a shallow one.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - id: judge
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request|merge_group) ;;
+            *) echo "prose_only=" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          prose=$(.github/prose-only.sh)
+          echo "the diff is prose-only: $prose"
+          echo "prose_only=$prose" >> "$GITHUB_OUTPUT"
+
   host:
+    needs: [scope]
+    if: needs.scope.outputs.prose_only != 'yes'
     runs-on: macos-latest
     timeout-minutes: 30
     steps:

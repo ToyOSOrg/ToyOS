@@ -20,6 +20,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # `ready_for_review` is not in the default set (`opened`, `synchronize`,
+    # `reopened`): without it, marking a draft ready never re-triggers this
+    # workflow, and `scope` below never gets a run to lift the guest suite on.
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   workflow_dispatch:
   schedule:
@@ -35,6 +39,47 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # What the rest of this workflow is for, decided once instead of by every
+  # downstream job separately. A pull request or merge group whose diff is
+  # prose only (`*.md` anywhere, `issues/**`, `.claude/**`) needs no toolchain
+  # and boots no guest — `toyos-build` never touched a file that changes what
+  # it does. A draft pull request needs the same lift for a different reason:
+  # nothing here is a required check until the author asks for review.
+  #
+  # Silent for every other trigger (`push`, `schedule`, `workflow_dispatch`):
+  # `skip_guest` is empty there, which every `if:` below reads the same as
+  # `false`, so a push to `main` and a nightly run are untouched by this job —
+  # `push`'s own exemption from the guest matrix (below) is a separate rule,
+  # since a code change to `main` still needs the toolchain built for
+  # `cache-writer`.
+  scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip_guest: ${{ steps.judge.outputs.skip_guest }}
+    steps:
+      # Full history: `.github/prose-only.sh`'s merge-base with `origin/main`
+      # does not resolve over a shallow one.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - id: judge
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request|merge_group) ;;
+            *) echo "skip_guest=" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          prose=$(.github/prose-only.sh)
+          draft=${{ github.event.pull_request.draft == true }}
+          if [ "$prose" = yes ] || [ "$draft" = true ]; then
+            echo "the diff is prose-only ($prose) or the pull request is a draft ($draft):" \
+              "no toolchain, no guest."
+            echo "skip_guest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip_guest=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Nothing here may run against a tree whose toolchain does not build.
   # `toolchain.yml` is a separate workflow because it must never be cancelled
   # (an hour-long bootstrap thrown away by the next push starts from nothing),
@@ -46,6 +91,8 @@ jobs:
   # for: this one does nothing but poll an API for up to two hours for what
   # `toolchain.yml`'s own job publishes.
   toolchain-ready:
+    needs: [scope]
+    if: needs.scope.outputs.skip_guest != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
@@ -109,7 +156,13 @@ jobs:
           exit 1
 
   guest:
-    needs: [toolchain-ready]
+    needs: [scope, toolchain-ready]
+    # `scope`'s lift for a prose-only diff or a draft pull request, and one
+    # more of its own: the merge queue already ran this exact composition
+    # before a push reaches `main`, so a push boots no shard a second time —
+    # `cache-writer` below is what a push still needs, and it does not read
+    # this flag.
+    if: needs.scope.outputs.skip_guest != 'true' && github.event_name != 'push'
     runs-on: ubuntu-24.04
     # A wedge guard, not a budget: the harness answers a dead shared boot with
     # a new one, so a shard that cannot finish inside this ceiling measures
@@ -627,17 +680,42 @@ jobs:
       # `toolchain-ready` is named here as well as in the shards' `needs:`,
       # since a skipped `guest` says nothing about why it was skipped and this
       # is the name a reader of the merge button sees.
+      #
+      # This is the required check's own name, so it must conclude fast and
+      # green whenever `scope` lifted the rest of the run — a prose-only diff,
+      # a draft pull request, or (a separate case, `guest` alone) a push to
+      # `main` the merge queue already validated. `toolchain-ready`'s result
+      # is the one signal read for the first two: `scope` skips it, and
+      # nothing below it runs either, so a skipped `toolchain-ready` is
+      # believed outright rather than re-deriving `scope`'s verdict here.
       - name: aggregate
         run: |
           echo "toolchain: ${{ needs.toolchain-ready.result }}"
           echo "guest partition: ${{ needs.guest.result }}"
           echo "duration profile: ${{ needs.durations.result }}"
           echo "cache writer: ${{ needs.cache-writer.result }}"
+
+          if [ "${{ needs.toolchain-ready.result }}" = skipped ]; then
+            if [ "${{ needs.guest.result }}" != skipped ] || [ "${{ needs.cache-writer.result }}" != skipped ] \
+               || [ "${{ needs.durations.result }}" != success ]; then
+              echo "::error::toolchain-ready was skipped but guest(${{ needs.guest.result }}),"
+              echo "::error::cache-writer(${{ needs.cache-writer.result }}) or"
+              echo "::error::durations(${{ needs.durations.result }}) was not the shape scope's"
+              echo "::error::lift produces — a job's own \`if:\` drifted from scope's."
+              exit 1
+            fi
+            echo "scope lifted this run: no toolchain, no guest, nothing to check."
+            exit 0
+          fi
           if [ "${{ needs.toolchain-ready.result }}" != success ]; then
             echo "::error::the toolchain for this tree did not build, so no shard ran."
             exit 1
           fi
-          if [ "${{ needs.guest.result }}" != success ]; then
+
+          if [ "${{ needs.guest.result }}" = skipped ] && [ "${{ github.event_name }}" = push ]; then
+            echo "guest was skipped: a push to main is already validated by the merge queue" \
+              "on the exact composition that landed."
+          elif [ "${{ needs.guest.result }}" != success ]; then
             echo "::error::a guest shard reported ${{ needs.guest.result }}. The run summary"
             echo "::error::names the shard, the test and whether it survived being re-run"
             echo "::error::alone; \`cargo run -- --known-red <test>\` says whether it is quarantined."

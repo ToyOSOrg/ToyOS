@@ -46,6 +46,19 @@ jobs:
           key: landing-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: landing-${{ runner.os }}-
 
+      # Neither rule below can move on a diff that is `*.md` anywhere,
+      # `issues/**` or `.claude/**` and nothing else — no sysroot crate and no
+      # published crate's manifest is prose — so the two steps skip the build
+      # this job exists to avoid on a prose-only pull request. Computed once
+      # here rather than in each: `cargo run` is the expensive half of both.
+      - id: scope
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "prose_only=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "prose_only=$(.github/prose-only.sh)" >> "$GITHUB_OUTPUT"
+
       # Always runs and answers "not a pull request" rather than being
       # skipped: a required check a `push` event skips reports a state a
       # protection rule then has an opinion about.
@@ -53,6 +66,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "not a pull request: this rule is about a branch against its base."
+            exit 0
+          fi
+          if [ "${{ steps.scope.outputs.prose_only }}" = yes ]; then
+            echo "the diff is prose-only: no sysroot crate it names could have moved."
             exit 0
           fi
           git fetch --quiet origin \
@@ -68,6 +85,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "not a pull request: this rule is about a branch against its base."
+            exit 0
+          fi
+          if [ "${{ steps.scope.outputs.prose_only }}" = yes ]; then
+            echo "the diff is prose-only: no published crate's manifest it names could have moved."
             exit 0
           fi
           git fetch --quiet origin \
