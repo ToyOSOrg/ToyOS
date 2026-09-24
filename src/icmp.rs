@@ -1,11 +1,5 @@
 //! One ICMP echo, asked over the platform's own unprivileged datagram socket.
 //!
-//! **No host binary.** `SOCK_DGRAM` with `IPPROTO_ICMP` is the socket both hosts
-//! this repository runs on open without privilege, so the probe is this crate's
-//! own code on either of them rather than an argument to somebody's `ping` —
-//! whose one flag that matters, the per-probe wait, means milliseconds on one
-//! and seconds on the other.
-//!
 //! **A host that cannot ask and an address that did not answer are different
 //! answers**, and the caller gets them as `Err` and `Ok(false)`: a socket the
 //! host refuses would otherwise red a boot for this machine's configuration.
@@ -13,7 +7,7 @@
 //! first — [`wire_is_down`] is where that line is drawn.
 
 use std::io;
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::os::fd::FromRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -64,7 +58,7 @@ pub fn echo(addr: Ipv4Addr, wait: Duration) -> Result<bool, String> {
             .set_read_timeout(Some(left))
             .map_err(|e| format!("this host would not bound an ICMP read by {left:?}: {e}"))?;
         match socket.recv_from(&mut buf) {
-            Ok((got, _)) if is_reply(&buf[..got], &token) => return Ok(true),
+            Ok((got, from)) if is_reply(from.ip(), addr, &buf[..got], &token) => return Ok(true),
             // Somebody else's echo on the same socket: keep listening for this
             // probe's own until the window is spent.
             Ok(_) => {}
@@ -134,29 +128,35 @@ fn request(token: &[u8; TOKEN]) -> [u8; HEADER + TOKEN] {
     message
 }
 
-/// Whether `message` is the reply to the request carrying `token`.
+/// Whether `message`, which came `from`, is `addr`'s reply to the request
+/// carrying `token`.
+///
+/// **Whose reply it was is half the question**: the socket is handed every ICMP
+/// datagram this host receives, so another host returning this probe's payload
+/// is not `addr` answering.
 ///
 /// **Found by the payload rather than at an offset**: one host hands the
 /// datagram over with the IPv4 header in front of the ICMP message and the
 /// other without it, and the type byte is [`HEADER`] bytes before the payload
 /// either way. The identifier is not read at all — Linux's ping socket
 /// overwrites it with the socket's own port.
-fn is_reply(message: &[u8], token: &[u8; TOKEN]) -> bool {
-    message
-        .windows(TOKEN)
-        .position(|window| window == token)
-        .is_some_and(|at| at >= HEADER && message[at - HEADER] == ECHO_REPLY)
+fn is_reply(from: IpAddr, addr: Ipv4Addr, message: &[u8], token: &[u8; TOKEN]) -> bool {
+    from == addr
+        && message
+            .windows(TOKEN)
+            .position(|window| window == token)
+            .is_some_and(|at| at >= HEADER && message[at - HEADER] == ECHO_REPLY)
 }
 
 /// The internet checksum (RFC 1071): the one's-complement sum of the message as
 /// 16-bit words, complemented.
 fn checksum(message: &[u8]) -> u16 {
     let mut sum = 0u32;
-    let mut words = message.chunks_exact(2);
-    for word in &mut words {
-        sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
+    let (words, rest) = message.as_chunks::<2>();
+    for word in words {
+        sum += u32::from(u16::from_be_bytes(*word));
     }
-    if let [odd] = words.remainder() {
+    if let [odd] = rest {
         sum += u32::from(u16::from_be_bytes([*odd, 0]));
     }
     while sum >> 16 != 0 {
@@ -173,6 +173,8 @@ mod tests {
     /// the message.
     const IPV4: [u8; 20] = [0x45, 0, 0, 36, 0, 0, 0, 0, 64, 1, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2];
 
+    const HOST: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
     fn reply_to(request: &[u8]) -> Vec<u8> {
         let mut reply = request.to_vec();
         reply[0] = ECHO_REPLY;
@@ -182,9 +184,6 @@ mod tests {
         reply
     }
 
-    /// **The property the checksum has and a wrong one does not**: a message
-    /// carrying its own checksum sums to zero, which is what the receiver
-    /// computes. Read against RFC 1071 §1 rather than against this code.
     #[test]
     fn a_message_carrying_its_own_checksum_sums_to_zero() {
         let message = request(&token());
@@ -208,15 +207,26 @@ mod tests {
         assert_ne!(token, super::token());
     }
 
-    /// **The reply is found with the IPv4 header in front of it and without**,
-    /// because the two hosts this runs on differ in that and nothing else here.
+    #[test]
+    fn the_checksum_is_the_field_rfc_792_gives_it() {
+        let token = token();
+        let message = request(&token);
+        // The same request with the checksum field unwritten, built here rather
+        // than taken from `request`, so where the sum went is what is compared.
+        let mut unsummed = [0u8; HEADER + TOKEN];
+        unsummed[0] = ECHO_REQUEST;
+        unsummed[HEADER..].copy_from_slice(&token);
+        assert_eq!(u16::from_be_bytes([message[2], message[3]]), checksum(&unsummed));
+        assert_eq!(message[4..HEADER], unsummed[4..HEADER], "{message:02x?}");
+    }
+
     #[test]
     fn a_reply_is_this_probes_however_the_host_hands_it_over() {
         let token = token();
         let reply = reply_to(&request(&token));
-        assert!(is_reply(&reply, &token));
+        assert!(is_reply(HOST.into(), HOST, &reply, &token));
         let headed: Vec<u8> = IPV4.iter().chain(reply.iter()).copied().collect();
-        assert!(is_reply(&headed, &token));
+        assert!(is_reply(HOST.into(), HOST, &headed, &token));
     }
 
     /// **A wire that is down right now is a second nothing answered, and
@@ -261,19 +271,20 @@ mod tests {
         let request = request(&token);
         // The request itself, which a host that loops its own traffic back
         // would otherwise read as an answer.
-        assert!(!is_reply(&request, &token));
+        assert!(!is_reply(HOST.into(), HOST, &request, &token));
+        assert!(!is_reply(Ipv4Addr::new(10, 0, 0, 9).into(), HOST, &reply_to(&request), &token));
         // Another probe's reply, and a reply to nobody.
-        assert!(!is_reply(&reply_to(&super::request(&super::token())), &token));
-        assert!(!is_reply(&[], &token));
+        assert!(!is_reply(HOST.into(), HOST, &reply_to(&super::request(&super::token())), &token));
+        assert!(!is_reply(HOST.into(), HOST, &[], &token));
         // The token with nothing in front of it: a message that cannot carry a
         // type byte is not one.
-        assert!(!is_reply(&token, &token));
+        assert!(!is_reply(HOST.into(), HOST, &token, &token));
         // An unreachable message quoting this probe's request in its own body
         // is the address refusing, not answering: the type byte before the
         // payload is the quoted request's `8`.
         let mut unreachable = vec![3u8, 0, 0, 0, 0, 0, 0, 0];
         unreachable.extend_from_slice(&IPV4);
         unreachable.extend_from_slice(&request);
-        assert!(!is_reply(&unreachable, &token));
+        assert!(!is_reply(HOST.into(), HOST, &unreachable, &token));
     }
 }

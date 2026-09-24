@@ -916,7 +916,7 @@ fn cargo_link_stale(stage2: &Path) -> bool {
 /// every run, never had it at all.
 ///
 /// **A symlink, and what survives the artifact round-trip is this step rather
-/// than the link.** `toolchain.yml` excludes it from the tarball for the reason
+/// than the link.** `src/release.rs` excludes it from the tarball for the reason
 /// it excludes `lib/rustlib/<host>`: it names a path only the publishing runner
 /// has, and a copy would put a 32 MB host binary into a 401 MiB artifact to
 /// stand in for a file the consumer can make in a microsecond. `Owner::Installed`
@@ -1754,7 +1754,7 @@ fn build_toyos_ld(root: &Path) {
     assert!(status.success(), "toyos-ld build failed");
 }
 
-/// Where `toolchain.yml` puts the linker in the tarball, so the consumer that
+/// Where `src/release.rs` puts the linker in the tarball, so the consumer that
 /// unpacks it finds one beside `rustc`.
 fn shipped_toyos_ld(rust_dir: &Path) -> PathBuf {
     rust_dir.join(format!("build/{}/stage2/bin/toyos-ld", host_triple()))

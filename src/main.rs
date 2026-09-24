@@ -95,9 +95,8 @@ fn main() {
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
     // The landing protocol, and the command it replaced — **before
-    // `check_prerequisites`**, because none of these builds anything and the
-    // runner that runs `--abi-split-check` has no QEMU on it. They are git, a
-    // push, and a refusal.
+    // `check_prerequisites`**, because none of these builds anything. They are
+    // git, a push, and a refusal.
     if asked(&flags::LAND) {
         toyos_build::pr::dispatch_retired_land();
     }
@@ -109,48 +108,24 @@ fn main() {
         toyos_build::pr::dispatch_sync(&root);
         return;
     }
-    if asked(&flags::ABI_SPLIT_CHECK) {
-        toyos_build::pr::dispatch_abi_check(&root, &args);
+    // Every CI job. Here for the same reason: the host job's runner has no QEMU,
+    // and a guest job names its own instrument rather than being noted at.
+    if asked(&flags::CI) {
+        toyos_build::ci::dispatch(&root, &args);
         return;
     }
-    // The published crates' rule, and the list the publish workflow reads. Here
-    // for the same reason: git and five manifests, on a runner with no QEMU.
-    if asked(&flags::SDK_VERSION_CHECK) {
-        toyos_build::sdkversion::dispatch_check(&root, &args);
-        return;
-    }
-    if asked(&flags::SDK_VERSIONS) {
-        toyos_build::sdkversion::dispatch_versions(&root);
-        return;
-    }
-    // Here for the same reason: it reads twelve files a sharded run left and
-    // writes one, and it is meant to be run on the machine holding them —
-    // which, since the run that produces them is CI's, is a runner with no
-    // QEMU.
-    if asked(&flags::MERGE_DURATIONS) {
-        toyos_build::durations::dispatch(&root, &args);
-        return;
-    }
-    // Runs the `host` job's clippy over three targets, so a branch verifies the
+    // Runs the nightly's clippy over three targets, so a branch verifies the
     // gate's own claim before a push. Here for the same reason as the two below:
     // it shells to `cargo clippy` and the runner that runs it has no QEMU.
     if asked(&flags::CLIPPY) {
         toyos_build::clippy::dispatch(&root);
         return;
     }
-    // Reads two directories and two files and prints. Here for the same reason
-    // again, and for one more: the question it answers — "is this red known,
-    // and on what?" — is asked while a build is broken as often as while one
-    // works.
+    // Reads one table and prints. Here for the same reason again, and for one
+    // more: the question it answers — "is this red quarantined?" — is asked
+    // while a build is broken as often as while one works.
     if asked(&flags::KNOWN_RED) {
-        toyos_build::redlist::dispatch(&root, &args);
-        return;
-    }
-    // Asks `gh`, not the toolchain, so it runs on the bare `ubuntu-latest`
-    // runner the nightly schedule gives it — no QEMU, no ToyOS toolchain.
-    // Same reason as the two above: before `check_prerequisites`.
-    if asked(&flags::MERGE_HEALTH) {
-        toyos_build::mergehealth::dispatch(&root, &args);
+        toyos_build::redlist::dispatch(&args);
         return;
     }
     // Reads lockfiles and cargo's own checkouts, nothing else: the half of a

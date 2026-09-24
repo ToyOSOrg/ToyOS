@@ -16,10 +16,12 @@ supplicant), a station state machine, and the firmware TLV pipeline can all be
 written today with no hardware and no IOMMU. They are blocked on sequencing
 alone.
 
-**The bottom half is blocked on the IOMMU**, which is at translation with one
-identity domain for the whole machine: there are no per-device domains, no
-invalidation, and no DMA-mapping syscall for userland at all. Handing a radio
-its own DMA is exactly what that subsystem exists for.
+**The bottom half needs what the LAN now uses**: a userland driver holding one
+PCI function in its own IOMMU domain, with `SYS_DEVICE_DMA_ALLOC` for its rings
+and its interrupt delivered as a message on the claim. netd drives the T14's
+I219 that way. The radio's firmware is admitted by the dependency rules only as
+vendor-signed and device-verified, pinned by version and hash, recorded in
+`NOTICE`, and loaded by that radio's own driver through its own domain.
 
 **One diagnostic should run before any of the bottom half is costed**, because
 it is the only thing that can invalidate the architecture: read the radio

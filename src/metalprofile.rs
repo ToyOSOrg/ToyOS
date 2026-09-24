@@ -350,6 +350,28 @@ mod sizing_tests {
         }
     }
 
+    /// **`lan_talk_hold` sleeps to the runner's bound less the tenth this file
+    /// keeps for the boot around a list**, and the talking boot's allowance is
+    /// that span: a hold longer than it is cut by the runner, and the boot is
+    /// then ended by the bound it exists to stay inside.
+    #[test]
+    fn the_talking_boots_hold_ends_where_its_list_does() {
+        let profile = Profile::load(root()).expect(PATH);
+        let hold = toyos_tco::JOB_BOUND_MS - AROUND_THE_LIST_MS;
+        let job = profile.row(&job_ms_row("lantalkcase")).expect("lantalkcase's own allowance");
+        assert_eq!(job.ceiling, hold);
+        assert_eq!(members_per_boot(job.ceiling), 1);
+        let source = std::fs::read_to_string(
+            root().join("tests/toyos-rust-tests/src/bin/lan_talk_hold.rs"),
+        )
+        .expect("the hold's source");
+        assert!(
+            source.contains("toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10"),
+            "lan_talk_hold no longer ends at the runner's bound less its tenth"
+        );
+        assert_eq!(AROUND_THE_LIST_MS, toyos_tco::JOB_BOUND_MS / 10);
+    }
+
     /// A boot whose allowance nobody wrote down is refused, not given the
     /// bound: the whole point of the row is that a list is cut to a number
     /// somebody committed.

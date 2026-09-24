@@ -23,11 +23,10 @@
 //! status check — branches up to date before merging — which bought the same
 //! property by serialising landings: the first merge moved main and every
 //! other branch was stale until it merged again. That tax, its measured
-//! breach, and the eased-law interlude between the two regimes are the
-//! tracker's record (`the-eased-merge-law-carries-a-threshold`); `--pr`
-//! remains the local half either way.
+//! breach, and the eased-law interlude between the two regimes are in the
+//! history; `--pr` remains the local half either way.
 //!
-//! Two rules gate a branch here and in CI's `abi-split` job alike: the
+//! Two rules gate a branch here and in `cargo run -- --ci abi-split` alike: the
 //! ABI-first rule ([`abi_lands_alone`]) and the published crates
 //! (`crate::sdkversion`).
 //!
@@ -90,18 +89,6 @@ pub fn dispatch_sync(root: &Path) {
     report(sync(root).map(|line| format!("[sync] {line}")));
 }
 
-/// The ABI-first rule as a check something other than a human can run.
-///
-/// `--base <ref>` exists because CI has no local `main`: a pull-request
-/// checkout of the head branch knows `origin/main` and nothing else.
-pub fn dispatch_abi_check(root: &Path, args: &[String]) {
-    let base = flags::CARGO_RUN.value(args, &flags::BASE).unwrap_or("origin/main");
-    report(abi_lands_alone(root, base).map(|()| {
-        format!("[abi] this branch's commits against {base} do not mix the shared sysroot's \
-                 sources with work that depends on them.")
-    }));
-}
-
 /// `--land` is retired, and it answers rather than going missing.
 ///
 /// A command that vanishes produces `no such subcommand` at an agent working
@@ -112,8 +99,7 @@ pub fn dispatch_retired_land() {
         "[land] `--land` is retired. `main` moves through pull requests and CI now, and this \
          command moved main on this host from a gate that ran on it.\n\
          [land] The dev host is arm64 cross-arch TCG and cannot execute the class of defect \
-         that lost 64 boots of 64 on an AMD KVM host, so the gate is twelve KVM \
-         shards on x86_64 instead.\n\
+         that lost 64 boots of 64 on an AMD KVM host, so the gate is CI's instead.\n\
          [land]\n\
          [land]   cargo run -- --pr      merge origin/main into this branch, push it, and print \
          the `gh` command that opens the pull request\n\

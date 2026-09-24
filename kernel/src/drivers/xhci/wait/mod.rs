@@ -42,8 +42,10 @@ use crate::log;
 use super::{deadline, enqueue_control, log_unrecoverable, Completion, Trb, TrbRing};
 use super::{XhciController, EVENT_TRANSFER, EVENT_CMD_COMPLETE, USB_TIMEOUT_NS};
 use super::{CC_SUCCESS, CC_SHORT_PACKET};
+use toyos_xhci::call::NotTaken;
 use toyos_xhci::job::Await;
 use toyos_xhci::recovery::{Act, NeedsConfigure, Recovery};
+use toyos_xhci::scan;
 
 /// How one control transfer ended; `Done` carries the bytes actually moved,
 /// since the completion code alone cannot say.
@@ -55,6 +57,8 @@ enum Control {
     Failed { stage: &'static str, code: u32 },
     /// Nothing came back for the named stage, for [`Quiet`]'s reason.
     Silent { stage: &'static str, why: Quiet },
+    /// Not put on the ring: the call it belongs to may spend nothing more.
+    NotSent(NotTaken),
 }
 
 /// Why a wait ended with no event; only [`Quiet::Elapsed`] spent the timeout budget.
@@ -64,6 +68,8 @@ pub(super) enum Quiet {
     Elapsed,
     /// The port reads disconnected.
     Gone,
+    /// What this part of a call whose transport broke may spend ran out before this wait's own timeout did.
+    Spent,
     /// A staged break skipped the wait by design.
     #[cfg(feature = "boot-actuators")]
     Staged,
@@ -84,6 +90,10 @@ impl Quiet {
                 USB_TIMEOUT_NS / 1_000_000
             ),
             Self::Gone => write!(f, "the port disconnected during the {step} {kind}"),
+            Self::Spent => write!(
+                f,
+                "the bound on this part of the call ran out during the {step} {kind}"
+            ),
             #[cfg(feature = "boot-actuators")]
             Self::Staged => write!(f, "a staged break skipped the {step} {kind} wait"),
         }
@@ -103,6 +113,7 @@ impl core::fmt::Display for Control {
             Self::Done { delivered } => write!(f, "{delivered} B delivered"),
             Self::Failed { stage, code } => write!(f, "{stage} stage completion {}", Completion(*code)),
             Self::Silent { stage, why } => why.about(stage, "stage", f),
+            Self::NotSent(why) => write!(f, "not sent: {why}"),
         }
     }
 }
@@ -127,37 +138,47 @@ fn settles(ready: impl Fn() -> bool) -> bool {
     crate::clock::settles(USB_TIMEOUT_NS, ready)
 }
 
+/// When a wait on the event ring gives up (`toyos_xhci::late`), against this
+/// kernel's clock and this driver's ring.
+struct Late(toyos_xhci::late::Late);
 
-/// What one endpoint's recovery still owes the **device**, once the
-/// controller has taken it off the transfer it was running. Produced only by
-/// [`XhciController::quiesce_endpoint`] and accepted only by
-/// [`XhciController::clear_endpoint_halt`], so the two halves cannot run out of order.
-#[derive(Clone, Copy)]
-pub(in crate::drivers::xhci) enum Owed {
-    /// The endpoint runs. Nothing further is owed.
-    Nothing,
-    /// The device is still holding a halt on the endpoint at this address.
-    ClearHalt { ep_addr: u8 },
-    /// The endpoint could not be taken off its transfer; carried through
-    /// rather than returned early, since the other endpoint's quiesce still
-    /// has to run.
-    Failed,
+impl Late {
+    fn new(deadline: u64) -> Self {
+        Self(toyos_xhci::late::Late::new(deadline, super::RING_SIZE))
+    }
+
+    fn past(&self) -> bool {
+        self.0.past(crate::clock::nanos_since_boot())
+    }
+
+    fn gives_up(&mut self) -> bool {
+        self.0.gives_up(crate::clock::nanos_since_boot())
+    }
 }
 
 impl XhciController {
+    /// Now, and when a wait starting now gives up: on its own timeout, or where this part of a call whose transport broke ends (`toyos_xhci::call`).
+    fn wait_ends(&self) -> (u64, u64) {
+        let now = crate::clock::nanos_since_boot();
+        (now, self.after_break.wait_ends(now, USB_TIMEOUT_NS))
+    }
+
+    /// [`settles`], inside what the call may still spend.
+    fn settles_within_call(&self, ready: impl Fn() -> bool) -> bool {
+        let now = crate::clock::nanos_since_boot();
+        crate::clock::settles(self.after_break.wait_left(now, USB_TIMEOUT_NS), ready)
+    }
+
     /// Take one endpoint back to a state that runs TRBs, waiting for each step.
-    fn restart_endpoint(&mut self, mut ep: Restart<'_>) -> bool {
-        let owed = self.quiesce_endpoint(&mut ep);
-        self.clear_endpoint_halt(ep.slot_id, ep.ctx_block, ep.ep0_ring, owed)
+    fn restart_endpoint(&mut self, ep: Restart<'_>) -> bool {
+        let halt = Some((ep.ep_addr, ep.ep0_ring));
+        self.run_recovery(ep.slot_id, ep.dci, ep.ctx_block, ep.ring, ep.ring_at, halt)
     }
 
-    /// The half of one endpoint's recovery the **controller** answers, up to
-    /// the point where the sequence would speak to the device.
-    fn quiesce_endpoint(&mut self, ep: &mut Restart<'_>) -> Owed {
-        self.run_recovery(ep.slot_id, ep.dci, ep.ctx_block, ep.ring, ep.ring_at, ep.ep_addr)
-    }
-
-    /// [`Recovery`] run to whatever it owes the device, one blocking command at a time.
+    /// [`Recovery`] run to its end, one blocking command at a time. `halt` is
+    /// the address the device knows the endpoint by and the EP0 ring a
+    /// CLEAR_FEATURE for it goes out on, or `None` for an endpoint with no Halt
+    /// feature to clear.
     #[allow(clippy::too_many_arguments)]
     fn run_recovery(
         &mut self,
@@ -166,8 +187,8 @@ impl XhciController {
         ctx_block: usize,
         ring: &mut TrbRing,
         ring_at: usize,
-        ep_addr: u8,
-    ) -> Owed {
+        halt: Option<(u8, &mut TrbRing)>,
+    ) -> bool {
         let slot = self.slot(slot_id);
         let state = self.endpoint_state(ctx_block, dci);
         log!("xHCI: {slot} endpoint {dci} is {state}, recovering");
@@ -175,18 +196,26 @@ impl XhciController {
             Ok(begun) => begun,
             Err(NeedsConfigure(state)) => {
                 log_unrecoverable(slot, dci, state);
-                return Owed::Failed;
+                return false;
             }
         };
         loop {
             let cmd = match act {
-                Act::Running => return Owed::Nothing,
-                Act::ClearHalt => return Owed::ClearHalt { ep_addr },
+                Act::Running => return true,
+                // The last act of every route that has one.
+                Act::ClearHalt => {
+                    return match halt {
+                        Some((ep_addr, ep0_ring)) => {
+                            self.clear_endpoint_halt(slot_id, ctx_block, ep0_ring, ep_addr)
+                        }
+                        None => true,
+                    }
+                }
                 Act::Command(cmd) => cmd,
             };
             let trb = self.recovery_trb(cmd, slot_id, dci, ring, ring_at);
             if !self.run_command(trb, cmd.name()) {
-                return Owed::Failed;
+                return false;
             }
             act = seq.completed();
         }
@@ -201,30 +230,25 @@ impl XhciController {
         ctx_block: usize,
         ring: &mut TrbRing,
     ) -> bool {
-        let owed = self.run_recovery(
+        self.run_recovery(
             slot_id,
             super::EP0_DCI,
             ctx_block,
             ring,
             ctx_block + super::DEV_EP0_RING,
-            0,
-        );
-        !matches!(owed, Owed::Failed)
+            None,
+        )
     }
 
-    /// The half the **device** answers, the only packet a recovery puts on the bus.
+    /// CLEAR_FEATURE(ENDPOINT_HALT) for the endpoint the device knows as
+    /// `ep_addr`: the half of a recovery the **device** answers.
     fn clear_endpoint_halt(
         &mut self,
         slot_id: u8,
         ctx_block: usize,
         ep0_ring: &mut TrbRing,
-        owed: Owed,
+        ep_addr: u8,
     ) -> bool {
-        let ep_addr = match owed {
-            Owed::Nothing => return true,
-            Owed::Failed => return false,
-            Owed::ClearHalt { ep_addr } => ep_addr,
-        };
         let cleared = self
             .control_transfer(slot_id, ctx_block, ep0_ring, 0x02, 0x01, 0, ep_addr as u16, None, 0);
         if !cleared.done() {
@@ -237,34 +261,44 @@ impl XhciController {
 
     /// Run whatever is outstanding to its end, waiting for each answer; the
     /// boot scan only, before `init` publishes the controller for anything else to poll.
+    ///
+    /// **The slot is free when this returns**, which is the contract the scan's
+    /// next port rests on: `device::begin` submits its Enable Slot into the one
+    /// slot without asking, as the runtime path cannot. What bounds the wait is
+    /// the operation's own deadline, taken by `advance_outstanding`, and not
+    /// the silence bound below — a bound the blocking bind inside
+    /// `advance_outstanding` has usually spent before the refusal at the end of
+    /// it submits anything. [`toyos_xhci::scan`] is the decision.
     fn settle_outstanding(&mut self) {
-        // **Bounded on silence and not on work.** Neither loop's exit is this
-        // driver's — `busy` clears when the controller answers and `broke_with`
-        // when a recovery takes — so a controller that answers neither is a boot
-        // scan that never returns, before there is a scheduler to preempt it. A
-        // scan that is still being answered is not stuck, though, and a bound on
-        // its *total* time is one a crowded bus reaches honestly: this one is
-        // re-armed by every event the controller produces.
+        // **Bounded on silence and not on work**, and spendable only on the
+        // broken-endpoint half: `broke_with` clears when a recovery takes, a
+        // device can break again as soon as it has, and nothing in that says
+        // when to stop. A scan that is still being answered is not stuck, so
+        // every event the controller produces re-arms it.
         let mut quiet_until = deadline();
-        // Also loops on `broke_with`: a halted endpoint raises no further
-        // interrupt, so a first-transfer failure would otherwise go
-        // unrecovered for the rest of boot.
-        while self.outstanding.busy() || self.devices.iter().any(|d| d.broke_with.is_some()) {
-            if crate::clock::nanos_since_boot() >= quiet_until {
-                log!("xHCI: the boot scan heard nothing for {} ms with work still outstanding; \
-                     the rest of this boot goes on without it", USB_TIMEOUT_NS / 1_000_000);
-                return;
+        loop {
+            if self.drain_events() {
+                quiet_until = deadline();
             }
-            self.recover_endpoints();
-            while self.outstanding.busy() {
-                if self.drain_events() {
-                    quiet_until = deadline();
-                } else if crate::clock::nanos_since_boot() >= quiet_until {
-                    break;
+            // After the drain, never inside it: everything below submits.
+            self.advance_outstanding();
+            // Also asks about `broke_with`: a halted endpoint raises no further
+            // interrupt, so a first-transfer failure would otherwise go
+            // unrecovered for the rest of boot.
+            let broken = self.devices.iter().any(|d| d.broke_with.is_some());
+            let now = crate::clock::nanos_since_boot();
+            match scan::settle(self.outstanding.busy(), broken, now, quiet_until) {
+                scan::Settle::Done => return,
+                scan::Settle::GaveUp => {
+                    log!("xHCI: the boot scan heard nothing for {} ms with an endpoint still \
+                         broken; the rest of this boot goes on without it",
+                        USB_TIMEOUT_NS / 1_000_000);
+                    return;
                 }
-                self.advance_outstanding();
-                core::hint::spin_loop();
+                scan::Settle::Recover => self.recover_endpoints(),
+                scan::Settle::Wait => {}
             }
+            core::hint::spin_loop();
         }
     }
 
@@ -273,16 +307,16 @@ impl XhciController {
     /// address, not the next completion event, per Command Completion Event's
     /// own addressing (xHCI 1.2 §6.4.2.2).
     fn wait_command(&mut self, trb: u64) -> Option<(u32, u32)> {
-        let deadline = deadline();
+        let (_, deadline) = self.wait_ends();
+        let mut late = Late::new(deadline);
         loop {
-            // **Every iteration, not only an empty ring.** A ring that keeps
-            // producing events this wait is not waiting for made the bound
-            // unreachable, and the caller holds `XHCI` and a block operation
-            // with preemption off for the whole of it.
-            if crate::clock::nanos_since_boot() >= deadline {
+            if late.gives_up() {
                 return None;
             }
             let Some(event) = self.next_event() else {
+                if late.past() {
+                    return None;
+                }
                 core::hint::spin_loop();
                 continue;
             };
@@ -296,16 +330,40 @@ impl XhciController {
     /// Submit `trb` and say whether the controller accepted it, logging
     /// anything it did not under `what`'s name.
     fn run_command(&mut self, trb: Trb, what: &str) -> bool {
-        let at = self.submit_command(trb);
-        match self.wait_command(at) {
-            Some((CC_SUCCESS, _)) => true,
-            Some((code, _)) => {
+        match self.command_code(trb, what) {
+            Some(CC_SUCCESS) => true,
+            Some(code) => {
                 log!("xHCI: {what} failed: {}", Completion(code));
                 false
             }
+            None => false,
+        }
+    }
+
+    /// Submit `trb` and hand back the completion code, for a caller with its
+    /// own answer to one; `None` is a controller that never answered, which is
+    /// logged here.
+    fn command_code(&mut self, trb: Trb, what: &str) -> Option<u32> {
+        let began = crate::clock::nanos_since_boot();
+        if let Err(why) = self.after_break.command(began) {
+            log!("xHCI: {what} not issued: {why}");
+            return None;
+        }
+        let at = self.submit_command(trb);
+        match self.wait_command(at) {
+            Some((code, _)) => Some(code),
             None => {
-                log!("xHCI: {what} timed out");
-                false
+                self.after_break.unanswered();
+                // The controller's own word beside the silence: a command ring
+                // that stopped (CRCR.CRR clear) or a Host Controller Error
+                // (USBSTS.HCE) is a controller no further command reaches.
+                log!(
+                    "xHCI: {what} timed out after {} ms with USBSTS={:#010x} and CRCR.CRR={}",
+                    (crate::clock::nanos_since_boot() - began) / 1_000_000,
+                    self.op_base.read_u32(super::OP_USBSTS),
+                    (self.op_base.read_u64(super::OP_CRCR) >> 3) & 1
+                );
+                None
             }
         }
     }
@@ -319,21 +377,35 @@ impl XhciController {
         if crate::actuator::io_depth_probe() {
             depth_probe::report();
         }
-        // `usb-reset-break` stages a Reset Recovery control transfer to answer
-        // nothing; see `msc::reset_break`.
+        // `usb-reset-break` stages a climb of the recovery ladder whose
+        // transfers answer nothing; see `msc::reset_break`.
         #[cfg(feature = "boot-actuators")]
         if msc::reset_break::active() {
             return Err(Quiet::Staged);
         }
         let on = Await::Transfer { slot, dci, trb };
-        let deadline = deadline();
+        let (began, deadline) = self.wait_ends();
         let port = self.port_of_slot(slot);
+        let mut late = Late::new(deadline);
+        let quiet = |call: &toyos_xhci::call::AfterBreak| {
+            let cut = call.cut(began, crate::clock::nanos_since_boot(), USB_TIMEOUT_NS);
+            if cut { Quiet::Spent } else { Quiet::Elapsed }
+        };
+        // `usb-return-silent` stages an operation sent again whose transfers
+        // answer nothing and are waited for; see `msc::return_silent`.
+        #[cfg(feature = "boot-actuators")]
+        if msc::return_silent::active() {
+            let _ = crate::clock::settles(deadline.saturating_sub(began), || false);
+            return Err(quiet(&self.after_break));
+        }
         loop {
-            // **Every iteration, not only an empty ring**; see `wait_command`.
-            if crate::clock::nanos_since_boot() >= deadline {
-                return Err(Quiet::Elapsed);
+            if late.gives_up() {
+                return Err(quiet(&self.after_break));
             }
             let Some(event) = self.next_event() else {
+                if late.past() {
+                    return Err(quiet(&self.after_break));
+                }
                 // An unplugged device is not a slow one; the timeout budget is
                 // for a port that might still answer.
                 if port.is_some_and(|p| !self.read_portsc(p).connected()) {
@@ -374,6 +446,9 @@ impl XhciController {
         data_buf: Option<u64>,
         data_len: u16,
     ) -> Control {
+        if let Err(why) = self.after_break.request(crate::clock::nanos_since_boot()) {
+            return Control::NotSent(why);
+        }
         let trbs = enqueue_control(
             ring, bm_request_type, b_request, w_value, w_index, data_buf, data_len,
         );

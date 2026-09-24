@@ -8,14 +8,14 @@
 //! invocations, and the other one runs nothing from this file.** That is the
 //! shape, not an accident — but it was silent until 2026-08-14, when CI ran
 //! only the default invocation and this file's `running 0 tests` looked
-//! identical to a pass. `.github/workflows/host-tests.yml` names both commands
+//! identical to a pass. `cargo run -- --ci host-full` runs both commands
 //! now, and every other `loom::model` file is gated `cfg(feature = "loom")`,
 //! so a bare `--no-default-features` run at the crate root exercises none of
 //! them either — the second command names this target explicitly instead.
 
 #![cfg(not(feature = "loom"))]
 
-use kernel_loom::log_shard::{Shard, FIRST_SEQ};
+use kernel_loom::log_shard::{Origin, Shard, FIRST_SEQ};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use toyos_abi::log::LogRecord;
 
@@ -56,9 +56,9 @@ fn a_zero_allocated_ap_shard_issues_first_seq_first() {
     record.msg[0] = b'A';
     // SAFETY: `first` came from this shard and is published exactly once under
     // the same guard.
-    unsafe { shard.commit(first, &record, &guard) };
+    unsafe { shard.commit(first, &record, Origin::Kernel, &guard) };
     let read_back = shard
-        .read(first)
+        .read(first).map(|(record, _)| record)
         .expect("an AP's first record must be readable");
     assert_eq!(read_back.seq, first);
     assert_eq!(&read_back.msg[..read_back.len as usize], b"A");

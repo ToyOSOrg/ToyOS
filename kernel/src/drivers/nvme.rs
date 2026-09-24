@@ -775,6 +775,11 @@ impl BlockDevice for NvmeBlockDevice {
         }
         Ok(())
     }
+
+    /// A namespace this driver never takes back once it has gone.
+    fn losses(&self) -> u64 {
+        0
+    }
 }
 
 /// `CSTS.RDY` as this boot can see it; the actuator blinds the read, so a

@@ -528,7 +528,7 @@ fn refused(name: &str, why: SyscallError) -> String {
         SyscallError::NotFound => format!("no {name} on this machine"),
         SyscallError::AlreadyExists => format!("{name} is already claimed"),
         SyscallError::InvalidArgument => {
-            format!("{name} names more than one function on this machine")
+            format!("{name} names more than one device on this machine")
         }
         SyscallError::PermissionDenied => {
             format!("{name} is driven by the kernel and cannot be claimed")
@@ -536,7 +536,7 @@ fn refused(name: &str, why: SyscallError) -> String {
         SyscallError::ResourceExhausted => format!("no claim slot is free for {name}"),
         SyscallError::NotSupported => {
             format!("{name} is on this machine and could not be handed over; the kernel's \
-                     `pcidev:` line says why")
+                     `pcidev:` or `partclaim:` line says why")
         }
         other => format!("{name} was refused with {other:?}"),
     }
@@ -616,6 +616,7 @@ fn start<'a>(
         let minted = match request {
             DeviceRequest::Class(class) => syscap.claim::<toyos::Device>(class),
             DeviceRequest::Pci(id) => syscap.claim_pci::<toyos::Device>(id),
+            DeviceRequest::Partition(name) => syscap.claim_partition::<toyos::Device>(name),
         };
         match minted {
             Ok(claim) => {

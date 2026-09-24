@@ -1,0 +1,38 @@
+# The T14 answering the development host over its own cable: netd serving the
+# I219 for as long as the boot lasts, `logd` streaming every record to the
+# listener the parameter line names, and sshd taking a command — `reboot`
+# among them, which is how the host hands the machine back.
+#
+# `tests/e1000talkcase` is the same boot in front of QEMU's 82574; the two
+# differ by the one `devices` row, for the reason `tests/lancase` and
+# `tests/e1000case` do. Nothing here reaches the internal NVMe: no `[disks]`
+# row, and the only device any program claims is the PCI function below.
+
+[boot]
+start = ["logd", "netd", "sshd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+# The record stream's authority: the address on the parameter line is
+# information, and this row is the whole of what can act on it.
+receives = ["netd"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:15fc"]
+
+[programs.sshd]
+receives = ["netd", "launcher"]
+
+[programs.test-runner]
+syscap = ["logread"]
+
+# What `exec` is asked for over the cable. `power` because `reboot` is this
+# binary under another name and it is the host's way of handing the machine
+# back; `echo` is the command whose answer the host compares.
+[programs.toybox]
+syscap = ["power"]
+
+[symlinks]
+"bin/echo" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"

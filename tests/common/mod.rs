@@ -34,6 +34,8 @@ pub mod logread;
 pub mod logstream;
 pub mod metal;
 #[allow(dead_code)]
+pub mod partclaim;
+#[allow(dead_code)]
 pub mod passcost;
 #[allow(dead_code)]
 pub mod pkg;
@@ -45,6 +47,8 @@ pub mod qemu;
 pub mod screen;
 #[allow(dead_code)]
 pub mod serial;
+#[allow(dead_code)]
+pub mod spoken;
 #[allow(dead_code)]
 pub mod ssh;
 #[allow(dead_code)]

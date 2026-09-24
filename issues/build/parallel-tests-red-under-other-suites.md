@@ -238,25 +238,14 @@ changes.
   this is its first recorded sighting. `screen_early_panic` failed in the same
   run and is already this file's and the redlist's, `ALONE … GREEN` there too.
 
-  **Its shape is this file's, in the one form worth naming separately: the
-  assertion that went red is the test's own control.** The message is `munmap
-  still took 11740090ns with the delay disarmed, so the numbers above measured
-  something other than the wait` — the test arms an injected shootdown delay,
-  measures, disarms it, and then requires the *baseline* to be small, because
-  that is what proves the armed numbers measured the wait and not the host.
-  Which makes it the one assertion in the suite that cannot tell a slow host
-  from a broken measurement: on a machine carrying two suites, 11.7 ms for a
-  disarmed `munmap` is the load, and the control has no way to say so. Widening
-  it is exactly what this file forbids — a control that tolerates 12 ms proves
-  nothing about the armed arm either. Making the verdict independent of the rate
-  here means comparing armed against disarmed *within the run* rather than each
-  against an absolute, which is the first of the two legitimate fix shapes below
-  and is the one thing this test already has both samples for. Still
-  `Sched::Parallel`, not investigated further.
+  The assertion that went red is the test's own disarmed control: `munmap still
+  took 11740090ns with the delay disarmed, so the numbers above measured
+  something other than the wait`. Still `Sched::Parallel`, not investigated
+  further.
 
 - **`console_locale_detect`** — added 2026-08-20, first push-triggered `main`
   sighting: `ci` run `32314166262`, `guest (9)`, headSha `eba06ad6`, found
-  auditing the merge-health backfill (`issues/build/the-eased-merge-law-carries-a-threshold.md`).
+  auditing the merge-health backfill.
   `STALLED: waiting for the wizard to ask for a key under /system/bin/console — the
   console did not lend it the keyboard — it never stopped talking and never got
   there`, `ALONE … GREEN` on the harness's own re-run. Same shape as

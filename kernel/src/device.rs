@@ -41,10 +41,12 @@ pub struct Claim {
 
 /// What one claim holds. A class is at most one device on this machine and a
 /// per-class flag says whether it is taken; a PCI function is one of several,
-/// so what it gives back is its `pcidev` slot.
+/// so what it gives back is its `pcidev` slot; a partition's exclusivity is its
+/// view's own hold on the blocks (`block::Partition::of`).
 enum Claimed {
     Class(DeviceType),
     PciFunction(usize),
+    Partition(crate::block::Partition),
 }
 
 impl Claim {
@@ -64,6 +66,14 @@ impl Claim {
     pub(crate) fn pci(slot: usize) -> Self {
         Self { what: Claimed::PciFunction(slot) }
     }
+
+    /// The view a partition claim transfers through, or `None` for any other.
+    pub(crate) fn partition(&self) -> Option<&crate::block::Partition> {
+        match &self.what {
+            Claimed::Partition(view) => Some(view),
+            Claimed::Class(_) | Claimed::PciFunction(_) => None,
+        }
+    }
 }
 
 impl Drop for Claim {
@@ -73,6 +83,8 @@ impl Drop for Claim {
             // Bus mastering off, then the domain, then the pages: `release`
             // owns that order, and this is where a dying process reaches it.
             Claimed::PciFunction(slot) => crate::pcidev::release(slot),
+            // The view drops with this, and its hold with the last clone of it.
+            Claimed::Partition(_) => {}
         }
     }
 }
@@ -112,9 +124,10 @@ pub enum ClaimError {
 /// `Claim` lives on this stack frame until the returned object takes it, so a
 /// failure after `acquire` cannot leave a device held by nobody.
 ///
-/// `selector` says *which* device where the class alone does not — today that
-/// is a PCI function's vendor and device id, and every other class ignores it.
-pub fn try_claim(class: DeviceType, selector: u64) -> Result<Arc<DeviceClaim>, ClaimError> {
+/// `selector` says *which* device where the class alone does not — a PCI
+/// function's vendor and device id in its first word, a partition's GUID in
+/// both — and the syscall has refused a word the class does not read.
+pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
         DeviceType::Keyboard => {
@@ -143,13 +156,23 @@ pub fn try_claim(class: DeviceType, selector: u64) -> Result<Arc<DeviceClaim>, C
             Ok(DeviceClaim::new(class, framebuffer_info(screen), claim))
         }
         DeviceType::PciFunction => {
-            let id = toyos_abi::syscall::PciId::from_wire(selector)
+            let id = toyos_abi::syscall::PciId::from_wire(selector[0])
                 .ok_or(ClaimError::Absent)?;
             // The slot's own guard, taken inside: a PCI claim's exclusivity is
             // per function rather than per class, so there is no flag here to
             // acquire first.
             let (info, slot, claim) = crate::pcidev::claim(id)?;
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info, slot), claim))
+        }
+        DeviceType::Partition => {
+            let found = crate::gpt::claimable(toyos_abi::part::PartGuid::from_wire(selector))?;
+            let view = partition_view(&found)?;
+            let info = toyos_abi::part::PartitionInfo {
+                blocks: view.block_count(),
+                unique_guid: found.unique.0,
+            };
+            let claim = Claim { what: Claimed::Partition(view) };
+            Ok(DeviceClaim::new(class, DeviceInfo::Partition(info), claim))
         }
         DeviceType::HdaAudio => {
             let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;
@@ -160,6 +183,50 @@ pub fn try_claim(class: DeviceType, selector: u64) -> Result<Arc<DeviceClaim>, C
             let (info, dma) = crate::drivers::virtio_sound::info().ok_or(ClaimError::Absent)?;
             let claim = Claim::acquire(class)?;
             Ok(DeviceClaim::new(class, DeviceInfo::VirtioSound(info, shm(dma)), claim))
+        }
+    }
+}
+
+/// The unit a claim transfers in is the block layer's, so a partition that is
+/// whole blocks of one is whole blocks of the other.
+const _: () = assert!(toyos_abi::part::BLOCK_BYTES as u64 == crate::mm::PAGE_SIZE);
+
+/// The claim's view of `found`, held against every other holder of any of its
+/// blocks. A partition the kernel mounted is the kernel's, one another claim
+/// holds is that claim's, and one that begins or ends inside a block would
+/// share that block with its neighbour, so it is not claimable at all.
+fn partition_view(found: &crate::gpt::Claimable) -> Result<crate::block::Partition, ClaimError> {
+    use crate::block::{Holder, ViewRefused};
+    let volume = found.volume;
+    let guid = found.unique;
+    let handle = crate::block::open(volume.device).ok_or(ClaimError::Absent)?;
+    let unit = toyos_abi::part::BLOCK_BYTES as u64;
+    let lba = volume.lba_bytes as u64;
+    let (Some(start), Some(len)) =
+        (volume.start_lba.checked_mul(lba), volume.blocks.checked_mul(lba))
+    else {
+        log!("partclaim: {guid} claims LBA {}+{} of {lba} bytes, which is no byte range",
+            volume.start_lba, volume.blocks);
+        return Err(ClaimError::Unusable);
+    };
+    if start % unit != 0 || len % unit != 0 {
+        log!(
+            "partclaim: {guid} is at {start}+{len} bytes on device {}, which is not whole \
+             {unit}-byte blocks — a transfer would share one with its neighbour",
+            volume.device
+        );
+        return Err(ClaimError::Unusable);
+    }
+    match crate::block::Partition::of(handle, start / unit, len / unit, Holder::Claim) {
+        Ok(view) => Ok(view),
+        Err(ViewRefused::Held(Holder::Kernel(what))) => {
+            log!("partclaim: {guid} is held by the kernel ({what}) and cannot be claimed");
+            Err(ClaimError::KernelDriven)
+        }
+        Err(ViewRefused::Held(Holder::Claim)) => Err(ClaimError::Owned),
+        Err(ViewRefused::OffDevice) => {
+            log!("partclaim: {guid} is at {start}+{len} bytes, off device {}", volume.device);
+            Err(ClaimError::Unusable)
         }
     }
 }
