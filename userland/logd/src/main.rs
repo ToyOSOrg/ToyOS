@@ -111,13 +111,6 @@ use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES, ROTATE_FAST_BYTES};
 /// handful of syscalls rather than one per line.
 const BATCH: usize = 64;
 
-/// How long a park waits before looking again.
-///
-/// A wake is what ends the park — `klogd` posts one after each drain batch,
-/// and a pipe with bytes in it is one too — so this is the bound on a machine
-/// that has posted nothing, not the pacing.
-const IDLE_NANOS: u64 = 100_000_000;
-
 /// Programs whose output this program reads at once: one per `[boot] start`
 /// entry, init's own and this program's, which is what there is to register.
 const MAX_ORIGINS: usize = 32;
@@ -264,9 +257,13 @@ fn main() {
         }
 
         if round.lines.is_empty() {
-            // **Nothing new, so park rather than spin.** `SYS_LOG_READ` and a
+            // **Nothing new, so park until something is.** `SYS_LOG_READ` and a
             // pipe read here never block by design; this is the other half.
-            poller.wait(1, IDLE_NANOS, |_| {});
+            // Every source was armed before it was read, so what lands after
+            // the reads is a completion this wait takes, and nothing else is
+            // worth waking for: `klogd` posts after each drain, and a pipe with
+            // bytes in it or a writer gone is readable.
+            poller.wait(1, u64::MAX, |_| {});
             continue;
         }
 
