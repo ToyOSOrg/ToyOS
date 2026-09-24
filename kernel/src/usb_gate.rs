@@ -8,7 +8,7 @@
 
 use alloc::vec;
 
-use crate::block::Handle;
+use crate::block::{BlockDevice, Handle};
 use crate::drivers::usb_storage;
 
 /// 16 bytes so the block count behind it stays 8-byte aligned.

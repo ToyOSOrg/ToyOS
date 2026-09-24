@@ -615,6 +615,9 @@ struct Awaited {
     returns_by: u64,
     /// It left owing a flush (`msc::MscDevice::owes_a_flush`).
     owed_flush: bool,
+    /// The disk's loss count it handed on, this departure counted
+    /// (`msc::MscDevice::losses_left`).
+    losses: u64,
 }
 
 /// Where the machine's `index`-th disk is, for an operation that found it
@@ -1368,6 +1371,7 @@ impl XhciController {
             port_idx,
             returns_by,
             owed_flush: disk.dev.owes_a_flush(),
+            losses: disk.dev.losses_left(),
         });
         log!(
             "usb-storage: disk {} left port {} ({why}) after this driver reset it; it is held {} ms \
@@ -1378,10 +1382,10 @@ impl XhciController {
         );
     }
 
-    /// The number of a disk held for its device, if the device that bound as `identity` on `port_idx` is it, and whether it left owing a flush; the record is spent when it matches. Every held disk it is not says why.
+    /// The number of a disk held for its device, if the device that bound as `identity` on `port_idx` is it, the loss count it handed on and whether it left owing a flush; the record is spent when it matches. Every held disk it is not says why.
     ///
     /// Asked at the end of a bind, and every record still here is one the enumeration that began it was inside the window of ([`Self::forget_the_unreturned`]): a device's own bind is not what makes it late.
-    fn adopt(&mut self, identity: &toyos_xhci::identity::Identity, port_idx: u8) -> Option<(usize, bool)> {
+    fn adopt(&mut self, identity: &toyos_xhci::identity::Identity, port_idx: u8) -> Option<(usize, u64, bool)> {
         let mut adopted = None;
         self.awaited.retain(|held| {
             if adopted.is_some() {
@@ -1389,7 +1393,7 @@ impl XhciController {
             }
             match toyos_xhci::identity::same(&held.identity, identity) {
                 Ok(()) => {
-                    adopted = Some((held.index, held.owed_flush));
+                    adopted = Some((held.index, held.losses, held.owed_flush));
                     false
                 }
                 Err(why) => {
@@ -1606,7 +1610,8 @@ pub fn flush_disks() {
     // itself, the way every other caller does.
     for index in 0..storage_count() {
         let _op = crate::block::begin_operation();
-        let outcome = storage_flush(index);
+        // The loss count is nobody's to answer here: the machine resets next.
+        let outcome = storage_flush(index, &mut 0);
         // Read after the flush, because the flush is what sets it on a device
         // that had not been asked before.
         let no_cache = outcome.is_ok() && storage_has_no_cache(index);

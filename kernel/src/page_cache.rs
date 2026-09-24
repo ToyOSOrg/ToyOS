@@ -1,7 +1,7 @@
 //! One page cache per (device, partition) served. Every slot is bound to a
 //! [`BlockKey`], so a resident page is written back where it was filled from.
 //!
-//! Lock order: a cache, then its device (`block::Handle::lock`); never
+//! Lock order: a cache, then its device (`block::Partition::lock`); never
 //! reversed, and no holder of one cache takes another's.
 
 use alloc::boxed::Box;
@@ -109,7 +109,7 @@ impl Cached {
     /// Locks cache then device, in that order.
     pub fn lock(&self) -> PageCacheGuard<'_> {
         let cache = self.cache.lock();
-        let dev = self.part.handle().lock();
+        let dev = self.part.lock();
         PageCacheGuard { cache, dev, part: &self.part }
     }
 
@@ -132,7 +132,7 @@ impl Cached {
 
 pub struct PageCacheGuard<'a> {
     cache: LockGuard<'a, PageCache>,
-    dev: LockGuard<'a, Box<dyn BlockDevice>>,
+    dev: block::Locked<'a>,
     part: &'a Partition,
 }
 
@@ -143,17 +143,17 @@ impl PageCacheGuard<'_> {
 
     pub fn read(&mut self, block: u64) -> Result<&[u8], BlockError> {
         let Self { cache, dev, part } = self;
-        cache.read(part, dev.as_mut(), block)
+        cache.read(part, dev, block)
     }
 
     pub fn write_new(&mut self, block: u64) -> Result<&mut [u8], BlockError> {
         let Self { cache, dev, part } = self;
-        cache.write_new(part, dev.as_mut(), block)
+        cache.write_new(part, dev, block)
     }
 
     pub fn sync(&mut self) -> BlockResult {
         let Self { cache, dev, .. } = self;
-        cache.sync(dev.as_mut())
+        cache.sync(dev)
     }
 }
 
@@ -459,6 +459,10 @@ mod read_fault {
 
         fn flush(&mut self) -> BlockResult {
             self.0.flush()
+        }
+
+        fn losses(&self) -> u64 {
+            self.0.losses()
         }
     }
 }

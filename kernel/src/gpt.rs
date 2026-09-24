@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use crate::block::{DeviceId, Handle};
+use crate::block::{BlockDevice, DeviceId, Handle};
 use crate::device::ClaimError;
 use crate::sync::Lock;
 use toyos_abi::boot::KernelArgs;

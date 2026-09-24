@@ -1,45 +1,39 @@
-//! What a disk owes a flush, across every device that serves it.
+//! What a disk owes a flush, and how often it has lost one, across every
+//! device that serves it.
 //!
 //! A write a device reported complete may sit in its volatile cache until a
 //! SYNCHRONIZE CACHE (SBC-3 §5.24) that succeeded has emptied it: until then it
 //! is a flush owed. **A device that leaves its port and comes back is not known
 //! to have kept its power** — a reset that moved it and an unplug and replug of
-//! it look alike to the host — so a disk taken back by a device that left owing
-//! one carries the debt, and its next flush fails: no flush now can say those
-//! writes are durable.
+//! it look alike to the host — so a device that left owing one may have lost
+//! those writes, and the disk counts that loss when it is taken back
+//! ([`Debt::losses`]). The count only grows: a loss is a fact about writes
+//! already reported, and no later flush brings them back.
 //!
-//! **A debt carried is still a debt owed.** The instance that took the disk
-//! back may leave in turn before its next flush, and the instance after it
-//! carries the same debt; only the flush that reports the loss, or a flush
-//! that succeeded over writes of its own instance, ends one.
+//! **Who is told is not this module's to decide.** A disk has several writers
+//! and a flush is the whole disk's, so the first flush after the loss answers
+//! for nobody in particular; the block layer holds each writer's own writes
+//! against the count and fails the flush of each writer whose writes were
+//! reported before it moved (`kernel/src/block.rs`).
 
-/// One device instance's flush debt; [`Self::NONE`] for a disk first bound.
+/// One device instance's flush debt and the disk's loss count;
+/// [`Self::NONE`] for a disk first bound.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Debt {
     /// A write this instance reported complete since its last flush that
     /// succeeded.
     unflushed: bool,
-    /// Carried from the instance before: writes it reported complete may be
-    /// gone, and the next flush says so.
-    carried: bool,
-}
-
-/// What a flush asked of a disk does.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Flush {
-    /// It fails, once, without going to the device: a carried debt.
-    Lost,
-    /// It goes to the device, and [`Debt::flushed`] follows if it succeeded.
-    Issue,
+    /// How many devices serving this disk left owing a flush.
+    losses: u64,
 }
 
 impl Debt {
-    pub const NONE: Self = Self { unflushed: false, carried: false };
+    pub const NONE: Self = Self { unflushed: false, losses: 0 };
 
-    /// The debt of the instance that takes back a disk whose device left with
-    /// `owed` ([`Self::owed`]).
-    pub const fn adopted(owed: bool) -> Self {
-        Self { unflushed: false, carried: owed }
+    /// The debt of the instance that takes back a disk whose device left
+    /// handing on `losses` ([`Self::left`]).
+    pub const fn adopted(losses: u64) -> Self {
+        Self { unflushed: false, losses }
     }
 
     /// The device reported a write complete, whole or in part.
@@ -48,22 +42,25 @@ impl Debt {
     }
 
     /// Whether a device that left now leaves a flush owed. `no_cache` is
-    /// whether this instance said it has no write cache, which makes its own
-    /// writes durable once complete and says nothing of a debt it carries.
+    /// whether this instance said it has no write cache, which makes its
+    /// writes durable once complete.
     pub const fn owed(&self, no_cache: bool) -> bool {
-        self.carried || (self.unflushed && !no_cache)
+        self.unflushed && !no_cache
     }
 
-    /// A flush is asked for.
-    pub fn flush(&mut self) -> Flush {
-        if core::mem::take(&mut self.carried) {
-            Flush::Lost
-        } else {
-            Flush::Issue
-        }
+    /// The loss count a device leaving now hands the instance that takes the
+    /// disk back: one more if it left owing a flush.
+    pub const fn left(&self, no_cache: bool) -> u64 {
+        self.losses + self.owed(no_cache) as u64
     }
 
-    /// The flush [`Self::flush`] issued succeeded: every write before it is
+    /// How many devices serving this disk left owing a flush before this one
+    /// took it back.
+    pub const fn losses(&self) -> u64 {
+        self.losses
+    }
+
+    /// A flush succeeded: every write this instance reported before it is
     /// durable.
     pub fn flushed(&mut self) {
         self.unflushed = false;
@@ -75,60 +72,47 @@ mod tests {
     use super::*;
 
     /// Both edges of the debt: owed after a write reported complete, and not
-    /// owed after the flush that succeeded over it, nor by the instance that
-    /// takes the disk back then.
+    /// owed after the flush that succeeded over it — so a device that leaves
+    /// then hands on no loss.
     #[test]
     fn a_write_is_owed_until_a_flush_that_succeeded_and_not_after() {
         let mut debt = Debt::NONE;
         assert!(!debt.owed(false), "a disk first bound owes nothing");
         debt.wrote();
         assert!(debt.owed(false), "a write reported complete is owed");
-        assert_eq!(debt.flush(), Flush::Issue);
-        assert!(debt.owed(false), "a flush asked for and not yet succeeded ends nothing");
+        assert_eq!(debt.left(false), 1, "a device that leaves now has lost it");
         debt.flushed();
         assert!(!debt.owed(false), "a flush that succeeded ends it");
-        let mut back = Debt::adopted(debt.owed(false));
-        assert!(!back.owed(false));
-        assert_eq!(back.flush(), Flush::Issue, "a device that left owing nothing is flushed as ever");
+        let back = Debt::adopted(debt.left(false));
+        assert_eq!(back.losses(), 0, "a device that left owing nothing lost nothing");
     }
 
-    /// A device with no write cache owes nothing for its own writes, and still
-    /// owes the debt it took the disk back with.
+    /// A device with no write cache owes nothing for its own writes, and a
+    /// loss counted before it is still counted.
     #[test]
-    fn a_device_with_no_cache_owes_only_what_it_carries() {
-        let mut debt = Debt::NONE;
+    fn a_device_with_no_cache_owes_nothing_and_keeps_the_count() {
+        let mut debt = Debt::adopted(2);
         debt.wrote();
         assert!(!debt.owed(true));
-        let mut back = Debt::adopted(true);
-        back.wrote();
-        assert!(back.owed(true), "a carried debt is not the device's cache to answer");
+        assert_eq!(debt.left(true), 2);
+        assert_eq!(debt.left(false), 3);
     }
 
-    /// Instance 1 acknowledges a write and leaves; instance 2 takes the disk
-    /// back owing it and leaves before any flush; instance 3 takes it back, and
-    /// its next flush fails by name — once.
+    /// Instance 1 reports a write and leaves; instance 2 takes the disk back
+    /// having counted that loss, and leaves before any write or flush;
+    /// instance 3 still carries the count, and a flush of its own does not
+    /// take the loss back.
     #[test]
-    fn a_debt_carried_is_carried_again_until_a_flush_reports_it() {
+    fn a_loss_is_counted_once_and_never_uncounted() {
         let mut first = Debt::NONE;
         first.wrote();
-        let second = Debt::adopted(first.owed(false));
-        assert!(second.owed(false), "the instance that took the debt leaves owing it");
-        let mut third = Debt::adopted(second.owed(false));
-        assert_eq!(third.flush(), Flush::Lost, "the third instance's next flush fails");
-        assert!(!third.owed(false));
-        assert_eq!(third.flush(), Flush::Issue, "once");
-    }
-
-    /// A write on the instance that carries a debt is owed after the flush that
-    /// reports the loss, until a flush of its own succeeds.
-    #[test]
-    fn a_write_on_a_carried_debt_outlives_the_flush_that_reports_the_loss() {
-        let mut debt = Debt::adopted(true);
-        debt.wrote();
-        assert_eq!(debt.flush(), Flush::Lost);
-        assert!(debt.owed(false));
-        assert_eq!(debt.flush(), Flush::Issue);
-        debt.flushed();
-        assert!(!debt.owed(false));
+        let second = Debt::adopted(first.left(false));
+        assert_eq!(second.losses(), 1);
+        assert!(!second.owed(false), "the instance that took the disk back wrote nothing");
+        let mut third = Debt::adopted(second.left(false));
+        assert_eq!(third.losses(), 1, "leaving owing nothing loses nothing more");
+        third.wrote();
+        third.flushed();
+        assert_eq!(third.losses(), 1, "a flush now cannot bring the lost writes back");
     }
 }
