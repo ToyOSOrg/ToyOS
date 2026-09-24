@@ -616,6 +616,7 @@ fn start<'a>(
     log: Option<&mut Log>,
 ) -> std::io::Result<Child> {
     command.args(&program.args);
+    let booting = log.is_some();
 
     // **Everything endowed stays owned until the spawn that moves it
     // succeeds.** `endow` records a number; a refused spawn moves nothing
@@ -751,7 +752,12 @@ fn start<'a>(
             if let Some((log, read, _write)) = output {
                 log.register(&program.name, read);
             }
-            say!("init: started {}", program.name);
+            // A launch is answered to its caller and recorded in the kernel's
+            // `spawn:`; a line of init's for each would be a line on the
+            // console beside every command typed at it.
+            if booting {
+                say!("init: started {}", program.name);
+            }
             Ok(child)
         }
         Err(e) => {
