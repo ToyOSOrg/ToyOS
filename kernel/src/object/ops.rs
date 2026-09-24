@@ -569,94 +569,134 @@ pub fn fsync(object: &KObjectRef) -> u64 {
     if !crate::vfs::lock().durability_owed(&path, file_id) {
         return 0;
     }
+    // A refused attempt discards nothing — an unsettled debt needs no restoring.
+    let run = until_answered(|| {
+        // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
+        // Flush and sync share one acquisition so this file cannot be unmounted between them.
+        let mut vfs = crate::vfs::lock();
+        let done = vfs
+            .flush_file(&path, file_id, mtime)
+            .and_then(|()| vfs.sync_for_path(&path));
+        drop(vfs);
+        done
+    });
+    match run {
+        Answered::Answer { answer: Ok(()), attempts, took } => {
+            if attempts > 1 {
+                crate::log!(
+                    "fsync: {path} durable on attempt {attempts} after {took} — a refused \
+                     attempt kept every page dirty and a later one delivered them",
+                );
+            }
+            // `flush_file` settled the file's debt and `sync_for_path` the mount's; there is no per-handle flag to clear.
+            0
+        }
+        // The device's own word (an error status, or a recovery that gave up) is passed through unchanged.
+        Answered::Answer { answer: Err(e), .. } => e.to_u64(),
+        Answered::Killed => SyscallError::WouldBlock.to_u64(),
+        Answered::Deadman { attempts, took } => {
+            crate::log!(
+                "fsync: {path} is not durable after {attempts} attempt(s) in {took} — {}",
+                crate::block::DEADMAN,
+            );
+            SyscallError::Io.to_u64()
+        }
+    }
+}
+
+/// What a run of [`until_answered`]'s attempts came to.
+pub(crate) enum Answered {
+    /// An attempt answered with a word of the device's own: `Ok`, or a failure
+    /// it named.
+    Answer { answer: Result<(), SyscallError>, attempts: u32, took: crate::time::Duration },
+    /// The caller is being killed; the word dies with its task.
+    Killed,
+    /// Every attempt until [`crate::block::DEADMAN`] was refused on its budget:
+    /// the caller answers `Io`, a device word, rather than another ask-again.
+    Deadman { attempts: u32, took: crate::time::Duration },
+}
+
+/// `attempt` run until it answers anything but `WouldBlock` — a budget that
+/// expired on a live device, never a device fact — each time on a fresh
+/// budget, parked between two (`block::between_attempts`), and given up once
+/// [`crate::block::DEADMAN`] is spent. The one loop in this kernel that asks a
+/// block device again, for a caller holding no spinlock: nothing it holds can
+/// be held across the wait, so no disk wait here is under one.
+pub(crate) fn until_answered(mut attempt: impl FnMut() -> Result<(), SyscallError>) -> Answered {
     let began = crate::clock::now();
     // Bounds the run of attempts, never a single attempt's elapsed time.
     let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
     #[cfg(feature = "boot-actuators")]
     let deadman = if crate::actuator::fsync_deadman_now() { Deadline::passed() } else { deadman };
-    let mut attempt = 0u32;
-    // No spinlock is held at this depth, so waiting here (unlike everywhere below `vfs::lock()`) is safe.
+    let mut attempts = 0u32;
     loop {
-        attempt += 1;
-        let refused = {
+        attempts += 1;
+        let answer = {
             // Stages a first attempt with its budget already spent, exercising the shipped refusal itself.
             #[cfg(feature = "boot-actuators")]
-            let _spent = (attempt == 1 && crate::actuator::fsync_budget_spent())
+            let _spent = (attempts == 1 && crate::actuator::fsync_budget_spent())
                 .then(|| crate::scheduler::Operation::begin(Deadline::passed()));
-            // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
-            // Flush and sync share one acquisition so this file cannot be unmounted between them.
-            let mut vfs = crate::vfs::lock();
-            let done = vfs
-                .flush_file(&path, file_id, mtime)
-                .and_then(|()| vfs.sync_for_path(&path));
-            drop(vfs);
-            done
+            attempt()
         };
-        match refused {
-            Ok(()) => {
-                if attempt > 1 {
-                    crate::log!(
-                        "fsync: {path} durable on attempt {attempt} after {} — a refused \
-                         attempt kept every page dirty and a later one delivered them",
-                        crate::clock::now() - began,
-                    );
-                }
-                // `flush_file` settled the file's debt and `sync_for_path` the mount's; there is no per-handle flag to clear.
-                return 0;
-            }
-            // A budget expired on a live device, never a device fact: retry on a fresh budget.
-            // A refused attempt discards nothing — an unsettled debt needs no restoring.
-            Err(SyscallError::WouldBlock) => {
-                // A killed caller stops retrying at the first safe point; the return value dies with the task.
-                if crate::sched::driver::current_kill_pending() {
-                    return SyscallError::WouldBlock.to_u64();
-                }
-                if deadman.reached(crate::clock::now()) {
-                    crate::log!(
-                        "fsync: {path} is not durable after {attempt} attempt(s) in {} — \
-                         {}",
-                        crate::clock::now() - began,
-                        crate::block::DEADMAN,
-                    );
-                    return SyscallError::Io.to_u64();
-                }
-                crate::block::between_attempts(attempt);
-            }
-            // The device's own word (an error status, or a recovery that gave up) is passed through unchanged.
-            Err(e) => return e.to_u64(),
+        if answer != Err(SyscallError::WouldBlock) {
+            return Answered::Answer { answer, attempts, took: crate::clock::now() - began };
         }
+        // A killed caller stops retrying at the first safe point.
+        if crate::sched::driver::current_kill_pending() {
+            return Answered::Killed;
+        }
+        if deadman.reached(crate::clock::now()) {
+            return Answered::Deadman { attempts, took: crate::clock::now() - began };
+        }
+        crate::block::between_attempts(attempts);
     }
 }
 
-/// `SYS_FSYNC` on a partition claim: the device's write cache flushed, so every
-/// write the claim returned from before this call is durable. The flush is the
-/// whole device's, which settles none of the kernel's own debts on it — each
-/// mount flushes again for its own.
+/// A block-device failure as the word a syscall returns: a budget that expired
+/// is asked again ([`until_answered`]), anything else is the device's.
+pub(crate) fn block_word(e: crate::block::BlockError) -> SyscallError {
+    match e {
+        crate::block::BlockError::Device => SyscallError::Io,
+        crate::block::BlockError::BudgetExpired => SyscallError::WouldBlock,
+    }
+}
+
+/// `SYS_FSYNC` on a partition claim: every write the claim returned from
+/// before this call durable, or the claim told they may not be. The flush is
+/// the whole device's, and its answer is the claim's own
+/// (`block::Partition::flush`).
 fn partition_fsync(claim: &DeviceClaim) -> u64 {
-    if !matches!(claim.class(), device_registry::DeviceType::Partition) {
-        return SyscallError::PermissionDenied.to_u64();
-    }
-    let mut gone = false;
-    let done = crate::block::to_completion("a partition flush", || match claim.partition_view() {
-        Some(view) => view.flush(),
-        None => {
-            gone = true;
-            Ok(())
+    match claim.class() {
+        device_registry::DeviceType::Partition => {}
+        device_registry::DeviceType::Keyboard
+        | device_registry::DeviceType::Mouse
+        | device_registry::DeviceType::Framebuffer
+        | device_registry::DeviceType::HdaAudio
+        | device_registry::DeviceType::VirtioSound
+        | device_registry::DeviceType::PciFunction => {
+            return SyscallError::PermissionDenied.to_u64();
         }
-    });
-    if gone {
-        return SyscallError::Gone.to_u64();
     }
-    completed_word(done)
+    let run = until_answered(|| match claim.partition_view() {
+        Some(view) => view.flush().map_err(block_word),
+        None => Err(SyscallError::Gone),
+    });
+    partition_word("a flush", run)
 }
 
-/// What [`crate::block::to_completion`] answered, as the word a syscall returns.
-pub(crate) fn completed_word(done: crate::block::BlockResult) -> u64 {
-    match done {
-        Ok(()) => 0,
-        Err(crate::block::BlockError::Device) => SyscallError::Io.to_u64(),
-        // Given back on a budget only to a caller being killed.
-        Err(crate::block::BlockError::BudgetExpired) => SyscallError::WouldBlock.to_u64(),
+/// What a partition claim's run of attempts at `what` answers its caller.
+pub(crate) fn partition_word(what: &str, run: Answered) -> u64 {
+    match run {
+        Answered::Answer { answer: Ok(()), .. } => 0,
+        Answered::Answer { answer: Err(e), .. } => e.to_u64(),
+        Answered::Killed => SyscallError::WouldBlock.to_u64(),
+        Answered::Deadman { attempts, took } => {
+            crate::log!(
+                "partclaim: {what} still refused after {attempts} attempt(s) in {took} — {}",
+                crate::block::DEADMAN,
+            );
+            SyscallError::Io.to_u64()
+        }
     }
 }
 

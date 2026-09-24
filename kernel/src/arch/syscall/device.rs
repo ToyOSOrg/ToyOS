@@ -312,8 +312,10 @@ pub(super) enum Transfer<'a, 'u> {
 /// wait between two: while an operation is on the device its view holds the
 /// partition, so a close on another thread cannot hand the partition to a
 /// second holder under a write in flight, and no view is left on a stack a
-/// kill could strand. The end of the partition is `block::Partition::locate`'s,
-/// the one check between a block number and the device.
+/// kill could strand. A run that does not end inside the partition is refused
+/// here without a word to the log — a caller can ask at syscall rate — and
+/// `block::Partition::locate` stands behind this as the one check between a
+/// block number and the device.
 pub(super) fn sys_partition_transfer(
     handle: RawHandle,
     first: u64,
@@ -331,49 +333,47 @@ pub(super) fn sys_partition_transfer(
         Err(e) => return e.refuse(),
     };
     let class = claim.class();
-    if !matches!(class, device::DeviceType::Partition) {
-        drop(claim);
-        return crate::object::HandleError::WrongType {
-            held: class.class_name(),
-            wanted: "a partition claim",
+    match class {
+        device::DeviceType::Partition => {}
+        device::DeviceType::Keyboard
+        | device::DeviceType::Mouse
+        | device::DeviceType::Framebuffer
+        | device::DeviceType::HdaAudio
+        | device::DeviceType::VirtioSound
+        | device::DeviceType::PciFunction => {
+            drop(claim);
+            return crate::object::HandleError::WrongType {
+                held: class.class_name(),
+                wanted: "a partition claim",
+            }
+            .refuse();
         }
-        .refuse();
     }
-    match claim.partition_view().map(|view| view.locate(first, count).is_ok()) {
+    match claim.partition_view().map(|view| view.fits(first, count)) {
         None => return SyscallError::Gone.to_u64(),
         Some(false) => return SyscallError::InvalidArgument.to_u64(),
         Some(true) => {}
     }
     let mut bounce = alloc::vec![0u8; count as usize * toyos_abi::part::BLOCK_BYTES];
-    let mut gone = false;
-    let done = match transfer {
+    match transfer {
         Transfer::Write(from) => {
             from.read_at(0, &mut bounce);
-            crate::block::to_completion("a partition write", || match claim.partition_view() {
-                Some(view) => view.write_blocks(first, count, &bounce),
-                None => {
-                    gone = true;
-                    Ok(())
-                }
-            })
+            let run = ops::until_answered(|| match claim.partition_view() {
+                Some(view) => view.write_blocks(first, count, &bounce).map_err(ops::block_word),
+                None => Err(SyscallError::Gone),
+            });
+            ops::partition_word("a write", run)
         }
         Transfer::Read(into) => {
-            let done =
-                crate::block::to_completion("a partition read", || match claim.partition_view() {
-                    Some(view) => view.read_blocks(first, count, &mut bounce),
-                    None => {
-                        gone = true;
-                        Ok(())
-                    }
-                });
-            if done.is_ok() && !gone {
+            let run = ops::until_answered(|| match claim.partition_view() {
+                Some(view) => view.read_blocks(first, count, &mut bounce).map_err(ops::block_word),
+                None => Err(SyscallError::Gone),
+            });
+            let word = ops::partition_word("a read", run);
+            if word == 0 {
                 into.write_at(0, &bounce);
             }
-            done
+            word
         }
-    };
-    if gone {
-        return SyscallError::Gone.to_u64();
     }
-    ops::completed_word(done)
 }

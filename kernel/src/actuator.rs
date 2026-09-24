@@ -207,10 +207,13 @@ actuators! {
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
-    /// Run `SYS_FSYNC`'s first attempt under an operation that is already over.
+    /// Run the first attempt of every block operation `object::ops::until_answered`
+    /// retries — `SYS_FSYNC`, a partition transfer — under an operation that is
+    /// already over.
     fsync_budget_spent = "fsync-budget-spent";
 
-    /// Make `SYS_FSYNC`'s deadman already expired.
+    /// Make the deadman of every run `object::ops::until_answered` makes already
+    /// expired.
     fsync_deadman_now = "fsync-deadman-now";
 
     /// Skip one NVMe completion wait so a submitted command goes unanswered.

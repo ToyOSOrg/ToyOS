@@ -87,34 +87,6 @@ pub(crate) fn between_attempts(attempt: u32) {
     );
 }
 
-/// `op` run to an answer, for a caller holding nothing: retried on a fresh
-/// budget while the budget is all that refused it, `Device` once [`DEADMAN`]
-/// is spent, and `BudgetExpired` only for a caller being killed.
-pub fn to_completion(what: &str, mut op: impl FnMut() -> BlockResult) -> BlockResult {
-    let began = crate::clock::now();
-    let deadman = Deadline::at(began + DEADMAN.duration());
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        match op() {
-            Err(BlockError::BudgetExpired) => {
-                if crate::sched::driver::current_kill_pending() {
-                    return Err(BlockError::BudgetExpired);
-                }
-                if deadman.reached(crate::clock::now()) {
-                    log!(
-                        "block: {what} still refused after {attempt} attempt(s) in {} — {DEADMAN}",
-                        crate::clock::now() - began,
-                    );
-                    return Err(BlockError::Device);
-                }
-                between_attempts(attempt);
-            }
-            done => return done,
-        }
-    }
-}
-
 /// Declares the running context inside one block-device operation, bounded by `OPERATION`, until the guard drops.
 // An absolute deadline, not a relative duration: it crosses into a driver that loops, and re-basing per command would bound each command instead of the whole operation.
 #[must_use = "the operation lasts exactly as long as this guard"]
@@ -349,11 +321,19 @@ impl Partition {
         Ok(BlockKey { device: self.device_id(), partition: self.first_block, block })
     }
 
+    /// Whether `count` blocks from `block` end inside the view — asked of a
+    /// caller's numbers, so a refusal is the caller's answer and not a line in
+    /// the kernel's log.
+    pub fn fits(&self, block: u64, count: u32) -> bool {
+        block.checked_add(count as u64).is_some_and(|end| end <= self.blocks)
+    }
+
     /// The device block `block` names, or a refusal past the view's end.
     pub fn locate(&self, block: u64, count: u32) -> Result<u64, BlockError> {
-        match block.checked_add(count as u64) {
-            Some(end) if end <= self.blocks => Ok(self.first_block + block),
-            _ => Err(self.past_end(block, count)),
+        if self.fits(block, count) {
+            Ok(self.first_block + block)
+        } else {
+            Err(self.past_end(block, count))
         }
     }
 
