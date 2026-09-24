@@ -11,10 +11,10 @@
 //!   `DEVICE_FRAMEBUFFER` stops `panic_console::boot_checkpoint` from ever
 //!   painting again, so a console that merely cleared the screen would trade
 //!   the diagnostic that works today for one that might. It asks `logd` for the
-//!   log ([`toyos_logstream::SERVICE`]), draws the boot so far above the first
-//!   prompt, and every line after as it is written: the kernel's records and
-//!   every program's output, each program's line under its name. Its own lines
-//!   it has already drawn, so it skips them.
+//!   log ([`toyos_logstream::SERVICE`]) and draws the boot so far above the
+//!   first prompt — the kernel's records and every program's output — and
+//!   every program's line after as it is written, each under its program's
+//!   name (`Log::draw`).
 //! - **A fatal panic still takes the screen back.** `render` ignores
 //!   `SCREEN_OWNED_BY_USERLAND` entirely — only boot checkpoints honour it —
 //!   so the report paints over whatever this program drew.
@@ -65,12 +65,19 @@ struct Log {
     pipe: Pipe,
     lines: Lines,
     handed: u64,
+    /// When this program asked, in milliseconds since boot: a kernel record
+    /// stamped before it is the boot so far, however late `logd` read it.
+    asked_ms: u64,
+    /// Whether the last kernel record was drawn, which its continuation lines
+    /// follow.
+    drawing: bool,
 }
 
 impl Log {
     /// Ask `logd`. A blocking read of one frame from the server this image
     /// names, which answers as it accepts.
     fn subscribe() -> Result<Self, String> {
+        let asked_ms = toyos_abi::syscall::clock_nanos() / 1_000_000;
         let conn = endow::service(SERVICE).map_err(|e| format!("no `{SERVICE}` service: {e:?}"))?;
         let header = conn.recv_header().map_err(|e| format!("logd did not answer: {e:?}"))?;
         if header.msg_type != SERVED {
@@ -82,23 +89,34 @@ impl Log {
         // SAFETY: the kernel moved this handle into this table with the frame
         // that names it, and nothing else answers for it.
         let pipe = unsafe { Pipe::from_raw(raw) };
-        Ok(Self { pipe, lines: Lines::new(), handed })
+        Ok(Self { pipe, lines: Lines::new(), handed, asked_ms, drawing: true })
     }
 
-    /// Draw every whole line in `bytes` but this program's own.
+    /// Draw every whole line in `bytes` that goes on the screen.
+    ///
+    /// **Every program's line but this program's own**, which it has already
+    /// drawn, and **the kernel's records of the boot before this program
+    /// asked** — the boot so far, as the panel it took over would have shown
+    /// it. A record after that is not drawn: it would put a `spawn:` and an
+    /// `exit:` beside every command typed.
     fn draw(&mut self, bytes: &[u8], console: &mut Console) {
-        self.lines.push(bytes, |line| draw_line(line, console));
-    }
-}
-
-fn draw_line(line: &[u8], console: &mut Console) {
-    let own = std::str::from_utf8(line)
-        .ok()
-        .and_then(toyos_logstream::program_line)
-        .is_some_and(|said| said.tag == OWN_TAG);
-    if !own {
-        console.write_bytes(line);
-        console.write_bytes(b"\n");
+        let (asked_ms, drawing) = (self.asked_ms, &mut self.drawing);
+        self.lines.push(bytes, |line| {
+            let text = std::str::from_utf8(line).ok();
+            let keep = match text.and_then(toyos_logstream::program_line) {
+                Some(said) => said.tag != OWN_TAG,
+                None => {
+                    if let Some(ms) = text.and_then(toyos_logstream::record_ms) {
+                        *drawing = ms < asked_ms;
+                    }
+                    *drawing
+                }
+            };
+            if keep {
+                console.write_bytes(line);
+                console.write_bytes(b"\n");
+            }
+        });
     }
 }
 

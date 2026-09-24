@@ -332,13 +332,7 @@ impl fmt::Display for Unfit {
 /// it is the writer's tag, and the two writers disagree about it on purpose —
 /// `logd` puts a wall clock there and the panel puts nothing.
 pub fn record_millis(line: &str) -> Option<u64> {
-    let (before, _) = line.split_once(" cpu")?;
-    // The opening bracket, for the writer that puts no tag before the field.
-    let field = before.split_whitespace().next_back()?.trim_start_matches('[');
-    let (secs, millis) = field.split_once('.')?;
-    let secs: u64 = secs.parse().ok()?;
-    let millis: u64 = millis.parse().ok()?;
-    secs.checked_mul(1_000)?.checked_add(millis)
+    toyos_logstream::record_ms(line)
 }
 
 /// The UTC second one record line carries, as seconds since the epoch.

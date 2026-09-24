@@ -157,6 +157,25 @@ pub fn program_line(line: &str) -> Option<Said<'_>> {
     Some(Said { tag, text })
 }
 
+/// The milliseconds since boot a kernel record's line carries, or `None` for
+/// any other line.
+///
+/// **Found from the CPU it precedes rather than by position**: the field before
+/// it is the writer's tag, and the writers disagree about it on purpose —
+/// `logd` puts a wall clock there and the panel puts nothing.
+///
+/// Read inside the record's bracket and nowhere else, so no text after it — a
+/// program's included — can answer for the time.
+pub fn record_ms(line: &str) -> Option<u64> {
+    let (head, _) = line.strip_prefix('[')?.split_once("] ")?;
+    let (before, _) = head.split_once(" cpu")?;
+    let field = before.split_whitespace().next_back()?;
+    let (secs, millis) = field.split_once('.')?;
+    let secs: u64 = secs.parse().ok()?;
+    let millis: u64 = millis.parse().ok()?;
+    secs.checked_mul(1_000)?.checked_add(millis)
+}
+
 /// Whether `line` opens as a program's line: what a judge of the kernel's
 /// records leaves out.
 pub fn is_program_line(line: &str) -> bool {
@@ -330,6 +349,17 @@ mod tests {
         for bad in ["", "a b", "a}b", "{", "x\n", "é", longer.as_str()] {
             assert!(Tag::new(bad).is_none(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_records_time_is_read_inside_its_bracket_and_nowhere_else() {
+        assert_eq!(record_ms("[2026-09-07 22:57:46 3.109 cpu1] exit: a pid=7"), Some(3_109));
+        assert_eq!(record_ms("[3.109 cpu1] exit: a pid=7 code=0"), Some(3_109));
+        assert_eq!(record_ms("[2026-09-07 22:58:03 20.071 cpu2 tid=1] x"), Some(20_071));
+        assert_eq!(record_ms("{2026-09-07 22:58:03 20.071 netd} 99.000 cpu0"), None);
+        assert_eq!(record_ms("[x] said 99.000 cpu0"), None);
+        assert_eq!(record_ms("no timestamp here, cpu=1ms"), None);
+        assert_eq!(record_ms(""), None);
     }
 
     #[test]
