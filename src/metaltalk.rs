@@ -813,8 +813,10 @@ mod tests {
     }
 
     /// **A peer that connects and says nothing yet is a stream, not an end**:
-    /// the reader waits for its next line rather than reading the silence as a
-    /// close.
+    /// the reader blocks on its next line rather than reading the silence as a
+    /// close. The reader has no timer, so the silence is an order of events and
+    /// not a length of time: the connection is seen before the peer speaks, and
+    /// the stream is still open once what it said has been read.
     #[test]
     fn a_peer_quiet_after_connecting_is_still_read() {
         let dir = std::env::temp_dir().join(format!("metaltalk-quiet-{}", std::process::id()));
@@ -825,11 +827,16 @@ mod tests {
             .expect("a loopback reader");
         let (mut conn, _) = server.accept().unwrap();
         stream.wait_connected().expect("the peer");
-        assert!(!stream.wait_ended(Duration::from_millis(500)), "a quiet peer was read as a closed one");
         writeln!(conn, "[kernel 1.216 cpu0] Boot: complete (1216ms)").unwrap();
+        assert!(stream.wait_for("Boot: complete", Duration::from_secs(5)), "the first line was not read");
+        assert!(!stream.wait_ended(Duration::ZERO), "a quiet peer was read as a closed one");
+        writeln!(conn, "[kernel 1.217 cpu0] init: started logd").unwrap();
         drop(conn);
         assert!(stream.wait_ended(Duration::from_secs(5)));
-        assert_eq!(stream.lines(), vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n"]);
+        assert_eq!(
+            stream.lines(),
+            vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] init: started logd\n"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -249,11 +249,19 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
         return Err(format!("{}.local was answered {got:02x?}, and {want:02x?} is owed", toyos_build::lan::HOSTNAME));
     }
 
-    socket.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e| format!("{e}"))?;
+    // Silence is not waited for: the other name is asked, then this one again,
+    // down one forward netd reads in order, so the next answer is the third
+    // question's unless the other name was answered.
     socket
         .send_to(&query(0x0bad, "some-other-host"), (Ipv4Addr::LOCALHOST, port))
-        .map_err(|e| format!("send the second query: {e}"))?;
-    if let Ok(n) = socket.recv(&mut answer) {
+        .map_err(|e| format!("send the other name's query: {e}"))?;
+    socket
+        .send_to(&query(0x5eee, toyos_build::lan::HOSTNAME), (Ipv4Addr::LOCALHOST, port))
+        .map_err(|e| format!("send the third query: {e}"))?;
+    let n = socket
+        .recv(&mut answer)
+        .map_err(|e| format!("no answer for {}.local asked again, in 10 s: {e}", toyos_build::lan::HOSTNAME))?;
+    if answer[..2] != [0x5e, 0xee] {
         return Err(format!("a query for another name was answered: {:02x?}", &answer[..n]));
     }
     drop(guest);
