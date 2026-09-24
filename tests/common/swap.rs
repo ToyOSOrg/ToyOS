@@ -468,12 +468,13 @@ pub fn swap_resets_the_function(
     std::fs::write(&binary, probe).map_err(|e| format!("{}: {e}", binary.display()))?;
     let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(probe))?;
     eprintln!("  [swap] the swap was answered {answer:?}");
-    let held = qemu::await_marker(
-        &mut rig.guest,
-        &mut rig.console,
-        "swap_flr_probe: done",
-        "the replacement reading the igb",
-    );
+    // The probe's read, or a line that says there will be none.
+    let failed = toyos_swap::said("netd", Word::Failed, "");
+    let held = qemu::await_guest(&mut rig.guest, &mut rig.console, "the replacement reading the igb", |c| {
+        c.contains("swap_flr_probe: igb BAR")
+            || c.contains("swap_flr_probe: started holding no igb")
+            || c.contains(&failed)
+    });
     if let Err(why) = held {
         return Err(rig.fail(why));
     }
