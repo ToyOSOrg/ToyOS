@@ -1202,10 +1202,6 @@ device_classes! {
     /// Like `pci`, a class whose name is not the whole of the entry —
     /// `part:<GUID>` — and [`DeviceRequest`] is the one parser.
     Partition = 8 => "part",
-    /// The same claim, naming the partition as the one partition on the machine
-    /// of a type GUID: `part-type:<GUID>`. The claim is the same object; the
-    /// class says how the selector is to be read.
-    PartitionOfType = 9 => "part-type",
 }
 
 /// A PCI function named by what identifies the *card*, not the slot firmware
@@ -1274,7 +1270,7 @@ fn hex16(text: &str) -> Option<u16> {
 pub enum DeviceRequest {
     Class(DeviceType),
     Pci(PciId),
-    Partition(crate::part::PartitionName),
+    Partition(crate::part::PartGuid),
 }
 
 impl DeviceRequest {
@@ -1284,40 +1280,31 @@ impl DeviceRequest {
     /// The spelling that carries a unique partition GUID.
     pub const PART_PREFIX: &'static str = "part:";
 
-    /// The spelling that carries a partition type GUID.
-    pub const PART_TYPE_PREFIX: &'static str = "part-type:";
-
     /// The longest a `devices` entry, and so a `dev:` label's tail, can be:
-    /// `part-type:` and a GUID, rounded up to a multiple of eight.
+    /// `part:` and a GUID, rounded up to a multiple of eight.
     pub const MAX_NAME: usize = 48;
 
     pub fn parse(name: &str) -> Option<Self> {
-        use crate::part::{PartGuid, PartitionName};
         if let Some(id) = name.strip_prefix(Self::PCI_PREFIX) {
             return PciId::parse(id).map(Self::Pci);
         }
         if let Some(guid) = name.strip_prefix(Self::PART_PREFIX) {
-            return PartGuid::parse(guid).map(|g| Self::Partition(PartitionName::Unique(g)));
-        }
-        if let Some(guid) = name.strip_prefix(Self::PART_TYPE_PREFIX) {
-            return PartGuid::parse(guid).map(|g| Self::Partition(PartitionName::OfType(g)));
+            return crate::part::PartGuid::parse(guid).map(Self::Partition);
         }
         let class = DeviceType::from_class_name(name)?;
         match class {
-            // A bare `pci`, `part` or `part-type` names no device, and would
-            // otherwise leave the selector at zero.
-            DeviceType::PciFunction | DeviceType::Partition | DeviceType::PartitionOfType => None,
+            // A bare `pci` or `part` names no device, and would otherwise
+            // leave the selector at zero.
+            DeviceType::PciFunction | DeviceType::Partition => None,
             _ => Some(Self::Class(class)),
         }
     }
 
     pub const fn class(self) -> DeviceType {
-        use crate::part::PartitionName;
         match self {
             Self::Class(class) => class,
             Self::Pci(_) => DeviceType::PciFunction,
-            Self::Partition(PartitionName::Unique(_)) => DeviceType::Partition,
-            Self::Partition(PartitionName::OfType(_)) => DeviceType::PartitionOfType,
+            Self::Partition(_) => DeviceType::Partition,
         }
     }
 
@@ -1327,7 +1314,7 @@ impl DeviceRequest {
         match self {
             Self::Class(_) => [0, 0],
             Self::Pci(id) => [id.wire(), 0],
-            Self::Partition(name) => name.guid().wire(),
+            Self::Partition(guid) => guid.wire(),
         }
     }
 
@@ -1335,22 +1322,18 @@ impl DeviceRequest {
     /// [`Self::MAX_NAME`] bounds. The name is also the tail of the `dev:` label
     /// the claim arrives under, and it is composed here so the two cannot drift.
     pub fn write_name(self, buf: &mut [u8; Self::MAX_NAME]) -> &str {
-        use crate::part::{PartitionName, GUID_TEXT_LEN};
+        use crate::part::GUID_TEXT_LEN;
         let id = match self {
             Self::Class(class) => {
                 let name = class.class_name();
                 buf[..name.len()].copy_from_slice(name.as_bytes());
                 return core::str::from_utf8(&buf[..name.len()]).expect("a class name is ASCII");
             }
-            Self::Partition(name) => {
-                let prefix = match name {
-                    PartitionName::Unique(_) => Self::PART_PREFIX,
-                    PartitionName::OfType(_) => Self::PART_TYPE_PREFIX,
-                };
-                let at = prefix.len();
-                buf[..at].copy_from_slice(prefix.as_bytes());
+            Self::Partition(guid) => {
+                let at = Self::PART_PREFIX.len();
+                buf[..at].copy_from_slice(Self::PART_PREFIX.as_bytes());
                 let mut text = [0u8; GUID_TEXT_LEN];
-                name.guid().write_text(&mut text);
+                guid.write_text(&mut text);
                 buf[at..at + GUID_TEXT_LEN].copy_from_slice(&text);
                 return core::str::from_utf8(&buf[..at + GUID_TEXT_LEN])
                     .expect("a prefix and a GUID's text are ASCII");
@@ -1383,7 +1366,7 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// `PermissionDenied` one the kernel drives itself — for a partition, one it
 /// has mounted. A request matching more than one function or partition answers
 /// `InvalidArgument`, because an ambiguous name is refused rather than resolved
-/// to the first match.
+/// to the first match; so does a nonzero selector word the class does not read.
 ///
 /// The claim comes back **without** [`Rights::DUP`], so it can only be moved,
 /// which is what makes endowing one to a child a provable hand-off.
@@ -2257,9 +2240,10 @@ mod tests {
             "nic",  // the retired class the NIC used to be claimed as
             "gpu",  // a class name this table has never had
             "part", // a bare partition class names no partition
-            "part-type",
             "part:",
-            "part-type:c12a7328-f81f-11d2-ba4b-00a0c93ec93b", // one spelling: uppercase
+            "part:c12a7328-f81f-11d2-ba4b-00a0c93ec93b", // one spelling: uppercase
+            // A partition is named by its unique GUID and nothing else.
+            "part-type:C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
             "",
         ] {
             assert_eq!(DeviceRequest::parse(bad), None, "{bad:?} parsed");
@@ -2277,9 +2261,8 @@ mod tests {
             "pci:0000:0000",
             "hda-audio",
             "mouse",
-            "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4",
             // The longest entry there is, which is what `MAX_NAME` is for.
-            "part-type:C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4",
         ] {
             let request = DeviceRequest::parse(name).expect("a name this table has");
             let mut buf = [0u8; DeviceRequest::MAX_NAME];
@@ -2287,20 +2270,16 @@ mod tests {
         }
     }
 
-    /// The two partition spellings are two classes over one GUID, so a type
-    /// row can never be read as the partition whose unique GUID it happens to
-    /// spell, nor the reverse.
+    /// A `part:` entry is the partition class carrying its GUID's sixteen bytes
+    /// in both selector words.
     #[test]
-    fn a_partition_entry_says_which_of_its_guids_it_names() {
-        use crate::part::{PartGuid, PartitionName};
-        let esp = PartGuid::parse("C12A7328-F81F-11D2-BA4B-00A0C93EC93B").expect("the ESP type");
-        let by_type = DeviceRequest::parse("part-type:C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
-        let by_unique = DeviceRequest::parse("part:C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
-        assert_eq!(by_type, Some(DeviceRequest::Partition(PartitionName::OfType(esp))));
-        assert_eq!(by_unique, Some(DeviceRequest::Partition(PartitionName::Unique(esp))));
-        assert_eq!(by_type.map(DeviceRequest::class), Some(DeviceType::PartitionOfType));
-        assert_eq!(by_unique.map(DeviceRequest::class), Some(DeviceType::Partition));
-        assert_eq!(by_type.map(DeviceRequest::selector), Some(esp.wire()));
+    fn a_partition_entry_carries_its_guid_in_both_selector_words() {
+        use crate::part::PartGuid;
+        let guid = PartGuid::parse("0FC63DAF-8483-4772-8E79-3D69D8477DE4").expect("a GUID");
+        let request = DeviceRequest::parse("part:0FC63DAF-8483-4772-8E79-3D69D8477DE4");
+        assert_eq!(request, Some(DeviceRequest::Partition(guid)));
+        assert_eq!(request.map(DeviceRequest::class), Some(DeviceType::Partition));
+        assert_eq!(request.map(DeviceRequest::selector), Some(guid.wire()));
     }
 
     /// The selector is one word on the wire and the kernel decodes it back;

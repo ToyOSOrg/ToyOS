@@ -114,7 +114,7 @@ pub enum ClaimError {
 ///
 /// `selector` says *which* device where the class alone does not — a PCI
 /// function's vendor and device id in its first word, a partition's GUID in
-/// both — and every other class ignores it.
+/// both — and the syscall has refused a word the class does not read.
 pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
@@ -152,8 +152,8 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let (info, slot, claim) = crate::pcidev::claim(id)?;
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info, slot), claim))
         }
-        DeviceType::Partition | DeviceType::PartitionOfType => {
-            log!("partclaim: this kernel does not hand out partition claims yet — {} refused", class.class_name());
+        DeviceType::Partition => {
+            log!("partclaim: this kernel does not hand out partition claims yet");
             Err(ClaimError::Unusable)
         }
         DeviceType::HdaAudio => {

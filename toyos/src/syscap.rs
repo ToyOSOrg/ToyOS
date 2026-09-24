@@ -40,17 +40,17 @@ impl SysCap {
         self.mint(DeviceRequest::Pci(id))
     }
 
-    /// Mint the claim for one GPT partition, by its unique GUID or as the one
-    /// partition of a type. Apart from [`Self::claim`] for the reason
-    /// [`Self::claim_pci`] is: this one cannot be asked without naming which.
+    /// Mint the claim for one GPT partition, by its unique GUID. Apart from
+    /// [`Self::claim`] for the reason [`Self::claim_pci`] is: this one cannot be
+    /// asked without naming which.
     ///
     /// `PermissionDenied` is a partition the kernel has mounted, and
     /// `AlreadyExists` one another process holds: a partition has one holder.
     pub fn claim_partition<T: FromHandle>(
         &self,
-        name: toyos_abi::part::PartitionName,
+        guid: toyos_abi::part::PartGuid,
     ) -> Result<T, SyscallError> {
-        self.mint(DeviceRequest::Partition(name))
+        self.mint(DeviceRequest::Partition(guid))
     }
 
     fn mint<T: FromHandle>(&self, request: DeviceRequest) -> Result<T, SyscallError> {
