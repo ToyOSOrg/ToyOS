@@ -6,8 +6,8 @@ opened: 2026-09-14
 
 # The machine stop says how many threads it waited for and never which
 
-`kernel/src/quiesce.rs`'s `stop` sweeps the process table, waits a cadence, and
-sweeps again until every userland thread it must stop has. The record it writes
+`kernel/src/quiesce.rs`'s `stop` sweeps the process table, parks until a thread
+it names stops, parks or exits, and sweeps again until every one has. The record it writes
 says how many threads there were and how long they took; it does not say
 **which** one the time went on.
 
@@ -49,7 +49,8 @@ file.
 
 ## What the dev host measures, and what the budget could be
 
-Twelve boots of `quiesce_stops_the_machine` at `feffffb6`, `tests/quiescecase`,
+Twelve boots of `quiesce_stops_the_machine` at `feffffb6` — a kernel that swept
+on a 10 ms cadence rather than on its threads' transitions — `tests/quiescecase`,
 six writer threads on two vcpus:
 
 | host | park, per boot |
@@ -79,6 +80,6 @@ rather than remembers.
 ## What would show it
 
 The record naming the last thread to stop, and a boot of `tests/metalcase`
-whose `park_ms` can then be attributed to it rather than inferred. Until the
-record names one, `boot.metalcase.park_ms` is priced at `quiesce::PARK`'s
-derivation and the reading beside it explains nothing about itself.
+whose stop time can then be attributed to it rather than inferred. Until the
+record names one, its `in N ms` explains nothing about itself, and no profile
+row prices it.
