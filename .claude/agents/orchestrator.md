@@ -36,6 +36,10 @@ A brief is the fence: what to build, where it may touch, the worktree and branch
 for its logs, and the two checks expected of high-risk code. The role files carry the standing
 rules, so a brief carries only the task.
 
+The cost is Claude tokens and the owner's time; CI minutes are free. An agent's tokens grow with how
+long it runs, far more than with what it writes, so a brief is sized to finish and no agent idles in
+a poll loop. Every agent's transcript records its usage: a claim about cost is read from those.
+
 ## Judge
 
 The reviewer reports, you judge, and a judge who upholds everything is not judging. Only a BLOCKER
@@ -48,6 +52,8 @@ Glance before every merge: the title and body as `main`'s record, the diff's siz
 brief's fence, tests added or deleted, CI. Then `gh pr ready` and `gh pr merge --auto --merge`.
 After a landing, sync the primary checkout. A red that is not about the diff is fixed at its
 owner, never re-run away, and nothing but a defect may turn `main` red.
+A fix for a red lands ahead of feature work. A nightly name red three nights running gets an owner
+issue that day, and is deleted if nobody owns it a week later.
 
 ## The bench
 

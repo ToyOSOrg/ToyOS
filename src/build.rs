@@ -2287,34 +2287,20 @@ mod tests {
     }
 
     /// **A control nobody runs is a control nobody has shown can fail.** Every
-    /// name [`declared_model_controls`] finds must appear as `--features <name>`
-    /// somewhere in `host-tests.yml` — the one place these are wired, by every
-    /// existing comment's own account — or a new control can be declared and
-    /// run nowhere, silently, which is exactly how five of `kernel-loom`'s six
-    /// and `toyos-sched-loom`'s `doorbell-kick-relaxed` went unwired until
-    /// 2026-08-17: nothing before this test required a declared control to
-    /// have a step.
-    ///
-    /// A substring check and not a YAML parse, for `src/ci.rs`'s `nameless`
-    /// reason: the shape a step's command line has is fixed, and a real parse
-    /// would have to reconstruct multi-line `run:` blocks to find it in.
+    /// name [`declared_model_controls`] finds is a row of `crate::ci::CONTROLS`,
+    /// which `cargo run -- --ci host-full` runs, and every row names a declared
+    /// control — or a new control can be declared and run nowhere, silently.
     #[test]
-    fn every_model_control_is_wired_into_host_tests() {
+    fn every_model_control_is_run() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workflow = fs::read_to_string(root.join(".github/workflows/host-tests.yml"))
-            .expect("host-tests.yml is readable");
-        let mut missing = Vec::new();
-        for (crate_name, control) in declared_model_controls(root) {
-            let needle = format!("--features {control}");
-            if !workflow.contains(&needle) {
-                missing.push(format!("{crate_name}: {control} ({needle:?} not found in host-tests.yml)"));
-            }
-        }
-        assert!(
-            missing.is_empty(),
-            "a model's negative control is declared with no CI step running it — \
-             wire it into .github/workflows/host-tests.yml beside the others:\n  {}",
-            missing.join("\n  ")
+        let declared: BTreeSet<String> =
+            declared_model_controls(root).into_iter().map(|(_, name)| name).collect();
+        let run: BTreeSet<String> =
+            crate::ci::CONTROLS.iter().map(|c| c.feature.to_string()).collect();
+        assert_eq!(
+            declared, run,
+            "a model's negative control is declared and not in src/ci.rs's CONTROLS, or a row \
+             there names a feature no model crate declares"
         );
     }
 

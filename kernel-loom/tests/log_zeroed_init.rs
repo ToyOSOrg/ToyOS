@@ -8,7 +8,7 @@
 //! invocations, and the other one runs nothing from this file.** That is the
 //! shape, not an accident — but it was silent until 2026-08-14, when CI ran
 //! only the default invocation and this file's `running 0 tests` looked
-//! identical to a pass. `.github/workflows/host-tests.yml` names both commands
+//! identical to a pass. `cargo run -- --ci host-full` runs both commands
 //! now, and every other `loom::model` file is gated `cfg(feature = "loom")`,
 //! so a bare `--no-default-features` run at the crate root exercises none of
 //! them either — the second command names this target explicitly instead.

@@ -422,7 +422,12 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
             sys_endowments(&mut buf)
         }
-        SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2, a3),
+        SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2, [a3, a4]),
+        // Numbered in the ABI and not yet served: a caller is told which call it made.
+        SYS_PARTITION_READ | SYS_PARTITION_WRITE => {
+            crate::log!("syscall {num} (a partition transfer) is not implemented in this kernel");
+            SyscallError::NotSupported.to_u64()
+        }
         SYS_RT_ENTER => sys_rt_enter(RawHandle(a1 as u32)),
         SYS_LOG_READ => {
             // checked_mul before mapping: a product that doesn't fit is a bad argument,
