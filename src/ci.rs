@@ -139,8 +139,9 @@ impl Step {
 fn step(label: &str, f: impl FnOnce() -> Result<String, String>) -> Step {
     println!("\n=== [ci] {label}");
     let verdict = f();
-    if let Err(why) = &verdict {
-        eprintln!("[ci] {label}: {why}");
+    match &verdict {
+        Ok(said) => println!("[ci] {label}: {said}"),
+        Err(why) => eprintln!("[ci] {label}: {why}"),
     }
     Step { label: label.to_string(), verdict }
 }
@@ -541,8 +542,7 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
 fn verdicts(log: &str) -> String {
     let total = log
         .lines()
-        .filter(|l| l.contains("test result:") && l.contains(" total ("))
-        .last()
+        .rfind(|l| l.contains("test result:") && l.contains(" total ("))
         .unwrap_or("no suite result line");
     let named: Vec<&str> = log
         .lines()
