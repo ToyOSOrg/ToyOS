@@ -282,6 +282,17 @@ pub fn quiesce_stops_the_machine(
             record.sweep.running,
         ));
     }
+    // The kernel's `quiesce::PARK`, `QUANTUM_NS` plus `block::OPERATION`,
+    // spelt here because the harness cannot link the kernel. A stop that
+    // stopped everything only once its budget was spent was parked while its
+    // threads stopped: their transitions never woke it.
+    const PARK_MS: u64 = 10 + 2_000;
+    if record.elapsed_ms >= PARK_MS {
+        return Err(format!(
+            "the stop took its whole {PARK_MS} ms budget to see a machine it had stopped, so \
+             nothing its threads did woke it:\n  {record}"
+        ));
+    }
 
     eprintln!("  [power] the machine stopped before it claimed anything: {record}");
     Ok(())

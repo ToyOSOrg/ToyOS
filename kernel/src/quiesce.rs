@@ -63,6 +63,7 @@ mod claim;
 /// parking between them inside a `block::OpenUpdate` this stop waits out, and
 /// `block::DEADMAN` is what bounds that sequence. A thread can therefore
 /// outlast this, which is why its expiry is a clause in the record.
+/// `tests/common/power.rs`'s `quiesce_stops_the_machine` spells it again.
 const PARK: Budget = Budget::of(
     Duration::from_nanos(toyos_sched::fair::QUANTUM_NS + crate::block::OPERATION.nanos()),
     "the reset lands wherever the threads that never reached a safe point are, and \
