@@ -53,6 +53,10 @@ above; otherwise it is a NOTE.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads.
+- **Waits.** A flat wait — sleep, then assume it happened — is a BLOCKER, in code and in tests,
+  unless a hardware document mandates that time and offers no notification, cited at the site.
+  Wait on the event itself, bounded by a timeout that fails loudly. Defensive code that hides a
+  failure instead of failing fast is a BLOCKER too.
 
 ## Prose is removed, never reviewed
 

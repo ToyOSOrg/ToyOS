@@ -11,8 +11,8 @@ use crate::{Device, AsHandle};
 use crate::ipc::IpcPayload;
 use toyos_abi::RawHandle;
 
-/// SAFETY: each is `#[repr(C)]` over `u32`/`u16`/`u8` fields and `RawHandle`s
-/// (`repr(transparent)` over a `u32`), so none holds a pointer or a field with
+/// SAFETY: each is `#[repr(C)]` over unsigned integers, arrays of them and
+/// `RawHandle`s (`repr(transparent)` over a `u32`), so none holds a pointer or a field with
 /// an invalid bit pattern, and the padding-free layout is the `const` assertion
 /// beside each declaration in `toyos-abi` — the one its `as_bytes` already
 /// reads on to publish these bytes.
@@ -24,6 +24,7 @@ device_info!(
     toyos_abi::pci::PciFunctionInfo,
     toyos_abi::virtio_sound::VirtioSoundInfo,
     toyos_abi::hda::HdaInfo,
+    toyos_abi::part::PartitionInfo,
 );
 
 /// Read a claim's description, whose buffer fields are handles this call
@@ -178,6 +179,37 @@ impl PciDev {
 }
 
 impl AsHandle for PciDev {
+    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
+}
+
+/// One GPT partition, read and written in its own block numbers
+/// ([`toyos_abi::part`]); a neighbour's blocks have no spelling here.
+pub struct PartitionDev(pub(crate) Device);
+
+impl PartitionDev {
+    /// Which partition this is and how long; read once per claim.
+    pub fn describe(&self) -> Result<toyos_abi::part::PartitionInfo, SyscallError> {
+        read_info(&self.0)
+    }
+
+    /// `buf.len()` blocks from the partition's block `first`.
+    pub fn read(&self, first: u64, buf: &mut [toyos_abi::part::Block]) -> Result<(), SyscallError> {
+        syscall::partition_read(self.0.as_handle(), first, buf)
+    }
+
+    /// `buf.len()` blocks to the partition's block `first`; durable only once
+    /// [`Self::sync`] answers `Ok`.
+    pub fn write(&self, first: u64, buf: &[toyos_abi::part::Block]) -> Result<(), SyscallError> {
+        syscall::partition_write(self.0.as_handle(), first, buf)
+    }
+
+    /// Every write this claim returned from, out of the device's cache.
+    pub fn sync(&self) -> Result<(), SyscallError> {
+        syscall::fsync(self.0.as_handle())
+    }
+}
+
+impl AsHandle for PartitionDev {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 

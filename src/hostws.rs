@@ -246,8 +246,7 @@ fn dead_member_target_paths(members: &BTreeSet<String>, text: &str) -> Vec<Strin
 /// `src/sourcegate.rs` strips both; this one may not. The paths that matter
 /// here live *inside* string literals — `root.join("../../toyos-cc/target/…")`
 /// is the whole defect — while the explanations of where those paths went live
-/// in comments, in this file and in `.github/workflows/ci.yml` and in the build
-/// script the gate first caught. A scan that read the explanation as the
+/// in comments, in this file and in the build script the gate first caught. A scan that read the explanation as the
 /// offence would be unable to say why it was complaining.
 #[cfg(test)]
 fn code_only(text: &str, line_comment: &str) -> String {

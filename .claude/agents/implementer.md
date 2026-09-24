@@ -27,6 +27,9 @@ guess. Then build, then test before anyone reviews:
   again. Ten minutes of silence kills you, and ending a turn to announce a wait strands the work.
 - A mutation is a measurement only once the mutated tree is shown to build. Apply it as a checked
   patch, restore it in the same script, and leave the tree clean.
+- Never a flat wait, in code or in a test: wait on the event, bounded by a timeout that fails
+  loudly. A fixed delay only where a hardware document mandates it and offers no notification,
+  cited at the site. No defensive code: fail fast, never degrade silently.
 - The T14 is the orchestrator's. Write the request file the brief names and end with
   `T14 RUN REQUESTED: <image path>`.
 

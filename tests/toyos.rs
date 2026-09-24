@@ -116,19 +116,6 @@ impl HostSlots {
 /// reason that is declared.
 const SHARED_TIER: Tier = Tier::Fast;
 
-/// The tier a duration label ran in: its registration's, or the shared boot's
-/// for a discovered test. An audio label is `<name> (smp=<n>)`.
-fn tier_of(label: &str) -> Tier {
-    let name = label.split_once(" (smp=").map_or(label, |(name, _)| name);
-    MACHINE_TESTS
-        .iter()
-        .chain(SCREEN_TESTS)
-        .map(|(n, _, tier)| (*n, *tier))
-        .chain(AUDIO_TESTS.iter().copied())
-        .find(|(n, _)| *n == name)
-        .map_or(SHARED_TIER, |(_, tier)| tier)
-}
-
 /// The one boot that carries every Rust and C test.
 ///
 /// Declared here for the same reason each list entry is: it is a scheduling
@@ -18236,7 +18223,10 @@ fn committed_durations_path() -> std::path::PathBuf {
 fn read_durations(path: &Path, out: &mut BTreeMap<String, Duration>) {
     let Ok(text) = fs::read_to_string(path) else { return };
     for line in text.lines() {
-        if let Some((name, ms)) = toyos_build::durations::parse_profile_line(line) {
+        // `<label> <ms>`, read from the right: a label may carry spaces
+        // (`audio_tone_load (smp=1)`).
+        let Some((name, ms)) = line.rsplit_once(' ') else { continue };
+        if let Ok(ms) = ms.parse() {
             out.insert(name.to_string(), Duration::from_millis(ms));
         }
     }
@@ -18256,19 +18246,12 @@ fn load_durations() -> BTreeMap<String, Duration> {
 /// What [`longest_first`] and [`Shard::keep`] price a task against.
 ///
 /// **Committed only — never [`durations_path`]'s worktree overlay.** That
-/// overlay lives under `target/`, which a sharded CI run restores from one
-/// build cache a sibling job can still be writing: `cache-writer` here and a
-/// same-commit sibling workflow's `cache-writer` both race the twelve shards'
-/// own restores for the identical key, so one shard can land on a fresh save
-/// and another on an older prefix match. `durations_path`'s own doc says a
-/// wrong number "costs some idle lane time" — true only when every shard
-/// prices a task the same wrong way. `Shard::keep` assumes exactly that
-/// agreement, twelve independent processes over it do not have it to give,
-/// and run `31617589126` is what two of them disagreeing on one number looks
-/// like: shard 1 and shard 9 both priced `abuse_kernel_addr`'s task low
-/// enough to take it, and `--merge-durations` refused the run for measuring
-/// it twice. `tests/test-durations` is `actions/checkout`, not
-/// `actions/cache`, and every shard checks out the identical bytes.
+/// overlay lives under `target/`, which each shard restores from a build cache
+/// on its own, so two shards need not read one overlay. `Shard::keep` assumes
+/// every process prices a task identically, and two disagreeing on one number
+/// is one test run twice and another nowhere. `tests/test-durations` is
+/// `actions/checkout`, not `actions/cache`, and every shard checks out the
+/// identical bytes.
 fn shard_pricing() -> BTreeMap<String, Duration> {
     let mut out = BTreeMap::new();
     read_durations(&committed_durations_path(), &mut out);
@@ -18278,44 +18261,15 @@ fn shard_pricing() -> BTreeMap<String, Duration> {
 /// Merge this run's durations into the recorded profile.
 ///
 /// Merged rather than replaced, because a filtered run knows about four tests
-/// and would otherwise throw away what the last full one measured.
-///
-/// **A shard writes somewhere nothing reads.** The partition is a function of
-/// the profile, so a shard that saved would move it under its siblings — three
-/// shards of `nvme_` in one worktree ran one test twice and one nowhere, and
-/// every one of the three reported green. What a shard measures is still a
-/// measurement, and the six of them are a partition of the suite, so it goes to
-/// a file named for the shard that took it: [`load_durations`] never opens one,
-/// and merging them into the committed profile is a deliberate act with a
-/// command behind it.
-fn save_durations(
-    mut known: BTreeMap<String, Duration>,
-    timed: &[(String, Duration)],
-    shard: Option<Shard>,
-) {
+/// and would otherwise throw away what the last full one measured. A sharded
+/// run never calls this: the partition is a function of the profile, so a
+/// shard that saved would move it under its siblings.
+fn save_durations(mut known: BTreeMap<String, Duration>, timed: &[(String, Duration)]) {
     for (name, elapsed) in timed {
         known.insert(name.clone(), *elapsed);
     }
-    let (path, body) = match shard {
-        None => (
-            durations_path(),
-            known.iter().map(|(n, d)| format!("{n} {}\n", d.as_millis())).collect::<String>(),
-        ),
-        // This shard's own tests and no others: a third of the suite is a third
-        // of a measurement, and the merge is what makes it a whole one. Each
-        // row carries its tier, which is what the merge's tier report reads.
-        Some(s) => {
-            let mut mine: Vec<&(String, Duration)> = timed.iter().collect();
-            mine.sort_by(|a, b| a.0.cmp(&b.0));
-            (
-                durations_path()
-                    .with_file_name(format!("test-durations.shard-{}-of-{}", s.index, s.count)),
-                mine.iter()
-                    .map(|(n, d)| format!("{n} {} {}\n", d.as_millis(), tier_of(n).token()))
-                    .collect::<String>(),
-            )
-        }
-    };
+    let path = durations_path();
+    let body = known.iter().map(|(n, d)| format!("{n} {}\n", d.as_millis())).collect::<String>();
     let tmp = path.with_extension("tmp");
     if fs::create_dir_all(path.parent().expect("target/ has a parent")).is_ok()
         && fs::write(&tmp, body).is_ok()
@@ -18502,10 +18456,8 @@ fn build_tasks<'a>(
 /// **The property every merged CI run depends on, checked before any of the
 /// twelve processes that would otherwise each discover it separately.** Every
 /// name [`Shard::keep`] is handed for `count` must land in exactly one of
-/// `1..=count`'s shards — run `31617589126` is what a violation costs: shard 1
-/// and shard 9 each priced the same task low enough to take it, and
-/// `--merge-durations` refused the run for measuring `abuse_kernel_addr`
-/// twice.
+/// `1..=count`'s shards: a violation is one test run twice and another
+/// nowhere, with every shard green.
 ///
 /// This cannot reproduce *why* two real processes disagreed — that needs
 /// [`shard_pricing`]'s fix, not a test, because the defect was two machines
@@ -19199,7 +19151,7 @@ fn main() {
         eprintln!(
             "[toyos] nightly tier: {} test(s) NOT run. \
              `cargo test --test toyos-build -- --nightly` runs them manually; \
-             .github/workflows/ci.yml runs them every night at 03:00 UTC.",
+             .github/workflows/nightly.yml runs them every night at 03:00 UTC.",
             held_back.len(),
         );
         eprintln!("[toyos]   {}", held_back.join(", "));
@@ -19414,9 +19366,10 @@ fn main() {
         }
     }
 
-    // After gate A, because its configs are the only tasks a shard prices by a
-    // name with an `smp=` in it and they are the last thing measured.
-    save_durations(known, &timed, shard);
+    // After gate A, because its configs are the last thing measured.
+    if shard.is_none() {
+        save_durations(known, &timed);
+    }
 
     // Three exit statuses, because there are three things a run can establish,
     // and a quarantined failure is deliberately none of them — see
