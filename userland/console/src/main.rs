@@ -105,7 +105,7 @@ impl Log {
     /// `exit:` beside every command typed.
     fn take(&mut self, bytes: &[u8]) {
         let (asked_ms, drawing, held) = (self.asked_ms, &mut self.drawing, &mut self.held);
-        self.lines.push(bytes, |line| {
+        self.lines.push(bytes, |line, _| {
             let text = std::str::from_utf8(line).ok();
             let keep = match text.and_then(toyos_logstream::program_line) {
                 Some(said) => said.tag != OWN_TAG,

@@ -185,12 +185,22 @@ pub fn is_program_line(line: &str) -> bool {
 /// One program's output, assembled into lines as it arrives in chunks.
 ///
 /// A line ends at `\n`, which it does not keep, and a `\r` before it goes too;
-/// one that reaches [`MAX_LINE`] bytes is let go as it stands. What is left
-/// when the writer is gone is a line of its own ([`Lines::finish`]): a dying
-/// program's last words are said, not dropped.
+/// one that reaches [`MAX_LINE`] bytes is let go as it stands, a piece
+/// [`Ended::No`] says the program had not ended. What is left when the writer
+/// is gone is a piece of its own ([`Lines::finish`]): a dying program's last
+/// words are said, not dropped.
 #[derive(Default)]
 pub struct Lines {
     held: Vec<u8>,
+}
+
+/// Whether a piece is where its writer ended a line — the difference between
+/// a line of the log and what the program wrote, for a reader that keeps the
+/// program's own bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    Yes,
+    No,
 }
 
 impl Lines {
@@ -198,27 +208,27 @@ impl Lines {
         Self { held: Vec::new() }
     }
 
-    /// Take `bytes`, and hand every line they complete to `line`, in order.
-    pub fn push(&mut self, bytes: &[u8], mut line: impl FnMut(&[u8])) {
+    /// Take `bytes`, and hand every piece they complete to `line`, in order.
+    pub fn push(&mut self, bytes: &[u8], mut line: impl FnMut(&[u8], Ended)) {
         for &byte in bytes {
             if byte == b'\n' {
                 let whole = self.held.strip_suffix(b"\r").unwrap_or(&self.held);
-                line(whole);
+                line(whole, Ended::Yes);
                 self.held.clear();
                 continue;
             }
             self.held.push(byte);
             if self.held.len() == MAX_LINE {
-                line(&self.held);
+                line(&self.held, Ended::No);
                 self.held.clear();
             }
         }
     }
 
     /// The writer is gone: what it left unfinished, if anything.
-    pub fn finish(&mut self, line: impl FnOnce(&[u8])) {
+    pub fn finish(&mut self, line: impl FnOnce(&[u8], Ended)) {
         if !self.held.is_empty() {
-            line(&self.held);
+            line(&self.held, Ended::No);
             self.held.clear();
         }
     }
@@ -383,31 +393,41 @@ mod tests {
         assert_eq!(format!("{}", Text(b"ok\xffok")), "ok\u{FFFD}ok");
     }
 
-    fn assemble(chunks: &[&[u8]]) -> vec::Vec<vec::Vec<u8>> {
+    fn assemble(chunks: &[&[u8]]) -> vec::Vec<(vec::Vec<u8>, Ended)> {
         let mut lines = Lines::new();
         let mut out = vec::Vec::new();
         for chunk in chunks {
-            lines.push(chunk, |l| out.push(l.to_vec()));
+            lines.push(chunk, |l, ended| out.push((l.to_vec(), ended)));
         }
-        lines.finish(|l| out.push(l.to_vec()));
+        lines.finish(|l, ended| out.push((l.to_vec(), ended)));
         out
     }
 
     #[test]
     fn lines_are_whole_however_the_writes_split_them() {
         let got = assemble(&[b"one\ntw", b"o\r\n", b"", b"thr", b"ee\n\nlast"]);
-        let want: [&[u8]; 5] = [b"one", b"two", b"three", b"", b"last"];
-        assert_eq!(got, want.map(<[u8]>::to_vec));
+        let want: [(&[u8], Ended); 5] = [
+            (b"one", Ended::Yes),
+            (b"two", Ended::Yes),
+            (b"three", Ended::Yes),
+            (b"", Ended::Yes),
+            (b"last", Ended::No),
+        ];
+        assert_eq!(got, want.map(|(l, e)| (l.to_vec(), e)));
     }
 
+    /// A line past the bound is let go in pieces, and only the last is one its
+    /// program ended — so a reader that keeps the program's own bytes puts
+    /// them back together.
     #[test]
     fn a_line_past_the_bound_is_let_go_in_pieces_and_nothing_is_lost() {
         let long = vec![b'x'; MAX_LINE * 2 + 7];
         let mut chunk = long.clone();
         chunk.push(b'\n');
         let got = assemble(&[&chunk]);
-        assert_eq!(got.iter().map(|l| l.len()).collect::<vec::Vec<_>>(), vec![MAX_LINE, MAX_LINE, 7]);
-        assert_eq!(got.concat(), long);
+        let shape: vec::Vec<(usize, Ended)> = got.iter().map(|(l, e)| (l.len(), *e)).collect();
+        assert_eq!(shape, vec![(MAX_LINE, Ended::No), (MAX_LINE, Ended::No), (7, Ended::Yes)]);
+        assert_eq!(got.into_iter().flat_map(|(l, _)| l).collect::<vec::Vec<_>>(), long);
     }
 
     #[test]

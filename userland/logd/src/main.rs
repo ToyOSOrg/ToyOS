@@ -100,7 +100,7 @@ use toyos::port::Acceptor;
 use toyos::syscap::SysCap;
 use toyos::Pipe;
 use toyos_abi::syscall::SyscallError;
-use toyos_logstream::{Lines, ProgramLine, Tag, LOGD, MAX_TAG, ORIGINS, REGISTER, SERVICE};
+use toyos_logstream::{Ended, Lines, ProgramLine, Tag, LOGD, MAX_TAG, ORIGINS, REGISTER, SERVICE};
 use toyos_wallclock::Civil;
 
 use policy::{fate, Fate, Step, LOG_WRITE_BUDGET};
@@ -445,11 +445,13 @@ fn read_origins(origins: &mut Vec<Origin>, boot_local: Option<u64>, round: &mut 
         let tag = origin.tag.as_str();
         match origin.pipe.read_nonblock(&mut chunk) {
             Ok(0) => {
-                origin.lines.finish(|line| said_by(tag, at_ns, line, boot_local, round));
+                origin.lines.finish(|line, ended| said_by(tag, at_ns, line, ended, boot_local, round));
                 false
             }
             Ok(n) => {
-                origin.lines.push(&chunk[..n], |line| said_by(tag, at_ns, line, boot_local, round));
+                origin
+                    .lines
+                    .push(&chunk[..n], |line, ended| said_by(tag, at_ns, line, ended, boot_local, round));
                 true
             }
             Err(SyscallError::WouldBlock) => true,
@@ -458,14 +460,24 @@ fn read_origins(origins: &mut Vec<Origin>, boot_local: Option<u64>, round: &mut 
     });
 }
 
-/// One program's line, into this round: its form in the log, and its bytes for
-/// the console.
-fn said_by(tag: &str, at_ns: u64, line: &[u8], boot_local: Option<u64>, round: &mut Round) {
+/// One program's line, into this round: its form in the log, a line of its
+/// own, and its bytes for the console as the program wrote them — a line the
+/// program had not ended is not ended there either.
+fn said_by(
+    tag: &str,
+    at_ns: u64,
+    line: &[u8],
+    ended: Ended,
+    boot_local: Option<u64>,
+    round: &mut Round,
+) {
     let tag = Tag::new(tag).expect("an origin's name was a tag when it registered");
     let stamp = stamp(boot_local, at_ns);
     round.lines.push((at_ns, format!("{}\n", ProgramLine { stamp: &stamp, at_ns, tag, text: line })));
     round.console.extend_from_slice(line);
-    round.console.push(b'\n');
+    if ended == Ended::Yes {
+        round.console.push(b'\n');
+    }
 }
 
 /// This boot's file stem, and the local epoch second the machine booted at.
