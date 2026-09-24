@@ -5,6 +5,8 @@
 use crate::arch::cpu;
 use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state, Ring3Entry};
 use crate::arch::percpu;
+#[cfg(feature = "boot-actuators")]
+use crate::arch::smp::asm_label_addr;
 
 use super::dispatch::syscall_dispatch;
 
@@ -38,12 +40,70 @@ pub fn init() {
 
 }
 
+/// The hold `nmi_gate::hold_one` asks for, spun inside the window.
+///
+/// Every instruction here runs at CPL 0 on the user's stack with every
+/// register the thread's, so each takes an immediate and per-CPU memory and
+/// nothing else: a push is the SMAP fault the window is about, and a register
+/// is state the thread gets back. `ASKED` is the storm's to set and to clear,
+/// `HELD` the entry's acknowledgement, and the spin ends on `ASKED` clearing
+/// or on the budget the ask carried above the flags running out, one `SPIN` a
+/// turn. The borrow is the end of it: the whole word becomes `EXPIRED`, so no
+/// ask stands and the next entry does not hold, and `nmi_gate::note_syscall`
+/// is where this CPU says so, on its kernel stack.
+///
+/// The two labels bound the instructions an NMI can interrupt with both bits
+/// set, for [`hold_spin`]; `src/build.rs` judges a shipping kernel's entry by
+/// its bytes, so no hold is compiled into one whatever it is spelled with.
+#[cfg(feature = "boot-actuators")]
+macro_rules! window_hold {
+    () => {
+        concat!(
+            "test qword ptr gs:[{nmi_hold}], {asked}\n",
+            "jz syscall_entry_hold_end\n",
+            "lock or qword ptr gs:[{nmi_hold}], {held}\n",
+            ".globl syscall_entry_hold_spin\n",
+            "syscall_entry_hold_spin:\n",
+            "pause\n",
+            "test qword ptr gs:[{nmi_hold}], {asked}\n",
+            "jz syscall_entry_hold_end\n",
+            // Locked: the storm's release is a read-modify-write of the same word, and an unlocked one here could write `ASKED` back over it.
+            "lock sub qword ptr gs:[{nmi_hold}], {spin}\n",
+            "jnc syscall_entry_hold_spin\n",
+            "mov qword ptr gs:[{nmi_hold}], {expired}\n",
+            ".globl syscall_entry_hold_end\n",
+            "syscall_entry_hold_end:\n",
+        )
+    };
+}
+
+#[cfg(feature = "boot-actuators")]
+extern "C" {
+    static syscall_entry_hold_spin: u8;
+    static syscall_entry_hold_end: u8;
+    static syscall_entry_end: u8;
+}
+
+/// Where [`window_hold`] spins, as addresses: an NMI taken under an acknowledged hold has its `rip` in this range.
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn hold_spin() -> core::ops::Range<u64> {
+    asm_label_addr!(syscall_entry_hold_spin) as u64..asm_label_addr!(syscall_entry_hold_end) as u64
+}
+
+/// `syscall_entry`, first instruction to last: both of the window's halves are inside it, so a Ring 0 frame with a user `rsp` and a `rip` outside it is not the window.
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn entry_extent() -> core::ops::Range<u64> {
+    asm_label_addr!(syscall_entry) as u64..asm_label_addr!(syscall_entry_end) as u64
+}
+
 // GS permanently points to kernel per-CPU data here; no swapgs.
 // `SYSCALL` switches no stack: before the `rsp` switch below runs, the CPU is at CPL 0 on the user's stack, so nothing that can fault may execute there.
 #[unsafe(naked)]
 extern "sysv64" fn syscall_entry() {
     ring3_naked_asm!(
         "mov gs:[{user_rsp}], rsp",
+        #[cfg(feature = "boot-actuators")]
+        window_hold!(),
         "mov rsp, gs:[{kernel_rsp}]",
         "mov gs:[{syscall_rip}], rcx",
         "mov gs:[{syscall_num}], rdi",
@@ -88,6 +148,8 @@ extern "sysv64" fn syscall_entry() {
         "pop rcx",
         "pop rsp",              // restore user RSP from kernel stack
         "sysretq",
+        #[cfg(feature = "boot-actuators")]
+        ".globl syscall_entry_end\nsyscall_entry_end:",
         handler = sym syscall_handler,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
         kernel_rsp = const percpu::OFF_KERNEL_RSP,
@@ -96,6 +158,16 @@ extern "sysv64" fn syscall_entry() {
         syscall_num = const percpu::OFF_SYSCALL_NUM,
         syscall_rbp = const percpu::OFF_SYSCALL_RBP,
         preempt_count = const percpu::OFF_PREEMPT_COUNT,
+        #[cfg(feature = "boot-actuators")]
+        nmi_hold = const percpu::OFF_NMI_HOLD,
+        #[cfg(feature = "boot-actuators")]
+        asked = const crate::nmi_gate::hold::ASKED,
+        #[cfg(feature = "boot-actuators")]
+        held = const crate::nmi_gate::hold::HELD,
+        #[cfg(feature = "boot-actuators")]
+        spin = const crate::nmi_gate::hold::SPIN,
+        #[cfg(feature = "boot-actuators")]
+        expired = const crate::nmi_gate::hold::EXPIRED,
     );
 }
 
