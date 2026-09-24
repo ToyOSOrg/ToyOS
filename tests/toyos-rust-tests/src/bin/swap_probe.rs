@@ -38,7 +38,7 @@ fn main() {
     };
     let answer = match conn.send_bytes(msg, b"not a swap request").map(|()| conn.recv_header()) {
         Ok(Ok(header)) => {
-            let mut text = vec![0u8; header.len as usize];
+            let mut text = vec![0u8; header.len() as usize];
             let n = conn.recv_bytes(&header, &mut text).unwrap_or(0);
             format!("message {}: {}", header.msg_type, String::from_utf8_lossy(&text[..n]))
         }
