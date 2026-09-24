@@ -2457,8 +2457,8 @@ pub fn log_partition_layout(
 }
 
 /// A disk image in 512-byte LBAs, for the kernel's own GPT parser.
-struct ImageSectors<'a> {
-    bytes: &'a [u8],
+pub struct ImageSectors<'a> {
+    pub bytes: &'a [u8],
 }
 
 impl toyos_gpt::Sectors for ImageSectors<'_> {

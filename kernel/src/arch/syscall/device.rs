@@ -298,3 +298,82 @@ pub(super) fn sys_gpu_reset_scanout(
     out.write_at(0, &minted);
     0
 }
+
+/// Which way one partition transfer moves bytes, with the caller's window.
+pub(super) enum Transfer<'a, 'u> {
+    Read(&'a mut crate::user_ptr::UserBytesMut<'u>),
+    Write(&'a crate::user_ptr::UserBytes<'u>),
+}
+
+/// `count` blocks of a claimed partition from its block `first`, through a
+/// kernel buffer: the device never sees a user address.
+///
+/// The view is taken from the claim for each attempt and dropped before the
+/// wait between two: while an operation is on the device its view holds the
+/// partition, so a close on another thread cannot hand the partition to a
+/// second holder under a write in flight, and no view is left on a stack a
+/// kill could strand. A run that does not end inside the partition is refused
+/// here without a word to the log — a caller can ask at syscall rate — and
+/// `block::Partition::locate` stands behind this as the one check between a
+/// block number and the device.
+pub(super) fn sys_partition_transfer(
+    handle: RawHandle,
+    first: u64,
+    count: u32,
+    transfer: Transfer<'_, '_>,
+) -> u64 {
+    let right = match transfer {
+        Transfer::Read(_) => Rights::READ,
+        Transfer::Write(_) => Rights::WRITE,
+    };
+    let claim = match process::with_process_data(|data| {
+        data.handles.get::<crate::object::device::DeviceClaim>(handle, right)
+    }) {
+        Ok(claim) => claim,
+        Err(e) => return e.refuse(),
+    };
+    let class = claim.class();
+    match class {
+        device::DeviceType::Partition => {}
+        device::DeviceType::Keyboard
+        | device::DeviceType::Mouse
+        | device::DeviceType::Framebuffer
+        | device::DeviceType::HdaAudio
+        | device::DeviceType::VirtioSound
+        | device::DeviceType::PciFunction => {
+            drop(claim);
+            return crate::object::HandleError::WrongType {
+                held: class.class_name(),
+                wanted: "a partition claim",
+            }
+            .refuse();
+        }
+    }
+    match claim.partition_view().map(|view| view.fits(first, count)) {
+        None => return SyscallError::Gone.to_u64(),
+        Some(false) => return SyscallError::InvalidArgument.to_u64(),
+        Some(true) => {}
+    }
+    let mut bounce = alloc::vec![0u8; count as usize * toyos_abi::part::BLOCK_BYTES];
+    match transfer {
+        Transfer::Write(from) => {
+            from.read_at(0, &mut bounce);
+            let run = ops::until_answered(|| match claim.partition_view() {
+                Some(view) => view.write_blocks(first, count, &bounce).map_err(ops::block_word),
+                None => Err(SyscallError::Gone),
+            });
+            ops::partition_word("a write", run)
+        }
+        Transfer::Read(into) => {
+            let run = ops::until_answered(|| match claim.partition_view() {
+                Some(view) => view.read_blocks(first, count, &mut bounce).map_err(ops::block_word),
+                None => Err(SyscallError::Gone),
+            });
+            let word = ops::partition_word("a read", run);
+            if word == 0 {
+                into.write_at(0, &bounce);
+            }
+            word
+        }
+    }
+}

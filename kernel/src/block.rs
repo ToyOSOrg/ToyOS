@@ -1,19 +1,36 @@
 //! One device object per physical device; a consumer takes a [`Handle`] and a
 //! [`Partition`] over it and can name no block outside its span.
 //!
+//! **A block has one holder.** Every view is made by [`Partition::of`], which
+//! refuses a span any live view holds a block of, and the view's hold goes
+//! with the last clone of it (`toyos_blockhold` decides both). The kernel's mounts hold their partitions this
+//! way ([`Holder::Kernel`]), and so does a process's partition claim
+//! ([`Holder::Claim`]): a mounted partition cannot be claimed, a claimed one
+//! cannot be mounted or claimed twice, and no kernel cache ever holds a block
+//! a claim writes — so a claim's transfers need no invalidation and read the
+//! device.
+//!
+//! **A flush answers for its writer's own writes.** A device's flush is the
+//! whole device's, but every write and flush goes through a [`Locked`] device
+//! that knows whose it is, and `toyos_blockhold` keeps each writer's account
+//! against the disk's loss count ([`BlockDevice::losses`]): a flush fails for
+//! exactly the writers whose writes were reported before a loss — at each
+//! one's own next flush, once, whoever flushes first — and a loss a released
+//! span owed is told to the next holder of its blocks.
+//!
 //! Lock order: a consumer's own lock, then [`Handle::lock`]; never the reverse,
-//! and never two devices at once. [`DEVICES`] is a leaf taken alone.
+//! and never two devices at once. [`DEVICES`] is a leaf taken alone, and a
+//! device's holds are taken last, alone or under its device's lock.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-#[cfg(feature = "boot-actuators")]
-use alloc::vec::Vec;
 
 use crate::mm::PAGE_SIZE;
 use crate::scheduler::Operation;
 use crate::sync::{Lock, LockGuard};
 use crate::time::{Budget, Cadence, Deadline, Duration};
+use toyos_blockhold::{Holds, Lost, Writer};
 
 /// Unique identifier for a block device; [`register`] issues each at most once.
 pub type DeviceId = u32;
@@ -122,12 +139,20 @@ pub trait BlockDevice: Send {
     /// Flush any hardware write caches to persistent storage.
     #[must_use = "a failed flush means the writes before it are not durable"]
     fn flush(&mut self) -> BlockResult;
+
+    /// How many times this disk has lost writes it reported complete — a
+    /// device that left owing a flush and was taken back
+    /// (`toyos_xhci::flush`) — as the device that ran the last operation to
+    /// return counts it. Never decreases; a disk that is never taken back
+    /// answers 0.
+    fn losses(&self) -> u64;
 }
 
 struct Device {
     id: DeviceId,
     blocks: u64,
     dev: Lock<Box<dyn BlockDevice>>,
+    holds: Lock<Holds<Holder>>,
 }
 
 /// A shared handle; there is never a second object for one [`DeviceId`].
@@ -152,7 +177,9 @@ pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
         );
         return None;
     }
-    let handle = Handle(Arc::new(Device { id, blocks, dev: Lock::new(dev) }));
+    let holds = Holds::new();
+    let handle =
+        Handle(Arc::new(Device { id, blocks, dev: Lock::new(dev), holds: Lock::new(holds) }));
     devices.insert(id, handle.clone());
     log!("block: device {id} registered, {blocks} blocks");
     Some(handle)
@@ -163,7 +190,7 @@ pub fn open(id: DeviceId) -> Option<Handle> {
 }
 
 #[cfg(feature = "boot-actuators")]
-pub fn registered() -> Vec<Handle> {
+pub fn registered() -> alloc::vec::Vec<Handle> {
     DEVICES.lock().values().cloned().collect()
 }
 
@@ -177,9 +204,71 @@ impl Handle {
         self.0.blocks
     }
 
-    /// The device itself, with its queue serialised for as long as the guard lives.
-    pub fn lock(&self) -> LockGuard<'_, Box<dyn BlockDevice>> {
-        self.0.dev.lock()
+    /// The device itself, with its queue serialised for as long as the guard
+    /// lives, for a writer that holds no view of it.
+    pub fn lock(&self) -> Locked<'_> {
+        Locked { dev: self.0.dev.lock(), device: &self.0, writer: Writer::Unspanned }
+    }
+
+    /// Whether writes this device's disk lost by the count `losses` are
+    /// reported to no writer yet: what a flush from below the block layer asks
+    /// before it calls the disk flushed.
+    pub fn untold(&self, losses: u64) -> bool {
+        self.0.holds.lock().untold(losses)
+    }
+}
+
+/// A device with its queue serialised, whose writes and flushes are one
+/// writer's: a flush through it fails if a write of that writer's was reported
+/// before the disk lost it, and for no other writer's.
+pub struct Locked<'a> {
+    dev: LockGuard<'a, Box<dyn BlockDevice>>,
+    device: &'a Device,
+    writer: Writer,
+}
+
+impl BlockDevice for Locked<'_> {
+    fn device_id(&self) -> DeviceId {
+        self.dev.device_id()
+    }
+
+    fn block_count(&self) -> u64 {
+        self.dev.block_count()
+    }
+
+    fn read_blocks(&mut self, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
+        self.dev.read_blocks(lba, count, buf)
+    }
+
+    fn write_blocks(&mut self, lba: u64, count: u32, buf: &[u8]) -> BlockResult {
+        let done = self.dev.write_blocks(lba, count, buf);
+        if done.is_ok() {
+            let losses = self.dev.losses();
+            self.device.holds.lock().wrote(self.writer, losses);
+        }
+        done
+    }
+
+    fn flush(&mut self) -> BlockResult {
+        self.dev.flush()?;
+        let losses = self.dev.losses();
+        let Err(Lost { holder }) = self.device.holds.lock().flushed(self.writer, losses) else {
+            return Ok(());
+        };
+        let whose = match holder {
+            Some(holder) => alloc::format!("{holder}"),
+            None => alloc::string::String::from("a writer holding no view"),
+        };
+        log!(
+            "block: device {}: writes {whose} made before its disk came back owing a flush \
+             may not have survived, and its flush says so",
+            self.device.id
+        );
+        Err(BlockError::Device)
+    }
+
+    fn losses(&self) -> u64 {
+        self.dev.losses()
     }
 }
 
@@ -203,6 +292,47 @@ impl BlockKey {
     }
 }
 
+/// Who holds a span of a device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Holder {
+    /// Something in this kernel — a mount, a probe — named for the log.
+    Kernel(&'static str),
+    /// A process, through a partition claim.
+    Claim,
+}
+
+impl core::fmt::Display for Holder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Kernel(what) => write!(f, "the kernel ({what})"),
+            Self::Claim => f.write_str("a process's partition claim"),
+        }
+    }
+}
+
+/// A span's hold, shared by every clone of the view that took it: a transfer
+/// in flight on a clone keeps the span held after the view it was cloned from
+/// has gone.
+struct Hold {
+    device: Arc<Device>,
+    first: u64,
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.device.holds.lock().release(self.first);
+    }
+}
+
+/// Why [`Partition::of`] made no view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewRefused {
+    /// The span is empty or runs off the device.
+    OffDevice,
+    /// A block of it is already held.
+    Held(Holder),
+}
+
 /// One consumer's view of one span of a device, in whole [`BlockDevice`] blocks:
 /// a read at `block_count()` is refused by name, never served from past its end.
 #[derive(Clone)]
@@ -210,13 +340,26 @@ pub struct Partition {
     handle: Handle,
     first_block: u64,
     blocks: u64,
+    _hold: Arc<Hold>,
 }
 
 impl Partition {
-    /// `blocks` blocks from `first_block`, or `None` when that span is off the device.
-    pub fn of(handle: Handle, first_block: u64, blocks: u64) -> Option<Self> {
-        let end = first_block.checked_add(blocks)?;
-        (end <= handle.block_count()).then_some(Self { handle, first_block, blocks })
+    /// `blocks` blocks from `first_block`, held for `holder` until the last
+    /// clone of the view drops — or refused when the span is empty, off the
+    /// device, or overlaps a span another view holds.
+    pub fn of(
+        handle: Handle,
+        first_block: u64,
+        blocks: u64,
+        holder: Holder,
+    ) -> Result<Self, ViewRefused> {
+        let end = first_block
+            .checked_add(blocks)
+            .filter(|&end| blocks != 0 && end <= handle.block_count())
+            .ok_or(ViewRefused::OffDevice)?;
+        handle.0.holds.lock().hold(first_block, end, holder).map_err(ViewRefused::Held)?;
+        let hold = Arc::new(Hold { device: handle.0.clone(), first: first_block });
+        Ok(Self { handle, first_block, blocks, _hold: hold })
     }
 
     pub fn device_id(&self) -> DeviceId {
@@ -231,21 +374,32 @@ impl Partition {
         self.blocks
     }
 
-    pub fn handle(&self) -> &Handle {
-        &self.handle
-    }
-
     /// The identity of `block` in this view, or a refusal past its end.
     pub fn key(&self, block: u64) -> Result<BlockKey, BlockError> {
         self.locate(block, 1)?;
         Ok(BlockKey { device: self.device_id(), partition: self.first_block, block })
     }
 
+    /// Whether `count` blocks from `block` end inside the view — asked of a
+    /// caller's numbers, so a refusal is the caller's answer and not a line in
+    /// the kernel's log.
+    pub fn fits(&self, block: u64, count: u32) -> bool {
+        block.checked_add(count as u64).is_some_and(|end| end <= self.blocks)
+    }
+
+    /// The device, serialised, with every write and flush through it this
+    /// view's own.
+    pub fn lock(&self) -> Locked<'_> {
+        let device = &*self.handle.0;
+        Locked { dev: device.dev.lock(), device, writer: Writer::Span(self.first_block) }
+    }
+
     /// The device block `block` names, or a refusal past the view's end.
     pub fn locate(&self, block: u64, count: u32) -> Result<u64, BlockError> {
-        match block.checked_add(count as u64) {
-            Some(end) if end <= self.blocks => Ok(self.first_block + block),
-            _ => Err(self.past_end(block, count)),
+        if self.fits(block, count) {
+            Ok(self.first_block + block)
+        } else {
+            Err(self.past_end(block, count))
         }
     }
 
@@ -265,18 +419,18 @@ impl Partition {
     #[must_use = "a failed read leaves the buffer holding whatever it held before"]
     pub fn read_blocks(&self, block: u64, count: u32, buf: &mut [u8]) -> BlockResult {
         let at = self.locate(block, count)?;
-        self.handle.lock().read_blocks(at, count, buf)
+        self.lock().read_blocks(at, count, buf)
     }
 
     #[must_use = "a failed write did not reach the device"]
     pub fn write_blocks(&self, block: u64, count: u32, buf: &[u8]) -> BlockResult {
         let at = self.locate(block, count)?;
-        self.handle.lock().write_blocks(at, count, buf)
+        self.lock().write_blocks(at, count, buf)
     }
 
     #[must_use = "a failed flush means the writes before it are not durable"]
     pub fn flush(&self) -> BlockResult {
-        self.handle.lock().flush()
+        self.lock().flush()
     }
 }
 
@@ -311,6 +465,9 @@ pub fn duplicate_id_selftest() {
         }
         fn flush(&mut self) -> BlockResult {
             Ok(())
+        }
+        fn losses(&self) -> u64 {
+            0
         }
     }
 
