@@ -14,7 +14,7 @@
 //!   log ([`toyos_logstream::SERVICE`]) and draws the boot so far above the
 //!   first prompt — the kernel's records and every program's output — and
 //!   every program's line after as it is written, each under its program's
-//!   name, between the shell's lines (`Log::take`).
+//!   name and above the shell's unfinished line (`Log::draw`).
 //! - **A fatal panic still takes the screen back.** `render` ignores
 //!   `SCREEN_OWNED_BY_USERLAND` entirely — only boot checkpoints honour it —
 //!   so the report paints over whatever this program drew.
@@ -71,9 +71,7 @@ struct Log {
     /// Whether the last kernel record was kept, which its continuation lines
     /// follow.
     drawing: bool,
-    /// Lines kept and not yet drawn: they wait while the shell is part of the
-    /// way through a line, so a line of the log never lands inside a prompt
-    /// and what is being typed at it.
+    /// Lines kept and not yet drawn.
     held: Vec<u8>,
 }
 
@@ -124,11 +122,20 @@ impl Log {
     }
 
     /// Draw what is held; whether there was any.
-    fn draw(&mut self, console: &mut Console) -> bool {
+    ///
+    /// **Above the shell's unfinished line, never inside it**: where the shell
+    /// is part of the way through one — its prompt, and what is being typed at
+    /// it — that row is cleared, the lines drawn, and the shell's line drawn
+    /// again under them. `partial` is that line as the shell wrote it.
+    fn draw(&mut self, partial: &[u8], console: &mut Console) -> bool {
         if self.held.is_empty() {
             return false;
         }
+        if !partial.is_empty() {
+            console.write_bytes(b"\r\x1b[K");
+        }
         console.write_bytes(&self.held);
+        console.write_bytes(partial);
         self.held.clear();
         true
     }
@@ -208,9 +215,9 @@ fn main() {
     const TOKEN_CLIENT: u64 = 4;
     const TOKEN_LOG: u64 = 5;
 
-    // Whether the shell's last byte left a line unfinished — a prompt, or what
-    // is being typed at it.
-    let mut mid_line = false;
+    // The shell's unfinished line — a prompt, and what is being typed at it —
+    // as it wrote it, for a line of the log to be drawn above.
+    let mut partial: Vec<u8> = Vec::new();
     loop {
         poller.watch_raw(toyos::RawHandle(shell.stdout.as_raw_fd() as u32), READABLE, TOKEN_STDOUT);
         poller.watch_raw(toyos::RawHandle(shell.stderr.as_raw_fd() as u32), READABLE, TOKEN_STDERR);
@@ -242,13 +249,13 @@ fn main() {
                     // is an ordinary thing to type.
                     shell.restart(&connector);
                     console.write_bytes(b"\n[console] the shell exited; a new one is running\n");
-                    mid_line = false;
+                    partial.clear();
                     painted = true;
                 }
                 n => {
                     console.write_bytes(&buf[..n]);
                     std::io::stdout().lock().write_all(&buf[..n]).ok();
-                    mid_line = buf[n - 1] != b'\n';
+                    unfinished(&mut partial, &buf[..n]);
                     painted = true;
                 }
             }
@@ -260,7 +267,7 @@ fn main() {
             if n > 0 {
                 console.write_bytes(&buf[..n]);
                 std::io::stdout().lock().write_all(&buf[..n]).ok();
-                mid_line = buf[n - 1] != b'\n';
+                unfinished(&mut partial, &buf[..n]);
                 painted = true;
             }
         }
@@ -279,10 +286,8 @@ fn main() {
                 }
             }
         }
-        // Between the shell's lines only, and a line the shell ends lets what
-        // waited through it be drawn.
-        if let (false, Ok(reader)) = (mid_line, &mut log) {
-            painted |= reader.draw(&mut console);
+        if let Ok(reader) = &mut log {
+            painted |= reader.draw(&partial, &mut console);
         }
 
         if ready[TOKEN_LISTEN as usize] {
@@ -360,6 +365,23 @@ fn main() {
     }
 }
 
+/// The most of the shell's unfinished line kept to draw again: a row and more
+/// of any panel, and a bound on output that never ends a line.
+const PARTIAL_MAX: usize = 1024;
+
+/// What of the shell's output is still an unfinished line after `bytes`.
+fn unfinished(partial: &mut Vec<u8>, bytes: &[u8]) {
+    match bytes.iter().rposition(|&b| b == b'\n') {
+        Some(at) => {
+            partial.clear();
+            partial.extend_from_slice(&bytes[at + 1..]);
+        }
+        None => partial.extend_from_slice(bytes),
+    }
+    let over = partial.len().saturating_sub(PARTIAL_MAX);
+    partial.drain(..over);
+}
+
 /// Draw the boot so far — the bytes `logd` handed over with the pipe — before
 /// the first prompt; returns the bytes drawn. Every later line arrives on the
 /// same pipe and is drawn as it comes.
@@ -378,7 +400,7 @@ fn seed(log: &mut Log, console: &mut Console) -> usize {
     }
     let tail = seed_tail(&boot);
     log.take(tail);
-    log.draw(console);
+    log.draw(&[], console);
     tail.len()
 }
 

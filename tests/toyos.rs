@@ -225,6 +225,10 @@ const RUST_SKIP: &[&str] = &[
     // It exits 7 on purpose; its verdict is which exit a judge of `/log` reads.
     // `log_program_forgery` runs it.
     "log_forger",
+    // Its verdict is where its one line went — `/log`, the served log and the
+    // console — which only a boot of its own reads back. `log_program_line`
+    // and `log_stream` run it.
+    "log_origin",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
