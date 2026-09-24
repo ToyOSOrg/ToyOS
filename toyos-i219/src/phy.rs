@@ -148,9 +148,9 @@ pub mod oem_bits {
 /// bits 3 and 2, which the NVM sets by default because "GbE is not supported in
 /// Sx states". A driver in D0 carries the first two into the PHY and clears
 /// what the second two left there. Every other field of the register is
-/// carried, as §9.1 asks, and the restart goes with the write because nothing
-/// else in §8.1 makes it take effect.
-pub fn oem_bits_in_d0(found: u16, phy_ctrl: u32) -> u16 {
+/// carried, as §9.1 asks, and the register's own restart goes with the write
+/// only where `fwsm` allows a PHY reset, the condition the reset reads.
+pub fn oem_bits_in_d0(found: u16, phy_ctrl: u32, fwsm: u32) -> u16 {
     use crate::regs::phy_ctrl;
     let mut wanted = found & !(oem_bits::LOW_POWER_LINK_UP | oem_bits::GIGABIT_DISABLED);
     if phy_ctrl & phy_ctrl::LPLU_D0A != 0 {
@@ -159,7 +159,10 @@ pub fn oem_bits_in_d0(found: u16, phy_ctrl: u32) -> u16 {
     if phy_ctrl & phy_ctrl::GLOBAL_GBE_DISABLE != 0 {
         wanted |= oem_bits::GIGABIT_DISABLED;
     }
-    wanted | oem_bits::RESTART_AUTONEG
+    if wake::phy_reset_allowed(fwsm) {
+        wanted |= oem_bits::RESTART_AUTONEG;
+    }
+    wanted
 }
 
 /// §9.3: "Setting the page is done by writing page_num x 32 to Register 31.
@@ -1136,15 +1139,12 @@ pub(crate) fn bring_up<R: Registers, C: Clock>(
         | control::RESTART_AUTONEG;
     mdi.write(addr, reg::CONTROL, wanted)?;
 
-    // Last, because §8.1 makes this register's own restart one of the two
-    // events that put its speed bits into effect, and the restart above is
-    // neither. Whatever put the PHY in low-power link-up before this driver —
-    // the MAC's own load of `PHY_CTRL`'s bits after the reset, the SMBus
-    // switch §9.5.8.2's footnote names, the agent before — this write is the
-    // latest event, and §8.1 has the latest one win.
+    // Two restarts: the OEM Bits' own is what makes their speed bits take
+    // effect (§8.1), and the Control register's above covers the firmware that
+    // blocks a PHY reset, where the OEM Bits' is not written.
     mdi.select(PAGE_GENERAL)?;
     let found = mdi.read(GENERAL, reg::OEM_BITS)?;
-    let wrote = oem_bits_in_d0(found, power.after.phy_ctrl);
+    let wrote = oem_bits_in_d0(found, power.after.phy_ctrl, power.after.fwsm);
     mdi.write(GENERAL, reg::OEM_BITS, wrote)?;
     let after = mdi.read(GENERAL, reg::OEM_BITS)?;
 

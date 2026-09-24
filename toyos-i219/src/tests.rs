@@ -1146,13 +1146,13 @@ fn the_advertised_abilities_are_what_the_link_resolves_to() {
     }
 }
 
-/// **The T14's 10 Mb/s, and the write that ends it.** The model's PHY arrives
-/// with I219 §9.5.8.2's Low Power Link Up and 1000 Mb/s disabled in effect, and
-/// every reset that reaches it has the MAC load them again from `PHY_CTRL`'s
-/// outside-D0a bits — so a bring-up that restarts auto-negotiation through
-/// §9.5.2.1 alone links at §8.1's lowest common speed, 10 full, against a
-/// partner offering a gigabit. The bring-up writes the platform's D0a policy
-/// with the register's own restart, and the link is the best the two share.
+/// The model's PHY arrives with I219 §9.5.8.2's Low Power Link Up and 1000
+/// Mb/s disabled in effect, and every reset that reaches it has the MAC load
+/// them again from `PHY_CTRL`'s outside-D0a bits — so a bring-up that
+/// restarts auto-negotiation through §9.5.2.1 alone links at §8.1's lowest
+/// common speed, 10 full, against a partner offering a gigabit. The bring-up
+/// writes the platform's D0a policy with the register's own restart, and the
+/// link is the best the two share.
 #[test]
 fn a_phy_left_in_low_power_link_up_links_at_a_gigabit() {
     use toyos_phy::oem_bits::{GIGABIT_DISABLED, LOW_POWER_LINK_UP, RESTART_AUTONEG};
@@ -1208,10 +1208,12 @@ fn a_platform_that_asks_for_low_power_link_up_in_d0a_gets_it() {
 
 /// [`toyos_phy::oem_bits_in_d0`], row by row: PCH Vol 2 §8.2.5's two D0a bits
 /// are what reach the PHY, its two outside-D0a bits never do, every other field
-/// of §9.5.8.2's register is carried, and the restart always goes with it.
+/// of §9.5.8.2's register is carried, and the restart goes with it exactly
+/// where `FWSM` allows a PHY reset.
 #[test]
 fn the_oem_bits_carry_the_platforms_d0a_policy_and_nothing_else() {
     use crate::regs::phy_ctrl::{GBE_DISABLE_NON_D0A, GLOBAL_GBE_DISABLE, LPLU_D0A, LPLU_NON_D0A};
+    use crate::regs::fwsm::PHY_RESET_ALLOWED;
     use toyos_phy::oem_bits::{GIGABIT_DISABLED, LOW_POWER_LINK_UP, RESTART_AUTONEG};
     let outside_d0a = GBE_DISABLE_NON_D0A | LPLU_NON_D0A;
     let carried = 0b1011_1000_0011_1011 & !(LOW_POWER_LINK_UP | GIGABIT_DISABLED | RESTART_AUTONEG);
@@ -1228,11 +1230,41 @@ fn the_oem_bits_carry_the_platforms_d0a_policy_and_nothing_else() {
         ),
     ] {
         assert_eq!(
-            toyos_phy::oem_bits_in_d0(found, phy_ctrl),
+            toyos_phy::oem_bits_in_d0(found, phy_ctrl, PHY_RESET_ALLOWED),
             wanted,
             "OEM Bits {found:#06x} under PHY_CTRL {phy_ctrl:#x}"
         );
+        assert_eq!(
+            toyos_phy::oem_bits_in_d0(found, phy_ctrl, !PHY_RESET_ALLOWED),
+            wanted & !RESTART_AUTONEG,
+            "OEM Bits {found:#06x} under PHY_CTRL {phy_ctrl:#x}, the firmware blocking a PHY reset"
+        );
     }
+}
+
+/// The bring-up's two restarts: §9.5.2.1's first and §9.5.8.2's `Aneg_now`
+/// after it where `FWSM` allows a PHY reset, and §9.5.2.1's alone where the
+/// firmware blocks one.
+#[test]
+fn the_oem_bits_restart_follows_the_control_restart_where_a_phy_reset_is_allowed() {
+    use crate::stub::Restart;
+    let nic = Nic::i219(52);
+    open(&nic);
+    assert_eq!(nic.restarts(), [Restart::Control, Restart::OemBits], "{}", nic.because("allowed"));
+
+    let nic = Nic::with(
+        53,
+        Part::I219,
+        Permits {
+            phy_starts_out_of_reach: false,
+            mac_reset_alone_loses_the_phy: false,
+            firmware_allows_a_phy_reset: false,
+            ..Permits::default()
+        },
+    );
+    let driver = open(&nic);
+    assert!(driver.brought_up().phy.is_ok(), "{}", nic.because("the PHY was not brought up"));
+    assert_eq!(nic.restarts(), [Restart::Control], "{}", nic.because("blocked"));
 }
 
 /// The premise of the test above: this model really does refuse a link to a PHY

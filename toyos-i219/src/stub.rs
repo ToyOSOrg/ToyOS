@@ -193,8 +193,7 @@ pub struct Permits {
     /// OEM Write Enable has the MAC load them from `PHY_CTRL` — whose reset
     /// value (PCH Vol 2 §8.2.5, `Ch`) sets both for every state but D0a. So a
     /// PHY is found with both in effect, and each reset that reaches it has the
-    /// MAC load them again from `PHY_CTRL`'s outside-D0a bits: what the T14's
-    /// PHY did on every boot before a driver wrote them.
+    /// MAC load them again from `PHY_CTRL`'s outside-D0a bits.
     pub phy_left_in_low_power_link_up: bool,
 }
 
@@ -327,6 +326,15 @@ const CTRL_RESERVED_SET: u32 = (1 << 3) | (1 << 20);
 /// bits. The value is arbitrary and its only property is that this driver never
 /// wrote it.
 const EXTCNF_FIRMWARE_FIELDS: u32 = 1 << 13;
+
+/// The register a restart of auto-negotiation was written to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Restart {
+    /// §9.5.2.1's Restart Auto-Negotiation.
+    Control,
+    /// §9.5.8.2's `Aneg_now`.
+    OemBits,
+}
 
 /// Where the PHY stands with respect to the MAC's end of their interconnect.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -590,6 +598,9 @@ struct Model {
     /// Every register offset the driver has written, so a test about what a
     /// path does *not* write can say so.
     written: BTreeSet<usize>,
+    /// Every restart of auto-negotiation the driver wrote, by the register it
+    /// wrote it to, in order.
+    restarts: Vec<Restart>,
     /// Whether the device does its work when a tail register is written.
     ///
     /// **Nothing in the datasheet says *when* the hardware acts** — a fetch
@@ -689,6 +700,7 @@ impl Model {
             messages: 0,
             not_decoding: None,
             written: BTreeSet::new(),
+            restarts: Vec::new(),
             held: false,
             arbitration_at: Vec::new(),
             lcd: if permits.phy_starts_out_of_reach { Lcd::Off } else { Lcd::InStep },
@@ -1643,6 +1655,7 @@ impl Model {
                 // `Aneg_now` is "self clearing".
                 self.phy.oem_bits = data & !oem_bits::RESTART_AUTONEG;
                 if data & oem_bits::RESTART_AUTONEG != 0 {
+                    self.restarts.push(Restart::OemBits);
                     // §8.1: the restart is one of the two events that put the
                     // speed bits into effect, and it is a restart.
                     self.phy.oem_in_effect = self.phy.oem_bits & OEM_SPEED_BITS;
@@ -1704,6 +1717,7 @@ impl Model {
                     self.phy.negotiating = true;
                 }
                 if r == reg::CONTROL && data & control::RESTART_AUTONEG != 0 {
+                    self.restarts.push(Restart::Control);
                     self.phy.negotiated_over = Some(abilities(&self.phy));
                     self.phy.negotiating = true;
                     // §9.5.2.1: the bit is `RW/SC`.
@@ -2151,6 +2165,11 @@ impl Nic {
         self.0.borrow().phy_resets
     }
 
+    /// Every restart of auto-negotiation the driver wrote, in order.
+    pub fn restarts(&self) -> Vec<Restart> {
+        self.0.borrow().restarts.clone()
+    }
+
     /// Every register offset the driver has written.
     pub fn written(&self) -> BTreeSet<usize> {
         self.0.borrow().written.clone()
@@ -2244,14 +2263,14 @@ impl Nic {
         self.0.borrow_mut().raise(causes);
     }
 
-    /// This part has no NVM, so §10.2.5.23's "if no NVM is present" arm is
-    /// what a driver reading `RAH0` finds.
     /// A platform whose NVM gives `PHY_CTRL` another policy, from the next
     /// reset on.
     pub fn platform_policy(&self, phy_ctrl: u32) {
         self.0.borrow_mut().nvm_phy_ctrl = phy_ctrl;
     }
 
+    /// This part has no NVM, so §10.2.5.23's "if no NVM is present" arm is
+    /// what a driver reading `RAH0` finds.
     pub fn without_nvm(&self) {
         let mut model = self.0.borrow_mut();
         model.has_nvm = false;
