@@ -343,13 +343,15 @@ const SLOW_TRANSFER_NS: u64 = 2_000_000;
 /// The boot-time connect settle reads the same interval the per-port machine uses.
 use portmachine::DEBOUNCE_NS as PORT_DEBOUNCE_NS;
 
-
-/// Report an empty root hub for the first [`SLOW_CONNECT_NS`] of the boot; a kernel feature since QEMU cannot stage a port that connects late.
+/// How long the slow-connect injection reports an empty root hub after this
+/// controller powered its ports.
 ///
-/// Replaces the register, not a verdict: the port reads exactly as unpopulated during the window.
-const SLOW_CONNECT_NS: u64 = 300_000_000;
+/// A kernel feature since QEMU cannot stage a port that connects late, and it
+/// replaces the register rather than a verdict: the port reads exactly as
+/// unpopulated during the window.
+use portmachine::SLOW_CONNECT_NS;
 
-/// Report *one* root-hub port empty for the first [`SLOW_CONNECT_NS`], while every other port reads normally.
+/// Report *one* root-hub port empty while every other port reads normally.
 ///
 /// The window closes on the boot scan, not the clock: what it stages is an ordering, not a duration.
 const SLOW_STORAGE_PORT: u8 = 0;
@@ -783,7 +785,8 @@ impl XhciController {
 
     fn read_portsc_raw(&self, port_idx: u8) -> u32 {
         let raw = self.op_base.read_u32(OP_PORT_BASE + port_idx as u64 * PORT_REG_SIZE);
-        if crate::actuator::xhci_slow_connect() && crate::clock::nanos_since_boot() < SLOW_CONNECT_NS
+        if crate::actuator::xhci_slow_connect()
+            && crate::clock::nanos_since_boot().saturating_sub(self.powered_at) < SLOW_CONNECT_NS
         {
             return raw & !(PORTSC_CCS | PORTSC_PED | PORTSC_SPEED);
         }
