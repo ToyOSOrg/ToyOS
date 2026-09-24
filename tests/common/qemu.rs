@@ -299,7 +299,7 @@ pub fn host_speed() -> (Option<u32>, u32, u32, u32) {
 /// The host cores this process may run on, read once.
 ///
 /// [`std::thread::available_parallelism`] is the Rust-native reading of what
-/// `.github/instrument.sh` prints as `N core(s)`: it needs no host binary and
+/// `cargo run -- --ci`'s instrument line prints as `N core(s)`: it needs no host binary and
 /// respects any affinity the runner imposed. The CI `guest` shard is a
 /// four-core AMD EPYC; the dev host has fourteen, and that gap is the whole of
 /// why the oversubscription factor below widens a ceiling on the runner and is
