@@ -58,8 +58,9 @@ const MIN_SETTLED: usize = 4;
 /// Settled beats a capture is taken to. `MIN_SETTLED` is the floor a verdict is
 /// read from and the spare is detection, not slack: a CPU whose first absence
 /// is the capture's last beat is a blip and convicts nobody, so the capture
-/// carries beats past the floor for the [`STOPPED_BEATS`]th one to land in.
-pub const CAPTURE_BEATS: usize = MIN_SETTLED + 3;
+/// carries one beat past the floor — enough for [`STOPPED_BEATS`]'s second
+/// absence to land in.
+pub const CAPTURE_BEATS: usize = MIN_SETTLED + 1;
 
 /// The widest `alive=N/M` denominator that is a reading of the `mask=` beside
 /// it: that mask is 64 bits, so no `M` at 64 or above describes it, and `M = 0`
@@ -696,6 +697,32 @@ compositor: ready
                 "{alive}"
             );
         }
+    }
+
+    /// The bound above is reached on its own, not stood in for by the
+    /// differing-`cpus` refusal: every beat here reads the same wide
+    /// `alive=8/64`, so `cpus` never differs from `beats[0].cpus` and that
+    /// refusal cannot fire. Without the bound `Beat::parse` would read `64`
+    /// and the eight bits `mask=0xff` never sets would convict cpus 8..64
+    /// instead of refusing the capture as unreadable.
+    #[test]
+    fn a_cpu_count_the_mask_cannot_carry_is_unreadable_even_when_every_beat_agrees() {
+        let wide = |t_ms: u64| {
+            format!(
+                "[kernel {0}.{1:03} cpu2] heartbeat: t={0}.{1:03}s alive=8/64 mask=0xff ran=40 \
+                 gap=0.250s",
+                t_ms / 1000,
+                t_ms % 1000,
+            )
+        };
+        let mut capture: String = started().iter().map(|s| format!("{s}\n")).collect();
+        for i in 0..=CAPTURE_BEATS as u64 {
+            capture.push_str(&wide(2000 + i * 250));
+            capture.push('\n');
+        }
+        let lines = lines(&capture);
+        let head = lines.iter().position(|l| l.contains("heartbeat: t=")).unwrap();
+        assert_eq!(settle(&lines, &started()), Err(Refused::Unreadable(lines[head].to_string())));
     }
 
     /// One capture is one machine: a beat whose `alive=` denominator is not the
