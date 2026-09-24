@@ -1,7 +1,7 @@
 //! One page cache per (device, partition) served. Every slot is bound to a
 //! [`BlockKey`], so a resident page is written back where it was filled from.
 //!
-//! Lock order: a cache, then its device (`block::Handle::lock`); never
+//! Lock order: a cache, then its device (`block::Partition::lock`); never
 //! reversed, and no holder of one cache takes another's.
 
 use alloc::boxed::Box;
@@ -19,11 +19,12 @@ pub struct Cached {
     part: Partition,
 }
 
-/// Wraps `dev` in the read-fault injector when `pc-unbind-selftest` is armed —
-/// at registration, so it sits under the one device object consumers share.
+/// Wraps `dev` in the read-fault injector when `pc-unbind-selftest` or
+/// `partclaim-table-unanswered` is armed — at registration, so it sits under
+/// the one device object consumers share.
 pub fn instrumented(dev: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
     #[cfg(feature = "boot-actuators")]
-    if crate::actuator::pc_unbind_selftest() {
+    if crate::actuator::pc_unbind_selftest() || crate::actuator::partclaim_table_unanswered() {
         return Box::new(read_fault::FaultDevice(dev));
     }
     dev
@@ -50,7 +51,10 @@ const PAGE: u64 = PAGE_BYTES as u64;
 /// A cache over the partition `candidate` names, or `None` with the reason
 /// logged under `what`. Every number below is one the disk chose, so each
 /// refusal says which; nothing here decides what the volume holds.
-pub fn over_candidate(candidate: &crate::gpt::Candidate, what: &str) -> Option<Arc<Cached>> {
+pub fn over_candidate(
+    candidate: &crate::gpt::Candidate,
+    what: &'static str,
+) -> Option<Arc<Cached>> {
     let volume = candidate.volume;
     let guid = candidate.guid;
     let Some(handle) = block::open(volume.device) else {
@@ -80,13 +84,20 @@ pub fn over_candidate(candidate: &crate::gpt::Candidate, what: &str) -> Option<A
         return None;
     }
     let device_blocks = handle.block_count();
-    let Some(part) = Partition::of(handle, start / PAGE, len / PAGE) else {
-        log!(
-            "{what}: candidate {guid} is at {start}+{len} on a device of {} bytes — refusing to \
-             read past the end of it",
-            device_blocks.saturating_mul(PAGE)
-        );
-        return None;
+    let part = match Partition::of(handle, start / PAGE, len / PAGE, block::Holder::Kernel(what)) {
+        Ok(part) => part,
+        Err(block::ViewRefused::OffDevice) => {
+            log!(
+                "{what}: candidate {guid} is at {start}+{len} on a device of {} bytes — refusing \
+                 to read past the end of it",
+                device_blocks.saturating_mul(PAGE)
+            );
+            return None;
+        }
+        Err(block::ViewRefused::Held(by)) => {
+            log!("{what}: candidate {guid} is held by {by} — refusing to open it a second time");
+            return None;
+        }
     };
     Some(init(part))
 }
@@ -99,7 +110,7 @@ impl Cached {
     /// Locks cache then device, in that order.
     pub fn lock(&self) -> PageCacheGuard<'_> {
         let cache = self.cache.lock();
-        let dev = self.part.handle().lock();
+        let dev = self.part.lock();
         PageCacheGuard { cache, dev, part: &self.part }
     }
 
@@ -122,7 +133,7 @@ impl Cached {
 
 pub struct PageCacheGuard<'a> {
     cache: LockGuard<'a, PageCache>,
-    dev: LockGuard<'a, Box<dyn BlockDevice>>,
+    dev: block::Locked<'a>,
     part: &'a Partition,
 }
 
@@ -133,17 +144,17 @@ impl PageCacheGuard<'_> {
 
     pub fn read(&mut self, block: u64) -> Result<&[u8], BlockError> {
         let Self { cache, dev, part } = self;
-        cache.read(part, dev.as_mut(), block)
+        cache.read(part, dev, block)
     }
 
     pub fn write_new(&mut self, block: u64) -> Result<&mut [u8], BlockError> {
         let Self { cache, dev, part } = self;
-        cache.write_new(part, dev.as_mut(), block)
+        cache.write_new(part, dev, block)
     }
 
     pub fn sync(&mut self) -> BlockResult {
         let Self { cache, dev, .. } = self;
-        cache.sync(dev.as_mut())
+        cache.sync(dev)
     }
 }
 
@@ -450,7 +461,20 @@ mod read_fault {
         fn flush(&mut self) -> BlockResult {
             self.0.flush()
         }
+
+        fn losses(&self) -> u64 {
+            self.0.losses()
+        }
     }
+}
+
+/// `partclaim-table-unanswered`: every instrumented disk refuses reads of its
+/// device block 0 from here on. Armed after the mounts, which read their own
+/// partitions and nothing there again.
+#[cfg(feature = "boot-actuators")]
+pub fn refuse_table_reads() {
+    read_fault::FAIL_BLOCK.store(0, core::sync::atomic::Ordering::Relaxed);
+    log!("partclaim-table-unanswered: device block 0 of every NVMe disk refuses reads from now on");
 }
 
 /// The un-index control, behind `pc-unbind-selftest`, for `PageCache::read`'s
@@ -518,9 +542,13 @@ pub fn unbind_selftest(cached: &Cached) {
 /// the view, so only the key the slot was filled under could have offset it.
 #[cfg(feature = "boot-actuators")]
 pub fn partition_offset_selftest(handle: &block::Handle) {
-    let Some(part) = block::Partition::of(handle.clone(), offset_probe::FIRST, offset_probe::BLOCKS)
-    else {
-        log!("pc-partition-offset: FAIL (the view does not fit on device {})", handle.device_id());
+    let Ok(part) = block::Partition::of(
+        handle.clone(),
+        offset_probe::FIRST,
+        offset_probe::BLOCKS,
+        block::Holder::Kernel("pc-partition-offset probe"),
+    ) else {
+        log!("pc-partition-offset: FAIL (no view over device {})", handle.device_id());
         return;
     };
     let cached = init(part);

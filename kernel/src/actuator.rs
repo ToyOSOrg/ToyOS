@@ -207,10 +207,13 @@ actuators! {
     /// Put the shared-object cache's byte budget within reach of the libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
-    /// Run `SYS_FSYNC`'s first attempt under an operation that is already over.
+    /// Run the first attempt of every block operation `object::ops::until_answered`
+    /// retries — `SYS_FSYNC`, a partition transfer — under an operation that is
+    /// already over.
     fsync_budget_spent = "fsync-budget-spent";
 
-    /// Make `SYS_FSYNC`'s deadman already expired.
+    /// Make the deadman of every run `object::ops::until_answered` makes already
+    /// expired.
     fsync_deadman_now = "fsync-deadman-now";
 
     /// Skip one NVMe completion wait so a submitted command goes unanswered.
@@ -463,6 +466,12 @@ actuators! {
 
     /// Wrap the metadata cache's device in a read-fault injector and run the un-index control after mount.
     pc_unbind_selftest = "pc-unbind-selftest";
+
+    /// Refuse every read of device block 0 of each NVMe disk — its protective
+    /// MBR and GPT header — once every mount has been made, so a partition
+    /// claim meets a disk that does not answer a read of its table. Judged by
+    /// `partition_claim_gives_up`.
+    partclaim_table_unanswered = "partclaim-table-unanswered";
 
     /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";

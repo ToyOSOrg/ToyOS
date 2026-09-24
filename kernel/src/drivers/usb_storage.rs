@@ -33,9 +33,17 @@ pub fn handle(index: usize) -> Option<(Handle, u32)> {
             index,
             id,
             blocks: geometry.blocks,
+            losses: 0,
         }))?,
     };
     Some((handle, geometry.logical_block_bytes))
+}
+
+/// Whether the `index`-th disk lost writes by the count `losses` that no
+/// writer's flush has reported (`block::Handle::untold`). A disk the block
+/// layer never registered had no writer to tell.
+pub fn untold(index: usize, losses: u64) -> bool {
+    block::open(USB_DEVICE_ID_BASE + index as DeviceId).is_some_and(|disk| disk.untold(losses))
 }
 
 /// Whether the controller will still speak to the disk, distinct from a failed
@@ -49,6 +57,9 @@ struct UsbBlockDevice {
     index: usize,
     id: DeviceId,
     blocks: u64,
+    /// The disk's loss count as the device that ran the last operation
+    /// counted it (`BlockDevice::losses`).
+    losses: u64,
 }
 
 impl UsbBlockDevice {
@@ -72,7 +83,7 @@ impl BlockDevice for UsbBlockDevice {
 
     fn read_blocks(&mut self, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
         let _op = block::begin_operation();
-        let done = xhci::storage_read(self.index, lba, count, buf);
+        let done = xhci::storage_read(self.index, lba, count, buf, &mut self.losses);
         if done.is_err() {
             log!("usb-storage: read of {count} blocks at {lba} {} on disk {}",
                 gave_up(done), self.index);
@@ -82,7 +93,7 @@ impl BlockDevice for UsbBlockDevice {
 
     fn write_blocks(&mut self, lba: u64, count: u32, buf: &[u8]) -> BlockResult {
         let _op = block::begin_operation();
-        let done = xhci::storage_write(self.index, lba, count, buf);
+        let done = xhci::storage_write(self.index, lba, count, buf, &mut self.losses);
         if done.is_err() {
             log!("usb-storage: write of {count} blocks at {lba} {} on disk {}",
                 gave_up(done), self.index);
@@ -93,12 +104,16 @@ impl BlockDevice for UsbBlockDevice {
     fn flush(&mut self) -> BlockResult {
         let _op = block::begin_operation();
         let began = crate::clock::now();
-        let done = xhci::storage_flush(self.index);
+        let done = xhci::storage_flush(self.index, &mut self.losses);
         block::census::flush_took(self.id, (crate::clock::now() - began).nanos());
         if done.is_err() {
             log!("usb-storage: cache flush {} on disk {}", gave_up(done), self.index);
         }
         self.noted(done)
+    }
+
+    fn losses(&self) -> u64 {
+        self.losses
     }
 }
 
