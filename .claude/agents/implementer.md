@@ -49,7 +49,9 @@ the brief says so.
 
 The review is the newest comment on the pull request whose last line is a verdict. Every BLOCKER is
 fixed, or refuted with the measurement that refutes it. NOTEs are fixed on the way. REMOVE means
-delete: prose is never rewritten. A reviewer's named fix is a hypothesis until you have run it.
+delete: prose is never rewritten. A reviewer's named fix is a hypothesis until you have run it. Every mutation the review
+names is applied as a checked patch, shown to build, run, and reported red or green with its exit
+code; one that stays green is a test to add.
 
 Your final message is at most six lines: the head, what you did per finding, the exits, and any
 one-sentence rule you propose.
