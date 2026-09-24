@@ -52,6 +52,29 @@ fn quiesce(last: &str) {
     if crate::actuator::wedge_before_reset() {
         crate::deadline::stage_a_wedge();
     }
+    // The same shape with a device left inside a Bulk-Only command. Here too,
+    // so the wedge is a boot that ran its job list.
+    #[cfg(feature = "boot-actuators")]
+    {
+        use toyos_xhci::bot::Phase;
+        let armed = [
+            (crate::actuator::usb_wedge_data_owed(), Phase::DataOwed),
+            (crate::actuator::usb_wedge_in_data(), Phase::Data),
+            (crate::actuator::usb_wedge_before_status(), Phase::StatusOwed),
+        ]
+        .into_iter()
+        .find_map(|(on, phase)| on.then_some(phase));
+        if let Some(phase) = armed {
+            crate::usb_gate::wedge_inside_a_write(phase);
+        }
+    }
+    // The same machine ended by the same bound, with the bus busy rather than
+    // idle: this one never stops writing, so the reset lands on a controller
+    // that is moving bytes.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::usb_reset_under_load() {
+        crate::usb_gate::sweep_under_load();
+    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::drivers::watchdog::disarm();
     log!("Syncing filesystems...");
@@ -91,6 +114,9 @@ fn quiesce(last: &str) {
     // reader left for the lines written past the point `/log` stopped taking
     // them.
     crate::log::account_for_durability(durability);
+    // Whether or not the volume got them: a stick this boot's transport broke
+    // on is a stick the next host may not be able to read the log off.
+    crate::blackbox::append_recovery();
     // **The barrier, and last of all.** Below the log volume's last durable
     // byte, because before it `logd` still has that volume to write and this
     // takes the controller away from it; and after everything else here,

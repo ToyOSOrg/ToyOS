@@ -30,7 +30,9 @@ macro_rules! say {
 }
 
 mod device;
+mod dhcp;
 mod i219;
+mod report;
 mod virtio_net;
 
 /// The cards this program can drive, named by what identifies one rather than
@@ -42,26 +44,70 @@ mod virtio_net;
 ///
 /// `1af4:1041` is virtio's transitional device id `1000 + 1` for a network
 /// device (virtio 1.2 §5.1.1). `8086:15fc` is the ThinkPad T14's onboard I219
-/// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models, and
-/// one driver takes both because the register file is the same one.
-const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, Card::intel),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, Card::intel),
+/// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models. One
+/// driver takes both, and each row names which part it is because below the
+/// register file they are not one.
+const CARDS: [(PciId, fn(toyos::PciDev, bool) -> Card); 3] = [
+    (PciId { vendor: 0x8086, device: 0x15fc }, |c, p| Card::intel(c, Part::I219, p)),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, |c, p| Card::intel(c, Part::E82574, p)),
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
+
+/// The actuator that makes the card raise one interrupt on purpose, so a boot
+/// whose only reading of the interrupt path is a count of messages can tell a
+/// part nothing made speak from a message that reached no CPU.
+///
+/// **Nothing a shipped machine runs arms it**: the argument comes from the
+/// `[programs.netd] args` row of a boot config, and the one config that carries
+/// it is `tests/lanicscase`. A boot that always raised a message would make the
+/// kernel's first-message record read the same on a working card and a dead
+/// one.
+const PROVOKE_MESSAGE: &str = "--provoke-message";
+
+/// The probe under which this process brings the card up and serves exactly as
+/// it always does for [`LEASE_WINDOW`], leaves what happened on the log volume
+/// one durable line at a time (`report::PATH`), and then ends with
+/// `toyos_i219::lease::Verdict`'s code: whether a leased address is held when
+/// the window ends, and where none is, what the bring-up and the link said.
+///
+/// **A lease is a frame out and a frame in, answered by a server this machine
+/// does not control**, which is the claim the probe is flashed for; the lines
+/// beside it say what the driver and the MAC counted each way, and so which
+/// half went missing on a boot that got none. Armed the same way as
+/// [`PROVOKE_MESSAGE`] and never beside it.
+const EXIT_WITH_LEASE: &str = "--exit-with-lease";
+
+/// How long [`EXIT_WITH_LEASE`] serves before it ends, counted from this
+/// process's start.
+///
+/// **It ends inside the job that holds its boot open**: `test_rs_lan_hold`
+/// sleeps `toyos_tco::LEASE_BOUND_MS` from a start after this process's, so
+/// the exit record and the report's last line land before the runner reboots,
+/// with two seconds to spare. Every moment of it after the lease is a moment
+/// the machine answers the host's ping at the leased address.
+const LEASE_WINDOW: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS - 2_000);
+
+/// The two, which cannot share a boot.
+const ACTUATORS: [&str; 2] = [PROVOKE_MESSAGE, EXIT_WITH_LEASE];
+
+fn armed(actuator: &str) -> bool {
+    std::env::args().any(|arg| arg == actuator)
+}
 
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
+use toyos_i219::lease::{Event, Verdict};
+use toyos_i219::Part;
 use virtio_net::VirtioNet;
 
 use toyos::net::*;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::{dns, tcp, udp};
+use smoltcp::socket::{dhcpv4, dns, tcp, udp};
 use smoltcp::time::Instant as SmoltcpInstant;
-use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint};
+use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, IpAddress, IpEndpoint};
 
 use std::net::Ipv4Addr;
 
@@ -84,14 +130,25 @@ impl Card {
         panic!("netd: the NIC this program was given is not one it can drive — {why}")
     }
 
-    fn intel(claim: toyos::PciDev) -> Self {
-        match i219::Nic::open(claim) {
-            Ok(nic) => Self::Intel(nic),
+    /// `provoke` is [`PROVOKE_MESSAGE`], carried out once the card is up.
+    fn intel(claim: toyos::PciDev, part: Part, provoke: bool) -> Self {
+        match i219::Nic::open(claim, part) {
+            Ok(nic) => {
+                if provoke {
+                    nic.provoke_message();
+                }
+                Self::Intel(nic)
+            }
             Err(why) => Self::undrivable(why),
         }
     }
 
-    fn virtio(claim: toyos::PciDev) -> Self {
+    /// [`PROVOKE_MESSAGE`] is the Intel driver's: armed here it is refused, not
+    /// skipped, before `open` touches the card.
+    fn virtio(claim: toyos::PciDev, provoke: bool) -> Self {
+        if provoke {
+            panic!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio");
+        }
         match VirtioNet::open(claim) {
             Ok(nic) => Self::Virtio(nic),
             Err(why) => Self::undrivable(why),
@@ -113,6 +170,18 @@ impl Card {
         }
     }
 
+    /// The Intel driver, for [`EXIT_WITH_LEASE`]: the bring-up it reports
+    /// beside the lease is that driver's.
+    fn intel_driver(&self) -> &i219::Nic {
+        match self {
+            Self::Virtio(_) => Self::undrivable(format_args!(
+                "{EXIT_WITH_LEASE} reports the Intel driver's bring-up beside the lease, which \
+                 this card has not"
+            )),
+            Self::Intel(nic) => nic,
+        }
+    }
+
     /// **The record has to be taken, not merely noticed.** A claim reads ready
     /// while it holds an undrained interrupt, so a pass that saw the token and
     /// left it would find the same one on the next `wait` and every one after
@@ -125,14 +194,15 @@ impl Card {
     /// function's bus mastering is gone. Every frame from here on is one that
     /// silently never arrives, so this dies where it can be read — once, for
     /// whichever driver is running.
-    fn begin_pass(&self) {
+    ///
+    /// Answers the link where the pass found it changed; virtio reports none.
+    fn begin_pass(&self) -> Option<toyos_i219::Link> {
         let answered = match self {
-            Self::Virtio(nic) => nic.take_interrupt().map(|_| ()),
+            Self::Virtio(nic) => nic.take_interrupt().map(|_| None),
             Self::Intel(nic) => nic.begin_pass(),
         };
-        if let Err(why) = answered {
-            panic!("netd: this NIC's claim refused an interrupt read: {why:?}");
-        }
+        answered
+            .unwrap_or_else(|why| panic!("netd: this NIC's claim refused an interrupt read: {why:?}"))
     }
 
     fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
@@ -913,6 +983,19 @@ impl NetDaemon {
             IpAddress::Ipv4(Ipv4Addr::from(req.addr)),
             req.port,
         );
+        if req.port == 0 || remote.addr.is_unspecified() {
+            msg.client.error(ERR_INVALID_INPUT);
+            return;
+        }
+        // **This machine holding no address is not a peer's refusal.** Before
+        // the lease there is no source for a SYN, and the socket's own
+        // `Unaddressable` would reach the client as `ERR_CONNECTION_REFUSED`,
+        // which says "that peer says no, give up" about a condition of this
+        // machine that clears when the lease lands.
+        if iface.ipv4_addr().is_none() {
+            msg.client.error(ERR_NOT_CONNECTED);
+            return;
+        }
         let local_port = self.alloc_port();
 
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
@@ -1116,6 +1199,15 @@ impl NetDaemon {
                 conn.close_rx();
             }
 
+            // **A connection that is over takes no more of the client's bytes.**
+            // A peer's reset leaves the socket `Closed` and `can_send` false for
+            // good, so the loop above never reads the pipe again; left open, the
+            // client's writes fill a pipe nobody drains and then block, and a
+            // writer that is never told its peer is gone cannot say so.
+            if !socket.is_open() && conn.tx_read.is_some() {
+                conn.close_tx();
+            }
+
             // Detect client death: a zero-byte write is refused by name once
             // the pipe has no reader — the kernel's fact, not the client's.
             if let Some(ref pipe) = conn.rx_write {
@@ -1281,7 +1373,28 @@ impl NetDaemon {
     }
 }
 
+/// [`EXIT_WITH_LEASE`]'s last two lines, and the exit they announce. `held` is
+/// whether a leased address is held now, at the end of the window — a lease
+/// that landed and was then lost inside it is not one.
+///
+/// **The card is taken and dropped before the exit**, which runs no destructor:
+/// dropping the driver is what lets the function go.
+fn end_the_lease_probe(report: &report::Report, card: Card, held: bool) -> ! {
+    let nic = card.intel_driver();
+    report.say(Event::Counts(nic.counts()));
+    let verdict = if held {
+        Verdict::Leased
+    } else {
+        Verdict::NotLeased(toyos_i219::phy::Outcome::of(nic.brought_up().phy, nic.link()))
+    };
+    drop(card);
+    let code = verdict.exit_code();
+    report.say(Event::Exit { code });
+    std::process::exit(code)
+}
+
 fn main() {
+    let started = Instant::now();
     // **The order this used to have was load-bearing and is now moot.** The
     // device was claimed before the name was published, because a client that
     // connected while netd was still in `DmaNic::open` reached a listener owned
@@ -1300,7 +1413,31 @@ fn main() {
     };
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
-    let nic = open(claim);
+    // Before the card is opened, so a boot config that arms both is refused
+    // before either acts.
+    let asked_for: Vec<&str> = ACTUATORS.into_iter().filter(|actuator| armed(actuator)).collect();
+    if asked_for.len() > 1 {
+        panic!(
+            "netd: {asked_for:?} cannot share a boot: a probe ends this process before the \
+             point another of them acts at"
+        );
+    }
+    let nic = open(claim, armed(PROVOKE_MESSAGE));
+    let report = armed(EXIT_WITH_LEASE).then(|| {
+        let report = report::Report::open(started);
+        let intel = nic.intel_driver();
+        for words in i219::brought_up_words(intel.brought_up()) {
+            report.say(Event::BroughtUp(&words));
+        }
+        report.say(Event::Link(intel.link()));
+        report
+    });
+    // The link as the card came up with it, which the first change a pass
+    // reports is measured against. Virtio reports no link changes at all.
+    let mut link_up = match &nic {
+        Card::Intel(intel) => intel.link().is_up(),
+        Card::Virtio(_) => true,
+    };
     let mac = nic.mac();
     let mut device = DmaNic { nic };
 
@@ -1313,29 +1450,18 @@ fn main() {
     let now = SmoltcpInstant::from_millis(0);
     let mut iface = Interface::new(config, &mut device, now);
 
-    iface.update_ip_addrs(|addrs| {
-        addrs.push(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24)).ok();
-    });
-    iface.routes_mut()
-        .add_default_ipv4_route(Ipv4Addr::new(10, 0, 2, 2))
-        .ok();
-
     let mut socket_set = SocketSet::new(vec![]);
 
-    let dns_servers = &[IpAddress::v4(10, 0, 2, 3)];
-    let dns_socket = dns::Socket::new(dns_servers, vec![]);
+    // Empty, because the lease names the resolvers and nothing else may: a
+    // server written down here would answer for one network on every other.
+    let dns_socket = dns::Socket::new(&[], vec![]);
     let dns_handle = socket_set.add(dns_socket);
+    let dhcp_handle = socket_set.add(dhcp::socket());
+    let mut dhcp = dhcp::Dhcp::new();
 
     let total_mem = total_memory();
     let max_piped = max_piped_connections(total_mem);
     let mut daemon = NetDaemon::new(dns_handle, max_piped);
-
-    say!(
-        "netd: ready, at most {max_piped} piped connections \
-         ({} MiB each of {} MiB total)",
-        PIPED_CONNECTION_BYTES / (1024 * 1024),
-        total_mem / (1024 * 1024),
-    );
 
     // Sized for the slot ceiling rather than for `max_piped`: the batch
     // between two `wait` calls is the two fixed registrations, one per live piped
@@ -1355,9 +1481,50 @@ fn main() {
     loop {
         // Before `iface.poll`, because it is what makes the interrupt taken and
         // what gives a driver with a per-pass receive budget that budget back.
-        device.nic.begin_pass();
+        if let Some(link) = device.nic.begin_pass() {
+            if let Some(report) = &report {
+                report.say(Event::Link(link));
+            }
+            // Down to up only, and only with no lease held: a speed change is
+            // no new network, and a bound lease is kept across a flap rather
+            // than given up — `dhcp::restart`'s own header. Before the poll
+            // below, so the DISCOVER goes out on this pass.
+            if link.is_up() && !link_up && !dhcp.leased() {
+                dhcp::restart(socket_set.get_mut::<dhcpv4::Socket>(dhcp_handle));
+            }
+            link_up = link.is_up();
+        }
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
         while iface.poll(now, &mut device, &mut socket_set) != PollResult::None {}
+
+        // **After the poll and before anything is served.** The lease is what
+        // gives this machine an address, a route and its resolvers, so a client
+        // answered before it was applied would be answered on a machine that is
+        // on no network.
+        let change = dhcp::Change::of(socket_set.get_mut::<dhcpv4::Socket>(dhcp_handle));
+        let held = dhcp.leased();
+        if let (Some(report), Some(change)) = (&report, change.as_ref()) {
+            match change.lease() {
+                Some((address, router, server)) => report.say(Event::Leased {
+                    address: address.address(),
+                    prefix: address.prefix_len(),
+                    server,
+                    router,
+                }),
+                // Only a lease that was held is lost: the client reports the
+                // same on its way to a first one.
+                None if held => report.say(Event::Lost),
+                None => {}
+            }
+        }
+        if dhcp.pass(change, &mut iface, socket_set.get_mut::<dns::Socket>(dns_handle)) {
+            say!(
+                "netd: ready, at most {max_piped} piped connections \
+                 ({} MiB each of {} MiB total)",
+                PIPED_CONNECTION_BYTES / (1024 * 1024),
+                total_mem / (1024 * 1024),
+            );
+        }
 
         daemon.bridge_piped(&mut socket_set);
 
@@ -1405,6 +1572,18 @@ fn main() {
         let timeout = match timeout_nanos {
             None => u64::MAX,
             Some(n) => n,
+        };
+        // The probe's window is a wake of its own: an idle machine would
+        // otherwise sleep through the moment it owes its answer.
+        let timeout = match &report {
+            Some(report) => {
+                let left = LEASE_WINDOW.saturating_sub(started.elapsed());
+                if left.is_zero() {
+                    end_the_lease_probe(report, device.nic, dhcp.leased());
+                }
+                timeout.min(left.as_nanos() as u64)
+            }
+            None => timeout,
         };
         // A client that connects and then says nothing wakes nothing, so the
         // deadline that removes it has to be a wake in its own right: without

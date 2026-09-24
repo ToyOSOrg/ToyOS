@@ -55,6 +55,8 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 Only **Rust** and **QEMU** (for development). The rules: no binary outside those two — a macOS binary is a hard no, and "only for tests" does not soften it; only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; no Python; a fork is the sanctioned form of every third-party source. The north star is **self-hosting**: nothing — build, test, or verification — rests on a host binary. Ask of anything new: could this ever run inside ToyOS?
 
+Vendor firmware a device verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`, and loaded only by that device's own driver through its IOMMU domain; it never executes on the CPU.
+
 The bar is not yet the tree. The standing failures are declared rather than removed — Python via `rust/x`, `cc` for every host link, four macOS FAT tools. `NOTICE` names every committed third-party file with its hash, upstream and licence; an image carrying `DOOM1.WAD` may not be sold.
 
 - **toyos-ld** — custom linker for bootloader, kernel and all userland. Its output is reproducible, and the container types say so: anything iterated into the output is a `BTreeMap`/`BTreeSet`; a container asked only for membership stays hashed.

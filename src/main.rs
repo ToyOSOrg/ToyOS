@@ -138,19 +138,11 @@ fn main() {
         toyos_build::clippy::dispatch(&root);
         return;
     }
-    // Reads two directories and two files and prints. Here for the same reason
-    // again, and for one more: the question it answers — "is this red known,
-    // and on what?" — is asked while a build is broken as often as while one
-    // works.
+    // Reads one table and prints. Here for the same reason again, and for one
+    // more: the question it answers — "is this red quarantined?" — is asked
+    // while a build is broken as often as while one works.
     if asked(&flags::KNOWN_RED) {
-        toyos_build::redlist::dispatch(&root, &args);
-        return;
-    }
-    // Asks `gh`, not the toolchain, so it runs on the bare `ubuntu-latest`
-    // runner the nightly schedule gives it — no QEMU, no ToyOS toolchain.
-    // Same reason as the two above: before `check_prerequisites`.
-    if asked(&flags::MERGE_HEALTH) {
-        toyos_build::mergehealth::dispatch(&root, &args);
+        toyos_build::redlist::dispatch(&args);
         return;
     }
     // Reads lockfiles and cargo's own checkouts, nothing else: the half of a

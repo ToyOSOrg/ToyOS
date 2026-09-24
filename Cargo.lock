@@ -1133,6 +1133,7 @@ dependencies = [
  "toyos-fat32",
  "toyos-fat32-check",
  "toyos-gpt",
+ "toyos-i219",
  "toyos-keymap",
  "toyos-ld",
  "toyos-logstream",
@@ -1142,6 +1143,7 @@ dependencies = [
  "toyos-tco",
  "toyos-userbound",
  "toyos-wallclock",
+ "toyos-xhci",
  "uuid",
 ]
 

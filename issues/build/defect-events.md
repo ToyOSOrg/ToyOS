@@ -145,9 +145,6 @@ ledger was written.
   soundd's stats line and a mixer counter, nothing i8042 touches.
   `cargo run -- --known-red i8042_health` answered `NOT ON THE LIST`, so every
   author who met it re-derived that from scratch.
-  `issues/build/i8042-health-sits-on-the-ten-second-line.md` (on #197's branch)
-  is the sighting; the fix is the margin rule below, which relegates it as an
-  honest `Why::Cost` row at its committed 9,509 ms.
 
 - **The one-sample tier rule** — origin: pre-existing, and it is the root cause
   of both entries above. discoverer: automated gate — the same `durations` gate,
@@ -167,11 +164,7 @@ ledger was written.
   `Why::Cost` row. Three names relegated with it (`i8042_health` 9,509 ms,
   `double_panic_names_the_fault` 9,120 ms, `console_line_atomicity` 8,925 ms);
   the two returns of the same morning were re-checked against the new line and
-  keep their Fast (`idle_stack_guard` 5,049 ms, `dump_nmi_probe` 6,284 ms). What
-  the fix does *not* cover is
-  `issues/build/xhci-full-speed-device-jumped-47-percent-over-its-commitment.md`:
-  that name had margin and jumped anyway, which the rule's own derivation says
-  is a finding about the test rather than a straddle.
+  keep their Fast (`idle_stack_guard` 5,049 ms, `dump_nmi_probe` 6,284 ms).
 
 ## 2026-08-22
 

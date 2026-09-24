@@ -546,12 +546,6 @@ const HOST_SPAWNS: &[Spawn] = &[
         why: "QEMU, the other half of the bar, and `REQUIRED`",
     },
     Spawn {
-        arg: "\"gh\"",
-        sites: &[],
-        why: "GitHub's CLI, read-only, in `--merge-health` alone. Outside the bar and \
-              declared by nothing else: no build, boot or gate reaches it",
-    },
-    Spawn {
         arg: "\"ssh\"",
         sites: &[],
         why: "OpenSSH's client, which is how `src/metal.rs` reaches the T14 and the only way it \
@@ -620,6 +614,11 @@ const HOST_SPAWNS: &[Spawn] = &[
         arg: "toyos_build::build::ssh_client_host(&compile::repo_root())",
         sites: &[("tests/common/ssh.rs", 1)],
         why: "the harness's SSH client, russh and russh-sftp from source and not a host `ssh`",
+    },
+    Spawn {
+        arg: "crate::build::ssh_client_host(&self.root)",
+        sites: &[("src/metaltalk.rs", 1)],
+        why: "the same client, driven by the metal loop at a booted T14 over its own cable",
     },
 ];
 
