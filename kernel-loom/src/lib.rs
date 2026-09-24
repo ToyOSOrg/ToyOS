@@ -190,6 +190,10 @@ pub mod reap_gate;
 #[path = "../../kernel/src/quiesce/claim.rs"]
 pub mod shutdown_claim;
 
+/// Ctrl+Alt+D's request word. Pure atomics, so it compiles here unshimmed.
+#[path = "../../kernel/src/sched/dump_request.rs"]
+pub mod dump_request;
+
 /// The interrupt record a claimed PCI function's ISR writes and its holder
 /// reads. Pure `core` atomics and nothing else, so it compiles here unshimmed.
 #[path = "../../kernel/src/pcidev/record.rs"]

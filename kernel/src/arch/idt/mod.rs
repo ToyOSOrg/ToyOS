@@ -353,6 +353,10 @@ pub(crate) extern "sysv64" fn kernel_exit_to_user_check() {
         crate::scheduler::leave_ring3_if_due();
         // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
         if !crate::preempt::need_resched() {
+            #[cfg(feature = "boot-actuators")]
+            if crate::actuator::dump_in_blocking_pass() {
+                crate::sched::dump::staged::note_return_to_ring3();
+            }
             return;
         }
         assert!(!crate::scheduler::in_schedule_self(),
