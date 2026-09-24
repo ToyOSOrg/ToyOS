@@ -508,8 +508,6 @@ const IMPLIES: &[(&str, &[&str])] = &[
     ("usb-first-wait-spent", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
-    // It arms from a pass, and a settled guest otherwise runs none.
-    ("dump-in-blocking-pass", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),
     // The staged CPU has to still be deaf when its bound passes, and this boot
     // would otherwise have handed the machine back at the end of its job list —
