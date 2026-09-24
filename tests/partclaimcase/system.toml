@@ -1,6 +1,7 @@
 # The partition-claim boot: `tests/testcases`'s estate, and one `devices` row
-# that grants test-runner a partition by type — the grant init makes from this
-# file, which `partition_claim` proves by finding that partition already held.
+# that grants test-runner a partition by its unique GUID — the grant init makes
+# from this file, which `partition_claim` proves by finding that partition
+# already held.
 # The disk carrying it is crafted by `tests/common/partclaim.rs`; the GUID is
 # mirrored there and in the guest binary.
 
@@ -41,7 +42,7 @@ syscap = ["rt"]
 [programs.test-runner]
 receives = ["soundd"]
 syscap = ["device", "dup", "logread", "power", "roster"]
-devices = ["part-type:A94F0E6D-3B2C-4E1A-8C7D-6E5F4A3B2C1D"]
+devices = ["part:A94F0E6D-3B2C-4E1A-8C7D-6E5F4A3B2C1D"]
 
 [programs.toybox]
 receives = ["soundd"]

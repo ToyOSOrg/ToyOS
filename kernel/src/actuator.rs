@@ -467,6 +467,12 @@ actuators! {
     /// Wrap the metadata cache's device in a read-fault injector and run the un-index control after mount.
     pc_unbind_selftest = "pc-unbind-selftest";
 
+    /// Refuse every read of device block 0 of each NVMe disk — its protective
+    /// MBR and GPT header — once every mount has been made, so a partition
+    /// claim meets a disk that does not answer a read of its table. Judged by
+    /// `partition_claim_gives_up`.
+    partclaim_table_unanswered = "partclaim-table-unanswered";
+
     /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 

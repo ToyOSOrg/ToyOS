@@ -19,11 +19,12 @@ pub struct Cached {
     part: Partition,
 }
 
-/// Wraps `dev` in the read-fault injector when `pc-unbind-selftest` is armed —
-/// at registration, so it sits under the one device object consumers share.
+/// Wraps `dev` in the read-fault injector when `pc-unbind-selftest` or
+/// `partclaim-table-unanswered` is armed — at registration, so it sits under
+/// the one device object consumers share.
 pub fn instrumented(dev: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
     #[cfg(feature = "boot-actuators")]
-    if crate::actuator::pc_unbind_selftest() {
+    if crate::actuator::pc_unbind_selftest() || crate::actuator::partclaim_table_unanswered() {
         return Box::new(read_fault::FaultDevice(dev));
     }
     dev
@@ -465,6 +466,15 @@ mod read_fault {
             self.0.losses()
         }
     }
+}
+
+/// `partclaim-table-unanswered`: every instrumented disk refuses reads of its
+/// device block 0 from here on. Armed after the mounts, which read their own
+/// partitions and nothing there again.
+#[cfg(feature = "boot-actuators")]
+pub fn refuse_table_reads() {
+    read_fault::FAIL_BLOCK.store(0, core::sync::atomic::Ordering::Relaxed);
+    log!("partclaim-table-unanswered: device block 0 of every NVMe disk refuses reads from now on");
 }
 
 /// The un-index control, behind `pc-unbind-selftest`, for `PageCache::read`'s

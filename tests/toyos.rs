@@ -404,8 +404,9 @@ const RUST_SKIP: &[&str] = &[
     "so_cache_policy",
     // Needs the NVMe `/home` and a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
     "home_overwrite_zero",
-    // Needs the disk `tests/common/partclaim.rs` crafts and `tests/partclaimcase`'s
-    // grant; `partition_claim` boots it with both and judges it off the image.
+    // Needs the disks `tests/common/partclaim.rs` crafts, the boot stick's GUIDs
+    // as arguments and a role; `partition_claim`, `partition_claim_gives_up` and
+    // `partition_claim_departure` boot it and judge it off the images.
     "partition_claimant",
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
@@ -753,8 +754,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("page_cache_partition_offset", Sched::Parallel, Tier::Fast),
     // A partition claimed as a device: one boot, every refusal in the guest,
     // the neighbours and the target judged off the image. Body in
-    // `tests/common/partclaim.rs`.
+    // `tests/common/partclaim.rs`, as are the two below.
     ("partition_claim", Sched::Parallel, Tier::Fast),
+    // Two boots: a disk that does not answer a read of its table, and every
+    // attempt refused until the deadman.
+    ("partition_claim_gives_up", Sched::Parallel, Tier::Fast),
+    // A USB stick's device leaves owing one claim's write and comes back on
+    // another port: each claim's fsync answers for its own writes.
+    ("partition_claim_departure", Sched::Parallel, Tier::Fast),
     // F9's negative control: a budget-refused /home fsync retried to durable,
     // its bytes then read off the NVMe image by the host's own bcachefs
     // reader. Body in `tests/common/storage.rs`.
@@ -9909,6 +9916,12 @@ fn run_machine_test(
         "foreign_disk_untouched" => storage::foreign_disk_untouched(test_config, c_bins, rust_bins),
         "internal_disk_boot" => storage::internal_disk_boot(test_config, c_bins, rust_bins),
         "partition_claim" => partclaim::partition_claim(test_config, c_bins, rust_bins),
+        "partition_claim_gives_up" => {
+            partclaim::partition_claim_gives_up(test_config, c_bins, rust_bins)
+        }
+        "partition_claim_departure" => {
+            partclaim::partition_claim_departure(test_config, c_bins, rust_bins)
+        }
         "block_duplicate_id" => storage::block_duplicate_id(test_config, c_bins, rust_bins),
         "page_cache_partition_offset" => {
             storage::page_cache_partition_offset(test_config, c_bins, rust_bins)
