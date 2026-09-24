@@ -210,6 +210,9 @@ fn main() {
 
     let mut tail = LogTail::new();
     let mut buf = vec![Record::EMPTY; BATCH];
+    // Programs' lines read and not yet written: each waits for the kernel's
+    // records stamped before it (`read_origins`'s doc).
+    let mut waiting: Vec<(u64, String)> = Vec::new();
     let poller = Poller::new((2 + MAX_ORIGINS) as u32);
     let mut lost = 0u64;
     // When the current run of consecutive retries began, or `None` when the
@@ -255,13 +258,23 @@ fn main() {
         // is what `publish_durable` promises the kernel is on the device, and a
         // program's later stamp would promise records this round never read.
         let newest = batch.last().map_or(0, |r| r.at_ns);
+        // A short batch is a ring this reader has caught up with.
+        let caught_up = batch.len() < BATCH;
         registered(&from_init, &mut from_init_rx, &mut origins);
         let mut round = Round { lines: Vec::new(), console: Vec::new() };
-        read_origins(&mut origins, boot_local, &mut round);
+        if waiting.is_empty() {
+            read_origins(&mut origins, boot_local, &mut round);
+            waiting.append(&mut round.lines);
+        }
         for record in batch {
             let line = format!("{}\n", record.tagged(&stamp(boot_local, record.at_ns)));
             round.lines.push((record.at_ns, line));
         }
+        let due = if caught_up { u64::MAX } else { newest };
+        let (now, later): (Vec<_>, Vec<_>) =
+            waiting.drain(..).partition(|(at_ns, _)| *at_ns <= due);
+        round.lines.extend(now);
+        waiting = later;
 
         if round.lines.is_empty() {
             // **Nothing new, so park until something is.** `SYS_LOG_READ` and a
@@ -438,6 +451,12 @@ fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut V
 
 /// One read of every origin's pipe, into `round`. An origin whose writers are
 /// all gone says what it left unfinished and is dropped.
+///
+/// **A line is stamped when it is read, and written after every kernel record
+/// stamped before it**: the caller holds it until the ring is caught up or its
+/// records have passed the stamp, and reads no pipe while it holds any — so a
+/// reader behind the kernel's ring cannot put a program's line ahead of the
+/// records that came before it, and what it holds is one read per origin.
 fn read_origins(origins: &mut Vec<Origin>, boot_local: Option<u64>, round: &mut Round) {
     let mut chunk = vec![0u8; READ_BYTES];
     origins.retain_mut(|origin| {
