@@ -29,6 +29,14 @@
 //! `usbd` are in the process table like anything else, and
 //! [`crate::sched::kthread::is_kernel_task`] is what tells them apart.
 //!
+//! # What the stop waits on
+//!
+//! [`PROGRESS`], posted by [`note_progress`] from the three transitions that
+//! turn a thread a sweep counted as running into one it does not: the pass
+//! that bands it at its safe point, the pass that parks it, and its exit. Each
+//! posts after its own transition, so the sweep it wakes finds it done; a
+//! thread still running when the budget is spent is the record's shortfall.
+//!
 //! Lock order: [`process::PROCESS_TABLE`] alone.
 
 use core::sync::atomic::{
@@ -36,11 +44,13 @@ use core::sync::atomic::{
 };
 
 use toyos_quiesce::{Record, Stage, Sweep, Thread, ThreadId};
+use toyos_sched::task::WaitClass;
 
 use crate::arch::percpu;
+use crate::completion::{self, Outcome, Subject, Token, Watch};
 use crate::process;
 use crate::scheduler::TaskId;
-use crate::time::{Budget, Cadence, Duration};
+use crate::time::{Budget, Deadline, Duration};
 
 mod claim;
 
@@ -57,17 +67,6 @@ const PARK: Budget = Budget::of(
     Duration::from_nanos(toyos_sched::fair::QUANTUM_NS + crate::block::OPERATION.nanos()),
     "the reset lands wherever the threads that never reached a safe point are, and \
      the record names how many",
-);
-
-/// How long the caller yields between two sweeps.
-///
-/// A sweep takes the machine-wide process table, and a thread finishing the
-/// teardown this loop waits for needs that same lock: without a cadence the
-/// wait contends with what it is waiting for. One quantum, because that is
-/// what a thread in Ring 3 needs to reach its safe point.
-const SWEEP: Cadence = Cadence::every(
-    Duration::from_nanos(toyos_sched::fair::QUANTUM_NS),
-    "the process table is taken again and every thread that must stop re-examined",
 );
 
 const RUNNING: u8 = 0;
@@ -124,6 +123,19 @@ pub fn claim_the_shutdown() -> bool {
 
 static CLAIMED: claim::Claim = claim::Claim::new();
 
+/// What the stop's caller parks on between two sweeps.
+static PROGRESS: Watch = Watch::new();
+
+/// Called just after the running thread made a transition that can end the
+/// stop's wait on it — banded at its safe point, parked, or exited — and never
+/// before one: a sweep woken first would find it still running and wait for a
+/// post that has already come.
+pub fn note_progress() {
+    if stops_this_thread() {
+        completion::post(Subject::of(&PROGRESS), Outcome::Ready);
+    }
+}
+
 /// Whether the machine's stop has begun: what the `quiesce-fsync-refuse`
 /// actuator refuses from.
 #[cfg(feature = "boot-actuators")]
@@ -170,18 +182,27 @@ pub fn stop(stage: Stage) -> Record {
         Release,
     );
 
+    // Armed before the first sweep, so a transition landing between a sweep
+    // and the park after it leaves a record that park returns on at once.
+    let parkable = crate::scheduler::Parkable::at_entry();
+    let armed = completion::arm(Subject::of(&PROGRESS), Token::new(0), WaitClass::Other)
+        .expect("quiesce::stop: the caller holds no task to park");
     // The kick is the timer vector, whose return to Ring 3 is the gate.
     crate::arch::apic::kick_all_but_self();
     let cpus = crate::arch::smp::cpu_count();
 
-    let began = crate::clock::nanos_since_boot();
+    let began = crate::clock::now();
+    let deadline = Deadline::at(began + PARK.duration());
     let mut sweeps = 0;
     loop {
         let swept = sweep(stage, caller);
         sweeps += 1;
-        let elapsed = crate::clock::nanos_since_boot().saturating_sub(began);
+        let elapsed = (crate::clock::now() - began).nanos();
         if swept.keep_waiting(elapsed, PARK.nanos()) {
-            between_sweeps();
+            // Uncancellable: the claim is taken, and a caller that left here
+            // would leave a machine nothing else may turn off. The deadline is
+            // `keep_waiting`'s own, so an expiry ends the loop at the next sweep.
+            let _ = completion::wait_uncancellable(&parkable, &armed, deadline);
             continue;
         }
         // Read here and not by the caller: the question is what was open at the
@@ -199,19 +220,10 @@ pub fn stop(stage: Stage) -> Record {
     }
 }
 
-/// Yielded and never parked: at `--smp 1` the caller's CPU is the only one the
-/// threads it waits for can reach their safe points on.
-fn between_sweeps() {
-    let until = crate::clock::nanos_since_boot().saturating_add(SWEEP.nanos());
-    while crate::clock::nanos_since_boot() < until {
-        crate::scheduler::yield_now();
-    }
-}
-
 /// Mark every parked thread `stage` names and count the rest.
 ///
-/// The table lock is held for the walk and given up before the cadence above:
-/// a thread on another CPU finishing its own teardown takes this same lock.
+/// The table lock is held for the walk and given up before the park: a thread
+/// on another CPU finishing its own teardown takes this same lock.
 fn sweep(stage: Stage, caller: ThreadId) -> Sweep {
     let mut out = Sweep::default();
     let guard = process::PROCESS_TABLE.lock();

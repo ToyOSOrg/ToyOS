@@ -103,7 +103,13 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     crate::irq_census::log_census();
     crate::drivers::nvme::log_census();
     crate::drivers::panic_console::log_census();
-    log!("{stopped}");
+    // A shortfall is the budget spent, not the reset refused: it is said at
+    // alert level, and the reset lands anyway.
+    if stopped.stopped_the_machine() {
+        log!("{stopped}");
+    } else {
+        crate::alert!("{stopped}");
+    }
     // Above the boot's last word, because these are ordinary records and the
     // volume that carries them is still there: every USB disk's write cache is
     // emptied and waited for before anything is taken down.

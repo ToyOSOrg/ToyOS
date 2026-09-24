@@ -512,6 +512,7 @@ pub fn pass(dispose: Dispose) {
     maybe_sweep(now);
     #[cfg(feature = "pass-spin")]
     maybe_hold(now);
+    let stops = matches!(dispose, Dispose::Stop);
     let action = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
         if let Some(current) = pass.cpu().running() {
@@ -536,6 +537,10 @@ pub fn pass(dispose: Dispose) {
     // while idling, so `pass_block` need not be a second one.
     #[cfg(feature = "sched-check")]
     report_pass_costs(now);
+    // After the band, before the switch: the running task is still this one.
+    if stops {
+        crate::quiesce::note_progress();
+    }
     execute(action);
     crate::preempt::enable_no_resched();
 }
@@ -604,6 +609,10 @@ pub fn pass_block(ticket: Ticket<'_>, deadline: Option<Nanos>) {
             current.ext().handle.publish(current.acct(), Some(now));
         }
     });
+    // After the commit, before the switch: the running task is still this one.
+    if registration.is_some() {
+        crate::quiesce::note_progress();
+    }
     execute(action);
     crate::preempt::enable_no_resched();
     if let Some(registration) = registration {

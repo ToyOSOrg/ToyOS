@@ -1004,8 +1004,9 @@ measured = 19488
 # budget and no more, so the record's own shortfall clause is the verdict, and
 # `Readback::stop_completed` reads it on every boot.
 #
-# `deadlinewedge` and `hardlockup` are absent on purpose: those two reset
-# without going through `quiesce`, so they stop nothing and write no record.
+# `deadlinewedge`, `hardlockup` and `usbload` are absent on purpose: those
+# reset on a bound without going through `quiesce`, so they stop nothing and
+# write no record.
 
 [[number]]
 name = "boot.testcases.park_open_operations"
@@ -1098,6 +1099,37 @@ name = "boot.foreignrecord.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.usbbreak.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.lancase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.lanicscase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.lanleasecase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.lantalkcase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
 [[number]]
 name = "boot.usbbreak.panel_us"
 unit = "us"

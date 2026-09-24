@@ -1896,6 +1896,11 @@ pub fn quiesce_leaves_the_volume_whole(
             return Err(format!("{bad:?} on the way down\n{tail}"));
         }
     }
+    // The drain ends when QEMU exits; a guest still up at its bound is a
+    // shutdown that never reached its last word, and nothing below is about it.
+    if !tail.contains("Shutting down.") {
+        return Err(format!("the guest did not shut down within the drain's 20 s\n{tail}"));
+    }
 
     let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
     if after.len() != image.len() {

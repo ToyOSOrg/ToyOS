@@ -399,6 +399,8 @@ pub fn exit_current(code: i32) -> ! {
         let pid = percpu::current_pid().unwrap();
         process::mark_thread_zombie(table, pid, tid, code);
     }
+    // The table says zombie now, which a sweep counts as nothing left to stop.
+    crate::quiesce::note_progress();
     driver::pass(Dispose::Exit);
     unreachable!("exit_current: returned from the exit pass");
 }

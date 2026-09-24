@@ -13,7 +13,7 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
@@ -34,12 +34,6 @@ const CHUNK: usize = 8192;
 /// the console it is read from rather than a budget ending the boot first.
 const SPIN_UP: Duration = Duration::from_secs(5);
 
-/// Writers that have finished a pass. **The reset is asked for over a machine
-/// every writer is known to be working on**: a writer still being spawned when
-/// the last word is written puts no line above it, which is a boot that had
-/// nothing to stop.
-static IN_THE_LOOP: AtomicUsize = AtomicUsize::new(0);
-
 /// What a writer says every pass.
 const WRITING: &str = "quiesce-writer:";
 
@@ -49,7 +43,13 @@ fn main() {
         std::process::exit(1);
     };
 
+    // One word per writer that has finished a pass. **The reset is asked for
+    // over a machine every writer is known to be working on**: a writer still
+    // being spawned when the last word is written puts no line above it, which
+    // is a boot that had nothing to stop.
+    let (in_the_loop, first_passes) = mpsc::channel::<usize>();
     for writer in 0..WRITERS {
+        let in_the_loop = in_the_loop.clone();
         std::thread::Builder::new()
             .name(format!("writer{writer}"))
             .spawn(move || {
@@ -82,7 +82,7 @@ fn main() {
                         return;
                     }
                     if pass == 0 {
-                        IN_THE_LOOP.fetch_add(1, Ordering::Relaxed);
+                        in_the_loop.send(writer).expect("main holds the receiver");
                     }
                 }
             })
@@ -90,15 +90,12 @@ fn main() {
     }
 
     let give_up = Instant::now() + SPIN_UP;
-    while IN_THE_LOOP.load(Ordering::Relaxed) < WRITERS {
-        if Instant::now() >= give_up {
-            eprintln!(
-                "quiesce_writers: {} of {WRITERS} writers reached their loop in {SPIN_UP:?}",
-                IN_THE_LOOP.load(Ordering::Relaxed),
-            );
+    for reached in 0..WRITERS {
+        let left = give_up.saturating_duration_since(Instant::now());
+        if first_passes.recv_timeout(left).is_err() {
+            eprintln!("quiesce_writers: {reached} of {WRITERS} writers reached their loop in {SPIN_UP:?}");
             std::process::exit(1);
         }
-        std::thread::yield_now();
     }
     println!("{WRITERS} writers are running; asking for the reset");
 

@@ -11,9 +11,11 @@ use std::fs::File;
 use std::io::Write;
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::log::{LogTail, Record, MAX_LOG_SHARDS};
+use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
 
 const SELF_PATH: &str = "/system/bin/test_rs_quiesce_twice";
@@ -33,6 +35,17 @@ const CHUNKS: usize = 8;
 
 /// Records per read; above the shard count, which the call refuses.
 const BATCH: usize = 4 * MAX_LOG_SHARDS as usize;
+
+/// The poll's one token.
+const LOG_TOKEN: u64 = 1;
+
+/// How long the first caller's drain gets to be refused before this boot
+/// says it never was. Inside the harness's own wait for the machine to stop.
+const REFUSAL_WITHIN: Duration = Duration::from_secs(10);
+
+/// How long the machine gets to stop this thread after its refusal before it
+/// says it was never stopped.
+const STOPPED_WITHIN: Duration = Duration::from_secs(20);
 
 fn main() {
     let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
@@ -95,6 +108,13 @@ fn second_caller(cap: &SysCap) -> ! {
         });
     drop(child.stdin.take());
 
+    // Parked on the log's readiness between reads. The readiness is an edge,
+    // so each watch is armed before the read it guards, and one is
+    // outstanding at a time.
+    let poller = Poller::new(1);
+    let give_up = Instant::now() + REFUSAL_WITHIN;
+    poller.watch(cap, READABLE, LOG_TOKEN);
+    poller.wait(0, 0, |_| {});
     loop {
         let batch = match tail.read(cap, &mut buf) {
             Ok(batch) => batch,
@@ -106,16 +126,28 @@ fn second_caller(cap: &SysCap) -> ! {
         if batch.iter().any(|record| record.message().contains(REFUSED)) {
             break;
         }
-        std::thread::yield_now();
+        if !batch.is_empty() {
+            continue;
+        }
+        let Some(left) = give_up.checked_duration_since(Instant::now()) else {
+            eprintln!(
+                "quiesce_twice: the first caller's drain was not refused in {REFUSAL_WITHIN:?}"
+            );
+            std::process::exit(1);
+        };
+        poller.wait(1, left.as_nanos() as u64, |_| {});
+        poller.watch(cap, READABLE, LOG_TOKEN);
+        poller.wait(0, 0, |_| {});
     }
     println!("quiesce_twice: the first caller's drain is being refused; asking again");
     // The other power syscall, so the one boot judges the claim on both: moved
     // into either one alone, this call or the first caller's is let in.
     let refused = cap.shutdown();
     println!("quiesce_twice: the second caller was refused ({refused:?})");
-    // Carved out of the first stage, so this thread runs until the second;
-    // it has nothing left to do but wait for that.
-    loop {
-        std::thread::yield_now();
-    }
+    // Carved out of the first stage, so this thread runs until the second
+    // stops it where it sleeps; nothing tells a thread it has been stopped,
+    // so the bound is the only word it can have.
+    std::thread::sleep(STOPPED_WITHIN);
+    eprintln!("quiesce_twice: the machine did not stop this thread in {STOPPED_WITHIN:?}");
+    std::process::exit(1);
 }
