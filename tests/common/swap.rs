@@ -446,6 +446,15 @@ fn test_binary<'a>(rust_bins: &'a [(String, Vec<u8>)], name: &str) -> Result<&'a
         .ok_or_else(|| format!("no `{name}` among the test binaries"))
 }
 
+/// Nothing after a swap that never reached init is init's to say, so a test
+/// waiting on init's words first holds the answer to init's `accepted`.
+fn init_accepted(answer: &Result<String, String>) -> Result<(), String> {
+    match answer {
+        Ok(said) if said.starts_with("accepted ") => Ok(()),
+        other => Err(format!("the swap was answered {other:?}, where init's `accepted` is owed")),
+    }
+}
+
 /// The machine with QEMU's `igb` beside the 82574, netd holding both.
 const IGB_BENCH: Bench =
     Bench { profile: qemu::Profile::E1000eBesideIgb, config: "tests/flrswapcase", device: "igb" };
@@ -473,6 +482,9 @@ pub fn swap_resets_the_function(
     std::fs::write(&binary, probe).map_err(|e| format!("{}: {e}", binary.display()))?;
     let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(probe))?;
     eprintln!("  [swap] the swap was answered {answer:?}");
+    if let Err(why) = init_accepted(&answer) {
+        return Err(rig.fail(why));
+    }
     // The probe's read, or a line that says there will be none.
     let failed = toyos_swap::said("netd", Word::Failed, "");
     let held = qemu::await_guest(&mut rig.guest, &mut rig.console, "the replacement reading the igb", |c| {
@@ -533,6 +545,9 @@ pub fn swap_refused_device_fails(
     let digest = toyos_swap::digest(&std::fs::read(&binary).map_err(|e| e.to_string())?);
     let answer = rig.swap_once_sshd_answers(&binary, &digest)?;
     eprintln!("  [swap] the swap was answered {answer:?}");
+    if let Err(why) = init_accepted(&answer) {
+        return Err(rig.fail(why));
+    }
     // The service carrying the stream is the one swapped, so init's words are
     // read off the console: its last one on this swap, whichever it is.
     let [gone, in_service, started, failed] =
