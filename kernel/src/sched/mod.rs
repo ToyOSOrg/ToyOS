@@ -4,6 +4,7 @@
 
 pub mod driver;
 pub mod dump;
+pub mod dump_request;
 pub mod kthread;
 pub mod payload;
 pub mod poison;

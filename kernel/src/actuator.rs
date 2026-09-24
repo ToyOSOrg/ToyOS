@@ -249,6 +249,9 @@ actuators! {
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
+    /// On one CPU, file Ctrl+Alt+D's request inside each kind of pass that may not serve it and inside a report, and count the Ring 3 returns each is left pending across.
+    dump_in_blocking_pass = "dump-in-blocking-pass";
+
     /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
     /// and never gives back: the negative control on `crate::hardlockup`, and a
     /// machine nothing else in this tree ends. Where CPUID states no

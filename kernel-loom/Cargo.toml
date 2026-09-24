@@ -180,6 +180,16 @@ durability-settle-blind = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 device-irq-lossy = []
+# The negative control for the blocked-task dump's report handoff. It makes
+# `dump_request.rs`'s `take` and `end_report` `Relaxed`, so a report is
+# unordered against the one before it, and `dump_request.rs` must red:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features dump-report-relaxed \
+#     --test dump_request
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+dump-report-relaxed = []
 
 [dependencies]
 loom = "0.7"

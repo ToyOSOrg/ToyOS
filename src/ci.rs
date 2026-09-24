@@ -322,6 +322,9 @@ pub(crate) const CONTROLS: &[Control] = &[
         "every_message_is_counted_once ... FAILED",
         "one_message_is_one_wake ... FAILED",
     ]),
+    red(KERNEL_LOOM, "dump-report-relaxed", Some("dump_request"), &[
+        "a_request_filed_during_a_report_is_reported ... FAILED",
+    ]),
     Control {
         krate: SCHED_LOOM,
         feature: "no-preempt-guard",
