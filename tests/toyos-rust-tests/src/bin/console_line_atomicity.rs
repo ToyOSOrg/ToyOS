@@ -67,10 +67,11 @@ const MIDLINE_BYTE: u8 = b'C';
 /// leading tag byte, zero-padded so every line stays exactly [`WIDTH`] bytes.
 const SEQ_DIGITS: usize = 6;
 
-/// The console, by the slot every process started under the runner holds it
-/// at. **Not stdout**: stdout is a pipe to `logd` that every child of the
-/// runner shares, so two children's writes to it meet in one byte stream, and
-/// the property under test is the console object's, which is per holder.
+/// The console, at stdin's slot: the runner starts this job holding its own
+/// there (`CONSOLE_JOBS`), and each writer inherits it as a console of its own.
+/// **Not stdout**: stdout is a pipe to `logd` that every child of the runner
+/// shares, so two children's writes to it meet in one byte stream, and the
+/// property under test is the console object's, which is per holder.
 const CONSOLE: RawHandle = RawHandle(0);
 
 fn main() {
