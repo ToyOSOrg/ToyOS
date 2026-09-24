@@ -265,6 +265,11 @@ impl Nic {
         self.driver.borrow().provoke_message();
     }
 
+    /// Pass frames sent to the multicast address `group`.
+    pub fn accept_multicast(&self, group: [u8; 6]) {
+        self.driver.borrow().accept_multicast(group);
+    }
+
     /// What the bring-up found.
     pub fn brought_up(&self) -> toyos_i219::BringUp {
         self.driver.borrow().brought_up()

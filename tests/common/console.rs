@@ -83,12 +83,17 @@ pub fn console_line_atomicity(
         ));
     }
     let declared = declared(&result.stdout)?;
+    // **The writers' lines reach the console as they write them, and the
+    // runner's `===TEST_START` reaches it through `logd`**, so a writer's first
+    // lines may arrive before the marker opens the window: every line since the
+    // command was typed is read.
+    let capture = format!("{}{}", result.before, result.stdout);
 
     let mut pure: [BTreeSet<usize>; 2] = [BTreeSet::new(), BTreeSet::new()];
     let mut duplicated: usize = 0;
     let mut mixed: Vec<&str> = Vec::new();
     let mut short: usize = 0;
-    for line in result.stdout.lines() {
+    for line in capture.lines() {
         let a = line.bytes().filter(|b| *b == b'A').count();
         let b = line.bytes().filter(|b| *b == b'B').count();
         // A writer's line is one tag byte, its sequence digits, and the tag
@@ -191,8 +196,7 @@ pub fn console_line_atomicity(
     // drops a dying process's last words — so the assertion is the run's
     // *length*, and it is exact on both sides: shorter means bytes were lost,
     // longer means something else was acquired inside them.
-    let longest = result
-        .stdout
+    let longest = capture
         .split(|c| c != 'C')
         .map(str::len)
         .max()
@@ -210,7 +214,7 @@ pub fn console_line_atomicity(
     // only land inside a userland line if the line reached the backend in
     // pieces, so this reds on exactly the coupling the count above reds on and
     // observes it from the other side.
-    let console = Serial::named("console", &result.stdout);
+    let console = Serial::named("console", &capture);
     if let Some(spliced) = console.interleaved() {
         return Err(format!(
             "a kernel record landed inside a userland line: {:?}",

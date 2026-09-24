@@ -220,16 +220,11 @@ const RUST_SKIP: &[&str] = &[
     // same stream. `console_line_atomicity` runs it.
     "console_line_atomicity",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
-    // holds. `console_flood_is_bounded` runs it.
-    "console_flood",
-    // Its verdict is which `exit:` record a judge of `/log` reads, off a boot of
-    // its own. `console_record_cannot_forge_the_kernel` runs it.
-    "console_forger",
-    // It halts the machine. `screen_fatal_behind_a_painter` runs it.
-    "fatal_while_talking",
-    // It talks for as long as a Ctrl+Alt+D hold lasts; its verdict is the panel's.
-    // `screen_held_dump_while_talking` runs it.
-    "console_talk",
+    // holds, and five megabytes of it. `log_program_flood` runs it.
+    "log_flood",
+    // It exits 7 on purpose; its verdict is which exit a judge of `/log` reads.
+    // `log_program_forgery` runs it.
+    "log_forger",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -508,13 +503,10 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_panic_muted", Sched::Parallel, Tier::Fast),
     ("screen_console_panic", Sched::Parallel, Tier::Fast),
     ("screen_fatal_halt", Sched::Parallel, Tier::Fast),
-    // The same fatal path while a program's repaint holds the panel and will not
-    // let it go: the report has to take the screen anyway.
+    // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
+    // panel's latch it will never give back: the report has to take the screen
+    // anyway, and its CPU has to go on to watch the reset bound.
     ("screen_fatal_behind_a_painter", Sched::Parallel, Tier::Fast),
-    // Ctrl+Alt+D with no compositor while a program talks: the hold is
-    // guest-timed and sampled across seconds, so it is timer-anchored as
-    // `screen_blocked_dump` is.
-    ("screen_held_dump_while_talking", Sched::Parallel, Tier::Nightly),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in and the one no screen
     // test covered: `screen_fatal_halt` boots a config with no compositor, and
@@ -538,11 +530,16 @@ const CONSOLE_NONCE: &str = "zqjxk";
 const CONSOLE_PROMPT: &str = "/home/root>";
 /// The seed's witness on the panel.
 ///
-/// `/system/bin/console` pushes the newest logs on `/log` into its scrollback before
-/// its first prompt, so a panel carrying one of their lines is a console that
-/// read them. This one is written hundreds of lines into a boot, which is what
-/// makes its *absence* two different things — see `screen_console_shell`.
+/// `/system/bin/console` draws the boot so far, as `logd` serves it, above its
+/// first prompt, so a panel carrying one of its lines is a console that read
+/// it. This one is written hundreds of lines into a boot, which is what makes
+/// its *absence* two different things — see `screen_console_shell`.
 const CONSOLE_SEED_WITNESS: &str = "i8042:";
+
+/// A program's line on the console, under the name of the pipe it came out of:
+/// init's, said just before it starts the console, so it is in the boot the
+/// console is handed.
+const CONSOLE_PROGRAM_WITNESS: &str = "init} init: started console";
 
 /// What `SYS_DEBUG` action 8 paints. Green, because the decoder thresholds on
 /// the brightest channel and a colour a glyph could contain would let a
@@ -658,28 +655,28 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // 82574L QEMU models has the register file the T14's I219 has, so this is
     // where that driver moves real frames before the laptop does.
     ("https_tls13_e1000e", Sched::Parallel, Tier::Fast),
-    // `logd`'s second sink: a host listener, the boot's address on the
-    // parameter line, and the guest's own `/log` as the oracle the wire is
-    // compared with. The verdicts are a line's arrival and a line-for-line
-    // comparison; the clocks in it are liveness guards on a guest that stopped
-    // talking.
+    // The log `logd` serves: a reader that connects after a job has ended is
+    // handed the boot from its first line, and every line it is handed is the
+    // line the guest's own `/log` holds, in its order. The verdicts are lines'
+    // arrival and a line-for-line comparison; the clocks in it are liveness
+    // guards on a guest that stopped talking.
     ("log_stream", Sched::Parallel, Tier::Nightly),
-    // The same stream over netd's Intel driver, for the same reason
+    // The same log over netd's Intel driver, for the same reason
     // `https_tls13_e1000e` exists: the T14's NIC is an I219 and this is the
     // only machine in reach that runs that driver.
     ("log_stream_e1000e", Sched::Parallel, Tier::Nightly),
-    // A boot told to stream to a port nothing answers on. The verdict is the
-    // one line the file carries about it and the file being whole regardless.
-    ("log_stream_no_listener", Sched::Parallel, Tier::Nightly),
-    // A `log-storm` offered to a stream whose address answers nothing: the
-    // bounded queue refuses what it cannot hold, counts it, says so in the log,
-    // and `/log` still carries every record. The control on the accounting.
-    ("log_stream_unreachable", Sched::Parallel, Tier::Nightly),
-    // The other half of that: a peer that accepted, stopped reading for a
-    // storm's worth of records and then read again. What a stall costs in lines
-    // is the buffers' business and no arm's to demand; what it may never cost
-    // is half a line, and that is what this one judges.
-    ("log_stream_stalled_peer_delivers_whole_records", Sched::Parallel, Tier::Nightly),
+    // A reader that never reads, beside a flood: the file and a second reader
+    // are whole regardless. Nightly for the flood's five megabytes.
+    ("log_stream_stalled_reader", Sched::Parallel, Tier::Nightly),
+    // A program's line in `/log`, on the served log and on the console, under
+    // the name of the pipe it came out of. Lines and a comparison; no clock.
+    ("log_program_line", Sched::Parallel, Tier::Fast),
+    // A program writing the kernel's words and another program's head: every
+    // judge of `/log` reads the truth. Lines, and the exit judge; no clock.
+    ("log_program_forgery", Sched::Parallel, Tier::Fast),
+    // A flood two and a half times its pipe: every line in `/log`, in order,
+    // once. Nightly for its five megabytes through a TCG guest's volume.
+    ("log_program_flood", Sched::Parallel, Tier::Nightly),
     // netd taking this machine's address from the network instead of carrying
     // one written down. The DHCP server it is judged against is QEMU's own, an
     // implementation of RFC 2131 this repository did not write, and its lease
@@ -692,20 +689,17 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // a link flap. Records and a file; its clocks are the flap's hold and the
     // drain that outlasts netd's window, and a slower machine moves neither.
     ("lan_lease_report", Sched::Parallel, Tier::Fast),
-    // The T14's talking boot rehearsed on the same part: the record stream to a
-    // host listener while the guest boots, one command over ssh answered byte
-    // for byte, and `reboot` over ssh ending the guest. Records, bytes and a
-    // reset; its clocks are liveness guards on a guest that stopped talking.
+    // The T14's talking boot rehearsed on the same part: the log the guest
+    // serves, read from its first line through a forward, one command over ssh
+    // answered byte for byte, and `reboot` over ssh ending the guest. Lines,
+    // bytes and a reset; its clocks are liveness guards on a guest that
+    // stopped talking.
     ("lan_talk", Sched::Parallel, Tier::Fast),
-    // The same boot with its cable out before netd starts and back seconds
-    // later: the stream must still open. The verdict is the stream opening
-    // and the guest's own records; its one clock paces the cable, and the
-    // premise — no lease before the cable goes back — is asked of the guest.
-    ("lan_talk_late_link", Sched::Parallel, Tier::Fast),
-    // The same boot with this host closing its stream on accept, as the T14's
-    // first talking run met it: the verdict is the guest's own `/log` saying
-    // the stream ended. Its one clock paces records into the dead connection.
-    ("lan_talk_host_closes", Sched::Parallel, Tier::Fast),
+    // netd answering for its name: a resolver's query through a forward onto
+    // the guest's multicast DNS port is answered with the lease's address, and
+    // one for another name is not answered. Bytes; its clocks are a guard on
+    // the answer and the window the unanswered query is given.
+    ("lan_mdns_answer", Sched::Parallel, Tier::Fast),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
@@ -1199,13 +1193,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_flush_retry", Sched::Parallel, Tier::Nightly),
     ("toybox_cp_volume", Sched::Parallel, Tier::Nightly),
     ("kernel_log_file", Sched::Parallel, Tier::Nightly),
-    // A program's line as a record on the machine with no serial port, and one
-    // program's share of the ring under a flood. Both read `/log` off the image.
-    ("console_line_is_a_record", Sched::Parallel, Tier::Fast),
-    ("console_flood_is_bounded", Sched::Parallel, Tier::Fast),
-    // A program spawned as `exit`, writing the kernel's verdict record for a job:
-    // every judge of `/log` reads the job's own exit.
-    ("console_record_cannot_forge_the_kernel", Sched::Parallel, Tier::Fast),
     // Serial: its verdict is a cadence — heartbeats against a 250 ms period —
     // and a guest sharing the host with eleven others reaches its idle loop
     // late for reasons that are not the defect.
@@ -1715,7 +1702,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::QemuOnly(
             "its subject is soundd's null sink, and whether the T14's own HDA controller binds \
              is unmeasured; both halves of the verdict — soundd's counters and a host-timed \
-             drain — are read against a host clock, which the stick does not carry",
+             drain — are console text and a host clock, neither of which the stick carries",
         ),
     ),
 ];
@@ -1792,9 +1779,9 @@ const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
     ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
 }];
 
-/// The boot the host talks to over its own cable: it streams its records to
-/// the listener `--metal-listen` names, and the loop pings it, runs a command
-/// on it and tells it to reboot.
+/// The boot the host talks to over its own cable: the loop reads the log it
+/// serves under its name, pings it, runs a command on it and tells it to
+/// reboot.
 const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
     talk: true,
     ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
@@ -4685,7 +4672,9 @@ fn run_screen_test(
                 Duration::from_millis(200),
                 |d| {
                     let text = d.console_text(&font);
-                    text.contains(CONSOLE_PROMPT) && text.contains(CONSOLE_SEED_WITNESS)
+                    text.contains(CONSOLE_PROMPT)
+                        && text.contains(CONSOLE_SEED_WITNESS)
+                        && text.contains(CONSOLE_PROGRAM_WITNESS)
                 },
             );
             let before = dump.console_text(&font);
@@ -4716,26 +4705,25 @@ fn run_screen_test(
                 // says "this boot's kernel log is …" on the same console, and
                 // a search for the shorter string finds that one first.
                 let seeded = said
-                    .split("cells), kernel log ")
+                    .split("cells), log ")
                     .nth(1)
                     .and_then(|rest| rest.split(' ').next())
                     .and_then(|n| n.parse::<u64>().ok());
                 return Err(match seeded {
                     Some(0) => format!(
                         "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and `console: \
-                         ready` reported 0 bytes of kernel log: this console started blank \
-                         where the diagnostic boot starts with the log\ndecoded \
-                         screen:\n{before}"
+                         ready` reported 0 bytes of log: this console started blank where \
+                         the diagnostic boot starts with the log\ndecoded screen:\n{before}"
                     ),
                     Some(bytes) => format!(
                         "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and the console \
-                         seeded {bytes} bytes of kernel log — so the log reached the \
-                         scrollback and what is on the panel is some other part of it. This \
-                         is not a console that started blank\ndecoded screen:\n{before}"
+                         drew {bytes} bytes of log — so the log reached the scrollback and \
+                         what is on the panel is some other part of it. This is not a \
+                         console that started blank\ndecoded screen:\n{before}"
                     ),
                     None => format!(
-                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and no `kernel \
-                         log N bytes` on the console to say whether the seed happened at \
+                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and no `log N \
+                         bytes` on the console to say whether the seed happened at \
                          all\nboot console:\n{said}\ndecoded screen:\n{before}"
                     ),
                 });
@@ -4752,6 +4740,15 @@ fn run_screen_test(
                 return Err(format!(
                     "the kernel's own font decodes this screen, so what is up is a boot \
                      checkpoint and not the console's paint\ndecoded screen:\n{kernel_font}"
+                ));
+            }
+
+            // A program's output, on the console that owns the screen, under
+            // the name of the pipe it came out of.
+            if !before.contains(CONSOLE_PROGRAM_WITNESS) {
+                return Err(format!(
+                    "no {CONSOLE_PROGRAM_WITNESS:?} on the panel: the console does not show \
+                     program output under its program's name\ndecoded screen:\n{before}"
                 ));
             }
 
@@ -5880,13 +5877,14 @@ fn run_screen_test(
             Ok(())
         }
         "screen_fatal_behind_a_painter" => {
-            // `screen_fatal_halt` with a program's repaint holding the panel's
-            // latch and never giving it back — which is what klogd is when the
-            // halt IPI lands mid-paint, or a preemption parks it there. The
-            // actuator spins a repaint inside the latch, and the fatal halt
-            // waits until one is; the report must take the screen regardless,
-            // and its CPU must go on to watch the reset bound, which is what
-            // the paging proves.
+            // `screen_fatal_halt` with a painter holding the panel's latch and
+            // never giving it back — which is what a painter is when the halt
+            // IPI lands mid-paint. The actuator has Ctrl+Alt+D's report painter
+            // go fatal once it holds the latch, so the fatal path meets a
+            // holder beneath itself; the report must take the screen
+            // regardless, and its CPU must go on to watch the reset bound,
+            // which is what the paging proves.
+            const HELD: &str = "panel: a painter holding the panel went fatal";
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -5898,30 +5896,24 @@ fn run_screen_test(
                     ..Default::default()
                 },
             );
-            let from = qemu.console_stream().mark();
-            if !qemu.command_until(
-                "run test_rs_fatal_while_talking",
-                FATAL_HALT_NONCE,
-                Duration::from_secs(30),
-            ) {
-                return Err(format!("{FATAL_HALT_NONCE:?} never reached the console"));
+            {
+                let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+                input.keys(&[
+                    ("ctrl", true),
+                    ("alt", true),
+                    ("d", true),
+                    ("d", false),
+                    ("alt", false),
+                    ("ctrl", false),
+                ]);
             }
-            // The premise: the fatal path met a painter inside the latch.
-            let said = qemu.console_stream().since(from);
-            const HELD: &str = "panel: a repaint is holding the latch and not painting";
-            let (Some(held), Some(nonce)) = (said.find(HELD), said.find(FATAL_HALT_NONCE)) else {
-                return Err(format!("no {HELD:?} before the halt: the premise never held\n{said}"));
-            };
-            if held > nonce {
-                return Err(format!("{HELD:?} came after the halt\n{said}"));
-            }
-            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
+            let dump = qemu.screendump_until(HELD, Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
-            if !text.contains(FATAL_HALT_NONCE) || dump.fill() != FILL_FATAL {
+            if !text.contains(HELD) || dump.fill() != FILL_FATAL {
                 return Err(format!(
-                    "a fatal halt behind a stalled painter left the panel at fill {:?} without \
-                     {FATAL_HALT_NONCE:?}: the report never took the screen\ndecoded screen:\n{text}",
+                    "a fatal path behind a painter that holds the panel left it at fill {:?} \
+                     without {HELD:?}: the report never took the screen\ndecoded screen:\n{text}",
                     dump.fill()
                 ));
             }
@@ -5936,81 +5928,6 @@ fn run_screen_test(
                      screen:\n{text}"
                 ));
             }
-            Ok(())
-        }
-        "screen_held_dump_while_talking" => {
-            // Ctrl+Alt+D with no compositor — the T14's boot — while a program
-            // talks. The report holds the panel for its whole hold: a program's
-            // repaint waits for the hold to end, so there is no flicker between
-            // the two and no stream of put-backs, and the lines it deferred are
-            // painted once the hold is over.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() },
-            );
-            writeln!(qemu.stdin_mut(), "run test_rs_console_talk").map_err(|e| format!("{e}"))?;
-            qemu.flush_stdin();
-            const TALK: &str = "@test_rs_console_talk: talk ";
-            let talking = qemu.screendump_until(TALK, Duration::from_secs(30));
-            if !talking.text().contains(TALK) {
-                return Err(format!("the talker never reached the panel\n{}", talking.text()));
-            }
-            let from = qemu.console_stream().mark();
-            const DUMP_TRIES: usize = 10;
-            let mut dump = talking;
-            for _ in 0..DUMP_TRIES {
-                if report_is_photographable(&dump, "").is_ok() {
-                    break;
-                }
-                {
-                    let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                    input.keys(&[
-                        ("ctrl", true),
-                        ("alt", true),
-                        ("d", true),
-                        ("d", false),
-                        ("alt", false),
-                        ("ctrl", false),
-                    ]);
-                }
-                dump = qemu.screendump_while(Duration::from_secs(4), Duration::from_millis(100), |d| {
-                    report_is_photographable(d, "").is_ok()
-                });
-            }
-            report_is_photographable(&dump, "the report the keystroke painted")?;
-            // Sampled well inside the guest-timed 15 s hold, for as long as it
-            // takes the talker's lines to be owed a dozen repaints.
-            let until = Instant::now() + Duration::from_secs(3);
-            let mut samples = 0;
-            while Instant::now() < until {
-                let seen = qemu.screendump();
-                report_is_photographable(&seen, "the panel inside the report's hold")?;
-                samples += 1;
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            let said = qemu.console_stream().since(from);
-            const PUT_BACK: &str = "the panel was drawn over, putting the report back";
-            let put_back = said.lines().filter(|l| l.contains(PUT_BACK)).count();
-            if put_back > 0 {
-                return Err(format!(
-                    "{put_back} put-back record(s) inside the hold: something painted over the \
-                     report\n{said}"
-                ));
-            }
-            // The hold ends and the deferred lines are painted: a talk line on
-            // a panel that is no longer the report.
-            let after = qemu.screendump_while(Duration::from_secs(40), Duration::from_millis(250), |d| {
-                d.text().contains(TALK) && report_is_photographable(d, "").is_err()
-            });
-            if !(after.text().contains(TALK) && report_is_photographable(&after, "").is_err()) {
-                return Err(format!(
-                    "the talker's lines never came back after the hold\ndecoded screen:\n{}",
-                    after.text()
-                ));
-            }
-            print_screen(name, &format!("{samples} samples inside the hold carried the report"));
             Ok(())
         }
         "screen_fatal_halt_composited" => {
@@ -6360,8 +6277,7 @@ fn run_screen_test(
             // from must not paint its report over a live display. Action 0
             // panics in syscall context, which the handler recovers from, so it
             // never reaches halt_all_cpus. **Every screen across the recovery,
-            // not two endpoints**: a program's line repaints the panel within a
-            // tenth of a second, so a report painted and then painted over is
+            // not two endpoints**: a report painted and then painted over is
             // gone by any endpoint — the fatal fill is looked for on each dump
             // from the command until well after the child is reaped.
             let mut qemu = QemuInstance::boot_with_options(
@@ -6384,7 +6300,8 @@ fn run_screen_test(
             writeln!(qemu.stdin_mut(), "run test_rs_test_panic_child").map_err(|e| format!("{e}"))?;
             qemu.flush_stdin();
             const ENDED: &str = "===TEST_END test_rs_test_panic_child exit=";
-            // Past the child's end by this much, for the repaint its end owes.
+            // Past the child's end by this much: a paint the recovery made late
+            // is still looked for.
             const AFTER_END: Duration = Duration::from_millis(1500);
             let deadline = Instant::now() + qemu.budget(Duration::from_secs(15));
             let mut ended_at: Option<Instant> = None;
@@ -9985,16 +9902,6 @@ fn run_machine_test(
         // Body in `tests/common/toybox.rs`, same reason.
         "toybox_cp_volume" => common::toybox::cp_volume(test_config, c_bins, rust_bins),
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),
-        // Bodies in `tests/common/spoken.rs`.
-        "console_line_is_a_record" => {
-            common::spoken::console_line_is_a_record(test_config, c_bins, rust_bins)
-        }
-        "console_flood_is_bounded" => {
-            common::spoken::console_flood_is_bounded(test_config, c_bins, rust_bins)
-        }
-        "console_record_cannot_forge_the_kernel" => {
-            common::spoken::console_record_cannot_forge_the_kernel(test_config, c_bins, rust_bins)
-        }
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
         "writeback_durability" => common::volumes::writeback_durability(test_config, c_bins, rust_bins),
@@ -13837,8 +13744,7 @@ fn run_machine_test(
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),
         "lan_lease_report" => lan::lan_lease_report(test_config, c_bins, rust_bins),
         "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
-        "lan_talk_late_link" => lan::lan_talk_late_link(test_config, c_bins, rust_bins),
-        "lan_talk_host_closes" => lan::lan_talk_host_closes(test_config, c_bins, rust_bins),
+        "lan_mdns_answer" => common::origin::mdns(c_bins, rust_bins),
         "lan_no_lease" => lan::lan_no_lease(test_config, c_bins, rust_bins),
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO).map(|_| ()),
         // The arming is asserted here and not on the bench above, whose claimed
@@ -13855,11 +13761,10 @@ fn run_machine_test(
         "log_stream_e1000e" => {
             common::logstream::stream(common::logstream::E1000E, c_bins, rust_bins)
         }
-        "log_stream_no_listener" => common::logstream::no_listener(c_bins, rust_bins),
-        "log_stream_unreachable" => common::logstream::unreachable(c_bins, rust_bins),
-        "log_stream_stalled_peer_delivers_whole_records" => {
-            common::logstream::stalled_peer(c_bins, rust_bins)
-        }
+        "log_stream_stalled_reader" => common::logstream::stalled_reader(c_bins, rust_bins),
+        "log_program_line" => common::origin::line(c_bins, rust_bins),
+        "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
+        "log_program_flood" => common::origin::flood(c_bins, rust_bins),
         "netd_connection_caps" => {
             // The only boot that runs netd at all. Its `main` opens the NIC
             // first and returns on `NotFound`, so metal-sim never reaches a
@@ -18985,7 +18890,6 @@ fn main() {
                 &rust_bins,
                 RUST_SKIP,
                 !nocapture && !debug_mode,
-                SUITE.value(&args, &testargs::METAL_LISTEN),
             ) {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,

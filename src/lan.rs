@@ -18,8 +18,9 @@ pub const LINK_UP: &str = "netd: I219: link up at ";
 pub const READY: &str = "netd: ready, at most ";
 pub const NO_LEASE: &str = "netd: DHCP: no lease as ";
 
-/// The name this machine asks its network to record for it, held to netd's own
-/// `dhcp::HOSTNAME` by [`tests::netd_declares_the_name_this_module_spells`].
+/// The name this machine asks its network to record for it, and answers for as
+/// `<name>.local`; held to netd's own `dhcp::HOSTNAME` by
+/// [`tests::netd_declares_the_name_this_module_spells`].
 pub const HOSTNAME: &str = "toyos-t14";
 
 /// RFC 2132 §3.14: the kind, the length, and the name.
@@ -93,9 +94,9 @@ pub fn link_up_ms(text: &str) -> Result<u64, String> {
         .map_err(|_| format!("{line:?} carries no readable link-up time"))
 }
 
-/// The lines of a boot's `/log` that are netd's own records.
+/// What netd wrote in a boot's `/log`: the text of each of its lines.
 pub fn netd_records(text: &str) -> String {
-    crate::bootlog::records_of(text, "netd")
+    crate::bootlog::lines_of(text, "netd")
 }
 
 /// The T14's I219, as the kernel's hand-over record spells its id.
@@ -240,8 +241,8 @@ mod tests {
         let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src/dhcp.rs");
         let source = std::fs::read_to_string(&at).expect("netd's dhcp module");
         assert!(
-            crate::bootlog::declares(&source, &format!("b\"{HOSTNAME}\"")),
-            "{} declares no constant equal to b\"{HOSTNAME}\"",
+            crate::bootlog::declares(&source, &format!("\"{HOSTNAME}\"")),
+            "{} declares no constant equal to \"{HOSTNAME}\"",
             at.display()
         );
     }
@@ -289,19 +290,18 @@ mod tests {
         assert!(why.contains("a millisecond count"), "{why}");
     }
 
-    /// netd's records and nothing else: a kernel record, one spelled like netd's
-    /// included, another program's line quoting netd, and a console line with no
-    /// bracket at all are each left out.
+    /// netd's lines and nothing else: a kernel record spelled like netd's,
+    /// another program's line quoting netd's head, and a console line with no
+    /// head at all are each left out.
     #[test]
-    fn only_netds_own_records_are_netds() {
+    fn only_netds_own_lines_are_netds() {
+        let lease = LEASED.split_once("] ").expect("a record").1;
         let log = format!(
-            "{}\n\
-             [2026-09-08 16:08:23 2.200 cpu1] @netd: ready, at most 8 clients\n\
-             [2026-09-08 16:08:23 2.300 cpu0] @evil: netd: MAC 00:00:00:00:00:00\n\
+            "{{2026-09-08 16:08:23 2.100 netd}} {lease}\n\
+             {{2026-09-08 16:08:23 2.200 netd}} netd: ready, at most 8 clients\n\
+             {{2026-09-08 16:08:23 2.300 evil}} {{2026-09-08 16:08:23 2.300 netd}} netd: MAC 00:00:00:00:00:00\n\
              [2026-09-08 16:08:23 2.400 cpu0] netd: MAC 00:00:00:00:00:01\n\
-             [2026-09-08 16:08:23 2.500 cpu0] pcidev: netd: is not a kernel word\n\
-             netd: MAC 52:54:00:12:34:56\n",
-            LEASED.replacen("] netd: ", "] @netd: ", 1)
+             netd: MAC 52:54:00:12:34:56\n"
         );
         let netd = netd_records(&log);
         assert_eq!(netd.lines().count(), 2, "{netd}");

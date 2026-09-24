@@ -17,10 +17,10 @@ code=3 cpu=0ms`. `exit_of(log, "test_rs_job")` matches its head, takes the
 first `code=` after it, and the forger's record is the last one. Not run: the
 reading of the two functions.
 
-A program's own records are not this: their tag replaces every byte outside
-`[A-Za-z0-9._+-]` (`toyos_elide::spoken::Tag`) and they open with a form no
-kernel record takes. This is the kernel's record quoting a name it does not
-clean.
+A program's own lines are not this: they reach `/log` under the head `logd`
+writes for them, whose name is init's and refused outside `[A-Za-z0-9._+-]`
+(`toyos_logstream::Tag`). This is the kernel's record quoting a name it does
+not clean.
 
 ## Exit condition
 

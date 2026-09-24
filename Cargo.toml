@@ -35,6 +35,7 @@ members = [
     "toyos-ld",
     "toyos-logstream",
     "toyos-manifest",
+    "toyos-mdns",
     "toyos-mixer",
     "toyos-pci",
     "toyos-pcid",
@@ -113,8 +114,8 @@ toyos-fat32 = { path = "toyos-fat32" }
 toyos-fat32-check = { path = "toyos-fat32-check" }
 toyos-gpt = { path = "toyos-gpt" }
 toyos-keymap = { path = "toyos-keymap" }
-# The record stream's boot parameter, so the gate that clears a valued
-# parameter by name reads the same constant the kernel and `logd` do.
+# The form a program's line takes in a boot's log and the port `logd` serves it
+# on, so the judges reading the log and `logd` writing it read one declaration.
 toyos-logstream = { path = "toyos-logstream" }
 toyos-manifest = { path = "toyos-manifest" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
@@ -134,6 +135,8 @@ sha2 = "0.10"
 
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
+# The port netd answers for its name on, which a boot's forward reaches.
+toyos-mdns = { path = "toyos-mdns" }
 toyos-ld = { path = "toyos-ld" }
 # The I219 driver's own words and its PHY probe's exit-code table, so the
 # harness judging netd's `exit:` record off the T14 and netd writing it read one

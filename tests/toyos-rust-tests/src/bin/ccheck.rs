@@ -3,10 +3,9 @@
 //! **Every case in the corpus `return 0`s unconditionally**, so an exit-code
 //! verdict would be vacuous: what a case is judged on is its whole output
 //! against a committed `.expect`, and on a machine with no serial port that
-//! output reaches a host only inside the case's share of the log, which a long
-//! case outruns. So the comparison happens here, and
-//! what crosses is this program's exit code — which the kernel writes as
-//! `exit: <name> pid=N code=N`.
+//! output reaches the host only as the runner's lines in `/log`, among every
+//! other job's. So the comparison happens here, and what crosses is this
+//! program's exit code — which the kernel writes as `exit: <name> pid=N code=N`.
 //!
 //! **The name is the case, and that is the whole trick.** One binary is staged
 //! once and reached through one symlink per case, so the kernel records each

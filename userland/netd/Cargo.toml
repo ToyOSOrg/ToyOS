@@ -8,6 +8,7 @@ toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 toyos-i219 = { path = "../../toyos-i219" }
 toyos-tco = { path = "../../toyos-tco" }
+toyos-mdns = { path = "../../toyos-mdns" }
 
 [dependencies.smoltcp]
 version = "0.12"
@@ -22,5 +23,8 @@ features = [
     # A lease carries up to `wire::DHCP_MAX_DNS_SERVER_COUNT` resolvers and the
     # resolver socket's default holds one; `netd/src/dhcp.rs` asserts the two.
     "dns-max-server-count-3",
+    # The multicast DNS group, which `mdns.rs` joins to answer for this
+    # machine's name.
+    "multicast",
     "alloc",
 ]

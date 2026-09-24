@@ -877,8 +877,7 @@ pub const INIT_PATH: &str = "/system/bin/init";
 /// Panics on failure: a boot that cannot start init has nowhere to report to.
 pub fn spawn_init() -> Pid {
     let mut handles = HandleTable::new();
-    let console =
-        KObjectRef::Console(crate::object::device::ConsoleObject::new(start::make_name(INIT_PATH)));
+    let console = KObjectRef::Console(crate::object::device::ConsoleObject::new());
     for slot in 0..3 {
         let entry = crate::object::HandleEntry::new(
             console.clone(),
@@ -916,15 +915,7 @@ pub fn spawn_init() -> Pid {
         }],
         label.as_bytes().to_vec(),
     );
-    // **The only channel a boot parameter has to userland**, and the one thing
-    // the kernel ever puts in an environment: the command line reaches no
-    // process. It is information and not authority — reaching the address needs
-    // a `netd` connector, which one manifest row grants.
-    let env = match crate::params::log_stream() {
-        Some(at) => alloc::format!("{}={at}\0", toyos_logstream::ENV).into_bytes(),
-        None => Vec::new(),
-    };
-    match spawn(&[INIT_PATH], PendingHandles::Ready(handles, endowments), String::from("/"), env) {
+    match spawn(&[INIT_PATH], PendingHandles::Ready(handles, endowments), String::from("/"), Vec::new()) {
         Ok(object) => object.pid(),
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_init: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_init: {e}"),

@@ -47,9 +47,11 @@ use std::sync::Arc;
 /// collision is systematic and not unlucky: this daemon prints a client's
 /// removal exactly when the kernel is printing that client's exit.
 ///
-/// **Fixed for everyone at the kernel now**: a `ConsoleObject` per holder
-/// buffers a line and emits it whole under one `BackendGuard`, so this macro is
-/// about the *count* of syscalls now rather than about atomicity.
+/// **Another writer can no longer land inside a line**: this daemon's output is
+/// a pipe of its own to `logd`, which ends a line at its newline, and the
+/// kernel's records never enter that pipe. What this macro still buys is one
+/// `write` per line, which keeps a line whole against this daemon's own other
+/// threads.
 macro_rules! say {
     ($($arg:tt)*) => {{
         use std::io::Write as _;

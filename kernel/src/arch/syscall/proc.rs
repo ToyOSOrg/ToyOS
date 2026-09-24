@@ -31,13 +31,14 @@ pub(super) fn sys_exit(code: i32) -> u64 {
 
 /// Start a program and return a handle to it; kill the child if the handle can't be installed.
 pub(super) fn sys_spawn(
-    args: &[&str],
+    text: &str,
     pending: crate::loader::PendingHandles,
-    env: Vec<u8>,
+    env: alloc::vec::Vec<u8>,
 ) -> u64 {
+    let args: Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
     let cwd = process::with_process_data(|data| data.cwd.clone());
     // Nothing to clean up yet: spawn's frame owns the child's resources on error.
-    let object = match process::spawn(args, pending, cwd, env) {
+    let object = match process::spawn(&args, pending, cwd, env) {
         Ok(object) => object,
         Err(e) => return e.refuse(),
     };

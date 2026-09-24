@@ -2311,16 +2311,12 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
-    /// Where this boot's `logd` streams its records, as seen from inside the
-    /// guest — [`GUEST_VIEW_OF_HOST`] and the host port a listener took, or an
-    /// address on the guest's network that answers nothing.
-    ///
-    /// **It is a `kernel_params` entry in every way but its type.** The host
-    /// picks the port, so the parameter cannot be a `&'static str`;
-    /// [`BootOptions::params`] is where the two become one list, and that list
-    /// is what an image is built with and what a staged image is asked to
-    /// match.
-    pub log_stream: Option<(&'static str, u16)>,
+    /// Forward this host port to the guest's TCP [`toyos_logstream::PORT`],
+    /// where `logd` serves the boot's log.
+    pub log_port: Option<u16>,
+    /// Forward this host port to the guest's UDP [`toyos_mdns::PORT`], where
+    /// netd answers for its name.
+    pub mdns_port: Option<u16>,
     /// Forward this host port to the guest's TCP 22. **slirp is one-way
     /// without it**: nothing on the host can open a connection into the guest
     /// unless QEMU is told which port to translate. A profile with no NIC
@@ -2360,26 +2356,25 @@ pub fn free_host_port() -> u16 {
         .port()
 }
 
+/// [`free_host_port`] for a UDP forward.
+pub fn free_udp_host_port() -> u16 {
+    std::net::UdpSocket::bind((SSH_FORWARD_HOST, 0))
+        .expect("a loopback port for a UDP forward")
+        .local_addr()
+        .expect("a bound socket has an address")
+        .port()
+}
+
 impl BootOptions {
     /// The whole parameter line this boot's image is built with: the names in
-    /// [`BootOptions::kernel_params`] and, when this boot streams its records,
-    /// the address it streams them to.
+    /// [`BootOptions::kernel_params`].
     ///
     /// One function, called by the build and by the staged-image check, so a
     /// parameter that reaches the image and not the check — or the other way
     /// round — is not expressible.
     pub fn params(&self) -> Vec<String> {
-        let mut params: Vec<String> = self.kernel_params.iter().map(|p| (*p).to_string()).collect();
-        if let Some(at) = self.log_stream {
-            params.push(log_stream_param(at));
-        }
-        params
+        self.kernel_params.iter().map(|p| (*p).to_string()).collect()
     }
-}
-
-/// `logstream=<host>:<port>`, spelled once.
-pub fn log_stream_param((host, port): (&str, u16)) -> String {
-    format!("{}{host}:{port}", toyos_logstream::PARAM)
 }
 
 /// The in-guest test runner's startup marker.
@@ -2411,7 +2406,8 @@ impl Default for BootOptions {
             usb_pcap: None,
             rtc_base: None,
             extra_root_files: Vec::new(),
-            log_stream: None,
+            log_port: None,
+            mdns_port: None,
             ssh_port: None,
             wire_dump: None,
         }
@@ -2570,8 +2566,8 @@ pub fn build_boot_image_carrying(
     kernel_params: &[&str],
 ) -> Vec<u8> {
     // A parameter carrying a value is one the *shipping* kernel answers to, so
-    // it selects no kernel: an image built for the record stream and nothing
-    // else must be the image a flashed stick would be.
+    // it selects no kernel: an image built with no actuator must be the image a
+    // flashed stick would be.
     let kernel: &[&str] =
         if kernel_params.iter().all(|p| toyos_build::build::is_valued_param(p)) {
             &[]
@@ -3400,6 +3396,31 @@ impl QemuInstance {
                     }
                     if line.contains(&format!("===TEST_START {want}===")) {
                         in_test = true;
+                        // **The runner's marker reaches the console through
+                        // `logd` and the kernel's records through `klogd`**, so
+                        // the kernel's record of this test's spawn, and what
+                        // followed it, may arrive before the marker that opens
+                        // the window. Everything from that record on is this
+                        // test's, and moves into the window.
+                        let spawned = format!("/{want} pid=");
+                        let from = before
+                            .match_indices('\n')
+                            .map(|(at, _)| at + 1)
+                            .chain(std::iter::once(0))
+                            .filter(|&start| {
+                                before[start..].lines().next().is_some_and(|l| {
+                                    l.contains("spawn: ") && l.contains(&spawned)
+                                })
+                            })
+                            .max();
+                        if let Some(at) = from {
+                            let moved = before.split_off(at);
+                            for early in moved.lines() {
+                                serial.push_str(early);
+                                serial.push('\n');
+                                push_user_half(early, &mut stdout);
+                            }
+                        }
                     } else if let Some(at) = line.find(END_MARKER) {
                         let rest = &line[at + END_MARKER.len()..];
                         let rest = rest.split_once("===").map_or(rest, |(head, _)| head);
@@ -4256,7 +4277,18 @@ fn qemu_command(
     // is decoded by the unit whatever it says, so it carries none.
     // The one clause that makes slirp two-way, on whichever card this profile
     // has.
-    let forward = options.ssh_port.map(ssh_forward_argv).unwrap_or_default();
+    let forward = [
+        options.ssh_port.map(ssh_forward_argv),
+        options.log_port.map(|port| {
+            format!(",hostfwd=tcp:{SSH_FORWARD_HOST}:{port}-:{}", toyos_logstream::PORT)
+        }),
+        options.mdns_port.map(|port| {
+            format!(",hostfwd=udp:{SSH_FORWARD_HOST}:{port}-:{}", toyos_mdns::PORT)
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<String>();
     match shape.nic {
         Nic::Absent => {}
         Nic::Virtio => {
@@ -4279,7 +4311,7 @@ fn qemu_command(
             // The hub is not slirp and takes no `hostfwd`, so a boot asking for
             // one here is refused rather than booted without a forward.
             assert!(
-                options.ssh_port.is_none(),
+                forward.is_empty(),
                 "this profile's cable is plugged into nothing, so no host port reaches the guest"
             );
             qemu.arg("-netdev")

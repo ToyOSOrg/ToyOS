@@ -17,10 +17,10 @@
 //!
 //! **Boundary contract: this program's exit code is its p99, in microseconds.**
 //! On the machine this instrument exists for there is no serial port, a
-//! userland `println!` reaches the log partition only as a record inside its
-//! program's share of the log, and the one word no share bounds is the
-//! kernel's own `exit: <name> pid=N code=N cpu=Nms` record, which carries the
-//! whole `i32`.
+//! userland `println!` reaches the log partition as a line under the runner's
+//! name among every other job's, and the one word about a program the kernel
+//! writes itself is its `exit: <name> pid=N code=N cpu=Nms` record, which
+//! carries the whole `i32`.
 //! So the headline number leaves through the exit code: a non-negative code is
 //! a measured p99 in microseconds, bounded above by [`BUCKETS`] because a p99
 //! at the histogram's last bucket is a floor rather than a measurement; a

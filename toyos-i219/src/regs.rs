@@ -56,6 +56,16 @@ pub const RADV: usize = 0x0282C;
 /// Multicast Table Array, 128 dwords (§10.2.5.21, `0x05200`..`0x053FC`).
 pub const MTA: usize = 0x05200;
 pub const MTA_DWORDS: usize = 128;
+
+/// Which Multicast Table Array bit a multicast destination hashes to: the
+/// dword, and the bit in it. §10.2.5.21: `RCTL.MO` selects which 12 bits of
+/// the destination address index the 4096-bit array, and this driver leaves it
+/// `00b`, which is bits 47:36 — the high nibble of the fifth octet and the
+/// whole sixth; bits 11:5 of the index pick the dword and bits 4:0 the bit.
+pub fn mta_bit(group: [u8; 6]) -> (usize, u32) {
+    let index = (group[4] as usize >> 4) | (group[5] as usize) << 4;
+    (index >> 5, index as u32 & 0x1F)
+}
 /// Receive Address Low/High, entry 0 (§10.2.5.22, §10.2.5.23) — the station
 /// address, and the one exact-match filter this driver uses.
 pub const RAL0: usize = 0x05400;

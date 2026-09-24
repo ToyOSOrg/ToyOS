@@ -7,51 +7,44 @@
 //! could be found four spinlocks deep inside a USB transfer with a userland
 //! `println!` behind it. The kernel keeps the record ring and the console;
 //! every policy about where records go — what the files are called, how many
-//! there are, what happens when the stick stops answering, and whether a copy
-//! also leaves the machine over a cable — is here.
+//! there are, what happens when the stick stops answering, and who may read
+//! the log as it is written — is here.
+//!
+//! # What goes in the log
+//!
+//! Two writers, told apart by the head this program gives each line
+//! (`toyos_logstream`'s header is the form):
+//!
+//! - **the kernel's records**, read off its ring with `SYS_LOG_READ`;
+//! - **every program's output.** `/system/bin/init` gives each program it
+//!   starts a pipe for its stdout and stderr and moves the read end here with
+//!   the manifest's name for the program, on a connection only init holds
+//!   ([`toyos_logstream::ORIGINS`]). A line is that program's because it came
+//!   out of that pipe. This program's own lines come out of a pipe of its own
+//!   the same way (`say!`).
+//!
+//! A full pipe is a writer that waits for this program to read it: a program's
+//! line is slowed, never dropped. Each program's line also goes to this
+//! program's console as the program wrote it, which on a machine with a serial
+//! port is the one console there is.
 //!
 //! # Two sinks, and only one of them is the sink of record
 //!
-//! The file is. `stream`'s is the other: the same text line, in the same order,
-//! over a TCP connection netd opens to an address the boot parameter line
-//! named. It is best effort in every direction — no address, no netd, no peer,
-//! a peer that stopped taking bytes — and none of those may cost `/log` a
-//! record or delay a write to it. `stream`'s own header is that argument; what
-//! this file owes it is one rule: **a line goes to the volume first and is
-//! offered to the stream after, and the offer cannot fail.**
+//! The file is. [`serve`]'s readers are the other: the same lines, in the same
+//! order, to whoever asks — over TCP and on this machine — from the boot's
+//! first line however late they ask. A line goes to the volume first and to the
+//! readers after, and no reader can slow the file.
 //!
 //! # Its whole authority
 //!
 //! One `SysCap` duplicate carrying `Rights::LOG | Rights::WAIT`, which its
-//! manifest row asks for by the name `logread`, and one `netd` connector, which
-//! the same row asks for by name. With the first it may read every record every
-//! CPU wrote and park on the readiness source when there is nothing new; the
-//! second is the whole of what stands between the address on the parameter line
-//! and a peer, since that address is inherited by every program on the machine
-//! and this is the only one endowed to act on it. It claims no device, opens no
-//! compositor connection and can name no process. Writing files is ambient — a
-//! known residual of the capability endowment, and not this program's to close.
-//!
-//! # What it does not do, and why the port is not here
-//!
-//! Its design carries a `log` port with two frame kinds, and **neither has a
-//! caller on this tree**:
-//!
-//! - `Register` carries the read ends of a child's stdout and stderr pipes.
-//!   Those pipes do not exist yet — until they do, every program's stdio is a
-//!   console object minted at spawn, and nothing sends this frame.
-//! - `Sync` was the shutdown path asking for durability. It is **struck**: the
-//!   asker is `SYS_SHUTDOWN`, which runs in the *kernel*, and a kernel that
-//!   opens an IPC connection to a userland server to ask it a question is the
-//!   inversion this architecture exists to avoid. `LogCursor::durable` already
-//!   travels the other way on a call this program makes every loop, so the
-//!   kernel reads a word instead — shutdown and panic are one mechanism now,
-//!   not two.
-//!
-//! So `serves = ["log"]` is not on its manifest row yet, by the same rule that
-//! keeps `logread` off `/system/bin/console`'s: *a right with no caller is a
-//! capability handed out for a plan*. The acceptor arrives with the first
-//! `Register`.
+//! manifest row asks for by the name `logread`; the origins acceptor init
+//! endows it; and what its row adds — a `netd` connector to serve the network,
+//! and the `log` acceptor to serve this machine. With the first it may read
+//! every record every CPU wrote and park on the readiness source when there is
+//! nothing new. It claims no device, opens no compositor connection and can
+//! name no process. Writing files is ambient — a known residual of the
+//! capability endowment, and not this program's to close.
 //!
 //! # Durability, which is a contract and not a hope
 //!
@@ -67,80 +60,132 @@
 //! at the page cache, and this program calling the result durable would have
 //! been a claim of durability that was not one.
 //!
-//! **A flush that would block is not a flush that failed**, and since
-//! 2026-08-22 this program can tell them apart: `io::ErrorKind::WouldBlock`
-//! from `sync_all` is `kernel/src/block.rs`'s `BlockError::BudgetExpired`,
-//! which means the kernel declined to *start* the operation on the caller's own
-//! clock — nothing was issued, the device is untouched, and the bytes are still
-//! in the file waiting for the next batch's flush. Keeping the volume across
-//! one loses nothing and publishes nothing; ending it on one was a boot's log
-//! thrown away for a stick that answered every transfer. `policy::fate` is the
-//! whole decision, and `policy`'s own header is the argument.
+//! **A flush that would block is not a flush that failed**:
+//! `io::ErrorKind::WouldBlock` from `sync_all` is `kernel/src/block.rs`'s
+//! `BlockError::BudgetExpired`, which means the kernel declined to *start* the
+//! operation on the caller's own clock — nothing was issued, the device is
+//! untouched, and the bytes are still in the file waiting for the next batch's
+//! flush. `policy::fate` is the whole decision, and `policy`'s own header is
+//! the argument.
 //!
-//! # The console is the kernel's and stays the kernel's
+//! # The kernel's records are the kernel's to put on the console
 //!
-//! This program does **not** write kernel records to the console. `klogd` does,
-//! at the commit, and a second copy from here would double every line on the
-//! wire. What it writes to its own console is what only it knows: where the log
-//! is going, and when it has stopped going there — the kernel keeping the
-//! console and giving up the filesystem, taken literally.
+//! `klogd` writes them to the console at the commit, and a second copy from
+//! here would double every line on the wire.
 
-mod policy;
-mod store;
-mod stream;
-mod wall;
-
-use std::time::Instant;
-
-use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::log::{LogTail, Record};
-use toyos::poller::{Poller, READABLE};
-use toyos::syscap::SysCap;
-use toyos_logstream::BATCH;
-use toyos_wallclock::Civil;
-
-use policy::{fate, Fate, Step, LOG_WRITE_BUDGET};
-use store::{Volume, DIR, MAX_LOG_BYTES, ROTATE_FAST_BYTES};
-use stream::Stream;
-use wall::Wall;
-
-
-
-/// How long a park on the log's readiness source waits before looking again.
-///
-/// The wake is what normally ends the park — `klogd` posts it after each drain
-/// batch — so this is the bound on a machine that has posted nothing and not
-/// the pacing. It is also what keeps this program's own rotation and retention
-/// from being deferred forever on a silent machine.
-const IDLE_NANOS: u64 = 100_000_000;
-
-/// The poll's token. One handle is watched, so it identifies the round rather
-/// than the source.
-const LOG_TOKEN: u64 = 1;
-
-/// One `write_all`, so a line of this program's own reaches the console as one
-/// `SYS_WRITE`.
-///
-/// The console object buffers a holder's line and emits it whole since L5, so
-/// this is about the *count* of syscalls rather than about atomicity — the same
-/// reason `init`, `soundd` and `netd` each carry one.
+/// One line into this program's own pipe, so it is a line of the log under
+/// `logd`'s name like any other program's — from any thread, and before the
+/// volume is open.
 macro_rules! say {
     ($($arg:tt)*) => {{
-        use std::io::Write;
         let mut line = format!($($arg)*);
         line.push('\n');
-        let _ = std::io::stderr().write_all(line.as_bytes());
+        $crate::said(line.as_bytes());
     }};
 }
 
+mod policy;
+mod serve;
+mod store;
+mod wall;
+
+use std::sync::OnceLock;
+use std::time::Instant;
+
+use toyos::endow::{self, Endowments, SYSCAP_LABEL};
+use toyos::ipc::{self, Connection, RxStep};
+use toyos::log::{LogTail, Record};
+use toyos::poller::{Poller, READABLE};
+use toyos::port::Acceptor;
+use toyos::syscap::SysCap;
+use toyos::Pipe;
+use toyos_abi::syscall::SyscallError;
+use toyos_logstream::{Lines, ProgramLine, Tag, LOGD, MAX_TAG, ORIGINS, REGISTER, SERVICE};
+use toyos_wallclock::Civil;
+
+use policy::{fate, Fate, Step, LOG_WRITE_BUDGET};
+use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES, ROTATE_FAST_BYTES};
+
+/// Records asked of `SYS_LOG_READ` at once: above `MAX_LOG_SHARDS`, which the
+/// call refuses below, and large enough that an ordinary boot's burst is a
+/// handful of syscalls rather than one per line.
+const BATCH: usize = 64;
+
+/// How long a park waits before looking again.
+///
+/// A wake is what ends the park — `klogd` posts one after each drain batch,
+/// and a pipe with bytes in it is one too — so this is the bound on a machine
+/// that has posted nothing, not the pacing.
+const IDLE_NANOS: u64 = 100_000_000;
+
+/// Programs whose output this program reads at once: one per `[boot] start`
+/// entry, init's own and this program's, which is what there is to register.
+const MAX_ORIGINS: usize = 32;
+
+/// The poll's tokens: the kernel's readiness, init's origins connection, and
+/// each origin's pipe from [`ORIGIN_BASE`] up.
+const KERNEL_TOKEN: u64 = 0;
+const ORIGINS_TOKEN: u64 = 1;
+const ORIGIN_BASE: u64 = 2;
+
+/// What one pipe read may take.
+const READ_BYTES: usize = 16 * 1024;
+
+/// How much of this boot a reader who connects late can be handed: as much as
+/// the volume keeps, so the stream is never the shorter of the two.
+const REPLAY_BYTES: usize = MAX_LOG_FILES * MAX_LOG_BYTES as usize;
+
+/// The write end of this program's own pipe.
+static OWN: OnceLock<Pipe> = OnceLock::new();
+
+/// `say!`'s one write: into the own pipe. A refusal is a pipe this program no
+/// longer reads, and there is nobody left to tell.
+fn said(line: &[u8]) {
+    if let Some(own) = OWN.get() {
+        let mut rest = line;
+        while let Ok(n @ 1..) = own.write(rest) {
+            rest = &rest[n..];
+        }
+    }
+}
+
+/// One program's output, as it is read.
+struct Origin {
+    tag: String,
+    pipe: Pipe,
+    lines: Lines,
+}
+
+/// The lines read in one round, each with the time it goes in the log under.
+struct Round {
+    lines: Vec<(u64, String)>,
+    /// Each program's line as it wrote it, for the console.
+    console: Vec<u8>,
+}
+
 fn main() {
+    // First, so every line this program says has somewhere to go.
+    let (own_read, own_write) =
+        toyos::pipe_pair().expect("logd: no pipe for this program's own lines");
+    if OWN.set(own_write).is_err() {
+        unreachable!("logd's own pipe is made once");
+    }
+    let mut origins: Vec<Origin> =
+        vec![Origin { tag: LOGD.to_string(), pipe: own_read, lines: Lines::new() }];
+
+    // The two refusals below are said on the console: there is no log for them
+    // to be in.
     let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
-        // A logd with no capability cannot read one record, so it says which
-        // manifest row is missing rather than running as a process that does
-        // nothing.
-        say!("logd: this program holds no system capability, so it holds no `logread`");
+        eprintln!("logd: this program holds no system capability, so it holds no `logread`");
         std::process::exit(1);
     };
+    let Some(acceptor) = Endowments::get().take::<Acceptor>(ORIGINS) else {
+        eprintln!("logd: init endowed no `{ORIGINS}`, so no program's output can reach this log");
+        std::process::exit(1);
+    };
+    // init connected before it started anything, so this is already queued.
+    let from_init: Connection = acceptor.accept().expect("logd: init's origins connection");
+    let mut from_init_rx = ipc::FrameRx::<MAX_TAG>::new();
 
     let rotate_at = if std::env::args().any(|a| a == "--rotate-fast") {
         ROTATE_FAST_BYTES
@@ -155,15 +200,9 @@ fn main() {
 
     let mut volume = Volume::open(stem, rotate_at, |line| say!("{line}"));
     match &volume {
-        // This program's half of the startup report, **in one line**: the
-        // kernel says whether it has a console, this program says whether it
-        // has a volume and what the name it chose was decided by, and the two
-        // lines are the four-way table split between the two things that know.
-        // One and not two, because every line a daemon writes on a shared
-        // console is a line that can land inside a test's window — the C family
-        // removes it by this program's own name now (`tests/common/console.rs`),
-        // which is a reason to write few rather than a licence to write any
-        // number — and the report is written once.
+        // This program's half of the startup report, in one line: the kernel
+        // says whether it has a console, this program whether it has a volume
+        // and what the name it chose was decided by.
         Some(v) => say!("logd: this boot's kernel log is {} ({zone})", v.path()),
         None => say!(
             "logd: no {DIR} on this machine - this boot's kernel log is on the console only \
@@ -171,26 +210,12 @@ fn main() {
         ),
     }
 
-    // The second sink, opened after the volume and never before it: the file is
-    // the sink of record, so nothing about the stream may stand between this
-    // program and the first line it writes.
-    let stream = Stream::start(std::env::var(toyos_logstream::ENV).ok().as_deref());
+    let hub = serve::Hub::start(REPLAY_BYTES, boot_local, endow::acceptor(SERVICE));
 
     let mut tail = LogTail::new();
     let mut buf = vec![Record::EMPTY; BATCH];
-    let poller = Poller::new(1);
-    // Armed before the first read, in the shape every reader on this readiness
-    // needs: the readiness is an edge, so the window is closed by reading once more
-    // after arming rather than by asking the kernel a question about a cursor
-    // it does not hold. `min_complete` 0 with no timeout submits the entry and
-    // returns — one `wait` per `watch`, which is what the ring's own
-    // capacity accounting requires.
-    poller.watch(&cap, READABLE, LOG_TOKEN);
-    poller.wait(0, 0, |_| {});
-
+    let poller = Poller::new((2 + MAX_ORIGINS) as u32);
     let mut lost = 0u64;
-    // What the stream owes this boot's log, carried until the file takes it.
-    let mut owed: Vec<String> = Vec::new();
     // When the current run of consecutive retries began, or `None` when the
     // last batch was answered. `policy::fate` bounds the run and not the round.
     let mut retrying_since: Option<Instant> = None;
@@ -199,20 +224,30 @@ fn main() {
     // rather than once per slow batch.
     let mut degraded = false;
     loop {
+        // **Armed before anything is read**, in the shape every reader of an
+        // edge needs: what arrives after a read and before the park has a
+        // registration waiting for it. `min_complete` 0 with no timeout
+        // submits the entries and returns.
+        poller.watch(&cap, READABLE, KERNEL_TOKEN);
+        poller.watch(&from_init, READABLE, ORIGINS_TOKEN);
+        for (i, origin) in origins.iter().enumerate() {
+            poller.watch(&origin.pipe, READABLE, ORIGIN_BASE + i as u64);
+        }
+        poller.wait(0, 0, |_| {});
+
         let batch = match tail.read(&cap, &mut buf) {
             Ok(batch) => batch,
             Err(e) => {
                 // The one call this program is built around. A refusal is not
                 // survivable by retrying — the buffer and the rights are the
                 // same every time — so it says so and stops.
-                say!("logd: SYS_LOG_READ refused a {BATCH}-record buffer ({e:?})");
+                eprintln!("logd: SYS_LOG_READ refused a {BATCH}-record buffer ({e:?})");
                 std::process::exit(1);
             }
         };
-
         if tail.lost() > lost {
             // One line per hole rather than one per read, and it goes in the
-            // file it is a hole in: the next batch carries it.
+            // file it is a hole in: a later round carries it.
             say!(
                 "logd: {} record(s) were overwritten in a shard before this reader got to them",
                 tail.lost() - lost
@@ -220,64 +255,44 @@ fn main() {
             lost = tail.lost();
         }
 
-        // Nothing to put a report in, so nothing owes one.
-        if volume.is_none() {
-            owed.clear();
+        registered(&from_init, &mut from_init_rx, &mut origins);
+        let mut round = Round { lines: Vec::new(), console: Vec::new() };
+        read_origins(&mut origins, boot_local, &mut round);
+        for record in batch {
+            let line = format!("{}\n", record.tagged(&stamp(boot_local, record.at_ns)));
+            round.lines.push((record.at_ns, line));
         }
 
-        if batch.is_empty() && owed.is_empty() {
-            // **Nothing new, so park on the readiness source rather than spin.**
-            // `SYS_LOG_READ` never blocks by design; this is the other half of
-            // that design.
-            poller.watch(&cap, READABLE, LOG_TOKEN);
+        if round.lines.is_empty() {
+            // **Nothing new, so park rather than spin.** `SYS_LOG_READ` and a
+            // pipe read here never block by design; this is the other half.
             poller.wait(1, IDLE_NANOS, |_| {});
             continue;
         }
 
-        let Some(v) = volume.as_mut() else { continue };
+        // Each program's line on the console as the program wrote it.
+        if !round.console.is_empty() {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(&round.console);
+        }
+        // One order for the file and every reader: the time each line was
+        // stamped at, the kernel's own merge kept among its records.
+        round.lines.sort_by_key(|(at_ns, _)| *at_ns);
+        let newest = round.lines.iter().map(|(at_ns, _)| *at_ns).max().unwrap_or(0);
+        let text: String = round.lines.into_iter().map(|(_, line)| line).collect();
 
-        let newest = batch.last().map_or(0, |r| r.at_ns);
+        let Some(v) = volume.as_mut() else {
+            hub.append(text.as_bytes());
+            continue;
+        };
         let began = Instant::now();
         let mut refused: Option<(Step, std::io::ErrorKind, String)> = None;
-        // What the stream owed at the end of the last round — a connection it
-        // could not open, or the count of what a peer slower than this machine
-        // cost. It goes in the file, because the file is where this boot's log
-        // is: a `say!` reaches it only as a record inside this program's share of
-        // the log, which a stream failing every round could spend, and a stream
-        // that failed without a line in the file would be a failure only somebody
-        // watching the wire could see.
-        // **Dropped as the file takes them, one by one**: a refused write
-        // leaves the rest owed rather than losing the line that says what the
-        // stream cost, and leaves none of them to be written a second time.
-        let mut said_through = 0usize;
-        for said in &owed {
-            if let Err(e) = v.write(format!("{said}\n").as_bytes()) {
-                refused = Some((Step::Append, e.kind(), e.to_string()));
-                break;
-            }
-            said_through += 1;
+        if let Err(e) = v.write(text.as_bytes()) {
+            refused = Some((Step::Append, e.kind(), e.to_string()));
         }
-        owed.drain(..said_through);
-        let lines: Vec<String> =
-            batch.iter().map(|r| format!("{}\n", r.tagged(&stamp(boot_local, r.at_ns)))).collect();
-        let mut written = 0usize;
-        if refused.is_none() {
-            for line in &lines {
-                if let Err(e) = v.write(line.as_bytes()) {
-                    refused = Some((Step::Append, e.kind(), e.to_string()));
-                    break;
-                }
-                written += 1;
-            }
-        }
-        // **After the file has them, and it cannot fail.** The queue either
-        // takes a line or counts it as dropped; there is no answer that waits,
-        // so no listener anywhere can slow this loop down. What comes back is
-        // the stream's own line about what it refused, which the next round
-        // writes to the file and never offers back.
-        if let Some(stream) = stream.as_ref() {
-            owed.extend(stream.round(lines[..written].iter().map(String::as_str)));
-        }
+        // **After the file has them.** A reader is a thread with an offset into
+        // what this hands it, and none of them can make this wait.
+        hub.append(text.as_bytes());
         if refused.is_none() {
             if let Err(e) = v.sync() {
                 refused = Some((Step::Flush, e.kind(), e.to_string()));
@@ -387,6 +402,66 @@ fn main() {
     }
 }
 
+/// Take every `REGISTER` init has sent: a program's name and the read end of
+/// its output pipe.
+///
+/// **init is the only peer this connection has**, so a frame that is not one,
+/// or a name that is no tag, is init's bug and a loud end: init checks the
+/// name before it sends.
+fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut Vec<Origin>) {
+    loop {
+        match rx.pump(conn) {
+            RxStep::Idle => return,
+            RxStep::Eof => panic!("logd: init closed the origins connection"),
+            RxStep::Malformed => panic!("logd: init sent a frame the origins protocol cannot carry"),
+            RxStep::Frame { msg_type, payload_len } => {
+                assert_eq!(msg_type, REGISTER, "logd: init sent frame type {msg_type} for an origin");
+                let name = std::str::from_utf8(rx.payload(payload_len))
+                    .ok()
+                    .and_then(Tag::new)
+                    .unwrap_or_else(|| panic!("logd: init registered an origin under no name"));
+                let Some([raw]) = conn.recv_handles_exact::<1>() else {
+                    panic!("logd: init registered {name:?} with no pipe");
+                };
+                assert!(origins.len() < MAX_ORIGINS, "logd: more than {MAX_ORIGINS} programs registered");
+                // SAFETY: the kernel moved this handle into this table with the
+                // frame that names it, and nothing else answers for it.
+                let pipe = unsafe { Pipe::from_raw(raw) };
+                origins.push(Origin { tag: name.as_str().to_string(), pipe, lines: Lines::new() });
+            }
+        }
+    }
+}
+
+/// Read every origin's pipe until it would block, into `round`. An origin whose
+/// writers are all gone says what it left unfinished and is dropped.
+fn read_origins(origins: &mut Vec<Origin>, boot_local: Option<u64>, round: &mut Round) {
+    let mut chunk = vec![0u8; READ_BYTES];
+    origins.retain_mut(|origin| loop {
+        let at_ns = toyos_abi::syscall::clock_nanos();
+        let tag = origin.tag.as_str();
+        match origin.pipe.read_nonblock(&mut chunk) {
+            Ok(0) => {
+                origin.lines.finish(|line| said_by(tag, at_ns, line, boot_local, round));
+                break false;
+            }
+            Ok(n) => origin.lines.push(&chunk[..n], |line| said_by(tag, at_ns, line, boot_local, round)),
+            Err(SyscallError::WouldBlock) => break true,
+            Err(e) => panic!("logd: {tag}'s pipe refused a read: {e:?}"),
+        }
+    });
+}
+
+/// One program's line, into this round: its form in the log, and its bytes for
+/// the console.
+fn said_by(tag: &str, at_ns: u64, line: &[u8], boot_local: Option<u64>, round: &mut Round) {
+    let tag = Tag::new(tag).expect("an origin's name was a tag when it registered");
+    let stamp = stamp(boot_local, at_ns);
+    round.lines.push((at_ns, format!("{}\n", ProgramLine { stamp: &stamp, at_ns, tag, text: line })));
+    round.console.extend_from_slice(line);
+    round.console.push(b'\n');
+}
+
 /// This boot's file stem, and the local epoch second the machine booted at.
 ///
 /// `None` for the stem is a boot that cannot be placed in time, which takes an
@@ -395,24 +470,22 @@ fn main() {
 /// two readings cannot separate" are different facts about the machine.
 fn boot_stamp() -> (Option<String>, Option<u64>, String) {
     match wall::local_now() {
-        Wall::Local { secs, offset_secs } => {
+        wall::Wall::Local { secs, offset_secs } => {
             let civil = Civil::from_unix_secs(secs);
-            let uptime_secs = uptime_nanos() / 1_000_000_000;
+            let uptime_secs = toyos_abi::syscall::clock_nanos() / 1_000_000_000;
             (
                 Some(format!("{}", civil.stem())),
                 Some(secs.saturating_sub(uptime_secs)),
                 format!("{civil} at UTC{:+} recovered from two readings", offset_secs / 3_600),
             )
         }
-        Wall::Unknown => (
-            None,
-            None,
-            "undated: this machine will not say what time it is".into(),
-        ),
+        wall::Wall::Unknown => {
+            (None, None, "undated: this machine will not say what time it is".into())
+        }
         // Named rather than guessed. The two candidates are the same time of day
         // on different days, so a file named from either is a day wrong half the
         // time; `wall`'s module header is the argument.
-        Wall::Ambiguous { east, west } => (
+        wall::Wall::Ambiguous { east, west } => (
             None,
             None,
             format!(
@@ -425,13 +498,10 @@ fn boot_stamp() -> (Option<String>, Option<u64>, String) {
     }
 }
 
-/// A record's wall-clock stamp: the local second the machine booted at, plus
-/// the record's own monotonic offset.
-///
-/// **The record's `at_ns` stays in the line too** — the stamp goes through
-/// `LogRecord::tagged`, the one formatter, so `/log` holds both clocks and a
-/// line in the file matches the same record on the wire without arithmetic.
-fn stamp(boot_local: Option<u64>, at_ns: u64) -> String {
+/// A line's wall-clock stamp: the local second the machine booted at, plus the
+/// line's own monotonic offset — which the line carries too, so `/log` holds
+/// both clocks.
+pub(crate) fn stamp(boot_local: Option<u64>, at_ns: u64) -> String {
     match boot_local {
         Some(base) => format!("{}", Civil::from_unix_secs(base + at_ns / 1_000_000_000)),
         // An undated boot writes the space the stamp would have taken, so the
@@ -439,20 +509,4 @@ fn stamp(boot_local: Option<u64>, at_ns: u64) -> String {
         // machine had no clock.
         None => "---------- --------".into(),
     }
-}
-
-/// Nanoseconds since boot, on the same monotonic clock every record's `at_ns`
-/// is stamped from.
-///
-/// **Through `toyos-abi` rather than through the SDK, and it is a deviation
-/// with a reason.** `toyos::system` is where this belongs and it does not have
-/// it; adding it there edits a path dependency of `rust/library/std`, which
-/// makes this branch claim the machine-global sysroot and blocks every other
-/// worktree until it lands. Root `CLAUDE.md` puts an ABI or SDK change on its
-/// own pull request first for exactly that reason, and this chunk is not one.
-/// `test-runner` names `toyos-abi` for the same kind of reason, so the shape is
-/// not new. It should become `toyos::system::clock_nanos` on the next landing
-/// that touches the SDK anyway.
-fn uptime_nanos() -> u64 {
-    toyos_abi::syscall::clock_nanos()
 }

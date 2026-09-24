@@ -2691,3 +2691,27 @@ fn a_lease_report_reads_back_as_it_was_written() {
         assert!(lease::summary(bad).is_err(), "{bad:?}");
     }
 }
+
+/// §10.2.5.21 with `RCTL.MO` = `00b`: bits 47:36 of the destination index the
+/// array. `01:00:5e:00:00:fb` — multicast DNS's group — is index `0xFB0`,
+/// dword 125, bit 16; and asking for it sets that bit and no other.
+#[test]
+fn a_multicast_group_sets_the_one_table_bit_its_address_hashes_to() {
+    assert_eq!(regs::mta_bit([0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb]), (125, 16));
+    assert_eq!(regs::mta_bit([0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]), (0, 16));
+    assert_eq!(regs::mta_bit([0x33, 0x33, 0x00, 0x00, 0xf0, 0xff]), (127, 31));
+    for part in [Part::E82574, Part::I219] {
+        let nic = Nic::with(29, part, Permits::default());
+        let driver = open(&nic);
+        driver.accept_multicast([0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb]);
+        for dword in 0..regs::MTA_DWORDS {
+            let want = if dword == 125 { 1 << 16 } else { 0 };
+            assert_eq!(
+                nic.peek(regs::MTA + dword * 4),
+                want,
+                "{}",
+                nic.because(&format!("MTA[{dword}] after the mDNS group was asked for"))
+            );
+        }
+    }
+}

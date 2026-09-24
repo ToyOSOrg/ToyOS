@@ -28,13 +28,13 @@ const _: () = assert!(DNS_MAX_SERVER_COUNT >= DHCP_MAX_DNS_SERVER_COUNT);
 /// RFC 2132 §3.14.
 const OPT_HOST_NAME: u8 = 12;
 
-/// The name this machine asks its network to record for it. One name, because
-/// there is one machine.
-const HOSTNAME: &[u8] = b"toyos-t14";
+/// The name this machine asks its network to record for it, and answers to on
+/// it as `<name>.local` (`crate::mdns`). One name, because there is one machine.
+pub const HOSTNAME: &str = "toyos-t14";
 
 /// The options every DISCOVER and REQUEST carries.
 static OUTGOING: [DhcpOption<'static>; 1] =
-    [DhcpOption { kind: OPT_HOST_NAME, data: HOSTNAME }];
+    [DhcpOption { kind: OPT_HOST_NAME, data: HOSTNAME.as_bytes() }];
 
 /// How long this machine waits for its first lease before saying it has none.
 ///
@@ -171,7 +171,7 @@ impl Dhcp {
             crate::say!(
                 "netd: DHCP: no lease as {} in {} s; this machine has no address and every \
                  connect through it is refused",
-                String::from_utf8_lossy(HOSTNAME),
+                HOSTNAME,
                 self.began.elapsed().as_secs(),
             );
             self.settled = true;
