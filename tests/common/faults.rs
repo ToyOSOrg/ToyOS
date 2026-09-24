@@ -971,3 +971,150 @@ pub fn dump_nmi_probe(
     }
     Ok(())
 }
+
+/// The blocked-task dump asked for where it may not be served, on one CPU:
+/// `dump-in-blocking-pass` files one request in a kernel thread's blocking pass,
+/// one in a user thread's, one in a pass entered above zero — which a thread
+/// exiting from its syscall drives — and one during a report. Each staged pass
+/// meets its request twice, with the clear a pass makes on entry between the
+/// meetings, as a task woken behind it that blocks again would.
+///
+/// One CPU, so no sibling's pass serves what a pass left. The stages arm at the
+/// SMP release, so one may fire under the boot's own load; one that has not,
+/// `test_rs_dump_stage_load` fires: every task leaves the CPU before a quantum
+/// ends and one is always ready, so no tick and no idle loop comes, and the only
+/// pass entered at zero is the one the leaving CPU owes itself. The bound is the
+/// construction's own and not a duration: `need_resched` is set by every pass
+/// that leaves a request, and the Ring 3 exit check runs a pass entered at zero
+/// while it is set — so zero returns to Ring 3 with the request pending.
+///
+/// Judged per request: it was left and that was said once, every report ran from
+/// a pass entered at zero and none began inside another, the request filed during
+/// a report got a report of its own, and the job finished clean.
+pub fn dump_left_pending_is_owed(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            kernel_params: &["dump-in-blocking-pass"],
+            smp: 1,
+            ..Default::default()
+        },
+    );
+    // Nothing is staged before this line, which the release prints at the first
+    // pass after it: in the boot log, or after it on a boot that outran that pass.
+    const ARMED: &str = "dump-in-blocking-pass: armed";
+    let mut armed = qemu.boot_log().to_string();
+    if !armed.contains(ARMED) {
+        armed.push_str(&qemu.drain_until(Duration::from_secs(20), |line| line.contains(ARMED)));
+    }
+    if !armed.contains(ARMED) {
+        return Err(format!("the actuator never armed — is `dump-in-blocking-pass` on?\n{armed}"));
+    }
+    let result = qemu.run_test("test_rs_dump_stage_load", Duration::from_secs(60));
+    let log = format!("{armed}{}{}{}", result.before, result.serial, result.stdout);
+
+    // A panic's message is the line after the one that says where.
+    let mut panic = log.lines().skip_while(|line| !line.contains("PANIC")).take(2);
+    if let Some(line) = panic.next() {
+        return Err(format!(
+            "a `PANIC` line is in the log: `{} {}`\n{log}",
+            unstamped(line),
+            unstamped(panic.next().unwrap_or(""))
+        ));
+    }
+    // A request is filed only once the one before it is accounted for, so the
+    // lines from one filing to the next are that request's.
+    const FILED: &str = "files a request in ";
+    let lines: Vec<&str> = log.lines().collect();
+    let starts: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].contains(FILED)).collect();
+    // What the filing line says, what the pass that left it says, and how many
+    // reports follow: the user thread's blocking pass hosts the request filed
+    // during a report.
+    const STAGES: [(&str, &str, usize); 3] = [
+        ("a blocking pass of a kernel thread", "met the request in a blocking pass", 1),
+        ("a blocking pass of a user thread", "met the request in a blocking pass", 2),
+        ("a pass entered at preempt depth", "met the request in a pass entered at preempt depth", 1),
+    ];
+    if starts.len() != STAGES.len() {
+        return Err(format!("{} request(s) filed in a pass, not {}\n{log}", starts.len(), STAGES.len()));
+    }
+    for (filed, left, reports) in STAGES {
+        let Some(at) = starts.iter().position(|&i| lines[i].contains(&format!("{FILED}{filed}"))) else {
+            return Err(format!("no request was filed in {filed}\n{log}"));
+        };
+        let end = starts.get(at + 1).copied().unwrap_or(lines.len());
+        let own = &lines[starts[at]..end];
+        let count = |needle: &str| own.iter().filter(|line| line.contains(needle)).count();
+
+        // Once per request: a line per meeting is two, and a line never re-armed
+        // is none for the requests after the first.
+        if count(left) != 1 || count("met the request in ") != 1 {
+            return Err(format!(
+                "the request filed in {filed} was left and that was said {} time(s), not once\n{log}",
+                count("met the request in ")
+            ));
+        }
+        let mut open = false;
+        for line in own {
+            if line.contains("=== blocked-task dump:") {
+                if open {
+                    return Err(format!("a report began inside another, after {filed}\n{log}"));
+                }
+                open = true;
+            } else if line.contains("=== end of dump ===") {
+                open = false;
+            }
+        }
+        if count("=== end of dump ===") != reports || count("files a request during a report") != reports - 1 {
+            return Err(format!(
+                "{} complete report(s) and {} request(s) filed during one after {filed}, not {reports} and {}\n{log}",
+                count("=== end of dump ==="),
+                count("files a request during a report"),
+                reports - 1,
+            ));
+        }
+        const FROM: &str = " reports from ";
+        if let Some(line) = own
+            .iter()
+            .find(|line| line.contains(FROM) && !line.contains("reports from a pass entered at preempt depth 0"))
+        {
+            return Err(format!("a pass that may not serve ran a report: `{}`\n{log}", unstamped(line)));
+        }
+        if count(FROM) != reports {
+            return Err(format!("{} of {reports} report(s) said where they ran after {filed}\n{log}", count(FROM)));
+        }
+        const OWED: &str = " time(s) with its request pending";
+        if count(OWED) != 1 {
+            return Err(format!("the request filed in {filed} was accounted for {} time(s)\n{log}", count(OWED)));
+        }
+        if let Some(line) = own
+            .iter()
+            .find(|line| line.contains(OWED) && !line.contains("returned to Ring 3 0 time(s)"))
+        {
+            return Err(format!(
+                "a cpu that left a request went back to Ring 3 without serving it: `{}`\n{log}",
+                unstamped(line)
+            ));
+        }
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "the job whose passes were staged did not finish clean: exit {:?}\n{log}",
+            result.exit_code
+        ));
+    }
+    Ok(())
+}
+
+/// A kernel line without its `[kernel <seconds> cpuN] ` stamp, which differs on every boot: a
+/// quoted line that kept it would make every red of a rerun a different one.
+fn unstamped(line: &str) -> &str {
+    let line = line.trim();
+    line.strip_prefix("[kernel ").and_then(|rest| rest.split_once("] ")).map_or(line, |(_, said)| said)
+}

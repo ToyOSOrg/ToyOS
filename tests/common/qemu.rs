@@ -4537,10 +4537,7 @@ fn wait_for_ready(
     // agents building: two boots exceeded the flat ten seconds, one of them in a
     // phase running a single guest.
     //
-    // A wedge costs that much longer to report and nothing else. No test asserts
-    // on how long a boot took by *this* clock: `i8042_absent` and
-    // `xhci_slow_connect` do assert on boot timing and read the guest's own
-    // stamps, and both are in the serial tail.
+    // A wedge costs that much longer to report and nothing else.
     //
     // Scaled by the host too, and the first boot of a run is the one that
     // cannot be: nothing has been measured yet, so it gets the flat number and

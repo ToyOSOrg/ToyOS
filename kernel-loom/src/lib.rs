@@ -187,6 +187,10 @@ pub mod log_registry;
 #[path = "../../kernel/src/sched/reap_gate.rs"]
 pub mod reap_gate;
 
+/// Ctrl+Alt+D's request word. Pure atomics, so it compiles here unshimmed.
+#[path = "../../kernel/src/sched/dump_request.rs"]
+pub mod dump_request;
+
 /// The interrupt record a claimed PCI function's ISR writes and its holder
 /// reads. Pure `core` atomics and nothing else, so it compiles here unshimmed.
 #[path = "../../kernel/src/pcidev/record.rs"]

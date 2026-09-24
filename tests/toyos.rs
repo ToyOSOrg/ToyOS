@@ -310,6 +310,10 @@ const RUST_SKIP: &[&str] = &[
     // have somewhere to land, and on its own it asserts nothing and costs ten
     // seconds. `syscall_window_nmi` runs it on the kernel that storms it.
     "nmi_window_spin",
+    // A victim, not a test: the load `dump-in-blocking-pass` files Ctrl+Alt+D
+    // inside, and on its own it asserts nothing. `dump_left_pending_is_owed` runs
+    // it on the kernel that stages it.
+    "dump_stage_load",
     // Driven, not run: `screen_console_clear` types its name at a console it is
     // watching, and on its own it asks the kernel to paint over a panel nobody
     // is reading and exits 0. A verdict its own exit code cannot carry — the
@@ -867,6 +871,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // same run and three times after it. Serial by the default rule — a
     // verdict that is a duration does not go in the parallel phase.
     ("dump_nmi_probe", Sched::Serial, Tier::Nightly),
+    // The same dump asked for inside the passes that may not serve it, on one
+    // CPU. Parallel: every verdict is a line the guest prints or a count the guest
+    // keeps, and no duration is in any of them.
+    ("dump_left_pending_is_owed", Sched::Parallel, Tier::Fast),
     ("diskless_boot", Sched::Parallel, Tier::Fast),
     // Every verdict is a line of text or a device property, and no clock is in
     // any of them.
@@ -1158,17 +1166,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("usb_storage_write_error", Sched::Parallel, Tier::Fast),
     ("usb_flush_optional", Sched::Parallel, Tier::Nightly),
     ("xhci_deaf_registers", Sched::Parallel, Tier::Nightly),
-    // Mirrors the kernel's `SLOW_CONNECT_NS` as a constant of its own and
-    // bounds the first port line from *both* sides. Both instants are the
-    // guest's own, and it is still serial: the *injection window* is 300 ms of
-    // guest **boot** time, so a guest that lost its share of the host reaches
-    // its controller after the ports have stopped lying and the gate refuses to
-    // certify — `the controller started at 0.366 s, past the 0.3 s the ports are
-    // held empty for`, measured at width 4 with four other worktrees' suites up.
-    // That is the test declining to measure nothing, which is correct, and a red
-    // all the same. The fix it asks for is the kernel's: anchor the window on
-    // the controller's own reset rather than on boot, which is where a real root
-    // hub's detection delay starts anyway.
+    // The window is anchored on the controller's own port-power stamp now, not
+    // boot, so a slow boot no longer eats it — but the bound is still a fixed
+    // span of the guest's own TSC clock (`SLOW_CONNECT_NS`/`DEBOUNCE_NS`), and
+    // a host running several other guests can still stall this one's vCPU past
+    // that span for reasons that are not the defect.
     ("xhci_slow_connect", Sched::Serial, Tier::Nightly),
     ("xhci_portsc_rw1c", Sched::Parallel, Tier::Fast),
     // One staged break and no other, which puts the driver's recovery finishing
@@ -1230,12 +1232,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
     ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),
     ("wall_clock_zone", Sched::Parallel, Tier::Nightly),
-    // `xhci_slow_connect`'s shape against the disk's port, and serial for the
-    // same reason and not by association: it shares `SLOW_CONNECT_NS`, so a boot
-    // that outgrows the window binds the disk in the port scan and it reports
-    // `the boot scan bound a disk, so the port was not held empty`. Same
-    // measurement, same afternoon.
-    ("late_storage_connect", Sched::Serial, Tier::Nightly),
+    // `xhci_slow_connect`'s shape against the disk's port, but its actuator
+    // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
+    // so what it stages is an ordering with no wall-clock margin on either
+    // side: nothing here needs the serial tail.
+    ("late_storage_connect", Sched::Parallel, Tier::Nightly),
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
@@ -10505,6 +10506,9 @@ fn run_machine_test(
         }
         "idle_stack_guard" => faults::idle_stack_guard(test_config, c_bins, rust_bins),
         "dump_nmi_probe" => faults::dump_nmi_probe(test_config, c_bins, rust_bins),
+        "dump_left_pending_is_owed" => {
+            faults::dump_left_pending_is_owed(test_config, c_bins, rust_bins)
+        }
         "diskless_boot" => faults::diskless_boot(test_config, c_bins, rust_bins),
         "virtio_net_no_msix" => faults::virtio_net_no_msix(),
         "pci_claim_caps_truncated" => faults::claim_caps_truncated(),
