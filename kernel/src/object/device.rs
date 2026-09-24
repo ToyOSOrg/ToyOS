@@ -205,7 +205,8 @@ impl ZeroHandles for DeviceClaim {
     }
 }
 
-/// One holder's view of the machine's serial console — each holder gets its own, never a shared handle.
+/// One holder's view of the machine's console — each holder gets its own, never a shared handle.
+/// A line it writes reaches the serial console and is a record tagged with the holder's name.
 pub struct ConsoleObject {
     pub(super) core: ObjectCore,
     // Lock order process_data -> line -> BackendGuard; taking them in reverse deadlocks.
@@ -213,10 +214,13 @@ pub struct ConsoleObject {
 }
 
 impl ConsoleObject {
-    pub fn new() -> Arc<Self> {
+    /// `name` is what the holder's records are tagged with: its process table name.
+    pub fn new(name: [u8; crate::process::THREAD_NAME_LEN]) -> Arc<Self> {
         Arc::new(Self {
             core: Self::new_core(),
-            line: crate::sync::Lock::new(crate::drivers::serial::ConsoleLine::new()),
+            line: crate::sync::Lock::new(crate::drivers::serial::ConsoleLine::new(Some(
+                crate::log::spoken::Speaker::new(name),
+            ))),
         })
     }
 

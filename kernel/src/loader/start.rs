@@ -185,12 +185,14 @@ impl PendingHandles {
     }
 }
 
-/// Reads `SpawnArgs`'s two handle vectors into the child's pending handle state.
+/// Reads `SpawnArgs`'s two handle vectors into the child's pending handle state; `program`
+/// is the path the child is spawned from, whose file name its consoles speak under.
 // Every refusal here precedes any child state, so nothing is enqueued or orphaned.
 pub fn build_child_handles(
     slot_map: &UserBytes,
     endow: &UserBytes,
     labels: &[u8],
+    program: &str,
 ) -> Result<PendingHandles, Refusal> {
     if endow.len() / ENDOW_ENTRY_LEN > MAX_ENDOWMENTS {
         return Err(SyscallError::InvalidArgument.into());
@@ -230,7 +232,7 @@ pub fn build_child_handles(
                     Some((_, object)) => object.clone(),
                     None => {
                         let object = crate::object::KObjectRef::Console(
-                            crate::object::device::ConsoleObject::new(),
+                            crate::object::device::ConsoleObject::new(make_name(program)),
                         );
                         minted.push((key, object.clone()));
                         object

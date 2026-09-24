@@ -98,8 +98,7 @@ adjudicate each against src/redlist.rs (a red not on the list is a defect at
 its owner, never the queue's)`** — 4 of 32 pushes (12.5 %), all four
 composition-success, zero interaction failures. The eased-law part of the
 same window (historical, superseded): 16 of 85 pushes (18.8 %),
-threshold-breached, already on record in
-`issues/build/the-eased-merge-law-carries-a-threshold.md`. Totals across both
+threshold-breached. Totals across both
 regimes: 20 of 117 pushes (17.1 %).<sup>2</sup>
 
 **What the numbers say, against this track's own falsifiability criterion.**
@@ -203,7 +202,6 @@ issues/audio/client-ring-depth-is-the-devices-pipeline-depth.md
 issues/audio/hda-has-no-jack-detection-volume-or-keys.md
 issues/build/defect-events.md
 issues/build/soundds-mix-pass-has-no-host-test.md
-issues/build/the-eased-merge-law-carries-a-threshold.md
 issues/build/the-swarm-is-not-yet-falsifiable.md
 issues/build/the-toolchain-ships-no-cargo-and-the-shared-cache-waits-on-one.md
 issues/build/there-is-no-network-gate.md

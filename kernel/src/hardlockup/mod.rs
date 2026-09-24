@@ -36,7 +36,7 @@
 //! `log!` — the interrupted context may hold the log ring's own shard, and
 //! `src/sourcegate.rs`'s `nmi_does_not_log` is the gate. The sampling path is
 //! also on every CPU every second of every boot, so it is atomics and one
-//! `rdtsc` and no division at all; `src/redlist.rs`'s `dump_nmi_probe` is the
+//! `rdtsc` and no division at all; the `dump_nmi_probe` test is the
 //! instrument that once caught a 128-bit divide on an NMI-sampled path. The
 //! report divides, and only after the machine is already being ended.
 //!

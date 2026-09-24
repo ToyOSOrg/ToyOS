@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use super::compile;
 use super::qemu::{self, BootOptions, QemuInstance};
+use super::{compile, serial};
 
 /// Where the host arm sees the servers the guest reaches at
 /// [`qemu::GUEST_VIEW_OF_HOST`]. The judge's certificate carries both.
@@ -51,13 +51,28 @@ pub struct Bench {
     /// suite's worst defect class, and a profile with no NIC would make every
     /// refusal below pass for the wrong reason.
     pub device: &'static str,
+    /// Why this card has a BAR no read can settle a candidate against, or
+    /// `None` for a card with none. The count is asserted either way, so a
+    /// kernel that stopped refusing such a BAR — and handed its holder a
+    /// window proved by `0 == 0` — reds here.
+    pub kept_bar: Option<&'static str>,
+    /// The function [`Bench::config`]'s netd declares, as its `devices` row
+    /// spells it. Held to that committed row by
+    /// [`every_bench_claims_what_its_config_declares`].
+    pub claims: &'static str,
 }
+
+/// The record `pcidev` writes for a BAR it settles nothing against: the BAR
+/// stays where firmware put it and no holder is given a window onto it.
+const KEPT_BAR: &str = "keeps BAR";
 
 /// The virtio NIC, which is the card every other network test uses.
 pub const VIRTIO: Bench = Bench {
     profile: qemu::Profile::Headless,
     config: "tests/netcase",
     device: "virtio-net",
+    kept_bar: None,
+    claims: "1af4:1041",
 };
 
 /// QEMU's `e1000e` — the 82574L, whose register file is the one the ThinkPad
@@ -67,9 +82,53 @@ pub const E1000E: Bench = Bench {
     profile: qemu::Profile::E1000e,
     config: "tests/e1000case",
     device: "e1000e",
+    kept_bar: Some("answers all-zeroes or all-ones where firmware put it"),
+    claims: "8086:10d3",
 };
 
-pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), String> {
+/// Each bench's [`Bench::claims`] is the `devices` row of the boot config it
+/// names, read off the committed file rather than restated beside it.
+///
+/// A plain function, called from the harness's registration checks, for the
+/// reason [`super::devices::the_config_runs_exactly_these_jobs`] gives.
+pub fn every_bench_claims_what_its_config_declares() {
+    for bench in [VIRTIO, E1000E] {
+        let at = compile::repo_root().join(bench.config).join("system.toml");
+        let config =
+            std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+        let config: toml::Value =
+            toml::from_str(&config).unwrap_or_else(|e| panic!("parse {}: {e}", at.display()));
+        // netd's own row and not the file's: `tests/netcase` declares the same
+        // function twice, once for the daemon and once for the test binary that
+        // asks the kernel for a second claim on it.
+        let declared = config
+            .get("programs")
+            .and_then(|programs| programs.get("netd"))
+            .and_then(|netd| netd.get("devices"))
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("{}: [programs.netd] declares no devices", at.display()));
+        let declared: Vec<&str> = declared
+            .iter()
+            .map(|device| {
+                device
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{}: {device} is not a device name", at.display()))
+            })
+            .collect();
+        assert_eq!(
+            declared,
+            [format!("pci:{}", bench.claims)],
+            "{} declares those devices, and the bench names {:?}",
+            at.display(),
+            bench.claims
+        );
+    }
+}
+
+/// Answers the boot console, up to netd's ready line: what the claim spent is
+/// on it, and only the caller knows whether its bench can red an assertion
+/// about that.
+pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<String, String> {
     let bins: Vec<(String, Vec<u8>)> = rust_bins
         .iter()
         .filter(|(name, _)| name == "https_fetch")
@@ -104,6 +163,14 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), 
         "netd to come up",
     )
     .map_err(|e| format!("netd never came up, so no fetch below means anything: {e}"))?;
+
+    let log = serial::Serial::named("boot console", console.as_str());
+    log.must_be_clean_apart_from(KEPT_BAR, usize::from(bench.kept_bar.is_some()))?;
+    // And by which refusal: the count alone would pass on a BAR kept back for
+    // any other reason.
+    if let Some(why) = bench.kept_bar {
+        log.must_say(why)?;
+    }
 
     let ok_line = format!(
         "https_fetch: ok bytes={} sha256={}",
@@ -162,7 +229,7 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), 
         eprintln!("  [https:{}] {line}", bench.device);
     }
     eprintln!("  [https:{}] host arm agreed byte for byte: {host_ok}", bench.device);
-    Ok(())
+    Ok(console)
 }
 
 fn fetch_in_guest(

@@ -1,16 +1,29 @@
-//! The register file, as the specification defines it.
+//! The register file, as the specifications define it.
 //!
-//! Every offset and every bit below is cited to the *Intel 82574 GbE
-//! Controller Family Datasheet*, order number 317694-018, revision 2.7; §10.2's
-//! Table 77 is the register summary the offsets are copied from.
+//! **Two MAC documents meet here.** Every `§10.`, `§7.`, `§4.` and `§3.` below
+//! is the *Intel 82574 GbE Controller Family Datasheet*, order number
+//! 317694-018, revision 2.7, whose §10.2 Table 77 is the register summary the
+//! offsets are copied from. Every `§8.` is the *Intel® 500 Series Chipset
+//! Family On-Package Platform Controller Hub Datasheet, Volume 2 of 2*,
+//! document 631120, revision 002, whose §8.2 is the register summary of the
+//! integrated GbE controller at `00:1f.6` — the MAC the ThinkPad's `8086:15fc`
+//! actually is. Where the two describe the same offset the `§8.` clause is the
+//! one that governs that part, and where only one of them names a field it is
+//! cited alone.
 //!
-//! Nothing here has behaviour, and a number that is not in the datasheet does
-//! not belong in this file.
+//! **Where neither document publishes a field the PCH's MAC needs, the field is
+//! stated as a property of that part** and named by what it does; each such
+//! constant says so where it stands. Nothing here has behaviour, and a number
+//! that is neither in a document nor a stated property of the part does not
+//! belong in this file.
 
 /// Device Control (§10.2.2.1, `0x00000`).
 pub const CTRL: usize = 0x00000;
 /// Device Status (§10.2.2.2, `0x00008`), read-only.
 pub const STATUS: usize = 0x00008;
+/// MDI Control (§10.2.2.7, `0x00020`), "used by software to read or write
+/// Management Data Interface (MDI) registers in a GMII/MII PHY".
+pub const MDIC: usize = 0x00020;
 /// Interrupt Cause Read (§10.2.4.1, `0x000C0`), read-to-clear and
 /// write-1-to-clear.
 pub const ICR: usize = 0x000C0;
@@ -62,6 +75,47 @@ pub const TDT: usize = 0x03818;
 pub const TIDV: usize = 0x03820;
 pub const TXDCTL: usize = 0x03828;
 pub const TADV: usize = 0x0382C;
+/// Extended Configuration Control (§10.2.2.15, `0x00F00`), which carries
+/// §4.5.2's arbitration for the MDIO interface — and which §8.2.4 gives one
+/// writable bit and no more.
+pub const EXTCNF_CTRL: usize = 0x00F00;
+/// Extended Device Control (§10.2.2.3, `0x00018`); §8.2.2 is the same offset
+/// on the PCH's MAC, where it carries the PHY's low-power entry.
+pub const CTRL_EXT: usize = 0x00018;
+/// PHY Control (§8.2.5, `0x00F10`), which the I219's §10.3.1.13 calls
+/// "PHY_CTRL" and loads the NVM's OEM configuration word into. Not a register
+/// the 82574 datasheet has.
+pub const PHY_CTRL: usize = 0x00F10;
+/// Firmware Semaphore (§8.2.9, `0x05B54`), the firmware's own report of
+/// itself. Not a register the 82574 datasheet has.
+pub const FWSM: usize = 0x05B54;
+/// The register at `0x0003C`, which neither document publishes: its bits 27:26
+/// set how long the PHY's configuration is given after a `LANPHYPC` power
+/// cycle, so it is named for the cycle it times.
+pub const LANPHYPC_TIMING: usize = 0x0003C;
+
+/// §8.2.8's `GBECSR_5800` at `5800h`, whose one writable field is the APM
+/// wake-up enable.
+pub const WAKE_UP: usize = 0x05800;
+
+/// The PCH's MAC's PCIe control at `0x05B00`, which neither document publishes
+/// for this part: bits 5:0 ask for PCIe's no-snoop attribute on the part's own
+/// DMA, one bit for each of receive data, receive descriptor write-back,
+/// receive descriptor fetch, and the same three for transmit.
+pub const PCIE_CONTROL: usize = 0x05B00;
+
+/// The MAC's own statistics, each a count the part keeps of frames at its end
+/// of the wire and each cleared by the read that takes it — offsets and
+/// behaviour stated as properties of the part, and which QEMU's model answers
+/// at the same offsets: CRC Error
+/// Count, Missed Packet Count (frames the part had no room for), Good Packets
+/// Received and Transmitted, and Total Packets Received (every frame the MAC
+/// saw, whatever its filters then did with it).
+pub const CRCERRS: usize = 0x04000;
+pub const MPC: usize = 0x04010;
+pub const GPRC: usize = 0x04074;
+pub const GPTC: usize = 0x04080;
+pub const TPR: usize = 0x040D0;
 
 /// The smallest register window this driver can be driven through: above every
 /// offset named here, and the bound the register accessor's contract rests on.
@@ -71,10 +125,21 @@ const _: () = {
     assert!(MTA + MTA_DWORDS * 4 <= REGISTER_BYTES);
     assert!(RAH0 < REGISTER_BYTES);
     assert!(TADV < REGISTER_BYTES);
+    assert!(EXTCNF_CTRL < REGISTER_BYTES);
+    assert!(CTRL_EXT < REGISTER_BYTES);
+    assert!(PHY_CTRL < REGISTER_BYTES);
+    assert!(FWSM + 4 <= REGISTER_BYTES);
+    assert!(LANPHYPC_TIMING < REGISTER_BYTES);
+    assert!(PCIE_CONTROL < REGISTER_BYTES);
+    assert!(TPR < REGISTER_BYTES);
 };
 
 /// Device Control bits (§10.2.2.1).
 pub mod ctrl {
+    /// PCIe Master Disable (bit 2). §3.1.3.10: set, "the 82574 blocks new
+    /// master requests, including manageability requests", and then "proceeds
+    /// to issue any pending requests by this function".
+    pub const GIO_MASTER_DISABLE: u32 = 1 << 2;
     /// Auto-Speed Detection Enable (bit 5). §10.2.2.1: "This bit must be set to
     /// 0b in the 82574".
     pub const ASDE: u32 = 1 << 5;
@@ -86,6 +151,20 @@ pub mod ctrl {
     /// Force Speed (bit 11) and Force Duplex (bit 12).
     pub const FRCSPD: u32 = 1 << 11;
     pub const FRCDPLX: u32 = 1 << 12;
+    /// Bits 16 and 17, which §8.2.1 calls reserved. **The host's hand on the
+    /// PHY's power pin**: with bit 16 set, bit 17 is the level the PCH drives
+    /// on `LANPHYPC` — the pin the PCH's Volume 1 (635218) §19.1 says restores
+    /// power to the LAN Connected Device and I219 §6.3.1.3 calls
+    /// `LAN_DISABLE_N`, "the only external signal that can reset the PHY" (I219
+    /// §5.2). Driven low for at least 10 µs and then given back to the PCH, the
+    /// pin takes the PHY's power away and restores it.
+    pub const LANPHYPC_HOST_DRIVEN: u32 = 1 << 16;
+    pub const LANPHYPC_LEVEL: u32 = 1 << 17;
+    /// PHY Power Down (bit 24). §8.2.1: "When cleared (0b), the PHY power down
+    /// setting is controlled by the internal logic of PCH." The document
+    /// describes the cleared case only, so that is the state this driver puts
+    /// the register in and the set case is one it reports.
+    pub const PHY_POWER_DOWN: u32 = 1 << 24;
     /// Device Reset (bit 26). §10.2.2.1: "writing 1b initiates the reset. This
     /// bit is self-clearing."
     pub const RST: u32 = 1 << 26;
@@ -94,6 +173,79 @@ pub mod ctrl {
     pub const TFCE: u32 = 1 << 28;
     /// VLAN Mode Enable (bit 30). Cleared, so a VLAN tag stays in the frame.
     pub const VME: u32 = 1 << 30;
+    /// PHY Reset (bit 31), which §8.2.1 calls reserved. **On the PCH's MAC it
+    /// goes out with `RST`**: written together, the two start both ends of the
+    /// interconnect between the MAC and the PHY over at once, which a reset of
+    /// the MAC alone does not.
+    pub const PHY_RST: u32 = 1 << 31;
+}
+
+/// Extended Device Control bits (§8.2.2), of which the PCH's own datasheet
+/// gives one and calls everything either side of it "Reserved".
+pub mod ctrl_ext {
+    /// Bit 2, which §8.2.2 calls reserved: set by the part once a `LANPHYPC`
+    /// power cycle has finished.
+    pub const LANPHYPC_CYCLE_DONE: u32 = 1 << 2;
+    /// Bit 11, which §8.2.2 calls reserved: set, the MAC carries its MDIO
+    /// traffic over SMBus instead of the PCIe-based interconnect — I219
+    /// §12.1.4's other half, the one the PHY uses outside S0.
+    pub const MAC_ON_SMBUS: u32 = 1 << 11;
+    /// Bit 17, which §8.2.2 calls reserved: set, the part leaves PCIe's
+    /// relaxed-ordering attribute off every write it makes to memory, so its
+    /// writes land in the order it made them and a descriptor's `DD` cannot
+    /// land ahead of the frame it describes.
+    pub const STRICT_WRITE_ORDER: u32 = 1 << 17;
+    /// PHY Power Down Enable (bit 20). §8.2.2: "When set, this bit enables the
+    /// PHY to enter a low-power state when the LAN controller is at the DMOff/
+    /// D3 or with no WOL."
+    pub const PHY_POWER_DOWN_ENABLE: u32 = 1 << 20;
+    /// Bit 28, which §8.2.2 calls reserved: the host's word to the part's
+    /// firmware that a driver holds the function.
+    pub const DRIVER_HOLDS_THE_FUNCTION: u32 = 1 << 28;
+}
+
+/// §8.2.8's wake-up register.
+pub mod wake_up {
+    /// Bit 0. §8.2.8: "Advanced Power Management Enable (APME): 1 = APM
+    /// Wakeup is enabled 0 = APM Wakeup is disabled".
+    pub const APM_WAKE: u32 = 1 << 0;
+}
+
+/// PCIe control bits.
+pub mod pcie_control {
+    /// The six no-snoop requests (bits 5:0). Clear, every DMA the part makes
+    /// is snooped, so what it reads and writes is coherent with the
+    /// processor's caches.
+    pub const NO_SNOOP: u32 = 0x3F;
+}
+
+/// PHY Control bits (§8.2.5) — the PHY's link-speed policy, read and never
+/// written: each of them makes a link slower or takes it away.
+pub mod phy_ctrl {
+    /// Global GbE Disable (bit 6). §8.2.5: "Prevents the PHY from
+    /// auto-negotiating 1000Mb/s link in all power states."
+    pub const GLOBAL_GBE_DISABLE: u32 = 1 << 6;
+    /// GbE Disable at non D0a (bit 3). §8.2.5: the same "in all power states
+    /// except D0a. This bit must be set since GbE is not supported in Sx
+    /// states."
+    pub const GBE_DISABLE_NON_D0A: u32 = 1 << 3;
+    /// LPLU in non D0a (bit 2). §8.2.5: "Enables the PHY to negotiate for the
+    /// slowest possible link in all power states except D0a."
+    pub const LPLU_NON_D0A: u32 = 1 << 2;
+    /// LPLU in D0a (bit 1). §8.2.5: the same "in all power states. This bit
+    /// overrides bit 2."
+    pub const LPLU_D0A: u32 = 1 << 1;
+}
+
+/// Firmware Semaphore bits (§8.2.9).
+pub mod fwsm {
+    /// Bit 6, which §8.2.9 does not publish: clear, the firmware forbids the
+    /// host to reset the PHY — by `CTRL`'s PHY reset and by its power pin alike
+    /// — and a reset of the part is a reset of the MAC alone.
+    pub const PHY_RESET_ALLOWED: u32 = 1 << 6;
+    /// Firmware Valid Bit (bit 15). §8.2.9: "1 = Firmware is ready. 0 =
+    /// Firmware is not ready."
+    pub const FIRMWARE_VALID: u32 = 1 << 15;
 }
 
 /// Device Status bits (§10.2.2.2).
@@ -101,10 +253,79 @@ pub mod status {
     pub const FD: u32 = 1 << 0;
     /// Link Up (bit 1), valid only while `CTRL.SLU` is set.
     pub const LU: u32 = 1 << 1;
+    /// Bit 9, which neither document publishes for the PCH's MAC: set once the
+    /// MAC has configured the PHY after a reset that reached it — the
+    /// configuration I219 Table 5-2 gives 0.5 s (`Tr2init`).
+    pub const PHY_CONFIGURED: u32 = 1 << 9;
     /// Link speed (bits 7:6): `00b` 10 Mb/s, `01b` 100 Mb/s, `10b` and `11b`
     /// 1000 Mb/s.
     pub const SPEED_SHIFT: u32 = 6;
     pub const SPEED_MASK: u32 = 0b11;
+    /// PCIe Master Enable Status (bit 19). §3.1.3.10: "Cleared by the 82574
+    /// when the PCIe Master Disable bit is set and no master requests are
+    /// pending by the relevant function, set otherwise."
+    pub const GIO_MASTER_ENABLE: u32 = 1 << 19;
+}
+
+/// MDI Control fields (§10.2.2.7). Five-bit PHY and register addresses, a
+/// two-bit opcode, and the three bits the transaction is read back on.
+pub mod mdic {
+    /// Data (bits 15:0). §10.2.2.7: on a write "software places the data bits
+    /// and the MAC shifts them out to the PHY"; on a read the MAC puts what the
+    /// PHY answered here.
+    pub const DATA_MASK: u32 = 0xFFFF;
+    /// PHY register address (bits 20:16) — "Reg 0, 1, 2, … 31".
+    pub const REGADD_SHIFT: u32 = 16;
+    /// PHY address (bits 25:21).
+    pub const PHYADD_SHIFT: u32 = 21;
+    /// Five bits each, which is what clause 22 of IEEE 802.3 allows.
+    pub const ADDRESS_MASK: u32 = 0x1F;
+    /// Op-Code (bits 27:26). §10.2.2.7: "01b = MDI write. 10b = MDI read. Other
+    /// values are reserved."
+    pub const OP_WRITE: u32 = 0b01 << 26;
+    pub const OP_READ: u32 = 0b10 << 26;
+    /// Ready (bit 28). §10.2.2.7: "Set to 1b by the 82574 at the end of the MDI
+    /// transaction [...] It should be reset to 0b by software at the same time
+    /// the command is written."
+    pub const READY: u32 = 1 << 28;
+    /// Interrupt Enable (bit 29). §10.2.2.7: set, it "causes an Interrupt to be
+    /// asserted to indicate the end of an MDI cycle" — and this driver polls
+    /// [`READY`] instead, so it is never written.
+    pub const INTERRUPT: u32 = 1 << 29;
+    /// Error (bit 30). §10.2.2.7: set by hardware "when it fails to complete an
+    /// MDI read. Software should make sure this bit is clear (0b) before making
+    /// an MDI Read or Write command."
+    pub const ERROR: u32 = 1 << 30;
+    /// Wait (bit 31), which the 82574 datasheet does not have. §8.2.3: "Set to
+    /// 1 by the Gigabit Ethernet Controller to indicate that a PCI Express* to
+    /// SMBus transition is taking place. The ME/Host should not issue new MDIC
+    /// transactions while this bit is set to 1. This bit is auto cleared by
+    /// hardware after the transition has occurred."
+    pub const WAIT: u32 = 1 << 31;
+}
+
+/// Extended Configuration Control fields (§10.2.2.15): §4.5.2's three ownership
+/// bits, of which "at any given time at most only one bit is 1b".
+///
+/// **The PCH's MAC has one of these three.** §8.2.4 gives the whole register
+/// bit 5 — "Software Semaphore FLAG (SWFLAG): This bit is set by the device
+/// driver to gain access permission to shared CSR registers with the firmware
+/// and hardware" — and calls bits 31:6 and 4:0 "Reserved", read-only. So on
+/// the T14 the two bits below read as whatever a reserved field reads, the
+/// flag is a semaphore over *shared CSRs* rather than a grant of the MDIO
+/// interface, and holding it is not on its own a statement that the MDI
+/// interface will run a cycle.
+pub mod extcnf {
+    /// MDIO SW Ownership (bit 5) — the software request, and the only one of
+    /// the three this driver may write.
+    pub const MDIO_SW_OWNERSHIP: u32 = 1 << 5;
+    /// MDIO HW Ownership (bit 6), read-only: the third of §4.5.2's agents.
+    pub const MDIO_HW_OWNERSHIP: u32 = 1 << 6;
+    /// MDIO MNG Ownership (bit 7), read-only: the manageability request.
+    pub const MDIO_MNG_OWNERSHIP: u32 = 1 << 7;
+    /// The three bits §4.5.2 arbitrates, which is the whole of this register
+    /// any agent writes.
+    pub const OWNERSHIP: u32 = MDIO_SW_OWNERSHIP | MDIO_HW_OWNERSHIP | MDIO_MNG_OWNERSHIP;
 }
 
 /// Interrupt cause bits, shared by `ICR`, `ICS`, `IMS` and `IMC` (§10.2.4.1).
@@ -193,6 +414,15 @@ pub mod txdctl {
     /// descriptors. Anything larger holds a completion back until the ring
     /// fills.
     pub const SUGGESTED: u32 = GRAN | (1 << WTHRESH_SHIFT);
+}
+
+/// [`super::LANPHYPC_TIMING`]'s one field this driver sets.
+pub mod lanphypc_timing {
+    /// Bits 27:26: how long the PHY's configuration is given after a power
+    /// cycle.
+    pub const CONFIGURATION_MASK: u32 = 0b11 << 26;
+    /// `10b`, fifty milliseconds: the setting a power cycle is made under.
+    pub const CONFIGURATION_50MS: u32 = 0b10 << 26;
 }
 
 /// Receive Address High bits (§10.2.5.23).

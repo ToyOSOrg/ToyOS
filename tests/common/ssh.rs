@@ -30,8 +30,13 @@ impl Identity {
     /// of these into its image, so a second mint would hand the later members
     /// a key the running guest has never heard of.
     pub fn mint(name: &str) -> Result<Self, String> {
-        let dir = super::lane::dir().join("ssh").join(name);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        Self::mint_in(&super::lane::dir().join("ssh").join(name))
+    }
+
+    /// The key kept in `dir`, minted the first time: a metal image carries its
+    /// public half, so the key lives beside the image and outlives this run.
+    pub fn mint_in(dir: &Path) -> Result<Self, String> {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         let private = dir.join("id_ed25519");
         let public = dir.join("id_ed25519.pub");
         let fingerprint = dir.join("fingerprint");
@@ -57,6 +62,11 @@ impl Identity {
     /// into the image so the guest will let it in.
     pub fn authorized_line(&self) -> String {
         self.line.clone()
+    }
+
+    /// The private half, for a client this module does not run.
+    pub fn private(&self) -> &Path {
+        &self.private
     }
 
     /// The fingerprint the guest's daemon prints for this key.
@@ -297,7 +307,7 @@ pub const STRANGER_KEY: &str = "sshdcase-stranger";
 /// Where the image's `authorized_keys` file lands, ROOT-relative — the guest
 /// reads it at `/system/etc/ssh_authorized_keys`, which `userland/sshd`'s
 /// `AUTHORIZED_KEYS` is the other half of.
-const KEYS_ON_ROOT: &str = "etc/ssh_authorized_keys";
+pub const KEYS_ON_ROOT: &str = "etc/ssh_authorized_keys";
 const KEYS_IN_GUEST: &str = "/system/etc/ssh_authorized_keys";
 
 /// The guest test binary run over `exec`. Self-contained — `/tmp` and syscalls,
