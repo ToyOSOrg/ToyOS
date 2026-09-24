@@ -20,6 +20,13 @@ implementation. A review is spawned only after the branch's tests and CI are gre
 after the hardware reading exists where the change targets hardware. Reviewing untested code buys
 rounds that a test would have made unnecessary.
 
+## Design before building
+
+Before a new program, flag or mechanism, ask which existing owner the need folds into and whether a
+general tool plus a pipe already answers it: one generic reader beats a tool per question. Roast
+the design, its cost against what it saves included, before an agent builds it. A scout arm is
+scaffolding, deleted once its question is answered.
+
 ## Agents
 
 Every task gets a fresh agent with an explicit model matched to the judgment in it: the strongest
