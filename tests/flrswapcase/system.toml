@@ -1,0 +1,32 @@
+# `tests/e1000talkcase` with QEMU's `igb` beside the 82574: a function that
+# resets on release by an Express function level reset, held by netd so a swap
+# of netd releases it and the replacement claims it again. The 82574 carries
+# the swap's ssh; the igb is only held.
+
+[boot]
+start = ["logd", "netd", "sshd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+# The record stream's authority: the address on the parameter line is
+# information, and this row is the whole of what can act on it.
+receives = ["netd"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:8086:10d3", "pci:8086:10c9"]
+
+[programs.sshd]
+receives = ["netd", "launcher", "swap"]
+
+[programs.test-runner]
+syscap = ["logread"]
+
+# `reboot` is this binary under another name and the host's way of ending the
+# boot.
+[programs.toybox]
+syscap = ["power"]
+
+[symlinks]
+"bin/echo" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"

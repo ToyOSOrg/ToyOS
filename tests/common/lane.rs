@@ -12,12 +12,9 @@
 //! every path derived from [`dir`] afterwards is that worker's alone, including
 //! ones written after this was.
 //!
-//! Reuse **within** a lane is deliberate and is what the serial suite already
-//! did: the NVMe scratch image is created by the first boot that wants that size
-//! and mounted by the ones after it. A filtered `cargo test -- <name>` has
-//! always given its first boot a blank disk, so no test may depend on a
-//! particular predecessor — which is what makes a lane's first boot the same
-//! situation.
+//! A lane is not a place state carries between tests: the NVMe scratch image is
+//! remade blank for every boot that names none (`QemuInstance::boot_with_options`),
+//! so no test can depend on, or be broken by, whichever test ran before it.
 
 use std::cell::Cell;
 use std::path::PathBuf;

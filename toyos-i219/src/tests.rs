@@ -2813,3 +2813,32 @@ fn a_lease_report_reads_back_as_it_was_written() {
         assert!(lease::summary(bad).is_err(), "{bad:?}");
     }
 }
+
+/// A previous holder's enabled receive and transmit units, and its unmasked
+/// interrupts, are stopped by the first thing a new holder does, and nothing
+/// else in the two registers changes.
+#[test]
+fn quiesce_stops_what_a_previous_holder_left_running() {
+    struct Regs(core::cell::RefCell<std::collections::BTreeMap<usize, u32>>);
+    impl crate::Registers for Regs {
+        fn bytes(&self) -> usize {
+            crate::regs::REGISTER_BYTES
+        }
+        fn read(&self, reg: usize) -> u32 {
+            *self.0.borrow().get(&reg).unwrap_or(&0)
+        }
+        fn write(&self, reg: usize, value: u32) {
+            self.0.borrow_mut().insert(reg, value);
+        }
+    }
+    let regs = Regs(core::cell::RefCell::default());
+    let rctl = crate::regs::rctl::EN | crate::regs::rctl::BAM;
+    let tctl = crate::regs::tctl::EN | crate::regs::tctl::PSP;
+    crate::Registers::write(&regs, crate::regs::RCTL, rctl);
+    crate::Registers::write(&regs, crate::regs::TCTL, tctl);
+    crate::quiesce(&regs);
+    let read = |reg| crate::Registers::read(&regs, reg);
+    assert_eq!(read(crate::regs::RCTL), crate::regs::rctl::BAM);
+    assert_eq!(read(crate::regs::TCTL), crate::regs::tctl::PSP);
+    assert_eq!(read(crate::regs::IMC), u32::MAX);
+}

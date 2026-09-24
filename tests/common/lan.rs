@@ -633,21 +633,25 @@ pub fn lan_talk(
     Ok(())
 }
 
-/// The talking boot's image, streaming to `at` and authorizing `identity`, and
-/// where its log partition sits in it.
+/// The talking boot's image, streaming to `at`, authorizing `identity` and
+/// arming `actuators`, and where its log partition sits in it.
 fn talk_image(
     case: &Path,
     name: &str,
     at: (&'static str, u16),
     identity: &super::ssh::Identity,
+    actuators: &[&str],
 ) -> Result<(std::path::PathBuf, usize, usize), String> {
     let param = qemu::log_stream_param(at);
+    // In `BootOptions::params`'s order, which the staged image is held to.
+    let mut params: Vec<&str> = actuators.to_vec();
+    params.push(&param);
     let bytes = qemu::build_boot_image_carrying(
         case,
         &[],
         &[],
         &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
-        &[&param],
+        &params,
     );
     let image = super::lane::dir().join(format!("{name}.img"));
     std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
@@ -655,22 +659,47 @@ fn talk_image(
     Ok((image, start, len))
 }
 
-/// A talking boot in front of QEMU's 82574, staged: its listener, the key its
-/// image authorizes, and where its log partition sits in the image.
-struct TalkBoot {
-    case: std::path::PathBuf,
-    stream: toyos_build::metaltalk::Stream,
-    identity: super::ssh::Identity,
-    image: std::path::PathBuf,
-    scratch: std::path::PathBuf,
+/// A talking boot staged in front of one of QEMU's NICs: its listener, the key
+/// its image authorizes, and where its log partition sits in the image.
+pub(super) struct TalkBoot {
+    pub(super) case: std::path::PathBuf,
+    pub(super) stream: toyos_build::metaltalk::Stream,
+    pub(super) identity: super::ssh::Identity,
+    pub(super) image: std::path::PathBuf,
+    pub(super) scratch: std::path::PathBuf,
     at: (&'static str, u16),
-    start: usize,
-    len: usize,
+    bench: super::logstream::Bench,
+    actuators: &'static [&'static str],
+    pub(super) start: usize,
+    pub(super) len: usize,
 }
+
+/// The talking boot's NIC: QEMU's 82574, the part whose register file the
+/// T14's I219 has.
+pub(super) const TALK_BENCH: super::logstream::Bench = super::logstream::Bench {
+    profile: qemu::Profile::E1000e,
+    config: TALK_QEMU_CONFIG,
+    device: "e1000e",
+};
 
 impl TalkBoot {
     fn stage(name: &str) -> Result<Self, String> {
-        let case = super::compile::repo_root().join(TALK_QEMU_CONFIG);
+        Self::stage_on(name, TALK_BENCH)
+    }
+
+    /// `bench.config`'s boot staged to stream to a listener of this host's and
+    /// to authorize the lane's talking key.
+    pub(super) fn stage_on(name: &str, bench: super::logstream::Bench) -> Result<Self, String> {
+        Self::stage_armed(name, bench, &[])
+    }
+
+    /// [`TalkBoot::stage_on`] on the test kernel, with `actuators` armed.
+    pub(super) fn stage_armed(
+        name: &str,
+        bench: super::logstream::Bench,
+        actuators: &'static [&'static str],
+    ) -> Result<Self, String> {
+        let case = super::compile::repo_root().join(bench.config);
         let scratch = super::lane::dir().join(name);
         std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
         let identity = super::ssh::Identity::mint(TALK_KEY)?;
@@ -680,21 +709,23 @@ impl TalkBoot {
             false,
         )?;
         let at = (qemu::GUEST_VIEW_OF_HOST, stream.local().port());
-        let (image, start, len) = talk_image(&case, name, at, &identity)?;
-        Ok(Self { case, stream, identity, image, scratch, at, start, len })
+        let (image, start, len) = talk_image(&case, name, at, &identity, actuators)?;
+        Ok(Self { case, stream, identity, image, scratch, at, bench, actuators, start, len })
     }
 
     /// The boot's options, the NIC asked of the argv rather than assumed.
-    fn options(&self) -> BootOptions {
+    pub(super) fn options(&self) -> BootOptions {
         let options = BootOptions {
-            profile: qemu::Profile::E1000e,
+            profile: self.bench.profile,
             boot_image: Some(qemu::Staged::Written(self.image.clone())),
             log_stream: Some(self.at),
+            kernel_params: self.actuators,
             ..Default::default()
         };
         assert!(
-            qemu::profile_argv(&options).iter().any(|a| a.contains("e1000e")),
-            "[lan] this boot needs an Intel NIC and the profile has none"
+            qemu::profile_argv(&options).iter().any(|a| a.contains(self.bench.device)),
+            "[lan] this boot needs {} and the profile has none",
+            self.bench.device
         );
         options
     }
@@ -797,7 +828,7 @@ pub fn lan_talk_host_closes(
         }
     });
     let at = (qemu::GUEST_VIEW_OF_HOST, port);
-    let (image, start, len) = talk_image(&case, "lan-talk-host-closes", at, &identity)?;
+    let (image, start, len) = talk_image(&case, "lan-talk-host-closes", at, &identity, &[])?;
     let options = BootOptions {
         profile: qemu::Profile::E1000e,
         boot_image: Some(qemu::Staged::Written(image.clone())),

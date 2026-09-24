@@ -1223,3 +1223,42 @@ name = "boot.lantalkcase.panel_us"
 unit = "us"
 ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
+
+# `lanswapcase` is `lantalkcase` flashed without `--talk`: netd is swapped while
+# it runs by the `--swap` invocation beside the loop, and its hold ends it.
+
+[[number]]
+name = "boot.lanswapcase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "as boot.lancase.complete_ms"
+
+[[number]]
+name = "boot.lanswapcase.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.lanswapcase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.lancase.stick_secs"
+
+[[number]]
+name = "list.lanswapcase.job_ms"
+unit = "ms"
+ceiling = 54000
+ceiling_from = "as list.lantalkcase.job_ms"
+
+[[number]]
+name = "boot.lanswapcase.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
+name = "boot.lanswapcase.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
