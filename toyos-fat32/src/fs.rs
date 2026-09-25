@@ -36,6 +36,13 @@ pub struct Fat32<D: BlockAccess> {
     /// directory scan reads one sector per sixteen entries instead of one per
     /// entry, and every write invalidates it, so it cannot go stale.
     pub(crate) scratch_at: Option<u64>,
+    /// The cluster this mount claimed and nothing reaches: the write that
+    /// would have linked or prepared it was refused. It is end-of-chain in
+    /// every FAT, so the next claim takes it instead of scanning — the retry a
+    /// refusal invites re-drives the refused write onto the same cluster — and
+    /// [`Fat32::sync`] frees it if no claim came. At most one: every claim
+    /// takes it before it can be set again.
+    pub(crate) unreached: Option<Cluster>,
 }
 
 /// What a path names, once resolved.
@@ -230,7 +237,7 @@ impl<D: BlockAccess> Fat32<D> {
         let geom = Self::probe(&mut dev)?;
         let mut scratch = vec![0u8; geom.bytes_per_sector as usize];
         let fsinfo = FsInfo::read(&mut dev, &geom, &mut scratch);
-        Ok(Fat32 { dev, geom, fsinfo, scratch, scratch_at: None })
+        Ok(Fat32 { dev, geom, fsinfo, scratch, scratch_at: None, unreached: None })
     }
 
     pub fn geometry(&self) -> &Geometry {
@@ -867,24 +874,19 @@ impl<D: BlockAccess> Fat32<D> {
         }
         name::validate_component(&name)?;
 
-        // The cluster is prepared before the entry that names it exists, so a
-        // failure here leaks a cluster rather than leaving a directory entry
-        // pointing at uninitialised bytes that would read as entries.
-        let cluster = self.alloc_zeroed_cluster()?;
-        self.init_dot_entries(cluster, dir, time)?;
-
-        let mut template = RawEntry::zeroed();
-        template.set_attr(ATTR_DIRECTORY);
-        template.set_first_cluster(cluster.raw());
-        template.set_create_time(time);
-        template.set_write_time(time);
-        match self.insert_entry(dir, &name, &template) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let _ = self.free_chain(cluster, None);
-                Err(e)
-            }
-        }
+        // The cluster is prepared before the entry that names it exists: an
+        // entry naming uninitialised bytes would read them as entries.
+        self.claim_reached(|fs, cluster| {
+            fs.zero_cluster(cluster)?;
+            fs.init_dot_entries(cluster, dir, time)?;
+            let mut template = RawEntry::zeroed();
+            template.set_attr(ATTR_DIRECTORY);
+            template.set_first_cluster(cluster.raw());
+            template.set_create_time(time);
+            template.set_write_time(time);
+            fs.insert_entry(dir, &name, &template).map(|_| ())
+        })?;
+        Ok(())
     }
 
     /// Create every missing directory along a path.
@@ -919,8 +921,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// leaks clusters, which `fsck` reclaims; the other order left a live
     /// entry naming freed clusters, which `fsck` can only repair by guessing
     /// who owns them, and which the next allocation turns into a cross-link.
-    /// This is the ordering `append_cluster` and `create_dir` already argue
-    /// for; `remove` was the one place it was not applied.
+    /// This is the ordering [`Self::claim_reached`] argues for, run backwards.
     pub fn remove(&mut self, path: &str) -> Result<(), Error> {
         let (dir, name) = self.parent_of(path)?;
         let Some((raw, loc)) = self.find_in_dir(dir, &name)? else {
@@ -1067,10 +1068,16 @@ impl<D: BlockAccess> Fat32<D> {
 
     /// Make every write durable and record the free-cluster hints.
     ///
-    /// FSInfo is written before the flush so the flush covers it.
+    /// FSInfo is written before the flush so the flush covers it, and a claim
+    /// nothing reaches is freed before either: a volume left at rest with one
+    /// is a cluster no entry reaches.
     pub fn sync(&mut self) -> Result<(), Error> {
+        if let Some(cluster) = self.unreached {
+            self.free_chain(cluster, None)?;
+            self.unreached = None;
+        }
         if self.fsinfo.dirty {
-            let Fat32 { dev, geom, fsinfo, scratch, scratch_at } = self;
+            let Fat32 { dev, geom, fsinfo, scratch, scratch_at, .. } = self;
             *scratch_at = None;
             fsinfo.write(dev, geom, scratch)?;
             fsinfo.dirty = false;
