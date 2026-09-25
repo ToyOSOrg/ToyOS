@@ -10,6 +10,8 @@
 //! actually is. Where the two describe the same offset the `§8.` clause is the
 //! one that governs that part, and where only one of them names a field it is
 //! cited alone.
+//! The PCH MAC's multicast table, which §8 does not publish, is cited from the
+//! *Intel Ethernet Connection I219 Datasheet*, document 612523, revision 2.02.
 //!
 //! **Where neither document publishes a field the PCH's MAC needs, the field is
 //! stated as a property of that part** and named by what it does; each such
@@ -56,6 +58,34 @@ pub const RADV: usize = 0x0282C;
 /// Multicast Table Array, 128 dwords (§10.2.5.21, `0x05200`..`0x053FC`).
 pub const MTA: usize = 0x05200;
 pub const MTA_DWORDS: usize = 128;
+
+/// Which of the 82574's Multicast Table Array bits a multicast destination
+/// hashes to: the dword, and the bit in it. §10.2.5.21: `RCTL.MO` selects which
+/// 12 bits of the destination address index the 4096-bit array, and this
+/// driver leaves it `00b`, which is bits 47:36 — the high nibble of the fifth
+/// octet and the whole sixth; bits 11:5 of the index pick the dword and bits
+/// 4:0 the bit.
+pub fn mta_bit_82574(group: [u8; 6]) -> (usize, u32) {
+    let index = (group[4] as usize >> 4) | (group[5] as usize) << 4;
+    (index >> 5, index as u32 & 0x1F)
+}
+
+/// The PCH MAC's Multicast Table Array, stated as a property of that part: 32
+/// dwords, not the 82574's 128. §8.2 publishes no row for it. The table the
+/// *Intel Ethernet Connection I219 Datasheet* (document 612523, revision 2.02)
+/// publishes is the PHY's wake-up copy of it, §9.5.9.2.23: "one register per 32
+/// bits of the multicast address table for a total of 32 registers".
+pub const MTA_DWORDS_PCH: usize = 32;
+
+/// Which of the PCH MAC's Multicast Table Array bits a multicast destination
+/// hashes to, stated from the same copy: 612523 §9.5.9.2.23, Figure 9-1, with
+/// the multicast offset `00b`, directs DA[47:38] to the table — the whole sixth octet and the
+/// top two bits of the fifth — a 10-bit index into [`MTA_DWORDS_PCH`] dwords,
+/// bits 9:5 the dword and 4:0 the bit.
+pub fn mta_bit_pch(group: [u8; 6]) -> (usize, u32) {
+    let index = (group[4] as usize >> 6) | (group[5] as usize) << 2;
+    (index >> 5, index as u32 & 0x1F)
+}
 /// Receive Address Low/High, entry 0 (§10.2.5.22, §10.2.5.23) — the station
 /// address, and the one exact-match filter this driver uses.
 pub const RAL0: usize = 0x05400;

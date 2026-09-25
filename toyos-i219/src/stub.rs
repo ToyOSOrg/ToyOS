@@ -1064,6 +1064,14 @@ impl Model {
         );
         self.keep_quiet(reg);
         self.written.insert(reg);
+        let past_pch_table = regs::MTA + regs::MTA_DWORDS_PCH * 4..regs::MTA + regs::MTA_DWORDS * 4;
+        assert!(
+            self.part != Part::I219 || !past_pch_table.contains(&reg),
+            "seed {}: the driver wrote {value:#010x} into {reg:#x}, past the PCH's {}-dword \
+             multicast table",
+            self.seed,
+            regs::MTA_DWORDS_PCH
+        );
         assert!(
             self.not_decoding != Some(reg),
             "seed {}: the driver wrote {value:#010x} into {reg:#x}, which nothing decodes — the \

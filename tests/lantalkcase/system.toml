@@ -13,8 +13,8 @@ start = ["logd", "netd", "sshd", "test-runner"]
 
 [programs.logd]
 syscap = ["logread"]
-# The record stream's authority: the address on the parameter line is
-# information, and this row is the whole of what can act on it.
+# What lets `logd` serve this boot's log on the network, to whoever connects:
+# without it the log is served on this machine only.
 receives = ["netd"]
 
 [programs.netd]

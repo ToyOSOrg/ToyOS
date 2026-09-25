@@ -34,9 +34,12 @@ enum ReadBlock {
     Pipe(pipe::PipeEnd, pipe::PipeId),
     VirtioSound,
     Hda,
-    /// A console read re-polls; a claimed keyboard waits with
-    /// [`Deadline::never`], woken by its own IRQ.
+    /// A claimed keyboard, woken by its own IRQ.
     Keyboard(Deadline),
+    /// A console, which reads the serial line and nothing else: it waits on
+    /// the serial line, never on the keyboard's queue, which only a claim
+    /// drains and which would answer it at once for as long as a key sits there.
+    Console(Deadline),
     /// Nothing to wait for: the answer is this word.
     Refused(u64),
     /// Carried out of the process's lock: `HandleError::refuse` may take the
@@ -109,7 +112,7 @@ fn read_block(object: &KObjectRef) -> ReadBlock {
                 Duration::from_millis(10),
                 "nothing posts a serial-console key, so this rate is the whole of the wake",
             );
-            ReadBlock::Keyboard(Deadline::at(crate::clock::now() + CONSOLE_REPOLL.duration()))
+            ReadBlock::Console(Deadline::at(crate::clock::now() + CONSOLE_REPOLL.duration()))
         }
         _ => match ops::pipe_id_read(object).and_then(|id| {
             pipe::readers_queue(id).map(|end| ReadBlock::Pipe(end, id))
@@ -205,6 +208,21 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                     WaitClass::Io,
                     deadline,
                     crate::keyboard::has_data,
+                )
+                .is_err()
+                {
+                    return cancelled();
+                }
+            }
+            Err(ReadBlock::Console(deadline)) => {
+                let parkable = crate::scheduler::Parkable::at_entry();
+                if completion::wait_until(
+                    &parkable,
+                    completion::Subject::of(&crate::sched::waitqs::KEYBOARD_WATCH),
+                    completion::Token::new(0),
+                    WaitClass::Io,
+                    deadline,
+                    crate::drivers::serial::has_data,
                 )
                 .is_err()
                 {

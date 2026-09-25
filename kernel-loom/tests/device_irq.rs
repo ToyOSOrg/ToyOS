@@ -106,3 +106,31 @@ fn an_idle_record_answers_nothing() {
         assert!(!irq.armed(), "a drained record still reads ready");
     });
 }
+
+/// A fault owes its holder a wake, and the pass that takes it reads the fault.
+///
+/// The fault handler and the scheduler pass that turns the wake into a wake-up
+/// may be different CPUs, and what the woken holder reads next is the refusal:
+/// a pass that took the wake and still read the claim unfaulted would wake a
+/// holder into reading "no interrupt" and parking again, for a function that
+/// can no longer send one. A `Relaxed` wake fails the first assertion, and a
+/// fault that posts no wake the last.
+#[test]
+fn a_faults_wake_carries_the_fault() {
+    loom::model(|| {
+        let irq = Arc::new(Interrupt::new());
+
+        let handler = {
+            let irq = irq.clone();
+            loom::thread::spawn(move || irq.fault())
+        };
+
+        let taken_before = irq.take_pending();
+        if taken_before {
+            assert!(irq.faulted(), "a pass took a fault's wake and read the claim unfaulted");
+        }
+        handler.join().unwrap();
+        assert!(irq.faulted());
+        assert!(taken_before || irq.take_pending(), "a fault owed its holder a wake and posted none");
+    });
+}

@@ -68,18 +68,19 @@ pub struct Arm {
     /// ask**: a boot whose judges read no cable would be refused for a fact
     /// none of them looks at.
     pub nic: Option<&'static str>,
-    /// **The boot is talked to over its own cable.** Its image streams its
-    /// records to the listener `--metal-listen` names and authorizes a key
-    /// minted beside it, and the loop — told `--talk` — listens, pings the
-    /// address that opens the stream, runs a command there and tells it to
-    /// reboot. `false` on every boot whose judge reads the stick alone.
+    /// **The boot is talked to over its own cable.** Its image authorizes a
+    /// key minted beside it, and the loop — told `--talk` — reads the log the
+    /// machine serves under its name, pings the address the name answers with,
+    /// runs a command there and tells it to reboot. `false` on every boot whose
+    /// judge reads the stick alone.
     pub talk: bool,
     /// **The boot has one of its services swapped while it runs**, with no
     /// reboot: its image is staged as a talking boot's is, the invocation
     /// that flashes it is not told `--talk`, and a second invocation —
-    /// `toyos-metal --swap <this service>`, started beside the first — owns the
-    /// listener, sends the build's own binary of that service and writes
-    /// [`toyos_build::metal::READBACK_SWAP`] beside the stick's files.
+    /// `toyos-metal --swap <this service>`, started beside the first — dials
+    /// the machine under its own name, sends the build's own binary of that
+    /// service and writes [`toyos_build::metal::READBACK_SWAP`] beside the
+    /// stick's files.
     pub swap: Option<&'static str>,
 }
 
@@ -215,7 +216,7 @@ pub struct Readback {
     loader: String,
     /// The kernel's own records of every `logd` file this boot wrote.
     kernel: String,
-    /// Every record of those files, the programs' included.
+    /// Every line of those files, the programs' included.
     log: String,
     /// `Boot: complete (Nms)`, or `None` on a boot that never got there.
     pub boot_ms: Option<u64>,
@@ -235,8 +236,8 @@ pub struct Readback {
 }
 
 impl Readback {
-    /// What the loop heard over the boot's own cable, and the record stream it
-    /// received — or why a boot that was to be talked to has neither.
+    /// What the loop heard over the boot's own cable, and the log the machine
+    /// served it — or why a boot that was to be talked to has neither.
     ///
     /// **Absent is a finding here, never an empty answer**: the loop writes
     /// the conversation before anything can refuse, so a talking boot's
@@ -287,12 +288,12 @@ impl Readback {
     }
 
     /// Every `logd` file this boot wrote, as one text, less every program's
-    /// record ([`bootlog::kernel_records`]): no program's line is read as the kernel's.
+    /// line ([`bootlog::kernel_records`]): no program's line is read as the kernel's.
     pub fn kernel(&self) -> Serial {
         Serial::named(&format!("{}'s kernel log", self.label), self.kernel.as_str())
     }
 
-    /// The same files whole, the programs' records included.
+    /// The same files whole, the programs' lines included.
     pub fn log(&self) -> Serial {
         Serial::named(&format!("{}'s log", self.label), self.log.as_str())
     }
@@ -499,8 +500,8 @@ impl Readback {
         match self.exit_code(binary)? {
             0 => Ok(()),
             code => Err(format!(
-                "{binary} exited {code} on the T14; its output reaches no channel on this \
-                 machine, so the code is the whole verdict"
+                "{binary} exited {code} on the T14; its own lines are in the boot's log under \
+                 the name of whoever ran it"
             )),
         }
     }
@@ -557,8 +558,6 @@ struct Batch {
     talk: bool,
     /// [`Arm::swap`], carried to the image, the invocation and the second one.
     swap: Option<&'static str>,
-    /// `--metal-listen`, on a talking batch: where its record stream goes.
-    listen: Option<String>,
 }
 
 impl Batch {
@@ -606,7 +605,6 @@ fn batches(
                 nic: None,
                 talk: false,
                 swap: None,
-                listen: None,
             },
         );
         if was.is_some() {
@@ -626,7 +624,6 @@ fn batches(
                 nic: arm.nic,
                 talk: arm.talk,
                 swap: arm.swap,
-                listen: None,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
@@ -796,28 +793,12 @@ fn build(
     let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
-    // **A talking boot carries the host's half of the cable in its image**: the
-    // listener's address, which only the command line can say, and the key the
-    // loop will offer, minted beside the image so the loop finds it there.
-    let stream_param = match (batch.talk || batch.swap.is_some(), batch.listen.as_deref()) {
-        (false, _) => None,
-        (true, None) => {
-            return Err(format!(
-                "{label} is talked to over its own cable, and its record stream needs this \
-                 host's address on the machine's network: pass --metal-listen <a.b.c.d:port>"
-            ))
-        }
-        (true, Some(at)) => {
-            let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
-            extra.push((
-                super::ssh::KEYS_ON_ROOT.to_string(),
-                identity.authorized_line().into_bytes(),
-            ));
-            Some(format!("{}{at}", toyos_logstream::PARAM))
-        }
-    };
-    if let Some(param) = &stream_param {
-        params.push(param);
+    // **A talking or swapping boot carries the key the loop will offer**,
+    // minted beside the image so the loop finds it there. Nothing about this
+    // host is in it: the loop finds the machine by its name.
+    if batch.talk || batch.swap.is_some() {
+        let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
+        extra.push((super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
     }
     let plan = toyos_build::build::Plan::new(&config, features, &params);
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
@@ -873,9 +854,9 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
 }
 
 /// The second invocation a swapping boot owes: started beside the one that
-/// flashes it, it listens for the boot's stream and swaps `service` for the
-/// binary [`build`] copied beside the image.
-fn swap_invocation(image: &Path, home: &Path, service: &str) -> Vec<String> {
+/// flashes it, it dials the address the machine answers to under its own
+/// name and swaps `service` for the binary [`build`] copied beside the image.
+fn swap_invocation(home: &Path, service: &str) -> Vec<String> {
     [
         "run",
         "--bin",
@@ -885,8 +866,6 @@ fn swap_invocation(image: &Path, home: &Path, service: &str) -> Vec<String> {
         service,
         "--binary",
         &home.join(service).display().to_string(),
-        "--image",
-        &image.display().to_string(),
         "--talk",
         &talk_home(home).join("id_ed25519").display().to_string(),
         "--readback",
@@ -955,8 +934,6 @@ pub fn run(
     // then put on the image.
     helpers: &[&str],
     quiet: bool,
-    // `--metal-listen`: where a talking boot streams its records.
-    listen: Option<&str>,
 ) -> Verdict {
     let root = super::compile::repo_root();
     let profile = match Profile::load(&root) {
@@ -976,16 +953,13 @@ pub fn run(
         }
     };
     let shared = shared.as_slice();
-    let mut batches = match batches(tests, shared, &profile) {
+    let batches = match batches(tests, shared, &profile) {
         Ok(batches) => batches,
         Err(why) => {
             eprintln!("[metal] {why}");
             return Verdict::Red;
         }
     };
-    for batch in batches.values_mut().filter(|b| b.talk || b.swap.is_some()) {
-        batch.listen = listen.map(str::to_string);
-    }
     let declared: Vec<&str> = tests
         .iter()
         .filter_map(|(name, decl)| match decl {
@@ -1058,7 +1032,7 @@ pub fn run(
             if let Some(service) = batches[*label].swap {
                 request.push_str(&format!(
                     "  and beside it, started first:\n  cargo {}\n",
-                    swap_invocation(image, &at(dir, label), service).join(" ")
+                    swap_invocation(&at(dir, label), service).join(" ")
                 ));
             }
         }
@@ -1087,10 +1061,11 @@ pub fn run(
     if mode == Mode::Drive {
         for (label, image) in &images {
             let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
-            // A swapping boot's second invocation is started first: it owns
-            // the listener the boot streams to, and waits for the boot.
+            // A swapping boot's second invocation is started first: it dials
+            // the machine under its own name for as long as it takes, and
+            // waits for the boot.
             let beside = batches[*label].swap.map(|service| {
-                let words = swap_invocation(image, &at(dir, label), service);
+                let words = swap_invocation(&at(dir, label), service);
                 eprintln!("[metal] {label}, beside it: cargo {}", words.join(" "));
                 Command::new("cargo").args(&words).current_dir(&root).spawn()
             });

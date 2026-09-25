@@ -147,7 +147,7 @@ struct Backfill<'a> {
 }
 
 impl log::read::RecordSink for Backfill<'_> {
-    fn put(&mut self, record: &toyos_abi::log::LogRecord, _origin: log::Origin) -> bool {
+    fn put(&mut self, record: &toyos_abi::log::LogRecord) -> bool {
         let line = rendered_len(record).saturating_add(1);
         let Some(at) = self.at.checked_sub(line) else { return false };
         let Some(out) = self.into.text.get_mut(at..self.at) else { return false };
@@ -649,11 +649,6 @@ fn fatal_claimed() -> bool {
     FATAL.load(Ordering::Relaxed) != 0
 }
 
-/// Whether the panel shows the log: a framebuffer is armed and no process has claimed it.
-pub fn shows_the_log() -> bool {
-    !SCREEN_OWNED_BY_USERLAND.load(Ordering::Relaxed) && snapshot().is_some()
-}
-
 /// Paint the newest page of the captured report, fatal paths only; returns
 /// whether this call claimed the screen, entitling [`page_forever`] — which it
 /// does whatever any painter that is not a fatal path holds.
@@ -804,90 +799,21 @@ pub fn boot_checkpoint() {
     repaint();
 }
 
-/// Repaint for a program's line; `klogd` paces the calls. Neither a claimed
-/// screen nor a held report ([`report_held_until`]) is painted over, and a
-/// paint under way gives the panel up the moment a report takes it. Returns
-/// whether the lines are still owed: a held report defers them to its end, and
-/// another painter holding the panel to the next pass.
-pub fn spoken_checkpoint() -> bool {
-    if SCREEN_OWNED_BY_USERLAND.load(Ordering::Relaxed) {
-        return false;
-    }
-    if report_held() {
-        return true;
-    }
-    if !take_for_boot() {
-        // Another painter's paint may predate these lines; a fatal one ends painting for good.
-        return !fatal_claimed();
-    }
-    // Again under the latch: `paint_report` sets the hold before it asks for the latch.
-    if report_held() {
-        PAINTING.store(false, Ordering::SeqCst);
-        return true;
-    }
-    #[cfg(feature = "boot-actuators")]
-    stall::inside_the_latch();
-    paint(Fill::Boot, live_tail(), Page::Last, Watch::No, || fatal_claimed() || report_held());
-    PAINTING.store(false, Ordering::SeqCst);
-    report_held()
-}
-
-/// When Ctrl+Alt+D's report gives the panel back, in `nanos_since_boot`; 0
-/// or a past instant when it does not hold it.
-pub fn report_held_until() -> u64 {
-    HOLD_UNTIL.load(Ordering::Relaxed)
-}
-
-fn report_held() -> bool {
-    crate::clock::nanos_since_boot() < HOLD_UNTIL.load(Ordering::Relaxed)
-}
-
-/// The `panel-painter-stalls` actuator: a program's repaint that keeps the
-/// latch while it is parked, the way one descheduled mid-paint does, and never
-/// runs again once the halt IPI is out; `SYS_DEBUG`'s fatal halt waits for one,
-/// so `screen_fatal_behind_a_painter` has a fatal path land on a latch no
-/// painter will give back.
+/// The `panel-painter-stalls` actuator: Ctrl+Alt+D's report painter, holding
+/// the latch, goes fatal before it paints, so `screen_fatal_behind_a_painter`
+/// has a fatal path land on a latch whose holder is beneath it and will never
+/// give it back — the case of a painter halted by the halt IPI mid-paint.
 #[cfg(feature = "boot-actuators")]
 pub mod stall {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    use crate::time::{Budget, Deadline, Duration};
-
-    /// Set while a repaint is parked holding the latch.
-    static STALLED: AtomicBool = AtomicBool::new(false);
-
-    const PARKED: Budget = Budget::of(
-        Duration::from_millis(50),
-        "the repaint goes on, and a fatal path that missed the window paints unopposed",
-    );
-
-    /// What the fatal halt says once it has found a repaint stalled; the test reads it.
-    #[cfg(feature = "test-actuators")]
-    pub const HELD: &str = "panel: a repaint is holding the latch and not painting";
+    /// What the painter says as it goes fatal; the test reads it off the panel.
+    pub const HELD: &str = "panel: a painter holding the panel went fatal";
 
     pub(super) fn inside_the_latch() {
         if !crate::actuator::panel_painter_stalls() {
             return;
         }
-        let Some(handle) = crate::sched::driver::current_handle() else { return };
-        let parkable = crate::scheduler::Parkable::at_entry();
-        STALLED.store(true, Ordering::SeqCst);
-        // Asleep, so whatever runs on this CPU meanwhile finds the latch held.
-        let _ = crate::completion::wait_until(
-            &parkable,
-            crate::completion::Subject::of(handle.watch()),
-            crate::completion::Token::new(0),
-            toyos_sched::task::WaitClass::Other,
-            Deadline::at(crate::clock::now() + PARKED.duration()),
-            || false,
-        );
-        STALLED.store(false, Ordering::SeqCst);
-    }
-
-    /// Whether a repaint is parked inside the latch right now; only the fatal halt asks.
-    #[cfg(feature = "test-actuators")]
-    pub fn stalled() -> bool {
-        STALLED.load(Ordering::SeqCst)
+        crate::log!("{HELD}");
+        crate::arch::apic::halt_all_cpus();
     }
 }
 
@@ -922,16 +848,6 @@ pub fn paint_report(from: u64, to: u64) {
         crate::clock::nanos_since_boot().saturating_add(REPORT_HOLD.nanos()),
         Ordering::Relaxed,
     );
-    // A program's repaint gives the latch up at its next row once the hold is
-    // set, and a boot checkpoint at the end of its paint: the report is the
-    // first paint of its hold rather than a put-back after one.
-    let until = crate::clock::nanos_since_boot().saturating_add(OUTWAIT.nanos());
-    while !fatal_claimed()
-        && PAINTING.load(Ordering::SeqCst)
-        && crate::clock::nanos_since_boot() < until
-    {
-        core::hint::spin_loop();
-    }
     paint_held_report();
 }
 
@@ -945,6 +861,8 @@ fn paint_held_report() {
     if !take_for_boot() {
         return;
     }
+    #[cfg(feature = "boot-actuators")]
+    stall::inside_the_latch();
     forget_the_glass();
     paint(Fill::Boot, report_text(), Page::Last, Watch::Yes, fatal_claimed);
     PAINTING.store(false, Ordering::SeqCst);

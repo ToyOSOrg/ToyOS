@@ -11,20 +11,19 @@
 //! choosing); [`submit`] waits instead, throttling the *control* thread, which
 //! is the one that can afford it.
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use toyos_mixer::Gain;
 
 use crate::client::{ClientStream, Departure};
 use crate::control::MAX_CONTROL_CLIENTS;
+use crate::ring::Spsc;
 
 /// Deep enough that one pass of the control loop can never fill it: a pass
 /// pushes at most one `AddClient` (there is one accept per wait) plus, per
 /// connected client, one coalesced `SetVolume` and one `RemoveClient`.
-const CMD_RING_SIZE: u32 = 256;
-const _: () = assert!(CMD_RING_SIZE as usize >= 1 + 2 * MAX_CONTROL_CLIENTS);
+const CMD_RING_SIZE: usize = 256;
+const _: () = assert!(CMD_RING_SIZE >= 1 + 2 * MAX_CONTROL_CLIENTS);
 
 pub(crate) enum MixCommand {
     AddClient(Box<ClientStream>),
@@ -32,22 +31,15 @@ pub(crate) enum MixCommand {
     SetVolume { client_id: usize, target: Gain },
 }
 
-pub(crate) struct CommandRing {
-    slots: std::cell::UnsafeCell<[Option<MixCommand>; CMD_RING_SIZE as usize]>,
-    write_idx: AtomicU32,
-    read_idx: AtomicU32,
-}
+/// The control thread is the one producer and the mix thread the one consumer.
+pub(crate) struct CommandRing(Spsc<MixCommand, CMD_RING_SIZE>);
 
 unsafe impl Send for CommandRing {}
 unsafe impl Sync for CommandRing {}
 
 impl CommandRing {
     pub(crate) fn new() -> Self {
-        Self {
-            slots: std::cell::UnsafeCell::new(std::array::from_fn(|_| None)),
-            write_idx: AtomicU32::new(0),
-            read_idx: AtomicU32::new(0),
-        }
+        Self(Spsc::new())
     }
 
     /// Hands the command back when the ring is full rather than dropping it (a
@@ -56,25 +48,11 @@ impl CommandRing {
     /// everything it has written before yielding. See `submit`, which waits.
     #[must_use]
     fn try_push(&self, cmd: MixCommand) -> Result<(), MixCommand> {
-        let w = self.write_idx.load(Ordering::Acquire);
-        let r = self.read_idx.load(Ordering::Acquire);
-        if w.wrapping_sub(r) >= CMD_RING_SIZE {
-            return Err(cmd);
-        }
-        let idx = (w % CMD_RING_SIZE) as usize;
-        unsafe { (*self.slots.get())[idx] = Some(cmd); }
-        self.write_idx.store(w.wrapping_add(1), Ordering::Release);
-        Ok(())
+        self.0.try_push(cmd)
     }
 
     pub(crate) fn pop(&self) -> Option<MixCommand> {
-        let w = self.write_idx.load(Ordering::Acquire);
-        let r = self.read_idx.load(Ordering::Acquire);
-        if w == r { return None; }
-        let idx = (r % CMD_RING_SIZE) as usize;
-        let cmd = unsafe { (*self.slots.get())[idx].take() };
-        self.read_idx.store(r.wrapping_add(1), Ordering::Release);
-        cmd
+        self.0.pop()
     }
 }
 

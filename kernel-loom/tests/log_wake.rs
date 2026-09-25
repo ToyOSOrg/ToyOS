@@ -36,7 +36,7 @@
 #![cfg(feature = "loom")]
 
 use kernel_loom::arch::LogCommitGuard;
-use kernel_loom::log_shard::{arm_waiter, signal_after_commit, waiter, Origin, Shard, FIRST_SEQ};
+use kernel_loom::log_shard::{arm_waiter, signal_after_commit, waiter, Shard, FIRST_SEQ};
 use loom::sync::atomic::{AtomicBool, Ordering};
 use loom::sync::Arc;
 use toyos_abi::log::LogRecord;
@@ -77,7 +77,7 @@ fn a_commit_and_an_arm_cannot_both_miss() {
             // the kernel's sole-writer bracket (`percpu_fetch_add`'s shim
             // argument in `lib.rs` is the other half).
             let seq = unsafe { producer.shard.reserve(&guard) };
-            unsafe { producer.shard.commit(seq, &record(seq), Origin::Kernel, &guard) };
+            unsafe { producer.shard.commit(seq, &record(seq), &guard) };
             // The kernel's `LogCommitGuard` has a `Drop` that reopens interrupts
             // here; the model's stand-in has nothing to restore, so this reads
             // as a no-op drop. It stays because the bracket closing before the

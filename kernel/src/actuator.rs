@@ -321,6 +321,9 @@ actuators! {
     /// Put a function a level reset returned to its defaults back with BAR 0 one BAR's size above the window it was cut, inside that window: a register holding a decodable address that is not the cut.
     pcidev_bar_moved_on_reset = "pcidev-bar-moved-on-reset";
 
+    /// Release every claimed function as though it advertised no reset at all, the way the T14's I219 is released: what it had taken in is still aimed at its last holder's grants when the next claim starts it mastering.
+    pcidev_reset_nothing = "pcidev-reset-nothing";
+
     /// Raise the local APIC's spurious vector on this CPU once.
     lapic_spurious_selftest = "lapic-spurious-selftest";
 
@@ -405,9 +408,6 @@ actuators! {
 
     /// Have every CPU emit patterned log records at once from spawned kernel threads.
     log_storm = "log-storm";
-
-    /// Widen every storm record to nearly a whole record's message, so one boot offers a stalled log stream more than the buffers under it can hold.
-    log_storm_wide = "log-storm-wide";
 
     /// Remove the IF/TF bracket around shard selection through publication — the negative control on the log's interrupt-atomicity claim.
     log_unbracketed_reserve = "log-unbracketed-reserve";
@@ -518,8 +518,8 @@ actuators! {
     /// Shorten the panicked kernel's own reboot bound from a minute to seconds, so a guest reaches the reset.
     panic_reboot_fast = "panic-reboot-fast";
 
-    /// Have a program's repaint spin inside the panel's latch, and `SYS_DEBUG`'s
-    /// fatal halt wait for one to: a fatal path meeting a painter that will not let go.
+    /// Have Ctrl+Alt+D's report painter go fatal holding the panel's latch: a
+    /// fatal path meeting a painter that will never let go.
     panel_painter_stalls = "panel-painter-stalls";
 }
 

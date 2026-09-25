@@ -150,7 +150,7 @@ fn is_reply(from: IpAddr, addr: Ipv4Addr, message: &[u8], token: &[u8; TOKEN]) -
 
 /// The internet checksum (RFC 1071): the one's-complement sum of the message as
 /// 16-bit words, complemented.
-fn checksum(message: &[u8]) -> u16 {
+pub fn checksum(message: &[u8]) -> u16 {
     let mut sum = 0u32;
     let (words, rest) = message.as_chunks::<2>();
     for word in words {

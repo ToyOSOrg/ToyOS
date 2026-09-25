@@ -12,20 +12,19 @@ use toyos_abi::log::LogRecord;
 use toyos_blackbox::{Kept, Recovery, Report};
 
 use super::read::{self, RecordSink};
-use super::shard::Origin;
 
 /// Write the section at `report`'s end.
 pub fn seal_into(report: &mut Report<'_>) {
     struct Measure(Recovery);
     impl RecordSink for Measure {
-        fn put(&mut self, record: &LogRecord, _origin: Origin) -> bool {
+        fn put(&mut self, record: &LogRecord) -> bool {
             self.0.saw(record.at_ns, record.message(), record);
             true
         }
     }
     struct Place<'k, 'r, 'a>(&'k mut Kept<'r, 'a>);
     impl RecordSink for Place<'_, '_, '_> {
-        fn put(&mut self, record: &LogRecord, _origin: Origin) -> bool {
+        fn put(&mut self, record: &LogRecord) -> bool {
             self.0.put(record.message(), record)
         }
     }

@@ -88,27 +88,12 @@ const _: () = assert!(core::mem::align_of::<Slot>() == 64);
 const _: () = assert!(core::mem::offset_of!(Slot, seq) == 0);
 const _: () = assert!(core::mem::offset_of!(LogRecord, at_ns) == core::mem::size_of::<u64>());
 
-/// Who wrote a record: the kernel, or a program through its console.
-///
-/// Kernel-private and never on the wire — the ABI's record has no field for it —
-/// because only the kernel's own serial drain acts on it: a spoken line reached
-/// the serial console when it was written, so the drain must not say it twice.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Origin {
-    Kernel,
-    Spoken,
-}
-
 /// One CPU's records.
 #[repr(C, align(64))]
 pub struct Shard {
     /// Next sequence number this shard will issue (a reservation count, not a commit count); only the owning CPU writes it.
     head: AtomicU64,
     slots: [Slot; SHARD_RECORDS],
-    /// Per slot, the sequence number of the spoken record it holds, or zero:
-    /// a sequence number rather than a flag, so a slot's previous generation can
-    /// never answer for its current one. Written as one more body word.
-    spoken: [AtomicU64; SHARD_RECORDS],
 }
 
 #[cfg(not(feature = "loom"))]
@@ -123,11 +108,7 @@ impl Shard {
             seq: AtomicU64::new(0),
             body: [const { AtomicU64::new(0) }; BODY_WORDS],
         };
-        Self {
-            head: AtomicU64::new(FIRST_SEQ),
-            slots: [EMPTY; SHARD_RECORDS],
-            spoken: [const { AtomicU64::new(0) }; SHARD_RECORDS],
-        }
+        Self { head: AtomicU64::new(FIRST_SEQ), slots: [EMPTY; SHARD_RECORDS] }
     }
 
     /// Loom's atomics have no `const` constructor, so this builds shards at run time.
@@ -141,7 +122,6 @@ impl Shard {
                 seq: AtomicU64::new(0),
                 body: core::array::from_fn(|_| AtomicU64::new(0)),
             }),
-            spoken: core::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 
@@ -181,7 +161,6 @@ impl Shard {
         &self,
         seq: u64,
         record: &LogRecord,
-        origin: Origin,
         _guard: &crate::arch::LogCommitGuard,
     ) {
         debug_assert!(
@@ -189,8 +168,7 @@ impl Shard {
             "reservation {seq} was lapped inside its publication bracket: an IF-ignoring path emitted a whole shard generation before this commit"
         );
 
-        let index = (seq % SHARD_RECORDS as u64) as usize;
-        let slot = &self.slots[index];
+        let slot = &self.slots[(seq % SHARD_RECORDS as u64) as usize];
 
         // Mark the slot `WRITING` before the body write, so a racing reader's re-check cannot see a false match.
         slot.seq.store(WRITING, Ordering::Relaxed);
@@ -211,12 +189,6 @@ impl Shard {
             bytes.copy_from_slice(&record.msg[i * 8..i * 8 + 8]);
             slot.body[HEADER_WORDS + i].store(u64::from_le_bytes(bytes), Ordering::Relaxed);
         }
-
-        let spoken = match origin {
-            Origin::Kernel => 0,
-            Origin::Spoken => seq,
-        };
-        self.spoken[index].store(spoken, Ordering::Relaxed);
 
         // Last store: this publishes the record.
         slot.seq.store(seq, PUBLISH);
@@ -242,8 +214,8 @@ impl Shard {
         Some(at_ns)
     }
 
-    /// Copy record `seq` out with who wrote it, or `None` if this shard cannot answer for it.
-    pub fn read(&self, seq: u64) -> Option<(LogRecord, Origin)> {
+    /// Copy record `seq` out, or `None` if this shard cannot answer for it.
+    pub fn read(&self, seq: u64) -> Option<LogRecord> {
         // Both bounds needed: `head` alone counts reservations, so `seq < head` admits a slot not yet committed.
         if seq < self.oldest_readable() || seq >= self.head() {
             return None;
@@ -275,11 +247,6 @@ impl Shard {
             let bytes = slot.body[HEADER_WORDS + i].load(Ordering::Relaxed).to_le_bytes();
             record.msg[i * 8..i * 8 + 8].copy_from_slice(&bytes);
         }
-        let origin = if self.spoken[(seq % SHARD_RECORDS as u64) as usize].load(Ordering::Relaxed) == seq {
-            Origin::Spoken
-        } else {
-            Origin::Kernel
-        };
 
         // Re-check is total: a writer marks `WRITING` before touching the body, so a match here means nothing wrote in between.
         fence(Ordering::Acquire);
@@ -287,7 +254,7 @@ impl Shard {
             return None;
         }
 
-        Some((record, origin))
+        Some(record)
     }
 }
 

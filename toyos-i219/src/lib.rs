@@ -784,8 +784,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         }
 
         // §4.6.5: "Set up the Multicast Table Array (MTA) per software. This
-        // generally means zeroing all entries initially."
-        for entry in 0..regs::MTA_DWORDS {
+        // generally means zeroing all entries initially." The table this part
+        // has, and nothing past it.
+        let table = match part {
+            Part::E82574 => regs::MTA_DWORDS,
+            Part::I219 => regs::MTA_DWORDS_PCH,
+        };
+        for entry in 0..table {
             regs.write(regs::MTA + entry * 4, 0);
         }
 
@@ -898,6 +903,19 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// re-reading `STATUS`, which the next pass does anyway.
     pub fn provoke_message(&self) {
         self.regs.write(regs::ICS, cause::LSC);
+    }
+
+    /// Pass frames sent to the multicast address `group`: the one bit of the
+    /// Multicast Table Array its hash names on this part ([`regs::mta_bit_82574`],
+    /// [`regs::mta_bit_pch`]) is set, and
+    /// every other bit is left as it was.
+    pub fn accept_multicast(&self, group: [u8; 6]) {
+        let (dword, bit) = match self.part {
+            Part::E82574 => regs::mta_bit_82574(group),
+            Part::I219 => regs::mta_bit_pch(group),
+        };
+        let at = regs::MTA + dword * 4;
+        self.regs.write(at, self.regs.read(at) | 1 << bit);
     }
 
     /// A register wrote what it was told, so a window that is not this register

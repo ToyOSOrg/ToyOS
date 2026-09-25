@@ -12,7 +12,6 @@ use crate::sync::Lock;
 use crate::user_ptr::UserBytesMut;
 
 use super::read::{drain_ordered, Cursor, RecordSink};
-use super::shard::Origin;
 
 static INBOX_WATCHERS: Lock<Vec<InboxId>> = Lock::new(Vec::new());
 
@@ -46,8 +45,7 @@ struct UserRecords<'a, 'b> {
 }
 
 impl RecordSink for UserRecords<'_, '_> {
-    // The origin is in the message: a program's record opens with the form only the kernel writes for one.
-    fn put(&mut self, record: &LogRecord, _origin: Origin) -> bool {
+    fn put(&mut self, record: &LogRecord) -> bool {
         if self.written >= self.capacity {
             return false;
         }

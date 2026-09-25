@@ -542,8 +542,8 @@ impl VirtioNet {
     }
 
     /// Say what this driver has refused or dropped, when either count has
-    /// moved.
-    fn report_refusals(&self) {
+    /// moved. Once a pass, never per frame: a burst of drops is one line.
+    pub fn report(&self) {
         let refused = self.rx.borrow().refused + self.tx.borrow().refused;
         let dropped = self.tx_dropped.get();
         if self.reported.moved((refused, dropped)).is_none() {
@@ -592,9 +592,6 @@ impl VirtioNet {
     pub fn poll_rx(&self) -> Option<(usize, usize)> {
         loop {
             let polled = self.rx.borrow_mut().poll_used();
-            // After the poll and before the answer, so a pass that refused
-            // every element it saw still says so.
-            self.report_refusals();
             let (head, written) = polled?;
             // `parse_used` bounded the head by the descriptor table's length,
             // which is this queue's size, which is the buffer count.
@@ -648,7 +645,6 @@ impl VirtioNet {
         self.reclaim_tx();
         let Some(head) = self.tx_free.borrow_mut().pop() else {
             self.tx_dropped.set(self.tx_dropped.get().saturating_add(1));
-            self.report_refusals();
             return fill(&mut self.dropped.borrow_mut()[..len]);
         };
         let at = OFF_TX_BUFS + head as usize * TX_BUF_SIZE;

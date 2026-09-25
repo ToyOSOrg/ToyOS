@@ -197,7 +197,7 @@ pub struct Panel {
 /// refused rather than skipped.
 pub fn panel_census(log: &str) -> Option<Panel> {
     let line =
-        log.split_inclusive('\n').rev().find(|line| !is_spoken(line) && line.contains(PANEL_CENSUS))?;
+        log.split_inclusive('\n').rev().find(|line| !is_program_line(line) && line.contains(PANEL_CENSUS))?;
     if !line.ends_with('\n') || line.contains(CUT_BY_THE_PAGE) {
         return None;
     }
@@ -216,9 +216,9 @@ pub fn panel_census(log: &str) -> Option<Panel> {
 /// The kernel's record for a process that ended, in `kernel/src/process.rs`.
 ///
 /// **The one channel a guest binary's verdict crosses on a machine with no
-/// serial port that no program's share of the log bounds**: its own output
-/// reaches the stick only as records inside its share, and this is the kernel's
-/// record, in a form no program's record takes ([`SPOKEN`]).
+/// serial port that is the kernel's own**: a program's output reaches the
+/// stick as its lines under its name, and this is the kernel's record of how it
+/// ended, which no program writes ([`is_program_line`]).
 pub const EXIT: &str = "exit: ";
 
 /// The kernel's record for a process that started, in `kernel/src/process.rs`.
@@ -227,30 +227,31 @@ pub const EXIT: &str = "exit: ";
 /// says a process still on a run queue started another one under a shutdown.
 pub const SPAWN: &str = "spawn: ";
 
-/// What opens every program's record and no record of the kernel's own:
-/// `toyos_elide::spoken::SIGIL`, then the program's tag and `": "`.
-pub const SPOKEN: char = '@';
-
-/// One rendered record's message: what follows the bracket every writer opens
-/// a line with. `None` for a line that is not a record's first.
+/// One rendered record's message: what follows the bracket every kernel
+/// record opens with. `None` for a line that is not a kernel record's first.
 pub fn message(line: &str) -> Option<&str> {
     line.strip_prefix('[')?.split_once("] ").map(|(_, message)| message)
 }
 
-/// Whether a rendered line is a program's record.
-pub fn is_spoken(line: &str) -> bool {
-    message(line).is_some_and(|m| m.starts_with(SPOKEN))
+/// Whether a line of the log is a program's (`toyos_logstream::ProgramLine`):
+/// `logd` writes that head and no kernel record opens with it.
+pub fn is_program_line(line: &str) -> bool {
+    toyos_logstream::is_program_line(line)
 }
 
-/// A log without its programs' records: what a judge of the kernel's own reads.
+/// A log without its programs' lines: what a judge of the kernel's own reads.
 pub fn kernel_records(log: &str) -> String {
-    log.split_inclusive('\n').filter(|line| !is_spoken(line)).collect()
+    log.split_inclusive('\n').filter(|line| !is_program_line(line)).collect()
 }
 
-/// One program's records, by the tag the kernel gives it (`name` as spawned).
-pub fn records_of(log: &str, name: &str) -> String {
-    let head = format!("{SPOKEN}{name}: ");
-    log.split_inclusive('\n').filter(|l| message(l).is_some_and(|m| m.starts_with(&head))).collect()
+/// One program's lines, by the name init started it under, as `logd` read them
+/// out of its pipe: each line's text, newline-terminated.
+pub fn lines_of(log: &str, name: &str) -> String {
+    log.lines()
+        .filter_map(toyos_logstream::program_line)
+        .filter(|said| said.tag == name)
+        .map(|said| format!("{}\n", said.text))
+        .collect()
 }
 
 /// The AP bring-up record, in `kernel/src/arch/smp.rs`. A reader asks for the
@@ -331,13 +332,7 @@ impl fmt::Display for Unfit {
 /// it is the writer's tag, and the two writers disagree about it on purpose —
 /// `logd` puts a wall clock there and the panel puts nothing.
 pub fn record_millis(line: &str) -> Option<u64> {
-    let (before, _) = line.split_once(" cpu")?;
-    // The opening bracket, for the writer that puts no tag before the field.
-    let field = before.split_whitespace().next_back()?.trim_start_matches('[');
-    let (secs, millis) = field.split_once('.')?;
-    let secs: u64 = secs.parse().ok()?;
-    let millis: u64 = millis.parse().ok()?;
-    secs.checked_mul(1_000)?.checked_add(millis)
+    toyos_logstream::record_ms(line)
 }
 
 /// The UTC second one record line carries, as seconds since the epoch.
@@ -345,7 +340,12 @@ pub fn record_millis(line: &str) -> Option<u64> {
 /// `logd` writes the wall clock and the panel writes none, so a line without one
 /// answers `None` rather than reading the milliseconds field as a date.
 fn record_unix_secs(line: &str) -> Option<u64> {
-    let mut fields = line.strip_prefix('[')?.split_whitespace();
+    // A kernel record's bracket or a program line's head: `logd` stamps both
+    // with the same wall clock in the same place.
+    let mut fields = line
+        .strip_prefix('[')
+        .or_else(|| line.strip_prefix(toyos_logstream::OPEN))?
+        .split_whitespace();
     let (year, rest) = fields.next()?.split_once('-')?;
     let (month, day) = rest.split_once('-')?;
     let (hour, rest) = fields.next()?.split_once(':')?;
@@ -414,7 +414,7 @@ pub fn host_second_inside_this_boot(
     let dated = |line: Option<&str>| line.and_then(record_unix_secs).map(i128::from);
     let began = dated(log.lines().find(|l| l.contains(after)))
         .ok_or_else(|| format!("this log carries no dated {after:?} record"))?;
-    let ended = dated(log.lines().rfind(|l| !is_spoken(l) && l.contains(REBOOTING))).ok_or_else(|| {
+    let ended = dated(log.lines().rfind(|l| !is_program_line(l) && l.contains(REBOOTING))).ok_or_else(|| {
         format!(
             "this log carries no dated {REBOOTING:?} record, so nothing in it says when this boot \
              handed the machine back"
@@ -450,7 +450,7 @@ pub fn last_record_millis(log: &str) -> Option<u64> {
 
 /// The boot's own duration, out of `Boot: complete (123ms)`.
 pub fn boot_millis(log: &str) -> Option<u64> {
-    let tail = log.lines().filter(|l| !is_spoken(l)).find_map(|line| line.split(COMPLETE).nth(1))?;
+    let tail = log.lines().filter(|l| !is_program_line(l)).find_map(|line| line.split(COMPLETE).nth(1))?;
     tail.split("ms)").next()?.parse().ok()
 }
 
@@ -462,7 +462,7 @@ pub fn verdict(log: &str) -> Result<u64, Unfit> {
     let last = log
         .lines()
         .rev()
-        .find(|line| !line.trim().is_empty() && !is_spoken(line))
+        .find(|line| !line.trim().is_empty() && !is_program_line(line))
         .unwrap_or_default();
     if !last.contains(REBOOTING) {
         return Err(Unfit::Unfinished(last.trim().to_string()));
@@ -587,7 +587,6 @@ mod tests {
             ("kernel/src/log/mod.rs", format!("\"{LOG_COMPLETE}")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_SHORT}")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
-            ("toyos-elide/src/spoken.rs", format!("SIGIL: u8 = b'{SPOKEN}';")),
         ] {
             let at = root.join(file);
             let source = std::fs::read_to_string(&at).expect("a kernel module");
@@ -595,20 +594,22 @@ mod tests {
         }
     }
 
-    /// A program spawned as `exit` writing a kernel verdict's words is left out of
-    /// the kernel's records, and a kernel record's continuation line is kept.
+    /// A program writing a kernel verdict's words, or another program's head,
+    /// is left out of the kernel's records and read as its own; a kernel
+    /// record's continuation line is the kernel's.
     #[test]
-    fn a_programs_record_is_never_the_kernels() {
+    fn a_programs_line_is_never_the_kernels() {
         let log = "[2026-09-08 16:08:23 2.100 cpu0] exit: test_rs_job pid=4 code=3 cpu=1ms\n\
                    [2026-09-08 16:08:23 2.150 cpu0] PANIC: a report\n  its second line\n\
-                   [2026-09-08 16:08:23 2.200 cpu1] @exit: test_rs_job pid=4 code=0 cpu=0ms\n\
-                   [2026-09-08 16:08:23 2.300 cpu1] @evil: exit: test_rs_job pid=4 code=0\n";
+                   {2026-09-08 16:08:23 2.200 test-runner} [2026-09-08 16:08:23 2.200 cpu0] exit: test_rs_job pid=4 code=0 cpu=0ms\n\
+                   {2026-09-08 16:08:23 2.300 test-runner} {x 2.3 netd} netd: MAC 00:00:00:00:00:00\n\
+                   {2026-09-08 16:08:23 2.400 netd} netd: MAC 52:54:00:12:34:56\n";
         let kernel = kernel_records(log);
         assert!(!kernel.contains("code=0"), "{kernel}");
         assert!(kernel.contains("code=3") && kernel.contains("  its second line\n"), "{kernel}");
-        assert_eq!(records_of(log, "exit").lines().count(), 1);
-        assert_eq!(records_of(log, "evil").lines().count(), 1);
-        assert!(is_spoken(log.lines().nth(3).expect("four lines")));
+        assert_eq!(lines_of(log, "netd"), "netd: MAC 52:54:00:12:34:56\n");
+        assert_eq!(lines_of(log, "test-runner").lines().count(), 2);
+        assert!(is_program_line(log.lines().nth(3).expect("five lines")));
     }
 
     /// The truncation, which is what a whole-name predicate would miss.

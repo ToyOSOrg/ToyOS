@@ -16,7 +16,10 @@
 //! every message the ISR recorded in between, and a driver that misses one
 //! waits for a device that has already spoken. No ordering carries anything
 //! across these words — each is the whole of what it says — so the orderings
-//! here are `Relaxed` and the model is about the interleaving.
+//! here are `Relaxed` and the model is about the interleaving, **but for one
+//! edge**: a fault arms the same wake a message does, and the pass that takes
+//! that wake has to read the fault, so `pending` is released by [`Interrupt::fault`]
+//! and acquired by [`Interrupt::take_pending`].
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -34,8 +37,11 @@ const ORDER: Ordering = Ordering::Relaxed;
 /// build.
 #[cfg(feature = "device-irq-lossy")]
 macro_rules! take_word {
-    ($word:expr, $empty:expr) => {{
-        let held = $word.load(ORDER);
+    ($word:expr, $empty:expr) => {
+        take_word!($word, $empty, ORDER)
+    };
+    ($word:expr, $empty:expr, $order:expr) => {{
+        let held = $word.load($order);
         $word.store($empty, ORDER);
         held
     }};
@@ -43,7 +49,10 @@ macro_rules! take_word {
 #[cfg(not(feature = "device-irq-lossy"))]
 macro_rules! take_word {
     ($word:expr, $empty:expr) => {
-        $word.swap($empty, ORDER)
+        take_word!($word, $empty, ORDER)
+    };
+    ($word:expr, $empty:expr, $order:expr) => {
+        $word.swap($empty, $order)
     };
 }
 
@@ -68,7 +77,6 @@ pub struct Interrupt {
     /// Messages since the holder's last read.
     count: AtomicU32,
     /// Set by the ISR, cleared by the scheduler pass that turns it into a wake.
-    /// Same CPU as the ISR and after it, so nothing here races.
     pending: AtomicBool,
     /// The unit refused this function an access. Every call the claim answers
     /// refuses from here on: its bus mastering is gone, so a driver that kept
@@ -114,7 +122,12 @@ impl Interrupt {
     /// two of these, and what it took plus what is left has to be what arrived.
     pub fn took(&self) {
         bump!(self.count);
-        self.pending.store(true, ORDER);
+        // `swap` and not a store: [`Self::fault`] releases through this same
+        // word, and a plain write landing after that release in `pending`'s
+        // modification order ends the release sequence there — the pass that
+        // later takes the fault's wake would then synchronize with nothing.
+        // An RMW extends the sequence instead, whichever order it lands in.
+        self.pending.swap(true, ORDER);
     }
 
     /// The messages since the last read, or `None` for none.
@@ -138,9 +151,10 @@ impl Interrupt {
     /// for the pass that owes it and `false` for every pass after.
     ///
     /// `swap` for the same reason as [`Self::take`]: two passes that both
-    /// loaded `true` would both wake one message's watchers.
+    /// loaded `true` would both wake one message's watchers. `Acquire`, so
+    /// the pass that takes a fault's wake reads [`Self::faulted`] set.
     pub fn take_pending(&self) -> bool {
-        take_word!(self.pending, false)
+        take_word!(self.pending, false, Ordering::Acquire)
     }
 
     /// Whether this is the first message this slot has taken. Answers `true`
@@ -153,10 +167,16 @@ impl Interrupt {
     }
 
     /// The unit refused this function an access. Called from the fault handler,
-    /// which takes no lock: one store, and every call the claim answers refuses
-    /// from here on.
+    /// which takes no lock: every call the claim answers refuses from here on,
+    /// and a wake is owed as for a message, because a holder waiting on the
+    /// claim would otherwise wait for a function that can no longer speak.
+    ///
+    /// The wake is a `swap` and not a store: this one races a pass on another
+    /// CPU, and loom 0.7 lets a plain store be lost to a concurrent `swap`, which
+    /// C11 forbids, so a store here is a wake the model cannot show is owed.
     pub fn fault(&self) {
         self.faulted.store(true, ORDER);
+        self.pending.swap(true, Ordering::Release);
     }
 
     pub fn faulted(&self) -> bool {

@@ -4,7 +4,7 @@ kind: track
 opened: 2026-09-07
 ---
 
-# The T14 answers only through a USB stick, and nothing a program prints reaches the harness
+# The T14 answers only through a USB stick
 
 Every result from the bench rides a stick and a reboot into Ubuntu. The laptop
 is on a cable on the same LAN as the development Mac and its NIC is the onboard
@@ -14,8 +14,8 @@ claims. The track is to make that cable the answer path.
 The substrate a process needs to drive a PCI function itself is built
 (`kernel/src/pcidev/mod.rs`, `userland/netd/src/virtio_net.rs`). What is left is
 the I219 driver in netd, with DHCP under the hostname `toyos-t14` and a first
-ping and ssh from the Mac; a record stream from logd to a listener in the
-harness, so a boot's log arrives while it is booting; command execution, file
+ping and ssh from the Mac; the log a boot serves, read from the Mac while it
+is booting; command execution, file
 transfer both ways and key auth in sshd, with the harness running userland tests
 over ssh through a russh client; and a netboot spike in which the firmware
 fetches the loader over HTTP so the stick leaves the boot path.
@@ -44,15 +44,10 @@ Constraints a reader would otherwise pay to re-derive:
   hand-over, so a function still holding its last holder's queue addresses can
   act on none of them. `release` asks for a reset where the function advertises
   one; the I219 does, so on the T14 both hold.
-- **The record stream is `logstream=<a.b.c.d>:<port>` on the parameter line**,
-  copied by the kernel into `/system/bin/init`'s environment and read from there
-  by `logd` (`toyos-logstream`'s `PARAM` and `ENV`). What is left to build is the
-  metal half: arming the flashed image with the Mac's address and listening while
-  the T14 boots. A boot that dies before `logd` runs still needs the stick.
-- **A stalled peer's backpressure reaches `logd`'s queue only after megabytes.**
-  Between them stand a 2 MiB kernel pipe (`kernel/src/pipe.rs`'s `PIPE_SIZE`) and
-  netd's 64 KiB send buffer, and a `log-storm` at `--smp 8` produces 4,213 lines
-  / 674 KiB — measured — which they absorb entirely. The guest arm for that path
-  widens the storm's records instead of narrowing the peer (`log-storm-wide`).
+- **The machine serves its own log, and the Mac finds it by name.** `logd`
+  serves the boot from its first line on TCP `41337` (`toyos-logstream`'s
+  `PORT`), and netd answers multicast DNS for `toyos-t14.local` once it holds a
+  lease (`toyos-mdns`), so nothing in the image names the Mac and nothing on the
+  Mac listens. A boot that dies before netd leases still needs the stick.
 - The metal loop is `toyos-metal` (`src/metal.rs`), and the T14 is run by the
   orchestrator alone.

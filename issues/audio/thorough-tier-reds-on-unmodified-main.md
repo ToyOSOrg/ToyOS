@@ -171,3 +171,17 @@ instrument-broken iteration. The finding above was taken at loads of 7-19
 beside other guests and stands as measured; this is the quiet-host reading it
 said nobody had taken, on that tip rather than on the sample's commit, so the
 question of the sample's commit is still open.
+
+## 2026-09-25: an A/B for #492, both arms dropping, main no less often
+
+`cargo test --test toyos-build -- --audio-gate 30 audio_tone_load`, three blocks
+per arm, alternating #492's merge of `origin/main` 3ad278c0 with a checkout of
+3ad278c0 itself, branch first; one session, 1-minute load 1.5-34.2. Branch:
+dropouts 1/60, 0/60, 0/60, every block `PASS`. `main`: 0/60, 1/60, 1/60, every
+block `FAILED` on `audio_tone_load.smp1` wake lateness alone (medians 6042,
+6803, 6473 against the recorded 5765; the branch's were 6147, 6137, 6121). The
+branch's dropout (1 period) has its lateness in the interrupt half (`irq 65153us
++ pickup 874us`); main's are 28 periods in the pickup half (`irq 2973us + pickup
+27401us`) and 1 period in the interrupt half (`irq 56120us + pickup 265us`). The fast tier,
+three runs each: the branch's first run dropped once at load 57 and did not
+reproduce on its confirming boot; every other boot on both arms was clean.

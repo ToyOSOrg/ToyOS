@@ -67,8 +67,12 @@ const MIDLINE_BYTE: u8 = b'C';
 /// leading tag byte, zero-padded so every line stays exactly [`WIDTH`] bytes.
 const SEQ_DIGITS: usize = 6;
 
-/// Stdout, by the slot every process starts with.
-const STDOUT: RawHandle = RawHandle(1);
+/// The console, at stdin's slot: the runner starts this job holding its own
+/// there (`CONSOLE_JOBS`), and each writer inherits it as a console of its own.
+/// **Not stdout**: stdout is a pipe to `logd` that every child of the runner
+/// shares, so two children's writes to it meet in one byte stream, and the
+/// property under test is the console object's, which is per holder.
+const CONSOLE: RawHandle = RawHandle(0);
 
 fn main() {
     let mut args = std::env::args();
@@ -91,7 +95,7 @@ fn exit_mid_line() {
     let partial = [MIDLINE_BYTE; MIDLINE];
     let (head, tail) = partial.split_at(MIDLINE / 2);
     for piece in [head, tail] {
-        match syscall::write(STDOUT, piece) {
+        match syscall::write(CONSOLE, piece) {
             Ok(n) if n == piece.len() => {}
             other => {
                 eprintln!(
@@ -180,7 +184,7 @@ fn write_lines(tag: u8) {
         // half a line, which is the defect and not an error to paper over.
         // `try_write`'s console arm accepts the whole buffer by construction.
         for piece in [head, tail] {
-            match syscall::write(STDOUT, piece) {
+            match syscall::write(CONSOLE, piece) {
                 Ok(n) if n == piece.len() => {}
                 other => {
                     eprintln!(

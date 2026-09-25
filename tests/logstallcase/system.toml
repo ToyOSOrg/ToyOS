@@ -1,0 +1,32 @@
+# The shared boot's shape with `/system/bin/logd` leaving soundd's pipe unread
+# until `test_rs_soundd_log_stall` says the tone has played: soundd's pipe fills
+# and stays full while it plays, which is the state its mix thread must never
+# wait in. `soundd_log_stall` runs it, and reads the verdict off `/log` after
+# `run shutdown`.
+
+[boot]
+start = ["logd", "soundd", "test-runner"]
+
+[programs.logd]
+args = [
+    "--stall=soundd",
+    "--stall-until=soundd_log_stall: the tone has played, and logd may read soundd again",
+]
+syscap = ["logread"]
+
+[programs.soundd]
+serves = ["soundd"]
+devices = ["hda-audio", "virtio-sound"]
+syscap = ["rt"]
+
+# `power` is what `run shutdown` needs and `dup` is what carries it to the
+# applet, which test-runner spawns directly.
+[programs.test-runner]
+receives = ["soundd"]
+syscap = ["dup", "power"]
+
+[programs.toybox]
+receives = ["soundd"]
+
+[symlinks]
+"bin/shutdown" = "/system/bin/toybox"

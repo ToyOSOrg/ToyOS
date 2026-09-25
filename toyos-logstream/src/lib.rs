@@ -1,18 +1,20 @@
-//! The record stream: where a boot's log goes besides the file, said once for
-//! everyone who has to spell it, and the one decision a peer that will not take
-//! it forces.
+//! A boot's log as `logd` writes it and serves it: the form a program's line
+//! takes beside the kernel's records, the frame `/system/bin/init` hands `logd`
+//! a program's output on, and the replay a reader who connects late is served
+//! from.
 //!
-//! `/system/bin/logd` owns every policy about where records go. The file is the
-//! sink of record and this is the second sink: the same text line, in the same
-//! order, over a TCP connection netd opens for it, the instant the file gets
-//! it.
+//! **Whose line a line is, is decided by the pipe it came out of, never by its
+//! words.** init creates one pipe per program it starts, hands the program the
+//! write end as its stdout and stderr, and moves the read end to `logd` under
+//! the manifest's name for the program ([`REGISTER`]). `logd` alone writes a
+//! line's head, so the head is structure no program's bytes can reach:
 //!
-//! Nothing here can lose a record from the file. [`Backlog::round`] offers a
-//! line and never waits: a peer that stops taking bytes fills the queue, and
-//! the lines that do not fit are refused, counted, and reported in one line
-//! that goes into the file like any other record. A drop nobody can count is
-//! the failure this type exists to make impossible, so the refusal and the
-//! counter are one statement.
+//! - a kernel record opens with `[` — `toyos_abi::log::LogRecord::tagged`;
+//! - a program's line opens with [`OPEN`], carries its [`Tag`] as the last word
+//!   before [`CLOSE`], and its text after — [`ProgramLine`];
+//! - any other line continues the kernel record above it, whose message held a
+//!   newline. A program's text never does: [`Lines`] ends a line at every
+//!   newline and [`Text`] writes every control byte as text.
 //!
 //! Pure: `core` and `alloc`, no `unsafe`, no I/O.
 
@@ -24,429 +26,521 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-use alloc::collections::VecDeque;
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt::{self, Display, Write};
 
-use toyos_abi::log::MAX_RECORD_MESSAGE;
+/// The TCP port `logd` serves this boot's log on, from its first line.
+pub const PORT: u16 = 41337;
 
-/// The boot parameter carrying the listener's address, with the address after
-/// it — `logstream=10.0.2.2:41337`.
-///
-/// A *valued* parameter, like `blackbox=`: the kernel matches it with
-/// `starts_with` rather than whole, so it is not in `kernel/src/params.rs`'s
-/// `PARAMS` table and is cleared by name in `src/build.rs`'s `VALUED_PARAMS`
-/// instead.
-pub const PARAM: &str = "logstream=";
+/// The service every connection on [`PORT`] is carried by. A swap of it ends
+/// each one with no FIN and no reset, which no reader could tell from a boot
+/// with nothing to say — so `logd` turns new readers away from init's word
+/// accepting that swap until the process it listened through is gone, and says
+/// so ([`CARRIER_LEAVING`]) before the swap may go.
+pub const CARRIER: &str = "netd";
 
-/// Where the kernel puts [`PARAM`]'s value for userland to find.
-///
-/// The kernel command line reaches no process, and the kernel already builds
-/// `/system/bin/init`'s environment. `init` passes its own environment on to
-/// the daemons it starts at boot and clears it for anything the launcher
-/// starts, so `logd` reads this and a program a user runs does not.
-pub const ENV: &str = "TOYOS_LOG_STREAM";
+/// `logd`'s line once it turns new readers away for a swap of [`CARRIER`]. A
+/// reader whose own connection that swap will end holds the swap's go until
+/// this has reached it: a reader that asks again after it is turned away until
+/// the next [`CARRIER`] serves, and never admitted by the one being stopped.
+pub const CARRIER_LEAVING: &str =
+    "logd: netd is being replaced, and readers are turned away until the next one serves";
 
-/// What the kernel copies [`PARAM`]'s value into.
-///
-/// The parameter line lives in memory the allocator may hand out, so the value
-/// is copied out of it before `mm::init` runs and there is no heap to copy it
-/// into. The widest address this can carry is `255.255.255.255:65535`, which is
-/// 21 bytes.
-pub const MAX_VALUE_BYTES: usize = 64;
+/// The name of the port a reader on this machine asks `logd` for the log on;
+/// the answer is the read end of a pipe the log is written into. The same port
+/// answers `inspect`, so a reader says which it wants ([`READ`]).
+pub const SERVICE: &str = "log";
 
-/// The value of [`PARAM`] on a boot parameter line, or `None` when the line
-/// does not carry it.
-///
-/// The line is comma-separated, as `toyos_abi::boot::actuators` reads it.
-pub fn value_in(cmdline: &str) -> Option<&str> {
-    cmdline.split(',').find_map(|token| token.strip_prefix(PARAM))
+/// A reader's request on [`SERVICE`]: a bare frame, answered by [`SERVED`].
+pub const READ: u32 = 3;
+
+/// The manifest's name for the program that is the log: init endows it the
+/// [`ORIGINS`] acceptor and gives it no pipe, since its own lines are its to
+/// write.
+pub const LOGD: &str = "logd";
+
+/// The endowment label of the acceptor init hands `logd` for [`REGISTER`]
+/// frames. **Named by no manifest row**, so the one connector to it is init's
+/// own and no program can register a pipe under a name of its choosing.
+pub const ORIGINS: &str = "log-origins";
+
+/// A program's output: the payload is its [`Tag`], and the frame carries one
+/// handle, the read end of the pipe the program writes its stdout and stderr to.
+pub const REGISTER: u32 = 1;
+
+/// `logd`'s answer to a reader on [`SERVICE`]: one handle, the read end of the
+/// pipe this boot's log is written into, and a `u64` payload — how many bytes
+/// of the boot that pipe starts with, so a reader can tell the boot so far from
+/// what arrives after it.
+pub const SERVED: u32 = 2;
+
+/// What opens a program's line, and no kernel record's.
+pub const OPEN: char = '{';
+
+/// What closes a program's line's head.
+pub const CLOSE: char = '}';
+
+/// The longest line a program's line carries; a longer one is written in
+/// pieces of this, each a line of its own.
+pub const MAX_LINE: usize = 1024;
+
+/// The longest name a [`Tag`] holds.
+pub const MAX_TAG: usize = 32;
+
+/// A program's name as its lines carry it: one to [`MAX_TAG`] bytes of
+/// `[A-Za-z0-9._+-]`. Refused otherwise, so a tag holds no space, bracket,
+/// separator or control, and so is always the one word before [`CLOSE`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tag<'a>(&'a str);
+
+impl<'a> Tag<'a> {
+    pub fn new(name: &'a str) -> Option<Self> {
+        let fits = (1..=MAX_TAG).contains(&name.len());
+        let kept =
+            name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'));
+        (fits && kept).then_some(Self(name))
+    }
+
+    pub fn as_str(&self) -> &'a str {
+        self.0
+    }
 }
 
-/// Why an address the machine was handed is not one.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Malformed {
-    /// No `:` at all, so nothing says which port.
-    NoPort,
-    /// The part before the `:` is not four decimal octets.
-    NotAnAddress,
-    /// The part after the `:` is not a port, or is zero — which names no
-    /// listener on any stack.
-    NotAPort,
-}
+/// Bytes a program wrote, as a line's text: a control character — C0, DEL or
+/// C1 — is written `\xNN` or `\u{NN}`, and each run that is not UTF-8 is one
+/// U+FFFD, so no reader of the log, a terminal included, is handed a byte that
+/// acts rather than reads. A tab reads, and stays.
+pub struct Text<'a>(pub &'a [u8]);
 
-impl Malformed {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NoPort => "it names no port",
-            Self::NotAnAddress => "the part before the colon is not four decimal octets",
-            Self::NotAPort => "the part after the colon is not a port between 1 and 65535",
+impl Display for Text<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.0.utf8_chunks() {
+            for ch in chunk.valid().chars() {
+                match ch {
+                    '\t' => f.write_char(ch)?,
+                    '\0'..='\x1f' | '\x7f' => write!(f, "\\x{:02x}", ch as u32)?,
+                    '\u{80}'..='\u{9f}' => write!(f, "\\u{{{:x}}}", ch as u32)?,
+                    _ => f.write_char(ch)?,
+                }
+            }
+            if !chunk.invalid().is_empty() {
+                f.write_char('\u{FFFD}')?;
+            }
         }
+        Ok(())
     }
 }
 
-/// `a.b.c.d:port`, refused by name.
-///
-/// A boot whose address is a typo has to say so rather than stream to whatever
-/// the typo parsed as.
-pub fn endpoint(value: &str) -> Result<([u8; 4], u16), Malformed> {
-    let (host, port) = value.rsplit_once(':').ok_or(Malformed::NoPort)?;
-    let mut octets = [0u8; 4];
-    let mut seen = 0usize;
-    for (slot, text) in host.split('.').enumerate() {
-        let octet = octets.get_mut(slot).ok_or(Malformed::NotAnAddress)?;
-        // Digits asked for before `parse` is: `u8::from_str` accepts a leading
-        // `+`, so `10.0.2.+2` would otherwise be this machine's own address
-        // spelled a way no writer of it meant.
-        if !text.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(Malformed::NotAnAddress);
-        }
-        *octet = text.parse::<u8>().map_err(|_| Malformed::NotAnAddress)?;
-        seen = slot + 1;
-    }
-    if seen != 4 {
-        return Err(Malformed::NotAnAddress);
-    }
-    if !port.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(Malformed::NotAPort);
-    }
-    let port: u16 = port.parse().map_err(|_| Malformed::NotAPort)?;
-    if port == 0 {
-        return Err(Malformed::NotAPort);
-    }
-    Ok((octets, port))
+/// One program's line as `logd` writes it:
+/// `{<stamp> <secs>.<mmm> <tag>} <text>` — the wall clock `logd` stamps every
+/// line with, the monotonic time it read the line, the program's [`Tag`], and
+/// its [`Text`]. No newline: the writer ends the line.
+pub struct ProgramLine<'a> {
+    pub stamp: &'a str,
+    pub at_ns: u64,
+    pub tag: Tag<'a>,
+    pub text: &'a [u8],
 }
 
-/// Records `logd` asks `SYS_LOG_READ` for at once, which is also the most it
-/// can offer this queue between two rounds of its own loop.
-///
-/// Above `MAX_LOG_SHARDS`, which the call refuses below, and large enough that
-/// an ordinary boot's burst is a handful of syscalls rather than one per line.
-pub const BATCH: usize = 64;
-
-/// What `toyos_abi::log::Tagged` renders around a record's message — the
-/// brackets, the wall-clock stamp `logd` tags it with, the monotonic
-/// `{secs}.{mmm} cpuN`, and the `boot`, `tid=` and elided-byte fields a record
-/// may carry — plus the newline `logd` ends the line with.
-///
-/// Above every one of those at its widest, which is a claim about what `Tagged`
-/// prints and is checked by rendering it: a number short here is a bound that
-/// does not hold what it says it holds, and a listener losing lines on a round
-/// nobody thought could overflow.
-const AROUND_A_MESSAGE: usize = 128;
-
-/// The widest line one record renders to.
-const WIDEST_LINE: usize = MAX_RECORD_MESSAGE + AROUND_A_MESSAGE;
-
-/// What the queue may hold before a line is refused rather than waited for:
-/// one whole `SYS_LOG_READ` batch at its widest, so a listener that misses one
-/// round of `logd`'s loop loses nothing.
-///
-/// It is deliberately the *small* buffer in the chain. Everything downstream —
-/// the pipe netd reads, netd's own send buffer, the peer's receive window —
-/// absorbs a stall before this is reached at all, so a line that reaches this
-/// bound is a peer that is gone rather than one that is behind.
-pub const MAX_BACKLOG_BYTES: usize = BATCH * WIDEST_LINE;
-
-/// Whether this round may put a line in the log about what the queue refused.
-///
-/// `logd` holds the clock and decides how often a run of loss is worth a line;
-/// what that line may not be is decided here.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Due {
-    Now,
-    NotYet,
+impl Display for ProgramLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secs = self.at_ns / 1_000_000_000;
+        let millis = self.at_ns % 1_000_000_000 / 1_000_000;
+        write!(
+            f,
+            "{OPEN}{} {secs}.{millis:03} {}{CLOSE} {}",
+            self.stamp,
+            self.tag.as_str(),
+            Text(self.text)
+        )
+    }
 }
 
-/// The lines waiting for a listener that is slower than the machine.
-///
-/// **Bounded, and its refusals are counted.** The alternative — waiting for the
-/// socket — puts a listener on the far side of a cable between `logd` and the
-/// file it owns, which is the one thing the stream may never cost.
-///
-/// Ordering is FIFO and drops are at the tail: nothing is ever reordered,
-/// duplicated or evicted after it was taken, so what a listener received is
-/// always the file's own lines in the file's own order. Evicting the head
-/// instead would keep the end of a boot at the price of making the two
-/// readings incomparable.
-#[derive(Debug, Default)]
-pub struct Backlog {
-    lines: VecDeque<String>,
-    bytes: usize,
-    /// Lines this queue refused, for the life of the process.
-    dropped: u64,
-    /// How much of [`Self::dropped`] has been said out loud.
-    reported: u64,
+/// A line of the log read back as a program's: its tag and its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Said<'a> {
+    pub tag: &'a str,
+    pub text: &'a str,
 }
 
-impl Backlog {
+/// Read `line` (its newline optional) as a program's line; `None` for a kernel
+/// record, a record's continuation, or anything else.
+pub fn program_line(line: &str) -> Option<Said<'_>> {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    let rest = line.strip_prefix(OPEN)?;
+    let (head, text) = rest.split_once(CLOSE)?;
+    let text = text.strip_prefix(' ')?;
+    let tag = head.rsplit(' ').next()?;
+    Tag::new(tag)?;
+    Some(Said { tag, text })
+}
+
+/// The milliseconds since boot a kernel record's line carries, or `None` for
+/// any other line.
+///
+/// **Found from the CPU it precedes rather than by position**: the field before
+/// it is the writer's tag, and the writers disagree about it on purpose —
+/// `logd` puts a wall clock there and the panel puts nothing.
+///
+/// Read inside the record's bracket and nowhere else, so no text after it — a
+/// program's included — can answer for the time.
+pub fn record_ms(line: &str) -> Option<u64> {
+    let (head, _) = line.strip_prefix('[')?.split_once("] ")?;
+    let (before, _) = head.split_once(" cpu")?;
+    let field = before.split_whitespace().next_back()?;
+    let (secs, millis) = field.split_once('.')?;
+    let secs: u64 = secs.parse().ok()?;
+    let millis: u64 = millis.parse().ok()?;
+    secs.checked_mul(1_000)?.checked_add(millis)
+}
+
+/// Whether `line` opens as a program's line: what a judge of the kernel's
+/// records leaves out.
+pub fn is_program_line(line: &str) -> bool {
+    line.starts_with(OPEN)
+}
+
+/// One program's output, assembled into lines as it arrives in chunks.
+///
+/// A line ends at `\n`, which it does not keep, and a `\r` before it goes too;
+/// one that reaches [`MAX_LINE`] bytes is let go as it stands, a piece
+/// [`Ended::No`] says the program had not ended. What is left when the writer
+/// is gone is a piece of its own ([`Lines::finish`]): a dying program's last
+/// words are said, not dropped.
+#[derive(Default)]
+pub struct Lines {
+    held: Vec<u8>,
+}
+
+/// Whether a piece is where its writer ended a line — the difference between
+/// a line of the log and what the program wrote, for a reader that keeps the
+/// program's own bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    Yes,
+    No,
+}
+
+impl Lines {
     pub const fn new() -> Self {
-        Self { lines: VecDeque::new(), bytes: 0, dropped: 0, reported: 0 }
+        Self { held: Vec::new() }
     }
 
-    /// One round: the lines the file has just taken, offered in order, and the
-    /// one line the file owes about what this queue refused.
-    ///
-    /// **The report is returned and never offered.** A report handed to a queue
-    /// that is refusing is refused too, which is a drop, which owes another
-    /// report — a run that never ends and a log that fills with lines about
-    /// itself. This is the only function that both offers lines and produces
-    /// the report, so it is the only place that mistake can be made.
-    pub fn round<'a>(
-        &mut self,
-        wrote: impl IntoIterator<Item = &'a str>,
-        due: Due,
-    ) -> Option<String> {
-        for line in wrote {
-            self.admit(line);
-        }
-        match due {
-            Due::Now => self.report(),
-            Due::NotYet => None,
+    /// Take `bytes`, and hand every piece they complete to `line`, in order.
+    pub fn push(&mut self, bytes: &[u8], mut line: impl FnMut(&[u8], Ended)) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                let whole = self.held.strip_suffix(b"\r").unwrap_or(&self.held);
+                line(whole, Ended::Yes);
+                self.held.clear();
+                continue;
+            }
+            self.held.push(byte);
+            if self.held.len() == MAX_LINE {
+                line(&self.held, Ended::No);
+                self.held.clear();
+            }
         }
     }
 
-    /// Offer one line, answering whether the queue took it.
-    ///
-    /// `false` is a drop and is counted; there is no third answer, and no
-    /// answer that waits.
-    fn admit(&mut self, line: &str) -> bool {
-        if self.bytes + line.len() > MAX_BACKLOG_BYTES {
-            self.dropped += 1;
-            return false;
+    /// The writer is gone: what it left unfinished, if anything.
+    pub fn finish(&mut self, line: impl FnOnce(&[u8], Ended)) {
+        if !self.held.is_empty() {
+            line(&self.held, Ended::No);
+            self.held.clear();
         }
-        self.bytes += line.len();
-        self.lines.push_back(line.to_string());
-        true
+    }
+}
+
+/// This boot's log as it was written, for a reader that connects late: every
+/// byte since the boot's first line, less whole lines from the front once more
+/// than `cap` bytes are held — and a reader told how many bytes that cost it,
+/// never handed a line cut in half.
+///
+/// Positions are offsets into the boot's whole log, so a reader's place
+/// survives what is let go ahead of it.
+pub struct Replay {
+    bytes: Vec<u8>,
+    /// The boot's offset of `bytes[0]`.
+    base: u64,
+    cap: usize,
+}
+
+/// What a reader at some offset is owed next.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Next<'a> {
+    /// The bytes after its offset, up to the most it asked for.
+    Bytes(&'a [u8]),
+    /// Its offset was let go: `lost` bytes are gone, and it resumes at `at`.
+    Evicted { lost: u64, at: u64 },
+    /// Nothing past its offset yet.
+    CaughtUp,
+}
+
+impl Replay {
+    pub const fn new(cap: usize) -> Self {
+        Self { bytes: Vec::new(), base: 0, cap }
     }
 
-    /// Everything waiting, oldest first, leaving the queue empty.
-    ///
-    /// The writer takes the whole queue in one step so it holds no lock while
-    /// it writes: a `logd` blocked behind its own stream thread would be the
-    /// defect this type exists to prevent, one level in.
-    pub fn drain(&mut self) -> Vec<String> {
-        self.bytes = 0;
-        self.lines.drain(..).collect()
+    /// The boot's offset after the last byte held: where a reader who has read
+    /// everything stands.
+    pub fn end(&self) -> u64 {
+        self.base + self.bytes.len() as u64
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
-
-    /// The one line that says what the stream lost, or `None` when it has lost
-    /// nothing since it last said so.
-    fn report(&mut self) -> Option<String> {
-        let unsaid = self.dropped - self.reported;
-        if unsaid == 0 {
-            return None;
+    /// Append whole lines. What falls past `cap` goes from the front, a
+    /// quarter of the cap at a time and at a line boundary, so an append does
+    /// not move the whole buffer every time.
+    pub fn append(&mut self, lines: &[u8]) {
+        self.bytes.extend_from_slice(lines);
+        if self.bytes.len() <= self.cap {
+            return;
         }
-        self.reported = self.dropped;
-        // **Two numbers, and they are checkable against each other**: every
-        // line's first number is what this run of loss added, and the second is
-        // the boot's running total, so a reader that adds the first numbers up
-        // must arrive at the last line's second one.
-        Some(alloc::format!(
-            "logd: {unsaid} record(s) never reached the log stream, and {} in this boot; \
-             /log has every one of them",
-            self.dropped
-        ))
+        let over = (self.bytes.len() - self.cap + self.cap / 4).min(self.bytes.len());
+        let cut = match self.bytes[over..].iter().position(|&b| b == b'\n') {
+            Some(at) => over + at + 1,
+            None => self.bytes.len(),
+        };
+        self.bytes.drain(..cut);
+        self.base += cut as u64;
+    }
+
+    /// What a reader at `from` gets next: the whole lines that fit in `max`
+    /// bytes, or the one line after `from` where it alone is longer. So a
+    /// reader that started on a line always stands on one, and an eviction's
+    /// notice never lands inside a line it was handed half of.
+    pub fn next(&self, from: u64, max: usize) -> Next<'_> {
+        if from < self.base {
+            return Next::Evicted { lost: self.base - from, at: self.base };
+        }
+        let start = (from - self.base) as usize;
+        if start >= self.bytes.len() {
+            return Next::CaughtUp;
+        }
+        let held = &self.bytes[start..];
+        let fits = &held[..max.min(held.len())];
+        let end = match fits.iter().rposition(|&b| b == b'\n') {
+            Some(at) => at + 1,
+            // `append` takes whole lines, so what is held ends one.
+            None => held.iter().position(|&b| b == b'\n').map_or(held.len(), |at| at + 1),
+        };
+        Next::Bytes(&held[..end])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::format;
+    use std::string::String;
+    use std::vec;
 
-    /// A round that offers the queue no line, for the reports.
-    const NOTHING: [&str; 0] = [];
+    fn line(tag: &str, text: &[u8]) -> String {
+        let tag = Tag::new(tag).expect("a tag");
+        format!("{}", ProgramLine { stamp: "2026-09-24 10:00:00", at_ns: 12_345_678_901, tag, text })
+    }
 
     #[test]
-    fn the_value_is_read_off_a_line_that_carries_other_parameters() {
-        assert_eq!(value_in("logstream=10.0.2.2:41337"), Some("10.0.2.2:41337"));
+    fn the_carriers_line_names_the_carrier() {
+        assert!(CARRIER_LEAVING.starts_with("logd: "));
+        assert!(CARRIER_LEAVING.contains(&format!(" {CARRIER} ")));
+    }
+
+    #[test]
+    fn a_program_line_reads_back_as_it_was_written() {
+        let written = line("netd", b"netd: MAC 52:54:00:12:34:56");
+        assert_eq!(written, "{2026-09-24 10:00:00 12.345 netd} netd: MAC 52:54:00:12:34:56");
         assert_eq!(
-            value_in("root=1234,blackbox=0x1000,logstream=10.0.2.2:1,watchdog"),
-            Some("10.0.2.2:1")
+            program_line(&format!("{written}\n")),
+            Some(Said { tag: "netd", text: "netd: MAC 52:54:00:12:34:56" })
         );
-        assert_eq!(value_in("root=1234,watchdog"), None);
-        assert_eq!(value_in(""), None);
-        // The name whole, not a prefix of another token.
-        assert_eq!(value_in("mylogstream=1.2.3.4:5"), None);
-        // Named and empty is not an address; `endpoint` is what refuses it.
-        assert_eq!(value_in("logstream="), Some(""));
+        let tag = Tag::new("logd").expect("a tag");
+        let undated = format!("{}", ProgramLine { stamp: "---------- --------", at_ns: 5, tag, text: b"x" });
+        assert_eq!(program_line(&undated), Some(Said { tag: "logd", text: "x" }));
     }
 
+    /// **The forgery the form exists to refuse**: whatever a program writes —
+    /// a kernel record's words, another program's head, a carriage return that
+    /// would hide what came before it on a terminal — its line is its own, and
+    /// is not a kernel record.
     #[test]
-    fn an_address_is_four_octets_and_a_port() {
-        assert_eq!(endpoint("10.0.2.2:41337"), Ok(([10, 0, 2, 2], 41337)));
-        assert_eq!(endpoint("255.255.255.255:65535"), Ok(([255, 255, 255, 255], 65535)));
-        assert_eq!(endpoint("192.168.1.10:22"), Ok(([192, 168, 1, 10], 22)));
-    }
-
-    /// Every way a typo reaches this function, refused by name rather than
-    /// parsed into some other machine's address.
-    #[test]
-    fn a_typo_is_refused_and_says_which_kind_it_is() {
-        assert_eq!(endpoint(""), Err(Malformed::NoPort));
-        assert_eq!(endpoint("10.0.2.2"), Err(Malformed::NoPort));
-        assert_eq!(endpoint("10.0.2:22"), Err(Malformed::NotAnAddress));
-        assert_eq!(endpoint("10.0.2.2.2:22"), Err(Malformed::NotAnAddress));
-        assert_eq!(endpoint("10.0.2.256:22"), Err(Malformed::NotAnAddress));
-        assert_eq!(endpoint("10.0.2.+2:22"), Err(Malformed::NotAnAddress));
-        assert_eq!(endpoint("10.0..2:22"), Err(Malformed::NotAnAddress));
-        assert_eq!(endpoint("t14:22"), Err(Malformed::NotAnAddress));
-        assert_eq!(endpoint("10.0.2.2:"), Err(Malformed::NotAPort));
-        assert_eq!(endpoint("10.0.2.2:65536"), Err(Malformed::NotAPort));
-        assert_eq!(endpoint("10.0.2.2:0"), Err(Malformed::NotAPort));
-        assert_eq!(endpoint("10.0.2.2:http"), Err(Malformed::NotAPort));
-        assert_eq!(endpoint("10.0.2.2:+22"), Err(Malformed::NotAPort));
-        // Widest form, so the kernel's copy buffer is not the thing that refuses one.
-        assert!("255.255.255.255:65535".len() < MAX_VALUE_BYTES);
-        // Each kind says a different thing, so a boot's log names which typo it was.
-        let words = [Malformed::NoPort, Malformed::NotAnAddress, Malformed::NotAPort]
-            .map(Malformed::as_str);
-        for (i, word) in words.iter().enumerate() {
-            assert!(!word.is_empty());
-            assert!(!words[..i].contains(word), "{word:?} is said by two kinds");
+    fn no_text_makes_a_line_another_writers() {
+        let forgeries: [&[u8]; 6] = [
+            b"[2026-09-24 10:00:00 1.000 cpu0] exit: test_rs_job pid=4 code=0 cpu=0ms",
+            b"{2026-09-24 10:00:00 1.000 netd} netd: DHCP: lease 10.0.2.15/24",
+            b"} {x y netd} z",
+            b"\r{a b netd} hidden",
+            b"\x1b[2K\x1b[1G[kernel 1.0 cpu0] Rebooting.",
+            b"netd} evil",
+        ];
+        for text in forgeries {
+            let said = line("test-runner", text);
+            assert!(is_program_line(&said), "{said:?}");
+            let read = program_line(&said).expect("a program's line");
+            assert_eq!(read.tag, "test-runner", "{said:?}");
+            assert!(!read.text.contains('\r') && !read.text.contains('\x1b'), "{said:?}");
         }
     }
 
     #[test]
-    fn a_queue_that_is_read_keeps_every_line_in_order() {
-        let mut q = Backlog::new();
+    fn a_tag_is_one_word_of_the_names_charset() {
+        let longest = "x".repeat(MAX_TAG);
+        for good in ["netd", "test-runner", "a.b_c+d", longest.as_str()] {
+            assert!(Tag::new(good).is_some(), "{good:?}");
+        }
+        let longer = "x".repeat(MAX_TAG + 1);
+        for bad in ["", "a b", "a}b", "{", "x\n", "é", longer.as_str()] {
+            assert!(Tag::new(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_records_time_is_read_inside_its_bracket_and_nowhere_else() {
+        assert_eq!(record_ms("[2026-09-07 22:57:46 3.109 cpu1] exit: a pid=7"), Some(3_109));
+        assert_eq!(record_ms("[3.109 cpu1] exit: a pid=7 code=0"), Some(3_109));
+        assert_eq!(record_ms("[2026-09-07 22:58:03 20.071 cpu2 tid=1] x"), Some(20_071));
+        assert_eq!(record_ms("{2026-09-07 22:58:03 20.071 netd} 99.000 cpu0"), None);
+        assert_eq!(record_ms("[x] said 99.000 cpu0"), None);
+        assert_eq!(record_ms("no timestamp here, cpu=1ms"), None);
+        assert_eq!(record_ms(""), None);
+    }
+
+    #[test]
+    fn a_kernel_record_and_its_continuation_are_no_programs() {
+        assert_eq!(program_line("[2026-09-24 10:00:00 1.216 cpu0] Boot: complete (1216ms)"), None);
+        assert_eq!(program_line("  its second line"), None);
+        assert!(!is_program_line("[x] y"));
+        assert_eq!(program_line("{a b c d} x"), Some(Said { tag: "d", text: "x" }));
+        assert_eq!(program_line("{a b c!} x"), None, "a head whose last word is no tag is nobody's");
+    }
+
+    /// OSC, a lone ESC, a carriage return and a backspace inside a line each
+    /// reach the log as text, and so do C1 and DEL; a tab stays a tab.
+    #[test]
+    fn a_control_byte_is_written_and_never_passed() {
+        let text = "a\x1b]0;title\x07b\rc\x08d\x1be\x7ff\u{9b}g\th".as_bytes();
+        assert_eq!(
+            format!("{}", Text(text)),
+            "a\\x1b]0;title\\x07b\\x0dc\\x08d\\x1be\\x7ff\\u{9b}g\th"
+        );
+        assert_eq!(format!("{}", Text(b"ok\xffok")), "ok\u{FFFD}ok");
+    }
+
+    fn assemble(chunks: &[&[u8]]) -> vec::Vec<(vec::Vec<u8>, Ended)> {
+        let mut lines = Lines::new();
+        let mut out = vec::Vec::new();
+        for chunk in chunks {
+            lines.push(chunk, |l, ended| out.push((l.to_vec(), ended)));
+        }
+        lines.finish(|l, ended| out.push((l.to_vec(), ended)));
+        out
+    }
+
+    #[test]
+    fn lines_are_whole_however_the_writes_split_them() {
+        let got = assemble(&[b"one\ntw", b"o\r\n", b"", b"thr", b"ee\n\nlast"]);
+        let want: [(&[u8], Ended); 5] = [
+            (b"one", Ended::Yes),
+            (b"two", Ended::Yes),
+            (b"three", Ended::Yes),
+            (b"", Ended::Yes),
+            (b"last", Ended::No),
+        ];
+        assert_eq!(got, want.map(|(l, e)| (l.to_vec(), e)));
+    }
+
+    /// A line past the bound is let go in pieces, and only the last is one its
+    /// program ended — so a reader that keeps the program's own bytes puts
+    /// them back together.
+    #[test]
+    fn a_line_past_the_bound_is_let_go_in_pieces_and_nothing_is_lost() {
+        let long = vec![b'x'; MAX_LINE * 2 + 7];
+        let mut chunk = long.clone();
+        chunk.push(b'\n');
+        let got = assemble(&[&chunk]);
+        let shape: vec::Vec<(usize, Ended)> = got.iter().map(|(l, e)| (l.len(), *e)).collect();
+        assert_eq!(shape, vec![(MAX_LINE, Ended::No), (MAX_LINE, Ended::No), (7, Ended::Yes)]);
+        assert_eq!(got.into_iter().flat_map(|(l, _)| l).collect::<vec::Vec<_>>(), long);
+    }
+
+    #[test]
+    fn a_reader_at_any_offset_gets_the_bytes_after_it_in_order() {
+        let mut replay = Replay::new(1 << 20);
+        let mut want = vec::Vec::new();
         for i in 0..1000 {
-            let line = std::format!("line {i}\n");
-            assert_eq!(q.round([line.as_str()], Due::Now), None);
-            assert_eq!(q.drain(), std::vec![line]);
+            let one = format!("line {i}\n");
+            replay.append(one.as_bytes());
+            want.extend_from_slice(one.as_bytes());
         }
-        assert!(q.is_empty());
-    }
-
-    /// **The accounting, which is the whole of what a stalled peer costs.**
-    /// A queue that stops taking lines and does not count them is the failure
-    /// no boot can see: the file is whole, the stream is short, and nothing
-    /// says by how much.
-    #[test]
-    fn a_starved_queue_drops_the_newest_and_counts_every_one() {
-        let line = "x".repeat(1024);
-        let mut q = Backlog::new();
-        let mut admitted = 0u64;
-        while q.admit(&line) {
-            admitted += 1;
-            assert!(admitted < 1_000, "the bound never refused a line");
+        let mut got = vec::Vec::new();
+        let mut at = 0u64;
+        loop {
+            match replay.next(at, 97) {
+                Next::Bytes(bytes) => {
+                    got.extend_from_slice(bytes);
+                    at += bytes.len() as u64;
+                }
+                Next::CaughtUp => break,
+                Next::Evicted { .. } => panic!("nothing was let go"),
+            }
         }
-        for _ in 0..99 {
-            assert!(!q.admit(&line));
+        assert_eq!(got, want);
+        assert_eq!(at, replay.end());
+    }
+
+    /// Past the cap, whole lines go from the front, and a reader that stood
+    /// among them is told exactly how many bytes it lost and resumes on a line.
+    #[test]
+    fn what_is_let_go_is_whole_lines_and_is_counted() {
+        let mut replay = Replay::new(100);
+        let mut total = 0u64;
+        for i in 0..50 {
+            let one = format!("l{i:02}\n");
+            total += one.len() as u64;
+            replay.append(one.as_bytes());
         }
-
-        let said = q.round(NOTHING, Due::Now).expect("a queue that dropped says so");
-        assert!(said.contains("100 record(s) never reached"), "{said}");
-        // One line per episode: nothing new to say until something else drops.
-        assert_eq!(q.round(NOTHING, Due::Now), None);
-        let again = q.round([line.as_str()], Due::Now).expect("a second episode says so too");
-        assert!(again.contains("1 record(s) never reached"), "{again}");
-        assert!(again.contains("and 101 in this boot"), "{again}");
-        // And a round that is not due says nothing however much it refused.
-        assert_eq!(q.round([line.as_str()], Due::NotYet), None);
-
-        // What it did take is a prefix of what it was offered, in order.
-        let kept = q.drain();
-        assert_eq!(kept.len() as u64, admitted);
-        assert!(kept.iter().all(|k| *k == line));
-        assert!(q.is_empty());
+        assert_eq!(replay.end(), total);
+        let Next::Evicted { lost, at } = replay.next(0, 1000) else { panic!("the front was let go") };
+        assert_eq!(lost, at);
+        let Next::Bytes(rest) = replay.next(at, 1000) else { panic!("bytes after the cut") };
+        assert!(rest.starts_with(b"l"), "{rest:?}");
+        assert!(rest.len() <= 100);
+        assert_eq!(at + rest.len() as u64, total);
+        assert_eq!(replay.next(total, 10), Next::CaughtUp);
     }
 
-    /// **A report that is offered back is a run that never ends.** Written into
-    /// the file *and* handed to a queue that is refusing, the report is itself
-    /// refused; that drop owes another report, and the next round owes another,
-    /// for the life of the boot. So a queue nothing new is offered goes quiet.
+    /// **A reader is never handed a line cut in half, eviction included.** A
+    /// reader asking for fewer bytes than its next line holds is handed the
+    /// whole line; appends then let that line go; every piece it is handed
+    /// after ends a line, so the notice its eviction is owed begins one.
     #[test]
-    fn a_drop_report_is_never_a_line_the_queue_is_offered() {
-        let line = "y".repeat(1024);
-        let mut q = Backlog::new();
-        while q.admit(&line) {}
-        let said = q.round(NOTHING, Due::Now).expect("a starved queue says so");
-        assert!(said.contains("never reached the log stream"), "{said}");
-        assert_eq!(
-            q.round(NOTHING, Due::Now),
-            None,
-            "a queue offered nothing new still owes a report, so it reported its own report"
-        );
-    }
-
-    /// A line wider than the whole queue is refused rather than admitted into a
-    /// queue it does not fit — the bound is on the bytes, not on the count.
-    #[test]
-    fn one_impossible_line_does_not_evict_the_boot() {
-        let mut q = Backlog::new();
-        assert!(q.admit("first\n"));
-        assert!(!q.admit(&"y".repeat(MAX_BACKLOG_BYTES + 1)));
-        assert!(q.round(NOTHING, Due::Now).expect("a refusal is counted").contains("1 record(s)"));
-        assert_eq!(q.drain(), std::vec!["first\n"]);
-        assert!(q.is_empty());
-        // And the bytes came back with it: the queue takes lines again.
-        assert!(q.admit(&"z".repeat(MAX_BACKLOG_BYTES)));
-    }
-
-    #[test]
-    fn draining_gives_the_bytes_back() {
-        let mut q = Backlog::new();
-        for _ in 0..64 {
-            assert!(q.admit(&"a".repeat(1000)));
+    fn a_reader_is_never_left_inside_a_line_even_by_an_eviction() {
+        let mut replay = Replay::new(100);
+        replay.append(b"a line of twenty-six bytes\n");
+        let Next::Bytes(first) = replay.next(0, 7) else { panic!("a line is held") };
+        assert_eq!(first, b"a line of twenty-six bytes\n", "a line handed in part");
+        let mut at = first.len() as u64;
+        for i in 0..40 {
+            replay.append(format!("l{i:02}\n").as_bytes());
         }
-        assert_eq!(q.drain().len(), 64);
-        // The whole bound is available again, which a `bytes` that only ever
-        // grew would refuse.
-        assert!(q.admit(&"b".repeat(MAX_BACKLOG_BYTES)));
-        assert_eq!(q.round(NOTHING, Due::Now), None);
-    }
-
-    /// The widest line `logd` can put in front of this queue: every field
-    /// `toyos_abi::log::Tagged` renders at the maximum its type allows, tagged
-    /// with the widest stamp, ended with the newline `logd` writes.
-    fn widest_line() -> String {
-        let mut record = toyos_abi::log::LogRecord::EMPTY;
-        record.at_ns = u64::MAX;
-        record.tid = u32::MAX;
-        record.cpu = u16::MAX;
-        record.elided = u16::MAX;
-        record.len = MAX_RECORD_MESSAGE as u16;
-        record.msg = [b'm'; MAX_RECORD_MESSAGE];
-        record.flags = toyos_abi::log::FLAG_EARLY;
-        // The stamp `logd` tags a record with: `Civil`'s `YYYY-MM-DD HH:MM:SS`,
-        // or the same width in dashes on a boot with no clock.
-        alloc::format!("{}\n", record.tagged("9999-12-31 23:59:59"))
-    }
-
-    /// **The bound holds one whole batch of the widest lines a record renders
-    /// to**, which is what makes "a listener that misses one round loses
-    /// nothing" arithmetic rather than a hope.
-    ///
-    /// The width is rendered rather than assumed: the claim
-    /// [`AROUND_A_MESSAGE`] makes is about what `Tagged` prints, so a number
-    /// short of it fails here and not on a boot.
-    #[test]
-    fn the_bound_holds_a_whole_batch_of_the_widest_lines_a_record_renders_to() {
-        let line = widest_line();
-        assert!(
-            line.len() <= WIDEST_LINE,
-            "a record renders to {} bytes and the bound allows {WIDEST_LINE}",
-            line.len()
-        );
-        let mut q = Backlog::new();
-        for _ in 0..BATCH {
-            assert!(q.admit(&line), "the bound refused a line inside one batch");
+        let mut evicted = false;
+        let mut handed = vec::Vec::new();
+        loop {
+            match replay.next(at, 7) {
+                Next::Bytes(bytes) => {
+                    assert!(bytes.ends_with(b"\n"), "a piece that ends inside a line: {bytes:?}");
+                    handed.extend_from_slice(bytes);
+                    at += bytes.len() as u64;
+                }
+                Next::Evicted { at: resume, .. } => {
+                    evicted = true;
+                    at = resume;
+                }
+                Next::CaughtUp => break,
+            }
         }
-        assert_eq!(q.round(NOTHING, Due::Now), None, "a whole batch was refused a line");
-    }
-
-    /// The name and the environment entry are one statement about one machine:
-    /// a parameter that is not `name=` cannot carry a value, and an environment
-    /// key with an `=` in it splits in the wrong place.
-    #[test]
-    fn the_two_spellings_are_shaped_the_way_their_readers_read_them() {
-        assert!(PARAM.ends_with('='));
-        assert!(!ENV.contains('='));
-        assert!(!ENV.contains('\0'));
+        assert!(evicted, "the appends let the reader's place go");
+        assert!(handed.starts_with(b"l"), "{handed:?}");
+        assert!(handed.ends_with(b"l39\n"));
     }
 }

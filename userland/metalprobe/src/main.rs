@@ -1,11 +1,11 @@
 //! The device measurements a metal boot takes of itself, one command per
 //! number, invoked by the name it is symlinked under the way `toybox` is.
 //!
-//! **The exit code is the measurement, because on the T14 nothing else
-//! crosses.** A userland `println!` reaches the stick of a machine with no
-//! serial port only as a record inside its program's share of the log; the one
-//! word of a process that no share bounds is the kernel's own record at its exit,
-//! `exit: <name> pid=N code=<code> cpu=Nms` (`kernel/src/process.rs`). That
+//! **The exit code is the measurement, because it is the one word of a process
+//! the kernel writes itself.** A userland `println!` reaches the stick as a
+//! line under the runner's name among every other job's; the kernel's own
+//! record at a process's exit, `exit: <name> pid=N code=<code> cpu=Nms`
+//! (`kernel/src/process.rs`), is a field a judge reads by name. That
 //! record carries the full `i32` the process exited with, so a command here
 //! exits with its measured value in the unit its own module declares, and the
 //! process name in the record is the symlink it was invoked under. The host

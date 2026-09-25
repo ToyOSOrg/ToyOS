@@ -190,8 +190,8 @@ struct SshSession {
     /// session does — is what ends them and kills the program they serve.
     alive: watch::Sender<()>,
     is_pty: bool,
-    /// Told when the client closes a swap's channel, which it does only once
-    /// it has read the answer this daemon closed the channel behind.
+    /// Told when the client closes a swap's channel, which it does once it has
+    /// read the answer and is ready for the swap to go.
     answered: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -410,15 +410,18 @@ impl SshSession {
             out.data(line.as_bytes()).await.ok();
             out.exit_status(status).await.ok();
             out.eof().await.ok();
-            out.close().await.ok();
-            // **The client's close is the proof it has the answer**: it
-            // follows this daemon's close on one ordered stream. Only then is
-            // init told to go, by this connection ending — and a client that
+            // **The client's close is the go**, and this daemon does not close
+            // first: a client answers a peer's close with its own at once, so
+            // a close that followed this one would say only that the answer
+            // arrived, not that the client — whose own connections the service
+            // being swapped may carry — is ready for it to stop. Only then is
+            // init told to go, by this connection ending, and a client that
             // never closes is waited for no longer than the bound.
             if init.is_some() {
                 let bound = std::time::Duration::from_millis(toyos_swap::ANSWER_MS);
                 let _ = tokio::time::timeout(bound, taken_in).await;
             }
+            out.close().await.ok();
             drop(init);
         });
     }

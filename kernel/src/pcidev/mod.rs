@@ -51,6 +51,25 @@
 //! no longer maps them, so bus mastering is not started at hand-over: it starts
 //! on the claim's first grant, after that grant is in the function's domain.
 //!
+//! **A function no mechanism resets is still aimed at what its last holder
+//! granted.** Nothing but that function's own driver can stop its queues, and
+//! no register write retracts a transfer it had taken in before its holder
+//! died: the first grant that starts it mastering again lets that transfer out.
+//! So [`release`] takes those grants back like any other — mastering is off,
+//! so the function reaches nothing until its next claim's first grant — and
+//! keeps only their device addresses, as the slot's [`RESIDUE`]: the domain
+//! never hands an address out twice, and the slot is that function's alone
+//! (`toyos_pci::slot`), for the rest of the boot if it is never claimed again.
+//! The next claim's grant of a range's size is fresh pages placed at that
+//! range; a range it places nothing at stays unmapped, so a transfer aimed there
+//! faults, and its own release drops it. No page is ever two holders'.
+//!
+//! **That rests on the next holder laying its grants out as the last one
+//! did.** The stale transfer — data and descriptor write-back — lands in
+//! whatever the new holder keeps at that address, after it has set up its own
+//! rings or not: harmless for a netd succeeding a netd, a silent write into its
+//! own memory for a holder with another layout.
+//!
 //! **A reset returns a function's configuration to its defaults, BARs
 //! included, and the next claim puts back what it needs.** [`release`] resets
 //! the function by the first mechanism it advertises ([`reset`]) while the old
@@ -73,6 +92,7 @@ use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
 use toyos_pci::bridge::Window;
+use toyos_pci::slot::{self, Slot};
 use toyos_pci::{af, aperture, bar, express, msix, placement, pm, probe};
 
 use crate::device::{Claim, ClaimError};
@@ -148,7 +168,22 @@ struct Grant {
     memory: Arc<SharedMemObject>,
     at: u64,
     bytes: u64,
+    /// Placed at a range of [`Bound::residue`]: taken back, the range returns
+    /// there.
+    residual: bool,
 }
+
+/// Device addresses a slot's domain handed out and no longer maps.
+#[derive(Clone, Copy)]
+struct Aimed {
+    at: u64,
+    bytes: u64,
+}
+
+/// Where a function [`release`] could not reset was left aimed: its last
+/// holder's grants, by address alone, until that function is claimed again.
+static RESIDUE: [Lock<Vec<Aimed>>; MAX_FUNCTIONS] =
+    [const { Lock::new(Vec::new()) }; MAX_FUNCTIONS];
 
 /// How a claimed function was made to speak. Both deliver [`VECTORS`]`[slot]`
 /// into the same [`Interrupt`] and the claim answers the same handle either way.
@@ -172,6 +207,10 @@ struct Bound {
     /// object rather than a second handle to one window.
     bars: [Option<Arc<SharedMemObject>>; BARS],
     grants: Vec<Grant>,
+    /// The [`RESIDUE`] this claim took over and has placed no grant at: mapped
+    /// to nothing and counted against nothing, and where a grant of a range's
+    /// size is placed.
+    residue: Vec<Aimed>,
     /// Whether this function may issue a transaction yet. False until its first
     /// grant is in its domain, so a function carrying a previous holder's queue
     /// addresses can act on none of them.
@@ -265,20 +304,17 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
 /// **Taken alone**: nothing is held while this is, and it is held across
 /// nothing — `reserve` runs after `claim` has dropped `MACHINE`, and `release`
 /// takes it once the teardown is over.
-static SLOTS: Lock<[Option<u16>; MAX_FUNCTIONS]> = Lock::new([None; MAX_FUNCTIONS]);
+static SLOTS: Lock<[Slot; MAX_FUNCTIONS]> = Lock::new([Slot::Free; MAX_FUNCTIONS]);
 
 /// Take a slot for `who`, or say why not.
 ///
 /// The scan and the take are one critical section: two claims arriving together
 /// must not both find the function unheld.
 fn reserve(who: u16) -> Result<usize, ClaimError> {
-    let mut slots = SLOTS.lock();
-    if slots.contains(&Some(who)) {
-        return Err(ClaimError::Owned);
-    }
-    let slot = slots.iter().position(Option::is_none).ok_or(ClaimError::Exhausted)?;
-    slots[slot] = Some(who);
-    Ok(slot)
+    slot::reserve(&mut *SLOTS.lock(), who).map_err(|refused| match refused {
+        slot::Refused::Owned => ClaimError::Owned,
+        slot::Refused::Exhausted => ClaimError::Exhausted,
+    })
 }
 
 /// Every function this machine enumerated, and who drives it now: a kernel
@@ -295,7 +331,7 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
         let who = requester_of(pci.at);
         pci.driven = if kernel_driven.contains(&who) {
             Driven::Kernel
-        } else if slots.contains(&Some(who)) {
+        } else if slots.contains(&Slot::Held(who)) {
             Driven::Claimed
         } else {
             Driven::Free
@@ -312,7 +348,7 @@ pub fn segment() -> u16 {
 
 /// The function a claim's slot holds, or `None` for a slot nobody holds.
 pub fn held_at(slot: usize) -> Option<toyos_abi::inventory::PciAddr> {
-    let who = SLOTS.lock().get(slot).copied().flatten()?;
+    let Some(Slot::Held(who)) = SLOTS.lock().get(slot).copied() else { return None };
     Some(addr_of(MACHINE.lock().segment, who))
 }
 
@@ -678,7 +714,8 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
     let claim = Claim::pci(slot);
 
     match bring_up(pci, id, slot) {
-        Ok(bound) => {
+        Ok(mut bound) => {
+            bound.residue = take_residue(slot);
             let info = PciFunctionInfo {
                 bar_bytes: bound.bar_bytes,
                 bus: pci.bus,
@@ -774,6 +811,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
                 bar_bytes,
                 bars: [const { None }; BARS],
                 grants: Vec::new(),
+                residue: Vec::new(),
                 mastering: false,
             })
         }
@@ -954,6 +992,8 @@ enum Declined {
     /// The function is not in D0, so a round trip from it is not one this
     /// kernel knows the timing of.
     NotInD0,
+    /// `pcidev-reset-nothing` declined it without asking the function.
+    Staged,
 }
 
 impl core::fmt::Display for Declined {
@@ -964,6 +1004,7 @@ impl core::fmt::Display for Declined {
             Self::NoFlr => "no function level reset advertised",
             Self::NoSoftReset => "No_Soft_Reset set",
             Self::NotInD0 => "not in D0",
+            Self::Staged => "declined unasked, as staged",
         })
     }
 }
@@ -996,8 +1037,8 @@ impl core::fmt::Display for How {
             Self::D3hot => f.write_str("the D3hot round trip"),
             Self::Nothing { express, af, pm } => write!(
                 f,
-                "nothing (Express: {express}; AF: {af}; PM: {pm}), so its queues are the next \
-                 holder's to stop"
+                "nothing (Express: {express}; AF: {af}; PM: {pm}), so where it may still be aimed \
+                 is kept for its next claim"
             ),
         }
     }
@@ -1010,6 +1051,10 @@ impl core::fmt::Display for How {
 /// in its place, then the D3hot round trip, which resets any function that
 /// does not say `No_Soft_Reset`.
 fn reset(pci: &PciDevice) -> (How, Option<Resetting>) {
+    if crate::actuator::pcidev_reset_nothing() {
+        let staged = Declined::Staged;
+        return (How::Nothing { express: staged, af: staged, pm: staged }, None);
+    }
     let now = crate::clock::nanos_since_boot();
     let express = match pci.capability(express::CAP_ID) {
         Ok(cap) if express::resets(cap.read_u32(express::DEVICE_CAPABILITIES)) => {
@@ -1127,6 +1172,20 @@ fn finish_retired(slot: usize) {
     }
     // The pages go back with this drop, after the unmap above.
     drop(retired);
+}
+
+/// The slot's [`RESIDUE`], for the claim that now holds its function.
+fn take_residue(slot: usize) -> Vec<Aimed> {
+    let residue = core::mem::take(&mut *RESIDUE[slot].lock());
+    if !residue.is_empty() {
+        let bytes: u64 = residue.iter().map(|aimed| aimed.bytes).sum();
+        log!(
+            "pcidev: slot {slot} holds {} range(s), {bytes} bytes, its function was left aimed \
+             at: a grant of a range's size is placed there, on fresh pages",
+            residue.len()
+        );
+    }
+    residue
 }
 
 /// Which BAR holds this function's MSI-X table or PBA, if any.
@@ -1363,7 +1422,8 @@ fn alone_in_its_page(claimed: &PciDevice, index: u8, at: u64, span: u64) {
 }
 
 /// Give up a slot: the device stops mastering the bus, then loses its
-/// addresses, and only then do the pages behind them go back.
+/// addresses, and only then do the pages behind them go back — and where
+/// nothing reset it, the addresses are kept as the slot's [`RESIDUE`].
 ///
 /// The order is what makes a dying driver safe. A page freed while the function
 /// could still reach it is a device writing into memory the allocator has
@@ -1378,8 +1438,10 @@ pub fn release(slot: usize) {
     }
     // Unconditional and last: a hand-over refused inside [`bring_up`] bound
     // nothing and still holds its reservation, and the slot comes back only
-    // once the function that was in it can no longer reach memory.
-    SLOTS.lock()[slot] = None;
+    // once the function that was in it can no longer reach memory — or, with
+    // a residue, stays that function's.
+    let residue = !RESIDUE[slot].lock().is_empty();
+    slot::release(&mut *SLOTS.lock(), slot, residue);
 }
 
 fn tear_down(slot: usize, mut bound: Bound) {
@@ -1412,12 +1474,18 @@ fn tear_down(slot: usize, mut bound: Bound) {
             let previous = RETIRED[slot].lock().replace(parked);
             assert!(previous.is_none(), "pcidev: slot {slot} was claimed with a retired holder left");
         }
+        // Nothing reset it, so whatever it had taken in is still aimed at these
+        // addresses; mastering is off, so it reaches none of them until the
+        // next claim's first grant.
         None => {
             for grant in grants.iter() {
                 if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
                     panic!("pcidev: slot {slot} could not take {:#x} back: {why}", grant.at);
                 }
             }
+            let mut residue = RESIDUE[slot].lock();
+            assert!(residue.is_empty(), "pcidev: slot {slot} was claimed with a residue left untaken");
+            *residue = grants.iter().map(|grant| Aimed { at: grant.at, bytes: grant.bytes }).collect();
         }
     }
     IRQ[slot].clear();
@@ -1485,14 +1553,22 @@ pub fn dma_alloc(
             return Err(SyscallError::ResourceExhausted);
         }
         let memory = SharedMemObject::create(span)?;
+        let phys = memory.phys().phys();
         // The pages are the allocator's own and 2 MiB, so a domain that cannot
         // take them is a kernel bug rather than the device's answer.
-        let at = bound
-            .space
-            .map(memory.phys().phys(), span)
-            .unwrap_or_else(|why| panic!("pcidev: slot {slot} could not map a grant: {why}"));
+        let refused = |why| -> ! { panic!("pcidev: slot {slot} could not map a grant: {why}") };
+        let (at, residual) = match bound.residue.iter().position(|aimed| aimed.bytes == span) {
+            // The function may still be aimed here, so this holder is the one
+            // whatever it had in flight lands on.
+            Some(index) => {
+                let aimed = bound.residue.remove(index);
+                bound.space.map_at(aimed.at, phys, span).unwrap_or_else(|why| refused(why));
+                (aimed.at, true)
+            }
+            None => (bound.space.map(phys, span).unwrap_or_else(|why| refused(why)), false),
+        };
         let first = bound.grants.is_empty();
-        bound.grants.push(Grant { memory: Arc::clone(&memory), at, bytes: span });
+        bound.grants.push(Grant { memory: Arc::clone(&memory), at, bytes: span, residual });
         // After the mapping and never before: the first thing this function may
         // reach has to exist before it may reach anything.
         if !bound.mastering {
@@ -1517,6 +1593,9 @@ pub fn dma_undo(slot: usize) {
         let Some(grant) = bound.grants.pop() else { return Ok(()) };
         if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
             panic!("pcidev: slot {slot} could not take {:#x} back: {why}", grant.at);
+        }
+        if grant.residual {
+            bound.residue.push(Aimed { at: grant.at, bytes: grant.bytes });
         }
         Ok(())
     });
@@ -1568,13 +1647,20 @@ pub fn config_read(slot: usize, at: Register, width: RegWidth) -> Result<u32, Sy
     })
 }
 
-/// The interrupts since the last read, or `None` for none.
-pub fn take_record(slot: usize) -> Option<DeviceIrqRecord> {
-    IRQ[slot].take().map(|count| DeviceIrqRecord { count })
+/// The interrupts since the last read, or `None` for none; `Io` once the unit
+/// has refused the function, which is the one answer its holder cannot take
+/// for a quiet device.
+pub fn take_record(slot: usize) -> Result<Option<DeviceIrqRecord>, SyscallError> {
+    if IRQ[slot].faulted() {
+        return Err(SyscallError::Io);
+    }
+    Ok(IRQ[slot].take().map(|count| DeviceIrqRecord { count }))
 }
 
+/// Whether a read of the claim answers at once: a message is waiting, or the
+/// refusal is.
 pub fn has_irq(slot: usize) -> bool {
-    IRQ[slot].armed()
+    IRQ[slot].armed() || IRQ[slot].faulted()
 }
 
 /// Records one message. Called from the vector's ISR, so it takes no lock and
@@ -1593,7 +1679,8 @@ pub fn drain_pending() {
         if !irq.take_pending() {
             continue;
         }
-        if irq.take_unannounced() {
+        // A fault's wake is no message.
+        if !irq.faulted() && irq.take_unannounced() {
             log!(
                 "pcidev: slot {slot} took its first message on vector {:#x}",
                 VECTORS[slot]
@@ -1605,10 +1692,14 @@ pub fn drain_pending() {
 
 /// The unit refused this function an access.
 ///
-/// Called from the fault handler, which takes no lock: one store, and every
-/// call the claim answers refuses from here on.
+/// Called from the fault handler, which takes no lock: every call the claim
+/// answers refuses from here on, its interrupt read included, and this CPU's
+/// next scheduler pass wakes whoever waits on the claim to read that refusal —
+/// the pass a message earns, posted the way its ISR posts it.
 pub fn note_fault(slot: usize) {
     IRQ[slot].fault();
+    crate::irq_ring::isr_publish(crate::irq_ring::IrqSource::UserDev, crate::clock::nanos_since_boot());
+    crate::preempt::set_need_resched();
 }
 
 pub fn add_inbox_watcher(slot: usize, id: InboxId) {

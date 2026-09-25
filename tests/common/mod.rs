@@ -36,6 +36,8 @@ pub mod logread;
 pub mod logstream;
 pub mod metal;
 #[allow(dead_code)]
+pub mod origin;
+#[allow(dead_code)]
 pub mod partclaim;
 #[allow(dead_code)]
 pub mod passcost;
@@ -47,10 +49,11 @@ pub mod power;
 pub mod qemu;
 #[allow(dead_code)]
 pub mod screen;
+/// The host as a neighbour on a guest's own Ethernet segment.
+#[allow(dead_code)]
+pub mod segment;
 #[allow(dead_code)]
 pub mod serial;
-#[allow(dead_code)]
-pub mod spoken;
 #[allow(dead_code)]
 pub mod ssh;
 #[allow(dead_code)]
