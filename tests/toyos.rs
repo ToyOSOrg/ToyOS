@@ -319,6 +319,9 @@ const RUST_SKIP: &[&str] = &[
     // no reason to hold. `launcher_refusals` runs it on tests/netcase, whose
     // test-runner receives one for exactly this.
     "launcher_refusals",
+    // Needs a launcher to tell its two roads apart, and a declared shell and
+    // toybox to take it: `spawn_cwd` runs it on tests/netcase.
+    "spawn_cwd",
     // Needs a boot image the harness staged a file into before the machine
     // started, which only `esp_filesystem` builds.
     "esp_files",
@@ -792,6 +795,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // margins, which is the definition of [`Sched::Serial`].
     ("netd_hostile_peer", Sched::Serial, Tier::Nightly),
     ("launcher_refusals", Sched::Parallel, Tier::Fast),
+    // Paths a child prints and the kernel's refusals by name; no clock in any of them.
+    ("spawn_cwd", Sched::Parallel, Tier::Fast),
     ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
     ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
     // Four kernel lines and a file read off the image once the guest is gone; no clock in any of them.
@@ -14454,6 +14459,46 @@ fn run_machine_test(
             }
             serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
             eprintln!("  [netcase] init refused three bad launches, named them, and kept launching");
+            Ok(())
+        }
+        "spawn_cwd" => {
+            // A child starts in the directory its spawn names — through the
+            // launcher from the shell's `cd`, through the launcher from
+            // `Command::current_dir`, and directly — and a spawn into a
+            // directory that is not there is refused by name. The guest carries
+            // every verdict; `tests/netcase` is where a launcher and a declared
+            // shell exist to tell the roads apart.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+            let bins: Vec<(String, Vec<u8>)> =
+                rust_bins.iter().filter(|(name, _)| name == "spawn_cwd").cloned().collect();
+            if bins.is_empty() {
+                return Err("spawn_cwd was not built".to_string());
+            }
+            let mut qemu = QemuInstance::boot_with_options(
+                &config,
+                &[],
+                &bins,
+                BootOptions { profile: qemu::Profile::Headless, ..Default::default() },
+            );
+            let mut console = qemu.boot_log().to_string();
+            let _ = await_marker(&mut qemu, &mut console, "===READY===", "test-runner to come up");
+
+            let result = qemu.run_test("test_rs_spawn_cwd", Duration::from_secs(120));
+            if let Some(err) = &result.error {
+                return Err(format!("{err}\n{}", result.stdout));
+            }
+            if result.exit_code != Some(0) {
+                return Err(format!(
+                    "spawn_cwd exited {:?}:\n{}{}",
+                    result.exit_code, result.stdout, result.serial
+                ));
+            }
+            if !result.stdout.contains("spawn-cwd: every child started where its spawn said") {
+                return Err(format!("spawn_cwd exited 0 without its verdict:\n{}", result.stdout));
+            }
+            console.push_str(&result.serial);
+            serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+            eprintln!("  [netcase] every child started in the directory its spawn named");
             Ok(())
         }
         "input_claim_absent" => {

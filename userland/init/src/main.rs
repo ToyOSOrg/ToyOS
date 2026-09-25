@@ -850,9 +850,8 @@ fn serve_launch<'a>(
             command.env(key, value);
         }
     }
-    if !request.cwd.is_empty() {
-        command.current_dir(request.cwd);
-    }
+    // Unconditional: an empty or relative cwd is the kernel's to refuse, never init's `/`.
+    command.current_dir(request.cwd);
     for arg in request.argv.split(|&b| b == 0).skip(1).filter(|a| !a.is_empty()) {
         if let Ok(arg) = std::str::from_utf8(arg) {
             command.arg(arg);
