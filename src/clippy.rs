@@ -34,8 +34,10 @@ struct Shape {
 /// `--all-targets` on the host workspace only: on the bootloader and kernel a
 /// test target links `std`, whose `panic_impl` collides with theirs. The second
 /// kernel shape is the feature set every guest boots, whose `cfg`s the default
-/// set never sees. `undocumented_unsafe_blocks` is adopted per area as each
-/// area's justifications land.
+/// set never sees; the third is the one `--kernel-param` builds, `boot-actuators`
+/// without `test-actuators`, whose dead code neither of the others can see.
+/// `undocumented_unsafe_blocks` is adopted per area as each area's
+/// justifications land.
 const SHAPES: &[Shape] = &[
     Shape {
         dir: "",
@@ -50,6 +52,11 @@ const SHAPES: &[Shape] = &[
     Shape {
         dir: "kernel",
         before: &["--target", "x86_64-unknown-none", "--features", "boot-actuators,test-actuators"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
+        before: &["--target", "x86_64-unknown-none", "--features", "boot-actuators"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {

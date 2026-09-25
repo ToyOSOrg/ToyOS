@@ -142,7 +142,6 @@ fn main() {
     let build_only = asked(&flags::BUILD_ONLY);
     let dump_audio = asked(&flags::DUMP_AUDIO);
     let rebuild_toolchain = asked(&flags::REBUILD_TOOLCHAIN);
-    let claim_sysroot = asked(&flags::CLAIM_SYSROOT);
     if let Some(budget) = CARGO_RUN.value(&args, &flags::HOST_BUILDS) {
         toyos_build::buildlock::set_host_builds(
             budget.parse().unwrap_or_else(|_| panic!("--host-builds: {budget:?} is not a budget")),
@@ -232,7 +231,7 @@ fn main() {
     // Toolchain included: `build` holds the build lock across both, so no other
     // agent's clean or bootstrap can land between the two.
     let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);
-    let image = toyos_build::build::build(&root, boot, rebuild_toolchain, claim_sysroot, &plan);
+    let image = toyos_build::build::build(&root, boot, rebuild_toolchain, &plan);
     println!("Build finished.");
     println!("Boot image: {}", image.display());
 

@@ -17,6 +17,7 @@ pub mod forkcheck;
 pub mod heartbeat;
 pub mod hostws;
 pub mod icmp;
+pub mod identity;
 pub mod image;
 /// Which kernel containers may be hashed, and by whose keys; read by nothing
 /// but its own tests.
@@ -33,6 +34,7 @@ pub mod metaltalk;
 pub mod pr;
 pub mod redlist;
 pub mod release;
+pub mod scratch;
 pub mod sdkversion;
 pub mod soundfont;
 /// Nothing outside its own gates reads this, so it is not compiled into the
@@ -40,6 +42,7 @@ pub mod soundfont;
 #[cfg(test)]
 pub mod sourcegate;
 pub mod stamps;
+pub mod sysroot;
 pub mod testargs;
 pub mod tiers;
 pub mod toolchain;

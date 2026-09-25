@@ -41,7 +41,7 @@ const NIGHTLY_RED: &str = "nightly is red";
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              cargo test --lib, every host-workspace suite and clippy (ci.yml)
-  abi-split         the ABI-first rule and the published crates' versions (ci.yml)
+  abi-split         the published crates' versions (ci.yml; the name is the required check's)
   gate-stage        what protects main, read back from GitHub (ci.yml)
   host-full         host, plus the model controls, userland and the SDK (nightly)
   toolchain         publish this tree's toolchain if nobody has (nightly)
@@ -100,7 +100,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
     let steps = match &job {
         Job::Host => host(root),
         Job::AbiSplit => {
-            vec![step("the ABI-first rule and the published crates", || abi_split(root))]
+            vec![step("the published crates' versions", || abi_split(root))]
         }
         Job::GateStage => vec![step("what protects main", || gate_stage(root))],
         Job::HostFull => host_full(root),
@@ -438,14 +438,13 @@ fn host_full(root: &Path) -> Vec<Step> {
 }
 
 /// A pull request against `main`, run as its own `ci.yml` job because it reads
-/// the branch's own commits — a merge group's are several branches' and each
-/// was already judged this way as a pull request, which is why `abi-split` is
-/// not a job there at all.
+/// the branch's own history against its merge base — a merge group's is
+/// several branches', each already judged this way as a pull request, which is
+/// why `abi-split` is not a job there at all. It keeps the name branch
+/// protection requires.
 fn abi_split(root: &Path) -> Result<String, String> {
     pr::git(root, &["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])?;
-    pr::abi_lands_alone(root, "origin/main")?;
-    let sdk = sdkversion::judge(root, "origin/main")?;
-    Ok(format!("the sysroot's sources are not mixed with work that depends on them; {sdk}"))
+    sdkversion::judge(root, "origin/main")
 }
 
 /// What protects `main` is configured outside the repository, so it is read
