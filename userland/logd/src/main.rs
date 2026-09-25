@@ -20,20 +20,25 @@
 //!   starts a pipe for its stdout and stderr and moves the read end here with
 //!   the manifest's name for the program, on a connection only init holds
 //!   ([`toyos_logstream::ORIGINS`]). A line is that program's because it came
-//!   out of that pipe. This program's own lines come out of a pipe of its own
-//!   the same way (`say!`).
+//!   out of that pipe. This program's own lines go in under its own name
+//!   (`say!`), and **none of them waits on anything**: the main loop's go
+//!   straight into its next round, and a reader thread's into a bounded queue
+//!   the loop takes each round, where one past the bound is counted and the
+//!   count said.
 //!
 //! A full pipe is a writer that waits for this program to read it: a program's
-//! line is slowed, never dropped. Each program's line also goes to this
-//! program's console as the program wrote it, which on a machine with a serial
-//! port is the one console there is.
+//! line is slowed, never dropped.
 //!
-//! # Two sinks, and only one of them is the sink of record
+//! # Three sinks, and only one of them is the sink of record
 //!
-//! The file is. [`serve`]'s readers are the other: the same lines, in the same
+//! The file is. [`serve`]'s readers are the second: the same lines, in the same
 //! order, to whoever asks — over TCP and on this machine — from the boot's
-//! first line however late they ask. A line goes to the volume first and to the
-//! readers after, and no reader can slow the file.
+//! first line however late they ask. The console is the third: each program's
+//! line as the program wrote it, which on a machine with a serial port is the
+//! one console there is. The readers and the console are each fed off this
+//! loop's thread, and neither can slow the file: a reader is a thread with an
+//! offset into what the file already has, and the console is a thread with a
+//! bounded queue ([`Echo`]).
 //!
 //! # Its whole authority
 //!
@@ -73,14 +78,12 @@
 //! `klogd` writes them to the console at the commit, and a second copy from
 //! here would double every line on the wire.
 
-/// One line into this program's own pipe, so it is a line of the log under
-/// `logd`'s name like any other program's — from any thread, and before the
-/// volume is open.
+/// One line of this program's own, under `logd`'s name like any other
+/// program's — from any thread, and before the volume is open. It never waits
+/// ([`said`]).
 macro_rules! say {
     ($($arg:tt)*) => {{
-        let mut line = format!($($arg)*);
-        line.push('\n');
-        $crate::said(line.as_bytes());
+        $crate::said(format!($($arg)*));
     }};
 }
 
@@ -89,7 +92,10 @@ mod serve;
 mod store;
 mod wall;
 
-use std::sync::OnceLock;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::thread::ThreadId;
 use std::time::Instant;
 
 use toyos::endow::{self, Endowments, SYSCAP_LABEL};
@@ -115,15 +121,19 @@ const BATCH: usize = 64;
 /// the one origin whose word on a swap this program acts on.
 const INIT: &str = "init";
 
-/// Programs whose output this program reads at once: one per `[boot] start`
-/// entry, init's own and this program's, which is what there is to register.
-const MAX_ORIGINS: usize = 32;
-
-/// The poll's tokens: the kernel's readiness, init's origins connection, and
-/// each origin's pipe from [`ORIGIN_BASE`] up.
+/// The poll's tokens: the kernel's readiness, init's origins connection, the
+/// bell this program's other threads ring, and each origin's pipe from
+/// [`ORIGIN_BASE`] up.
 const KERNEL_TOKEN: u64 = 0;
 const ORIGINS_TOKEN: u64 = 1;
-const ORIGIN_BASE: u64 = 2;
+const BELL_TOKEN: u64 = 2;
+const ORIGIN_BASE: u64 = 3;
+
+/// Programs whose output this program reads at once: what one poller can
+/// watch beside the other three sources. A swap registers the new program's
+/// pipe while the old one's may still have a writer, so this is a bound
+/// init's own actions reach, and one past it is refused by name.
+const MAX_ORIGINS: usize = Poller::MAX_HANDLES as usize - ORIGIN_BASE as usize;
 
 /// What one origin's pipe gives a round at most: one read. **A bound on the
 /// round, not on the program** — what is left is read the next round, and a
@@ -135,16 +145,142 @@ const READ_BYTES: usize = 64 * 1024;
 /// the volume keeps, so the stream is never the shorter of the two.
 const REPLAY_BYTES: usize = MAX_LOG_FILES * MAX_LOG_BYTES as usize;
 
-/// The write end of this program's own pipe.
-static OWN: OnceLock<Pipe> = OnceLock::new();
+/// Lines this program's other threads may have said and the main loop not yet
+/// taken. A bound, because how many there are is a LAN host's choice: each
+/// connection it opens is a line or two.
+const THEIRS_LINES: usize = 256;
 
-/// `say!`'s one write: into the own pipe. A refusal is a pipe this program no
-/// longer reads, and there is nobody left to tell.
-fn said(line: &[u8]) {
-    if let Some(own) = OWN.get() {
-        let mut rest = line;
-        while let Ok(n @ 1..) = own.write(rest) {
-            rest = &rest[n..];
+/// This program's own lines, before a round takes them.
+struct Own {
+    /// The main loop's thread: its lines are its next round's, unbounded,
+    /// since it is the thread that takes them.
+    main: OnceLock<ThreadId>,
+    mine: Mutex<Vec<(u64, String)>>,
+    /// Every other thread's, to [`THEIRS_LINES`], and how many found it full.
+    theirs: Mutex<VecDeque<(u64, String)>>,
+    unsaid: AtomicU64,
+    /// Rung after a push onto `theirs`, so a parked main loop wakes for it.
+    bell: OnceLock<Pipe>,
+}
+
+static OWN: Own = Own {
+    main: OnceLock::new(),
+    mine: Mutex::new(Vec::new()),
+    theirs: Mutex::new(VecDeque::new()),
+    unsaid: AtomicU64::new(0),
+    bell: OnceLock::new(),
+};
+
+/// `say!`'s one step, stamped as it is said, and never a wait: a push, and
+/// from any thread but the main loop's a nonblocking byte on the bell.
+fn said(line: String) {
+    let at_ns = toyos_abi::syscall::clock_nanos();
+    if OWN.main.get() == Some(&std::thread::current().id()) {
+        OWN.mine.lock().expect("logd: its own lines are poisoned").push((at_ns, line));
+        return;
+    }
+    {
+        let mut theirs = OWN.theirs.lock().expect("logd: its own lines are poisoned");
+        if theirs.len() >= THEIRS_LINES {
+            OWN.unsaid.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        theirs.push_back((at_ns, line));
+    }
+    let bell = OWN.bell.get().expect("logd: a thread other than the main loop exists only after the bell");
+    match bell.write_nonblock(&[1]) {
+        // A full bell is a main loop with a wake already owed.
+        Ok(_) | Err(SyscallError::WouldBlock) => {}
+        Err(e) => panic!("logd: its own bell refused a byte: {e:?}"),
+    }
+}
+
+/// Every line of this program's own said since the last round, into `round`:
+/// the bell emptied first, so a push after this look rings it again.
+fn own_lines(bell: &Pipe, boot_local: Option<u64>, round: &mut Round) {
+    let mut rung = [0u8; 4096];
+    loop {
+        match bell.read_nonblock(&mut rung) {
+            Ok(1..) => {}
+            Err(SyscallError::WouldBlock) => break,
+            other => panic!("logd: its own bell answered {other:?}"),
+        }
+    }
+    let mut lines = std::mem::take(&mut *OWN.mine.lock().expect("logd: its own lines are poisoned"));
+    lines.extend(OWN.theirs.lock().expect("logd: its own lines are poisoned").drain(..));
+    let unsaid = OWN.unsaid.swap(0, Ordering::Relaxed);
+    if unsaid > 0 {
+        lines.push((
+            toyos_abi::syscall::clock_nanos(),
+            format!("logd: {unsaid} line(s) from its reader threads went unsaid: their queue was full"),
+        ));
+    }
+    let from = round.console.len();
+    for (at_ns, line) in lines {
+        said_by(LOGD, at_ns, line.as_bytes(), Ended::Yes, boot_local, round);
+    }
+    let own = round.console.split_off(from);
+    round.own_console.extend_from_slice(&own);
+}
+
+/// The console, fed off the main loop's thread: a serial port spins per byte
+/// (`uart_write_bytes` waits on the transmitter, and a byte at 115200 baud is
+/// ten bit times, 87 us), so a round's echo written from the loop would hold the file for
+/// seconds while the kernel's shards overwrite. The queue is bounded; what
+/// does not fit is counted and the count said on the console, and `/log` has
+/// every byte of it.
+struct Echo {
+    held: Mutex<(Vec<u8>, u64)>,
+    more: Condvar,
+}
+
+/// What the console may fall behind the log by.
+const ECHO_BYTES: usize = 1 << 20;
+
+impl Echo {
+    fn start() -> Arc<Echo> {
+        let echo = Arc::new(Echo { held: Mutex::new((Vec::new(), 0)), more: Condvar::new() });
+        let theirs = Arc::clone(&echo);
+        std::thread::Builder::new()
+            .name("log-echo".into())
+            .spawn(move || theirs.run())
+            .expect("logd: the console's thread could not be started");
+        echo
+    }
+
+    /// `programs`' bytes where they fit, and this program's own lines always:
+    /// they are few, and they are what says the console fell behind.
+    fn push(&self, programs: &[u8], own: &[u8]) {
+        let mut held = self.held.lock().expect("logd: the console's queue is poisoned");
+        held.0.extend_from_slice(own);
+        let bytes = programs;
+        if held.0.len() + bytes.len() > ECHO_BYTES {
+            held.1 += bytes.len() as u64;
+        } else {
+            held.0.extend_from_slice(bytes);
+        }
+        self.more.notify_one();
+    }
+
+    fn run(&self) -> ! {
+        use std::io::Write;
+        loop {
+            let (bytes, dropped) = {
+                let mut held = self.held.lock().expect("logd: the console's queue is poisoned");
+                while held.0.is_empty() && held.1 == 0 {
+                    held = self.more.wait(held).expect("logd: the console's queue is poisoned");
+                }
+                (std::mem::take(&mut held.0), std::mem::replace(&mut held.1, 0))
+            };
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(&bytes);
+            if dropped > 0 {
+                let _ = writeln!(
+                    out,
+                    "logd: {dropped} bytes of programs' output were not echoed here: this console \
+                     is slower than the log, and /log has them"
+                );
+            }
         }
     }
 }
@@ -161,19 +297,22 @@ struct Round {
     lines: Vec<(u64, String)>,
     /// Each program's line as it wrote it, for the console.
     console: Vec<u8>,
+    /// This program's own lines, for the console: never dropped there.
+    own_console: Vec<u8>,
     /// init's words on a swap of [`CARRIER`] this round, in order.
     carrier: Vec<serve::Carrier>,
 }
 
 fn main() {
     // First, so every line this program says has somewhere to go.
-    let (own_read, own_write) =
-        toyos::pipe_pair().expect("logd: no pipe for this program's own lines");
-    if OWN.set(own_write).is_err() {
-        unreachable!("logd's own pipe is made once");
+    if OWN.main.set(std::thread::current().id()).is_err() {
+        unreachable!("logd's main loop starts once");
     }
-    let mut origins: Vec<Origin> =
-        vec![Origin { tag: LOGD.to_string(), pipe: own_read, lines: Lines::new() }];
+    let (bell, ring) = toyos::pipe_pair().expect("logd: no pipe for its own threads' bell");
+    if OWN.bell.set(ring).is_err() {
+        unreachable!("logd's bell is made once");
+    }
+    let mut origins: Vec<Origin> = Vec::new();
 
     // The two refusals below are said on the console: there is no log for them
     // to be in.
@@ -194,7 +333,7 @@ fn main() {
     } else {
         MAX_LOG_BYTES
     };
-    let mut stall = Stall::from_args();
+    let mut held = Held::from_args();
 
     // The wall clock, read once. The kernel reads the RTC once too, so a second
     // reading later in the boot would answer out of the same anchor and tell
@@ -214,13 +353,14 @@ fn main() {
     }
 
     let hub = serve::Hub::start(REPLAY_BYTES, boot_local, endow::acceptor(SERVICE));
+    let echo = Echo::start();
 
     let mut tail = LogTail::new();
     let mut buf = vec![Record::EMPTY; BATCH];
     // Programs' lines read and not yet written: each waits for the kernel's
     // records stamped before it (`read_origins`'s doc).
     let mut waiting: Vec<(u64, String)> = Vec::new();
-    let poller = Poller::new((2 + MAX_ORIGINS) as u32);
+    let poller = Poller::new(Poller::MAX_HANDLES);
     let mut lost = 0u64;
     // When the current run of consecutive retries began, or `None` when the
     // last batch was answered. `policy::fate` bounds the run and not the round.
@@ -235,27 +375,48 @@ fn main() {
         // registration waiting for it. `min_complete` 0 with no timeout
         // submits the entries and returns. A watch is one-shot, so one that
         // answered here is spent: its source is read below and no longer
-        // armed, and this round may not park on it.
-        poller.watch(&cap, READABLE, KERNEL_TOKEN);
+        // armed, and this round may not park on it. A source this round will
+        // not read is not armed either: it stays readable, and a watch on it
+        // would never let this loop park.
+        if held.ring.is_none() {
+            poller.watch(&cap, READABLE, KERNEL_TOKEN);
+        }
         poller.watch(&from_init, READABLE, ORIGINS_TOKEN);
+        poller.watch(&bell, READABLE, BELL_TOKEN);
         for (i, origin) in origins.iter().enumerate() {
-            // A pipe this round will not read is not armed either: it stays
-            // readable, and a watch on it would never let this loop park.
-            if !Stall::holds(&stall, origin) {
+            if !held.holds(origin) {
                 poller.watch(&origin.pipe, READABLE, ORIGIN_BASE + i as u64);
             }
         }
         let mut spent = false;
         poller.wait(0, 0, |_| spent = true);
 
-        let batch = match tail.read(&cap, &mut buf) {
-            Ok(batch) => batch,
-            Err(e) => {
-                // The one call this program is built around. A refusal is not
-                // survivable by retrying — the buffer and the rights are the
-                // same every time — so it says so and stops.
-                eprintln!("logd: SYS_LOG_READ refused a {BATCH}-record buffer ({e:?})");
-                std::process::exit(1);
+        let joined = registered(&from_init, &mut from_init_rx, &mut origins);
+        let mut round =
+            Round { lines: Vec::new(), console: Vec::new(), own_console: Vec::new(), carrier: Vec::new() };
+        if waiting.is_empty() {
+            read_origins(&mut origins, boot_local, &mut round, &mut held);
+            for word in round.carrier.drain(..) {
+                hub.carrier(word);
+            }
+        }
+        own_lines(&bell, boot_local, &mut round);
+        waiting.append(&mut round.lines);
+
+        // After the pipes, so a line read this round is stamped before every
+        // record this read can hand back that was written after it.
+        let batch: &[Record] = if held.ring.is_some() {
+            &[]
+        } else {
+            match tail.read(&cap, &mut buf) {
+                Ok(batch) => batch,
+                Err(e) => {
+                    // The one call this program is built around. A refusal is
+                    // not survivable by retrying — the buffer and the rights
+                    // are the same every time — so it says so and stops.
+                    eprintln!("logd: SYS_LOG_READ refused a {BATCH}-record buffer ({e:?})");
+                    std::process::exit(1);
+                }
             }
         };
         if tail.lost() > lost {
@@ -274,15 +435,6 @@ fn main() {
         let newest = batch.last().map_or(0, |r| r.at_ns);
         // A short batch is a ring this reader has caught up with.
         let caught_up = batch.len() < BATCH;
-        let joined = registered(&from_init, &mut from_init_rx, &mut origins);
-        let mut round = Round { lines: Vec::new(), console: Vec::new(), carrier: Vec::new() };
-        if waiting.is_empty() {
-            read_origins(&mut origins, boot_local, &mut round, &mut stall);
-            for word in round.carrier.drain(..) {
-                hub.carrier(word);
-            }
-            waiting.append(&mut round.lines);
-        }
         for record in batch {
             let line = format!("{}\n", record.tagged(&stamp(boot_local, record.at_ns)));
             round.lines.push((record.at_ns, line));
@@ -293,27 +445,29 @@ fn main() {
         round.lines.extend(now);
         waiting = later;
 
+        // Each program's line on the console as the program wrote it, off this
+        // thread ([`Echo`]).
+        if !round.console.is_empty() || !round.own_console.is_empty() {
+            echo.push(&round.console, &round.own_console);
+        }
+
         if round.lines.is_empty() {
             // **Nothing new, so park until something is.** `SYS_LOG_READ` and a
             // pipe read here never block by design; this is the other half.
             // Every source was armed before it was read, so what lands after
             // the reads is a completion this wait takes, and nothing else is
-            // worth waking for: `klogd` posts after each drain, and a pipe with
-            // bytes in it or a writer gone is readable. A watch spent at the
-            // arm, or a pipe that joined this round, is not armed, so the
-            // round goes again instead: a program's line written in pieces
-            // lands its later pieces on exactly that source.
-            if spent || joined {
+            // worth waking for: `klogd` posts after each drain, a pipe with
+            // bytes in it or a writer gone is readable, and so is the bell
+            // once another thread has said a line. A watch spent at the arm, a
+            // pipe that joined this round, or a line this loop said itself, is
+            // not armed, so the round goes again instead: a program's line
+            // written in pieces lands its later pieces on exactly that source.
+            let mine = !OWN.mine.lock().expect("logd: its own lines are poisoned").is_empty();
+            if spent || joined || mine {
                 continue;
             }
             poller.wait(1, u64::MAX, |_| {});
             continue;
-        }
-
-        // Each program's line on the console as the program wrote it.
-        if !round.console.is_empty() {
-            use std::io::Write;
-            let _ = std::io::stdout().write_all(&round.console);
         }
         // One order for the file and every reader: the time each line was
         // stamped at, the kernel's own merge kept among its records.
@@ -447,7 +601,9 @@ fn main() {
 ///
 /// **init is the only peer this connection has**, so a frame that is not one,
 /// or a name that is no tag, is init's bug and a loud end: init checks the
-/// name before it sends.
+/// name before it sends. A pipe past [`MAX_ORIGINS`] is refused by name and
+/// let go rather than ending this program: a swap registers its program's
+/// pipe while the old one's may still have a writer, so it is reachable.
 fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut Vec<Origin>) -> bool {
     let mut came = false;
     loop {
@@ -464,10 +620,16 @@ fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut V
                 let Some([raw]) = conn.recv_handles_exact::<1>() else {
                     panic!("logd: init registered {name:?} with no pipe");
                 };
-                assert!(origins.len() < MAX_ORIGINS, "logd: more than {MAX_ORIGINS} programs registered");
                 // SAFETY: the kernel moved this handle into this table with the
                 // frame that names it, and nothing else answers for it.
                 let pipe = unsafe { Pipe::from_raw(raw) };
+                if origins.len() >= MAX_ORIGINS {
+                    say!(
+                        "logd: refusing {}'s output: {MAX_ORIGINS} programs' pipes are already read",
+                        name.as_str()
+                    );
+                    continue;
+                }
                 origins.push(Origin { tag: name.as_str().to_string(), pipe, lines: Lines::new() });
                 came = true;
             }
@@ -478,27 +640,25 @@ fn registered(conn: &Connection, rx: &mut ipc::FrameRx<MAX_TAG>, origins: &mut V
 /// One read of every origin's pipe, into `round`. An origin whose writers are
 /// all gone says what it left unfinished and is dropped.
 ///
-/// **A line is stamped when it is read, and written after every kernel record
-/// stamped before it**: the caller holds it until the ring is caught up or its
-/// records have passed the stamp, and reads no pipe while it holds any — so a
-/// reader behind the kernel's ring cannot put a program's line ahead of the
-/// records that came before it, and what it holds is one read per origin.
-fn read_origins(
-    origins: &mut Vec<Origin>,
-    boot_local: Option<u64>,
-    round: &mut Round,
-    stall: &mut Option<Stall>,
-) {
+/// **A line is stamped when this program reads it, not when its program wrote
+/// it**, and written after every kernel record stamped before that: the caller
+/// holds it until the ring is caught up or its records have passed the stamp,
+/// and reads no pipe while it holds any. So a line is never put ahead of a
+/// record written before it was read — and a line written before a record and
+/// read after it is put after that record, which is the order a program's last
+/// words and its own `exit:` record can land in.
+fn read_origins(origins: &mut Vec<Origin>, boot_local: Option<u64>, round: &mut Round, held: &mut Held) {
     let mut chunk = vec![0u8; READ_BYTES];
-    let mut released = false;
+    let (mut released, mut ring_released) = (false, false);
     origins.retain_mut(|origin| {
-        if Stall::holds(stall, origin) {
+        if held.holds(origin) {
             return true;
         }
         let at_ns = toyos_abi::syscall::clock_nanos();
         let tag = origin.tag.as_str();
         let mut said = |line: &[u8], ended| {
-            released |= stall.as_ref().is_some_and(|s| s.until.as_bytes() == line);
+            released |= held.stall.as_ref().is_some_and(|s| s.until.as_bytes() == line);
+            ring_released |= held.ring.as_ref().is_some_and(|until| until.as_bytes() == line);
             said_by(tag, at_ns, line, ended, boot_local, round)
         };
         match origin.pipe.read_nonblock(&mut chunk) {
@@ -514,13 +674,17 @@ fn read_origins(
             Err(e) => panic!("logd: {tag}'s pipe refused a read: {e:?}"),
         }
     });
+    if ring_released {
+        held.ring = None;
+        say!("logd: reading the kernel's records again, as `--hold-ring-until` asked");
+    }
     if released {
-        let held = stall.take().expect("released only while one is armed");
+        let stall = held.stall.take().expect("released only while one is armed");
         // Everything the stall left waiting, in one read, so the line below
         // says how full the pipe was when it ended.
         let mut waiting = vec![0u8; STALL_READ_BYTES];
         let mut read = 0;
-        if let Some(Origin { tag, pipe, lines }) = origins.iter_mut().find(|o| o.tag == held.origin) {
+        if let Some(Origin { tag, pipe, lines }) = origins.iter_mut().find(|o| o.tag == stall.origin) {
             let at_ns = toyos_abi::syscall::clock_nanos();
             match pipe.read_nonblock(&mut waiting) {
                 Ok(n) => {
@@ -535,7 +699,7 @@ fn read_origins(
         }
         say!(
             "logd: reading {} again, as `--stall-until` asked, with {read} bytes waiting",
-            held.origin
+            stall.origin
         );
     }
 }
@@ -543,9 +707,19 @@ fn read_origins(
 /// Larger than any pipe: the kernel's is one 2 MiB page.
 const STALL_READ_BYTES: usize = 4 << 20;
 
-/// A test's actuator, armed by nothing but a boot config's `args`: the origin
-/// this program leaves unread (`--stall=<name>`), and the exact line, from any
-/// program, that ends that (`--stall-until=<line>`).
+/// A test's actuators, armed by nothing but a boot config's `args`.
+struct Held {
+    stall: Option<Stall>,
+    /// `--hold-ring-until=<line>`: no record is read off the kernel's ring from
+    /// the boot's start until a program says exactly `<line>`, and the round
+    /// that reads it reads the ring after it. It is how a boot stages a
+    /// program's line read while more than [`BATCH`] records written before it
+    /// are unread, which is the state the hold on a program's line exists for.
+    ring: Option<String>,
+}
+
+/// The origin this program leaves unread (`--stall=<name>`), and the exact
+/// line, from any program, that ends that (`--stall-until=<line>`).
 ///
 /// It is how a boot stages a `logd` that stops reading one program while the
 /// rest of the log — the test's own lines among them — still flows: that
@@ -558,21 +732,22 @@ struct Stall {
     until: String,
 }
 
-impl Stall {
-    fn from_args() -> Option<Stall> {
+impl Held {
+    fn from_args() -> Held {
         let arg = |key: &str| std::env::args().find_map(|a| a.strip_prefix(key).map(str::to_string));
-        match (arg("--stall="), arg("--stall-until=")) {
+        let stall = match (arg("--stall="), arg("--stall-until=")) {
             (Some(origin), Some(until)) => Some(Stall { origin, until }),
             (None, None) => None,
             (origin, until) => panic!(
                 "logd: `--stall` and `--stall-until` are armed together or not at all, and this \
                  boot gave {origin:?} and {until:?}"
             ),
-        }
+        };
+        Held { stall, ring: arg("--hold-ring-until=") }
     }
 
-    fn holds(stall: &Option<Stall>, origin: &Origin) -> bool {
-        stall.as_ref().is_some_and(|s| s.origin == origin.tag)
+    fn holds(&self, origin: &Origin) -> bool {
+        self.stall.as_ref().is_some_and(|s| s.origin == origin.tag)
     }
 }
 

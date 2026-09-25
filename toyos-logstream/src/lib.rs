@@ -301,7 +301,10 @@ impl Replay {
         self.base += cut as u64;
     }
 
-    /// What a reader at `from` gets next, at most `max` bytes of it.
+    /// What a reader at `from` gets next: the whole lines that fit in `max`
+    /// bytes, or the one line after `from` where it alone is longer. So a
+    /// reader that started on a line always stands on one, and an eviction's
+    /// notice never lands inside a line it was handed half of.
     pub fn next(&self, from: u64, max: usize) -> Next<'_> {
         if from < self.base {
             return Next::Evicted { lost: self.base - from, at: self.base };
@@ -310,8 +313,14 @@ impl Replay {
         if start >= self.bytes.len() {
             return Next::CaughtUp;
         }
-        let end = start.saturating_add(max).min(self.bytes.len());
-        Next::Bytes(&self.bytes[start..end])
+        let held = &self.bytes[start..];
+        let fits = &held[..max.min(held.len())];
+        let end = match fits.iter().rposition(|&b| b == b'\n') {
+            Some(at) => at + 1,
+            // `append` takes whole lines, so what is held ends one.
+            None => held.iter().position(|&b| b == b'\n').map_or(held.len(), |at| at + 1),
+        };
+        Next::Bytes(&held[..end])
     }
 }
 
@@ -494,5 +503,40 @@ mod tests {
         assert!(rest.len() <= 100);
         assert_eq!(at + rest.len() as u64, total);
         assert_eq!(replay.next(total, 10), Next::CaughtUp);
+    }
+
+    /// **A reader is never handed a line cut in half, eviction included.** A
+    /// reader asking for fewer bytes than its next line holds is handed the
+    /// whole line; appends then let that line go; every piece it is handed
+    /// after ends a line, so the notice its eviction is owed begins one.
+    #[test]
+    fn a_reader_is_never_left_inside_a_line_even_by_an_eviction() {
+        let mut replay = Replay::new(100);
+        replay.append(b"a line of twenty-six bytes\n");
+        let Next::Bytes(first) = replay.next(0, 7) else { panic!("a line is held") };
+        assert_eq!(first, b"a line of twenty-six bytes\n", "a line handed in part");
+        let mut at = first.len() as u64;
+        for i in 0..40 {
+            replay.append(format!("l{i:02}\n").as_bytes());
+        }
+        let mut evicted = false;
+        let mut handed = vec::Vec::new();
+        loop {
+            match replay.next(at, 7) {
+                Next::Bytes(bytes) => {
+                    assert!(bytes.ends_with(b"\n"), "a piece that ends inside a line: {bytes:?}");
+                    handed.extend_from_slice(bytes);
+                    at += bytes.len() as u64;
+                }
+                Next::Evicted { at: resume, .. } => {
+                    evicted = true;
+                    at = resume;
+                }
+                Next::CaughtUp => break,
+            }
+        }
+        assert!(evicted, "the appends let the reader's place go");
+        assert!(handed.starts_with(b"l"), "{handed:?}");
+        assert!(handed.ends_with(b"l39\n"));
     }
 }

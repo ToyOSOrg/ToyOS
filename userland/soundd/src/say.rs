@@ -15,9 +15,12 @@
 //!
 //! One ring per voice because a ring with one producer takes no lock and no
 //! compare-and-swap, so the mix thread's push is a bounded number of its own
-//! instructions whatever the other threads are doing. The drain merges the
-//! rings back into the order the lines were said in by a ticket each line takes
-//! as it is said.
+//! instructions whatever the other threads are doing. Each line takes a ticket
+//! as it is said, and a voice is [`BUSY`] from before it takes one until its
+//! push is done: the drain writes a line only once no line with an earlier
+//! ticket can still be on its way, so a line said earlier and pushed later is
+//! never overtaken, and the rings merge back into the order their lines were
+//! said in.
 //!
 //! A panic's message is the one write another thread makes, and it is that
 //! process's last.
@@ -55,7 +58,10 @@ static RINGS: [Spsc<Line, RING_LINES>; VOICES] = [const { Spsc::new() }; VOICES]
 static SPOKEN_FOR: [AtomicBool; VOICES] = [const { AtomicBool::new(false) }; VOICES];
 static TICKET: AtomicU64 = AtomicU64::new(0);
 static DROPPED: AtomicU64 = AtomicU64::new(0);
-/// The write end of the pipe the drain parks on: one byte per line pushed.
+/// Whether a voice is between taking a ticket and landing its line: a line
+/// another voice pushed meanwhile may carry a later ticket than this one.
+static BUSY: [AtomicBool; VOICES] = [const { AtomicBool::new(false) }; VOICES];
+/// The write end of the pipe the drain parks on: one byte per line said.
 static WAKE: OnceLock<RawHandle> = OnceLock::new();
 
 thread_local! {
@@ -86,16 +92,18 @@ pub(crate) fn speak_as(voice: Voice) {
 }
 
 /// `say!`'s one step, which never waits: a push, and a nonblocking byte to wake
-/// the drain.
+/// the drain. The voice is [`BUSY`] from before its ticket is taken until the
+/// push has landed or been dropped, and the byte is written after either.
 pub(crate) fn said(line: String) {
     let voice = SPEAKER
         .with(Cell::get)
         .unwrap_or_else(|| panic!("soundd: a thread with no voice said {line:?}"));
-    let ticket = TICKET.fetch_add(1, Ordering::Relaxed);
+    BUSY[voice as usize].store(true, Ordering::SeqCst);
+    let ticket = TICKET.fetch_add(1, Ordering::SeqCst);
     if RINGS[voice as usize].try_push((ticket, line)).is_err() {
         DROPPED.fetch_add(1, Ordering::Relaxed);
-        return;
     }
+    BUSY[voice as usize].store(false, Ordering::SeqCst);
     let wake = *WAKE.get().expect("a voice is given out only after the writer starts");
     match syscall::write_nonblock(wake, &[1]) {
         // A full wake pipe is a drain with a wake already owed.
@@ -118,7 +126,13 @@ fn drain(wake: RawHandle) -> ! {
         // At most what the rings hold at once, so a voice that never stops
         // cannot keep this from writing.
         let mut emptied = false;
+        let mut behind = false;
         for _ in 0..VOICES * RING_LINES {
+            // In this order: every ticket below `taken` was taken before any
+            // voice was looked at, so one of them not yet pushed belongs to a
+            // voice found busy below whose ring was empty.
+            let taken = TICKET.load(Ordering::SeqCst);
+            let busy: [bool; VOICES] = core::array::from_fn(|v| BUSY[v].load(Ordering::SeqCst));
             for (head, ring) in heads.iter_mut().zip(&RINGS) {
                 if head.is_none() {
                     *head = ring.pop();
@@ -131,6 +145,13 @@ fn drain(wake: RawHandle) -> ! {
                 emptied = true;
                 break;
             };
+            let ticket = heads[next].as_ref().map_or(0, |(ticket, _)| *ticket);
+            // A line said before this one may still be on its way: written
+            // after it, once its voice has woken this thread again.
+            if ticket >= taken || (0..VOICES).any(|v| v != next && busy[v] && heads[v].is_none()) {
+                behind = true;
+                break;
+            }
             let (_, line) = heads[next].take().expect("chosen for holding a line");
             batch.extend_from_slice(line.as_bytes());
         }
@@ -155,9 +176,10 @@ fn drain(wake: RawHandle) -> ! {
             }
             batch.clear();
         }
-        // Parked only on rings found empty: a line pushed after that look
-        // writes its wake byte after its push, so this read returns for it.
-        if emptied {
+        // Parked only on rings found empty or on a line still on its way: a
+        // voice writes its wake byte after its push and after it is no longer
+        // busy, so this read returns for either.
+        if emptied || behind {
             match syscall::read(wake, &mut woken) {
                 Ok(1..) => {}
                 other => panic!("soundd: its line writer's wake pipe answered {other:?}"),

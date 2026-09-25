@@ -35,6 +35,14 @@ const REFUSED_WORD: Duration = Duration::from_secs(10);
 /// How long `logd`'s [`toyos_logstream::CARRIER_LEAVING`] has to reach this
 /// side before the swap goes: sshd hangs up on init this long after it answered
 /// whether or not its client has closed, and the old netd is stopped then.
+///
+/// **Not widened to cover a slow `logd` round, because nothing on this side
+/// can.** The line reaches a reader in the round after the one `logd` was in
+/// when it was said, and that round's flush may outlast `logd`'s own
+/// `LOG_WRITE_BUDGET` on a slow volume; the swap goes on sshd's clock whatever
+/// this side waits for. A reader that dialled again without the line could be
+/// admitted by the netd being stopped and lose its connection with no word, so
+/// a missing line is a red verdict rather than a longer wait.
 const CARRIER_WORD: Duration = Duration::from_millis(toyos_swap::ANSWER_MS);
 
 /// What asking for one swap came to.
@@ -61,6 +69,9 @@ pub struct Swapped {
     pub again: Result<Exec, String>,
     /// Stream connections before the ask and when this ended.
     pub connections: (usize, usize),
+    /// Connections the stream made from the ask on that ended before carrying
+    /// a line: each redial `logd` or the machine turned away.
+    pub turned_away: usize,
     /// From the ask to the answer, to init's final word, and to `echo`'s answer.
     pub answer_ms: u64,
     pub outcome_ms: Option<u64>,
@@ -92,6 +103,22 @@ enum Settled {
     SshdRefused(String),
 }
 
+/// The manifest's names for the two programs whose lines judge a swap.
+const INIT: &str = "init";
+const SSHD: &str = "sshd";
+
+/// `line`'s text where it is `tag`'s own line: judged by the head `logd`
+/// gives it (`toyos_logstream::program_line`), never by its words, so no other
+/// program can say init's word for it.
+fn said_by<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
+    toyos_logstream::program_line(line).filter(|said| said.tag == tag).map(|said| said.text)
+}
+
+/// init's word about `service` in `line`, where `line` is init's.
+fn init_heard<'a>(line: &'a str, service: &str) -> Option<(Word, &'a str)> {
+    said_by(line, INIT).and_then(|text| toyos_swap::heard(text, service))
+}
+
 /// Whether the wait for `service`'s outcome is over, reading `lines[mark..]`:
 /// init's final word about it, or sshd's own refused line — named for
 /// `service`, or (before sshd has read the request's header) `?` — whichever
@@ -99,12 +126,13 @@ enum Settled {
 /// never asked and so never speaks.
 fn settled(lines: &[String], mark: usize, service: &str) -> Option<Settled> {
     for line in &lines[mark.min(lines.len())..] {
-        if toyos_swap::heard(line, service).is_some_and(|(word, _)| word.is_final()) {
+        if init_heard(line, service).is_some_and(|(word, _)| word.is_final()) {
             return Some(Settled::Outcome);
         }
-        let named = line.contains(&format!(": swap {service}: refused ")) || line.contains(": swap ?: refused ");
+        let Some(text) = said_by(line, SSHD) else { continue };
+        let named = text.contains(&format!(": swap {service}: refused ")) || text.contains(": swap ?: refused ");
         if named {
-            if let Some(why) = toyos_swap::sshd_refused(line) {
+            if let Some(why) = toyos_swap::sshd_refused(text) {
                 return Some(Settled::SshdRefused(why.to_string()));
             }
         }
@@ -140,7 +168,7 @@ pub fn swap(
         return Err(format!("the stream's peer is {peer}, which is no IPv4 address"));
     };
     let at = ssh_at.unwrap_or(SocketAddr::V4(SocketAddrV4::new(*peer.ip(), SSH_PORT)));
-    let (mark, before) = (stream.lines().len(), stream.connections());
+    let (mark, before, away) = (stream.lines().len(), stream.connections(), stream.turned_away());
     let began = Instant::now();
 
     let mut answer = Err(String::from("never asked"));
@@ -165,7 +193,7 @@ pub fn swap(
     let heard = |lines: &[String]| -> Vec<(Word, String)> {
         lines[mark.min(lines.len())..]
             .iter()
-            .filter_map(|line| toyos_swap::heard(line, service))
+            .filter_map(|line| init_heard(line, service))
             .map(|(word, detail)| (word, detail.to_string()))
             .collect()
     };
@@ -181,7 +209,7 @@ pub fn swap(
         let leaving = stream.wait_until(CARRIER_WORD, |lines| {
             lines[mark.min(lines.len())..]
                 .iter()
-                .any(|line| line.contains(toyos_logstream::CARRIER_LEAVING))
+                .any(|line| said_by(line, toyos_logstream::LOGD) == Some(toyos_logstream::CARRIER_LEAVING))
                 .then_some(())
         });
         if leaving.is_none() {
@@ -235,17 +263,15 @@ pub fn swap(
         peer: *peer.ip(),
         answer,
         words: heard(&lines),
-        // A program's own line carries its name in the head `logd` gives it
-        // (`toyos_logstream::program_line`), never a sigil in its text — #483's
-        // `@tag:` marker is gone with the rest of that machinery.
         said: lines[mark.min(lines.len())..]
             .iter()
-            .filter(|line| toyos_logstream::program_line(line).is_some_and(|said| said.tag == service))
+            .filter(|line| said_by(line, service).is_some())
             .cloned()
             .collect(),
         sshd_refused,
         again,
         connections: (before, stream.connections()),
+        turned_away: stream.turned_away() - away,
         answer_ms,
         outcome_ms,
         again_ms,
@@ -315,6 +341,13 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
             heard.connections.1
         )),
     }
+    if heard.service == toyos_logstream::CARRIER {
+        said.push(format!(
+            "the stream made {} connection(s) that ended before carrying a line, from the ask to \
+             the end",
+            heard.turned_away
+        ));
+    }
     match &heard.again {
         Ok(exec) if exec.status == Some(0) && exec.stdout == metaltalk::owed() => said.push(format!(
             "`{}` answered byte for byte afterwards, {} ms after the ask",
@@ -343,6 +376,7 @@ const AGAIN_STATUS: &str = "swap_again_status";
 const AGAIN_STDOUT: &str = "swap_again_stdout";
 const AGAIN_FAILED: &str = "swap_again_failed";
 const CONNECTIONS: &str = "swap_connections";
+const TURNED_AWAY: &str = "swap_turned_away";
 const TIMES: &str = "swap_ms";
 
 /// A value on one line, whatever it carried, read back by `unquote`.
@@ -409,6 +443,7 @@ impl Swapped {
             Err(why) => out.push_str(&format!("{AGAIN_FAILED} {}\n", quote(why))),
         }
         out.push_str(&format!("{CONNECTIONS} {} {}\n", self.connections.0, self.connections.1));
+        out.push_str(&format!("{TURNED_AWAY} {}\n", self.turned_away));
         let outcome = self.outcome_ms.map_or("none".to_string(), |ms| ms.to_string());
         out.push_str(&format!("{TIMES} {} {outcome} {}\n", self.answer_ms, self.again_ms));
         out
@@ -458,6 +493,10 @@ impl Swapped {
                 .collect()
         };
         let conns = numbers(CONNECTIONS)?;
+        let turned_away = one(TURNED_AWAY)
+            .ok_or_else(|| format!("no {TURNED_AWAY}"))?
+            .parse()
+            .map_err(|_| format!("{TURNED_AWAY} is no count"))?;
         let times = numbers(TIMES)?;
         let (&[Some(before), Some(after)], &[Some(answer_ms), outcome_ms, Some(again_ms)]) =
             (conns.as_slice(), times.as_slice())
@@ -474,6 +513,7 @@ impl Swapped {
             sshd_refused,
             again,
             connections: (before as usize, after as usize),
+            turned_away,
             answer_ms,
             outcome_ms,
             again_ms,
@@ -484,6 +524,27 @@ impl Swapped {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `text` as `logd` writes it under `tag`.
+    fn line(tag: &str, text: &str) -> String {
+        let tag = toyos_logstream::Tag::new(tag).expect("a tag");
+        let stamp = "2026-09-24 22:01:37";
+        format!("{}\n", toyos_logstream::ProgramLine { stamp, at_ns: 2_940_000_000, tag, text: text.as_bytes() })
+    }
+
+    /// init's words, sshd's refusal and `logd`'s carrier line count only under
+    /// their own programs' names: another program printing them settles nothing.
+    #[test]
+    fn a_judge_reads_the_speaker_from_the_head_and_never_the_words() {
+        let words = toyos_swap::said("netd", Word::InService, "/tmp/netd as pid 12");
+        let refusal = toyos_swap::sshd_said("10.0.2.2:1", "netd", "refused x");
+        assert_eq!(settled(&[line("init", &words)], 0, "netd"), Some(Settled::Outcome));
+        assert_eq!(settled(&[line("test-runner", &words), line("netd", &refusal)], 0, "netd"), None);
+        assert_eq!(init_heard(&line("test-runner", &words), "netd"), None);
+        let leaving = line("logd", toyos_logstream::CARRIER_LEAVING);
+        assert_eq!(said_by(&leaving, toyos_logstream::LOGD), Some(toyos_logstream::CARRIER_LEAVING));
+        assert_eq!(said_by(&line("netd", toyos_logstream::CARRIER_LEAVING), toyos_logstream::LOGD), None);
+    }
 
     fn heard(expect: Expect) -> Swapped {
         let digest = toyos_swap::digest(b"netd");
@@ -517,10 +578,11 @@ mod tests {
             peer: Ipv4Addr::new(10, 0, 2, 15),
             answer: Ok(answer),
             words,
-            said: vec!["[1.0 cpu0] @netd: DHCP: lease 10.0.2.15/24 from 10.0.2.2, \"x\"\n".into()],
+            said: vec![line("netd", "netd: DHCP: lease 10.0.2.15/24 from 10.0.2.2, \"x\"")],
             sshd_refused: None,
             again: Ok(Exec { stdout: metaltalk::owed(), status: Some(0) }),
             connections: (1, 2),
+            turned_away: 3,
             answer_ms: 900,
             outcome_ms: Some(7_000),
             again_ms: 9_000,
@@ -569,11 +631,13 @@ mod tests {
         let lines: Vec<String> = [
             "[2026-09-24 22:01:36 2.433 cpu0] pcidev: PCI 00:03.0 BAR 0 (0x20000 bytes) placed at 0xc0200000",
             "[2026-09-24 22:01:36 2.939 cpu0] pcidev: slot 0 took its first message on vector 0x28",
-            "@sshd: 10.0.2.2:60872: swap ?: refused the channel ended after 2080768 bytes, before the request was whole",
-            "sshd: session error: DecryptionError",
         ]
         .into_iter()
         .map(String::from)
+        .chain([
+            line("sshd", "sshd: 10.0.2.2:60872: swap ?: refused the channel ended after 2080768 bytes, before the request was whole"),
+            line("sshd", "sshd: session error: DecryptionError"),
+        ])
         .collect();
         assert_eq!(
             settled(&lines, 0, "netd"),
@@ -589,9 +653,9 @@ mod tests {
     /// sshd's refusal is only past `mark`, and only for this service or `?`.
     #[test]
     fn settled_ignores_a_refusal_before_mark_or_for_another_service() {
-        let refusal = toyos_swap::sshd_said("10.0.2.2:1", "?", "refused x");
+        let refusal = line("sshd", &toyos_swap::sshd_said("10.0.2.2:1", "?", "refused x"));
         assert_eq!(settled(&[refusal], 1, "netd"), None, "before mark");
-        let other = toyos_swap::sshd_said("10.0.2.2:1", "soundd", "refused x");
+        let other = line("sshd", &toyos_swap::sshd_said("10.0.2.2:1", "soundd", "refused x"));
         assert_eq!(settled(&[other], 0, "netd"), None, "another service");
     }
 

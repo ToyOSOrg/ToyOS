@@ -3181,6 +3181,33 @@ impl QemuInstance {
         &self.audio_wav
     }
 
+    /// Wait for QEMU to exit within `by`: its console closing is the event, and
+    /// the process is reaped after it. Answers what the guest said on the way.
+    /// A file QEMU finishes only at its exit, the wav among them, is whole once
+    /// this answers, and is still there until this instance is dropped.
+    pub fn await_exit(&mut self, by: Duration) -> Result<String, String> {
+        let deadline = Instant::now() + by;
+        let mut said = String::new();
+        loop {
+            let left = deadline.checked_duration_since(Instant::now()).unwrap_or_default();
+            match self.rx.recv_timeout(left) {
+                Ok(line) => {
+                    said.push_str(&line);
+                    said.push('\n');
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!("QEMU had not exited {} s after it was asked to\n{said}", by.as_secs()))
+                }
+            }
+        }
+        let status = self.child.wait().map_err(|e| format!("QEMU could not be waited for: {e}"))?;
+        if !status.success() {
+            return Err(format!("QEMU exited {status}\n{said}"));
+        }
+        Ok(said)
+    }
+
     /// The NVMe backing file. It is what the *device* received, so it is the
     /// only place a storage assertion can stand outside the guest's own
     /// account of itself.

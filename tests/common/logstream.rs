@@ -119,6 +119,28 @@ pub fn shut_down(
     volumes::whole_log(&staged.image, staged.start, staged.len)
 }
 
+/// [`shut_down`], with `keep` handed the guest once QEMU has exited and before
+/// it is dropped: what QEMU finishes only at its exit — the wav it captured —
+/// is whole then, and gone once the guest is dropped.
+pub fn shut_down_keeping<R>(
+    mut guest: QemuInstance,
+    console: &mut String,
+    staged: &Staged,
+    keep: impl FnOnce(&QemuInstance) -> R,
+) -> Result<(Vec<String>, R), String> {
+    writeln!(guest.stdin_mut(), "run shutdown").map_err(|e| format!("write to QEMU stdin: {e}"))?;
+    guest.flush_stdin();
+    console.push_str(&guest.await_exit(Duration::from_secs(20))?);
+    let kept = keep(&guest);
+    drop(guest);
+    for bad in ["PANIC:", "panicked at"] {
+        if console.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{console}"));
+        }
+    }
+    Ok((volumes::whole_log(&staged.image, staged.start, staged.len)?, kept))
+}
+
 /// What a reader received is the file's own first lines, in the file's own
 /// order, and nothing else.
 ///
@@ -213,11 +235,26 @@ pub fn stream(
     Ok(())
 }
 
-/// **A reader that stops reading costs nobody else anything.** One reader
-/// connects and never reads while a program floods its output past every
-/// buffer between the two; the file takes every line, and a second reader that
-/// connects after the flood is handed the whole boot, the flood's last line
-/// included.
+/// `logd`'s readers on the network at once (`serve.rs`'s `MAX_NETWORK_READERS`).
+const NETWORK_READERS: usize = 8;
+
+/// A liveness guard on the flood reaching a reader: five megabytes through a
+/// TCG guest's netd, as long as the flood job itself is given.
+const FLOOD_CEILING: Duration = Duration::from_secs(300);
+
+/// How long `logd` lets a reader take no bytes before it lets it go
+/// (`serve.rs`'s `STALLED`).
+const STALLED_SECS: u64 = 10;
+
+/// What `logd` says as it lets a reader go that took no bytes it was owed.
+const LET_GO: &str = "logd: letting ";
+
+/// **A reader that stops reading costs nobody else anything, and its slot is
+/// not kept.** Every network slot `logd` has is taken by a connection that
+/// never reads, while a program floods its output past every buffer between
+/// them; the file takes every line, `logd` lets each stalled reader go, and a
+/// reader that connects after that is handed the whole boot, the flood's last
+/// line included.
 pub fn stalled_reader(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -227,17 +264,38 @@ pub fn stalled_reader(
     let port = qemu::free_host_port();
     let (mut guest, mut console) = boot(bench, &staged, port, c_bins, rust_bins)?;
 
-    let stalled = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
-        .map_err(|e| format!("connect the reader that will not read: {e}"))?;
+    let stalled = (0..NETWORK_READERS)
+        .map(|_| never_read(port))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("connect the readers that will not read: {e}"))?;
+    let from = console.len();
     let flood = guest.run_test(super::origin::FLOODER, Duration::from_secs(300));
     if flood.exit_code != Some(0) {
         return Err(format!("the flood exited {:?}", flood.exit_code));
     }
-    let second = reader(port, "logstream-stalled-second.txt")?;
-    if !second.wait_for(super::origin::FLOOD_DONE, CEILING) {
+    console.push_str(&flood.before);
+    console.push_str(&flood.serial);
+    let waited = qemu::await_guest(&mut guest, &mut console, "logd to let every stalled reader go", |log| {
+        log[from.min(log.len())..].matches(LET_GO).count() >= NETWORK_READERS
+    });
+    if let Err(why) = waited {
+        let seen = console[from.min(console.len())..].matches(LET_GO).count();
+        let file = shut_down(guest, &mut console, &staged)?;
+        let said: Vec<&String> = file.iter().filter(|l| l.contains("logd: ")).collect();
         return Err(format!(
-            "a reader that connected after the flood, beside one that never read, did not \
-             receive the flood's last line: {} line(s)",
+            "logd let {seen} of the {NETWORK_READERS} readers that stopped reading go, and owes it \
+             {} s after their writes stop being taken, and its guard ran out waiting ({}); /log's logd \
+             lines:\n{}",
+            STALLED_SECS,
+            why.replace(qemu::STALLED, "").trim(),
+            said.iter().map(|l| l.as_str()).collect::<String>()
+        ));
+    }
+    let second = reader(port, "logstream-stalled-second.txt")?;
+    if !second.wait_for(super::origin::FLOOD_DONE, FLOOD_CEILING) {
+        return Err(format!(
+            "a reader that connected after the flood, once every stalled reader was let go, did \
+             not receive the flood's last line: {} line(s)",
             second.lines().len()
         ));
     }
@@ -247,11 +305,82 @@ pub fn stalled_reader(
     let received = second.lines();
     is_prefix_of(&received, &file)?;
     let floods = received.iter().filter(|l| l.contains("} flood ")).count();
+    let let_go = file.iter().filter(|l| l.contains(LET_GO)).count();
     eprintln!(
-        "  [stream] beside a reader that never read, a second one got {} line(s), {floods} of \
-         them the flood's, each the line /log holds",
+        "  [stream] {let_go} reader(s) that never read were let go; a reader after them got {} \
+         line(s), {floods} of them the flood's, each the line /log holds",
         received.len()
     );
     let _ = std::fs::remove_file(&staged.image);
     Ok(())
+}
+
+/// The receive buffer a reader that never reads is given: set before the
+/// connect, so this host's autotuning does not grow it, and the window it
+/// advertises closes once this much has arrived.
+const NARROW_WINDOW: libc::c_int = 16 * 1024;
+
+/// A connection to this host's `port`, admitted — its first line read — and
+/// never read again, with a receive buffer of [`NARROW_WINDOW`]: the peer a
+/// zero window makes of it.
+fn never_read(port: u16) -> Result<TcpStream, String> {
+    use std::os::fd::FromRawFd;
+    let failed = |what: &str| format!("{what}: {}", std::io::Error::last_os_error());
+    // SAFETY: a fresh descriptor, owned by the `TcpStream` made of it at once
+    // so every path below closes it.
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(failed("socket"));
+    }
+    // SAFETY: `fd` is the descriptor just made, and nothing else owns it.
+    let stream = unsafe { TcpStream::from_raw_fd(fd) };
+    let size = NARROW_WINDOW;
+    // SAFETY: `size` outlives the call, and the length is its own.
+    let set = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&size as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if set != 0 {
+        return Err(failed("SO_RCVBUF"));
+    }
+    // SAFETY: all-zero is a valid `sockaddr_in`, whose fields are integers.
+    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    #[cfg(target_os = "macos")]
+    {
+        addr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+    }
+    addr.sin_family = libc::AF_INET as libc::sa_family_t;
+    addr.sin_port = port.to_be();
+    addr.sin_addr = libc::in_addr { s_addr: u32::from(Ipv4Addr::LOCALHOST).to_be() };
+    // SAFETY: `addr` is a whole `sockaddr_in` and the length says so.
+    let connected = unsafe {
+        libc::connect(
+            fd,
+            (&addr as *const libc::sockaddr_in).cast(),
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    };
+    if connected != 0 {
+        return Err(failed("connect"));
+    }
+    // Admitted once it carries a line: `logd` hands every reader the boot's
+    // first line at once. One byte at a time, so nothing past it is taken.
+    use std::io::Read;
+    let mut stream = stream;
+    stream.set_read_timeout(Some(CEILING)).map_err(|e| format!("a read bound: {e}"))?;
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(1) if byte[0] == b'\n' => break,
+            Ok(1) => {}
+            other => return Err(format!("a reader that will not read was never admitted: {other:?}")),
+        }
+    }
+    stream.set_read_timeout(None).map_err(|e| format!("a read bound: {e}"))?;
+    Ok(stream)
 }

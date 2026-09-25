@@ -6,8 +6,13 @@
 //! connects: the main loop appends each round's lines to one
 //! [`toyos_logstream::Replay`] after the file has them, and a reader is a
 //! thread with an offset into it. So the same text reaches `/log` and every
-//! reader, in the same order, and nothing a reader does can reach the file: a
-//! reader that stops taking bytes blocks its own thread and nothing else.
+//! reader, in the same order, and nothing a reader does can reach the file.
+//!
+//! **A reader holds a slot only while it takes bytes.** One that takes none
+//! for [`STALLED`] while bytes are owed to it — a zero window, a peer that
+//! vanished — is let go, and that is a line in the log. The network's readers
+//! and this machine's are counted apart, so no number of network peers can
+//! take the console's slot.
 //!
 //! **A reader that is caught up waits on the replay growing**, and nothing
 //! else wakes it: there is no poll and no timer.
@@ -25,10 +30,11 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use toyos::ipc::Connection;
 use toyos::port::Acceptor;
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
@@ -38,9 +44,18 @@ use toyos_logstream::{Next, ProgramLine, Replay, Tag, CARRIER_LEAVING, LOGD, POR
 /// lock is held for a copy, not how far a reader may fall behind.
 const CHUNK: usize = 64 * 1024;
 
-/// Readers at once. Each is a thread, and anybody on the network may be one,
-/// so the count is bounded and a reader past it is refused by name.
-const MAX_READERS: usize = 8;
+/// Readers on the network at once. Each is a thread, and anybody on the network
+/// may be one, so the count is bounded and a reader past it is refused by name.
+const MAX_NETWORK_READERS: usize = 8;
+
+/// Readers on this machine at once: only a program holding the
+/// [`SERVICE`](toyos_logstream::SERVICE) connector is one, and the network's
+/// count cannot reach this one.
+const MAX_LOCAL_READERS: usize = 2;
+
+/// How long a reader may take no byte at all of what it is owed before its
+/// slot is let go: a wait on its sink taking bytes, bounded by this.
+const STALLED: Duration = Duration::from_secs(10);
 
 /// The replay, and the wake a caught-up reader waits on.
 pub struct Hub {
@@ -68,7 +83,8 @@ impl Carrier {
 struct Shared {
     replay: Mutex<Replay>,
     grew: Condvar,
-    readers: AtomicUsize,
+    network: AtomicUsize,
+    local: AtomicUsize,
     /// The wall clock the boot started at, for a line a reader is owed.
     boot_local: Option<u64>,
 }
@@ -80,7 +96,8 @@ impl Hub {
         let shared = Arc::new(Shared {
             replay: Mutex::new(Replay::new(cap)),
             grew: Condvar::new(),
-            readers: AtomicUsize::new(0),
+            network: AtomicUsize::new(0),
+            local: AtomicUsize::new(0),
             boot_local,
         });
         // A row with no `receives` gives this program no namespace, so no netd,
@@ -187,7 +204,12 @@ fn serve_network(shared: &Arc<Shared>, told: &Pipe) {
         }
         let Some(open) = listener.as_ref().filter(|_| ready) else { continue };
         match open.accept() {
-            Ok((stream, peer)) => admit(shared, format!("{peer}"), Announce::Yes, stream),
+            Ok((stream, peer)) => {
+                stream
+                    .set_write_timeout(Some(STALLED))
+                    .expect("logd: a reader's stream that cannot bound its own write");
+                admit(shared, format!("{peer}"), Announce::Yes, stream)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
                 say!("logd: the log's listener on port {PORT} failed ({e}); binding it again");
@@ -227,7 +249,7 @@ fn serve_local(shared: &Arc<Shared>, acceptor: &Acceptor) {
         };
         let end = shared.replay.lock().expect("logd: the replay is poisoned").end();
         let Some(pipe) = hand_over(&conn, end) else { continue };
-        admit(shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink(pipe));
+        admit(shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink::new(pipe));
     }
 }
 
@@ -250,21 +272,33 @@ fn hand_over(conn: &Connection, end: u64) -> Option<Pipe> {
     }
 }
 
-/// Whether a reader's coming and going is a line in the log: a peer on the
-/// network is somebody the machine's owner may want named, and a reader on
-/// this machine is the console, which would draw the line about itself
-/// beside its own prompt.
+/// Whether a reader's coming and going is a line in the log, and which count it
+/// is held against: a peer on the network is somebody the machine's owner may
+/// want named, and a reader on this machine is the console, which would draw
+/// the line about itself beside its own prompt.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Announce {
     Yes,
     No,
 }
 
-/// A reader thread, where the count allows one.
+/// Why a reader's thread ended.
+enum Left {
+    /// The reader closed, or its sink refused a write.
+    Gone,
+    /// Its sink took no byte for [`STALLED`] while bytes were owed.
+    Stalled,
+}
+
+/// A reader thread, where its count allows one.
 fn admit(shared: &Arc<Shared>, who: String, announce: Announce, sink: impl Write + Send + 'static) {
-    if shared.readers.fetch_add(1, Ordering::SeqCst) >= MAX_READERS {
-        shared.readers.fetch_sub(1, Ordering::SeqCst);
-        say!("logd: refusing {who}: {MAX_READERS} readers are already served");
+    let (count, max, place) = match announce {
+        Announce::Yes => (&shared.network, MAX_NETWORK_READERS, "on the network"),
+        Announce::No => (&shared.local, MAX_LOCAL_READERS, "on this machine"),
+    };
+    if count.fetch_add(1, Ordering::SeqCst) >= max {
+        count.fetch_sub(1, Ordering::SeqCst);
+        say!("logd: refusing {who}: {max} readers {place} are already served");
         return;
     }
     if announce == Announce::Yes {
@@ -272,47 +306,57 @@ fn admit(shared: &Arc<Shared>, who: String, announce: Announce, sink: impl Write
     }
     let theirs = Arc::clone(shared);
     let spawned = std::thread::Builder::new().name("log-reader".into()).spawn(move || {
-        let sent = feed(&theirs, sink);
-        theirs.readers.fetch_sub(1, Ordering::SeqCst);
-        if announce == Announce::Yes {
-            say!("logd: {who} stopped reading after {sent} bytes");
+        let (sent, left) = feed(&theirs, sink);
+        match announce {
+            Announce::Yes => theirs.network.fetch_sub(1, Ordering::SeqCst),
+            Announce::No => theirs.local.fetch_sub(1, Ordering::SeqCst),
+        };
+        match left {
+            Left::Stalled => say!(
+                "logd: letting {who} go after {sent} bytes: it took none of what it is owed for {} s",
+                STALLED.as_secs()
+            ),
+            Left::Gone if announce == Announce::Yes => {
+                say!("logd: {who} stopped reading after {sent} bytes")
+            }
+            Left::Gone => {}
         }
     });
     if let Err(e) = spawned {
-        shared.readers.fetch_sub(1, Ordering::SeqCst);
+        count.fetch_sub(1, Ordering::SeqCst);
         say!("logd: no thread for a reader: {e}");
     }
 }
 
 /// Write the boot to `sink` from its first byte, then each round as it lands,
-/// until the reader goes. Answers the bytes it sent.
-fn feed(shared: &Shared, mut sink: impl Write) -> u64 {
+/// until the reader goes or stalls. Answers the bytes it sent and why it ended.
+fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
     let mut at = 0u64;
+    let mut sent = 0u64;
     loop {
         let chunk = {
             let mut replay = shared.replay.lock().expect("logd: the replay is poisoned");
             loop {
-                let next = match replay.next(at, CHUNK) {
-                    Next::Bytes(bytes) => Some(Ok(bytes.to_vec())),
-                    Next::Evicted { lost, at: resume } => Some(Err((lost, resume))),
-                    Next::CaughtUp => None,
-                };
-                match next {
-                    Some(Ok(bytes)) => break bytes,
-                    Some(Err((lost, resume))) => {
+                match replay.next(at, CHUNK) {
+                    Next::Bytes(bytes) => {
+                        at += bytes.len() as u64;
+                        break bytes.to_vec();
+                    }
+                    Next::Evicted { lost, at: resume } => {
                         at = resume;
                         break evicted(shared.boot_local, lost);
                     }
-                    None => {
+                    Next::CaughtUp => {
                         replay = shared.grew.wait(replay).expect("logd: the replay is poisoned");
                     }
                 }
             }
         };
-        if sink.write_all(&chunk).and_then(|()| sink.flush()).is_err() {
-            return at;
+        match sink.write_all(&chunk) {
+            Ok(()) => sent += chunk.len() as u64,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return (sent, Left::Stalled),
+            Err(_) => return (sent, Left::Gone),
         }
-        at += chunk.len() as u64;
     }
 }
 
@@ -325,12 +369,34 @@ fn evicted(boot_local: Option<u64>, lost: u64) -> Vec<u8> {
     format!("{}\n", ProgramLine { stamp: &stamp, at_ns, tag, text: text.as_bytes() }).into_bytes()
 }
 
-/// A pipe as a byte sink: one `write` may take part of what it is handed.
-struct PipeSink(Pipe);
+/// A pipe as a byte sink: one `write` takes what fits, and a full pipe is
+/// waited on for [`STALLED`] and no longer.
+struct PipeSink {
+    pipe: Pipe,
+    poller: Poller,
+}
+
+impl PipeSink {
+    fn new(pipe: Pipe) -> Self {
+        Self { pipe, poller: Poller::new(1) }
+    }
+}
 
 impl Write for PipeSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.write(buf).map_err(|e| std::io::Error::other(format!("{e:?}")))
+        loop {
+            match self.pipe.write_nonblock(buf) {
+                Ok(n) => return Ok(n),
+                Err(SyscallError::WouldBlock) => {}
+                Err(e) => return Err(std::io::Error::other(format!("{e:?}"))),
+            }
+            self.poller.watch(&self.pipe, WRITABLE, 0);
+            let mut room = false;
+            self.poller.wait(1, STALLED.as_nanos() as u64, |_| room = true);
+            if !room {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

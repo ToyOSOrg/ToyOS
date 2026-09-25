@@ -2814,24 +2814,39 @@ fn a_lease_report_reads_back_as_it_was_written() {
     }
 }
 
-/// §10.2.5.21 with `RCTL.MO` = `00b`: bits 47:36 of the destination index the
-/// array. `01:00:5e:00:00:fb` — multicast DNS's group — is index `0xFB0`,
-/// dword 125, bit 16; and asking for it sets that bit and no other.
+/// Each part's table, and the one bit asking for a group sets in it. The
+/// 82574's is §10.2.5.21 with `RCTL.MO` = `00b`, bits 47:36 into 128 dwords;
+/// the PCH MAC's is 612523 §9.5.9.2.23, bits 47:38 into 32. The differential
+/// oracle is Linux's `e1000_hash_mc_addr_generic` (drivers/net/ethernet/intel/
+/// e1000e/mac.c): its own worked example, an address ending
+/// `0x34, 0x56` hashing to `0x563` over a 4096-bit table, and the same
+/// function over `ich8lan.c`'s `mta_reg_count = 32`, a 1024-bit table, where
+/// its shift of two gives `0x158`. `01:00:5e:00:00:fb` — multicast DNS's
+/// group — is `0xFB0` (dword 125, bit 16) on the 82574 and `0x3EC` (dword 31,
+/// bit 12) on the PCH.
 #[test]
 fn a_multicast_group_sets_the_one_table_bit_its_address_hashes_to() {
-    assert_eq!(regs::mta_bit([0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb]), (125, 16));
-    assert_eq!(regs::mta_bit([0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]), (0, 16));
-    assert_eq!(regs::mta_bit([0x33, 0x33, 0x00, 0x00, 0xf0, 0xff]), (127, 31));
-    for part in [Part::E82574, Part::I219] {
+    const MDNS: [u8; 6] = [0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb];
+    let linux = [0x12, 0x34, 0x56, 0x78, 0x34, 0x56];
+    assert_eq!(regs::mta_bit_82574(linux), (0x563 >> 5, 0x563 & 0x1F));
+    assert_eq!(regs::mta_bit_pch(linux), (0x158 >> 5, 0x158 & 0x1F));
+    assert_eq!(regs::mta_bit_82574(MDNS), (125, 16));
+    assert_eq!(regs::mta_bit_pch(MDNS), (31, 12));
+    assert_eq!(regs::mta_bit_82574([0x33, 0x33, 0x00, 0x00, 0xf0, 0xff]), (127, 31));
+    assert_eq!(regs::mta_bit_pch([0x33, 0x33, 0x00, 0x00, 0xf0, 0xff]), (31, 31));
+    for (part, set, dwords) in
+        [(Part::E82574, (125, 16), regs::MTA_DWORDS), (Part::I219, (31, 12), regs::MTA_DWORDS_PCH)]
+    {
         let nic = Nic::with(29, part, Permits::default());
         let driver = open(&nic);
-        driver.accept_multicast([0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb]);
+        driver.accept_multicast(MDNS);
         for dword in 0..regs::MTA_DWORDS {
-            let want = if dword == 125 { 1 << 16 } else { 0 };
+            let want = if dword == set.0 { 1 << set.1 } else { 0 };
+            assert!(set.0 < dwords, "{part:?}");
             assert_eq!(
                 nic.peek(regs::MTA + dword * 4),
                 want,
-                "{}",
+                "{part:?}: {}",
                 nic.because(&format!("MTA[{dword}] after the mDNS group was asked for"))
             );
         }

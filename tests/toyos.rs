@@ -228,6 +228,13 @@ const RUST_SKIP: &[&str] = &[
     // console — which only a boot of its own reads back. `log_program_line`
     // and `log_stream` run it.
     "log_origin",
+    // Its verdict is where its line lands among the kernel's records, on a
+    // boot whose `logd` holds the ring until it speaks.
+    // `log_program_line_after_its_records` runs it on `tests/logholdcase`.
+    "log_hold",
+    // It prints init's word accepting a swap of netd; its verdict is that a
+    // `logd` serving the network changed nothing. `log_carrier_forgery` runs it.
+    "log_carrier_forger",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -709,6 +716,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // A program writing the kernel's words and another program's head: every
     // judge of `/log` reads the truth. Lines, and the exit judge; no clock.
     ("log_program_forgery", Sched::Parallel, Tier::Fast),
+    // A program's line read while three batches of records written before it
+    // are unread: `/log` carries it after every one. Lines and positions; no clock.
+    ("log_program_line_after_its_records", Sched::Parallel, Tier::Fast),
+    // A program printing init's word accepting a swap of netd: logd turns
+    // nobody away, and a reader after it is admitted. Lines; no clock.
+    ("log_carrier_forgery", Sched::Parallel, Tier::Fast),
     // A flood two and a half times its pipe: every line in `/log`, in order,
     // once. Nightly for its five megabytes through a TCG guest's volume.
     ("log_program_flood", Sched::Parallel, Tier::Nightly),
@@ -13883,6 +13896,8 @@ fn run_machine_test(
         "log_stream_stalled_reader" => common::logstream::stalled_reader(c_bins, rust_bins),
         "log_program_line" => common::origin::line(c_bins, rust_bins),
         "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
+        "log_program_line_after_its_records" => common::origin::after_records(c_bins, rust_bins),
+        "log_carrier_forgery" => common::origin::carrier_forgery(c_bins, rust_bins),
         "log_program_flood" => common::origin::flood(c_bins, rust_bins),
         "netd_connection_caps" => {
             // The only boot that runs netd at all. Its `main` opens the NIC

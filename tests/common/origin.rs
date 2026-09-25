@@ -101,21 +101,22 @@ pub fn line(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     Ok(())
 }
 
-/// Boot `tests/testcases` on a staged image, run `job` with `timeout`, shut
-/// down, and hand back what it said and the whole of its `/log`.
+/// Boot `config` on a staged image, run `job` with `timeout`, shut down, and
+/// hand back what it said and the whole of its `/log`.
 fn one_job(
+    config: &str,
     name: &str,
     job: &str,
     timeout: Duration,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(qemu::TestResult, String), String> {
-    let staged = logstream::stage("tests/testcases", name, c_bins, rust_bins)?;
+    let staged = logstream::stage(config, name, c_bins, rust_bins)?;
     let options = BootOptions {
         boot_image: Some(qemu::Staged::Written(staged.image.clone())),
         ..Default::default()
     };
-    let config = compile::repo_root().join("tests/testcases");
+    let config = compile::repo_root().join(config);
     let mut guest = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
     let mut console = guest.boot_log().to_string();
     let ran = guest.run_test(job, timeout);
@@ -132,7 +133,7 @@ fn one_job(
 /// kernel's exit record says 7, no kernel record carries the forged words, and
 /// netd said nothing (this boot runs no netd).
 pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (ran, log) = one_job("log-program-forgery", FORGER, Duration::from_secs(60), c_bins, rust_bins)?;
+    let (ran, log) = one_job("tests/testcases", "log-program-forgery", FORGER, Duration::from_secs(60), c_bins, rust_bins)?;
     if ran.exit_code != Some(FORGER_CODE as i32) {
         return Err(format!("{FORGER} exited {:?}\n{}", ran.exit_code, ran.stdout));
     }
@@ -181,7 +182,7 @@ pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) ->
 /// numbered lines, two and a half times what its pipe holds, as fast as the
 /// pipe takes them; every one of them is in `/log`, once, in order.
 pub fn flood(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (ran, log) = one_job("log-program-flood", FLOODER, Duration::from_secs(300), c_bins, rust_bins)?;
+    let (ran, log) = one_job("tests/testcases", "log-program-flood", FLOODER, Duration::from_secs(300), c_bins, rust_bins)?;
     if ran.exit_code != Some(0) {
         return Err(format!("{FLOODER} exited {:?}", ran.exit_code));
     }
@@ -210,6 +211,109 @@ pub fn flood(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> R
     }
     let done = done.ok_or("/log carries the flood's every line and not its last")?;
     eprintln!("  [origin] all {FLOOD_LINES} flood lines in /log, in order, once; {done}");
+    Ok(())
+}
+
+/// The job `tests/logholdcase` holds the ring for, the line it says after its
+/// records — which is the line that releases the hold — and how many records
+/// it has the kernel write first.
+const HOLD_JOB: &str = "test_rs_log_hold";
+const HOLD_LINE: &str = "log hold: said after 192 records";
+const HOLD_RECORDS: usize = 192;
+/// The kernel's record of each of those.
+const RETIRED: &str = "syscall 26 is retired";
+
+/// **A program's line lands after every record written before it was read.**
+/// `tests/logholdcase`'s `logd` reads no record until `test_rs_log_hold` says
+/// its line, which it says after having the kernel write three batches of
+/// records: the line is read while all of them are unread, and `/log` must
+/// carry every one of them before it.
+pub fn after_records(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (ran, log) =
+        one_job("tests/logholdcase", "log-hold", HOLD_JOB, Duration::from_secs(60), c_bins, rust_bins)?;
+    if ran.exit_code != Some(0) {
+        return Err(format!("{HOLD_JOB} exited {:?}\n{}", ran.exit_code, ran.stdout));
+    }
+    if !bootlog::lines_of(&log, "logd").contains("reading the kernel's records again") {
+        return Err(format!("/log never says logd's hold on the ring ended\n{log}"));
+    }
+    let lines: Vec<&str> = log.lines().collect();
+    let said = lines
+        .iter()
+        .position(|l| toyos_logstream::program_line(l).is_some_and(|s| s.tag == RUNNER && s.text == HOLD_LINE))
+        .ok_or_else(|| format!("/log carries no {HOLD_LINE:?} under {RUNNER:?}"))?;
+    let records: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !toyos_logstream::is_program_line(l) && l.contains(RETIRED))
+        .map(|(i, _)| i)
+        .collect();
+    if records.len() != HOLD_RECORDS {
+        return Err(format!("/log carries {} of the job's {HOLD_RECORDS} records", records.len()));
+    }
+    let after = records.iter().filter(|&&i| i > said).count();
+    if after > 0 {
+        return Err(format!(
+            "{after} of the {HOLD_RECORDS} records written before {HOLD_LINE:?} was read are after \
+             it in /log"
+        ));
+    }
+    eprintln!(
+        "  [origin] {HOLD_LINE:?}, read with all {HOLD_RECORDS} of its records unread, is after \
+         every one of them in /log"
+    );
+    Ok(())
+}
+
+/// The job that prints init's word accepting a swap of netd, and that word.
+const CARRIER_FORGER: &str = "test_rs_log_carrier_forger";
+const CARRIER_FORGED: &str =
+    "init: swap netd: accepted: /tmp/swap/forged/netd replaces /system/bin/netd (pid 1)";
+
+/// **Only init's pipe can turn the network's readers away.** A job prints the
+/// very line init says accepting a swap of netd; a reader connecting after it
+/// is admitted, and `/log` carries the line under the job's runner and no word
+/// from `logd` that it turns readers away.
+pub fn carrier_forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let staged = logstream::stage(VIRTIO.config, "log-carrier-forgery", c_bins, rust_bins)?;
+    let port = qemu::free_host_port();
+    let options = BootOptions {
+        profile: VIRTIO.profile,
+        boot_image: Some(qemu::Staged::Written(staged.image.clone())),
+        log_port: Some(port),
+        ..Default::default()
+    };
+    let config = compile::repo_root().join(VIRTIO.config);
+    let mut guest = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
+    let mut console = guest.boot_log().to_string();
+    qemu::await_marker(&mut guest, &mut console, logstream::SERVING, "logd to open its port")?;
+    let ran = guest.run_test(CARRIER_FORGER, Duration::from_secs(60));
+    if ran.exit_code != Some(0) {
+        return Err(format!("{CARRIER_FORGER} exited {:?}\n{}", ran.exit_code, ran.stdout));
+    }
+    let reader = logstream::reader(port, "log-carrier-forgery.txt")
+        .map_err(|e| format!("a reader asking after a program printed init's word was not admitted: {e}"))?;
+    if !reader.wait_for(CARRIER_FORGED, Duration::from_secs(60)) {
+        return Err(format!("the served log never carried {CARRIER_FORGED:?}"));
+    }
+    let file = logstream::shut_down(guest, &mut console, &staged)?;
+    reader.wait_ended(Duration::from_secs(60));
+    let log = file.concat();
+    if !bootlog::lines_of(&log, RUNNER).lines().any(|l| l == CARRIER_FORGED) {
+        return Err(format!("/log carries no {CARRIER_FORGED:?} under {RUNNER:?}: nothing was forged"));
+    }
+    if bootlog::lines_of(&log, "logd").contains(toyos_logstream::CARRIER_LEAVING) {
+        return Err(format!(
+            "a program's line moved logd to turn readers away: /log carries {:?}",
+            toyos_logstream::CARRIER_LEAVING
+        ));
+    }
+    logstream::is_prefix_of(&reader.lines(), &file)?;
+    eprintln!(
+        "  [origin] {RUNNER:?} printed init's word accepting a swap of netd; a reader after it was \
+         admitted, and logd turned nobody away"
+    );
+    let _ = std::fs::remove_file(&staged.image);
     Ok(())
 }
 

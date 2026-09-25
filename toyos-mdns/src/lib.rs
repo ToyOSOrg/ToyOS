@@ -17,6 +17,11 @@
 //!   back to its address and port, carrying its ID and its question, with no
 //!   cache-flush bit and a TTL of at most ten seconds.
 //!
+//! A query whose source is not on this link is ignored (§11), and the record
+//! is multicast at most once a second (§6) — announcements included — so no
+//! host can turn the queries it sends into a multicast to every host on the
+//! link at its own rate ([`Pace`]).
+//!
 //! **Not implemented, and so not claimed:** probing for the name before using
 //! it (§8.1) and defending it against another host's (§9). Two machines named
 //! alike both answer, and a resolver may see either.
@@ -129,11 +134,62 @@ pub fn announcement(host: Host, addr: [u8; 4]) -> Vec<u8> {
     out
 }
 
-/// The answer `query`, from port `from_port`, is owed for `host` at `addr`, or
-/// `None` where it asks nothing this host answers — a response, a query with a
+/// Where a query came from: the source address and port of its packet.
+#[derive(Clone, Copy, Debug)]
+pub struct Asker {
+    pub addr: [u8; 4],
+    pub port: u16,
+}
+
+/// This machine on its link: the address its lease gave it and the prefix
+/// length of the subnet that address is on.
+#[derive(Clone, Copy, Debug)]
+pub struct Link {
+    pub addr: [u8; 4],
+    pub prefix: u8,
+}
+
+impl Link {
+    /// Whether `addr` is on this link: in this subnet, or link-local
+    /// (RFC 3927), which is on every link.
+    fn holds(&self, addr: [u8; 4]) -> bool {
+        let mask = u32::MAX.checked_shl(32 - u32::from(self.prefix.min(32))).unwrap_or(0);
+        let (ours, theirs) = (u32::from_be_bytes(self.addr), u32::from_be_bytes(addr));
+        ours & mask == theirs & mask || addr[..2] == [169, 254]
+    }
+}
+
+/// §6: a record is multicast on an interface at most once a second.
+const GROUP_EVERY_MS: u64 = 1_000;
+
+/// When this host's one record was last multicast, in milliseconds on the
+/// caller's monotonic clock.
+#[derive(Debug, Default)]
+pub struct Pace {
+    last_group_ms: Option<u64>,
+}
+
+impl Pace {
+    pub const fn new() -> Self {
+        Self { last_group_ms: None }
+    }
+
+    /// The record was multicast at `now_ms` — an announcement, or an answer
+    /// [`answer`] sent to the group.
+    pub fn multicast(&mut self, now_ms: u64) {
+        self.last_group_ms = Some(now_ms);
+    }
+}
+
+/// The answer `query`, from `asker`, is owed for `host` on `link` at `now_ms`,
+/// or `None` where it asks nothing this host answers — a response, a query with a
 /// nonzero opcode, a question for another name or type, or bytes that are not
 /// a message at all.
-pub fn answer(query: &[u8], from_port: u16, host: Host, addr: [u8; 4]) -> Option<Answer> {
+pub fn answer(query: &[u8], asker: Asker, link: Link, host: Host, pace: &mut Pace, now_ms: u64) -> Option<Answer> {
+    if !link.holds(asker.addr) {
+        return None;
+    }
+    let (from_port, addr) = (asker.port, link.addr);
     let id = u16_at(query, 0)?;
     let flags = u16_at(query, 2)?;
     if flags & (QR | OPCODE_MASK) != 0 {
@@ -165,6 +221,12 @@ pub fn answer(query: &[u8], from_port: u16, host: Host, addr: [u8; 4]) -> Option
         out.extend_from_slice(&CLASS_IN.to_be_bytes());
         answer_record(&mut out, host, addr, CLASS_IN, LEGACY_TTL);
         return Some(Answer { to: To::Asker, bytes: out });
+    }
+    if !unicast {
+        if pace.last_group_ms.is_some_and(|last| now_ms < last.saturating_add(GROUP_EVERY_MS)) {
+            return None;
+        }
+        pace.multicast(now_ms);
     }
     let mut out = header(0, RESPONSE_FLAGS, 0, 1);
     answer_record(&mut out, host, addr, CLASS_IN | CACHE_FLUSH, TTL);
@@ -239,6 +301,15 @@ mod tests {
         Host::new("toyos-t14").expect("a label")
     }
 
+    const LINK: Link = Link { addr: ADDR, prefix: 24 };
+    const NEIGHBOUR: [u8; 4] = [192, 168, 1, 7];
+
+    /// One query from a neighbour on the link, to a responder that has
+    /// multicast nothing yet.
+    fn ask(query: &[u8], port: u16) -> Option<Answer> {
+        answer(query, Asker { addr: NEIGHBOUR, port }, LINK, host(), &mut Pace::new(), 0)
+    }
+
     /// A query as RFC 1035 §4.1 lays one out, spelled byte by byte here rather
     /// than by this crate's own writer.
     fn query(id: u16, name: &[&str], kind: u16, class: u16) -> Vec<u8> {
@@ -258,7 +329,7 @@ mod tests {
     /// cache-flush bit and a 120 s TTL.
     #[test]
     fn a_query_for_this_name_is_answered_to_the_group() {
-        let got = answer(&query(0, &["toyos-t14", "local"], 1, 1), PORT, host(), ADDR)
+        let got = ask(&query(0, &["toyos-t14", "local"], 1, 1), PORT)
             .expect("an answer");
         assert_eq!(got.to, To::Group);
         let mut want = vec![0, 0, 0x84, 0x00, 0, 0, 0, 1, 0, 0, 0, 0];
@@ -271,12 +342,12 @@ mod tests {
     #[test]
     fn a_name_is_matched_whatever_its_case_and_any_asks_for_it_too() {
         let q = query(0, &["ToyOS-T14", "LOCAL"], 255, 1);
-        assert!(answer(&q, PORT, host(), ADDR).is_some());
+        assert!(ask(&q, PORT).is_some());
     }
 
     #[test]
     fn the_unicast_bit_sends_the_answer_back_to_the_asker() {
-        let got = answer(&query(0, &["toyos-t14", "local"], 1, 0x8001), PORT, host(), ADDR)
+        let got = ask(&query(0, &["toyos-t14", "local"], 1, 0x8001), PORT)
             .expect("an answer");
         assert_eq!(got.to, To::Asker);
     }
@@ -285,7 +356,7 @@ mod tests {
     /// a short TTL, and no cache-flush bit.
     #[test]
     fn a_legacy_resolver_gets_its_id_its_question_and_a_short_ttl() {
-        let got = answer(&query(0xBEEF, &["toyos-t14", "local"], 1, 1), 53_000, host(), ADDR)
+        let got = ask(&query(0xBEEF, &["toyos-t14", "local"], 1, 1), 53_000)
             .expect("an answer");
         assert_eq!(got.to, To::Asker);
         let mut want = vec![0xBE, 0xEF, 0x84, 0x00, 0, 1, 0, 1, 0, 0, 0, 0];
@@ -305,14 +376,14 @@ mod tests {
             (&["toyos-t14", "local"][..], 28, 1),
             (&["toyos-t14", "local"][..], 1, 3),
         ] {
-            assert_eq!(answer(&query(0, name, kind, class), PORT, host(), ADDR), None, "{name:?}");
+            assert_eq!(ask(&query(0, name, kind, class), PORT), None, "{name:?}");
         }
         let mut response = query(0, &["toyos-t14", "local"], 1, 1);
         response[2] = 0x84;
-        assert_eq!(answer(&response, PORT, host(), ADDR), None, "a response is not a question");
+        assert_eq!(ask(&response, PORT), None, "a response is not a question");
         let mut opcode = query(0, &["toyos-t14", "local"], 1, 1);
         opcode[2] = 0x08;
-        assert_eq!(answer(&opcode, PORT, host(), ADDR), None, "a nonzero opcode is not a query");
+        assert_eq!(ask(&opcode, PORT), None, "a nonzero opcode is not a query");
     }
 
     /// A second question may name the first's labels by pointer (RFC 1035
@@ -323,7 +394,7 @@ mod tests {
         q[5] = 2;
         // `toyos-t14`, then a pointer to `local` at offset 12 + 6.
         q.extend_from_slice(b"\x09toyos-t14\xC0\x12\x00\x01\x00\x01");
-        assert_eq!(answer(&q, PORT, host(), ADDR).map(|a| a.to), Some(To::Group));
+        assert_eq!(ask(&q, PORT).map(|a| a.to), Some(To::Group));
     }
 
     /// Nothing a peer sends can hold the parser: a short message, a label past
@@ -332,17 +403,60 @@ mod tests {
     fn a_malformed_message_is_no_question() {
         let whole = query(0, &["toyos-t14", "local"], 1, 1);
         for cut in 0..whole.len() {
-            assert_eq!(answer(&whole[..cut], PORT, host(), ADDR), None, "cut at {cut}");
+            assert_eq!(ask(&whole[..cut], PORT), None, "cut at {cut}");
         }
         let mut forward = vec![0u8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
         forward.extend_from_slice(&[0xC0, 12, 0, 1, 0, 1]);
-        assert_eq!(answer(&forward, PORT, host(), ADDR), None, "a pointer to itself");
+        assert_eq!(ask(&forward, PORT), None, "a pointer to itself");
         let mut ahead = vec![0u8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
         ahead.extend_from_slice(&[0xC0, 20, 0, 1, 0, 1, 0, 0]);
-        assert_eq!(answer(&ahead, PORT, host(), ADDR), None, "a pointer forwards");
+        assert_eq!(ask(&ahead, PORT), None, "a pointer forwards");
         let mut reserved = vec![0u8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
         reserved.extend_from_slice(&[0x40, 0, 0, 1, 0, 1]);
-        assert_eq!(answer(&reserved, PORT, host(), ADDR), None, "a reserved label type");
+        assert_eq!(ask(&reserved, PORT), None, "a reserved label type");
+    }
+
+    /// RFC 6762 §6: "a Multicast DNS responder MUST NOT (except in the one
+    /// special case of answering probe queries) multicast a record on a given
+    /// interface until at least one second has elapsed since the last time that
+    /// record was multicast on that particular interface." So a second query
+    /// inside the second is not answered to the group, and one after it is; an
+    /// announcement is a multicast of the record too.
+    #[test]
+    fn the_record_is_multicast_at_most_once_a_second() {
+        let q = query(0, &["toyos-t14", "local"], 1, 1);
+        let from = Asker { addr: NEIGHBOUR, port: PORT };
+        let mut pace = Pace::new();
+        let first = answer(&q, from, LINK, host(), &mut pace, 10_000).map(|a| a.to);
+        assert_eq!(first, Some(To::Group));
+        let again = answer(&q, from, LINK, host(), &mut pace, 10_999).map(|a| a.to);
+        assert_ne!(again, Some(To::Group), "the record was multicast 999 ms ago");
+        let later = answer(&q, from, LINK, host(), &mut pace, 11_000).map(|a| a.to);
+        assert_eq!(later, Some(To::Group), "a second has passed");
+        let mut announced = Pace::new();
+        announced.multicast(20_000);
+        assert_ne!(answer(&q, from, LINK, host(), &mut announced, 20_500).map(|a| a.to), Some(To::Group));
+        let legacy = Asker { addr: NEIGHBOUR, port: 53_000 };
+        assert_eq!(
+            answer(&q, legacy, LINK, host(), &mut announced, 20_500).map(|a| a.to),
+            Some(To::Asker),
+            "a unicast answer is no multicast of the record"
+        );
+    }
+
+    /// RFC 6762 §11: a query whose source is not on this link is ignored, and a
+    /// link-local source (RFC 3927) is on every link.
+    #[test]
+    fn a_query_from_off_the_link_is_not_answered() {
+        let q = query(0, &["toyos-t14", "local"], 1, 1);
+        for (addr, port) in [([10, 0, 0, 7], PORT), ([192, 168, 2, 7], 53_000), ([8, 8, 8, 8], PORT)] {
+            let asked = answer(&q, Asker { addr, port }, LINK, host(), &mut Pace::new(), 0);
+            assert_eq!(asked, None, "{addr:?}");
+        }
+        for addr in [[192, 168, 1, 254], [169, 254, 3, 4]] {
+            let asked = answer(&q, Asker { addr, port: PORT }, LINK, host(), &mut Pace::new(), 0);
+            assert!(asked.is_some(), "{addr:?}");
+        }
     }
 
     #[test]

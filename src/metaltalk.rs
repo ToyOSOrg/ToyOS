@@ -102,6 +102,9 @@ struct State {
     peer: Option<SocketAddr>,
     /// How many connections carried a line.
     admitted: usize,
+    /// How many connections ended before carrying one: `logd` turning a
+    /// reader away, or nothing on the machine's side taking it.
+    turned_away: usize,
     /// The connection being read, kept so [`Stream::redial`] can end it.
     current: Option<TcpStream>,
     /// How the latest admitted connection ended, once it has and none has been
@@ -167,6 +170,11 @@ impl Stream {
         self.state().admitted
     }
 
+    /// How many connections ended before carrying a line.
+    pub fn turned_away(&self) -> usize {
+        self.state().turned_away
+    }
+
     /// Lines a connection's end cut short.
     pub fn torn(&self) -> usize {
         self.state().torn
@@ -197,7 +205,10 @@ impl Stream {
 
     /// End the current connection, and dial again until a connection carries a
     /// line or `by` has passed: every dial is a wait on the machine's answer,
-    /// and one it turns away is asked again at once.
+    /// and one it turns away is asked again at once and counted
+    /// ([`Stream::turned_away`]). A netd with no listener answers a connect at
+    /// once and nothing the machine sends says when `logd` listens again, so
+    /// the count is what bounds this, and a swap reports it.
     ///
     /// **For a connection this host knows is going**: a swap of the netd
     /// carrying it ends it with no FIN and no reset, so nothing but this host
@@ -436,6 +447,9 @@ fn read(conn: TcpStream, shared: &Shared, out: &mut std::fs::File, echo: bool) -
     // it was; the first dial's has nothing before it, and is that account.
     if carried || state.admitted == 0 {
         state.end = Some(end);
+    }
+    if !carried {
+        state.turned_away += 1;
     }
     shared.moved.notify_all();
     carried

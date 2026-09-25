@@ -1138,13 +1138,14 @@ pub fn soundd_log_stall(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         });
     }
 
-    // The capture's tail reaches the file before it is read, and the file goes
-    // with the guest.
-    let _ = qemu.drain_serial(Duration::from_millis(500));
-    let wav = parse_wav(qemu.audio_wav_path())?;
-    let analysis = analyze(&wav);
+    // Read once QEMU has exited, which is when it has written the capture's
+    // tail, and before the guest is dropped, which deletes it.
     let mut shutdown = String::new();
-    let file = super::logstream::shut_down(qemu, &mut shutdown, &staged)?.concat();
+    let (file, wav) = super::logstream::shut_down_keeping(qemu, &mut shutdown, &staged, |qemu| {
+        parse_wav(qemu.audio_wav_path())
+    })?;
+    let (file, wav) = (file.concat(), wav?);
+    let analysis = analyze(&wav);
     let _ = std::fs::remove_file(&staged.image);
 
     let log = new_ledger();

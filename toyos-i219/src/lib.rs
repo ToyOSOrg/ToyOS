@@ -901,10 +901,14 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     }
 
     /// Pass frames sent to the multicast address `group`: the one bit of the
-    /// Multicast Table Array its hash names ([`regs::mta_bit`]) is set, and
+    /// Multicast Table Array its hash names on this part ([`regs::mta_bit_82574`],
+    /// [`regs::mta_bit_pch`]) is set, and
     /// every other bit is left as it was.
     pub fn accept_multicast(&self, group: [u8; 6]) {
-        let (dword, bit) = regs::mta_bit(group);
+        let (dword, bit) = match self.part {
+            Part::E82574 => regs::mta_bit_82574(group),
+            Part::I219 => regs::mta_bit_pch(group),
+        };
         let at = regs::MTA + dword * 4;
         self.regs.write(at, self.regs.read(at) | 1 << bit);
     }

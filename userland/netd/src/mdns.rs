@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::udp;
-use smoltcp::wire::{IpAddress, IpEndpoint};
-use toyos_mdns::{Host, To, GROUP, PORT};
+use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint};
+use toyos_mdns::{Asker, Host, Link, Pace, To, GROUP, PORT};
 
 /// §8.3: "The Multicast DNS responder MUST send at least two unsolicited
 /// responses, one second apart."
@@ -32,6 +32,9 @@ pub struct Responder {
     /// The address last announced, and when its second announcement is owed.
     announced: Option<Ipv4Addr>,
     again_at: Option<Instant>,
+    /// When the record was last multicast, on a clock from `born`.
+    pace: Pace,
+    born: Instant,
 }
 
 impl Responder {
@@ -47,14 +50,22 @@ impl Responder {
         };
         let mut socket = udp::Socket::new(buffer(), buffer());
         socket.bind(PORT).expect("netd: nothing else binds the multicast DNS port");
-        Self { handle: socket_set.add(socket), host, announced: None, again_at: None }
+        Self {
+            handle: socket_set.add(socket),
+            host,
+            announced: None,
+            again_at: None,
+            pace: Pace::new(),
+            born: Instant::now(),
+        }
     }
 
     /// After each poll: answer every query that arrived, and announce an
     /// address that is new or owed its second announcement.
     pub fn pass(&mut self, iface: &Interface, socket_set: &mut SocketSet<'_>, now: Instant) {
         let socket = socket_set.get_mut::<udp::Socket>(self.handle);
-        let Some(addr) = iface.ipv4_addr() else {
+        // IPv4 is the one protocol this netd is built with, so every address is one.
+        let Some(&IpCidr::Ipv4(cidr)) = iface.ip_addrs().first() else {
             // No address, so nothing to answer with: the queries are read and
             // let go, and the next address is announced as new.
             while socket.recv().is_ok() {}
@@ -62,17 +73,24 @@ impl Responder {
             self.again_at = None;
             return;
         };
+        let addr = cidr.address();
+        let link = Link { addr: addr.octets(), prefix: cidr.prefix_len() };
+        let now_ms = now.saturating_duration_since(self.born).as_millis() as u64;
         let group = IpEndpoint::new(IpAddress::Ipv4(Ipv4Addr::from(GROUP)), PORT);
         if self.announced != Some(addr) {
             self.announced = Some(addr);
             self.again_at = Some(now + ANNOUNCE_AGAIN);
+            self.pace.multicast(now_ms);
             send(socket, &toyos_mdns::announcement(self.host, addr.octets()), group);
         } else if self.again_at.is_some_and(|at| now >= at) {
             self.again_at = None;
+            self.pace.multicast(now_ms);
             send(socket, &toyos_mdns::announcement(self.host, addr.octets()), group);
         }
         while let Ok((query, meta)) = socket.recv() {
-            let Some(answer) = toyos_mdns::answer(query, meta.endpoint.port, self.host, addr.octets())
+            let IpAddress::Ipv4(from) = meta.endpoint.addr;
+            let asker = Asker { addr: from.octets(), port: meta.endpoint.port };
+            let Some(answer) = toyos_mdns::answer(query, asker, link, self.host, &mut self.pace, now_ms)
             else {
                 continue;
             };
