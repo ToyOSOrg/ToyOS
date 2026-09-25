@@ -53,7 +53,7 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 ## Dependencies
 
-Only **Rust** and **QEMU** (for development). The rules: no binary outside those two — a macOS binary is a hard no, and "only for tests" does not soften it; only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; no Python; a fork is the sanctioned form of every third-party source. The north star is **self-hosting**: nothing — build, test, or verification — rests on a host binary. Ask of anything new: could this ever run inside ToyOS?
+Only **Rust** and **QEMU** (for development). The rules: no binary outside those two — a macOS binary is a hard no, and "only for tests" does not soften it; only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; no Python; third-party crates are used as published, and a fork exists only to carry a change being upstreamed and goes when upstream has it. The north star is **self-hosting**: nothing — build, test, or verification — rests on a host binary. Ask of anything new: could this ever run inside ToyOS?
 
 Vendor firmware a device verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`, and loaded only by that device's own driver through its IOMMU domain; it never executes on the CPU.
 
