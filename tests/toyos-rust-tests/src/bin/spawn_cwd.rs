@@ -183,12 +183,15 @@ fn refusals() {
 fn a_cwd_is_judged_in_its_depth() {
     // Never made by `mkdir`: a directory the VFS carries is answered from its own
     // set, and this one has to be judged by the filesystem its files are on.
-    for i in 0..BIG_FILES {
-        std::fs::File::create(format!("{BIG}/{i}")).expect("/tmp is writable");
-    }
+    std::fs::File::create(format!("{BIG}/0")).expect("/tmp is writable");
     let from_root = mean_spawn("/");
     let from_named = mean_spawn(NAMED);
+    // Entered while small, grown after: the process that `cd`s into a build
+    // directory is not asked again when the build fills it.
     std::env::set_current_dir(BIG).expect("chdir into a directory this made");
+    for i in 1..BIG_FILES {
+        std::fs::File::create(format!("{BIG}/{i}")).expect("/tmp is writable");
+    }
     said("own cwd over a large subtree, direct", Command::new(SELF).arg("pwd").output(), BIG);
     let from_big = mean_spawn(BIG);
     std::env::set_current_dir("/").expect("chdir to /");
