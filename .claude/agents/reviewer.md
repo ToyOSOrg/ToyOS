@@ -42,7 +42,7 @@ above; otherwise it is a NOTE.
 - **Fit.** Does the tree already do this? Is each new thing where it belongs: a pure decision in a
   pure crate, the user/kernel boundary in `toyos-userbound`, a device claim in a userland server?
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
-  legacy: no shim, no workaround, no silent default. A syscall or ABI change lands alone. No new
+  legacy: no shim, no workaround, no silent default. No new
   dependency, host binary or fetch. Nothing outside the brief's fence.
 - **Growth.** What could be deleted, merged into what exists, or made smaller? An abstraction with
   one caller, a parameter with one value, dead code. A compromise the branch found is removed or
