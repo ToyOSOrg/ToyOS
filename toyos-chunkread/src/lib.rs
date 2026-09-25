@@ -1,15 +1,10 @@
-//! An extent read off a block device in bounded chunks, each one said as it
-//! lands, and the first that fails named and nothing read after it.
+//! An extent read off a block device in bounded chunks, the first that fails
+//! named and nothing read after it.
 //!
 //! **Why bounded.** Firmware Block I/O takes a request of any size and reports
 //! no largest one it serves (UEFI 2.11 §13.9's `EFI_BLOCK_IO_MEDIA` carries an
 //! alignment and, from revision 3, an optimal granularity, and no maximum), so
 //! the bound is the caller's to choose, and [`chunk_bytes`] chooses it.
-//!
-//! **Why said.** Block I/O takes no timeout and says nothing while a request is
-//! outstanding, so a request that never returns leaves only what was said
-//! before it. [`read`] hands its caller a [`Progress`] at each tenth crossed,
-//! before it asks for the next chunk.
 //!
 //! Pure: no `alloc`, no firmware; the loader supplies the device.
 
@@ -33,13 +28,6 @@ pub struct Failed<E> {
     /// Bytes of the extent read before this chunk, every one of them good.
     pub read: usize,
     pub error: E,
-}
-
-/// How far [`read`] has got: `tenths` of the extent, `read` bytes of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Progress {
-    pub tenths: u32,
-    pub read: usize,
 }
 
 /// The chunk length to read with: the largest multiple of `align` and of the
@@ -76,8 +64,7 @@ fn lcm(a: usize, b: usize) -> Option<usize> {
 }
 
 /// Read `into.len()` bytes from `first_lba` onwards, `chunk` bytes per request
-/// and the last request whatever is left, calling `progress` each time the
-/// share read crosses a tenth.
+/// and the last request whatever is left.
 ///
 /// # Panics
 /// When `chunk` or `into.len()` is not a whole number of `lba_bytes` blocks,
@@ -88,24 +75,15 @@ pub fn read<B: Blocks>(
     lba_bytes: u32,
     chunk: usize,
     into: &mut [u8],
-    mut progress: impl FnMut(Progress),
 ) -> Result<(), Failed<B::Error>> {
     let lba_bytes = lba_bytes as usize;
     assert!(lba_bytes != 0 && chunk != 0 && chunk.is_multiple_of(lba_bytes), "a {chunk}-byte chunk of {lba_bytes}-byte blocks");
     assert!(into.len().is_multiple_of(lba_bytes), "a {}-byte extent of {lba_bytes}-byte blocks", into.len());
-    let len = into.len();
-    let mut said = 0;
     for (index, piece) in into.chunks_mut(chunk).enumerate() {
         let read = index * chunk;
         let lba = first_lba + (read / lba_bytes) as u64;
         let blocks = (piece.len() / lba_bytes) as u64;
         device.read(lba, piece).map_err(|error| Failed { lba, blocks, read, error })?;
-        let read = read + piece.len();
-        let tenths = (read as u128 * 10 / len as u128) as u32;
-        if tenths > said {
-            said = tenths;
-            progress(Progress { tenths, read });
-        }
     }
     Ok(())
 }

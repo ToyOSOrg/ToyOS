@@ -12710,7 +12710,7 @@ fn run_machine_test(
         }
         "root_from_memory" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
-            root_from_memory(qemu.boot_log(), &qemu.uart_log())
+            root_from_memory(qemu.boot_log())
         }
         "root_withheld_refused" => {
             let qemu = QemuInstance::boot_with_options(
@@ -19612,14 +19612,7 @@ const ROOT_WITHHELD_REFUSAL: &str =
 /// record at init's spawn counts zero storage commands before it — every NVMe
 /// command and every USB mass-storage command counts, so a ROOT read off a disk
 /// could not leave it at zero. Both precede the first storage driver's line.
-/// And the loader said every tenth of ROOT as it read it, on the 16550.
-fn root_from_memory(log: &str, loader: &str) -> Result<(), String> {
-    for tenth in 1..=10 {
-        let said = format!("ROOT: {}% read, ", tenth * 10);
-        if !loader.contains(&said) {
-            return Err(format!("the loader never said {said:?}"));
-        }
-    }
+fn root_from_memory(log: &str) -> Result<(), String> {
     let mounted = log
         .find(ROOT_MOUNTED_FROM_MEMORY)
         .ok_or_else(|| format!("no {ROOT_MOUNTED_FROM_MEMORY:?} record in the boot log"))?;

@@ -3256,9 +3256,8 @@ pub fn root_named_twice(
 /// **A chunk of ROOT the disk will not read refuses the boot, naming that
 /// chunk.** The boot stick fails with EIO every read covering the sector
 /// seven past ROOT's middle, so the chunk that fails is not the first. The
-/// loader reads ROOT in chunks and says each tenth as it lands, so the
-/// refusal names a chunk that holds the sector and starts where the bytes
-/// read before it end, and the tenths before it were said.
+/// loader reads ROOT in chunks, so the refusal names a chunk that holds the
+/// sector and starts where the bytes read before it end.
 pub fn root_chunk_refused(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3311,16 +3310,6 @@ pub fn root_chunk_refused(
     }
     if !verdict.contains("DEVICE_ERROR") {
         return Err(format!("the refusal does not carry the firmware's status: {verdict}"));
-    }
-    let tenths = read * 10 / len as u64;
-    for tenth in 1..=tenths {
-        let said = format!("ROOT: {}% read, ", tenth * 10);
-        if !log.contains(&said) {
-            return Err(format!("{said:?} was never said before the refusal:\n{}", volume_lines(&log)));
-        }
-    }
-    if log.contains(&format!("ROOT: {}% read, ", (tenths + 1) * 10)) {
-        return Err(format!("a tenth past the failed chunk was said:\n{}", volume_lines(&log)));
     }
     eprintln!("  [root] bad sector {bad}: {verdict}");
     Ok(())

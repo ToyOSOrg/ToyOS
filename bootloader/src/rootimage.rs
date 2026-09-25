@@ -43,7 +43,7 @@ const MAX_CANDIDATES: usize = 4;
 /// one SCSI READ(10) at 512-byte blocks (SBC-3: a 16-bit count, 65535 blocks),
 /// so a mass-storage driver that does not split has a legal command, and keeps
 /// any bounce buffer a driver maps for DMA at that size rather than ROOT's; and
-/// a stop is located to within 1 MiB.
+/// a read that fails is named to within 1 MiB.
 const CHUNK_BOUND: usize = 1 << 20;
 
 /// UEFI 2.11 §13.9's `EFI_BLOCK_IO_PROTOCOL_REVISION3`, the first whose media
@@ -247,14 +247,14 @@ impl<'a> Disk<'a> {
     }
 
     /// The whole of `part`, in chunks of at most [`CHUNK_BOUND`], into pages
-    /// the kernel keeps, with a line on the console at each tenth.
+    /// the kernel keeps.
     ///
     /// **Nothing bounds a chunk that never returns.** `ReadBlocks` takes no
     /// timeout and says nothing while it runs, so a firmware driver that stalls
     /// holds this loader until the firmware watchdog `main` armed at entry
     /// resets the machine, if the firmware honours it. What shows where it
-    /// stopped is the last progress line, written to `loader.log` before the
-    /// next chunk is asked for, and the attempt count the next pass reads.
+    /// stopped is the `ROOT: reading` line before the read and the attempt count
+    /// the next pass reads.
     fn read_partition(&mut self, bs: &BootServices, part: &Partition) -> RootImage {
         let blocks = part.last_lba - part.first_lba + 1;
         let Some(len) = blocks.checked_mul(u64::from(self.lba_bytes)).filter(|len| len.is_multiple_of(BLOCK as u64))
@@ -286,9 +286,7 @@ impl<'a> Disk<'a> {
         );
         let began = tsc();
         let mut device = Firmware { io: &self.io, media_id: self.media_id };
-        let read = toyos_chunkread::read(&mut device, part.first_lba, self.lba_bytes, chunk, into, |p| {
-            println!("ROOT: {}% read, {} of {len} bytes, {} TSC cycles in", p.tenths * 10, p.read, tsc().wrapping_sub(began));
-        });
+        let read = toyos_chunkread::read(&mut device, part.first_lba, self.lba_bytes, chunk, into);
         if let Err(failed) = read {
             refuse(format_args!(
                 "the read of {} blocks at LBA {} failed: {:?}, after {} of {len} bytes read",
