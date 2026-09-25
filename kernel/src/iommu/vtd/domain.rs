@@ -105,6 +105,36 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
     Ok(at)
 }
 
+/// Put `bytes` at `phys` at `at`, room this domain handed out before and whose
+/// mapping was taken back: a device still aimed there reaches these pages.
+/// Room it never handed out is a kernel bug, since [`map`] may yet hand it out.
+pub fn map_at(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
+    if !phys.is_multiple_of(crate::mm::PAGE_2M) {
+        return Err(IommuError::Unaligned(phys));
+    }
+    let mut domains = DOMAINS.lock();
+    let domain = *domains.at(id);
+    assert!(
+        domain.handed_out(at, bytes),
+        "iommu: domain{} never handed out {:#x}+{bytes:#x}",
+        domain.id(),
+        at.raw()
+    );
+    let mut units = UNITS.lock();
+    table::map(&mut TABLES.lock(), &domain, at, phys, bytes);
+    for unit in units.iter_mut() {
+        unit.invalidate_domain(domain.id());
+    }
+    log!(
+        "iommu: domain{} maps {:#x}..{:#x} at {:#x} again",
+        domain.id(),
+        phys,
+        phys + bytes.next_multiple_of(crate::mm::PAGE_2M),
+        at.raw(),
+    );
+    Ok(())
+}
+
 pub fn unmap(id: DomainId, at: Iova, bytes: u64) -> Result<(), IommuError> {
     let mut domains = DOMAINS.lock();
     let domain = *domains.at(id);

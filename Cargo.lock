@@ -1233,9 +1233,6 @@ dependencies = [
 [[package]]
 name = "toyos-logstream"
 version = "0.1.0"
-dependencies = [
- "toyos-abi",
-]
 
 [[package]]
 name = "toyos-manifest"
@@ -1243,6 +1240,10 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi",
 ]
+
+[[package]]
+name = "toyos-mdns"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-mixer"

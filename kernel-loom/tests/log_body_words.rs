@@ -17,7 +17,7 @@
 
 #![cfg(not(feature = "loom"))]
 
-use kernel_loom::log_shard::{Origin, Shard};
+use kernel_loom::log_shard::Shard;
 use toyos_abi::log::{LogRecord, Level, FLAG_EARLY, MAX_RECORD_MESSAGE};
 
 /// A record whose every field is distinct, so a swap between two of them fails
@@ -46,10 +46,10 @@ fn round_trip(len: usize) {
     // number is committed once.
     let seq = unsafe { shard.reserve(&guard) };
     let want = record(seq, len);
-    unsafe { shard.commit(seq, &want, Origin::Kernel, &guard) };
+    unsafe { shard.commit(seq, &want, &guard) };
     drop(guard);
 
-    let got = shard.read(seq).map(|(record, _)| record).expect("the record just committed must be readable");
+    let got = shard.read(seq).expect("the record just committed must be readable");
     assert_eq!(got.seq, want.seq, "seq");
     assert_eq!(got.at_ns, want.at_ns, "at_ns");
     assert_eq!(got.pid, want.pid, "pid");
@@ -89,14 +89,14 @@ fn a_shorter_record_does_not_inherit_the_longer_one_it_replaced() {
     let guard = kernel_loom::arch::LogCommitGuard::close();
     // SAFETY: sole producer, each number committed once.
     let first = unsafe { shard.reserve(&guard) };
-    unsafe { shard.commit(first, &record(first, 64), Origin::Kernel, &guard) };
+    unsafe { shard.commit(first, &record(first, 64), &guard) };
     let second = unsafe { shard.reserve(&guard) };
     let mut short = record(second, 3);
     short.msg[..3].copy_from_slice(b"xyz");
-    unsafe { shard.commit(second, &short, Origin::Kernel, &guard) };
+    unsafe { shard.commit(second, &short, &guard) };
     drop(guard);
 
-    let got = shard.read(second).map(|(record, _)| record).expect("the second record is readable");
+    let got = shard.read(second).expect("the second record is readable");
     assert_eq!(got.message(), "xyz");
     assert_eq!(got.len, 3);
 }

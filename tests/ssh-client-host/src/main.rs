@@ -25,6 +25,8 @@
 //! toyos_ssh swap    <host> <port> <key> <service> <binary> <sha256>
 //!                                                → accepted <path> | refused <why>
 //!                                                | unanswered <what> | no-subsystem
+//!                                                  (after `accepted`, the channel is
+//!                                                  held until stdin closes)
 //! ```
 //!
 //! A program's stdout and stderr go to files rather than to this process's own,
@@ -376,26 +378,38 @@ async fn swap(
     channel.eof().await.map_err(|e| format!("ending the binary: {e}"))?;
     let (mut stdout, mut status) = (Vec::new(), None);
     let answered = tokio::time::timeout(SWAP_ANSWER, async {
+        // Until the guest's EOF, which follows its answer: the guest leaves
+        // the channel open for this program to close, and that close is the go.
         while let Some(message) = channel.wait().await {
             match message {
                 ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
                 ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                ChannelMsg::Eof => break,
                 _ => {}
             }
         }
     })
     .await;
-    // The guest waits for this close before it stops the service that may be
-    // carrying this connection: it is this client saying it has the answer.
-    let _ = channel.close().await;
     let said = String::from_utf8_lossy(&stdout).trim_end().to_string();
     match (answered, status, said.split_once(' ')) {
-        (Ok(()), Some(0), Some(("accepted", _))) | (Ok(()), Some(1), Some(("refused", _))) => {
-            println!("{said}")
+        (Ok(()), Some(0), Some(("accepted", _))) => {
+            println!("{said}");
+            // **The close below is the go**: the guest stops the service that
+            // may be carrying this connection once it has it, so the caller —
+            // whose own connections that service may carry too — says when, by
+            // closing this program's stdin.
+            tokio::task::spawn_blocking(|| std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new()))
+                .await
+                .map_err(|e| format!("waiting for the go: {e}"))?
+                .map_err(|e| format!("reading the go: {e}"))?;
         }
+        (Ok(()), Some(1), Some(("refused", _))) => println!("{said}"),
         (Ok(()), _, _) => println!("unanswered the channel closed after {said:?}, status {status:?}"),
         (Err(_), _, _) => println!("unanswered nothing in {}s after {said:?}", SWAP_ANSWER.as_secs()),
     }
+    // The guest waits for this close before it stops the service that may be
+    // carrying this connection: it is this client saying it has the answer.
+    let _ = channel.close().await;
     // Dropped rather than disconnected: the connection may be gone with the
     // service that carried it.
     drop(session);

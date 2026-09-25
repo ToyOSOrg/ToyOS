@@ -1,27 +1,38 @@
-//! The cable half of a metal boot: the listener a booting machine's `logd`
-//! streams its records to, and the conversation the host then has with that
+//! The cable half of a metal boot: this boot's log as the machine serves it,
+//! read from its first line, and the conversation the host then has with that
 //! machine over ssh — a ping, one command whose answer is compared, and
 //! `reboot`, which is how the host hands the machine back.
 //!
-//! **The machine names itself by connecting.** The stream's peer is the address
-//! the boot leased, so nothing here is told it and nothing guesses it: the
-//! ping and both ssh exchanges go to whoever opened the stream.
+//! **The machine is found by its name.** Its netd answers multicast DNS for
+//! `toyos-t14.local` once it holds a lease (`toyos_mdns`), so this host asks its
+//! own resolver for that name and connects to `logd`'s port there
+//! ([`toyos_logstream::PORT`]); nothing is baked into the image about this
+//! host, and nothing on this host listens. The ping and both ssh exchanges go
+//! to the address the name answered with.
 //!
-//! **Every answer is recorded, including the ones that are not.** A boot that
-//! never opened the stream, a command that was refused, a reboot the machine
-//! went down under without a word — each is a [`Conversation`] field a judge
-//! reads, and the loop that ran it hands the machine to its own fallback (the
-//! boot's hold ends, the runner reboots) rather than stopping at the first.
+//! **This host's resolver may answer from its cache**: the previous boot's
+//! address, which nothing holds while this boot is still coming up, and whose
+//! failed dial this host's ARP then refuses at once for as long as it keeps
+//! the address down. So a dial the machine was not reachable at is followed by
+//! asking the name of the machine itself, on the link ([`ask_the_link`]), whose
+//! answer is the event the next dial waits on.
+//!
+//! **Every answer is recorded, including the ones that are not.** A boot whose
+//! name never answered, a command that was refused, a reboot the machine went
+//! down under without a word — each is a [`Conversation`] field a judge reads,
+//! and the loop that ran it hands the machine to its own fallback (the boot's
+//! hold ends, the runner reboots) rather than stopping at the first.
 //!
 //! The ssh client is `tests/ssh-client-host`, russh from source: no host `ssh`
 //! reaches ToyOS.
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, ToSocketAddrs, UdpSocket};
+#[cfg(test)]
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// What the host asks the machine to say, and so what it must answer.
@@ -38,231 +49,644 @@ pub const SSH_PORT: u16 = 22;
 const PING_TRIES: u32 = 10;
 const PING_WAIT: Duration = Duration::from_secs(1);
 
-/// How long the host keeps asking for the command once the stream is open.
-///
-/// **A liveness guard, not a measurement.** The stream opens the moment netd
-/// has a lease and sshd may still be binding; what bounds the whole
-/// conversation is the boot's own hold, and this is well inside it.
-const EXEC_WINDOW: Duration = Duration::from_secs(30);
-const EXEC_RETRY: Duration = Duration::from_secs(1);
+/// How long one connect waits for the machine's answer to its SYN.
+const CONNECT_WAIT: Duration = Duration::from_secs(5);
 
-/// The record stream, as this host receives it.
+/// Under this, a failed ask did not wait on anything: this host's resolver
+/// holds an unanswered `.local` question for five seconds (measured on the
+/// development host, three asks in a row, 5.00 s each), and a connect that
+/// failed sooner never had a machine to wait for. Asking again would spin, so
+/// it is an answer.
+const WAITED: Duration = Duration::from_secs(1);
+
+/// How long one ask of the name on the link waits for the machine's answer
+/// before it is asked again: RFC 6762 §5.2's floor between two queries.
+const ASK_WAIT: Duration = Duration::from_secs(1);
+
+/// The multicast DNS group and port (RFC 6762 §3).
+const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
+const MDNS_PORT: u16 = 5353;
+
+/// A wait with no bound of its own, whose caller's bound was already applied:
+/// not [`Duration::MAX`], which overflows the clock a wait adds it to.
+const FOREVER: Duration = Duration::from_secs(365 * 24 * 3600);
+
+/// Where the stream is asked for.
+#[derive(Clone, Debug)]
+pub enum Peer {
+    /// A name this host's resolver answers — `toyos-t14.local`, over multicast
+    /// DNS — asked again until the machine answers for it, and asked of the
+    /// machine on the link once a dial to an answer has failed. Each asking is
+    /// a wait on the answer: this host's resolver holds an unanswered `.local`
+    /// question for five seconds before it gives up, and the link is asked for
+    /// [`ASK_WAIT`].
+    Named { host: String, port: u16 },
+    /// One address: a forward onto a guest that already serves.
+    At(SocketAddr),
+}
+
+/// The log as this host reads it: this host dials `logd`'s port and reads until
+/// the connection ends.
 ///
-/// **Connection after connection, the newest ending the one before.** A boot's
-/// `logd` asks for its stream again whenever it ends — netd swapped under it,
-/// or a listener that left and came back — so the listener keeps accepting,
-/// and every line from every connection is one sequence in arrival order.
+/// **A connection is `logd`'s once it carries a line.** `logd` hands every
+/// reader it admits the boot from its first line at once, so a connection that
+/// ends before a line is one it never admitted — and through QEMU's forward,
+/// which takes this host's connect before it has asked the guest, that is the
+/// only sign the guest refused.
+///
+/// **One connection at a time, and another only when asked** ([`Stream::redial`]):
+/// every connection replays the boot from its first line, so a redial skips the
+/// lines this reader already has rather than keeping them twice, and every line
+/// from every connection is one sequence in arrival order.
 #[derive(Clone)]
 pub struct Stream {
     shared: Arc<Shared>,
-    /// Where it listens, the port a bind to `0` took included.
-    at: SocketAddr,
+    /// Ends the reader when the last clone goes: the reader holds `shared` and
+    /// not this.
+    _owner: Arc<Owner>,
 }
 
 struct Shared {
-    lines: Mutex<Vec<String>>,
-    /// The latest connection's peer.
-    peer: Mutex<Option<SocketAddr>>,
-    /// How many connections have been accepted.
-    accepted: AtomicUsize,
-    /// The latest connection has ended and no other has been accepted since.
-    ended: AtomicBool,
-    /// How the latest connection ended and how long after it opened, once it
-    /// has.
-    end: Mutex<Option<End>>,
-    /// Lines a connection's end cut short, which are in no sequence: `logd`
-    /// writes such a line again, whole, on its next connection.
-    torn: AtomicUsize,
-    /// Set to stop waiting for a peer that has not come.
-    stop: AtomicBool,
+    state: Mutex<State>,
+    /// Woken by every change to `state`.
+    moved: Condvar,
+}
+
+#[derive(Default)]
+struct State {
+    lines: Vec<String>,
+    /// The latest connection `logd` admitted.
+    peer: Option<SocketAddr>,
+    /// How many connections carried a line.
+    admitted: usize,
+    /// How many dials ended with no line: a connection `logd` turned away,
+    /// one nothing on the machine's side took, or a connect that failed.
+    turned_away: usize,
+    /// Those of them since the first dial or the latest redial began, and its
+    /// ceiling.
+    turned_since_dial: usize,
+    ceiling: usize,
+    /// The connection being read, kept so [`Stream::redial`] can end it.
+    current: Option<TcpStream>,
+    /// How the latest admitted connection ended, once it has and none has been
+    /// admitted since.
+    end: Option<End>,
+    /// Why the latest dial ended with no connection that carried a line.
+    unopened: Option<String>,
+    /// A redial asked for and not yet begun: the instant it gives up by, and
+    /// how many dials turned away it gives up at.
+    redial: Option<(Instant, usize)>,
+    /// Lines a connection's end cut short, discarded rather than kept: the next
+    /// connection's replay carries the same content whole.
+    torn: usize,
+    /// Stop dialing, and stop reading once the current connection ends.
+    stop: bool,
+}
+
+struct Owner(Arc<Shared>);
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().expect("the stream's state");
+        state.stop = true;
+        if let Some(conn) = state.current.take() {
+            let _ = conn.shutdown(std::net::Shutdown::Both);
+        }
+        self.0.moved.notify_all();
+    }
 }
 
 impl Stream {
-    /// Bind `at`, before anything boots, and accept the connections a boot
-    /// opens, one after another. Every whole line is appended to `file` as it
-    /// arrives — a machine that dies mid-boot leaves what it said on disk —
-    /// and, with `echo`, printed.
+    /// Ask `peer` for its log within `by`, and read it on a thread of its own:
+    /// every line is appended to `file` as it arrives — a machine that dies
+    /// mid-boot leaves what it said on disk — and, with `echo`, printed.
     ///
-    /// **A bind that fails is this host's answer and never the boot's**: an
-    /// address this host does not hold is an image staged for another listener.
-    pub fn listen(at: SocketAddr, file: &Path, echo: bool) -> Result<Self, String> {
-        let socket = TcpListener::bind(at).map_err(|e| {
-            format!("this host cannot listen at {at} ({e}): the image streams to an address it does not hold")
-        })?;
-        let at = socket
-            .local_addr()
-            .map_err(|e| format!("this host would not say where it listens at {at}: {e}"))?;
-        socket
-            .set_nonblocking(true)
-            .map_err(|e| format!("this host would not poll its listener at {at}: {e}"))?;
-        let out = Arc::new(Mutex::new(
-            std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?,
-        ));
-        let shared = Arc::new(Shared {
-            lines: Mutex::new(Vec::new()),
-            peer: Mutex::new(None),
-            accepted: AtomicUsize::new(0),
-            ended: AtomicBool::new(false),
-            end: Mutex::new(None),
-            torn: AtomicUsize::new(0),
-            stop: AtomicBool::new(false),
-        });
+    /// **A machine not yet reachable is asked again**: a dial refused, or
+    /// answered with its host or network down or unreachable, is counted, and
+    /// the dial gives up at `ceiling` of them ([`Stream::unopened`]).
+    pub fn connect(peer: Peer, file: &Path, echo: bool, by: Duration, ceiling: usize) -> Result<Self, String> {
+        Self::through(Arc::new(Net), peer, file, echo, by, ceiling)
+    }
+
+    fn through(
+        reach: Arc<dyn Reach>,
+        peer: Peer,
+        file: &Path,
+        echo: bool,
+        by: Duration,
+        ceiling: usize,
+    ) -> Result<Self, String> {
+        let out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let state = State { ceiling, ..State::default() };
+        let shared = Arc::new(Shared { state: Mutex::new(state), moved: Condvar::new() });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("metal-stream".into())
-            .spawn(move || {
-                // The connection being read, so a newer one can end it.
-                let mut reading: Option<std::net::TcpStream> = None;
-                loop {
-                    if theirs.stop.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    let (conn, peer) = match socket.accept() {
-                        Ok(pair) => pair,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(50));
-                            continue;
-                        }
-                        // One connection that died in the backlog is not the
-                        // listener: the next one is still owed.
-                        Err(_) => continue,
-                    };
-                    // **A new connection ends the one before it.** A swapped
-                    // netd goes without a FIN or a reset, so the host's side of
-                    // the old connection can wait for a byte for ever while the
-                    // boot's `logd` writes into the new one — which is what a
-                    // reader that went back to `accept` only after its
-                    // connection ended met.
-                    if let Some(old) = reading.take() {
-                        let _ = old.shutdown(std::net::Shutdown::Both);
-                    }
-                    // Accepted sockets inherit the listener's mode on this
-                    // host's BSD half; the reader below blocks.
-                    let _ = conn.set_nonblocking(false);
-                    reading = conn.try_clone().ok();
-                    *theirs.peer.lock().expect("the stream's peer") = Some(peer);
-                    theirs.ended.store(false, Ordering::SeqCst);
-                    let index = theirs.accepted.fetch_add(1, Ordering::SeqCst) + 1;
-                    if echo {
-                        println!("  stream: {peer} connected");
-                    }
-                    let (shared, out) = (Arc::clone(&theirs), Arc::clone(&out));
-                    std::thread::spawn(move || read(conn, peer, index, &shared, &out, echo));
-                }
-            })
+            .spawn(move || serve(&*reach, &peer, &theirs, out, echo, Instant::now() + by))
             .map_err(|e| format!("the stream's reader could not be started: {e}"))?;
-        Ok(Self { shared, at })
+        Ok(Self { _owner: Arc::new(Owner(Arc::clone(&shared))), shared })
     }
 
-    pub fn local(&self) -> SocketAddr {
-        self.at
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.shared.state.lock().expect("the stream's state")
     }
 
-    /// The latest connection's peer.
+    /// The latest admitted connection's peer.
     pub fn peer(&self) -> Option<SocketAddr> {
-        *self.shared.peer.lock().expect("the stream's peer")
+        self.state().peer
     }
 
     pub fn lines(&self) -> Vec<String> {
-        self.shared.lines.lock().expect("the stream's lines").clone()
+        self.state().lines.clone()
     }
 
-    /// How many connections this listener has accepted.
+    /// How many connections `logd` admitted.
     pub fn connections(&self) -> usize {
-        self.shared.accepted.load(Ordering::SeqCst)
+        self.state().admitted
+    }
+
+    /// How many dials ended with no line, refusals included.
+    pub fn turned_away(&self) -> usize {
+        self.state().turned_away
     }
 
     /// Lines a connection's end cut short.
     pub fn torn(&self) -> usize {
-        self.shared.torn.load(Ordering::SeqCst)
+        self.state().torn
     }
 
-    /// Whether the latest connection has ended with none accepted since.
+    /// Whether the latest admitted connection has ended with none admitted
+    /// since.
     pub fn ended(&self) -> bool {
-        self.shared.ended.load(Ordering::SeqCst)
+        self.end().is_some()
     }
 
-    /// How the latest connection ended, or `None` while it is open or never
-    /// opened.
+    /// How the latest admitted connection ended, or `None` while it is open or
+    /// none was.
     pub fn end(&self) -> Option<End> {
-        self.shared.end.lock().expect("the stream's end").clone()
+        self.state().end.clone()
     }
 
-    /// Stop waiting for a peer. A connection already accepted is read on.
+    /// Why the latest dial ended with no connection `logd` admitted.
+    pub fn unopened(&self) -> Option<String> {
+        self.state().unopened.clone()
+    }
+
+    /// Stop dialing. A connection already admitted is read on.
     pub fn give_up(&self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
+        self.state().stop = true;
+        self.shared.moved.notify_all();
     }
 
-    /// The peer, once one has connected, or `None` after `by` or once the
-    /// host has given up on one.
+    /// End the current connection, and dial again until a connection carries a
+    /// line, `by` has passed, or `ceiling` dials were turned away: every dial
+    /// is a wait on the machine's answer, and one it turns away — a connect
+    /// that failed, or a connection closed before a line — is asked again and
+    /// counted ([`Stream::turned_away`]). A redial that reaches its ceiling
+    /// gives up and says so ([`Stream::unopened`]).
+    ///
+    /// **For a connection this host knows is going**: a swap of the netd
+    /// carrying it ends it with no FIN and no reset, so nothing but this host
+    /// ever says it has ended.
+    pub fn redial(&self, by: Duration, ceiling: usize) {
+        let mut state = self.state();
+        state.redial = Some((Instant::now() + by, ceiling));
+        if let Some(conn) = state.current.take() {
+            let _ = conn.shutdown(std::net::Shutdown::Both);
+        }
+        self.shared.moved.notify_all();
+    }
+
+    /// The first `T` that `seen` finds in the lines, or `None` after `by`.
+    /// Woken by each line as it lands, never a poll.
+    pub fn wait_until<T>(&self, by: Duration, mut seen: impl FnMut(&[String]) -> Option<T>) -> Option<T> {
+        let began = Instant::now();
+        let mut state = self.state();
+        loop {
+            if let Some(found) = seen(&state.lines) {
+                return Some(found);
+            }
+            let left = by.saturating_sub(began.elapsed());
+            if left.is_zero() {
+                return None;
+            }
+            state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
+        }
+    }
+
+    /// Wait for a line carrying `needle`, or `by`; whether one arrived.
+    pub fn wait_for(&self, needle: &str, by: Duration) -> bool {
+        self.wait_until(by, |lines| lines.iter().any(|l| l.contains(needle)).then_some(())).is_some()
+    }
+
+    /// The peer, once a connection has carried a line, or `None` after `by`
+    /// or once the dial has given up.
     pub fn wait_connected(&self, by: Duration) -> Option<SocketAddr> {
         self.wait_for_connection(0, by)
     }
 
-    /// The peer of a connection accepted after the first `seen`, or `None`
-    /// after `by` or once the host has given up.
+    /// The peer of a connection admitted after the first `seen`, or `None`
+    /// after `by`, once the host has given up, or once the dial asked for it
+    /// ended with none.
     pub fn wait_for_connection(&self, seen: usize, by: Duration) -> Option<SocketAddr> {
         let began = Instant::now();
+        let mut state = self.state();
         loop {
-            if self.connections() > seen {
-                return self.peer();
+            if state.admitted > seen {
+                return state.peer;
             }
-            if began.elapsed() >= by || self.shared.stop.load(Ordering::SeqCst) {
+            let left = by.saturating_sub(began.elapsed());
+            let dialing = state.redial.is_some() || state.current.is_some() || state.unopened.is_none();
+            if left.is_zero() || state.stop || !dialing {
                 return None;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
+        }
+    }
+
+    /// Wait until the latest connection ends, or `by` has passed; whether it
+    /// ended.
+    pub fn wait_ended(&self, by: Duration) -> bool {
+        let began = Instant::now();
+        let mut state = self.state();
+        loop {
+            if state.end.is_some() {
+                return true;
+            }
+            let left = by.saturating_sub(began.elapsed());
+            if left.is_zero() || (state.unopened.is_some() && state.current.is_none()) {
+                return false;
+            }
+            state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
         }
     }
 }
 
-/// Read one connection's lines into the stream until it ends, and record how
-/// it ended if it is still the latest.
-fn read(
-    conn: std::net::TcpStream,
-    peer: SocketAddr,
-    index: usize,
-    shared: &Shared,
-    out: &Mutex<std::fs::File>,
-    echo: bool,
-) {
+/// The reader: the first dial by `until`, then each redial it is asked for,
+/// until the stream is given up.
+fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File, echo: bool, mut until: Instant) {
+    // Whether a connection closed before a line is asked again: never on the
+    // first dial, where that close is `logd`'s answer, and always on a redial,
+    // which is made while the machine's network is coming back.
+    let mut again = false;
+    loop {
+        match open(reach, peer, until, shared) {
+            Err(why) => {
+                let mut state = shared.state.lock().expect("the stream's state");
+                state.unopened = Some(why);
+                shared.moved.notify_all();
+            }
+            Ok(conn) => {
+                if echo {
+                    println!("  stream: reading {peer:?} at {:?}", conn.peer_addr().ok());
+                }
+                let carried = read(conn, shared, &mut out, echo);
+                // A connection `logd` turned away, while the redial it answers
+                // is still inside its bounds: asked again at once, the refusal
+                // being the event.
+                if !carried && again && Instant::now() < until {
+                    let mut state = shared.state.lock().expect("the stream's state");
+                    if state.turned_since_dial >= state.ceiling {
+                        state.unopened = Some(past_ceiling(&state, "the latest connection ended before a line"));
+                        shared.moved.notify_all();
+                    } else if !state.stop && state.redial.is_none() {
+                        continue;
+                    }
+                }
+            }
+        }
+        let mut state = shared.state.lock().expect("the stream's state");
+        loop {
+            if state.stop {
+                return;
+            }
+            if let Some((by, ceiling)) = state.redial.take() {
+                until = by;
+                again = true;
+                state.unopened = None;
+                state.turned_since_dial = 0;
+                state.ceiling = ceiling;
+                break;
+            }
+            state = shared.moved.wait(state).expect("the stream's state");
+        }
+    }
+}
+
+/// Count one dial that failed against the ceiling, and why the dial gives up
+/// where that reaches it.
+fn count_or_give_up(shared: &Shared, last: &str) -> Option<String> {
+    let mut state = shared.state.lock().expect("the stream's state");
+    state.turned_away += 1;
+    state.turned_since_dial += 1;
+    (state.turned_since_dial >= state.ceiling).then(|| past_ceiling(&state, last))
+}
+
+/// A connect that ended this way may be taken once the machine is up: it was
+/// refused, or its host or network is down or unreachable from here.
+fn not_yet_reachable(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ConnectionRefused
+        || matches!(e.raw_os_error(), Some(libc::EHOSTDOWN | libc::EHOSTUNREACH | libc::ENETUNREACH))
+}
+
+/// The connection, or why there is none by `until`.
+///
+/// **The ceiling counts dials, not asks.** A connect that failed is counted,
+/// and so is a connection closed before a line (`read`); an ask of the name is
+/// a wait on the machine's answer, bounded by `until` alone, and one that
+/// returns at once is no ask at all and ends the dial.
+fn open(reach: &dyn Reach, peer: &Peer, until: Instant, shared: &Shared) -> Result<TcpStream, String> {
+    let stopped = || shared.state.lock().expect("the stream's state").stop;
+    let mut last = String::from("never asked");
+    // Set by the first failed dial: the resolver's answer may be the one its
+    // cache kept, so the name is asked of the machine from then on.
+    let mut on_the_link = false;
+    while Instant::now() < until {
+        if stopped() {
+            return Err(format!("given up on {peer:?}: {last}"));
+        }
+        let addrs = match peer {
+            // No wait between dials: an address carries no name to ask the link
+            // for, and the only event a forward can give is a dial it takes, so
+            // the dial ceiling, not a wait, bounds a forward that refuses.
+            Peer::At(at) => vec![*at],
+            Peer::Named { host, port } if on_the_link => match reach.ask(host, until)? {
+                Some(ip) => vec![SocketAddr::from((ip, *port))],
+                None => {
+                    last = format!("{host} did not answer on the link");
+                    continue;
+                }
+            },
+            Peer::Named { host, port } => {
+                let asked = Instant::now();
+                match reach.resolve(host, *port) {
+                    Ok(addrs) if addrs.is_empty() => {
+                        return Err(format!("this host's resolver answered no IPv4 address for {host}"));
+                    }
+                    Ok(addrs) => addrs,
+                    Err(e) if asked.elapsed() < WAITED => {
+                        return Err(format!("this host's resolver did not ask for {host} at all: {e}"));
+                    }
+                    Err(e) => {
+                        last = format!("{host} did not resolve: {e}");
+                        continue;
+                    }
+                }
+            }
+        };
+        for at in addrs {
+            let asked = Instant::now();
+            match reach.dial(at) {
+                Ok(conn) => return Ok(conn),
+                Err(e) if not_yet_reachable(&e) || asked.elapsed() >= WAITED => {
+                    last = match e.kind() {
+                        std::io::ErrorKind::ConnectionRefused => format!("{at} refused the connection: {e}"),
+                        _ => format!("{at} was not reachable: {e}"),
+                    };
+                    on_the_link = true;
+                    if let Some(why) = count_or_give_up(shared, &last) {
+                        return Err(why);
+                    }
+                }
+                Err(e) => return Err(format!("{at} cannot be reached from this host: {e}")),
+            }
+        }
+    }
+    Err(format!("{peer:?} was not serving its log by the bound: {last}"))
+}
+
+/// How a stream reaches the machine: the seam a test stages a network through.
+trait Reach: Send + Sync {
+    /// This host's resolver's IPv4 answers for `host`.
+    fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>>;
+    /// The machine's own answer for `host`, or `None` where none came within
+    /// [`ASK_WAIT`] or by `until`.
+    fn ask(&self, host: &str, until: Instant) -> Result<Option<Ipv4Addr>, String>;
+    fn dial(&self, at: SocketAddr) -> std::io::Result<TcpStream>;
+}
+
+/// This host's network.
+struct Net;
+
+impl Reach for Net {
+    fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        Ok((host, port).to_socket_addrs()?.filter(SocketAddr::is_ipv4).collect())
+    }
+
+    fn ask(&self, host: &str, until: Instant) -> Result<Option<Ipv4Addr>, String> {
+        ask_the_link(host, until)
+    }
+
+    fn dial(&self, at: SocketAddr) -> std::io::Result<TcpStream> {
+        TcpStream::connect_timeout(&at, CONNECT_WAIT)
+    }
+}
+
+/// Ask the link who holds `host`, as a legacy one-shot querier (RFC 6762
+/// §6.7): the question is multicast from a port of this socket's own, so a
+/// responder answers that port directly, and no cache on this host answers in
+/// its place. `None` where no answer came within [`ASK_WAIT`] or by `until`.
+fn ask_the_link(host: &str, until: Instant) -> Result<Option<Ipv4Addr>, String> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| format!("a socket to ask for {host}: {e}"))?;
+    // §11: a query leaves with an IP TTL of 255.
+    socket.set_multicast_ttl_v4(255).map_err(|e| format!("a socket to ask for {host}: {e}"))?;
+    let id = socket.local_addr().map_err(|e| format!("a socket to ask for {host}: {e}"))?.port();
+    socket
+        .send_to(&mdns_question(host, id)?, (MDNS_GROUP, MDNS_PORT))
+        .map_err(|e| format!("{host} could not be asked on the link: {e}"))?;
+    let by = until.min(Instant::now() + ASK_WAIT);
+    // §17: a multicast DNS message is at most 9000 bytes.
+    let mut reply = vec![0u8; 9000];
+    loop {
+        let left = by.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        socket.set_read_timeout(Some(left)).map_err(|e| format!("a socket to ask for {host}: {e}"))?;
+        match socket.recv_from(&mut reply) {
+            Ok((len, _)) => {
+                if let Some(addr) = mdns_answer(&reply[..len], host, id) {
+                    return Ok(Some(addr));
+                }
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                return Ok(None)
+            }
+            Err(e) => return Err(format!("the answer for {host} could not be read: {e}")),
+        }
+    }
+}
+
+const DNS_TYPE_A: u16 = 1;
+const DNS_CLASS_IN: u16 = 1;
+/// A multicast DNS class's top bit is the cache-flush or unicast-response
+/// bit, not the class (RFC 6762 §10.2, §5.4).
+const DNS_CLASS_MASK: u16 = 0x7fff;
+const DNS_QR: u16 = 0x8000;
+const DNS_RCODE: u16 = 0x000f;
+
+/// A standard query (RFC 1035 §4.1) for `host`'s `A` record, with ID `id`.
+fn mdns_question(host: &str, id: u16) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(64);
+    for word in [id, 0, 1, 0, 0, 0] {
+        out.extend_from_slice(&word.to_be_bytes());
+    }
+    for label in host.split('.') {
+        if !(1..=63).contains(&label.len()) {
+            return Err(format!("{host:?} is no name: each label is 1 to 63 bytes"));
+        }
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    out.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
+    out.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+    Ok(out)
+}
+
+/// The address `reply` answers for `host`, where it is the response to query
+/// `id` and carries `host`'s `A` record; `None` for anything else.
+fn mdns_answer(reply: &[u8], host: &str, id: u16) -> Option<Ipv4Addr> {
+    let word = |at: usize| Some(u16::from_be_bytes([*reply.get(at)?, *reply.get(at.checked_add(1)?)?]));
+    let flags = word(2)?;
+    if word(0)? != id || flags & DNS_QR == 0 || flags & DNS_RCODE != 0 {
+        return None;
+    }
+    let mut at = 12;
+    for _ in 0..word(4)? {
+        at = dns_name(reply, at)?.1 + 4;
+    }
+    for _ in 0..word(6)? {
+        let (name, after) = dns_name(reply, at)?;
+        let (kind, class, len) = (word(after)?, word(after + 2)?, usize::from(word(after + 8)?));
+        let data = reply.get(after + 10..after + 10 + len)?;
+        if name.eq_ignore_ascii_case(host) && kind == DNS_TYPE_A && class & DNS_CLASS_MASK == DNS_CLASS_IN {
+            let octets: [u8; 4] = data.try_into().ok()?;
+            return Some(Ipv4Addr::from(octets));
+        }
+        at = after + 10 + len;
+    }
+    None
+}
+
+/// The dotted name at `at` and where the bytes after it begin, following
+/// compression pointers (RFC 1035 §4.1.4). A pointer only points backwards and
+/// every pass spells a label before the next one, so the name's 255-byte bound
+/// ends a loop of pointers.
+fn dns_name(bytes: &[u8], at: usize) -> Option<(String, usize)> {
+    let (mut name, mut here, mut after) = (String::new(), at, None);
+    loop {
+        let len = usize::from(*bytes.get(here)?);
+        match len {
+            0 => return Some((name, after.unwrap_or(here + 1))),
+            1..=63 => {
+                let label = std::str::from_utf8(bytes.get(here + 1..here + 1 + len)?).ok()?;
+                if !name.is_empty() {
+                    name.push('.');
+                }
+                name.push_str(label);
+                if name.len() > 255 {
+                    return None;
+                }
+                here += 1 + len;
+            }
+            0xC0..=0xFF => {
+                let target = usize::from(u16::from_be_bytes([len as u8, *bytes.get(here + 1)?]) & 0x3fff);
+                if target >= here {
+                    return None;
+                }
+                after.get_or_insert(here + 2);
+                here = target;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Read one connection's lines into the stream until it ends, and whether it
+/// carried one.
+///
+/// **Every connection replays the boot from its first line** (`logd`'s
+/// `serve.rs`): the lines this reader already has are skipped rather than kept
+/// twice, and a line the connection ends inside is dropped rather than kept, so
+/// the same content lands whole on the next connection.
+fn read(conn: TcpStream, shared: &Shared, out: &mut std::fs::File, echo: bool) -> bool {
     let opened = Instant::now();
+    let at = conn.peer_addr().ok();
+    let mut skip = {
+        let mut state = shared.state.lock().expect("the stream's state");
+        // A redial asked for while this connection was being made wants a
+        // connection made after the ask, and this is not one.
+        if state.stop || state.redial.is_some() {
+            return false;
+        }
+        state.current = conn.try_clone().ok();
+        state.lines.len()
+    };
+    let mut carried = false;
     let mut reader = BufReader::new(conn);
     let how = loop {
         let mut line = String::new();
-        match reader.read_line(&mut line) {
+        let read = reader.read_line(&mut line);
+        let mut state = shared.state.lock().expect("the stream's state");
+        match read {
             Ok(0) => break "the peer closed it".to_string(),
             Err(e) => break e.to_string(),
-            Ok(_) if !line.ends_with('\n') => {
-                shared.torn.fetch_add(1, Ordering::SeqCst);
-            }
+            Ok(_) if !line.ends_with('\n') => state.torn += 1,
             Ok(_) => {
-                {
-                    let mut out = out.lock().expect("the stream's file");
+                if !carried {
+                    carried = true;
+                    state.admitted += 1;
+                    state.peer = at;
+                    state.end = None;
+                    state.unopened = None;
+                }
+                if skip > 0 {
+                    skip -= 1;
+                } else {
                     let _ = out.write_all(line.as_bytes());
                     let _ = out.flush();
+                    if echo {
+                        print!("  stream| {line}");
+                        let _ = std::io::stdout().flush();
+                    }
+                    state.lines.push(line);
                 }
-                if echo {
-                    print!("  stream| {line}");
-                    let _ = std::io::stdout().flush();
-                }
-                shared.lines.lock().expect("the stream's lines").push(line);
             }
         }
+        shared.moved.notify_all();
     };
     let end = End { after_ms: opened.elapsed().as_millis() as u64, how };
     if echo {
-        println!("  stream: {peer} ended {} ms after it opened: {}", end.after_ms, end.how);
+        println!("  stream: ended {} ms after it opened, {}: {}", end.after_ms, if carried { "admitted" } else { "turned away" }, end.how);
     }
-    if shared.accepted.load(Ordering::SeqCst) == index {
-        *shared.end.lock().expect("the stream's end") = Some(end);
-        shared.ended.store(true, Ordering::SeqCst);
+    let mut state = shared.state.lock().expect("the stream's state");
+    state.current = None;
+    // A connection never admitted leaves the latest admitted one's account as
+    // it was; the first dial's has nothing before it, and is that account.
+    if carried || state.admitted == 0 {
+        state.end = Some(end);
     }
+    if !carried {
+        state.turned_away += 1;
+        state.turned_since_dial += 1;
+    }
+    shared.moved.notify_all();
+    carried
+}
+
+/// Why a dial gave up at its ceiling.
+fn past_ceiling(state: &State, last: &str) -> String {
+    format!(
+        "turned away {} time(s) since the dial began, which is its ceiling: {last}",
+        state.turned_since_dial
+    )
 }
 
 /// How a stream's connection ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct End {
-    /// Milliseconds from the accept to the end, on this host's clock.
+    /// Milliseconds from the connect to the end, on this host's clock.
     pub after_ms: u64,
     /// The peer's close, or the error the read ended on.
     pub how: String,
@@ -300,9 +724,16 @@ impl Ssh {
         Ok(Self { root: root.to_path_buf(), key })
     }
 
+    /// The client, asked for `argv`.
+    fn client(&self, argv: &[&str]) -> Command {
+        let mut client = Command::new(crate::build::ssh_client_host(&self.root));
+        client.args(argv);
+        client
+    }
+
     fn run(&self, argv: &[&str]) -> Result<String, String> {
-        let out = Command::new(crate::build::ssh_client_host(&self.root))
-            .args(argv)
+        let out = self
+            .client(argv)
             .output()
             .map_err(|e| format!("the ssh client would not start: {e}"))?;
         let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -348,24 +779,76 @@ impl Ssh {
     /// Send `binary` as `service`'s replacement, naming `digest` for it, and
     /// answer the machine's word: `accepted <path>`, `refused <why>`,
     /// `unanswered <what>` or `no-subsystem`.
+    ///
+    /// **An `accepted` is answered with the channel still open**: closing it is
+    /// the go — sshd hangs up on init once its client has closed it, and init
+    /// stops the old service then ([`toyos_swap::ANSWER_MS`] bounds the wait) —
+    /// and it is [`Answered::go`]'s, so a caller whose own connection that
+    /// service carries can see to it first.
     pub fn swap(
         &self,
         at: SocketAddr,
         service: &str,
         binary: &Path,
         digest: &toyos_swap::Digest,
-    ) -> Result<String, String> {
+    ) -> Result<Answered, String> {
         let (host, port) = (at.ip().to_string(), at.port().to_string());
-        let said = self.run(&[
-            "swap",
-            &host,
-            &port,
-            path_str(&self.key)?,
-            service,
-            path_str(binary)?,
-            &toyos_swap::hex(digest),
-        ])?;
-        Ok(said.lines().last().unwrap_or("").to_string())
+        let mut client = self
+            .client(&[
+                "swap",
+                &host,
+                &port,
+                path_str(&self.key)?,
+                service,
+                path_str(binary)?,
+                &toyos_swap::hex(digest),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("the ssh client would not start: {e}"))?;
+        let mut said = String::new();
+        let stdout = client.stdout.take().expect("the client's stdout was asked for piped");
+        BufReader::new(stdout)
+            .read_line(&mut said)
+            .map_err(|e| format!("the ssh client's answer could not be read: {e}"))?;
+        let said = said.trim_end().to_string();
+        let answered = Answered { said, client: Some(client) };
+        if answered.said.starts_with("accepted ") {
+            return Ok(answered);
+        }
+        answered.go()
+    }
+}
+
+/// The machine's word on one swap, and the client holding the channel it came
+/// on until [`Answered::go`] — or until this is dropped, which is the same go.
+#[derive(Debug)]
+pub struct Answered {
+    pub said: String,
+    client: Option<std::process::Child>,
+}
+
+impl Answered {
+    /// Close the channel the answer came on, and wait for the client to end:
+    /// the word, or the client's own failure.
+    pub fn go(mut self) -> Result<Self, String> {
+        let Some(mut client) = self.client.take() else { return Ok(self) };
+        drop(client.stdin.take());
+        let status = client.wait().map_err(|e| format!("the ssh client could not be waited for: {e}"))?;
+        if !status.success() {
+            return Err(self.said.clone());
+        }
+        Ok(self)
+    }
+}
+
+impl Drop for Answered {
+    fn drop(&mut self) {
+        if let Some(mut client) = self.client.take() {
+            drop(client.stdin.take());
+            let _ = client.wait();
+        }
     }
 }
 
@@ -380,8 +863,7 @@ pub struct Conversation {
     pub peer: Ipv4Addr,
     /// Whether it answered a ping, or `None` where none was asked.
     pub ping: Option<bool>,
-    /// What `echo` answered, or the client's last refusal after
-    /// [`EXEC_WINDOW`] of asking.
+    /// What `echo` answered, or the client's refusal.
     pub exec: Result<Exec, String>,
     /// The machine's reply to `reboot`, or the client's refusal.
     pub reboot: Result<String, String>,
@@ -402,26 +884,30 @@ pub fn owed() -> Vec<u8> {
     format!("{PHRASE}\n").into_bytes()
 }
 
-/// Talk to the machine that opens `stream`: ping it, ask it to say
-/// [`PHRASE`], and then ask it to reboot — whatever the first two said,
-/// because handing the machine back is owed either way.
+/// Talk to the machine `stream` reads: ping it, ask it to say [`PHRASE`], and
+/// then ask it to reboot — whatever the first two said, because handing the
+/// machine back is owed either way.
 ///
 /// `ssh_at` is where sshd is reached, and `None` is the peer's own port 22;
 /// QEMU's forward is the other case. `ping` is `false` where no ICMP can reach
 /// the machine at all, which is QEMU's user-mode network.
 ///
-/// `Err` is only a boot that never opened the stream within `by`.
+/// **One ask of each**, each a wait on the machine's answer: a machine serving
+/// its log holds a lease, and sshd binds its port before netd can have one.
+///
+/// `Err` is only a stream that never opened.
 pub fn converse(
     stream: &Stream,
     ssh: &Ssh,
     ssh_at: Option<SocketAddr>,
     ping: bool,
-    by: Duration,
     scratch: &Path,
 ) -> Result<Conversation, String> {
-    let peer = stream.wait_connected(by).ok_or_else(|| {
-        format!("no boot opened the record stream within {} s", by.as_secs())
-    })?;
+    // The bound the connection itself already applied is `connect`'s `by`; this
+    // wait is for that settling, not a second bound on it.
+    let peer = stream
+        .wait_connected(FOREVER)
+        .ok_or_else(|| stream.unopened().unwrap_or_else(|| "the stream never opened".to_string()))?;
     let SocketAddr::V4(peer_v4) = peer else {
         return Err(format!("the stream's peer is {peer}, which is no IPv4 address"));
     };
@@ -445,17 +931,7 @@ pub fn converse(
 
     std::fs::create_dir_all(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
     let command = asked();
-    let mut exec = Err(String::from("never asked"));
-    while began.elapsed() < EXEC_WINDOW {
-        exec = ssh.exec(ssh_at, &command, scratch);
-        match &exec {
-            Ok(_) => break,
-            Err(why) => {
-                println!("  talk: {ssh_at} did not take `{command}` yet: {why}");
-                std::thread::sleep(EXEC_RETRY);
-            }
-        }
-    }
+    let exec = ssh.exec(ssh_at, &command, scratch);
     let exec_ms = began.elapsed().as_millis() as u64;
     match &exec {
         Ok(got) => println!(
@@ -463,7 +939,7 @@ pub fn converse(
             String::from_utf8_lossy(&got.stdout),
             got.status
         ),
-        Err(why) => println!("  talk: `{command}` was never answered: {why}"),
+        Err(why) => println!("  talk: `{command}` was not answered: {why}"),
     }
 
     let reboot = ssh.fire(ssh_at, REBOOT);
@@ -615,37 +1091,29 @@ impl Heard {
 /// heard said in one line per fact.
 ///
 /// **The stream is judged by what it carries, not by its length.** It owes the
-/// boot's `Boot: complete` — the record that says the lines are this boot's —
-/// and the peer that opened it is the machine that then answered the ping and
-/// the command, because both were asked of that address and no other. What
-/// the stream carries is kernel records alone; a daemon's own lines reach no
-/// channel on a machine with no serial port, so netd's lease is not among them.
+/// boot's `Boot: complete` — the record that says the lines are this boot's,
+/// from its first — and the peer that served it is the machine that then
+/// answered the ping and the command, because both were asked of that address
+/// and no other.
 pub fn judge(heard: &Heard, stream: &[String]) -> Result<Vec<String>, Vec<String>> {
     let mut bad = Vec::new();
     let mut said = Vec::new();
     match crate::bootlog::boot_millis(&stream.concat()) {
         Some(ms) => said.push(format!(
-            "{} record(s) arrived from {} over the cable, `Boot: complete` ({ms} ms) among them",
+            "{} line(s) arrived from {} over the cable, `Boot: complete` ({ms} ms) among them",
             stream.len(),
             heard.peer
         )),
         None => bad.push(format!(
-            "{} record(s) arrived over the cable and none is this boot's `Boot: complete`",
+            "{} line(s) arrived over the cable and none is this boot's `Boot: complete`",
             stream.len()
         )),
     }
-    // **A connection this host accepted and then lost before a byte is this
-    // host's own doing as often as the peer's**: macOS's application firewall
-    // lets the handshake finish and then closes the socket of a binary it
-    // blocks incoming connections for, which is what the T14's first talking
-    // boot to open its stream met.
+    // The machine serves the boot from its first line to whoever connects, so
+    // a connection that ends before a byte is one it refused or dropped.
     if let (true, Some(end)) = (stream.is_empty(), &heard.stream_end) {
         bad.push(format!(
-            "the connection from {} ended {} ms after this host accepted it, {}, before a byte \
-             arrived: a host firewall that blocks this binary's incoming connections ends \
-             one exactly so (on macOS: `/usr/libexec/ApplicationFirewall/socketfilterfw \
-             --listapps` names this binary with `Block incoming connections`; its \
-             `--getappblocked` answered `permitted` for a binary `--listapps` blocked)",
+            "{} closed the stream {} ms after this host connected, {}, before a byte arrived",
             heard.peer, end.after_ms, end.how
         ));
     }
@@ -744,38 +1212,33 @@ mod tests {
         assert_eq!(bad.len(), 3, "{bad:?}");
     }
 
-    /// **The T14's run 116 at the socket**: the peer is accepted, and the
-    /// connection ends before a byte — which the stream records with how and
-    /// when, and which the judge names as the host firewall's shape rather
-    /// than as a boot that said nothing.
+    /// A machine that closes the stream before a byte is named as that, and
+    /// not read as a boot that said nothing.
     #[test]
-    fn a_connection_that_ends_before_a_byte_is_named_and_not_read_as_silence() {
+    fn a_stream_closed_before_a_byte_is_named_and_not_read_as_silence() {
         let dir = std::env::temp_dir().join(format!("metaltalk-cut-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let stream = Stream::listen("127.0.0.1:0".parse().unwrap(), &dir.join("s.log"), false)
-            .expect("a loopback listener");
-        drop(std::net::TcpStream::connect(stream.local()).unwrap());
-        let began = Instant::now();
-        while stream.end().is_none() && began.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
+            .expect("a loopback reader");
+        drop(server.accept().unwrap());
+        assert!(stream.wait_ended(Duration::from_secs(5)), "the close is read as an end");
         let end = stream.end().expect("the end is recorded");
         assert_eq!(end.how, "the peer closed it");
         assert!(stream.lines().is_empty());
 
-        let mut cut = heard(Ok(Exec { stdout: owed(), status: Some(0) }), Ok("accepted".into()));
         let said = Conversation {
-            peer: cut.peer,
+            peer: Ipv4Addr::LOCALHOST,
             ping: Some(true),
             exec: Ok(Exec { stdout: owed(), status: Some(0) }),
             reboot: Ok("accepted".into()),
             exec_ms: 457,
             stream_end: Some(end),
         };
-        cut = Conversation::parse(&said.render()).unwrap().unwrap();
+        let cut = Conversation::parse(&said.render()).unwrap().unwrap();
         let bad = judge(&cut, &[]).unwrap_err();
-        assert!(bad.iter().any(|b| b.contains("host firewall")), "{bad:?}");
-        // A stream that carried records and then ended is no such finding.
+        assert!(bad.iter().any(|b| b.contains("before a byte arrived")), "{bad:?}");
         let lines = vec!["[---------- -------- 1.216 cpu0] Boot: complete (1216ms)\n".to_string()];
         assert!(judge(&cut, &lines).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
@@ -793,29 +1256,26 @@ mod tests {
         assert!(Conversation::parse(both).is_err());
     }
 
-    /// The listener is the peer's naming: whoever connects is who the host then
-    /// talks to, and every line arrives whole and in order.
+    /// **A name is asked of this host's resolver and the machine found by it**:
+    /// the reader connects to what `localhost` answers, names that peer, and
+    /// keeps every line whole and in order.
     #[test]
-    fn the_stream_names_its_peer_and_keeps_its_lines_in_order() {
+    fn the_stream_is_read_from_the_address_its_name_answers() {
         let dir = std::env::temp_dir().join(format!("metaltalk-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("stream.log");
-        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
-        let at = probe.local_addr().unwrap();
-        drop(probe);
-        let stream = Stream::listen(at, &file, false).expect("a loopback listener");
-        assert_eq!(stream.wait_connected(Duration::from_millis(200)), None);
-        let mut conn = std::net::TcpStream::connect(at).unwrap();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let peer = Peer::Named { host: "localhost".to_string(), port };
+        let stream = Stream::connect(peer, &file, false, Duration::from_secs(10), 8).unwrap();
+        let (mut conn, _) = server.accept().unwrap();
         for i in 0..100 {
             writeln!(conn, "[kernel 0.{i:03} cpu0] line {i}").unwrap();
         }
         drop(conn);
         let peer = stream.wait_connected(Duration::from_secs(5)).expect("the peer");
-        assert_eq!(peer.ip(), at.ip());
-        let began = Instant::now();
-        while !stream.ended() && began.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert_eq!(peer.ip(), std::net::IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(stream.wait_ended(Duration::from_secs(5)));
         let lines = stream.lines();
         assert_eq!(lines.len(), 100);
         for (i, line) in lines.iter().enumerate() {
@@ -825,65 +1285,269 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **A peer that connects and says nothing yet is a stream, not an end.**
-    /// A booting machine opens the connection before its next record exists;
-    /// the reader waits for it rather than reading the silence as a close.
+    /// **A first dial refused is asked again, counted, and ends at its
+    /// ceiling**: a machine still coming up refuses until `logd` listens, and
+    /// one that never does is named at the ceiling rather than waited on to
+    /// the bound.
+    #[test]
+    fn a_refused_first_dial_is_asked_again_up_to_its_ceiling() {
+        const CEILING: usize = 3;
+        let dir = std::env::temp_dir().join(format!("metaltalk-first-refused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = probe.local_addr().unwrap();
+        drop(probe);
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(60), CEILING).unwrap();
+        assert!(stream.wait_connected(Duration::from_secs(5)).is_none(), "nothing listens");
+        let why = stream.unopened().expect("the dial gave up within 5 s of its 60 and said why");
+        assert!(why.contains("ceiling") && why.contains("refused"), "{why}");
+        assert_eq!(stream.turned_away(), CEILING, "every refused dial, and no more");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A machine rebooting behind the address this host's resolver still
+    /// keeps for it: every dial to `at` fails with its host down, as this
+    /// host's ARP answers for an address nothing holds, until the machine has
+    /// answered for its name on the link, which it does from the ask after
+    /// `unanswered` of them.
+    struct Rebooting {
+        at: SocketAddr,
+        unanswered: usize,
+        up: std::sync::atomic::AtomicBool,
+        resolved: std::sync::atomic::AtomicUsize,
+        asked: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Reach for Rebooting {
+        fn resolve(&self, _: &str, _: u16) -> std::io::Result<Vec<SocketAddr>> {
+            self.resolved.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![self.at])
+        }
+
+        fn ask(&self, _: &str, _: Instant) -> Result<Option<Ipv4Addr>, String> {
+            if self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < self.unanswered {
+                return Ok(None);
+            }
+            self.up.store(true, std::sync::atomic::Ordering::SeqCst);
+            let SocketAddr::V4(at) = self.at else { unreachable!("the staged address is IPv4") };
+            Ok(Some(*at.ip()))
+        }
+
+        fn dial(&self, at: SocketAddr) -> std::io::Result<TcpStream> {
+            if !self.up.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(std::io::Error::from_raw_os_error(libc::EHOSTDOWN));
+            }
+            TcpStream::connect(at)
+        }
+    }
+
+    /// **A host down on the first dial is asked again on the machine's own
+    /// answer**: the resolver's address fails with EHOSTDOWN while the machine
+    /// is still coming up, the name is then asked on the link until the
+    /// machine answers, and the dial after that answer is read. One dial is
+    /// counted, and the resolver is asked once.
+    #[test]
+    fn a_host_down_on_the_first_dial_is_asked_again_once_the_name_answers() {
+        const UNANSWERED: usize = 3;
+        let dir = std::env::temp_dir().join(format!("metaltalk-down-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let net = Arc::new(Rebooting {
+            at,
+            unanswered: UNANSWERED,
+            up: false.into(),
+            resolved: 0.into(),
+            asked: 0.into(),
+        });
+        let peer = Peer::Named { host: "toyos-t14.local".to_string(), port: at.port() };
+        let reach: Arc<dyn Reach> = net.clone();
+        let stream = Stream::through(reach, peer, &dir.join("s.log"), false, Duration::from_secs(5), 8).unwrap();
+        let mut conn = accepted(&server, "the dial after the name answered");
+        writeln!(conn, "[kernel 1.216 cpu0] Boot: complete (1216ms)").unwrap();
+        assert_eq!(stream.wait_connected(Duration::from_secs(5)), Some(at), "{:?}", stream.unopened());
+        assert!(stream.wait_for("Boot: complete", Duration::from_secs(5)));
+        assert_eq!(stream.turned_away(), 1, "the one dial before the machine answered");
+        assert_eq!(net.resolved.load(std::sync::atomic::Ordering::SeqCst), 1, "the resolver's cache is asked once");
+        assert_eq!(net.asked.load(std::sync::atomic::Ordering::SeqCst), UNANSWERED + 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A peer that has spoken and then says nothing is a stream, not an
+    /// end**: the reader blocks on its next line rather than reading the
+    /// silence as a close. The reader has no timer, so the silence is an order
+    /// of events and not a length of time: the stream is still open once what
+    /// the peer said has been read.
     #[test]
     fn a_peer_quiet_after_connecting_is_still_read() {
         let dir = std::env::temp_dir().join(format!("metaltalk-quiet-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let stream = Stream::listen("127.0.0.1:0".parse().unwrap(), &dir.join("s.log"), false)
-            .expect("a loopback listener");
-        let mut conn = std::net::TcpStream::connect(stream.local()).unwrap();
-        stream.wait_connected(Duration::from_secs(5)).expect("the peer");
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(!stream.ended(), "a quiet peer was read as a closed one");
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
+            .expect("a loopback reader");
+        let (mut conn, _) = server.accept().unwrap();
         writeln!(conn, "[kernel 1.216 cpu0] Boot: complete (1216ms)").unwrap();
+        stream.wait_connected(Duration::from_secs(5)).expect("the peer");
+        assert!(stream.wait_for("Boot: complete", Duration::from_secs(5)), "the first line was not read");
+        assert!(!stream.wait_ended(Duration::ZERO), "a quiet peer was read as a closed one");
+        writeln!(conn, "[kernel 1.217 cpu0] init: started logd").unwrap();
         drop(conn);
-        let began = Instant::now();
-        while !stream.ended() && began.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(stream.lines(), vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n"]);
+        assert!(stream.wait_ended(Duration::from_secs(5)));
+        assert_eq!(
+            stream.lines(),
+            vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] init: started logd\n"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **A swapped netd leaves its connection open on this side**: no FIN, no
-    /// reset. The boot's next connection must be read while the old one is
-    /// still waiting for a byte, and it ends the old one.
+    /// The next connection `server` takes, or a panic naming `what` once a
+    /// bound has passed with none: a reader that stopped dialing fails the test
+    /// rather than hanging it.
+    fn accepted(server: &TcpListener, what: &str) -> TcpStream {
+        let server = server.try_clone().unwrap();
+        let (took, taken) = std::sync::mpsc::channel();
+        std::thread::spawn(move || took.send(server.accept().map(|(conn, _)| conn)));
+        taken
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("{what} never connected"))
+            .unwrap()
+    }
+
+    /// **A redial ends the connection it replaces, asks again past every
+    /// connection turned away before a line, and keeps each line once.** The
+    /// first connection is left open, as a swapped netd leaves it; the second
+    /// is closed before a byte, as `logd` turns a reader away; the third
+    /// replays the boot from its first line, as `logd` hands it to every
+    /// reader, and only its new line is kept.
     #[test]
-    fn a_new_connection_is_read_while_the_old_one_still_hangs_open() {
+    fn a_redial_asks_past_a_refusal_and_keeps_each_line_once() {
         let dir = std::env::temp_dir().join(format!("metaltalk-again-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let stream = Stream::listen("127.0.0.1:0".parse().unwrap(), &dir.join("s.log"), false)
-            .expect("a loopback listener");
-        let mut first = std::net::TcpStream::connect(stream.local()).unwrap();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
+            .expect("a loopback reader");
+        let mut first = accepted(&server, "the first dial");
         writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
-        stream.wait_connected(Duration::from_secs(5)).expect("the first peer");
-        let mut second = std::net::TcpStream::connect(stream.local()).unwrap();
-        writeln!(second, "[kernel 9.000 cpu0] after the swap").unwrap();
-        let began = Instant::now();
-        while stream.lines().len() < 2 && began.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(stream.connections(), 2);
+        assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
+        stream.redial(Duration::from_secs(5), 8);
+        drop(accepted(&server, "the redial"));
+        let mut third = accepted(&server, "the dial after a connection turned away");
+        writeln!(third, "[kernel 0.001 cpu0] before the swap").unwrap();
+        writeln!(third, "[kernel 9.000 cpu0] after the swap").unwrap();
+        assert!(stream.wait_for("after the swap", Duration::from_secs(5)));
+        assert_eq!(stream.connections(), 2, "the connection turned away was counted as admitted");
+        assert_eq!(stream.turned_away(), 1, "the connection closed before a line");
         assert_eq!(
             stream.lines(),
             vec!["[kernel 0.001 cpu0] before the swap\n", "[kernel 9.000 cpu0] after the swap\n"]
         );
-        drop(first);
+        let mut rest = [0u8; 1];
+        assert_eq!(
+            std::io::Read::read(&mut first, &mut rest).unwrap(),
+            0,
+            "the connection the redial replaced was left open"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An address this host does not hold is refused at the bind, before any
-    /// machine is touched — the image was staged for some other listener.
+    /// **A redial counts every refused dial, and gives up at its ceiling
+    /// saying so.** The listener is dropped, as a netd with no `logd` listener
+    /// answers a SYN with a reset, so every connect the redial makes is
+    /// refused at once: exactly the ceiling's number are counted, and the
+    /// redial ends long before its time bound.
     #[test]
-    fn an_address_this_host_does_not_hold_is_refused_at_the_bind() {
-        let file = std::env::temp_dir().join(format!("metaltalk-bind-{}.log", std::process::id()));
-        // TEST-NET-1 (RFC 5737): assigned to no host.
-        let at: SocketAddr = "192.0.2.1:41337".parse().unwrap();
-        let refused = Stream::listen(at, &file, false).err().expect("no host holds TEST-NET-1");
-        assert!(refused.contains("does not hold"), "{refused}");
-        let _ = std::fs::remove_file(&file);
+    fn a_redial_counts_every_refusal_and_gives_up_at_its_ceiling() {
+        const CEILING: usize = 3;
+        let dir = std::env::temp_dir().join(format!("metaltalk-refused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
+            .expect("a loopback reader");
+        let mut first = accepted(&server, "the first dial");
+        writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
+        assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
+        drop(server);
+        stream.redial(Duration::from_secs(60), CEILING);
+        assert_eq!(stream.wait_for_connection(1, Duration::from_secs(5)), None, "nothing listens");
+        let why = stream.unopened().expect("the redial gave up within 5 s of its 60 and said why");
+        assert!(why.contains("ceiling") && why.contains("refused"), "{why}");
+        assert_eq!(stream.turned_away(), CEILING, "every refused dial, and no more");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A redial counts a dial that closes before a line, not only a
+    /// refusal, and gives up at its ceiling.** The listener admits every
+    /// connection and drops it before a byte, as a swapped netd's own
+    /// listener does while nothing on the machine side has yet queued a
+    /// line: each is turned away and counted, and the redial ends at its
+    /// ceiling rather than spinning until its time bound.
+    #[test]
+    fn a_redial_counts_every_close_before_a_line_and_gives_up_at_its_ceiling() {
+        const CEILING: usize = 3;
+        let dir = std::env::temp_dir().join(format!("metaltalk-closed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
+            .expect("a loopback reader");
+        let mut first = accepted(&server, "the first dial");
+        writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
+        assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
+        let dropper = server.try_clone().unwrap();
+        std::thread::spawn(move || {
+            while let Ok((conn, _)) = dropper.accept() {
+                drop(conn);
+            }
+        });
+        stream.redial(Duration::from_secs(60), CEILING);
+        assert_eq!(stream.wait_for_connection(1, Duration::from_secs(5)), None, "every dial closed before a line");
+        let why = stream.unopened().expect("the redial gave up within 5 s of its 60 and said why");
+        assert!(why.contains("ceiling") && why.contains("ended before a line"), "{why}");
+        assert_eq!(stream.turned_away(), CEILING, "every closed dial, and no more");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reply macOS's mDNSResponder sent this host's legacy question for its
+    /// own name: the question echoed, the `A` record by a compression pointer,
+    /// and two `AAAA` records after it.
+    const MDNS_REPLY: [u8; 112] = [
+        0xe6, 0xfb, 0x84, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x10, 0x4a, 0x61, 0x6e, 0x73,
+        0x2d, 0x4d, 0x61, 0x63, 0x42, 0x6f, 0x6f, 0x6b, 0x2d, 0x50, 0x72, 0x6f, 0x05, 0x6c, 0x6f, 0x63, 0x61,
+        0x6c, 0x00, 0x00, 0x01, 0x00, 0x01, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00,
+        0x04, 0xc0, 0xa8, 0x01, 0x2f, 0xc0, 0x0c, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x10,
+        0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x28, 0xe1, 0x03, 0xd6, 0xd1, 0x40, 0xf2, 0xc0,
+        0x0c, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x10, 0x20, 0x01, 0x17, 0x08, 0x47, 0x43,
+        0xd7, 0x00, 0x0c, 0xbc, 0x45, 0x4f, 0xa3, 0xfd, 0xc9, 0x2d,
+    ];
+    const MDNS_REPLY_ID: u16 = 0xe6fb;
+    const MDNS_REPLY_HOST: &str = "Jans-MacBook-Pro.local";
+
+    /// **The question is the one another responder echoes, and its answer is
+    /// read through a compression pointer**: only for the question's own ID,
+    /// its own name, and a whole record.
+    #[test]
+    fn a_name_asked_on_the_link_reads_another_responders_answer() {
+        let question = mdns_question(MDNS_REPLY_HOST, MDNS_REPLY_ID).unwrap();
+        assert_eq!(question[..2], MDNS_REPLY[..2]);
+        assert_eq!(question[12..], MDNS_REPLY[12..question.len()], "the question as the responder echoed it");
+        assert_eq!(mdns_answer(&MDNS_REPLY, MDNS_REPLY_HOST, MDNS_REPLY_ID), Some(Ipv4Addr::new(192, 168, 1, 47)));
+        assert_eq!(mdns_answer(&MDNS_REPLY, "jans-macbook-pro.LOCAL", MDNS_REPLY_ID), Some(Ipv4Addr::new(192, 168, 1, 47)));
+        assert_eq!(mdns_answer(&MDNS_REPLY, MDNS_REPLY_HOST, MDNS_REPLY_ID ^ 1), None, "another question's answer");
+        assert_eq!(mdns_answer(&MDNS_REPLY, "toyos-t14.local", MDNS_REPLY_ID), None, "another name's answer");
+        assert_eq!(mdns_answer(&MDNS_REPLY[..55], MDNS_REPLY_HOST, MDNS_REPLY_ID), None, "a record cut short");
+        assert!(mdns_question("toyos..local", 1).is_err());
+    }
+
+    /// A pointer back to the label before it would loop; the name's bound ends
+    /// it rather than the stack.
+    #[test]
+    fn a_loop_of_compression_pointers_is_no_name() {
+        let mut bytes = vec![0u8; 12];
+        bytes.extend_from_slice(&[1, b'a', 0xc0, 12]);
+        assert_eq!(dns_name(&bytes, 12), None);
+        assert_eq!(dns_name(&[0xc0, 0], 0), None, "a pointer to itself");
     }
 }

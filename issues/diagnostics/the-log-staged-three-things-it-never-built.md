@@ -4,29 +4,24 @@ kind: track
 opened: 2026-08-18
 ---
 
-# The log staged three things it never built, and userland output still never reaches logd
+# The log staged three things it never built
 
 The log architecture is on the tree: the per-CPU record ring, `klogd`, the
 cursor syscall, the per-holder console object, and `/system/bin/logd` owning `/log`.
 Three staged pieces were never built.
 
-**1. Userland stdout and stderr are console writes, not streams to logd.** Every
-program's slots 1 and 2 are a `ConsoleObject` minted at spawn, so a `println!`
-reaches the backend directly and `/log` carries kernel records only. What was
-designed instead: init creates a pipe pair per `[boot] start` program, sends the
-read ends to `logd` over `SYS_HANDLE_SEND` with a frame naming the program, and
-endows the write ends as the child's slots; the launcher and sshd do the same
-for what they spawn.
+**1. Userland output reaches `logd` from every program init starts at boot,
+and not yet from every program.** init gives each `[boot] start` program one
+pipe for its stdout and stderr and moves the read end to `logd` under the
+program's name, on a connection only init holds (`userland/init`,
+`toyos-logstream`'s `REGISTER`); a program it starts runs its own children on
+the same pipe. What is left:
 
-None of what that needs exists:
-
-- `serves = ["log"]` on logd's manifest row, and the acceptor with it. **It is
-  absent on purpose** — an acceptor with no client is a port that exists for a
-  plan, and nothing sends a frame today.
-- The frame itself, a label bound, a stream count, and a per-stream bounded
-  backlog, so a flooding process fills only its own pipe.
-- The std PAL mapping `Gone` on slots 1 and 2 to a successful write of zero
-  bytes, so a dead `logd` does not panic every daemon through `println!`.
+- A program `launcher` starts whose caller sent it no stdout writes to a console
+  minted from init's, which reaches the serial port and not the log.
+- The std PAL mapping a closed pipe on slots 1 and 2 to a successful write of
+  zero bytes, so a dead `logd` does not panic every daemon through `println!` —
+  today it does, where the `say!` macros ignore the refusal.
 - init holding logd's `Process` handle and naming its exit on the console —
   the only thing that would tell a machine its userland output has stopped going
   anywhere.

@@ -933,24 +933,10 @@ impl Boot {
 /// actuator name is refused here by name rather than reaching
 /// [`build_test_image`]'s assert, which would answer about kernel features.
 ///
-/// **Every valued parameter is cleared here by name, and the one this build can
-/// read is parsed here too.** A stick is written, carried to the bench and
-/// booted before anything else looks at what is on it, so an address this gate
-/// passed and the kernel cannot use is discovered by a machine that streams to
-/// nothing — the round trip the record stream exists to remove.
+/// **Every valued parameter is cleared here by name.**
 pub fn flashable_params(root: &Path, asked: &[String]) -> Result<(), String> {
     let own = declared_params(root);
     for name in asked {
-        if let Some(value) = name.strip_prefix(toyos_logstream::PARAM) {
-            toyos_logstream::endpoint(value).map_err(|why| {
-                format!(
-                    "--kernel-param {name} beside --boot-config: {value:?} is not an address \
-                     ({})",
-                    why.as_str()
-                )
-            })?;
-            continue;
-        }
         if !own.contains(name) && !is_valued_param(name) {
             return Err(format!(
                 "--kernel-param {name} beside --boot-config: {name} is not one of the kernel's \
@@ -1048,7 +1034,6 @@ fn check_params(root: &Path, params: &[String]) {
 const VALUED_PARAMS: &[(&str, &str)] = &[
     ("toyos_blackbox::PARAM", toyos_blackbox::PARAM),
     ("toyos_tco::DEADLINE_PARAM", toyos_tco::DEADLINE_PARAM),
-    ("toyos_logstream::PARAM", toyos_logstream::PARAM),
 ];
 
 /// The names in [`VALUED_PARAMS`], for a refusal that says what it would have
@@ -2204,30 +2189,12 @@ mod tests {
         );
     }
 
-    /// The gate a stick is written behind, on the one valued parameter it can
-    /// read: an address it cannot parse is refused by name here, and not by a
-    /// machine on the bench that streams to nothing.
+    /// A valued parameter passes the gate a stick is written behind, and a name
+    /// that is neither a parameter nor a valued one is refused.
     #[test]
-    fn the_pre_flash_gate_parses_the_address_it_clears() {
+    fn the_pre_flash_gate_clears_a_valued_parameter_and_refuses_an_actuator() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let good = format!("{}10.0.2.2:41337", toyos_logstream::PARAM);
-        assert_eq!(flashable_params(root, &[good]), Ok(()));
-        for (bad, why) in [
-            ("10.0.2.2", toyos_logstream::Malformed::NoPort),
-            ("", toyos_logstream::Malformed::NoPort),
-            ("t14:22", toyos_logstream::Malformed::NotAnAddress),
-            ("10.0.2.2:0", toyos_logstream::Malformed::NotAPort),
-            ("10.0.2.2:65536", toyos_logstream::Malformed::NotAPort),
-        ] {
-            let asked = format!("{}{bad}", toyos_logstream::PARAM);
-            let refused = flashable_params(root, std::slice::from_ref(&asked))
-                .expect_err(&format!("{asked} passed the gate"));
-            assert!(refused.contains(why.as_str()), "{asked} was refused as {refused:?}");
-        }
-        // The other valued parameter still passes: this gate parses the one it
-        // can read and clears the rest by name.
         assert_eq!(flashable_params(root, &[format!("{}0x1000", toyos_blackbox::PARAM)]), Ok(()));
-        // And a name that is neither is still refused.
         assert!(flashable_params(root, &["log-storm".to_string()]).is_err());
     }
 
@@ -2765,7 +2732,11 @@ mod tests {
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
+        "tests/logholdcase/system.toml",
         "tests/logrotatecase/system.toml",
+        "tests/logstallcase/system.toml",
+        "tests/logstreamcase/system.toml",
+        "tests/logstreame1000case/system.toml",
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",

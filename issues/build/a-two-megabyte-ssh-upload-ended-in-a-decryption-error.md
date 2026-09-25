@@ -35,3 +35,8 @@ Seen again on the e1000e: one `lan_swap` of thirty (`tests/e1000talkcase`), ten
 guests at once beside fourteen CPU hogs on the dev host, the same two lines at
 the same count, `after 2080768 bytes`. So it is not virtio-net's, and the byte
 count repeating across two NICs points above the driver.
+
+Seen again in `swap_refusals` on PR #492's `-- swap` gate (ten tests beside
+each other on the dev host): `sshd refused the ask before init heard it: the
+channel ended after 2080768 bytes, before the request was whole` — the same
+count a third time.

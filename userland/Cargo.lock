@@ -503,6 +503,7 @@ dependencies = [
  "toyos 0.11.0",
  "toyos-abi 0.10.0",
  "toyos-font 0.1.0",
+ "toyos-logstream",
  "toyos-window 0.11.0",
 ]
 
@@ -1529,6 +1530,7 @@ version = "0.1.0"
 dependencies = [
  "toyos 0.11.0",
  "toyos-abi 0.10.0",
+ "toyos-logstream",
  "toyos-manifest",
  "toyos-swap",
 ]
@@ -1814,6 +1816,7 @@ dependencies = [
  "toyos-abi 0.10.0",
  "toyos-inspect",
  "toyos-logstream",
+ "toyos-swap",
  "toyos-wallclock",
 ]
 
@@ -1935,6 +1938,7 @@ dependencies = [
  "toyos-abi 0.10.0",
  "toyos-i219",
  "toyos-inspect",
+ "toyos-mdns",
  "toyos-tco",
 ]
 
@@ -3805,9 +3809,6 @@ checksum = "06db3c1cb438056c9b9a766c8f0dbbfdf3331e723a5bc7f287badc0cfb2f7f78"
 [[package]]
 name = "toyos-logstream"
 version = "0.1.0"
-dependencies = [
- "toyos-abi 0.10.0",
-]
 
 [[package]]
 name = "toyos-manifest"
@@ -3815,6 +3816,10 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi 0.10.0",
 ]
+
+[[package]]
+name = "toyos-mdns"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-mixer"

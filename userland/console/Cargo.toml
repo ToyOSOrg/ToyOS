@@ -10,3 +10,4 @@ toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
 toyos-font = { path = "../toyos-font" }
 toyos-window = { path = "../toyos-window" }
+toyos-logstream = { path = "../../toyos-logstream" }

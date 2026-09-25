@@ -1036,6 +1036,173 @@ pub fn null_sink_real_rate(
     Ok(())
 }
 
+/// Gate: soundd's mix thread never waits on the log.
+///
+/// `tests/logstallcase` boots a `logd` that reads nothing of soundd's until the
+/// guest says the tone has played. The guest fills soundd's pipe with soundd's
+/// own refusals and then plays the tone into it, so every line the mix thread
+/// says while it plays is said to a full pipe. Judged off `/log`, the sink of
+/// record, after `run shutdown`:
+///
+/// 1. **The tone played whole**: the capture carries it with no underrun and no
+///    click. A mix thread parked on the pipe stops at the client's first line,
+///    and the tone never plays at all.
+/// 2. **The pipe was full** — the premise: `logd` found it holding its whole
+///    capacity when the stall ended, and had read none of it before.
+/// 3. **Nothing went unsaid silently**: every line soundd's control thread
+///    said after the boot is in `/log` or among the lines soundd counted
+///    unsaid, exactly, and some were counted — the flood is larger than the
+///    pipe.
+pub fn soundd_log_stall(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    use std::cell::Cell;
+
+    const REFUSAL: &str = "soundd: refusing connection,";
+    const UNSAID: &str = " line(s) went unsaid:";
+    const RELEASED: &str = "logd: reading soundd again, as `--stall-until` asked, with ";
+    // The control thread's lines after the flood that are not refusals: the
+    // probe it accepted, and the tone's stream. Either is in `/log` or counted.
+    const AFTER_FLOOD: [&str; 2] = ["soundd: protocol violation (msg ", "soundd: opening stream: "];
+    // `kernel/src/pipe.rs`'s one 2 MiB page, less the 64-byte `RingHeader`
+    // (`toyos-abi/src/ring.rs`) at its start.
+    const PIPE_CAPACITY: u64 = 2 * 1024 * 1024 - 64;
+    let number_before = |line: &str, marker: &str| -> Option<u64> {
+        let at = line.find(marker)?;
+        line[..at].rsplit(' ').next()?.parse().ok()
+    };
+    let number_after = |line: &str, marker: &str| -> Option<u64> {
+        let rest = &line[line.find(marker)? + marker.len()..];
+        rest.split(' ').next()?.parse().ok()
+    };
+
+    let staged = super::logstream::stage("tests/logstallcase", "soundd-log-stall", &[], rust_bins)?;
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/logstallcase");
+    let options = BootOptions {
+        boot_image: Some(qemu::Staged::Written(staged.image.clone())),
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], rust_bins, options);
+    let result = qemu.run_test("test_rs_soundd_log_stall", Duration::from_secs(240));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the guest failed (exit {:?}):\n{}", result.exit_code, result.stdout));
+    }
+    let said_by_guest = |marker: &str| -> Result<u64, String> {
+        result
+            .stdout
+            .lines()
+            .find_map(|l| number_after(l, marker))
+            .ok_or_else(|| format!("the guest never said {marker:?}:\n{}", result.stdout))
+    };
+    // Every refusal the guest heard or provoked is one line soundd said.
+    let owed = said_by_guest("flooded soundd with ")? + said_by_guest("soundd refused ")?;
+
+    // What the ledger reads over a log so far: refusals present, lines counted
+    // unsaid, the other control lines present, and `logd`'s word on the pipe.
+    struct Ledger {
+        refusals: Cell<u64>,
+        unsaid: Cell<u64>,
+        others: Cell<u64>,
+        waiting: Cell<Option<u64>>,
+    }
+    let read = |ledger: &Ledger, line: &str| {
+        if line.contains(REFUSAL) {
+            ledger.refusals.set(ledger.refusals.get() + 1);
+        }
+        ledger.unsaid.set(ledger.unsaid.get() + number_before(line, UNSAID).unwrap_or(0));
+        if AFTER_FLOOD.iter().any(|m| line.contains(m)) {
+            ledger.others.set(ledger.others.get() + 1);
+        }
+        if let Some(bytes) = number_after(line, RELEASED) {
+            ledger.waiting.set(Some(bytes));
+        }
+    };
+    let new_ledger =
+        || Ledger { refusals: Cell::new(0), unsaid: Cell::new(0), others: Cell::new(0), waiting: Cell::new(None) };
+    let closed = |l: &Ledger| {
+        l.waiting.get().is_some()
+            && l.refusals.get() + l.others.get() + l.unsaid.get() >= owed + AFTER_FLOOD.len() as u64
+    };
+
+    // The console carries the same lines as `/log`; it is only what says when
+    // to shut the guest down.
+    let console = new_ledger();
+    for line in result.before.lines().chain(result.serial.lines()) {
+        read(&console, line);
+    }
+    if !closed(&console) {
+        let _ = qemu.drain_until(Duration::from_secs(120), |line| {
+            read(&console, line);
+            closed(&console)
+        });
+    }
+
+    // Read once QEMU has exited, which is when it has written the capture's
+    // tail, and before the guest is dropped, which deletes it.
+    let mut shutdown = String::new();
+    let (file, wav) = super::logstream::shut_down_keeping(qemu, &mut shutdown, &staged, |qemu| {
+        parse_wav(qemu.audio_wav_path())
+    })?;
+    let (file, wav) = (file.concat(), wav?);
+    let analysis = analyze(&wav);
+    let _ = std::fs::remove_file(&staged.image);
+
+    let log = new_ledger();
+    for line in toyos_build::bootlog::lines_of(&file, "soundd").lines() {
+        read(&log, line);
+    }
+    for line in toyos_build::bootlog::lines_of(&file, "logd").lines() {
+        read(&log, line);
+    }
+
+    match log.waiting.get() {
+        Some(PIPE_CAPACITY) => {}
+        Some(bytes) => {
+            return Err(format!(
+                "logd found {bytes} bytes in soundd's pipe when its stall ended, not the \
+                 {PIPE_CAPACITY} a full one holds: the tone was not played to a full pipe"
+            ))
+        }
+        None => return Err("/log never says logd's stall on soundd ended".to_string()),
+    }
+    let said = owed + AFTER_FLOOD.len() as u64;
+    let accounted = log.refusals.get() + log.others.get() + log.unsaid.get();
+    if accounted != said || log.unsaid.get() == 0 {
+        return Err(format!(
+            "soundd's control thread said {said} lines after the boot ({owed} refusals and \
+             {} others); /log holds {} refusals and {} of the others, and soundd counted {} \
+             unsaid",
+            AFTER_FLOOD.len(),
+            log.refusals.get(),
+            log.others.get(),
+            log.unsaid.get()
+        ));
+    }
+
+    let signal_secs = analysis.active_samples as f64 / wav.sample_rate as f64;
+    // The tone is 3 s, and a sine of amplitude 16000 is under SIGNAL_THRESHOLD
+    // for 2 asin(500 / 16000) / pi = 2% of its samples.
+    const MIN_SIGNAL_SECS: f64 = 2.5;
+    if signal_secs < MIN_SIGNAL_SECS || !analysis.underruns.is_empty() || !analysis.clicks.is_empty()
+    {
+        return Err(format!(
+            "the tone played to a stalled log is not whole: {signal_secs:.2} s of signal \
+             (expected at least {MIN_SIGNAL_SECS}), {} underrun(s), {} click(s)",
+            analysis.underruns.len(),
+            analysis.clicks.len()
+        ));
+    }
+
+    eprintln!(
+        "  [logstallcase] {said} lines said to a full pipe of {PIPE_CAPACITY} bytes: {} in /log, \
+         {} counted unsaid; the tone played {signal_secs:.2} s with no underrun",
+        log.refusals.get() + log.others.get(),
+        log.unsaid.get()
+    );
+    Ok(())
+}
+
 /// Gate: doom's sound producer outruns its audio callback and the game lives.
 ///
 /// The T14 report this exists for: about five seconds into playing doom the

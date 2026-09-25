@@ -64,8 +64,8 @@ pub const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 pub const PROBATION_MS: u64 = 5_000;
 
 /// How long sshd waits for its client to close the channel it answered on —
-/// the client's proof that it has the answer — before it hangs up on init
-/// anyway.
+/// the client's proof that it has the answer, and its word that the swap may
+/// go — before it hangs up on init anyway.
 pub const ANSWER_MS: u64 = 2_000;
 
 /// How long init waits for the requester to hang up once it has answered

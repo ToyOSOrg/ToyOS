@@ -348,7 +348,10 @@ pub fn read_device(
                 return Some(SyscallError::InvalidArgument.to_u64());
             }
             let slot = claim.pci_slot().expect("a PCI claim knows its slot");
-            let record = crate::pcidev::take_record(slot)?;
+            let record = match crate::pcidev::take_record(slot) {
+                Ok(record) => record?,
+                Err(refused) => return Some(refused.to_u64()),
+            };
             buf.write_at(0, record_bytes(&record));
             Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
         }

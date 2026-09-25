@@ -32,6 +32,13 @@ const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
     ("kbd-close", kbd_close::run),
 ];
 
+/// Jobs started holding this program's console as stdin rather than a pipe:
+/// a job whose subject is the console object has no other way to hold one, its
+/// stdout being a pipe to `logd`. The kernel mints the job a console of its
+/// own from this one, and a job that never reads it takes none of the serial
+/// commands.
+const CONSOLE_JOBS: &[&str] = &["test_rs_console_line_atomicity"];
+
 /// The job the runner is inside, and whether the list got through: written by
 /// the loop, read by the deadline watching it.
 static RUNNING: Mutex<String> = Mutex::new(String::new());
@@ -119,10 +126,9 @@ fn main() {
                 // **A builtin's exit code reaches no kernel record.** A spawned
                 // job's does — `process::exit_process` logs one — so a host
                 // reading a stick can judge it; a builtin runs inside this
-                // process and its code is console text, which on a machine with
-                // no serial port reaches the stick only as this program's record,
-                // inside its share of the log. So a failing builtin ends the
-                // boot: the missing `Rebooting.` is the channel no share bounds.
+                // process and its code is only this program's own text. So a
+                // failing builtin ends the boot: the missing `Rebooting.` is
+                // the channel the kernel writes for it.
                 Ran::Builtin(code) if code != 0 => give_the_machine_back(
                     &format!("the builtin {job:?} exited {code}"),
                     cap.as_ref(),
@@ -147,10 +153,9 @@ fn main() {
 /// Watch the job list for `bound_ms` measured from boot, which is the only
 /// bound over a kernel that is alive while a job never finishes.
 ///
-/// **The line below is console output**, which reaches the log only as this
-/// program's record inside its share of it; so on a machine with no serial port
+/// **The line below is this program's own text**, in the log under its name;
 /// the evidence a judge reads that this fired is the kernel's own reboot line
-/// and the boot's elapsed time, which no share bounds.
+/// and the boot's elapsed time, not this.
 fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
     let Some(power) = cap.and_then(|cap| cap.duplicate().ok()) else {
         // A boot list with no way back to the firmware would sit here forever
@@ -275,9 +280,13 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
         return Ran::Builtin(code);
     }
 
-    // Piped stdin so the child does not consume the serial commands.
+    // Piped stdin so the child does not consume the serial commands, but for
+    // a job in `CONSOLE_JOBS`.
     let mut command = Command::new(&path);
-    command.args(args).stdin(Stdio::piped());
+    command.args(args);
+    if !CONSOLE_JOBS.contains(&name) {
+        command.stdin(Stdio::piped());
+    }
     // **A refused dup is an answer and not a failure — but only one
     // refusal is.** `duplicate` needs `DUP` on the capability, which a
     // manifest grants by name, so `PermissionDenied` says this cap is one

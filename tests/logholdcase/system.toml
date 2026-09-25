@@ -1,0 +1,22 @@
+# A boot whose `/system/bin/logd` reads no record off the kernel's ring until
+# `test_rs_log_hold` says its line, which it says after three batches of
+# records: the line is read while every one of them is unread.
+# `log_program_line_after_its_records` runs it, and reads the verdict off
+# `/log` after `run shutdown`.
+
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+args = ["--hold-ring-until=log hold: said after 192 records"]
+syscap = ["logread"]
+
+# `power` is what `run shutdown` needs and `dup` is what carries it to the
+# applet, which test-runner spawns directly.
+[programs.test-runner]
+syscap = ["dup", "power"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/shutdown" = "/system/bin/toybox"

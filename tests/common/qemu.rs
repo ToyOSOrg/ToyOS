@@ -2349,16 +2349,13 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
-    /// Where this boot's `logd` streams its records, as seen from inside the
-    /// guest — [`GUEST_VIEW_OF_HOST`] and the host port a listener took, or an
-    /// address on the guest's network that answers nothing.
-    ///
-    /// **It is a `kernel_params` entry in every way but its type.** The host
-    /// picks the port, so the parameter cannot be a `&'static str`;
-    /// [`BootOptions::params`] is where the two become one list, and that list
-    /// is what an image is built with and what a staged image is asked to
-    /// match.
-    pub log_stream: Option<(&'static str, u16)>,
+    /// Forward this host port to the guest's TCP [`toyos_logstream::PORT`],
+    /// where `logd` serves the boot's log.
+    pub log_port: Option<u16>,
+    /// Put the host on the guest's own segment (`super::segment`): frames
+    /// it writes reach the NIC as if off the cable, and it sees every frame the
+    /// guest sends. Refused by name on a profile with no NIC.
+    pub segment: Option<super::segment::Tap>,
     /// Forward this host port to the guest's TCP 22. **slirp is one-way
     /// without it**: nothing on the host can open a connection into the guest
     /// unless QEMU is told which port to translate. A profile with no NIC
@@ -2400,24 +2397,14 @@ pub fn free_host_port() -> u16 {
 
 impl BootOptions {
     /// The whole parameter line this boot's image is built with: the names in
-    /// [`BootOptions::kernel_params`] and, when this boot streams its records,
-    /// the address it streams them to.
+    /// [`BootOptions::kernel_params`].
     ///
     /// One function, called by the build and by the staged-image check, so a
     /// parameter that reaches the image and not the check — or the other way
     /// round — is not expressible.
     pub fn params(&self) -> Vec<String> {
-        let mut params: Vec<String> = self.kernel_params.iter().map(|p| (*p).to_string()).collect();
-        if let Some(at) = self.log_stream {
-            params.push(log_stream_param(at));
-        }
-        params
+        self.kernel_params.iter().map(|p| (*p).to_string()).collect()
     }
-}
-
-/// `logstream=<host>:<port>`, spelled once.
-pub fn log_stream_param((host, port): (&str, u16)) -> String {
-    format!("{}{host}:{port}", toyos_logstream::PARAM)
 }
 
 /// The in-guest test runner's startup marker.
@@ -2449,7 +2436,8 @@ impl Default for BootOptions {
             usb_pcap: None,
             rtc_base: None,
             extra_root_files: Vec::new(),
-            log_stream: None,
+            log_port: None,
+            segment: None,
             ssh_port: None,
             wire_dump: None,
         }
@@ -2608,8 +2596,8 @@ pub fn build_boot_image_carrying(
     kernel_params: &[&str],
 ) -> Vec<u8> {
     // A parameter carrying a value is one the *shipping* kernel answers to, so
-    // it selects no kernel: an image built for the record stream and nothing
-    // else must be the image a flashed stick would be.
+    // it selects no kernel: an image built with no actuator must be the image a
+    // flashed stick would be.
     let kernel: &[&str] =
         if kernel_params.iter().all(|p| toyos_build::build::is_valued_param(p)) {
             &[]
@@ -3185,6 +3173,33 @@ impl QemuInstance {
         &self.audio_wav
     }
 
+    /// Wait for QEMU to exit within `by`: its console closing is the event, and
+    /// the process is reaped after it. Answers what the guest said on the way.
+    /// A file QEMU finishes only at its exit, the wav among them, is whole once
+    /// this answers, and is still there until this instance is dropped.
+    pub fn await_exit(&mut self, by: Duration) -> Result<String, String> {
+        let deadline = Instant::now() + by;
+        let mut said = String::new();
+        loop {
+            let left = deadline.checked_duration_since(Instant::now()).unwrap_or_default();
+            match self.rx.recv_timeout(left) {
+                Ok(line) => {
+                    said.push_str(&line);
+                    said.push('\n');
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!("QEMU had not exited {} s after it was asked to\n{said}", by.as_secs()))
+                }
+            }
+        }
+        let status = self.child.wait().map_err(|e| format!("QEMU could not be waited for: {e}"))?;
+        if !status.success() {
+            return Err(format!("QEMU exited {status}\n{said}"));
+        }
+        Ok(said)
+    }
+
     /// The NVMe backing file. It is what the *device* received, so it is the
     /// only place a storage assertion can stand outside the guest's own
     /// account of itself.
@@ -3437,6 +3452,31 @@ impl QemuInstance {
                     }
                     if line.contains(&format!("===TEST_START {want}===")) {
                         in_test = true;
+                        // **The runner's marker reaches the console through
+                        // `logd` and the kernel's records through `klogd`**, so
+                        // the kernel's record of this test's spawn, and what
+                        // followed it, may arrive before the marker that opens
+                        // the window. Everything from that record on is this
+                        // test's, and moves into the window.
+                        let spawned = format!("/{want} pid=");
+                        let from = before
+                            .match_indices('\n')
+                            .map(|(at, _)| at + 1)
+                            .chain(std::iter::once(0))
+                            .filter(|&start| {
+                                before[start..].lines().next().is_some_and(|l| {
+                                    l.contains("spawn: ") && l.contains(&spawned)
+                                })
+                            })
+                            .max();
+                        if let Some(at) = from {
+                            let moved = before.split_off(at);
+                            for early in moved.lines() {
+                                serial.push_str(early);
+                                serial.push('\n');
+                                push_user_half(early, &mut stdout);
+                            }
+                        }
                     } else if let Some(at) = line.find(END_MARKER) {
                         let rest = &line[at + END_MARKER.len()..];
                         let rest = rest.split_once("===").map_or(rest, |(head, _)| head);
@@ -4294,7 +4334,15 @@ fn qemu_command(
     // is decoded by the unit whatever it says, so it carries none.
     // The one clause that makes slirp two-way, on whichever card this profile
     // has.
-    let forward = options.ssh_port.map(ssh_forward_argv).unwrap_or_default();
+    let forward = [
+        options.ssh_port.map(ssh_forward_argv),
+        options.log_port.map(|port| {
+            format!(",hostfwd=tcp:{SSH_FORWARD_HOST}:{port}-:{}", toyos_logstream::PORT)
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<String>();
     match shape.nic {
         Nic::Absent => {}
         Nic::Virtio => {
@@ -4325,7 +4373,7 @@ fn qemu_command(
             // The hub is not slirp and takes no `hostfwd`, so a boot asking for
             // one here is refused rather than booted without a forward.
             assert!(
-                options.ssh_port.is_none(),
+                forward.is_empty(),
                 "this profile's cable is plugged into nothing, so no host port reaches the guest"
             );
             qemu.arg("-netdev")
@@ -4341,6 +4389,13 @@ fn qemu_command(
         );
         qemu.arg("-object")
             .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
+    }
+    if let Some(tap) = &options.segment {
+        assert!(
+            !matches!(shape.nic, Nic::Absent),
+            "this profile carries no NIC, so there is no `net0` segment to stand on"
+        );
+        qemu.args(tap.argv());
     }
 
     if shape.virtio.present() {

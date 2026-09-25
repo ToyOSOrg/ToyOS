@@ -13,12 +13,12 @@ use toyos::ipc::{Connection, IpcPayload, RxStep};
 /// line lands inside this daemon's. `netd: ready, at most ` and
 /// `init: started test-runner` arrived interleaved and the harness parsed a cap
 /// out of the wrong number. `userland/soundd` has the same macro for the same
-/// reason. **The class is closed at the kernel now** — a `ConsoleObject` per
-/// holder buffers a line and emits it whole under one `BackendGuard` — so what
-/// this still buys is one syscall per line instead of one per fragment.
-/// Exported so the driver beside this file can speak in netd's own name: the
-/// console's speakers are derived from the manifest, and a line from a module
-/// of this program is still this program's.
+/// reason. **The class is closed now**: this daemon's output is a pipe of its
+/// own to `logd`, which ends a line at its newline, so another program's line
+/// cannot land inside one; what this still buys is one `write` per line, which
+/// keeps a line whole against this daemon's own other threads.
+/// Exported so the driver beside this file can speak in netd's own name: a line
+/// from a module of this program is still this program's.
 #[macro_export]
 macro_rules! say {
     ($($arg:tt)*) => {{
@@ -32,6 +32,7 @@ macro_rules! say {
 mod device;
 mod dhcp;
 mod i219;
+mod mdns;
 mod report;
 mod virtio_net;
 
@@ -262,6 +263,15 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.tx(len, fill),
             Self::Intel(nic) => nic.tx(len, fill),
+        }
+    }
+
+    /// Say what the driver counted, once a pass and after every frame the pass
+    /// sent: a line per dropped frame is itself more frames to send.
+    fn report(&self) {
+        match self {
+            Self::Virtio(nic) => nic.report(),
+            Self::Intel(nic) => nic.report(),
         }
     }
 }
@@ -1584,6 +1594,10 @@ fn main() {
     let dns_handle = socket_set.add(dns_socket);
     let dhcp_handle = socket_set.add(dhcp::socket());
     let mut dhcp = dhcp::Dhcp::new();
+    if let Card::Intel(nic) = &device.nic {
+        nic.accept_multicast(toyos_mdns::GROUP_MAC);
+    }
+    let mut mdns = mdns::Responder::new(dhcp::HOSTNAME, &mut iface, &mut socket_set);
 
     let total_mem = total_memory();
     let max_piped = max_piped_connections(total_mem);
@@ -1622,6 +1636,7 @@ fn main() {
         }
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
         while iface.poll(now, &mut device, &mut socket_set) != PollResult::None {}
+        device.nic.report();
 
         // **After the poll and before anything is served.** The lease is what
         // gives this machine an address, a route and its resolvers, so a client
@@ -1651,6 +1666,8 @@ fn main() {
                 total_mem / (1024 * 1024),
             );
         }
+
+        mdns.pass(&iface, &mut socket_set, Instant::now());
 
         daemon.bridge_piped(&mut socket_set);
 
@@ -1698,6 +1715,10 @@ fn main() {
         let timeout = match timeout_nanos {
             None => u64::MAX,
             Some(n) => n,
+        };
+        let timeout = match mdns.wake_in(Instant::now()) {
+            Some(left) => timeout.min(left.as_nanos() as u64),
+            None => timeout,
         };
         // The probe's window is a wake of its own: an idle machine would
         // otherwise sleep through the moment it owes its answer.

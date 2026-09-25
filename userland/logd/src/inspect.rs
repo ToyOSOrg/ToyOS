@@ -1,4 +1,5 @@
-//! The `log` port: `inspect`'s answer about where this boot's log is going.
+//! The `log` port: `inspect`'s answer about where this boot's log is going,
+//! and a reader on this machine handed the log itself ([`READ`]).
 //!
 //! **On a thread of its own, so no reader can reach the loop that writes the
 //! file.** The loop publishes what it knows once a round — a few relaxed
@@ -17,6 +18,9 @@ use toyos::port::Acceptor;
 use toyos::{AsHandle, Connection};
 use toyos_inspect::Snapshot;
 
+use toyos_logstream::READ;
+
+use crate::serve::Hub;
 use crate::store::Volume;
 
 const _: () = assert!(
@@ -78,7 +82,7 @@ pub struct Published {
 }
 
 impl Published {
-    /// `stream` is whether this boot was asked to stream its log at all.
+    /// `stream` is whether this boot's log is served on the network at all.
     pub fn new(stream: bool) -> Self {
         Self {
             state: AtomicU8::new(State::ConsoleOnly as u8),
@@ -127,15 +131,16 @@ struct Pending {
     since: Instant,
 }
 
-/// Serve `inspect` on `acceptor` for the life of the process.
-pub fn serve(acceptor: Acceptor, published: Arc<Published>) {
+/// Serve `inspect` and this machine's readers on `acceptor` for the life of
+/// the process.
+pub fn serve(acceptor: Acceptor, published: Arc<Published>, hub: Arc<Hub>) {
     std::thread::Builder::new()
         .name("log-inspect".into())
-        .spawn(move || run(&acceptor, &published))
+        .spawn(move || run(&acceptor, &published, &hub))
         .expect("logd: the inspect thread could not be started");
 }
 
-fn run(acceptor: &Acceptor, published: &Published) -> ! {
+fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
     let poller = Poller::new(1 + MAX_PENDING as u32);
     let mut pending: Vec<Pending> = Vec::new();
     loop {
@@ -171,6 +176,10 @@ fn run(acceptor: &Acceptor, published: &Published) -> ! {
                 RxStep::Idle => true,
                 RxStep::Frame { msg_type: toyos_inspect::MSG_INSPECT, payload_len: 0 } => {
                     let _ = p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot());
+                    false
+                }
+                RxStep::Frame { msg_type: READ, payload_len: 0 } => {
+                    hub.read(&p.conn);
                     false
                 }
                 RxStep::Eof | RxStep::Frame { .. } | RxStep::Malformed => false,

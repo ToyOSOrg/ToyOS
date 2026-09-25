@@ -35,7 +35,7 @@ const STATS_INTERVAL_NANOS: u64 = 2_000_000_000;
 /// it detects.
 const IDLE_WAKES_SAID: u32 = 8;
 
-/// One reporting window on the console. One line, one `write`.
+/// One reporting window, one line.
 ///
 /// The counters are `toyos_mixer::MixStats`, and what they mean is documented
 /// there beside the decision that fills them; this is the emission, which is an

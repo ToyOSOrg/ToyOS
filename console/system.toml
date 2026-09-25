@@ -5,8 +5,9 @@
 # boot checkpoint stays on the glass — which is the only thing that works on a
 # machine that wedges before userland, and is the answer to exactly one
 # question. This image answers the rest by being asked them: `/system/bin/console`
-# claims the screen, seeds its scrollback from the newest `/log` files so the
-# boot log is not lost with the checkpoint, and puts a prompt underneath.
+# claims the screen, shows this boot's log as `logd` serves it — the kernel's
+# records and every program's output — so nothing is lost with the checkpoint,
+# and puts a prompt underneath.
 #
 # Deliberately three programs. Every extra one is something that can fail
 # between the kernel and a prompt, on the machine where a failure costs a
@@ -22,15 +23,16 @@ start = ["logd", "console"]
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no
 # file at all, so a boot config without `logd` is a boot whose `/log` is empty —
-# `every_boot_config_runs_logd` is what refuses one. It claims no device and
-# serves no port: its whole authority is `logread`, which is
-# `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate.
+# `every_boot_config_runs_logd` is what refuses one. It claims no device; it
+# reads the kernel's records with `logread`, which is `Rights::LOG |
+# Rights::WAIT` on a `SysCap` duplicate, and serves `log` to the console.
 [programs.logd]
 syscap = ["logread"]
+serves = ["log"]
 
 [programs.console]
 provides = ["surface"]
-receives = ["launcher"]
+receives = ["launcher", "log"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.shell]

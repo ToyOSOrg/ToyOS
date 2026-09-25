@@ -27,7 +27,6 @@ the pipe only what the socket has room for, so nothing is consumed from one side
 without landing on the other. The same answer does not fit here yet — it needs
 the pipe's remaining room, which no syscall answers today.
 
-Reproduced on the send side by `tests/common/logstream.rs`'s
-`log_stream_stalled_peer_wide_storm`: against a peer that had stopped reading,
-a record arrived cut in half with the next record's line beginning inside it.
-That arm is the reproduction to point this half at once the room is askable.
+The send side's reproduction — a record arriving cut in half at a peer that
+had stopped reading — was an arm of the outbound log stream, which is gone; a
+reproduction of this half is owed with the fix.

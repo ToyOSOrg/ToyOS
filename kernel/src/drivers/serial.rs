@@ -2,9 +2,8 @@
 //! Every writer takes [`BackendGuard`] once per whole unit (a record, a
 //! userland `write`, a panic report) and holds it for that whole unit; that
 //! is the only source of line atomicity. Every unit taken under the guard is
-//! bounded, except the panic path's `drain_locked`. Nothing formats under the
-//! guard: a console line's record is formatted by `log::spoken` after the line
-//! has been written and the guard released.
+//! bounded, except the panic path's `drain_locked`. Nothing that holds a
+//! kernel lock formats here.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::cpu::{inb, outb};
@@ -259,7 +258,7 @@ pub fn flush_final() {
 
 /// A userland `write` to the console, unbuffered and ANSI-stripped.
 pub fn write_console(src: &crate::user_ptr::UserBytes) {
-    let mut line = ConsoleLine::new(None);
+    let mut line = ConsoleLine::new();
     line.out.on_newline = false;
     line.write(src);
     // Nothing held back: a trailing ESC is the caller's own byte, emitted here too.
@@ -274,11 +273,9 @@ pub struct ConsoleLine {
 }
 
 impl ConsoleLine {
-    /// `speaker` is who each emitted line is also a record from; `None` is a
-    /// write that reaches the serial console and nothing else.
-    pub fn new(speaker: Option<crate::log::spoken::Speaker>) -> Self {
+    pub const fn new() -> Self {
         Self {
-            out: Stripped { buf: [0; MAX_CONSOLE_LINE], len: 0, on_newline: true, speaker },
+            out: Stripped { buf: [0; MAX_CONSOLE_LINE], len: 0, on_newline: true },
             csi: Csi::Text,
         }
     }
@@ -301,9 +298,12 @@ impl ConsoleLine {
         let csi = core::mem::replace(&mut self.csi, Csi::Text);
         csi.finish(&mut self.out);
         self.out.flush();
-        if let Some(speaker) = self.out.speaker.as_mut() {
-            speaker.finish();
-        }
+    }
+}
+
+impl Default for ConsoleLine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -320,8 +320,6 @@ struct Stripped {
     len: usize,
     /// Whether a newline ends a unit; true for a line buffer, false for [`write_console`]'s unbuffered chunking.
     on_newline: bool,
-    /// Who each unit is also a record from, once the backend has it.
-    speaker: Option<crate::log::spoken::Speaker>,
 }
 
 impl Stripped {
@@ -339,9 +337,6 @@ impl Stripped {
     fn flush(&mut self) {
         if self.len > 0 {
             BackendGuard::lock().write_raw(&self.buf[..self.len]);
-            if let Some(speaker) = self.speaker.as_mut() {
-                speaker.say(&self.buf[..self.len]);
-            }
             self.len = 0;
         }
     }

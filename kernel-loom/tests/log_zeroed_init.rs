@@ -15,7 +15,7 @@
 
 #![cfg(not(feature = "loom"))]
 
-use kernel_loom::log_shard::{Origin, Shard, FIRST_SEQ};
+use kernel_loom::log_shard::{Shard, FIRST_SEQ};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use toyos_abi::log::LogRecord;
 
@@ -56,9 +56,9 @@ fn a_zero_allocated_ap_shard_issues_first_seq_first() {
     record.msg[0] = b'A';
     // SAFETY: `first` came from this shard and is published exactly once under
     // the same guard.
-    unsafe { shard.commit(first, &record, Origin::Kernel, &guard) };
+    unsafe { shard.commit(first, &record, &guard) };
     let read_back = shard
-        .read(first).map(|(record, _)| record)
+        .read(first)
         .expect("an AP's first record must be readable");
     assert_eq!(read_back.seq, first);
     assert_eq!(&read_back.msg[..read_back.len as usize], b"A");
