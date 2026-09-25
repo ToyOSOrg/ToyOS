@@ -230,7 +230,7 @@ impl Domain {
         self.id
     }
 
-    pub fn floor(&self) -> u64 {
+    pub const fn floor(&self) -> u64 {
         Self::first_address(self.translatable)
     }
 
@@ -258,11 +258,57 @@ impl Domain {
 
     /// Whether `bytes` at `at` is room [`Self::reserve`] already handed out:
     /// the only room a mapping may be placed in by address.
-    pub fn handed_out(&self, at: Iova, bytes: u64) -> bool {
+    ///
+    /// `at` must itself be a leaf `reserve` could have returned, not merely
+    /// inside a handed-out span: [`map_2m`]'s index floors to the enclosing
+    /// leaf, so an unaligned `at` this let through would silently place a
+    /// mapping short of, or overlapping, where the caller named.
+    pub const fn handed_out(&self, at: Iova, bytes: u64) -> bool {
+        if !at.raw().is_multiple_of(PAGE_2M) {
+            return false;
+        }
         let span = bytes.next_multiple_of(PAGE_2M);
-        at.raw() >= self.floor() && at.raw().checked_add(span).is_some_and(|end| end <= self.next)
+        if at.raw() < self.floor() {
+            return false;
+        }
+        match at.raw().checked_add(span) {
+            Some(end) => end <= self.next,
+            None => false,
+        }
     }
 }
+
+/// [`Domain::handed_out`] is a pure predicate on a `Copy` struct: checked here
+/// at compile time rather than under a test harness this no-`std` binary has
+/// none of.
+const _: () = {
+    const ROOT: Table = Table { phys: 0 };
+    // `translatable = 48` puts `floor()` (a quarter of `1 << 48`) at `1 << 46`,
+    // itself far past `PAGE_2M`-aligned.
+    const FLOOR: u64 = Domain::first_address(48);
+    const ONE_LEAF: Domain = Domain {
+        root: ROOT,
+        id: KERNEL_DOMAIN + 1,
+        width: AddressWidth::Bits48,
+        translatable: 48,
+        next: FLOOR + PAGE_2M,
+    };
+    const TWO_LEAVES: Domain = Domain { next: FLOOR + 2 * PAGE_2M, ..ONE_LEAF };
+
+    // Exactly what one `reserve(PAGE_2M)` handed out.
+    assert!(ONE_LEAF.handed_out(Iova::translated(FLOOR), PAGE_2M));
+    // Short of the floor: nothing this domain has ever reserved.
+    assert!(!ONE_LEAF.handed_out(Iova::translated(FLOOR - PAGE_2M), PAGE_2M));
+    // Past what has been reserved so far.
+    assert!(!ONE_LEAF.handed_out(Iova::translated(FLOOR + PAGE_2M), PAGE_2M));
+    // A byte count is rounded up to the leaf it needs, not truncated to fit.
+    assert!(!ONE_LEAF.handed_out(Iova::translated(FLOOR), PAGE_2M + 1));
+    // Two leaves handed out; the second is room in its own right.
+    assert!(TWO_LEAVES.handed_out(Iova::translated(FLOOR + PAGE_2M), PAGE_2M));
+    // Mid-span but off a leaf boundary: inside the handed-out range without
+    // being an address `reserve` ever returned.
+    assert!(!TWO_LEAVES.handed_out(Iova::translated(FLOOR + 1), PAGE_2M));
+};
 
 pub fn map(tables: &mut Tables, domain: &Domain, at: Iova, phys: u64, bytes: u64) {
     let levels = levels(domain.width);
@@ -336,6 +382,14 @@ fn leaf_of(root: Table, levels: u8, at: Iova) -> Option<(Table, usize)> {
 fn map_2m(tables: &mut Tables, root: Table, levels: u8, at: Iova, phys: u64, perm: u64) {
     let table = descend(tables, root, levels, at);
     let index = ((at.raw() >> 21) & 0x1FF) as usize;
+    // A present leaf here is memory some holder still reaches: the caller
+    // unmaps before it writes over one, so a leaf that is already live is a
+    // dead holder's pages about to be silently repurposed under a live one.
+    assert!(
+        table.read(index) & (SL_READ | SL_WRITE) == 0,
+        "iommu: {:#x} was still mapped when a new leaf was written there",
+        at.raw()
+    );
     table.write(index, (phys & !(PAGE_2M - 1)) | SL_LARGE | perm);
 }
 

@@ -24,3 +24,17 @@ up after a named, logged condition — a claim finding no free slot takes the
 oldest residue slot and logs whose addresses it dropped, with the dropped
 function detached from that domain first — and a guest test that leaves a
 residue and then claims `MAX_FUNCTIONS` other functions is handed all of them.
+
+A second, narrower gap in the same neighbourhood (`kernel/src/pcidev/mod.rs`,
+`tear_down`'s `None` arm): a successor takes `RESIDUE[slot]` into
+`Bound::residue` (`take_residue`) and places a grant at a range it chooses to
+use, but is never required to place one at every range. A range it never
+places is still mapped — `map_at` is what unmaps a residue range's old leaf,
+by placing a fresh one over it — and when *that* successor is torn down in
+turn, only `bound.grants` is unmapped and returned to `RESIDUE[slot]`;
+`bound.residue`'s untouched leftover is simply dropped with the rest of
+`Bound`. The range stays mapped, in nobody's `RESIDUE` and nobody's `grants`,
+until a third holder's mastering reaches whatever the first holder's
+descriptors named there and takes the fault the design promises the first
+holder's own dead reach, one generation late — the same shape `T14` run 132
+first showed.

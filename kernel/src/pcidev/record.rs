@@ -122,7 +122,12 @@ impl Interrupt {
     /// two of these, and what it took plus what is left has to be what arrived.
     pub fn took(&self) {
         bump!(self.count);
-        self.pending.store(true, ORDER);
+        // `swap` and not a store: [`Self::fault`] releases through this same
+        // word, and a plain write landing after that release in `pending`'s
+        // modification order ends the release sequence there — the pass that
+        // later takes the fault's wake would then synchronize with nothing.
+        // An RMW extends the sequence instead, whichever order it lands in.
+        self.pending.swap(true, ORDER);
     }
 
     /// The messages since the last read, or `None` for none.
