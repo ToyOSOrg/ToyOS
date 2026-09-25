@@ -3448,6 +3448,54 @@ pub fn root_backup_superblock(
     Ok(())
 }
 
+/// **A ROOT candidate whose superblock the disk will not read is a boot the
+/// loader refuses, naming the firmware's status.** Block 0 of the boot disk's
+/// ROOT is inverted, so the loader reads on to the backup at its last block,
+/// and the boot stick fails with EIO every read covering that block's last
+/// sector. Block 0 itself is left readable: firmware reads it when it connects
+/// the partition, and an unreadable one stalls it before the loader runs.
+pub fn root_superblock_unreadable(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let (at, len) = root_extent(&image)?;
+    for byte in &mut image[at..at + 4096] {
+        *byte = !*byte;
+    }
+    let backup = len / 4096 - 1;
+    let path = test_dir().join("root-superblock-unreadable.img");
+    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let qemu = qemu::QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            boot_image: Some(qemu::Staged::Written(path.clone())),
+            stick_read_error: Some(((at + len) / GPT_LBA - 1) as u64),
+            ready_marker: ROOT_REFUSED,
+            ..Default::default()
+        },
+    );
+    let log = format!("{}{}", qemu.boot_log(), qemu.uart_log());
+    drop(qemu);
+    let _ = std::fs::remove_file(&path);
+
+    let verdict = log
+        .lines()
+        .find(|l| l.contains(ROOT_REFUSED))
+        .map(str::trim)
+        .ok_or_else(|| format!("the loader did not refuse an unreadable superblock:\n{}", volume_lines(&log)))?;
+    if !verdict.contains(&format!("the read of block {backup} of the TOYOS-ROOT candidate"))
+        || !verdict.contains("DEVICE_ERROR")
+    {
+        return Err(format!("the refusal does not name the superblock's read and the firmware's status: {verdict}"));
+    }
+    eprintln!("  [root] {verdict}");
+    Ok(())
+}
+
 /// The logical block every table `build_boot_image` writes is laid out in.
 const GPT_LBA: usize = 512;
 

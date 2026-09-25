@@ -1373,16 +1373,18 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
     // What the loader does with a ROOT set: a bad candidate, an absent name, an
-    // overlapping candidate, a twin on the boot disk and an unreadable chunk
-    // refused by name, a bad primary superblock read past to its backup, and a
-    // twin on another disk never read. Serial, not by association: each stages
-    // a whole boot image, one a second 32 GiB stick beside it.
+    // overlapping candidate, a twin on the boot disk, an unreadable superblock
+    // and an unreadable chunk refused by name, a bad primary superblock read
+    // past to its backup, and a twin on another disk never read. Serial, not by
+    // association: each stages a whole boot image, one a second 32 GiB stick
+    // beside it.
     ("root_candidate_malformed", Sched::Serial, Tier::Fast),
     ("root_named_but_absent", Sched::Serial, Tier::Fast),
     ("root_chunk_refused", Sched::Serial, Tier::Fast),
     ("root_candidate_overlaps", Sched::Serial, Tier::Fast),
     ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Fast),
     ("root_backup_superblock", Sched::Serial, Tier::Fast),
+    ("root_superblock_unreadable", Sched::Serial, Tier::Fast),
     ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
@@ -10503,6 +10505,9 @@ fn run_machine_test(
             common::volumes::root_named_twice_on_the_boot_disk(test_config, c_bins, rust_bins)
         }
         "root_backup_superblock" => common::volumes::root_backup_superblock(test_config, c_bins, rust_bins),
+        "root_superblock_unreadable" => {
+            common::volumes::root_superblock_unreadable(test_config, c_bins, rust_bins)
+        }
         "root_named_twice" => {
             common::volumes::root_named_twice(test_config, c_bins, rust_bins)
         }

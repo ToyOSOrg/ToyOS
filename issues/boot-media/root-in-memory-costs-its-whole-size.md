@@ -26,8 +26,9 @@ held.
 alternating A/B of `cargo test` against `origin/main` at `b0adc600`, three arms
 each in one session, summing the RSS of the run's QEMU processes every 2 s:
 `main` peaked at 5801, 6367 and 6275 MiB, and the branch, with a 680 MiB ROOT
-that still carried a tenth of free blocks, at 7867, 9634 and 10836 MiB. No arm
-of either used swap, and the kernel's `memorystatus_level` never fell below 73.
+that still carried a tenth of free blocks, at 7867, 9634 and 10836 MiB, and a
+fourth branch run with the trimmed 619 MiB ROOT at 10591 MiB. No arm of either
+used swap, and the kernel's `memorystatus_level` never fell below 73.
 
 The read, QEMU 11 TCG, host clock and TSC agreeing, measured before the free
 blocks were trimmed: the `--build-only` image's 117 MiB ROOT in 98–111 ms off

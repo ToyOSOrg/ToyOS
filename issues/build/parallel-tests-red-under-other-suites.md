@@ -348,6 +348,11 @@ changes.
   its panel grows 10, 10 and 11 rows for 14 loader lines on `main` and 14, 14
   and 14 on the branch, the most the test accepts, and the red arm's GOP-query
   dump carried 23 rows where the alone runs carried 24.
+  A fourth branch run at `1b46dd5d`, ROOT trimmed to 158464 blocks, passed it
+  again and was red on `syscall_window_nmi`, `screen_loader_lines` and
+  `launcher_refusals`, each `ALONE … GREEN`, its QEMU RSS peaking at 10591 MiB
+  with no swap. `syscall_window_nmi` is red in two of four branch runs and none
+  of three on `main`; not investigated.
 
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
