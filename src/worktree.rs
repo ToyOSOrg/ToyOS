@@ -7,9 +7,12 @@
 //! `toyos` name at it — taking the toolchain out from under every other
 //! checkout. Measured, in that order, on this host.
 //!
-//! So the shared state stays shared and nothing here copies it: `rust/` is left
-//! the stub it was, and [`crate::toolchain::rust_dir`] sends every read to the
-//! primary checkout. What this module does is the small remainder — create the
+//! So the compiler stays the primary's and nothing here copies it:
+//! [`crate::toolchain::rust_dir`] sends every compiler read to the primary
+//! checkout. `rust/` is left the stub it was until the first build makes it
+//! this worktree's own fork checkout — a git worktree of the primary's fork
+//! repository, sharing its objects (`src/sysroot.rs`) — which [`remove`] takes
+//! away again. What this module does is the small remainder — create the
 //! worktree, carry over the one file git cannot, and refuse by name when the
 //! result would not be usable.
 
@@ -21,8 +24,9 @@ use crate::flags;
 use crate::toolchain;
 
 /// What a worktree's crate target directories reach: 4.1 GiB after
-/// `--build-only`, and 23 GiB on the primary checkout, which has run everything.
-/// Measured with `du`. The 50 GiB `rust/` is shared and never counted here.
+/// `--build-only`, and 23 GiB on the primary checkout, which has run everything;
+/// its fork checkout and std build directory add 4.2 GiB. Measured with `du`.
+/// The primary's 50 GiB `rust/` is shared and never counted here.
 ///
 /// Refusing at the upper figure plus a little, rather than at the lower one: a
 /// build that fills the disk halfway through costs more than a worktree that
@@ -95,10 +99,10 @@ fn add(root: &Path, path: &str) {
     let branch = format!("wt/{name}");
     git(root, &["worktree", "add", "-b", &branch, &path.to_string_lossy(), "main"]);
 
-    // `rust/` is deliberately left the empty stub `git worktree add` made. It is
-    // not an oversight the next reader should fix: initialising it is the
-    // 913 MiB clone, and a symlink in its place makes git error out of `status`,
-    // `diff` and `submodule` alike rather than just ignoring it.
+    // `rust/` is deliberately left the empty stub `git worktree add` made: the
+    // first build makes it a fork checkout sharing the primary's objects, where
+    // `git submodule update` would be the 913 MiB clone, and a symlink in its
+    // place makes git error out of `status`, `diff` and `submodule` alike.
 
     // The one file git cannot carry: it is gitignored, and a worktree that
     // silently loses the fork redirects would build different code from the
@@ -113,7 +117,7 @@ fn add(root: &Path, path: &str) {
     eprintln!();
     eprintln!("worktree   {}", path.display());
     eprintln!("branch     {branch}");
-    eprintln!("toolchain  {} (shared, not copied)", stage2.display());
+    eprintln!("compiler   {} (shared, not copied)", stage2.display());
     eprintln!();
     eprintln!("Build it with `cargo run -- --build-only` from {}.", path.display());
 }
@@ -295,15 +299,19 @@ fn gib(bytes: u64) -> String {
 ///
 /// Deliberately not `--force`: git refuses a worktree holding tracked changes
 /// or untracked files and leaves it registered, because the work in a
-/// worktree is the only copy of itself — that refusal stands.
+/// worktree is the only copy of itself — that refusal stands, and so does the
+/// one for its own fork checkout ([`remove_fork_checkout`]).
 ///
 /// **git can unregister a worktree and then fail to delete it**: a path deeper
 /// than `PATH_MAX` under an ignored `target/`, or a file created while it
 /// walks, and it exits non-zero with the directory still there and no longer
 /// a worktree of anything. Once git has let go of it nothing in it is work,
 /// so the whole directory goes.
-fn remove(root: &Path, path: &str) {
+///
+/// Then every sysroot no remaining worktree names goes too (`src/sysroot.rs`).
+pub(crate) fn remove(root: &Path, path: &str) {
     let at = root.join(path);
+    remove_fork_checkout(root, &at);
     if !ok_loud(root, &["worktree", "remove", path]) {
         assert!(
             !registered(root, &at),
@@ -316,6 +324,50 @@ fn remove(root: &Path, path: &str) {
         eprintln!("git unregistered {path} and left its ignored files; deleted them");
     }
     eprintln!("removed {path}; its branch is still there, and `git branch -d` will say if it is unmerged");
+    let swept = crate::sysroot::sweep(root);
+    if !swept.is_empty() {
+        eprintln!("removed {} sysroot(s) no worktree names any more", swept.len());
+    }
+}
+
+/// A linked worktree's own fork checkout (`src/sysroot.rs`'s `fork_checkout`)
+/// is a git worktree of the primary's fork repository, which git will not
+/// remove a worktree around. It goes first, and only while it holds nothing
+/// that is not also somewhere else: no change in its tree, and a `HEAD` some
+/// ref of the fork repository reaches.
+fn remove_fork_checkout(root: &Path, at: &Path) {
+    let fork = at.join("rust");
+    if !fork.join(".git").is_file() || !at.join(".git").is_file() {
+        return;
+    }
+    let path = at.display();
+    let mine = capture(at, &["status", "--porcelain", "--ignore-submodules=all"]);
+    assert!(mine.is_empty(), "{path} holds uncommitted work:\n{mine}Nothing was deleted.");
+    let theirs = capture(&fork, &["status", "--porcelain", "--ignore-submodules=none"]);
+    assert!(
+        theirs.is_empty(),
+        "{}'s fork checkout holds uncommitted work:\n{theirs}Nothing was deleted.",
+        path
+    );
+    let head = capture(&fork, &["rev-parse", "HEAD"]);
+    let reached = capture(&fork, &["for-each-ref", "--count=1", "--contains", head.trim()]);
+    assert!(
+        !reached.trim().is_empty(),
+        "{}'s fork checkout is at {}, which no branch, tag or remote ref of the fork \
+         repository reaches: it is the only copy of those commits. Push them, or name them \
+         with a branch, first. Nothing was deleted.",
+        path,
+        head.trim()
+    );
+    fs::remove_dir_all(&fork)
+        .unwrap_or_else(|e| panic!("remove {}: {e}", fork.display()));
+    fs::create_dir(&fork).unwrap_or_else(|e| panic!("recreate the stub {}: {e}", fork.display()));
+    let primary = crate::primary_checkout(root);
+    git(&primary.join("rust"), &["worktree", "prune"]);
+    let backtrace = primary.join("rust/library/backtrace");
+    if backtrace.join(".git").exists() {
+        git(&backtrace, &["worktree", "prune"]);
+    }
 }
 
 /// Whether `git worktree list` still names `at`, compared as real paths:

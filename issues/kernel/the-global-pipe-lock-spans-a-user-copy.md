@@ -48,7 +48,7 @@ The shape that keeps that argument true is a per-pipe lock under the table lock:
 
 The lazy allocation should move out from under both: allocate the ring page before taking the table lock (or, on the miss, drop and retry the way `file_cache::read_page` already does at `kernel/src/file_cache.rs:217-231`), so neither the bitmap scan nor the 2 MiB zeroing runs with a global held.
 
-Sequencing note: this touches `toyos-abi/src/ring.rs`'s doc contract — the sentence naming `PIPES` as the serializing lock — so it lands as one commit over `toyos-abi/src` and `kernel/src` together, which `abi_lands_alone` permits. The two closures at `pipe.rs:220` and `pipe.rs:254` now hand `Ring` a `toyos_abi::ring::Src`/`Dst` rather than a slice; a per-pipe lock changes who serializes them, not their shape.
+Sequencing note: this touches `toyos-abi/src/ring.rs`'s doc contract — the sentence naming `PIPES` as the serializing lock — so it lands as one commit over `toyos-abi/src` and `kernel/src` together. The two closures at `pipe.rs:220` and `pipe.rs:254` now hand `Ring` a `toyos_abi::ring::Src`/`Dst` rather than a slice; a per-pipe lock changes who serializes them, not their shape.
 
 ## Two checks
 

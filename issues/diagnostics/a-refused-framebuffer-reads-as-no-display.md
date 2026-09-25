@@ -45,8 +45,6 @@ things to go and look at.
 
 **What would close it.** A reason, carried in `KernelArgs` beside the geometry
 and printed on the `boot: gop` line, so a zero framebuffer says which zero it is.
-`toyos-abi/boot.rs` is the shared sysroot, so it lands on its own single-commit
-branch.
 
 Found while landing the mode-inheritance half of the 2026-09-01 GOP ruling, which
 is what made a refusal reachable at all: before it, `query_gop` returned the same

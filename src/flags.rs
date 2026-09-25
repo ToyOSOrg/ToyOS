@@ -65,7 +65,6 @@ declare_flags!(pub CARGO_RUN = {
     pub BUILD_ONLY = "--build-only", None;
     pub DUMP_AUDIO = "--dump-audio", None;
     pub REBUILD_TOOLCHAIN = "--rebuild-toolchain", None;
-    pub CLAIM_SYSROOT = "--claim-sysroot", None;
     pub HOST_BUILDS = "--host-builds", Next;
     pub SMP = "--smp", Next;
     pub GOP = "--gop", None;
