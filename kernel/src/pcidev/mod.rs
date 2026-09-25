@@ -1670,13 +1670,20 @@ pub fn config_read(slot: usize, at: Register, width: RegWidth) -> Result<u32, Sy
     })
 }
 
-/// The interrupts since the last read, or `None` for none.
-pub fn take_record(slot: usize) -> Option<DeviceIrqRecord> {
-    IRQ[slot].take().map(|count| DeviceIrqRecord { count })
+/// The interrupts since the last read, or `None` for none; `Io` once the unit
+/// has refused the function, which is the one answer its holder cannot take
+/// for a quiet device.
+pub fn take_record(slot: usize) -> Result<Option<DeviceIrqRecord>, SyscallError> {
+    if IRQ[slot].faulted() {
+        return Err(SyscallError::Io);
+    }
+    Ok(IRQ[slot].take().map(|count| DeviceIrqRecord { count }))
 }
 
+/// Whether a read of the claim answers at once: a message is waiting, or the
+/// refusal is.
 pub fn has_irq(slot: usize) -> bool {
-    IRQ[slot].armed()
+    IRQ[slot].armed() || IRQ[slot].faulted()
 }
 
 /// Records one message. Called from the vector's ISR, so it takes no lock and
@@ -1695,7 +1702,8 @@ pub fn drain_pending() {
         if !irq.take_pending() {
             continue;
         }
-        if irq.take_unannounced() {
+        // A fault's wake is no message.
+        if !irq.faulted() && irq.take_unannounced() {
             log!(
                 "pcidev: slot {slot} took its first message on vector {:#x}",
                 VECTORS[slot]
@@ -1707,10 +1715,14 @@ pub fn drain_pending() {
 
 /// The unit refused this function an access.
 ///
-/// Called from the fault handler, which takes no lock: one store, and every
-/// call the claim answers refuses from here on.
+/// Called from the fault handler, which takes no lock: every call the claim
+/// answers refuses from here on, its interrupt read included, and this CPU's
+/// next scheduler pass wakes whoever waits on the claim to read that refusal —
+/// the pass a message earns, posted the way its ISR posts it.
 pub fn note_fault(slot: usize) {
     IRQ[slot].fault();
+    crate::irq_ring::isr_publish(crate::irq_ring::IrqSource::UserDev, crate::clock::nanos_since_boot());
+    crate::preempt::set_need_resched();
 }
 
 pub fn add_inbox_watcher(slot: usize, id: InboxId) {

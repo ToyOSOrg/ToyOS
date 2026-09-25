@@ -16,7 +16,10 @@
 //! every message the ISR recorded in between, and a driver that misses one
 //! waits for a device that has already spoken. No ordering carries anything
 //! across these words — each is the whole of what it says — so the orderings
-//! here are `Relaxed` and the model is about the interleaving.
+//! here are `Relaxed` and the model is about the interleaving, **but for one
+//! edge**: a fault arms the same wake a message does, and the pass that takes
+//! that wake has to read the fault, so `pending` is released by [`Interrupt::fault`]
+//! and acquired by [`Interrupt::take_pending`].
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -34,8 +37,11 @@ const ORDER: Ordering = Ordering::Relaxed;
 /// build.
 #[cfg(feature = "device-irq-lossy")]
 macro_rules! take_word {
-    ($word:expr, $empty:expr) => {{
-        let held = $word.load(ORDER);
+    ($word:expr, $empty:expr) => {
+        take_word!($word, $empty, ORDER)
+    };
+    ($word:expr, $empty:expr, $order:expr) => {{
+        let held = $word.load($order);
         $word.store($empty, ORDER);
         held
     }};
@@ -43,7 +49,10 @@ macro_rules! take_word {
 #[cfg(not(feature = "device-irq-lossy"))]
 macro_rules! take_word {
     ($word:expr, $empty:expr) => {
-        $word.swap($empty, ORDER)
+        take_word!($word, $empty, ORDER)
+    };
+    ($word:expr, $empty:expr, $order:expr) => {
+        $word.swap($empty, $order)
     };
 }
 
@@ -138,9 +147,10 @@ impl Interrupt {
     /// for the pass that owes it and `false` for every pass after.
     ///
     /// `swap` for the same reason as [`Self::take`]: two passes that both
-    /// loaded `true` would both wake one message's watchers.
+    /// loaded `true` would both wake one message's watchers. `Acquire`, so
+    /// the pass that takes a fault's wake reads [`Self::faulted`] set.
     pub fn take_pending(&self) -> bool {
-        take_word!(self.pending, false)
+        take_word!(self.pending, false, Ordering::Acquire)
     }
 
     /// Whether this is the first message this slot has taken. Answers `true`
@@ -153,10 +163,12 @@ impl Interrupt {
     }
 
     /// The unit refused this function an access. Called from the fault handler,
-    /// which takes no lock: one store, and every call the claim answers refuses
-    /// from here on.
+    /// which takes no lock: every call the claim answers refuses from here on,
+    /// and a wake is owed as for a message, because a holder waiting on the
+    /// claim would otherwise wait for a function that can no longer speak.
     pub fn fault(&self) {
         self.faulted.store(true, ORDER);
+        self.pending.store(true, Ordering::Release);
     }
 
     pub fn faulted(&self) -> bool {

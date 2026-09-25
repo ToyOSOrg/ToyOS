@@ -542,6 +542,73 @@ pub fn swap_keeps_what_nothing_reset(
     Ok(())
 }
 
+/// The replacement the refusal control swaps in: it aims the 82574's receive
+/// ring outside its grant and waits on its claim.
+const ASTRAY: &str = "swap_claim_astray";
+
+/// Its line once the part is mastering.
+const ASTRAY_HOLDING: &str = "swap_claim_astray: holding the NIC mastering";
+
+/// Its line when the claim refused the read, and when it refused nothing.
+const ASTRAY_TOLD: &str = "swap_claim_astray: its claim refused the interrupt read: Io";
+const ASTRAY_UNTOLD: &str = "swap_claim_astray: its claim refused nothing";
+
+/// A fault the unit took on a function a process drives.
+const HOLDER_FAULT: &str = "iommu: DMA FAULT owner=slot";
+
+/// **A holder whose function the unit refused is told, rather than reading its
+/// dead device as a quiet one.** On T14 run 132 the replacement netd's claim
+/// faulted, bus mastering was cleared, and netd went on reading "no interrupt"
+/// on every pass: it served nothing, said `ready`, and init put it in service.
+///
+/// netd on QEMU's 82574 is swapped for a program that aims the part's receive
+/// ring outside its one grant, masks every interrupt, and waits on its claim;
+/// this host's SYNs make the part fetch a descriptor there, and the unit
+/// refuses it. Nothing but that fault can wake the program. The verdict is its
+/// own line: the claim refused the interrupt read with `Io`. Without the
+/// refusal and the wake it earns, the program waits out its bound and says it
+/// was told nothing.
+pub fn swap_fault_tells_its_holder(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut rig = Rig::boot("swap-astray", super::lan::TALK_BENCH)?;
+    let (taken, took) = match swap_and_knock(&mut rig, rust_bins, ASTRAY, ASTRAY_HOLDING) {
+        Ok(knocked) => knocked,
+        Err(why) => return Err(rig.fail(why)),
+    };
+    let ended = qemu::await_guest(&mut rig.guest, &mut rig.console, "the replacement's word on its claim", |c| {
+        c.contains(ASTRAY_TOLD) || c.contains(ASTRAY_UNTOLD)
+    });
+    if let Err(why) = ended {
+        return Err(rig.fail(why));
+    }
+    let text = rig.console.clone();
+    let judged = (|| {
+        let console = serial::Serial::named("the astray boot", text.as_str());
+        let fault = console.must_say(HOLDER_FAULT)?;
+        if !fault.contains("owner=slot0") || !fault.contains("access=read") {
+            return Err(format!("the premise: the unit refused no descriptor fetch of the claim's part — {fault}"));
+        }
+        let told = console.must_say(ASTRAY_TOLD)?;
+        let faults = text.matches(HOLDER_FAULT).count();
+        console.must_be_clean_apart_from(HOLDER_FAULT, faults)?;
+        eprintln!(
+            "  [swap] {}; {}; after {taken} SYNs in {took:?}",
+            fault.trim_end(),
+            told.trim_end(),
+        );
+        Ok(())
+    })();
+    if let Err(why) = judged {
+        return Err(rig.fail(why));
+    }
+    drop(rig.guest);
+    let _ = std::fs::remove_file(&rig.staged.image);
+    Ok(())
+}
+
 /// `name` among the build's test binaries.
 fn test_binary<'a>(rust_bins: &'a [(String, Vec<u8>)], name: &str) -> Result<&'a [u8], String> {
     rust_bins

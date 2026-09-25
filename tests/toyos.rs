@@ -253,6 +253,10 @@ const RUST_SKIP: &[&str] = &[
     // The residue control's replacement netd: it masters the 82574 with its
     // receive unit as netd left it. `swap_keeps_what_nothing_reset` stages it.
     "swap_claim_running",
+    // The refusal control's replacement netd: it aims the 82574's receive ring
+    // outside its grant and waits on its claim. `swap_fault_tells_its_holder`
+    // stages it.
+    "swap_claim_astray",
     // The reset control's replacement netd: it claims the `igb` an Express
     // function level reset released. `swap_resets_the_function` stages it.
     "swap_flr_probe",
@@ -784,6 +788,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // unit still on. The verdict is the kernel's console; its clocks are
     // liveness guards.
     ("swap_keeps_what_nothing_reset", Sched::Parallel, Tier::Fast),
+    // The same part swapped to a holder that aims it outside its grant and
+    // waits on its claim. The verdict is the holder's own word on what the
+    // faulted claim answered; its clocks are liveness guards.
+    ("swap_fault_tells_its_holder", Sched::Parallel, Tier::Fast),
     // An `igb` netd held, released by an Express function level reset and
     // claimed again by netd's replacement, which reads it through the window
     // its claim maps. The verdict is what the function answers there.
@@ -13904,6 +13912,9 @@ fn run_machine_test(
         }
         "swap_keeps_what_nothing_reset" => {
             common::swap::swap_keeps_what_nothing_reset(test_config, c_bins, rust_bins)
+        }
+        "swap_fault_tells_its_holder" => {
+            common::swap::swap_fault_tells_its_holder(test_config, c_bins, rust_bins)
         }
         "swap_resets_the_function" => {
             common::swap::swap_resets_the_function(test_config, c_bins, rust_bins)
