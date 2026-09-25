@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -2572,6 +2573,90 @@ pub struct QemuInstance {
     /// The host port [`BootOptions::ssh_port`] forwarded into this guest, kept
     /// so a boot several tests share can tell each of them which port it took.
     ssh_port: Option<u16>,
+    /// The test binaries this boot put on ROOT, by the name `run` takes; `None`
+    /// for a staged image, whose contents its builder chose.
+    carried: Option<BTreeSet<String>>,
+}
+
+/// The test binaries one boot carries onto ROOT, out of the suite's catalogue.
+pub struct Carried {
+    pub c: Vec<(String, Vec<u8>)>,
+    pub rust: Vec<(String, Vec<u8>)>,
+}
+
+/// What a boot that runs `names` (`test_rs_<bin>`, `test_c_<case>`) carries.
+///
+/// **ROOT is held whole in the guest's memory, so a binary on it costs the
+/// guest whether it runs or not.** The closure is over what the named binaries
+/// name in turn: a child a binary spawns and a library it links or `dlopen`s
+/// appear in its bytes by file name, so every catalogue name found there is
+/// carried too. A name the catalogue does not hold panics.
+pub fn carrying<'n>(
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    names: impl IntoIterator<Item = &'n str>,
+) -> Carried {
+    let mut catalogue: std::collections::BTreeMap<String, (bool, &(String, Vec<u8>))> =
+        std::collections::BTreeMap::new();
+    for bin in c_bins {
+        catalogue.insert(format!("test_c_{}", bin.0), (true, bin));
+    }
+    for bin in rust_bins {
+        let key =
+            if bin.0.ends_with(".so") { bin.0.clone() } else { format!("test_rs_{}", bin.0) };
+        catalogue.insert(key, (false, bin));
+    }
+    let mut todo: Vec<String> = Vec::new();
+    for name in names {
+        assert!(
+            catalogue.contains_key(name),
+            "[qemu] a boot names {name:?} and the suite built no such binary"
+        );
+        todo.push(name.to_string());
+    }
+    let mut taken: BTreeSet<String> = BTreeSet::new();
+    while let Some(name) = todo.pop() {
+        if taken.insert(name.clone()) {
+            todo.extend(named_in(&catalogue[&name].1 .1, &catalogue));
+        }
+    }
+    let mut carried = Carried { c: Vec::new(), rust: Vec::new() };
+    for name in &taken {
+        let (is_c, bin) = catalogue[name];
+        if is_c { carried.c.push(bin.clone()) } else { carried.rust.push(bin.clone()) }
+    }
+    carried
+}
+
+/// Every catalogue name that starts somewhere in `bytes`, the longest where
+/// two do: string literals sit end to end in `.rodata`, so what follows a name
+/// is as often the next literal's first byte as a terminator.
+fn named_in<V>(bytes: &[u8], catalogue: &std::collections::BTreeMap<String, V>) -> Vec<String> {
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'.';
+    let widest = catalogue.keys().map(String::len).max().unwrap_or(0);
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let rest = &bytes[at..];
+        if !(rest.starts_with(b"test_rs_") || rest.starts_with(b"test_c_") || rest.starts_with(b"lib"))
+        {
+            at += 1;
+            continue;
+        }
+        let run = rest.iter().take(widest).position(|&b| !word(b)).unwrap_or(widest.min(rest.len()));
+        let longest = (1..=run)
+            .rev()
+            .filter_map(|end| std::str::from_utf8(&rest[..end]).ok())
+            .find(|candidate| catalogue.contains_key(*candidate));
+        match longest {
+            Some(name) => {
+                at += name.len();
+                found.push(name.to_string());
+            }
+            None => at += 1,
+        }
+    }
+    found
 }
 
 /// The bootable disk image a boot with these arguments would use.
@@ -2865,6 +2950,21 @@ impl QemuInstance {
                 options.debug_wait,
             )
         };
+        let carried = match &options.boot_image {
+            Some(Staged::Written(_) | Staged::Pristine(_)) => None,
+            Some(Staged::Carried(_)) | None => Some(
+                c_tests
+                    .iter()
+                    .map(|(name, _)| format!("test_c_{name}"))
+                    .chain(
+                        rust_tests
+                            .iter()
+                            .filter(|(name, _)| !name.ends_with(".so"))
+                            .map(|(name, _)| format!("test_rs_{name}")),
+                    )
+                    .collect(),
+            ),
+        };
         let (boot_image, own_boot_image) = match &options.boot_image {
             // Both boot the file the test staged; what tells them apart is the
             // `snapshot=on` `qemu_command` puts on the drive for a `Pristine`
@@ -2970,6 +3070,7 @@ impl QemuInstance {
                 qmp_socket,
                 screendump,
                 own_boot_image,
+                carried,
             },
         )
     }
@@ -3392,6 +3493,15 @@ impl QemuInstance {
 
         // `run <name> [args...]`, and the markers carry only the binary name.
         let want = name.split_whitespace().next().unwrap_or(name);
+        if let Some(carried) = &self.carried {
+            let harness = want.starts_with("test_rs_") || want.starts_with("test_c_");
+            assert!(
+                !harness || carried.contains(want),
+                "[qemu] `run {want}` on a boot whose ROOT does not carry it: a boot carries the \
+                 test binaries its task names (`CARRIES` in tests/toyos.rs), and this one \
+                 carries {carried:?}"
+            );
+        }
 
         let timeout = budget_smp(timeout, self.smp);
         let start = Instant::now();
@@ -4479,6 +4589,7 @@ struct Files {
     qmp_socket: Option<PathBuf>,
     screendump: PathBuf,
     own_boot_image: Option<PathBuf>,
+    carried: Option<BTreeSet<String>>,
 }
 
 fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) -> QemuInstance {
@@ -4491,6 +4602,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         qmp_socket,
         screendump,
         own_boot_image,
+        carried,
     } = files;
 
     qemu.stdin(Stdio::piped())
@@ -4575,6 +4687,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         i8042_trace: options.kernel_params.contains(&"i8042-trace"),
         smp: options.smp,
         ssh_port: options.ssh_port,
+        carried,
     }
 }
 

@@ -1475,6 +1475,156 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("nightly_tier_is_announced", Sched::Parallel, Tier::Fast),
 ];
 
+/// The test binaries a [`MACHINE_TESTS`] or [`SCREEN_TESTS`] entry runs, which
+/// are all its boots carry of the suite's catalogue: **ROOT is held whole in
+/// the guest's memory**, so a binary a boot does not run is memory the guest
+/// pays for nothing, twelve guests at a time.
+///
+/// A name with no row carries none. A grouped boot carries its members' union;
+/// what a named binary spawns or links is carried with it
+/// ([`qemu::carrying`]). A `run` of a binary the boot does not carry panics
+/// naming this table, and a row naming what the suite did not build panics
+/// before the boot.
+const CARRIES: &[(&str, &[&str])] = &[
+    ("writeback_reopen", &["test_rs_writeback_reopen"]),
+    ("writeback_spawn", &["test_rs_writeback_spawn"]),
+    ("xhci_second_controller", &["test_rs_input_events"]),
+    ("xhci_msi_only", &["test_rs_input_events"]),
+    ("metal_sim_input", &["test_rs_input_events"]),
+    ("xhci_flap", &["test_rs_input_events"]),
+    ("xhci_hotplug", &["test_rs_input_events"]),
+    ("xhci_hid_break", &["test_rs_input_events"]),
+    ("nvme_large_device", &["test_rs_nvme_home_roundtrip"]),
+    ("va_exhaustion", &["test_rs_va_exhaustion"]),
+    ("readdir_bound", &["test_rs_readdir_bound"]),
+    ("mkdir_cap", &["test_rs_mkdir_cap"]),
+    ("fpu_isolation", &["test_rs_fpu_isolation"]),
+    ("gsbase_locked", &["test_rs_gsbase_locked"]),
+    ("sched_check_build", &["test_rs_sched_stress"]),
+    ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
+    ("heap_ceiling_recovery", &["test_rs_heap_ceiling"]),
+    ("cache_eviction", &["test_rs_cache_eviction"]),
+    ("irq_census_conservation", &["test_rs_std_mmap"]),
+    ("i8042_health_cadence", &["test_rs_i8042_keyboard"]),
+    ("i8042_health", &["test_rs_i8042_keyboard"]),
+    ("i8042_fadt_denial", &["test_rs_i8042_keyboard"]),
+    ("i8042_kbd_echo", &["test_rs_i8042_keyboard"]),
+    ("i8042_undecoded_bytes", &["test_rs_i8042_keyboard"]),
+    ("i8042_quarantine", &["test_rs_i8042_keyboard"]),
+    ("i8042_keyboard", &["test_rs_i8042_keyboard"]),
+    ("i8042_no_spurious_wake", &["test_rs_i8042_keyboard"]),
+    ("i8042_mouse", &["test_rs_i8042_mouse"]),
+    ("swiss_german_layout", &["test_rs_locale_gate"]),
+    ("locale_detect", &["test_rs_locale_gate"]),
+    ("locale_detect_unrecognized", &["test_rs_locale_gate"]),
+    ("netd_connection_caps", &["test_rs_netd_caps"]),
+    ("netd_listener_forgery", &["test_rs_netd_listener_forgery"]),
+    ("netd_hostile_peer", &["test_rs_netd_hostile_peer"]),
+    ("launcher_refusals", &["test_rs_launcher_refusals"]),
+    ("spawn_cwd", &["test_rs_spawn_cwd"]),
+    ("input_claim_absent", &["test_rs_input_absent"]),
+    ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
+    ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
+    ("userdev_dma_fault", &["test_rs_handle_basic"]),
+    ("userdev_residue_is_its_own", &["test_rs_userdev_residue"]),
+    (
+        "inspect_reads_its_owners",
+        &["test_rs_inspect_denied", "test_rs_inspect_plays", "test_rs_inventory_bounds"],
+    ),
+    ("metal_sim_compositor", METAL_SIM_CLIENTS),
+    ("metal_sim_scanout_wc", METAL_SIM_CLIENTS),
+    ("metal_sim_window_caps", METAL_SIM_CLIENTS),
+    ("metal_sim_ipc_hostile_peer", METAL_SIM_CLIENTS),
+    ("metal_sim_compositor_stall", METAL_SIM_CLIENTS),
+    ("metal_sim_client_death", METAL_SIM_CLIENTS),
+    ("metal_sim_window_drag", &["test_rs_window_drag"]),
+    ("desktop_window_child", &["test_rs_window_child"]),
+    ("doom_sound_flood", &["test_rs_doom_sound_flood"]),
+    ("doom_music", &["test_rs_doom_music"]),
+    ("soundd_log_stall", &["test_rs_soundd_log_stall"]),
+    ("metal_sim_null_audio", &["test_rs_audio_tone"]),
+    ("null_sink_shipped_client", &["test_rs_null_sink_client_exits"]),
+    ("hda_tone", &["test_rs_audio_tone"]),
+    ("hda_client_stall", &["test_rs_hda_client_stall"]),
+    ("latency_wake", &["test_rs_cyclictest", "test_rs_sched_stress"]),
+    ("smp_failed_ap_leaves_no_hole", &["test_rs_smp_hole_shootdown"]),
+    ("sshd_exec", &["test_rs_empty_dir_stat"]),
+    ("sshd_files", &["test_rs_empty_dir_stat"]),
+    ("sshd_key_auth", &["test_rs_empty_dir_stat"]),
+    ("https_tls13", &["test_rs_https_fetch"]),
+    ("https_tls13_e1000e", &["test_rs_https_fetch"]),
+    ("pkg_install_gbae", &["test_rs_pkg_launch_gbae"]),
+    ("apps_and_home_are_one_filesystem", &["test_rs_hierarchy_paths"]),
+    ("broken_data_volume_is_absent", &["test_rs_home_absent"]),
+    ("data_candidate_with_bad_geometry_is_absent", &["test_rs_home_absent"]),
+    ("home_budget_refusal_retried", &["test_rs_home_fsync_budget"]),
+    ("home_overwrite_reads_back", &["test_rs_home_overwrite_zero"]),
+    ("so_cache_refusals", &["test_rs_so_cache_policy"]),
+    ("boot_volume_metadata_error", &["test_rs_boot_volume_metadata_error"]),
+    ("esp_filesystem", &["test_rs_esp_files"]),
+    ("log_flush_retry", &["test_rs_esp_files"]),
+    ("fat_backing_revoked", &["test_rs_fat_backing_revoked"]),
+    ("fs_dirs_durable", &["test_rs_fs_dirs_durable"]),
+    ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
+    ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
+    ("ftruncate_flush_race", &["test_rs_ftruncate_flush_race", "test_rs_fs_rename_durable"]),
+    ("log_backing_read_error", &["test_rs_log_volume_reread"]),
+    ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
+    ("writeback_durability", &["test_rs_writeback_durability", "test_rs_fat_backing_revoked"]),
+    ("kernel_log_file", &["test_rs_writeback_durability"]),
+    ("double_fault_stack", &["test_rs_test_panic_child"]),
+    ("idle_stack_guard", &["test_rs_test_panic_child"]),
+    ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
+    ("dump_nmi_probe", &["test_rs_dump_stage_load"]),
+    ("syscall_window_nmi", &["test_rs_nmi_window_spin"]),
+    ("syscall_window_nmi_controls", &["test_rs_nmi_window_spin"]),
+    ("partition_claim", &["test_rs_partition_claimant"]),
+    ("partition_claim_gives_up", &["test_rs_partition_claimant"]),
+    ("partition_claim_departure", &["test_rs_partition_claimant"]),
+    ("log_program_line", &["test_rs_log_origin"]),
+    ("log_program_forgery", &["test_rs_log_forger"]),
+    ("log_program_flood", &["test_rs_log_flood"]),
+    ("log_program_line_after_its_records", &["test_rs_log_hold"]),
+    ("log_carrier_forgery", &["test_rs_log_carrier_forger"]),
+    ("log_stream", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
+    ("log_stream_e1000e", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
+    ("log_stream_stalled_reader", &["test_rs_log_flood"]),
+    ("console_line_atomicity", &["test_rs_console_line_atomicity"]),
+    ("c_capture_ignores_daemon_lines", &["test_c_71_macro_empty_arg"]),
+    ("quiesce_stops_the_machine", &["test_rs_quiesce_writers"]),
+    ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
+    ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
+    ("quiesce_wakes_on_the_last_exit", &["test_rs_quiesce_last"]),
+    ("quiesce_dump_holds_the_stopped", &["test_rs_quiesce_writers"]),
+    ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
+    ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
+    ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),
+    ("swap_fault_tells_its_holder", &["test_rs_swap_claim_astray"]),
+    ("swap_resets_the_function", &["test_rs_swap_flr_probe"]),
+    ("swap_not_inherited", &["test_rs_swap_probe"]),
+    ("wall_clock_file", &["test_rs_wall_clock_now"]),
+    ("wall_clock_rtc_dead", &["test_rs_wall_clock_now"]),
+    ("wall_clock_rtc_unstable", &["test_rs_wall_clock_now"]),
+    ("wall_clock_no_century", &["test_rs_wall_clock_now"]),
+    ("wall_clock_century_register", &["test_rs_wall_clock_now"]),
+    ("wall_clock_zone", &["test_rs_wall_clock_now"]),
+    ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
+    ("screen_console_scroll", &["test_rs_test_screen_churn"]),
+    ("screen_console_panic", &["test_rs_test_panic_child"]),
+    ("screen_fatal_halt", &["test_rs_test_panic_child"]),
+    ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
+    ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
+];
+
+/// The clients every `tests/metalcase` desktop boot carries: the group shares
+/// one boot, so each member's row names them all.
+const METAL_SIM_CLIENTS: &[&str] = &[
+    "test_rs_window_caps",
+    "test_rs_ipc_hostile_peer",
+    "test_rs_compositor_stall",
+    "test_rs_compositor_client_death",
+];
+
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
 /// boots each one needs, and how each is judged off the log the stick came back
 /// with.
@@ -3564,11 +3714,13 @@ fn measure_audio_run(
     };
     // Bounds every duration soundd can report: its whole life is inside this
     // process's. See `audio::check_physical`.
+    let job = format!("test_rs_{name}");
+    let carried = qemu::carrying(c_bins, rust_bins, [job.as_str()]);
     let run_start = std::time::Instant::now();
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
-        c_bins,
-        rust_bins,
+        &carried.c,
+        &carried.rust,
         BootOptions {
             smp,
             kernel_params: if SLOW_USB.load(std::sync::atomic::Ordering::Relaxed) {
@@ -3580,7 +3732,7 @@ fn measure_audio_run(
         },
     );
 
-    let result = qemu.run_test(&format!("test_rs_{name}"), Duration::from_secs(30));
+    let result = qemu.run_test(&job, Duration::from_secs(30));
     if let Some(err) = &result.error {
         return Err(err.to_string());
     }
@@ -18215,6 +18367,12 @@ struct Bins<'a> {
     rust_bins: &'a [(String, Vec<u8>)],
 }
 
+/// What a task's boots carry: its members' [`CARRIES`] rows, unioned.
+fn carried_by(names: &[&str], bins: &Bins<'_>) -> qemu::Carried {
+    let rows = CARRIES.iter().filter(|(test, _)| names.contains(test));
+    qemu::carrying(bins.c_bins, bins.rust_bins, rows.flat_map(|(_, carries)| carries.iter().copied()))
+}
+
 fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Outcome>) {
     // Both clocks, at every test, because what the host did *between* two of
     // them is a different question from what it did during one: a lid closed
@@ -18229,6 +18387,15 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
     };
     match task {
         Task::Shared(tests, features) => {
+            let carried =
+                qemu::carrying(bins.c_bins, bins.rust_bins, tests.iter().map(|t| t.qemu_name.as_str()));
+            let bytes: usize = carried.c.iter().chain(&carried.rust).map(|(_, data)| data.len()).sum();
+            eprintln!(
+                "  [shared] {} test(s) on {features:?}, carrying {} binaries, {} MiB",
+                tests.len(),
+                carried.c.len() + carried.rust.len(),
+                bytes >> 20
+            );
             // The boot itself can fail, and it used to take the run with it.
             // Reporting the block's tests against its reason keeps the count
             // honest and says which one it died on.
@@ -18243,8 +18410,8 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
                 let boot = |_: qemu::LaneFree| {
                     QemuInstance::boot_with_options(
                         bins.test_config,
-                        bins.c_bins,
-                        bins.rust_bins,
+                        &carried.c,
+                        &carried.rust,
                         BootOptions { kernel_features: features, smp, ..Default::default() },
                     )
                 };
@@ -18317,13 +18484,14 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
             }
         }
         Task::Machine(names) => {
+            let carried = carried_by(&names, bins);
             // Dropped with the task, so no group's guest outlives the worker
             // that booted it.
             let mut held: Grouped = None;
             for name in names {
                 let start = common::clock::mark();
                 let outcome = catching(|| {
-                    run_machine_test(name, bins.test_config, bins.c_bins, bins.rust_bins, &mut held)
+                    run_machine_test(name, bins.test_config, &carried.c, &carried.rust, &mut held)
                 });
                 // **A member that failed does not hand its guest on.** The
                 // shared block answers a boot that stopped answering with a new
@@ -18345,9 +18513,10 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
             }
         }
         Task::Screen(name) => {
+            let carried = carried_by(&[name], bins);
             let start = common::clock::mark();
             let outcome =
-                catching(|| run_screen_test(name, bins.test_config, bins.c_bins, bins.rust_bins));
+                catching(|| run_screen_test(name, bins.test_config, &carried.c, &carried.rust));
             send(name.to_string(), outcome.err(), start);
         }
     }
@@ -18940,6 +19109,14 @@ fn the_metal_gates_refuse_what_they_name() -> Result<(), String> {
 
 fn check_registration() {
     check_metal_registration();
+    let mut rows: BTreeSet<&str> = BTreeSet::new();
+    for (test, _) in CARRIES {
+        assert!(rows.insert(test), "CARRIES has two rows for {test}");
+        assert!(
+            MACHINE_TESTS.iter().chain(SCREEN_TESTS).any(|(name, _, _)| name == test),
+            "CARRIES has a row for {test}, which no MACHINE_TESTS or SCREEN_TESTS entry registers"
+        );
+    }
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for name in MACHINE_TESTS
         .iter()
@@ -19254,6 +19431,11 @@ fn main() {
     let all_tests = build_test_registry(&rust_bins, &c_compiled);
     check_no_collisions(&all_tests);
     check_metal_only_unshared(&rust_bins, &c_bins);
+    // Every row against the catalogue before any boot, so a name the suite did
+    // not build is refused here and not by whichever worker reaches it.
+    for (_, names) in CARRIES {
+        qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
+    }
     check_shard_partition(&all_tests);
     // Every name this process could produce a verdict for, which is what a
     // quarantine row has to be one of. Taken before the filter, so a filtered
@@ -19367,8 +19549,9 @@ fn main() {
         let actuator_count =
             tests_to_run.iter().filter(|t| ACTUATOR_TESTS.contains(&t.name.as_str())).count();
         eprintln!(
-            "[toyos] The shared boot carries {} C + {} Rust binaries: {} on the shipping \
+            "[toyos] The shared boots run {} of {} C + {} Rust binaries: {} on the shipping \
              kernel, {} on the actuator one",
+            tests_to_run.len(),
             c_bins.len(),
             rust_bins.len(),
             tests_to_run.len() - actuator_count,

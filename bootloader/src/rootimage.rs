@@ -280,8 +280,8 @@ impl<'a> Disk<'a> {
     /// timeout and says nothing while it runs, so a firmware driver that stalls
     /// holds this loader until the firmware watchdog `main` armed at entry
     /// resets the machine, if the firmware honours it. What shows where it
-    /// stopped is the `ROOT: reading` line before the read and the attempt count
-    /// the next pass reads.
+    /// stopped is the `ROOT: candidate` line before the read and the attempt
+    /// count the next pass reads.
     fn read_filesystem(&mut self, bs: &BootServices, part: &Partition, blocks: u64) -> RootImage {
         let Some(len) = blocks.checked_mul(BLOCK as u64) else {
             refuse(format_args!("ROOT's filesystem states {blocks} blocks, which is no byte length"));
@@ -300,14 +300,6 @@ impl<'a> Disk<'a> {
         // Chunks are whole `BLOCK`s from a page-aligned buffer, so each one
         // keeps the `IoAlign` `open` checked against `BLOCK`.
         let chunk = chunk::chunk_bytes(CHUNK_BOUND, BLOCK, self.lba_bytes, granularity.unwrap_or(0));
-        println!(
-            "ROOT: reading {len} bytes at LBA {}+{lbas}, {chunk} bytes a request (optimal granularity: {})",
-            part.first_lba,
-            match granularity {
-                Some(lbas) => alloc::format!("{lbas} block(s)"),
-                None => alloc::string::String::from("not reported"),
-            }
-        );
         let began = tsc();
         let mut device = Firmware { io: &self.io, media_id: self.media_id };
         let read = chunk::read(&mut device, part.first_lba, self.lba_bytes, chunk, into);
@@ -321,7 +313,14 @@ impl<'a> Disk<'a> {
             ));
         }
         let took = tsc().wrapping_sub(began);
-        println!("{} {at:#x}+{len:#x} in {took} TSC cycles", READ_AT);
+        println!(
+            "{READ_AT} {at:#x}+{len:#x} from LBA {}+{lbas}, {chunk} bytes a request (optimal granularity: {}), in {took} TSC cycles",
+            part.first_lba,
+            match granularity {
+                Some(lbas) => alloc::format!("{lbas} block(s)"),
+                None => alloc::string::String::from("not reported"),
+            }
+        );
         RootImage { at, len, partition: part.unique_guid.0 }
     }
 
