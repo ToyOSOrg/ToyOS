@@ -1442,9 +1442,9 @@ dependencies = [
 
 [[package]]
 name = "toyos"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
- "toyos-abi 0.10.0",
+ "toyos-abi 0.11.0",
 ]
 
 [[package]]
@@ -1461,7 +1461,7 @@ checksum = "ec119a115b619cec7ca5e56858e98db6558658d6cc9b400906187e62f2877f48"
 
 [[package]]
 name = "toyos-abi"
-version = "0.10.0"
+version = "0.11.0"
 
 [[package]]
 name = "toyos-font"
@@ -1489,8 +1489,8 @@ dependencies = [
  "rustls-pki-types",
  "rustls-rustcrypto",
  "sha2",
- "toyos 0.11.0",
- "toyos-abi 0.10.0",
+ "toyos 0.12.0",
+ "toyos-abi 0.11.0",
  "toyos-i219",
  "toyos-quiesce",
  "toyos-tco",
@@ -1505,10 +1505,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-window"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
- "toyos 0.11.0",
- "toyos-abi 0.10.0",
+ "toyos 0.12.0",
+ "toyos-abi 0.11.0",
  "toyos-font",
  "toyos-keymap",
 ]
