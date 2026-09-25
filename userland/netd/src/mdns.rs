@@ -89,3 +89,33 @@ impl Responder {
 fn send(socket: &mut udp::Socket, bytes: &[u8], to: IpEndpoint) {
     let _ = socket.send_slice(bytes, to);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smoltcp::iface::SocketSet;
+
+    const LINK: Link = Link { addr: [10, 0, 2, 15], prefix: 24 };
+
+    /// A `Responder` over a socket taken from a set of its own — `wake_in`
+    /// touches neither, only `record` and `born`.
+    fn responder() -> Responder {
+        let buffer = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0u8; 64]);
+        let mut set = SocketSet::new(Vec::new());
+        let handle = set.add(udp::Socket::new(buffer(), buffer()));
+        Responder { handle, record: toyos_mdns::Responder::new(Host::new("t14").unwrap()), born: Instant::now() }
+    }
+
+    /// **A wake is asked for exactly what the record owes.** Nothing before
+    /// an address is held; the §8.3 second announcement's own instant once
+    /// `on` schedules it. A responder that never asks for this wake answers a
+    /// query §6 held back only on some other, unrelated one.
+    #[test]
+    fn wake_in_asks_for_what_the_record_owes_and_nothing_else() {
+        let mut r = responder();
+        assert_eq!(r.wake_in(r.born), None, "nothing is owed before an address is held");
+        r.record.on(Some(LINK), 0);
+        let owed_ms = r.record.owed_at().expect("§8.3 owes the second announcement");
+        assert_eq!(r.wake_in(r.born), Some(Duration::from_millis(owed_ms)));
+    }
+}

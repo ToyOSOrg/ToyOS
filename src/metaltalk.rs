@@ -342,6 +342,19 @@ fn serve(peer: &Peer, shared: &Shared, mut out: std::fs::File, echo: bool, mut u
     }
 }
 
+/// Count one dial `again` turned away with no connection, against the same
+/// ceiling a refusal counts against; `None` on the first dial, whose failure
+/// is answered rather than retried, so nothing here is counted twice.
+fn count_or_give_up(shared: &Shared, again: bool, last: &str) -> Option<String> {
+    if !again {
+        return None;
+    }
+    let mut state = shared.state.lock().expect("the stream's state");
+    state.turned_away += 1;
+    state.turned_since_redial += 1;
+    (state.turned_since_redial >= state.ceiling).then(|| past_ceiling(&state, last))
+}
+
 /// The connection, or why there is none by `until`. `again` asks a refusal
 /// again rather than answering with it.
 fn open(peer: &Peer, until: Instant, again: bool, shared: &Shared) -> Result<TcpStream, String> {
@@ -362,6 +375,9 @@ fn open(peer: &Peer, until: Instant, again: bool, shared: &Shared) -> Result<Tcp
                     }
                     Err(e) => {
                         last = format!("{host} did not resolve: {e}");
+                        if let Some(why) = count_or_give_up(shared, again, &last) {
+                            return Err(why);
+                        }
                         continue;
                     }
                 }
@@ -373,11 +389,8 @@ fn open(peer: &Peer, until: Instant, again: bool, shared: &Shared) -> Result<Tcp
                 Ok(conn) => return Ok(conn),
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused && again => {
                     last = format!("{at} refused the connection: {e}");
-                    let mut state = shared.state.lock().expect("the stream's state");
-                    state.turned_away += 1;
-                    state.turned_since_redial += 1;
-                    if state.turned_since_redial >= state.ceiling {
-                        return Err(past_ceiling(&state, &last));
+                    if let Some(why) = count_or_give_up(shared, again, &last) {
+                        return Err(why);
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
@@ -392,7 +405,12 @@ fn open(peer: &Peer, until: Instant, again: bool, shared: &Shared) -> Result<Tcp
                 Err(e) if asked.elapsed() < WAITED && !again => {
                     return Err(format!("{at} cannot be reached from this host: {e}"));
                 }
-                Err(e) => last = format!("{at} did not answer: {e}"),
+                Err(e) => {
+                    last = format!("{at} did not answer: {e}");
+                    if let Some(why) = count_or_give_up(shared, again, &last) {
+                        return Err(why);
+                    }
+                }
             }
         }
     }
@@ -1203,6 +1221,38 @@ mod tests {
         let why = stream.unopened().expect("the redial gave up within 5 s of its 60 and said why");
         assert!(why.contains("ceiling") && why.contains("refused"), "{why}");
         assert_eq!(stream.turned_away(), CEILING, "every refused dial, and no more");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A redial counts a dial that closes before a line, not only a
+    /// refusal, and gives up at its ceiling.** The listener admits every
+    /// connection and drops it before a byte, as a swapped netd's own
+    /// listener does while nothing on the machine side has yet queued a
+    /// line: each is turned away and counted, and the redial ends at its
+    /// ceiling rather than spinning until its time bound.
+    #[test]
+    fn a_redial_counts_every_close_before_a_line_and_gives_up_at_its_ceiling() {
+        const CEILING: usize = 3;
+        let dir = std::env::temp_dir().join(format!("metaltalk-closed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
+            .expect("a loopback reader");
+        let mut first = accepted(&server, "the first dial");
+        writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
+        assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
+        let dropper = server.try_clone().unwrap();
+        std::thread::spawn(move || {
+            while let Ok((conn, _)) = dropper.accept() {
+                drop(conn);
+            }
+        });
+        stream.redial(Duration::from_secs(60), CEILING);
+        assert_eq!(stream.wait_for_connection(1, Duration::from_secs(5)), None, "every dial closed before a line");
+        let why = stream.unopened().expect("the redial gave up within 5 s of its 60 and said why");
+        assert!(why.contains("ceiling") && why.contains("ended before a line"), "{why}");
+        assert_eq!(stream.turned_away(), CEILING, "every closed dial, and no more");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

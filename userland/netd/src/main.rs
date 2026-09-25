@@ -1606,7 +1606,6 @@ fn main() {
             None => u64::MAX,
             Some(n) => n,
         };
-        // The second announcement of a new address is a wake of its own.
         let timeout = match mdns.wake_in(Instant::now()) {
             Some(left) => timeout.min(left.as_nanos() as u64),
             None => timeout,

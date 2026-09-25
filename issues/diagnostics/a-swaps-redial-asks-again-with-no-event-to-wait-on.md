@@ -18,9 +18,9 @@ that is a `getaddrinfo` and a `connect` per round trip for the whole gap.
 What bounds it: every dial turned away is counted, refusals included
 (`Stream::turned_away`), and a redial gives up at
 `metalswap::TURNED_AWAY_CEILING`, which the swap's judge reds on by name
-(`a_redial_counts_every_refusal_and_gives_up_at_its_ceiling`). Measured in
-QEMU, 6 dials turned away per swap of netd; the T14 is unmeasured, and a
-refusal there costs a LAN round trip rather than QEMU's forward's.
+(`a_redial_counts_every_refusal_and_gives_up_at_its_ceiling`). The T14 is
+unmeasured, and a refusal there costs a LAN round trip rather than QEMU's
+forward's.
 
 ## Exit condition
 

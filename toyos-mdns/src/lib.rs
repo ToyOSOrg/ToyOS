@@ -263,7 +263,7 @@ impl<'a> Responder<'a> {
         if !unicast {
             let free_ms = self.last_group_ms.map_or(now_ms, |last| last.saturating_add(GROUP_EVERY_MS));
             if now_ms < free_ms {
-                self.owed_ms = Some(self.owed_ms.map_or(free_ms, |at| at.min(free_ms)));
+                self.owed_ms = Some(free_ms);
                 return None;
             }
             self.last_group_ms = Some(now_ms);
