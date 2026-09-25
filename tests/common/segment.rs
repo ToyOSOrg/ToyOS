@@ -59,7 +59,8 @@ impl Tap {
     }
 
     /// Stand on the segment of a guest booted with this tap. QEMU made both
-    /// sockets before the machine ran, so both connects answer at once.
+    /// sockets before the machine ran, so both connects answer at once; a frame
+    /// the guest sent before them is not seen, and QEMU says so on its stderr.
     pub fn open(&self) -> Result<Segment, String> {
         let connect = |path: &PathBuf| {
             UnixStream::connect(path).map_err(|e| format!("connect to QEMU's {}: {e}", path.display()))

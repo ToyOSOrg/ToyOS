@@ -93,7 +93,6 @@ mod store;
 mod wall;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::ThreadId;
 use std::time::Instant;
@@ -156,9 +155,7 @@ struct Own {
     /// since it is the thread that takes them.
     main: OnceLock<ThreadId>,
     mine: Mutex<Vec<(u64, String)>>,
-    /// Every other thread's, to [`THEIRS_LINES`], and how many found it full.
-    theirs: Mutex<VecDeque<(u64, String)>>,
-    unsaid: AtomicU64,
+    theirs: Mutex<Theirs>,
     /// Rung after a push onto `theirs`, so a parked main loop wakes for it.
     bell: OnceLock<Pipe>,
 }
@@ -166,10 +163,37 @@ struct Own {
 static OWN: Own = Own {
     main: OnceLock::new(),
     mine: Mutex::new(Vec::new()),
-    theirs: Mutex::new(VecDeque::new()),
-    unsaid: AtomicU64::new(0),
+    theirs: Mutex::new(Theirs::new()),
     bell: OnceLock::new(),
 };
+
+/// Every thread's lines but the main loop's, to [`THEIRS_LINES`], and how
+/// many found it full.
+struct Theirs {
+    lines: VecDeque<(u64, String)>,
+    unsaid: u64,
+}
+
+impl Theirs {
+    const fn new() -> Self {
+        Self { lines: VecDeque::new(), unsaid: 0 }
+    }
+
+    /// Whether `line` was queued: past the bound it is counted instead.
+    fn push(&mut self, at_ns: u64, line: String) -> bool {
+        if self.lines.len() >= THEIRS_LINES {
+            self.unsaid += 1;
+            return false;
+        }
+        self.lines.push_back((at_ns, line));
+        true
+    }
+
+    /// Every line queued, and how many went unsaid, since the last take.
+    fn take(&mut self) -> (VecDeque<(u64, String)>, u64) {
+        (std::mem::take(&mut self.lines), std::mem::replace(&mut self.unsaid, 0))
+    }
+}
 
 /// `say!`'s one step, stamped as it is said, and never a wait: a push, and
 /// from any thread but the main loop's a nonblocking byte on the bell.
@@ -179,13 +203,8 @@ fn said(line: String) {
         OWN.mine.lock().expect("logd: its own lines are poisoned").push((at_ns, line));
         return;
     }
-    {
-        let mut theirs = OWN.theirs.lock().expect("logd: its own lines are poisoned");
-        if theirs.len() >= THEIRS_LINES {
-            OWN.unsaid.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        theirs.push_back((at_ns, line));
+    if !OWN.theirs.lock().expect("logd: its own lines are poisoned").push(at_ns, line) {
+        return;
     }
     let bell = OWN.bell.get().expect("logd: a thread other than the main loop exists only after the bell");
     match bell.write_nonblock(&[1]) {
@@ -207,8 +226,8 @@ fn own_lines(bell: &Pipe, boot_local: Option<u64>, round: &mut Round) {
         }
     }
     let mut lines = std::mem::take(&mut *OWN.mine.lock().expect("logd: its own lines are poisoned"));
-    lines.extend(OWN.theirs.lock().expect("logd: its own lines are poisoned").drain(..));
-    let unsaid = OWN.unsaid.swap(0, Ordering::Relaxed);
+    let (queued, unsaid) = OWN.theirs.lock().expect("logd: its own lines are poisoned").take();
+    lines.extend(queued);
     if unsaid > 0 {
         lines.push((
             toyos_abi::syscall::clock_nanos(),
@@ -830,5 +849,26 @@ pub(crate) fn stamp(boot_local: Option<u64>, at_ns: u64) -> String {
         // columns line up and nothing has to be re-parsed to notice that a
         // machine had no clock.
         None => "---------- --------".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A LAN host cannot grow logd by connecting.** Each connection is a
+    /// line or two from a reader thread; past [`THEIRS_LINES`] a line is
+    /// counted and not kept, the first lines stay, and a take empties both.
+    #[test]
+    fn a_thread_line_past_the_bound_is_counted_and_not_kept() {
+        let mut theirs = Theirs::new();
+        let pushed: Vec<bool> = (0..THEIRS_LINES + 5).map(|i| theirs.push(i as u64, format!("line {i}"))).collect();
+        assert!(pushed[..THEIRS_LINES].iter().all(|&kept| kept));
+        assert!(pushed[THEIRS_LINES..].iter().all(|&kept| !kept));
+        let (lines, unsaid) = theirs.take();
+        assert_eq!((lines.len(), unsaid), (THEIRS_LINES, 5));
+        assert_eq!(lines.back().map(|(_, l)| l.as_str()), Some(format!("line {}", THEIRS_LINES - 1).as_str()));
+        let (lines, unsaid) = theirs.take();
+        assert_eq!((lines.len(), unsaid), (0, 0), "a take empties the queue and the count");
     }
 }

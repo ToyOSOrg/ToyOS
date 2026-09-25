@@ -66,7 +66,9 @@ pub fn line(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     }
     let file = logstream::shut_down(guest, &mut console, &staged)?;
     serial::Serial::named("the boot", console.as_str()).must_be_clean()?;
-    reader.wait_ended(Duration::from_secs(60));
+    if !reader.wait_ended(Duration::from_secs(60)) {
+        return Err("the reader's connection had not ended once the guest was down".to_string());
+    }
 
     let log = file.concat();
     let under = |name: &str, text: &str| -> Result<(), String> {
@@ -297,7 +299,9 @@ pub fn carrier_forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u
         return Err(format!("the served log never carried {CARRIER_FORGED:?}"));
     }
     let file = logstream::shut_down(guest, &mut console, &staged)?;
-    reader.wait_ended(Duration::from_secs(60));
+    if !reader.wait_ended(Duration::from_secs(60)) {
+        return Err("the reader's connection had not ended once the guest was down".to_string());
+    }
     let log = file.concat();
     if !bootlog::lines_of(&log, RUNNER).lines().any(|l| l == CARRIER_FORGED) {
         return Err(format!("/log carries no {CARRIER_FORGED:?} under {RUNNER:?}: nothing was forged"));

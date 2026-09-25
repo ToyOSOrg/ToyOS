@@ -8,11 +8,10 @@
 //! thread with an offset into it. So the same text reaches `/log` and every
 //! reader, in the same order, and nothing a reader does can reach the file.
 //!
-//! **A reader holds a slot only while it takes bytes.** One that takes none
-//! for [`STALLED`] while bytes are owed to it — a zero window, a peer that
-//! vanished — is let go, and that is a line in the log. The network's readers
-//! and this machine's are counted apart, so no number of network peers can
-//! take the console's slot.
+//! A reader that takes none for [`STALLED`] while bytes are owed to it — a
+//! zero window, a peer that vanished — is let go, and that is a line in the
+//! log. The network's readers and this machine's are counted apart, so no
+//! number of network peers can take the console's slot.
 //!
 //! **A reader that is caught up waits on the replay growing**, and nothing
 //! else wakes it: there is no poll and no timer.

@@ -12,7 +12,7 @@
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use toyos_build::metaltalk::{Peer, Stream};
 
@@ -101,22 +101,10 @@ pub fn reader(port: u16, file: &str) -> Result<Stream, String> {
     Ok(stream)
 }
 
-/// Shut the guest down and read what it left on its volume.
-pub fn shut_down(
-    mut guest: QemuInstance,
-    console: &mut String,
-    staged: &Staged,
-) -> Result<Vec<String>, String> {
-    writeln!(guest.stdin_mut(), "run shutdown").map_err(|e| format!("write to QEMU stdin: {e}"))?;
-    guest.flush_stdin();
-    console.push_str(&guest.drain_serial(Duration::from_secs(20)));
-    drop(guest);
-    for bad in ["PANIC:", "panicked at"] {
-        if console.contains(bad) {
-            return Err(format!("{bad:?} on the way down\n{console}"));
-        }
-    }
-    volumes::whole_log(&staged.image, staged.start, staged.len)
+/// Shut the guest down, wait for QEMU to exit, and read what it left on its
+/// volume.
+pub fn shut_down(guest: QemuInstance, console: &mut String, staged: &Staged) -> Result<Vec<String>, String> {
+    shut_down_keeping(guest, console, staged, |_| ()).map(|(file, ())| file)
 }
 
 /// [`shut_down`], with `keep` handed the guest once QEMU has exited and before
@@ -214,7 +202,9 @@ pub fn stream(
     }
 
     let file = shut_down(guest, &mut console, &staged)?;
-    stream.wait_ended(CEILING);
+    if !stream.wait_ended(CEILING) {
+        return Err("the reader's connection had not ended once the guest was down".to_string());
+    }
     let received = stream.lines();
     is_prefix_of(&received, &file)?;
     let whole = received.concat();
@@ -275,20 +265,34 @@ pub fn stalled_reader(
     }
     console.push_str(&flood.before);
     console.push_str(&flood.serial);
-    let waited = qemu::await_guest(&mut guest, &mut console, "logd to let every stalled reader go", |log| {
-        log[from.min(log.len())..].matches(LET_GO).count() >= NETWORK_READERS
-    });
-    if let Err(why) = waited {
-        let seen = console[from.min(console.len())..].matches(LET_GO).count();
-        let file = shut_down(guest, &mut console, &staged)?;
-        let said: Vec<&String> = file.iter().filter(|l| l.contains("logd: ")).collect();
+    // Every stalled reader's writes stopped being taken during the flood, whose
+    // five megabytes outrun every buffer between it and logd, so each let-go is
+    // owed `STALLED_SECS` after the flood's end at the latest. Twice that,
+    // widened by this host, is logd's promise judged; a guest that stays quiet
+    // past it has broken the promise, which is this test's verdict and not a
+    // stall of the harness.
+    let flood_ended = Instant::now();
+    let deadline = flood_ended + guest.budget(Duration::from_secs(2 * STALLED_SECS));
+    let seen = |console: &str| console[from.min(console.len())..].matches(LET_GO).count();
+    while seen(&console) < NETWORK_READERS {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let more = guest.drain_until(left, |line| line.contains(LET_GO));
+        console.push_str(&more);
+    }
+    let let_go = seen(&console);
+    if let_go < NETWORK_READERS {
+        let waited = flood_ended.elapsed().as_secs();
+        let said = match shut_down(guest, &mut console, &staged) {
+            Ok(file) => file.iter().filter(|l| l.contains("logd: ")).cloned().collect::<String>(),
+            Err(why) => format!("none read: {}", why.lines().next().unwrap_or("")),
+        };
         return Err(format!(
-            "logd let {seen} of the {NETWORK_READERS} readers that stopped reading go, and owes it \
-             {} s after their writes stop being taken, and its guard ran out waiting ({}); /log's logd \
-             lines:\n{}",
-            STALLED_SECS,
-            why.replace(qemu::STALLED, "").trim(),
-            said.iter().map(|l| l.as_str()).collect::<String>()
+            "logd let {let_go} of the {NETWORK_READERS} readers that stopped reading go in the {waited} s \
+             after the flood ended, and owes each one {STALLED_SECS} s after its writes stop being \
+             taken; /log's logd lines:\n{said}"
         ));
     }
     let second = reader(port, "logstream-stalled-second.txt")?;
@@ -301,7 +305,9 @@ pub fn stalled_reader(
     }
     let file = shut_down(guest, &mut console, &staged)?;
     drop(stalled);
-    second.wait_ended(CEILING);
+    if !second.wait_ended(CEILING) {
+        return Err("the reader's connection had not ended once the guest was down".to_string());
+    }
     let received = second.lines();
     is_prefix_of(&received, &file)?;
     let floods = received.iter().filter(|l| l.contains("} flood ")).count();
