@@ -27,6 +27,7 @@ dependencies = [
  "toyos-acpi",
  "toyos-blackbox",
  "toyos-bootmap",
+ "toyos-chunkread",
  "toyos-elf",
  "toyos-gpt",
  "toyos-tco",
@@ -124,6 +125,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-bootmap"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-chunkread"
 version = "0.1.0"
 
 [[package]]

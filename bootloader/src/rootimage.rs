@@ -23,7 +23,7 @@ use toyos_gpt::{Guid, Partition, Sectors};
 use uefi::prelude::*;
 use uefi::proto::device_path::{DevicePath, DevicePathNode, DeviceSubType, DeviceType};
 use uefi::proto::loaded_image::LoadedImage;
-use uefi::proto::media::block::BlockIO;
+use uefi::proto::media::block::{BlockIO, BlockIoProtocol};
 use uefi::table::boot::{AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
 
 /// The unit ROOT's filesystem is written in, and the alignment every buffer
@@ -33,6 +33,20 @@ const BLOCK: usize = 4096;
 /// How many TOYOS-ROOT partitions the boot disk may offer: the two slots of a
 /// self-updating machine, with room to name a third in the refusal.
 const MAX_CANDIDATES: usize = 4;
+
+/// The most one firmware read of ROOT asks for.
+///
+/// Block I/O reports no largest request it serves, so this is the loader's
+/// choice and not a limit read off the media. 1 MiB keeps every request inside
+/// one SCSI READ(10) at 512-byte blocks (SBC-3: a 16-bit count, 65535 blocks),
+/// so a mass-storage driver that does not split has a legal command, and keeps
+/// any bounce buffer a driver maps for DMA at that size rather than ROOT's; and
+/// a stop is located to within 1 MiB.
+const CHUNK_BOUND: usize = 1 << 20;
+
+/// UEFI 2.11 §13.9's `EFI_BLOCK_IO_PROTOCOL_REVISION3`, the first whose media
+/// carries `OptimalTransferLengthGranularity`.
+const BLOCK_IO_REVISION3: u64 = 0x0002_001F;
 
 /// The line a read ROOT is reported on, with where it went and what it cost.
 pub const READ_AT: &str = "ROOT: read into memory at";
@@ -230,7 +244,15 @@ impl<'a> Disk<'a> {
         Superblock::parse(&block).ok().map(|sb| sb.uuid)
     }
 
-    /// The whole of `part`, in one read, into pages the kernel keeps.
+    /// The whole of `part`, in chunks of at most [`CHUNK_BOUND`], into pages
+    /// the kernel keeps, with a line on the console at each tenth.
+    ///
+    /// **Nothing bounds a chunk that never returns.** `ReadBlocks` takes no
+    /// timeout and says nothing while it runs, so a firmware driver that stalls
+    /// holds this loader until the firmware watchdog `main` armed at entry
+    /// resets the machine, if the firmware honours it. What shows where it
+    /// stopped is the last progress line, written to `loader.log` before the
+    /// next chunk is asked for, and the attempt count the next pass reads.
     fn read_partition(&mut self, bs: &BootServices, part: &Partition) -> RootImage {
         let blocks = part.last_lba - part.first_lba + 1;
         let Some(len) = blocks.checked_mul(u64::from(self.lba_bytes)).filter(|len| len.is_multiple_of(BLOCK as u64))
@@ -245,14 +267,62 @@ impl<'a> Disk<'a> {
         // are identity-mapped while boot services live, and nothing else holds them.
         let into = unsafe { core::slice::from_raw_parts_mut(at as *mut u8, len as usize) };
 
-        println!("ROOT: reading {len} bytes at LBA {}+{blocks}", part.first_lba);
+        let granularity = self.granularity_lbas();
+        // Chunks are whole `BLOCK`s from a page-aligned buffer, so each one
+        // keeps the `IoAlign` `open` checked against `BLOCK`.
+        let chunk = toyos_chunkread::chunk_bytes(CHUNK_BOUND, BLOCK, self.lba_bytes, granularity.unwrap_or(0));
+        println!(
+            "ROOT: reading {len} bytes at LBA {}+{blocks}, {chunk} bytes a request (optimal granularity: {})",
+            part.first_lba,
+            match granularity {
+                Some(lbas) => alloc::format!("{lbas} block(s)"),
+                None => alloc::string::String::from("not reported"),
+            }
+        );
         let began = tsc();
-        if let Err(e) = self.io.read_blocks(self.media_id, part.first_lba, into) {
-            refuse(format_args!("the read of {len} bytes at LBA {} failed: {e:?}", part.first_lba));
+        let mut device = Firmware { io: &self.io, media_id: self.media_id };
+        let read = toyos_chunkread::read(&mut device, part.first_lba, self.lba_bytes, chunk, into, |p| {
+            println!("ROOT: {}% read, {} of {len} bytes, {} TSC cycles in", p.tenths * 10, p.read, tsc().wrapping_sub(began));
+        });
+        if let Err(failed) = read {
+            refuse(format_args!(
+                "the read of {} blocks at LBA {} failed: {:?}, after {} of {len} bytes read",
+                failed.blocks,
+                failed.lba,
+                failed.error.status(),
+                failed.read
+            ));
         }
         let took = tsc().wrapping_sub(began);
         println!("{} {at:#x}+{len:#x} in {took} TSC cycles", READ_AT);
         RootImage { at, len, partition: part.unique_guid.0 }
+    }
+
+    /// `OptimalTransferLengthGranularity`, where the media is revision 3 or
+    /// later and so carries the field, and reports a non-zero one.
+    fn granularity_lbas(&self) -> Option<u32> {
+        let io: &BlockIO = &self.io;
+        // SAFETY: uefi 0.26 declares `BlockIO` `repr(transparent)` over
+        // `BlockIoProtocol`, so the one is the other's layout; `revision` is
+        // the field the crate does not expose.
+        let revision = unsafe { &*core::ptr::from_ref(io).cast::<BlockIoProtocol>() }.revision;
+        if revision < BLOCK_IO_REVISION3 {
+            return None;
+        }
+        Some(self.io.media().optimal_transfer_length_granularity()).filter(|&lbas| lbas != 0)
+    }
+}
+
+/// The boot disk as [`toyos_chunkread`] asks for it.
+struct Firmware<'a> {
+    io: &'a BlockIO,
+    media_id: u32,
+}
+
+impl toyos_chunkread::Blocks for Firmware<'_> {
+    type Error = uefi::Error;
+    fn read(&mut self, lba: u64, into: &mut [u8]) -> uefi::Result {
+        self.io.read_blocks(self.media_id, lba, into)
     }
 }
 

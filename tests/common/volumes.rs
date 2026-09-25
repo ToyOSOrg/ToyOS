@@ -3253,6 +3253,79 @@ pub fn root_named_twice(
     Ok(())
 }
 
+/// **A chunk of ROOT the disk will not read refuses the boot, naming that
+/// chunk.** The boot stick fails with EIO every read covering the sector
+/// seven past ROOT's middle, so the chunk that fails is not the first. The
+/// loader reads ROOT in chunks and says each tenth as it lands, so the
+/// refusal names a chunk that holds the sector and starts where the bytes
+/// read before it end, and the tenths before it were said.
+pub fn root_chunk_refused(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let (at, len) = root_extent(&image)?;
+    let first = (at / 512) as u64;
+    let bad = first + (len / 512 / 2) as u64 + 7;
+    let path = test_dir().join("root-chunk-refused.img");
+    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let qemu = qemu::QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            boot_image: Some(qemu::Staged::Written(path.clone())),
+            stick_read_error: Some(bad),
+            ready_marker: ROOT_REFUSED,
+            ..Default::default()
+        },
+    );
+    let log = format!("{}{}", qemu.boot_log(), qemu.uart_log());
+    drop(qemu);
+    let _ = std::fs::remove_file(&path);
+
+    let verdict = log
+        .lines()
+        .find(|l| l.contains(ROOT_REFUSED) && l.contains("the read of "))
+        .map(str::trim)
+        .ok_or_else(|| format!("the loader did not refuse the unreadable chunk:\n{}", volume_lines(&log)))?;
+    let number = |after: &str| -> Result<u64, String> {
+        let rest = verdict.split(after).nth(1).ok_or_else(|| format!("{verdict:?} has no {after:?}"))?;
+        rest.split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| format!("{verdict:?} has no number after {after:?}"))
+    };
+    let blocks = number("the read of ")?;
+    let lba = number(" blocks at LBA ")?;
+    let read = number(", after ")?;
+    if !(lba <= bad && bad < lba + blocks) {
+        return Err(format!("the refusal names LBA {lba}+{blocks}, which does not hold the bad sector {bad}: {verdict}"));
+    }
+    if (lba - first) * 512 != read || read == 0 || blocks * 512 >= len as u64 {
+        return Err(format!(
+            "ROOT at LBA {first}+{} was not read in chunks up to the bad one: {verdict}",
+            len / 512
+        ));
+    }
+    if !verdict.contains("DEVICE_ERROR") {
+        return Err(format!("the refusal does not carry the firmware's status: {verdict}"));
+    }
+    let tenths = read * 10 / len as u64;
+    for tenth in 1..=tenths {
+        let said = format!("ROOT: {}% read, ", tenth * 10);
+        if !log.contains(&said) {
+            return Err(format!("{said:?} was never said before the refusal:\n{}", volume_lines(&log)));
+        }
+    }
+    if log.contains(&format!("ROOT: {}% read, ", (tenths + 1) * 10)) {
+        return Err(format!("a tenth past the failed chunk was said:\n{}", volume_lines(&log)));
+    }
+    eprintln!("  [root] bad sector {bad}: {verdict}");
+    Ok(())
+}
+
 /// The loader's refusal line: the first word a boot whose ROOT is refused
 /// says, and so the marker the boot is waited on.
 const ROOT_REFUSED: &str = "ROOT: REFUSED, ";

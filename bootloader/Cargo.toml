@@ -21,6 +21,9 @@ toyos-elf = { path = "../toyos-elf" }
 # ROOT is picked off the boot disk with the kernel's own readers: the GPT by
 # partition type, and the superblock by the UUID the boot parameter names.
 toyos-gpt = { path = "../toyos-gpt" }
+# ROOT is read in bounded chunks, each said as it lands; the arithmetic is
+# host-tested there.
+toyos-chunkread = { path = "../toyos-chunkread" }
 bcachefs = { path = "../bcachefs", default-features = false }
 toyos-tco = { path = "../toyos-tco" }
 # `alloc`: `variable_keys` and `get_variable_boxed`, which are how the boot

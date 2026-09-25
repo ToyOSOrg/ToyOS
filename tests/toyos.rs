@@ -1346,6 +1346,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // what pushed `port_poll_churn` over its 300 s ceiling twice in a row.
     ("root_candidate_malformed", Sched::Serial, Tier::Fast),
     ("root_named_but_absent", Sched::Serial, Tier::Fast),
+    ("root_chunk_refused", Sched::Serial, Tier::Fast),
     ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
@@ -10536,6 +10537,7 @@ fn run_machine_test(
         "root_named_but_absent" => {
             common::volumes::root_named_but_absent(test_config, c_bins, rust_bins)
         }
+        "root_chunk_refused" => common::volumes::root_chunk_refused(test_config, c_bins, rust_bins),
         "root_named_twice" => {
             common::volumes::root_named_twice(test_config, c_bins, rust_bins)
         }
@@ -12708,7 +12710,7 @@ fn run_machine_test(
         }
         "root_from_memory" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
-            root_from_memory(qemu.boot_log())
+            root_from_memory(qemu.boot_log(), &qemu.uart_log())
         }
         "root_withheld_refused" => {
             let qemu = QemuInstance::boot_with_options(
@@ -19610,7 +19612,14 @@ const ROOT_WITHHELD_REFUSAL: &str =
 /// record at init's spawn counts zero storage commands before it — every NVMe
 /// command and every USB mass-storage command counts, so a ROOT read off a disk
 /// could not leave it at zero. Both precede the first storage driver's line.
-fn root_from_memory(log: &str) -> Result<(), String> {
+/// And the loader said every tenth of ROOT as it read it, on the 16550.
+fn root_from_memory(log: &str, loader: &str) -> Result<(), String> {
+    for tenth in 1..=10 {
+        let said = format!("ROOT: {}% read, ", tenth * 10);
+        if !loader.contains(&said) {
+            return Err(format!("the loader never said {said:?}"));
+        }
+    }
     let mounted = log
         .find(ROOT_MOUNTED_FROM_MEMORY)
         .ok_or_else(|| format!("no {ROOT_MOUNTED_FROM_MEMORY:?} record in the boot log"))?;

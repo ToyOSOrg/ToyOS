@@ -2332,6 +2332,10 @@ pub struct BootOptions {
     /// a driver put on it, which no line the guest prints can be. Refused by
     /// name on a profile with no data disk, where it would record nothing.
     pub usb_pcap: Option<PathBuf>,
+    /// Fail with EIO every read of the boot stick that covers this 512-byte
+    /// sector, through QEMU's `blkdebug` under the stick's raw format: a disk
+    /// error at a place the test chose, which no well-formed image can stage.
+    pub stick_read_error: Option<u64>,
     /// What the emulated RTC reads when the machine starts, as
     /// `YYYY-MM-DDTHH:MM:SS`.
     ///
@@ -2447,6 +2451,7 @@ impl Default for BootOptions {
             boot_image: None,
             usb_images: Vec::new(),
             usb_pcap: None,
+            stick_read_error: None,
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_stream: None,
@@ -4028,6 +4033,20 @@ pub fn profile_argv(options: &BootOptions) -> Vec<String> {
         .collect()
 }
 
+/// The boot stick's backing, as `-drive` keys: the raw image, or the raw image
+/// over `blkdebug` failing every read that covers `read_error` with EIO.
+fn stick_file(image: &Path, read_error: Option<u64>) -> String {
+    match read_error {
+        None => format!("format=raw,file={}", image.display()),
+        Some(sector) => format!(
+            "driver=raw,file.driver=blkdebug,file.inject-error.0.event=read_aio,\
+             file.inject-error.0.sector={sector},file.inject-error.0.errno=5,\
+             file.inject-error.0.once=off,file.image.driver=file,file.image.filename={}",
+            image.display()
+        ),
+    }
+}
+
 fn qemu_command(
     boot_image: &Path,
     nvme_image: &Path,
@@ -4098,8 +4117,8 @@ fn qemu_command(
         ))
         .arg("-drive")
         .arg(format!(
-            "if=none,id=stick,format=raw,file={}{}",
-            boot_image.display(),
+            "if=none,id=stick,{}{}",
+            stick_file(boot_image, options.stick_read_error),
             // **What a `Staged::Pristine` boot is made of.** QEMU keeps this
             // drive's writes in a temporary file and drops it when the guest
             // exits, so the staged image is never written and the boot after it

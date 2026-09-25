@@ -22,6 +22,7 @@ members = [
     "toyos-blackbox",
     "toyos-blockhold",
     "toyos-bootmap",
+    "toyos-chunkread",
     "toyos-cc",
     "toyos-desktop",
     "toyos-dma",
