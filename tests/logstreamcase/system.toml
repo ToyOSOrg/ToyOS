@@ -1,0 +1,28 @@
+# The boot the served log is judged on (`tests/common/logstream.rs`'s
+# `VIRTIO`): netd in front of a virtio NIC, `logd` serving the log through it,
+# and a test-runner that can `run shutdown`, so every verdict is read off a
+# volume the guest closed itself.
+
+[boot]
+start = ["logd", "netd", "test-runner"]
+
+# `receives = ["netd"]` is what lets `logd` serve this boot's log on the
+# network.
+[programs.logd]
+syscap = ["logread"]
+receives = ["netd"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:1af4:1041"]
+
+# `power` is what `run shutdown` needs and `dup` is what carries it to the
+# applet, which test-runner spawns directly.
+[programs.test-runner]
+receives = ["netd"]
+syscap = ["dup", "power"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/shutdown" = "/system/bin/toybox"

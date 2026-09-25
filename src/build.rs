@@ -2734,6 +2734,8 @@ mod tests {
         "tests/logholdcase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",
+        "tests/logstreamcase/system.toml",
+        "tests/logstreame1000case/system.toml",
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",

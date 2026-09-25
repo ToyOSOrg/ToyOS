@@ -40,10 +40,10 @@ pub struct Bench {
 }
 
 pub const VIRTIO: Bench =
-    Bench { profile: qemu::Profile::Headless, config: "tests/netcase", device: "virtio-net" };
+    Bench { profile: qemu::Profile::Headless, config: "tests/logstreamcase", device: "virtio-net" };
 
 pub const E1000E: Bench =
-    Bench { profile: qemu::Profile::E1000e, config: "tests/e1000case", device: "e1000e" };
+    Bench { profile: qemu::Profile::E1000e, config: "tests/logstreame1000case", device: "e1000e" };
 
 /// One boot's image and where its log partition sits inside it.
 pub struct Staged {
