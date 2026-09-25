@@ -74,7 +74,7 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // program whose whole loop is read-then-park.
     ("logread", Rights::LOG.union(Rights::WAIT)),
     // Power the machine off. The largest authority on the list — it ends every
-    // process there is, including the ones that hold the other five — and the
+    // process there is, including the ones that hold every other right here — and the
     // last but one to have been free: `SYS_SHUTDOWN` took no handle at all, so
     // a program endowed exactly one connector could halt the machine with it.
     ("power", Rights::POWER),
@@ -84,6 +84,10 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // every daemon that sizes itself off total memory name nothing here — this
     // is the census alone, and `/system/bin/ps` is what it is for.
     ("roster", Rights::ROSTER),
+    // Read what the machine is made of and who holds each part of it:
+    // `SYS_DEVICE_INVENTORY`'s records. A census of the hardware and of which
+    // program drives what, and `/system/bin/inspect` is what it is for.
+    ("inventory", Rights::INVENTORY),
 ];
 
 /// The whole right set a program's `syscap` list asks for.

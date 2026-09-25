@@ -1,0 +1,9 @@
+[package]
+name = "toyos-inspect"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The inventory records `dev` renders, whose layout the ABI owns.
+toyos-abi = { path = "../toyos-abi" }

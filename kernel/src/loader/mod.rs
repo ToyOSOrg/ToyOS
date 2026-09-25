@@ -902,7 +902,8 @@ pub fn spawn_init() -> Pid {
         .union(Rights::LOG)
         .union(Rights::WAIT)
         .union(Rights::POWER)
-        .union(Rights::ROSTER);
+        .union(Rights::ROSTER)
+        .union(Rights::INVENTORY);
     let cap_handle = handles
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_init: an empty table refused the system capability");

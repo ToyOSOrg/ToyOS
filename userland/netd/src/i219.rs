@@ -145,6 +145,7 @@ pub struct Nic {
     /// its bytes even when there is no descriptor to send them on.
     dropped: RefCell<Vec<u8>>,
     mac: [u8; 6],
+    part: toyos_i219::Part,
     reported: Latch<(toyos_i219::Counters, toyos_i219::Link)>,
 }
 
@@ -257,12 +258,17 @@ impl Nic {
             frames,
             dropped: RefCell::new(vec![0; toyos_i219::TX_BUF_BYTES]),
             mac,
+            part,
             reported: Latch::default(),
         })
     }
 
     pub fn mac(&self) -> [u8; 6] {
         self.mac
+    }
+
+    pub fn part(&self) -> toyos_i219::Part {
+        self.part
     }
 
     /// The claim, for the poller: readable means an interrupt has landed.

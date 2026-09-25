@@ -31,11 +31,16 @@ use crate::client::{
     MAX_CLIPBOARD_BYTES, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
-use crate::stats::FrameStats;
+use crate::stats::{FrameStats, FrameTotals};
 use crate::{
     launcher_apps, CURSOR_PX, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
     FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, STATS_INTERVAL,
 };
+
+const _: () = assert!(
+    toyos_inspect::MAX_SNAPSHOT_BYTES == ipc::MAX_FRAME_LEN as usize,
+    "a snapshot is one frame"
+);
 
 struct Cursors {
     default: sprite::Sprite,
@@ -123,6 +128,8 @@ pub struct Session {
     ready: Vec<u64>,
 
     stats: FrameStats,
+    /// Every window `stats` has reported, summed, for `inspect`.
+    totals: FrameTotals,
     cached_stats: SystemStats,
     prev_busy_ticks: u64,
     prev_total_ticks: u64,
@@ -274,6 +281,7 @@ impl Session {
             dead: Vec::new(),
             ready: Vec::new(),
             stats: FrameStats::default(),
+            totals: FrameTotals::default(),
             cached_stats: SystemStats { used_mb: 0, total_mb: 0, cpu_pct: 0 },
             prev_busy_ticks: 0,
             prev_total_ticks: 0,
@@ -822,6 +830,13 @@ impl Session {
                 // the answer: eight bytes in, sixteen out. Blocking here is a
                 // client filling its own pipe and taking the desktop with it.
                 window::MSG_GET_RESOLUTION => self.answer_resolution(handle),
+                // A connection's first frame, bare, answered and closed with
+                // `frame.conn`; one with a payload, or on a window's
+                // connection, is not this protocol.
+                toyos_inspect::MSG_INSPECT => match frame.conn {
+                    Some(_) if frame.payload().is_empty() => self.answer_inspect(handle),
+                    _ => mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol),
+                },
                 _ => {}
             }
         }
@@ -950,6 +965,24 @@ impl Session {
             window::ResolutionInfo { width: self.fb_info.width, height: self.fb_info.height };
         if ipc::try_send(handle, window::MSG_RESOLUTION_CHANGED, &reply).is_err() {
             mark_dead(&mut self.dead, handle, DropReason::NotReading);
+        }
+    }
+
+    /// `inspect`'s answer: the panel, how many windows there are and may be,
+    /// and every frame composited so far. Counts only, never a title — every
+    /// client holding `compositor` can ask.
+    fn answer_inspect(&mut self, handle: RawHandle) {
+        let mut snap = toyos_inspect::Snapshot::new(toyos_inspect::DISPLAY);
+        snap.put("width", self.fb_info.width);
+        snap.put("height", self.fb_info.height);
+        snap.put("cursor", if self.hw_cursor { "hardware" } else { "software" });
+        snap.put("windows.open", self.stack.len());
+        snap.put("windows.max", self.max_windows);
+        self.totals.plus(&self.stats).inspect(&mut snap);
+        let encoded =
+            snap.encode().unwrap_or_else(|why| panic!("compositor: its snapshot: {why}"));
+        if let Err(e) = ipc::try_send_bytes(handle, toyos_inspect::MSG_SNAPSHOT, &encoded) {
+            mark_dead(&mut self.dead, handle, e.into());
         }
     }
 
@@ -1163,6 +1196,7 @@ impl Session {
                 composed.since(self.reported_composed),
                 self.stack.len(),
             );
+            self.totals.fold(&self.stats);
             self.stats = FrameStats::default();
             self.reported_traffic = traffic;
             self.reported_composed = composed;
@@ -1296,7 +1330,7 @@ fn total_memory() -> u64 {
     let mut buf = [0u8; system::SYSINFO_HEADER_SIZE];
     let n = system::sysinfo(&mut buf);
     assert!(n >= system::SYSINFO_HEADER_SIZE, "sysinfo returned {n} bytes");
-    u64::from_le_bytes(buf[0..8].try_into().unwrap())
+    toyos_abi::syscall::SysinfoHeader::decode(&buf).memory_total
 }
 
 /// The mode a window toggles into when it is maximized by button or chord.

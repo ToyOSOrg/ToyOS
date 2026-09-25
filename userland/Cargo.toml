@@ -11,6 +11,7 @@ members = [
     "files",
     "init",
     "input-test",
+    "inspect",
     "logd",
     "metalprobe",
     "netd",

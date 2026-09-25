@@ -144,6 +144,18 @@ impl DeviceClaim {
         self.reference.with(|claim| claim.partition().cloned()).flatten()
     }
 
+    /// The block device and unique GUID of the partition a partition claim is
+    /// on; `None` for a claim on anything else, and once the last handle has
+    /// let the partition go.
+    pub fn partition_on(&self) -> Option<(crate::block::DeviceId, [u8; 16])> {
+        let unique = match &self.described.lock().info {
+            DeviceInfo::Partition(info) => info.unique_guid,
+            _ => return None,
+        };
+        let device = self.reference.with(|claim| claim.partition().map(|view| view.device_id())).flatten()?;
+        Some((device, unique))
+    }
+
     pub fn info_read(&self) -> bool {
         self.info_read.load(Ordering::Relaxed)
     }

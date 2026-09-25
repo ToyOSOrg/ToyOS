@@ -23,8 +23,9 @@
 //! # Its whole authority
 //!
 //! One `SysCap` duplicate carrying `Rights::LOG | Rights::WAIT`, which its
-//! manifest row asks for by the name `logread`, and one `netd` connector, which
-//! the same row asks for by name. With the first it may read every record every
+//! manifest row asks for by the name `logread`, one `netd` connector, which
+//! the same row asks for by name, and the `log` port's acceptor, which answers
+//! `inspect` and grants nothing. With the first it may read every record every
 //! CPU wrote and park on the readiness source when there is nothing new; the
 //! second is the whole of what stands between the address on the parameter line
 //! and a peer, since that address is inherited by every program on the machine
@@ -32,9 +33,16 @@
 //! compositor connection and can name no process. Writing files is ambient — a
 //! known residual of the capability endowment, and not this program's to close.
 //!
-//! # What it does not do, and why the port is not here
+//! # The `log` port, and the one request it answers
 //!
-//! Its design carries a `log` port with two frame kinds, and **neither has a
+//! It serves `log`, and answers `inspect` there and nothing else: where this
+//! boot's log is going, how much has gone, and what the kernel overwrote before
+//! it was read (`inspect`'s module). That is a thread of its own with the
+//! acceptor, so a reader reaches the file loop through a few published words and
+//! never through a wait. A boot config whose `logd` row serves no `log` has no
+//! reader to answer, and gets no thread.
+//!
+//! Its design carries two more frame kinds on that port, and **neither has a
 //! caller on this tree**:
 //!
 //! - `Register` carries the read ends of a child's stdout and stderr pipes.
@@ -48,10 +56,9 @@
 //!   kernel reads a word instead — shutdown and panic are one mechanism now,
 //!   not two.
 //!
-//! So `serves = ["log"]` is not on its manifest row yet, by the same rule that
-//! keeps `logread` off `/system/bin/console`'s: *a right with no caller is a
-//! capability handed out for a plan*. The acceptor arrives with the first
-//! `Register`.
+//! So neither is read here, by the same rule that keeps `logread` off
+//! `/system/bin/console`'s row: *a right with no caller is a capability handed
+//! out for a plan*.
 //!
 //! # Durability, which is a contract and not a hope
 //!
@@ -90,7 +97,10 @@ mod store;
 mod stream;
 mod wall;
 
+use std::sync::Arc;
 use std::time::Instant;
+
+use toyos::endow;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::log::{LogTail, Record};
@@ -132,6 +142,8 @@ macro_rules! say {
         let _ = std::io::stderr().write_all(line.as_bytes());
     }};
 }
+
+mod inspect;
 
 fn main() {
     let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
@@ -176,6 +188,11 @@ fn main() {
     // program and the first line it writes.
     let stream = Stream::start(std::env::var(toyos_logstream::ENV).ok().as_deref());
 
+    let published = Arc::new(inspect::Published::new(stream.is_some()));
+    if let Some(acceptor) = endow::acceptor(toyos_inspect::LOG.port) {
+        inspect::serve(acceptor, Arc::clone(&published));
+    }
+
     let mut tail = LogTail::new();
     let mut buf = vec![Record::EMPTY; BATCH];
     let poller = Poller::new(1);
@@ -199,6 +216,14 @@ fn main() {
     // rather than once per slow batch.
     let mut degraded = false;
     loop {
+        let state = match (&volume, retrying_since, degraded) {
+            (None, _, _) => inspect::State::ConsoleOnly,
+            (Some(_), Some(_), _) => inspect::State::Retrying,
+            (Some(_), None, true) => inspect::State::Degraded,
+            (Some(_), None, false) => inspect::State::Writing,
+        };
+        published.publish(volume.as_ref(), state, tail.lost());
+
         let batch = match tail.read(&cap, &mut buf) {
             Ok(batch) => batch,
             Err(e) => {

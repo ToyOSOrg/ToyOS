@@ -62,35 +62,36 @@ pub fn over_candidate(
         return None;
     };
 
-    let lba = volume.lba_bytes as u64;
-    let (Some(start), Some(len)) =
-        (volume.start_lba.checked_mul(lba), volume.blocks.checked_mul(lba))
-    else {
-        log!(
-            "{what}: candidate {guid} claims LBA {}+{} of {lba} bytes, which is not a byte range \
-             — refusing it",
-            volume.start_lba,
-            volume.blocks
-        );
-        return None;
-    };
     // Whole device blocks or nothing: a view that began or ended inside one
     // would share it with the table or with the next partition.
-    if start % PAGE != 0 || len % PAGE != 0 {
-        log!(
-            "{what}: candidate {guid} is at {start}+{len} bytes, which is not whole {PAGE}-byte \
-             blocks — refusing it"
-        );
-        return None;
-    }
+    let (first_block, blocks) = match block::span_blocks(volume.start_lba, volume.blocks, volume.lba_bytes) {
+        Ok(span) => span,
+        Err(block::SpanRefused::Overflow) => {
+            log!(
+                "{what}: candidate {guid} claims LBA {}+{} of {} bytes, which is not a byte range \
+                 — refusing it",
+                volume.start_lba,
+                volume.blocks,
+                volume.lba_bytes
+            );
+            return None;
+        }
+        Err(block::SpanRefused::NotWhole { start_bytes, len_bytes }) => {
+            log!(
+                "{what}: candidate {guid} is at {start_bytes}+{len_bytes} bytes, which is not \
+                 whole {PAGE}-byte blocks — refusing it"
+            );
+            return None;
+        }
+    };
     let device_blocks = handle.block_count();
-    let part = match Partition::of(handle, start / PAGE, len / PAGE, block::Holder::Kernel(what)) {
+    let part = match Partition::of(handle, first_block, blocks, block::Holder::Kernel(what)) {
         Ok(part) => part,
         Err(block::ViewRefused::OffDevice) => {
             log!(
-                "{what}: candidate {guid} is at {start}+{len} on a device of {} bytes — refusing \
-                 to read past the end of it",
-                device_blocks.saturating_mul(PAGE)
+                "{what}: candidate {guid} is at {first_block}+{blocks} blocks on a device of {} \
+                 blocks — refusing to read past the end of it",
+                device_blocks
             );
             return None;
         }

@@ -9,6 +9,7 @@ use toyos_xhci::port::{self, Reset};
 use toyos_xhci::identity::UsbId;
 use toyos_xhci::recovery;
 use toyos_xhci::reset_recovery::SlotGoes;
+use toyos_abi::inventory::UsbSpeed;
 use super::{deadline, Answer, Trb, TrbRing, What, XhciController, PAGE};
 use super::{OFF_INPUT_CTX, OFF_DATA_BUF};
 use super::{DEV_INT_RING, DEV_EP0_RING, DEV_OUT_CTX, DEV_REPORT, EP0_DCI};
@@ -238,6 +239,9 @@ pub fn reset_done(ctrl: &XhciController, port_idx: u8) -> bool {
 pub(super) struct Enumerating {
     port_idx: u8,
     speed: u8,
+    /// `speed` decoded once, at [`begin`], where a psiv with no default
+    /// Protocol Speed ID already refuses the port.
+    usb_speed: UsbSpeed,
     // The enabled slot; every refusal from here carries it back, since only Disable Slot returns one.
     slot_id: u8,
     block: usize,
@@ -291,12 +295,21 @@ pub(super) fn begin(ctrl: &mut XhciController, port_idx: u8, after: Option<Reset
              control-endpoint packet size for; skipping it", port_idx + 1);
         return finish(ctrl, port_idx, None);
     };
+    // Decoded here, once, so a bound device's inventory record is never built
+    // from a psiv `UsbSpeed::from_psiv` might refuse: the two tables agreeing
+    // is checked before a slot is spent, not assumed again every time
+    // `SYS_DEVICE_INVENTORY` is answered.
+    let Some(usb_speed) = UsbSpeed::from_psiv(speed) else {
+        log!("xHCI: port {} came up at speed {speed}, which has a control-endpoint packet size \
+             but no default Protocol Speed ID; skipping it", port_idx + 1);
+        return finish(ctrl, port_idx, None);
+    };
 
     let (seq, _) = Enumeration::begin();
     let mut enable_slot = Trb::ZERO;
     enable_slot.control = TRB_ENABLE_SLOT;
     let on = Await::Command { trb: ctrl.submit_command(enable_slot) };
-    let what = What::SlotWanted { port_idx, speed, packet, seq };
+    let what = What::SlotWanted { port_idx, speed, usb_speed, packet, seq };
     ctrl.outstanding.submit(what, on, Stages::One, deadline());
 }
 
@@ -305,6 +318,7 @@ pub(super) fn slot_answered(
     ctrl: &mut XhciController,
     port_idx: u8,
     speed: u8,
+    usb_speed: UsbSpeed,
     packet: u16,
     seq: Enumeration,
     outcome: Outcome,
@@ -326,6 +340,7 @@ pub(super) fn slot_answered(
     let state = Enumerating {
         port_idx,
         speed,
+        usb_speed,
         slot_id,
         block,
         ep0_ring,
@@ -700,6 +715,7 @@ fn bind(ctrl: &mut XhciController, state: Enumerating) {
             let (configuration, _) = state.parsed.expect("a configuration named a function");
             let enumerated = super::msc::Enumerated {
                 speed: state.speed,
+                usb_speed: state.usb_speed,
                 ep0_packet: state.packet,
                 configuration,
             };
@@ -755,6 +771,8 @@ fn bind_hid(
     let mut dev = HidDevice {
         slot_id: state.slot_id,
         port_idx: state.port_idx,
+        speed: state.usb_speed,
+        usb: state.described.expect("the device descriptor was read before its configuration").0,
         block: state.block,
         int_ep_dci: info.ep.dci(),
         ep_addr: info.ep.addr,

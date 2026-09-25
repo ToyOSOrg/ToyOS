@@ -99,6 +99,7 @@ use toyos::Pipe;
 use toyos_abi::syscall::PciId;
 use toyos_i219::lease::{Event, Verdict};
 use toyos_i219::Part;
+use toyos_inspect::Snapshot;
 use virtio_net::VirtioNet;
 
 use toyos::net::*;
@@ -203,6 +204,58 @@ impl Card {
         };
         answered
             .unwrap_or_else(|why| panic!("netd: this NIC's claim refused an interrupt read: {why:?}"))
+    }
+
+    /// What `inspect` reads about the card: which driver, its address, its
+    /// link, and on the Intel parts what the driver and the MAC counted.
+    ///
+    /// **virtio's link is `unreported`, not `up`**: the device tells netd
+    /// nothing about one, and netd serving as though it were up is netd's
+    /// assumption rather than something it measured.
+    fn inspect(&self, snap: &mut Snapshot) {
+        let m = self.mac();
+        snap.put(
+            "mac",
+            format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]),
+        );
+        let nic = match self {
+            Self::Virtio(_) => {
+                snap.put("driver", "virtio-net");
+                snap.put("link.state", "unreported");
+                return;
+            }
+            Self::Intel(nic) => nic,
+        };
+        snap.put(
+            "driver",
+            match nic.part() {
+                Part::I219 => "i219",
+                Part::E82574 => "82574",
+            },
+        );
+        match nic.link() {
+            toyos_i219::Link::Down => snap.put("link.state", "down"),
+            toyos_i219::Link::Up { speed, full_duplex } => {
+                snap.put("link.state", "up");
+                snap.put(
+                    "link.speed_mbps",
+                    match speed {
+                        toyos_i219::Speed::Mbps10 => 10u32,
+                        toyos_i219::Speed::Mbps100 => 100,
+                        toyos_i219::Speed::Mbps1000 => 1000,
+                    },
+                );
+                snap.put("link.duplex", if full_duplex { "full" } else { "half" });
+            }
+        }
+        let counts = nic.counts();
+        snap.put("descriptors.sent", counts.sent);
+        snap.put("descriptors.received", counts.received);
+        snap.put("wire.sent", counts.wire.sent);
+        snap.put("wire.received", counts.wire.received);
+        snap.put("wire.seen", counts.wire.seen);
+        snap.put("errors.missed", counts.wire.missed);
+        snap.put("errors.crc", counts.wire.crc_errors);
     }
 
     fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
@@ -429,6 +482,10 @@ impl Client {
         self.answered(self.conn.try_send(RESP_ERROR, &ErrorResponse { code }));
     }
 
+    fn snapshot(&self, encoded: &[u8]) {
+        self.answered(self.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, encoded));
+    }
+
     /// **The answer goes out in one non-blocking write, and a refusal is not
     /// retried.** `ipc::send` parks in `sys_write` until the client drains,
     /// which is a client deciding when the network stack runs again; and
@@ -570,7 +627,7 @@ fn total_memory() -> u64 {
     let mut buf = [0u8; toyos::system::SYSINFO_HEADER_SIZE];
     let n = toyos::system::sysinfo(&mut buf);
     assert!(n >= toyos::system::SYSINFO_HEADER_SIZE, "sysinfo returned {n} bytes");
-    u64::from_le_bytes(buf[0..8].try_into().unwrap())
+    toyos_abi::syscall::SysinfoHeader::decode(&buf).memory_total
 }
 
 /// Where this netd's socket ids start: at random, and never 0.
@@ -634,6 +691,24 @@ impl NetDaemon {
     /// bug in the check rather than the check working.
     fn piped_live(&self) -> usize {
         self.piped_connections.len() + self.pending_piped_connects.len()
+    }
+
+    /// The socket table's size, as `inspect` reads it: counts, and no
+    /// endpoint, because every client holding `netd` can ask.
+    fn inspect(&self, snap: &mut Snapshot) {
+        let (mut streams, mut listeners, mut udp) = (0u32, 0u32, 0u32);
+        for kind in self.sockets.values() {
+            match kind {
+                SocketKind::TcpStream(_) => streams += 1,
+                SocketKind::TcpListener(_) => listeners += 1,
+                SocketKind::Udp(_) => udp += 1,
+            }
+        }
+        snap.put("sockets.tcp", streams);
+        snap.put("sockets.listeners", listeners);
+        snap.put("sockets.udp", udp);
+        snap.put("piped.live", self.piped_live());
+        snap.put("piped.max", self.max_piped_connections);
     }
 
     fn alloc_id(&mut self) -> u32 {
@@ -1399,6 +1474,31 @@ impl NetDaemon {
     }
 }
 
+/// Answer `inspect` with what this pass knows, in one non-blocking write, and
+/// let the connection close as every other answer does.
+///
+/// Here and not in [`NetDaemon::handle_message`] because the card and the
+/// lease are the loop's and not the socket table's.
+fn answer_inspect(request: &Request, daemon: &NetDaemon, card: &Card, dhcp: &dhcp::Dhcp) {
+    // The request is a bare header, and anything riding on one is not this
+    // protocol.
+    if request.payload_len != 0 {
+        request.client.error(ERR_INVALID_INPUT);
+        return;
+    }
+    let mut snap = Snapshot::new(toyos_inspect::NET);
+    card.inspect(&mut snap);
+    dhcp.inspect(&mut snap);
+    daemon.inspect(&mut snap);
+    let encoded = snap.encode().unwrap_or_else(|why| panic!("netd: its snapshot: {why}"));
+    request.client.snapshot(&encoded);
+}
+
+const _: () = assert!(
+    toyos_inspect::MAX_SNAPSHOT_BYTES == ipc::MAX_FRAME_LEN as usize,
+    "a snapshot is one frame"
+);
+
 /// [`EXIT_WITH_LEASE`]'s last two lines, and the exit they announce. `held` is
 /// whether a leased address is held now, at the end of the window — a lease
 /// that landed and was then lost inside it is not one.
@@ -1700,6 +1800,10 @@ fn main() {
         }
 
         for request in requests {
+            if request.msg_type == toyos_inspect::MSG_INSPECT {
+                answer_inspect(&request, &daemon, &device.nic, &dhcp);
+                continue;
+            }
             daemon.handle_message(request, &mut socket_set, &mut iface);
         }
     }

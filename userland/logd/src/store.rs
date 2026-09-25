@@ -200,6 +200,16 @@ impl Volume {
         self.file.sync_all()
     }
 
+    /// Bytes in the current part so far.
+    pub fn bytes(&self) -> u64 {
+        self.size
+    }
+
+    /// Which part of this boot's sequence is being written, from 1.
+    pub fn part(&self) -> u32 {
+        self.part
+    }
+
     /// Whether this part has reached its bound.
     pub fn full(&self) -> bool {
         self.size >= self.rotate_at

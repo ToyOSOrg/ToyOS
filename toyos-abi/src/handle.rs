@@ -127,10 +127,20 @@ impl Rights {
     /// [`SYS_SYSINFO`]: crate::syscall::SYS_SYSINFO
     /// [`SYS_CPU_COUNT`]: crate::syscall::SYS_CPU_COUNT
     pub const ROSTER: Rights = Rights(1 << 11);
+    /// On a `SysCap`: read what the machine is made of, and who holds each
+    /// part of it.
+    ///
+    /// [`SYS_DEVICE_INVENTORY`] answers one record per PCI function, bound USB
+    /// device, block device and GPT partition, and one per claim naming the
+    /// process that holds it. That is a census of the machine's hardware and of
+    /// which program drives what, so it rides a bit as the roster does.
+    ///
+    /// [`SYS_DEVICE_INVENTORY`]: crate::syscall::SYS_DEVICE_INVENTORY
+    pub const INVENTORY: Rights = Rights(1 << 12);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0xfff);
+    pub const ALL: Rights = Rights(0x1fff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -161,7 +171,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 12] = [
+        const NAMES: [(Rights, &str); 13] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -174,6 +184,7 @@ impl core::fmt::Debug for Rights {
             (Rights::LOG, "LOG"),
             (Rights::POWER, "POWER"),
             (Rights::ROSTER, "ROSTER"),
+            (Rights::INVENTORY, "INVENTORY"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

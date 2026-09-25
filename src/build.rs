@@ -2757,6 +2757,7 @@ mod tests {
         "tests/e1000leasecase/system.toml",
         "tests/e1000talkcase/system.toml",
         "tests/flrswapcase/system.toml",
+        "tests/inspectcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
         "tests/lancase/system.toml",

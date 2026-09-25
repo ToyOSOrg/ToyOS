@@ -196,28 +196,29 @@ const _: () = assert!(toyos_abi::part::BLOCK_BYTES as u64 == crate::mm::PAGE_SIZ
 /// holds is that claim's, and one that begins or ends inside a block would
 /// share that block with its neighbour, so it is not claimable at all.
 fn partition_view(found: &crate::gpt::Claimable) -> Result<crate::block::Partition, ClaimError> {
-    use crate::block::{Holder, ViewRefused};
+    use crate::block::{span_blocks, Holder, SpanRefused, ViewRefused};
     let volume = found.volume;
     let guid = found.unique;
     let handle = crate::block::open(volume.device).ok_or(ClaimError::Absent)?;
-    let unit = toyos_abi::part::BLOCK_BYTES as u64;
-    let lba = volume.lba_bytes as u64;
-    let (Some(start), Some(len)) =
-        (volume.start_lba.checked_mul(lba), volume.blocks.checked_mul(lba))
-    else {
-        log!("partclaim: {guid} claims LBA {}+{} of {lba} bytes, which is no byte range",
-            volume.start_lba, volume.blocks);
-        return Err(ClaimError::Unusable);
-    };
-    if start % unit != 0 || len % unit != 0 {
-        log!(
-            "partclaim: {guid} is at {start}+{len} bytes on device {}, which is not whole \
-             {unit}-byte blocks — a transfer would share one with its neighbour",
-            volume.device
-        );
-        return Err(ClaimError::Unusable);
-    }
-    match crate::block::Partition::of(handle, start / unit, len / unit, Holder::Claim) {
+    let (first_block, blocks) =
+        match span_blocks(volume.start_lba, volume.blocks, volume.lba_bytes) {
+            Ok(span) => span,
+            Err(SpanRefused::Overflow) => {
+                log!("partclaim: {guid} claims LBA {}+{} of {} bytes, which is no byte range",
+                    volume.start_lba, volume.blocks, volume.lba_bytes);
+                return Err(ClaimError::Unusable);
+            }
+            Err(SpanRefused::NotWhole { start_bytes, len_bytes }) => {
+                log!(
+                    "partclaim: {guid} is at {start_bytes}+{len_bytes} bytes on device {}, which \
+                     is not whole {}-byte blocks — a transfer would share one with its neighbour",
+                    volume.device,
+                    crate::mm::PAGE_SIZE
+                );
+                return Err(ClaimError::Unusable);
+            }
+        };
+    match crate::block::Partition::of(handle, first_block, blocks, Holder::Claim) {
         Ok(view) => Ok(view),
         Err(ViewRefused::Held(Holder::Kernel(what))) => {
             log!("partclaim: {guid} is held by the kernel ({what}) and cannot be claimed");
@@ -225,7 +226,10 @@ fn partition_view(found: &crate::gpt::Claimable) -> Result<crate::block::Partiti
         }
         Err(ViewRefused::Held(Holder::Claim)) => Err(ClaimError::Owned),
         Err(ViewRefused::OffDevice) => {
-            log!("partclaim: {guid} is at {start}+{len} bytes, off device {}", volume.device);
+            log!(
+                "partclaim: {guid} is at {first_block}+{blocks} blocks, off device {}",
+                volume.device
+            );
             Err(ClaimError::Unusable)
         }
     }

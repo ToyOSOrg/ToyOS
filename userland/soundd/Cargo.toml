@@ -8,4 +8,5 @@ toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 toyos-hda = { path = "../../toyos-hda" }
 toyos-mixer = { path = "../../toyos-mixer" }
+toyos-inspect = { path = "../../toyos-inspect" }
 rubato = "0.16"

@@ -188,6 +188,15 @@ static WATCHERS: [Lock<Vec<InboxId>>; MAX_FUNCTIONS] =
 /// moved into.
 struct Machine {
     functions: Vec<PciDevice>,
+    /// What each of [`Self::functions`] said it was, read once in [`publish`]:
+    /// the inventory is answered from here and never by reading config space
+    /// of a function a reset may be in the middle of. The requester id is not
+    /// stored beside it — a `Pci`'s own `at` already names the function, and
+    /// [`requester_of`] is its inverse.
+    identities: Vec<toyos_abi::inventory::Pci>,
+    /// The PCI segment group every one of [`Self::functions`] is on: the one
+    /// the ECAM window they were enumerated through serves.
+    segment: u16,
     /// Every memory BAR every function decodes, as `(requester, base, end)`.
     ///
     /// Recorded in [`publish`] and never re-derived: reading a BAR's *size*
@@ -234,6 +243,8 @@ struct Machine {
 
 static MACHINE: Lock<Machine> = Lock::new(Machine {
     functions: Vec::new(),
+    identities: Vec::new(),
+    segment: 0,
     decoded: Vec::new(),
     kernel_driven: Vec::new(),
     low: Vec::new(),
@@ -270,8 +281,59 @@ fn reserve(who: u16) -> Result<usize, ClaimError> {
     Ok(slot)
 }
 
+/// Every function this machine enumerated, and who drives it now: a kernel
+/// driver, a process holding a claim, or nobody.
+pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
+    use toyos_abi::inventory::Driven;
+    let (identities, kernel_driven) = {
+        let machine = MACHINE.lock();
+        (machine.identities.clone(), machine.kernel_driven.clone())
+    };
+    let slots = *SLOTS.lock();
+    let mut out = Vec::with_capacity(identities.len());
+    for mut pci in identities {
+        let who = requester_of(pci.at);
+        pci.driven = if kernel_driven.contains(&who) {
+            Driven::Kernel
+        } else if slots.contains(&Some(who)) {
+            Driven::Claimed
+        } else {
+            Driven::Free
+        };
+        out.push(pci);
+    }
+    out
+}
+
+/// The PCI segment group every enumerated function is on.
+pub fn segment() -> u16 {
+    MACHINE.lock().segment
+}
+
+/// The function a claim's slot holds, or `None` for a slot nobody holds.
+pub fn held_at(slot: usize) -> Option<toyos_abi::inventory::PciAddr> {
+    let who = SLOTS.lock().get(slot).copied().flatten()?;
+    Some(addr_of(MACHINE.lock().segment, who))
+}
+
 pub(crate) fn requester(pci: &PciDevice) -> u16 {
     ((pci.bus as u16) << 8) | ((pci.dev as u16) << 3) | pci.func as u16
+}
+
+/// The function a [`requester`] ID names on `segment`: its inverse.
+pub(crate) fn addr_of(segment: u16, who: u16) -> toyos_abi::inventory::PciAddr {
+    toyos_abi::inventory::PciAddr {
+        segment,
+        bus: (who >> 8) as u8,
+        dev: ((who >> 3) & 0x1f) as u8,
+        func: (who & 7) as u8,
+    }
+}
+
+/// [`addr_of`]'s inverse: the requester id `at` names, dropping the segment
+/// [`requester`] never carried either.
+pub(crate) fn requester_of(at: toyos_abi::inventory::PciAddr) -> u16 {
+    ((at.bus as u16) << 8) | ((at.dev as u16) << 3) | at.func as u16
 }
 
 /// Record that a kernel driver has taken this function.
@@ -301,7 +363,7 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 /// alike. Below 4 GiB there is no such address: the platform's fixed MMIO is at
 /// [`PLATFORM_MMIO`] and the memory map reaches it, so the low runs are the
 /// gaps *between* what those sources describe ([`free_runs_below_4g`]).
-pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
+pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
     let mut wide_end = 0u64;
     let mut decoded = Vec::new();
     for entry in maps {
@@ -349,6 +411,9 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootB
     }
     let mut machine = MACHINE.lock();
     machine.functions = devices.to_vec();
+    machine.identities =
+        devices.iter().map(|d| d.identity(addr_of(segment, requester(d)))).collect();
+    machine.segment = segment;
     machine.decoded = decoded;
     machine.firmware = firmware.to_vec();
     machine.low = low;
