@@ -318,9 +318,7 @@ pub(crate) fn remove(root: &Path, path: &str) {
             "git refused to remove {path} and it is still a worktree; what it said above is \
              why. Nothing was deleted."
         );
-        fs::remove_dir_all(&at).unwrap_or_else(|e| {
-            panic!("git unregistered {path} and left it on disk, and removing it failed: {e}")
-        });
+        remove_tree(&at);
         eprintln!("git unregistered {path} and left its ignored files; deleted them");
     }
     eprintln!("removed {path}; its branch is still there, and `git branch -d` will say if it is unmerged");
@@ -359,8 +357,12 @@ fn remove_fork_checkout(root: &Path, at: &Path) {
         path,
         head.trim()
     );
-    fs::remove_dir_all(&fork)
-        .unwrap_or_else(|e| panic!("remove {}: {e}", fork.display()));
+    // Moved out whole first, so a removal a writer interrupts leaves a named
+    // directory outside the worktree rather than a half-deleted checkout in it.
+    let name = at.file_name().expect("a worktree has a name").to_string_lossy();
+    let aside = at.with_file_name(format!(".{name}-rust.removing"));
+    fs::rename(&fork, &aside)
+        .unwrap_or_else(|e| panic!("move {} to {}: {e}", fork.display(), aside.display()));
     fs::create_dir(&fork).unwrap_or_else(|e| panic!("recreate the stub {}: {e}", fork.display()));
     let primary = crate::primary_checkout(root);
     git(&primary.join("rust"), &["worktree", "prune"]);
@@ -368,7 +370,31 @@ fn remove_fork_checkout(root: &Path, at: &Path) {
     if backtrace.join(".git").exists() {
         git(&backtrace, &["worktree", "prune"]);
     }
+    remove_tree(&aside);
 }
+
+/// Remove `dir` and everything in it, including what appears while it goes.
+///
+/// A writer on this host — the leftovers are `.DS_Store` files — can put a file
+/// into a directory while it is being emptied, so a plain recursive delete finds a directory it has just emptied not empty and
+/// stops halfway — the `Directory not empty` git itself dies on. The removal
+/// runs again over what is left, at most [`PASSES`] times; a tree still refusing
+/// after that has a writer this cannot outrun, and the panic says so.
+fn remove_tree(dir: &Path) {
+    for pass in 1..=PASSES {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty && pass < PASSES => {
+                eprintln!("{} gained files while it was removed ({e}); removing again", dir.display());
+            }
+            Err(e) => panic!("remove {}: {e}, after {pass} pass(es)", dir.display()),
+        }
+    }
+}
+
+/// How many times [`remove_tree`] runs over a tree that keeps refusing.
+const PASSES: usize = 10;
 
 /// Whether `git worktree list` still names `at`, compared as real paths:
 /// git prints its own realpath, `/private/tmp/…` for `/tmp/…`.
