@@ -78,9 +78,11 @@ devices = ["pci:1af4:1041"]
 receives = ["netd", "launcher", "swap"]
 
 # The reader of every owner's `inspect` answer: a connector to each owner's
-# port is the whole of what it can observe, and nothing else it holds.
+# port, and `inventory` for the kernel's `dev.*`, are the whole of what it can
+# observe.
 [programs.inspect]
 receives = ["netd", "soundd", "log", "compositor"]
+syscap = ["inventory"]
 
 [programs.filepicker]
 serves = ["filepicker"]

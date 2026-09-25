@@ -318,3 +318,31 @@ pub(super) fn sys_sched_info() -> toyos_abi::syscall::SchedInfo {
         lag: crate::scheduler::process_lag(pid),
     }
 }
+
+/// The most records one `SYS_DEVICE_INVENTORY` buffer may be declared to hold:
+/// far past any machine this kernel enumerates, and small enough that the
+/// declared length is never an allocation or a window worth refusing later.
+pub(super) const MAX_INVENTORY_RECORDS: u64 = 4096;
+
+/// Every inventory record, into `out`, or nothing: requires a `SysCap`
+/// carrying `Rights::INVENTORY`. An empty `out` answers the count; one too
+/// short for every record is refused whole with `ResourceExhausted`.
+pub(super) fn sys_device_inventory(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
+    use toyos_abi::inventory::RECORD_BYTES;
+    // Demanded before anything is collected: `refuse` takes the process down
+    // and walks the tables `collect` locks.
+    if let Err(e) = demand_syscap(syscap, Rights::INVENTORY) {
+        return e.refuse();
+    }
+    let records = crate::inventory::collect();
+    if out.len() == 0 {
+        return records.len() as u64;
+    }
+    if out.len() < records.len() * RECORD_BYTES {
+        return SyscallError::ResourceExhausted.to_u64();
+    }
+    for (i, record) in records.iter().enumerate() {
+        out.write_at(i * RECORD_BYTES, &record.encode().0);
+    }
+    records.len() as u64
+}

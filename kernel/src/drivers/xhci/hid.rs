@@ -22,6 +22,10 @@ pub struct HidDevice {
     pub slot_id: u8,
     /// The root-hub port this device is on; unlike the slot id, survives a disable.
     pub port_idx: u8,
+    /// PORTSC's Port Speed when the port came up.
+    pub speed: u8,
+    /// What its device descriptor says it is.
+    pub usb: toyos_xhci::identity::UsbId,
     /// This device's block in the DMA pool: interrupt ring, EP0 ring and output context.
     pub block: usize,
     pub int_ep_dci: u8,

@@ -50,6 +50,7 @@ mod nmi_gate;
 mod block;
 mod durability;
 mod gpt;
+mod inventory;
 mod page_cache;
 mod rollback;
 mod rootfs;
@@ -555,12 +556,16 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // The filesystem sits outside the capability model by ruling, so no handle is owed for /boot.
     // /log is ReadWrite on purpose: it's an ordinary userland file logd owns, and the worst a process can do is cost the diagnostic.
     match fat32_adapter::mount(Role::Boot) {
-        Some(fs) => vfs::lock().mount(&[Role::Boot.mount()], Box::new(fs), UserAccess::KernelOnly),
+        Some(fs) => {
+            vfs::lock().mount(&[Role::Boot.mount()], Box::new(fs), UserAccess::KernelOnly);
+            gpt::note_mounted(&gpt::boot_volume().expect("a mounted /boot has a volume"));
+        }
         None => log!("boot-volume: not mounted; the kernel has no /boot this boot"),
     }
     match fat32_adapter::mount(Role::Log) {
         Some(fs) => {
             vfs::lock().mount(&[Role::Log.mount()], Box::new(fs), UserAccess::ReadWrite);
+            gpt::note_mounted(&gpt::log_volume().expect("a mounted /log has a volume"));
         }
         // No fallback onto /boot: with no log partition the log stays in the in-memory shards, still reachable via screen and console.
         None => log!("log-volume: not mounted; this boot's kernel log stays in memory"),

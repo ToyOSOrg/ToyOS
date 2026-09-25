@@ -18,7 +18,10 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use toyos::endow::{self, EndowError};
+use toyos::endow::{self, EndowError, Endowments, SYSCAP_LABEL};
+use toyos::syscap::SysCap;
+use toyos_abi::inventory::{RawRecord, Record};
+use toyos_abi::syscall::SyscallError;
 use toyos::ipc::{self, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos_inspect::{Invocation, Owner, Value, MAX_SNAPSHOT_BYTES, MSG_INSPECT, MSG_SNAPSHOT};
@@ -56,6 +59,20 @@ fn main() {
             }
             Err(why) => {
                 eprintln!("inspect: {}.*: {why}", owner.root);
+                refused = true;
+            }
+        }
+    }
+
+    if run.selector.reaches(toyos_inspect::dev::ROOT) {
+        match inventory() {
+            Ok(records) => found.extend(
+                toyos_inspect::dev::render(&records)
+                    .into_iter()
+                    .filter(|(path, _)| run.selector.matches(path)),
+            ),
+            Err(why) => {
+                eprintln!("inspect: {}.*: {why}", toyos_inspect::dev::ROOT);
                 refused = true;
             }
         }
@@ -122,4 +139,39 @@ fn ask(owner: Owner) -> Result<BTreeMap<String, Value>, String> {
         poller.watch(&conn, READABLE, 0);
         poller.wait(1, left.as_nanos() as u64, |_| {});
     }
+}
+
+/// How many times the inventory is asked for again after the machine changed
+/// between counting it and reading it. Policy: a device arriving on every
+/// round is a machine the reader names rather than chases.
+const INVENTORY_ROUNDS: usize = 4;
+
+/// The kernel's inventory, asked with this process's `SysCap`.
+fn inventory() -> Result<Vec<Record>, String> {
+    let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
+        return Err("this program holds no system capability, so the inventory is not its to read"
+            .to_string());
+    };
+    let refused = |e: SyscallError| match e {
+        SyscallError::PermissionDenied => {
+            "the kernel refused: this program's capability does not carry `inventory`".to_string()
+        }
+        other => format!("the kernel refused the inventory ({other:?})"),
+    };
+    for _ in 0..INVENTORY_ROUNDS {
+        let count = cap.inventory(&mut []).map_err(refused)?;
+        let mut raw = vec![RawRecord::EMPTY; count];
+        match cap.inventory(&mut raw) {
+            Ok(n) => {
+                return raw[..n]
+                    .iter()
+                    .map(|r| Record::decode(r).map_err(|why| format!("a record did not decode: {why}")))
+                    .collect();
+            }
+            // The machine grew between the two calls.
+            Err(SyscallError::ResourceExhausted) => continue,
+            Err(e) => return Err(refused(e)),
+        }
+    }
+    Err(format!("the machine changed on each of {INVENTORY_ROUNDS} reads of its inventory"))
 }

@@ -1766,6 +1766,40 @@ pub struct StorageGeometry {
     pub blocks: u64,
 }
 
+/// Every device a controller bound, as `SYS_DEVICE_INVENTORY` records it.
+pub fn inventory() -> Vec<toyos_abi::inventory::Usb> {
+    use toyos_abi::inventory::{Bdf, Usb, UsbFunction};
+    let mut out = Vec::new();
+    for ctrl in XHCI.lock().iter() {
+        let controller = Bdf { bus: ctrl.pci.bus, dev: ctrl.pci.dev, func: ctrl.pci.func };
+        for hid in &ctrl.devices {
+            out.push(Usb {
+                controller,
+                port: hid.port_idx + 1,
+                speed: hid.speed,
+                vendor: hid.usb.vendor,
+                product: hid.usb.product,
+                function: match hid.role {
+                    hid::HidRole::Keyboard => UsbFunction::Keyboard,
+                    hid::HidRole::Pointer(_) => UsbFunction::Pointer,
+                },
+            });
+        }
+        for disk in ctrl.msc.iter().filter_map(|block| block.disk) {
+            let (port_idx, speed, usb) = disk.dev.inventory();
+            out.push(Usb {
+                controller,
+                port: port_idx + 1,
+                speed,
+                vendor: usb.vendor,
+                product: usb.product,
+                function: UsbFunction::Storage,
+            });
+        }
+    }
+    out
+}
+
 /// How many disk numbers this machine has issued; every value below it names a disk bound at some point in this boot.
 pub fn storage_count() -> usize {
     DISKS_BOUND.load(Ordering::Relaxed)

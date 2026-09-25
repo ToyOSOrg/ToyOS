@@ -467,6 +467,20 @@ impl PciDevice {
         CapabilityIter { device: self, walk: caps::CapWalk::new(), next: first }
     }
 
+    /// What this function says it is, for the inventory; driven by nobody
+    /// until [`crate::pcidev::inventory`] says otherwise.
+    pub fn identity(&self) -> toyos_abi::inventory::Pci {
+        toyos_abi::inventory::Pci {
+            at: toyos_abi::inventory::Bdf { bus: self.bus, dev: self.dev, func: self.func },
+            vendor: self.vendor_id(),
+            device: self.device_id(),
+            class: self.read_config_u8(CLASS),
+            subclass: self.read_config_u8(SUBCLASS),
+            prog_if: self.read_config_u8(PROG_IF),
+            driven: toyos_abi::inventory::Driven::Free,
+        }
+    }
+
     pub fn is_id(&self, vendor: u16, device: u16) -> bool {
         self.vendor_id() == vendor && self.device_id() == device
     }

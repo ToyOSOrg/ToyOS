@@ -194,6 +194,12 @@ impl MscDevice {
         self.port_idx
     }
 
+    /// Where the disk is and what it says it is: its root-hub port, the speed
+    /// that port trained at, and its device descriptor's ids.
+    pub fn inventory(&self) -> (u8, u8, toyos_xhci::identity::UsbId) {
+        (self.port_idx, self.enumerated.speed, self.identity.usb)
+    }
+
     pub fn geometry(&self) -> StorageGeometry {
         StorageGeometry {
             logical_block_bytes: self.logical_block_bytes,

@@ -893,7 +893,7 @@ pub fn spawn_init() -> Pid {
     // Every machine-wide authority the system has: rights only shrink from
     // here, so a bit absent here is a bit no manifest can ever name. LOG and
     // WAIT arrive together since SYS_LOG_READ never blocks on its own; ROSTER
-    // needs no partner since SYS_SYSINFO never blocks either.
+    // and INVENTORY need no partner since neither of their calls blocks.
     let rights = Rights::DUP
         .union(Rights::TRANSFER)
         .union(Rights::DEVICE)
@@ -902,7 +902,8 @@ pub fn spawn_init() -> Pid {
         .union(Rights::LOG)
         .union(Rights::WAIT)
         .union(Rights::POWER)
-        .union(Rights::ROSTER);
+        .union(Rights::ROSTER)
+        .union(Rights::INVENTORY);
     let cap_handle = handles
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_init: an empty table refused the system capability");

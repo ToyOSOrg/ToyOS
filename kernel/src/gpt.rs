@@ -65,6 +65,49 @@ static DATA: Lock<Vec<Candidate>> = Lock::new(Vec::new());
 /// partition claim is looked for on. Taken alone.
 static DISKS: Lock<Vec<(Handle, u32)>> = Lock::new(Vec::new());
 
+/// Every partition this kernel mounted a filesystem from, by where it starts.
+static MOUNTED: Lock<Vec<(DeviceId, u64)>> = Lock::new(Vec::new());
+
+/// The most entries [`inventory`] reports for one disk: the 128 a GPT's entry
+/// array holds by convention (UEFI 2.10 §5.3.2). A disk with more says so.
+const MAX_LISTED: usize = 128;
+
+/// Record that a filesystem is mounted from `volume`, for [`inventory`].
+pub fn note_mounted(volume: &Volume) {
+    MOUNTED.lock().push((volume.device, volume.start_lba));
+}
+
+/// Every GPT entry on every disk [`probe`] read, as its table states it, and
+/// whether this kernel mounted a filesystem from it.
+///
+/// Read off the disks when asked, as [`claimable`] is: a table is outside
+/// every partition, so nothing a holder writes can change it under the read.
+pub fn inventory() -> Vec<(DeviceId, Partition, bool)> {
+    let disks = DISKS.lock().clone();
+    let mounted = MOUNTED.lock().clone();
+    let mut out = Vec::new();
+    let mut listed = alloc::vec![BLANK; MAX_LISTED];
+    for (handle, lba_bytes) in &disks {
+        let id = handle.device_id();
+        match toyos_gpt::list(&mut DeviceSectors::new(handle, *lba_bytes), &mut listed) {
+            Ok(scan) => {
+                if scan.matched as usize > scan.listed {
+                    log!(
+                        "inventory: device {id} carries {} partitions and the inventory lists {}",
+                        scan.matched,
+                        scan.listed
+                    );
+                }
+                for part in &listed[..scan.listed] {
+                    out.push((id, *part, mounted.contains(&(id, part.first_lba))));
+                }
+            }
+            Err(e) => log!("inventory: device {id} has no partition table to list: {e:?}"),
+        }
+    }
+    out
+}
+
 /// How many partitions of one ToyOS type one device may offer this kernel.
 ///
 /// A bound rather than a `Vec` because [`toyos_gpt::locate_type`] fills a

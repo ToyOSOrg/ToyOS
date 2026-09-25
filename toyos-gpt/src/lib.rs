@@ -246,11 +246,26 @@ pub fn locate_type(
     target: Guid,
     out: &mut [Partition],
 ) -> Result<TypeScan, GptError> {
+    scan(dev, &|part| part.type_guid == target, out)
+}
+
+/// Every partition on `dev`, in entry order: [`locate_type`] with no type
+/// asked for, so a match here is what the table *states* — checked up to the
+/// entry array's CRC and not for range or overlap.
+pub fn list(dev: &mut dyn Sectors, out: &mut [Partition]) -> Result<TypeScan, GptError> {
+    scan(dev, &|_| true, out)
+}
+
+fn scan(
+    dev: &mut dyn Sectors,
+    keep: &dyn Fn(&Partition) -> bool,
+    out: &mut [Partition],
+) -> Result<TypeScan, GptError> {
     let disk = open_disk(dev)?;
-    match scan_type_at(dev, 1, target, &disk, out) {
+    match scan_type_at(dev, 1, keep, &disk, out) {
         Ok(scan) => Ok(scan),
         Err(primary_err) if primary_err.primary_never_checked_out() => {
-            scan_type_at(dev, disk.lba_count - 1, target, &disk, out).or(Err(primary_err))
+            scan_type_at(dev, disk.lba_count - 1, keep, &disk, out).or(Err(primary_err))
         }
         Err(primary_err) => Err(primary_err),
     }
@@ -300,7 +315,7 @@ fn open_disk(dev: &mut dyn Sectors) -> Result<Disk, GptError> {
 fn scan_type_at(
     dev: &mut dyn Sectors,
     header_lba: u64,
-    target: Guid,
+    keep: &dyn Fn(&Partition) -> bool,
     disk: &Disk,
     out: &mut [Partition],
 ) -> Result<TypeScan, GptError> {
@@ -315,7 +330,7 @@ fn scan_type_at(
     // Meaningless unless `walk_entries` returns `Ok`: the array's CRC is
     // checked at the end of the walk, and an `Err` hands the caller nothing.
     let used_entries = walk_entries(dev, &header, disk.lba_bytes, &mut |part| {
-        if part.type_guid == target {
+        if keep(&part) {
             matched += 1;
             if let Some(slot) = out.get_mut(listed) {
                 *slot = part;

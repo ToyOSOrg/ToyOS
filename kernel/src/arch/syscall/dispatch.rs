@@ -42,7 +42,10 @@ use super::ipc::{
     sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe, sys_pipe_map,
     sys_port_create, sys_shm_create, sys_shm_map,
 };
-use super::machine::{sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo};
+use super::machine::{
+    sys_device_inventory, sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo,
+    MAX_INVENTORY_RECORDS,
+};
 #[cfg(feature = "test-actuators")]
 use super::machine::SYSINFO_BOUND_LOWERED;
 use super::proc::{
@@ -292,6 +295,16 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SYSINFO => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
             sys_sysinfo(RawHandle(a1 as u32), &mut buf)
+        }
+        // A census of the hardware and of who drives it, so it costs
+        // Rights::INVENTORY. The count is bounded before it becomes a window.
+        SYS_DEVICE_INVENTORY => {
+            let Ok(count) = Untrusted::new(a3).at_most(MAX_INVENTORY_RECORDS) else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
+            let len = count * toyos_abi::inventory::RECORD_BYTES as u64;
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
+            sys_device_inventory(RawHandle(a1 as u32), &mut buf)
         }
         SYS_NANOSLEEP => sys_nanosleep(a1),
         SYS_HANDLE_DUP => sys_handle_dup(RawHandle(a1 as u32), a2),

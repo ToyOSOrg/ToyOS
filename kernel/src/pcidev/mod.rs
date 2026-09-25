@@ -188,6 +188,10 @@ static WATCHERS: [Lock<Vec<InboxId>>; MAX_FUNCTIONS] =
 /// moved into.
 struct Machine {
     functions: Vec<PciDevice>,
+    /// What each of [`Self::functions`] said it was, read once in [`publish`]:
+    /// the inventory is answered from here and never by reading config space
+    /// of a function a reset may be in the middle of.
+    identities: Vec<toyos_abi::inventory::Pci>,
     /// Every memory BAR every function decodes, as `(requester, base, end)`.
     ///
     /// Recorded in [`publish`] and never re-derived: reading a BAR's *size*
@@ -234,6 +238,7 @@ struct Machine {
 
 static MACHINE: Lock<Machine> = Lock::new(Machine {
     functions: Vec::new(),
+    identities: Vec::new(),
     decoded: Vec::new(),
     kernel_driven: Vec::new(),
     low: Vec::new(),
@@ -268,6 +273,34 @@ fn reserve(who: u16) -> Result<usize, ClaimError> {
     let slot = slots.iter().position(Option::is_none).ok_or(ClaimError::Exhausted)?;
     slots[slot] = Some(who);
     Ok(slot)
+}
+
+/// Every function this machine enumerated, and who drives it now: a kernel
+/// driver, a process holding a claim, or nobody.
+pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
+    use toyos_abi::inventory::Driven;
+    let (mut out, kernel_driven) = {
+        let machine = MACHINE.lock();
+        (machine.identities.clone(), machine.kernel_driven.clone())
+    };
+    let slots = *SLOTS.lock();
+    for pci in &mut out {
+        let who = (u16::from(pci.at.bus) << 8) | (u16::from(pci.at.dev) << 3) | u16::from(pci.at.func);
+        pci.driven = if kernel_driven.contains(&who) {
+            Driven::Kernel
+        } else if slots.contains(&Some(who)) {
+            Driven::Claimed
+        } else {
+            Driven::Free
+        };
+    }
+    out
+}
+
+/// The function a claim's slot holds, or `None` for a slot nobody holds.
+pub fn held_at(slot: usize) -> Option<toyos_abi::inventory::Bdf> {
+    let who = SLOTS.lock().get(slot).copied().flatten()?;
+    Some(toyos_abi::inventory::Bdf { bus: (who >> 8) as u8, dev: ((who >> 3) & 0x1f) as u8, func: (who & 7) as u8 })
 }
 
 pub(crate) fn requester(pci: &PciDevice) -> u16 {
@@ -349,6 +382,7 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry], firmware: &[RootB
     }
     let mut machine = MACHINE.lock();
     machine.functions = devices.to_vec();
+    machine.identities = devices.iter().map(PciDevice::identity).collect();
     machine.decoded = decoded;
     machine.firmware = firmware.to_vec();
     machine.low = low;

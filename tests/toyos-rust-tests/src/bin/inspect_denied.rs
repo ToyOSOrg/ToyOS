@@ -9,11 +9,17 @@
 //!
 //! The denied child keeps every other owner's connector, so what it is refused
 //! is exactly the one name it lacks and not a namespace that reaches nothing.
+//!
+//! The kernel's inventory is the same pair on a capability: `dev.*` read with
+//! a duplicate carrying `Rights::INVENTORY` and with one narrowed to lack it.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Output, Stdio};
 
+use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::syscap::SysCap;
 use toyos::{endow, namespace};
+use toyos_abi::handle::Rights;
 use toyos_abi::syscall::SVC_LABEL;
 
 const READER: &str = "/system/bin/inspect";
@@ -52,4 +58,45 @@ fn main() {
         "denied was refused for another reason: {err:?}"
     );
     println!("inspect denied: granted read netd, denied was refused by name");
+
+    the_inventory_is_a_right();
+}
+
+/// `inspect dev.*` with a capability carrying `INVENTORY` and with one that
+/// does not: the kernel's own refusal is the only difference, and the reader
+/// has to name it.
+fn the_inventory_is_a_right() {
+    let cap: SysCap = Endowments::get()
+        .take(SYSCAP_LABEL)
+        .expect("test-runner endows every binary it spawns a system capability");
+    let dev = |rights: Rights| -> Output {
+        let narrowed = cap.narrowed(rights).expect("a narrower capability");
+        Command::new(READER)
+            .arg("dev.*")
+            .endow(SYSCAP_LABEL, narrowed.into_raw().0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn /system/bin/inspect")
+            .wait_with_output()
+            .expect("wait for /system/bin/inspect")
+    };
+
+    let granted = dev(Rights::TRANSFER.union(Rights::INVENTORY));
+    let out = String::from_utf8_lossy(&granted.stdout);
+    let err = String::from_utf8_lossy(&granted.stderr);
+    assert_eq!(granted.status.code(), Some(0), "granted: stdout {out:?} stderr {err:?}");
+    assert!(out.lines().any(|l| l.starts_with("dev.cpus = ")), "granted: {out:?}");
+    assert!(out.lines().all(|l| l.starts_with("dev.")), "granted answered past dev.*: {out:?}");
+
+    let denied = dev(Rights::TRANSFER);
+    let out = String::from_utf8_lossy(&denied.stdout);
+    let err = String::from_utf8_lossy(&denied.stderr);
+    assert_eq!(denied.status.code(), Some(2), "denied: stdout {out:?} stderr {err:?}");
+    assert!(out.is_empty(), "denied read the inventory anyway: {out:?}");
+    assert!(
+        err.contains("does not carry `inventory`"),
+        "denied was refused for another reason: {err:?}"
+    );
+    println!("inventory denied: granted read dev.*, denied was refused by the kernel");
 }

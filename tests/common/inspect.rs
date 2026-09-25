@@ -203,9 +203,24 @@ pub fn reads_its_owners(qemu: &mut QemuInstance) -> Result<(), String> {
 
     // A `*` in first place reaches every owner, and one in last place stops at
     // a whole segment: exactly one `state` from each owner that has one.
+    // A `*` in first place reaches every owner and the kernel, and one in last
+    // place stops at a whole segment: one `state` from each owner that has
+    // one, and each partition's.
     let line = "inspect *.state";
     let got = answer(&job(qemu, line, 0)?);
-    exactly(line, &got, &["log.volume.state", "net.link.state", "sound.stream.state"])?;
+    let (dev, owners): (BTreeMap<String, String>, BTreeMap<String, String>) =
+        got.into_iter().partition(|(path, _)| path.starts_with("dev."));
+    exactly(line, &owners, &["log.volume.state", "net.link.state", "sound.stream.state"])?;
+    if dev.is_empty() {
+        return Err(format!("`{line}` printed no partition's state"));
+    }
+    if let Some(path) =
+        dev.keys().find(|p| !(p.starts_with("dev.part.") && p.ends_with(".state")))
+    {
+        return Err(format!("`{line}` printed {path}, which is no partition's state"));
+    }
+
+    inventory(qemu)?;
 
     // Exact, with no `*`, is one path and never a prefix.
     let line = "inspect net.link";
@@ -220,8 +235,54 @@ pub fn reads_its_owners(qemu: &mut QemuInstance) -> Result<(), String> {
     }
 
     let result = job(qemu, &format!("test_rs_{DENIED}"), 0)?;
-    if !result.stdout.contains("inspect denied: granted read netd, denied was refused by name") {
-        return Err(format!("{DENIED} printed no verdict:\n{}", result.stdout));
+    for verdict in [
+        "inspect denied: granted read netd, denied was refused by name",
+        "inventory denied: granted read dev.*, denied was refused by the kernel",
+    ] {
+        if !result.stdout.contains(verdict) {
+            return Err(format!("{DENIED} did not say {verdict:?}:\n{}", result.stdout));
+        }
+    }
+    Ok(())
+}
+
+/// `inspect dev.*`: the kernel's inventory, judged where QEMU fixes it. The
+/// virtio NIC is `1af4:1041` and netd holds it; the virtio sound card and the
+/// framebuffer are classes soundd and the compositor hold; the Gop profile's
+/// USB keyboard is on the xHCI; and the boot stick carries partitions this
+/// kernel mounted.
+fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
+    let line = "inspect dev.*";
+    let got = answer(&job(qemu, line, 0)?);
+    if number(line, &got, "dev.cpus")? == 0 {
+        return Err(format!("`{line}`: the machine has no CPU"));
+    }
+    if number(line, &got, "dev.memory.total_bytes")? == 0 {
+        return Err(format!("`{line}`: the machine has no memory"));
+    }
+    let nic: Vec<&str> = got
+        .iter()
+        .filter(|(path, value)| path.starts_with("dev.pci.") && path.ends_with(".device") && *value == "1041")
+        .map(|(path, _)| path.trim_end_matches(".device"))
+        .collect();
+    let [nic] = nic.as_slice() else {
+        return Err(format!("`{line}`: {} functions are a virtio NIC, not one", nic.len()));
+    };
+    expect(line, &got, &format!("{nic}.vendor"), "1af4")?;
+    expect(line, &got, &format!("{nic}.driver"), "netd")?;
+    expect(line, &got, "dev.class.virtio-sound.holder", "soundd")?;
+    expect(line, &got, "dev.class.framebuffer.holder", "compositor")?;
+    if !got.iter().any(|(p, v)| p.starts_with("dev.pci.") && p.ends_with(".driver") && v == "kernel") {
+        return Err(format!("`{line}`: no PCI function is driven by the kernel"));
+    }
+    if !got.iter().any(|(p, v)| p.starts_with("dev.usb.") && p.ends_with(".function") && v == "keyboard") {
+        return Err(format!("`{line}`: no USB keyboard"));
+    }
+    if !got.keys().any(|p| p.starts_with("dev.block.")) {
+        return Err(format!("`{line}`: no block device"));
+    }
+    if !got.iter().any(|(p, v)| p.starts_with("dev.part.") && p.ends_with(".state") && v == "mounted") {
+        return Err(format!("`{line}`: no partition is mounted"));
     }
     Ok(())
 }

@@ -294,6 +294,13 @@ pub const SYS_PARTITION_READ: u64 = 119;
 /// Write blocks of a claimed partition. See [`partition_write`].
 pub const SYS_PARTITION_WRITE: u64 = 120;
 
+/// What the machine is made of, and who holds each part of it, as
+/// [`crate::inventory`] records. Gated by [`Rights::INVENTORY`] on a `SysCap`.
+/// See [`device_inventory`].
+///
+/// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
+pub const SYS_DEVICE_INVENTORY: u64 = 121;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
@@ -306,7 +313,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_PARTITION_WRITE < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_INVENTORY < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -1729,6 +1736,32 @@ pub fn sysinfo(syscap: RawHandle, buf: &mut [u8]) -> usize {
         0,
     );
     if SyscallError::from_u64(n).is_some() { 0 } else { n as usize }
+}
+
+/// Every [`crate::inventory`] record the machine has, into `buf`; answers how
+/// many were written.
+///
+/// **Whole or not at all.** A `buf` with room for fewer records than there
+/// are is refused with [`SyscallError::ResourceExhausted`] and nothing is
+/// written; an empty `buf` is the question "how many", answered without the
+/// records. Between the two calls the machine can change, so a caller sizes
+/// from the answer and asks again when refused.
+///
+/// `syscap` must carry [`crate::handle::Rights::INVENTORY`]: a capability
+/// without it is refused with a word, and a handle the caller does not hold
+/// ends it.
+pub fn device_inventory(
+    syscap: RawHandle,
+    buf: &mut [crate::inventory::RawRecord],
+) -> Result<usize, SyscallError> {
+    check(syscall(
+        SYS_DEVICE_INVENTORY,
+        syscap.0 as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    ))
+    .map(|n| n as usize)
 }
 
 /// Sleep for the given number of nanoseconds.

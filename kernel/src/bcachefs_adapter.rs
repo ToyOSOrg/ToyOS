@@ -608,6 +608,7 @@ pub fn open_data() -> Option<(Arc<page_cache::Cached>, Mounted<PageCacheBlockIO,
         Storage::Designated => format(&cache)?,
         Storage::Foreign => return None,
     };
+    crate::gpt::note_mounted(&candidate.volume);
     Some((cache, fs))
 }
 

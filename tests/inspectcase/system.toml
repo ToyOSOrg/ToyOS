@@ -31,15 +31,18 @@ syscap = ["rt"]
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
-# Every owner's connector, and nothing else: the runner's namespace is what its
-# jobs inherit, and the reader is what they run.
+# Every owner's connector, and `inventory` for `dev.*`: the runner's namespace
+# is what its jobs inherit, and `dup` is what hands each job a duplicate of the
+# capability, which `test_rs_inspect_denied` narrows to prove the refusal.
 [programs.test-runner]
 receives = ["netd", "soundd", "log", "compositor"]
+syscap = ["inventory", "dup"]
 
 # The shipped reader's row. Declared so the image carries it; the runner spawns
 # it directly, so what it holds here is the runner's namespace.
 [programs.inspect]
 receives = ["netd", "soundd", "log", "compositor"]
+syscap = ["inventory"]
 
 # `shell -c` is how a job line becomes a pipe.
 [programs.shell]

@@ -269,7 +269,6 @@ pub fn open(id: DeviceId) -> Option<Handle> {
     DEVICES.lock().get(&id).cloned()
 }
 
-#[cfg(feature = "boot-actuators")]
 pub fn registered() -> alloc::vec::Vec<Handle> {
     DEVICES.lock().values().cloned().collect()
 }

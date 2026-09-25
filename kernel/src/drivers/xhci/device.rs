@@ -755,6 +755,8 @@ fn bind_hid(
     let mut dev = HidDevice {
         slot_id: state.slot_id,
         port_idx: state.port_idx,
+        speed: state.speed,
+        usb: state.described.expect("the device descriptor was read before its configuration").0,
         block: state.block,
         int_ep_dci: info.ep.dci(),
         ep_addr: info.ep.addr,
