@@ -492,11 +492,12 @@ pub fn swap_quiets_the_function(
 /// this host then sends it [`KNOCKS`] SYNs.
 ///
 /// The premises are asked of the console: the release says it reset nothing,
-/// the replacement inherited a receive unit that is on, and its claim took
-/// netd's grant over. The verdict is the unit seeing no DMA fault: every frame
-/// the part writes to netd's old descriptors lands in the replacement's own
-/// grant. Without the residue those addresses are unmapped at the release, and
-/// the first frame faults and ends the replacement's claim.
+/// the replacement inherited a receive unit that is on, and its claim was
+/// handed the range netd's grant was at. The verdict is the unit seeing no DMA
+/// fault: every frame the part writes to netd's old descriptors lands in the
+/// replacement's own grant, placed there. Without the residue nothing is
+/// placed at those addresses, and the first frame faults and ends the
+/// replacement's claim.
 pub fn swap_keeps_what_nothing_reset(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -525,7 +526,7 @@ pub fn swap_keeps_what_nothing_reset(
             return Err(format!("the premise: the part's receive unit was off when it was claimed — {inherited}"));
         }
         console.must_be_clean()?;
-        let taken_over = console.must_say("pcidev: slot 0 takes over 1 grant(s)")?;
+        let taken_over = console.must_say("pcidev: slot 0 holds 1 range(s)")?;
         eprintln!(
             "  [swap] {}; {}; {}; mastered through {taken} SYNs in {took:?}, and the unit saw no fault",
             released.trim_end(),

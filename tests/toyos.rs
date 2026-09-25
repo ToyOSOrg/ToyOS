@@ -250,6 +250,10 @@ const RUST_SKIP: &[&str] = &[
     // The swap DMA control's replacement netd: it claims the 82574, stops it
     // and masters it. `swap_quiets_the_function` stages it.
     "swap_claim_idle",
+    // Both holders of the residue isolation test: it claims the 82574 through
+    // the test estate's capability, which only the E1000e profile has.
+    // `userdev_residue_is_its_own` stages it.
+    "userdev_residue",
     // The residue control's replacement netd: it masters the 82574 with its
     // receive unit as netd left it. `swap_keeps_what_nothing_reset` stages it.
     "swap_claim_running",
@@ -1414,6 +1418,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The one arm of that family whose device is driven by a *process*, and
     // the only one whose verdict is that the machine is still running.
     ("userdev_dma_fault", Sched::Parallel, Tier::Fast),
+    // Two claims of a function nothing resets, the first closed with its grant
+    // still mapped: the verdict is the first holder's own grant, read in the
+    // guest after the second holder wrote its own.
+    ("userdev_residue_is_its_own", Sched::Parallel, Tier::Fast),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -10562,6 +10570,9 @@ fn run_machine_test(
         }
         "userdev_dma_fault" => {
             common::iommu::userdev_dma_fault(test_config, c_bins, rust_bins)
+        }
+        "userdev_residue_is_its_own" => {
+            common::iommu::userdev_residue_is_its_own(test_config, c_bins, rust_bins)
         }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),

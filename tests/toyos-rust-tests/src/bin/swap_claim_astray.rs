@@ -7,8 +7,9 @@
 //! faults. The part's interrupts stay masked, so nothing but that fault can
 //! wake this program; what it then reads from the claim is the verdict.
 //!
-//! It exits 1 on the refusal it waits for, and 2 when the claim answered
-//! anything else within [`TOLD_WITHIN`] of the part mastering.
+//! It exits 1 on the refusal it waits for, and 2 when [`TOLD_WITHIN`] passed
+//! or a wait on the claim ended with nothing ready: a refusal read after an
+//! unwoken wait is one nobody was woken for.
 
 use std::time::{Duration, Instant};
 
@@ -87,6 +88,11 @@ fn main() {
             std::process::exit(2);
         };
         poller.watch(&dev, READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
+        let mut woken = false;
+        poller.wait(1, left.as_nanos() as u64, |_| woken = true);
+        if !woken {
+            println!("swap_claim_astray: its claim refused nothing: no wake in {TOLD_WITHIN:?}");
+            std::process::exit(2);
+        }
     }
 }

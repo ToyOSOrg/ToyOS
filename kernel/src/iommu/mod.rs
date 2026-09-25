@@ -189,6 +189,16 @@ impl DeviceSpace {
         }
     }
 
+    /// Put `bytes` at `phys` at `at` again, where a device may still be aimed
+    /// from a mapping this space took back. Only a space of its own has such
+    /// an address; a physical one has no address to choose.
+    pub fn map_at(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
+        match self {
+            Self::Untranslated => panic!("iommu: an untranslated space was asked to place {phys:#x} at {at:#x}"),
+            Self::Own(id) => vtd::domain::map_at(id, Iova::translated(at), phys, bytes),
+        }
+    }
+
     /// Take `bytes` at `at` back, so the pages behind them can be reused.
     pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
         match self {

@@ -255,6 +255,13 @@ impl Domain {
         self.next = end;
         Some(at)
     }
+
+    /// Whether `bytes` at `at` is room [`Self::reserve`] already handed out:
+    /// the only room a mapping may be placed in by address.
+    pub fn handed_out(&self, at: Iova, bytes: u64) -> bool {
+        let span = bytes.next_multiple_of(PAGE_2M);
+        at.raw() >= self.floor() && at.raw().checked_add(span).is_some_and(|end| end <= self.next)
+    }
 }
 
 pub fn map(tables: &mut Tables, domain: &Domain, at: Iova, phys: u64, bytes: u64) {

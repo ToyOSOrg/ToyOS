@@ -2109,3 +2109,50 @@ pub fn userdev_dma_fault(
     );
     Ok(())
 }
+
+/// **Two claims of a function nothing resets never share a page.** A claim is
+/// an ordinary handle and a grant outlives it, so the first holder can close
+/// its claim and keep its grant mapped while a second claim of the same
+/// function is granted memory at the address the first grant was at.
+///
+/// QEMU's 82574 under `pcidev-reset-nothing`, which declines every reset the
+/// way the T14's I219 does, on the test estate's boot, where nobody else
+/// claims it. `userdev_residue` is both holders and asserts in the guest: the
+/// second holder's first grant reads zeros, and the first holder's grant still
+/// holds its own word after the second has written its own. The premises are
+/// asked of the console: the release reset nothing, and the second claim was
+/// handed the range the function was left aimed at.
+pub fn userdev_residue_is_its_own(
+    test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let bins: Vec<(String, Vec<u8>)> =
+        rust_bins.iter().filter(|(name, _)| name == "userdev_residue").cloned().collect();
+    if bins.is_empty() {
+        return Err("userdev_residue was not built".to_string());
+    }
+    let options = BootOptions {
+        profile: Profile::E1000e,
+        kernel_params: &["pcidev-reset-nothing"],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &bins, options);
+    let result = qemu.run_test("test_rs_userdev_residue", Duration::from_secs(60));
+    let mut log = Serial::boot(&qemu);
+    log.push(&result.serial);
+    if let Some(err) = &result.error {
+        return Err(format!("userdev_residue did not finish: {err}\n{}\n{}", result.stdout, log.text()));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("userdev_residue: exit {:?}\n{}\n{}", result.exit_code, result.stdout, log.text()));
+    }
+    let released = log.must_say("[8086:10d3] released from slot 0; reset by")?;
+    if !released.contains("reset by nothing") {
+        return Err(format!("the premise: the 82574 was not released by nothing — {released}"));
+    }
+    let kept = log.must_say("pcidev: slot 0 holds 1 range(s)")?.to_string();
+    log.must_be_clean()?;
+    eprintln!("  [iommu] {}; {}", kept.trim_end(), result.stdout.trim_end());
+    Ok(())
+}

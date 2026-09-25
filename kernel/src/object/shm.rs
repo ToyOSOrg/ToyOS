@@ -93,13 +93,6 @@ impl SharedMemObject {
         }))
     }
 
-    /// A new object over the same pages and memory type, mapped nowhere: for a
-    /// holder that never had a handle to this one. The pages live while either
-    /// object does.
-    pub fn reissued(&self) -> Arc<Self> {
-        Self::over(self.region.clone())
-    }
-
     pub fn size(&self) -> u64 {
         self.region.size
     }

@@ -77,7 +77,6 @@ pub struct Interrupt {
     /// Messages since the holder's last read.
     count: AtomicU32,
     /// Set by the ISR, cleared by the scheduler pass that turns it into a wake.
-    /// Same CPU as the ISR and after it, so nothing here races.
     pending: AtomicBool,
     /// The unit refused this function an access. Every call the claim answers
     /// refuses from here on: its bus mastering is gone, so a driver that kept
@@ -166,9 +165,13 @@ impl Interrupt {
     /// which takes no lock: every call the claim answers refuses from here on,
     /// and a wake is owed as for a message, because a holder waiting on the
     /// claim would otherwise wait for a function that can no longer speak.
+    ///
+    /// The wake is a `swap` and not a store: this one races a pass on another
+    /// CPU, and loom 0.7 lets a plain store be lost to a concurrent `swap`, which
+    /// C11 forbids, so a store here is a wake the model cannot show is owed.
     pub fn fault(&self) {
         self.faulted.store(true, ORDER);
-        self.pending.store(true, Ordering::Release);
+        self.pending.swap(true, Ordering::Release);
     }
 
     pub fn faulted(&self) -> bool {

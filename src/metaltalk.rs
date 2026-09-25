@@ -406,6 +406,9 @@ fn open(reach: &dyn Reach, peer: &Peer, until: Instant, shared: &Shared) -> Resu
             return Err(format!("given up on {peer:?}: {last}"));
         }
         let addrs = match peer {
+            // No wait between dials: an address carries no name to ask the link
+            // for, and the only event a forward can give is a dial it takes, so
+            // the dial ceiling, not a wait, bounds a forward that refuses.
             Peer::At(at) => vec![*at],
             Peer::Named { host, port } if on_the_link => match reach.ask(host, until)? {
                 Some(ip) => vec![SocketAddr::from((ip, *port))],
