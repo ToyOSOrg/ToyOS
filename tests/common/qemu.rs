@@ -2352,9 +2352,10 @@ pub struct BootOptions {
     /// Forward this host port to the guest's TCP [`toyos_logstream::PORT`],
     /// where `logd` serves the boot's log.
     pub log_port: Option<u16>,
-    /// Forward this host port to the guest's UDP [`toyos_mdns::PORT`], where
-    /// netd answers for its name.
-    pub mdns_port: Option<u16>,
+    /// Put the host on the guest's own segment (`super::segment`): frames
+    /// it writes reach the NIC as if off the cable, and it sees every frame the
+    /// guest sends. Refused by name on a profile with no NIC.
+    pub segment: Option<super::segment::Tap>,
     /// Forward this host port to the guest's TCP 22. **slirp is one-way
     /// without it**: nothing on the host can open a connection into the guest
     /// unless QEMU is told which port to translate. A profile with no NIC
@@ -2391,15 +2392,6 @@ pub fn free_host_port() -> u16 {
         .expect("a loopback port for the ssh forward")
         .local_addr()
         .expect("a bound listener has an address")
-        .port()
-}
-
-/// [`free_host_port`] for a UDP forward.
-pub fn free_udp_host_port() -> u16 {
-    std::net::UdpSocket::bind((SSH_FORWARD_HOST, 0))
-        .expect("a loopback port for a UDP forward")
-        .local_addr()
-        .expect("a bound socket has an address")
         .port()
 }
 
@@ -2445,7 +2437,7 @@ impl Default for BootOptions {
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_port: None,
-            mdns_port: None,
+            segment: None,
             ssh_port: None,
             wire_dump: None,
         }
@@ -4347,9 +4339,6 @@ fn qemu_command(
         options.log_port.map(|port| {
             format!(",hostfwd=tcp:{SSH_FORWARD_HOST}:{port}-:{}", toyos_logstream::PORT)
         }),
-        options.mdns_port.map(|port| {
-            format!(",hostfwd=udp:{SSH_FORWARD_HOST}:{port}-:{}", toyos_mdns::PORT)
-        }),
     ]
     .into_iter()
     .flatten()
@@ -4400,6 +4389,13 @@ fn qemu_command(
         );
         qemu.arg("-object")
             .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
+    }
+    if let Some(tap) = &options.segment {
+        assert!(
+            !matches!(shape.nic, Nic::Absent),
+            "this profile carries no NIC, so there is no `net0` segment to stand on"
+        );
+        qemu.args(tap.argv());
     }
 
     if shape.virtio.present() {

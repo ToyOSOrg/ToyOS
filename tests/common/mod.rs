@@ -47,6 +47,9 @@ pub mod power;
 pub mod qemu;
 #[allow(dead_code)]
 pub mod screen;
+/// The host as a neighbour on a guest's own Ethernet segment.
+#[allow(dead_code)]
+pub mod segment;
 #[allow(dead_code)]
 pub mod serial;
 #[allow(dead_code)]

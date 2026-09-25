@@ -1142,7 +1142,6 @@ dependencies = [
  "toyos-ld",
  "toyos-logstream",
  "toyos-manifest",
- "toyos-mdns",
  "toyos-quiesce",
  "toyos-sched",
  "toyos-swap",

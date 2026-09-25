@@ -4,10 +4,11 @@
 //! development host finds the T14's served log this way.
 //!
 //! **Answered only while an address is held**, and announced on every new
-//! one: RFC 6762 §8.3 asks for two unsolicited answers one second apart, and
-//! the second is a wake of netd's own loop ([`Responder::wake_in`]) rather than
-//! a sleep, because the protocol names the interval and nothing on the wire
-//! says when it has passed.
+//! one. Every decision is `toyos_mdns::Responder`'s; this is the socket and
+//! the clock. What the record is owed later — the second announcement (§8.3),
+//! or an answer §6 held back — is a wake of netd's own loop
+//! ([`Responder::wake_in`]) rather than a sleep, because the protocol names
+//! the interval and nothing on the wire says when it has passed.
 
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
@@ -15,11 +16,7 @@ use std::time::{Duration, Instant};
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::udp;
 use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint};
-use toyos_mdns::{Asker, Host, Link, Pace, To, GROUP, PORT};
-
-/// §8.3: "The Multicast DNS responder MUST send at least two unsolicited
-/// responses, one second apart."
-const ANNOUNCE_AGAIN: Duration = Duration::from_secs(1);
+use toyos_mdns::{Asker, Host, Link, To, GROUP, PORT};
 
 /// A query is a few hundred bytes; this holds a handful of them between two
 /// passes, and a query past it is dropped by the socket, which is what the
@@ -28,12 +25,8 @@ const BUFFER: usize = 4096;
 
 pub struct Responder {
     handle: SocketHandle,
-    host: Host<'static>,
-    /// The address last announced, and when its second announcement is owed.
-    announced: Option<Ipv4Addr>,
-    again_at: Option<Instant>,
-    /// When the record was last multicast, on a clock from `born`.
-    pace: Pace,
+    record: toyos_mdns::Responder<'static>,
+    /// The origin of the responder's clock.
     born: Instant,
 }
 
@@ -50,48 +43,27 @@ impl Responder {
         };
         let mut socket = udp::Socket::new(buffer(), buffer());
         socket.bind(PORT).expect("netd: nothing else binds the multicast DNS port");
-        Self {
-            handle: socket_set.add(socket),
-            host,
-            announced: None,
-            again_at: None,
-            pace: Pace::new(),
-            born: Instant::now(),
-        }
+        Self { handle: socket_set.add(socket), record: toyos_mdns::Responder::new(host), born: Instant::now() }
     }
 
-    /// After each poll: answer every query that arrived, and announce an
-    /// address that is new or owed its second announcement.
+    /// After each poll: send what the record is owed now, then answer every
+    /// query that arrived.
     pub fn pass(&mut self, iface: &Interface, socket_set: &mut SocketSet<'_>, now: Instant) {
         let socket = socket_set.get_mut::<udp::Socket>(self.handle);
         // IPv4 is the one protocol this netd is built with, so every address is one.
-        let Some(&IpCidr::Ipv4(cidr)) = iface.ip_addrs().first() else {
-            // No address, so nothing to answer with: the queries are read and
-            // let go, and the next address is announced as new.
-            while socket.recv().is_ok() {}
-            self.announced = None;
-            self.again_at = None;
-            return;
-        };
-        let addr = cidr.address();
-        let link = Link { addr: addr.octets(), prefix: cidr.prefix_len() };
-        let now_ms = now.saturating_duration_since(self.born).as_millis() as u64;
+        let link = iface.ip_addrs().first().map(|&IpCidr::Ipv4(cidr)| Link {
+            addr: cidr.address().octets(),
+            prefix: cidr.prefix_len(),
+        });
+        let now_ms = self.ms(now);
         let group = IpEndpoint::new(IpAddress::Ipv4(Ipv4Addr::from(GROUP)), PORT);
-        if self.announced != Some(addr) {
-            self.announced = Some(addr);
-            self.again_at = Some(now + ANNOUNCE_AGAIN);
-            self.pace.multicast(now_ms);
-            send(socket, &toyos_mdns::announcement(self.host, addr.octets()), group);
-        } else if self.again_at.is_some_and(|at| now >= at) {
-            self.again_at = None;
-            self.pace.multicast(now_ms);
-            send(socket, &toyos_mdns::announcement(self.host, addr.octets()), group);
+        if let Some(record) = self.record.on(link, now_ms) {
+            send(socket, &record, group);
         }
         while let Ok((query, meta)) = socket.recv() {
             let IpAddress::Ipv4(from) = meta.endpoint.addr;
             let asker = Asker { addr: from.octets(), port: meta.endpoint.port };
-            let Some(answer) = toyos_mdns::answer(query, asker, link, self.host, &mut self.pace, now_ms)
-            else {
+            let Some(answer) = self.record.answer(query, asker, now_ms) else {
                 continue;
             };
             let to = match answer.to {
@@ -102,9 +74,13 @@ impl Responder {
         }
     }
 
-    /// When the loop must wake for the second announcement, if one is owed.
+    /// When the loop must wake for what the record is owed, if anything is.
     pub fn wake_in(&self, now: Instant) -> Option<Duration> {
-        self.again_at.map(|at| at.saturating_duration_since(now))
+        self.record.owed_at().map(|at| Duration::from_millis(at.saturating_sub(self.ms(now))))
+    }
+
+    fn ms(&self, now: Instant) -> u64 {
+        now.saturating_duration_since(self.born).as_millis() as u64
     }
 }
 

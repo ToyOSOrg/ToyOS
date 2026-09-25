@@ -148,8 +148,6 @@ sha2 = "0.10"
 
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
-# The port netd answers for its name on, which a boot's forward reaches.
-toyos-mdns = { path = "toyos-mdns" }
 toyos-ld = { path = "toyos-ld" }
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.

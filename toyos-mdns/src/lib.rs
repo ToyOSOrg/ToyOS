@@ -18,9 +18,8 @@
 //!   cache-flush bit and a TTL of at most ten seconds.
 //!
 //! A query whose source is not on this link is ignored (§11), and the record
-//! is multicast at most once a second (§6) — announcements included — so no
-//! host can turn the queries it sends into a multicast to every host on the
-//! link at its own rate ([`Pace`]).
+//! is multicast at most once a second (§6) — announcements included — with a
+//! query inside that second answered when it ends ([`Responder`]).
 //!
 //! **Not implemented, and so not claimed:** probing for the name before using
 //! it (§8.1) and defending it against another host's (§9). Two machines named
@@ -151,88 +150,128 @@ pub struct Link {
 
 impl Link {
     /// Whether a query from `addr` is not from off this link, which is what
-    /// §11 refuses: in this subnet, link-local (RFC 3927), or loopback — a
-    /// source RFC 1122 §3.2.1.3 keeps off every wire, so no router forwarded it,
-    /// and the one QEMU's forward hands a host's query in with.
+    /// §11 refuses: in this subnet, or link-local (RFC 3927). A loopback
+    /// source is off every link (RFC 1122 §3.2.1.3: a host silently discards
+    /// a datagram carrying one), so it is refused wherever it arrived.
     fn holds(&self, addr: [u8; 4]) -> bool {
         let mask = u32::MAX.checked_shl(32 - u32::from(self.prefix.min(32))).unwrap_or(0);
         let (ours, theirs) = (u32::from_be_bytes(self.addr), u32::from_be_bytes(addr));
-        ours & mask == theirs & mask || addr[..2] == [169, 254] || addr[0] == 127
+        ours & mask == theirs & mask || addr[..2] == [169, 254]
     }
 }
 
 /// §6: a record is multicast on an interface at most once a second.
 const GROUP_EVERY_MS: u64 = 1_000;
 
-/// When this host's one record was last multicast, in milliseconds on the
-/// caller's monotonic clock.
-#[derive(Debug, Default)]
-pub struct Pace {
+/// §8.3: "The Multicast DNS responder MUST send at least two unsolicited
+/// responses, one second apart."
+const ANNOUNCE_AGAIN_MS: u64 = 1_000;
+
+/// This host's one record on its link, on the caller's monotonic clock in
+/// milliseconds: announced on every new address and a second later (§8.3),
+/// answered to whoever asks, and multicast at most once a second (§6), so no
+/// host can turn the queries it sends into a multicast to every host on the
+/// link at its own rate. A query §6 holds back is answered when the second
+/// ends, not dropped: the caller wakes at [`Responder::owed_at`].
+#[derive(Debug)]
+pub struct Responder<'a> {
+    host: Host<'a>,
+    /// The link the record was last announced on.
+    link: Option<Link>,
     last_group_ms: Option<u64>,
+    /// When the record is next owed to the group: the second announcement,
+    /// or an answer §6 delayed. One multicast of the record answers every
+    /// query it held.
+    owed_ms: Option<u64>,
 }
 
-impl Pace {
-    pub const fn new() -> Self {
-        Self { last_group_ms: None }
+impl<'a> Responder<'a> {
+    pub const fn new(host: Host<'a>) -> Self {
+        Self { host, link: None, last_group_ms: None, owed_ms: None }
     }
 
-    /// The record was multicast at `now_ms` — an announcement, or an answer
-    /// [`answer`] sent to the group.
-    pub fn multicast(&mut self, now_ms: u64) {
-        self.last_group_ms = Some(now_ms);
-    }
-}
-
-/// The answer `query`, from `asker`, is owed for `host` on `link` at `now_ms`,
-/// or `None` where it asks nothing this host answers — a response, a query with a
-/// nonzero opcode, a question for another name or type, or bytes that are not
-/// a message at all.
-pub fn answer(query: &[u8], asker: Asker, link: Link, host: Host, pace: &mut Pace, now_ms: u64) -> Option<Answer> {
-    if !link.holds(asker.addr) {
-        return None;
-    }
-    let (from_port, addr) = (asker.port, link.addr);
-    let id = u16_at(query, 0)?;
-    let flags = u16_at(query, 2)?;
-    if flags & (QR | OPCODE_MASK) != 0 {
-        return None;
-    }
-    let questions = u16_at(query, 4)?;
-    let mut at = 12;
-    let mut asked = None;
-    for _ in 0..questions {
-        let mut labels: [&[u8]; 8] = [&[]; 8];
-        let (count, after) = name_at(query, at, &mut labels)?;
-        let kind = u16_at(query, after)?;
-        let class = u16_at(query, after + 2)?;
-        at = after + 4;
-        if host.is(&labels[..count])
-            && matches!(kind, TYPE_A | TYPE_ANY)
-            && class & !UNICAST_RESPONSE == CLASS_IN
-        {
-            asked = Some(class & UNICAST_RESPONSE != 0);
-            break;
-        }
-    }
-    let unicast = asked?;
-    if from_port != PORT {
-        // §6.7: the asker's ID and question, and a record no cache keeps long.
-        let mut out = header(id, RESPONSE_FLAGS, 1, 1);
-        host.put_name(&mut out);
-        out.extend_from_slice(&TYPE_A.to_be_bytes());
-        out.extend_from_slice(&CLASS_IN.to_be_bytes());
-        answer_record(&mut out, host, addr, CLASS_IN, LEGACY_TTL);
-        return Some(Answer { to: To::Asker, bytes: out });
-    }
-    if !unicast {
-        if pace.last_group_ms.is_some_and(|last| now_ms < last.saturating_add(GROUP_EVERY_MS)) {
+    /// This host is on `link` at `now_ms`, or on none while it holds no
+    /// address: the multicast the record is owed now, if any — a new
+    /// address's announcement, its second, or an answer §6 delayed.
+    pub fn on(&mut self, link: Option<Link>, now_ms: u64) -> Option<Vec<u8>> {
+        let Some(link) = link else {
+            self.link = None;
+            self.owed_ms = None;
+            return None;
+        };
+        let new = self.link.is_none_or(|was| was.addr != link.addr);
+        self.link = Some(link);
+        if new {
+            self.owed_ms = Some(now_ms.saturating_add(ANNOUNCE_AGAIN_MS));
+        } else if self.owed_ms.is_some_and(|at| now_ms >= at) {
+            self.owed_ms = None;
+        } else {
             return None;
         }
-        pace.multicast(now_ms);
+        self.last_group_ms = Some(now_ms);
+        Some(announcement(self.host, link.addr))
     }
-    let mut out = header(0, RESPONSE_FLAGS, 0, 1);
-    answer_record(&mut out, host, addr, CLASS_IN | CACHE_FLUSH, TTL);
-    Some(Answer { to: if unicast { To::Asker } else { To::Group }, bytes: out })
+
+    /// When the record is next owed to the group, on the caller's clock.
+    pub fn owed_at(&self) -> Option<u64> {
+        self.owed_ms
+    }
+
+    /// The answer `query`, from `asker`, is owed now, or `None` where it asks
+    /// nothing this host answers — no address held, a source off the link, a
+    /// response, a query with a nonzero opcode, a question for another name or
+    /// type, or bytes that are not a message at all — or where §6 delays it
+    /// to [`Responder::owed_at`].
+    pub fn answer(&mut self, query: &[u8], asker: Asker, now_ms: u64) -> Option<Answer> {
+        let link = self.link?;
+        if !link.holds(asker.addr) {
+            return None;
+        }
+        let host = self.host;
+        let id = u16_at(query, 0)?;
+        let flags = u16_at(query, 2)?;
+        if flags & (QR | OPCODE_MASK) != 0 {
+            return None;
+        }
+        let questions = u16_at(query, 4)?;
+        let mut at = 12;
+        let mut asked = None;
+        for _ in 0..questions {
+            let mut labels: [&[u8]; 8] = [&[]; 8];
+            let (count, after) = name_at(query, at, &mut labels)?;
+            let kind = u16_at(query, after)?;
+            let class = u16_at(query, after + 2)?;
+            at = after + 4;
+            if host.is(&labels[..count])
+                && matches!(kind, TYPE_A | TYPE_ANY)
+                && class & !UNICAST_RESPONSE == CLASS_IN
+            {
+                asked = Some(class & UNICAST_RESPONSE != 0);
+                break;
+            }
+        }
+        let unicast = asked?;
+        if asker.port != PORT {
+            // §6.7: the asker's ID and question, and a record no cache keeps long.
+            let mut out = header(id, RESPONSE_FLAGS, 1, 1);
+            host.put_name(&mut out);
+            out.extend_from_slice(&TYPE_A.to_be_bytes());
+            out.extend_from_slice(&CLASS_IN.to_be_bytes());
+            answer_record(&mut out, host, link.addr, CLASS_IN, LEGACY_TTL);
+            return Some(Answer { to: To::Asker, bytes: out });
+        }
+        if !unicast {
+            let free_ms = self.last_group_ms.map_or(now_ms, |last| last.saturating_add(GROUP_EVERY_MS));
+            if now_ms < free_ms {
+                self.owed_ms = Some(self.owed_ms.map_or(free_ms, |at| at.min(free_ms)));
+                return None;
+            }
+            self.last_group_ms = Some(now_ms);
+        }
+        let mut out = header(0, RESPONSE_FLAGS, 0, 1);
+        answer_record(&mut out, host, link.addr, CLASS_IN | CACHE_FLUSH, TTL);
+        Some(Answer { to: if unicast { To::Asker } else { To::Group }, bytes: out })
+    }
 }
 
 fn header(id: u16, flags: u16, questions: u16, answers: u16) -> Vec<u8> {
@@ -306,10 +345,16 @@ mod tests {
     const LINK: Link = Link { addr: ADDR, prefix: 24 };
     const NEIGHBOUR: [u8; 4] = [192, 168, 1, 7];
 
-    /// One query from a neighbour on the link, to a responder that has
-    /// multicast nothing yet.
+    /// A responder that announced [`LINK`]'s address at 0.
+    fn announced() -> Responder<'static> {
+        let mut r = Responder::new(host());
+        assert!(r.on(Some(LINK), 0).is_some(), "a new address is announced");
+        r
+    }
+
+    /// One query from a neighbour on the link, long after the announcement.
     fn ask(query: &[u8], port: u16) -> Option<Answer> {
-        answer(query, Asker { addr: NEIGHBOUR, port }, LINK, host(), &mut Pace::new(), 0)
+        announced().answer(query, Asker { addr: NEIGHBOUR, port }, 10_000)
     }
 
     /// A query as RFC 1035 §4.1 lays one out, spelled byte by byte here rather
@@ -421,43 +466,73 @@ mod tests {
     /// RFC 6762 §6: "a Multicast DNS responder MUST NOT (except in the one
     /// special case of answering probe queries) multicast a record on a given
     /// interface until at least one second has elapsed since the last time that
-    /// record was multicast on that particular interface." So a second query
-    /// inside the second is not answered to the group, and one after it is; an
-    /// announcement is a multicast of the record too.
+    /// record was multicast on that particular interface." An announcement is a
+    /// multicast of the record too. A query inside the second is answered when
+    /// it ends, by one multicast of the record, and not before or never.
     #[test]
-    fn the_record_is_multicast_at_most_once_a_second() {
+    fn the_record_is_multicast_at_most_once_a_second_and_a_query_inside_it_waits() {
         let q = query(0, &["toyos-t14", "local"], 1, 1);
         let from = Asker { addr: NEIGHBOUR, port: PORT };
-        let mut pace = Pace::new();
-        let first = answer(&q, from, LINK, host(), &mut pace, 10_000).map(|a| a.to);
-        assert_eq!(first, Some(To::Group));
-        let again = answer(&q, from, LINK, host(), &mut pace, 10_999).map(|a| a.to);
-        assert_ne!(again, Some(To::Group), "the record was multicast 999 ms ago");
-        let later = answer(&q, from, LINK, host(), &mut pace, 11_000).map(|a| a.to);
-        assert_eq!(later, Some(To::Group), "a second has passed");
-        let mut announced = Pace::new();
-        announced.multicast(20_000);
-        assert_ne!(answer(&q, from, LINK, host(), &mut announced, 20_500).map(|a| a.to), Some(To::Group));
+        let mut r = Responder::new(host());
+        let record = r.on(Some(LINK), 20_000).expect("a new address is announced");
+        assert_eq!(r.owed_at(), Some(21_000), "§8.3: the second announcement");
+        assert_eq!(r.answer(&q, from, 20_500), None, "the record was announced 500 ms ago");
         let legacy = Asker { addr: NEIGHBOUR, port: 53_000 };
         assert_eq!(
-            answer(&q, legacy, LINK, host(), &mut announced, 20_500).map(|a| a.to),
+            r.answer(&q, legacy, 20_500).map(|a| a.to),
             Some(To::Asker),
             "a unicast answer is no multicast of the record"
         );
+        assert_eq!(r.on(Some(LINK), 20_999), None);
+        assert_eq!(r.on(Some(LINK), 21_000).as_ref(), Some(&record), "announced again, which answers the query");
+        assert_eq!(r.owed_at(), None);
+
+        assert_eq!(r.answer(&q, from, 21_400), None, "the record was multicast 400 ms ago");
+        assert_eq!(r.answer(&q, from, 21_600), None);
+        assert_eq!(r.owed_at(), Some(22_000), "both queries are owed one multicast when the second ends");
+        assert_eq!(r.on(Some(LINK), 21_999), None);
+        assert_eq!(r.on(Some(LINK), 22_000).as_ref(), Some(&record));
+        assert_eq!(r.on(Some(LINK), 22_001), None, "owed once");
+
+        let later = r.answer(&q, from, 23_000).map(|a| a.to);
+        assert_eq!(later, Some(To::Group), "a second has passed");
+        assert_eq!(r.answer(&q, from, 23_999), None);
+        assert_eq!(r.owed_at(), Some(24_000));
+    }
+
+    /// Nothing is answered without an address; an address after none, or a
+    /// different one, is new and announced at once with what it is.
+    #[test]
+    fn an_address_is_announced_when_new_and_none_is_answered_for() {
+        let q = query(0, &["toyos-t14", "local"], 1, 1);
+        let from = Asker { addr: NEIGHBOUR, port: 53_000 };
+        let mut r = Responder::new(host());
+        assert_eq!(r.answer(&q, from, 0), None, "no address yet");
+        assert!(r.on(Some(LINK), 0).is_some());
+        assert_eq!(r.on(Some(LINK), 500), None);
+        assert_eq!(r.on(None, 600), None);
+        assert_eq!(r.owed_at(), None, "nothing is owed for an address no longer held");
+        assert_eq!(r.answer(&q, from, 600), None, "no address any more");
+        assert!(r.on(Some(LINK), 700).is_some(), "an address after none is new");
+        let moved = Link { addr: [192, 168, 1, 50], prefix: 24 };
+        let announced = r.on(Some(moved), 800).expect("a different address is new");
+        assert_eq!(announced[announced.len() - 4..], [192, 168, 1, 50]);
     }
 
     /// RFC 6762 §11: a query whose source is not on this link is ignored; a
-    /// link-local source (RFC 3927) is on every link, and a loopback one was
-    /// routed by nobody.
+    /// link-local source (RFC 3927) is on every link. RFC 1122 §3.2.1.3: a
+    /// loopback source is never on a wire, and a datagram carrying one is
+    /// silently discarded.
     #[test]
     fn a_query_from_off_the_link_is_not_answered() {
         let q = query(0, &["toyos-t14", "local"], 1, 1);
-        for (addr, port) in [([10, 0, 0, 7], PORT), ([192, 168, 2, 7], 53_000), ([8, 8, 8, 8], PORT)] {
-            let asked = answer(&q, Asker { addr, port }, LINK, host(), &mut Pace::new(), 0);
-            assert_eq!(asked, None, "{addr:?}");
+        for addr in [[10, 0, 0, 7], [192, 168, 2, 7], [8, 8, 8, 8], [127, 0, 0, 1], [127, 1, 2, 3]] {
+            for port in [PORT, 53_000] {
+                assert_eq!(announced().answer(&q, Asker { addr, port }, 10_000), None, "{addr:?}:{port}");
+            }
         }
-        for addr in [[192, 168, 1, 254], [169, 254, 3, 4], [127, 0, 0, 1]] {
-            let asked = answer(&q, Asker { addr, port: PORT }, LINK, host(), &mut Pace::new(), 0);
+        for addr in [[192, 168, 1, 254], [169, 254, 3, 4]] {
+            let asked = announced().answer(&q, Asker { addr, port: PORT }, 10_000);
             assert!(asked.is_some(), "{addr:?}");
         }
     }

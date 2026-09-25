@@ -16,7 +16,7 @@ use toyos_build::metaldevices::exit_of;
 
 use super::logstream::{self, VIRTIO};
 use super::qemu::{self, BootOptions, QemuInstance};
-use super::{compile, serial};
+use super::{compile, segment, serial};
 
 /// What `test_rs_log_origin` says, and the name its line goes in the log under:
 /// it runs as `test-runner`'s child, on `test-runner`'s pipe.
@@ -317,67 +317,119 @@ pub fn carrier_forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u
     Ok(())
 }
 
-/// **netd answers for its name.** A legacy resolver's query (RFC 6762 §6.7) for
-/// `toyos-t14.local`, sent from the host through a forward onto the guest's
-/// multicast DNS port once the guest holds its lease, is answered with the
-/// lease's address, the asker's ID and question, and a TTL of ten seconds; a
-/// query for another name is not answered at all.
+/// **netd answers for its name, to its link and to nobody off it.** The host
+/// stands on the guest's segment (`segment`) as a neighbour, [`NEIGHBOUR`]. Once
+/// the guest holds its lease, the neighbour makes itself known (an ARP request
+/// for the guest's address, which the guest answers) and then puts three
+/// legacy resolvers' queries (RFC 6762 §6.7) on the wire:
 ///
-/// The query and the reading of the answer are spelled here, byte by byte from
-/// RFC 1035 §4.1, and not by `toyos_mdns`, which is what wrote the answer.
+/// 1. for this machine's name, from `127.0.0.1` — a source RFC 1122
+///    §3.2.1.3 says a host MUST NOT send and MUST silently discard;
+/// 2. for another name, from the neighbour;
+/// 3. for this machine's name, from the neighbour.
+///
+/// Only the third is answered: the lease's address, the asker's ID and
+/// question, a TTL of ten seconds, addressed to the neighbour. Silence is not
+/// waited for — netd answers one socket's queries in the order they arrived,
+/// through one socket's queue sent in order, so an answer to either earlier
+/// query would be on the wire before the third one's.
+///
+/// The frames, the query and the reading of the answer are spelled here, byte
+/// by byte from RFC 826, 791, 768 and 1035 §4.1, and not by `toyos_mdns`,
+/// which is what wrote the answer.
 pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let port = qemu::free_udp_host_port();
-    let options = BootOptions { profile: VIRTIO.profile, mdns_port: Some(port), ..Default::default() };
+    let tap = segment::Tap::in_lane();
+    let options = BootOptions { profile: VIRTIO.profile, segment: Some(tap.clone()), ..Default::default() };
     let config = compile::repo_root().join(VIRTIO.config);
     let mut guest = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
     let mut console = guest.boot_log().to_string();
     qemu::await_marker(&mut guest, &mut console, "netd: DHCP: lease ", "netd's lease")?;
+    let mut wire = tap.open()?;
+    let deadline = || Instant::now() + Duration::from_secs(10);
 
-    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("bind: {e}"))?;
-    socket.set_read_timeout(Some(Duration::from_secs(10))).map_err(|e| format!("{e}"))?;
+    wire.send(&segment::arp_request(NEIGHBOUR_MAC, NEIGHBOUR, GUEST))?;
+    let until = deadline();
+    let guest_mac = loop {
+        let frame = wire.next(until).map_err(|e| format!("no ARP reply for {GUEST:?} in 10 s: {e}"))?;
+        if let Some(mac) = segment::arp_reply_for(&frame, GUEST) {
+            break mac;
+        }
+    };
+
+    // Where slirp delivers anything the guest sends to an address on its
+    // network that is none of slirp's own: host loopback, at this port. Held
+    // here so that no other process on the host is handed it.
+    let stray = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("bind: {e}"))?;
+    let port = stray.local_addr().map_err(|e| format!("{e}"))?.port();
+    let host = toyos_build::lan::HOSTNAME;
+    let ask = |from: [u8; 4], payload: &[u8]| {
+        segment::Udp {
+            dst_mac: guest_mac,
+            src_mac: NEIGHBOUR_MAC,
+            src: (from, port),
+            dst: (GUEST, MDNS_PORT),
+            payload,
+        }
+        .frame()
+    };
+    const LOOPBACK_ID: u16 = 0x7f01;
+    const OTHER_ID: u16 = 0x0bad;
+    const OWN_ID: u16 = 0x5eed;
     let asked = Instant::now();
-    socket
-        .send_to(&query(0x5eed, toyos_build::lan::HOSTNAME), (Ipv4Addr::LOCALHOST, port))
-        .map_err(|e| format!("send the query: {e}"))?;
-    let mut answer = [0u8; 512];
-    let n = socket
-        .recv(&mut answer)
-        .map_err(|e| format!("no answer for {}.local in 10 s: {e}", toyos_build::lan::HOSTNAME))?;
+    wire.send(&ask([127, 0, 0, 1], &query(LOOPBACK_ID, host)))?;
+    wire.send(&ask(NEIGHBOUR, &query(OTHER_ID, "some-other-host")))?;
+    wire.send(&ask(NEIGHBOUR, &query(OWN_ID, host)))?;
+
+    let until = deadline();
+    let (answer, to) = loop {
+        let frame = wire.next(until).map_err(|e| format!("no answer for {host}.local in 10 s: {e}"))?;
+        let Some(udp) = segment::udp_in(&frame) else { continue };
+        if udp.src != (GUEST, MDNS_PORT) || udp.payload.len() < 2 {
+            continue;
+        }
+        match u16::from_be_bytes([udp.payload[0], udp.payload[1]]) {
+            LOOPBACK_ID => {
+                return Err(format!(
+                    "a query from 127.0.0.1 was answered, to {:?}: {:02x?}",
+                    udp.dst, udp.payload
+                ));
+            }
+            OTHER_ID => return Err(format!("a query for another name was answered: {:02x?}", udp.payload)),
+            OWN_ID => break (udp.payload.to_vec(), (udp.dst_mac, udp.dst)),
+            _ => {}
+        }
+    };
     let took = asked.elapsed();
-    let got = &answer[..n];
-    let mut want = query(0x5eed, toyos_build::lan::HOSTNAME);
+    let mut want = query(OWN_ID, host);
     // QR and AA, one question, one answer.
     want[2..8].copy_from_slice(&[0x84, 0x00, 0, 1, 0, 1]);
-    want.extend_from_slice(&name(toyos_build::lan::HOSTNAME));
-    want.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 10, 0, 4, 10, 0, 2, 15]);
-    if got != want {
-        return Err(format!("{}.local was answered {got:02x?}, and {want:02x?} is owed", toyos_build::lan::HOSTNAME));
+    want.extend_from_slice(&name(host));
+    want.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 10, 0, 4]);
+    want.extend_from_slice(&GUEST);
+    if answer != want {
+        return Err(format!("{host}.local was answered {answer:02x?}, and {want:02x?} is owed"));
     }
-
-    // Silence is not waited for: the other name is asked, then this one again,
-    // down one forward netd reads in order, so the next answer is the third
-    // question's unless the other name was answered.
-    socket
-        .send_to(&query(0x0bad, "some-other-host"), (Ipv4Addr::LOCALHOST, port))
-        .map_err(|e| format!("send the other name's query: {e}"))?;
-    socket
-        .send_to(&query(0x5eee, toyos_build::lan::HOSTNAME), (Ipv4Addr::LOCALHOST, port))
-        .map_err(|e| format!("send the third query: {e}"))?;
-    let n = socket
-        .recv(&mut answer)
-        .map_err(|e| format!("no answer for {}.local asked again, in 10 s: {e}", toyos_build::lan::HOSTNAME))?;
-    if answer[..2] != [0x5e, 0xee] {
-        return Err(format!("a query for another name was answered: {:02x?}", &answer[..n]));
+    if to != (NEIGHBOUR_MAC, (NEIGHBOUR, port)) {
+        return Err(format!("{host}.local was answered to {to:02x?}, not to the neighbour that asked"));
     }
     drop(guest);
     serial::Serial::named("the boot", console.as_str()).must_be_clean()?;
     eprintln!(
-        "  [mdns] {}.local answered 10.0.2.15 in {} ms; another name, nothing",
-        toyos_build::lan::HOSTNAME,
+        "  [mdns] {host}.local answered {GUEST:?} to an on-link neighbour in {} ms; 127.0.0.1 and \
+         another name, nothing",
         took.as_millis()
     );
     Ok(())
 }
+
+/// The address slirp's DHCP gives the first guest on its network, and a
+/// neighbour on the same /24 that is none of slirp's own addresses.
+const GUEST: [u8; 4] = [10, 0, 2, 15];
+const NEIGHBOUR: [u8; 4] = [10, 0, 2, 7];
+/// A locally administered unicast address (IEEE 802 bit 1 of the first octet).
+const NEIGHBOUR_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x0a, 0x00, 0x07];
+/// RFC 6762 §3: the port every multicast DNS responder listens on.
+const MDNS_PORT: u16 = 5353;
 
 /// `<host>.local` as labels.
 fn name(host: &str) -> Vec<u8> {
