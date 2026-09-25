@@ -262,9 +262,9 @@ impl<'a> Disk<'a> {
             refuse(format_args!("ROOT is {blocks} blocks of {} bytes, not whole {BLOCK}-byte blocks", self.lba_bytes));
         };
         let pages = (len / BLOCK as u64) as usize;
-        // LoaderData and not the type the kernel reads: firmware walks its own map
-        // in `ExitBootServices`, and a type it did not define there is one no
-        // firmware is obliged to have been tested against.
+        // LoaderData to the firmware, and `ROOT_IMAGE_MEMORY_TYPE` only in the map
+        // the kernel is handed: the T14's firmware never returns from
+        // `ExitBootServices` while its own map holds an OS-loader type.
         let at = bs
             .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
             .unwrap_or_else(|e| refuse(format_args!("firmware would not give {len} bytes for ROOT: {e:?}")));

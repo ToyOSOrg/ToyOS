@@ -20,7 +20,6 @@ use uefi::{
     Event,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS, ROOT_IMAGE_MEMORY_TYPE};
-use toyos_bootmap::mark::{self, Step};
 use toyos_bootmap::relabel::{relabel, Extent};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
 
@@ -458,33 +457,6 @@ struct GopInfo {
     pixel_format: u32,
 }
 
-impl GopInfo {
-    fn scanout(&self) -> mark::Scanout {
-        mark::Scanout {
-            width: self.width,
-            height: self.height,
-            stride: self.stride,
-            bytes: self.framebuffer_size,
-        }
-    }
-
-    /// Paint `step`'s square of the handoff row through the scanout's identity
-    /// address, which the firmware's tables and the boot map both hold.
-    ///
-    /// Past `ExitBootServices`, so it allocates nothing and cannot panic:
-    /// `square` bounds every offset inside `framebuffer_size`, and `Plan::new`
-    /// refused a framebuffer whose end does not fit an address.
-    fn mark(&self, step: Step) {
-        let Some(pixels) = mark::square(step, self.scanout()) else { return };
-        for offset in pixels {
-            // SAFETY: `offset + 4 <= framebuffer_size` by `square`'s contract,
-            // and the scanout is mapped at identity under both tables this
-            // loader runs on.
-            unsafe { core::ptr::write_volatile((self.framebuffer + offset) as *mut u32, mark::WHITE) };
-        }
-    }
-}
-
 /// The mode is the firmware's: `Mode->Info` is the mode it already set for the
 /// panel (UEFI 2.11 §12.9.2, "Current Mode of the graphics device"), and
 /// §12.9.2.2's `SetMode` is never called.
@@ -713,19 +685,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         mem::size_of::<KernelArgs>() as u64,
     );
 
-    // The legend for what this loader and the kernel paint once no line can be
-    // printed, said while one still can.
-    match gop.as_ref().map(|g| mark::square(Step::KernelEntered, g.scanout()).is_some()) {
-        Some(true) => println!(
-            "Handoff marks: white squares at the top right, from the left: exit asked \
-             (painted before it, so a row without it is marks this panel cannot show), boot \
-             services exited, the boot map live, the kernel entered; the kernel's panel paints \
-             over them"
-        ),
-        Some(false) => println!("Handoff marks: none, this mode cannot hold the row"),
-        None => println!("Handoff marks: none, this machine has no scanout"),
-    }
-
     // Last, and after every line above: a console write, a FAT write and a
     // handle drop can each add a descriptor, and the margin below is fixed.
     loaderlog::close();
@@ -739,14 +698,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         ty: ROOT_IMAGE_MEMORY_TYPE,
     };
 
-    if let Some(g) = &gop {
-        g.mark(Step::ExitAsked);
-    }
-
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
-    if let Some(g) = &gop {
-        g.mark(Step::BootServicesExited);
-    }
 
     // **Nothing below this line may allocate or panic.** Boot services are gone,
     // so the allocator answers null and `println!` dereferences a system table
@@ -787,9 +739,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // the same range at `PHYS_OFFSET` for the jump below. The assert before the
     // exit proved the whole kernel image is inside that range.
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack)) };
-    if let Some(g) = &gop {
-        g.mark(Step::BootMapLive);
-    }
 
     let entry_virt = PHYS_OFFSET + kernel_phys + kernel.entry_offset as u64;
 

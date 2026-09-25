@@ -12,8 +12,7 @@ the table in `IDTR` is the one firmware left. A CPU exception in that window
 parse) vectors into firmware code, which on EDK2 dead-loops; no panic runs, so
 neither the panel nor the black box nor serial carries anything.
 
-What a machine shows today is location, not cause: the handoff squares
-(`toyos-bootmap/src/mark.rs`) say the kernel was entered, and the panel
+What a machine shows today is at most location, never cause: the panel
 repaints on each record only until `params::init`, or throughout on a boot
 naming `early-panel`. A fault's vector, `RIP` and `CR2` reach no channel.
 

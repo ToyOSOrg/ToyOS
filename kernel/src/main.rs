@@ -244,10 +244,6 @@ fn report_log_destination() {
 }
 
 unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
-    // First: every statement after it can stop the machine before the panel
-    // arms, and this square is then what says the kernel was entered at all.
-    drivers::panic_console::mark_entry(kernel_args);
-
     // Copied onto the kernel stack: the original lives on the UEFI stack, unreachable once mm::init drops the identity map.
     let kernel_args = *kernel_args;
 

@@ -111,8 +111,9 @@ pub struct KernelArgs {
     /// says what firmware *used*, not what the bridge would decode.
     pub root_bridge_windows: [RootBridgeWindow; MAX_ROOT_BRIDGE_WINDOWS],
     /// Where the loader put ROOT: the whole partition, read through the
-    /// firmware's block I/O into pages of [`ROOT_IMAGE_MEMORY_TYPE`], so the
-    /// kernel mounts it from memory and never frees it.
+    /// firmware's block I/O into pages the map in [`Self::memory_map_addr`]
+    /// marks [`ROOT_IMAGE_MEMORY_TYPE`], so the kernel mounts it from memory and
+    /// never frees it.
     ///
     /// These are the bytes a signature check over ROOT has to cover: the loader
     /// writes them once, and nothing writes them between that read and the
@@ -126,10 +127,15 @@ pub struct KernelArgs {
     pub root_partition_guid: [u8; 16],
 }
 
-/// The UEFI memory type the loader allocates ROOT's image as: one of the
-/// values UEFI 2.11 §7.2.1 leaves to an OS loader (`0x8000_0000..`), so the
-/// firmware's map marks those pages as nobody's free memory and the kernel's
-/// allocator, which takes only the types it knows are free, never hands them out.
+/// The type ROOT's image has in the memory map the loader hands the kernel: one
+/// of the values UEFI 2.11 §7.2.1 leaves to an OS loader (`0x8000_0000..`), so
+/// the kernel's allocator, which takes only the types it knows are free, never
+/// hands those pages out.
+///
+/// Never in the firmware's own map: the loader allocates the pages as
+/// `LoaderData` and relabels them only in its copy taken after
+/// `ExitBootServices`, because the T14's firmware never returns from
+/// `ExitBootServices` while its map holds an OS-loader type.
 pub const ROOT_IMAGE_MEMORY_TYPE: u32 = 0x8000_7201;
 
 /// The boot parameter on which the loader hands the kernel no ROOT image: the
