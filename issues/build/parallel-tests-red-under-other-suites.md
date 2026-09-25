@@ -330,17 +330,6 @@ changes.
   and both of this test's guests are ordinary handoff passes on RAM QEMU zeroed,
   so the string it changes is on no line either of them prints.
 
-- **`screen_loader_lines`**, third sighting — 2026-09-25 on `wt/toyos-ramroot`
-  (PR #506), a full fast tier: `the panel carried 29 rows at the GOP query and 44
-  at the loader's last line, a growth of 15, where the loader printed 14 lines
-  between them`, then `ALONE … GREEN` with `30 to 44, for 14 line(s) printed`,
-  and red the same way once more under `cargo test screen_loader_lines`, where
-  the harness runs it beside no other suite but its own two guests. A third
-  shape: growth one *above* the lines printed, because the first dump caught the
-  panel one row short of the console, the GOP line on serial and not yet drawn.
-  That branch adds twelve loader lines before the query and none between it and
-  the last line. Not investigated further.
-
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
 twelve guests across every worktree. It recurred on 2026-08-07: **eight
