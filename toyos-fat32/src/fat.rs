@@ -165,16 +165,10 @@ impl<D: BlockAccess> Fat32<D> {
 
     /// Claim one free cluster and mark it end-of-chain.
     ///
-    /// A held [`Fat32::unreached`] is that claim already made, so it is taken
-    /// first.
-    ///
     /// Scans the FAT a sector at a time from the FSInfo hint, wrapping once.
     /// The hint is only a starting point: a hostile FSInfo can make the scan
     /// begin in the wrong place, which costs a wrap and nothing else.
     pub(crate) fn alloc_cluster(&mut self) -> Result<Cluster, Error> {
-        if let Some(held) = self.unreached.take() {
-            return Ok(held);
-        }
         let bps = self.geom.bytes_per_sector as u64;
         let entries_per_sector = bps / 4;
         let last_sector = self.geom.max_cluster() as u64 * 4 / bps;
@@ -209,36 +203,16 @@ impl<D: BlockAccess> Fat32<D> {
         Err(Error::NoSpace)
     }
 
-    /// Claim a cluster and hand it to `reach`: the writes that prepare it and
-    /// make the volume reach it.
+    /// Allocate a cluster and link it onto the end of an existing chain.
     ///
-    /// **Claim, then reach.** The cluster is end-of-chain in every FAT before
-    /// anything points at it, because a chain or entry reaching a free cluster
-    /// is a filesystem two files can share. A refused `reach` therefore leaves
-    /// a claimed cluster nothing reaches, and it is held in
-    /// [`Fat32::unreached`] rather than dropped: the next claim — the retry the
-    /// refusal invites — takes the same cluster, and [`Fat32::sync`] frees it
-    /// if none comes. Freeing it here instead would be one more write to a
-    /// device that has just refused one.
-    ///
-    /// Nothing reaches it after a refusal because `reach`'s links obey
-    /// [`Self::set_fat_entry`]'s rule: a refused write left the active FAT as
-    /// it was.
-    pub(crate) fn claim_reached(
-        &mut self,
-        reach: impl FnOnce(&mut Self, Cluster) -> Result<(), Error>,
-    ) -> Result<Cluster, Error> {
-        let cluster = self.alloc_cluster()?;
-        if let Err(e) = reach(self, cluster) {
-            self.unreached = Some(cluster);
-            return Err(e);
-        }
-        Ok(cluster)
-    }
-
-    /// Claim a cluster and link it onto the end of an existing chain.
+    /// The link is written after the new cluster is claimed and terminated, so
+    /// a failure between the two leaks a cluster rather than producing a chain
+    /// that runs into free space. Leaked clusters are recoverable by `fsck`; a
+    /// chain pointing at a free cluster is a filesystem two files can share.
     pub(crate) fn append_cluster(&mut self, last: Cluster) -> Result<Cluster, Error> {
-        self.claim_reached(|fs, new| fs.set_fat_entry(last, new.raw()))
+        let new = self.alloc_cluster()?;
+        self.set_fat_entry(last, new.raw())?;
+        Ok(new)
     }
 
     /// Free every cluster of a chain, refusing if the walk reaches `anchor`.
@@ -322,12 +296,18 @@ impl<D: BlockAccess> Fat32<D> {
         }
     }
 
-    /// Zero a cluster a directory is about to reach.
+    /// Allocate a cluster with its contents zeroed, for a new directory.
     ///
     /// Data clusters are not zeroed on allocation — a file write covers what
     /// it allocates — but a directory's free slots are recognised by being
     /// zero, so a new directory cluster full of stale bytes would read as
     /// entries.
+    pub(crate) fn alloc_zeroed_cluster(&mut self) -> Result<Cluster, Error> {
+        let cluster = self.alloc_cluster()?;
+        self.zero_cluster(cluster)?;
+        Ok(cluster)
+    }
+
     pub(crate) fn zero_cluster(&mut self, cluster: Cluster) -> Result<(), Error> {
         let bps = self.geom.bytes_per_sector as usize;
         let base = self.geom.cluster_offset(cluster);

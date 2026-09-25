@@ -409,10 +409,8 @@ impl<D: BlockAccess> Fat32<D> {
             }
             let max_clusters = (MAX_DIR_ENTRIES / per_cluster).max(1) as u64;
             let last = self.chain_last(dir_start, max_clusters)?;
-            self.claim_reached(|fs, new| {
-                fs.zero_cluster(new)?;
-                fs.set_fat_entry(last, new.raw())
-            })?;
+            let new = self.alloc_zeroed_cluster()?;
+            self.set_fat_entry(last, new.raw())?;
             capacity += per_cluster;
         }
     }
