@@ -432,14 +432,14 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     let t_storage = clock::nanos_since_boot();
 
-    let ecam_base = acpi::find_ecam_base(kernel_args.rsdp_addr)
+    let (ecam_base, pci_segment) = acpi::find_ecam_base(kernel_args.rsdp_addr)
         .expect("ACPI: failed to find ECAM base address");
     let ecam = mm::paging::map_mmio(ecam_base, 256 * 32 * 8 * 4096, MmioPolicy::Uncacheable);
     let pci_devices = pci::enumerate(&ecam);
     // Before any driver `init`: this sizes every BAR on the machine, and the
     // spec's probe takes memory decode off the function it is sizing for the
     // length of it. Nothing has bound yet, so nothing is mid-transfer.
-    pcidev::publish(&pci_devices, maps, kernel_args.root_bridge_windows());
+    pcidev::publish(&pci_devices, pci_segment, maps, kernel_args.root_bridge_windows());
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
         drivers::virtio::cap_selftest();
@@ -556,16 +556,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // The filesystem sits outside the capability model by ruling, so no handle is owed for /boot.
     // /log is ReadWrite on purpose: it's an ordinary userland file logd owns, and the worst a process can do is cost the diagnostic.
     match fat32_adapter::mount(Role::Boot) {
-        Some(fs) => {
-            vfs::lock().mount(&[Role::Boot.mount()], Box::new(fs), UserAccess::KernelOnly);
-            gpt::note_mounted(&gpt::boot_volume().expect("a mounted /boot has a volume"));
-        }
+        Some(fs) => vfs::lock().mount(&[Role::Boot.mount()], Box::new(fs), UserAccess::KernelOnly),
         None => log!("boot-volume: not mounted; the kernel has no /boot this boot"),
     }
     match fat32_adapter::mount(Role::Log) {
         Some(fs) => {
             vfs::lock().mount(&[Role::Log.mount()], Box::new(fs), UserAccess::ReadWrite);
-            gpt::note_mounted(&gpt::log_volume().expect("a mounted /log has a volume"));
         }
         // No fallback onto /boot: with no log partition the log stays in the in-memory shards, still reachable via screen and console.
         None => log!("log-volume: not mounted; this boot's kernel log stays in memory"),

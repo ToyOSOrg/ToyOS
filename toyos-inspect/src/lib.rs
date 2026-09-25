@@ -99,7 +99,7 @@ pub const OWNERS: [Owner; 4] = [NET, SOUND, LOG, DISPLAY];
 pub const MSG_INSPECT: u32 = u32::from_le_bytes(*b"insp");
 
 /// The answer: one frame whose payload is a [`Snapshot`]'s encoding. The owner
-/// sends exactly one and closes the connection.
+/// sends exactly one.
 pub const MSG_SNAPSHOT: u32 = u32::from_le_bytes(*b"snap");
 
 const _: () = assert!(

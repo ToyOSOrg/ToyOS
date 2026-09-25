@@ -13,7 +13,12 @@
 //! the device's record says whether it is claimed and a claim record says by
 //! whom when the kernel found the handle in a table.
 //!
+//! The CPU count and the memory are not here: they are `SYS_SYSINFO`'s header,
+//! which needs no right.
+//!
 //! [`SYS_DEVICE_INVENTORY`]: crate::syscall::SYS_DEVICE_INVENTORY
+
+use crate::syscall::DeviceType;
 
 /// The width of every record.
 pub const RECORD_BYTES: usize = 64;
@@ -45,9 +50,12 @@ impl Holder {
     }
 }
 
-/// A PCI function's address.
+/// A PCI function's address: its segment group, as the MCFG entry its
+/// configuration space was found through names it, and its bus, device and
+/// function there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Bdf {
+pub struct PciAddr {
+    pub segment: u16,
     pub bus: u8,
     pub dev: u8,
     pub func: u8,
@@ -65,18 +73,10 @@ pub enum Driven {
     Claimed,
 }
 
-/// The machine: what `SYS_SYSINFO`'s header also says.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Machine {
-    pub cpus: u32,
-    pub memory_total: u64,
-    pub memory_used: u64,
-}
-
 /// One PCI function.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Pci {
-    pub at: Bdf,
+    pub at: PciAddr,
     pub vendor: u16,
     pub device: u16,
     pub class: u8,
@@ -94,16 +94,60 @@ pub enum UsbFunction {
     Storage,
 }
 
+/// The speed a USB port trained at: PORTSC's Port Speed under the default
+/// Protocol Speed IDs (xHCI 1.2 §7.2.2.1.1, Table 7-13), which are the only
+/// ones a device this kernel binds can have.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UsbSpeed {
+    Full,
+    Low,
+    High,
+    /// SuperSpeed, Gen 1 on one lane.
+    Super,
+    /// SuperSpeedPlus, Gen 2 on one lane.
+    SuperPlusGen2x1,
+    /// SuperSpeedPlus, Gen 1 on two lanes.
+    SuperPlusGen1x2,
+    /// SuperSpeedPlus, Gen 2 on two lanes.
+    SuperPlusGen2x2,
+}
+
+impl UsbSpeed {
+    /// The Port Speed value, or `None` for one no default ID names.
+    pub fn from_psiv(psiv: u8) -> Option<Self> {
+        Some(match psiv {
+            1 => Self::Full,
+            2 => Self::Low,
+            3 => Self::High,
+            4 => Self::Super,
+            5 => Self::SuperPlusGen2x1,
+            6 => Self::SuperPlusGen1x2,
+            7 => Self::SuperPlusGen2x2,
+            _ => return None,
+        })
+    }
+
+    pub fn psiv(self) -> u8 {
+        match self {
+            Self::Full => 1,
+            Self::Low => 2,
+            Self::High => 3,
+            Self::Super => 4,
+            Self::SuperPlusGen2x1 => 5,
+            Self::SuperPlusGen1x2 => 6,
+            Self::SuperPlusGen2x2 => 7,
+        }
+    }
+}
+
 /// One USB device a kernel driver bound.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Usb {
     /// The xHCI controller it hangs off.
-    pub controller: Bdf,
+    pub controller: PciAddr,
     /// The root-hub port, from 1.
     pub port: u8,
-    /// PORTSC's Port Speed, as the controller's protocol capability names it
-    /// (xHCI 1.2 §7.2.2.1.1): 1 full, 2 low, 3 high, 4 SuperSpeed.
-    pub speed: u8,
+    pub speed: UsbSpeed,
     pub vendor: u16,
     pub product: u16,
     pub function: UsbFunction,
@@ -117,21 +161,24 @@ pub struct Block {
     pub blocks: u64,
 }
 
-/// What a partition is to this machine.
+/// Who holds a partition's blocks, as the block layer records every hold.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PartState {
-    /// Nothing the kernel mounted and nothing a process holds.
+    /// No hold is exactly this partition's span.
     Free,
-    /// A filesystem this kernel mounted.
-    Mounted,
-    /// A process holds a claim on it.
+    /// This kernel holds it: a filesystem it mounted, or a probe of its own.
+    Kernel,
+    /// A process's partition claim holds it; a [`Claim`] record says whose,
+    /// when the handle was in a table.
     Claimed,
 }
 
-/// One GPT entry, as its table states it.
+/// One GPT entry, as its table stated it when the disk was probed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Partition {
     pub device: u32,
+    /// Its entry's index in the table, from 1 (UEFI 2.10 §5.3.3).
+    pub index: u32,
     pub type_guid: [u8; 16],
     pub unique_guid: [u8; 16],
     /// In the device's own logical blocks, as GPT stores them.
@@ -143,11 +190,12 @@ pub struct Partition {
 /// What a claim is on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Claimed {
-    /// A device class, by its `DeviceType` wire number.
-    Class(u8),
-    Pci(Bdf),
-    /// A partition, by its unique GUID.
-    Partition([u8; 16]),
+    /// A device class.
+    Class(DeviceType),
+    Pci(PciAddr),
+    /// A partition, by the block device it is on and its unique GUID: a
+    /// GUID a table carries twice is refused a claim, so the pair names one.
+    Partition { device: u32, unique_guid: [u8; 16] },
 }
 
 /// A claim, and the process holding its handle.
@@ -160,7 +208,6 @@ pub struct Claim {
 /// One record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Record {
-    Machine(Machine),
     Pci(Pci),
     Usb(Usb),
     Block(Block),
@@ -173,27 +220,27 @@ pub enum Record {
 pub enum Undecodable {
     /// The kind byte names no record.
     Kind(u8),
-    /// A field's byte names no variant of its type: the byte's offset, and it.
-    Variant { at: usize, byte: u8 },
+    /// A field's bytes name no variant of its type: the field's offset, and
+    /// its value.
+    Variant { at: usize, value: u64 },
 }
 
 impl core::fmt::Display for Undecodable {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Kind(kind) => write!(f, "record kind {kind} names no record"),
-            Self::Variant { at, byte } => {
-                write!(f, "byte {byte} at offset {at} names no variant of its field")
+            Self::Variant { at, value } => {
+                write!(f, "{value} at offset {at} names no variant of its field")
             }
         }
     }
 }
 
-const KIND_MACHINE: u8 = 1;
-const KIND_PCI: u8 = 2;
-const KIND_USB: u8 = 3;
-const KIND_BLOCK: u8 = 4;
-const KIND_PARTITION: u8 = 5;
-const KIND_CLAIM: u8 = 6;
+const KIND_PCI: u8 = 1;
+const KIND_USB: u8 = 2;
+const KIND_BLOCK: u8 = 3;
+const KIND_PARTITION: u8 = 4;
+const KIND_CLAIM: u8 = 5;
 
 /// Little-endian writes at fixed offsets.
 struct Out([u8; RECORD_BYTES]);
@@ -214,8 +261,10 @@ impl Out {
     fn bytes(&mut self, at: usize, v: &[u8]) {
         self.0[at..at + v.len()].copy_from_slice(v);
     }
-    fn bdf(&mut self, at: usize, v: Bdf) {
-        self.bytes(at, &[v.bus, v.dev, v.func]);
+    /// Five bytes: the segment, then bus, device and function.
+    fn addr(&mut self, at: usize, v: PciAddr) {
+        self.u16(at, v.segment);
+        self.bytes(at + 2, &[v.bus, v.dev, v.func]);
     }
 }
 
@@ -238,12 +287,12 @@ impl In<'_> {
     fn array<const N: usize>(&self, at: usize) -> [u8; N] {
         self.0[at..at + N].try_into().expect("N bytes")
     }
-    fn bdf(&self, at: usize) -> Bdf {
-        Bdf { bus: self.0[at], dev: self.0[at + 1], func: self.0[at + 2] }
+    fn addr(&self, at: usize) -> PciAddr {
+        PciAddr { segment: self.u16(at), bus: self.0[at + 2], dev: self.0[at + 3], func: self.0[at + 4] }
     }
     fn variant<T>(&self, at: usize, of: impl FnOnce(u8) -> Option<T>) -> Result<T, Undecodable> {
         let byte = self.0[at];
-        of(byte).ok_or(Undecodable::Variant { at, byte })
+        of(byte).ok_or(Undecodable::Variant { at, value: u64::from(byte) })
     }
 }
 
@@ -260,20 +309,14 @@ impl Record {
     pub fn encode(&self) -> RawRecord {
         let mut o = Out([0; RECORD_BYTES]);
         match self {
-            Self::Machine(m) => {
-                o.u8(0, KIND_MACHINE);
-                o.u32(4, m.cpus);
-                o.u64(8, m.memory_total);
-                o.u64(16, m.memory_used);
-            }
             Self::Pci(p) => {
                 o.u8(0, KIND_PCI);
-                o.bdf(1, p.at);
-                o.u16(4, p.vendor);
-                o.u16(6, p.device);
-                o.bytes(8, &[p.class, p.subclass, p.prog_if]);
+                o.addr(1, p.at);
+                o.u16(6, p.vendor);
+                o.u16(8, p.device);
+                o.bytes(10, &[p.class, p.subclass, p.prog_if]);
                 o.u8(
-                    11,
+                    13,
                     match p.driven {
                         Driven::Free => 0,
                         Driven::Kernel => 1,
@@ -283,13 +326,13 @@ impl Record {
             }
             Self::Usb(u) => {
                 o.u8(0, KIND_USB);
-                o.bdf(1, u.controller);
-                o.u8(4, u.port);
-                o.u8(5, u.speed);
-                o.u16(6, u.vendor);
-                o.u16(8, u.product);
+                o.addr(1, u.controller);
+                o.u8(6, u.port);
+                o.u8(7, u.speed.psiv());
+                o.u16(8, u.vendor);
+                o.u16(10, u.product);
                 o.u8(
-                    10,
+                    12,
                     match u.function {
                         UsbFunction::Keyboard => 0,
                         UsbFunction::Pointer => 1,
@@ -308,7 +351,7 @@ impl Record {
                     1,
                     match p.state {
                         PartState::Free => 0,
-                        PartState::Mounted => 1,
+                        PartState::Kernel => 1,
                         PartState::Claimed => 2,
                     },
                 );
@@ -317,24 +360,26 @@ impl Record {
                 o.u64(16, p.lbas);
                 o.bytes(24, &p.type_guid);
                 o.bytes(40, &p.unique_guid);
+                o.u32(56, p.index);
             }
             Self::Claim(c) => {
                 o.u8(0, KIND_CLAIM);
                 match c.on {
                     Claimed::Class(class) => {
                         o.u8(1, 0);
-                        o.u8(4, class);
+                        o.u64(4, class as u64);
                     }
                     Claimed::Pci(at) => {
                         o.u8(1, 1);
-                        o.bdf(4, at);
+                        o.addr(4, at);
                     }
-                    Claimed::Partition(guid) => {
+                    Claimed::Partition { device, unique_guid } => {
                         o.u8(1, 2);
-                        o.bytes(4, &guid);
+                        o.u32(4, device);
+                        o.bytes(8, &unique_guid);
                     }
                 }
-                holder_out(&mut o, 20, &c.holder);
+                holder_out(&mut o, 28, &c.holder);
             }
         }
         RawRecord(o.0)
@@ -343,19 +388,14 @@ impl Record {
     pub fn decode(raw: &RawRecord) -> Result<Self, Undecodable> {
         let r = In(&raw.0);
         Ok(match r.u8(0) {
-            KIND_MACHINE => Self::Machine(Machine {
-                cpus: r.u32(4),
-                memory_total: r.u64(8),
-                memory_used: r.u64(16),
-            }),
             KIND_PCI => Self::Pci(Pci {
-                at: r.bdf(1),
-                vendor: r.u16(4),
-                device: r.u16(6),
-                class: r.u8(8),
-                subclass: r.u8(9),
-                prog_if: r.u8(10),
-                driven: r.variant(11, |b| match b {
+                at: r.addr(1),
+                vendor: r.u16(6),
+                device: r.u16(8),
+                class: r.u8(10),
+                subclass: r.u8(11),
+                prog_if: r.u8(12),
+                driven: r.variant(13, |b| match b {
                     0 => Some(Driven::Free),
                     1 => Some(Driven::Kernel),
                     2 => Some(Driven::Claimed),
@@ -363,12 +403,12 @@ impl Record {
                 })?,
             }),
             KIND_USB => Self::Usb(Usb {
-                controller: r.bdf(1),
-                port: r.u8(4),
-                speed: r.u8(5),
-                vendor: r.u16(6),
-                product: r.u16(8),
-                function: r.variant(10, |b| match b {
+                controller: r.addr(1),
+                port: r.u8(6),
+                speed: r.variant(7, UsbSpeed::from_psiv)?,
+                vendor: r.u16(8),
+                product: r.u16(10),
+                function: r.variant(12, |b| match b {
                     0 => Some(UsbFunction::Keyboard),
                     1 => Some(UsbFunction::Pointer),
                     2 => Some(UsbFunction::Storage),
@@ -379,7 +419,7 @@ impl Record {
             KIND_PARTITION => Self::Partition(Partition {
                 state: r.variant(1, |b| match b {
                     0 => Some(PartState::Free),
-                    1 => Some(PartState::Mounted),
+                    1 => Some(PartState::Kernel),
                     2 => Some(PartState::Claimed),
                     _ => None,
                 })?,
@@ -388,14 +428,21 @@ impl Record {
                 lbas: r.u64(16),
                 type_guid: r.array(24),
                 unique_guid: r.array(40),
+                index: r.u32(56),
             }),
             KIND_CLAIM => Self::Claim(Claim {
                 on: match r.variant(1, |b| (b <= 2).then_some(b))? {
-                    0 => Claimed::Class(r.u8(4)),
-                    1 => Claimed::Pci(r.bdf(4)),
-                    _ => Claimed::Partition(r.array(4)),
+                    0 => {
+                        let raw = r.u64(4);
+                        Claimed::Class(
+                            DeviceType::from_raw(raw)
+                                .ok_or(Undecodable::Variant { at: 4, value: raw })?,
+                        )
+                    }
+                    1 => Claimed::Pci(r.addr(4)),
+                    _ => Claimed::Partition { device: r.u32(4), unique_guid: r.array(8) },
                 },
-                holder: holder_in(&r, 20),
+                holder: holder_in(&r, 28),
             }),
             kind => return Err(Undecodable::Kind(kind)),
         })
@@ -412,11 +459,10 @@ mod tests {
         n
     }
 
-    fn every_kind() -> [Record; 8] {
-        let at = Bdf { bus: 0, dev: 0x1f, func: 6 };
+    fn every_kind() -> [Record; 7] {
+        let at = PciAddr { segment: 0x1234, bus: 0, dev: 0x1f, func: 6 };
         let holder = Holder { pid: 7, name: name("netd") };
         [
-            Record::Machine(Machine { cpus: 4, memory_total: 1 << 32, memory_used: 1 << 20 }),
             Record::Pci(Pci {
                 at,
                 vendor: 0x8086,
@@ -427,9 +473,9 @@ mod tests {
                 driven: Driven::Claimed,
             }),
             Record::Usb(Usb {
-                controller: Bdf { bus: 0, dev: 4, func: 0 },
+                controller: PciAddr { segment: 0, bus: 0, dev: 4, func: 0 },
                 port: 3,
-                speed: 3,
+                speed: UsbSpeed::SuperPlusGen2x2,
                 vendor: 0x0627,
                 product: 1,
                 function: UsbFunction::Pointer,
@@ -437,15 +483,19 @@ mod tests {
             Record::Block(Block { device: 1, blocks: u64::MAX }),
             Record::Partition(Partition {
                 device: 1,
+                index: 128,
                 type_guid: [0xab; 16],
                 unique_guid: [0xcd; 16],
                 first_lba: 2048,
                 lbas: 4096,
-                state: PartState::Mounted,
+                state: PartState::Kernel,
             }),
             Record::Claim(Claim { on: Claimed::Pci(at), holder }),
-            Record::Claim(Claim { on: Claimed::Class(5), holder }),
-            Record::Claim(Claim { on: Claimed::Partition([0x11; 16]), holder }),
+            Record::Claim(Claim { on: Claimed::Class(DeviceType::VirtioSound), holder }),
+            Record::Claim(Claim {
+                on: Claimed::Partition { device: 3, unique_guid: [0x11; 16] },
+                holder,
+            }),
         ]
     }
 
@@ -455,6 +505,11 @@ mod tests {
             assert_eq!(Record::decode(&record.encode()), Ok(record));
         }
         assert_eq!(Holder { pid: 1, name: name("soundd") }.name(), Some("soundd"));
+        for psiv in 0..=u8::MAX {
+            if let Some(speed) = UsbSpeed::from_psiv(psiv) {
+                assert_eq!(speed.psiv(), psiv);
+            }
+        }
     }
 
     #[test]
@@ -463,11 +518,41 @@ mod tests {
         let mut raw = RawRecord::EMPTY;
         raw.0[0] = 99;
         assert_eq!(Record::decode(&raw), Err(Undecodable::Kind(99)));
-        for (kind, at) in [(KIND_PCI, 11), (KIND_USB, 10), (KIND_PARTITION, 1), (KIND_CLAIM, 1)] {
+        for (kind, at) in [(KIND_PCI, 13), (KIND_USB, 12), (KIND_PARTITION, 1), (KIND_CLAIM, 1)] {
             let mut raw = RawRecord::EMPTY;
             raw.0[0] = kind;
             raw.0[at] = 9;
-            assert_eq!(Record::decode(&raw), Err(Undecodable::Variant { at, byte: 9 }), "{kind}");
+            if kind == KIND_USB {
+                raw.0[7] = 1;
+            }
+            assert_eq!(Record::decode(&raw), Err(Undecodable::Variant { at, value: 9 }), "{kind}");
+        }
+        // A speed no default Protocol Speed ID names.
+        let mut raw = Record::Usb(Usb {
+            controller: PciAddr { segment: 0, bus: 0, dev: 4, func: 0 },
+            port: 1,
+            speed: UsbSpeed::Full,
+            vendor: 0,
+            product: 0,
+            function: UsbFunction::Keyboard,
+        })
+        .encode();
+        for psiv in [0, 8, 15] {
+            raw.0[7] = psiv;
+            assert_eq!(
+                Record::decode(&raw),
+                Err(Undecodable::Variant { at: 7, value: u64::from(psiv) })
+            );
+        }
+        // A class number no `DeviceType` carries: 3 and 4 are retired.
+        let mut raw = Record::Claim(Claim {
+            on: Claimed::Class(DeviceType::Keyboard),
+            holder: Holder { pid: 1, name: name("x") },
+        })
+        .encode();
+        for class in [3u64, 4, 1 << 40] {
+            raw.0[4..12].copy_from_slice(&class.to_le_bytes());
+            assert_eq!(Record::decode(&raw), Err(Undecodable::Variant { at: 4, value: class }));
         }
     }
 

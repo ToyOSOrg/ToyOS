@@ -102,20 +102,32 @@ impl Selector {
     }
 }
 
-/// `segments` against `parts`, a `*` taking one part and then either stopping
-/// or taking another. Backtracking, and bounded: a path has at most
-/// [`MAX_PATH`] / 2 segments.
+/// `segments` against `parts`, one segment at a time over every prefix of
+/// `parts` the segments before it can take: `reach[j]` is whether they take
+/// exactly `parts[..j]`, and a `*` takes one or more parts past any prefix
+/// reached. Segments times parts, whatever the selector.
 fn matches_from(segments: &[Segment], parts: &[&str]) -> bool {
-    match segments.split_first() {
-        None => parts.is_empty(),
-        Some((Segment::Literal(lit), rest)) => match parts.split_first() {
-            Some((part, more)) => part == lit && matches_from(rest, more),
-            None => false,
-        },
-        Some((Segment::Any, rest)) => {
-            (1..=parts.len()).any(|taken| matches_from(rest, &parts[taken..]))
+    let mut reach = alloc::vec![false; parts.len() + 1];
+    reach[0] = true;
+    for segment in segments {
+        let mut next = alloc::vec![false; parts.len() + 1];
+        match segment {
+            Segment::Literal(lit) => {
+                for (j, part) in parts.iter().enumerate() {
+                    next[j + 1] = reach[j] && *part == lit.as_str();
+                }
+            }
+            Segment::Any => {
+                let mut reached = false;
+                for j in 0..parts.len() {
+                    reached |= reach[j];
+                    next[j + 1] = reached;
+                }
+            }
         }
+        reach = next;
     }
+    reach[parts.len()]
 }
 
 #[cfg(test)]
@@ -197,5 +209,24 @@ mod tests {
         // The refusal names the problem in words, not only as a variant.
         let said = alloc::format!("{}", Selector::parse("ne*").unwrap_err());
         assert!(said.contains("whole segment"), "{said}");
+    }
+
+    /// The selector that took a backtracking matcher C(63, 30) steps: 31 stars
+    /// and a literal, against the longest path of 64 segments that ends in
+    /// something else. Answered in segments times parts, either way.
+    #[test]
+    fn a_pathological_selector_is_answered_in_polynomial_time() {
+        let selector = alloc::format!("{}x", "*.".repeat(31));
+        let s = Selector::parse(&selector).unwrap();
+        let parts: Vec<&str> = core::iter::repeat_n("a", 64).collect();
+        let miss = parts.join(".");
+        assert!(miss.len() <= MAX_PATH);
+        assert!(!s.matches(&miss));
+        let mut hit = parts.clone();
+        hit[63] = "x";
+        assert!(s.matches(&hit.join(".")));
+        // Fewer parts than stars and a literal cannot match at all.
+        assert!(!s.matches(&parts[..31].join(".")));
+        assert!(s.matches(&alloc::format!("{}.x", parts[..31].join("."))));
     }
 }

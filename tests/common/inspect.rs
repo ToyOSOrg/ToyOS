@@ -6,7 +6,9 @@
 //! matches too much is a path in the answer this file did not name, and one
 //! that matches too little is a named path missing from it. Values are judged
 //! where the machine fixes them — QEMU's user network leases `10.0.2.15/24`,
-//! and nothing on this boot plays audio — and read only for shape elsewhere.
+//! nothing plays audio until `inspect_plays` does, and the NVMe disk this file
+//! crafts has one partition free and one init grants — and read only for shape
+//! elsewhere.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -21,6 +23,15 @@ pub const CONFIG: &str = "tests/inspectcase";
 
 /// The guest binary that holds the negative control.
 pub const DENIED: &str = "inspect_denied";
+/// The guest binary that plays periods through soundd.
+pub const PLAYS: &str = "inspect_plays";
+/// The guest binary that sends `SYS_DEVICE_INVENTORY` its edges.
+pub const BOUNDS: &str = "inventory_bounds";
+
+/// The crafted disk's partition nobody holds.
+const FREE: &str = "9D1E2F30-4A5B-4C6D-8E7F-0A1B2C3D4E5F";
+/// The one init grants test-runner; mirrored in the config.
+const GRANTED: &str = "B4C5D6E7-F809-4A1B-8C2D-3E4F5A6B7C8D";
 
 /// Every path the reader answers for netd on a virtio NIC with a lease.
 const NET: &[&str] = &[
@@ -41,12 +52,20 @@ const NET: &[&str] = &[
 
 pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
     let bins: Vec<(String, Vec<u8>)> =
-        rust_bins.iter().filter(|(name, _)| name == DENIED).cloned().collect();
-    if bins.is_empty() {
-        return Err(format!("{DENIED} was not built"));
+        rust_bins.iter().filter(|(name, _)| [DENIED, PLAYS, BOUNDS].contains(&name.as_str())).cloned().collect();
+    if bins.len() != 3 {
+        return Err(format!("{DENIED}, {PLAYS} and {BOUNDS} were not all built"));
     }
+    let nvme = super::lane::dir().join("inspect-disk.img");
+    let mib = 1024 * 1024;
+    super::partclaim::craft_plain_disk(
+        &nvme,
+        &[("free", mib, FREE), ("granted", mib, GRANTED)],
+        96 * mib,
+    )?;
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join(CONFIG);
-    let options = BootOptions { profile: qemu::Profile::Gop, ..Default::default() };
+    let options =
+        BootOptions { profile: qemu::Profile::Gop, nvme_image: Some(nvme), ..Default::default() };
     let argv = qemu::profile_argv(&options);
     if !argv.iter().any(|a| a.contains("virtio-net")) || !argv.iter().any(|a| a.contains("virtio-sound")) {
         return Err("this test needs a virtio NIC and a virtio sound card".to_string());
@@ -163,6 +182,30 @@ pub fn reads_its_owners(qemu: &mut QemuInstance) -> Result<(), String> {
     expect(line, &got, "sound.stream.state", "suspended")?;
     expect(line, &got, "sound.stream.clients", "0")?;
 
+    // Periods through soundd, and the running sums grow by at least what it
+    // took: each frame soundd took went out in a period it submitted.
+    let result = job(qemu, &format!("test_rs_{PLAYS}"), 0)?;
+    let said = "inspect plays: soundd took ";
+    let taken: u64 = result
+        .stdout
+        .lines()
+        .find_map(|l| l.split_once(said).map(|(_, rest)| rest.trim_end_matches(" frames")))
+        .and_then(|n| n.trim().parse().ok())
+        .ok_or_else(|| format!("{PLAYS} did not say how much soundd took:\n{}", result.stdout))?;
+    if taken == 0 {
+        return Err(format!("{PLAYS} proved soundd took nothing:\n{}", result.stdout));
+    }
+    let line = "inspect sound.*";
+    let got = answer(&job(qemu, line, 0)?);
+    let submitted = number(line, &got, "sound.periods.submitted")?;
+    let period = number(line, &got, "sound.period_frames")?;
+    if submitted.saturating_mul(period) < taken {
+        return Err(format!(
+            "`{line}`: {submitted} periods of {period} frames submitted, and soundd took {taken} \
+             frames"
+        ));
+    }
+
     let line = "inspect log.*";
     let got = answer(&job(qemu, line, 0)?);
     exactly(
@@ -201,8 +244,7 @@ pub fn reads_its_owners(qemu: &mut QemuInstance) -> Result<(), String> {
         return Err(format!("`{line}`: the compositor has composited no frame"));
     }
 
-    // A `*` in first place reaches every owner, and one in last place stops at
-    // a whole segment: exactly one `state` from each owner that has one.
+
     // A `*` in first place reaches every owner and the kernel, and one in last
     // place stops at a whole segment: one `state` from each owner that has
     // one, and each partition's.
@@ -214,13 +256,23 @@ pub fn reads_its_owners(qemu: &mut QemuInstance) -> Result<(), String> {
     if dev.is_empty() {
         return Err(format!("`{line}` printed no partition's state"));
     }
-    if let Some(path) =
-        dev.keys().find(|p| !(p.starts_with("dev.part.") && p.ends_with(".state")))
-    {
+    if let Some(path) = dev.keys().find(|p| !(p.starts_with("dev.disk.") && p.ends_with(".state"))) {
         return Err(format!("`{line}` printed {path}, which is no partition's state"));
     }
 
     inventory(qemu)?;
+
+    let result = job(qemu, &format!("test_rs_{BOUNDS}"), 0)?;
+    for verdict in [
+        "inventory bounds: an empty buffer answers ",
+        " records is refused whole",
+        "inventory bounds: 1025 records is refused",
+        "inventory bounds: a count whose length wraps is refused",
+    ] {
+        if !result.stdout.contains(verdict) {
+            return Err(format!("{BOUNDS} did not say {verdict:?}:\n{}", result.stdout));
+        }
+    }
 
     // Exact, with no `*`, is one path and never a prefix.
     let line = "inspect net.link";
@@ -246,11 +298,32 @@ pub fn reads_its_owners(qemu: &mut QemuInstance) -> Result<(), String> {
     Ok(())
 }
 
+/// The value of every `holder.<pid>` under `at`.
+fn holders<'a>(got: &'a BTreeMap<String, String>, at: &str) -> Vec<&'a str> {
+    let under = format!("{at}.holder.");
+    got.iter().filter(|(p, _)| p.starts_with(&under)).map(|(_, v)| v.as_str()).collect()
+}
+
+/// The `dev.disk.<id>.part<index>` whose unique GUID is `unique`.
+fn partition<'a>(line: &str, got: &'a BTreeMap<String, String>, unique: &str) -> Result<&'a str, String> {
+    let unique = unique.to_ascii_lowercase();
+    let found: Vec<&str> = got
+        .iter()
+        .filter(|(p, v)| p.starts_with("dev.disk.") && p.ends_with(".unique") && **v == unique)
+        .map(|(p, _)| p.trim_end_matches(".unique"))
+        .collect();
+    match found.as_slice() {
+        [one] => Ok(one),
+        _ => Err(format!("`{line}`: {} partitions are {unique}, not one", found.len())),
+    }
+}
+
 /// `inspect dev.*`: the kernel's inventory, judged where QEMU fixes it. The
 /// virtio NIC is `1af4:1041` and netd holds it; the virtio sound card and the
 /// framebuffer are classes soundd and the compositor hold; the Gop profile's
-/// USB keyboard is on the xHCI; and the boot stick carries partitions this
-/// kernel mounted.
+/// USB keyboard is on the xHCI; the boot stick carries partitions this kernel
+/// mounted; and of the crafted disk's two, one is free and test-runner holds
+/// the other.
 fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
     let line = "inspect dev.*";
     let got = answer(&job(qemu, line, 0)?);
@@ -269,20 +342,37 @@ fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
         return Err(format!("`{line}`: {} functions are a virtio NIC, not one", nic.len()));
     };
     expect(line, &got, &format!("{nic}.vendor"), "1af4")?;
-    expect(line, &got, &format!("{nic}.driver"), "netd")?;
-    expect(line, &got, "dev.class.virtio-sound.holder", "soundd")?;
-    expect(line, &got, "dev.class.framebuffer.holder", "compositor")?;
+    expect(line, &got, &format!("{nic}.driver"), "claimed")?;
+    for (at, want) in [
+        (nic.to_string(), "netd"),
+        ("dev.class.virtio-sound".to_string(), "soundd"),
+        ("dev.class.framebuffer".to_string(), "compositor"),
+    ] {
+        if holders(&got, &at) != [want] {
+            return Err(format!("`{line}`: {at} is held by {:?}, not {want}", holders(&got, &at)));
+        }
+    }
     if !got.iter().any(|(p, v)| p.starts_with("dev.pci.") && p.ends_with(".driver") && v == "kernel") {
         return Err(format!("`{line}`: no PCI function is driven by the kernel"));
     }
     if !got.iter().any(|(p, v)| p.starts_with("dev.usb.") && p.ends_with(".function") && v == "keyboard") {
         return Err(format!("`{line}`: no USB keyboard"));
     }
-    if !got.keys().any(|p| p.starts_with("dev.block.")) {
+    if !got.keys().any(|p| p.starts_with("dev.disk.") && p.ends_with(".blocks")) {
         return Err(format!("`{line}`: no block device"));
     }
-    if !got.iter().any(|(p, v)| p.starts_with("dev.part.") && p.ends_with(".state") && v == "mounted") {
-        return Err(format!("`{line}`: no partition is mounted"));
+    if !got.iter().any(|(p, v)| p.starts_with("dev.disk.") && p.ends_with(".state") && v == "kernel") {
+        return Err(format!("`{line}`: no partition is held by the kernel"));
+    }
+    let free = partition(line, &got, FREE)?;
+    expect(line, &got, &format!("{free}.state"), "free")?;
+    if !holders(&got, free).is_empty() {
+        return Err(format!("`{line}`: {free} is free and held by {:?}", holders(&got, free)));
+    }
+    let granted = partition(line, &got, GRANTED)?;
+    expect(line, &got, &format!("{granted}.state"), "claimed")?;
+    if holders(&got, granted) != ["test-runner"] {
+        return Err(format!("`{line}`: {granted} is held by {:?}, not test-runner", holders(&got, granted)));
     }
     Ok(())
 }

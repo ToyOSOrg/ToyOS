@@ -893,7 +893,7 @@ pub fn spawn_init() -> Pid {
     // Every machine-wide authority the system has: rights only shrink from
     // here, so a bit absent here is a bit no manifest can ever name. LOG and
     // WAIT arrive together since SYS_LOG_READ never blocks on its own; ROSTER
-    // and INVENTORY need no partner since neither of their calls blocks.
+    // needs no partner since SYS_SYSINFO never blocks either.
     let rights = Rights::DUP
         .union(Rights::TRANSFER)
         .union(Rights::DEVICE)

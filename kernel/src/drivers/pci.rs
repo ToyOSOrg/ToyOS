@@ -467,11 +467,11 @@ impl PciDevice {
         CapabilityIter { device: self, walk: caps::CapWalk::new(), next: first }
     }
 
-    /// What this function says it is, for the inventory; driven by nobody
-    /// until [`crate::pcidev::inventory`] says otherwise.
-    pub fn identity(&self) -> toyos_abi::inventory::Pci {
+    /// What this function at `at` says it is, for the inventory; driven by
+    /// nobody until [`crate::pcidev::inventory`] says otherwise.
+    pub fn identity(&self, at: toyos_abi::inventory::PciAddr) -> toyos_abi::inventory::Pci {
         toyos_abi::inventory::Pci {
-            at: toyos_abi::inventory::Bdf { bus: self.bus, dev: self.dev, func: self.func },
+            at,
             vendor: self.vendor_id(),
             device: self.device_id(),
             class: self.read_config_u8(CLASS),

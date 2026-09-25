@@ -76,7 +76,6 @@ pub fn mount() -> Root {
     }
 
     let (candidate, root) = matched.remove(0);
-    gpt::note_mounted(&candidate.volume);
     log!(
         "root: mounted {named} read-only off device {} at LBA {}+{}, {} blocks",
         candidate.volume.device,

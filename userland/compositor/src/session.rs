@@ -830,9 +830,13 @@ impl Session {
                 // the answer: eight bytes in, sixteen out. Blocking here is a
                 // client filling its own pipe and taking the desktop with it.
                 window::MSG_GET_RESOLUTION => self.answer_resolution(handle),
-                toyos_inspect::MSG_INSPECT if frame.payload().is_empty() => {
-                    self.answer_inspect(handle)
-                }
+                // A connection's first frame, bare, answered and closed with
+                // `frame.conn`; one with a payload, or on a window's
+                // connection, is not this protocol.
+                toyos_inspect::MSG_INSPECT => match frame.conn {
+                    Some(_) if frame.payload().is_empty() => self.answer_inspect(handle),
+                    _ => mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol),
+                },
                 _ => {}
             }
         }

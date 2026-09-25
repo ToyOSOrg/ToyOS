@@ -6,32 +6,77 @@
 //!
 //! ```text
 //! dev.cpus, dev.memory.{total,used}_bytes
-//! dev.pci.<bb:dd.f>.{vendor,device,class,driver[,pid]}
-//! dev.usb.<controller bb:dd.f>.port<n>.{function,speed,vendor,product}
-//! dev.block.<id>.blocks
-//! dev.part.<unique guid>.{device,type,first_lba,lbas,state[,holder,pid]}
-//! dev.class.<class>.{holder,pid}
+//! dev.pci.<addr>.{vendor,device,class,driver}
+//! dev.usb.<controller addr>.port<n>.{function,speed,vendor,product}
+//! dev.disk.<id>.blocks
+//! dev.disk.<id>.part<index>.{type,unique,first_lba,lbas,state}
+//! dev.class.<class>
+//! ... and under a claimed device, holder.<pid> = <process name>
 //! ```
 //!
-//! A PCI function's `driver` is the process holding its claim, `kernel` for a
-//! function a kernel driver took, `none` for one nobody drives, and `claimed`
-//! for one whose claim was in no process's table when the kernel looked.
+//! **Every address is one segment**, so a `*` never lines one address's parts
+//! up against another kind's: a PCI function is `ssss:bb:dd:f` in hex — its
+//! segment group, bus, device and function — and never contains a `.`.
+//!
+//! A PCI function's `driver` is `kernel` for one a kernel driver took, `none`
+//! for one nobody drives, and `claimed` for one a process's claim holds; a
+//! partition's `state` is `kernel`, `free` or `claimed` the same way. A claim
+//! whose handle the kernel found in a table adds `holder.<pid>` under what it
+//! holds; one moving between two tables adds nothing.
+//!
+//! **A path is rendered once or the inventory is refused** ([`Repeated`]): two
+//! records that would render to one path are two things this layout cannot
+//! tell apart, and the second one's fields are never shown as the first's.
 
 use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use toyos_abi::inventory::{Bdf, Claim, Claimed, Driven, Holder, PartState, Record, UsbFunction};
+use toyos_abi::inventory::{
+    Claimed, Driven, Holder, PartState, PciAddr, Record, UsbFunction, UsbSpeed,
+};
 use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
-use toyos_abi::syscall::DeviceType;
+use toyos_abi::syscall::SYSINFO_HEADER_SIZE;
 
 use crate::wire::Value;
 
 /// The root every inventory path is under.
 pub const ROOT: &str = "dev";
 
-fn bdf(at: Bdf) -> String {
-    format!("{:02x}:{:02x}.{}", at.bus, at.dev, at.func)
+/// What `SYS_SYSINFO`'s ambient header says about the machine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Machine {
+    pub cpus: u32,
+    pub memory_total: u64,
+    pub memory_used: u64,
+}
+
+impl Machine {
+    /// The header's total memory, used memory and CPU count, at the offsets
+    /// the kernel writes them.
+    pub fn from_header(header: &[u8; SYSINFO_HEADER_SIZE]) -> Self {
+        let u64_at = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().expect("eight"));
+        Self {
+            memory_total: u64_at(0),
+            memory_used: u64_at(8),
+            cpus: u32::from_le_bytes(header[16..20].try_into().expect("four")),
+        }
+    }
+}
+
+/// Two records rendered to one path, which is named.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Repeated(pub String);
+
+impl core::fmt::Display for Repeated {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "two inventory records render to {}, so neither is shown", self.0)
+    }
+}
+
+fn addr(at: PciAddr) -> String {
+    format!("{:04x}:{:02x}:{:02x}:{:x}", at.segment, at.bus, at.dev, at.func)
 }
 
 fn guid(bytes: [u8; 16]) -> String {
@@ -48,105 +93,120 @@ fn name(holder: &Holder) -> String {
     }
 }
 
-/// Every record as `dev.*` paths, sorted.
-pub fn render(records: &[Record]) -> BTreeMap<String, Value> {
-    let mut out = BTreeMap::new();
-    let mut put = |path: String, value: Value| {
-        out.insert(format!("{ROOT}.{path}"), value);
-    };
-    let claim_of = |on: Claimed| -> Option<&Claim> {
-        records.iter().find_map(|r| match r {
-            Record::Claim(c) if c.on == on => Some(c),
-            _ => None,
-        })
-    };
+fn speed(s: UsbSpeed) -> &'static str {
+    match s {
+        UsbSpeed::Full => "full",
+        UsbSpeed::Low => "low",
+        UsbSpeed::High => "high",
+        UsbSpeed::Super => "super",
+        UsbSpeed::SuperPlusGen2x1 => "super-plus-gen2x1",
+        UsbSpeed::SuperPlusGen1x2 => "super-plus-gen1x2",
+        UsbSpeed::SuperPlusGen2x2 => "super-plus-gen2x2",
+    }
+}
+
+/// Paths under `dev`, each written once.
+struct Out(BTreeMap<String, Value>);
+
+impl Out {
+    fn put(&mut self, path: String, value: Value) -> Result<(), Repeated> {
+        let path = format!("{ROOT}.{path}");
+        if self.0.contains_key(&path) {
+            return Err(Repeated(path));
+        }
+        self.0.insert(path, value);
+        Ok(())
+    }
+}
+
+/// The machine and every record as `dev.*` paths, sorted.
+pub fn render(machine: &Machine, records: &[Record]) -> Result<BTreeMap<String, Value>, Repeated> {
+    let mut out = Out(BTreeMap::new());
+    out.put("cpus".into(), machine.cpus.into())?;
+    out.put("memory.total_bytes".into(), machine.memory_total.into())?;
+    out.put("memory.used_bytes".into(), machine.memory_used.into())?;
+
+    // Where each partition renders, by the claim's own key for it.
+    let mut parts: BTreeMap<(u32, [u8; 16]), String> = BTreeMap::new();
     for record in records {
         match record {
-            Record::Machine(m) => {
-                put("cpus".into(), m.cpus.into());
-                put("memory.total_bytes".into(), m.memory_total.into());
-                put("memory.used_bytes".into(), m.memory_used.into());
-            }
             Record::Pci(p) => {
-                let at = format!("pci.{}", bdf(p.at));
-                put(format!("{at}.vendor"), format!("{:04x}", p.vendor).into());
-                put(format!("{at}.device"), format!("{:04x}", p.device).into());
-                put(
+                let at = format!("pci.{}", addr(p.at));
+                out.put(format!("{at}.vendor"), format!("{:04x}", p.vendor).into())?;
+                out.put(format!("{at}.device"), format!("{:04x}", p.device).into())?;
+                out.put(
                     format!("{at}.class"),
                     format!("{:02x}:{:02x}:{:02x}", p.class, p.subclass, p.prog_if).into(),
-                );
+                )?;
                 let driver = match p.driven {
-                    Driven::Free => "none".to_string(),
-                    Driven::Kernel => "kernel".to_string(),
-                    Driven::Claimed => match claim_of(Claimed::Pci(p.at)) {
-                        Some(c) => {
-                            put(format!("{at}.pid"), c.holder.pid.into());
-                            name(&c.holder)
-                        }
-                        None => "claimed".to_string(),
-                    },
+                    Driven::Free => "none",
+                    Driven::Kernel => "kernel",
+                    Driven::Claimed => "claimed",
                 };
-                put(format!("{at}.driver"), driver.into());
+                out.put(format!("{at}.driver"), driver.into())?;
             }
             Record::Usb(u) => {
-                let at = format!("usb.{}.port{}", bdf(u.controller), u.port);
+                let at = format!("usb.{}.port{}", addr(u.controller), u.port);
                 let function = match u.function {
                     UsbFunction::Keyboard => "keyboard",
                     UsbFunction::Pointer => "pointer",
                     UsbFunction::Storage => "storage",
                 };
-                put(format!("{at}.function"), function.into());
-                let speed = match u.speed {
-                    1 => "full".to_string(),
-                    2 => "low".to_string(),
-                    3 => "high".to_string(),
-                    4 => "super".to_string(),
-                    other => format!("psi{other}"),
-                };
-                put(format!("{at}.speed"), speed.into());
-                put(format!("{at}.vendor"), format!("{:04x}", u.vendor).into());
-                put(format!("{at}.product"), format!("{:04x}", u.product).into());
+                out.put(format!("{at}.function"), function.into())?;
+                out.put(format!("{at}.speed"), speed(u.speed).into())?;
+                out.put(format!("{at}.vendor"), format!("{:04x}", u.vendor).into())?;
+                out.put(format!("{at}.product"), format!("{:04x}", u.product).into())?;
             }
             Record::Block(b) => {
-                put(format!("block.{}.blocks", b.device), b.blocks.into());
+                out.put(format!("disk.{}.blocks", b.device), b.blocks.into())?;
             }
             Record::Partition(p) => {
-                let at = format!("part.{}", guid(p.unique_guid));
-                put(format!("{at}.device"), p.device.into());
-                put(format!("{at}.type"), guid(p.type_guid).into());
-                put(format!("{at}.first_lba"), p.first_lba.into());
-                put(format!("{at}.lbas"), p.lbas.into());
+                let at = format!("disk.{}.part{}", p.device, p.index);
+                out.put(format!("{at}.type"), guid(p.type_guid).into())?;
+                out.put(format!("{at}.unique"), guid(p.unique_guid).into())?;
+                out.put(format!("{at}.first_lba"), p.first_lba.into())?;
+                out.put(format!("{at}.lbas"), p.lbas.into())?;
                 let state = match p.state {
                     PartState::Free => "free",
-                    PartState::Mounted => "mounted",
+                    PartState::Kernel => "kernel",
                     PartState::Claimed => "claimed",
                 };
-                put(format!("{at}.state"), state.into());
-                if let Some(c) = claim_of(Claimed::Partition(p.unique_guid)) {
-                    put(format!("{at}.holder"), name(&c.holder).into());
-                    put(format!("{at}.pid"), c.holder.pid.into());
-                }
+                out.put(format!("{at}.state"), state.into())?;
+                parts.entry((p.device, p.unique_guid)).or_insert(at);
             }
-            Record::Claim(c) => {
-                if let Claimed::Class(raw) = c.on {
-                    let class = match DeviceType::from_raw(u64::from(raw)) {
-                        Some(class) => class.class_name().to_string(),
-                        None => format!("class{raw}"),
-                    };
-                    put(format!("class.{class}.holder"), name(&c.holder).into());
-                    put(format!("class.{class}.pid"), c.holder.pid.into());
-                }
-            }
+            Record::Claim(_) => {}
         }
     }
-    out
+
+    // One process holding two handles to one claim holds it once.
+    let mut held: BTreeSet<(String, u32)> = BTreeSet::new();
+    for record in records {
+        let Record::Claim(c) = record else { continue };
+        let at = match c.on {
+            Claimed::Pci(at) => format!("pci.{}", addr(at)),
+            Claimed::Class(class) => format!("class.{}", class.class_name()),
+            // A claim on a partition no listed table carries is on nothing
+            // this layout has a path for.
+            Claimed::Partition { device, unique_guid } => match parts.get(&(device, unique_guid)) {
+                Some(at) => at.clone(),
+                None => continue,
+            },
+        };
+        if held.insert((at.clone(), c.holder.pid)) {
+            out.put(format!("{at}.holder.{}", c.holder.pid), name(&c.holder).into())?;
+        }
+    }
+    Ok(out.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::path::check_path;
-    use toyos_abi::inventory::{Block, Machine, Partition, Pci, Usb, NAME_BYTES};
+    use crate::Selector;
+    use alloc::vec::Vec;
+    use toyos_abi::inventory::{Block, Claim, Partition, Pci, Usb, NAME_BYTES};
+    use toyos_abi::syscall::DeviceType;
 
     fn holder(pid: u32, s: &str) -> Holder {
         let mut name = [0; NAME_BYTES];
@@ -154,57 +214,137 @@ mod tests {
         Holder { pid, name }
     }
 
-    fn records() -> [Record; 9] {
-        let nic = Bdf { bus: 0, dev: 0x1f, func: 6 };
-        let pci = |at, driven| {
-            Record::Pci(Pci { at, vendor: 0x8086, device: 0x15fc, class: 2, subclass: 0, prog_if: 0, driven })
-        };
-        [
-            Record::Machine(Machine { cpus: 2, memory_total: 1024, memory_used: 512 }),
-            pci(nic, Driven::Claimed),
-            pci(Bdf { bus: 0, dev: 4, func: 0 }, Driven::Kernel),
-            pci(Bdf { bus: 0, dev: 5, func: 0 }, Driven::Claimed),
+    const MACHINE: Machine = Machine { cpus: 2, memory_total: 1024, memory_used: 512 };
+    const NIC: PciAddr = PciAddr { segment: 0, bus: 0, dev: 0x1f, func: 6 };
+    const XHCI: PciAddr = PciAddr { segment: 0, bus: 0, dev: 4, func: 0 };
+
+    fn pci(at: PciAddr, driven: Driven) -> Record {
+        Record::Pci(Pci { at, vendor: 0x8086, device: 0x15fc, class: 2, subclass: 0, prog_if: 0, driven })
+    }
+
+    fn part(device: u32, index: u32, unique: u8, state: PartState) -> Record {
+        Record::Partition(Partition {
+            device,
+            index,
+            type_guid: [0x28; 16],
+            unique_guid: [unique; 16],
+            first_lba: 2048,
+            lbas: 100,
+            state,
+        })
+    }
+
+    fn records() -> Vec<Record> {
+        let netd = holder(9, "netd");
+        alloc::vec![
+            pci(NIC, Driven::Claimed),
+            pci(XHCI, Driven::Kernel),
+            pci(PciAddr { segment: 1, bus: 0x80, dev: 5, func: 0 }, Driven::Claimed),
             Record::Usb(Usb {
-                controller: Bdf { bus: 0, dev: 4, func: 0 },
+                controller: XHCI,
                 port: 1,
-                speed: 3,
+                speed: UsbSpeed::High,
                 vendor: 0x46f4,
                 product: 1,
                 function: UsbFunction::Storage,
             }),
+            Record::Block(Block { device: 0, blocks: 4096 }),
             Record::Block(Block { device: 1, blocks: 4096 }),
-            Record::Partition(Partition {
-                device: 1,
-                type_guid: [0x28; 16],
-                unique_guid: [0xab; 16],
-                first_lba: 2048,
-                lbas: 100,
-                state: PartState::Mounted,
+            part(0, 0, 0xab, PartState::Kernel),
+            part(1, 0, 0xcd, PartState::Claimed),
+            part(1, 1, 0xef, PartState::Free),
+            // The image `dd`'d to a second disk: one GUID, two partitions.
+            part(0, 1, 0xcd, PartState::Free),
+            Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netd }),
+            // The same claim through a second handle in the same table.
+            Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netd }),
+            Record::Claim(Claim { on: Claimed::Class(DeviceType::VirtioSound), holder: holder(7, "soundd") }),
+            Record::Claim(Claim {
+                on: Claimed::Partition { device: 1, unique_guid: [0xcd; 16] },
+                holder: holder(12, "test-runner"),
             }),
-            Record::Claim(Claim { on: Claimed::Pci(nic), holder: holder(9, "netd") }),
-            Record::Claim(Claim { on: Claimed::Class(6), holder: holder(7, "soundd") }),
         ]
+    }
+
+    fn text(got: &BTreeMap<String, Value>, path: &str) -> Option<String> {
+        got.get(path).map(|v| alloc::format!("{v}"))
     }
 
     #[test]
     fn every_record_renders_to_paths_the_grammar_accepts() {
-        let got = render(&records());
+        let got = render(&MACHINE, &records()).expect("no path twice");
         for path in got.keys() {
             check_path(path).unwrap_or_else(|why| panic!("{path}: {why}"));
         }
-        let text = |p: &str| got.get(p).map(|v| alloc::format!("{v}"));
+        let text = |p: &str| text(&got, p);
         assert_eq!(text("dev.cpus").as_deref(), Some("2"));
-        assert_eq!(text("dev.pci.00:1f.6.driver").as_deref(), Some("netd"));
-        assert_eq!(text("dev.pci.00:1f.6.pid").as_deref(), Some("9"));
-        assert_eq!(text("dev.pci.00:1f.6.class").as_deref(), Some("02:00:00"));
-        assert_eq!(text("dev.pci.00:04.0.driver").as_deref(), Some("kernel"));
+        assert_eq!(text("dev.memory.used_bytes").as_deref(), Some("512"));
+        assert_eq!(text("dev.pci.0000:00:1f:6.driver").as_deref(), Some("claimed"));
+        assert_eq!(text("dev.pci.0000:00:1f:6.holder.9").as_deref(), Some("netd"));
+        assert_eq!(text("dev.pci.0000:00:1f:6.class").as_deref(), Some("02:00:00"));
+        assert_eq!(text("dev.pci.0000:00:04:0.driver").as_deref(), Some("kernel"));
         // Claimed, and its handle was in no table the kernel walked.
-        assert_eq!(text("dev.pci.00:05.0.driver").as_deref(), Some("claimed"));
-        assert_eq!(text("dev.usb.00:04.0.port1.function").as_deref(), Some("storage"));
-        assert_eq!(text("dev.usb.00:04.0.port1.speed").as_deref(), Some("high"));
-        assert_eq!(text("dev.block.1.blocks").as_deref(), Some("4096"));
-        let part = "dev.part.abababab-abab-abab-abab-abababababab";
-        assert_eq!(text(&alloc::format!("{part}.state")).as_deref(), Some("mounted"));
-        assert_eq!(text("dev.class.virtio-sound.holder").as_deref(), Some("soundd"));
+        assert_eq!(text("dev.pci.0001:80:05:0.driver").as_deref(), Some("claimed"));
+        assert!(!got.keys().any(|p| p.starts_with("dev.pci.0001:80:05:0.holder")));
+        assert_eq!(text("dev.usb.0000:00:04:0.port1.function").as_deref(), Some("storage"));
+        assert_eq!(text("dev.usb.0000:00:04:0.port1.speed").as_deref(), Some("high"));
+        assert_eq!(text("dev.disk.1.blocks").as_deref(), Some("4096"));
+        assert_eq!(text("dev.disk.0.part0.state").as_deref(), Some("kernel"));
+        assert_eq!(text("dev.disk.1.part1.state").as_deref(), Some("free"));
+        // One GUID on two disks is two partitions, and the claim is on the
+        // one its device names.
+        assert_eq!(text("dev.disk.1.part0.state").as_deref(), Some("claimed"));
+        assert_eq!(text("dev.disk.1.part0.holder.12").as_deref(), Some("test-runner"));
+        assert_eq!(text("dev.disk.0.part1.state").as_deref(), Some("free"));
+        assert!(!got.keys().any(|p| p.starts_with("dev.disk.0.part1.holder")));
+        assert_eq!(
+            text("dev.disk.0.part1.unique").as_deref(),
+            Some("cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd")
+        );
+        assert_eq!(text("dev.class.virtio-sound.holder.7").as_deref(), Some("soundd"));
+    }
+
+    #[test]
+    fn a_path_two_records_render_to_is_refused_by_name() {
+        let mut twice = records();
+        twice.push(part(1, 1, 0x99, PartState::Kernel));
+        assert_eq!(
+            render(&MACHINE, &twice),
+            Err(Repeated("dev.disk.1.part1.type".into()))
+        );
+        let mut twice = records();
+        twice.push(pci(NIC, Driven::Free));
+        assert_eq!(
+            render(&MACHINE, &twice),
+            Err(Repeated("dev.pci.0000:00:1f:6.vendor".into()))
+        );
+    }
+
+    /// An address is one segment: `*.0.*` is the one disk numbered 0, and no
+    /// function 0, bus 0 or segment 0 of any other kind.
+    #[test]
+    fn a_star_never_lines_up_the_parts_of_an_address() {
+        let got = render(&MACHINE, &records()).expect("no path twice");
+        let s = Selector::parse("*.0.*").unwrap();
+        let hits: Vec<&str> = got.keys().map(String::as_str).filter(|p| s.matches(p)).collect();
+        assert!(!hits.is_empty());
+        for path in &hits {
+            assert!(path.starts_with("dev.disk.0."), "{path}");
+        }
+        let s = Selector::parse("dev.pci.*.driver").unwrap();
+        assert_eq!(got.keys().filter(|p| s.matches(p)).count(), 3);
+    }
+
+    #[test]
+    fn the_header_is_read_at_the_kernels_offsets() {
+        let mut header = [0u8; SYSINFO_HEADER_SIZE];
+        header[0..8].copy_from_slice(&(8u64 << 30).to_le_bytes());
+        header[8..16].copy_from_slice(&(1u64 << 30).to_le_bytes());
+        header[16..20].copy_from_slice(&4u32.to_le_bytes());
+        header[20..24].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(
+            Machine::from_header(&header),
+            Machine { cpus: 4, memory_total: 8 << 30, memory_used: 1 << 30 }
+        );
     }
 }

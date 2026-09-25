@@ -66,9 +66,12 @@ impl State {
 /// module's thread.
 pub struct Published {
     state: AtomicU8,
-    /// The part being written, or 0 for none. Only ever changes with `path`.
+    /// The part the loop last published, or 0 for none: the loop's own record
+    /// of when `file` changes, and read by nothing else.
     part: AtomicU32,
-    path: Mutex<Option<String>>,
+    /// The part being written and its path, one pair under one lock, so no
+    /// reader pairs one file's part number with another's path.
+    file: Mutex<Option<(u32, String)>>,
     bytes: AtomicU64,
     lost: AtomicU64,
     stream: bool,
@@ -80,7 +83,7 @@ impl Published {
         Self {
             state: AtomicU8::new(State::ConsoleOnly as u8),
             part: AtomicU32::new(0),
-            path: Mutex::new(None),
+            file: Mutex::new(None),
             bytes: AtomicU64::new(0),
             lost: AtomicU64::new(0),
             stream,
@@ -96,18 +99,18 @@ impl Published {
         self.bytes.store(volume.map_or(0, Volume::bytes), Ordering::Relaxed);
         // The lock is taken when the file changes and at no other round.
         if self.part.swap(part, Ordering::Relaxed) != part {
-            *self.path.lock().expect("the inspect thread does not panic holding this") =
-                volume.map(Volume::path);
+            *self.file.lock().expect("the inspect thread does not panic holding this") =
+                volume.map(|v| (v.part(), v.path()));
         }
     }
 
     fn snapshot(&self) -> Vec<u8> {
         let mut snap = Snapshot::new(toyos_inspect::LOG);
         snap.put("volume.state", State::word(self.state.load(Ordering::Relaxed)));
-        let path = self.path.lock().expect("the loop does not panic holding this").clone();
-        if let Some(path) = path {
+        let file = self.file.lock().expect("the loop does not panic holding this").clone();
+        if let Some((part, path)) = file {
             snap.put("volume.path", path);
-            snap.put("volume.part", self.part.load(Ordering::Relaxed));
+            snap.put("volume.part", part);
             snap.put("volume.bytes", self.bytes.load(Ordering::Relaxed));
         }
         snap.put("records.lost", self.lost.load(Ordering::Relaxed));
@@ -145,23 +148,18 @@ fn run(acceptor: &Acceptor, published: &Published) -> ! {
         let mut ready: Vec<u64> = Vec::new();
         poller.wait(1, timeout, |token| ready.push(token));
 
+        // No line for any reader dropped, refused or unanswered below: each is
+        // the reader's doing, a line apiece would let every holder of `log`
+        // write into the log at its own rate, and the reader is told by its
+        // connection closing.
         let now = Instant::now();
-        pending.retain(|p| {
-            let alive = now.duration_since(p.since) < HANDSHAKE_TIMEOUT;
-            if !alive {
-                say!("logd: dropping inspect reader {} — it never sent its request", p.conn.as_handle().0);
-            }
-            alive
-        });
+        pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
         if ready.contains(&ACCEPT) {
-            match acceptor.accept() {
-                Ok(conn) if pending.len() >= MAX_PENDING => say!(
-                    "logd: refusing inspect reader {} — {MAX_PENDING} are already waiting",
-                    conn.as_handle().0
-                ),
-                Ok(conn) => pending.push(Pending { conn, rx: FrameRx::new(), since: now }),
-                Err(e) => say!("logd: an inspect reader could not be accepted ({e:?})"),
+            if let Ok(conn) = acceptor.accept() {
+                if pending.len() < MAX_PENDING {
+                    pending.push(Pending { conn, rx: FrameRx::new(), since: now });
+                }
             }
         }
 
@@ -171,23 +169,11 @@ fn run(acceptor: &Acceptor, published: &Published) -> ! {
             }
             match p.rx.pump(&p.conn) {
                 RxStep::Idle => true,
-                RxStep::Eof => false,
                 RxStep::Frame { msg_type: toyos_inspect::MSG_INSPECT, payload_len: 0 } => {
-                    if let Err(e) =
-                        p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot())
-                    {
-                        say!("logd: inspect reader {} was not answered ({e:?})", p.conn.as_handle().0);
-                    }
+                    let _ = p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot());
                     false
                 }
-                RxStep::Frame { .. } | RxStep::Malformed => {
-                    say!(
-                        "logd: dropping inspect reader {} — it sent something that is not a \
-                         request",
-                        p.conn.as_handle().0
-                    );
-                    false
-                }
+                RxStep::Eof | RxStep::Frame { .. } | RxStep::Malformed => false,
             }
         });
     }

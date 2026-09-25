@@ -66,11 +66,9 @@ fn main() {
 
     if run.selector.reaches(toyos_inspect::dev::ROOT) {
         match inventory() {
-            Ok(records) => found.extend(
-                toyos_inspect::dev::render(&records)
-                    .into_iter()
-                    .filter(|(path, _)| run.selector.matches(path)),
-            ),
+            Ok(paths) => {
+                found.extend(paths.into_iter().filter(|(path, _)| run.selector.matches(path)))
+            }
             Err(why) => {
                 eprintln!("inspect: {}.*: {why}", toyos_inspect::dev::ROOT);
                 refused = true;
@@ -146,8 +144,20 @@ fn ask(owner: Owner) -> Result<BTreeMap<String, Value>, String> {
 /// round is a machine the reader names rather than chases.
 const INVENTORY_ROUNDS: usize = 4;
 
-/// The kernel's inventory, asked with this process's `SysCap`.
-fn inventory() -> Result<Vec<Record>, String> {
+/// The kernel's inventory, asked with this process's `SysCap`, and the
+/// machine `SYS_SYSINFO`'s ambient header describes, as `dev.*` paths.
+fn inventory() -> Result<BTreeMap<String, Value>, String> {
+    let records = records()?;
+    let mut header = [0u8; toyos::system::SYSINFO_HEADER_SIZE];
+    if toyos::system::sysinfo(&mut header) != header.len() {
+        return Err("the kernel wrote no machine header".to_string());
+    }
+    let machine = toyos_inspect::dev::Machine::from_header(&header);
+    toyos_inspect::dev::render(&machine, &records).map_err(|why| why.to_string())
+}
+
+/// Every inventory record, asked with this process's `SysCap`.
+fn records() -> Result<Vec<Record>, String> {
     let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
         return Err("this program holds no system capability, so the inventory is not its to read"
             .to_string());

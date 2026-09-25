@@ -1,6 +1,7 @@
 # The one boot that runs all four owners `inspect` reads: logd, the compositor,
 # soundd and netd, on a machine with a framebuffer, a virtio NIC and a virtio
-# sound card (`Profile::Gop`).
+# sound card (`Profile::Gop`), whose NVMe disk `tests/common/inspect.rs` crafts
+# with one partition nobody holds and one init grants test-runner.
 #
 # test-runner holds no `launcher`, so every binary it runs is spawned directly
 # and inherits its namespace — which is how `run inspect ...` reaches the
@@ -34,9 +35,12 @@ devices = ["pci:1af4:1041"]
 # Every owner's connector, and `inventory` for `dev.*`: the runner's namespace
 # is what its jobs inherit, and `dup` is what hands each job a duplicate of the
 # capability, which `test_rs_inspect_denied` narrows to prove the refusal.
+# The partition is the claimed one on the disk `tests/common/inspect.rs`
+# crafts, where the GUID is mirrored; its neighbour there is the free one.
 [programs.test-runner]
 receives = ["netd", "soundd", "log", "compositor"]
 syscap = ["inventory", "dup"]
+devices = ["part:B4C5D6E7-F809-4A1B-8C2D-3E4F5A6B7C8D"]
 
 # The shipped reader's row. Declared so the image carries it; the runner spawns
 # it directly, so what it holds here is the runner's namespace.

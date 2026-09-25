@@ -289,6 +289,13 @@ impl Handle {
         Locked { dev: self.0.dev.lock(), device: &self.0, writer: Writer::Unspanned }
     }
 
+    /// Who holds exactly blocks `first..end` of this device, from the holds
+    /// every view takes: the record [`Partition::of`] refuses against, so no
+    /// copy of it can disagree.
+    pub fn holder(&self, first: u64, end: u64) -> Option<Holder> {
+        self.0.holds.lock().holder_of(first, end)
+    }
+
     /// Whether writes this device's disk lost by the count `losses` are
     /// reported to no writer yet: what a flush from below the block layer asks
     /// before it calls the disk flushed.

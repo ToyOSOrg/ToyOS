@@ -313,9 +313,11 @@ const RUST_SKIP: &[&str] = &[
     "gsbase_locked",
     // Needs netd with a NIC. `netd_connection_caps` runs it on tests/netcase.
     "netd_caps",
-    // Needs every owner `inspect` reads, which only tests/inspectcase runs.
-    // `inspect_reads_its_owners` runs it there.
+    // Need every owner `inspect` reads, which only tests/inspectcase runs.
+    // `inspect_reads_its_owners` runs all three there.
     "inspect_denied",
+    "inspect_plays",
+    "inventory_bounds",
     // Same reason, same config: `netd_hostile_peer` runs it there.
     "netd_hostile_peer",
     // Needs a `launcher` connector, which `tests/testcases`'s test-runner has

@@ -8,7 +8,8 @@
 //! A ROOT or DATA candidate is selected by partition *type* and nothing more —
 //! which of them is a role's filesystem is answered against each one's own
 //! superblock, by `rootfs` and by `bcachefs_adapter::probe`. A partition a
-//! process claims is found by [`claimable`], on the disks [`probe`] read.
+//! process claims is found by [`claimable`], on the disks [`probe`] read, and
+//! the inventory is answered from the tables [`probe`] listed ([`inventory`]).
 //! Nothing here writes.
 
 use alloc::vec::Vec;
@@ -65,47 +66,66 @@ static DATA: Lock<Vec<Candidate>> = Lock::new(Vec::new());
 /// partition claim is looked for on. Taken alone.
 static DISKS: Lock<Vec<(Handle, u32)>> = Lock::new(Vec::new());
 
-/// Every partition this kernel mounted a filesystem from, by where it starts.
-static MOUNTED: Lock<Vec<(DeviceId, u64)>> = Lock::new(Vec::new());
+/// Every entry each disk's table stated when [`probe`] read it, for the
+/// inventory: a table is outside every partition, so nothing a holder writes
+/// changes it, and nothing here reads a disk again to answer.
+static LISTED: Lock<Vec<Listed>> = Lock::new(Vec::new());
 
-/// The most entries [`inventory`] reports for one disk: the 128 a GPT's entry
-/// array holds by convention (UEFI 2.10 §5.3.2). A disk with more says so.
-const MAX_LISTED: usize = 128;
-
-/// Record that a filesystem is mounted from `volume`, for [`inventory`].
-pub fn note_mounted(volume: &Volume) {
-    MOUNTED.lock().push((volume.device, volume.start_lba));
+/// One disk's entries, as [`probe`] listed them.
+struct Listed {
+    handle: Handle,
+    lba_bytes: u32,
+    parts: Vec<Partition>,
 }
 
-/// Every GPT entry on every disk [`probe`] read, as its table states it, and
-/// whether this kernel mounted a filesystem from it.
-///
-/// Read off the disks when asked, as [`claimable`] is: a table is outside
-/// every partition, so nothing a holder writes can change it under the read.
-pub fn inventory() -> Vec<(DeviceId, Partition, bool)> {
-    let disks = DISKS.lock().clone();
-    let mounted = MOUNTED.lock().clone();
+/// The most entries the inventory lists for one disk: the 128 a GPT's entry
+/// array holds by convention (UEFI 2.10 §5.3.2). A disk with more says so
+/// when it is probed.
+const MAX_LISTED: usize = 128;
+
+/// Every GPT entry on every disk [`probe`] read, and who holds exactly its
+/// span now, from the block layer's holds. A partition that is not whole
+/// blocks is held by nothing, since no view can be made of it.
+pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
+    let unit = toyos_abi::part::BLOCK_BYTES as u64;
+    let listed: Vec<(Handle, u32, Vec<Partition>)> = LISTED
+        .lock()
+        .iter()
+        .map(|disk| (disk.handle.clone(), disk.lba_bytes, disk.parts.clone()))
+        .collect();
     let mut out = Vec::new();
-    let mut listed = alloc::vec![BLANK; MAX_LISTED];
-    for (handle, lba_bytes) in &disks {
-        let id = handle.device_id();
-        match toyos_gpt::list(&mut DeviceSectors::new(handle, *lba_bytes), &mut listed) {
-            Ok(scan) => {
-                if scan.matched as usize > scan.listed {
-                    log!(
-                        "inventory: device {id} carries {} partitions and the inventory lists {}",
-                        scan.matched,
-                        scan.listed
-                    );
+    for (handle, lba_bytes, parts) in listed {
+        let lba = u64::from(lba_bytes);
+        for part in parts {
+            let span = part.first_lba.checked_mul(lba).zip(part.lba_count().checked_mul(lba));
+            let holder = match span {
+                Some((start, len)) if start % unit == 0 && len % unit == 0 => {
+                    handle.holder(start / unit, start / unit + len / unit)
                 }
-                for part in &listed[..scan.listed] {
-                    out.push((id, *part, mounted.contains(&(id, part.first_lba))));
-                }
-            }
-            Err(e) => log!("inventory: device {id} has no partition table to list: {e:?}"),
+                _ => None,
+            };
+            out.push((handle.device_id(), part, holder));
         }
     }
     out
+}
+
+/// List `handle`'s table into [`LISTED`], once per disk.
+fn list(sectors: &mut DeviceSectors<'_>, handle: &Handle, lba_bytes: u32) {
+    let id = handle.device_id();
+    let mut found = alloc::vec![BLANK; MAX_LISTED];
+    // A disk with no table this kernel parses carries no partition, and
+    // `collect` says so, naming the refusal.
+    let Ok(scan) = toyos_gpt::list(sectors, &mut found) else { return };
+    if scan.matched as usize > scan.listed {
+        log!(
+            "gpt: device {id} carries {} partitions and the inventory lists {}",
+            scan.matched,
+            scan.listed
+        );
+    }
+    found.truncate(scan.listed);
+    LISTED.lock().push(Listed { handle: handle.clone(), lba_bytes, parts: found });
 }
 
 /// How many partitions of one ToyOS type one device may offer this kernel.
@@ -176,13 +196,18 @@ pub fn data_candidates() -> Vec<Candidate> {
 /// always, and the boot partition when firmware named one.
 pub fn probe(handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();
-    {
+    let first = {
         let mut disks = DISKS.lock();
-        if !disks.iter().any(|(held, _)| held.device_id() == id) {
+        let first = !disks.iter().any(|(held, _)| held.device_id() == id);
+        if first {
             disks.push((handle.clone(), lba_bytes));
         }
-    }
+        first
+    };
     let mut sectors = DeviceSectors::new(handle, lba_bytes);
+    if first {
+        list(&mut sectors, handle, lba_bytes);
+    }
     collect(&mut sectors, id, lba_bytes, "ROOT", Guid::TOYOS_ROOT, &ROOTS);
     collect(&mut sectors, id, lba_bytes, "DATA", Guid::TOYOS_DATA, &DATA);
 
