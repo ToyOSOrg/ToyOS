@@ -148,11 +148,16 @@ pub fn witness(root: &Path) -> String {
     lines.join("\n")
 }
 
-/// The identity of every file under `dir`, paths relative to `base`, as one
-/// hash.
-fn tree_identity(base: &Path, dir: &Path) -> String {
+/// The identity of the source files under `paths` of the git checkout `base`,
+/// as one hash.
+///
+/// **Source as git sees it**: tracked files and untracked ones no ignore rule
+/// covers, into every submodule checked out there — never what a build or the
+/// desktop leaves beside them (bootstrap's `__pycache__`, Finder's
+/// `.DS_Store`), which would make a key that moves while it is being built.
+fn tree_identity(base: &Path, paths: &[&str]) -> String {
     let mut files = Vec::new();
-    files_under(dir, &mut files);
+    source_files(base, paths, &mut files);
     files.sort();
     let mut hasher = Sha256::new();
     for path in files {
@@ -163,6 +168,24 @@ fn tree_identity(base: &Path, dir: &Path) -> String {
         hasher.update([0]);
     }
     hex(&hasher.finalize())[..16].to_string()
+}
+
+fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
+    let mut args = vec!["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"];
+    args.extend(paths);
+    let listed = git_bytes(checkout, &args);
+    let mut seen = BTreeSet::new();
+    for entry in listed.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let path = checkout.join(String::from_utf8_lossy(entry).as_ref());
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if path.join(".git").exists() {
+            source_files(&path, &["."], out);
+        } else if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+            out.push(path);
+        }
+    }
 }
 
 /// The compiler as the key sees it: the source it was built from, as
@@ -237,8 +260,7 @@ pub fn key(root: &Path, rust_dir: &Path, fork: &Path) -> String {
     let parts = [
         format!("{RECIPE}; cargo {STAGE0_CARGO}"),
         witness(root),
-        tree_identity(fork, &fork.join("library")),
-        tree_identity(fork, &fork.join("src/bootstrap")),
+        tree_identity(fork, &["library", "src/bootstrap"]),
         compiler_identity(rust_dir),
     ];
     short(parts.join("\n\0\n").as_bytes())
@@ -646,6 +668,8 @@ mod tests {
         let fork = base.join("fork");
         write(&fork.join("library/std/src/lib.rs"), "//! std\npub fn exit() {}\n");
         write(&fork.join("src/bootstrap/src/lib.rs"), "fn main() {}\n");
+        write(&fork.join(".gitignore"), "__pycache__\n.DS_Store\n");
+        git(&fork, &["init", "-q"]);
         let rust_dir = base.join("rust");
         write(&compiler_record(&rust_dir), "tree-1");
         write(&toolchain::stage2(&rust_dir).join("lib/librustc_driver-1.dylib"), "a driver");
@@ -676,6 +700,15 @@ mod tests {
         write(&std, "//! std\npub fn exit() { loop {} }\n");
         assert_ne!(k(), base, "a change to the fork's code kept the old sysroot");
         write(&std, "//! std\npub fn exit() {}\n");
+        assert_eq!(k(), base);
+
+        // What a build and the desktop leave in the checkout is not its source.
+        write(&fork.join("src/bootstrap/__pycache__/bootstrap.cpython-313.pyc"), "bytecode");
+        write(&fork.join("library/.DS_Store"), "finder");
+        assert_eq!(k(), base, "a file git ignores moved the key");
+        write(&fork.join("library/std/src/new.rs"), "pub fn new() {}\n");
+        assert_ne!(k(), base, "an untracked source file was not in the key");
+        fs::remove_file(fork.join("library/std/src/new.rs")).unwrap();
         assert_eq!(k(), base);
 
         write(&root.join("toyos-abi/Cargo.toml"), "[package]\nversion = \"0.2.0\"\n");
