@@ -233,6 +233,10 @@ impl FileSystem for BcacheFsAdapter {
         mapped("list", dir, self.fs.list(limit, &|name| crate::vfs::under_directory(name, dir)))
     }
 
+    fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError> {
+        Ok(self.fs.is_dir(dir))
+    }
+
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
         present("file_mtime", name, self.fs.file_mtime(name))
     }
@@ -412,6 +416,10 @@ impl ReadOnlyBcacheFsAdapter {
 impl FileSystem for ReadOnlyBcacheFsAdapter {
     fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         mapped("list", dir, self.fs.list(limit, &|name| crate::vfs::under_directory(name, dir)))
+    }
+
+    fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError> {
+        Ok(self.fs.is_dir(dir))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {

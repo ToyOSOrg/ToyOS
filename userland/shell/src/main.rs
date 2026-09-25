@@ -24,7 +24,6 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() >= 3 && args[1] == "-c" {
         let input = args[2..].join(" ");
-        let _ = env::set_current_dir("/");
         execute_line(&input);
         std::process::exit(unsafe { LAST_STATUS });
     }

@@ -14499,6 +14499,10 @@ fn run_machine_test(
             console.push_str(&result.serial);
             serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
             eprintln!("  [netcase] every child started in the directory its spawn named");
+            // The spawn latency by cwd, which is the guest's to measure and nobody's to assert.
+            for line in result.stdout.lines().filter(|l| l.contains("a spawn and wait")) {
+                eprintln!("  [netcase] {line}");
+            }
             Ok(())
         }
         "input_claim_absent" => {

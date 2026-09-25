@@ -480,10 +480,11 @@ fn crc_verification_on_nodes() {
     let root_offset = 2 * 4096 + 100;
     raw[root_offset] ^= 0xFF;
 
-    let io = VecBlockIO::from_vec(raw);
-    let mounted = Mounted::<_, ReadOnly>::open(io).expect("mount");
-    let result = mounted.read_file("test.txt");
-    assert!(result.is_err(), "expected checksum error, got: {:?}", result.ok().map(|d| d.len()));
+    // The mount walks the tree, so the mount is what meets the corrupt node.
+    match Mounted::<_, ReadOnly>::open(VecBlockIO::from_vec(raw)).err() {
+        Some(FsError::ChecksumMismatch { .. }) => {}
+        other => panic!("expected ChecksumMismatch, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1083,9 +1084,8 @@ fn a_btree_node_the_device_refuses_is_not_a_node_of_zeros() {
     let raw = volume_with("doc.bin", b"small");
     let root = u64::from_le_bytes(raw[24..32].try_into().unwrap());
 
-    let fs = Mounted::<_, ReadOnly>::open(Refuses::read(raw, root)).expect("open");
-    match fs.list(usize::MAX, &|_| true) {
-        Err(FsError::DeviceRead(block, _)) => assert_eq!(block.raw(), root),
+    match Mounted::<_, ReadOnly>::open(Refuses::read(raw, root)).err() {
+        Some(FsError::DeviceRead(block, _)) => assert_eq!(block.raw(), root),
         other => panic!("expected DeviceRead, got {other:?}"),
     }
 }

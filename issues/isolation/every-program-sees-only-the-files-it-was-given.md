@@ -47,7 +47,10 @@ nameable by every program and make confused-deputy bugs structural.
    `SYS_RMDIR`, `SYS_RENAME`, `SYS_SYMLINK`, `SYS_READLINK`, `SYS_SPAWN` and
    `SYS_DLOPEN` resolving inside it. `SYS_SPAWN`'s working directory is one of
    those paths: `SpawnArgs` names it, and it must lie in the child's view or the
-   spawn is refused. This lands as an ABI change on its own PR.
+   spawn is refused. Today it is judged at spawn time only: the directory can
+   be removed or replaced before the child starts, and the child then holds a
+   path that names nothing — a view-relative cwd has to close that or say so.
+   This lands as an ABI change on its own PR.
    **Exit**: an escape suite (every `..`, symlink and rename race the
    literature names) is red on a resolver that walks the global tree and green
    on this one. A process given an empty view names nothing.
