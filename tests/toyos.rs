@@ -18992,6 +18992,10 @@ fn main() {
         }
     };
 
+    // Before anything boots: every exit below goes through `run`, which removes
+    // this run's scratch or keeps a red one's, and sweeps what older runs left.
+    let run = common::lane::Run::begin();
+
     // How many guests may be up on the *host* at once, across every worktree.
     // `--jobs` is this run's demand; this is what the machine will supply, and
     // zero turns it off.
@@ -19069,7 +19073,7 @@ fn main() {
         // Three statuses for the three things this can establish, as the
         // ordinary suite has: green, red, and "measured nothing" — a run that
         // staged images and never reached the machine has no claim to make.
-        std::process::exit(
+        run.exit(
             match metal::run(
                 mode,
                 &dir,
@@ -19169,7 +19173,7 @@ fn main() {
             &rust_bins,
         );
         if !ok {
-            std::process::exit(1);
+            run.exit(1);
         }
         return;
     }
@@ -19190,7 +19194,7 @@ fn main() {
         .collect();
     if let Err(refusal) = check_quarantine(redlist::QUARANTINE, &runnable) {
         eprintln!("[toyos] src/redlist.rs: {refusal}");
-        std::process::exit(1);
+        run.exit(1);
     }
 
     let keep = |name: &str| filter.is_none_or(|f| name.contains(f));
@@ -19260,7 +19264,7 @@ fn main() {
         } else {
             eprintln!("No tests match filter {filter:?}");
         }
-        std::process::exit(1);
+        run.exit(1);
     }
     for row in redlist::QUARANTINE {
         // Before anything boots, so that the run reads as what it is from its
@@ -19353,7 +19357,7 @@ fn main() {
         + audio_to_run.len() * AUDIO_SMP.len();
     if let Err(refusal) = toyos_build::testargs::validate_ordinary_shard(shard, filter, total) {
         eprintln!("[toyos] {refusal}");
-        std::process::exit(1);
+        run.exit(1);
     }
     eprintln!("\nrunning {total} tests\n");
 
@@ -19497,5 +19501,5 @@ fn main() {
     eprint!("{}", common::irqcensus::summary());
 
     eprint!("{}", tally.summary(total, suite_start.elapsed(), suite_start.suspended()));
-    std::process::exit(tally.exit_code());
+    run.exit(tally.exit_code());
 }
