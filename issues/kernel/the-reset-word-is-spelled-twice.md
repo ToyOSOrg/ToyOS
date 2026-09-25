@@ -15,8 +15,7 @@ kernel's and every metal run refuses with `the log's last line is … and not
 It fails closed, so it is a maintenance hazard and not a hole — the same shape
 as `issues/kernel/a-known-mask-is-copied-out-of-toyos-abi-by-hand.md`, and with
 the same cause: the only crate a `no_std` kernel and a host build crate both
-read is `toyos-abi`, and a change that adds a word there lands alone by the
-abi-split rule.
+read is `toyos-abi`.
 
 **Exit condition**: the word declared once in `toyos-abi` and named by both
 `quiesce` and `src/bootlog.rs`, so `git grep '"Rebooting\.'` returns the one

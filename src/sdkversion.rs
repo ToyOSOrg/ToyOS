@@ -8,11 +8,12 @@
 //! policy — a built program that breaks, breaks.
 //!
 //! **That policy is what this gate is for.** None of the five is
-//! compatible-by-construction, so a branch that changes a file under one of
-//! them bumps its minor — `0.x.0` to `0.(x+1).0` — and every in-tree
-//! dependent's `version` pin with it. A crate *changed* and not republished is
-//! worse than one republished under a taken version, which crates.io refuses:
-//! the fork naming the version still resolves, and silently gets the old code.
+//! compatible-by-construction, so a branch that changes what a file under one
+//! of them builds — its `src/identity.rs` identity, so a comment is no change —
+//! bumps its minor, `0.x.0` to `0.(x+1).0`, and every in-tree dependent's
+//! `version` pin with it. A crate *changed* and not republished is worse than
+//! one republished under a taken version, which crates.io refuses: the fork
+//! naming the version still resolves, and silently gets the old code.
 //!
 //! [`PUBLISHED`]'s order is a dependency order, and it is the order
 //! `cargo run -- --ci publish` takes: a crate cannot go up before the index
@@ -20,6 +21,7 @@
 
 use std::path::Path;
 
+use crate::identity;
 use crate::pr::git;
 
 /// One published crate: where its manifest is, and which of the five it names
@@ -144,7 +146,11 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
     for krate in PUBLISHED {
         let manifest = format!("{}/Cargo.toml", krate.dir);
         let prefix = format!("{}/", krate.dir);
-        if !changed.iter().any(|p| p.starts_with(&prefix) && !p.ends_with("Cargo.lock")) {
+        let mut touched = false;
+        for path in changed.iter().filter(|p| p.starts_with(&prefix) && !p.ends_with("Cargo.lock")) {
+            touched |= builds_differently(root, &merge_base, path)?;
+        }
+        if !touched {
             continue;
         }
         let at_head = version_at(root, "HEAD", &manifest)?;
@@ -232,6 +238,34 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
             .to_string(),
     );
     Err(refusals.join("\n"))
+}
+
+/// Whether `path` builds differently at `HEAD` than at `base`: its
+/// [`identity`] moved, or it came or went.
+fn builds_differently(root: &Path, base: &str, path: &str) -> Result<bool, String> {
+    let at = |commit: &str| -> Result<Option<Vec<u8>>, String> {
+        Ok(blob_at(root, commit, path)?.map(|b| identity::of(Path::new(path), &b).into_owned()))
+    };
+    Ok(at(base)? != at("HEAD")?)
+}
+
+/// `path`'s bytes at `commit`, or `None` where that commit does not hold it.
+/// Bytes and not [`git`]'s text: a lossy decode makes two different binaries
+/// equal.
+fn blob_at(root: &Path, commit: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    if git(root, &["ls-tree", commit, "--", path])?.is_empty() {
+        return Ok(None);
+    }
+    let out = std::process::Command::new("git")
+        .args(["cat-file", "blob", &format!("{commit}:{path}")])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("git cat-file in {}: {e}", root.display()))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git cat-file blob {commit}:{path}: {why}"));
+    }
+    Ok(Some(out.stdout))
 }
 
 /// `path`'s `[package] version` at `commit`.
@@ -338,6 +372,31 @@ mod tests {
         let refusal = judge(&wt, "main").expect_err("a changed crate must bump its version");
         assert!(refusal.contains("toyos-abi changed and its version did not"), "{refusal}");
         assert!(refusal.contains("still says 0.1.0, and the next one is 0.2.0"), "{refusal}");
+    }
+
+    /// **A comment is not a change to what the crate builds**, so a branch that
+    /// only rewrites one owes no version; the same crate's signature change in
+    /// the next commit still does.
+    #[test]
+    fn a_comment_only_change_owes_no_bump_and_a_signature_change_still_does() {
+        let (_origin, wt) = repo("sdk-comment-only");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
+        commit(&wt, "toyos-abi/src/lib.rs", "/// One.\npub struct A;\n", "abi source");
+        publishing(&wt);
+        main_is_here(&wt);
+
+        commit(
+            &wt,
+            "toyos-abi/src/lib.rs",
+            "//! The crate.\n\n/// One, now said better.\n// And a plain comment.\npub  struct /* here */ A;\n",
+            "abi: reword A's doc",
+        );
+        let verdict = judge(&wt, "main").expect("a comment-only change owes no bump");
+        assert!(verdict.contains("changes none of the five"), "{verdict}");
+
+        commit(&wt, "toyos-abi/src/lib.rs", "/// One.\npub struct A(pub u64);\n", "abi: widen A");
+        let refusal = judge(&wt, "main").expect_err("a signature change still owes one");
+        assert!(refusal.contains("toyos-abi changed and its version did not"), "{refusal}");
     }
 
     /// **The rule's precondition, which is also this branch's own exemption**:

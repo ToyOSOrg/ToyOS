@@ -12,17 +12,23 @@
 //! cargo's business and serialising those would destroy the parallelism the
 //! builds depend on:
 //!
-//! - **shared** — "I am building against the toolchain and the crate target
-//!   directories as they stand". Any number at once.
-//! - **exclusive** — "I am replacing shared build state": the rust bootstrap,
-//!   the sysroot writes, the `cargo clean`s. One at a time, and never while a
-//!   build holds the shared mode.
+//! - **shared** — "I am building against the state as it stands". Any number
+//!   at once.
+//! - **exclusive** — "I am replacing it": the rust bootstrap, this worktree's
+//!   std build, the `cargo clean`s. One at a time, and never while a build
+//!   holds the shared mode.
 //!
-//! And two [`Scope`]s, because "shared" stopped meaning one thing once the repo
-//! grew worktrees: a crate target directory is shared by the builds in one
-//! worktree, while the sysroot is shared by every worktree at once. A lock in
-//! the worktree cannot serialise the second, and a lock in the common directory
-//! would serialise the first against worktrees that have nothing to do with it.
+//! And two [`Scope`]s: a crate target directory is shared by the builds in one
+//! worktree, while the primary's `rust/build` — the compiler every sysroot is
+//! cloned from and compiled by — is shared by every worktree at once. A build
+//! holds its worktree's lock shared for its whole length and the global one not
+//! at all: it compiles against its own content-addressed sysroot
+//! (`src/sysroot.rs`), which nothing rewrites. Only a sysroot being *made*
+//! reads the compiler, and it holds [`compiler_shared`] while it does.
+//!
+//! A sysroot's own lock ([`sysroot_building`], [`sysroot_using`]) is per key,
+//! so two worktrees with different ABIs never meet in it, and two with the same
+//! one build it once.
 //!
 //! [`integration`] is neither: one file of its own, exclusive-only, and held
 //! while this host's `main` moves rather than while anything builds.
@@ -42,11 +48,12 @@
 //! what separates that from an ordinary slow one is that no `[host-slots]` or
 //! `[host-builds] waiting …` line was printed.
 //!
-//! **The order between all four is a constraint, not a preference:** sysroot →
-//! host slot (guest or build) → build lock → artifact. A build slot is taken
-//! before any build lock and never while one is held, and after the sysroot lock
-//! rather than before it: a `--claim-sysroot` holds the sysroot and then wants a
-//! build slot, so the reverse order closes a cycle.
+//! **The order between them is a constraint, not a preference:** host slot
+//! (guest or build) → a sysroot key's lock → the worktree build lock → the
+//! global one → artifact. A build slot is taken before any build lock and never
+//! while one is held; a key's lock is taken with the worktree lock put down
+//! ([`Held::without_shared`]), because the key's builder takes the worktree lock
+//! exclusively.
 //!
 //! Holder death: `flock` is released by the kernel when the open file
 //! description closes, so a builder that is SIGKILLed mid-phase — routine here
@@ -97,8 +104,8 @@ fn git_lock_dir(root: &Path) -> PathBuf {
 /// taken in the global scope stalls builds it has no business stalling.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Scope {
-    /// State every worktree shares: the `rust/` checkout and its build tree,
-    /// the sysroot, and the machine-global rustup link.
+    /// State every worktree shares: the primary's `rust/` build tree — the
+    /// compiler every sysroot is made with — and the machine-global rustup link.
     Global,
     /// State this worktree alone owns — its crate target directories. Two
     /// worktrees cleaning their own have nothing to say to each other.
@@ -122,18 +129,17 @@ impl Drop for Guard {
     }
 }
 
-/// The build lock, held in shared mode — in **both** scopes — for the length of
-/// one build. A build reads the shared sysroot from beginning to end, so a
-/// bootstrap in another worktree may no more land inside it than a clean in
-/// this one.
+/// The worktree's build lock, held in shared mode for the length of one build so
+/// no clean of its crate targets lands inside it. The global lock is not held:
+/// what a build reads of the shared tree is its own sysroot, which nothing
+/// rewrites once it is made.
 pub struct Held {
     worktree_dir: PathBuf,
     global_dir: PathBuf,
     what: String,
-    /// `None` only for the duration of an [`Held::act_if`] escalation, which is
-    /// the whole reason this is an `Option`: the shared locks have to be put
-    /// down before either exclusive one can be taken.
-    guards: Option<(Guard, Guard)>,
+    /// `None` only while [`Held::without_shared`] has it put down, which is the
+    /// whole reason this is an `Option`.
+    guard: Option<Guard>,
 }
 
 /// Take the build lock in shared mode for `what`, and hold it until the
@@ -145,9 +151,9 @@ pub fn shared(root: &Path, what: &str) -> Held {
         worktree_dir: root.join(LOCK_DIR),
         global_dir: git_lock_dir(root),
         what: what.to_string(),
-        guards: None,
+        guard: None,
     };
-    held.guards = Some(held.take_shared());
+    held.guard = Some(held.take_shared());
     held
 }
 
@@ -155,17 +161,16 @@ impl Held {
     /// Ask `decide`, and if it reports work, do that work under `scope`'s
     /// exclusive lock.
     ///
-    /// `decide` runs first under the shared locks this value holds, so a phase
+    /// `decide` runs first under the shared lock this value holds, so a phase
     /// with nothing to do costs no serialisation at all. When it does report
-    /// work the shared locks are dropped, the exclusive one taken, and `decide`
+    /// work the shared lock is dropped, the exclusive one taken, and `decide`
     /// asked **again**: whatever it saw a moment ago may have been done by the
     /// process that held the lock in between, and only this second answer is
     /// acted on. Serialising the action alone would still double-clean.
     ///
-    /// Both shared locks go down, never just the one being escalated. Holding
-    /// either while queueing for the other is a deadlock with the process doing
-    /// it the other way round, and two builds in one worktree can be exactly
-    /// that pair.
+    /// The shared lock goes down whichever scope is escalated: holding it while
+    /// queueing for the global one is a deadlock with a process holding the
+    /// global one that wants this worktree's.
     pub fn act_if<W>(
         &mut self,
         scope: Scope,
@@ -176,29 +181,43 @@ impl Held {
         if decide().is_none() {
             return;
         }
-        self.guards = None;
-        {
-            let _exclusive = acquire(self.dir(scope), LOCK_EX, phase, BUILD);
+        let dir = match scope {
+            Scope::Global => self.global_dir.clone(),
+            Scope::Worktree => self.worktree_dir.clone(),
+        };
+        self.without_shared(|| {
+            let _exclusive = acquire(&dir, LOCK_EX, phase, BUILD);
             if let Some(work) = decide() {
                 act(work);
             }
-        }
-        self.guards = Some(self.take_shared());
+        });
     }
 
-    fn dir(&self, scope: Scope) -> &Path {
-        match scope {
-            Scope::Global => &self.global_dir,
-            Scope::Worktree => &self.worktree_dir,
-        }
+    /// Run `f` with this worktree's shared lock put down and take it back after:
+    /// for a lock that orders before it, as a sysroot key's does.
+    pub fn without_shared<R>(&mut self, f: impl FnOnce() -> R) -> R {
+        self.guard = None;
+        let out = f();
+        self.guard = Some(self.take_shared());
+        out
     }
 
-    fn take_shared(&self) -> (Guard, Guard) {
-        (
-            acquire(&self.global_dir, LOCK_SH, &self.what, BUILD),
-            acquire(&self.worktree_dir, LOCK_SH, &self.what, BUILD),
-        )
+    fn take_shared(&self) -> Guard {
+        acquire(&self.worktree_dir, LOCK_SH, &self.what, BUILD)
     }
+}
+
+/// This worktree's build lock, exclusively: what a sysroot build holds while it
+/// writes the worktree's fork build directory, with the key's lock already held.
+pub fn worktree_exclusive(root: &Path, what: &str) -> Guard {
+    acquire(&root.join(LOCK_DIR), LOCK_EX, what, BUILD)
+}
+
+/// The global lock in shared mode: "I am reading the primary's compiler". A
+/// sysroot build holds it from its std compile to its clone of `stage2`, so a
+/// toolchain rebuild does not land inside either.
+pub fn compiler_shared(root: &Path, what: &str) -> Guard {
+    acquire(&git_lock_dir(root), LOCK_SH, what, BUILD)
 }
 
 /// Exclusive lock over the shared cargo artifact paths.
@@ -219,8 +238,8 @@ pub fn artifact(root: &Path) -> Guard {
 /// this side is `--sync` fast-forwarding the primary checkout onto
 /// `origin/main`, and that is still a tree somebody may be building in.
 ///
-/// Its own file and not `Scope::Global`'s `state`, because a build holds `state`
-/// shared for its whole length and this must not wait for one.
+/// Its own file and not `Scope::Global`'s `state`, because a sysroot build
+/// holds `state` shared for its whole length and this must not wait for one.
 ///
 /// No `intent` beside it either. Writer preference exists because a stream of
 /// shared acquirers can starve an exclusive one out of `state`; nothing takes
@@ -333,41 +352,39 @@ pub fn build_slot(root: &Path, what: &str) -> Option<Guard> {
 
 const BUILD_SLOT_DIR: &str = "build-slots";
 
-/// The shared sysroot stays what it is for the length of a *run*.
-///
-/// [`Scope::Global`]'s `state` already says "nothing replaces the sysroot while
-/// I build", and it is the wrong length. A suite is a hundred builds over two
-/// minutes and every one of them reads the sysroot the first one agreed with; a
-/// claim landing between two of those builds corrupts nothing and makes every
-/// later build refuse, which is what 156 identical refusals and a dead gate
-/// looked like on 2026-08-04.
-///
-/// **A run holds this and nothing else holds it**, which is the whole of the
-/// deadlock argument: it is taken once, outermost, before any build lock, so the
-/// order is always sysroot → global and never the reverse. A landing does *not*
-/// take it — its gate is a separate process that does, and a landing holding it
-/// while its gate queued behind a claim's writer preference would be a cycle
-/// with itself. What the landing leaves unprotected is the merge and the
-/// fast-forward, neither of which reads a sysroot.
-pub fn run_against_sysroot(root: &Path, what: &str) -> Guard {
-    acquire(&git_lock_dir(root).join(SYSROOT_DIR), LOCK_SH, what, SYSROOT)
+/// Make the sysroot `key` names: exclusive, and waited for by every other
+/// process that wants the same key, which then finds it made.
+pub fn sysroot_building(root: &Path, key: &str) -> Guard {
+    exclusive(&sysroot_lock_path(root, key), "sysroot lock", &format!("building sysroot {key}"))
 }
 
-/// Replace the shared sysroot from this worktree.
-///
-/// Exclusive against every run now in flight, and — through `acquire`'s writer
-/// preference — against every run that starts while this one waits. The refusal
-/// this makes possible is right and stays: a worktree whose `toyos-abi` differs
-/// from the sysroot's still compiles, still links and still boots, into a guest
-/// whose syscall arguments land at the wrong offsets. What was missing was
-/// arbitration, so two worktrees that both legitimately needed it took it from
-/// each other four times in 38 minutes, each rewrite killing whatever gate was
-/// running elsewhere.
-pub fn claim_sysroot(root: &Path, what: &str) -> Guard {
-    acquire(&git_lock_dir(root).join(SYSROOT_DIR), LOCK_EX, what, SYSROOT)
+/// Compile against the sysroot `key` names: shared, so any number of builds use
+/// it at once, a builder of it is waited for, and a sweep cannot remove it.
+pub fn sysroot_using(root: &Path, key: &str) -> Guard {
+    let path = sysroot_lock_path(root, key);
+    let file = open_lock_file(&path);
+    if !try_lock(&file, LOCK_SH) {
+        let what = format!("using sysroot {key}");
+        let holder = describe_holder(&path)
+            .unwrap_or_else(|| "held, but the holder left no readable note".to_string());
+        announce("sysroot lock", &what, &holder);
+        take_lock_announcing(&file, LOCK_SH, &path, "sysroot lock", &what);
+    }
+    Guard { file, records_holder: false }
 }
 
-const SYSROOT_DIR: &str = "sysroot";
+/// The sysroot `key` names, exclusively and only if nobody is making or using
+/// it: what a sweep holds while it removes one.
+pub fn sysroot_idle(root: &Path, key: &str) -> Option<Guard> {
+    let file = open_lock_file(&sysroot_lock_path(root, key));
+    try_lock(&file, LOCK_EX).then_some(Guard { file, records_holder: false })
+}
+
+fn sysroot_lock_path(root: &Path, key: &str) -> PathBuf {
+    git_lock_dir(root).join(SYSROOT_DIR).join(key)
+}
+
+const SYSROOT_DIR: &str = "sysroots";
 
 fn slot_path(dir: &Path, index: usize) -> PathBuf {
     dir.join(format!("slot-{index}"))
@@ -482,11 +499,6 @@ const BUILD: Lock = Lock {
     name: "build lock",
     shared_holders: "held by other builds in this tree",
     queued_ahead: "an exclusive phase is queued ahead of it",
-};
-const SYSROOT: Lock = Lock {
-    name: "sysroot lock",
-    shared_holders: "held by suite runs, here or in another worktree",
-    queued_ahead: "a --claim-sysroot is queued ahead of it",
 };
 
 /// Acquire one mode of a two-file lock.
@@ -725,10 +737,6 @@ mod tests {
         root.join(LOCK_DIR)
     }
 
-    fn sysroot_lock_dir(root: &Path) -> PathBuf {
-        git_lock_dir(root).join(SYSROOT_DIR)
-    }
-
     /// A host of two, so filling it costs two processes rather than twelve.
     const TEST_SLOTS: usize = 2;
 
@@ -866,27 +874,19 @@ mod tests {
                 touch(&root.join(format!("held-{}", std::process::id())));
                 until_orphaned();
             }
-            "hold-run" => {
-                let _run = run_against_sysroot(&root, "a child's suite run");
+            "hold-sysroot-build" => {
+                let _building = sysroot_building(&root, "k1");
                 touch(&root.join("held"));
                 appeared(&root.join("release"), Duration::from_secs(20));
-            }
-            "hold-run-forever" => {
-                let _run = run_against_sysroot(&root, "a child's suite run");
-                touch(&root.join("held"));
-                until_orphaned();
+                note(&root, "built");
             }
             "want-integration" => {
                 let _landing = integration(&root);
                 note(&root, "landed");
             }
-            "want-claim" => {
-                let _claim = claim_sysroot(&root, "a child's --claim-sysroot");
-                note(&root, "claim");
-            }
-            "want-run" => {
-                let _run = run_against_sysroot(&root, "a child's suite run");
-                note(&root, "run");
+            "want-sysroot" => {
+                let _using = sysroot_using(&root, "k1");
+                note(&root, "used");
             }
             "want-slot" => {
                 let _slot = slot(&slot_dir(&root), TEST_SLOTS, "the queued run", GUESTS);
@@ -1009,15 +1009,14 @@ mod tests {
         assert_eq!(describe_holder(&integration_path(&root)), None);
     }
 
-    /// The property that forced a second file. A build takes the global `state`
-    /// shared for its whole length, and `--sync` must not wait for one: a
-    /// landing that queued behind every build on the host would be a hang
-    /// rather than a message.
+    /// The property that forced a second file. A sysroot build takes the global
+    /// `state` shared for its whole length, and `--sync` must not wait for one:
+    /// a landing that queued behind it would be a hang rather than a message.
     #[test]
     fn a_landing_and_a_build_do_not_exclude_each_other() {
         let root = scratch("integration-vs-build");
 
-        let building = shared(&root, "the gate's build");
+        let building = compiler_shared(&root, "the gate's sysroot build");
         let landing = open_lock_file(&integration_path(&root));
         assert!(try_lock(&landing, LOCK_EX), "a build in flight kept a landing out");
         drop(landing);
@@ -1081,13 +1080,21 @@ mod tests {
         drop(global);
         drop(held);
 
+        // A build compiles against its own sysroot and reads no compiler, so a
+        // toolchain rebuild does not wait for it; a sysroot being made reads the
+        // compiler, so the rebuild waits for that.
         let building = shared(&linked, "a build in the worktree");
+        let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
+        assert!(try_lock(&global, LOCK_EX), "a build kept the toolchain from being rebuilt");
+        drop(global);
+        drop(building);
+        let making = compiler_shared(&linked, "a sysroot build in the worktree");
         let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(
             !try_lock(&global, LOCK_EX),
-            "a bootstrap could land inside a build running in another worktree"
+            "a toolchain rebuild could land inside a sysroot build in another worktree"
         );
-        drop(building);
+        drop(making);
     }
 
     fn git_common_lock_dir(root: &Path) -> PathBuf {
@@ -1132,84 +1139,35 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "ex\nsh\n");
     }
 
-    /// **The decision `--claim-sysroot` did not have: a claim may not land
-    /// inside another worktree's running gate.**
-    ///
-    /// It could, and on 2026-08-04 it did four times in 38 minutes — 23:03,
-    /// 23:15, 23:27, 23:41 — each rewrite turning some other worktree's every
-    /// later build into a refusal. One gate died with 156 of them. The refusal
-    /// itself is right and stays; what it lacked was somewhere to queue.
+    /// **One key is built once, and two keys never meet.** A second process
+    /// wanting the key being built waits on the builder's lock — not on a
+    /// timer — and gets it only once the build is done; a process making
+    /// another key is not held at all; and a sweep cannot take a key that
+    /// somebody is making or using.
     #[test]
-    fn a_claim_waits_for_a_run_in_flight() {
-        let root = scratch("sysroot-run");
-        let mut kid = child(&root, "hold-run");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
+    fn a_key_being_built_is_waited_for_and_another_key_is_not() {
+        let root = scratch("sysroot-keys");
+        let mut builder = child(&root, "hold-sysroot-build");
+        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "the builder never started");
 
-        let state = sysroot_lock_dir(&root).join("state");
-        assert!(
-            !try_lock(&open_lock_file(&state), LOCK_EX),
-            "a claim could land inside a run in flight"
-        );
-        assert!(
-            try_lock(&open_lock_file(&state), LOCK_SH),
-            "two suite runs excluded each other; only a claim may"
-        );
+        assert!(sysroot_idle(&root, "k1").is_none(), "a sweep could remove a key being built");
+        let other = sysroot_building(&root, "k2");
+        drop(other);
 
-        touch(&root.join("release"));
-        assert!(kid.wait().unwrap().success());
-        let _mine = claim_sysroot(&root, "the parent's claim");
-    }
-
-    /// A run that starts while a claim is queued goes second.
-    ///
-    /// Without this the claim is what starves: `flock` has no writer preference,
-    /// and a tree that runs 15-25 suites a day never has a moment with none in
-    /// flight. The intent file is the same mechanism
-    /// [`a_queued_exclusive_phase_goes_first`] gates for the build lock.
-    #[test]
-    fn a_run_queues_behind_a_waiting_claim() {
-        let root = scratch("sysroot-preference");
-        let mine = run_against_sysroot(&root, "the parent's run");
-
-        let mut claimer = child(&root, "want-claim");
-        let intent = sysroot_lock_dir(&root).join("intent");
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while try_lock(&open_lock_file(&intent), LOCK_SH) {
-            assert!(Instant::now() < deadline, "the claiming child never queued");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-
-        let mut runner = child(&root, "want-run");
+        let mut user = child(&root, "want-sysroot");
         assert!(
             !appeared(&root.join("order.log"), Duration::from_millis(300)),
-            "a suite run overtook a queued claim"
+            "a build used a sysroot while it was still being made"
         );
+        touch(&root.join("release"));
+        assert!(builder.wait().unwrap().success());
+        assert!(user.wait().unwrap().success());
+        assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "built\nused\n");
 
-        drop(mine);
-        assert!(claimer.wait().unwrap().success());
-        assert!(runner.wait().unwrap().success());
-        assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "claim\nrun\n");
-    }
-
-    /// A suite is exactly the thing an agent kills, and a stranded run lock
-    /// would leave the sysroot unclaimable by anyone, in every worktree, until
-    /// the machine rebooted.
-    #[test]
-    fn a_killed_run_does_not_wedge_the_claim() {
-        let root = scratch("sysroot-killed");
-        let mut kid = child(&root, "hold-run-forever");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
-
-        let state = sysroot_lock_dir(&root).join("state");
-        assert!(!try_lock(&open_lock_file(&state), LOCK_EX), "the lock was not actually held");
-
-        kid.kill().unwrap();
-        kid.wait().unwrap();
-
-        assert!(
-            try_lock(&open_lock_file(&state), LOCK_EX),
-            "a SIGKILLed suite run stranded the sysroot lock"
-        );
+        let using = sysroot_using(&root, "k1");
+        assert!(sysroot_idle(&root, "k1").is_none(), "a sweep could remove a key in use");
+        drop(using);
+        assert!(sysroot_idle(&root, "k1").is_some());
     }
 
     /// The whole point of a counting semaphore: the run past the budget waits.

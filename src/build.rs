@@ -165,11 +165,12 @@ fn parse_config(path: &Path) -> SystemConfig {
 
 // --- Freshness checking ---
 
-/// Fingerprint all external build dependencies that cargo cannot track.
-fn external_fingerprint(root: &Path) -> String {
-    let host = toolchain::host_triple();
-    let sysroot = toolchain::rust_dir(root).join(format!("build/{host}/stage2/lib/rustlib"));
-    let mut entries = Vec::new();
+/// Fingerprint all external build dependencies that cargo cannot track: the
+/// sysroot `toolchain` is — by where it is, which names its key, and by its
+/// libraries — and the linker.
+fn external_fingerprint(root: &Path, toolchain: &Path) -> String {
+    let sysroot = toolchain.join("lib/rustlib");
+    let mut entries = vec![format!("sysroot:{}", toolchain.display())];
 
     for triple in toolchain::GUEST_TARGETS {
         let lib_dir = sysroot.join(format!("{triple}/lib"));
@@ -280,12 +281,17 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
 /// `target/<profile>/.cargo-lock`, inside what the clean deletes. Two processes
 /// that each decided before either acted would still both clean, which is the
 /// pair of `cargo clean`s that died with ENOENT on each other's files.
-fn invalidate_stale(root: &Path, lock: &mut buildlock::Held, targets: &[(PathBuf, Clean)]) {
+fn invalidate_stale(
+    root: &Path,
+    lock: &mut buildlock::Held,
+    toolchain: &Path,
+    targets: &[(PathBuf, Clean)],
+) {
     lock.act_if(
         buildlock::Scope::Worktree,
         "clean crate targets against changed external deps",
         || {
-            let fp = external_fingerprint(root);
+            let fp = external_fingerprint(root, toolchain);
             let work: Vec<(PathBuf, Clean)> = targets
                 .iter()
                 .filter(|(dir, _)| stale(root, dir, &fp))
@@ -328,11 +334,26 @@ fn config_targets(root: &Path, config: &SystemConfig) -> Vec<(PathBuf, Clean)> {
 /// no longer a second profile to pick, which is why there is no longer a flag.
 pub const PROFILE: &str = "toyos";
 
+/// What every guest `cargo` and `rustc` here runs with: the toolchain directory
+/// of the sysroot this checkout's sources name, as `RUSTUP_TOOLCHAIN`, and
+/// `toyos-ld` on `PATH`. Never the `toyos` rustup name, which is the primary's.
+#[derive(Clone)]
+struct GuestEnv {
+    toolchain: PathBuf,
+    path: String,
+}
+
+impl GuestEnv {
+    fn new(root: &Path, sysroot: &crate::sysroot::Sysroot) -> Self {
+        Self { toolchain: sysroot.dir.clone(), path: toolchain::path_with_toyos_ld(root) }
+    }
+}
+
 fn cargo_build(
     crate_dir: &Path,
     target: &str,
     extra_args: &[&str],
-    path_env: &str,
+    env: &GuestEnv,
     extra_env: &[(&str, &str)],
     quiet: bool,
 ) {
@@ -344,9 +365,9 @@ fn cargo_build(
     let mut cmd = Command::new("cargo");
     cmd.args(&args)
         .current_dir(crate_dir)
-        .env("RUSTUP_TOOLCHAIN", "toyos")
+        .env("RUSTUP_TOOLCHAIN", &env.toolchain)
         .env_remove("RUSTFLAGS")
-        .env("PATH", path_env)
+        .env("PATH", &env.path)
         .env_remove("RUSTC");
     for (k, v) in extra_env {
         cmd.env(k, v);
@@ -453,13 +474,13 @@ const OVERFLOW_CHECK_MARKER: &[u8] = b"attempt to add with overflow";
 ///
 /// Asked of the compiler rather than of the manifest, and once per process: it
 /// is a property of the toolchain rather than of any one image.
-fn assert_kernel_is_softfloat(path_env: &str) {
+fn assert_kernel_is_softfloat(env: &GuestEnv) {
     static CHECKED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CHECKED.get_or_init(|| {
         let out = Command::new("rustc")
             .args(["--print", "cfg", "--target", "x86_64-unknown-none"])
-            .env("RUSTUP_TOOLCHAIN", "toyos")
-            .env("PATH", path_env)
+            .env("RUSTUP_TOOLCHAIN", &env.toolchain)
+            .env("PATH", &env.path)
             .env_remove("RUSTFLAGS")
             .env_remove("RUSTC")
             .output()
@@ -592,7 +613,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
 fn build_and_assemble(
     root: &Path,
     config: &SystemConfig,
-    path_env: &str,
+    env: &GuestEnv,
     extra_files: &[(String, Vec<u8>)],
     quiet: bool,
 ) -> Vec<u8> {
@@ -636,7 +657,7 @@ fn build_and_assemble(
                 &userland_dir,
                 "x86_64-unknown-toyos",
                 &extra,
-                path_env,
+                env,
                 &[],
                 quiet,
             );
@@ -652,7 +673,7 @@ fn build_and_assemble(
                 &crate_dir,
                 "x86_64-unknown-toyos",
                 &extra,
-                path_env,
+                env,
                 &[],
                 quiet,
             );
@@ -675,10 +696,10 @@ fn build_and_assemble(
         let data = fs::read(&init).expect("Failed to read binary for init");
         root_files.push((format!("bin/{INIT_PROGRAM}"), data));
         root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
+    }
 
-        if config.hosted_rustc {
-            collect_hosted_rustc(root, &mut root_files);
-        }
+    if config.hosted_rustc {
+        collect_hosted_rustc(root, &env.toolchain, &mut root_files);
     }
 
     if !config.assets.is_empty() {
@@ -1491,7 +1512,7 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
 /// the kernel of every image this build system produces that gets it. The
 /// caller has already run `cargo_build` on the kernel crate and must hold
 /// [`buildlock::artifact`], since the stage below copies the shared cargo path.
-fn stage_and_certify_kernel(root: &Path, features: &str, path_env: &str) -> Vec<u8> {
+fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv) -> Vec<u8> {
     let staged = stage_artifact(
         root,
         &root.join(format!("kernel/target/x86_64-unknown-none/{PROFILE}/kernel")),
@@ -1504,7 +1525,7 @@ fn stage_and_certify_kernel(root: &Path, features: &str, path_env: &str) -> Vec<
     assert_entry_window_matches_features(features, &bytes);
     assert_entry_labels_match_features(features, &bytes);
     assert_sched_check_matches_features(features, &bytes);
-    assert_kernel_is_softfloat(path_env);
+    assert_kernel_is_softfloat(env);
     bytes
 }
 
@@ -1513,22 +1534,13 @@ pub fn build(
     root: &Path,
     boot: Boot,
     rebuild_toolchain: bool,
-    claim_sysroot: bool,
     plan: &Plan,
 ) -> PathBuf {
     let kernel_features = plan.features.join(",");
     let params = plan.params.join(",");
 
-    // Outermost, before any build lock, and that order is the whole deadlock
-    // argument: every acquirer of both takes the sysroot lock first. It waits
-    // for every suite run in flight — replacing the sysroot under one turns its
-    // every later build into a refusal, which is what a dead gate and 156
-    // identical refusals looked like on 2026-08-04.
-    let _claim = claim_sysroot.then(|| buildlock::claim_sysroot(root, "--claim-sysroot"));
-
-    // The sysroot claim above is held across this; every lock below is
-    // `build_test_image`'s own, and the flags it cannot combine with were
-    // refused before any of them.
+    // Every lock below is `build_test_image`'s own, and the flags it cannot
+    // combine with were refused before any of them.
     if boot.case {
         let bytes = build_test_image(root, plan, false, &[]);
         let image_path = root.join(&boot.image);
@@ -1537,20 +1549,20 @@ pub fn build(
         return image_path;
     }
 
-    // After the sysroot lock and before every build lock, which is the order
-    // the module header fixes. What it bounds is the host: ten agents' builds
-    // spend the same fourteen cores, and nothing was counting them.
+    // Before every build lock, which is the order `buildlock`'s header fixes.
+    // What it bounds is the host: ten agents' builds spend the same fourteen
+    // cores, and nothing was counting them.
     let _slot = buildlock::build_slot(root, "cargo run");
 
-    // Held until the last staged artifact has been read back, so no other
-    // agent's clean or toolchain rebuild can land inside this build.
+    // Held until the last staged artifact has been read back, so no clean of
+    // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
-    toolchain::ensure(root, rebuild_toolchain, claim_sysroot, &mut lock);
+    let sysroot = toolchain::ensure(root, rebuild_toolchain, &mut lock);
 
-    let path_env = toolchain::path_with_toyos_ld(root);
+    let env = GuestEnv::new(root, &sysroot);
     let config = parse_config(&boot.config);
 
-    invalidate_stale(root, &mut lock, &config_targets(root, &config));
+    invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
 
     // Same lock-and-stage as `build_test_image`: `cargo run --build-only` and
     // `cargo test` share these paths, so this races the harness too. The kernel
@@ -1560,7 +1572,7 @@ pub fn build(
         let _artifact = buildlock::artifact(root);
         let kernel_handle = {
             let root = root.to_path_buf();
-            let path_env = path_env.clone();
+            let env = env.clone();
             let features = kernel_features.clone();
             std::thread::spawn(move || {
                 let mut extra = Vec::new();
@@ -1572,7 +1584,7 @@ pub fn build(
                     &root.join("kernel"),
                     "x86_64-unknown-none",
                     &extra,
-                    &path_env,
+                    &env,
                     &[],
                     false,
                 );
@@ -1583,14 +1595,14 @@ pub fn build(
                 &root.join("bootloader"),
                 "x86_64-unknown-uefi",
                 &[],
-                &path_env,
+                &env,
                 &[],
                 false,
             );
         }
         kernel_handle.join().expect("kernel build thread panicked");
         (
-            stage_and_certify_kernel(root, &kernel_features, &path_env),
+            stage_and_certify_kernel(root, &kernel_features, &env),
             stage_artifact(
                 root,
                 &root.join(format!(
@@ -1603,7 +1615,7 @@ pub fn build(
     };
 
     let root_bytes =
-        build_and_assemble(root, &config, &path_env, &[], false);
+        build_and_assemble(root, &config, &env, &[], false);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
     let disk_bytes = image::create_boot_image(&kernel_bytes, &bl_bytes, &root_bytes, &params);
@@ -1777,10 +1789,10 @@ pub fn build_test_image(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    crate::toolchain::ensure(root, false, false, &mut lock);
-    let path_env = toolchain::path_with_toyos_ld(root);
+    let sysroot = crate::toolchain::ensure(root, false, &mut lock);
+    let env = GuestEnv::new(root, &sysroot);
 
-    invalidate_stale(root, &mut lock, &config_targets(root, &config));
+    invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
 
     // Build and stage under one lock, released before `build_and_assemble`.
     // Releasing it there is deliberate and required: that build takes its own
@@ -1800,18 +1812,18 @@ pub fn build_test_image(
                 &root.join("kernel"),
                 "x86_64-unknown-none",
                 &kernel_extra,
-                &path_env,
+                &env,
                 &[],
                 quiet,
             );
-            stage_and_certify_kernel(root, &features, &path_env)
+            stage_and_certify_kernel(root, &features, &env)
         });
         let bl = BOOTLOADER.get_or_build(bl_key, || {
             cargo_build(
                 &root.join("bootloader"),
                 "x86_64-unknown-uefi",
                 &[],
-                &path_env,
+                &env,
                 &[],
                 quiet,
             );
@@ -1827,7 +1839,7 @@ pub fn build_test_image(
     };
 
     let root_bytes = ROOT_IMAGE.get_or_build(root_image_key, || {
-        build_and_assemble(root, &config, &path_env, extra_files, quiet)
+        build_and_assemble(root, &config, &env, extra_files, quiet)
     });
 
     drop(build_timer);
@@ -1913,8 +1925,8 @@ fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
 pub fn build_toyos_bins(root: &Path, crate_path: &Path, quiet: bool) -> Vec<(String, Vec<u8>)> {
     let _slot = buildlock::build_slot(root, "the test binaries");
     let mut lock = buildlock::shared(root, "test binaries");
-    crate::toolchain::ensure(root, false, false, &mut lock);
-    let path_env = toolchain::path_with_toyos_ld(root);
+    let sysroot = crate::toolchain::ensure(root, false, &mut lock);
+    let env = GuestEnv::new(root, &sysroot);
 
     let mut targets = vec![(crate_path.to_path_buf(), Clean::All)];
     for entry in fs::read_dir(crate_path).into_iter().flatten().flatten() {
@@ -1923,7 +1935,7 @@ pub fn build_toyos_bins(root: &Path, crate_path: &Path, quiet: bool) -> Vec<(Str
             targets.push((sub_path, Clean::All));
         }
     }
-    invalidate_stale(root, &mut lock, &targets);
+    invalidate_stale(root, &mut lock, &env.toolchain, &targets);
 
     let mut results = Vec::new();
 
@@ -1956,7 +1968,7 @@ pub fn build_toyos_bins(root: &Path, crate_path: &Path, quiet: bool) -> Vec<(Str
         if !quiet {
             eprintln!("[build] Building cdylib subcrate: {lib_name}");
         }
-        cargo_build(&sub_path, "x86_64-unknown-toyos", &[], &path_env, &[], quiet);
+        cargo_build(&sub_path, "x86_64-unknown-toyos", &[], &env, &[], quiet);
 
         let lib_out = sub_path.join(format!("target/x86_64-unknown-toyos/{PROFILE}"));
         lib_search_dirs.push(lib_out.clone());
@@ -1987,7 +1999,7 @@ pub fn build_toyos_bins(root: &Path, crate_path: &Path, quiet: bool) -> Vec<(Str
         crate_path,
         "x86_64-unknown-toyos",
         &["--bins"],
-        &path_env,
+        &env,
         &extra_env,
         quiet,
     );
@@ -2018,7 +2030,12 @@ pub fn build_toyos_bins(root: &Path, crate_path: &Path, quiet: bool) -> Vec<(Str
 
 // --- Internal helpers ---
 
-fn collect_hosted_rustc(root: &Path, root_files: &mut Vec<(String, Vec<u8>)>) {
+/// The ToyOS-hosted rustc, and the target libraries it compiles against: this
+/// build's own sysroot's, so the compiler on the image links what the image's
+/// programs link. The hosted compiler itself is the primary's, read under the
+/// lock its rebuild takes.
+fn collect_hosted_rustc(root: &Path, toolchain: &Path, root_files: &mut Vec<(String, Vec<u8>)>) {
+    let _compiler = buildlock::compiler_shared(root, "reading the hosted rustc");
     let sysroot = toolchain::rust_dir(root).join("build/x86_64-unknown-toyos/stage2");
     assert!(
         sysroot.exists(),
@@ -2060,40 +2077,17 @@ fn collect_hosted_rustc(root: &Path, root_files: &mut Vec<(String, Vec<u8>)>) {
         }
     }
 
-    if let Some(host_rlibs) = find_host_rlibs(root) {
-        for entry in fs::read_dir(&host_rlibs).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|e| e == "rlib" || e == "rmeta")
-            {
-                let name = path.file_name().unwrap().to_str().unwrap().to_string();
-                root_files.push((
-                    format!("lib/rustlib/x86_64-unknown-toyos/lib/{name}"),
-                    fs::read(&path).unwrap(),
-                ));
-            }
+    let rlibs = toolchain.join("lib/rustlib/x86_64-unknown-toyos/lib");
+    for entry in fs::read_dir(&rlibs).unwrap_or_else(|e| panic!("read {}: {e}", rlibs.display())) {
+        let path = entry.unwrap_or_else(|e| panic!("read {}: {e}", rlibs.display())).path();
+        if path.extension().is_some_and(|e| e == "rlib" || e == "rmeta") {
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            root_files.push((
+                format!("lib/rustlib/x86_64-unknown-toyos/lib/{name}"),
+                fs::read(&path).unwrap(),
+            ));
         }
     }
-}
-
-fn find_host_rlibs(root: &Path) -> Option<PathBuf> {
-    let build_dir = toolchain::rust_dir(root).join("build");
-    let entries = fs::read_dir(&build_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .is_some_and(|n| n == "x86_64-unknown-toyos")
-        {
-            continue;
-        }
-        let rlib_dir = path.join("stage2/lib/rustlib/x86_64-unknown-toyos/lib");
-        if rlib_dir.exists() {
-            return Some(rlib_dir);
-        }
-    }
-    None
 }
 
 #[cfg(test)]
