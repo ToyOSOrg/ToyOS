@@ -250,6 +250,9 @@ const RUST_SKIP: &[&str] = &[
     // The swap DMA control's replacement netd: it claims the 82574, stops it
     // and masters it. `swap_quiets_the_function` stages it.
     "swap_claim_idle",
+    // The residue control's replacement netd: it masters the 82574 with its
+    // receive unit as netd left it. `swap_keeps_what_nothing_reset` stages it.
+    "swap_claim_running",
     // The reset control's replacement netd: it claims the `igb` an Express
     // function level reset released. `swap_resets_the_function` stages it.
     "swap_flr_probe",
@@ -776,6 +779,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // host sends it frames. The verdict is the kernel's console; its clocks
     // are liveness guards.
     ("swap_quiets_the_function", Sched::Parallel, Tier::Fast),
+    // The same part released as though nothing could reset it, the way the
+    // T14's I219 is, and swapped to a holder that masters it with its receive
+    // unit still on. The verdict is the kernel's console; its clocks are
+    // liveness guards.
+    ("swap_keeps_what_nothing_reset", Sched::Parallel, Tier::Fast),
     // An `igb` netd held, released by an Express function level reset and
     // claimed again by netd's replacement, which reads it through the window
     // its claim maps. The verdict is what the function answers there.
@@ -13893,6 +13901,9 @@ fn run_machine_test(
         "swap_crash_rolls_back" => common::swap::swap_crash_rolls_back(test_config, c_bins, rust_bins),
         "swap_quiets_the_function" => {
             common::swap::swap_quiets_the_function(test_config, c_bins, rust_bins)
+        }
+        "swap_keeps_what_nothing_reset" => {
+            common::swap::swap_keeps_what_nothing_reset(test_config, c_bins, rust_bins)
         }
         "swap_resets_the_function" => {
             common::swap::swap_resets_the_function(test_config, c_bins, rust_bins)

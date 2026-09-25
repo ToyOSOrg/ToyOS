@@ -377,6 +377,16 @@ const IDLE: &str = "swap_claim_idle";
 /// Its line once the part is mastering, which opens the window.
 const HOLDING: &str = "swap_claim_idle: holding the NIC mastering";
 
+/// The replacement the residue control swaps in: it masters the 82574 with its
+/// receive unit as netd left it.
+const RUNNING: &str = "swap_claim_running";
+
+/// Its line once the part is mastering.
+const RUNNING_HOLDING: &str = "swap_claim_running: holding the NIC mastering";
+
+/// The actuator that releases every function as though nothing could reset it.
+const RESET_NOTHING: &[&str] = &["pcidev-reset-nothing"];
+
 /// Connects to the forward that slirp's listener completed inside the window,
 /// each one a SYN slirp sends the guest's address: the window closes on the
 /// last of them.
@@ -384,6 +394,52 @@ const KNOCKS: usize = 25;
 
 /// A liveness guard on those connects, never a verdict.
 const KNOCKS_WITHIN: Duration = Duration::from_secs(30);
+
+/// netd swapped for `replacement` (the test binary `name`), and from the moment
+/// it says `holding` — its part mastering — [`KNOCKS`] SYNs sent through slirp
+/// at the guest's address. Answers how many slirp completed and how long they
+/// took; `Err` is a why the caller fails the rig with.
+fn swap_and_knock(rig: &mut Rig, rust_bins: &[(String, Vec<u8>)], name: &str, holding: &str) -> Result<(usize, Duration), String> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let replacement = test_binary(rust_bins, name)?;
+    let binary = rig.staged.scratch.join(name);
+    std::fs::write(&binary, replacement).map_err(|e| format!("{}: {e}", binary.display()))?;
+    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(replacement));
+    eprintln!("  [swap] the swap was answered {answer:?}");
+    init_accepted(&answer)?;
+    qemu::await_marker(&mut rig.guest, &mut rig.console, holding, "the replacement holding the part mastering")?;
+    // From the holding line on, so every frame lands while the replacement
+    // holds the part.
+    let (stop, taken) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let knocking = {
+        let (stop, taken, at) = (Arc::clone(&stop), Arc::clone(&taken), rig.forward);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                if std::net::TcpStream::connect_timeout(&at, Duration::from_millis(200)).is_ok() {
+                    taken.fetch_add(1, Ordering::SeqCst);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+    let asked = std::time::Instant::now();
+    let knocked = qemu::await_guest(&mut rig.guest, &mut rig.console, "the host's frames at the part", |_| {
+        taken.load(Ordering::SeqCst) >= KNOCKS || asked.elapsed() > KNOCKS_WITHIN
+    });
+    stop.store(true, Ordering::SeqCst);
+    let _ = knocking.join();
+    knocked?;
+    let taken = taken.load(Ordering::SeqCst);
+    if taken < KNOCKS {
+        return Err(format!(
+            "slirp took {taken} of {KNOCKS} connects in {KNOCKS_WITHIN:?}, so the window held too few \
+             frames for a clean console to mean anything"
+        ));
+    }
+    Ok((taken, asked.elapsed()))
+}
 
 /// **The part keeps running across a release, and the next holder stops it
 /// before its first grant.** netd on QEMU's 82574 is swapped for a program that
@@ -403,51 +459,11 @@ pub fn swap_quiets_the_function(
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
-
     let mut rig = Rig::boot("swap-quiet", super::lan::TALK_BENCH)?;
-    let idle = test_binary(rust_bins, IDLE)?;
-    let binary = rig.staged.scratch.join(IDLE);
-    std::fs::write(&binary, idle).map_err(|e| format!("{}: {e}", binary.display()))?;
-    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(idle));
-    eprintln!("  [swap] the swap was answered {answer:?}");
-    if let Err(why) = init_accepted(&answer) {
-        return Err(rig.fail(why));
-    }
-    let held = qemu::await_marker(&mut rig.guest, &mut rig.console, HOLDING, "the replacement holding the part mastering");
-    if let Err(why) = held {
-        return Err(rig.fail(why));
-    }
-    // From the holding line on, so every frame is the replacement's to stop.
-    let (stop, taken) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
-    let knocking = {
-        let (stop, taken, at) = (Arc::clone(&stop), Arc::clone(&taken), rig.forward);
-        std::thread::spawn(move || {
-            while !stop.load(Ordering::SeqCst) {
-                if std::net::TcpStream::connect_timeout(&at, Duration::from_millis(200)).is_ok() {
-                    taken.fetch_add(1, Ordering::SeqCst);
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        })
+    let (taken, took) = match swap_and_knock(&mut rig, rust_bins, IDLE, HOLDING) {
+        Ok(knocked) => knocked,
+        Err(why) => return Err(rig.fail(why)),
     };
-    let asked = std::time::Instant::now();
-    let knocked = qemu::await_guest(&mut rig.guest, &mut rig.console, "the host's frames at the part", |_| {
-        taken.load(Ordering::SeqCst) >= KNOCKS || asked.elapsed() > KNOCKS_WITHIN
-    });
-    stop.store(true, Ordering::SeqCst);
-    let _ = knocking.join();
-    if let Err(why) = knocked {
-        return Err(rig.fail(why));
-    }
-    let taken = taken.load(Ordering::SeqCst);
-    if taken < KNOCKS {
-        return Err(rig.fail(format!(
-            "slirp took {taken} of {KNOCKS} connects in {KNOCKS_WITHIN:?}, so the window held too few \
-             frames for a clean console to mean the part was stopped"
-        )));
-    }
     let text = rig.console.clone();
     let console = serial::Serial::named("the quieting boot", text.as_str());
     let released = console.must_say("released from slot 0; reset by")?.to_string();
@@ -456,12 +472,71 @@ pub fn swap_quiets_the_function(
         return Err(rig.fail(format!("{why}\n  the release said: {}", released.trim_end())));
     }
     eprintln!(
-        "  [swap] {}; {}; the next holder stopped it, mastered it through {taken} SYNs in {:?}, and \
+        "  [swap] {}; {}; the next holder stopped it, mastered it through {taken} SYNs in {took:?}, and \
          the unit saw no fault",
         released.trim_end(),
         inherited.trim_end(),
-        asked.elapsed()
     );
+    drop(rig.guest);
+    let _ = std::fs::remove_file(&rig.staged.image);
+    Ok(())
+}
+
+/// **A function nothing resets reaches, at its next claim, only memory that
+/// claim holds.** The T14's I219 advertises no reset, and after netd's
+/// replacement had stopped it, its first grant let out a frame the part had
+/// already taken in — written into the previous netd's buffers. Here netd on
+/// QEMU's 82574 is released under `pcidev-reset-nothing`, which declines every
+/// reset the way the I219's capabilities do, and swapped for a program that
+/// masters the part with one grant of netd's size and its receive unit left on;
+/// this host then sends it [`KNOCKS`] SYNs.
+///
+/// The premises are asked of the console: the release says it reset nothing,
+/// the replacement inherited a receive unit that is on, and its claim took
+/// netd's grant over. The verdict is the unit seeing no DMA fault: every frame
+/// the part writes to netd's old descriptors lands in the replacement's own
+/// grant. Without the residue those addresses are unmapped at the release, and
+/// the first frame faults and ends the replacement's claim.
+pub fn swap_keeps_what_nothing_reset(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut rig = Rig::boot_armed("swap-residue", super::lan::TALK_BENCH, RESET_NOTHING)?;
+    let (taken, took) = match swap_and_knock(&mut rig, rust_bins, RUNNING, RUNNING_HOLDING) {
+        Ok(knocked) => knocked,
+        Err(why) => return Err(rig.fail(why)),
+    };
+    let text = rig.console.clone();
+    let judged = (|| {
+        let console = serial::Serial::named("the residue boot", text.as_str());
+        let released = console.must_say("[8086:10d3] released from slot 0; reset by")?;
+        if !released.contains("reset by nothing") {
+            return Err(format!("the premise: the 82574 was not released by nothing — {released}"));
+        }
+        let inherited = console.must_say("swap_claim_running: inherited RCTL 0x")?;
+        let rctl = inherited
+            .split("RCTL 0x")
+            .nth(1)
+            .and_then(|rest| rest.get(..8))
+            .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+            .ok_or_else(|| format!("the replacement's line carries no RCTL: {inherited:?}"))?;
+        if rctl & toyos_i219::regs::rctl::EN == 0 {
+            return Err(format!("the premise: the part's receive unit was off when it was claimed — {inherited}"));
+        }
+        console.must_be_clean()?;
+        let taken_over = console.must_say("pcidev: slot 0 takes over 1 grant(s)")?;
+        eprintln!(
+            "  [swap] {}; {}; {}; mastered through {taken} SYNs in {took:?}, and the unit saw no fault",
+            released.trim_end(),
+            inherited.trim_end(),
+            taken_over.trim_end(),
+        );
+        Ok(())
+    })();
+    if let Err(why) = judged {
+        return Err(rig.fail(why));
+    }
     drop(rig.guest);
     let _ = std::fs::remove_file(&rig.staged.image);
     Ok(())

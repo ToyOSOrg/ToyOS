@@ -317,6 +317,9 @@ actuators! {
     /// Put a function a level reset returned to its defaults back with BAR 0 one BAR's size above the window it was cut, inside that window: a register holding a decodable address that is not the cut.
     pcidev_bar_moved_on_reset = "pcidev-bar-moved-on-reset";
 
+    /// Release every claimed function as though it advertised no reset at all, the way the T14's I219 is released: what it had taken in is still aimed at its last holder's grants when the next claim starts it mastering.
+    pcidev_reset_nothing = "pcidev-reset-nothing";
+
     /// Raise the local APIC's spurious vector on this CPU once.
     lapic_spurious_selftest = "lapic-spurious-selftest";
 
