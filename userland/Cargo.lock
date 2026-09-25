@@ -483,7 +483,7 @@ dependencies = [
  "toyos-font 0.1.0",
  "toyos-inspect",
  "toyos-manifest",
- "toyos-window 0.10.0",
+ "toyos-window 0.11.0",
 ]
 
 [[package]]
@@ -503,7 +503,7 @@ dependencies = [
  "toyos 0.11.0",
  "toyos-abi 0.10.0",
  "toyos-font 0.1.0",
- "toyos-window 0.10.0",
+ "toyos-window 0.11.0",
 ]
 
 [[package]]
@@ -988,7 +988,7 @@ version = "0.1.0"
 dependencies = [
  "filepicker-api",
  "toyos-font 0.1.0",
- "toyos-window 0.10.0",
+ "toyos-window 0.11.0",
 ]
 
 [[package]]
@@ -1110,7 +1110,7 @@ dependencies = [
  "filepicker-api",
  "toyos 0.11.0",
  "toyos-font 0.1.0",
- "toyos-window 0.10.0",
+ "toyos-window 0.11.0",
 ]
 
 [[package]]
@@ -1126,7 +1126,7 @@ version = "0.1.0"
 dependencies = [
  "sprite",
  "toyos-font 0.1.0",
- "toyos-window 0.10.0",
+ "toyos-window 0.11.0",
 ]
 
 [[package]]
@@ -2312,7 +2312,7 @@ version = "0.1.0"
 dependencies = [
  "filepicker-api",
  "toyos-font 0.1.0",
- "toyos-window 0.10.0",
+ "toyos-window 0.11.0",
 ]
 
 [[package]]
@@ -3575,7 +3575,7 @@ version = "0.1.0"
 dependencies = [
  "toyos 0.11.0",
  "toyos-font 0.1.0",
- "toyos-window 0.10.0",
+ "toyos-window 0.11.0",
 ]
 
 [[package]]
@@ -3716,7 +3716,7 @@ dependencies = [
  "toyos 0.11.0",
  "toyos-abi 0.10.0",
  "toyos-keymap 0.1.0",
- "toyos-window 0.10.0",
+ "toyos-window 0.11.0",
 ]
 
 [[package]]
@@ -3850,7 +3850,7 @@ dependencies = [
 
 [[package]]
 name = "toyos-window"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "toyos 0.11.0",
  "toyos-abi 0.10.0",
