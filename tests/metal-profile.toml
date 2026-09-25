@@ -1262,3 +1262,10 @@ name = "boot.lanswapcase.panel_us"
 unit = "us"
 ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
+name = "boot.lanswapcase.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+measured = 0
