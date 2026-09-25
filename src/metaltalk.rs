@@ -46,6 +46,29 @@ const PING_WAIT: Duration = Duration::from_secs(1);
 /// How long one connect waits for the machine's answer to its SYN.
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
 
+/// How long [`Peer::Forwarded`] waits between refusals: a closed host port
+/// answers a refusal at once, and asking again with nothing between would
+/// spend the wait budget spinning rather than giving the guest time to boot.
+const FORWARD_RETRY: Duration = Duration::from_millis(200);
+
+/// The floor under a resilient stream's reconnections: never less than this
+/// between one connection ending and the next dial, however fast the last one
+/// ended.
+const RECONNECT_PACE: Duration = Duration::from_millis(200);
+
+/// The ceiling the pace backs off to while connections keep ending almost as
+/// soon as they open: a device mid-reset (a NIC's own handover, not this
+/// side's doing) can answer and drop several in a row, and asking again at
+/// the floor's pace the whole time would spend the reset's own window
+/// hammering a path that is not there yet instead of giving it room to settle.
+const RECONNECT_PACE_CEILING: Duration = Duration::from_secs(2);
+
+/// Under this, an episode counts as one more of "ended almost as soon as it
+/// opened" for the backoff; at or over it, the pace resets to its floor — the
+/// connection was good for a while, so whatever just ended it is a fresh
+/// event and not the same reset still settling.
+const RAPID_EPISODE: Duration = Duration::from_millis(500);
+
 /// Under this, a failed ask did not wait on anything: this host's resolver
 /// holds an unanswered `.local` question for five seconds (measured on the
 /// development host, three asks in a row, 5.00 s each), and a connect that
@@ -68,6 +91,11 @@ pub enum Peer {
     /// One address, asked once: a forward onto a guest that is already
     /// serving.
     At(SocketAddr),
+    /// One address, asked again on refusal until the machine answers there:
+    /// a host-forwarded port, which exists at the bind before the guest that
+    /// will serve on it does — unlike [`Peer::At`], a refusal here is the
+    /// guest not up yet and not an answer.
+    Forwarded(SocketAddr),
 }
 
 /// The record stream, as this host reads it: this host dials `logd`'s port and
@@ -152,6 +180,7 @@ impl Stream {
             .name("metal-stream".into())
             .spawn(move || {
                 let mut bound = by;
+                let mut pace = RECONNECT_PACE;
                 loop {
                     if theirs.stop.load(Ordering::SeqCst) {
                         return;
@@ -179,10 +208,25 @@ impl Stream {
                         let _gate = theirs.gate.lock().expect("the stream's gate");
                         theirs.moved.notify_all();
                     }
+                    let opened = Instant::now();
                     read(conn, index, &theirs, &out, echo);
                     if !resilient || theirs.stop.load(Ordering::SeqCst) {
                         return;
                     }
+                    // **A floor under every reconnection, whatever ended the
+                    // last one, backed off while they keep ending almost as
+                    // soon as they open.** A device mid-reset (its own NIC
+                    // handover, not this side's doing) can accept and drop
+                    // several connections in a row; asking again at the floor's
+                    // pace the whole time would spend the reset's own window
+                    // hammering a path that is not there yet, so a run of rapid
+                    // episodes backs the pace off, and one that holds resets it.
+                    pace = if opened.elapsed() < RAPID_EPISODE {
+                        (pace * 2).min(RECONNECT_PACE_CEILING)
+                    } else {
+                        RECONNECT_PACE
+                    };
+                    std::thread::sleep(pace);
                     // Every reconnection replays the whole boot from its first
                     // line, so this side keeps dialing for as long as it takes
                     // rather than the bound its first connection had.
@@ -313,6 +357,7 @@ fn open(peer: &Peer, by: Duration, stop: &AtomicBool) -> Result<TcpStream, Strin
             return TcpStream::connect_timeout(at, CONNECT_WAIT)
                 .map_err(|e| format!("{at} did not take the connection: {e}"));
         }
+        Peer::Forwarded(at) => return open_forwarded(*at, by, stop),
         Peer::Named { host, port } => (host.as_str(), *port),
     };
     let began = Instant::now();
@@ -350,6 +395,28 @@ fn open(peer: &Peer, by: Duration, stop: &AtomicBool) -> Result<TcpStream, Strin
         }
     }
     Err(format!("{host} was not serving its log within {} s: {last}", by.as_secs()))
+}
+
+/// [`Peer::Forwarded`]'s connect: `at` is asked again on every refusal, unlike
+/// [`open`]'s [`Peer::Named`] arm, because there is no name whose resolution
+/// already answers for the machine being up — the forward exists at the host
+/// before the guest that will accept on it does.
+fn open_forwarded(at: SocketAddr, by: Duration, stop: &AtomicBool) -> Result<TcpStream, String> {
+    let began = Instant::now();
+    let mut last = String::from("never asked");
+    while began.elapsed() < by {
+        if stop.load(Ordering::SeqCst) {
+            return Err(format!("given up on {at} after {} s: {last}", began.elapsed().as_secs()));
+        }
+        match TcpStream::connect_timeout(&at, CONNECT_WAIT) {
+            Ok(conn) => return Ok(conn),
+            Err(e) => {
+                last = format!("{at} did not take the connection: {e}");
+                std::thread::sleep(FORWARD_RETRY);
+            }
+        }
+    }
+    Err(format!("{at} was not serving its log within {} s: {last}", by.as_secs()))
 }
 
 /// Read one connection's lines into the stream until it ends, and record how

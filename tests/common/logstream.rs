@@ -95,7 +95,9 @@ fn boot(
 pub fn reader(port: u16, file: &str) -> Result<Stream, String> {
     let at = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let stream = Stream::connect(Peer::At(at), &super::lane::dir().join(file), false, CEILING)?;
-    stream.wait_connected()?;
+    stream
+        .wait_connected(CEILING)
+        .ok_or_else(|| stream.unopened().unwrap_or_else(|| "the stream never opened".to_string()))?;
     Ok(stream)
 }
 

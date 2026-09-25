@@ -163,7 +163,7 @@ impl Rig {
         serial::Serial::named("the swapping boot", console.as_str()).must_be_clean()?;
         let file = super::volumes::whole_log(&self.staged.image, self.staged.start, self.staged.len)?;
         let streamed = self.staged.stream.lines();
-        super::logstream::is_subsequence_of(&streamed, &file)?;
+        super::logstream::is_prefix_of(&streamed, &file)?;
         let boots = file.iter().filter(|l| l.contains("Boot: complete")).count();
         if boots != 1 {
             return Err(format!("/log holds {boots} `Boot: complete` record(s), where one boot owes one"));
@@ -326,7 +326,7 @@ pub fn swapped_on_metal(back: &super::metal::Readback) -> Result<(), String> {
         Err(found) => bad.extend(found),
     }
     let file: Vec<String> = back.log().text().split_inclusive('\n').map(str::to_string).collect();
-    if let Err(why) = super::logstream::is_subsequence_of(&stream, &file) {
+    if let Err(why) = super::logstream::is_prefix_of(&stream, &file) {
         bad.push(why);
     }
     let boots = file.iter().filter(|l| l.contains("Boot: complete")).count();

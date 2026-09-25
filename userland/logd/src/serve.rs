@@ -10,10 +10,17 @@
 //! reader that stops taking bytes blocks its own thread and nothing else.
 //!
 //! **A reader that is caught up waits on the replay growing**, and nothing
-//! else wakes it: there is no poll and no timer.
+//! else wakes it but its own departure: there is no poll and no timer. A
+//! network reader's departure is a second thread's blocking read on its own
+//! clone of the connection — this protocol carries nothing the client ever
+//! sends, so that read's only event is the peer closing it — which is how a
+//! reader that reconnects on the client's own clock (a stream surviving a
+//! netd swap) is not still counted against [`MAX_READERS`] once it is gone:
+//! writing to it can wait for ever on a dead connection that never errors
+//! while there is nothing new to write, and only that second thread notices.
 
-use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use toyos::ipc::Connection;
@@ -101,7 +108,10 @@ fn serve_network(shared: &Arc<Shared>) {
                 continue;
             }
         };
-        admit(shared, format!("{peer}"), Announce::Yes, stream);
+        // A clone for the departure watcher: it only ever reads, the feed
+        // thread only ever writes, and each closes its own half when it ends.
+        let watch = stream.try_clone().ok();
+        admit(shared, format!("{peer}"), Announce::Yes, stream, watch);
     }
 }
 
@@ -133,7 +143,7 @@ fn serve_local(shared: &Arc<Shared>, acceptor: &Acceptor) {
         };
         let end = shared.replay.lock().expect("logd: the replay is poisoned").end();
         let Some(pipe) = hand_over(&conn, end) else { continue };
-        admit(shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink(pipe));
+        admit(shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink(pipe), None);
     }
 }
 
@@ -166,8 +176,16 @@ enum Announce {
     No,
 }
 
-/// A reader thread, where the count allows one.
-fn admit(shared: &Arc<Shared>, who: String, announce: Announce, sink: impl Write + Send + 'static) {
+/// A reader thread, where the count allows one. `watch` is a network reader's
+/// own clone of its connection, read on a thread of its own so this reader's
+/// departure while idle is noticed and not left counted for ever.
+fn admit(
+    shared: &Arc<Shared>,
+    who: String,
+    announce: Announce,
+    sink: impl Write + Send + 'static,
+    watch: Option<std::net::TcpStream>,
+) {
     if shared.readers.fetch_add(1, Ordering::SeqCst) >= MAX_READERS {
         shared.readers.fetch_sub(1, Ordering::SeqCst);
         say!("logd: refusing {who}: {MAX_READERS} readers are already served");
@@ -176,9 +194,25 @@ fn admit(shared: &Arc<Shared>, who: String, announce: Announce, sink: impl Write
     if announce == Announce::Yes {
         say!("logd: serving this boot's log to {who}");
     }
+    let gone = Arc::new(AtomicBool::new(false));
+    if let Some(mut probe) = watch {
+        let (theirs, gone) = (Arc::clone(shared), Arc::clone(&gone));
+        let spawned = std::thread::Builder::new().name("log-reader-watch".into()).spawn(move || {
+            // This protocol carries nothing a reader ever sends, so the one
+            // event a read on it can end on is the reader closing its end —
+            // never data, and never a timeout this holds none of.
+            let mut byte = [0u8; 1];
+            let _ = probe.read(&mut byte);
+            gone.store(true, Ordering::SeqCst);
+            theirs.grew.notify_all();
+        });
+        // A watcher that could not be started leaves this reader indistinguishable
+        // from a live one until it next writes, same as before this existed.
+        let _ = spawned;
+    }
     let theirs = Arc::clone(shared);
     let spawned = std::thread::Builder::new().name("log-reader".into()).spawn(move || {
-        let sent = feed(&theirs, sink);
+        let sent = feed(&theirs, sink, &gone);
         theirs.readers.fetch_sub(1, Ordering::SeqCst);
         if announce == Announce::Yes {
             say!("logd: {who} stopped reading after {sent} bytes");
@@ -191,13 +225,17 @@ fn admit(shared: &Arc<Shared>, who: String, announce: Announce, sink: impl Write
 }
 
 /// Write the boot to `sink` from its first byte, then each round as it lands,
-/// until the reader goes. Answers the bytes it sent.
-fn feed(shared: &Shared, mut sink: impl Write) -> u64 {
+/// until the reader goes or `gone` says it already has. Answers the bytes it
+/// sent.
+fn feed(shared: &Shared, mut sink: impl Write, gone: &AtomicBool) -> u64 {
     let mut at = 0u64;
     loop {
         let chunk = {
             let mut replay = shared.replay.lock().expect("logd: the replay is poisoned");
             loop {
+                if gone.load(Ordering::SeqCst) {
+                    return at;
+                }
                 let next = match replay.next(at, CHUNK) {
                     Next::Bytes(bytes) => Some(Ok(bytes.to_vec())),
                     Next::Evicted { lost, at: resume } => Some(Err((lost, resume))),

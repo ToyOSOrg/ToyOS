@@ -29,6 +29,12 @@ const RETRY: Duration = Duration::from_secs(1);
 /// the answer is sent, over a stream the refusal left alone.
 const REFUSED_WORD: Duration = Duration::from_secs(10);
 
+/// How long the wait for a settlement takes nothing new from the stream
+/// before it reconnects on the suspicion the connection is one a second
+/// restart left silent: well past one round of a chatty guest's ordinary
+/// traffic, short enough that a real second restart is not waited out.
+const RECONNECT_ON_SILENCE: Duration = Duration::from_secs(2);
+
 /// What asking for one swap came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Swapped {
@@ -170,8 +176,24 @@ pub fn swap(
     let mut outcome_ms = None;
     let mut sshd_refused = None;
     if let Some(until) = until {
+        // **A second restart owns no reconnect of its own.** The accepted
+        // ask's own gets the connection through the first stop/start; a crash
+        // inside probation is a second one (init starts the replaced binary
+        // again), and that swap of netd under the connection is exactly as
+        // silent as the first. So this side reconnects again whenever the
+        // stream has produced nothing for a beat while a settlement is still
+        // owed — never on a fixed cadence, only on the silence that a second
+        // restart's dead connection actually causes.
+        let (mut quiet_since, mut seen) = (Instant::now(), stream.lines().len());
         while began.elapsed() < until {
-            match settled(&stream.lines(), mark, service) {
+            let lines = stream.lines();
+            if lines.len() != seen {
+                (seen, quiet_since) = (lines.len(), Instant::now());
+            } else if quiet_since.elapsed() > RECONNECT_ON_SILENCE {
+                stream.reconnect();
+                quiet_since = Instant::now();
+            }
+            match settled(&lines, mark, service) {
                 Some(Settled::Outcome) => {
                     outcome_ms = Some(began.elapsed().as_millis() as u64);
                     break;
@@ -203,16 +225,18 @@ pub fn swap(
     }
     let again_ms = began.elapsed().as_millis() as u64;
     let lines = stream.lines();
-    let marker = format!("@{service}: ");
     Ok(Swapped {
         service: service.to_string(),
         digest: toyos_swap::hex(&digest),
         peer: *peer.ip(),
         answer,
         words: heard(&lines),
+        // A program's own line carries its name in the head `logd` gives it
+        // (`toyos_logstream::program_line`), never a sigil in its text — #483's
+        // `@tag:` marker is gone with the rest of that machinery.
         said: lines[mark.min(lines.len())..]
             .iter()
-            .filter(|line| line.contains(&marker))
+            .filter(|line| toyos_logstream::program_line(line).is_some_and(|said| said.tag == service))
             .cloned()
             .collect(),
         sshd_refused,

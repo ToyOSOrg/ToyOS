@@ -2572,26 +2572,29 @@ mod tests {
     }
 
     /// **A swap flashes nothing and reboots nothing**, so every flag that
-    /// describes a boot is refused beside it, and it is refused without the
-    /// four things it acts with. A `--binary` or a `--hand-back` with no swap
-    /// is no swap.
+    /// describes a boot is refused beside it — `--image` among them, since the
+    /// machine is found by its name and not by the image it is running — and
+    /// it is refused without the three things it acts with. A `--binary` or a
+    /// `--hand-back` with no swap is no swap.
     #[test]
     fn a_swap_is_not_a_boot_and_names_what_it_acts_with() {
-        let whole = [
-            "--swap", "netd", "--binary", "n", "--image", "x.img", "--talk", "/tmp/k",
-            "--readback", "/tmp/r",
-        ]
-        .map(String::from);
+        let whole = ["--swap", "netd", "--binary", "n", "--talk", "/tmp/k", "--readback", "/tmp/r"]
+            .map(String::from);
         let args = Args::parse(&whole).expect("a whole swap");
         assert_eq!(args.swap.as_deref(), Some("netd"));
 
-        for flag in [vec!["--fat32-check"], vec!["--dry-run"], vec!["--nic", "0000:00:1f.6"]] {
+        for flag in [
+            vec!["--fat32-check"],
+            vec!["--dry-run"],
+            vec!["--nic", "0000:00:1f.6"],
+            vec!["--image", "x.img"],
+        ] {
             let mut words = whole.to_vec();
             words.extend(flag.iter().map(|w| (*w).to_string()));
             let said = Args::parse(&words).unwrap_err().to_string();
             assert!(said.contains(flag[0]) && said.contains("will not make"), "{said}");
         }
-        for missing in ["--binary", "--image", "--talk", "--readback"] {
+        for missing in ["--binary", "--talk", "--readback"] {
             let at = whole.iter().position(|w| w == missing).unwrap();
             let words: Vec<String> = whole
                 .iter()

@@ -728,7 +728,11 @@ impl TalkBoot {
         std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
         let (start, len) = super::volumes::log_extent(&bytes, &image)?;
         let log_port = qemu::free_host_port();
-        let peer = toyos_build::metaltalk::Peer::At(std::net::SocketAddr::from((
+        // `Peer::Forwarded`, not `Peer::At`: this is staged before the guest —
+        // let alone its `logd` — has even been started, so a refusal here is
+        // the guest not up yet and has to be asked again, which only
+        // `Peer::Forwarded` does for a bare address.
+        let peer = toyos_build::metaltalk::Peer::Forwarded(std::net::SocketAddr::from((
             Ipv4Addr::LOCALHOST,
             log_port,
         )));
