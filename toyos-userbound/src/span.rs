@@ -85,7 +85,7 @@ mod tests {
         ("Stat", 24, 8),
         ("SchedInfo", 24, 8),
         ("FramebufferInfo", 32, 4),
-        ("SpawnArgs", 80, 8),
+        ("SpawnArgs", 96, 8),
         ("NamespaceBuild", 56, 8),
         ("InboxSetup", 16, 8),
         ("ProcessStats", 128, 8),

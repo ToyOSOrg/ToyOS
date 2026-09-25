@@ -65,6 +65,9 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, debug_action, MmapFlags, MmapProt, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
 
+/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
+const CWD: &str = "/";
+
 const SELF_PATH: &str = "/system/bin/test_rs_handle_kill_policy";
 
 /// How long a `POLL_ADD` that cannot ever fire is given to say so.
@@ -397,6 +400,8 @@ fn spawn_naming(handle: RawHandle) -> Result<RawHandle, SyscallError> {
             endow_count: 0,
             labels_ptr: 0,
             labels_len: 0,
+            cwd_ptr: CWD.as_ptr() as u64,
+            cwd_len: CWD.len() as u64,
         })
     }
 }

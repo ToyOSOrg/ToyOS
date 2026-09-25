@@ -30,8 +30,8 @@ use super::device::{
     sys_device_reg, sys_gpu_reset_scanout, sys_partition_transfer, Transfer,
 };
 use super::fs::{
-    sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink, sys_rename,
-    sys_rmdir, sys_symlink,
+    spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
+    sys_rename, sys_rmdir, sys_symlink,
 };
 use super::handles::{sys_close, sys_dup2, sys_handle_dup, with_object, with_object_ref};
 use super::io::{
@@ -189,6 +189,10 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SPAWN => {
             let Ok(args) = ctx.copy_in::<SpawnArgs>(UserAddr::new(a1)) else { return bad_addr };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
+            let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {
+                Ok(cwd) => cwd,
+                Err(e) => return e.to_u64(),
+            };
             if args.endow_count as usize > toyos_abi::syscall::MAX_ENDOWMENTS
                 || args.labels_len > toyos_abi::syscall::MAX_LABELS_LEN as u64
             {
@@ -232,7 +236,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             } else {
                 alloc::vec::Vec::new()
             };
-            sys_spawn(&argv, pending, env)
+            sys_spawn(&argv, pending, cwd, env)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {

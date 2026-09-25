@@ -253,7 +253,13 @@ impl Superblock {
             Ok(sb) => Ok(sb),
             Err(primary_err) => {
                 io.read(BlockNum::new(device_blocks - 1), &mut buf)?;
-                checked(&buf).map_err(|_| primary_err)
+                // `BadMagic` is returned only when no copy claims to be a
+                // volume: a caller tells a disk that is not ours from one of
+                // ours that broke by it.
+                checked(&buf).map_err(|backup_err| match primary_err {
+                    FsError::BadMagic { .. } => backup_err,
+                    _ => primary_err,
+                })
             }
         }
     }

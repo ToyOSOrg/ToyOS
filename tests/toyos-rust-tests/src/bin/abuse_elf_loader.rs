@@ -13,6 +13,9 @@ use std::fs;
 
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 
+/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
+const CWD: &str = "/";
+
 const DIR: &str = "/home/abuse_loader";
 
 /// The two cases about a table larger than one kernel allocation need a file
@@ -234,6 +237,8 @@ fn spawn_path(path: &str) -> Result<u64, SyscallError> {
             endow_count: 0,
             labels_ptr: 0,
             labels_len: 0,
+            cwd_ptr: CWD.as_ptr() as u64,
+            cwd_len: CWD.len() as u64,
         })
     }
     .map(|pid| pid.0 as u64)

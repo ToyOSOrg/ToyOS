@@ -1656,7 +1656,7 @@ pub fn create_sparse(path: &Path, len: u64) {
 /// what stops it taking the disk of any machine it is booted on. So a throwaway
 /// image has to say so, and this is the whole of the test harness's opt-in:
 /// **data on a scratch file, not a build flag.** The kernel binary and the
-/// code path are identical either way — `probe` runs the same three-way match
+/// code path are identical either way — `probe` runs the same match
 /// on metal as it does here — so the configuration under test is the
 /// configuration that ships, which a `#[cfg]` could not have given us.
 ///

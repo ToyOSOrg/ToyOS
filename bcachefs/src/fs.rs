@@ -2,6 +2,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::ops::ControlFlow;
 
 use crate::alloc_bitmap::BitmapAllocator;
 use crate::block_io::{BlockBuf, BlockNum, BlockIO, BlockIOExt, DeviceError, BLOCK_SIZE};
@@ -99,6 +100,40 @@ pub enum FsError {
     /// A tree with more live entries than the caller's ceiling — refused before
     /// the over-bound entry materialises, as [`FsError::TargetTooLong`] is.
     ListTooLong { limit: usize },
+}
+
+impl FsError {
+    /// Whether a mount refused for this reason means the volume was never
+    /// ours — the only question a caller deciding whether to offer a format
+    /// stamp may ask. Exhaustive on purpose: a caller outside this crate
+    /// cannot classify a refusal any other way, and a new variant has to be
+    /// placed here before it compiles. `BadMagic` alone disowns the volume —
+    /// neither copy of the superblock claims it. Every other refusal,
+    /// including a device that would not answer at all, is a volume of ours
+    /// that did not mount, and disowns nothing.
+    pub fn disowns_volume(&self) -> bool {
+        match self {
+            FsError::BadMagic { .. } => true,
+            FsError::UnsupportedVersion(_)
+            | FsError::ChecksumMismatch { .. }
+            | FsError::CorruptedKey(_)
+            | FsError::CorruptedNode(_)
+            | FsError::BlockOffDevice { .. }
+            | FsError::NotEnoughBlocks { .. }
+            | FsError::TreeTooDeep(_)
+            | FsError::BadSuperblock { .. }
+            | FsError::DeviceRead(_, _)
+            | FsError::DeviceWrite(_, _)
+            | FsError::DeviceSync(_)
+            | FsError::NotFound
+            | FsError::NoSpace { .. }
+            | FsError::NameTooLong { .. }
+            | FsError::EntryTooLarge { .. }
+            | FsError::NodeOverfull { .. }
+            | FsError::TargetTooLong { .. }
+            | FsError::ListTooLong { .. } => false,
+        }
+    }
 }
 
 pub struct ReadOnly;
@@ -717,18 +752,38 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     /// volume's.
     pub fn list(&self, limit: usize, keep: &dyn Fn(&str) -> bool) -> Result<Vec<(String, u64)>, FsError> {
         let mut result = Vec::new();
-        btree::for_each_live(&self.io, self.sb.root_node, &mut |entry| {
-            let Ok(leaf) = self.decode(&entry.value) else { return Ok(()) };
+        let ControlFlow::Continue(()) = btree::for_each_live(&self.io, self.sb.root_node, &mut |entry| {
+            let Ok(leaf) = self.decode(&entry.value) else { return Ok(ControlFlow::Continue(())) };
             if !keep(leaf.name()) {
-                return Ok(());
+                return Ok(ControlFlow::Continue(()));
             }
             if result.len() >= limit {
                 return Err(FsError::ListTooLong { limit });
             }
             result.push((String::from(leaf.name()), leaf.size()));
-            Ok(())
-        })?;
+            Ok(ControlFlow::Continue(()))
+        })? else {
+            unreachable!("`list`'s visitor never breaks")
+        };
         Ok(result)
+    }
+
+    /// Whether some name lies beneath `dir` (`""` is the root): the flat
+    /// namespace has no other kind of directory. Keys are hashes of whole
+    /// names, so the answer is a walk that stops at the first such name and
+    /// costs the whole tree when there is none; it keeps nothing, and a node
+    /// it cannot read refuses this question alone.
+    pub fn is_dir(&self, dir: &str) -> Result<bool, FsError> {
+        if dir.is_empty() {
+            return Ok(true);
+        }
+        let found = btree::for_each_live(&self.io, self.sb.root_node, &mut |entry| {
+            // As `list`: a leaf that does not decode answers to no name.
+            let Ok(leaf) = self.decode(&entry.value) else { return Ok(ControlFlow::Continue(())) };
+            let beneath = leaf.name().strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'));
+            Ok(if beneath { ControlFlow::Break(()) } else { ControlFlow::Continue(()) })
+        })?;
+        Ok(found.is_break())
     }
 
     /// Convert back to Formatted state (for testing — insert more files after reading).
@@ -1633,6 +1688,66 @@ mod tests {
         fs.io.read_block(BlockNum::new(gap), &mut buf).expect("read the gap block");
         if let Some(at) = buf.0.iter().position(|&b| b != 0) {
             panic!("the gap block holds {:#04x} at byte {at}, not zero", buf.0[at]);
+        }
+    }
+
+    /// A directory is a name with something beneath it, and follows every
+    /// write that adds or takes one.
+    #[test]
+    fn is_dir_is_a_name_beneath() {
+        let mut fs = Formatted::format(VecBlockIO::new(512)).expect("format");
+        fs.create("a/b/file", b"x", 1).expect("create");
+        fs.create("ab", b"x", 1).expect("create");
+        fs.create_symlink("s/link", "a", 1).expect("symlink");
+        let mut fs = mount_rw(fs.into_io().expect("sync").into_vec()).expect("mount");
+        for dir in ["", "a", "a/b", "s"] {
+            assert!(fs.is_dir(dir).expect("a walk of a sound tree"), "{dir:?}");
+        }
+        // `ab` shares `a`'s bytes, so a prefix test without the separator answers it.
+        for not in ["a/b/file", "ab", "a/missing", "b", "a/b/file/deeper", "a/"] {
+            assert!(!fs.is_dir(not).expect("a walk of a sound tree"), "{not:?}");
+        }
+
+        fs.rename("a/b/file", "e/moved").expect("rename");
+        assert!(!fs.is_dir("a").expect("walk") && fs.is_dir("e").expect("walk"));
+        assert!(fs.delete("e/moved").expect("delete"));
+        assert!(!fs.is_dir("e").expect("walk"));
+    }
+
+    /// A node the walk cannot follow refuses the one question that met it;
+    /// the mount before it stands.
+    #[test]
+    fn is_dir_over_a_corrupt_node_is_refused() {
+        let blocks = 128;
+        let mut raw = image(blocks);
+        craft_interior(&mut raw, 3, 4, 4);
+        set_root(&mut raw, blocks, 3);
+
+        let fs = mount(raw).expect("mount");
+        match fs.is_dir("a") {
+            Err(FsError::CorruptedNode(_)) => {}
+            other => panic!("expected CorruptedNode, got {other:?}"),
+        }
+        assert!(fs.is_dir("").expect("the root needs no walk"));
+    }
+
+    /// `is_dir_is_a_name_beneath` never grows the root past one leaf, so a
+    /// walk that stopped propagating `Break` through an interior node would
+    /// still pass it. More names than `MAX_ENTRIES` (169) fit in one leaf
+    /// forces at least one split, so the root here is `Interior` and every
+    /// `d{i}` is beneath a child the walk has to descend into and return from.
+    #[test]
+    fn is_dir_over_a_split_root_finds_every_directory() {
+        const COUNT: usize = 200;
+        let mut fs = Formatted::format(VecBlockIO::new(2048)).expect("format");
+        for i in 0..COUNT {
+            fs.create(&format!("d{i}/f"), b"x", i as u64)
+                .unwrap_or_else(|e| panic!("create d{i}/f: {e:?}"));
+        }
+        let fs = mount_rw(fs.into_io().expect("sync").into_vec()).expect("mount");
+        for i in 0..COUNT {
+            let dir = format!("d{i}");
+            assert!(fs.is_dir(&dir).expect("a walk of a sound tree"), "{dir}");
         }
     }
 }

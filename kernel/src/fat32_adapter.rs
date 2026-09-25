@@ -857,6 +857,15 @@ impl FileSystem for FatFs {
         self.fs.walk(dir, limit).map_err(|e| refused(role, "list", dir, e))
     }
 
+    fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError> {
+        let role = self.role;
+        match self.fs.metadata(dir) {
+            Ok(meta) => Ok(meta.is_dir),
+            Err(Error::NotFound | Error::NotADirectory) => Ok(false),
+            Err(e) => Err(refused(role, "metadata", dir, e)),
+        }
+    }
+
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
         let role = self.role;
         self.fs
