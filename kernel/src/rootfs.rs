@@ -6,14 +6,16 @@
 //! it against firmware's map: every byte of it inside one descriptor of
 //! [`ROOT_IMAGE_MEMORY_TYPE`], which the allocator never hands out. [`mount`]
 //! refuses the boot by name on a handoff with no image, and on an image whose
-//! superblock is not the one `root=` names. The image's bytes crossed a trust
+//! superblock is not the one `root=` names. [`hold_source`] holds the
+//! partition the image came from once the disks are up, so no claim writes the
+//! slot this boot runs. The image's bytes crossed a trust
 //! boundary like any disk's, so every read of it is bounds-checked and a block
 //! outside it is a refused read, never a panic.
 
 use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, FsUuid, Mounted, ReadOnly};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, ROOT_IMAGE_MEMORY_TYPE};
 
-use crate::block::BlockError;
+use crate::block::{BlockError, Holder, Partition};
 use crate::mm::DirectMap;
 use crate::sync::Lock;
 
@@ -43,9 +45,14 @@ enum Handed {
 struct Boot {
     named: Option<FsUuid>,
     handed: Handed,
+    /// The partition the image was read from, raw as in its GPT entry.
+    source: [u8; 16],
 }
 
-static BOOT: Lock<Boot> = Lock::new(Boot { named: None, handed: Handed::Nothing });
+static BOOT: Lock<Boot> = Lock::new(Boot { named: None, handed: Handed::Nothing, source: [0; 16] });
+
+/// The kernel's hold on the partition ROOT was read from, for the machine's life.
+static SOURCE: Lock<Option<Partition>> = Lock::new(None);
 
 /// ROOT's bytes: whole blocks, read-only, in memory the kernel never frees.
 #[derive(Clone, Copy)]
@@ -105,13 +112,17 @@ pub fn init(cmdline: &str, args: &KernelArgs, map: &[MemoryMapEntry]) {
             core::slice::from_raw_parts(DirectMap::from_phys(at).as_ptr::<u8>(), len as usize)
         }))
     };
-    *BOOT.lock() = Boot { named: toyos_abi::boot::root_uuid(cmdline).and_then(FsUuid::parse), handed };
+    *BOOT.lock() = Boot {
+        named: toyos_abi::boot::root_uuid(cmdline).and_then(FsUuid::parse),
+        handed,
+        source: args.root_partition_guid,
+    };
 }
 
 /// Mount the filesystem the boot parameter named, off the image the loader
 /// handed. Panics when there is no image, or it is not that filesystem.
 pub fn mount() -> (Mounted<MemoryImage, ReadOnly>, MemoryImage) {
-    let Boot { named, handed } = *BOOT.lock();
+    let Boot { named, handed, .. } = *BOOT.lock();
     let Some(named) = named else {
         panic!("boot: the kernel argument names no root filesystem this kernel can parse");
     };
@@ -141,4 +152,44 @@ pub fn mount() -> (Mounted<MemoryImage, ReadOnly>, MemoryImage) {
     let (at, len) = image.extent();
     log!("{MOUNTED_FROM_MEMORY} {at:#x}+{len:#x}, filesystem {named}, {} blocks", image.block_count());
     (fs, image)
+}
+
+/// Hold the partition ROOT was read from, so no process's claim writes the
+/// slot this boot is running; the hold reads nothing. Runs once the disks are
+/// probed. A partition on no disk this kernel drives is one nothing here can
+/// write either, and is said so rather than refused.
+pub fn hold_source() {
+    let guid = BOOT.lock().source;
+    let found = match crate::gpt::claimable(toyos_abi::part::PartGuid(guid)) {
+        Ok(found) => found,
+        Err(e) => {
+            log!(
+                "root: the partition ROOT was read from, {}, is on no disk this kernel drives \
+                 ({e:?}), so nothing here can write it",
+                toyos_gpt::Guid(guid)
+            );
+            return;
+        }
+    };
+    let volume = found.volume;
+    let view = crate::block::open(volume.device)
+        .ok_or(())
+        .and_then(|handle| {
+            let (first, blocks) =
+                crate::block::span_blocks(volume.start_lba, volume.blocks, volume.lba_bytes)
+                    .map_err(drop)?;
+            Partition::of(handle, first, blocks, Holder::Kernel("system")).map_err(drop)
+        });
+    match view {
+        Ok(view) => {
+            log!("root: holding {}, the partition ROOT was read from, on device {}", found.unique, volume.device);
+            *SOURCE.lock() = Some(view);
+        }
+        // The same refusals a claim of it meets in `device::partition_view`,
+        // so a partition this cannot hold is one no claim can take either.
+        Err(()) => log!(
+            "root: the partition ROOT was read from, {}, is on device {} and is no span a view can hold",
+            found.unique, volume.device
+        ),
+    }
 }

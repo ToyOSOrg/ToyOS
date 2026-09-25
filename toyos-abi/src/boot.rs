@@ -120,6 +120,10 @@ pub struct KernelArgs {
     /// kernel refuses to boot on it by name; it never reads ROOT anywhere else.
     pub root_image_addr: u64,
     pub root_image_len: u64,
+    /// The unique GUID of the partition the image was read from, raw as in the
+    /// GPT entry like [`Self::boot_partition_guid`]; zero with no image. The
+    /// kernel holds that partition so no claim writes the slot it is running.
+    pub root_partition_guid: [u8; 16],
 }
 
 /// The UEFI memory type the loader allocates ROOT's image as: one of the
@@ -230,7 +234,8 @@ const _: () = {
     assert!(offset_of!(KernelArgs, root_bridge_windows) == 200);
     assert!(offset_of!(KernelArgs, root_image_addr) == 1224);
     assert!(offset_of!(KernelArgs, root_image_len) == 1232);
-    assert!(size_of::<KernelArgs>() == 1240);
+    assert!(offset_of!(KernelArgs, root_partition_guid) == 1240);
+    assert!(size_of::<KernelArgs>() == 1256);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
     assert!(align_of::<RootBridgeWindow>() == 8);
@@ -321,6 +326,7 @@ mod tests {
             MAX_ROOT_BRIDGE_WINDOWS],
         root_image_addr: 0,
         root_image_len: 0,
+        root_partition_guid: [0; 16],
     };
 
     #[test]

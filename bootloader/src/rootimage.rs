@@ -42,12 +42,14 @@ pub const READ_AT: &str = "ROOT: read into memory at";
 pub struct RootImage {
     at: u64,
     len: u64,
+    /// The partition it was read from, raw as in its GPT entry.
+    partition: [u8; 16],
 }
 
 impl RootImage {
-    /// Where the kernel is told the image is.
-    pub fn handoff(&self) -> (u64, u64) {
-        (self.at, self.len)
+    /// Where the kernel is told the image is, and which partition it came from.
+    pub fn handoff(&self) -> (u64, u64, [u8; 16]) {
+        (self.at, self.len, self.partition)
     }
 }
 
@@ -250,7 +252,7 @@ impl<'a> Disk<'a> {
         }
         let took = tsc().wrapping_sub(began);
         println!("{} {at:#x}+{len:#x} in {took} TSC cycles", READ_AT);
-        RootImage { at, len }
+        RootImage { at, len, partition: part.unique_guid.0 }
     }
 }
 

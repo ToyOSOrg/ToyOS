@@ -639,7 +639,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             None => ([0u8; 16], 0, 0, 0),
         };
 
-    let (root_image_addr, root_image_len) = root_image.as_ref().map_or((0, 0), rootimage::RootImage::handoff);
+    let (root_image_addr, root_image_len, root_partition_guid) =
+        root_image.as_ref().map_or((0, 0, [0; 16]), rootimage::RootImage::handoff);
 
     // Built before the exit so the address the kernel is handed is one this
     // loader can still print and refuse on.
@@ -675,6 +676,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         root_bridge_windows,
         root_image_addr,
         root_image_len,
+        root_partition_guid,
     };
     report_reach(
         "Kernel arguments",

@@ -484,58 +484,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     boot_phase!("subsystems ready", t_subsys);
 
-    let t_devices = clock::nanos_since_boot();
-
-    // Runs once for the machine: it touches no device, so per-driver repetition would say the same thing four times.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::virtio_used_selftest() {
-        drivers::virtio::used_selftest();
-    }
-
-    // Needs interrupts on and the timer already ticking: its last assertion is that the interrupt after the spurious one arrives.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::lapic_spurious_selftest() {
-        arch::idt::spurious::selftest();
-    }
-
-    #[cfg(feature = "boot-actuators")]
-    if actuator::unclaimed_vector_selftest() {
-        arch::idt::unclaimed::selftest();
-    }
-
-    virtio_console::init(&pci_devices);
-
-    virtio_sound::init(&pci_devices);
-    drivers::hda::init(&pci_devices);
-
-    if let Some((gpu_driver, gpu_info)) = virtio_gpu::init(&pci_devices) {
-        log!("GPU: using VirtIO");
-        // virtio's scanout is only reachable through a virtqueue round trip behind GPU.lock(), which the panic path may not take.
-        drivers::panic_console::disable();
-        register_gpu(gpu_driver, gpu_info);
-    } else if kernel_args.gop_framebuffer != 0 {
-        log!("GPU: using UEFI GOP");
-        let (gpu_driver, gpu_info) = gop::init(
-            kernel_args.gop_framebuffer,
-            kernel_args.gop_framebuffer_size,
-            kernel_args.gop_width,
-            kernel_args.gop_height,
-            kernel_args.gop_stride,
-            kernel_args.gop_pixel_format,
-        );
-        register_gpu(gpu_driver, gpu_info);
-    } else {
-        log!("GPU: none found, running headless");
-    }
-
-    boot_phase!("devices ready", t_devices);
-
-    // Before userland, so nothing else is reading the input queues.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::test_input_merge() {
-        input_merge_test::run();
-    }
-
     // init reads /system/etc/system.manifest itself; the boot config never names the program it starts.
     let pid = process::spawn_init();
     log!("spawned {} pid={pid}", process::INIT_PATH);
@@ -552,7 +500,8 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // After init's spawn and before it runs: nothing runs a task until
     // `smp::set_ready` below, and `/home`, `/apps`, `/boot` and `/log` are
-    // mounted by then.
+    // mounted and every device is up by then. Before the device phase: its
+    // IOMMU controls aim at the pool NVMe stages.
     let t_storage = clock::nanos_since_boot();
 
     // No controller is a configuration, not a failure — same as a missing xHCI, NIC, or sound device.
@@ -588,6 +537,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     // After xhci::init, not beside the NVMe probe: a USB-booted disk doesn't exist until the controller binds it.
     fat32_adapter::probe_boot_disks();
+    rootfs::hold_source();
 
     // One filesystem, two paths: `/apps` and `/home` are two directories of
     // DATA, so one sync settles both and neither can outlive the other.
@@ -668,6 +618,58 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
 
     boot_phase!("storage ready", t_storage);
+
+    let t_devices = clock::nanos_since_boot();
+
+    // Runs once for the machine: it touches no device, so per-driver repetition would say the same thing four times.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::virtio_used_selftest() {
+        drivers::virtio::used_selftest();
+    }
+
+    // Needs interrupts on and the timer already ticking: its last assertion is that the interrupt after the spurious one arrives.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::lapic_spurious_selftest() {
+        arch::idt::spurious::selftest();
+    }
+
+    #[cfg(feature = "boot-actuators")]
+    if actuator::unclaimed_vector_selftest() {
+        arch::idt::unclaimed::selftest();
+    }
+
+    virtio_console::init(&pci_devices);
+
+    virtio_sound::init(&pci_devices);
+    drivers::hda::init(&pci_devices);
+
+    if let Some((gpu_driver, gpu_info)) = virtio_gpu::init(&pci_devices) {
+        log!("GPU: using VirtIO");
+        // virtio's scanout is only reachable through a virtqueue round trip behind GPU.lock(), which the panic path may not take.
+        drivers::panic_console::disable();
+        register_gpu(gpu_driver, gpu_info);
+    } else if kernel_args.gop_framebuffer != 0 {
+        log!("GPU: using UEFI GOP");
+        let (gpu_driver, gpu_info) = gop::init(
+            kernel_args.gop_framebuffer,
+            kernel_args.gop_framebuffer_size,
+            kernel_args.gop_width,
+            kernel_args.gop_height,
+            kernel_args.gop_stride,
+            kernel_args.gop_pixel_format,
+        );
+        register_gpu(gpu_driver, gpu_info);
+    } else {
+        log!("GPU: none found, running headless");
+    }
+
+    boot_phase!("devices ready", t_devices);
+
+    // Before userland, so nothing else is reading the input queues.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::test_input_merge() {
+        input_merge_test::run();
+    }
 
     // Under Drain::Inline every record above is already on the wire, so this gate reads the whole boot and then silence.
     #[cfg(feature = "boot-actuators")]
