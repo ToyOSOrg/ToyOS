@@ -45,6 +45,13 @@ const REFUSED_WORD: Duration = Duration::from_secs(10);
 /// a missing line is a red verdict rather than a longer wait.
 const CARRIER_WORD: Duration = Duration::from_millis(toyos_swap::ANSWER_MS);
 
+/// How many dials a swap's redial may have turned away — refused, or closed
+/// before a line — before it gives up and the swap is red. Nothing the machine
+/// sends says when `logd` listens again, so a redial asks again at once and
+/// this ceiling is the one thing that stops it spinning unseen: the recorded
+/// compromise `issues/diagnostics/a-swaps-redial-asks-again-with-no-event-to-wait-on.md`.
+pub const TURNED_AWAY_CEILING: usize = 64;
+
 /// What asking for one swap came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Swapped {
@@ -69,8 +76,8 @@ pub struct Swapped {
     pub again: Result<Exec, String>,
     /// Stream connections before the ask and when this ended.
     pub connections: (usize, usize),
-    /// Connections the stream made from the ask on that ended before carrying
-    /// a line: each redial `logd` or the machine turned away.
+    /// Dials the stream made from the ask on that ended with no line: each
+    /// redial `logd` or the machine turned away, refusals included.
     pub turned_away: usize,
     /// From the ask to the answer, to init's final word, and to `echo`'s answer.
     pub answer_ms: u64,
@@ -227,7 +234,7 @@ pub fn swap(
         }
     }
     if accepted && service == toyos_logstream::CARRIER {
-        stream.redial(window);
+        stream.redial(window, TURNED_AWAY_CEILING);
     }
     let mut outcome_ms = None;
     let mut sshd_refused = None;
@@ -341,9 +348,15 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
             heard.connections.1
         )),
     }
-    if heard.service == toyos_logstream::CARRIER {
+    if heard.turned_away >= TURNED_AWAY_CEILING {
+        bad.push(format!(
+            "the stream's redial was turned away {} time(s), its ceiling of {TURNED_AWAY_CEILING}, \
+             and gave up",
+            heard.turned_away
+        ));
+    } else if heard.service == toyos_logstream::CARRIER {
         said.push(format!(
-            "the stream made {} connection(s) that ended before carrying a line, from the ask to \
+            "the stream's dials were turned away {} time(s), refusals included, from the ask to \
              the end",
             heard.turned_away
         ));
@@ -619,6 +632,9 @@ mod tests {
         let mut elsewhere = heard(Expect::InService);
         elsewhere.words.last_mut().unwrap().1 = "/tmp/swap/other/netd as pid 12".into();
         assert!(judge(&elsewhere, Expect::InService).is_err());
+        let mut spun = heard(Expect::InService);
+        spun.turned_away = TURNED_AWAY_CEILING;
+        assert!(judge(&spun, Expect::InService).is_err(), "a redial that reached its ceiling");
     }
 
     /// The recorded stream from a swap sshd refused before init ever heard of
