@@ -1006,7 +1006,7 @@ impl core::fmt::Display for Declined {
             Self::NoFlr => "no function level reset advertised",
             Self::NoSoftReset => "No_Soft_Reset set",
             Self::NotInD0 => "not in D0",
-            Self::Staged => "declined by pcidev-reset-nothing",
+            Self::Staged => "declined unasked, as staged",
         })
     }
 }
