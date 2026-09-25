@@ -150,12 +150,14 @@ pub struct Link {
 }
 
 impl Link {
-    /// Whether `addr` is on this link: in this subnet, or link-local
-    /// (RFC 3927), which is on every link.
+    /// Whether a query from `addr` is not from off this link, which is what
+    /// §11 refuses: in this subnet, link-local (RFC 3927), or loopback — a
+    /// source RFC 1122 §3.2.1.3 keeps off every wire, so no router forwarded it,
+    /// and the one QEMU's forward hands a host's query in with.
     fn holds(&self, addr: [u8; 4]) -> bool {
         let mask = u32::MAX.checked_shl(32 - u32::from(self.prefix.min(32))).unwrap_or(0);
         let (ours, theirs) = (u32::from_be_bytes(self.addr), u32::from_be_bytes(addr));
-        ours & mask == theirs & mask || addr[..2] == [169, 254]
+        ours & mask == theirs & mask || addr[..2] == [169, 254] || addr[0] == 127
     }
 }
 
@@ -444,8 +446,9 @@ mod tests {
         );
     }
 
-    /// RFC 6762 §11: a query whose source is not on this link is ignored, and a
-    /// link-local source (RFC 3927) is on every link.
+    /// RFC 6762 §11: a query whose source is not on this link is ignored; a
+    /// link-local source (RFC 3927) is on every link, and a loopback one was
+    /// routed by nobody.
     #[test]
     fn a_query_from_off_the_link_is_not_answered() {
         let q = query(0, &["toyos-t14", "local"], 1, 1);
@@ -453,7 +456,7 @@ mod tests {
             let asked = answer(&q, Asker { addr, port }, LINK, host(), &mut Pace::new(), 0);
             assert_eq!(asked, None, "{addr:?}");
         }
-        for addr in [[192, 168, 1, 254], [169, 254, 3, 4]] {
+        for addr in [[192, 168, 1, 254], [169, 254, 3, 4], [127, 0, 0, 1]] {
             let asked = answer(&q, Asker { addr, port: PORT }, LINK, host(), &mut Pace::new(), 0);
             assert!(asked.is_some(), "{addr:?}");
         }
