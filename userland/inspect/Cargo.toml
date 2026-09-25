@@ -1,12 +1,9 @@
 [package]
-name = "logd"
+name = "inspect"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos = { path = "../../toyos" }
-toyos-abi = { path = "../../toyos-abi" }
-toyos-logstream = { path = "../../toyos-logstream" }
 toyos-inspect = { path = "../../toyos-inspect" }
-toyos-wallclock = { path = "../../toyos-wallclock" }

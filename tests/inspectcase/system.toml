@@ -1,0 +1,50 @@
+# The one boot that runs all four owners `inspect` reads: logd, the compositor,
+# soundd and netd, on a machine with a framebuffer, a virtio NIC and a virtio
+# sound card (`Profile::Gop`).
+#
+# test-runner holds no `launcher`, so every binary it runs is spawned directly
+# and inherits its namespace — which is how `run inspect ...` reaches the
+# owners, and how `test_rs_inspect_denied` can hand its own children a narrower
+# one.
+
+assets = ["assets"]
+
+[boot]
+start = ["logd", "compositor", "soundd", "netd", "test-runner"]
+
+# `every_boot_config_runs_logd` refuses a config without it. `log` is the port
+# it answers `inspect` on.
+[programs.logd]
+syscap = ["logread"]
+serves = ["log"]
+
+[programs.compositor]
+serves = ["compositor"]
+devices = ["framebuffer", "keyboard", "mouse"]
+
+[programs.soundd]
+serves = ["soundd"]
+devices = ["hda-audio", "virtio-sound"]
+syscap = ["rt"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:1af4:1041"]
+
+# Every owner's connector, and nothing else: the runner's namespace is what its
+# jobs inherit, and the reader is what they run.
+[programs.test-runner]
+receives = ["netd", "soundd", "log", "compositor"]
+
+# The shipped reader's row. Declared so the image carries it; the runner spawns
+# it directly, so what it holds here is the runner's namespace.
+[programs.inspect]
+receives = ["netd", "soundd", "log", "compositor"]
+
+# `shell -c` is how a job line becomes a pipe.
+[programs.shell]
+
+[programs.toybox]
+
+[symlinks]
+"bin/grep" = "/system/bin/toybox"

@@ -23,6 +23,7 @@ use toyos_mixer::{period_nanos, Gain, MAX_CLIENT_RATE, MIN_CLIENT_RATE};
 
 use crate::client::{open_stream, Departure};
 use crate::command::{remove, submit, CommandRing, MixCommand};
+use crate::inspect::{self, Device, Published};
 
 /// Control connections soundd will hold at once.
 ///
@@ -85,6 +86,8 @@ enum Control {
     Open,
     SetVolume { idx: usize },
     Close { idx: usize },
+    /// `inspect`, on a connection that carries no stream: answered and closed.
+    Inspect,
     /// An unknown message type, a payload the wrong width for its type, or a
     /// message this connection is not in the state to send. All three are the
     /// client getting it wrong, and all three end the connection.
@@ -110,6 +113,7 @@ fn classify(msg_type: u32, payload_len: usize, stream_idx: Option<usize>) -> Con
             Control::SetVolume { idx }
         }
         (MSG_STREAM_CLOSE, Some(idx)) => Control::Close { idx },
+        (toyos_inspect::MSG_INSPECT, None) if payload_len == 0 => Control::Inspect,
         _ => Control::Violation,
     }
 }
@@ -136,6 +140,8 @@ pub(crate) fn control_thread(
     device_period_frames: u32,
     slot_count: u32,
     ramp_frames: u32,
+    device: &Device,
+    published: &Published,
 ) {
     // One handle per client plus the acceptor; `MAX_CONTROL_CLIENTS` is derived
     // from this ring, so the set always fits in one batch.
@@ -287,6 +293,20 @@ pub(crate) fn control_thread(
                         disconnected = true;
                         break 'msgs;
                     }
+                    // One non-blocking write and the connection goes, whether
+                    // or not the reader took it: a reader that will not take
+                    // one frame is not one this thread waits for.
+                    Control::Inspect => {
+                        let answer = inspect::snapshot(device, published);
+                        if let Err(e) =
+                            clients[i].conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &answer)
+                        {
+                            say!("soundd: an inspect reader was not answered ({e:?})");
+                        }
+                        dead.push(i);
+                        disconnected = true;
+                        break 'msgs;
+                    }
                     Control::Violation => {
                         say!("soundd: protocol violation (msg {msg_type}), disconnecting client");
                         if let Some(idx) = clients[i].stream_idx {
@@ -383,6 +403,12 @@ mod tests {
                 );
             }
         }
+
+        // `inspect` is a bare header, and only on a connection that carries no
+        // stream: a stream's control connection is the stream's.
+        assert_eq!(classify(toyos_inspect::MSG_INSPECT, 0, None), Control::Inspect);
+        assert_eq!(classify(toyos_inspect::MSG_INSPECT, 0, Some(3)), Control::Violation);
+        assert_eq!(classify(toyos_inspect::MSG_INSPECT, 1, None), Control::Violation);
 
         // Nothing else is a message — including the two soundd only ever sends.
         for other in [0, MSG_STREAM_OPENED, MSG_STREAM_ERROR, u32::MAX] {

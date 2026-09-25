@@ -24,6 +24,8 @@ pub mod https;
 #[allow(dead_code)]
 pub mod iommu;
 #[allow(dead_code)]
+pub mod inspect;
+#[allow(dead_code)]
 pub mod irqcensus;
 /// The cable: netd's address, and the T14 answering the host on it.
 #[allow(dead_code)]

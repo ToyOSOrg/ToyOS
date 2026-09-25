@@ -45,10 +45,11 @@ toyos-cc = { path = "toyos-cc" }
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no
 # file at all, so a boot config without `logd` is a boot whose `/log` is empty —
-# `every_boot_config_runs_logd` is what refuses one. It claims no device and
-# serves no port.
+# `every_boot_config_runs_logd` is what refuses one. It claims no device, and
+# `log` is the port it answers `inspect` on.
 [programs.logd]
 syscap = ["logread"]
+serves = ["log"]
 # The record stream's authority: the address on the boot parameter line is
 # information, and this row is the whole of what can act on it.
 receives = ["netd"]
@@ -75,6 +76,11 @@ devices = ["pci:1af4:1041"]
 # refuses it to any other program (`src/build.rs`).
 [programs.sshd]
 receives = ["netd", "launcher", "swap"]
+
+# The reader of every owner's `inspect` answer: a connector to each owner's
+# port is the whole of what it can observe, and nothing else it holds.
+[programs.inspect]
+receives = ["netd", "soundd", "log", "compositor"]
 
 [programs.filepicker]
 serves = ["filepicker"]

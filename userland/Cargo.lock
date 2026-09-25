@@ -481,6 +481,7 @@ dependencies = [
  "toyos-abi 0.8.0",
  "toyos-desktop",
  "toyos-font 0.1.0",
+ "toyos-inspect",
  "toyos-manifest",
  "toyos-window 0.9.0",
 ]
@@ -1557,6 +1558,14 @@ name = "input-test"
 version = "0.1.0"
 
 [[package]]
+name = "inspect"
+version = "0.1.0"
+dependencies = [
+ "toyos 0.9.0",
+ "toyos-inspect",
+]
+
+[[package]]
 name = "internal-russh-forked-ssh-key"
 version = "0.6.18+upstream-0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1802,6 +1811,7 @@ version = "0.1.0"
 dependencies = [
  "toyos 0.9.0",
  "toyos-abi 0.8.0",
+ "toyos-inspect",
  "toyos-logstream",
  "toyos-wallclock",
 ]
@@ -1923,6 +1933,7 @@ dependencies = [
  "toyos 0.9.0",
  "toyos-abi 0.8.0",
  "toyos-i219",
+ "toyos-inspect",
  "toyos-tco",
 ]
 
@@ -3421,6 +3432,7 @@ dependencies = [
  "toyos 0.9.0",
  "toyos-abi 0.8.0",
  "toyos-hda",
+ "toyos-inspect",
  "toyos-mixer",
 ]
 
@@ -3770,6 +3782,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-i219"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-inspect"
 version = "0.1.0"
 
 [[package]]
