@@ -685,15 +685,37 @@ fn craft_nvme(path: &Path) -> Result<Layout, String> {
         device.seek(SeekFrom::Start(span.start)).map_err(|e| format!("seek: {e}"))?;
         device.write_all(&volume).map_err(|e| format!("write {label}: {e}"))?;
     }
-    // The designation: the kernel formats a DATA only on this consent.
+    designate(&mut *device, layout.data)?;
+    device.flush().map_err(|e| format!("flush the disk: {e}"))?;
+    Ok(layout)
+}
+
+/// The designation on `data`: the kernel formats a DATA only on this consent.
+fn designate(device: &mut dyn gpt::DiskDevice, data: Span) -> Result<(), String> {
     let mut stamp = [0u8; BLOCK as usize];
     stamp[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);
     let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;
-    stamp[at..at + 8].copy_from_slice(&(layout.data.len / BLOCK).to_le_bytes());
-    device.seek(SeekFrom::Start(layout.data.start)).map_err(|e| format!("seek: {e}"))?;
-    device.write_all(&stamp).map_err(|e| format!("stamp DATA: {e}"))?;
-    device.flush().map_err(|e| format!("flush the disk: {e}"))?;
-    Ok(layout)
+    stamp[at..at + 8].copy_from_slice(&(data.len / BLOCK).to_le_bytes());
+    device.seek(SeekFrom::Start(data.start)).map_err(|e| format!("seek: {e}"))?;
+    device.write_all(&stamp).map_err(|e| format!("stamp DATA: {e}"))
+}
+
+/// A disk at `path` carrying `parts` — each a name, a length in bytes and its
+/// unique GUID, on its own MiB boundary — and after them a DATA of
+/// `data_bytes` the kernel may format, so `/home` mounts from this disk.
+pub(super) fn craft_plain_disk(
+    path: &Path,
+    parts: &[(&'static str, u64, &'static str)],
+    data_bytes: u64,
+) -> Result<(), String> {
+    const DATA_GUID: &str = "C1A2B3D4-E5F6-4718-9A0B-1C2D3E4F5A6B";
+    let mut all: Vec<Part> =
+        parts.iter().map(|&(name, len, unique)| (name, len, PLAIN_TYPE, unique, ALIGNED)).collect();
+    all.push(("ToyOS data", data_bytes, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA_GUID, ALIGNED));
+    let total = MIB + all.iter().map(|p| p.1.next_multiple_of(MIB)).sum::<u64>() + 2 * MIB;
+    let (mut device, spans) = table(path, total, &all)?;
+    designate(&mut *device, *spans.last().expect("DATA was just added"))?;
+    device.flush().map_err(|e| format!("flush the disk: {e}"))
 }
 
 /// A USB stick of `bytes` carrying `parts`, each a name, a length and its

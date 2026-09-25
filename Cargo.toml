@@ -32,6 +32,7 @@ members = [
     "toyos-gpt",
     "toyos-hda",
     "toyos-i219",
+    "toyos-inspect",
     "toyos-keymap",
     "toyos-ld",
     "toyos-logstream",

@@ -99,11 +99,19 @@ impl Change {
     }
 }
 
+/// The lease the interface holds: everything the server decided.
+struct Held {
+    address: Ipv4Cidr,
+    router: Option<Ipv4Address>,
+    server: Ipv4Address,
+    dns: Vec<Ipv4Address>,
+}
+
 /// The lease's own state, and what the boot's log still owes about it.
 pub struct Dhcp {
     began: Instant,
-    /// Whether the interface currently holds a lease.
-    leased: bool,
+    /// The lease the interface currently holds, if it holds one.
+    lease: Option<Held>,
     /// Whether this boot has settled the question once — a lease landed, or the
     /// bound passed with none. netd announces itself on the edge of this.
     settled: bool,
@@ -111,12 +119,28 @@ pub struct Dhcp {
 
 impl Dhcp {
     pub fn new() -> Self {
-        Self { began: Instant::now(), leased: false, settled: false }
+        Self { began: Instant::now(), lease: None, settled: false }
     }
 
     /// Whether the interface holds a lease now.
     pub fn leased(&self) -> bool {
-        self.leased
+        self.lease.is_some()
+    }
+
+    /// The lease as `inspect` reads it: what the interface holds now.
+    pub fn inspect(&self, snap: &mut toyos_inspect::Snapshot) {
+        let Some(held) = &self.lease else {
+            snap.put("lease.held", false);
+            return;
+        };
+        snap.put("lease.held", true);
+        snap.put("lease.address", held.address.to_string());
+        snap.put("lease.server", held.server.to_string());
+        if let Some(router) = held.router {
+            snap.put("lease.router", router.to_string());
+        }
+        let dns: Vec<String> = held.dns.iter().map(ToString::to_string).collect();
+        snap.put("lease.dns", dns.join(" "));
     }
 
     /// Apply what the client decided, and answer whether this machine's address
@@ -129,7 +153,7 @@ impl Dhcp {
         resolver: &mut dns::Socket,
     ) -> bool {
         if let Some(change) = change {
-            let (lease, dns) = match change {
+            let held = match change {
                 Change::Leased { address, router, server, dns } => {
                     // **One record carrying every field the lease decided.** A
                     // boot read off a stick or a stream has this line and
@@ -146,24 +170,29 @@ impl Dhcp {
                         dns.iter().map(ToString::to_string).collect::<Vec<_>>().join(" "),
                         self.began.elapsed().as_millis(),
                     );
-                    (Some((address, router)), dns)
+                    Some(Held { address, router, server, dns })
                 }
                 // Only worth a line where there was something to lose: the
                 // client reports this on its way to a first lease too.
                 Change::Lost => {
-                    if self.leased {
+                    if self.lease.is_some() {
                         crate::say!("netd: DHCP: the lease is gone; this machine has no address");
                     }
-                    (None, Vec::new())
+                    None
                 }
             };
-            self.leased = lease.is_some();
-            Self::write(lease, &dns, iface, resolver);
+            Self::write(
+                held.as_ref().map(|h| (h.address, h.router)),
+                held.as_ref().map_or(&[][..], |h| &h.dns),
+                iface,
+                resolver,
+            );
+            self.lease = held;
         }
         if self.settled {
             return false;
         }
-        if self.leased {
+        if self.lease.is_some() {
             self.settled = true;
             return true;
         }

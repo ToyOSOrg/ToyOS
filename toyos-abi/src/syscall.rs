@@ -64,6 +64,37 @@ pub const SYS_SYSINFO: u64 = 45;
 /// decodes it, so a second spelling is a reader that walks off by a field.
 pub const SYSINFO_HEADER_SIZE: usize = 48;
 
+/// [`SYSINFO_HEADER_SIZE`] bytes, decoded once: the one spelling of the
+/// header's offsets, so a reader takes a field rather than an index.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SysinfoHeader {
+    pub memory_total: u64,
+    pub memory_used: u64,
+    pub cpus: u32,
+    /// Live threads in the roster this same call would answer with
+    /// [`Rights::ROSTER`](crate::handle::Rights::ROSTER).
+    pub entries: u32,
+    pub uptime_ns: u64,
+    pub total_cpu_ns: u64,
+    pub total_available_ns: u64,
+}
+
+impl SysinfoHeader {
+    pub fn decode(header: &[u8; SYSINFO_HEADER_SIZE]) -> Self {
+        let u64_at = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().expect("eight"));
+        let u32_at = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().expect("four"));
+        Self {
+            memory_total: u64_at(0),
+            memory_used: u64_at(8),
+            cpus: u32_at(16),
+            entries: u32_at(20),
+            uptime_ns: u64_at(24),
+            total_cpu_ns: u64_at(32),
+            total_available_ns: u64_at(40),
+        }
+    }
+}
+
 /// Bytes per roster entry, after the header: pid, tid, scheduler state, whether
 /// it is a secondary thread, resident memory, CPU nanoseconds, and a 28-byte
 /// name.
@@ -294,6 +325,13 @@ pub const SYS_PARTITION_READ: u64 = 119;
 /// Write blocks of a claimed partition. See [`partition_write`].
 pub const SYS_PARTITION_WRITE: u64 = 120;
 
+/// What the machine is made of, and who holds each part of it, as
+/// [`crate::inventory`] records. Gated by [`Rights::INVENTORY`] on a `SysCap`.
+/// See [`device_inventory`].
+///
+/// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
+pub const SYS_DEVICE_INVENTORY: u64 = 121;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
@@ -306,7 +344,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_PARTITION_WRITE < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_INVENTORY < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -1735,6 +1773,32 @@ pub fn sysinfo(syscap: RawHandle, buf: &mut [u8]) -> usize {
         0,
     );
     if SyscallError::from_u64(n).is_some() { 0 } else { n as usize }
+}
+
+/// Every [`crate::inventory`] record the machine has, into `buf`; answers how
+/// many were written.
+///
+/// **Whole or not at all.** A `buf` with room for fewer records than there
+/// are is refused with [`SyscallError::ResourceExhausted`] and nothing is
+/// written; an empty `buf` is the question "how many", answered without the
+/// records. Between the two calls the machine can change, so a caller sizes
+/// from the answer and asks again when refused.
+///
+/// `syscap` must carry [`crate::handle::Rights::INVENTORY`]: a capability
+/// without it is refused with a word, and a handle the caller does not hold
+/// ends it.
+pub fn device_inventory(
+    syscap: RawHandle,
+    buf: &mut [crate::inventory::RawRecord],
+) -> Result<usize, SyscallError> {
+    check(syscall(
+        SYS_DEVICE_INVENTORY,
+        syscap.0 as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    ))
+    .map(|n| n as usize)
 }
 
 /// Sleep for the given number of nanoseconds.

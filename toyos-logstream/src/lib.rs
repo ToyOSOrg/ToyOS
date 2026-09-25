@@ -47,8 +47,12 @@ pub const CARRIER_LEAVING: &str =
     "logd: netd is being replaced, and readers are turned away until the next one serves";
 
 /// The name of the port a reader on this machine asks `logd` for the log on;
-/// the answer is the read end of a pipe the log is written into.
+/// the answer is the read end of a pipe the log is written into. The same port
+/// answers `inspect`, so a reader says which it wants ([`READ`]).
 pub const SERVICE: &str = "log";
+
+/// A reader's request on [`SERVICE`]: a bare frame, answered by [`SERVED`].
+pub const READ: u32 = 3;
 
 /// The manifest's name for the program that is the log: init endows it the
 /// [`ORIGINS`] acceptor and gives it no pipe, since its own lines are its to

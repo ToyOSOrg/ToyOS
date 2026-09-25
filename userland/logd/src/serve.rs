@@ -32,7 +32,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use toyos::ipc::Connection;
-use toyos::port::Acceptor;
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::SyscallError;
@@ -89,9 +88,10 @@ struct Shared {
 }
 
 impl Hub {
-    /// Start serving: the network where the manifest gave this program netd,
-    /// and this machine where it gave it the [`SERVICE`](toyos_logstream::SERVICE) port.
-    pub fn start(cap: usize, boot_local: Option<u64>, local: Option<Acceptor>) -> Self {
+    /// Start serving the network, where the manifest gave this program netd.
+    /// A reader on this machine is handed over by the `log` port's thread
+    /// ([`Hub::read`]).
+    pub fn start(cap: usize, boot_local: Option<u64>) -> Self {
         let shared = Arc::new(Shared {
             replay: Mutex::new(Replay::new(cap)),
             grew: Condvar::new(),
@@ -112,14 +112,20 @@ impl Hub {
                 .spawn(move || serve_network(&network, &told))
                 .expect("logd: the network server's thread could not be started");
         }
-        if let Some(acceptor) = local {
-            let here = Arc::clone(&shared);
-            std::thread::Builder::new()
-                .name("log-serve-local".into())
-                .spawn(move || serve_local(&here, &acceptor))
-                .expect("logd: the local server's thread could not be started");
-        }
         Self { shared, carrier }
+    }
+
+    /// Whether this boot's log is served on the network at all.
+    pub fn network(&self) -> bool {
+        self.carrier.is_some()
+    }
+
+    /// A reader on this machine that asked for the log: it gets the read end
+    /// of a pipe of its own, which the log is written into.
+    pub fn read(&self, conn: &Connection) {
+        let end = self.shared.replay.lock().expect("logd: the replay is poisoned").end();
+        let Some(pipe) = hand_over(conn, end) else { return };
+        admit(&self.shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink::new(pipe));
     }
 
     /// The lines the file has just taken, for every reader.
@@ -232,23 +238,6 @@ fn bind_port() -> Option<std::net::TcpListener> {
             say!("logd: cannot serve this boot's log on port {PORT}: {e}");
             None
         }
-    }
-}
-
-/// Accept readers on this machine: each gets the read end of a pipe of its
-/// own, which the log is written into.
-fn serve_local(shared: &Arc<Shared>, acceptor: &Acceptor) {
-    loop {
-        let conn = match acceptor.accept() {
-            Ok(conn) => conn,
-            Err(e) => {
-                say!("logd: the local log service ended: {e:?}");
-                return;
-            }
-        };
-        let end = shared.replay.lock().expect("logd: the replay is poisoned").end();
-        let Some(pipe) = hand_over(&conn, end) else { continue };
-        admit(shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink::new(pipe));
     }
 }
 

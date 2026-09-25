@@ -50,6 +50,7 @@ mod nmi_gate;
 mod block;
 mod durability;
 mod gpt;
+mod inventory;
 mod page_cache;
 mod rollback;
 mod rootfs;
@@ -431,14 +432,14 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     let t_storage = clock::nanos_since_boot();
 
-    let ecam_base = acpi::find_ecam_base(kernel_args.rsdp_addr)
+    let (ecam_base, pci_segment) = acpi::find_ecam_base(kernel_args.rsdp_addr)
         .expect("ACPI: failed to find ECAM base address");
     let ecam = mm::paging::map_mmio(ecam_base, 256 * 32 * 8 * 4096, MmioPolicy::Uncacheable);
     let pci_devices = pci::enumerate(&ecam);
     // Before any driver `init`: this sizes every BAR on the machine, and the
     // spec's probe takes memory decode off the function it is sizing for the
     // length of it. Nothing has bound yet, so nothing is mid-transfer.
-    pcidev::publish(&pci_devices, maps, kernel_args.root_bridge_windows());
+    pcidev::publish(&pci_devices, pci_segment, maps, kernel_args.root_bridge_windows());
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
         drivers::virtio::cap_selftest();

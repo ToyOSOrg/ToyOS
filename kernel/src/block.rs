@@ -269,7 +269,6 @@ pub fn open(id: DeviceId) -> Option<Handle> {
     DEVICES.lock().get(&id).cloned()
 }
 
-#[cfg(feature = "boot-actuators")]
 pub fn registered() -> alloc::vec::Vec<Handle> {
     DEVICES.lock().values().cloned().collect()
 }
@@ -288,6 +287,13 @@ impl Handle {
     /// lives, for a writer that holds no view of it.
     pub fn lock(&self) -> Locked<'_> {
         Locked { dev: self.0.dev.lock(), device: &self.0, writer: Writer::Unspanned }
+    }
+
+    /// Who holds exactly blocks `first..end` of this device, from the holds
+    /// every view takes: the record [`Partition::of`] refuses against, so no
+    /// copy of it can disagree.
+    pub fn holder(&self, first: u64, end: u64) -> Option<Holder> {
+        self.0.holds.lock().holder_of(first, end)
     }
 
     /// Whether writes this device's disk lost by the count `losses` are
@@ -411,6 +417,32 @@ pub enum ViewRefused {
     OffDevice,
     /// A block of it is already held.
     Held(Holder),
+}
+
+/// Why [`span_blocks`] found no whole-block span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpanRefused {
+    /// The LBA range does not fit a byte offset or length in `u64`.
+    Overflow,
+    /// The byte range does not begin or end on a [`PAGE_SIZE`] boundary,
+    /// carried along so a caller that logs can name what it computed.
+    NotWhole { start_bytes: u64, len_bytes: u64 },
+}
+
+/// A partition's `(start_lba, lba_count)`, in its device's `lba_bytes`-byte
+/// logical blocks, converted to the [`PAGE_SIZE`] blocks every [`Partition`]
+/// view is made in. The one spelling of that conversion every caller that
+/// makes or reports a view agrees with bit-for-bit — a second copy that
+/// drifts from this one would let a held span read as free, or the reverse.
+pub fn span_blocks(start_lba: u64, lba_count: u64, lba_bytes: u32) -> Result<(u64, u64), SpanRefused> {
+    let lba = u64::from(lba_bytes);
+    let (Some(start), Some(len)) = (start_lba.checked_mul(lba), lba_count.checked_mul(lba)) else {
+        return Err(SpanRefused::Overflow);
+    };
+    if start % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 {
+        return Err(SpanRefused::NotWhole { start_bytes: start, len_bytes: len });
+    }
+    Ok((start / PAGE_SIZE, len / PAGE_SIZE))
 }
 
 /// One consumer's view of one span of a device, in whole [`BlockDevice`] blocks:

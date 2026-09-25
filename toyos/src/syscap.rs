@@ -1,11 +1,11 @@
 //! The capability whose whole authority is in the rights on the handle.
 //!
-//! Five things are reachable no other way — minting a device claim, entering
+//! Some things are reachable no other way — minting a device claim, entering
 //! the real-time band, turning a pid into a process handle, listing every
-//! process in the machine, and taking its power away — off, or back to
-//! firmware — and each is one bit on a handle to this. The kernel makes exactly
-//! one at boot, for `/bin/init`, so the set of processes that can ever do any
-//! of the five is exactly what init endowed.
+//! process in the machine, reading what the machine is made of, and taking its
+//! power away, off or back to firmware — and each is one bit on a handle to
+//! this. The kernel makes exactly one at boot, for `/bin/init`, so the set of
+//! processes that can ever do any of them is exactly what init endowed.
 
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, DeviceRequest, DeviceType, SyscallError};
@@ -102,6 +102,20 @@ impl SysCap {
     /// capability is not needed for and is not consulted about.
     pub fn roster(&self, buf: &mut [u8]) -> usize {
         syscall::sysinfo(self.0.raw(), buf)
+    }
+
+    /// Every `toyos_abi::inventory` record the machine has, into `buf`;
+    /// answers how many. An empty `buf` asks how many there are, and a `buf`
+    /// too short for all of them is refused whole
+    /// ([`SyscallError::ResourceExhausted`]) — see
+    /// [`syscall::device_inventory`].
+    ///
+    /// Needs [`Rights::INVENTORY`].
+    pub fn inventory(
+        &self,
+        buf: &mut [toyos_abi::inventory::RawRecord],
+    ) -> Result<usize, SyscallError> {
+        syscall::device_inventory(self.0.raw(), buf)
     }
 
     /// A second handle to this capability carrying **less**.

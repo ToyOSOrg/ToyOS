@@ -18,6 +18,7 @@
 //! | [`client`] | one stream: its ring, its ramp, and how it ended |
 //! | [`command`] | the ring the control thread hands the mix thread |
 //! | [`control`] | the connections, the framing, and what a client may ask for |
+//! | [`inspect`] | what a reader of `inspect` is told, and the mix loop's side of it |
 //! | [`mix`] | the two loops — a device's, and the null sink's |
 //! | [`ring`] | the lock-free ring every hand-off to or from the mix thread is |
 //! | [`say`] | the one thread that writes soundd's output, so no other waits on it |
@@ -52,6 +53,7 @@ mod client;
 mod command;
 mod control;
 mod hda;
+mod inspect;
 mod mix;
 mod ring;
 mod say;
@@ -59,6 +61,7 @@ mod virtio;
 
 use backend::{Backend, HdaBackend, VirtioBackend};
 use command::CommandRing;
+use inspect::{Device, Published, State};
 use control::control_thread;
 use mix::{mix_thread, null_sink_thread};
 
@@ -116,6 +119,7 @@ fn main() {
 fn run_virtio(acceptor: Acceptor, virtio: virtio::Virtio, rate: u32, channels: u8) {
     run_with_device(
         acceptor,
+        "virtio-sound",
         &mut VirtioBackend { virtio },
         toyos_abi::virtio_sound::PERIODS,
         rate,
@@ -137,6 +141,7 @@ fn run_hda(acceptor: Acceptor, hda: hda::Hda, channels: u8) {
 
     run_with_device(
         acceptor,
+        "hda",
         &mut HdaBackend { hda, buffers, period_bytes },
         num_buffers,
         toyos_hda::config::RATE,
@@ -147,6 +152,7 @@ fn run_hda(acceptor: Acceptor, hda: hda::Hda, channels: u8) {
 
 fn run_with_device(
     acceptor: Acceptor,
+    kind: &'static str,
     backend: &mut dyn Backend,
     num_buffers: usize,
     device_sample_rate: u32,
@@ -177,8 +183,17 @@ fn run_with_device(
 
     let cmd_ring = Arc::new(CommandRing::new());
     let cmd_pipe = syscall::pipe().expect("soundd: failed to create the command pipe");
+    let published = Arc::new(Published::new(State::Suspended));
+    let device = Device {
+        kind,
+        rate: device_sample_rate,
+        channels: device_channels,
+        period_frames: device_period_frames as u32,
+        buffers: slot_count,
+    };
 
     let cmd_ring2 = cmd_ring.clone();
+    let published2 = published.clone();
     std::thread::Builder::new()
         .name("soundd-ctrl".into())
         .spawn(move || {
@@ -192,6 +207,8 @@ fn run_with_device(
                 device_period_frames as u32,
                 slot_count,
                 ramp_frames,
+                &device,
+                &published2,
             );
         })
         .expect("soundd: failed to spawn control thread");
@@ -199,6 +216,7 @@ fn run_with_device(
     mix_thread(
         backend,
         &cmd_ring,
+        &published,
         cmd_pipe.read,
         num_buffers,
         device_sample_rate,
@@ -224,8 +242,17 @@ fn run_null_sink(acceptor: Acceptor) {
 
     let cmd_ring = Arc::new(CommandRing::new());
     let cmd_pipe = syscall::pipe().expect("soundd: failed to create the command pipe");
+    let published = Arc::new(Published::new(State::Idle));
+    let device = Device {
+        kind: "null",
+        rate: device_sample_rate,
+        channels: device_channels,
+        period_frames: device_period_frames as u32,
+        buffers: slot_count,
+    };
 
     let cmd_ring2 = cmd_ring.clone();
+    let published2 = published.clone();
     std::thread::Builder::new()
         .name("soundd-ctrl".into())
         .spawn(move || {
@@ -239,12 +266,15 @@ fn run_null_sink(acceptor: Acceptor) {
                 device_period_frames as u32,
                 slot_count,
                 ramp_frames,
+                &device,
+                &published2,
             );
         })
         .expect("soundd: failed to spawn control thread");
 
     null_sink_thread(
         &cmd_ring,
+        &published,
         cmd_pipe.read,
         device_sample_rate,
         device_channels,

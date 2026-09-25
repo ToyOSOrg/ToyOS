@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "toyos-abi"
-version = "0.9.0"
+version = "0.10.0"
 
 [[package]]
 name = "toyos-acpi"

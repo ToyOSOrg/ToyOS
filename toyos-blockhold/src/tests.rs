@@ -271,3 +271,21 @@ fn every_interleaving_tells_each_loss_to_the_blocks_it_touched() {
     let states = seen.len();
     assert!(states > 10_000, "{states} states is not the space the model claims");
 }
+
+/// A span's holder is asked by the span: a released one, a neighbour's and a
+/// part of a held one are no hold of it.
+#[test]
+fn a_holder_is_the_hold_of_exactly_that_span() {
+    let mut holds = Holds::new();
+    holds.hold(0, 8, 'K').unwrap();
+    holds.hold(8, 16, 'C').unwrap();
+    assert_eq!(holds.holder_of(0, 8), Some('K'));
+    assert_eq!(holds.holder_of(8, 16), Some('C'));
+    assert_eq!(holds.holder_of(0, 4), None, "part of a hold");
+    assert_eq!(holds.holder_of(0, 16), None, "two holds");
+    assert_eq!(holds.holder_of(16, 24), None, "nobody's");
+    // Released owing a report: its blocks keep the account and have no holder.
+    holds.wrote(Writer::Span(8), 0);
+    holds.release(8);
+    assert_eq!(holds.holder_of(8, 16), None);
+}

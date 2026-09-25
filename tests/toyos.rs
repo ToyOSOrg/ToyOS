@@ -319,6 +319,11 @@ const RUST_SKIP: &[&str] = &[
     "gsbase_locked",
     // Needs netd with a NIC. `netd_connection_caps` runs it on tests/netcase.
     "netd_caps",
+    // Need every owner `inspect` reads, which only tests/inspectcase runs.
+    // `inspect_reads_its_owners` runs all three there.
+    "inspect_denied",
+    "inspect_plays",
+    "inventory_bounds",
     // Same reason, same config: `netd_hostile_peer` runs it there.
     "netd_hostile_peer",
     // Needs a `launcher` connector, which `tests/testcases`'s test-runner has
@@ -790,6 +795,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // a slower machine moves it.
     ("lan_no_lease", Sched::Parallel, Tier::Nightly),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
+    // `inspect` against the four owners on the one boot that runs them all,
+    // with the negative control's binary run on it too. Every verdict is the
+    // set of lines a selector printed; no clock in any.
+    ("inspect_reads_its_owners", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
     // no clock in it.
@@ -14222,6 +14231,10 @@ fn run_machine_test(
             );
             eprintln!("  [netcase] {}", spoke.trim());
             Ok(())
+        }
+        "inspect_reads_its_owners" => {
+            let mut qemu = common::inspect::boot(rust_bins)?;
+            common::inspect::reads_its_owners(&mut qemu)
         }
         "netd_listener_forgery" => {
             // The netcase boot (the only NIC-under-netd one). The client binds

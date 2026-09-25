@@ -26,6 +26,7 @@ use toyos_mixer::{
 use crate::backend::{Backend, Pipeline};
 use crate::client::{mix_client, ClientStream, Departure};
 use crate::command::{CommandRing, MixCommand};
+use crate::inspect::{Published, State, Totals};
 use crate::NULL_SINK_BUFFERS;
 
 const STATS_INTERVAL_NANOS: u64 = 2_000_000_000;
@@ -46,6 +47,15 @@ fn report(stats: &MixStats, clients: usize) {
         stats.max_wake_lat_ns / 1_000, stats.max_batch, clients, stats.deferred,
         stats.starve_max, stats.worst.irq_late_ns / 1_000, stats.worst.pickup_ns / 1_000,
         stats.worst.empty, stats.worst.batch, stats.late_wakes);
+}
+
+/// Close one reporting window: say it, add it to the running totals `inspect`
+/// reads, and start the next. The only place a reported window is reset, so the
+/// totals are exactly the sum of what the console said.
+fn flush(stats: &mut MixStats, totals: &mut Totals, clients: usize) {
+    report(stats, clients);
+    totals.fold(stats);
+    *stats = MixStats::default();
 }
 
 /// Signal every client before the wait so priority inheritance can fill their
@@ -120,6 +130,7 @@ fn retain_active(streams: &mut Vec<ClientStream>) {
 pub(crate) fn mix_thread(
     backend: &mut dyn Backend,
     cmd_ring: &CommandRing,
+    published: &Published,
     cmd_pipe_read: RawHandle,
     num_buffers: usize,
     device_sample_rate: u32,
@@ -225,6 +236,7 @@ pub(crate) fn mix_thread(
     // site, which must not mistake soundd's own restraint for a device stall.
     let mut deferred_last: u32 = 0;
     let mut stats = MixStats::default();
+    let mut totals = Totals::default();
     let mut next_stats_ns = syscall::clock_nanos() + STATS_INTERVAL_NANOS;
     let mut idle_wakes: u32 = 0;
 
@@ -601,16 +613,16 @@ pub(crate) fn mix_thread(
         // shorter than two windows that tail is most of it.
         let now_ns = syscall::clock_nanos();
         if was_streaming && streams.is_empty() {
-            report(&stats, 0);
-            stats = MixStats::default();
+            flush(&mut stats, &mut totals, 0);
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         } else if now_ns >= next_stats_ns {
             if !streams.is_empty() {
-                report(&stats, streams.len());
-                stats = MixStats::default();
+                flush(&mut stats, &mut totals, streams.len());
             }
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         }
+        let state = if started { State::Running } else { State::Suspended };
+        published.publish(&totals, &stats, streams.len(), state);
     }
 }
 
@@ -633,6 +645,7 @@ pub(crate) fn mix_thread(
 /// output, so there is nothing for the band to protect.
 pub(crate) fn null_sink_thread(
     cmd_ring: &CommandRing,
+    published: &Published,
     cmd_pipe_read: RawHandle,
     device_sample_rate: u32,
     device_channels: u16,
@@ -654,6 +667,7 @@ pub(crate) fn null_sink_thread(
     const TOKEN_CMD: u64 = u64::MAX - 2;
 
     let mut stats = MixStats::default();
+    let mut totals = Totals::default();
     let mut next_stats_ns = syscall::clock_nanos() + STATS_INTERVAL_NANOS;
     let mut idle_wakes: u32 = 0;
     // The virtual playout grid: the wall-clock instant the next period is due.
@@ -770,16 +784,57 @@ pub(crate) fn null_sink_thread(
         // silent about being discarded (#106's status tool reads one shape).
         let now_ns = syscall::clock_nanos();
         if was_streaming && streams.is_empty() {
-            report(&stats, 0);
-            stats = MixStats::default();
+            flush(&mut stats, &mut totals, 0);
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
             say!("soundd: null sink idle");
         } else if now_ns >= next_stats_ns {
             if !streams.is_empty() {
-                report(&stats, streams.len());
-                stats = MixStats::default();
+                flush(&mut stats, &mut totals, streams.len());
             }
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         }
+        let state = if streams.is_empty() { State::Idle } else { State::Streaming };
+        published.publish(&totals, &stats, streams.len(), state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(submitted: u32, underruns: u32, drains: u32, late_wakes: u32) -> MixStats {
+        let mut stats = MixStats::default();
+        stats.submitted = submitted;
+        stats.underruns = underruns;
+        stats.drains = drains;
+        stats.late_wakes = late_wakes;
+        stats
+    }
+
+    /// `flush` on two windows with known counts, then `publish` with a third,
+    /// still-open one: what `inspect` reads back must be exactly the sum of
+    /// all three, once each — not a window double-counted, and not one lost to
+    /// a window `flush` failed to reset.
+    ///
+    /// The same `MixStats` is reused across both `flush` calls, as the mix
+    /// loop's own is across its wakes: a `flush` that folded the first window
+    /// but left it in `stats` would fold it a second time into the second.
+    #[test]
+    fn published_totals_are_exactly_the_sum_of_every_window() {
+        let mut totals = Totals::default();
+
+        let mut stats = window(10, 1, 2, 3);
+        flush(&mut stats, &mut totals, 0);
+        stats.submitted += 20;
+        stats.underruns += 4;
+        stats.drains += 5;
+        stats.late_wakes += 6;
+        flush(&mut stats, &mut totals, 0);
+
+        let open = window(7, 8, 9, 10);
+        let published = Published::new(State::Running);
+        published.publish(&totals, &open, 1, State::Running);
+
+        assert_eq!(published.published(), (1 + 4 + 8, 2 + 5 + 9, 10 + 20 + 7, 3 + 6 + 10));
     }
 }

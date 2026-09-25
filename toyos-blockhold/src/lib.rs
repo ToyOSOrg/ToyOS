@@ -215,6 +215,12 @@ impl<H: Copy> Holds<H> {
         }
     }
 
+    /// Who holds exactly `first..end`, or `None` when no live hold is that
+    /// span: a hold of part of it, or of more, is not a hold of it.
+    pub fn holder_of(&self, first: u64, end: u64) -> Option<H> {
+        self.spans.iter().find(|span| span.first == first && span.end == end).and_then(|span| span.holder)
+    }
+
     /// Whether writes the disk lost by the count `losses` are reported to no
     /// writer yet.
     pub fn untold(&self, losses: u64) -> bool {

@@ -149,16 +149,22 @@ fn refuse<T>(what: &str, error: TableError) -> Option<T> {
     None
 }
 
-/// Given the RSDP address from UEFI, parse XSDT -> MCFG -> return ECAM base address.
-pub fn find_ecam_base(rsdp_addr: u64) -> Option<u64> {
+/// Given the RSDP address from UEFI, parse XSDT -> MCFG -> return the ECAM
+/// base address and the PCI segment group it serves.
+pub fn find_ecam_base(rsdp_addr: u64) -> Option<(u64, u16)> {
     log!("ACPI: RSDP at {rsdp_addr:#x}");
     let (mcfg, base) = match toyos_acpi::ecam_base(DirectPhys, rsdp_addr) {
         Ok(found) => found,
         Err(e) => return refuse("MCFG", e),
     };
+    // PCI Firmware Specification 3.3, Table 4-3: the entry's segment group
+    // follows its base, inside the entry `ecam_base` already bounded.
+    let segment = mcfg
+        .u16_at(toyos_acpi::MCFG_FIRST_ENTRY + 8)
+        .expect("ecam_base bounded the whole first allocation structure");
     log!("ACPI: MCFG found at {:#x}", mcfg.base());
     log!("ACPI: ECAM base address: {base:#x}");
-    Some(base)
+    Some((base, segment))
 }
 
 /// Parse FADT and DSDT to prepare for ACPI shutdown.

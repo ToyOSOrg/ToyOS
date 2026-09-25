@@ -173,7 +173,13 @@ enum What {
     /// One step of a HID endpoint's recovery; `seq` carries where it is, `issued` names the command for failure lines.
     Recovering { slot_id: u8, seq: Recovery, issued: &'static str },
     /// Enable Slot for a port that finished reset; there is no device until the controller answers.
-    SlotWanted { port_idx: u8, speed: u8, packet: u16, seq: toyos_xhci::enumerate::Enumeration },
+    SlotWanted {
+        port_idx: u8,
+        speed: u8,
+        usb_speed: toyos_abi::inventory::UsbSpeed,
+        packet: u16,
+        seq: toyos_xhci::enumerate::Enumeration,
+    },
     /// One act of a device's enumeration.
     Enumerating(device::Enumerating),
 }
@@ -1484,8 +1490,8 @@ impl XhciController {
                 What::Recovering { slot_id, seq, issued } => {
                     self.recovery_stepped(slot_id, seq, issued, outcome)
                 }
-                What::SlotWanted { port_idx, speed, packet, seq } => {
-                    device::slot_answered(self, port_idx, speed, packet, seq, outcome)
+                What::SlotWanted { port_idx, speed, usb_speed, packet, seq } => {
+                    device::slot_answered(self, port_idx, speed, usb_speed, packet, seq, outcome)
                 }
                 What::Enumerating(state) => device::stepped(self, state, outcome),
             }
@@ -1764,6 +1770,41 @@ pub struct StorageGeometry {
     pub logical_block_bytes: u32,
     /// The same capacity in the 4 KiB blocks `BlockDevice` is written in.
     pub blocks: u64,
+}
+
+/// Every device a controller bound, as `SYS_DEVICE_INVENTORY` records it.
+pub fn inventory() -> Vec<toyos_abi::inventory::Usb> {
+    use toyos_abi::inventory::{Usb, UsbFunction};
+    let segment = crate::pcidev::segment();
+    let mut out = Vec::new();
+    for ctrl in XHCI.lock().iter() {
+        let controller = crate::pcidev::addr_of(segment, crate::pcidev::requester(&ctrl.pci));
+        for hid in &ctrl.devices {
+            out.push(Usb {
+                controller,
+                port: hid.port_idx + 1,
+                speed: hid.speed,
+                vendor: hid.usb.vendor,
+                product: hid.usb.product,
+                function: match hid.role {
+                    hid::HidRole::Keyboard => UsbFunction::Keyboard,
+                    hid::HidRole::Pointer(_) => UsbFunction::Pointer,
+                },
+            });
+        }
+        for disk in ctrl.msc.iter().filter_map(|block| block.disk) {
+            let (port_idx, speed, usb) = disk.dev.inventory();
+            out.push(Usb {
+                controller,
+                port: port_idx + 1,
+                speed,
+                vendor: usb.vendor,
+                product: usb.product,
+                function: UsbFunction::Storage,
+            });
+        }
+    }
+    out
 }
 
 /// How many disk numbers this machine has issued; every value below it names a disk bound at some point in this boot.

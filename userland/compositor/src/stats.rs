@@ -71,3 +71,39 @@ impl FrameStats {
         );
     }
 }
+
+/// Every reported window summed, for `inspect`: the console says a window at a
+/// time and this is what they add up to. No new measurement — the same four
+/// counters [`FrameStats::record`] fills.
+#[derive(Default, Clone, Copy)]
+pub struct FrameTotals {
+    frames: u64,
+    rects: u64,
+    damage_px: u64,
+    composite_ns: u64,
+}
+
+impl FrameTotals {
+    /// Add a window the console has just reported, before it is reset.
+    pub fn fold(&mut self, window: &FrameStats) {
+        *self = self.plus(window);
+    }
+
+    /// These totals with the still-open window on top: where the compositor is
+    /// now.
+    pub fn plus(self, window: &FrameStats) -> Self {
+        Self {
+            frames: self.frames + u64::from(window.frames),
+            rects: self.rects + u64::from(window.rects),
+            damage_px: self.damage_px + window.damage_px,
+            composite_ns: self.composite_ns + window.composite_ns_total,
+        }
+    }
+
+    pub fn inspect(&self, snap: &mut toyos_inspect::Snapshot) {
+        snap.put("frames.composited", self.frames);
+        snap.put("frames.rects", self.rects);
+        snap.put("frames.damage_px", self.damage_px);
+        snap.put("frames.composite_us", self.composite_ns / 1_000);
+    }
+}

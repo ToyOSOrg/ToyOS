@@ -45,7 +45,9 @@
 //! One `SysCap` duplicate carrying `Rights::LOG | Rights::WAIT`, which its
 //! manifest row asks for by the name `logread`; the origins acceptor init
 //! endows it; and what its row adds — a `netd` connector to serve the network,
-//! and the `log` acceptor to serve this machine. With the first it may read
+//! and the `log` acceptor, where this machine's readers ask for the log and
+//! `inspect` asks where it is going ([`inspect`]'s module, which grants
+//! nothing). With the first it may read
 //! every record every CPU wrote and park on the readiness source when there is
 //! nothing new. It claims no device, opens no compositor connection and can
 //! name no process. Writing files is ambient — a known residual of the
@@ -87,6 +89,7 @@ macro_rules! say {
     }};
 }
 
+mod inspect;
 mod policy;
 mod serve;
 mod store;
@@ -371,8 +374,13 @@ fn main() {
         ),
     }
 
-    let hub = serve::Hub::start(REPLAY_BYTES, boot_local, endow::acceptor(SERVICE));
+    let hub = Arc::new(serve::Hub::start(REPLAY_BYTES, boot_local));
     let echo = Echo::start();
+
+    let published = Arc::new(inspect::Published::new(hub.network()));
+    if let Some(acceptor) = endow::acceptor(SERVICE) {
+        inspect::serve(acceptor, Arc::clone(&published), Arc::clone(&hub));
+    }
 
     let mut tail = LogTail::new();
     let mut buf = vec![Record::EMPTY; BATCH];
@@ -389,6 +397,14 @@ fn main() {
     // rather than once per slow batch.
     let mut degraded = false;
     loop {
+        let state = match (&volume, retrying_since, degraded) {
+            (None, _, _) => inspect::State::ConsoleOnly,
+            (Some(_), Some(_), _) => inspect::State::Retrying,
+            (Some(_), None, true) => inspect::State::Degraded,
+            (Some(_), None, false) => inspect::State::Writing,
+        };
+        published.publish(volume.as_ref(), state, tail.lost());
+
         // **Armed before anything is read**, in the shape every reader of an
         // edge needs: what arrives after a read and before the park has a
         // registration waiting for it. `min_complete` 0 with no timeout
@@ -855,6 +871,14 @@ pub(crate) fn stamp(boot_local: Option<u64>, at_ns: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `log` port answers a reader and `inspect` on one acceptor, told
+    /// apart by the request's frame type alone.
+    #[test]
+    fn readers_and_inspect_share_one_port_and_never_one_request() {
+        assert_eq!(toyos_inspect::LOG.port, SERVICE);
+        assert_ne!(toyos_logstream::READ, toyos_inspect::MSG_INSPECT);
+    }
 
     /// **A LAN host cannot grow logd by connecting.** Each connection is a
     /// line or two from a reader thread; past [`THEIRS_LINES`] a line is

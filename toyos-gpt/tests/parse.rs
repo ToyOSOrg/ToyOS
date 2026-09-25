@@ -763,3 +763,24 @@ fn a_tiny_entry_array_cannot_buy_the_backup_header() {
         })
     );
 }
+
+/// The whole table, in entry order: every used entry and none of the unused
+/// ones, whatever its type.
+#[test]
+fn a_list_is_every_used_entry_in_order() {
+    let mut img = Builder::default().build();
+    let mut out = [toyos_gpt::Partition {
+        index: 0,
+        type_guid: Guid::ZERO,
+        unique_guid: Guid::ZERO,
+        first_lba: 0,
+        last_lba: 0,
+    }; 8];
+    let scan = toyos_gpt::list(&mut img, &mut out).expect("the table parses");
+    assert_eq!((scan.matched, scan.listed, scan.used_entries), (4, 4, 4));
+    let found: Vec<(u32, Guid)> = out[..scan.listed].iter().map(|p| (p.index, p.unique_guid)).collect();
+    assert_eq!(
+        found,
+        vec![(0, guid(0xA1)), (1, guid(0xB2)), (2, guid(0xC3)), (3, guid(0xD4))]
+    );
+}

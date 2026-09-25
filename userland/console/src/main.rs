@@ -37,7 +37,7 @@ use toyos::port::{self, Connector};
 use toyos::surface::{self, Delivery, Host, Notice};
 use toyos::{FramebufferDev, Keyboard, Pipe};
 use toyos_abi::syscall::{DeviceType, SyscallError};
-use toyos_logstream::{Lines, SERVED, SERVICE};
+use toyos_logstream::{Lines, READ, SERVED, SERVICE};
 use window::Screen;
 
 const FONT: &str = "/system/share/fonts/JetBrainsMono-Regular-8x16.font";
@@ -76,11 +76,11 @@ struct Log {
 }
 
 impl Log {
-    /// Ask `logd`. A blocking read of one frame from the server this image
-    /// names, which answers as it accepts.
+    /// Ask `logd`: one request, and a blocking read of its one answer.
     fn subscribe() -> Result<Self, String> {
         let asked_ms = toyos_abi::syscall::clock_nanos() / 1_000_000;
         let conn = endow::service(SERVICE).map_err(|e| format!("no `{SERVICE}` service: {e:?}"))?;
+        conn.signal(READ).map_err(|e| format!("logd would not take the request: {e:?}"))?;
         let header = conn.recv_header().map_err(|e| format!("logd did not answer: {e:?}"))?;
         if header.msg_type != SERVED {
             return Err(format!("logd answered frame type {}", header.msg_type));

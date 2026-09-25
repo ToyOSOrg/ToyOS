@@ -9,6 +9,7 @@ sprite = { path = "../sprite" }
 toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
 toyos-desktop = { path = "../../toyos-desktop" }
+toyos-inspect = { path = "../../toyos-inspect" }
 toyos-font = { path = "../toyos-font" }
 toyos-manifest = { path = "../../toyos-manifest" }
 toyos-window = { path = "../toyos-window" }
