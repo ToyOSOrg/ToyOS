@@ -133,7 +133,7 @@ mod tests {
 
         let now = SystemTime::now();
         let removed = sweep(&tmp, |pid| pid == 10, now);
-        assert_eq!(removed, [killed.clone()], "only the killed run goes today");
+        assert_eq!(removed, [killed], "only the killed run goes today");
         assert!(live.exists() && red_today.exists() && red_old.exists());
 
         let tomorrow = now + KEEP_FAILED + Duration::from_secs(1);
