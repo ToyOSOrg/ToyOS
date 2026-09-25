@@ -22,6 +22,8 @@ use super::cancelled;
 use super::handles::{demand_syscap, handle_result};
 
 pub(super) fn sys_thread_exit(code: i32) -> u64 {
+    #[cfg(feature = "boot-actuators")]
+    crate::quiesce::last::hold(crate::quiesce::last::Last::Exit);
     process::thread_exit(code);
 }
 
@@ -179,6 +181,8 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
 }
 
 pub(super) fn sys_nanosleep(nanos: u64) -> u64 {
+    #[cfg(feature = "boot-actuators")]
+    crate::quiesce::last::hold(crate::quiesce::last::Last::Park);
     // The ABI's relative span becomes an absolute Deadline here, and only here.
     let deadline = Deadline::at(crate::clock::now() + Duration::from_nanos(nanos));
     // Armed on its own thread with no subject: nothing posts, only the deadline fires it.

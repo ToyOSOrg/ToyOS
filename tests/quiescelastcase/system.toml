@@ -1,0 +1,13 @@
+# The boot `quiesce_wakes_on_the_last_park` and `quiesce_wakes_on_the_last_exit`
+# judge: its one job starts the two threads the kernel may hold and reboots.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+# `power` because the job ends the machine, `dup` because the runner passes a
+# duplicate of what it holds to the binary it spawns.
+[programs.test-runner]
+args = ["test_rs_quiesce_last"]
+syscap = ["dup", "power"]

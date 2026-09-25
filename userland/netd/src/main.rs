@@ -574,6 +574,21 @@ fn total_memory() -> u64 {
     u64::from_le_bytes(buf[0..8].try_into().unwrap())
 }
 
+/// Where this netd's socket ids start: at random, and never 0.
+///
+/// **A client holds a socket id across netd being replaced** (`toyos-swap`): it
+/// learns the old netd is gone when a request fails, and closing what it held
+/// is its first reaction. Every netd counting from 1 made that stale number
+/// another client's live socket in the new one. A random start makes two
+/// instances' ranges overlap only by a chance the size of their lengths over
+/// 2^32, which bounds the harm and does not remove it: an id is a number any
+/// client can name (`issues/isolation/netd-socket-ids-are-ambient.md`).
+fn first_socket_id() -> u32 {
+    let mut bytes = [0u8; 4];
+    toyos_abi::syscall::random(&mut bytes);
+    u32::from_le_bytes(bytes).max(1)
+}
+
 struct NetDaemon {
     sockets: HashMap<u32, SocketKind>,
     next_id: u32,
@@ -592,7 +607,7 @@ impl NetDaemon {
     fn new(dns_handle: SocketHandle, max_piped_connections: usize) -> Self {
         Self {
             sockets: HashMap::new(),
-            next_id: 1,
+            next_id: first_socket_id(),
             next_local_port: 49152,
             pending_udp_recvs: Vec::new(),
             pending_dns: Vec::new(),
@@ -624,7 +639,10 @@ impl NetDaemon {
 
     fn alloc_id(&mut self) -> u32 {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = match self.next_id.wrapping_add(1) {
+            0 => 1,
+            next => next,
+        };
         id
     }
 
@@ -677,6 +695,14 @@ impl NetDaemon {
                     socket_set.remove(handle);
                     if let Some(pos) = self.piped_connections.iter().position(|c| c.handle == handle) {
                         self.piped_connections.swap_remove(pos).close_all();
+                    }
+                    // A connect still waiting for its SYN-ACK names the
+                    // handle just removed, and the pass that would read it
+                    // next is a panic; its client is answered instead.
+                    if let Some(pos) =
+                        self.pending_piped_connects.iter().position(|c| c.handle == handle)
+                    {
+                        self.pending_piped_connects.swap_remove(pos).client.error(ERR_CONNECTION_REFUSED);
                     }
                 }
                 SocketKind::TcpListener(handle) => {

@@ -1143,7 +1143,9 @@ dependencies = [
  "toyos-logstream",
  "toyos-manifest",
  "toyos-mdns",
+ "toyos-quiesce",
  "toyos-sched",
+ "toyos-swap",
  "toyos-symbols",
  "toyos-tco",
  "toyos-userbound",
@@ -1264,6 +1266,10 @@ name = "toyos-ps2"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-quiesce"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-sched"
 version = "0.1.0"
 
@@ -1280,6 +1286,14 @@ version = "0.1.0"
 dependencies = [
  "rand",
  "toyos-sched",
+]
+
+[[package]]
+name = "toyos-swap"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "toyos-manifest",
 ]
 
 [[package]]

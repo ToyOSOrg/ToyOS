@@ -84,25 +84,39 @@ impl Hub {
 /// A machine whose manifest gives this program no netd serves nothing on the
 /// network, and says nothing about it: the row is the decision. A namespace
 /// without netd in it ends this thread at once.
+///
+/// **A listener is a registration netd holds, and a failed accept is netd no
+/// longer holding it** — netd was swapped or is gone. Asked again, the same
+/// listener answers the same error at once and for ever, so it is dropped and
+/// bound anew: through the same port, which init keeps open across a swap.
 fn serve_network(shared: &Arc<Shared>) {
-    let listener = match std::net::TcpListener::bind(("0.0.0.0", PORT)) {
-        Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => return,
-        Err(e) => {
-            say!("logd: cannot serve this boot's log on port {PORT}: {e}");
-            return;
-        }
-    };
-    say!("logd: serving this boot's log on port {PORT}");
+    let Some(mut listener) = bind_port() else { return };
     loop {
         let (stream, peer) = match listener.accept() {
             Ok(pair) => pair,
             Err(e) => {
-                say!("logd: the log's listener ended: {e}");
-                return;
+                say!("logd: the log's listener on port {PORT} failed ({e}); binding it again");
+                let Some(again) = bind_port() else { return };
+                listener = again;
+                continue;
             }
         };
         admit(shared, format!("{peer}"), Announce::Yes, stream);
+    }
+}
+
+/// The listener on [`PORT`], or `None` once this machine has none to offer.
+fn bind_port() -> Option<std::net::TcpListener> {
+    match std::net::TcpListener::bind(("0.0.0.0", PORT)) {
+        Ok(listener) => {
+            say!("logd: serving this boot's log on port {PORT}");
+            Some(listener)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => None,
+        Err(e) => {
+            say!("logd: cannot serve this boot's log on port {PORT}: {e}");
+            None
+        }
     }
 }
 

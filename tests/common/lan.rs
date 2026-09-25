@@ -671,10 +671,100 @@ pub fn lan_talk(
     Ok(())
 }
 
+/// A talking boot staged in front of one of QEMU's NICs: its log port
+/// forwarded and dialed as soon as this is staged, the key its image
+/// authorizes, and where its log partition sits in the image.
+pub(super) struct TalkBoot {
+    pub(super) case: std::path::PathBuf,
+    pub(super) stream: toyos_build::metaltalk::Stream,
+    pub(super) identity: super::ssh::Identity,
+    pub(super) image: std::path::PathBuf,
+    pub(super) scratch: std::path::PathBuf,
+    log_port: u16,
+    bench: super::logstream::Bench,
+    actuators: &'static [&'static str],
+    pub(super) start: usize,
+    pub(super) len: usize,
+}
+
+/// The talking boot's NIC: QEMU's 82574, the part whose register file the
+/// T14's I219 has.
+pub(super) const TALK_BENCH: super::logstream::Bench = super::logstream::Bench {
+    profile: qemu::Profile::E1000e,
+    config: TALK_QEMU_CONFIG,
+    device: "e1000e",
+};
+
+impl TalkBoot {
+    fn stage(name: &str) -> Result<Self, String> {
+        Self::stage_on(name, TALK_BENCH)
+    }
+
+    /// `bench.config`'s boot staged to authorize the lane's talking key; its
+    /// stream dials the forwarded port at once and keeps asking, so it is
+    /// already reading by the time the boot's `logd` opens it.
+    pub(super) fn stage_on(name: &str, bench: super::logstream::Bench) -> Result<Self, String> {
+        Self::stage_armed(name, bench, &[])
+    }
+
+    /// [`TalkBoot::stage_on`] on the test kernel, with `actuators` armed.
+    pub(super) fn stage_armed(
+        name: &str,
+        bench: super::logstream::Bench,
+        actuators: &'static [&'static str],
+    ) -> Result<Self, String> {
+        let case = super::compile::repo_root().join(bench.config);
+        let scratch = super::lane::dir().join(name);
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        let identity = super::ssh::Identity::mint(TALK_KEY)?;
+        let bytes = qemu::build_boot_image_carrying(
+            &case,
+            &[],
+            &[],
+            &[(super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes())],
+            actuators,
+        );
+        let image = super::lane::dir().join(format!("{name}.img"));
+        std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
+        let (start, len) = super::volumes::log_extent(&bytes, &image)?;
+        let log_port = qemu::free_host_port();
+        let peer = toyos_build::metaltalk::Peer::At(std::net::SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            log_port,
+        )));
+        // Resilient: a swap of netd under this stream leaves the old
+        // connection open with no FIN or reset, and the caller that knows to
+        // abandon it (`Stream::reconnect`) is answered with a fresh one.
+        let stream = toyos_build::metaltalk::Stream::connect_resilient(
+            peer,
+            &scratch.join(toyos_build::metal::READBACK_STREAM),
+            false,
+            TALK_CEILING,
+        )?;
+        Ok(Self { case, stream, identity, image, scratch, log_port, bench, actuators, start, len })
+    }
+
+    /// The boot's options, the NIC asked of the argv rather than assumed.
+    pub(super) fn options(&self) -> BootOptions {
+        let options = BootOptions {
+            profile: self.bench.profile,
+            boot_image: Some(qemu::Staged::Written(self.image.clone())),
+            log_port: Some(self.log_port),
+            kernel_params: self.actuators,
+            ..Default::default()
+        };
+        assert!(
+            qemu::profile_argv(&options).iter().any(|a| a.contains(self.bench.device)),
+            "[lan] this boot needs {} and the profile has none",
+            self.bench.device
+        );
+        options
+    }
+}
+
 /// Where this process writes the frames one boot put on its wire.
 fn wire_dump() -> std::path::PathBuf {
     let at = std::env::temp_dir().join(format!("toyos-lan-{}.pcap", std::process::id()));
     let _ = std::fs::remove_file(&at);
     at
 }
-

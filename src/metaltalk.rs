@@ -25,7 +25,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, ToSocketAddrs};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,10 @@ const CONNECT_WAIT: Duration = Duration::from_secs(5);
 /// it is an answer.
 const WAITED: Duration = Duration::from_secs(1);
 
+/// How long a resilient stream keeps dialing after its first connection: not
+/// [`Duration::MAX`], which overflows the clock a wait adds it to.
+const FOREVER: Duration = Duration::from_secs(365 * 24 * 3600);
+
 /// Where the stream is asked for.
 #[derive(Clone, Debug)]
 pub enum Peer {
@@ -66,7 +70,14 @@ pub enum Peer {
     At(SocketAddr),
 }
 
-/// The log as this host reads it.
+/// The record stream, as this host reads it: this host dials `logd`'s port and
+/// reads until the connection ends.
+///
+/// **Connection after connection, the newest replacing the one before it**
+/// ([`Stream::connect_resilient`]). `logd` serves the whole boot from its
+/// first line to every connection, so a reconnect replays lines this reader
+/// already has; [`read`] skips them rather than keeping them twice, so every
+/// line from every connection is one sequence in arrival order.
 #[derive(Clone)]
 pub struct Stream {
     shared: Arc<Shared>,
@@ -74,32 +85,65 @@ pub struct Stream {
 
 struct Shared {
     lines: Mutex<Vec<String>>,
-    state: Mutex<State>,
-    /// Woken when the state moves: connected, failed, ended.
+    /// The latest connection's peer.
+    peer: Mutex<Option<SocketAddr>>,
+    /// The connection currently being read, kept so [`Stream::reconnect`] can
+    /// force it closed: a swapped netd leaves it open with no FIN or reset, so
+    /// nothing but this host ever ends it.
+    current: Mutex<Option<TcpStream>>,
+    /// How many connections have been made.
+    connections: AtomicUsize,
+    /// The latest connection has ended and no other has been made since.
+    ended: AtomicBool,
+    /// How the latest connection ended and how long after it opened, once it
+    /// has.
+    end: Mutex<Option<End>>,
+    /// Lines a connection's end cut short, discarded rather than kept: a
+    /// reconnect's replay carries the same content whole.
+    torn: AtomicUsize,
+    /// Why no connection was ever made, once that is settled.
+    unopened: Mutex<Option<String>>,
+    /// Paired with no field of its own: every wait below re-reads whichever
+    /// field it cares about after taking this lock, so what it guards is
+    /// never more than a wake.
+    gate: Mutex<()>,
+    /// Woken by every change above.
     moved: Condvar,
-    /// Set to stop asking for a peer that has not answered.
+    /// Set to stop asking for a peer that has not answered, and to stop
+    /// reconnecting once the current connection ends.
     stop: AtomicBool,
 }
 
-#[derive(Default)]
-struct State {
-    peer: Option<SocketAddr>,
-    /// Why no connection was ever made.
-    unopened: Option<String>,
-    /// How the connection ended and how long after it opened, once it has.
-    end: Option<End>,
-}
-
 impl Stream {
-    /// Ask `peer` for its log within `by`, and read it on a thread of its own:
-    /// every line is appended to `file` as it arrives — a machine that dies
-    /// mid-boot leaves what it said on disk — and, with `echo`, printed.
+    /// Ask `peer` for its log within `by`, and read it on a thread of its own
+    /// until the connection ends: every line is appended to `file` as it
+    /// arrives — a machine that dies mid-boot leaves what it said on disk —
+    /// and, with `echo`, printed. One connection, never asked for again.
     pub fn connect(peer: Peer, file: &Path, echo: bool, by: Duration) -> Result<Self, String> {
-        let mut out =
-            std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        Self::dial(peer, file, echo, by, false)
+    }
+
+    /// [`Stream::connect`], asked for again for as long as this process runs
+    /// or until [`Stream::give_up`]: a connection that ends is a boot that
+    /// left and came back, never a reason to stop reading it.
+    pub fn connect_resilient(peer: Peer, file: &Path, echo: bool, by: Duration) -> Result<Self, String> {
+        Self::dial(peer, file, echo, by, true)
+    }
+
+    fn dial(peer: Peer, file: &Path, echo: bool, by: Duration, resilient: bool) -> Result<Self, String> {
+        let out = Arc::new(Mutex::new(
+            std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?,
+        ));
         let shared = Arc::new(Shared {
             lines: Mutex::new(Vec::new()),
-            state: Mutex::new(State::default()),
+            peer: Mutex::new(None),
+            current: Mutex::new(None),
+            connections: AtomicUsize::new(0),
+            ended: AtomicBool::new(false),
+            end: Mutex::new(None),
+            torn: AtomicUsize::new(0),
+            unopened: Mutex::new(None),
+            gate: Mutex::new(()),
             moved: Condvar::new(),
             stop: AtomicBool::new(false),
         });
@@ -107,123 +151,154 @@ impl Stream {
         std::thread::Builder::new()
             .name("metal-stream".into())
             .spawn(move || {
-                let conn = match open(&peer, by, &theirs.stop) {
-                    Ok(conn) => conn,
-                    Err(why) => {
-                        theirs.moved(|state| state.unopened = Some(why));
+                let mut bound = by;
+                loop {
+                    if theirs.stop.load(Ordering::SeqCst) {
                         return;
                     }
-                };
-                let at = conn.peer_addr().ok();
-                if echo {
-                    println!("  stream: reading {peer:?} at {at:?}");
-                }
-                theirs.moved(|state| state.peer = at);
-                let opened = Instant::now();
-                let mut reader = BufReader::new(conn);
-                let how = loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(0) => break "the peer closed it".to_string(),
-                        Err(e) => break e.to_string(),
-                        Ok(_) => {
-                            let _ = out.write_all(line.as_bytes());
-                            let _ = out.flush();
-                            if echo {
-                                print!("  stream| {line}");
-                                let _ = std::io::stdout().flush();
-                            }
-                            theirs.lines.lock().expect("the stream's lines").push(line);
-                            // Under the state's lock, so a waiter between its
-                            // look and its wait cannot miss this line.
-                            theirs.moved(|_| {});
+                    let conn = match open(&peer, bound, &theirs.stop) {
+                        Ok(conn) => conn,
+                        Err(why) => {
+                            *theirs.unopened.lock().expect("the stream's unopened state") = Some(why);
+                            let _gate = theirs.gate.lock().expect("the stream's gate");
+                            theirs.moved.notify_all();
+                            return;
                         }
+                    };
+                    let at = conn.peer_addr().ok();
+                    if echo {
+                        println!("  stream: reading {peer:?} at {at:?}");
                     }
-                };
-                let end = End { after_ms: opened.elapsed().as_millis() as u64, how };
-                if echo {
-                    println!("  stream: ended {} ms after it opened: {}", end.after_ms, end.how);
+                    *theirs.peer.lock().expect("the stream's peer") = at;
+                    *theirs.current.lock().expect("the stream's current connection") =
+                        conn.try_clone().ok();
+                    theirs.ended.store(false, Ordering::SeqCst);
+                    theirs.connections.fetch_add(1, Ordering::SeqCst);
+                    let index = theirs.connections.load(Ordering::SeqCst);
+                    {
+                        let _gate = theirs.gate.lock().expect("the stream's gate");
+                        theirs.moved.notify_all();
+                    }
+                    read(conn, index, &theirs, &out, echo);
+                    if !resilient || theirs.stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    // Every reconnection replays the whole boot from its first
+                    // line, so this side keeps dialing for as long as it takes
+                    // rather than the bound its first connection had.
+                    bound = FOREVER;
                 }
-                theirs.moved(|state| state.end = Some(end));
             })
             .map_err(|e| format!("the stream's reader could not be started: {e}"))?;
         Ok(Self { shared })
     }
 
+    /// The latest connection's peer.
     pub fn peer(&self) -> Option<SocketAddr> {
-        self.shared.state.lock().expect("the stream's state").peer
+        *self.shared.peer.lock().expect("the stream's peer")
     }
 
     pub fn lines(&self) -> Vec<String> {
         self.shared.lines.lock().expect("the stream's lines").clone()
     }
 
+    /// How many connections this reader has made.
+    pub fn connections(&self) -> usize {
+        self.shared.connections.load(Ordering::SeqCst)
+    }
+
+    /// Lines a connection's end cut short.
+    pub fn torn(&self) -> usize {
+        self.shared.torn.load(Ordering::SeqCst)
+    }
+
+    /// Whether the latest connection has ended with none made since.
     pub fn ended(&self) -> bool {
         self.end().is_some()
     }
 
-    /// How the connection ended, or `None` while it is open or never opened.
+    /// How the latest connection ended, or `None` while it is open or never
+    /// opened.
     pub fn end(&self) -> Option<End> {
-        self.shared.state.lock().expect("the stream's state").end.clone()
+        self.shared.end.lock().expect("the stream's end").clone()
     }
 
-    /// Stop asking for a peer that has not answered. A connection already made
-    /// is read on.
+    /// Why no connection was ever made, once that is settled.
+    pub fn unopened(&self) -> Option<String> {
+        self.shared.unopened.lock().expect("the stream's unopened state").clone()
+    }
+
+    /// Stop asking for a peer that has not answered, and stop reconnecting
+    /// once the current connection ends. A connection already made is read on.
     pub fn give_up(&self) {
         self.shared.stop.store(true, Ordering::SeqCst);
     }
 
-    /// The peer, once the connection is made; why none was, once that is
-    /// settled. A wait on the reader thread's own word, never a poll.
-    pub fn wait_connected(&self) -> Result<SocketAddr, String> {
-        let mut state = self.shared.state.lock().expect("the stream's state");
-        loop {
-            if let Some(peer) = state.peer {
-                return Ok(peer);
-            }
-            if let Some(why) = &state.unopened {
-                return Err(why.clone());
-            }
-            if state.end.is_some() {
-                return Err("the connection ended before it named its peer".to_string());
-            }
-            state = self.shared.moved.wait(state).expect("the stream's state");
+    /// Force the current connection closed, so a resilient stream dials again
+    /// at once rather than waiting on a byte its peer may never send: a
+    /// swapped netd leaves the old connection open with no FIN or reset.
+    /// Nothing on a stream with no open connection.
+    pub fn reconnect(&self) {
+        if let Some(conn) = &*self.shared.current.lock().expect("the stream's current connection") {
+            let _ = conn.shutdown(std::net::Shutdown::Both);
         }
     }
 
-    /// Wait for a line carrying `needle`, or `by`; whether one arrived. Woken by
-    /// each line as it lands, never a poll.
+    /// The peer, once one has connected, or `None` after `by` or once the
+    /// host has given up on one.
+    pub fn wait_connected(&self, by: Duration) -> Option<SocketAddr> {
+        self.wait_for_connection(0, by)
+    }
+
+    /// The peer of a connection made after the first `seen`, or `None` after
+    /// `by`, once the host has given up, or once no connection was ever made.
+    pub fn wait_for_connection(&self, seen: usize, by: Duration) -> Option<SocketAddr> {
+        let began = Instant::now();
+        let mut gate = self.shared.gate.lock().expect("the stream's gate");
+        loop {
+            if self.connections() > seen {
+                return self.peer();
+            }
+            if self.unopened().is_some() {
+                return None;
+            }
+            let left = by.saturating_sub(began.elapsed());
+            if left.is_zero() || self.shared.stop.load(Ordering::SeqCst) {
+                return None;
+            }
+            gate = self.shared.moved.wait_timeout(gate, left).expect("the stream's gate").0;
+        }
+    }
+
+    /// Wait for a line carrying `needle`, or `by`; whether one arrived. Woken
+    /// by each line as it lands, never a poll.
     pub fn wait_for(&self, needle: &str, by: Duration) -> bool {
         let began = Instant::now();
-        let mut state = self.shared.state.lock().expect("the stream's state");
+        let mut gate = self.shared.gate.lock().expect("the stream's gate");
         loop {
             if self.lines().iter().any(|l| l.contains(needle)) {
                 return true;
             }
             let left = by.saturating_sub(began.elapsed());
-            if left.is_zero() || state.end.is_some() || state.unopened.is_some() {
+            if left.is_zero() || self.unopened().is_some() {
                 return false;
             }
-            state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
+            gate = self.shared.moved.wait_timeout(gate, left).expect("the stream's gate").0;
         }
     }
 
     /// Wait until the connection ends, or `by` has passed; whether it ended.
     pub fn wait_ended(&self, by: Duration) -> bool {
-        let state = self.shared.state.lock().expect("the stream's state");
-        let (state, _) = self
-            .shared
-            .moved
-            .wait_timeout_while(state, by, |s| s.end.is_none() && s.unopened.is_none())
-            .expect("the stream's state");
-        state.end.is_some()
-    }
-}
-
-impl Shared {
-    fn moved(&self, change: impl FnOnce(&mut State)) {
-        change(&mut self.state.lock().expect("the stream's state"));
-        self.moved.notify_all();
+        let began = Instant::now();
+        let mut gate = self.shared.gate.lock().expect("the stream's gate");
+        while !self.ended() {
+            let left = by.saturating_sub(began.elapsed());
+            if left.is_zero() || self.unopened().is_some() {
+                return self.ended();
+            }
+            gate = self.shared.moved.wait_timeout(gate, left).expect("the stream's gate").0;
+        }
+        true
     }
 }
 
@@ -275,6 +350,59 @@ fn open(peer: &Peer, by: Duration, stop: &AtomicBool) -> Result<TcpStream, Strin
         }
     }
     Err(format!("{host} was not serving its log within {} s: {last}", by.as_secs()))
+}
+
+/// Read one connection's lines into the stream until it ends, and record how
+/// it ended if it is still the latest.
+///
+/// **Every connection replays the whole boot from its first line**
+/// (`serve.rs`'s design): the lines this reader already has are skipped
+/// rather than kept twice, and a line the connection ends inside is dropped
+/// rather than counted, so the same content lands whole when the next
+/// connection replays it.
+fn read(conn: TcpStream, index: usize, shared: &Shared, out: &Mutex<std::fs::File>, echo: bool) {
+    let opened = Instant::now();
+    let mut skip = shared.lines.lock().expect("the stream's lines").len();
+    let mut reader = BufReader::new(conn);
+    let how = loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break "the peer closed it".to_string(),
+            Err(e) => break e.to_string(),
+            Ok(_) if !line.ends_with('\n') => {
+                shared.torn.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(_) if skip > 0 => {
+                skip -= 1;
+            }
+            Ok(_) => {
+                {
+                    let mut out = out.lock().expect("the stream's file");
+                    let _ = out.write_all(line.as_bytes());
+                    let _ = out.flush();
+                }
+                if echo {
+                    print!("  stream| {line}");
+                    let _ = std::io::stdout().flush();
+                }
+                shared.lines.lock().expect("the stream's lines").push(line);
+                // Under the gate's lock, so a waiter between its look and its
+                // wait cannot miss this line.
+                let _gate = shared.gate.lock().expect("the stream's gate");
+                shared.moved.notify_all();
+            }
+        }
+    };
+    let end = End { after_ms: opened.elapsed().as_millis() as u64, how };
+    if echo {
+        println!("  stream: ended {} ms after it opened: {}", end.after_ms, end.how);
+    }
+    if shared.connections.load(Ordering::SeqCst) == index {
+        *shared.end.lock().expect("the stream's end") = Some(end);
+        shared.ended.store(true, Ordering::SeqCst);
+    }
+    let _gate = shared.gate.lock().expect("the stream's gate");
+    shared.moved.notify_all();
 }
 
 /// How a stream's connection ended.
@@ -362,6 +490,29 @@ impl Ssh {
         let said = self.run(&["fire", &host, &port, path_str(&self.key)?, command])?;
         Ok(said.lines().last().unwrap_or("").to_string())
     }
+
+    /// Send `binary` as `service`'s replacement, naming `digest` for it, and
+    /// answer the machine's word: `accepted <path>`, `refused <why>`,
+    /// `unanswered <what>` or `no-subsystem`.
+    pub fn swap(
+        &self,
+        at: SocketAddr,
+        service: &str,
+        binary: &Path,
+        digest: &toyos_swap::Digest,
+    ) -> Result<String, String> {
+        let (host, port) = (at.ip().to_string(), at.port().to_string());
+        let said = self.run(&[
+            "swap",
+            &host,
+            &port,
+            path_str(&self.key)?,
+            service,
+            path_str(binary)?,
+            &toyos_swap::hex(digest),
+        ])?;
+        Ok(said.lines().last().unwrap_or("").to_string())
+    }
 }
 
 fn path_str(path: &Path) -> Result<&str, String> {
@@ -415,7 +566,11 @@ pub fn converse(
     ping: bool,
     scratch: &Path,
 ) -> Result<Conversation, String> {
-    let peer = stream.wait_connected()?;
+    // The bound the connection itself already applied is `connect`'s `by`; this
+    // wait is for that settling, not a second bound on it.
+    let peer = stream
+        .wait_connected(FOREVER)
+        .ok_or_else(|| stream.unopened().unwrap_or_else(|| "the stream never opened".to_string()))?;
     let SocketAddr::V4(peer_v4) = peer else {
         return Err(format!("the stream's peer is {peer}, which is no IPv4 address"));
     };
@@ -781,7 +936,7 @@ mod tests {
             writeln!(conn, "[kernel 0.{i:03} cpu0] line {i}").unwrap();
         }
         drop(conn);
-        let peer = stream.wait_connected().expect("the peer");
+        let peer = stream.wait_connected(Duration::from_secs(5)).expect("the peer");
         assert_eq!(peer.ip(), std::net::IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert!(stream.wait_ended(Duration::from_secs(5)));
         let lines = stream.lines();
@@ -806,7 +961,8 @@ mod tests {
         let peer = Peer::Named { host: "localhost".to_string(), port };
         let began = Instant::now();
         let stream = Stream::connect(peer, &dir.join("s.log"), false, Duration::from_secs(60)).unwrap();
-        let why = stream.wait_connected().expect_err("nothing serves there");
+        assert!(stream.wait_connected(Duration::from_secs(60)).is_none());
+        let why = stream.unopened().expect("nothing serves there");
         assert!(why.contains("nothing there serves the log"), "{why}");
         assert!(began.elapsed() < Duration::from_secs(10), "a refusal was waited on");
         let _ = std::fs::remove_dir_all(&dir);
@@ -826,7 +982,7 @@ mod tests {
         let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
             .expect("a loopback reader");
         let (mut conn, _) = server.accept().unwrap();
-        stream.wait_connected().expect("the peer");
+        stream.wait_connected(Duration::from_secs(5)).expect("the peer");
         writeln!(conn, "[kernel 1.216 cpu0] Boot: complete (1216ms)").unwrap();
         assert!(stream.wait_for("Boot: complete", Duration::from_secs(5)), "the first line was not read");
         assert!(!stream.wait_ended(Duration::ZERO), "a quiet peer was read as a closed one");
@@ -837,6 +993,43 @@ mod tests {
             stream.lines(),
             vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] init: started logd\n"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A swapped netd leaves the old connection open on this side**: no FIN,
+    /// no reset. [`Stream::reconnect`] is what ends it, and the second
+    /// connection's replay — the whole boot from its first line, `logd`'s own
+    /// design — is skipped where this reader already has it rather than kept
+    /// twice.
+    #[test]
+    fn a_reconnect_replays_the_boot_and_skips_what_this_reader_already_has() {
+        let dir = std::env::temp_dir().join(format!("metaltalk-again-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let stream =
+            Stream::connect_resilient(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
+                .expect("a loopback reader");
+        let (mut first, _) = server.accept().unwrap();
+        writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
+        assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
+        stream.reconnect();
+        // The replay, from the boot's first line, as `logd` hands it to every
+        // connection: the line this reader already has, once more, and the
+        // one that is new to it.
+        let (mut second, _) = server.accept().unwrap();
+        writeln!(second, "[kernel 0.001 cpu0] before the swap").unwrap();
+        writeln!(second, "[kernel 9.000 cpu0] after the swap").unwrap();
+        let began = Instant::now();
+        while stream.lines().len() < 2 && began.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(stream.connections(), 2);
+        assert_eq!(
+            stream.lines(),
+            vec!["[kernel 0.001 cpu0] before the swap\n", "[kernel 9.000 cpu0] after the swap\n"]
+        );
+        drop(first);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

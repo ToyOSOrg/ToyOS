@@ -1743,6 +1743,7 @@ dependencies = [
  "russh",
  "russh-sftp",
  "tokio",
+ "toyos-swap",
 ]
 
 [[package]]
@@ -1843,6 +1844,25 @@ dependencies = [
  "futures-util",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "toyos-abi"
+version = "0.8.0"
+
+[[package]]
+name = "toyos-manifest"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
+name = "toyos-swap"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "toyos-manifest",
 ]
 
 [[package]]

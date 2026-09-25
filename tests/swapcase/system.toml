@@ -1,0 +1,39 @@
+# A running service's binary replaced with no reboot, rehearsed on QEMU's
+# virtio-net: `logd` streams every record to the host's listener, sshd takes the
+# swap on an authenticated channel and hands it to init, and netd is the
+# service swapped — the one whose restart the stream and the ssh connection
+# asking for it both have to outlive.
+#
+# `tests/e1000talkcase` is the same exchange in front of the T14's register
+# file, and `tests/lantalkcase` the T14 itself.
+
+[boot]
+start = ["logd", "netd", "sshd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+# The record stream's authority: the address on the parameter line is
+# information, and this row is the whole of what can act on it.
+receives = ["netd"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:1af4:1041"]
+
+# `swap` is the authority to replace a service's binary, and no other program
+# may hold it.
+[programs.sshd]
+receives = ["netd", "launcher", "swap"]
+
+[programs.test-runner]
+syscap = ["logread"]
+
+# What `exec` is asked for over the cable. `power` because `reboot` is this
+# binary under another name and it is the host's way of ending the boot with
+# its log whole; `echo` is the command whose answer the host compares.
+[programs.toybox]
+syscap = ["power"]
+
+[symlinks]
+"bin/echo" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"

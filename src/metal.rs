@@ -180,6 +180,10 @@ pub enum Refusal {
     /// This host could not set up its half of the cable: the client, the key,
     /// or the reader of the log the boot serves.
     Cable(String),
+    /// **What a swap of a running machine's service came to is not the new
+    /// binary in service**: init's words, the machine's answer or ssh
+    /// afterwards, each finding by name.
+    Swap(Vec<String>),
     Usage(String),
 }
 
@@ -196,6 +200,7 @@ impl Refusal {
                 | Self::ReportedAndBootedNothing { .. }
                 | Self::HungWithoutARecord
                 | Self::Talk(_)
+                | Self::Swap(_)
                 | Self::Wedge { .. }
         )
     }
@@ -331,6 +336,11 @@ impl fmt::Display for Refusal {
                 findings.join("\n  ")
             ),
             Self::Cable(why) => write!(f, "this host's half of the cable is not ready: {why}"),
+            Self::Swap(findings) => write!(
+                f,
+                "the swap did not put the new binary in service:\n  {}",
+                findings.join("\n  ")
+            ),
             Self::Usage(why) => write!(f, "{why}"),
         }
     }
@@ -770,6 +780,20 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
         Flash::Never(
             "it holds the shutdown open after the boot's last word, which is the one window a \
              metal verdict is read across — an image armed with it stages its own red",
+        ),
+    ),
+    (
+        "quiesce-drain-refuse",
+        Flash::Never(
+            "it refuses the shutdown's own drain of a closed file's flush, so an image armed \
+             with it stages a stall inside the one sync a metal verdict rests on",
+        ),
+    ),
+    (
+        "quiesce-fsync-refuse",
+        Flash::Never(
+            "it refuses `/system/bin/logd`'s own flush for longer than the shutdown waits for \
+             it, so an image armed with it never makes its last word durable",
         ),
     ),
     (
@@ -1486,7 +1510,15 @@ declare_flags!(METAL = {
     WAIT_SECS = "--wait-secs", Next;
     TALK = "--talk", Next;
     DRY_RUN = "--dry-run", None;
+    SWAP = "--swap", Next;
+    BINARY = "--binary", Next;
+    HAND_BACK = "--hand-back", None;
 });
+
+/// The flags a swap of a running machine's service refuses beside it: it
+/// flashes nothing and reboots nothing, so each of these describes a boot it
+/// will not make.
+const NOT_A_SWAP: &[&Flag] = &[&DRY_RUN, &FAT32_CHECK, &NIC, &INSTALL_SUDOERS, &IMAGE];
 
 /// The flags that describe a boot, as against the ones that say which machine
 /// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
@@ -1537,6 +1569,17 @@ pub struct Args {
     /// and tell it to reboot. **Nothing in the image names this host**: the
     /// machine answers for its own name, and this host asks for it.
     talk: Option<PathBuf>,
+    /// **Replace a running service's binary, and flash and reboot nothing.**
+    /// The service's key; [`Args::binary`] is the new binary, `--talk` the key
+    /// the running machine authorizes — asked for it by name at
+    /// `toyos-t14.local`, so no image needs naming — and `--readback` where the
+    /// stream and the swap's facts are written.
+    swap: Option<String>,
+    binary: Option<PathBuf>,
+    /// After the swap is judged, whichever way, ask the machine to `reboot`
+    /// over ssh: the host saying it is done with a boot held for it. Absent
+    /// leaves the machine running, which is the development loop.
+    hand_back: bool,
 }
 
 impl Args {
@@ -1568,6 +1611,9 @@ impl Args {
             fat32_check: METAL.present(args, &FAT32_CHECK),
             nic: value(&NIC).map(str::to_string),
             talk: value(&TALK).map(PathBuf::from),
+            swap: value(&SWAP).map(str::to_string),
+            binary: value(&BINARY).map(PathBuf::from),
+            hand_back: METAL.present(args, &HAND_BACK),
         };
         if let Some(host) = value(&HOST) {
             let (user, machine) = host.split_once('@').ok_or_else(|| {
@@ -1608,6 +1654,41 @@ impl Args {
                     .to_string(),
             ));
         }
+        match (&out.swap, &out.binary) {
+            (None, None) if out.hand_back => {
+                return Err(Refusal::Usage("--hand-back ends a --swap".to_string()))
+            }
+            (None, None) => {}
+            (None, Some(_)) => {
+                return Err(Refusal::Usage("--binary is the new binary of a --swap".to_string()))
+            }
+            (Some(service), binary) => {
+                let beside: Vec<&str> = line
+                    .seen
+                    .iter()
+                    .map(|seen| seen.flag.name)
+                    .filter(|name| NOT_A_SWAP.iter().any(|flag| flag.name == *name))
+                    .collect();
+                if !beside.is_empty() {
+                    return Err(Refusal::Usage(format!(
+                        "--swap replaces a running service's binary and flashes and reboots \
+                         nothing, so {} describes a boot it will not make",
+                        beside.join(" and ")
+                    )));
+                }
+                if !toyos_swap::is_service_name(service) {
+                    return Err(Refusal::Usage(format!("--swap {service:?} is no service's key")));
+                }
+                if binary.is_none() || out.talk.is_none() {
+                    return Err(Refusal::Usage(
+                        "--swap <service> wants --binary <new binary>, --talk <the key the running \
+                         machine authorizes> and --readback <where the stream and the swap are \
+                         written>"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
         Ok(out)
     }
 }
@@ -1647,21 +1728,130 @@ impl Talking {
         (crate::metaltalk::Stream, std::thread::JoinHandle<Result<crate::metaltalk::Conversation, String>>),
         Refusal,
     > {
-        let peer = crate::metaltalk::Peer::Named {
-            host: format!("{}.local", crate::lan::HOSTNAME),
-            port: toyos_logstream::PORT,
-        };
-        println!("asking for {peer:?}'s log");
-        let stream =
-            crate::metaltalk::Stream::connect(peer, &self.dir.join(READBACK_STREAM), true, by)
-                .map_err(Refusal::Cable)?;
-        let (theirs, ssh, scratch) = (stream.clone(), self.ssh.clone(), self.dir.join("talk"));
+        self.start_into(READBACK_STREAM, "talk", by)
+    }
+
+    /// [`Talking::start`], writing the stream to `file` and the conversation's
+    /// scratch under `scratch`, both in [`Talking::dir`] — so a swap of an
+    /// already-running machine and a flash's own boot each keep their own
+    /// files in one readback directory.
+    fn start_into(
+        &self,
+        file: &str,
+        scratch: &str,
+        by: std::time::Duration,
+    ) -> Result<
+        (crate::metaltalk::Stream, std::thread::JoinHandle<Result<crate::metaltalk::Conversation, String>>),
+        Refusal,
+    > {
+        let stream = self.connect(file, false, by)?;
+        let (theirs, ssh, scratch) = (stream.clone(), self.ssh.clone(), self.dir.join(scratch));
         let talking = std::thread::Builder::new()
             .name("metal-talk".into())
             .spawn(move || crate::metaltalk::converse(&theirs, &ssh, None, true, &scratch))
             .expect("the metal loop's conversation could not be started");
         Ok((stream, talking))
     }
+
+    /// The stream itself, asked of the machine's name, for a caller that runs
+    /// its own protocol on it rather than [`Talking::start`]'s ping/command/
+    /// reboot conversation — a swap's own exchange
+    /// ([`crate::metalswap::swap`]).
+    ///
+    /// `resilient` asks for the stream again for as long as this process runs:
+    /// a swap of the very service carrying the connection (netd) leaves the
+    /// old one open with no FIN or reset, so the caller that knows to abandon
+    /// it ([`crate::metaltalk::Stream::reconnect`]) is answered with a fresh
+    /// one rather than a stream that gave up.
+    fn connect(
+        &self,
+        file: &str,
+        resilient: bool,
+        by: std::time::Duration,
+    ) -> Result<crate::metaltalk::Stream, Refusal> {
+        let peer = crate::metaltalk::Peer::Named {
+            host: format!("{}.local", crate::lan::HOSTNAME),
+            port: toyos_logstream::PORT,
+        };
+        println!("asking for {peer:?}'s log");
+        let at = self.dir.join(file);
+        if resilient {
+            crate::metaltalk::Stream::connect_resilient(peer, &at, true, by)
+        } else {
+            crate::metaltalk::Stream::connect(peer, &at, true, by)
+        }
+        .map_err(Refusal::Cable)
+    }
+}
+
+/// Where a swap writes the stream it connected to and what it heard, beside
+/// whatever else the readback holds.
+pub const READBACK_SWAP_STREAM: &str = "swap-stream.log";
+pub const READBACK_SWAP: &str = "swap.txt";
+
+/// Replace `service`'s binary on the machine that answers for its own name,
+/// and judge it: the machine is asked over ssh, init's words are read off the
+/// log stream, and ssh must answer again afterwards.
+///
+/// **Nothing is flashed and nothing is rebooted**: the machine is found at
+/// `toyos-t14.local` the way [`Talking::start`] finds it, so this can be
+/// started before that machine has booted or long after — and, unlike
+/// [`Talking::start`], read on across the reconnect a swap of netd itself
+/// causes ([`crate::metaltalk::Stream::connect_resilient`]).
+fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
+    let (Some(key), Some(dir), Some(binary)) = (&args.talk, &args.readback, &args.binary) else {
+        return Err(Refusal::Usage("--swap wants --talk, --readback and --binary".into()));
+    };
+    // Before anything can refuse: a swap file left standing is one a judge
+    // reads as this swap's.
+    let at = dir.join(READBACK_SWAP);
+    match std::fs::remove_file(&at) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Refusal::File { path: at.display().to_string(), why: e.to_string() }),
+    }
+    let cable = Talking::prepare(key, dir)?;
+    let by = std::time::Duration::from_secs(args.wait_secs);
+    let stream = cable.connect(READBACK_SWAP_STREAM, true, by)?;
+    let scratch = dir.join("swap");
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| Refusal::File { path: scratch.display().to_string(), why: e.to_string() })?;
+    println!("asking whichever machine opens it to run {} as {service}", binary.display());
+    let swapped = crate::metalswap::swap(
+        &stream,
+        &cable.ssh,
+        None,
+        &crate::metalswap::Ask { service, binary, named: None },
+        by,
+        &scratch,
+    );
+    stream.give_up();
+    let swapped = swapped.map_err(|why| Refusal::Swap(vec![why]))?;
+    let at = dir.join(READBACK_SWAP);
+    std::fs::write(&at, swapped.render())
+        .map_err(|e| Refusal::File { path: at.display().to_string(), why: e.to_string() })?;
+    for (word, detail) in &swapped.words {
+        println!("  init: {}: {detail}", word.as_str());
+    }
+    for line in &swapped.said {
+        print!("  {service}| {line}");
+    }
+    let judged = crate::metalswap::judge(&swapped, crate::metalswap::Expect::InService);
+    // Whichever way it was judged: a boot held for this host is handed back
+    // either way, over a connection held until the machine drops it.
+    if args.hand_back {
+        let at = match stream.peer() {
+            Some(std::net::SocketAddr::V4(peer)) => std::net::SocketAddr::from((*peer.ip(), crate::metaltalk::SSH_PORT)),
+            _ => std::net::SocketAddr::from((swapped.peer, crate::metaltalk::SSH_PORT)),
+        };
+        let asked = cable.ssh.exec(at, crate::metaltalk::REBOOT, &scratch);
+        println!("handed back: `{}` at {at} answered {asked:?}", crate::metaltalk::REBOOT);
+    }
+    for line in judged.map_err(Refusal::Swap)? {
+        println!("swap: {line}");
+    }
+    println!("SWAPPED: {service} runs {} and nothing was rebooted to put it there", binary.display());
+    Ok(())
 }
 
 /// Put the rule on the machine, with the account's password on this one
@@ -1742,6 +1932,9 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     if let Some(password) = &args.install_sudoers {
         install_sudoers(&args.target, password)?;
         return Ok(None);
+    }
+    if let Some(service) = &args.swap {
+        return swap_running(args, service).map(|()| None);
     }
     let driver = Driver { target: args.target.clone(), dry_run: args.dry_run };
 
@@ -2018,6 +2211,17 @@ pub fn deadline_lateness_ms(loader: &str) -> Option<u64> {
     let (bound, rest) = rest.split_once(" ms, reached at ")?;
     let (reached, _) = rest.split_once(" ms,")?;
     reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
+}
+
+/// What the kernel's stop wrote about itself in this boot's own kernel log.
+///
+/// `None` on a boot that wrote none, which is every boot that reset without
+/// going through `quiesce`.
+pub fn park(kernel: &str) -> Option<toyos_quiesce::Record> {
+    kernel
+        .lines()
+        .find(|line| line.contains(toyos_quiesce::STOPPED))
+        .and_then(toyos_quiesce::Record::parse)
 }
 
 /// The same for the other bound: how far past its own bound the hard-lockup
@@ -2365,6 +2569,48 @@ mod tests {
         let refusal = Args::parse(&bare).unwrap_err();
         assert!(refusal.to_string().contains("--readback"), "{refusal}");
         assert!(!refusal.about_the_boot());
+    }
+
+    /// **A swap flashes nothing and reboots nothing**, so every flag that
+    /// describes a boot is refused beside it, and it is refused without the
+    /// four things it acts with. A `--binary` or a `--hand-back` with no swap
+    /// is no swap.
+    #[test]
+    fn a_swap_is_not_a_boot_and_names_what_it_acts_with() {
+        let whole = [
+            "--swap", "netd", "--binary", "n", "--image", "x.img", "--talk", "/tmp/k",
+            "--readback", "/tmp/r",
+        ]
+        .map(String::from);
+        let args = Args::parse(&whole).expect("a whole swap");
+        assert_eq!(args.swap.as_deref(), Some("netd"));
+
+        for flag in [vec!["--fat32-check"], vec!["--dry-run"], vec!["--nic", "0000:00:1f.6"]] {
+            let mut words = whole.to_vec();
+            words.extend(flag.iter().map(|w| (*w).to_string()));
+            let said = Args::parse(&words).unwrap_err().to_string();
+            assert!(said.contains(flag[0]) && said.contains("will not make"), "{said}");
+        }
+        for missing in ["--binary", "--image", "--talk", "--readback"] {
+            let at = whole.iter().position(|w| w == missing).unwrap();
+            let words: Vec<String> = whole
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != at && *i != at + 1)
+                .map(|(_, w)| w.clone())
+                .collect();
+            assert!(Args::parse(&words).is_err(), "a swap without {missing} was taken");
+        }
+        let lone = ["--binary", "n"].map(String::from);
+        assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
+        let lone = ["--hand-back"].map(String::from);
+        assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
+        let mut back = whole.to_vec();
+        back.push("--hand-back".into());
+        assert!(Args::parse(&back).expect("a swap that hands back").hand_back);
+        let mut bent = whole.to_vec();
+        bent[1] = "../netd".to_string();
+        assert!(Args::parse(&bent).unwrap_err().to_string().contains("no service"));
     }
 
     /// **There is nothing to fall through to.** A default image was what let the

@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::hasher::HashMap;
 use toyos_sched::fair::{ShareState, QUANTUM_NS};
 use toyos_sched::hw::{CpuId, Machine, Nanos};
-use toyos_sched::task::{WaitClass, WakeCause, WakeReason};
+use toyos_sched::task::{SafePoint, WaitClass, WakeCause, WakeReason};
 
 use crate::arch::percpu;
 use crate::completion::{self, Cancel, Outcome, Subject};
@@ -363,18 +363,30 @@ pub fn do_preempt() {
     driver::pass(Dispose::None);
 }
 
-/// A killed thread's last safe point: the return to Ring 3. Called from every
-/// Ring 3 exit boundary, since a killed task is dispatched rather than reaped
-/// and would otherwise run in userland unbounded.
+/// The last thing a thread does before returning to Ring 3, if either mark it
+/// can carry says it never does. `kernel_exit_to_user_check` is the one caller;
+/// `kernel/src/quiesce.rs`'s header says why that boundary is the safe point.
+///
+/// **One call and one match, so the two marks have no order to disagree
+/// about**: `toyos_sched::task::SafePoint` ranks them, here and in
+/// `CpuSched::place` alike.
 #[track_caller]
-pub fn exit_if_killed() {
-    if !driver::current_kill_pending() {
+pub fn leave_ring3_if_due() {
+    let Some(due) = driver::current_safe_point(crate::quiesce::stops_this_thread()) else {
         return;
-    }
+    };
     assert_baseline(BASELINE_IRQ_EXIT);
-    // The retirer owns teardown; a mark_thread_zombie here would race it.
-    driver::pass(Dispose::Exit);
-    unreachable!("exit_if_killed: returned from the exit pass");
+    match due {
+        SafePoint::Stop => {
+            driver::pass(Dispose::Stop);
+            unreachable!("leave_ring3_if_due: a stopped task was dispatched again");
+        }
+        SafePoint::Exit => {
+            // The retirer owns teardown; a mark_thread_zombie here would race it.
+            driver::pass(Dispose::Exit);
+            unreachable!("leave_ring3_if_due: returned from the exit pass");
+        }
+    }
 }
 
 #[track_caller]
@@ -387,6 +399,8 @@ pub fn exit_current(code: i32) -> ! {
         let pid = percpu::current_pid().unwrap();
         process::mark_thread_zombie(table, pid, tid, code);
     }
+    // The table says zombie now, which a sweep counts as nothing left to stop.
+    crate::quiesce::note_progress();
     driver::pass(Dispose::Exit);
     unreachable!("exit_current: returned from the exit pass");
 }
@@ -731,11 +745,13 @@ pub fn log_health() {
         let ready = driver::ready_len() + usize::from(percpu::current_tid().is_some());
         let parked = driver::parked_len();
         let dying = driver::dying_len();
+        let stopped = driver::stopped_len();
         crate::log!(
-            "sched: cpu={} ready={} dying={} parked={} current={:?} trips={}",
+            "sched: cpu={} ready={} dying={} stopped={} parked={} current={:?} trips={}",
             cpu,
             ready,
             dying,
+            stopped,
             parked,
             percpu::current_tid(),
             trips,

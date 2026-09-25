@@ -237,7 +237,7 @@ fn an_acceptor_killed_in_the_accept() {
 /// holds reaches EOF when — and only when — the victim's handles are drained.
 /// That is `kill_process`'s phase 3, which runs after `retire_task` has seen
 /// the victim released, which the victim publishes from its own pass out of
-/// `exit_if_killed` — the last exit boundary itself. EOF is downstream of the
+/// `leave_ring3_if_due` — the last exit boundary itself. EOF is downstream of the
 /// boundary by a teardown and by nothing that can wait, and it is unreachable
 /// without it.
 ///

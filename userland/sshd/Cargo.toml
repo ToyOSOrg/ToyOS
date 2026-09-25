@@ -7,3 +7,6 @@ license = "MIT OR Apache-2.0"
 rand = "0.10"
 russh = { version = "0.60", default-features = false, features = ["rustcrypto", "flate2", "rsa"] }
 tokio = { version = "1", features = ["rt", "net", "macros", "io-util", "sync", "time"] }
+# The swap subsystem: init's port, reached through this daemon's namespace.
+toyos = { path = "../../toyos" }
+toyos-swap = { path = "../../toyos-swap" }

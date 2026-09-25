@@ -55,6 +55,7 @@ pub mod ssh;
 pub mod stats;
 #[allow(dead_code)]
 pub mod storage;
+pub mod swap;
 #[allow(dead_code)]
 pub mod toybox;
 #[allow(dead_code)]

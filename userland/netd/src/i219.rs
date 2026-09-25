@@ -181,10 +181,20 @@ fn registers(dev: &PciDev) -> Result<Bar, Opening> {
 }
 
 /// Everything the claim is asked for before the part is reached, in the order
-/// it is asked: the register window, then one grant — as the driver reaches its
-/// descriptors, and as netd reaches its frames.
+/// it is asked: the register window, the part stopped, then one grant — as the
+/// driver reaches its descriptors, and as netd reaches its frames.
 fn granted(dev: &PciDev) -> Result<(Bar, Grant, Window), Opening> {
     let bar = registers(dev)?;
+    // Before the grant: the grant is what starts the function mastering, and a
+    // part a previous holder left receiving would write into its descriptors.
+    // Said first: whether the kernel's release reset the part is read here, in
+    // the receive and transmit enables it handed over.
+    crate::say!(
+        "netd: I219: inherited RCTL {:#010x} TCTL {:#010x}",
+        toyos_i219::Registers::read(&bar, toyos_i219::regs::RCTL),
+        toyos_i219::Registers::read(&bar, toyos_i219::regs::TCTL)
+    );
+    toyos_i219::quiesce(&bar);
     let region = dev
         .dma_alloc(toyos_i219::GRANT_BYTES)
         .map_err(KernelRefused::on("a DMA grant"))

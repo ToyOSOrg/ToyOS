@@ -1,0 +1,12 @@
+[package]
+name = "toyos-swap"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The program-key bound a service name is held to, which is the manifest's.
+toyos-manifest = { path = "../toyos-manifest" }
+# The digest a swap is verified by. Already resolved in the root, userland and
+# ssh-client-host lockfiles, so nothing new is fetched.
+sha2 = { version = "0.10", default-features = false }

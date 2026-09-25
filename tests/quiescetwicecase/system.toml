@@ -1,0 +1,13 @@
+# The boot `quiesce_refuses_a_second_shutdown` judges.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+# `power` because the job ends the machine, `logread` because the second
+# caller has to still be running when it calls, `dup` because the runner
+# passes a duplicate of what it holds to the job and the job to its child.
+[programs.test-runner]
+args = ["test_rs_quiesce_twice"]
+syscap = ["dup", "logread", "power"]

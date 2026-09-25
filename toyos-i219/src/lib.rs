@@ -507,6 +507,23 @@ pub(crate) enum Whole {
     WithThePhy { after: Option<u64> },
 }
 
+/// Stop what a previous holder left the part doing, before this driver's first
+/// grant lets it master the bus again: every interrupt masked, receive and
+/// transmit off.
+///
+/// **The function keeps its rings across a release**, and the grant is the
+/// instant it may use them — an enabled receive unit would write the next
+/// frame into the previous holder's descriptors. The kernel resets a released
+/// function where it advertises a reset; this is the driver not trusting that
+/// it did. Register writes only, so it is safe with mastering off.
+pub fn quiesce<R: Registers>(regs: &R) {
+    regs.write(regs::IMC, u32::MAX);
+    let rctl = regs.read(regs::RCTL);
+    regs.write(regs::RCTL, rctl & !rctl::EN);
+    let tctl = regs.read(regs::TCTL);
+    regs.write(regs::TCTL, tctl & !tctl::EN);
+}
+
 /// §4.6.1's reset, with every interrupt masked on both sides of it.
 fn reset<R: Registers, C: Clock>(
     regs: &R,

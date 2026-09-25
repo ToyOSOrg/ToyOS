@@ -1531,6 +1531,7 @@ dependencies = [
  "toyos-abi 0.8.0",
  "toyos-logstream",
  "toyos-manifest",
+ "toyos-swap",
 ]
 
 [[package]]
@@ -3495,6 +3496,8 @@ dependencies = [
  "rand 0.10.0",
  "russh",
  "tokio",
+ "toyos 0.9.0",
+ "toyos-swap",
 ]
 
 [[package]]
@@ -3800,6 +3803,14 @@ version = "0.1.0"
 [[package]]
 name = "toyos-mixer"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-swap"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "toyos-manifest",
+]
 
 [[package]]
 name = "toyos-tco"

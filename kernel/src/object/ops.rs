@@ -569,14 +569,21 @@ pub fn fsync(object: &KObjectRef) -> u64 {
     if !crate::vfs::lock().durability_owed(&path, file_id) {
         return 0;
     }
+    // A refused attempt can leave the two FATs split, and the park between two attempts is where the machine's stop would find this thread.
+    let _update = crate::block::begin_update();
     // A refused attempt discards nothing — an unsettled debt needs no restoring.
     let run = until_answered(|| {
         // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
         // Flush and sync share one acquisition so this file cannot be unmounted between them.
         let mut vfs = crate::vfs::lock();
+        // Tags the flush as `SYS_FSYNC`'s, for `quiesce-fsync-refuse` to stage on this path.
+        #[cfg(feature = "boot-actuators")]
+        crate::fat32_adapter::enter_fsync_flush();
         let done = vfs
             .flush_file(&path, file_id, mtime)
             .and_then(|()| vfs.sync_for_path(&path));
+        #[cfg(feature = "boot-actuators")]
+        crate::fat32_adapter::leave_fsync_flush();
         drop(vfs);
         done
     });
@@ -641,7 +648,7 @@ pub(crate) fn until_answered(mut attempt: impl FnMut() -> Result<(), SyscallErro
         if answer != Err(SyscallError::WouldBlock) {
             return Answered::Answer { answer, attempts, took: crate::clock::now() - began };
         }
-        // A killed caller stops retrying at the first safe point.
+        // A killed caller stops retrying at the first safe point. The machine's stop is deliberately not read here: `quiesce` claims every filesystem is synced, and a sync it named may not be abandoned by the stop that is about to make that claim.
         if crate::sched::driver::current_kill_pending() {
             return Answered::Killed;
         }

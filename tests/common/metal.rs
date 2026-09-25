@@ -23,6 +23,13 @@ use toyos_build::metalprofile::{job_ms_row, Profile, AROUND_THE_LIST_MS};
 
 use super::serial::Serial;
 
+/// The fields only the boots that took that path produce: the two bounds'
+/// lateness, and the stop's own count. Absent **and** unpriced is a boot that
+/// did not take the path and owes nothing; absent and priced is a boot armed
+/// for one path that ended on another, which is a red the pricing loop names.
+const PATH_TAKEN: &[&str] =
+    &["deadline_lateness_ms", "lockup_lateness_ms", "park_open_operations"];
+
 /// One boot a metal test needs.
 pub struct Arm {
     /// **The boot this test rides, named.** Two arms naming one boot share an
@@ -67,6 +74,14 @@ pub struct Arm {
     /// runs a command there and tells it to reboot. `false` on every boot whose
     /// judge reads the stick alone.
     pub talk: bool,
+    /// **The boot has one of its services swapped while it runs**, with no
+    /// reboot: its image is staged as a talking boot's is, the invocation
+    /// that flashes it is not told `--talk`, and a second invocation —
+    /// `toyos-metal --swap <this service>`, started beside the first — dials
+    /// the machine under its own name, sends the build's own binary of that
+    /// service and writes [`toyos_build::metal::READBACK_SWAP`] beside the
+    /// stick's files.
+    pub swap: Option<&'static str>,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -80,7 +95,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false }
+    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false, swap: None }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -240,6 +255,20 @@ impl Readback {
         Ok((heard, stream.split_inclusive('\n').map(str::to_string).collect()))
     }
 
+    /// What the swap invocation beside this boot heard, and the stream it
+    /// received — or why a swapping boot has neither.
+    pub fn swap(&self) -> Result<(toyos_build::metalswap::Swapped, Vec<String>), String> {
+        let at = self.home.join(toyos_build::metal::READBACK_SWAP);
+        let text = std::fs::read_to_string(&at).map_err(|e| {
+            format!("{}: {e} — no `toyos-metal --swap` ran beside this boot", at.display())
+        })?;
+        let swapped = toyos_build::metalswap::Swapped::parse(&text)?
+            .ok_or_else(|| format!("{} names no swap:\n{text}", at.display()))?;
+        let at = self.home.join(toyos_build::metal::READBACK_SWAP_STREAM);
+        let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        Ok((swapped, stream.split_inclusive('\n').map(str::to_string).collect()))
+    }
+
     /// One file off the log volume that is neither the loader's nor `logd`'s,
     /// read out of the partition's own bytes; `None` where the volume has no
     /// such file.
@@ -352,6 +381,33 @@ impl Readback {
     /// up on. Read out of the same channel and for the same reason.
     pub fn lockup_lateness_ms(&self) -> Option<u64> {
         toyos_build::metal::lockup_lateness_ms(&self.loader)
+    }
+
+    /// Block-device operations still open where this boot's stop ended.
+    /// `None` on a boot that reset without going through `quiesce`. It is the
+    /// block layer's own count, so it is what the stop can be wrong against.
+    pub fn park_open_operations(&self) -> Option<u64> {
+        toyos_build::metal::park(&self.kernel).map(|park| u64::from(park.in_flight))
+    }
+
+    /// Whether the stop stopped the machine, as against how long it spent
+    /// trying.
+    ///
+    /// **No ceiling can ask this.** A stop that gave up returns having spent
+    /// its budget and no more, and `park_open_operations` then reads whatever
+    /// the threads it left running happened to be doing. The shortfall the
+    /// record names is the only thing that says the machine was not stopped.
+    pub fn stop_completed(&self) -> Result<(), String> {
+        match toyos_build::metal::park(&self.kernel) {
+            Some(park) if !park.stopped_the_machine() => Err(format!(
+                "{}'s stop gave up on {} userland thread(s) that never reached a safe point, so \
+                 this boot's sync and its last word are claims about a machine that was still \
+                 running:\n    {park}",
+                self.label,
+                park.sweep.running,
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// The loader pass **after** the kernel's reset, which is where a chain
@@ -500,6 +556,8 @@ struct Batch {
     nic: Option<&'static str>,
     /// [`Arm::talk`], carried to the image and to the invocation.
     talk: bool,
+    /// [`Arm::swap`], carried to the image, the invocation and the second one.
+    swap: Option<&'static str>,
 }
 
 impl Batch {
@@ -546,6 +604,7 @@ fn batches(
                 links: boot.links.clone(),
                 nic: None,
                 talk: false,
+                swap: None,
             },
         );
         if was.is_some() {
@@ -564,12 +623,14 @@ fn batches(
                 links: Vec::new(),
                 nic: arm.nic,
                 talk: arm.talk,
+                swap: arm.swap,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
                 || batch.nic != arm.nic
                 || batch.talk != arm.talk
+                || batch.swap != arm.swap
             {
                 return Err(format!(
                     "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}) and another row \
@@ -732,10 +793,10 @@ fn build(
     let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
-    // **A talking boot carries the key the loop will offer**, minted beside the
-    // image so the loop finds it there. Nothing about this host is in it: the
-    // loop finds the machine by its name.
-    if batch.talk {
+    // **A talking or swapping boot carries the key the loop will offer**,
+    // minted beside the image so the loop finds it there. Nothing about this
+    // host is in it: the loop finds the machine by its name.
+    if batch.talk || batch.swap.is_some() {
         let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
         extra.push((super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
     }
@@ -743,6 +804,11 @@ fn build(
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
     std::fs::write(&image, &bytes).map_err(|e| format!("{}: {e}", image.display()))?;
+    // The binary the second invocation sends, copied now so it is this
+    // build's and not whatever the tree holds when the machine is reached.
+    if let Some(service) = batch.swap {
+        toyos_build::build::copy_guest_program(root, service, &home.join(service))?;
+    }
     Ok(image)
 }
 
@@ -785,6 +851,29 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
         words.push(talk_home(home).join("id_ed25519").display().to_string());
     }
     words
+}
+
+/// The second invocation a swapping boot owes: started beside the one that
+/// flashes it, it dials the address the machine answers to under its own
+/// name and swaps `service` for the binary [`build`] copied beside the image.
+fn swap_invocation(home: &Path, service: &str) -> Vec<String> {
+    [
+        "run",
+        "--bin",
+        "toyos-metal",
+        "--",
+        "--swap",
+        service,
+        "--binary",
+        &home.join(service).display().to_string(),
+        "--talk",
+        &talk_home(home).join("id_ed25519").display().to_string(),
+        "--readback",
+        &home.display().to_string(),
+        "--hand-back",
+    ]
+    .map(str::to_string)
+    .to_vec()
 }
 
 fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
@@ -908,7 +997,7 @@ pub fn run(
     if !judging {
         // The key a talking boot authorizes is minted by the harness's own ssh
         // client, which the suite builds only on its QEMU path.
-        if batches.values().any(|b| b.talk) {
+        if batches.values().any(|b| b.talk || b.swap.is_some()) {
             toyos_build::build::build_host_judges(&root, quiet);
         }
         for (label, batch) in &batches {
@@ -940,6 +1029,12 @@ pub fn run(
                 image.display(),
                 invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
             ));
+            if let Some(service) = batches[*label].swap {
+                request.push_str(&format!(
+                    "  and beside it, started first:\n  cargo {}\n",
+                    swap_invocation(&at(dir, label), service).join(" ")
+                ));
+            }
         }
         let path = dir.join("request.txt");
         if let Err(e) = std::fs::write(&path, &request) {
@@ -966,8 +1061,28 @@ pub fn run(
     if mode == Mode::Drive {
         for (label, image) in &images {
             let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
+            // A swapping boot's second invocation is started first: it dials
+            // the machine under its own name for as long as it takes, and
+            // waits for the boot.
+            let beside = batches[*label].swap.map(|service| {
+                let words = swap_invocation(&at(dir, label), service);
+                eprintln!("[metal] {label}, beside it: cargo {}", words.join(" "));
+                Command::new("cargo").args(&words).current_dir(&root).spawn()
+            });
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
-            match Command::new("cargo").args(&words).current_dir(&root).status() {
+            let booted = Command::new("cargo").args(&words).current_dir(&root).status();
+            if let Some(swap) = beside {
+                match swap.and_then(|mut child| child.wait()) {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => {
+                        refused.insert(label, format!("toyos-metal --swap exited {status}"));
+                    }
+                    Err(e) => {
+                        refused.insert(label, format!("toyos-metal --swap: {e}"));
+                    }
+                }
+            }
+            match booted {
                 Ok(status) if status.success() => {}
                 Ok(status) => {
                     refused.insert(label, format!("toyos-metal exited {status}"));
@@ -1013,14 +1128,8 @@ pub fn run(
                         panel.paints, panel.pixels
                     );
                 }
-                // **The profile's row is what a boot owes, and the boot's own
-                // record is what it paid.** The two lateness fields are `None`
-                // on every boot but the one armed to stop itself, and at most
-                // one is ever `Some` — a boot has one bound that ended it. A
-                // boot the file prices a lateness for and that produced none is
-                // therefore a boot some *other* bound ended, which is exactly
-                // what a run of `deadlinewedge` sealed by the lockup detector
-                // was, and it used to be skipped rather than reported.
+                // A boot the file prices a path-taken field for and that
+                // produced none is a boot some *other* bound ended.
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),
@@ -1029,10 +1138,11 @@ pub fn run(
                     ("lockup_lateness_ms", back.lockup_lateness_ms()),
                     ("panel_max_us", panel.map(|panel| panel.max_micros)),
                     ("panel_us", panel.map(|panel| panel.micros)),
+                    ("park_open_operations", back.park_open_operations()),
                 ] {
                     let name = format!("boot.{label}.{field}");
                     let priced = profile.row(&name).is_some();
-                    if value.is_none() && !priced && field.ends_with("_lateness_ms") {
+                    if value.is_none() && !priced && PATH_TAKEN.contains(&field) {
                         continue;
                     }
                     let Some(value) = value else {
@@ -1055,6 +1165,10 @@ pub fn run(
                 // machine fact into a missing line — and the missing line is
                 // what a reader would have to guess about.
                 if let Err(why) = back.log_reached_the_stick() {
+                    eprintln!("    FAIL {why}");
+                    red = true;
+                }
+                if let Err(why) = back.stop_completed() {
                     eprintln!("    FAIL {why}");
                     red = true;
                 }

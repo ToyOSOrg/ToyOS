@@ -333,6 +333,8 @@ process_reopen_selftest 5800
 process_stats 221
 query_modules_size 12
 query_pci_agreement 7182
+quiesce_refuses_a_second_shutdown 4249
+quiesce_stops_the_machine 4434
 read_fault_selftests 4694
 readdir_bound 19823
 redirty_mid_flush 21262

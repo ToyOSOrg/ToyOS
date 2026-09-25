@@ -1828,6 +1828,135 @@ pub fn fs_dirs_durable(
     Ok(())
 }
 
+/// **The machine's stop leaves no filesystem update half made**, and
+/// `toyos-fat32-check` is who says so.
+///
+/// `quiesce-fsync-refuse` refuses `/system/bin/logd`'s flush from the moment
+/// the shutdown begins: each attempt writes a new cluster's entry into the
+/// mirror FAT and is refused the active one, and the caller parks in
+/// `block::between_attempts` for longer than the shutdown waits for `/log`. So
+/// the stop's second stage meets a thread parked over two FATs that disagree,
+/// with every other userland thread already stopped and nothing left that
+/// could allocate that cluster and heal it by accident. A stop that bands the
+/// thread where it is parked leaves that volume at the reset; one that lets the
+/// update close leaves it whole, and the kernel's own `fsync:` line says which
+/// attempt closed it.
+pub fn quiesce_leaves_the_volume_whole(
+    test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    // The kernel's `mirror_refuse::FSYNC_REFUSALS`, spelt here because the
+    // harness cannot link the kernel.
+    const REFUSALS: usize = 9;
+    const REFUSED: &str = "quiesce-fsync-refuse: refusing a SYS_FSYNC flush's active-FAT write";
+    const GAVE_UP: &str = "shutdown: /log did not answer in";
+    const PARAMS: &[&str] = &["quiesce-fsync-refuse"];
+
+    let image_path = test_dir().join("quiesce-volume-whole.img");
+    let image = qemu::build_boot_image(test_config, &[], &[], PARAMS);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = log_extent(&image, &image_path)?;
+
+    let complaints_before = check(&image[start..start + len]);
+    if !complaints_before.is_empty() {
+        return Err(format!(
+            "the log partition was not born clean, so this gate cannot tell a complaint the \
+             stop caused from one it inherited:\n{}",
+            describe(&complaints_before)
+        ));
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(qemu::Staged::Written(image_path.clone())),
+            kernel_params: PARAMS,
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+    if !boot.contains("log-volume: partition mounted") {
+        return Err(format!(
+            "the log partition did not mount, so this boot has no volume to leave whole:\n{}",
+            volume_lines(&boot)
+        ));
+    }
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+    // The drain ends when QEMU exits; a guest still up at its bound is a
+    // shutdown that never reached its last word, and nothing below is about it.
+    if !tail.contains("Shutting down.") {
+        return Err(format!("the guest did not shut down within the drain's 20 s\n{tail}"));
+    }
+
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    if after.len() != image.len() {
+        return Err(format!("the image is {} bytes, was {}", after.len(), image.len()));
+    }
+
+    // **The harm, first.**
+    let complaints_after = check(&after[start..start + len]);
+    if !complaints_after.is_empty() {
+        return Err(format!(
+            "the machine's stop left the log volume breaking the format:\n{}\n{tail}",
+            describe(&complaints_after)
+        ));
+    }
+
+    // The arm fired as many times as the kernel declares and the shutdown gave
+    // up waiting inside that ladder, or the silence above is about a stop that
+    // met nobody parked.
+    let refusals = tail.lines().filter(|line| line.contains(REFUSED)).count();
+    if refusals != REFUSALS {
+        return Err(format!(
+            "the quiesce-fsync-refuse actuator refused {refusals} attempt(s), not the \
+             {REFUSALS} the kernel declares, so no thread was parked where this boot says one \
+             was\n{tail}"
+        ));
+    }
+    let lines: Vec<&str> = tail.lines().collect();
+    let last_refusal = lines.iter().rposition(|line| line.contains(REFUSED));
+    let gave_up = lines.iter().position(|line| line.contains(GAVE_UP));
+    let closed_by = format!("durable on attempt {}", REFUSALS + 1);
+    let closed = lines.iter().position(|line| line.contains(&closed_by));
+    let (Some(last_refusal), Some(gave_up), Some(closed)) = (last_refusal, gave_up, closed) else {
+        return Err(format!(
+            "the volume is whole, but this boot does not say the stop's second stage met the \
+             parked flush and let it close: the shutdown's give-up line is at {gave_up:?} and \
+             the kernel's `fsync: … {closed_by}` at {closed:?}, so something else healed the \
+             FATs\n{tail}"
+        ));
+    };
+    if !(last_refusal < gave_up && gave_up < closed) {
+        return Err(format!(
+            "the last refusal, the shutdown's give-up and the flush's close are at console \
+             lines {last_refusal}, {gave_up} and {closed}; the second stage did not begin while \
+             the flush was parked\n{tail}"
+        ));
+    }
+
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!(
+        "  [fat] the stop's second stage met a flush parked over split FATs and let it close; \
+         the checker is silent:\n    {}\n    {}",
+        lines[gave_up], lines[closed],
+    );
+    Ok(())
+}
+
 
 /// The boot disk arrives *after* the port scan, and both mounts still happen.
 ///
