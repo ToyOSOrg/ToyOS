@@ -18,6 +18,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_bootmap::mark;
 use toyos_ps2::{KeyDecoder, KeyOutcome};
 
 use crate::log;
@@ -417,6 +418,29 @@ const _: () = {
     assert!(framebuffer_is_reclaimed_ram(&SPLIT, 0xE000_0000, 0x0100_0000).is_some());
     assert!(framebuffer_is_reclaimed_ram(&SPLIT, 0xE000_0000, 0x0080_0000).is_none());
 };
+
+/// The kernel's square of the handoff row (`toyos_bootmap::mark`): painted
+/// through the loader's mapping of the scanout, before `pat::init` and before
+/// [`arm`], so a machine that stops in either still says it entered.
+pub fn mark_entry(args: &KernelArgs) {
+    if args.gop_framebuffer == 0 {
+        return;
+    }
+    let scanout = mark::Scanout {
+        width: args.gop_width,
+        height: args.gop_height,
+        stride: args.gop_stride,
+        bytes: args.gop_framebuffer_size,
+    };
+    let Some(pixels) = mark::square(mark::Step::KernelEntered, scanout) else { return };
+    let base = DirectMap::from_phys(args.gop_framebuffer).as_mut_ptr::<u8>();
+    for offset in pixels {
+        // SAFETY: `square` returns only offsets whose 4 bytes lie inside the
+        // `gop_framebuffer_size` bytes the loader's boot map holds at
+        // `PHYS_OFFSET`, which is the mapping this CPU runs under until `mm::init`.
+        unsafe { core::ptr::write_volatile(base.add(offset as usize).cast::<u32>(), mark::WHITE) };
+    }
+}
 
 /// Arm the console from `KernelArgs`, before `serial::init`; covers everything
 /// up to `mm::init`.

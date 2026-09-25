@@ -7,9 +7,15 @@
 //!
 //! Pure: three numbers in, a [`Plan`] out. The loader allocates the pages and
 //! writes the entries.
+//!
+//! [`mark`] is the other thing both sides of that window agree on: where each
+//! step of the handoff paints its square, which the loader and the kernel both
+//! draw and neither may place differently.
 
 #![no_std]
 #![forbid(unsafe_code)]
+
+pub mod mark;
 
 use core::fmt;
 
