@@ -862,6 +862,7 @@ pub mod stall {
     );
 
     /// What the fatal halt says once it has found a repaint stalled; the test reads it.
+    #[cfg(feature = "test-actuators")]
     pub const HELD: &str = "panel: a repaint is holding the latch and not painting";
 
     pub(super) fn inside_the_latch() {
@@ -883,7 +884,8 @@ pub mod stall {
         STALLED.store(false, Ordering::SeqCst);
     }
 
-    /// Whether a repaint is parked inside the latch right now.
+    /// Whether a repaint is parked inside the latch right now; only the fatal halt asks.
+    #[cfg(feature = "test-actuators")]
     pub fn stalled() -> bool {
         STALLED.load(Ordering::SeqCst)
     }

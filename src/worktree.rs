@@ -7,9 +7,12 @@
 //! `toyos` name at it — taking the toolchain out from under every other
 //! checkout. Measured, in that order, on this host.
 //!
-//! So the shared state stays shared and nothing here copies it: `rust/` is left
-//! the stub it was, and [`crate::toolchain::rust_dir`] sends every read to the
-//! primary checkout. What this module does is the small remainder — create the
+//! So the compiler stays the primary's and nothing here copies it:
+//! [`crate::toolchain::rust_dir`] sends every compiler read to the primary
+//! checkout. `rust/` is left the stub it was until the first build makes it
+//! this worktree's own fork checkout — a git worktree of the primary's fork
+//! repository, sharing its objects (`src/sysroot.rs`) — which [`remove`] takes
+//! away again. What this module does is the small remainder — create the
 //! worktree, carry over the one file git cannot, and refuse by name when the
 //! result would not be usable.
 
@@ -21,8 +24,9 @@ use crate::flags;
 use crate::toolchain;
 
 /// What a worktree's crate target directories reach: 4.1 GiB after
-/// `--build-only`, and 23 GiB on the primary checkout, which has run everything.
-/// Measured with `du`. The 50 GiB `rust/` is shared and never counted here.
+/// `--build-only`, and 23 GiB on the primary checkout, which has run everything;
+/// its fork checkout and std build directory add 4.2 GiB. Measured with `du`.
+/// The primary's 50 GiB `rust/` is shared and never counted here.
 ///
 /// Refusing at the upper figure plus a little, rather than at the lower one: a
 /// build that fills the disk halfway through costs more than a worktree that
@@ -95,10 +99,10 @@ fn add(root: &Path, path: &str) {
     let branch = format!("wt/{name}");
     git(root, &["worktree", "add", "-b", &branch, &path.to_string_lossy(), "main"]);
 
-    // `rust/` is deliberately left the empty stub `git worktree add` made. It is
-    // not an oversight the next reader should fix: initialising it is the
-    // 913 MiB clone, and a symlink in its place makes git error out of `status`,
-    // `diff` and `submodule` alike rather than just ignoring it.
+    // `rust/` is deliberately left the empty stub `git worktree add` made: the
+    // first build makes it a fork checkout sharing the primary's objects, where
+    // `git submodule update` would be the 913 MiB clone, and a symlink in its
+    // place makes git error out of `status`, `diff` and `submodule` alike.
 
     // The one file git cannot carry: it is gitignored, and a worktree that
     // silently loses the fork redirects would build different code from the
@@ -113,7 +117,7 @@ fn add(root: &Path, path: &str) {
     eprintln!();
     eprintln!("worktree   {}", path.display());
     eprintln!("branch     {branch}");
-    eprintln!("toolchain  {} (shared, not copied)", stage2.display());
+    eprintln!("compiler   {} (shared, not copied)", stage2.display());
     eprintln!();
     eprintln!("Build it with `cargo run -- --build-only` from {}.", path.display());
 }
@@ -293,11 +297,113 @@ fn gib(bytes: u64) -> String {
 
 /// Remove a worktree and the branch it was made with.
 ///
-/// Deliberately not `--force`: a worktree with uncommitted work in it is a
-/// refusal, because the work in a worktree is the only copy of itself.
-fn remove(root: &Path, path: &str) {
-    git(root, &["worktree", "remove", path]);
+/// Deliberately not `--force`: git refuses a worktree holding tracked changes
+/// or untracked files and leaves it registered, because the work in a
+/// worktree is the only copy of itself — that refusal stands, and so does the
+/// one for its own fork checkout ([`remove_fork_checkout`]).
+///
+/// **git can unregister a worktree and then fail to delete it**: a path deeper
+/// than `PATH_MAX` under an ignored `target/`, or a file created while it
+/// walks, and it exits non-zero with the directory still there and no longer
+/// a worktree of anything. Once git has let go of it nothing in it is work,
+/// so the whole directory goes.
+///
+/// Then every sysroot no remaining worktree names goes too (`src/sysroot.rs`).
+pub(crate) fn remove(root: &Path, path: &str) {
+    let at = root.join(path);
+    remove_fork_checkout(root, &at);
+    if !ok_loud(root, &["worktree", "remove", path]) {
+        assert!(
+            !registered(root, &at),
+            "git refused to remove {path} and it is still a worktree; what it said above is \
+             why. Nothing was deleted."
+        );
+        remove_tree(&at);
+        eprintln!("git unregistered {path} and left its ignored files; deleted them");
+    }
     eprintln!("removed {path}; its branch is still there, and `git branch -d` will say if it is unmerged");
+    let swept = crate::sysroot::sweep(root);
+    if !swept.is_empty() {
+        eprintln!("removed {} sysroot(s) no worktree names any more", swept.len());
+    }
+}
+
+/// A linked worktree's own fork checkout (`src/sysroot.rs`'s `fork_checkout`)
+/// is a git worktree of the primary's fork repository, which git will not
+/// remove a worktree around. It goes first, and only while it holds nothing
+/// that is not also somewhere else: no change in its tree, and a `HEAD` some
+/// ref of the fork repository reaches.
+fn remove_fork_checkout(root: &Path, at: &Path) {
+    let fork = at.join("rust");
+    if !fork.join(".git").is_file() || !at.join(".git").is_file() {
+        return;
+    }
+    let path = at.display();
+    let mine = capture(at, &["status", "--porcelain", "--ignore-submodules=all"]);
+    assert!(mine.is_empty(), "{path} holds uncommitted work:\n{mine}Nothing was deleted.");
+    let theirs = capture(&fork, &["status", "--porcelain", "--ignore-submodules=none"]);
+    assert!(
+        theirs.is_empty(),
+        "{}'s fork checkout holds uncommitted work:\n{theirs}Nothing was deleted.",
+        path
+    );
+    let head = capture(&fork, &["rev-parse", "HEAD"]);
+    let reached = capture(&fork, &["for-each-ref", "--count=1", "--contains", head.trim()]);
+    assert!(
+        !reached.trim().is_empty(),
+        "{}'s fork checkout is at {}, which no branch, tag or remote ref of the fork \
+         repository reaches: it is the only copy of those commits. Push them, or name them \
+         with a branch, first. Nothing was deleted.",
+        path,
+        head.trim()
+    );
+    // Moved out whole first, so a removal a writer interrupts leaves a named
+    // directory outside the worktree rather than a half-deleted checkout in it.
+    let name = at.file_name().expect("a worktree has a name").to_string_lossy();
+    let aside = at.with_file_name(format!(".{name}-rust.removing"));
+    fs::rename(&fork, &aside)
+        .unwrap_or_else(|e| panic!("move {} to {}: {e}", fork.display(), aside.display()));
+    fs::create_dir(&fork).unwrap_or_else(|e| panic!("recreate the stub {}: {e}", fork.display()));
+    let primary = crate::primary_checkout(root);
+    git(&primary.join("rust"), &["worktree", "prune"]);
+    let backtrace = primary.join("rust/library/backtrace");
+    if backtrace.join(".git").exists() {
+        git(&backtrace, &["worktree", "prune"]);
+    }
+    remove_tree(&aside);
+}
+
+/// Remove `dir` and everything in it, including what appears while it goes.
+///
+/// A writer on this host — the leftovers are `.DS_Store` files — can put a file
+/// into a directory while it is being emptied, so a plain recursive delete finds a directory it has just emptied not empty and
+/// stops halfway — the `Directory not empty` git itself dies on. The removal
+/// runs again over what is left, at most [`PASSES`] times; a tree still refusing
+/// after that has a writer this cannot outrun, and the panic says so.
+fn remove_tree(dir: &Path) {
+    for pass in 1..=PASSES {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty && pass < PASSES => {
+                eprintln!("{} gained files while it was removed ({e}); removing again", dir.display());
+            }
+            Err(e) => panic!("remove {}: {e}, after {pass} pass(es)", dir.display()),
+        }
+    }
+}
+
+/// How many times [`remove_tree`] runs over a tree that keeps refusing.
+const PASSES: usize = 10;
+
+/// Whether `git worktree list` still names `at`, compared as real paths:
+/// git prints its own realpath, `/private/tmp/…` for `/tmp/…`.
+fn registered(root: &Path, at: &Path) -> bool {
+    let at = fs::canonicalize(at).unwrap_or_else(|_| at.to_path_buf());
+    capture(root, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .any(|listed| fs::canonicalize(listed).unwrap_or_else(|_| PathBuf::from(listed)) == at)
 }
 
 fn free_bytes(dir: &Path) -> u64 {
@@ -330,6 +436,16 @@ fn capture(dir: &Path, args: &[&str]) -> String {
         .unwrap_or_else(|e| panic!("run git: {e}"));
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr).trim());
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Whether git did it, with what it said left on stderr for the reader.
+fn ok_loud(dir: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .unwrap_or_else(|e| panic!("run git: {e}"))
+        .success()
 }
 
 /// Whether git says yes. A non-zero exit is the answer here, never a failure.
@@ -390,5 +506,58 @@ mod tests {
         assert!(!line.contains("/live"), "{line}");
         assert!(!line.contains("/primary"), "{line}");
         assert!(line.contains("2.0 GiB"), "the offer has to say what it is worth: {line}");
+    }
+
+    /// A linked worktree of a fresh repository whose `.gitignore` names `target/`.
+    fn linked(name: &str) -> (PathBuf, PathBuf) {
+        let (_origin, work) = crate::pr::tests::repo(name);
+        let tree = work.with_file_name(format!("{}-linked", work.file_name().unwrap().to_string_lossy()));
+        let _ = fs::remove_dir_all(&tree);
+        git(&work, &["worktree", "add", "-q", "-b", "linked", tree.to_str().unwrap()]);
+        (work, tree)
+    }
+
+    /// **git unregisters, then fails to delete, and exits non-zero.** A path
+    /// deeper than `PATH_MAX` under the ignored `target/` is a deterministic
+    /// way to make it do that.
+    #[test]
+    fn a_worktree_git_unregistered_but_left_on_disk_is_deleted_whole() {
+        let (work, tree) = linked("wt-remove-leftovers");
+        // Two chains of twenty, each short enough to make, one renamed into
+        // the other's end: no path any call here names exceeds `PATH_MAX`.
+        let chain = |at: &Path| {
+            let mut end = at.to_path_buf();
+            for _ in 0..20 {
+                end.push("a-directory-name-thirty-bytes-");
+            }
+            fs::create_dir_all(&end).unwrap();
+            end
+        };
+        let target = tree.join("target");
+        let lower = chain(&tree.join("lower"));
+        fs::write(lower.join("f"), "cache\n").unwrap();
+        let upper = chain(&target);
+        fs::rename(tree.join("lower"), upper.join("lower")).unwrap();
+        let depth = upper.as_os_str().len() + lower.strip_prefix(&tree).unwrap().as_os_str().len();
+        assert!(depth > 1024, "the fixture must exceed PATH_MAX to make git fail: {depth}");
+
+        remove(&work, tree.to_str().unwrap());
+
+        assert!(!tree.exists(), "{} is still on disk", tree.display());
+        assert!(!registered(&work, &tree), "{} is still a worktree", tree.display());
+    }
+
+    /// git's own refusal stands: untracked work keeps the worktree registered,
+    /// and nothing of it is deleted.
+    #[test]
+    fn a_worktree_holding_untracked_work_is_refused_and_left_whole() {
+        let (work, tree) = linked("wt-remove-dirty");
+        fs::write(tree.join("unsaved.rs"), "the only copy\n").unwrap();
+
+        let refused = std::panic::catch_unwind(|| remove(&work, tree.to_str().unwrap()));
+
+        assert!(refused.is_err(), "a worktree with untracked work was removed");
+        assert!(registered(&work, &tree), "the refusal unregistered it");
+        assert_eq!(fs::read_to_string(tree.join("unsaved.rs")).unwrap(), "the only copy\n");
     }
 }

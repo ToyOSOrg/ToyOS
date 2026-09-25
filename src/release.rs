@@ -235,8 +235,15 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
         .env_remove("CI")
         .current_dir(root))?;
 
+    // What ships as `{HOST}/stage2` is the sysroot that build compiled against:
+    // the compiler with the guest libraries and `libtoyos_c.a` this tree's
+    // sources name, recorded beside the witness an installer checks it by.
     let build = root.join("rust/build");
-    let stage2 = build.join(format!("{HOST}/stage2"));
+    let key = crate::sysroot::recorded_key(root).ok_or("the build recorded no sysroot key")?;
+    let sysroot = format!("sysroots/{key}");
+    let stage2 = build.join(&sysroot);
+    fs::write(build.join("toyos-sysroot-witness"), crate::sysroot::witness(root))
+        .map_err(|e| format!("recording the sysroot's witness: {e}"))?;
     let need = shipped_glibc(&stage2)?;
     if need > GLIBC_FLOOR {
         return Err(format!(
@@ -254,15 +261,17 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     .map_err(|e| format!("copying toyos-ld into the release: {e}"))?;
     fs::copy(tmp.join("TOOLCHAIN"), build.join("TOOLCHAIN")).map_err(|e| e.to_string())?;
 
-    // `lib/rustlib/<host>` and `<host>/stage2/bin/cargo` are links into this
-    // runner's own toolchain; `Owner::Installed` recreates both.
+    // `lib/rustlib/<host>` and the sysroot's `bin/cargo` are links into this
+    // runner's own toolchain; `Owner::Installed` recreates both. GNU tar's
+    // `--transform` renames the sysroot to the path an installer links.
     let tarball = tmp.join(ASSET);
     let mut tar = Command::new("tar")
         .arg("-C")
         .arg(&build)
         .arg(format!("--exclude=x86_64-unknown-toyos/stage2/lib/rustlib/{HOST}"))
-        .arg(format!("--exclude={HOST}/stage2/bin/cargo"))
-        .args(["-c", &format!("{HOST}/stage2"), "x86_64-unknown-toyos/stage2"])
+        .arg(format!("--exclude={sysroot}/bin/cargo"))
+        .arg(format!("--transform=s,^{sysroot},{HOST}/stage2,"))
+        .args(["-c", &sysroot, "x86_64-unknown-toyos/stage2"])
         .args(["toyos-sysroot-witness", "toyos-ld-witness", "TOOLCHAIN"])
         .stdout(Stdio::piped())
         .spawn()
