@@ -717,6 +717,13 @@ pub fn c_capture_ignores_daemon_lines(
 /// only keyboard on the machine — no USB HID, no virtio — which is the shape
 /// `i8042_keyboard` and `swiss_german_layout` already inject through, and the
 /// mouse the middle arm claims is the PS/2 one beside it.
+///
+/// **One CPU, because the keystroke outlives the probe.** Nothing holds the
+/// keyboard once the claim is released, so the key stays queued while the
+/// runner goes back to reading its console, which waits on the serial line. A
+/// console read that woke on the keyboard's queue instead would spin in the
+/// kernel, and on one CPU that spin starves `logd` and the probe's verdict
+/// never reaches the console, every boot rather than some.
 pub fn keyboard_claim_close_spares_stdin(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -748,6 +755,7 @@ fn kbd_close_probe(
         BootOptions {
             profile: super::qemu::Profile::Metal,
             qmp: true,
+            smp: 1,
             kernel_params: params,
             ..Default::default()
         },

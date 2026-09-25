@@ -502,16 +502,3 @@ mechanism for it. `src/redlist.rs` carries the sighting.
   parallel run — a loaded full fast tier in which `i8042_undecoded_bytes`'
   first mute line names nothing and its second names the sequence, or the
   retirement's clause narrowed to the conditions under which it holds.
-
-- **`keyboard_claim_close_spares_stdin`** — added 2026-09-25 on the logd branch
-  (#492), fast tier at `319db4d8`, dev host: `STALLED: 972s of guard expired,
-  and the guest had said nothing for the last 973s of it`, its last line
-  `===KBD_CLOSE_READY===`, the one red of 358, and `ALONE
-  keyboard_claim_close_spares_stdin: GREEN`. The same branch's nightly at
-  `583f21e5` reported it `STALL` at 726 s, ALONE green. The branch changes
-  `userland/test-runner/src/main.rs` (which job gets the console as stdin) and
-  not `kbd_close.rs`; whether it is the cause is not known.
-
-  Owner: the kbd-close gate. **Exit condition**: the guest's state at the stall
-  read (a Ctrl+Alt+D dump on the guard's expiry), or a loaded fast tier of
-  `origin/main` that stalls it the same way.
