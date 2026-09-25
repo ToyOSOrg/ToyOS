@@ -330,6 +330,16 @@ changes.
   and both of this test's guests are ordinary handoff passes on RAM QEMU zeroed,
   so the string it changes is on no line either of them prints.
 
+- **`quiesce_dump_holds_the_stopped`**, first sighting — 2026-09-25 on
+  `wt/toyos-ramroot` (PR #506, head `696f46cb`), one full fast tier: `QEMU never
+  reported stopping: the guest asked for a reboot and stayed up`, after 262 s,
+  then `ALONE … GREEN`. `cargo run -- --known-red quiesce_dump_holds_the_stopped`
+  answered `NO, not quarantined`. It was a slow run: `sysret_ss_reload` took
+  168 s in the same tier, and `uptime` just after read load averages 4.26 7.17
+  9.30. That branch's last change deletes loader console lines and touches no
+  quiesce or power path. Not investigated.
+
+
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
 twelve guests across every worktree. It recurred on 2026-08-07: **eight
