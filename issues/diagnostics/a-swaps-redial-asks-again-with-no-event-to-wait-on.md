@@ -13,7 +13,8 @@ with the old netd, so init's words are unreachable until a dial succeeds. So
 every dial turned away — refused with a reset by the old netd whose `logd`
 listener is closed, or by the new netd before `logd` binds; or, through QEMU's
 forward, accepted and closed before a line — is asked again at once. On a LAN
-that is a `getaddrinfo` and a `connect` per round trip for the whole gap.
+that is a question for the name on the link, which the old netd answers at
+once, and a `connect` per round trip for the whole gap.
 
 What bounds it: every dial turned away is counted, refusals included
 (`Stream::turned_away`), and a redial gives up at

@@ -45,9 +45,10 @@ const REFUSED_WORD: Duration = Duration::from_secs(10);
 /// a missing line is a red verdict rather than a longer wait.
 const CARRIER_WORD: Duration = Duration::from_millis(toyos_swap::ANSWER_MS);
 
-/// How many dials a swap's redial may have turned away — refused, or closed
-/// before a line — before it gives up and the swap is red. Nothing the machine
-/// sends says when `logd` listens again, so a redial asks again at once and
+/// How many dials a stream's first dial, or a swap's redial, may have turned
+/// away — a failed connect, or a connection closed before a line — before it
+/// gives up and the boot or the swap is red. Nothing the machine sends says
+/// when `logd` listens again after a swap, so a redial asks again at once and
 /// this ceiling is the one thing that stops it spinning unseen: the recorded
 /// compromise `issues/diagnostics/a-swaps-redial-asks-again-with-no-event-to-wait-on.md`.
 pub const TURNED_AWAY_CEILING: usize = 64;

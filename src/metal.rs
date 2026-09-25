@@ -1767,7 +1767,8 @@ impl Talking {
         };
         println!("asking for {peer:?}'s log");
         let at = self.dir.join(file);
-        crate::metaltalk::Stream::connect(peer, &at, true, by).map_err(Refusal::Cable)
+        crate::metaltalk::Stream::connect(peer, &at, true, by, crate::metalswap::TURNED_AWAY_CEILING)
+            .map_err(Refusal::Cable)
     }
 }
 

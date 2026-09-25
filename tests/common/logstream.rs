@@ -94,7 +94,8 @@ fn boot(
 /// A reader of the forwarded port, connected now.
 pub fn reader(port: u16, file: &str) -> Result<Stream, String> {
     let at = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let stream = Stream::connect(Peer::At(at), &super::lane::dir().join(file), false, CEILING)?;
+    let path = super::lane::dir().join(file);
+    let stream = Stream::connect(Peer::At(at), &path, false, CEILING, toyos_build::metalswap::TURNED_AWAY_CEILING)?;
     stream
         .wait_connected(CEILING)
         .ok_or_else(|| stream.unopened().unwrap_or_else(|| "the stream never opened".to_string()))?;
