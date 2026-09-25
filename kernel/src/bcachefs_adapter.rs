@@ -546,16 +546,25 @@ pub enum Storage {
 
 /// Decide what the device is, from its superblock and block 0.
 ///
-/// A failed mount is not consent. Only `BadMagic` — no copy of the superblock
-/// claims the volume — lets the stamp be asked for; every other refusal is a
-/// volume of ours that did not mount, or a device that did not say.
+/// A failed mount is not consent. Only [`FsError::disowns_volume`] lets the
+/// stamp be asked for; every other refusal is a volume of ours that did not
+/// mount, or a device that did not say. The classification lives on the error
+/// type in the bcachefs crate, exhaustive over its variants, so the kernel
+/// cannot widen "not ours" by drifting from it.
+///
+/// Two residues stay here, unfixed: a volume of ours whose block 0 and backup
+/// both lost the magic reads exactly like a disk that was never ours, because
+/// nothing on disk still says otherwise; and a designation stamp at block 0
+/// sitting over a backup superblock that carries the magic but fails its own
+/// check reads `Unmountable` rather than `Designated`, so the stamp's consent
+/// goes unread. Both fail toward no write rather than toward a false format.
 pub fn probe(cache: &Arc<page_cache::Cached>) -> Storage {
     match mount(cache) {
         Ok(fs) => {
             log!("storage: mounted the ToyOS volume at block 0");
             return Storage::Ours(fs);
         }
-        Err(FsError::BadMagic { .. }) => {}
+        Err(err) if err.disowns_volume() => {}
         Err(err) => {
             log!(
                 "storage: the DATA volume does not mount, and nothing says it is another's: \
@@ -636,7 +645,12 @@ pub fn open_data() -> Data {
         );
         return Data::Volatile;
     };
-    let Some(cache) = page_cache::over_candidate(candidate, "data") else { return Data::Volatile };
+    // The GPT type names this candidate ours, whether or not a view over it
+    // could be opened — no driver claimed its device, or its geometry is not
+    // whole blocks. That is the same harm `Absent` exists for: a candidate of
+    // ours that a tmpfs would silently stand in behind. `over_candidate`
+    // already logged which.
+    let Some(cache) = page_cache::over_candidate(candidate, "data") else { return Data::Absent };
     let fs = match probe(&cache) {
         Storage::Ours(fs) => fs,
         Storage::Designated => match format(&cache) {

@@ -102,6 +102,40 @@ pub enum FsError {
     ListTooLong { limit: usize },
 }
 
+impl FsError {
+    /// Whether a mount refused for this reason means the volume was never
+    /// ours — the only question a caller deciding whether to offer a format
+    /// stamp may ask. Exhaustive on purpose: a caller outside this crate
+    /// cannot classify a refusal any other way, and a new variant has to be
+    /// placed here before it compiles. `BadMagic` alone disowns the volume —
+    /// neither copy of the superblock claims it. Every other refusal,
+    /// including a device that would not answer at all, is a volume of ours
+    /// that did not mount, and disowns nothing.
+    pub fn disowns_volume(&self) -> bool {
+        match self {
+            FsError::BadMagic { .. } => true,
+            FsError::UnsupportedVersion(_)
+            | FsError::ChecksumMismatch { .. }
+            | FsError::CorruptedKey(_)
+            | FsError::CorruptedNode(_)
+            | FsError::BlockOffDevice { .. }
+            | FsError::NotEnoughBlocks { .. }
+            | FsError::TreeTooDeep(_)
+            | FsError::BadSuperblock { .. }
+            | FsError::DeviceRead(_, _)
+            | FsError::DeviceWrite(_, _)
+            | FsError::DeviceSync(_)
+            | FsError::NotFound
+            | FsError::NoSpace { .. }
+            | FsError::NameTooLong { .. }
+            | FsError::EntryTooLarge { .. }
+            | FsError::NodeOverfull { .. }
+            | FsError::TargetTooLong { .. }
+            | FsError::ListTooLong { .. } => false,
+        }
+    }
+}
+
 pub struct ReadOnly;
 pub struct ReadWrite;
 
@@ -1695,5 +1729,25 @@ mod tests {
             other => panic!("expected CorruptedNode, got {other:?}"),
         }
         assert!(fs.is_dir("").expect("the root needs no walk"));
+    }
+
+    /// `is_dir_is_a_name_beneath` never grows the root past one leaf, so a
+    /// walk that stopped propagating `Break` through an interior node would
+    /// still pass it. More names than `MAX_ENTRIES` (169) fit in one leaf
+    /// forces at least one split, so the root here is `Interior` and every
+    /// `d{i}` is beneath a child the walk has to descend into and return from.
+    #[test]
+    fn is_dir_over_a_split_root_finds_every_directory() {
+        const COUNT: usize = 200;
+        let mut fs = Formatted::format(VecBlockIO::new(2048)).expect("format");
+        for i in 0..COUNT {
+            fs.create(&format!("d{i}/f"), b"x", i as u64)
+                .unwrap_or_else(|e| panic!("create d{i}/f: {e:?}"));
+        }
+        let fs = mount_rw(fs.into_io().expect("sync").into_vec()).expect("mount");
+        for i in 0..COUNT {
+            let dir = format!("d{i}");
+            assert!(fs.is_dir(&dir).expect("a walk of a sound tree"), "{dir}");
+        }
     }
 }

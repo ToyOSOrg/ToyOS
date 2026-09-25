@@ -515,6 +515,49 @@ pub fn designate_data_disk(path: &Path, len: u64) -> (u64, u64) {
     (start, bytes)
 }
 
+/// Lay a table on the disk at `path` carrying one TOYOS-DATA partition aligned
+/// to a sector rather than a page, so its start lands where the primary table
+/// ends and not on a 4096-byte boundary. `over_candidate` refuses that view
+/// before anything beneath it is read, and the GPT type still names the
+/// partition ours. Answers the byte offset it landed at.
+pub fn misaligned_data_disk(path: &Path, len: u64) -> u64 {
+    let Some(data_bytes) = len.checked_sub(PARTITION_ALIGN as u64).filter(|b| *b > 0) else {
+        panic!("a {len}-byte disk has no room for a misaligned DATA partition");
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("open {} to partition it: {e}", path.display()));
+    let mbr =
+        gpt::mbr::ProtectiveMBR::with_lb_size(u32::try_from(len / 512 - 1).unwrap_or(0xFF_FF_FF_FF));
+    mbr.overwrite_lba0(&mut file).expect("write the protective MBR");
+
+    let mut gdisk = gpt::GptConfig::default()
+        .initialized(false)
+        .writable(true)
+        .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
+        .create_from_device(Box::new(file), None)
+        .expect("create a GPT on the data disk");
+    gdisk
+        .update_partitions(BTreeMap::<u32, gpt::partition::Partition>::new())
+        .expect("initialize the data disk's partition table");
+    // One sector, not `PARTITION_ALIGN`: the partition lands at the first
+    // usable LBA, right after the primary table, which is not a page boundary.
+    let id = gdisk
+        .add_partition("ToyOS data", data_bytes, TOYOS_DATA, 0, Some(1))
+        .expect("add the data partition");
+    let placed = gdisk.partitions().get(&id).expect("the partition was just added");
+    let start = placed
+        .bytes_start(gpt::disk::LogicalBlockSize::Lb512)
+        .expect("the data partition's start");
+    assert_ne!(start % SECTOR as u64, 0, "the partition landed on a page boundary by accident");
+
+    gdisk.write().expect("write the data disk's GPT");
+    start
+}
+
 /// Block 0 of a volume the kernel may format: the magic and its block count.
 fn designation(blocks: u64) -> [u8; SECTOR] {
     let mut block = [0u8; SECTOR];

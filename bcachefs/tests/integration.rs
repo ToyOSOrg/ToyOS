@@ -1,4 +1,4 @@
-use bcachefs::{Extent, Formatted, FsError, FsUuid, Mounted, ReadOnly, ReadWrite, VecBlockIO};
+use bcachefs::{BlockNum, Extent, Formatted, FsError, FsUuid, Mounted, ReadOnly, ReadWrite, VecBlockIO};
 
 // --- Basic read-only tests ---
 
@@ -1131,6 +1131,49 @@ fn a_block_zero_the_device_refuses_does_not_fall_through_to_the_backup() {
     match Mounted::<_, ReadOnly>::open(Refuses::read(raw, 0)) {
         Err(FsError::DeviceRead(block, _)) => assert_eq!(block.raw(), 0),
         other => panic!("expected DeviceRead, got {:?}", other.map(|_| "a mount")),
+    }
+}
+
+/// `disowns_volume` is what a caller outside this crate uses to tell "not
+/// ours" from "ours, but did not mount" — every variant, so a new one left
+/// out of this list is a case this test does not cover rather than one that
+/// silently defaults to either answer.
+#[test]
+fn bad_magic_alone_disowns_the_volume() {
+    let block = BlockNum::new(0);
+    let device = bcachefs::DeviceError::classify(&Attempted);
+    let cases: &[(FsError, bool)] = &[
+        (FsError::BadMagic { expected: *b"TOYS", got: *b"NOPE" }, true),
+        (FsError::UnsupportedVersion(1), false),
+        (FsError::ChecksumMismatch { block, stored: 0, computed: 1 }, false),
+        (FsError::CorruptedKey(0), false),
+        (FsError::CorruptedNode(block), false),
+        (FsError::BlockOffDevice { block: 0, device_blocks: 0 }, false),
+        (FsError::NotEnoughBlocks { needed: 0, available: 0 }, false),
+        (FsError::TreeTooDeep(block), false),
+        (FsError::BadSuperblock { field: "x" }, false),
+        (FsError::DeviceRead(block, device), false),
+        (FsError::DeviceWrite(block, device), false),
+        (FsError::DeviceSync(device), false),
+        (FsError::NotFound, false),
+        (FsError::NoSpace { requested: 0, available: 0 }, false),
+        (FsError::NameTooLong { len: 0, max: 0 }, false),
+        (FsError::EntryTooLarge { size: 0, max: 0 }, false),
+        (FsError::NodeOverfull { used: 0, max: 0 }, false),
+        (FsError::TargetTooLong { size: 0, max: 0 }, false),
+        (FsError::ListTooLong { limit: 0 }, false),
+    ];
+    for (err, want) in cases {
+        assert_eq!(err.disowns_volume(), *want, "{err:?}");
+    }
+
+    // A device that will not answer at block 0 is not a device that says
+    // "not ours" — the volume stays `Unmountable`, never a candidate for the
+    // designation stamp.
+    let raw = volume_with("doc.bin", b"small");
+    match Mounted::<_, ReadOnly>::open(Refuses::read(raw, 0)) {
+        Err(err) => assert!(!err.disowns_volume(), "{err:?}"),
+        Ok(_) => panic!("a device that refuses block 0 must not mount"),
     }
 }
 

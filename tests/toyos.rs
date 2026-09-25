@@ -425,6 +425,11 @@ const RUST_SKIP: &[&str] = &[
     "so_cache_policy",
     // Needs the NVMe `/home` and a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
     "home_overwrite_zero",
+    // Needs a boot where the DATA volume is ours and absent; on the shared
+    // boot `/apps` and `/home` are ordinarily mounted, so every refusal it
+    // checks would be granted instead. `broken_data_volume_is_absent` and
+    // `data_candidate_with_bad_geometry_is_absent` run it.
+    "home_absent",
     // Needs the disks `tests/common/partclaim.rs` crafts, the boot stick's GUIDs
     // as arguments and a role; `partition_claim`, `partition_claim_gives_up` and
     // `partition_claim_departure` boot it and judge it off the images.
@@ -800,6 +805,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
     ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
     ("broken_data_volume_is_absent", Sched::Parallel, Tier::Fast),
+    ("data_candidate_with_bad_geometry_is_absent", Sched::Parallel, Tier::Fast),
     // Four kernel lines and a file read off the image once the guest is gone; no clock in any of them.
     ("internal_disk_boot", Sched::Parallel, Tier::Fast),
     // One boot each, kernel lines and image bytes for verdicts, no clock in either.
@@ -10016,6 +10022,9 @@ fn run_machine_test(
         }
         "broken_data_volume_is_absent" => {
             storage::broken_data_volume_is_absent(test_config, c_bins, rust_bins)
+        }
+        "data_candidate_with_bad_geometry_is_absent" => {
+            storage::data_candidate_with_bad_geometry_is_absent(test_config, c_bins, rust_bins)
         }
         "home_budget_refusal_retried" => {
             storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)
