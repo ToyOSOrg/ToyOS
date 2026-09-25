@@ -52,3 +52,10 @@ path's two posts.
 **Exit condition.** A capture taken from a boot that has actually stopped, which
 names the first waiter and the subject it waits on — the blocked-task dump, or a
 guest whose own last line is not the periodic reporter.
+
+**Sighting, 2026-09-25.** `cargo test` (the full fast tier) on the dev host, 12 wide, TCG, on
+`wt/toyos-inspect` at `9ff0d254`. That branch touches no file under `kernel/`,
+`toyos/`, `toyos-abi/` or `tests/testcases/`. `port_poll_churn` failed with `timed out after
+300s, with the guest still talking 2s ago (366 console line(s) while it ran)`, and then
+passed alone in 641 ms. The capture's last 60 lines are only the periodic `sched:` / `PMM:`
+reporter (`parked=5 current=None`), so this sighting also does not meet the exit condition.
