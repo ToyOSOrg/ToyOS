@@ -898,6 +898,14 @@ fn serve_launch<'a>(
         }
     };
 
+    // std joins a relative `current_dir` onto init's own cwd, so passing one
+    // on would start the child in init's `/` — the default this field removes.
+    if !request.cwd.starts_with('/') {
+        say!("init: launcher: refused a working directory that is not absolute");
+        let _ = conn.try_signal(launch::MSG_REFUSED);
+        return;
+    }
+
     // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
     // has already established that the two name one binary, so this grants
     // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
@@ -918,9 +926,7 @@ fn serve_launch<'a>(
             command.env(key, value);
         }
     }
-    if !request.cwd.is_empty() {
-        command.current_dir(request.cwd);
-    }
+    command.current_dir(request.cwd);
     for arg in request.argv.split(|&b| b == 0).skip(1).filter(|a| !a.is_empty()) {
         if let Ok(arg) = std::str::from_utf8(arg) {
             command.arg(arg);

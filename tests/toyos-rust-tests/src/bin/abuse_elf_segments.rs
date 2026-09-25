@@ -17,6 +17,9 @@ use std::fs;
 
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 
+/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
+const CWD: &str = "/";
+
 const DIR: &str = "/home/abuse_elf";
 
 const ET_DYN: u16 = 3;
@@ -136,6 +139,8 @@ fn spawn_err(name: &str, bytes: &[u8]) -> SyscallError {
             endow_count: 0,
             labels_ptr: 0,
             labels_len: 0,
+            cwd_ptr: CWD.as_ptr() as u64,
+            cwd_len: CWD.len() as u64,
         })
     }
     .map(|pid| panic!("{name}: spawn succeeded (pid {pid:?}) — the header is malformed"))

@@ -92,6 +92,15 @@ pub(super) fn sys_chdir(path: &str) -> u64 {
     }
 }
 
+/// A spawned child's working directory, judged as `SYS_CHDIR` judges a path but
+/// against nobody's cwd: a relative one would be the caller's by another road.
+pub(super) fn spawn_cwd(path: &str) -> Result<alloc::string::String, SyscallError> {
+    if !path.starts_with('/') {
+        return Err(SyscallError::InvalidArgument);
+    }
+    vfs::lock().cd("/", path)
+}
+
 /// Returns the length needed; writes the cwd only when it fits (`n <= out.len()`).
 pub(super) fn sys_getcwd(out: &mut UserBytesMut) -> u64 {
     process::with_process_data(|data| {

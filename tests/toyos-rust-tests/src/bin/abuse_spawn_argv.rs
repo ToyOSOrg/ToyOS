@@ -9,6 +9,9 @@ use std::process::Command;
 
 use toyos_abi::syscall::{self, MmapFlags, MmapProt, SpawnArgs, SyscallError};
 
+/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
+const CWD: &str = "/";
+
 /// One contiguous mmap region — `user_slice` requires physical contiguity,
 /// so a heap `String` would risk a vacuous pass on `BadAddress`.
 const REGION: usize = 4 * 1024 * 1024;
@@ -43,6 +46,8 @@ fn main() {
         endow_count: 0,
         labels_ptr: 0,
         labels_len: 0,
+        cwd_ptr: CWD.as_ptr() as u64,
+        cwd_len: CWD.len() as u64,
     };
 
     let err = unsafe {

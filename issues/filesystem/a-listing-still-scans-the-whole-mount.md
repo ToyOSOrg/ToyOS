@@ -31,3 +31,12 @@ which every other filesystem syscall on the machine waits behind.
 The end of it is a real directory index — a store keyed by (directory, name)
 rather than a flat namespace of paths that happen to contain `/`. On bcachefs
 that is an on-disk format change, so it is not a small one.
+
+**`SYS_CHDIR` and `SYS_SPAWN` pay the same worst case on bcachefs.** Both judge
+their directory with `FileSystem::is_dir` under the VFS lock, and
+`Mounted::is_dir` (`bcachefs/src/fs.rs`) is a `for_each_live` walk that stops
+at the first name beneath the directory — so a directory that is there costs
+the walk up to its first entry, and one that is not costs every node on the
+mount. Every spawn states a cwd, so this is on the path of every process start
+whose cwd is under `/system`, `/apps` or `/home`. Nothing is kept, and a node the walk
+cannot read refuses that one call. The same (directory, name) index ends it.

@@ -117,6 +117,18 @@ impl FileSystem for TmpFs {
         Ok(out)
     }
 
+    /// The first name at or after `dir/` in key order is the only one that can
+    /// lie beneath it.
+    fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError> {
+        if dir.is_empty() {
+            return Ok(true);
+        }
+        let prefix = alloc::format!("{dir}/");
+        Ok(self.entries.range::<str, _>((core::ops::Bound::Included(prefix.as_str()), core::ops::Bound::Unbounded))
+            .next()
+            .is_some_and(|(name, _)| name.starts_with(&prefix)))
+    }
+
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
         match self.entries.get(name) {
             Some(Entry::File { mtime, .. }) => Ok(*mtime),

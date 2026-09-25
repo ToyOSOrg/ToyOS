@@ -49,3 +49,8 @@ devices = ["pci:1af4:1041"]
 # nothing and provides nothing, so a refused launch of it takes no acceptor
 # with it and a granted one is a clean round trip.
 [programs.toybox]
+
+# What `spawn_cwd` asks for the owner's `cd` and a launch from it: the shell
+# reaches the launcher through its own row, as it does on the desktop.
+[programs.shell]
+receives = ["launcher"]

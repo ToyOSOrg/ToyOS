@@ -84,6 +84,7 @@ fn main() {
     a_quiet_client_does_not_wedge_the_launcher();
     not_a_connector();
     a_connector_it_cannot_duplicate();
+    a_working_directory_that_is_not_absolute();
 
     let before = churn();
     let after = churn();
@@ -235,9 +236,13 @@ fn a_connector_it_cannot_duplicate() {
 /// Send one launch carrying `extras` and answer the message type init replied
 /// with. The reply is the liveness proof as much as the verdict.
 fn refused_with(extras: &[(&str, RawHandle)]) -> u32 {
+    answer_to("/", extras)
+}
+
+/// Send one launch from `cwd` carrying `extras`, and answer init's reply.
+fn answer_to(cwd: &str, extras: &[(&str, RawHandle)]) -> u32 {
     let mut buf = [0u8; 512];
-    let request =
-        Launch { program: DECLARED, argv: b"", env: b"", cwd: "/", extras, slots: &[] };
+    let request = Launch { program: DECLARED, argv: b"", env: b"", cwd, extras, slots: &[] };
     let (handles, count) = request.handles();
     let len = request.encode(&mut buf).expect("encode a launch");
 
@@ -245,6 +250,15 @@ fn refused_with(extras: &[(&str, RawHandle)]) -> u32 {
     conn.send_bytes_with_handles(&handles[..count], launch::MSG_LAUNCH, &buf[..len])
         .expect("the launcher took the frame");
     answer_within(&conn, ANSWER_BUDGET).expect("init answered the launch")
+}
+
+/// A cwd the launch does not state absolutely. std would join it onto init's
+/// own, so a grant here is the child started in a directory nobody named.
+fn a_working_directory_that_is_not_absolute() {
+    for cwd in ["", "tmp"] {
+        assert_eq!(answer_to(cwd, &[]), launch::MSG_REFUSED, "a launch from cwd {cwd:?} was not refused");
+    }
+    println!("  a working directory that is not absolute: refused, and init is still here");
 }
 
 /// The non-vacuity arm. `/system/bin/toybox` is a `[programs]` key, so a caller
