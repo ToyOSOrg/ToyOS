@@ -61,7 +61,7 @@ const SOURCES: &str = "SOURCES";
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, targets toyos none uefi, \
-                      libtoyos_c merged; 1";
+                      libtoyos_c merged, libraries from the stamp; 2";
 
 /// Where each build records the key it compiled against, for [`sweep`].
 const RECORD: &str = "target/toyos-sysroot-key";
@@ -395,13 +395,9 @@ fn build(root: &Path, rust_dir: &Path, fork: &Path, key: &str, dir: &Path) {
     if partial.exists() {
         fs::remove_dir_all(&partial).unwrap_or_else(|e| panic!("remove {}: {e}", partial.display()));
     }
-    clone_tree(&toolchain::stage2(rust_dir), &partial, Links::Keep);
+    clone_tree(&toolchain::stage2(rust_dir), &partial);
     for target in GUEST_TARGETS {
-        let into = partial.join("lib/rustlib").join(target);
-        if into.exists() {
-            fs::remove_dir_all(&into).unwrap_or_else(|e| panic!("remove {}: {e}", into.display()));
-        }
-        clone_tree(&built.join(target), &into, Links::Follow);
+        place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
     }
     let libc_target = dir.with_extension("libc-target");
     crate::libc::build(root, &partial, &libc_target);
@@ -424,7 +420,7 @@ fn build(root: &Path, rust_dir: &Path, fork: &Path, key: &str, dir: &Path) {
 }
 
 /// Compile the guest targets' libraries from `fork`'s `library/` with the
-/// primary's compiler, and return the `lib/rustlib` they were put in.
+/// primary's compiler, and return the directory each target's is under.
 fn build_std(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
     if fork == rust_dir {
         crate::ensure_submodule(fork, "library/backtrace");
@@ -453,7 +449,52 @@ fn build_std(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
     toolchain::refuse_on_compile_error(&log, "std");
     assert!(ok, "the std build failed, and nothing in its output was a compile error");
     toolchain::assert_std_built_from(root, &build_dir.join(&host).join("stage0-std/x86_64-unknown-toyos"));
-    build_dir.join(&host).join("stage0-sysroot/lib/rustlib")
+    build_dir.join(&host).join("stage0-std")
+}
+
+/// The stamp bootstrap wrote naming every library it built for `target` under
+/// `built`: the one list of them. **Not `stage0-sysroot`**, which a stage-0
+/// build fills with the stage-0 compiler's own libraries and never with what
+/// it built.
+fn stamp(built: &Path, target: &str) -> PathBuf {
+    let dir = built.join(target);
+    let stamps: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .flatten()
+        .map(|e| e.path().join(".libstd-stamp"))
+        .filter(|p| p.is_file())
+        .collect();
+    match stamps.as_slice() {
+        [one] => one.clone(),
+        other => panic!("{} holds {} std stamps, not one: {other:?}", dir.display(), other.len()),
+    }
+}
+
+/// Put the libraries `stamp` names in `lib`, which they replace, as
+/// bootstrap's own `add_to_sysroot` does: `t` in `lib`, `s` in its
+/// `self-contained`. A host (`h`) library is not something a std build for a
+/// guest target makes, and is refused rather than placed.
+fn place_std(stamp: &Path, lib: &Path) {
+    if lib.exists() {
+        fs::remove_dir_all(lib).unwrap_or_else(|e| panic!("remove {}: {e}", lib.display()));
+    }
+    let contained = lib.join("self-contained");
+    fs::create_dir_all(&contained).unwrap_or_else(|e| panic!("create {}: {e}", contained.display()));
+    let listed = fs::read(stamp).unwrap_or_else(|e| panic!("read {}: {e}", stamp.display()));
+    let mut placed = 0;
+    for part in listed.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let path = PathBuf::from(String::from_utf8_lossy(&part[1..]).as_ref());
+        let into = match part[0] {
+            b't' => lib,
+            b's' => &contained,
+            kind => panic!("{} names {} as {:?}, a kind a guest std does not make", stamp.display(), path.display(), kind as char),
+        };
+        let name = path.file_name().unwrap_or_else(|| panic!("{} names no file", path.display()));
+        fs::copy(&path, into.join(name))
+            .unwrap_or_else(|e| panic!("copy {} into {}: {e}", path.display(), into.display()));
+        placed += 1;
+    }
+    assert!(placed > 0, "{} names no library", stamp.display());
 }
 
 /// Bootstrap's configuration for a std built by an existing compiler:
@@ -532,30 +573,21 @@ impl Drop for Restore {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Links {
-    /// Copy a symbolic link as a link: `stage2`'s own point at things that
-    /// outlive it.
-    Keep,
-    /// Copy what it names: bootstrap's sysroot links into a build directory the
-    /// next build rewrites.
-    Follow,
-}
-
-/// Copy `from` to `to`. `fs::copy` clones on APFS and reflinks where Linux can,
-/// so a sysroot costs the bytes its own libraries differ by.
-fn clone_tree(from: &Path, to: &Path, links: Links) {
+/// Copy `from` to `to`, a symbolic link as a link: `stage2`'s own point at
+/// things that outlive it. `fs::copy` clones on APFS and reflinks where Linux
+/// can, so a sysroot costs the bytes its own libraries differ by.
+fn clone_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap_or_else(|e| panic!("create {}: {e}", to.display()));
     for entry in fs::read_dir(from).unwrap_or_else(|e| panic!("read {}: {e}", from.display())).flatten() {
         let src = entry.path();
         let dst = to.join(entry.file_name());
         let meta = fs::symlink_metadata(&src).unwrap_or_else(|e| panic!("stat {}: {e}", src.display()));
-        if meta.file_type().is_symlink() && matches!(links, Links::Keep) {
+        if meta.file_type().is_symlink() {
             let target = fs::read_link(&src).unwrap_or_else(|e| panic!("readlink {}: {e}", src.display()));
             std::os::unix::fs::symlink(&target, &dst)
                 .unwrap_or_else(|e| panic!("symlink {}: {e}", dst.display()));
         } else if src.is_dir() {
-            clone_tree(&src, &dst, links);
+            clone_tree(&src, &dst);
         } else {
             fs::copy(&src, &dst)
                 .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", src.display(), dst.display()));
@@ -827,6 +859,33 @@ mod tests {
         }
         drop(using);
         assert_eq!(sweep(&root), [dir.join("in-use")]);
+    }
+
+    /// **What a stage-0 std build made is what its stamp names**: its
+    /// `stage0-sysroot` holds the compiler's own libraries, and taking those was
+    /// a sysroot built from sources it never compiled. Each kind goes where
+    /// bootstrap puts it, whatever the directory held before goes, and a host
+    /// library is refused.
+    #[test]
+    fn the_libraries_placed_are_the_ones_the_stamp_names() {
+        let base = scratch("stamp");
+        let built = base.join("built/x86_64-unknown-toyos/dist");
+        write(&built.join("out/libstd-new.rlib"), "new std");
+        write(&built.join("out/crt0.o"), "start");
+        let entries = [format!("t{}", built.join("out/libstd-new.rlib").display()),
+                       format!("s{}", built.join("out/crt0.o").display())];
+        write(&built.join(".libstd-stamp"), &format!("{}\0", entries.join("\0")));
+        let lib = base.join("sysroot/lib/rustlib/x86_64-unknown-toyos/lib");
+        write(&lib.join("libstd-compilers-own.rlib"), "the stage-0 compiler's std");
+
+        place_std(&stamp(&base.join("built"), "x86_64-unknown-toyos"), &lib);
+        assert_eq!(fs::read_to_string(lib.join("libstd-new.rlib")).unwrap(), "new std");
+        assert_eq!(fs::read_to_string(lib.join("self-contained/crt0.o")).unwrap(), "start");
+        assert!(!lib.join("libstd-compilers-own.rlib").exists(), "a library nobody built stayed");
+
+        write(&built.join(".libstd-stamp"), &format!("h{}\0", built.join("out/libstd-new.rlib").display()));
+        let refused = std::panic::catch_unwind(|| place_std(&built.join(".libstd-stamp"), &lib));
+        assert!(refused.is_err(), "a host library was placed in a guest target");
     }
 
     /// `--worktree remove` takes the worktree's fork checkout with it — git will
