@@ -288,7 +288,10 @@ fn pinned_fork(root: &Path) -> String {
 ///
 /// A checkout that exists is used as it stands, which is where an agent edits
 /// the fork; one whose `HEAD` is neither the pinned commit nor ahead of it is
-/// refused, because it builds a fork this tree does not name.
+/// moved there itself, fetching the commit from the primary's repository first
+/// if the checkout does not already hold it, unless the checkout has local
+/// changes, in which case it is refused by name rather than moved out from
+/// under whoever made them.
 pub fn fork_checkout(root: &Path) -> PathBuf {
     let fork = root.join("rust");
     let primary = match toolchain::owner(root) {
@@ -333,14 +336,27 @@ pub fn fork_checkout(root: &Path) -> PathBuf {
         .current_dir(&fork)
         .status()
         .is_ok_and(|s| s.success());
+    if head == pinned || ahead {
+        return fork;
+    }
+    let dirty = git_out(&fork, &["status", "--porcelain", "--ignore-submodules=none"]);
     assert!(
-        head == pinned || ahead,
-        "{} is at {head}, and this tree pins the fork at {pinned}, which that is not ahead of: \
-         a build here would compile a std this tree does not name.\n\
-         `git -C {} checkout {pinned}` moves it to the pinned commit.",
-        fork.display(),
+        dirty.is_empty(),
+        "{} is at {head} with uncommitted work, and this tree pins the fork at {pinned}, which \
+         that is not ahead of: a build here would compile a std this tree does not name, and \
+         moving the checkout would lose that work.\n{dirty}",
         fork.display(),
     );
+    let held = Command::new("git")
+        .args(["cat-file", "-e", &format!("{pinned}^{{commit}}")])
+        .current_dir(&fork)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !held {
+        git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]);
+    }
+    git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
+    eprintln!("{} was at {head}, behind this tree's pin {pinned}: checked it out", fork.display());
     fork
 }
 
@@ -823,12 +839,18 @@ mod tests {
         git(&fork, &["commit", "-qam", "C3, the agent's own"]);
         assert_eq!(fork_checkout(&linked), fork);
 
-        // A checkout behind what the tree pins is not what the tree names.
+        // A clean checkout behind what the tree pins is moved to the pin itself.
         git(&fork, &["checkout", "-q", &c1]);
+        assert_eq!(fork_checkout(&linked), fork);
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2, "a checkout behind its pin was not moved to it");
+
+        // One with local changes is never moved out from under whoever made them.
+        git(&fork, &["checkout", "-q", &c1]);
+        write(&fork.join("library/std/src/lib.rs"), "pub fn uncommitted() {}\n");
         let refused = std::panic::catch_unwind(|| fork_checkout(&linked))
-            .expect_err("a fork checkout behind its pin was built from");
+            .expect_err("a fork checkout with local changes was moved out from under them");
         let message = refused.downcast::<String>().expect("a formatted refusal");
-        assert!(message.contains(&c2), "{message}");
+        assert!(message.contains(&c1) && message.contains(&c2), "{message}");
     }
 
     /// A key no registered worktree records goes, and so does a half-built one;
