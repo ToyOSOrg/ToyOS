@@ -319,10 +319,11 @@ pub(super) fn sys_sched_info() -> toyos_abi::syscall::SchedInfo {
     }
 }
 
-/// The most records one `SYS_DEVICE_INVENTORY` buffer may be declared to hold:
-/// far past any machine this kernel enumerates, and small enough that the
-/// declared length is never an allocation or a window worth refusing later.
-pub(super) const MAX_INVENTORY_RECORDS: u64 = 4096;
+/// The most records one `SYS_DEVICE_INVENTORY` buffer may be declared to hold,
+/// 64 KiB of them: a declared length past it is refused before it becomes a
+/// window, and a machine with more records than this is refused by name rather
+/// than answered in part.
+pub(super) const MAX_INVENTORY_RECORDS: u64 = 1024;
 
 /// Every inventory record, into `out`, or nothing: requires a `SysCap`
 /// carrying `Rights::INVENTORY`. An empty `out` answers the count; one too
@@ -335,7 +336,7 @@ pub(super) fn sys_device_inventory(syscap: RawHandle, out: &mut UserBytesMut) ->
         return e.refuse();
     }
     let records = crate::inventory::collect();
-    if out.len() == 0 {
+    if out.is_empty() {
         return records.len() as u64;
     }
     if out.len() < records.len() * RECORD_BYTES {
