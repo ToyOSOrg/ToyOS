@@ -130,6 +130,10 @@ fn refusals() {
         assert_eq!(spawn_in(cwd), Err(want), "a spawn into {cwd:?}");
         println!("spawn-cwd: a spawn into {cwd:?} is refused: {want:?}");
     }
+    // `SYS_CHDIR` is the same judge, so it refuses the same files.
+    for file in [FILE, SELF] {
+        assert!(std::env::set_current_dir(file).is_err(), "chdir into the file {file}");
+    }
 
     let direct = Command::new(SELF).arg("pwd").current_dir(ABSENT).spawn();
     let refused = direct.map(|_| ()).expect_err("std spawned into a directory that is not there");

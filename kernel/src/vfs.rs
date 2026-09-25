@@ -322,7 +322,8 @@ impl Vfs {
         let prefix = format!("{}/", fs_path);
         // A mount too large to list cannot be entered either: the answer needs the same allocation.
         let names = fs.list(&fs_path, MAX_LIST_ENTRIES)?;
-        if names.iter().any(|(name, _)| name.starts_with(&prefix) || *name == fs_path) {
+        // Only a directory lists a name under `prefix`; an entry named `fs_path` itself is a file.
+        if names.iter().any(|(name, _)| name.starts_with(&prefix)) {
             return Ok(abs);
         }
 
