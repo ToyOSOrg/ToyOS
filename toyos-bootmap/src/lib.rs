@@ -11,11 +11,14 @@
 //! [`mark`] is the other thing both sides of that window agree on: where each
 //! step of the handoff paints its square, which the loader and the kernel both
 //! draw and neither may place differently.
+//!
+//! [`relabel`] is the one change the loader makes to the memory map it hands on.
 
 #![no_std]
 #![forbid(unsafe_code)]
 
 pub mod mark;
+pub mod relabel;
 
 use core::fmt;
 

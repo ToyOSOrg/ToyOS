@@ -29,9 +29,23 @@ What is not ruled out: the firmware's `ExitBootServices` after this loader's
 raw whole-disk block reads and its `0x8000_7201` allocation, and a kernel
 image or boot state the T14 corrupts at the new placement.
 
-The next run is the instrument: the loader and the kernel now paint the
+Run 137 carried the first instrument: the loader and the kernel paint the
 handoff squares (`toyos-bootmap/src/mark.rs`), so the photograph says which of
 `ExitBootServices`, the `mov cr3` and the kernel's entry the machine reached.
+
+Run 137 (head 35826467) showed none of the three squares: the loader read ROOT
+(`0x5ed16000+0x2a00000`), printed through the legend and `Loader log: the
+kernel handoff begins`, and the row stayed dark. Read at face value that is
+`ExitBootServices` not returning; the square had never been seen on this panel,
+so the reading rests on an instrument with no positive control there.
+
+The next run carries that control and one change: a fourth square, painted
+leftmost just before the call through the same writes, and ROOT allocated as
+`LoaderData` with `ROOT_IMAGE_MEMORY_TYPE` given only in the map the kernel is
+handed (`toyos-bootmap/src/relabel.rs`). No square: the marks cannot be seen
+here and 137 says nothing. One: the exit still does not return with no
+OS-loader type in the firmware's map, so the type is not it and the 42 block
+reads are next. Two or more: the type was it.
 
 Exit: the stop located by those squares, its cause fixed where it lives, and a
 T14 run of the branch reaching `Boot: complete`.

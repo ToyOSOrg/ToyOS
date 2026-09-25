@@ -8,8 +8,10 @@
 //! one, refuses the boot by name.
 //!
 //! **The contract with the kernel**: [`RootImage`] is made only by [`read`],
-//! its pages are [`ROOT_IMAGE_MEMORY_TYPE`] so the kernel's allocator never
-//! takes them, and nothing writes them between the read and the jump. A check
+//! its pages are `LoaderData` in the firmware's map and
+//! `toyos_abi::boot::ROOT_IMAGE_MEMORY_TYPE` in the map the kernel is handed
+//! (`toyos_bootmap::relabel`), so the kernel's allocator never takes them, and
+//! nothing writes them between the read and the jump. A check
 //! over the image between [`read`] and [`RootImage::handoff`] is therefore a
 //! check over exactly what the kernel mounts.
 
@@ -18,7 +20,7 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 use bcachefs::{BlockBuf, FsUuid, Superblock};
-use toyos_abi::boot::{ROOT_IMAGE_MEMORY_TYPE, WITHHOLD_ROOT_PARAM};
+use toyos_abi::boot::WITHHOLD_ROOT_PARAM;
 use toyos_gpt::{Guid, Partition, Sectors};
 use uefi::prelude::*;
 use uefi::proto::device_path::{DevicePath, DevicePathNode, DeviceSubType, DeviceType};
@@ -260,8 +262,11 @@ impl<'a> Disk<'a> {
             refuse(format_args!("ROOT is {blocks} blocks of {} bytes, not whole {BLOCK}-byte blocks", self.lba_bytes));
         };
         let pages = (len / BLOCK as u64) as usize;
+        // LoaderData and not the type the kernel reads: firmware walks its own map
+        // in `ExitBootServices`, and a type it did not define there is one no
+        // firmware is obliged to have been tested against.
         let at = bs
-            .allocate_pages(AllocateType::AnyPages, MemoryType::custom(ROOT_IMAGE_MEMORY_TYPE), pages)
+            .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
             .unwrap_or_else(|e| refuse(format_args!("firmware would not give {len} bytes for ROOT: {e:?}")));
         // SAFETY: the `pages` pages at `at` were just allocated to this loader,
         // are identity-mapped while boot services live, and nothing else holds them.

@@ -31,12 +31,12 @@ fn every_square_is_inside_the_scanout_and_whole() {
 #[test]
 fn the_squares_stand_apart_in_step_order_from_the_left() {
     let lefts: Vec<u64> = Step::ALL.iter().map(|&step| pixels(step, T14)[0] / 4).collect();
-    assert_eq!(lefts, [16 * 1920 + 1776, 16 * 1920 + 1824, 16 * 1920 + 1872]);
+    assert_eq!(lefts, [16 * 1920 + 1728, 16 * 1920 + 1776, 16 * 1920 + 1824, 16 * 1920 + 1872]);
 }
 
 #[test]
 fn a_mode_that_cannot_hold_the_row_gets_no_square() {
-    let narrow = Scanout { width: 159, height: 1080, stride: 159, bytes: 159 * 1080 * 4 };
+    let narrow = Scanout { width: 207, height: 1080, stride: 207, bytes: 207 * 1080 * 4 };
     assert!(square(Step::KernelEntered, narrow).is_none());
     let short = Scanout { width: 1920, height: 63, stride: 1920, bytes: 1920 * 63 * 4 };
     assert!(square(Step::KernelEntered, short).is_none());
