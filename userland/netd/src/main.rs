@@ -212,6 +212,15 @@ impl Card {
             Self::Intel(nic) => nic.tx(len, fill),
         }
     }
+
+    /// Say what the driver counted, once a pass and after every frame the pass
+    /// sent: a line per dropped frame is itself more frames to send.
+    fn report(&self) {
+        match self {
+            Self::Virtio(nic) => nic.report(),
+            Self::Intel(nic) => nic.report(),
+        }
+    }
 }
 
 /// The driver, as smoltcp's `Device`.
@@ -1527,6 +1536,7 @@ fn main() {
         }
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
         while iface.poll(now, &mut device, &mut socket_set) != PollResult::None {}
+        device.nic.report();
 
         // **After the poll and before anything is served.** The lease is what
         // gives this machine an address, a route and its resolvers, so a client

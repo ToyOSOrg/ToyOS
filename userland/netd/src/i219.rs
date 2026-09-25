@@ -302,7 +302,6 @@ impl Nic {
     /// answer the link where this pass found it changed.
     pub fn begin_pass(&self) -> Result<Option<toyos_i219::Link>, SyscallError> {
         let pass = self.driver.borrow_mut().begin_pass()?;
-        self.report();
         Ok(pass.link_changed.then(|| self.link()))
     }
 
@@ -334,7 +333,6 @@ impl Nic {
     pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
         let slot = self.driver.borrow_mut().tx_reserve(len);
         let Some(slot) = slot else {
-            self.report();
             let mut scratch = self.dropped.borrow_mut();
             if scratch.len() < len {
                 scratch.resize(len, 0);
@@ -352,11 +350,13 @@ impl Nic {
     }
 
     /// Say what this driver has refused, dropped or been told about, and what
-    /// the link is doing — when either has moved.
+    /// the link is doing — when either has moved. Once a pass, never per frame:
+    /// a burst of drops is one line, where a line per drop is more frames for a
+    /// served log to send through the ring that is already full.
     ///
     /// Keyed on the anomalies and never on the spurious count: that one moves
     /// on its own.
-    fn report(&self) {
+    pub fn report(&self) {
         let driver = self.driver.borrow();
         let counters = driver.counters();
         let link = driver.link();
