@@ -19,8 +19,7 @@ use uefi::{
     table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
     Event,
 };
-use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS, ROOT_IMAGE_MEMORY_TYPE};
-use toyos_bootmap::relabel::{relabel, Extent};
+use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
 
 /// Every line this loader prints: the firmware's console, and the file on the
@@ -578,8 +577,6 @@ fn report_reach(what: &str, at: u64, len: u64) {
     );
 }
 
-// Ten arguments because this is the handoff and they are what firmware leaves:
-// every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, root_image: Option<rootimage::RootImage>, system_table: SystemTable<Boot>) -> ! {
     // The last of the firmware questions, and asked here for the same reason
@@ -694,14 +691,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // handle drop can each add a descriptor, and the margin below is fixed.
     loaderlog::close();
     let mms = system_table.boot_services().memory_map_size();
-    // Two more than the firmware's: the relabel below can split one descriptor in three.
-    let memory_map_entry_count = mms.map_size / mms.entry_size + MAP_MARGIN + 2;
+    let memory_map_entry_count = mms.map_size / mms.entry_size + MAP_MARGIN;
     let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
-    let root_claim = Extent {
-        start: root_image_addr,
-        end: root_image_addr.saturating_add(root_image_len),
-        ty: ROOT_IMAGE_MEMORY_TYPE,
-    };
 
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
 
@@ -712,27 +703,24 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // dead-loops. The machine then holds the loader's last line on the panel
     // forever and says nothing — which is the failure this loop is written to
     // be incapable of, not merely unlikely to reach.
-    'map: for entry in uefi_memory_map.entries() {
-        let extent = Extent {
-            ty: entry.ty.0,
+    uefi_memory_map.entries().for_each(|entry| {
+        if memory_map.len() == memory_map.capacity() {
+            // A `push` here would grow the vector, and growing it is the death
+            // above. What was dropped is not reported: the page that carried
+            // that refusal off this boot is gone with the claim, and
+            // `issues/panic-path/the-loaders-truncated-map-refusal-is-executed-by-nothing.md`
+            // holds what is owed.
+            return;
+        }
+        memory_map.push(MemoryMapEntry {
+            uefi_type: entry.ty.0,
             // Saturating: `overflow-checks` is on in this profile, so a
             // descriptor whose extent does not fit an address would panic here
             // rather than in a caller that could report it.
             start: entry.phys_start,
             end: entry.phys_start.saturating_add(entry.page_count.saturating_mul(PAGE_SIZE as u64)),
-        };
-        for piece in relabel(extent, MemoryType::LOADER_DATA.0, root_claim).into_iter().flatten() {
-            if memory_map.len() == memory_map.capacity() {
-                // A `push` here would grow the vector, and growing it is the death
-                // above. What was dropped is not reported: the page that carried
-                // that refusal off this boot is gone with the claim, and
-                // `issues/panic-path/the-loaders-truncated-map-refusal-is-executed-by-nothing.md`
-                // holds what is owed.
-                break 'map;
-            }
-            memory_map.push(MemoryMapEntry { uefi_type: piece.ty, start: piece.start, end: piece.end });
-        }
-    }
+        });
+    });
 
     kernel_args.memory_map_addr = memory_map.as_ptr() as u64;
     kernel_args.memory_map_size =

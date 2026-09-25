@@ -1167,10 +1167,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toyos-chunkread"
-version = "0.1.0"
-
-[[package]]
 name = "toyos-desktop"
 version = "0.1.0"
 dependencies = [
@@ -1276,6 +1272,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-quiesce"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-rootimage"
 version = "0.1.0"
 
 [[package]]

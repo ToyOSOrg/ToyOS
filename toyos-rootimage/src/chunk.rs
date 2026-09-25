@@ -5,11 +5,6 @@
 //! no largest one it serves (UEFI 2.11 §13.9's `EFI_BLOCK_IO_MEDIA` carries an
 //! alignment and, from revision 3, an optimal granularity, and no maximum), so
 //! the bound is the caller's to choose, and [`chunk_bytes`] chooses it.
-//!
-//! Pure: no `alloc`, no firmware; the loader supplies the device.
-
-#![no_std]
-#![forbid(unsafe_code)]
 
 /// A device that reads whole logical blocks starting at an LBA.
 pub trait Blocks {

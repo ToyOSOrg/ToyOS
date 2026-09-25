@@ -2,26 +2,30 @@
 //! from these bytes and needs no storage driver to boot.
 //!
 //! **Which ROOT** is the boot parameter's `root=<uuid>` against each
-//! TOYOS-ROOT-typed partition's superblock, on the disk firmware loaded this
+//! TOYOS-ROOT-typed partition's filesystem, on the disk firmware loaded this
 //! image from and on no other: a slot is a pair of partitions on one disk, and
-//! a ROOT on another disk is another machine's business. None, or more than
-//! one, refuses the boot by name.
+//! a ROOT on another disk is another machine's business. Each candidate is
+//! `toyos_gpt::locate`d, and its superblock is the one `Superblock::read`
+//! decides, primary or backup, which is the decision the kernel's mount makes
+//! over the same bytes. `toyos_rootimage::pick` makes the choice.
 //!
 //! **The contract with the kernel**: [`RootImage`] is made only by [`read`],
-//! its pages are `LoaderData` in the firmware's map and
-//! `toyos_abi::boot::ROOT_IMAGE_MEMORY_TYPE` in the map the kernel is handed
-//! (`toyos_bootmap::relabel`), so the kernel's allocator never takes them, and
-//! nothing writes them between the read and the jump. A check
-//! over the image between [`read`] and [`RootImage::handoff`] is therefore a
-//! check over exactly what the kernel mounts.
+//! its pages are `LoaderData`, which the kernel keeps out of its allocator by
+//! the address it is handed, as it keeps the black box's page, and nothing
+//! writes them between the read and the jump. A check over the image between
+//! [`read`] and [`RootImage::handoff`] is therefore a check over exactly what
+//! the kernel mounts.
 
 use alloc::alloc::Layout;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::num::NonZeroU64;
 
-use bcachefs::{BlockBuf, FsUuid, Superblock};
+use bcachefs::{BlockBuf, BlockNum, DeviceError, FsError, FsUuid, Superblock, TransferError};
 use toyos_abi::boot::WITHHOLD_ROOT_PARAM;
 use toyos_gpt::{Guid, Partition, Sectors};
+use toyos_rootimage::chunk;
+use toyos_rootimage::pick::{pick, Refused};
 use uefi::prelude::*;
 use uefi::proto::device_path::{DevicePath, DevicePathNode, DeviceSubType, DeviceType};
 use uefi::proto::loaded_image::LoadedImage;
@@ -100,31 +104,40 @@ pub fn read(handle: Handle, system_table: &SystemTable<Boot>, params: &str) -> O
     let scan = toyos_gpt::locate_type(&mut sectors, Guid::TOYOS_ROOT, &mut found)
         .unwrap_or_else(|e| refuse(format_args!("the boot disk's partition table: {e:?}")));
 
-    let mut matched: Vec<Partition> = Vec::new();
+    let mut candidates: Vec<((Partition, u64), Option<FsUuid>)> = Vec::new();
     for candidate in &found[..scan.listed] {
-        let uuid = sectors.superblock_uuid(candidate);
+        let part = toyos_gpt::locate(&mut sectors, candidate.unique_guid)
+            .unwrap_or_else(|e| {
+                refuse(format_args!(
+                    "the boot disk's table names the TOYOS-ROOT candidate {} and then refuses it: {e:?}",
+                    candidate.unique_guid
+                ))
+            })
+            .partition;
+        let superblock = sectors.superblock(&part);
         println!(
             "ROOT: candidate {} at LBA {}..={} holds {}",
-            candidate.unique_guid,
-            candidate.first_lba,
-            candidate.last_lba,
-            match uuid {
-                Some(uuid) => alloc::format!("{uuid}"),
-                None => alloc::string::String::from("no superblock this loader can read"),
+            part.unique_guid,
+            part.first_lba,
+            part.last_lba,
+            match &superblock {
+                Ok(sb) => alloc::format!("{}", sb.uuid),
+                Err(e) => alloc::format!("no superblock this loader can read ({e:?})"),
             }
         );
-        if uuid == Some(named) {
-            matched.push(*candidate);
-        }
+        let superblock = superblock.ok();
+        let blocks = superblock.as_ref().map_or(0, |sb| sb.block_count);
+        candidates.push(((part, blocks), superblock.map(|sb| sb.uuid)));
     }
-    let [root] = matched[..] else {
-        refuse(format_args!(
-            "root={named} matches {} of the {} TOYOS-ROOT partition(s) on the boot disk",
-            matched.len(),
-            scan.matched
-        ));
-    };
-    Some(sectors.read_partition(bs, &root))
+    let (root, blocks) = pick(&named, &candidates, scan.matched).unwrap_or_else(|refused| match refused {
+        Refused::Unlisted { matched, listed } => refuse(format_args!(
+            "the boot disk carries {matched} TOYOS-ROOT partitions and this loader looks at {listed}"
+        )),
+        Refused::Matches { matches, candidates } => refuse(format_args!(
+            "root={named} matches {matches} of the {candidates} TOYOS-ROOT partition(s) on the boot disk"
+        )),
+    });
+    Some(sectors.read_filesystem(bs, &root, blocks))
 }
 
 /// The whole-disk block device carrying the partition firmware loaded this
@@ -234,20 +247,34 @@ impl<'a> Disk<'a> {
         }
     }
 
-    /// What the superblock at the start of `part` names, or `None` for a
-    /// partition that carries none this loader parses.
-    fn superblock_uuid(&mut self, part: &Partition) -> Option<FsUuid> {
+    /// The superblock `Superblock::read` decides for `part` — block 0, or the
+    /// backup at the last whole block when block 0 is not one — which is the
+    /// decision the kernel's mount makes over the image; `Err` for a candidate
+    /// that carries none. A read the disk would not do refuses the boot,
+    /// naming the firmware's status.
+    fn superblock(&self, part: &Partition) -> Result<Superblock, FsError> {
         let lbas = BLOCK as u64 / u64::from(self.lba_bytes);
-        if part.last_lba.checked_sub(part.first_lba)? + 1 < lbas {
-            return None;
+        let view = View {
+            io: &self.io,
+            media_id: self.media_id,
+            first_lba: part.first_lba,
+            lbas,
+            blocks: part.lba_count() / lbas,
+            failed: Cell::new(None),
+        };
+        match Superblock::read(&view) {
+            Err(FsError::DeviceRead(block, _)) => refuse(format_args!(
+                "the read of block {} of the TOYOS-ROOT candidate {} failed: {:?}",
+                block.raw(),
+                part.unique_guid,
+                view.failed.get().expect("a refused read recorded the firmware's status")
+            )),
+            decided => decided,
         }
-        self.io.read_blocks(self.media_id, part.first_lba, self.scratch).ok()?;
-        let block = BlockBuf(<[u8; BLOCK]>::try_from(&self.scratch[..]).ok()?);
-        Superblock::parse(&block).ok().map(|sb| sb.uuid)
     }
 
-    /// The whole of `part`, in chunks of at most [`CHUNK_BOUND`], into pages
-    /// the kernel keeps.
+    /// The filesystem on `part`, its `blocks` from the partition's start, in
+    /// chunks of at most [`CHUNK_BOUND`], into pages the kernel keeps.
     ///
     /// **Nothing bounds a chunk that never returns.** `ReadBlocks` takes no
     /// timeout and says nothing while it runs, so a firmware driver that stalls
@@ -255,29 +282,26 @@ impl<'a> Disk<'a> {
     /// resets the machine, if the firmware honours it. What shows where it
     /// stopped is the `ROOT: reading` line before the read and the attempt count
     /// the next pass reads.
-    fn read_partition(&mut self, bs: &BootServices, part: &Partition) -> RootImage {
-        let blocks = part.last_lba - part.first_lba + 1;
-        let Some(len) = blocks.checked_mul(u64::from(self.lba_bytes)).filter(|len| len.is_multiple_of(BLOCK as u64))
-        else {
-            refuse(format_args!("ROOT is {blocks} blocks of {} bytes, not whole {BLOCK}-byte blocks", self.lba_bytes));
+    fn read_filesystem(&mut self, bs: &BootServices, part: &Partition, blocks: u64) -> RootImage {
+        let Some(len) = blocks.checked_mul(BLOCK as u64) else {
+            refuse(format_args!("ROOT's filesystem states {blocks} blocks, which is no byte length"));
         };
-        let pages = (len / BLOCK as u64) as usize;
-        // LoaderData to the firmware, and `ROOT_IMAGE_MEMORY_TYPE` only in the map
-        // the kernel is handed: the T14's firmware never returns from
-        // `ExitBootServices` while its own map holds an OS-loader type.
+        let lbas = len / u64::from(self.lba_bytes);
+        // `LoaderData`, as the black box's page is, for the reason its module
+        // header gives.
         let at = bs
-            .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
+            .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, blocks as usize)
             .unwrap_or_else(|e| refuse(format_args!("firmware would not give {len} bytes for ROOT: {e:?}")));
-        // SAFETY: the `pages` pages at `at` were just allocated to this loader,
+        // SAFETY: the `blocks` pages at `at` were just allocated to this loader,
         // are identity-mapped while boot services live, and nothing else holds them.
         let into = unsafe { core::slice::from_raw_parts_mut(at as *mut u8, len as usize) };
 
         let granularity = self.granularity_lbas();
         // Chunks are whole `BLOCK`s from a page-aligned buffer, so each one
         // keeps the `IoAlign` `open` checked against `BLOCK`.
-        let chunk = toyos_chunkread::chunk_bytes(CHUNK_BOUND, BLOCK, self.lba_bytes, granularity.unwrap_or(0));
+        let chunk = chunk::chunk_bytes(CHUNK_BOUND, BLOCK, self.lba_bytes, granularity.unwrap_or(0));
         println!(
-            "ROOT: reading {len} bytes at LBA {}+{blocks}, {chunk} bytes a request (optimal granularity: {})",
+            "ROOT: reading {len} bytes at LBA {}+{lbas}, {chunk} bytes a request (optimal granularity: {})",
             part.first_lba,
             match granularity {
                 Some(lbas) => alloc::format!("{lbas} block(s)"),
@@ -286,7 +310,7 @@ impl<'a> Disk<'a> {
         );
         let began = tsc();
         let mut device = Firmware { io: &self.io, media_id: self.media_id };
-        let read = toyos_chunkread::read(&mut device, part.first_lba, self.lba_bytes, chunk, into);
+        let read = chunk::read(&mut device, part.first_lba, self.lba_bytes, chunk, into);
         if let Err(failed) = read {
             refuse(format_args!(
                 "the read of {} blocks at LBA {} failed: {:?}, after {} of {len} bytes read",
@@ -316,16 +340,55 @@ impl<'a> Disk<'a> {
     }
 }
 
-/// The boot disk as [`toyos_chunkread`] asks for it.
+/// The boot disk as [`chunk::read`] asks for it.
 struct Firmware<'a> {
     io: &'a BlockIO,
     media_id: u32,
 }
 
-impl toyos_chunkread::Blocks for Firmware<'_> {
+impl chunk::Blocks for Firmware<'_> {
     type Error = uefi::Error;
     fn read(&mut self, lba: u64, into: &mut [u8]) -> uefi::Result {
         self.io.read_blocks(self.media_id, lba, into)
+    }
+}
+
+/// One candidate partition as `bcachefs` reads a device: `blocks` whole
+/// `BLOCK`s of `lbas` logical blocks each from `first_lba`, keeping the status
+/// of a read the firmware refused.
+struct View<'a> {
+    io: &'a BlockIO,
+    media_id: u32,
+    first_lba: u64,
+    lbas: u64,
+    blocks: u64,
+    failed: Cell<Option<Status>>,
+}
+
+/// A read the firmware attempted and failed.
+struct Attempted;
+
+impl TransferError for Attempted {
+    fn refused_before_attempt(&self) -> bool {
+        false
+    }
+}
+
+impl bcachefs::BlockIO for View<'_> {
+    fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
+        assert!(block.raw() < self.blocks, "the loader read {block} of a {}-block candidate", self.blocks);
+        self.io.read_blocks(self.media_id, self.first_lba + block.raw() * self.lbas, &mut buf.0).map_err(|e| {
+            self.failed.set(Some(e.status()));
+            DeviceError::classify(&Attempted)
+        })
+    }
+
+    fn write_block(&self, block: BlockNum, _buf: &BlockBuf) -> Result<(), DeviceError> {
+        panic!("the loader wrote {block} of a ROOT candidate, and it writes no disk");
+    }
+
+    fn block_count(&self) -> u64 {
+        self.blocks
     }
 }
 

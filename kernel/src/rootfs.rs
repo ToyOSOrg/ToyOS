@@ -1,22 +1,25 @@
 //! ROOT: the filesystem the boot parameter names, mounted read-only at
 //! `/system` from the image the loader read into memory.
 //!
-//! The loader picks the partition and reads it whole; this kernel reads ROOT
-//! from nowhere else. [`init`] takes the image out of the handoff and checks
-//! it against firmware's map: every byte of it inside one descriptor of
-//! [`ROOT_IMAGE_MEMORY_TYPE`], which the allocator never hands out. [`mount`]
-//! refuses the boot by name on a handoff with no image, and on an image whose
-//! superblock is not the one `root=` names. [`hold_source`] holds the
-//! partition the image came from once the disks are up, so no claim writes the
-//! slot this boot runs. The image's bytes crossed a trust
-//! boundary like any disk's, so every read of it is bounds-checked and a block
-//! outside it is a refused read, never a panic.
+//! The loader picks the partition and reads its filesystem whole; this kernel
+//! reads ROOT from nowhere else. [`init`] takes the image out of the handoff
+//! and keeps it only when `toyos_rootimage::handoff` finds it whole blocks
+//! inside one `LoaderData` descriptor of firmware's map, returning the region
+//! `mm::init` keeps out of the allocator. [`mount`] refuses the boot by name on
+//! a handoff with no image, and on an image whose superblock is not the one
+//! `root=` names. [`hold_source`] holds the partition the image came from once
+//! the disks are up, so no claim writes the slot this boot runs, and refuses
+//! the boot when it cannot say that no claim will. The image's bytes crossed a
+//! trust boundary like any disk's, so every read of it is bounds-checked and a
+//! block outside it is a refused read, never a panic.
 
 use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, FsUuid, Mounted, ReadOnly};
-use toyos_abi::boot::{KernelArgs, MemoryMapEntry, ROOT_IMAGE_MEMORY_TYPE};
+use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_rootimage::handoff::{held, Descriptor};
 
 use crate::block::{BlockError, Holder, Partition};
-use crate::mm::DirectMap;
+use crate::device::ClaimError;
+use crate::mm::{DirectMap, Region};
 use crate::sync::Lock;
 
 /// The unit ROOT's filesystem is written in, which is the page.
@@ -35,9 +38,8 @@ pub const MOUNTED_FROM_MEMORY: &str = "root: mounted read-only from memory at";
 enum Handed {
     /// The loader handed no image.
     Nothing,
-    /// An extent firmware's map does not mark as the loader's image, or not
-    /// whole blocks.
-    Unmarked { at: u64, len: u64 },
+    /// An extent that is not whole blocks inside one `LoaderData` descriptor.
+    Unheld { at: u64, len: u64 },
     Image(MemoryImage),
 }
 
@@ -92,36 +94,38 @@ impl BlockIO for MemoryImage {
 }
 
 /// Take ROOT's name out of the boot parameter and its image out of the
-/// handoff. Runs before `mm::init`, so it neither allocates nor logs.
-pub fn init(cmdline: &str, args: &KernelArgs, map: &[MemoryMapEntry]) {
+/// handoff, returning the region `mm::init` must keep: the image, or an empty
+/// one where there is none to keep. Runs before `mm::init`, so it neither
+/// allocates nor logs.
+pub fn init(cmdline: &str, args: &KernelArgs, map: &[MemoryMapEntry]) -> Region {
     let (at, len) = (args.root_image_addr, args.root_image_len);
-    let marked = map.iter().any(|entry| {
-        entry.uefi_type == ROOT_IMAGE_MEMORY_TYPE
-            && entry.start <= at
-            && at.checked_add(len).is_some_and(|end| end <= entry.end)
-    });
-    let handed = if len == 0 {
-        Handed::Nothing
-    } else if !marked || !len.is_multiple_of(BLOCK as u64) {
-        Handed::Unmarked { at, len }
-    } else {
-        // SAFETY: the extent is inside one descriptor of the type only the
-        // loader allocates and no allocator here hands out, so it is live,
-        // never written, and mapped at PHYS_OFFSET for the kernel's life.
-        Handed::Image(MemoryImage(unsafe {
-            core::slice::from_raw_parts(DirectMap::from_phys(at).as_ptr::<u8>(), len as usize)
-        }))
+    let descriptors = map.iter().map(|entry| Descriptor { ty: entry.uefi_type, start: entry.start, end: entry.end });
+    let none = Region { start: 0, end: 0 };
+    let (handed, region) = match held(descriptors, crate::mm::pmm::EFI_LOADER_DATA, at, len, BLOCK as u64) {
+        _ if len == 0 => (Handed::Nothing, none),
+        None => (Handed::Unheld { at, len }, none),
+        Some(extent) => (
+            // SAFETY: the extent is whole pages of `LoaderData` the loader
+            // allocated and wrote before the jump, and the region returned here
+            // keeps `mm::init`'s allocator off it, so it is live, never written,
+            // and mapped at PHYS_OFFSET for the kernel's life.
+            Handed::Image(MemoryImage(unsafe {
+                core::slice::from_raw_parts(DirectMap::from_phys(at).as_ptr::<u8>(), len as usize)
+            })),
+            Region { start: extent.start, end: extent.end },
+        ),
     };
     *BOOT.lock() = Boot {
         named: toyos_abi::boot::root_uuid(cmdline).and_then(FsUuid::parse),
         handed,
         source: args.root_partition_guid,
     };
+    region
 }
 
 /// Mount the filesystem the boot parameter named, off the image the loader
 /// handed. Panics when there is no image, or it is not that filesystem.
-pub fn mount() -> (Mounted<MemoryImage, ReadOnly>, MemoryImage) {
+pub fn mount() -> Mounted<MemoryImage, ReadOnly> {
     let Boot { named, handed, .. } = *BOOT.lock();
     let Some(named) = named else {
         panic!("boot: the kernel argument names no root filesystem this kernel can parse");
@@ -130,9 +134,9 @@ pub fn mount() -> (Mounted<MemoryImage, ReadOnly>, MemoryImage) {
         Handed::Nothing => panic!(
             "boot: the loader handed no ROOT image, and this kernel reads ROOT from memory and nowhere else"
         ),
-        Handed::Unmarked { at, len } => panic!(
+        Handed::Unheld { at, len } => panic!(
             "boot: the ROOT image at {at:#x}+{len:#x} is not whole {BLOCK}-byte blocks inside one \
-             descriptor of memory type {ROOT_IMAGE_MEMORY_TYPE:#x}"
+             LoaderData descriptor"
         ),
         Handed::Image(image) => image,
     };
@@ -151,25 +155,26 @@ pub fn mount() -> (Mounted<MemoryImage, ReadOnly>, MemoryImage) {
     }
     let (at, len) = image.extent();
     log!("{MOUNTED_FROM_MEMORY} {at:#x}+{len:#x}, filesystem {named}, {} blocks", image.block_count());
-    (fs, image)
+    fs
 }
 
 /// Hold the partition ROOT was read from, so no process's claim writes the
-/// slot this boot is running; the hold reads nothing. Runs once the disks are
-/// probed. A partition on no disk this kernel drives is one nothing here can
-/// write either, and is said so rather than refused.
+/// slot this boot is running. Runs once the disks are probed.
+///
+/// A partition on no disk this kernel drives is one no claim can write either,
+/// and one carried twice is one every claim is refused as carried twice, since
+/// the disks a claim looks on only grow and no claim holds a table. Every other
+/// answer leaves a later claim free to find the partition, so it refuses the
+/// boot.
 pub fn hold_source() {
-    let guid = BOOT.lock().source;
-    let found = match crate::gpt::claimable(toyos_abi::part::PartGuid(guid)) {
+    let guid = toyos_gpt::Guid(BOOT.lock().source);
+    let found = match crate::gpt::claimable(toyos_abi::part::PartGuid(guid.0)) {
         Ok(found) => found,
-        Err(e) => {
-            log!(
-                "root: the partition ROOT was read from, {}, is on no disk this kernel drives \
-                 ({e:?}), so nothing here can write it",
-                toyos_gpt::Guid(guid)
-            );
+        Err(e @ (ClaimError::Absent | ClaimError::Ambiguous)) => {
+            log!("root: the partition ROOT was read from, {guid}, is claimable by no one ({e:?})");
             return;
         }
+        Err(e) => panic!("boot: the partition ROOT was read from, {guid}, cannot be held: {e:?}"),
     };
     let volume = found.volume;
     let view = crate::block::open(volume.device)

@@ -294,7 +294,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
-    rootfs::init(cmdline, &kernel_args, maps);
+    let root_image = rootfs::init(cmdline, &kernel_args, maps);
 
     // Armed here so the next record — `PAT:` — reaches the console and the panel keeps the one before it.
     #[cfg(feature = "boot-actuators")]
@@ -373,6 +373,9 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         // memory the allocator would otherwise hand out. Empty on a boot whose
         // parameter line names none.
         blackbox::reserved_region(),
+        // ROOT's image, `LoaderData` like the black box's page. Empty on a
+        // boot the loader handed none.
+        root_image,
     ];
 
     // The last point before the first hash container (`mm::init`'s address
@@ -474,10 +477,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // ROOT is the loader's image in memory, so nothing from here to init's
     // spawn asks a disk for anything: every storage driver comes up after it.
     use vfs::UserAccess;
-    let (root_fs, root_image) = rootfs::mount();
+    let root_fs = rootfs::mount();
     vfs::lock().mount(
         &["system"],
-        Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(root_fs, root_image)),
+        Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(root_fs)),
         UserAccess::KernelOnly,
     );
     vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite);

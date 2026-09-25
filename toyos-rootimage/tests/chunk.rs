@@ -1,7 +1,7 @@
 //! The chunking arithmetic against a device that records every request and
 //! can be told to fail one.
 
-use toyos_chunkread::{chunk_bytes, read, Blocks, Failed};
+use toyos_rootimage::chunk::{chunk_bytes, read, Blocks, Failed};
 
 const MIB: usize = 1 << 20;
 const PAGE: usize = 4096;

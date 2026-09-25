@@ -7,13 +7,9 @@
 //!
 //! Pure: three numbers in, a [`Plan`] out. The loader allocates the pages and
 //! writes the entries.
-//!
-//! [`relabel`] is the one change the loader makes to the memory map it hands on.
 
 #![no_std]
 #![forbid(unsafe_code)]
-
-pub mod relabel;
 
 use core::fmt;
 

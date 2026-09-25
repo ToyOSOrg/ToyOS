@@ -3315,6 +3315,200 @@ pub fn root_chunk_refused(
     Ok(())
 }
 
+/// **A ROOT candidate its own table refuses is a boot the loader refuses,
+/// naming why.** The partition after ROOT on the boot disk has its first LBA
+/// moved eight blocks inside ROOT's end, both copies of the table rewritten
+/// and their checksums recomputed, so the table is well-formed and ROOT
+/// overlaps its neighbour: `toyos_gpt::locate` refuses it, and a loader that
+/// read the candidate without asking would hand the kernel blocks another
+/// partition also claims.
+pub fn root_candidate_overlaps(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let (at, len) = root_extent(&image)?;
+    let root_last = ((at + len) / GPT_LBA - 1) as u64;
+    let size = image.len();
+    rewrite_gpt(&mut image, size, |entries, entry_bytes| {
+        let next = entries
+            .chunks(entry_bytes)
+            .enumerate()
+            .filter(|(_, entry)| entry[..16] != [0; 16] && entry_lba(entry, 32) > root_last)
+            .min_by_key(|(_, entry)| entry_lba(entry, 32))
+            .map(|(index, _)| index)
+            .ok_or("no partition follows ROOT on the boot disk")?;
+        entries[next * entry_bytes + 32..][..8].copy_from_slice(&(root_last - 7).to_le_bytes());
+        Ok(())
+    })?;
+    let path = test_dir().join("root-overlaps.img");
+    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let log = boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path)?;
+    let _ = std::fs::remove_file(&path);
+
+    let verdict = log
+        .lines()
+        .find(|l| l.contains(ROOT_REFUSED))
+        .map(str::trim)
+        .ok_or_else(|| format!("the loader did not refuse an overlapping ROOT:\n{}", volume_lines(&log)))?;
+    if !verdict.contains("PartitionOverlap") {
+        return Err(format!("the refusal does not name the overlap: {verdict}"));
+    }
+    eprintln!("  [root] {verdict}");
+    Ok(())
+}
+
+/// **Two filesystems answering to one name on the boot disk is a boot the
+/// loader refuses rather than one it guesses at.** The boot disk grows by a
+/// second TOYOS-ROOT partition holding a byte-for-byte copy of ROOT under its
+/// own unique GUID, so both candidates carry the name `root=` gives and both
+/// are equally good.
+pub fn root_named_twice_on_the_boot_disk(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const MIB: usize = 1 << 20;
+    let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let (at, len) = root_extent(&image)?;
+    let root = image[at..at + len].to_vec();
+    let twin_at = image.len().div_ceil(MIB) * MIB;
+    rewrite_gpt(&mut image, twin_at + len + MIB, |entries, entry_bytes| {
+        let root_entry = entries
+            .chunks(entry_bytes)
+            .find(|entry| entry_lba(entry, 32) == (at / GPT_LBA) as u64 && entry[..16] != [0; 16])
+            .ok_or("no entry holds ROOT")?
+            .to_vec();
+        let free = entries
+            .chunks_mut(entry_bytes)
+            .find(|entry| entry[..16] == [0; 16])
+            .ok_or("the table has no free entry")?;
+        free.copy_from_slice(&root_entry);
+        free[16] ^= 0xff;
+        free[32..40].copy_from_slice(&((twin_at / GPT_LBA) as u64).to_le_bytes());
+        free[40..48].copy_from_slice(&(((twin_at + len) / GPT_LBA - 1) as u64).to_le_bytes());
+        Ok(())
+    })?;
+    image[twin_at..twin_at + len].copy_from_slice(&root);
+    let path = test_dir().join("root-twice-one-disk.img");
+    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let log = boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path)?;
+    let _ = std::fs::remove_file(&path);
+
+    let verdict = root_refusal(&log)?;
+    if !verdict.contains("matches 2 of the 2") {
+        return Err(format!("the loader did not refuse two filesystems under one name: {verdict}"));
+    }
+    eprintln!("  [root] {verdict}");
+    Ok(())
+}
+
+/// **A ROOT whose primary superblock is bad and whose backup is good boots,
+/// because the loader decides the superblock as the kernel's mount does.**
+/// Block 0 of the boot disk's ROOT is inverted and the backup at its last
+/// block is left alone.
+pub fn root_backup_superblock(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let (at, _) = root_extent(&image)?;
+    for byte in &mut image[at..at + 4096] {
+        *byte = !*byte;
+    }
+    let path = test_dir().join("root-backup-superblock.img");
+    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let qemu = qemu::QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { boot_image: Some(qemu::Staged::Written(path.clone())), ..Default::default() },
+    );
+    let log = format!("{}{}", qemu.uart_log(), qemu.boot_log());
+    drop(qemu);
+    let _ = std::fs::remove_file(&path);
+
+    let seen = log
+        .lines()
+        .find(|l| l.contains("ROOT: candidate ") && l.contains(" at LBA "))
+        .map(str::trim)
+        .ok_or_else(|| format!("the loader named no candidate:\n{}", volume_lines(&log)))?;
+    if seen.contains("no superblock") {
+        return Err(format!("the loader did not read the backup superblock: {seen}"));
+    }
+    let mounted = log
+        .lines()
+        .find(|l| l.contains("root: mounted read-only from memory at"))
+        .map(str::trim)
+        .ok_or_else(|| format!("ROOT did not mount from memory:\n{}", volume_lines(&log)))?;
+    eprintln!("  [root] {seen}");
+    eprintln!("  [root] {mounted}");
+    Ok(())
+}
+
+/// The logical block every table `build_boot_image` writes is laid out in.
+const GPT_LBA: usize = 512;
+
+/// The LBA at byte `at` of a partition entry: 32 is its first, 40 its last.
+fn entry_lba(entry: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(entry[at..at + 8].try_into().expect("eight bytes"))
+}
+
+/// Rewrite `image`'s GPT with its entry array `edit`ed, the disk resized to
+/// `len` bytes, and everything UEFI 2.11 §5.3 derives from those recomputed:
+/// the backup array and header moved to the new end, the primary's pointers to
+/// them and its last usable LBA, both arrays' and both headers' CRCs, and the
+/// protective MBR's size. `edit` gets the array and one entry's length.
+fn rewrite_gpt(
+    image: &mut Vec<u8>,
+    len: usize,
+    edit: impl FnOnce(&mut [u8], usize) -> Result<(), String>,
+) -> Result<(), String> {
+    let word = |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+    let mut primary = image[GPT_LBA..2 * GPT_LBA].to_vec();
+    if &primary[..8] != b"EFI PART" {
+        return Err("the boot image has no GPT header at LBA 1".to_string());
+    }
+    let header_bytes = word(&primary, 12) as usize;
+    let old_backup = entry_lba(&primary, 32) as usize;
+    let array_at = entry_lba(&primary, 72) as usize * GPT_LBA;
+    let entry_bytes = word(&primary, 84) as usize;
+    let array_bytes = word(&primary, 80) as usize * entry_bytes;
+    let old_backup_array = entry_lba(&image[old_backup * GPT_LBA..], 72) as usize;
+
+    let mut array = image[array_at..array_at + array_bytes].to_vec();
+    edit(&mut array, entry_bytes)?;
+    image[old_backup_array * GPT_LBA..(old_backup + 1) * GPT_LBA].fill(0);
+    image.resize(len, 0);
+
+    let last = len / GPT_LBA - 1;
+    let backup_array = last - array_bytes.div_ceil(GPT_LBA);
+    let seal = |header: &mut Vec<u8>| {
+        header[16..20].fill(0);
+        let crc = toyos_gpt::crc32(&header[..header_bytes]);
+        header[16..20].copy_from_slice(&crc.to_le_bytes());
+    };
+    primary[32..40].copy_from_slice(&(last as u64).to_le_bytes());
+    primary[48..56].copy_from_slice(&(backup_array as u64 - 1).to_le_bytes());
+    primary[88..92].copy_from_slice(&toyos_gpt::crc32(&array).to_le_bytes());
+    seal(&mut primary);
+    let mut backup = primary.clone();
+    backup[24..32].copy_from_slice(&(last as u64).to_le_bytes());
+    backup[32..40].copy_from_slice(&1u64.to_le_bytes());
+    backup[72..80].copy_from_slice(&(backup_array as u64).to_le_bytes());
+    seal(&mut backup);
+
+    image[GPT_LBA..2 * GPT_LBA].copy_from_slice(&primary);
+    image[array_at..array_at + array_bytes].copy_from_slice(&array);
+    image[backup_array * GPT_LBA..][..array_bytes].copy_from_slice(&array);
+    image[last * GPT_LBA..][..GPT_LBA].copy_from_slice(&backup);
+    let mbr_size = u32::try_from(last).unwrap_or(u32::MAX);
+    image[446 + 12..446 + 16].copy_from_slice(&mbr_size.to_le_bytes());
+    Ok(())
+}
+
 /// The loader's refusal line: the first word a boot whose ROOT is refused
 /// says, and so the marker the boot is waited on.
 const ROOT_REFUSED: &str = "ROOT: REFUSED, ";
