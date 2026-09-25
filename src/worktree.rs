@@ -293,11 +293,39 @@ fn gib(bytes: u64) -> String {
 
 /// Remove a worktree and the branch it was made with.
 ///
-/// Deliberately not `--force`: a worktree with uncommitted work in it is a
-/// refusal, because the work in a worktree is the only copy of itself.
+/// Deliberately not `--force`: git refuses a worktree holding tracked changes
+/// or untracked files and leaves it registered, because the work in a
+/// worktree is the only copy of itself — that refusal stands.
+///
+/// **git can unregister a worktree and then fail to delete it**: a path deeper
+/// than `PATH_MAX` under an ignored `target/`, or a file created while it
+/// walks, and it exits non-zero with the directory still there and no longer
+/// a worktree of anything. Once git has let go of it nothing in it is work,
+/// so the whole directory goes.
 fn remove(root: &Path, path: &str) {
-    git(root, &["worktree", "remove", path]);
+    let at = root.join(path);
+    if !ok_loud(root, &["worktree", "remove", path]) {
+        assert!(
+            !registered(root, &at),
+            "git refused to remove {path} and it is still a worktree; what it said above is \
+             why. Nothing was deleted."
+        );
+        fs::remove_dir_all(&at).unwrap_or_else(|e| {
+            panic!("git unregistered {path} and left it on disk, and removing it failed: {e}")
+        });
+        eprintln!("git unregistered {path} and left its ignored files; deleted them");
+    }
     eprintln!("removed {path}; its branch is still there, and `git branch -d` will say if it is unmerged");
+}
+
+/// Whether `git worktree list` still names `at`, compared as real paths:
+/// git prints its own realpath, `/private/tmp/…` for `/tmp/…`.
+fn registered(root: &Path, at: &Path) -> bool {
+    let at = fs::canonicalize(at).unwrap_or_else(|_| at.to_path_buf());
+    capture(root, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .any(|listed| fs::canonicalize(listed).unwrap_or_else(|_| PathBuf::from(listed)) == at)
 }
 
 fn free_bytes(dir: &Path) -> u64 {
@@ -330,6 +358,16 @@ fn capture(dir: &Path, args: &[&str]) -> String {
         .unwrap_or_else(|e| panic!("run git: {e}"));
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr).trim());
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Whether git did it, with what it said left on stderr for the reader.
+fn ok_loud(dir: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .unwrap_or_else(|e| panic!("run git: {e}"))
+        .success()
 }
 
 /// Whether git says yes. A non-zero exit is the answer here, never a failure.
@@ -390,5 +428,58 @@ mod tests {
         assert!(!line.contains("/live"), "{line}");
         assert!(!line.contains("/primary"), "{line}");
         assert!(line.contains("2.0 GiB"), "the offer has to say what it is worth: {line}");
+    }
+
+    /// A linked worktree of a fresh repository whose `.gitignore` names `target/`.
+    fn linked(name: &str) -> (PathBuf, PathBuf) {
+        let (_origin, work) = crate::pr::tests::repo(name);
+        let tree = work.with_file_name(format!("{}-linked", work.file_name().unwrap().to_string_lossy()));
+        let _ = fs::remove_dir_all(&tree);
+        git(&work, &["worktree", "add", "-q", "-b", "linked", tree.to_str().unwrap()]);
+        (work, tree)
+    }
+
+    /// **git unregisters, then fails to delete, and exits non-zero.** A path
+    /// deeper than `PATH_MAX` under the ignored `target/` is a deterministic
+    /// way to make it do that.
+    #[test]
+    fn a_worktree_git_unregistered_but_left_on_disk_is_deleted_whole() {
+        let (work, tree) = linked("wt-remove-leftovers");
+        // Two chains of twenty, each short enough to make, one renamed into
+        // the other's end: no path any call here names exceeds `PATH_MAX`.
+        let chain = |at: &Path| {
+            let mut end = at.to_path_buf();
+            for _ in 0..20 {
+                end.push("a-directory-name-thirty-bytes-");
+            }
+            fs::create_dir_all(&end).unwrap();
+            end
+        };
+        let target = tree.join("target");
+        let lower = chain(&tree.join("lower"));
+        fs::write(lower.join("f"), "cache\n").unwrap();
+        let upper = chain(&target);
+        fs::rename(tree.join("lower"), upper.join("lower")).unwrap();
+        let depth = upper.as_os_str().len() + lower.strip_prefix(&tree).unwrap().as_os_str().len();
+        assert!(depth > 1024, "the fixture must exceed PATH_MAX to make git fail: {depth}");
+
+        remove(&work, tree.to_str().unwrap());
+
+        assert!(!tree.exists(), "{} is still on disk", tree.display());
+        assert!(!registered(&work, &tree), "{} is still a worktree", tree.display());
+    }
+
+    /// git's own refusal stands: untracked work keeps the worktree registered,
+    /// and nothing of it is deleted.
+    #[test]
+    fn a_worktree_holding_untracked_work_is_refused_and_left_whole() {
+        let (work, tree) = linked("wt-remove-dirty");
+        fs::write(tree.join("unsaved.rs"), "the only copy\n").unwrap();
+
+        let refused = std::panic::catch_unwind(|| remove(&work, tree.to_str().unwrap()));
+
+        assert!(refused.is_err(), "a worktree with untracked work was removed");
+        assert!(registered(&work, &tree), "the refusal unregistered it");
+        assert_eq!(fs::read_to_string(tree.join("unsaved.rs")).unwrap(), "the only copy\n");
     }
 }
