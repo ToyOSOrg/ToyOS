@@ -294,7 +294,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
-    rootfs::init(cmdline);
+    rootfs::init(cmdline, &kernel_args, maps);
 
     // Armed here so the next record — `PAT:` — reaches the console and the panel keeps the one before it.
     #[cfg(feature = "boot-actuators")]
@@ -430,7 +430,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     boot_phase!("CPU ready", 0);
 
-    let t_storage = clock::nanos_since_boot();
+    let t_periph = clock::nanos_since_boot();
 
     let (ecam_base, pci_segment) = acpi::find_ecam_base(kernel_args.rsdp_addr)
         .expect("ACPI: failed to find ECAM base address");
@@ -452,50 +452,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     drivers::watchdog::init(&pci_devices);
     file_cache::init();
     gpt::init(kernel_args);
-
-    // No controller is a configuration, not a failure — same as a missing xHCI, NIC, or sound device.
-    match nvme::init(&pci_devices) {
-        Some(nvme_dev) => {
-            let sector_size = nvme_dev.sector_size();
-            let dev = page_cache::instrumented(Box::new(nvme_dev));
-            if let Some(handle) = block::register(dev) {
-                gpt::probe(&handle, sector_size);
-                // Before anything mounts the device: the block the gate reads is one nothing else is touching yet.
-                #[cfg(feature = "boot-actuators")]
-                if actuator::nvme_spent_budget() {
-                    nvme_gate::run(&handle);
-                }
-                #[cfg(feature = "boot-actuators")]
-                if actuator::nvme_command_silent() {
-                    nvme_gate::silent_command(&handle);
-                }
-                // Before DATA is mounted: the device blocks it reads back are ones nothing else has written.
-                #[cfg(feature = "boot-actuators")]
-                if actuator::page_cache_partition_offset() {
-                    page_cache::partition_offset_selftest(&handle);
-                }
-            }
-        }
-        None => log!("NVMe: no controller on this machine, storage unavailable"),
-    }
-
-    boot_phase!("storage ready", t_storage);
-
-    // Under Drain::Inline every record above is already on the wire, so this gate reads the whole boot and then silence.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::pre_idle_wedge() {
-        pre_idle_wedge();
-    }
-
-    let t_periph = clock::nanos_since_boot();
-
-    xhci::init(&pci_devices);
-    #[cfg(feature = "boot-actuators")]
-    if actuator::usb_storage_gate() {
-        usb_gate::run();
-    }
-    // After xhci::init, not beside the NVMe probe: a USB-booted disk doesn't exist until the controller binds it.
-    fat32_adapter::probe_boot_disks();
     i8042::init(kernel_args.rsdp_addr);
     acpi::init_power(kernel_args.rsdp_addr);
 
@@ -515,97 +471,18 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     pipe::init();
     inbox::init();
 
-
-    // After `probe_boot_disks`: ROOT and DATA are partitions, and on a
-    // USB-booted machine the device carrying one does not exist until the
-    // controller has bound it.
+    // ROOT is the loader's image in memory, so nothing from here to init's
+    // spawn asks a disk for anything: every storage driver comes up after it.
     use vfs::UserAccess;
-    let root = rootfs::mount();
+    let (root_fs, root_image) = rootfs::mount();
     vfs::lock().mount(
         &["system"],
-        Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(root.fs, root.cache)),
+        Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(root_fs, root_image)),
         UserAccess::KernelOnly,
     );
-
-    // One filesystem, two paths: `/apps` and `/home` are two directories of
-    // DATA, so one sync settles both and neither can outlive the other.
-    // tmpfs when there is no DATA volume this kernel may write: persistence is
-    // the only difference, so the earlier refusal doesn't cascade. Nothing at
-    // all when the volume is ours and did not mount.
-    #[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
-    let (data_cache, home) = match bcachefs_adapter::open_data() {
-        bcachefs_adapter::Data::Mounted(cache, fs) => {
-            let adapter = bcachefs_adapter::BcacheFsAdapter::new(fs, Arc::clone(&cache));
-            vfs::lock().mount(&DATA_PATHS, Box::new(adapter), UserAccess::ReadWrite);
-            (Some(cache), true)
-        }
-        bcachefs_adapter::Data::Volatile => {
-            log!("storage: /apps and /home are a tmpfs — they will not survive a reboot");
-            vfs::lock().mount(
-                &DATA_PATHS,
-                Box::new(crate::tmpfs::TmpFs::new()),
-                UserAccess::ReadWrite,
-            );
-            (None, true)
-        }
-        bcachefs_adapter::Data::Absent => {
-            log!("storage: /apps and /home are absent this boot — the DATA volume is ours and did not mount");
-            (None, false)
-        }
-    };
     vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite);
 
-    // Named by role, not type: both partitions are FAT32 and neither is selected for being FAT32 — a missing one just has no mount.
-    use fat32_adapter::Role;
-    // /boot is KernelOnly: a writable /boot lets a process brick the machine — esp_files replayed exactly that attack.
-    // The filesystem sits outside the capability model by ruling, so no handle is owed for /boot.
-    // /log is ReadWrite on purpose: it's an ordinary userland file logd owns, and the worst a process can do is cost the diagnostic.
-    match fat32_adapter::mount(Role::Boot) {
-        Some(fs) => vfs::lock().mount(&[Role::Boot.mount()], Box::new(fs), UserAccess::KernelOnly),
-        None => log!("boot-volume: not mounted; the kernel has no /boot this boot"),
-    }
-    match fat32_adapter::mount(Role::Log) {
-        Some(fs) => {
-            vfs::lock().mount(&[Role::Log.mount()], Box::new(fs), UserAccess::ReadWrite);
-        }
-        // No fallback onto /boot: with no log partition the log stays in the in-memory shards, still reachable via screen and console.
-        None => log!("log-volume: not mounted; this boot's kernel log stays in memory"),
-    }
-
-    // Fixed kernel strings well under MAX_PATH: a refusal here is a kernel bug, so this fails fast instead of returning an error.
-    // Not on an absent `/home`: the VFS's own directory set would answer for a directory nothing holds.
-    if home {
-        vfs::lock().create_dir("/home/root").expect("boot: /home/root exceeds MAX_PATH");
-        vfs::lock().create_dir("/home/root/.config").expect("boot: /home/root/.config exceeds MAX_PATH");
-    }
-
     boot_phase!("subsystems ready", t_subsys);
-
-    // After the mounts above: the FAT reopen control drives `/log`.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::leak_rollback_selftest() {
-        leak_selftest::run();
-    }
-    #[cfg(feature = "boot-actuators")]
-    if actuator::revoked_backing_selftest() {
-        revoke_selftest::run();
-    }
-    #[cfg(feature = "boot-actuators")]
-    if actuator::pc_unbind_selftest() {
-        match &data_cache {
-            Some(cache) => page_cache::unbind_selftest(cache),
-            None => log!("pc-unbind-selftest: FAIL (this boot has no metadata page cache)"),
-        }
-    }
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_table_unanswered() {
-        page_cache::refuse_table_reads();
-    }
-    // After every driver has registered: the number under test is one a real device holds.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::block_duplicate_id() {
-        block::duplicate_id_selftest();
-    }
 
     let t_devices = clock::nanos_since_boot();
 
@@ -667,6 +544,135 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     #[cfg(feature = "boot-actuators")]
     if actuator::process_reopen_selftest() {
         object::process::reopen_selftest(pid);
+    }
+
+    // The proof the boot up to here needed no disk: ROOT and init's image both
+    // came out of memory.
+    log!("{} {}", rootfs::INIT_WITHOUT_A_DISK, block::census::commands_issued());
+
+    // After init's spawn and before it runs: nothing runs a task until
+    // `smp::set_ready` below, and `/home`, `/apps`, `/boot` and `/log` are
+    // mounted by then.
+    let t_storage = clock::nanos_since_boot();
+
+    // No controller is a configuration, not a failure — same as a missing xHCI, NIC, or sound device.
+    match nvme::init(&pci_devices) {
+        Some(nvme_dev) => {
+            let sector_size = nvme_dev.sector_size();
+            let dev = page_cache::instrumented(Box::new(nvme_dev));
+            if let Some(handle) = block::register(dev) {
+                gpt::probe(&handle, sector_size);
+                // Before anything mounts the device: the block the gate reads is one nothing else is touching yet.
+                #[cfg(feature = "boot-actuators")]
+                if actuator::nvme_spent_budget() {
+                    nvme_gate::run(&handle);
+                }
+                #[cfg(feature = "boot-actuators")]
+                if actuator::nvme_command_silent() {
+                    nvme_gate::silent_command(&handle);
+                }
+                // Before DATA is mounted: the device blocks it reads back are ones nothing else has written.
+                #[cfg(feature = "boot-actuators")]
+                if actuator::page_cache_partition_offset() {
+                    page_cache::partition_offset_selftest(&handle);
+                }
+            }
+        }
+        None => log!("NVMe: no controller on this machine, storage unavailable"),
+    }
+
+    xhci::init(&pci_devices);
+    #[cfg(feature = "boot-actuators")]
+    if actuator::usb_storage_gate() {
+        usb_gate::run();
+    }
+    // After xhci::init, not beside the NVMe probe: a USB-booted disk doesn't exist until the controller binds it.
+    fat32_adapter::probe_boot_disks();
+
+    // One filesystem, two paths: `/apps` and `/home` are two directories of
+    // DATA, so one sync settles both and neither can outlive the other.
+    // tmpfs when there is no DATA volume this kernel may write: persistence is
+    // the only difference, so the earlier refusal doesn't cascade. Nothing at
+    // all when the volume is ours and did not mount.
+    #[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
+    let (data_cache, home) = match bcachefs_adapter::open_data() {
+        bcachefs_adapter::Data::Mounted(cache, fs) => {
+            let adapter = bcachefs_adapter::BcacheFsAdapter::new(fs, Arc::clone(&cache));
+            vfs::lock().mount(&DATA_PATHS, Box::new(adapter), UserAccess::ReadWrite);
+            (Some(cache), true)
+        }
+        bcachefs_adapter::Data::Volatile => {
+            log!("storage: /apps and /home are a tmpfs — they will not survive a reboot");
+            vfs::lock().mount(
+                &DATA_PATHS,
+                Box::new(crate::tmpfs::TmpFs::new()),
+                UserAccess::ReadWrite,
+            );
+            (None, true)
+        }
+        bcachefs_adapter::Data::Absent => {
+            log!("storage: /apps and /home are absent this boot — the DATA volume is ours and did not mount");
+            (None, false)
+        }
+    };
+
+    // Named by role, not type: both partitions are FAT32 and neither is selected for being FAT32 — a missing one just has no mount.
+    use fat32_adapter::Role;
+    // /boot is KernelOnly: a writable /boot lets a process brick the machine — esp_files replayed exactly that attack.
+    // The filesystem sits outside the capability model by ruling, so no handle is owed for /boot.
+    // /log is ReadWrite on purpose: it's an ordinary userland file logd owns, and the worst a process can do is cost the diagnostic.
+    match fat32_adapter::mount(Role::Boot) {
+        Some(fs) => vfs::lock().mount(&[Role::Boot.mount()], Box::new(fs), UserAccess::KernelOnly),
+        None => log!("boot-volume: not mounted; the kernel has no /boot this boot"),
+    }
+    match fat32_adapter::mount(Role::Log) {
+        Some(fs) => {
+            vfs::lock().mount(&[Role::Log.mount()], Box::new(fs), UserAccess::ReadWrite);
+        }
+        // No fallback onto /boot: with no log partition the log stays in the in-memory shards, still reachable via screen and console.
+        None => log!("log-volume: not mounted; this boot's kernel log stays in memory"),
+    }
+
+    // Fixed kernel strings well under MAX_PATH: a refusal here is a kernel bug, so this fails fast instead of returning an error.
+    // Not on an absent `/home`: the VFS's own directory set would answer for a directory nothing holds.
+    if home {
+        vfs::lock().create_dir("/home/root").expect("boot: /home/root exceeds MAX_PATH");
+        vfs::lock().create_dir("/home/root/.config").expect("boot: /home/root/.config exceeds MAX_PATH");
+    }
+
+
+    // After the mounts above: the FAT reopen control drives `/log`.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::leak_rollback_selftest() {
+        leak_selftest::run();
+    }
+    #[cfg(feature = "boot-actuators")]
+    if actuator::revoked_backing_selftest() {
+        revoke_selftest::run();
+    }
+    #[cfg(feature = "boot-actuators")]
+    if actuator::pc_unbind_selftest() {
+        match &data_cache {
+            Some(cache) => page_cache::unbind_selftest(cache),
+            None => log!("pc-unbind-selftest: FAIL (this boot has no metadata page cache)"),
+        }
+    }
+    #[cfg(feature = "boot-actuators")]
+    if actuator::partclaim_table_unanswered() {
+        page_cache::refuse_table_reads();
+    }
+    // After every driver has registered: the number under test is one a real device holds.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::block_duplicate_id() {
+        block::duplicate_id_selftest();
+    }
+
+    boot_phase!("storage ready", t_storage);
+
+    // Under Drain::Inline every record above is already on the wire, so this gate reads the whole boot and then silence.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::pre_idle_wedge() {
+        pre_idle_wedge();
     }
 
     report_log_destination();

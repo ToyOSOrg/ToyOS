@@ -618,6 +618,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // over records, with no clock in the judging, so all six are Parallel.
     ("smp_roster_and_tsc_trail", Sched::Parallel, Tier::Fast),
     ("pmm_accounting", Sched::Parallel, Tier::Fast),
+    // ROOT is the loader's image in memory: the kernel says it mounted it
+    // from memory, and that init was spawned with no storage command issued;
+    // and a loader that hands no image is a boot refused by name, never one
+    // that goes to a disk for ROOT. Both are records of one boot each, with no
+    // clock in the verdict.
+    ("root_from_memory", Sched::Parallel, Tier::Fast),
+    ("root_withheld_refused", Sched::Parallel, Tier::Fast),
     ("acpi_table_inventory", Sched::Parallel, Tier::Fast),
     ("timer_calibration", Sched::Parallel, Tier::Fast),
     ("pci_inventory", Sched::Parallel, Tier::Fast),
@@ -1332,9 +1339,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
-    // The three ways a machine's ROOT set can be wrong. Serial, not by
-    // association: each stages a whole boot image and up to a second 32 GiB
-    // stick beside it, and the three of them widening the parallel phase is
+    // What the loader does with a ROOT set: a bad candidate and an absent name
+    // refused by name, and a twin on another disk never read. Serial, not by
+    // association: each stages a whole boot image, one a second 32 GiB stick
+    // beside it, and the three of them widening the parallel phase is
     // what pushed `port_poll_churn` over its 300 s ceiling twice in a row.
     ("root_candidate_malformed", Sched::Serial, Tier::Fast),
     ("root_named_but_absent", Sched::Serial, Tier::Fast),
@@ -12251,12 +12259,13 @@ fn run_machine_test(
             );
             let mut boot = serial::Serial::boot(&qemu);
             // Every phase up to the wedge, oldest first — the first line the
-            // machine ever logs, both boot checkpoints before phase 3, and a
-            // phase-3 line from between them and the wedge.
+            // machine ever logs, a line from between the first two checkpoints,
+            // and the storage phase the wedge follows.
             for needle in [
                 "serial: 16550 loopback read",
                 "Boot: CPU ready",
                 "gpt: firmware booted us from partition",
+                "Boot: peripherals ready",
                 "Boot: storage ready",
                 WEDGE,
             ] {
@@ -12266,9 +12275,7 @@ fn run_machine_test(
             // is wedged rather than slow — over a window the later phases could
             // have reached, the marker here being the wedge line itself.
             boot.push(&qemu.drain_serial(STAYED_WEDGED));
-            for needle in ["Boot: peripherals ready", "Boot: complete"] {
-                boot.must_not_say(needle)?;
-            }
+            boot.must_not_say("Boot: complete")?;
             eprintln!(
                 "  [wedge] {} kernel line(s) reached the console from a machine that never \
                  reached a scheduler pass",
@@ -12698,6 +12705,24 @@ fn run_machine_test(
         "pmm_accounting" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
             pmm_accounting(qemu.boot_log())
+        }
+        "root_from_memory" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            root_from_memory(qemu.boot_log())
+        }
+        "root_withheld_refused" => {
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &[ROOT_WITHHELD_PARAM],
+                    ready_marker: ROOT_WITHHELD_REFUSAL,
+                    ..Default::default()
+                },
+            );
+            // Both channels: this kernel dies before virtio-console init.
+            root_withheld_refused(&format!("{}{}", qemu.boot_log(), qemu.uart_log()))
         }
         "acpi_table_inventory" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
@@ -19569,4 +19594,62 @@ fn main() {
 
     eprint!("{}", tally.summary(total, suite_start.elapsed(), suite_start.suspended()));
     run.exit(tally.exit_code());
+}
+
+/// `rootfs::MOUNTED_FROM_MEMORY`: the kernel mounted ROOT off the loader's image.
+const ROOT_MOUNTED_FROM_MEMORY: &str = "root: mounted read-only from memory at";
+/// `rootfs::INIT_WITHOUT_A_DISK`, followed by the count of storage commands.
+const INIT_WITHOUT_A_DISK: &str = "boot: init spawned with ROOT from memory; storage commands before it:";
+/// `toyos_abi::boot::WITHHOLD_ROOT_PARAM`.
+const ROOT_WITHHELD_PARAM: &str = toyos_abi::boot::WITHHOLD_ROOT_PARAM;
+/// The kernel's refusal of a handoff that carries no ROOT image.
+const ROOT_WITHHELD_REFUSAL: &str =
+    "boot: the loader handed no ROOT image, and this kernel reads ROOT from memory and nowhere else";
+
+/// ROOT came from memory: the kernel's mount record names the image, and the
+/// record at init's spawn counts zero storage commands before it — every NVMe
+/// command and every USB mass-storage command counts, so a ROOT read off a disk
+/// could not leave it at zero. Both precede the first storage driver's line.
+fn root_from_memory(log: &str) -> Result<(), String> {
+    let mounted = log
+        .find(ROOT_MOUNTED_FROM_MEMORY)
+        .ok_or_else(|| format!("no {ROOT_MOUNTED_FROM_MEMORY:?} record in the boot log"))?;
+    let spawned = log
+        .find(INIT_WITHOUT_A_DISK)
+        .ok_or_else(|| format!("no {INIT_WITHOUT_A_DISK:?} record in the boot log"))?;
+    let count = log[spawned + INIT_WITHOUT_A_DISK.len()..]
+        .lines()
+        .next()
+        .map(str::trim)
+        .ok_or("the spawn record carries no count")?;
+    if count != "0" {
+        return Err(format!("init was spawned after {count} storage command(s), wanted none"));
+    }
+    if mounted > spawned {
+        return Err("the ROOT mount record follows init's spawn".to_string());
+    }
+    for driver in ["nvme:", "NVMe:", "usb-storage:", "gpt: device"] {
+        if let Some(at) = log.find(driver) {
+            if at < spawned {
+                return Err(format!("{driver:?} spoke before init's spawn record"));
+            }
+        }
+    }
+    eprintln!("  [root] mounted from memory, init spawned with 0 storage commands before it");
+    Ok(())
+}
+
+/// A loader that hands no ROOT image is a boot refused by name: the kernel's
+/// refusal is on the console, and nothing after it mounted ROOT from anywhere.
+fn root_withheld_refused(log: &str) -> Result<(), String> {
+    if !log.contains(ROOT_WITHHELD_REFUSAL) {
+        return Err(format!("no {ROOT_WITHHELD_REFUSAL:?} in the boot log"));
+    }
+    for never in [ROOT_MOUNTED_FROM_MEMORY, INIT_WITHOUT_A_DISK, "Boot: storage ready"] {
+        if log.contains(never) {
+            return Err(format!("a boot handed no ROOT image still said {never:?}"));
+        }
+    }
+    eprintln!("  [root] a handoff with no ROOT image refused the boot by name");
+    Ok(())
 }

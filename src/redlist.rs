@@ -90,11 +90,6 @@ pub const QUARANTINE: &[Quarantined] = &[
         issue: "issues/build/latency-wake-reds-on-the-dev-host-at-a-rate.md",
     },
     Quarantined {
-        test: "root_named_but_absent",
-        says: &["the kernel did not refuse this ROOT set"],
-        issue: "issues/boot-media/root-named-but-absent-misses-the-refusal-inside-its-window.md",
-    },
-    Quarantined {
         test: "sched_check_build",
         says: &["this distribution has mass the KVM, native x86-64 sample never showed"],
         issue: "issues/build/the-pass-cost-gates-ci-sample-is-eight-days-stale-twice.md",

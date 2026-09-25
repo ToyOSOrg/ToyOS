@@ -37,6 +37,7 @@ mod bootnext;
 mod gcd;
 mod loaderlog;
 mod rootbridge;
+mod rootimage;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
@@ -571,10 +572,10 @@ fn report_reach(what: &str, at: u64, len: u64) {
     );
 }
 
-// Nine arguments because this is the handoff and they are what firmware leaves:
+// Ten arguments because this is the handoff and they are what firmware leaves:
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, root_image: Option<rootimage::RootImage>, system_table: SystemTable<Boot>) -> ! {
     // The last of the firmware questions, and asked here for the same reason
     // the GOP's was asked before this: the protocol dies with boot services.
     //
@@ -638,6 +639,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             None => ([0u8; 16], 0, 0, 0),
         };
 
+    let (root_image_addr, root_image_len) = root_image.as_ref().map_or((0, 0), rootimage::RootImage::handoff);
+
     // Built before the exit so the address the kernel is handed is one this
     // loader can still print and refuse on.
     let mut kernel_args = KernelArgs {
@@ -670,6 +673,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         cmdline_len: cmdline.len() as u64,
         root_bridge_window_count,
         root_bridge_windows,
+        root_image_addr,
+        root_image_len,
     };
     report_reach(
         "Kernel arguments",
@@ -918,6 +923,11 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         .unwrap_or_else(|e| panic!("\\toyos\\cmdline is not UTF-8: {e}"));
     println!("Boot parameter: {params:?}");
 
+    // Before the kernel is loaded and not after: this is the allocation the
+    // image pages come from, and a machine whose ROOT is refused has no use for
+    // the kernel's.
+    let root_image = rootimage::read(handle, &system_table, params);
+
     println!("Loading kernel elf...");
     let loaded_kernel = load_kernel_elf(&kernel_bytes);
 
@@ -939,5 +949,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, root_image, system_table);
 }

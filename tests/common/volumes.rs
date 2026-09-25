@@ -3110,72 +3110,49 @@ fn root_twin(
     Ok(())
 }
 
-/// **A ROOT candidate this kernel cannot mount is refused by name and the boot
-/// goes on.** Disk contents crossed a trust boundary, so a partition wearing
-/// the ROOT type over bytes that are not a filesystem may not stop a machine
-/// whose real ROOT is right there. The candidate is a second stick whose two
-/// ROOT superblocks — block 0 and the backup at the volume's last block, which
-/// is where `Superblock::read` looks second — are inverted.
+/// **A ROOT candidate the loader cannot read a superblock from is refused by
+/// name.** Disk contents crossed a trust boundary, so a partition wearing the
+/// ROOT type over bytes that are not a filesystem is named with what it holds
+/// and never handed to the kernel. The boot disk's own ROOT has both
+/// superblocks — block 0, which the loader reads, and the backup at the
+/// volume's last block — inverted, so it is the one candidate and it is bad.
 pub fn root_candidate_malformed(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (bytes, _) = qemu::Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
-    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
-    let twin = test_dir().join("root-malformed-twin.img");
-    root_twin(&twin, &image, bytes, |copy| {
-        let (at, len) = root_extent(copy)?;
-        for block in [at, at + len - 4096] {
-            for byte in &mut copy[block..block + 4096] {
-                *byte = !*byte;
-            }
+    let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let (at, len) = root_extent(&image)?;
+    for block in [at, at + len - 4096] {
+        for byte in &mut image[block..block + 4096] {
+            *byte = !*byte;
         }
-        Ok(())
-    })?;
-
-    let qemu = qemu::QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::UsbDisk,
-            usb_images: vec![twin.clone()],
-            ..Default::default()
-        },
-    );
-    let log = qemu.boot_log().to_string();
-    drop(qemu);
-    let _ = std::fs::remove_file(&twin);
-
-    let refused = log
-        .lines()
-        .find(|l| l.contains("holds no filesystem this kernel can mount"))
-        .ok_or_else(|| {
-            format!("the malformed candidate was not refused by name:\n{}", volume_lines(&log))
-        })?
-        .trim()
-        .to_string();
-    if !refused.contains("BadMagic") {
-        return Err(format!("the refusal does not name what was wrong with it: {refused}"));
     }
-    let mounted = log
+    let path = test_dir().join("root-malformed.img");
+    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let log = boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path)?;
+    let _ = std::fs::remove_file(&path);
+
+    let seen = log
         .lines()
-        .find(|l| l.contains("root: mounted"))
-        .ok_or_else(|| {
-            format!("the real ROOT did not mount beside it:\n{}", volume_lines(&log))
-        })?
+        .find(|l| l.contains("ROOT: candidate ") && l.contains("no superblock this loader can read"))
+        .ok_or_else(|| format!("the malformed candidate was not named:\n{}", volume_lines(&log)))?
         .trim()
         .to_string();
-    eprintln!("  [root] {refused}");
-    eprintln!("  [root] {mounted}");
+    let verdict = root_refusal(&log)?;
+    if !verdict.contains("matches 0 of the 1") {
+        return Err(format!("the loader did not refuse a boot disk with no good ROOT: {verdict}"));
+    }
+    eprintln!("  [root] {seen}");
+    eprintln!("  [root] {verdict}");
     Ok(())
 }
 
-/// **A machine that carries no filesystem the kernel argument names cannot
-/// continue, and says which one and what it saw.** One hex digit of `root=` on
-/// the ESP is flipped, which is a byte-for-byte edit inside a file of the same
-/// length — so the FAT volume is untouched and only the name changes.
+/// **A boot disk that carries no filesystem the boot parameter names is a
+/// boot the loader refuses, saying which one and what it saw.** One hex digit
+/// of `root=` on the ESP is flipped, which is a byte-for-byte edit inside a
+/// file of the same length — so the FAT volume is untouched and only the name
+/// changes.
 pub fn root_named_but_absent(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3206,17 +3183,17 @@ pub fn root_named_but_absent(
     image[digit] = if was == b'0' { b'1' } else { b'0' };
 
     std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let log = boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path, Vec::new())?;
+    let log = boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path)?;
     let _ = std::fs::remove_file(&path);
 
     let verdict = root_refusal(&log)?;
     if !verdict.contains("matches 0 of the 1") {
-        return Err(format!("the kernel did not report a machine with no ROOT: {verdict}"));
+        return Err(format!("the loader did not report a disk with no such ROOT: {verdict}"));
     }
     let seen = log
         .lines()
-        .find(|l| l.contains("root: candidate ") && l.contains(" at LBA "))
-        .ok_or_else(|| format!("the panic named no candidate:\n{}", volume_lines(&log)))?
+        .find(|l| l.contains("ROOT: candidate ") && l.contains(" at LBA "))
+        .ok_or_else(|| format!("the refusal named no candidate:\n{}", volume_lines(&log)))?
         .trim()
         .to_string();
     eprintln!("  [root] {verdict}");
@@ -3224,10 +3201,11 @@ pub fn root_named_but_absent(
     Ok(())
 }
 
-/// **Two filesystems answering to one name is a boot the kernel refuses rather
-/// than one it guesses at.** A second stick carries an untouched copy of the
-/// boot image, so the machine has two TOYOS-ROOT partitions whose superblocks
-/// carry the same UUID and which are equally good.
+/// **A second disk answering to the same name is not the boot's business.** A
+/// second stick carries an untouched copy of the boot image, so the machine
+/// has two TOYOS-ROOT partitions whose superblocks carry one UUID. The loader
+/// looks on the disk it was loaded from and on no other: it names one
+/// candidate, and the kernel mounts that one from memory.
 pub fn root_named_twice(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3235,83 +3213,77 @@ pub fn root_named_twice(
 ) -> Result<(), String> {
     let (bytes, _) = qemu::Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
     let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
-    let path = test_dir().join("root-twice.img");
-    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
     let twin = test_dir().join("root-twice-twin.img");
     root_twin(&twin, &image, bytes, |_| Ok(()))?;
 
-    let log =
-        boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path, vec![twin.clone()])?;
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(&twin);
-
-    let verdict = root_refusal(&log)?;
-    if !verdict.contains("matches 2 of the 2") {
-        return Err(format!("the kernel did not report two filesystems under one name: {verdict}"));
-    }
-    let named: Vec<String> = log
-        .lines()
-        .filter(|l| l.contains("root: candidate ") && l.contains(" at LBA "))
-        .map(|l| l.trim().to_string())
-        .collect();
-    if named.len() != 2 {
-        return Err(format!(
-            "the panic named {} candidates and the machine carries two:\n{}",
-            named.len(),
-            volume_lines(&log)
-        ));
-    }
-    eprintln!("  [root] {verdict}");
-    for line in &named {
-        eprintln!("  [root] {line}");
-    }
-    Ok(())
-}
-
-/// Boot an image whose ROOT set the kernel is expected to refuse, and hand back
-/// the log. `ready_marker` is the panic's own first words, which is what tells
-/// the harness this boot is not going to reach userland.
-fn boot_expecting_root_refusal(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-    image: &Path,
-    usb_images: Vec<PathBuf>,
-) -> Result<String, String> {
-    let profile =
-        if usb_images.is_empty() { qemu::Profile::Headless } else { qemu::Profile::UsbDisk };
     let qemu = qemu::QemuInstance::boot_with_options(
         test_config,
         c_bins,
         rust_bins,
         BootOptions {
-            profile,
-            boot_image: Some(qemu::Staged::Written(image.to_path_buf())),
-            usb_images,
-            ready_marker: "boot: root=",
+            profile: qemu::Profile::UsbDisk,
+            usb_images: vec![twin.clone()],
             ..Default::default()
         },
     );
-    // Both channels: this kernel dies before virtio-console init, so the 16550
-    // carries the refusal, and which of the two a profile puts the early log on
-    // is not something this test is about.
-    let mut log = qemu.boot_log().to_string();
-    for _ in 0..20 {
-        let uart = qemu.uart_log();
-        if uart.contains("boot: root=") {
-            log.push_str(&uart);
-            return Ok(log);
-        }
-        std::thread::sleep(Duration::from_millis(250));
+    let log = qemu.boot_log().to_string();
+    drop(qemu);
+    let _ = std::fs::remove_file(&twin);
+
+    let named: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("ROOT: candidate ") && l.contains(" at LBA "))
+        .map(str::trim)
+        .collect();
+    if named.len() != 1 {
+        return Err(format!(
+            "the loader named {} candidates and the boot disk carries one:\n{}",
+            named.len(),
+            volume_lines(&log)
+        ));
     }
-    log.push_str(&qemu.uart_log());
-    Ok(log)
+    let mounted = log
+        .lines()
+        .find(|l| l.contains("root: mounted read-only from memory at"))
+        .ok_or_else(|| format!("ROOT did not mount from memory:\n{}", volume_lines(&log)))?
+        .trim()
+        .to_string();
+    eprintln!("  [root] {}", named[0]);
+    eprintln!("  [root] {mounted}");
+    Ok(())
 }
 
-/// The kernel's refusal line, or what the boot said instead.
+/// The loader's refusal line: the first word a boot whose ROOT is refused
+/// says, and so the marker the boot is waited on.
+const ROOT_REFUSED: &str = "ROOT: REFUSED, ";
+
+/// Boot an image whose ROOT the loader is expected to refuse, and hand back the
+/// log, which ends at the refusal.
+fn boot_expecting_root_refusal(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    image: &Path,
+) -> Result<String, String> {
+    let qemu = qemu::QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            boot_image: Some(qemu::Staged::Written(image.to_path_buf())),
+            ready_marker: ROOT_REFUSED,
+            ..Default::default()
+        },
+    );
+    // Both channels: the loader and an early kernel speak on the 16550, and the
+    // harness stops at the marker on whichever carried it.
+    Ok(format!("{}{}", qemu.boot_log(), qemu.uart_log()))
+}
+
+/// The loader's refusal line, or what the boot said instead.
 fn root_refusal(log: &str) -> Result<String, String> {
     log.lines()
-        .find(|l| l.contains("boot: root=") && l.contains("TOYOS-ROOT partition"))
+        .find(|l| l.contains(ROOT_REFUSED) && l.contains("TOYOS-ROOT partition"))
         .map(|l| l.trim().to_string())
-        .ok_or_else(|| format!("the kernel did not refuse this ROOT set:\n{}", volume_lines(log)))
+        .ok_or_else(|| format!("the loader did not refuse this ROOT set:\n{}", volume_lines(log)))
 }

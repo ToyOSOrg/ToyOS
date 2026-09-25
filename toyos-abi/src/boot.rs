@@ -110,7 +110,27 @@ pub struct KernelArgs {
     /// land inside, and there is no deriving it from the memory map — the map
     /// says what firmware *used*, not what the bridge would decode.
     pub root_bridge_windows: [RootBridgeWindow; MAX_ROOT_BRIDGE_WINDOWS],
+    /// Where the loader put ROOT: the whole partition, read through the
+    /// firmware's block I/O into pages of [`ROOT_IMAGE_MEMORY_TYPE`], so the
+    /// kernel mounts it from memory and never frees it.
+    ///
+    /// These are the bytes a signature check over ROOT has to cover: the loader
+    /// writes them once, and nothing writes them between that read and the
+    /// kernel's mount. Zero length is a loader that handed no image, and the
+    /// kernel refuses to boot on it by name; it never reads ROOT anywhere else.
+    pub root_image_addr: u64,
+    pub root_image_len: u64,
 }
+
+/// The UEFI memory type the loader allocates ROOT's image as: one of the
+/// values UEFI 2.11 §7.2.1 leaves to an OS loader (`0x8000_0000..`), so the
+/// firmware's map marks those pages as nobody's free memory and the kernel's
+/// allocator, which takes only the types it knows are free, never hands them out.
+pub const ROOT_IMAGE_MEMORY_TYPE: u32 = 0x8000_7201;
+
+/// The boot parameter on which the loader hands the kernel no ROOT image: the
+/// negative control on the kernel's refusal, and read by both of them.
+pub const WITHHOLD_ROOT_PARAM: &str = "loader-withholds-root";
 
 /// The most windows the loader will carry.
 pub const MAX_ROOT_BRIDGE_WINDOWS: usize = 64;
@@ -208,7 +228,9 @@ const _: () = {
     assert!(offset_of!(KernelArgs, cmdline_len) == 184);
     assert!(offset_of!(KernelArgs, root_bridge_window_count) == 192);
     assert!(offset_of!(KernelArgs, root_bridge_windows) == 200);
-    assert!(size_of::<KernelArgs>() == 1224);
+    assert!(offset_of!(KernelArgs, root_image_addr) == 1224);
+    assert!(offset_of!(KernelArgs, root_image_len) == 1232);
+    assert!(size_of::<KernelArgs>() == 1240);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
     assert!(align_of::<RootBridgeWindow>() == 8);
@@ -297,6 +319,8 @@ mod tests {
         root_bridge_window_count: 0,
         root_bridge_windows: [RootBridgeWindow { base: 0, length: 0 };
             MAX_ROOT_BRIDGE_WINDOWS],
+        root_image_addr: 0,
+        root_image_len: 0,
     };
 
     #[test]

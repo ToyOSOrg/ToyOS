@@ -10,6 +10,7 @@ use crate::mm::PAGE_BYTES;
 use crate::file_cache::{self, FileId, Residency};
 use crate::fs_rename::{self, Committed, ReplaceRename};
 use crate::page_cache;
+use crate::rootfs::MemoryImage;
 use toyos_abi::syscall::SyscallError;
 
 use crate::vfs::FileSystem;
@@ -396,20 +397,19 @@ impl FileSystem for BcacheFsAdapter {
     }
 }
 
-/// VFS adapter for a read-only bcachefs volume on one cached partition.
+/// VFS adapter for ROOT, a read-only bcachefs volume in memory.
 ///
-/// Nothing here names a device either: every backing it hands out reads through
-/// the cache the mount was opened over, so a file cannot be served off a
-/// partition its filesystem does not occupy.
+/// Every backing it hands out reads the image the mount was opened over, so a
+/// file cannot be served off bytes its filesystem does not occupy.
 pub struct ReadOnlyBcacheFsAdapter {
-    fs: Mounted<PageCacheBlockIO, ReadOnly>,
-    cache: Arc<page_cache::Cached>,
+    fs: Mounted<MemoryImage, ReadOnly>,
+    image: MemoryImage,
     name_to_id: BTreeMap<String, FileId>,
 }
 
 impl ReadOnlyBcacheFsAdapter {
-    pub fn new(fs: Mounted<PageCacheBlockIO, ReadOnly>, cache: Arc<page_cache::Cached>) -> Self {
-        Self { fs, cache, name_to_id: BTreeMap::new() }
+    pub fn new(fs: Mounted<MemoryImage, ReadOnly>, image: MemoryImage) -> Self {
+        Self { fs, image, name_to_id: BTreeMap::new() }
     }
 }
 
@@ -434,7 +434,7 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
         let (extents, size) = present("open", name, self.fs.file_extents(name))?;
         if let Some(&file_id) = self.name_to_id.get(name) {
             file_cache::open(file_id).commit();
-            let backing = Arc::new(ReadOnlyBacking::new(Arc::clone(&self.cache), extents, size));
+            let backing = Arc::new(ReadOnlyBacking::new(self.image, extents, size));
             return Ok((file_id, Some(backing)));
         }
 
@@ -443,7 +443,7 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
 
         self.name_to_id.insert(String::from(name), file_id);
 
-        let backing = Arc::new(ReadOnlyBacking::new(Arc::clone(&self.cache), extents, size));
+        let backing = Arc::new(ReadOnlyBacking::new(self.image, extents, size));
         Ok((file_id, Some(backing)))
     }
 
@@ -501,7 +501,7 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
 
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         let (extents, size) = present("open_backing", name, self.fs.file_extents(name))?;
-        Ok(Arc::new(ReadOnlyBacking::new(Arc::clone(&self.cache), extents, size)))
+        Ok(Arc::new(ReadOnlyBacking::new(self.image, extents, size)))
     }
 
     fn cached_file_id(&mut self, name: &str) -> Option<FileId> {

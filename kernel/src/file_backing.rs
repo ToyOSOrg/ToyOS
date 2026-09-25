@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use bcachefs::Extent;
 use crate::block::{BlockError, BlockResult};
 use crate::page_cache;
+use crate::rootfs::MemoryImage;
 use crate::sync::Lock;
 use crate::time::Deadline;
 
@@ -174,23 +175,22 @@ impl FileBacking for NvmeBacking {
     }
 }
 
-/// File on a read-only volume, backed by a fixed extent list over the partition
-/// one page cache serves.
+/// File on ROOT, backed by a fixed extent list over the image in memory.
 ///
 /// No revocation cell, unlike [`NvmeBacking`]: nothing can delete or truncate a
 /// file here, so the blocks a backing was opened over stay that file's for as
-/// long as it lives. A block outside the volume is refused by the view
-/// (`block::Partition::locate`), which is where every bound on a number the
-/// disk chose belongs.
+/// long as it lives. A block outside the image is refused by
+/// [`MemoryImage::read`], which is where every bound on a number the image
+/// chose belongs.
 pub struct ReadOnlyBacking {
-    cache: Arc<page_cache::Cached>,
+    image: MemoryImage,
     extents: Vec<Extent>,
     size: u64,
 }
 
 impl ReadOnlyBacking {
-    pub fn new(cache: Arc<page_cache::Cached>, extents: Vec<Extent>, size: u64) -> Self {
-        Self { cache, extents, size }
+    pub fn new(image: MemoryImage, extents: Vec<Extent>, size: u64) -> Self {
+        Self { image, extents, size }
     }
 }
 
@@ -204,10 +204,9 @@ impl FileBacking for ReadOnlyBacking {
         let Some(block) = offset_to_block(&self.extents, file_offset) else {
             return Ok(());
         };
-        // Bypasses the block page cache; the file cache is the sole cache for file data.
         let mut raw = [0u8; BLOCK_SIZE];
         // `buf` is already zeroed, so a failed read returns a hole, not stale data.
-        if let Err(e) = read_block_retrying(&self.cache, block, &mut raw) {
+        if let Err(e) = self.image.read(block, &mut raw) {
             log!("root: read of block {block} failed");
             return Err(e);
         }
