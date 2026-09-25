@@ -1122,31 +1122,33 @@ pub fn mount(role: Role) -> Option<FatFs> {
         return None;
     };
 
-    let lba = volume.lba_bytes as u64;
-    let start = volume.start_lba.checked_mul(lba)?;
-    let len = volume.blocks.checked_mul(lba)?;
     // Whole device blocks or nothing: a view that began or ended inside one
     // would have to read and write the blocks either side of it, which are the
     // partition table's and the next partition's.
-    if start % BLOCK != 0 || len % BLOCK != 0 {
-        log!(
-            "{role}-volume: the table puts the partition at {start}+{len} bytes, which is not \
-             whole {BLOCK}-byte blocks — refusing to mount it"
-        );
-        return None;
-    }
-    let device_bytes = handle.block_count().checked_mul(BLOCK)?;
+    let (first_block, blocks) = match block::span_blocks(volume.start_lba, volume.blocks, volume.lba_bytes) {
+        Ok(span) => span,
+        Err(block::SpanRefused::Overflow) => return None,
+        Err(block::SpanRefused::NotWhole { start_bytes, len_bytes }) => {
+            log!(
+                "{role}-volume: the table puts the partition at {start_bytes}+{len_bytes} bytes, \
+                 which is not whole {BLOCK}-byte blocks — refusing to mount it"
+            );
+            return None;
+        }
+    };
+    let len = blocks * BLOCK;
+    let device_blocks = handle.block_count();
     let part = match block::Partition::of(
         handle,
-        start / BLOCK,
-        len / BLOCK,
+        first_block,
+        blocks,
         block::Holder::Kernel(role.mount()),
     ) {
         Ok(part) => part,
         Err(block::ViewRefused::OffDevice) => {
             log!(
-                "{role}-volume: the table puts the partition at {start}+{len} on a device of \
-                 {device_bytes} bytes — refusing to mount past the end of it"
+                "{role}-volume: the table puts the partition at {first_block}+{blocks} blocks on \
+                 a device of {device_blocks} blocks — refusing to mount past the end of it"
             );
             return None;
         }
@@ -1195,8 +1197,9 @@ pub fn mount(role: Role) -> Option<FatFs> {
         Ok(fs) => {
             log!(
                 "{role}-volume: partition mounted from device {device_id}, {volume_bytes} bytes of a \
-                 {len}-byte partition at device offset {start}, {}-byte sectors, {}-byte \
+                 {len}-byte partition at device offset {}, {}-byte sectors, {}-byte \
                  clusters, {} clusters",
+                first_block * BLOCK,
                 geom.bytes_per_sector,
                 geom.bytes_per_cluster(),
                 geom.cluster_count

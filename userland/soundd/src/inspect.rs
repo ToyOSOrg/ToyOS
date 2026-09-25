@@ -109,6 +109,18 @@ impl Published {
         self.submitted.store(totals.submitted + u64::from(open.submitted), Ordering::Relaxed);
         self.late_wakes.store(totals.late_wakes + u64::from(open.late_wakes), Ordering::Relaxed);
     }
+
+    /// What the last [`publish`](Self::publish) stored, for the mix loop's own
+    /// host test — the mix loop has no other way to read back what it wrote.
+    #[cfg(test)]
+    pub(crate) fn published(&self) -> (u64, u64, u64, u64) {
+        (
+            self.underruns.load(Ordering::Relaxed),
+            self.drains.load(Ordering::Relaxed),
+            self.submitted.load(Ordering::Relaxed),
+            self.late_wakes.load(Ordering::Relaxed),
+        )
+    }
 }
 
 /// The encoded answer.

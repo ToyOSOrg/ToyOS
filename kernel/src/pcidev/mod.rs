@@ -190,8 +190,10 @@ struct Machine {
     functions: Vec<PciDevice>,
     /// What each of [`Self::functions`] said it was, read once in [`publish`]:
     /// the inventory is answered from here and never by reading config space
-    /// of a function a reset may be in the middle of.
-    identities: Vec<(u16, toyos_abi::inventory::Pci)>,
+    /// of a function a reset may be in the middle of. The requester id is not
+    /// stored beside it — a `Pci`'s own `at` already names the function, and
+    /// [`requester_of`] is its inverse.
+    identities: Vec<toyos_abi::inventory::Pci>,
     /// The PCI segment group every one of [`Self::functions`] is on: the one
     /// the ECAM window they were enumerated through serves.
     segment: u16,
@@ -289,7 +291,8 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     };
     let slots = *SLOTS.lock();
     let mut out = Vec::with_capacity(identities.len());
-    for (who, mut pci) in identities {
+    for mut pci in identities {
+        let who = requester_of(pci.at);
         pci.driven = if kernel_driven.contains(&who) {
             Driven::Kernel
         } else if slots.contains(&Some(who)) {
@@ -325,6 +328,12 @@ pub(crate) fn addr_of(segment: u16, who: u16) -> toyos_abi::inventory::PciAddr {
         dev: ((who >> 3) & 0x1f) as u8,
         func: (who & 7) as u8,
     }
+}
+
+/// [`addr_of`]'s inverse: the requester id `at` names, dropping the segment
+/// [`requester`] never carried either.
+pub(crate) fn requester_of(at: toyos_abi::inventory::PciAddr) -> u16 {
+    ((at.bus as u16) << 8) | ((at.dev as u16) << 3) | at.func as u16
 }
 
 /// Record that a kernel driver has taken this function.
@@ -403,7 +412,7 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
     let mut machine = MACHINE.lock();
     machine.functions = devices.to_vec();
     machine.identities =
-        devices.iter().map(|d| (requester(d), d.identity(addr_of(segment, requester(d))))).collect();
+        devices.iter().map(|d| d.identity(addr_of(segment, requester(d)))).collect();
     machine.segment = segment;
     machine.decoded = decoded;
     machine.firmware = firmware.to_vec();

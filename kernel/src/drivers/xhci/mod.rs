@@ -173,7 +173,13 @@ enum What {
     /// One step of a HID endpoint's recovery; `seq` carries where it is, `issued` names the command for failure lines.
     Recovering { slot_id: u8, seq: Recovery, issued: &'static str },
     /// Enable Slot for a port that finished reset; there is no device until the controller answers.
-    SlotWanted { port_idx: u8, speed: u8, packet: u16, seq: toyos_xhci::enumerate::Enumeration },
+    SlotWanted {
+        port_idx: u8,
+        speed: u8,
+        usb_speed: toyos_abi::inventory::UsbSpeed,
+        packet: u16,
+        seq: toyos_xhci::enumerate::Enumeration,
+    },
     /// One act of a device's enumeration.
     Enumerating(device::Enumerating),
 }
@@ -1484,8 +1490,8 @@ impl XhciController {
                 What::Recovering { slot_id, seq, issued } => {
                     self.recovery_stepped(slot_id, seq, issued, outcome)
                 }
-                What::SlotWanted { port_idx, speed, packet, seq } => {
-                    device::slot_answered(self, port_idx, speed, packet, seq, outcome)
+                What::SlotWanted { port_idx, speed, usb_speed, packet, seq } => {
+                    device::slot_answered(self, port_idx, speed, usb_speed, packet, seq, outcome)
                 }
                 What::Enumerating(state) => device::stepped(self, state, outcome),
             }
@@ -1768,12 +1774,7 @@ pub struct StorageGeometry {
 
 /// Every device a controller bound, as `SYS_DEVICE_INVENTORY` records it.
 pub fn inventory() -> Vec<toyos_abi::inventory::Usb> {
-    use toyos_abi::inventory::{Usb, UsbFunction, UsbSpeed};
-    // A bound device trained at a speed `initial_ep0_packet` has a packet
-    // size for, and every such speed is a default Protocol Speed ID.
-    let speed = |psiv: u8| {
-        UsbSpeed::from_psiv(psiv).unwrap_or_else(|| panic!("xhci: a bound device at port speed {psiv}"))
-    };
+    use toyos_abi::inventory::{Usb, UsbFunction};
     let segment = crate::pcidev::segment();
     let mut out = Vec::new();
     for ctrl in XHCI.lock().iter() {
@@ -1782,7 +1783,7 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Usb> {
             out.push(Usb {
                 controller,
                 port: hid.port_idx + 1,
-                speed: speed(hid.speed),
+                speed: hid.speed,
                 vendor: hid.usb.vendor,
                 product: hid.usb.product,
                 function: match hid.role {
@@ -1792,11 +1793,11 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Usb> {
             });
         }
         for disk in ctrl.msc.iter().filter_map(|block| block.disk) {
-            let (port_idx, psiv, usb) = disk.dev.inventory();
+            let (port_idx, speed, usb) = disk.dev.inventory();
             out.push(Usb {
                 controller,
                 port: port_idx + 1,
-                speed: speed(psiv),
+                speed,
                 vendor: usb.vendor,
                 product: usb.product,
                 function: UsbFunction::Storage,

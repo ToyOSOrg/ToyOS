@@ -53,15 +53,10 @@ pub struct Machine {
 }
 
 impl Machine {
-    /// The header's total memory, used memory and CPU count, at the offsets
-    /// the kernel writes them.
+    /// The header's total memory, used memory and CPU count.
     pub fn from_header(header: &[u8; SYSINFO_HEADER_SIZE]) -> Self {
-        let u64_at = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().expect("eight"));
-        Self {
-            memory_total: u64_at(0),
-            memory_used: u64_at(8),
-            cpus: u32::from_le_bytes(header[16..20].try_into().expect("four")),
-        }
+        let decoded = toyos_abi::syscall::SysinfoHeader::decode(header);
+        Self { memory_total: decoded.memory_total, memory_used: decoded.memory_used, cpus: decoded.cpus }
     }
 }
 

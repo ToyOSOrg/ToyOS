@@ -64,6 +64,37 @@ pub const SYS_SYSINFO: u64 = 45;
 /// decodes it, so a second spelling is a reader that walks off by a field.
 pub const SYSINFO_HEADER_SIZE: usize = 48;
 
+/// [`SYSINFO_HEADER_SIZE`] bytes, decoded once: the one spelling of the
+/// header's offsets, so a reader takes a field rather than an index.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SysinfoHeader {
+    pub memory_total: u64,
+    pub memory_used: u64,
+    pub cpus: u32,
+    /// Live threads in the roster this same call would answer with
+    /// [`Rights::ROSTER`](crate::handle::Rights::ROSTER).
+    pub entries: u32,
+    pub uptime_ns: u64,
+    pub total_cpu_ns: u64,
+    pub total_available_ns: u64,
+}
+
+impl SysinfoHeader {
+    pub fn decode(header: &[u8; SYSINFO_HEADER_SIZE]) -> Self {
+        let u64_at = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().expect("eight"));
+        let u32_at = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().expect("four"));
+        Self {
+            memory_total: u64_at(0),
+            memory_used: u64_at(8),
+            cpus: u32_at(16),
+            entries: u32_at(20),
+            uptime_ns: u64_at(24),
+            total_cpu_ns: u64_at(32),
+            total_available_ns: u64_at(40),
+        }
+    }
+}
+
 /// Bytes per roster entry, after the header: pid, tid, scheduler state, whether
 /// it is a secondary thread, resident memory, CPU nanoseconds, and a 28-byte
 /// name.

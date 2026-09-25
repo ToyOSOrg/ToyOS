@@ -1330,7 +1330,7 @@ fn total_memory() -> u64 {
     let mut buf = [0u8; system::SYSINFO_HEADER_SIZE];
     let n = system::sysinfo(&mut buf);
     assert!(n >= system::SYSINFO_HEADER_SIZE, "sysinfo returned {n} bytes");
-    u64::from_le_bytes(buf[0..8].try_into().unwrap())
+    toyos_abi::syscall::SysinfoHeader::decode(&buf).memory_total
 }
 
 /// The mode a window toggles into when it is maximized by button or chord.

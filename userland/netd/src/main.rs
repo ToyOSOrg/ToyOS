@@ -627,7 +627,7 @@ fn total_memory() -> u64 {
     let mut buf = [0u8; toyos::system::SYSINFO_HEADER_SIZE];
     let n = toyos::system::sysinfo(&mut buf);
     assert!(n >= toyos::system::SYSINFO_HEADER_SIZE, "sysinfo returned {n} bytes");
-    u64::from_le_bytes(buf[0..8].try_into().unwrap())
+    toyos_abi::syscall::SysinfoHeader::decode(&buf).memory_total
 }
 
 /// Where this netd's socket ids start: at random, and never 0.

@@ -196,8 +196,8 @@ impl MscDevice {
 
     /// Where the disk is and what it says it is: its root-hub port, the speed
     /// that port trained at, and its device descriptor's ids.
-    pub fn inventory(&self) -> (u8, u8, toyos_xhci::identity::UsbId) {
-        (self.port_idx, self.enumerated.speed, self.identity.usb)
+    pub fn inventory(&self) -> (u8, toyos_abi::inventory::UsbSpeed, toyos_xhci::identity::UsbId) {
+        (self.port_idx, self.enumerated.usb_speed, self.identity.usb)
     }
 
     pub fn geometry(&self) -> StorageGeometry {
@@ -268,6 +268,9 @@ enum Asks {
 #[derive(Clone, Copy)]
 pub(in crate::drivers::xhci) struct Enumerated {
     pub speed: u8,
+    /// `speed` decoded once, at bind, where a psiv with no default Protocol
+    /// Speed ID already refused the port.
+    pub usb_speed: toyos_abi::inventory::UsbSpeed,
     pub ep0_packet: u16,
     pub configuration: u8,
 }

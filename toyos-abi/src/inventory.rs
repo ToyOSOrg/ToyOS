@@ -177,7 +177,7 @@ pub enum PartState {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Partition {
     pub device: u32,
-    /// Its entry's index in the table, from 1 (UEFI 2.10 §5.3.3).
+    /// Its entry's index in the table.
     pub index: u32,
     pub type_guid: [u8; 16],
     pub unique_guid: [u8; 16],

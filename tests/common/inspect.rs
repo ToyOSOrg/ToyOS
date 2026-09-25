@@ -244,7 +244,6 @@ pub fn reads_its_owners(qemu: &mut QemuInstance) -> Result<(), String> {
         return Err(format!("`{line}`: the compositor has composited no frame"));
     }
 
-
     // A `*` in first place reaches every owner and the kernel, and one in last
     // place stops at a whole segment: one `state` from each owner that has
     // one, and each partition's.

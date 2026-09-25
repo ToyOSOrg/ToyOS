@@ -51,8 +51,8 @@ fn sample(cap: &SysCap, buf: &mut [u8]) -> Option<(u64, u64, Vec<Row>)> {
     if n < HEADER {
         return None;
     }
-    let uptime_ns = u64::from_le_bytes(buf[24..32].try_into().unwrap());
-    let total_cpu_ns = u64::from_le_bytes(buf[32..40].try_into().unwrap());
+    let header = toyos_abi::syscall::SysinfoHeader::decode(buf[..HEADER].try_into().unwrap());
+    let (uptime_ns, total_cpu_ns) = (header.uptime_ns, header.total_cpu_ns);
     let mut rows = Vec::new();
     let mut pos = HEADER;
     while pos + ENTRY <= n {

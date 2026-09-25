@@ -797,3 +797,44 @@ pub(crate) fn null_sink_thread(
         published.publish(&totals, &stats, streams.len(), state);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(submitted: u32, underruns: u32, drains: u32, late_wakes: u32) -> MixStats {
+        let mut stats = MixStats::default();
+        stats.submitted = submitted;
+        stats.underruns = underruns;
+        stats.drains = drains;
+        stats.late_wakes = late_wakes;
+        stats
+    }
+
+    /// `flush` on two windows with known counts, then `publish` with a third,
+    /// still-open one: what `inspect` reads back must be exactly the sum of
+    /// all three, once each — not a window double-counted, and not one lost to
+    /// a window `flush` failed to reset.
+    ///
+    /// The same `MixStats` is reused across both `flush` calls, as the mix
+    /// loop's own is across its wakes: a `flush` that folded the first window
+    /// but left it in `stats` would fold it a second time into the second.
+    #[test]
+    fn published_totals_are_exactly_the_sum_of_every_window() {
+        let mut totals = Totals::default();
+
+        let mut stats = window(10, 1, 2, 3);
+        flush(&mut stats, &mut totals, 0);
+        stats.submitted += 20;
+        stats.underruns += 4;
+        stats.drains += 5;
+        stats.late_wakes += 6;
+        flush(&mut stats, &mut totals, 0);
+
+        let open = window(7, 8, 9, 10);
+        let published = Published::new(State::Running);
+        published.publish(&totals, &open, 1, State::Running);
+
+        assert_eq!(published.published(), (1 + 4 + 8, 2 + 5 + 9, 10 + 20 + 7, 3 + 6 + 10));
+    }
+}

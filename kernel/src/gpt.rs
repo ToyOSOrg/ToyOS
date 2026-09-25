@@ -87,7 +87,6 @@ const MAX_LISTED: usize = 128;
 /// span now, from the block layer's holds. A partition that is not whole
 /// blocks is held by nothing, since no view can be made of it.
 pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
-    let unit = toyos_abi::part::BLOCK_BYTES as u64;
     let listed: Vec<(Handle, u32, Vec<Partition>)> = LISTED
         .lock()
         .iter()
@@ -95,14 +94,10 @@ pub fn inventory() -> Vec<(DeviceId, Partition, Option<crate::block::Holder>)> {
         .collect();
     let mut out = Vec::new();
     for (handle, lba_bytes, parts) in listed {
-        let lba = u64::from(lba_bytes);
         for part in parts {
-            let span = part.first_lba.checked_mul(lba).zip(part.lba_count().checked_mul(lba));
-            let holder = match span {
-                Some((start, len)) if start % unit == 0 && len % unit == 0 => {
-                    handle.holder(start / unit, start / unit + len / unit)
-                }
-                _ => None,
+            let holder = match crate::block::span_blocks(part.first_lba, part.lba_count(), lba_bytes) {
+                Ok((first_block, blocks)) => handle.holder(first_block, first_block + blocks),
+                Err(_) => None,
             };
             out.push((handle.device_id(), part, holder));
         }

@@ -496,3 +496,31 @@ mechanism for it. `src/redlist.rs` carries the sighting.
   parallel run — a loaded full fast tier in which `i8042_undecoded_bytes`'
   first mute line names nothing and its second names the sequence, or the
   retirement's clause narrowed to the conditions under which it holds.
+
+- **`partition_claim_gives_up`, `partition_claim_departure`, `syscall_window_nmi`,
+  `swap_refused_device_fails`, `swap_quiets_the_function`** — added 2026-09-25,
+  `wt/toyos-inspect` (PR #501, round-2 review fixes), dev host, one worktree,
+  five back-to-back full `cargo test` runs in one session with nothing else on
+  the machine. Run 1: `376 passed, 0 failed`. Run 2: `partition_claim_gives_up`
+  alone, its deadman case, never printing `partclaim: a write still refused
+  after 1 attempt(s)` — the boot's own `/log` fsync tripped the actuator's
+  global deadman first (`log-volume: write ... the device would not answer`,
+  `fsync: /log/... is not durable after 1 attempt(s)`), exactly the race
+  `partition_claim_departure`'s own doc comment names as its `silent` case's
+  premise ("another claim flushes first — logd's `/log`"). Run 3:
+  `partition_claim_departure`'s `silent` case (`0 flushes were told of the
+  loss, not 1`) plus two unrelated `swap_*` names. Run 4: 376/376 again. Run 5:
+  `syscall_window_nmi` (this file's own 2026-08-27 row, same shape: a wall-clock
+  storm guard) plus `partition_claim_gives_up`'s *other* case (`unanswered`).
+  `cargo run -- --known-red` on each said not on the list. No two of the five
+  runs named the same failing test, and none of the five failures is in a file
+  this round's diff touches (`kernel/src/block.rs`, `device.rs`, `gpt.rs`,
+  `page_cache.rs`, `fat32_adapter.rs`, `pcidev/mod.rs`, the xHCI PSIV decode,
+  `toyos-abi`, `toyos-inspect`, soundd's `inspect.rs`/`mix.rs`) — this round's
+  own dedicated tests (`inspect_reads_its_owners`, `toyos-inspect`'s and
+  `toyos-abi`'s host suites, soundd's host tests) stayed green across all five.
+  `uptime`'s 5- and 15-minute load averages were 8.30 and 11.26 against a
+  1-minute 1.92 partway through — a host still carrying the previous runs'
+  weight — which is this file's own class rather than a new one: a shifting
+  subset of wall-clock-guarded or first-fsync-wins tests reds under a host
+  loaded by nothing but this session's own repeated full suites.
