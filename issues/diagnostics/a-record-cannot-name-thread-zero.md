@@ -78,5 +78,4 @@ main thread — noise bought for nothing, until the second PR.
 So this one is not the two-PR sequence `LogRecord::tagged` was: there the ABI
 half had an in-tree caller (`Display`) and changed no byte of output. Option 1
 or 2 wants a single PR carrying `toyos-abi/src/log.rs` and the kernel's
-producer together, which `abi_lands_alone` permits — it partitions commits, so
-one commit holding the ABI change and its inseparable consumer is lawful.
+producer together.

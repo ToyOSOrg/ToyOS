@@ -21,15 +21,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The ABI-first rule and the published crates' versions, read from the
-  # branch's own commits — a merge group's commits were each already judged
-  # this way as a pull request, so this does not run there.
+  # The published crates' versions, read from the branch against its merge
+  # base — a merge group's branches were each already judged this way as a
+  # pull request, so this does not run there. The name is the required check's.
   abi-split:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # Full history: `abi_lands_alone` walks `origin/main..HEAD`.
+      # Full history: `sdkversion::judge` needs the merge base with origin/main.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0

@@ -1,49 +1,26 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-use crate::stamps;
-use crate::toolchain::host_triple;
-
-/// The source, the stamp, and the archive in the sysroot.
-fn paths(root: &Path, rust_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
-    let host = host_triple();
-    (
-        root.join("userland/libc/src"),
-        root.join("target/stamps/toyos-libc.stamp"),
-        rust_dir
-            .join(format!("build/{host}/stage2/lib/rustlib/x86_64-unknown-toyos/lib"))
-            .join("libtoyos_c.a"),
-    )
-}
-
-/// Whether the sysroot's `libtoyos_c.a` is missing or older than its source.
-///
-/// Separate from [`build`] because the caller asks this under the shared build
-/// lock and acts under the exclusive one.
-pub fn stale(root: &Path, rust_dir: &Path) -> bool {
-    let (libc_src, stamp, dest) = paths(root, rust_dir);
-    stamps::dir_changed(&libc_src, &stamp) || !dest.exists()
-}
-
-/// Build toyos-libc and install it as `libtoyos_c.a` in the sysroot.
-pub fn build(root: &Path, rust_dir: &Path) {
-    let (libc_src, stamp, dest) = paths(root, rust_dir);
+/// Build toyos-libc against the toolchain at `toolchain`, in `target_dir`, and
+/// install it there as `libtoyos_c.a`. Part of making a sysroot
+/// (`src/sysroot.rs`), whose key `userland/libc/src` is one of.
+pub fn build(root: &Path, toolchain: &Path, target_dir: &Path) {
+    let dest = toolchain.join("lib/rustlib/x86_64-unknown-toyos/lib/libtoyos_c.a");
 
     eprintln!("Building toyos-libc for sysroot...");
 
     // The one guest artifact `build::PROFILE` does not reach, so it is the one
     // place `overflow-checks` is off — and it is linked into std, so it is in
     // every userland binary. Left deliberately, on two grounds: CLAUDE.md gives
-    // the POSIX compatibility layer explicitly relaxed rules, and this build is
-    // gated on `stamps::dir_changed` over the *source* directory, so changing
-    // the flag alone would not rebuild the installed archive and the manifest
-    // would then claim something the artifact does not have.
+    // the POSIX compatibility layer explicitly relaxed rules, and a flag changed
+    // here does not move any sysroot's key unless `sysroot::RECIPE` moves with
+    // it, so the installed archive would not be rebuilt and the manifest would
+    // then claim something the artifact does not have.
     //
     // --message-format=json to discover the exact rlib artifacts.
     let output = Command::new("cargo")
         .args([
-            "+toyos",
             "build",
             "--release",
             "--target",
@@ -54,6 +31,11 @@ pub fn build(root: &Path, rust_dir: &Path) {
             "--manifest-path",
         ])
         .arg(root.join("userland/libc/Cargo.toml").to_str().unwrap())
+        .arg("--target-dir")
+        .arg(target_dir)
+        .env("RUSTUP_TOOLCHAIN", toolchain)
+        .env_remove("RUSTFLAGS")
+        .env_remove("RUSTC")
         .current_dir(root.join("userland"))
         .stderr(std::process::Stdio::inherit())
         .output()
@@ -92,7 +74,6 @@ pub fn build(root: &Path, rust_dir: &Path) {
     let archive = merge_rlibs(&rlib_paths);
     fs::write(&dest, archive)
         .unwrap_or_else(|e| panic!("Failed to write {}: {e}", dest.display()));
-    stamps::write_dir_stamp(&libc_src, &stamp);
 }
 
 /// Extract .o files from rlibs and merge them into a single GNU-format ar archive.

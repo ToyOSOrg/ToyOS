@@ -25,5 +25,4 @@ so a drift would take the test with it and the arm would still pass.
 cannot drift, because it sits beside the constants it unions and every reader
 names it. Four more of those — for `MmapProt`, `MmapFlags`, `OpenFlags` and
 `WNOHANG` — delete this entry, the three copies in the kernel and the three in
-the tests. It is an ABI change, so it lands on its own single-commit branch by
-the abi-split rule.
+the tests.
