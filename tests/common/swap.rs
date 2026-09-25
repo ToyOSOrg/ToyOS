@@ -41,9 +41,11 @@ pub const HOLD_JOBS: &[&str] = &[HOLD];
 const CRASH: &str = "swap_crash";
 const CRASH_PANIC: &str = "panicked at src/bin/swap_crash.rs";
 
-/// A booted talking guest with its ssh forward, and the client to reach it.
+/// A booted talking guest with its ssh forward, the client to reach it, and
+/// the log it serves, read from the moment `logd` opened its port.
 struct Rig {
     staged: TalkBoot,
+    stream: toyos_build::metaltalk::Stream,
     guest: QemuInstance,
     console: String,
     ssh: Ssh,
@@ -52,22 +54,17 @@ struct Rig {
 
 impl Rig {
     /// `binary` sent as netd's replacement once sshd answers, and the
-    /// machine's word on it: a boot's stream opens when netd leases, and sshd
-    /// may still be binding then.
-    fn swap_once_sshd_answers(
-        &self,
-        binary: &Path,
-        digest: &toyos_swap::Digest,
-    ) -> Result<Result<String, String>, String> {
-        self.staged.stream.wait_connected(CEILING).ok_or("the boot never opened its stream")?;
+    /// machine's word on it, let go at once: `logd` serves its port before
+    /// netd leases, and sshd may still be binding then.
+    fn swap_once_sshd_answers(&self, binary: &Path, digest: &toyos_swap::Digest) -> Result<String, String> {
         let asked = std::time::Instant::now();
         loop {
-            match self.ssh.swap(self.forward, "netd", binary, digest) {
+            match self.ssh.swap(self.forward, "netd", binary, digest).and_then(|answered| answered.go()) {
                 Err(why) if asked.elapsed() < Duration::from_secs(30) => {
                     eprintln!("  [swap] not taken yet: {why}");
                     std::thread::sleep(Duration::from_secs(1));
                 }
-                answered => return Ok(answered),
+                answered => return answered.map(|a| a.said.clone()),
             }
         }
     }
@@ -81,16 +78,18 @@ impl Rig {
         let staged = TalkBoot::stage_armed(name, bench, actuators)?;
         let ssh_port = qemu::free_host_port();
         let options = BootOptions { ssh_port: Some(ssh_port), ..staged.options() };
-        let guest = QemuInstance::boot_with_options(&staged.case, &[], &[], options);
-        let console = guest.boot_log().to_string();
+        let mut guest = QemuInstance::boot_with_options(&staged.case, &[], &[], options);
+        let mut console = guest.boot_log().to_string();
+        qemu::await_marker(&mut guest, &mut console, super::logstream::SERVING, "logd to open its port")?;
+        let stream = super::logstream::reader(staged.log_port, &format!("{name}-stream.txt"))?;
         let ssh = Ssh::at(&super::compile::repo_root(), staged.identity.private().to_path_buf())?;
         let forward = SocketAddr::from((Ipv4Addr::LOCALHOST, ssh_port));
-        Ok(Self { staged, guest, console, ssh, forward })
+        Ok(Self { staged, stream, guest, console, ssh, forward })
     }
 
     fn swap(&self, service: &str, binary: &Path, named: Option<toyos_swap::Digest>) -> Result<Swapped, String> {
         let swapped = metalswap::swap(
-            &self.staged.stream,
+            &self.stream,
             &self.ssh,
             Some(self.forward),
             &Ask { service, binary, named },
@@ -162,7 +161,7 @@ impl Rig {
         }
         serial::Serial::named("the swapping boot", console.as_str()).must_be_clean()?;
         let file = super::volumes::whole_log(&self.staged.image, self.staged.start, self.staged.len)?;
-        let streamed = self.staged.stream.lines();
+        let streamed = self.stream.lines();
         super::logstream::is_prefix_of(&streamed, &file)?;
         let boots = file.iter().filter(|l| l.contains("Boot: complete")).count();
         if boots != 1 {
@@ -190,7 +189,10 @@ fn after(file: &[String], from: usize, needle: &str) -> Option<usize> {
 fn netd_in_service(name: &str, bench: Bench) -> Result<(), String> {
     let rig = Rig::boot(name, bench)?;
     let binary = rebuilt("netd", &rig.staged.scratch)?;
-    let swapped = rig.swap("netd", &binary, None)?;
+    let swapped = match rig.swap("netd", &binary, None) {
+        Ok(swapped) => swapped,
+        Err(why) => return Err(rig.fail(why)),
+    };
     let rig = rig.judged(&swapped, Expect::InService)?;
     if !swapped.said.iter().any(|l| l.contains(toyos_build::lan::LEASE)) {
         return Err(format!(
@@ -250,7 +252,10 @@ pub fn swap_refusals(
 
     let mut wrong = toyos_swap::digest(&std::fs::read(&binary).map_err(|e| e.to_string())?);
     wrong[0] ^= 1;
-    let swapped = rig.swap("netd", &binary, Some(wrong))?;
+    let swapped = match rig.swap("netd", &binary, Some(wrong)) {
+        Ok(swapped) => swapped,
+        Err(why) => return Err(rig.fail(why)),
+    };
     let rig = rig.judged(&swapped, Expect::Refused)?;
     if !swapped.answer.as_deref().unwrap_or("").contains("hashes to") {
         return Err(format!("the wrong digest was refused as {:?}, not for its hash", swapped.answer));
@@ -293,7 +298,10 @@ pub fn swap_crash_rolls_back(
         .ok_or_else(|| format!("no `{CRASH}` among the test binaries"))?;
     let binary = rig.staged.scratch.join(CRASH);
     std::fs::write(&binary, crash).map_err(|e| format!("{}: {e}", binary.display()))?;
-    let swapped = rig.swap("netd", &binary, None)?;
+    let swapped = match rig.swap("netd", &binary, None) {
+        Ok(swapped) => swapped,
+        Err(why) => return Err(rig.fail(why)),
+    };
     let rig = rig.judged(&swapped, Expect::Restored)?;
     let (file, _, staged) = rig.finish(Some(CRASH_PANIC))?;
     let restored = after(&file, 0, &toyos_swap::said("netd", Word::Restored, "/system/bin/netd as pid"))
@@ -402,7 +410,7 @@ pub fn swap_quiets_the_function(
     let idle = test_binary(rust_bins, IDLE)?;
     let binary = rig.staged.scratch.join(IDLE);
     std::fs::write(&binary, idle).map_err(|e| format!("{}: {e}", binary.display()))?;
-    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(idle))?;
+    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(idle));
     eprintln!("  [swap] the swap was answered {answer:?}");
     if let Err(why) = init_accepted(&answer) {
         return Err(rig.fail(why));
@@ -502,7 +510,7 @@ pub fn swap_resets_the_function(
     let probe = test_binary(rust_bins, FLR_PROBE)?;
     let binary = rig.staged.scratch.join(FLR_PROBE);
     std::fs::write(&binary, probe).map_err(|e| format!("{}: {e}", binary.display()))?;
-    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(probe))?;
+    let answer = rig.swap_once_sshd_answers(&binary, &toyos_swap::digest(probe));
     eprintln!("  [swap] the swap was answered {answer:?}");
     if let Err(why) = init_accepted(&answer) {
         return Err(rig.fail(why));
@@ -586,7 +594,7 @@ fn refused_device_fails(name: &str, actuators: &'static [&'static str]) -> Resul
     let mut rig = Rig::boot_armed(name, IGB_BENCH, actuators)?;
     let binary = rebuilt("netd", &rig.staged.scratch)?;
     let digest = toyos_swap::digest(&std::fs::read(&binary).map_err(|e| e.to_string())?);
-    let answer = rig.swap_once_sshd_answers(&binary, &digest)?;
+    let answer = rig.swap_once_sshd_answers(&binary, &digest);
     eprintln!("  [swap] the swap was answered {answer:?}");
     if let Err(why) = init_accepted(&answer) {
         return Err(rig.fail(why));
@@ -659,7 +667,6 @@ pub fn swap_not_inherited(
     let probe = test_binary(rust_bins, PROBE)?;
     let remote = format!("/tmp/{PROBE}");
     let (host, port) = (super::ssh::HOST, rig.forward.port());
-    rig.staged.stream.wait_connected(CEILING).ok_or("the boot never opened its stream")?;
     let asked = std::time::Instant::now();
     loop {
         match super::ssh::ssh_put(host, port, &rig.staged.identity, &remote, probe) {

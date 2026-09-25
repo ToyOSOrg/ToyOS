@@ -8,4 +8,6 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
 toyos-logstream = { path = "../../toyos-logstream" }
+# init's words on a swap, read to turn readers away while netd is replaced.
+toyos-swap = { path = "../../toyos-swap" }
 toyos-wallclock = { path = "../../toyos-wallclock" }

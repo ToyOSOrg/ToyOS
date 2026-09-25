@@ -672,15 +672,14 @@ pub fn lan_talk(
 }
 
 /// A talking boot staged in front of one of QEMU's NICs: its log port
-/// forwarded and dialed as soon as this is staged, the key its image
-/// authorizes, and where its log partition sits in the image.
+/// forwarded, the key its image authorizes, and where its log partition sits
+/// in the image.
 pub(super) struct TalkBoot {
     pub(super) case: std::path::PathBuf,
-    pub(super) stream: toyos_build::metaltalk::Stream,
     pub(super) identity: super::ssh::Identity,
     pub(super) image: std::path::PathBuf,
     pub(super) scratch: std::path::PathBuf,
-    log_port: u16,
+    pub(super) log_port: u16,
     bench: super::logstream::Bench,
     actuators: &'static [&'static str],
     pub(super) start: usize,
@@ -696,18 +695,8 @@ pub(super) const TALK_BENCH: super::logstream::Bench = super::logstream::Bench {
 };
 
 impl TalkBoot {
-    fn stage(name: &str) -> Result<Self, String> {
-        Self::stage_on(name, TALK_BENCH)
-    }
-
-    /// `bench.config`'s boot staged to authorize the lane's talking key; its
-    /// stream dials the forwarded port at once and keeps asking, so it is
-    /// already reading by the time the boot's `logd` opens it.
-    pub(super) fn stage_on(name: &str, bench: super::logstream::Bench) -> Result<Self, String> {
-        Self::stage_armed(name, bench, &[])
-    }
-
-    /// [`TalkBoot::stage_on`] on the test kernel, with `actuators` armed.
+    /// `bench.config`'s boot staged to authorize the lane's talking key, on the
+    /// test kernel with `actuators` armed.
     pub(super) fn stage_armed(
         name: &str,
         bench: super::logstream::Bench,
@@ -728,24 +717,7 @@ impl TalkBoot {
         std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
         let (start, len) = super::volumes::log_extent(&bytes, &image)?;
         let log_port = qemu::free_host_port();
-        // `Peer::Forwarded`, not `Peer::At`: this is staged before the guest —
-        // let alone its `logd` — has even been started, so a refusal here is
-        // the guest not up yet and has to be asked again, which only
-        // `Peer::Forwarded` does for a bare address.
-        let peer = toyos_build::metaltalk::Peer::Forwarded(std::net::SocketAddr::from((
-            Ipv4Addr::LOCALHOST,
-            log_port,
-        )));
-        // Resilient: a swap of netd under this stream leaves the old
-        // connection open with no FIN or reset, and the caller that knows to
-        // abandon it (`Stream::reconnect`) is answered with a fresh one.
-        let stream = toyos_build::metaltalk::Stream::connect_resilient(
-            peer,
-            &scratch.join(toyos_build::metal::READBACK_STREAM),
-            false,
-            TALK_CEILING,
-        )?;
-        Ok(Self { case, stream, identity, image, scratch, log_port, bench, actuators, start, len })
+        Ok(Self { case, identity, image, scratch, log_port, bench, actuators, start, len })
     }
 
     /// The boot's options, the NIC asked of the argv rather than assumed.

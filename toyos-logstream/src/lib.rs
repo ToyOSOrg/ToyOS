@@ -32,6 +32,20 @@ use core::fmt::{self, Display, Write};
 /// The TCP port `logd` serves this boot's log on, from its first line.
 pub const PORT: u16 = 41337;
 
+/// The service every connection on [`PORT`] is carried by. A swap of it ends
+/// each one with no FIN and no reset, which no reader could tell from a boot
+/// with nothing to say — so `logd` turns new readers away from init's word
+/// accepting that swap until the process it listened through is gone, and says
+/// so ([`CARRIER_LEAVING`]) before the swap may go.
+pub const CARRIER: &str = "netd";
+
+/// `logd`'s line once it turns new readers away for a swap of [`CARRIER`]. A
+/// reader whose own connection that swap will end holds the swap's go until
+/// this has reached it: a reader that asks again after it is turned away until
+/// the next [`CARRIER`] serves, and never admitted by the one being stopped.
+pub const CARRIER_LEAVING: &str =
+    "logd: netd is being replaced, and readers are turned away until the next one serves";
+
 /// The name of the port a reader on this machine asks `logd` for the log on;
 /// the answer is the read end of a pipe the log is written into.
 pub const SERVICE: &str = "log";
@@ -311,6 +325,12 @@ mod tests {
     fn line(tag: &str, text: &[u8]) -> String {
         let tag = Tag::new(tag).expect("a tag");
         format!("{}", ProgramLine { stamp: "2026-09-24 10:00:00", at_ns: 12_345_678_901, tag, text })
+    }
+
+    #[test]
+    fn the_carriers_line_names_the_carrier() {
+        assert!(CARRIER_LEAVING.starts_with("logd: "));
+        assert!(CARRIER_LEAVING.contains(&format!(" {CARRIER} ")));
     }
 
     #[test]

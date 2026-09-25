@@ -100,7 +100,7 @@ use toyos::port::Acceptor;
 use toyos::syscap::SysCap;
 use toyos::Pipe;
 use toyos_abi::syscall::SyscallError;
-use toyos_logstream::{Ended, Lines, ProgramLine, Tag, LOGD, MAX_TAG, ORIGINS, REGISTER, SERVICE};
+use toyos_logstream::{Ended, Lines, ProgramLine, Tag, CARRIER, LOGD, MAX_TAG, ORIGINS, REGISTER, SERVICE};
 use toyos_wallclock::Civil;
 
 use policy::{fate, Fate, Step, LOG_WRITE_BUDGET};
@@ -110,6 +110,10 @@ use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES, ROTATE_FAST_BYTES};
 /// call refuses below, and large enough that an ordinary boot's burst is a
 /// handful of syscalls rather than one per line.
 const BATCH: usize = 64;
+
+/// The name init registers its own pipe under (`userland/init`'s `Log::open`):
+/// the one origin whose word on a swap this program acts on.
+const INIT: &str = "init";
 
 /// Programs whose output this program reads at once: one per `[boot] start`
 /// entry, init's own and this program's, which is what there is to register.
@@ -157,6 +161,8 @@ struct Round {
     lines: Vec<(u64, String)>,
     /// Each program's line as it wrote it, for the console.
     console: Vec<u8>,
+    /// init's words on a swap of [`CARRIER`] this round, in order.
+    carrier: Vec<serve::Carrier>,
 }
 
 fn main() {
@@ -269,9 +275,12 @@ fn main() {
         // A short batch is a ring this reader has caught up with.
         let caught_up = batch.len() < BATCH;
         let joined = registered(&from_init, &mut from_init_rx, &mut origins);
-        let mut round = Round { lines: Vec::new(), console: Vec::new() };
+        let mut round = Round { lines: Vec::new(), console: Vec::new(), carrier: Vec::new() };
         if waiting.is_empty() {
             read_origins(&mut origins, boot_local, &mut round, &mut stall);
+            for word in round.carrier.drain(..) {
+                hub.carrier(word);
+            }
             waiting.append(&mut round.lines);
         }
         for record in batch {
@@ -581,6 +590,19 @@ fn said_by(
     let tag = Tag::new(tag).expect("an origin's name was a tag when it registered");
     let stamp = stamp(boot_local, at_ns);
     round.lines.push((at_ns, format!("{}\n", ProgramLine { stamp: &stamp, at_ns, tag, text: line })));
+    // Only init's own pipe can say it: the same words from any other program
+    // are that program's, and would turn every reader away for good.
+    if tag.as_str() == INIT {
+        use toyos_swap::Word;
+        match std::str::from_utf8(line).ok().and_then(|text| toyos_swap::heard(text, CARRIER)) {
+            Some((Word::Accepted, _)) => round.carrier.push(serve::Carrier::Leaving),
+            // Each said once the netd it replaces has been waited for.
+            Some((Word::Started | Word::Failed | Word::Restored | Word::Gone, _)) => {
+                round.carrier.push(serve::Carrier::Back)
+            }
+            Some((Word::Refused | Word::Stopping | Word::InService, _)) | None => {}
+        }
+    }
     round.console.extend_from_slice(line);
     if ended == Ended::Yes {
         round.console.push(b'\n');

@@ -1744,7 +1744,7 @@ impl Talking {
         (crate::metaltalk::Stream, std::thread::JoinHandle<Result<crate::metaltalk::Conversation, String>>),
         Refusal,
     > {
-        let stream = self.connect(file, false, by)?;
+        let stream = self.connect(file, by)?;
         let (theirs, ssh, scratch) = (stream.clone(), self.ssh.clone(), self.dir.join(scratch));
         let talking = std::thread::Builder::new()
             .name("metal-talk".into())
@@ -1758,29 +1758,16 @@ impl Talking {
     /// reboot conversation — a swap's own exchange
     /// ([`crate::metalswap::swap`]).
     ///
-    /// `resilient` asks for the stream again for as long as this process runs:
-    /// a swap of the very service carrying the connection (netd) leaves the
-    /// old one open with no FIN or reset, so the caller that knows to abandon
-    /// it ([`crate::metaltalk::Stream::reconnect`]) is answered with a fresh
-    /// one rather than a stream that gave up.
-    fn connect(
-        &self,
-        file: &str,
-        resilient: bool,
-        by: std::time::Duration,
-    ) -> Result<crate::metaltalk::Stream, Refusal> {
+    /// A swap of the netd carrying it is followed across by
+    /// [`crate::metalswap::swap`] itself ([`crate::metaltalk::Stream::redial`]).
+    fn connect(&self, file: &str, by: std::time::Duration) -> Result<crate::metaltalk::Stream, Refusal> {
         let peer = crate::metaltalk::Peer::Named {
             host: format!("{}.local", crate::lan::HOSTNAME),
             port: toyos_logstream::PORT,
         };
         println!("asking for {peer:?}'s log");
         let at = self.dir.join(file);
-        if resilient {
-            crate::metaltalk::Stream::connect_resilient(peer, &at, true, by)
-        } else {
-            crate::metaltalk::Stream::connect(peer, &at, true, by)
-        }
-        .map_err(Refusal::Cable)
+        crate::metaltalk::Stream::connect(peer, &at, true, by).map_err(Refusal::Cable)
     }
 }
 
@@ -1795,9 +1782,8 @@ pub const READBACK_SWAP: &str = "swap.txt";
 ///
 /// **Nothing is flashed and nothing is rebooted**: the machine is found at
 /// `toyos-t14.local` the way [`Talking::start`] finds it, so this can be
-/// started before that machine has booted or long after — and, unlike
-/// [`Talking::start`], read on across the reconnect a swap of netd itself
-/// causes ([`crate::metaltalk::Stream::connect_resilient`]).
+/// started before that machine has booted or long after — and read on across
+/// a swap of netd itself ([`crate::metalswap::swap`]).
 fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     let (Some(key), Some(dir), Some(binary)) = (&args.talk, &args.readback, &args.binary) else {
         return Err(Refusal::Usage("--swap wants --talk, --readback and --binary".into()));
@@ -1812,7 +1798,7 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     }
     let cable = Talking::prepare(key, dir)?;
     let by = std::time::Duration::from_secs(args.wait_secs);
-    let stream = cable.connect(READBACK_SWAP_STREAM, true, by)?;
+    let stream = cable.connect(READBACK_SWAP_STREAM, by)?;
     let scratch = dir.join("swap");
     std::fs::create_dir_all(&scratch)
         .map_err(|e| Refusal::File { path: scratch.display().to_string(), why: e.to_string() })?;

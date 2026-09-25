@@ -1805,6 +1805,7 @@ dependencies = [
  "toyos 0.9.0",
  "toyos-abi 0.8.0",
  "toyos-logstream",
+ "toyos-swap",
  "toyos-wallclock",
 ]
 

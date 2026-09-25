@@ -10,23 +10,29 @@
 //! reader that stops taking bytes blocks its own thread and nothing else.
 //!
 //! **A reader that is caught up waits on the replay growing**, and nothing
-//! else wakes it but its own departure: there is no poll and no timer. A
-//! network reader's departure is a second thread's blocking read on its own
-//! clone of the connection — this protocol carries nothing the client ever
-//! sends, so that read's only event is the peer closing it — which is how a
-//! reader that reconnects on the client's own clock (a stream surviving a
-//! netd swap) is not still counted against [`MAX_READERS`] once it is gone:
-//! writing to it can wait for ever on a dead connection that never errors
-//! while there is nothing new to write, and only that second thread notices.
+//! else wakes it: there is no poll and no timer.
+//!
+//! **A swap of netd ([`toyos_logstream::CARRIER`]) ends every network reader's
+//! connection without a word**, and a connection the netd being stopped
+//! accepts ends the same way, so from init's line accepting one until its
+//! word that the old netd is gone — started, failed, restored or gone — this
+//! program holds no listener ([`Carrier`]). It closes the listener before it says so
+//! ([`CARRIER_LEAVING`]), and netd has answered the close by then: a reader
+//! that asks after reading that line is refused by the old netd or answered by
+//! the next, and never admitted by the one being stopped.
 
-use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use toyos::ipc::Connection;
 use toyos::port::Acceptor;
+use toyos::poller::{Poller, READABLE};
 use toyos::{AsHandle, Pipe};
-use toyos_logstream::{Next, ProgramLine, Replay, Tag, LOGD, PORT, SERVED};
+use toyos_abi::syscall::SyscallError;
+use toyos_abi::RawHandle;
+use toyos_logstream::{Next, ProgramLine, Replay, Tag, CARRIER_LEAVING, LOGD, PORT, SERVED};
 
 /// The most bytes one reader is handed per wake: bounds how long the replay's
 /// lock is held for a copy, not how far a reader may fall behind.
@@ -39,6 +45,24 @@ const MAX_READERS: usize = 8;
 /// The replay, and the wake a caught-up reader waits on.
 pub struct Hub {
     shared: Arc<Shared>,
+    /// The network server's control pipe, where this program serves the
+    /// network: one byte per [`Carrier`] word.
+    carrier: Option<Pipe>,
+}
+
+/// init's word on a swap of netd, as the network server acts on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Carrier {
+    /// init accepted the swap: the netd the listener is registered with is
+    /// about to be stopped.
+    Leaving,
+    /// init has stopped it and started or restored another, or has none.
+    Back,
+}
+
+impl Carrier {
+    const LEAVING: u8 = b'L';
+    const BACK: u8 = b'B';
 }
 
 struct Shared {
@@ -62,11 +86,14 @@ impl Hub {
         // A row with no `receives` gives this program no namespace, so no netd,
         // and no thread to learn so on: its exit would be a kernel record at a
         // time nothing orders, after a shutdown's last word included.
+        let mut carrier = None;
         if toyos::endow::namespace().is_some() {
             let network = Arc::clone(&shared);
+            let (told, tell) = toyos::pipe_pair().expect("logd: no pipe for the network server");
+            carrier = Some(tell);
             std::thread::Builder::new()
                 .name("log-serve-net".into())
-                .spawn(move || serve_network(&network))
+                .spawn(move || serve_network(&network, &told))
                 .expect("logd: the network server's thread could not be started");
         }
         if let Some(acceptor) = local {
@@ -76,13 +103,29 @@ impl Hub {
                 .spawn(move || serve_local(&here, &acceptor))
                 .expect("logd: the local server's thread could not be started");
         }
-        Self { shared }
+        Self { shared, carrier }
     }
 
     /// The lines the file has just taken, for every reader.
     pub fn append(&self, lines: &[u8]) {
         self.shared.replay.lock().expect("logd: the replay is poisoned").append(lines);
         self.shared.grew.notify_all();
+    }
+
+    /// init's word on a swap of netd, for the network server.
+    pub fn carrier(&self, word: Carrier) {
+        let Some(tell) = &self.carrier else { return };
+        let byte = match word {
+            Carrier::Leaving => Carrier::LEAVING,
+            Carrier::Back => Carrier::BACK,
+        };
+        match tell.write(&[byte]) {
+            Ok(1) => {}
+            // The server ended with no netd left to serve through, which it
+            // said: nothing is listening to be told.
+            Err(SyscallError::Gone) => {}
+            other => panic!("logd: the network server's pipe refused a word: {other:?}"),
+        }
     }
 }
 
@@ -96,22 +139,62 @@ impl Hub {
 /// longer holding it** — netd was swapped or is gone. Asked again, the same
 /// listener answers the same error at once and for ever, so it is dropped and
 /// bound anew: through the same port, which init keeps open across a swap.
-fn serve_network(shared: &Arc<Shared>) {
-    let Some(mut listener) = bind_port() else { return };
+///
+/// `told` carries init's words on a swap of netd ([`Hub::carrier`]): the
+/// listener is closed on [`Carrier::Leaving`] and bound again on
+/// [`Carrier::Back`]. Each wait is on either being ready, and a completion a
+/// closed listener left behind is answered by a non-blocking accept.
+fn serve_network(shared: &Arc<Shared>, told: &Pipe) {
+    const TOLD: u64 = 0;
+    const READY: u64 = 1;
+    let Some(first) = bind_port() else { return };
+    let mut listener = Some(first);
+    let poller = Poller::new(2);
     loop {
-        let (stream, peer) = match listener.accept() {
-            Ok(pair) => pair,
+        poller.watch(told, READABLE, TOLD);
+        if let Some(listener) = &listener {
+            poller.watch_raw(RawHandle(listener.as_raw_fd() as u32), READABLE, READY);
+        }
+        let (mut words, mut ready) = (false, false);
+        poller.wait(1, u64::MAX, |token| match token {
+            TOLD => words = true,
+            READY => ready = true,
+            other => unreachable!("logd: the network server watches no token {other}"),
+        });
+        if words {
+            let mut said = [0u8; 16];
+            let n = match told.read_nonblock(&mut said) {
+                Ok(n) => n,
+                Err(SyscallError::WouldBlock) => 0,
+                Err(e) => panic!("logd: the network server's pipe refused a read: {e:?}"),
+            };
+            for &word in &said[..n] {
+                match word {
+                    // Closed before the line, and netd has answered the close
+                    // when `drop` returns: the line is the proof.
+                    Carrier::LEAVING => {
+                        drop(listener.take());
+                        say!("{CARRIER_LEAVING}");
+                    }
+                    Carrier::BACK if listener.is_none() => {
+                        let Some(again) = bind_port() else { return };
+                        listener = Some(again);
+                    }
+                    Carrier::BACK => {}
+                    other => unreachable!("logd: the network server was told {other}"),
+                }
+            }
+        }
+        let Some(open) = listener.as_ref().filter(|_| ready) else { continue };
+        match open.accept() {
+            Ok((stream, peer)) => admit(shared, format!("{peer}"), Announce::Yes, stream),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
                 say!("logd: the log's listener on port {PORT} failed ({e}); binding it again");
                 let Some(again) = bind_port() else { return };
-                listener = again;
-                continue;
+                listener = Some(again);
             }
-        };
-        // A clone for the departure watcher: it only ever reads, the feed
-        // thread only ever writes, and each closes its own half when it ends.
-        let watch = stream.try_clone().ok();
-        admit(shared, format!("{peer}"), Announce::Yes, stream, watch);
+        }
     }
 }
 
@@ -119,6 +202,7 @@ fn serve_network(shared: &Arc<Shared>) {
 fn bind_port() -> Option<std::net::TcpListener> {
     match std::net::TcpListener::bind(("0.0.0.0", PORT)) {
         Ok(listener) => {
+            listener.set_nonblocking(true).expect("logd: a listener that cannot be asked without waiting");
             say!("logd: serving this boot's log on port {PORT}");
             Some(listener)
         }
@@ -143,7 +227,7 @@ fn serve_local(shared: &Arc<Shared>, acceptor: &Acceptor) {
         };
         let end = shared.replay.lock().expect("logd: the replay is poisoned").end();
         let Some(pipe) = hand_over(&conn, end) else { continue };
-        admit(shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink(pipe), None);
+        admit(shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink(pipe));
     }
 }
 
@@ -176,16 +260,8 @@ enum Announce {
     No,
 }
 
-/// A reader thread, where the count allows one. `watch` is a network reader's
-/// own clone of its connection, read on a thread of its own so this reader's
-/// departure while idle is noticed and not left counted for ever.
-fn admit(
-    shared: &Arc<Shared>,
-    who: String,
-    announce: Announce,
-    sink: impl Write + Send + 'static,
-    watch: Option<std::net::TcpStream>,
-) {
+/// A reader thread, where the count allows one.
+fn admit(shared: &Arc<Shared>, who: String, announce: Announce, sink: impl Write + Send + 'static) {
     if shared.readers.fetch_add(1, Ordering::SeqCst) >= MAX_READERS {
         shared.readers.fetch_sub(1, Ordering::SeqCst);
         say!("logd: refusing {who}: {MAX_READERS} readers are already served");
@@ -194,25 +270,9 @@ fn admit(
     if announce == Announce::Yes {
         say!("logd: serving this boot's log to {who}");
     }
-    let gone = Arc::new(AtomicBool::new(false));
-    if let Some(mut probe) = watch {
-        let (theirs, gone) = (Arc::clone(shared), Arc::clone(&gone));
-        let spawned = std::thread::Builder::new().name("log-reader-watch".into()).spawn(move || {
-            // This protocol carries nothing a reader ever sends, so the one
-            // event a read on it can end on is the reader closing its end —
-            // never data, and never a timeout this holds none of.
-            let mut byte = [0u8; 1];
-            let _ = probe.read(&mut byte);
-            gone.store(true, Ordering::SeqCst);
-            theirs.grew.notify_all();
-        });
-        // A watcher that could not be started leaves this reader indistinguishable
-        // from a live one until it next writes, same as before this existed.
-        let _ = spawned;
-    }
     let theirs = Arc::clone(shared);
     let spawned = std::thread::Builder::new().name("log-reader".into()).spawn(move || {
-        let sent = feed(&theirs, sink, &gone);
+        let sent = feed(&theirs, sink);
         theirs.readers.fetch_sub(1, Ordering::SeqCst);
         if announce == Announce::Yes {
             say!("logd: {who} stopped reading after {sent} bytes");
@@ -225,17 +285,13 @@ fn admit(
 }
 
 /// Write the boot to `sink` from its first byte, then each round as it lands,
-/// until the reader goes or `gone` says it already has. Answers the bytes it
-/// sent.
-fn feed(shared: &Shared, mut sink: impl Write, gone: &AtomicBool) -> u64 {
+/// until the reader goes. Answers the bytes it sent.
+fn feed(shared: &Shared, mut sink: impl Write) -> u64 {
     let mut at = 0u64;
     loop {
         let chunk = {
             let mut replay = shared.replay.lock().expect("logd: the replay is poisoned");
             loop {
-                if gone.load(Ordering::SeqCst) {
-                    return at;
-                }
                 let next = match replay.next(at, CHUNK) {
                     Next::Bytes(bytes) => Some(Ok(bytes.to_vec())),
                     Next::Evicted { lost, at: resume } => Some(Err((lost, resume))),

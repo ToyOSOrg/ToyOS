@@ -7,10 +7,13 @@
 //! verdict is read off the stream in [`toyos_swap::heard`]'s form. **The stream
 //! is the one channel that outlives a swap of netd**: the ssh connection that
 //! asked goes with the netd that carried it, and this side's connection to
-//! `logd` goes with it too — with no FIN or reset, so [`swap`] abandons it the
-//! instant the ask is taken ([`Stream::reconnect`]) and dials the new netd's
-//! address again — so the verdict is whatever init said, as the machine's own
-//! log carries it.
+//! `logd` goes with it too, with no FIN and no reset. So a swap of
+//! [`toyos_logstream::CARRIER`] is let go only once `logd` has said it turns new
+//! readers away until the next netd serves
+//! ([`toyos_logstream::CARRIER_LEAVING`]), and this side then dials again
+//! ([`Stream::redial`]) — every connection it makes before the old netd is gone
+//! turned away, the first one admitted a connection through the new one — so
+//! the verdict is whatever init said, as the machine's own log carries it.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::Path;
@@ -29,11 +32,10 @@ const RETRY: Duration = Duration::from_secs(1);
 /// the answer is sent, over a stream the refusal left alone.
 const REFUSED_WORD: Duration = Duration::from_secs(10);
 
-/// How long the wait for a settlement takes nothing new from the stream
-/// before it reconnects on the suspicion the connection is one a second
-/// restart left silent: well past one round of a chatty guest's ordinary
-/// traffic, short enough that a real second restart is not waited out.
-const RECONNECT_ON_SILENCE: Duration = Duration::from_secs(2);
+/// How long `logd`'s [`toyos_logstream::CARRIER_LEAVING`] has to reach this
+/// side before the swap goes: sshd hangs up on init this long after it answered
+/// whether or not its client has closed, and the old netd is stopped then.
+const CARRIER_WORD: Duration = Duration::from_millis(toyos_swap::ANSWER_MS);
 
 /// What asking for one swap came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,8 +118,10 @@ fn settled(lines: &[String], mark: usize, service: &str) -> Option<Settled> {
 /// `ssh_at` is where sshd is reached, and `None` is the
 /// stream's peer's own port 22; QEMU's forward is the other case.
 ///
-/// `Err` is only a boot that never opened the stream within `window`, or a
-/// binary this host cannot read.
+/// `Err` is a boot that never opened the stream within `window`, a binary this
+/// host cannot read, or a swap of the stream's own carrier whose `logd` never
+/// said it would turn readers away before sshd let the swap go without this
+/// side.
 pub fn swap(
     stream: &Stream,
     ssh: &Ssh,
@@ -140,12 +144,17 @@ pub fn swap(
     let began = Instant::now();
 
     let mut answer = Err(String::from("never asked"));
+    let mut held = None;
     while began.elapsed() < ASK_WINDOW {
-        answer = ssh.swap(at, service, binary, &digest);
-        match &answer {
-            Ok(_) => break,
+        match ssh.swap(at, service, binary, &digest) {
+            Ok(answered) => {
+                answer = Ok(answered.said.clone());
+                held = Some(answered);
+                break;
+            }
             Err(why) => {
                 println!("  swap: {at} did not take the request yet: {why}");
+                answer = Err(why);
                 std::thread::sleep(RETRY);
             }
         }
@@ -162,48 +171,43 @@ pub fn swap(
     };
     // A refusal leaves the service as it was, and init's word on it is on the
     // stream at once; an accepted swap is followed to init's final word.
+    let accepted = matches!(&answer, Ok(said) if said.starts_with("accepted "));
     let until = match &answer {
         Ok(said) if said.starts_with("refused") => Some(REFUSED_WORD),
-        Ok(said) if said != "no-subsystem" => {
-            // The ask was taken, so the process behind this connection may be
-            // the very one init is about to stop (a netd swap): abandon it now
-            // rather than wait on a byte its peer can never send.
-            stream.reconnect();
-            Some(window)
-        }
+        Ok(said) if said != "no-subsystem" => Some(window),
         _ => None,
     };
+    if accepted && service == toyos_logstream::CARRIER {
+        let leaving = stream.wait_until(CARRIER_WORD, |lines| {
+            lines[mark.min(lines.len())..]
+                .iter()
+                .any(|line| line.contains(toyos_logstream::CARRIER_LEAVING))
+                .then_some(())
+        });
+        if leaving.is_none() {
+            return Err(format!(
+                "`logd` did not say it turns readers away within {} ms of the swap of {service} \
+                 being accepted, so sshd let the swap go without this side, and the connection \
+                 it carries may end with no word",
+                CARRIER_WORD.as_millis()
+            ));
+        }
+    }
+    if let Some(answered) = held {
+        if let Err(why) = answered.go() {
+            println!("  swap: the client ended on the go: {why}");
+        }
+    }
+    if accepted && service == toyos_logstream::CARRIER {
+        stream.redial(window);
+    }
     let mut outcome_ms = None;
     let mut sshd_refused = None;
     if let Some(until) = until {
-        // **A second restart owns no reconnect of its own.** The accepted
-        // ask's own gets the connection through the first stop/start; a crash
-        // inside probation is a second one (init starts the replaced binary
-        // again), and that swap of netd under the connection is exactly as
-        // silent as the first. So this side reconnects again whenever the
-        // stream has produced nothing for a beat while a settlement is still
-        // owed — never on a fixed cadence, only on the silence that a second
-        // restart's dead connection actually causes.
-        let (mut quiet_since, mut seen) = (Instant::now(), stream.lines().len());
-        while began.elapsed() < until {
-            let lines = stream.lines();
-            if lines.len() != seen {
-                (seen, quiet_since) = (lines.len(), Instant::now());
-            } else if quiet_since.elapsed() > RECONNECT_ON_SILENCE {
-                stream.reconnect();
-                quiet_since = Instant::now();
-            }
-            match settled(&lines, mark, service) {
-                Some(Settled::Outcome) => {
-                    outcome_ms = Some(began.elapsed().as_millis() as u64);
-                    break;
-                }
-                Some(Settled::SshdRefused(why)) => {
-                    sshd_refused = Some(why);
-                    break;
-                }
-                None => std::thread::sleep(Duration::from_millis(100)),
-            }
+        match stream.wait_until(until.saturating_sub(began.elapsed()), |lines| settled(lines, mark, service)) {
+            Some(Settled::Outcome) => outcome_ms = Some(began.elapsed().as_millis() as u64),
+            Some(Settled::SshdRefused(why)) => sshd_refused = Some(why),
+            None => {}
         }
     }
     let again_at = match (ssh_at, stream.peer()) {
