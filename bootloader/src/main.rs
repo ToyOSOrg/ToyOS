@@ -24,12 +24,17 @@ use toyos_bootmap::relabel::{relabel, Extent};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
 
 /// Every line this loader prints: the firmware's console, and the file on the
-/// stick once [`loaderlog::open`] has one.
+/// stick once [`loaderlog::open`] has one. The arguments are evaluated once, so
+/// a line that reads a clock says the same on both.
 macro_rules! println {
-    ($($arg:tt)*) => {{
-        uefi_services::println!($($arg)*);
-        $crate::loaderlog::line(core::format_args!($($arg)*));
-    }};
+    ($($arg:tt)*) => {
+        match core::format_args!($($arg)*) {
+            args => {
+                uefi_services::println!("{}", args);
+                $crate::loaderlog::line(args);
+            }
+        }
+    };
 }
 
 mod attempt;
