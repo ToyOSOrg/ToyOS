@@ -17,8 +17,8 @@ use crate::block::BlockError;
 use crate::mm::DirectMap;
 use crate::sync::Lock;
 
-/// The unit ROOT's filesystem is written in.
-const BLOCK: usize = 4096;
+/// The unit ROOT's filesystem is written in, which is the page.
+const BLOCK: usize = crate::mm::PAGE_SIZE as usize;
 
 /// The record init's spawn is reported on, followed by how many storage
 /// commands the boot had issued by then: zero is the claim.
@@ -95,7 +95,7 @@ pub fn init(cmdline: &str, args: &KernelArgs, map: &[MemoryMapEntry]) {
     });
     let handed = if len == 0 {
         Handed::Nothing
-    } else if !marked || len % BLOCK as u64 != 0 {
+    } else if !marked || !len.is_multiple_of(BLOCK as u64) {
         Handed::Unmarked { at, len }
     } else {
         // SAFETY: the extent is inside one descriptor of the type only the

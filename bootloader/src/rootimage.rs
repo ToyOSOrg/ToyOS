@@ -203,7 +203,7 @@ impl<'a> Disk<'a> {
         if !align.is_power_of_two() || align > BLOCK {
             refuse(format_args!("the boot disk wants buffers aligned to {align} bytes"));
         }
-        if lba_bytes == 0 || BLOCK % lba_bytes as usize != 0 {
+        if lba_bytes == 0 || !BLOCK.is_multiple_of(lba_bytes as usize) {
             refuse(format_args!("the boot disk's {lba_bytes}-byte block does not divide {BLOCK}"));
         }
         let scratch = aligned(BLOCK);
@@ -231,7 +231,7 @@ impl<'a> Disk<'a> {
     /// The whole of `part`, in one read, into pages the kernel keeps.
     fn read_partition(&mut self, bs: &BootServices, part: &Partition) -> RootImage {
         let blocks = part.last_lba - part.first_lba + 1;
-        let Some(len) = blocks.checked_mul(u64::from(self.lba_bytes)).filter(|len| len % BLOCK as u64 == 0)
+        let Some(len) = blocks.checked_mul(u64::from(self.lba_bytes)).filter(|len| len.is_multiple_of(BLOCK as u64))
         else {
             refuse(format_args!("ROOT is {blocks} blocks of {} bytes, not whole {BLOCK}-byte blocks", self.lba_bytes));
         };
