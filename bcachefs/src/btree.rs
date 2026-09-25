@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 use crate::block_io::{BlockBuf, BlockNum, BlockIO, BlockIOExt, BLOCK_SIZE};
 use crate::crc32c::crc32c;
 use crate::alloc_bitmap::BitmapAllocator;
@@ -451,12 +452,13 @@ pub fn delete(io: &dyn BlockIO, root: BlockNum, key: &Key) -> Result<Option<Vec<
 
 /// Every live leaf entry, one at a time, in tree order. Nothing accumulates
 /// here: what a caller keeps is the only allocation the tree's size can drive,
-/// so a bound applied inside `visit` is applied before the entry lands.
+/// so a bound applied inside `visit` is applied before the entry lands. The
+/// walk ends at the first `Break`, and returns it.
 pub fn for_each_live(
     io: &dyn BlockIO,
     root: BlockNum,
-    visit: &mut dyn FnMut(Entry) -> Result<(), FsError>,
-) -> Result<(), FsError> {
+    visit: &mut dyn FnMut(Entry) -> Result<ControlFlow<()>, FsError>,
+) -> Result<ControlFlow<()>, FsError> {
     walk_recursive(io, root, Depth::ROOT, visit)
 }
 
@@ -464,22 +466,26 @@ fn walk_recursive(
     io: &dyn BlockIO,
     block: BlockNum,
     depth: Depth,
-    visit: &mut dyn FnMut(Entry) -> Result<(), FsError>,
-) -> Result<(), FsError> {
+    visit: &mut dyn FnMut(Entry) -> Result<ControlFlow<()>, FsError>,
+) -> Result<ControlFlow<()>, FsError> {
     match Node::read(io, block)? {
         Node::Leaf(entries) => {
             for entry in entries.into_iter().filter(|e| e.key.key_type != KeyType::Deleted) {
-                visit(entry)?;
+                if visit(entry)?.is_break() {
+                    return Ok(ControlFlow::Break(()));
+                }
             }
         }
         Node::Interior { children, .. } => {
             let deeper = depth.descend(block)?;
             for child in children {
-                walk_recursive(io, child.block, deeper, visit)?;
+                if walk_recursive(io, child.block, deeper, visit)?.is_break() {
+                    return Ok(ControlFlow::Break(()));
+                }
             }
         }
     }
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
 
 /// Insert a key-value pair into the B+ tree.

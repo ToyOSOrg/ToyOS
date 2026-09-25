@@ -5,7 +5,7 @@
 //! whatever the PMM had handed out next.
 //!
 //! Two are reachable from userland: `fstat`'s 24-byte `Stat`, a kernel write,
-//! and `spawn`'s 80-byte `SpawnArgs`, a kernel read whose `argv_ptr` and
+//! and `spawn`'s 96-byte `SpawnArgs`, a kernel read whose `argv_ptr` and
 //! `argv_len` the kernel then acts on.
 //!
 //! **The verdict is not the assertion.** The canary is the sixteen bytes on the
@@ -19,8 +19,11 @@ use toyos_abi::syscall::{
     SYS_FSTAT, SYS_PROCESS_STATS, SYS_SCHED_INFO,
 };
 
+/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
+const CWD: &str = "/";
+
 const PAGE_2M: u64 = 2 * 1024 * 1024;
-/// `Stat` is three `u64`, and `SpawnArgs` ten.
+/// `Stat` is three `u64`, and `SpawnArgs` twelve.
 const STAT_LEN: usize = 24;
 const CANARY: u8 = 0xA5;
 
@@ -106,7 +109,7 @@ fn main() {
     // 3. `SpawnArgs` straddling. Every byte of it is this process's own and
     //    says the same thing on both sides of the boundary, so a kernel that
     //    reads it out of one translation gets a *correct* argv — and spawns.
-    //    That is the observation: a child means the kernel acted on forty bytes
+    //    That is the observation: a child means the kernel acted on bytes
     //    it never validated.
     let argv = b"/system/bin/echo\0straddle\0";
     unsafe {
@@ -123,6 +126,8 @@ fn main() {
         endow_count: 0,
         labels_ptr: 0,
         labels_len: 0,
+        cwd_ptr: CWD.as_ptr() as u64,
+        cwd_len: CWD.len() as u64,
     };
     let placed = (boundary - 8) as *mut SpawnArgs;
     unsafe { placed.write_volatile(args) };

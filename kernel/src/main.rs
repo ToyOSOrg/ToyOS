@@ -529,22 +529,27 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // One filesystem, two paths: `/apps` and `/home` are two directories of
     // DATA, so one sync settles both and neither can outlive the other.
     // tmpfs when there is no DATA volume this kernel may write: persistence is
-    // the only difference, so the earlier refusal doesn't cascade.
+    // the only difference, so the earlier refusal doesn't cascade. Nothing at
+    // all when the volume is ours and did not mount.
     #[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
-    let data_cache = match bcachefs_adapter::open_data() {
-        Some((cache, fs)) => {
+    let (data_cache, home) = match bcachefs_adapter::open_data() {
+        bcachefs_adapter::Data::Mounted(cache, fs) => {
             let adapter = bcachefs_adapter::BcacheFsAdapter::new(fs, Arc::clone(&cache));
             vfs::lock().mount(&DATA_PATHS, Box::new(adapter), UserAccess::ReadWrite);
-            Some(cache)
+            (Some(cache), true)
         }
-        None => {
+        bcachefs_adapter::Data::Volatile => {
             log!("storage: /apps and /home are a tmpfs — they will not survive a reboot");
             vfs::lock().mount(
                 &DATA_PATHS,
                 Box::new(crate::tmpfs::TmpFs::new()),
                 UserAccess::ReadWrite,
             );
-            None
+            (None, true)
+        }
+        bcachefs_adapter::Data::Absent => {
+            log!("storage: /apps and /home are absent this boot — the DATA volume is ours and did not mount");
+            (None, false)
         }
     };
     vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite);
@@ -567,8 +572,11 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
 
     // Fixed kernel strings well under MAX_PATH: a refusal here is a kernel bug, so this fails fast instead of returning an error.
-    vfs::lock().create_dir("/home/root").expect("boot: /home/root exceeds MAX_PATH");
-    vfs::lock().create_dir("/home/root/.config").expect("boot: /home/root/.config exceeds MAX_PATH");
+    // Not on an absent `/home`: the VFS's own directory set would answer for a directory nothing holds.
+    if home {
+        vfs::lock().create_dir("/home/root").expect("boot: /home/root exceeds MAX_PATH");
+        vfs::lock().create_dir("/home/root/.config").expect("boot: /home/root/.config exceeds MAX_PATH");
+    }
 
     boot_phase!("subsystems ready", t_subsys);
 

@@ -336,9 +336,15 @@ pub struct SpawnArgs {
     /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
     pub labels_ptr: u64,
     pub labels_len: u64,
+    /// The child's working directory: an absolute path to a directory that
+    /// exists, or the spawn is refused — `InvalidArgument` for a path that is
+    /// not absolute, `NotFound` for one that names no directory. **Always the
+    /// caller's statement**: the kernel never substitutes the caller's own.
+    pub cwd_ptr: u64,
+    pub cwd_len: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 80);
+const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 96);
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///
@@ -848,8 +854,8 @@ pub fn get_env(buf: &mut [u8]) -> usize {
     syscall(SYS_GET_ENV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
 }
 
-/// Spawn a new process. The `SpawnArgs` struct contains argv, the slot map and
-/// env.
+/// Spawn a new process. The `SpawnArgs` struct contains argv, the slot map,
+/// env, the endowments and the working directory the child starts in.
 ///
 /// Answers a `Process` handle carrying `WAIT|MANAGE|READ|DUP|TRANSFER`. A
 /// caller that wants nothing to do with the child closes it; a caller that

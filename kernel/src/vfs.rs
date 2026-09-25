@@ -61,6 +61,12 @@ pub trait FileSystem: Send {
     /// root), or `ResourceExhausted` above `limit`, which counts only those.
     fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError>;
 
+    /// Whether `dir` (`""` is the mount root) is a directory: a working
+    /// directory is judged by this, on every spawn and `SYS_CHDIR`, under the
+    /// VFS lock. Nothing beneath it is materialised and nothing caps it; what it costs is
+    /// the mount's — a bcachefs answer of no reads the whole tree.
+    fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError>;
+
     /// When `name` was last written, in whatever epoch the mount keeps.
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError>;
 
@@ -319,14 +325,7 @@ impl Vfs {
         }
 
         let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
-        let prefix = format!("{}/", fs_path);
-        // A mount too large to list cannot be entered either: the answer needs the same allocation.
-        let names = fs.list(&fs_path, MAX_LIST_ENTRIES)?;
-        if names.iter().any(|(name, _)| name.starts_with(&prefix) || *name == fs_path) {
-            return Ok(abs);
-        }
-
-        Err(SyscallError::NotFound)
+        if fs.is_dir(&fs_path)? { Ok(abs) } else { Err(SyscallError::NotFound) }
     }
 
     /// `list` refuses above [`MAX_LIST_ENTRIES`] rather than truncating because a short listing is a confidently wrong answer to a caller checking existence or deleting a tree.

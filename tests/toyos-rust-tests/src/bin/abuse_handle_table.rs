@@ -22,6 +22,9 @@ use toyos_abi::syscall::{
 };
 use toyos_abi::RawHandle;
 
+/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
+const CWD: &str = "/";
+
 /// Mirrors `RawHandle::MAX_SLOTS`. A cap that moves should fail this test
 /// loudly.
 const MAX_HANDLES: u32 = 4096;
@@ -66,6 +69,8 @@ fn main() {
             endow_count,
             labels_ptr: (region as u64) + (REGION / 8) as u64,
             labels_len: LABELS.len() as u64,
+            cwd_ptr: CWD.as_ptr() as u64,
+            cwd_len: CWD.len() as u64,
         };
         unsafe { syscall::spawn(&args) }
     };

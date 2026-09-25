@@ -32,6 +32,9 @@ use toyos_abi::syscall::{
     self, DeviceType, MmapFlags, MmapProt, SpawnArgs, SyscallError, SYSCAP_LABEL,
 };
 
+/// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
+const CWD: &str = "/";
+
 const SELF_PATH: &str = "/system/bin/test_rs_device_claim_lifetime";
 
 fn main() {
@@ -210,6 +213,8 @@ fn spawn_with_slot_map(handle: toyos_abi::RawHandle) -> Result<toyos_abi::RawHan
             endow_count: 0,
             labels_ptr: 0,
             labels_len: 0,
+            cwd_ptr: CWD.as_ptr() as u64,
+            cwd_len: CWD.len() as u64,
         })
     };
     unsafe { syscall::munmap(region, REGION) }.expect("munmap");

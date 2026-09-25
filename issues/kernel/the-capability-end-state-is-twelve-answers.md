@@ -218,17 +218,22 @@ A child starts with an empty `HandleTable` and gets exactly two vectors:
 slot-map pair naming a handle the parent does not hold ends the parent
 (`kernel/src/loader/start.rs:308`), an endowed handle without `TRANSFER` refuses
 the spawn before anything leaves the table (`:206`), and the move is the last
-thing a spawn does (`kernel/src/loader/mod.rs:649`). **Three things are implicit
+thing a spawn does (`kernel/src/loader/mod.rs:649`). **Two things are implicit
 and nothing else is:**
 
 1. a `Console` slot is *minted fresh* rather than duplicated, at the parent's
    rights, because the object is the line buffer
    (`kernel/src/loader/start.rs:325`);
-2. the child's cwd is the **caller's** cwd — `SpawnArgs` has no field for one
-   (`kernel/src/arch/syscall.rs:1530`, `toyos-abi/src/syscall.rs:292`);
-3. the spawner is handed a `Process` handle carrying
+2. the spawner is handed a `Process` handle carrying
    `DUP|TRANSFER|WAIT|READ|MANAGE` by type (`kernel/src/object/ops.rs:74`), and
    must dup-narrow and close if it wants to hold less.
+
+The child's cwd is not implicit: `SpawnArgs` states it (`cwd_ptr`/`cwd_len`),
+and the kernel starts the child there or refuses the spawn — `InvalidArgument`
+for a path that is not absolute, `NotFound` for one naming no directory — with
+no default to the caller's (`spawn_cwd` in `kernel/src/arch/syscall/fs.rs`).
+std states `Command::current_dir`, or the caller's own directory when there is
+none, and `tests/toyos-rust-tests/src/bin/spawn_cwd.rs` holds both routes to it.
 
 Beyond that a child holds nothing, plus question 5's ambient set, which every
 process has.
