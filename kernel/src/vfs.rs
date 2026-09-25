@@ -61,9 +61,10 @@ pub trait FileSystem: Send {
     /// root), or `ResourceExhausted` above `limit`, which counts only those.
     fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError>;
 
-    /// Whether `dir` (`""` is the mount root) is a directory, answered in the
-    /// path's depth and never the size of what lies beneath it: a working
-    /// directory is judged by this, on every spawn.
+    /// Whether `dir` (`""` is the mount root) is a directory: a working
+    /// directory is judged by this, on every spawn and `SYS_CHDIR`, under the
+    /// VFS lock. Nothing beneath it is materialised and nothing caps it; what it costs is
+    /// the mount's — a bcachefs answer of no reads the whole tree.
     fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError>;
 
     /// When `name` was last written, in whatever epoch the mount keeps.

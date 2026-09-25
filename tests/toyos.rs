@@ -799,6 +799,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("spawn_cwd", Sched::Parallel, Tier::Fast),
     ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
     ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
+    ("broken_data_volume_is_absent", Sched::Parallel, Tier::Fast),
     // Four kernel lines and a file read off the image once the guest is gone; no clock in any of them.
     ("internal_disk_boot", Sched::Parallel, Tier::Fast),
     // One boot each, kernel lines and image bytes for verdicts, no clock in either.
@@ -10012,6 +10013,9 @@ fn run_machine_test(
         }
         "volume_from_another_disk" => {
             storage::volume_from_another_disk(test_config, c_bins, rust_bins)
+        }
+        "broken_data_volume_is_absent" => {
+            storage::broken_data_volume_is_absent(test_config, c_bins, rust_bins)
         }
         "home_budget_refusal_retried" => {
             storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)

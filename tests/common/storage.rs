@@ -171,7 +171,9 @@ pub fn volume_from_another_disk(
              {MOUNTED:?}\n{log}"
         ));
     }
-    const REFUSED: &str = "this disk is not ours";
+    // A superblock of ours that does not describe this device is a volume of
+    // ours that did not mount, not another's disk.
+    const REFUSED: &str = "does not mount, and nothing says it is another's: BadSuperblock";
     if !log.contains(REFUSED) {
         return Err(format!("the kernel never said {REFUSED:?} — did it reach storage?\n{log}"));
     }
@@ -199,6 +201,117 @@ pub fn volume_from_another_disk(
         return Err(format!("the kernel wrote to a volume it refused: {diff}"));
     }
     let _ = std::fs::remove_file(&image);
+    Ok(())
+}
+
+/// A DATA volume of ours whose superblock broke, both copies of it: the boot
+/// goes on with `/apps` and `/home` absent and the reason logged by name, and
+/// never on a tmpfs, which would take the owner's writes into RAM under the
+/// paths their data lives at. Absent rather than a refused boot because a
+/// corrupt disk is input, and input never takes the kernel down. The oracle for
+/// "nothing wrote to it" is the image, compared byte for byte after shutdown.
+pub fn broken_data_volume_is_absent(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const DEVICE_BYTES: u64 = 128 * 1024 * 1024;
+    /// Inside the bytes the superblock's CRC covers, and past every field.
+    const FLIPPED: usize = 200;
+    let dir = super::lane::dir();
+    let image = dir.join("broken-data-volume.img");
+
+    let file = std::fs::File::create(&image).map_err(|e| format!("create the image: {e}"))?;
+    file.set_len(DEVICE_BYTES).map_err(|e| format!("size the image: {e}"))?;
+    let (at, bytes) = toyos_build::image::designate_data_disk(&image, DEVICE_BYTES);
+    let blocks = bytes / 4096;
+    let mut fs = bcachefs::Formatted::format(bcachefs::VecBlockIO::new(blocks))
+        .map_err(|e| format!("format the partition's volume on the host: {e:?}"))?;
+    fs.create("home/kept.txt", b"the owner's file", 1)
+        .map_err(|e| format!("put a file on the host volume: {e:?}"))?;
+    let mut volume = fs.into_io().map_err(|e| format!("sync the host volume: {e:?}"))?.into_vec();
+
+    // The premise, both halves: the volume mounts as written, so the refusal
+    // below is the flipped bytes' and not the partition's size.
+    let open = |raw: &[u8]| {
+        bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(bcachefs::VecBlockIO::from_vec(raw.to_vec()))
+            .err()
+            .map(|e| format!("{e:?}"))
+    };
+    if let Some(e) = open(&volume) {
+        return Err(format!("the volume this test wrote does not mount before it is broken: {e}"));
+    }
+    let backup = (blocks as usize - 1) * 4096;
+    volume[FLIPPED] ^= 0xFF;
+    volume[backup + FLIPPED] ^= 0xFF;
+    match open(&volume) {
+        Some(e) if e.starts_with("ChecksumMismatch") => {}
+        other => return Err(format!("both superblocks flipped, and the host says {other:?}")),
+    }
+    {
+        use std::io::{Seek, SeekFrom};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .map_err(|e| format!("open the image: {e}"))?;
+        file.seek(SeekFrom::Start(at)).map_err(|e| format!("seek: {e}"))?;
+        file.write_all(&volume).map_err(|e| format!("write the broken volume: {e}"))?;
+    }
+    let before = whole_device(&image);
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            nvme_image: Some(image.clone()),
+            ..Default::default()
+        },
+    );
+    let log = qemu.boot_log().to_string();
+    for bad in ["PANIC:", "panicked at"] {
+        if log.contains(bad) {
+            return Err(format!("{bad:?}: a broken volume must not be fatal\n{log}"));
+        }
+    }
+    for said in [
+        "storage: the DATA volume does not mount, and nothing says it is another's: \
+         ChecksumMismatch",
+        "storage: /apps and /home are absent this boot",
+        "Boot: complete",
+    ] {
+        if !log.contains(said) {
+            return Err(format!("the kernel never said {said:?}\n{log}"));
+        }
+    }
+    for unsaid in [
+        "are a tmpfs",
+        "mounted the ToyOS volume",
+        "formatting it",
+        "this disk is not ours",
+    ] {
+        if log.contains(unsaid) {
+            return Err(format!("the kernel said {unsaid:?} of a volume of ours that broke\n{log}"));
+        }
+    }
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} during shutdown\n{tail}"));
+        }
+    }
+    drop(qemu);
+
+    let after = whole_device(&image);
+    if let Some(diff) = first_difference(&before, &after) {
+        return Err(format!("the kernel wrote to a volume it could not mount: {diff}"));
+    }
+    let _ = std::fs::remove_file(&image);
+    eprintln!("  [storage] a broken DATA volume left /apps and /home absent, and the image unchanged");
     Ok(())
 }
 

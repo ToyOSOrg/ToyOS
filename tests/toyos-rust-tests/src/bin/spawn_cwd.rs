@@ -32,6 +32,14 @@ const FILE: &str = "/tmp/spawn-cwd/file";
 /// refuses every spawn from here.
 const BIG: &str = "/tmp/spawn-cwd/big";
 const BIG_FILES: usize = 16_385;
+/// A directory and a file on each writable mount that is not a tmpfs, so each
+/// filesystem's own `is_dir` is asked: `/log` is FAT32 and `/home` is the DATA
+/// volume's bcachefs. The `/home` directory is never `mkdir`ed, for the reason
+/// `BIG` is not.
+const LOG_DIR: &str = "/log/spawn-cwd/dir";
+const LOG_FILE: &str = "/log/spawn-cwd/file";
+const HOME_DIR: &str = "/home/spawn-cwd/dir";
+const HOME_FILE: &str = "/home/spawn-cwd/file";
 /// Spawns timed from each cwd, so the figure is an average and not one outlier.
 const TIMED: u32 = 8;
 
@@ -53,6 +61,10 @@ fn main() {
     std::fs::create_dir_all(NAMED).expect("/tmp is writable");
     std::fs::create_dir_all(OWN).expect("/tmp is writable");
     std::fs::write(FILE, b"not a directory").expect("/tmp is writable");
+    std::fs::create_dir_all(LOG_DIR).expect("/log is writable");
+    std::fs::write(LOG_FILE, b"not a directory").expect("/log is writable");
+    std::fs::write(format!("{HOME_DIR}/marker"), b"a name beneath").expect("/home is writable");
+    std::fs::write(HOME_FILE, b"not a directory").expect("/home is writable");
     let _ = std::fs::remove_dir(ABSENT);
 
     // First, so a kernel that grants any of them is seen refusing none of them.
@@ -93,6 +105,11 @@ fn main() {
     std::env::set_current_dir("/").expect("chdir to /");
 
     a_cwd_is_judged_in_its_depth();
+    for file in [LOG_FILE, HOME_FILE, format!("{HOME_DIR}/marker").as_str()] {
+        std::fs::remove_file(file).expect("remove a file this made");
+    }
+    std::fs::remove_dir(LOG_DIR).expect("remove a directory this made");
+    std::fs::remove_dir("/log/spawn-cwd").expect("remove a directory this made");
     println!("spawn-cwd: every child started where its spawn said");
 }
 
@@ -136,13 +153,17 @@ fn refusals() {
     let mut wrong = Vec::new();
     // The same arguments succeed with a directory that exists, so each refusal
     // below is the directory and nothing else.
-    let named = spawn_in(NAMED);
-    if named != Ok(0) {
-        wrong.push(format!("a spawn into {NAMED}: {named:?}, not started in it"));
+    for dir in [NAMED, LOG_DIR, HOME_DIR] {
+        let got = spawn_in(dir);
+        if got != Ok(0) {
+            wrong.push(format!("a spawn into {dir}: {got:?}, not started in it"));
+        }
     }
     for (cwd, want) in [
         (ABSENT, SyscallError::NotFound),
         (FILE, SyscallError::NotFound),
+        (LOG_FILE, SyscallError::NotFound),
+        (HOME_FILE, SyscallError::NotFound),
         (SELF, SyscallError::NotFound),
         ("tmp/spawn-cwd/named", SyscallError::InvalidArgument),
         ("", SyscallError::InvalidArgument),
@@ -154,7 +175,7 @@ fn refusals() {
         }
     }
     // `SYS_CHDIR` is the same judge, so it refuses the same files.
-    for file in [FILE, SELF] {
+    for file in [FILE, LOG_FILE, HOME_FILE, SELF] {
         if std::env::set_current_dir(file).is_ok() {
             wrong.push(format!("chdir into the file {file} succeeded"));
             std::env::set_current_dir("/").expect("chdir to /");
@@ -178,12 +199,15 @@ fn refusals() {
     println!("spawn-cwd: every refusal arrived under its own name");
 }
 
-/// A cwd with more beneath it than one listing may hold is still a cwd, and a
-/// spawn from it costs what one from a bare directory does.
+/// A cwd with more beneath it than one listing may hold is still a cwd. The
+/// spawns it times are all from `/` or a tmpfs, so they price tmpfs's `is_dir`
+/// and no other filesystem's.
 fn a_cwd_is_judged_in_its_depth() {
     // Never made by `mkdir`: a directory the VFS carries is answered from its own
     // set, and this one has to be judged by the filesystem its files are on.
     std::fs::File::create(format!("{BIG}/0")).expect("/tmp is writable");
+    // Unmeasured, so the first figure is not the one that pays for a cold start.
+    mean_spawn("/");
     let from_root = mean_spawn("/");
     let from_named = mean_spawn(NAMED);
     // Entered while small, grown after: the process that `cd`s into a build
@@ -196,8 +220,8 @@ fn a_cwd_is_judged_in_its_depth() {
     let from_big = mean_spawn(BIG);
     std::env::set_current_dir("/").expect("chdir to /");
     println!(
-        "spawn-cwd: a spawn and wait, mean of {TIMED}: from / {} us, from {NAMED} {} us, \
-         from {BIG} ({BIG_FILES} files) {} us",
+        "spawn-cwd: a spawn and wait, mean of {TIMED} after {TIMED} unmeasured, no cwd on \
+         bcachefs or FAT32: from / {} us, from {NAMED} {} us, from {BIG} ({BIG_FILES} files) {} us",
         from_root.as_micros(),
         from_named.as_micros(),
         from_big.as_micros(),

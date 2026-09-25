@@ -234,7 +234,7 @@ impl FileSystem for BcacheFsAdapter {
     }
 
     fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError> {
-        Ok(self.fs.is_dir(dir))
+        mapped("is_dir", dir, self.fs.is_dir(dir))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
@@ -419,7 +419,7 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
     }
 
     fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError> {
-        Ok(self.fs.is_dir(dir))
+        mapped("is_dir", dir, self.fs.is_dir(dir))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
@@ -516,38 +516,54 @@ fn format(cache: &Arc<page_cache::Cached>) -> Option<Mounted<PageCacheBlockIO, R
     match Formatted::format(PageCacheBlockIO::new(Arc::clone(cache))) {
         Ok(fs) => Some(fs.mount()),
         Err(err) => {
-            // A half-written volume is not one to mount; `open_home` falls back to tmpfs.
+            // A half-written volume is not one to mount; `open_data` answers `Volatile`.
             log!("storage: formatting the designated device failed: {:?}", err);
             None
         }
     }
 }
 
-/// Try to mount an existing bcachefs filesystem on the partition `cache` serves.
-fn mount(cache: &Arc<page_cache::Cached>) -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
-    Mounted::<PageCacheBlockIO, ReadWrite>::open(PageCacheBlockIO::new(Arc::clone(cache))).ok()
+/// Mount an existing bcachefs filesystem on the partition `cache` serves.
+fn mount(cache: &Arc<page_cache::Cached>) -> Result<Mounted<PageCacheBlockIO, ReadWrite>, FsError> {
+    Mounted::<PageCacheBlockIO, ReadWrite>::open(PageCacheBlockIO::new(Arc::clone(cache)))
 }
 
 /// What the machine's block device is, as far as we are entitled to care.
 ///
-/// No fourth arm and no default that writes: `Foreign` covers both someone else's disk and a blank one.
+/// No default that writes: `Foreign` covers both someone else's disk and a blank one.
 pub enum Storage {
     /// A ToyOS volume, mounted read-write, identified by its own superblock.
     Ours(Mounted<PageCacheBlockIO, ReadWrite>),
+    /// A volume that does not mount and that no refusal says is another's: a
+    /// superblock of ours that broke, or a device that would not answer.
+    /// Never written to, and never stood in for.
+    Unmountable,
     /// Carries a designation stamp naming its own size: consent to destroy what is here.
     Designated,
     /// Anything else. Never written to, under any circumstances.
     Foreign,
 }
 
-/// Decide what the device is, from one read of block 0.
+/// Decide what the device is, from its superblock and block 0.
 ///
-/// A failed mount is not consent: an unformatted disk, another OS, and a corrupt volume all read as `None`.
-/// One read decides all three because bcachefs's own superblock also lives at block 0.
+/// A failed mount is not consent. Only `BadMagic` — no copy of the superblock
+/// claims the volume — lets the stamp be asked for; every other refusal is a
+/// volume of ours that did not mount, or a device that did not say.
 pub fn probe(cache: &Arc<page_cache::Cached>) -> Storage {
-    if let Some(fs) = mount(cache) {
-        log!("storage: mounted the ToyOS volume at block 0");
-        return Storage::Ours(fs);
+    match mount(cache) {
+        Ok(fs) => {
+            log!("storage: mounted the ToyOS volume at block 0");
+            return Storage::Ours(fs);
+        }
+        Err(FsError::BadMagic { .. }) => {}
+        Err(err) => {
+            log!(
+                "storage: the DATA volume does not mount, and nothing says it is another's: \
+                 {:?} — nothing will be written to it",
+                err
+            );
+            return Storage::Unmountable;
+        }
     }
     if designated(cache) {
         log!("storage: block 0 designates this device for ToyOS — formatting it");
@@ -594,28 +610,42 @@ fn designated(cache: &Arc<page_cache::Cached>) -> bool {
     true
 }
 
+/// What `/apps` and `/home` are this boot.
+pub enum Data {
+    /// The DATA volume, mounted read-write.
+    Mounted(Arc<page_cache::Cached>, Mounted<PageCacheBlockIO, ReadWrite>),
+    /// No volume of ours to mount — none, two, one that is not ours, or a
+    /// format that failed — so a tmpfs stands in, and says so.
+    Volatile,
+    /// A volume of ours that did not mount. Nothing stands in: a tmpfs under
+    /// the paths the owner's data lives at would take their writes into RAM.
+    Absent,
+}
+
 /// The DATA filesystem `/apps` and `/home` are two paths into, and the only
 /// path on which `format` runs.
 ///
 /// A role names one filesystem, so two TOYOS-DATA partitions are refused rather
-/// than guessed between. `None` — none of them, two of them, or a volume that
-/// is not ours — leaves the caller a volatile tmpfs rather than a panic or a
-/// format without consent.
-pub fn open_data() -> Option<(Arc<page_cache::Cached>, Mounted<PageCacheBlockIO, ReadWrite>)> {
+/// than guessed between; no arm panics or formats without consent.
+pub fn open_data() -> Data {
     let candidates = crate::gpt::data_candidates();
     let [candidate] = candidates.as_slice() else {
         log!(
             "storage: this machine carries {} TOYOS-DATA partitions, and a data volume is one",
             candidates.len()
         );
-        return None;
+        return Data::Volatile;
     };
-    let cache = page_cache::over_candidate(candidate, "data")?;
+    let Some(cache) = page_cache::over_candidate(candidate, "data") else { return Data::Volatile };
     let fs = match probe(&cache) {
         Storage::Ours(fs) => fs,
-        Storage::Designated => format(&cache)?,
-        Storage::Foreign => return None,
+        Storage::Designated => match format(&cache) {
+            Some(fs) => fs,
+            None => return Data::Volatile,
+        },
+        Storage::Unmountable => return Data::Absent,
+        Storage::Foreign => return Data::Volatile,
     };
-    Some((cache, fs))
+    Data::Mounted(cache, fs)
 }
 

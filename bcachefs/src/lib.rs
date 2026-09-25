@@ -20,7 +20,6 @@ mod crc32c;
 mod superblock;
 mod alloc_bitmap;
 mod btree;
-mod dir_index;
 mod fs;
 pub mod upstream;
 

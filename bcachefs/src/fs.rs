@@ -2,11 +2,11 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::ops::ControlFlow;
 
 use crate::alloc_bitmap::BitmapAllocator;
 use crate::block_io::{BlockBuf, BlockNum, BlockIO, BlockIOExt, DeviceError, BLOCK_SIZE};
 use crate::btree::{self, Entry, Key, KeyType, Node};
-use crate::dir_index::DirIndex;
 use crate::superblock::{FsUuid, Superblock};
 
 /// Extent: a contiguous run of blocks on disk.
@@ -110,7 +110,6 @@ pub struct Formatted<IO: BlockIO> {
     io: IO,
     sb: Superblock,
     alloc: BitmapAllocator,
-    dirs: DirIndex,
 }
 
 /// A mounted filesystem. Mode is ReadOnly or ReadWrite.
@@ -118,7 +117,6 @@ pub struct Mounted<IO: BlockIO, Mode = ReadWrite> {
     io: IO,
     sb: Superblock,
     alloc: BitmapAllocator,
-    dirs: DirIndex,
     _mode: PhantomData<Mode>,
 }
 
@@ -533,7 +531,7 @@ impl<IO: BlockIO> Formatted<IO> {
 
         sb.write(&io)?;
 
-        Ok(Self { io, sb, alloc, dirs: DirIndex::default() })
+        Ok(Self { io, sb, alloc })
     }
 
     /// Name this filesystem, so a role's kernel argument can select it.
@@ -557,7 +555,6 @@ impl<IO: BlockIO> Formatted<IO> {
         let entry = Entry { key, value };
 
         self.sb.root_node = btree::insert(&self.io, &mut self.alloc, self.sb.root_node, entry)?;
-        self.dirs.add(name);
 
         Ok(())
     }
@@ -575,7 +572,6 @@ impl<IO: BlockIO> Formatted<IO> {
         let entry = Entry { key, value };
 
         self.sb.root_node = btree::insert(&self.io, &mut self.alloc, self.sb.root_node, entry)?;
-        self.dirs.add(name);
 
         Ok(())
     }
@@ -595,7 +591,6 @@ impl<IO: BlockIO> Formatted<IO> {
             io: self.io,
             sb: self.sb,
             alloc: self.alloc,
-            dirs: self.dirs,
             _mode: PhantomData,
         }
     }
@@ -606,7 +601,6 @@ impl<IO: BlockIO> Formatted<IO> {
             io: self.io,
             sb: self.sb,
             alloc: self.alloc,
-            dirs: self.dirs,
             _mode: PhantomData,
         }
     }
@@ -621,8 +615,7 @@ impl<IO: BlockIO> Formatted<IO> {
 // --- Mounted (read operations, available for both ReadOnly and ReadWrite) ---
 
 impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
-    /// Open an existing filesystem from disk: one walk of the tree, which
-    /// [`Self::is_dir`] answers from ever after.
+    /// Open an existing filesystem from disk.
     pub fn open(io: IO) -> Result<Mounted<IO, Mode>, FsError> {
         let sb = Superblock::read(&io)?;
         let alloc = BitmapAllocator {
@@ -632,27 +625,12 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
             free_blocks: sb.free_blocks,
             next_alloc: sb.next_alloc,
         };
-        let mut dirs = DirIndex::default();
-        // As `list`: a leaf that does not decode answers to no name.
-        btree::for_each_live(&io, sb.root_node, &mut |entry| {
-            if let Ok(leaf) = decode_leaf_value(&entry.value, sb.block_count) {
-                dirs.add(leaf.name());
-            }
-            Ok(())
-        })?;
         Ok(Mounted {
             io,
             sb,
             alloc,
-            dirs,
             _mode: PhantomData,
         })
-    }
-
-    /// Whether some name lies beneath `dir` (`""` is the root), in its depth
-    /// and not the volume's size: the answer a working directory is judged by.
-    pub fn is_dir(&self, dir: &str) -> bool {
-        self.dirs.is_dir(dir)
     }
 
     /// What this filesystem is named, or [`FsUuid::UNNAMED`].
@@ -740,18 +718,38 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     /// volume's.
     pub fn list(&self, limit: usize, keep: &dyn Fn(&str) -> bool) -> Result<Vec<(String, u64)>, FsError> {
         let mut result = Vec::new();
-        btree::for_each_live(&self.io, self.sb.root_node, &mut |entry| {
-            let Ok(leaf) = self.decode(&entry.value) else { return Ok(()) };
+        let ControlFlow::Continue(()) = btree::for_each_live(&self.io, self.sb.root_node, &mut |entry| {
+            let Ok(leaf) = self.decode(&entry.value) else { return Ok(ControlFlow::Continue(())) };
             if !keep(leaf.name()) {
-                return Ok(());
+                return Ok(ControlFlow::Continue(()));
             }
             if result.len() >= limit {
                 return Err(FsError::ListTooLong { limit });
             }
             result.push((String::from(leaf.name()), leaf.size()));
-            Ok(())
-        })?;
+            Ok(ControlFlow::Continue(()))
+        })? else {
+            unreachable!("`list`'s visitor never breaks")
+        };
         Ok(result)
+    }
+
+    /// Whether some name lies beneath `dir` (`""` is the root): the flat
+    /// namespace has no other kind of directory. Keys are hashes of whole
+    /// names, so the answer is a walk that stops at the first such name and
+    /// costs the whole tree when there is none; it keeps nothing, and a node
+    /// it cannot read refuses this question alone.
+    pub fn is_dir(&self, dir: &str) -> Result<bool, FsError> {
+        if dir.is_empty() {
+            return Ok(true);
+        }
+        let found = btree::for_each_live(&self.io, self.sb.root_node, &mut |entry| {
+            // As `list`: a leaf that does not decode answers to no name.
+            let Ok(leaf) = self.decode(&entry.value) else { return Ok(ControlFlow::Continue(())) };
+            let beneath = leaf.name().strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'));
+            Ok(if beneath { ControlFlow::Break(()) } else { ControlFlow::Continue(()) })
+        })?;
+        Ok(found.is_break())
     }
 
     /// Convert back to Formatted state (for testing — insert more files after reading).
@@ -760,7 +758,6 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
             io: self.io,
             sb: self.sb,
             alloc: self.alloc,
-            dirs: self.dirs,
         }
     }
 
@@ -827,7 +824,6 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
             self.sb.root_node,
             Entry { key, value },
         )?;
-        self.dirs.add(name);
 
         self.retire_displaced(displaced, key)
     }
@@ -886,7 +882,6 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         if btree::delete(&self.io, self.sb.root_node, &key)?.is_none() {
             return Err(FsError::CorruptedNode(self.sb.root_node));
         }
-        self.dirs.remove(name);
         for ext in &extents {
             self.alloc.free_range(&self.io, BlockNum::new(ext.start_block), ext.block_count)?;
         }
@@ -931,7 +926,6 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
             self.sb.root_node,
             Entry { key: new_key, value: new_value },
         )?;
-        self.dirs.add(new_name);
 
         self.retire_displaced(displaced, new_key)?;
 
@@ -940,10 +934,6 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         // entry under it is the one the insert just wrote.
         if new_key != old_key {
             btree::delete(&self.io, self.sb.root_node, &old_key)?;
-        }
-        // Equal keys under two names are a collision the insert already resolved.
-        if old_name != new_name {
-            self.dirs.remove(old_name);
         }
 
         Ok(())
@@ -1210,9 +1200,9 @@ mod tests {
         craft_interior(&mut raw, 3, 3, 8);
         set_root(&mut raw, blocks, 3);
 
-        // The mount's own walk meets the tree, so the mount is what refuses it.
-        match mount(raw).err() {
-            Some(FsError::TreeTooDeep(_)) => {}
+        let fs = mount(raw).expect("the volume still describes its device");
+        match fs.list(usize::MAX, &|_| true) {
+            Err(FsError::TreeTooDeep(_)) => {}
             other => panic!("expected TreeTooDeep, got {other:?}"),
         }
     }
@@ -1224,8 +1214,9 @@ mod tests {
         craft_interior(&mut raw, 3, 4, 4);
         set_root(&mut raw, blocks, 3);
 
-        match mount(raw).err() {
-            Some(FsError::CorruptedNode(_)) => {}
+        let fs = mount(raw).expect("mount");
+        match fs.list(usize::MAX, &|_| true) {
+            Err(FsError::CorruptedNode(_)) => {}
             other => panic!("expected CorruptedNode, got {other:?}"),
         }
     }
@@ -1237,8 +1228,9 @@ mod tests {
         craft_interior(&mut raw, 3, u64::MAX, 8);
         set_root(&mut raw, blocks, 3);
 
-        match mount(raw).err() {
-            Some(FsError::BlockOffDevice { .. }) => {}
+        let fs = mount(raw).expect("mount");
+        match fs.list(usize::MAX, &|_| true) {
+            Err(FsError::BlockOffDevice { .. }) => {}
             other => panic!("expected BlockOffDevice, got {other:?}"),
         }
     }
@@ -1665,31 +1657,43 @@ mod tests {
         }
     }
 
-    /// The index a mount walks into being answers as the one the writes kept,
-    /// and each write that adds or takes a name moves it.
+    /// A directory is a name with something beneath it, and follows every
+    /// write that adds or takes one.
     #[test]
-    fn is_dir_follows_every_name_the_volume_answers_to() {
+    fn is_dir_is_a_name_beneath() {
         let mut fs = Formatted::format(VecBlockIO::new(512)).expect("format");
         fs.create("a/b/file", b"x", 1).expect("create");
+        fs.create("ab", b"x", 1).expect("create");
         fs.create_symlink("s/link", "a", 1).expect("symlink");
-        let raw = fs.into_io().expect("sync").into_vec();
+        let mut fs = mount_rw(fs.into_io().expect("sync").into_vec()).expect("mount");
+        for dir in ["", "a", "a/b", "s"] {
+            assert!(fs.is_dir(dir).expect("a walk of a sound tree"), "{dir:?}");
+        }
+        // `ab` shares `a`'s bytes, so a prefix test without the separator answers it.
+        for not in ["a/b/file", "ab", "a/missing", "b", "a/b/file/deeper", "a/"] {
+            assert!(!fs.is_dir(not).expect("a walk of a sound tree"), "{not:?}");
+        }
 
-        let mut fs = mount_rw(raw).expect("mount");
-        assert!(fs.is_dir("") && fs.is_dir("a") && fs.is_dir("a/b") && fs.is_dir("s"));
-        assert!(!fs.is_dir("a/b/file"), "a file is not a directory");
-        assert!(!fs.is_dir("a/missing"));
-
-        fs.create("c/d/new", b"y", 1).expect("create");
-        assert!(fs.is_dir("c/d"));
-        fs.rename("c/d/new", "e/moved").expect("rename");
-        assert!(!fs.is_dir("c"), "the rename took the only name under c");
-        assert!(fs.is_dir("e"));
+        fs.rename("a/b/file", "e/moved").expect("rename");
+        assert!(!fs.is_dir("a").expect("walk") && fs.is_dir("e").expect("walk"));
         assert!(fs.delete("e/moved").expect("delete"));
-        assert!(!fs.is_dir("e"));
-        assert!(fs.delete("a/b/file").expect("delete"));
-        assert!(!fs.is_dir("a"));
+        assert!(!fs.is_dir("e").expect("walk"));
+    }
 
-        let reopened = mount(fs.into_formatted().into_io().expect("sync").into_vec()).expect("reopen");
-        assert!(reopened.is_dir("s") && !reopened.is_dir("a") && !reopened.is_dir("e"));
+    /// A node the walk cannot follow refuses the one question that met it;
+    /// the mount before it stands.
+    #[test]
+    fn is_dir_over_a_corrupt_node_is_refused() {
+        let blocks = 128;
+        let mut raw = image(blocks);
+        craft_interior(&mut raw, 3, 4, 4);
+        set_root(&mut raw, blocks, 3);
+
+        let fs = mount(raw).expect("mount");
+        match fs.is_dir("a") {
+            Err(FsError::CorruptedNode(_)) => {}
+            other => panic!("expected CorruptedNode, got {other:?}"),
+        }
+        assert!(fs.is_dir("").expect("the root needs no walk"));
     }
 }
