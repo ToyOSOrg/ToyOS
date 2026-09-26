@@ -925,6 +925,38 @@ impl Boot {
     }
 }
 
+/// What the three modes' images are built from, besides std: every directory
+/// [`build`] runs `cargo build` in for one of them, and the asset directories
+/// their configs copy onto ROOT. A case's config is a test image and is not here.
+pub struct Shipped {
+    pub crates: BTreeSet<PathBuf>,
+    pub assets: BTreeSet<PathBuf>,
+}
+
+/// [`Shipped`], read out of the modes' configs the way [`build`] reads them.
+///
+/// **A config that ships the hosted compiler is refused**: its dependencies are
+/// the rust fork's `compiler/` workspace, which no reader of this answer walks.
+pub fn shipped(root: &Path) -> Result<Shipped, String> {
+    let mut crates = BTreeSet::from([root.join("kernel"), root.join("bootloader")]);
+    let mut assets = BTreeSet::new();
+    for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
+        let config = parse_config(&boot.config);
+        if config.hosted_rustc {
+            return Err(format!(
+                "{} sets hosted-rustc, and nothing reads the licences of the compiler it ships",
+                boot.config.display()
+            ));
+        }
+        crates.insert(ProgramConfig::default().crate_dir(root, INIT_PROGRAM));
+        for (name, program) in &config.programs {
+            crates.insert(program.crate_dir(root, name));
+        }
+        assets.extend(config.assets.iter().map(|dir| root.join(dir)));
+    }
+    Ok(Shipped { crates, assets })
+}
+
 /// The parameters an image built for flashing may carry: the kernel's own boot
 /// parameters (`kernel/src/params.rs`) and nothing else.
 ///

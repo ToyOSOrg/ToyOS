@@ -2,6 +2,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+/// The crate every sysroot links into std, so into every userland binary.
+pub const CRATE: &str = "userland/libc";
+
 /// Build toyos-libc against the toolchain at `toolchain`, in `target_dir`, and
 /// install it there as `libtoyos_c.a`. Part of making a sysroot
 /// (`src/sysroot.rs`), whose key `userland/libc/src` is one of.
@@ -30,7 +33,7 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path) {
             "--message-format=json",
             "--manifest-path",
         ])
-        .arg(root.join("userland/libc/Cargo.toml").to_str().unwrap())
+        .arg(root.join(CRATE).join("Cargo.toml").to_str().unwrap())
         .arg("--target-dir")
         .arg(target_dir)
         .env("RUSTUP_TOOLCHAIN", toolchain)
