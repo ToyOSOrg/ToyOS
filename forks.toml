@@ -34,8 +34,8 @@
 #
 # `.github/workflows/publish.yml` is what unblocks them: it publishes the five
 # on every landing that moves a version, and `src/sdkversion.rs` is the rule
-# that keeps those versions moving. What is left is the owner's crates.io token
-# as a repository secret, then the `owed` edits below, one per fork.
+# that keeps those versions moving. The token is a repository secret and the
+# five are on crates.io, so what is left is the `owed` edits below, one per fork.
 #
 # A fork being sendable is not the same as it being *worth* sending. See memmap2
 # below: purely additive, unblocked, and still a bad PR.
@@ -96,7 +96,9 @@ base = "v0.60.0"
 delta = "+703/-231"
 tier = "fork"
 why = "ToyOS bits are small; most of the delta is a pure-Rust `rustcrypto` cipher backend."
-pr = "none — the rustcrypto backend is independently upstreamable TODAY (no ToyOS dependency); split it out and send it"
+pr = "https://github.com/Eugeny/russh/pull/782 (open, 2026-09-26): the `rustcrypto` backend alone"
+pr_branch = "rustcrypto-backend"
+pr_note = "The PR is not a split of `toyos`: it sits on upstream main past v0.63.3 and is rewritten for the RustCrypto generation that main is on (`aes-gcm` 0.11, `chacha20` 0.10, `poly1305` 0.9), in a new `cipher::rustcrypto` module that leaves upstream's ring/aws-lc-rs files untouched. `toyos` stays on v0.60.0 with the old backend until the fork moves onto a release that carries the PR. What is left for ToyOS then is the `cryptovec` mlock no-ops and `known_hosts_path`, both behind `target_os = \"toyos\"`."
 
 [cpal]
 upstream = "RustAudio/cpal"

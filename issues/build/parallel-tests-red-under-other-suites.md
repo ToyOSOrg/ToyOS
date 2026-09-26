@@ -365,10 +365,11 @@ changes.
   entry does not reach: corrupt cluster chain` — the second stage
   `issues/kernel/nothing-bounds-the-log-writer-below-the-boots-last-word.md`
   describes, on a boot that now carries 13 MiB of ROOT where it carried 619.
-  Not the host: `main`'s own FAT defects, which the branch reaches by timing
-  (`issues/filesystem/a-refused-link-write-leaks-the-cluster-append-cluster-just-claimed.md`
-  forces it red on both trees, and the split is
-  `issues/filesystem/a-refused-free-in-fat32-keeps-the-cluster-it-could-not-let-go.md`).
+  Not the host: `main`'s own FAT refusal defects at `b0adc600`, which the
+  branch reaches by timing: a refused link write leaked the cluster
+  `append_cluster` had just claimed, and a refused free split the FATs; a
+  forced interleaving reddened both trees. #510 closed both with
+  `toyos-fat32/src/repair.rs`.
   `metal_job_reboot` was red in one of the six, `ALONE` red too, and in one
   further branch run (`the job drain carried no kernel output at all (24
   bytes)`), and green alone three times on each tree, alternating;
