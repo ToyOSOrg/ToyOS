@@ -13,9 +13,10 @@ two sockets in the lane's scratch directory, and on this macOS host that
 directory sits under `$TMPDIR`, so the path is 104 bytes, past the 103 a
 `sockaddr_un` holds before its terminating NUL on macOS.
 
-Seen in the fast tier on one session twice: at `origin/main`, checked out in
-the `toyos-guiplat` worktree (the same message, wide and alone), and at PR
-#528's head after it merged `e48604c0` (the same, wide and alone). `cargo run
+Seen in the fast tier twice in one session: at `origin/main` checked out in
+the `toyos-guiplat` worktree (alone with this message, wide as `QEMU died
+before ===READY===`), and at PR #528's head after it merged `e48604c0` (this
+message wide and alone). `cargo run
 -- --known-red lan_mdns_answer` answers NO.
 
 **Exit**: the socket paths fit a `sockaddr_un` wherever the scratch
