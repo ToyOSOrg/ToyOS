@@ -89,6 +89,34 @@ service entirely. A fix that survives contact with a real refusal may be
 simpler to write once the write path is straight-line userland code than as
 another case bolted onto the kernel's busy-waiting VFS.
 
+## `quiesce_leaves_the_volume_whole` reaches it when the stop lands mid-attempt
+
+`quiesce-fsync-refuse` refuses from the moment `quiesce::stopping()` turns
+true, so an `fsync` attempt `logd` began *before* the stop has its first
+FAT updates land on both FATs and a later one refused. That is this file's
+leak, forced on `main` at `b0adc600` and on PR #506 at `f758d504` with the
+same scratch patch: the shutdown waits, before `stop(ExceptLog)`, until
+`logd`'s `SYS_FSYNC` has landed one active-FAT write, and that write holds
+until the stop has begun. Both trees red, each run and its `ALONE` re-run:
+`alloc_cluster` claims 47 (volume offset 4284, both FATs), the link `46 → 47`
+is refused at 4280, `rollback_to` frees nothing, attempts 2 to 9 are refused
+claiming 48 (4288), attempt 10 lands 48, and `toyos-fat32-check` says `1
+cluster(s) from 47 are marked allocated and no directory entry reaches them`.
+The same wait placed after `Syncing filesystems...`, where attempt 1 is
+refused at its first active-FAT write, is green: the harm needs an attempt
+that has already changed the active FAT.
+
+Nothing on #506 touches `toyos-fat32`, `fat32_adapter`, `fsync` or `quiesce`;
+it moves the timing. Its `/system/bin/shutdown` is paged in from ROOT in memory
+rather than off the stick (the stop's census: `0 of 5 userland block
+operation(s)` against `main`'s `0 of 3033`), so the shutdown reaches its stop
+16 to 22 ms after its `spawn:` line where `main` takes 50 to 62 ms (three
+invocations of the test alone on each tree, observed through the test's own
+tail). In that window `logd` is still flushing the spawn's lines: `logd`'s
+first refusal came at or before `Syncing filesystems...` in three of the
+branch's four boots and after the stop's record in all three of `main`'s, and
+two of the branch's four boots left the volume broken.
+
 ## What would show it
 
 A host test in `toyos-fat32/` over a `BlockAccess` that refuses the N-th write

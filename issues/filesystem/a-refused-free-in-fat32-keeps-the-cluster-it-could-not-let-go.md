@@ -39,6 +39,20 @@ them"), the same signature
 carries for the link-write case; this file is the free-side sibling, not the
 one that file already tracks.
 
+## Seen: the `rollback_to` arm splits the FATs under `quiesce_leaves_the_volume_whole`
+
+Where the stop lands inside a `logd` `fsync` attempt that has already grown
+the file on both FATs (the interleaving
+`a-refused-link-write-leaks-the-cluster-append-cluster-just-claimed.md`
+forces), the refused attempt's `rollback_to` writes its free's mirror half and
+is refused the active half. On PR #506, which only moves that interleaving
+earlier, `toyos-fat32-check` read the split off the volume the stop left: `FAT 1 differs from FAT 0 at entry 46: 0x00000000
+against 0x0000002F` beside `4 cluster(s) from 46 are marked allocated and no
+directory entry reaches them` (a free's mirror half), and in the earlier A/B
+`FAT 1 differs from FAT 0 at entry 45: 0x0FFFFFFF against 0x0000002E` (a
+`truncate_chain`'s mirror half). The split is worse than the leak for the
+reason the link file gives: nothing says which copy is true.
+
 ## Owner
 
 `toyos-fat32`, the crate that owns `rollback_to`, `remove` and `free_chain`.
