@@ -46,7 +46,7 @@ impl Region {
     /// A placeholder for a driver struct built before its buffers exist:
     /// size zero maps nothing.
     pub fn empty() -> Self {
-        Self { phys: DirectMap::from_phys(0), size: 0, cache: CachePolicy::DeferToMtrr, pages: None }
+        Self { phys: DirectMap::from_phys(0), size: 0, cache: CachePolicy::Normal, pages: None }
     }
 }
 
@@ -88,7 +88,7 @@ impl SharedMemObject {
         Ok(Self::over(Region {
             phys,
             size: aligned as u64,
-            cache: CachePolicy::DeferToMtrr,
+            cache: CachePolicy::Normal,
             pages: Some(Arc::new(Pages(pages))),
         }))
     }
@@ -130,7 +130,7 @@ impl SharedMemObject {
         // Logged only for a non-default policy: this process is the one
         // paying for it. Read back the installed policy, not the request,
         // so the line describes the mapping.
-        if self.region.cache != CachePolicy::DeferToMtrr {
+        if self.region.cache != CachePolicy::Normal {
             let installed = pt.lock().user_policy(addr).expect("shm: just mapped");
             crate::log!(
                 "shm: {:#x} mapped {:?} into pid {}",

@@ -541,23 +541,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             // Unlike every other action, this costs the machine, not just the caller's
             // process: one call is already a permanent halt.
-            DA::FATAL_HALT => { log!("{}", FATAL_HALT_NONCE); crate::arch::apic::halt_all_cpus(); }
-            // A real #DF, not simulated: pushing to a non-canonical rsp raises #SS,
-            // and delivering that needs another push to the same rsp — the #DF condition.
-            // Non-canonical rather than unmapped: on a bigger machine an unmapped
-            // address can fall inside the direct map and simply get written to.
-            // Only #DF has an IST, so every fault on the way there lands on this same unusable stack.
+            DA::FATAL_HALT => { log!("{}", FATAL_HALT_NONCE); crate::arch::irqchip::halt_all_cpus(); }
             DA::DOUBLE_FAULT => {
                 log!("SYS_DEBUG: provoking a double fault");
-                // SAFETY: unsound by design like NULL_READ; the #DF this raises never returns here.
-                unsafe {
-                    core::arch::asm!(
-                        "mov rsp, {bad}",
-                        "push 0",
-                        bad = in(reg) 0x0000_8000_0000_0000u64,
-                        options(noreturn),
-                    );
-                }
+                crate::arch::trap::provoke_double_fault()
             }
             // Both sides of MAX_HEAP_ALLOC plus the alignment corner: the page-aligned
             // case pads past one page and must error, not panic inside the allocator's lock.

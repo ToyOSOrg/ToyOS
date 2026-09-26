@@ -3,7 +3,7 @@ use super::device_irq::device_irq_entry;
 // Reports the IOMMU blocking a device, not device work finished: the one wake
 // it owes is a claim holder's, which `pcidev::note_fault` posts itself.
 extern "sysv64" fn dma_fault_handler() {
-    crate::irq_census::irq_took!(DmaFault);
+    crate::arch::percpu::irq_took!(DmaFault);
     crate::iommu::fault_interrupt();
 }
 

@@ -7,7 +7,6 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::arch::{asm, naked_asm};
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
@@ -490,12 +489,7 @@ fn env(preempt: &PreemptOff) -> Env<'_, crate::hw::KernelHw, PreemptOff> {
 pub fn pass(dispose: Dispose) {
     // The witness's negative control: sets DF one instruction before the reader that must refuse it.
     #[cfg(feature = "df-witness-mutate")]
-    // SAFETY: a build that exists to stage the defect, and the reader below
-    // panics before any `rep movs` can run. Nothing runs in between, so no
-    // string op ever executes with it set.
-    unsafe {
-        core::arch::asm!("std", options(nomem, nostack))
-    };
+    crate::arch::cpu::df_witness_mutate();
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("a scheduler pass");
     // Read before this pass's own level goes on top of it.
@@ -694,21 +688,8 @@ pub fn enter_idle_loop() -> ! {
     unsafe { percpu::set_kernel_stack(percpu::idle_stack_top()) };
     // SAFETY: `kernel_cr3` is the space this function's own code and stack already run in, so the write cannot unmap what executes it.
     unsafe { crate::mm::paging::kernel_cr3().activate() };
-    let sp = percpu::idle_stack_top();
-    // SAFETY: nothing on the outgoing stack is live past this — the function returns `!`, and `sp` is this CPU's own idle stack top.
-    unsafe {
-        asm!(
-            "mov rsp, {sp}",
-            // Zeroes the frame chain, so a panic here can backtrace instead of walking off the top of this stack;
-            // `push` also leaves `rsp` where a function entry expects it.
-            "xor ebp, ebp",
-            "push rbp",
-            "jmp {func}",
-            sp = in(reg) sp,
-            func = in(reg) idle_loop as *const () as usize,
-            options(noreturn),
-        );
-    }
+    // SAFETY: nothing on the outgoing stack is live past this — the function returns `!`, and the stack is this CPU's own idle stack.
+    unsafe { crate::arch::cpu::run_on_stack(percpu::idle_stack_top(), idle_loop) }
 }
 
 extern "C" fn idle_loop() -> ! {
@@ -878,9 +859,9 @@ pub fn for_each_parked(mut f: impl FnMut(ParkedInfo)) -> bool {
 
 /// Tail of the first switch into a fresh task. No lock to release, no outgoing task to park: only the
 /// preempt-count bracket's other half is owed.
-pub extern "sysv64" fn trampoline_entry() {
+pub extern "C" fn trampoline_entry() {
     crate::preempt::enable_no_resched();
-    crate::arch::idt::kernel_exit_to_user_check();
+    crate::arch::trap::kernel_exit_to_user_check();
 }
 
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
@@ -1004,55 +985,3 @@ fn stack_depth(payload: &KernelPayload) {
     DEEPEST.fetch_max(used, Ordering::Relaxed);
 }
 
-/// The outgoing half of [`context_switch`]. A macro, not inlined twice, so both builds share one instruction sequence.
-macro_rules! switch_save {
-    () => {
-        "pushfq
-         push rbp
-         push rbx
-         push r12
-         push r13
-         push r14
-         push r15
-         mov [rdi], rsp
-         mov rsp, rsi"
-    };
-}
-
-/// The incoming half: the seven words a resumed context stands on, ending in `ret`.
-macro_rules! switch_restore {
-    () => {
-        "pop r15
-         pop r14
-         pop r13
-         pop r12
-         pop rbx
-         pop rbp
-         popfq
-         ret"
-    };
-}
-
-/// Callee-saved register save/restore.
-#[cfg(not(feature = "switch-witness"))]
-#[unsafe(naked)]
-pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
-    naked_asm!(switch_save!(), switch_restore!());
-}
-
-/// The same switch with [`crate::hw::switch_witness_verify`] between the stack move and the first `pop`; never fired.
-///
-/// Placed after `mov rsp, rsi`, reading the incoming frame through the register the machine will use. Sound
-/// to `call`: the return lands inside the incoming task's own stack, and every register `verify` may clobber
-/// is caller-saved and already dead here.
-#[cfg(feature = "switch-witness")]
-#[unsafe(naked)]
-pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
-    naked_asm!(
-        switch_save!(),
-        "mov rdi, rsp",
-        "call {verify}",
-        switch_restore!(),
-        verify = sym crate::hw::switch_witness_verify,
-    );
-}

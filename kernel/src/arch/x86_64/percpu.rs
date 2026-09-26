@@ -804,3 +804,97 @@ pub fn swap_fault_state(new: CpuFaultState) -> CpuFaultState {
 pub fn set_fault_state(new: CpuFaultState) {
     gs::write_u8::<OFF_FAULT_STATE>(new as u8);
 }
+
+/// The `gs:` displacement of interrupt counter `index` in this CPU's block.
+pub const fn irq_slot_offset(index: usize) -> u32 {
+    OFF_IRQ_COUNTS + (index as u32) * 8
+}
+
+/// Records one delivery of `$source` as two lock-free `add`s to this CPU's own gs: slots.
+/// A macro, not a function: the two offsets must be asm immediates, not const-generic values an optimiser could relax.
+macro_rules! irq_took {
+    ($source:ident) => {{
+        // SAFETY: both slots are this CPU's own counter block per `arch::percpu`, and the caller is an interrupt handler, so `GS_BASE` already points at this CPU's `PerCpu`.
+        unsafe {
+            ::core::arch::asm!(
+                "add qword ptr gs:[{total}], 1",
+                "add qword ptr gs:[{source}], 1",
+                total = const $crate::arch::percpu::irq_slot_offset($crate::irq_census::TOTAL),
+                source = const $crate::arch::percpu::irq_slot_offset(
+                    1 + $crate::irq_census::Source::$source as usize
+                ),
+                // no `nomem` because both instructions write; no `preserves_flags` because `add` clobbers flags.
+                options(nostack),
+            );
+        }
+    }};
+}
+
+pub(crate) use irq_took;
+
+/// Two of this CPU's interrupt counters, read straight off `gs:` with one load
+/// each — the form a CPU inside an NMI may use.
+pub fn irq_counts_here(first: usize, second: usize) -> (u64, u64) {
+    let a: u64;
+    let b: u64;
+    // SAFETY: both slots are this CPU's own counter block, and `GS_BASE` points
+    // at the running CPU's `PerCpu` in every context this is read from; both
+    // indices are below `irq_census::SLOTS`, asserted by the callers' constants.
+    unsafe {
+        core::arch::asm!(
+            "mov {a}, qword ptr gs:[{first}]",
+            "mov {b}, qword ptr gs:[{second}]",
+            a = out(reg) a,
+            b = out(reg) b,
+            first = in(reg) u64::from(irq_slot_offset(first)),
+            second = in(reg) u64::from(irq_slot_offset(second)),
+            options(nostack, readonly, preserves_flags),
+        );
+    }
+    (a, b)
+}
+
+/// This CPU's preempt count: the per-CPU word `crate::preempt` keeps, read and
+/// written only through the five functions below.
+#[inline]
+pub fn preempt_count() -> u32 {
+    gs::read_u32::<OFF_PREEMPT_COUNT>()
+}
+
+#[inline]
+pub fn set_preempt_count(value: u32) {
+    gs::write_u32::<OFF_PREEMPT_COUNT>(value);
+}
+
+/// One increment, atomic against an interrupt on this CPU.
+#[inline]
+pub fn preempt_count_up() {
+    gs::lock_inc_u32::<OFF_PREEMPT_COUNT>();
+}
+
+/// One decrement, atomic against an interrupt on this CPU.
+#[inline]
+pub fn preempt_count_down() {
+    gs::lock_dec_u32::<OFF_PREEMPT_COUNT>();
+}
+
+/// Whether this CPU owes a reschedule.
+#[inline]
+pub fn resched_owed() -> bool {
+    gs::read_u8::<OFF_NEED_RESCHED>() != 0
+}
+
+#[inline]
+pub fn set_resched_owed(owed: bool) {
+    if owed {
+        gs::write_u8_imm::<OFF_NEED_RESCHED, 1>();
+    } else {
+        gs::write_u8_imm::<OFF_NEED_RESCHED, 0>();
+    }
+}
+
+/// Whether this CPU is inside a fault or panic ([`CpuFaultState`] not `Normal`).
+#[inline]
+pub fn faulting() -> bool {
+    gs::read_u8::<OFF_FAULT_STATE>() != 0
+}

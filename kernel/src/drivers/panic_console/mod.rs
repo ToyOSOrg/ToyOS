@@ -813,7 +813,7 @@ pub mod stall {
             return;
         }
         crate::log!("{HELD}");
-        crate::arch::apic::halt_all_cpus();
+        crate::arch::irqchip::halt_all_cpus();
     }
 }
 
@@ -1148,7 +1148,7 @@ pub fn log_census() {
 
 /// Charge one paint to the census.
 fn spent(began: u64, pixels: u64) {
-    let ticks = crate::arch::cpu::rdtsc().saturating_sub(began);
+    let ticks = crate::arch::cpu::counter().saturating_sub(began);
     PAINTS.fetch_add(1, Ordering::Relaxed);
     PIXELS.fetch_add(pixels, Ordering::Relaxed);
     TICKS.fetch_add(ticks, Ordering::Relaxed);
@@ -1163,7 +1163,7 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch, stop: impl Fn() -> bo
         return;
     }
     let Some((cols, grid_rows)) = geometry(&fb) else { return };
-    let began = crate::arch::cpu::rdtsc();
+    let began = crate::arch::cpu::counter();
     let mut pixels = 0u64;
     let text = view.text;
     let (total, pages, per) = pagination(text, cols, grid_rows);

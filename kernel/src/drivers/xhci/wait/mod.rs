@@ -31,10 +31,8 @@ mod depth_probe {
             "io-depth: a disk transfer is being waited for at preempt depth {depth}, task {:?}",
             crate::arch::percpu::current_tid().map(|t| t.raw())
         );
-        let rbp: u64;
-        // SAFETY: reads the frame pointer; `kernel_backtrace` stops at the first unreadable frame.
-        unsafe { core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack)) };
-        crate::arch::idt::exceptions::kernel_backtrace(rbp, 20);
+        // `kernel_backtrace` stops at the first unreadable frame.
+        crate::arch::trap::kernel_backtrace(crate::arch::cpu::frame_pointer(), 20);
     }
 }
 

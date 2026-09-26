@@ -356,3 +356,106 @@ pub fn io_wait() {
     // SAFETY: port 0x80 is the unused POST diagnostic port, so this commands nothing.
     unsafe { outb(0x80, 0) };
 }
+
+/// The CPU's free-running counter: the TSC, which counts from reset.
+#[inline]
+pub fn counter() -> u64 {
+    rdtsc()
+}
+
+/// This function's caller's frame pointer: `rbp`, which `-Cforce-frame-pointers=yes` makes one.
+#[inline(always)]
+pub fn frame_pointer() -> u64 {
+    let rbp: u64;
+    // SAFETY: register-to-register mov only.
+    unsafe { asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags)) };
+    rbp
+}
+
+/// Raise the architecture's undefined-instruction exception here: `ud2`, whose `#UD` the IDT catches as the kernel's own fault.
+pub fn undefined_instruction() {
+    // SAFETY: ud2 reads and writes nothing and raises #UD, caught by the installed IDT.
+    unsafe { asm!("ud2", options(nomem, nostack)) };
+}
+
+/// The TSC's frequency in hertz as CPUID *states* it, for the one caller that
+/// may run before the clock is calibrated — the panic path, which has to bound a wait on a
+/// machine that never reached the HPET. Nothing calibrates against it and no
+/// third source is guessed at: a CPU that states neither leaf answers `None`
+/// and its caller says so rather than inventing a rate.
+pub fn stated_counter_hz() -> Option<u64> {
+    let max_leaf = cpuid(0, 0).0;
+    tsc_hz_from(
+        (max_leaf >= 0x15).then(|| cpuid(0x15, 0)),
+        (max_leaf >= 0x16).then(|| cpuid(0x16, 0)),
+    )
+}
+
+/// SDM Vol. 2A, CPUID leaf 15H: EAX is the denominator and EBX the numerator of
+/// the core crystal's ratio to the TSC, ECX the crystal's hertz — any of the
+/// three reading zero means the leaf states nothing. Leaf 16H's EAX is the
+/// processor base frequency in MHz, which an invariant TSC counts at.
+const fn tsc_hz_from(
+    leaf15: Option<(u32, u32, u32, u32)>,
+    leaf16: Option<(u32, u32, u32, u32)>,
+) -> Option<u64> {
+    if let Some((denominator, numerator, crystal_hz, _)) = leaf15 {
+        if denominator != 0 && numerator != 0 && crystal_hz != 0 {
+            return Some(crystal_hz as u64 * numerator as u64 / denominator as u64);
+        }
+    }
+    if let Some((base_mhz, _, _, _)) = leaf16 {
+        if base_mhz != 0 {
+            return Some(base_mhz as u64 * 1_000_000);
+        }
+    }
+    None
+}
+
+const _: () = {
+    // The ratio, then the fall-through to the base frequency when the crystal
+    // is not enumerated, then the CPU that states neither.
+    assert!(matches!(tsc_hz_from(Some((2, 4, 25_000_000, 0)), None), Some(50_000_000)));
+    assert!(matches!(tsc_hz_from(Some((0, 0, 0, 0)), Some((2_400, 0, 0, 0))), Some(2_400_000_000)));
+    assert!(tsc_hz_from(None, Some((0, 0, 0, 0))).is_none());
+    assert!(tsc_hz_from(None, None).is_none());
+};
+
+
+/// The thread pointer this CPU is running with: the FS base, which user TLS is addressed from.
+#[inline]
+pub fn thread_pointer() -> u64 {
+    read_fs_base()
+}
+
+/// Leave the current stack for good and run `func` on the one ending at `top`,
+/// with a zeroed frame chain so a panic there backtraces instead of walking off
+/// the top.
+/// # Safety
+/// Nothing on the current stack is live past this call, and `top` is the end of
+/// a stack this CPU owns.
+pub unsafe fn run_on_stack(top: u64, func: extern "C" fn() -> !) -> ! {
+    // SAFETY: the caller's contract; `push` leaves `rsp` where a function entry
+    // expects it.
+    unsafe {
+        asm!(
+            "mov rsp, {sp}",
+            "xor ebp, ebp",
+            "push rbp",
+            "jmp {func}",
+            sp = in(reg) top,
+            func = in(reg) func as *const () as usize,
+            options(noreturn),
+        );
+    }
+}
+
+/// `df-witness-mutate`'s staging: set `DF` one instruction before the reader
+/// that must refuse it.
+#[cfg(feature = "df-witness-mutate")]
+pub fn df_witness_mutate() {
+    // SAFETY: a build that exists to stage the defect, and the reader after it
+    // panics before any `rep movs` can run. Nothing runs in between, so no
+    // string op ever executes with it set.
+    unsafe { asm!("std", options(nomem, nostack)) };
+}

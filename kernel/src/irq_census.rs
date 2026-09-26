@@ -15,7 +15,7 @@ use crate::scheduler::MAX_CPUS;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(usize)]
 pub enum Source {
-    /// Vector 0x20: shared by this CPU's LAPIC one-shot and every `apic::kick_cpu` IPI.
+    /// Vector 0x20: shared by this CPU's LAPIC one-shot and every `irqchip::kick_cpu` IPI.
     Timer,
     /// Vector 0x21, xHCI MSI-X (or MSI).
     Xhci,
@@ -38,7 +38,7 @@ pub enum Source {
     /// Vector 0xFF, the local APIC's spurious vector.
     /// A non-zero count on a machine that staged nothing is an interrupt-routing defect.
     Spurious,
-    /// Every vector no `idt_vectors!` row claims — `arch::idt::unclaimed`.
+    /// Every vector no `idt_vectors!` row claims — `arch::trap::unclaimed`.
     /// A non-zero count a boot staged nothing for is a routing defect the gate kept off `#DF`.
     Unclaimed,
 }
@@ -53,38 +53,14 @@ impl Source {
     ];
 }
 
-/// One `u64` per source plus the total; `percpu::OFF_IRQ_COUNTS` is where the block starts.
+/// One `u64` per source plus the total, in each CPU's own per-CPU block.
 pub const SLOTS: usize = 1 + Source::COUNT;
 
 /// Index of the machine's own total inside a CPU's block.
 pub const TOTAL: usize = 0;
 
-/// The `gs:` displacement of slot `index` in this CPU's block.
-pub const fn slot_offset(index: usize) -> u32 {
-    percpu::OFF_IRQ_COUNTS + (index as u32) * 8
-}
-
-/// Records one delivery of `$source` as two lock-free `add`s to this CPU's own gs: slots.
-/// A macro, not a function: the two offsets must be asm immediates, not const-generic values an optimiser could relax.
-macro_rules! irq_took {
-    ($source:ident) => {{
-        // SAFETY: both slots are this CPU's own counter block per `arch::percpu`, and the caller is an interrupt handler, so `GS_BASE` already points at this CPU's `PerCpu`.
-        unsafe {
-            ::core::arch::asm!(
-                "add qword ptr gs:[{total}], 1",
-                "add qword ptr gs:[{source}], 1",
-                total = const $crate::irq_census::slot_offset($crate::irq_census::TOTAL),
-                source = const $crate::irq_census::slot_offset(
-                    1 + $crate::irq_census::Source::$source as usize
-                ),
-                // no `nomem` because both instructions write; no `preserves_flags` because `add` clobbers flags.
-                options(nostack),
-            );
-        }
-    }};
-}
-
-pub(crate) use irq_took;
+/// Counted where each is taken, by the architecture's handlers
+/// (`arch::percpu::irq_took!`), into this CPU's own block.
 
 /// Each CPU's counter-array address; only the array is published, so a reader never touches the rest of the block the owning CPU writes through raw pointers.
 static BLOCKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
@@ -148,26 +124,11 @@ pub fn taken_by(cpu: u32) -> Option<u64> {
     read(cpu).map(|counts| counts[TOTAL].saturating_sub(counts[1 + Source::Nmi as usize]))
 }
 
-/// [`taken_by`] for the CPU asking, read straight off `gs:` — the one form a CPU
-/// inside an NMI may use, since it needs neither the published pointer array nor
-/// a bounds check on a `cpu_id` it is standing on.
+/// [`taken_by`] for the CPU asking, read straight off its own block — the one
+/// form a CPU inside an NMI may use, since it needs neither the published
+/// pointer array nor a bounds check on a `cpu_id` it is standing on.
 pub fn taken_here() -> u64 {
-    let total: u64;
-    let nmis: u64;
-    // SAFETY: both slots are this CPU's own counter block per `arch::percpu`;
-    // `GS_BASE` points at the running CPU's `PerCpu` in every context this is
-    // read from.
-    unsafe {
-        core::arch::asm!(
-            "mov {total}, qword ptr gs:[{at}]",
-            "mov {nmis}, qword ptr gs:[{nmi_at}]",
-            total = out(reg) total,
-            nmis = out(reg) nmis,
-            at = const slot_offset(TOTAL),
-            nmi_at = const slot_offset(1 + Source::Nmi as usize),
-            options(nostack, readonly, preserves_flags),
-        );
-    }
+    let (total, nmis) = percpu::irq_counts_here(TOTAL, 1 + Source::Nmi as usize);
     total.saturating_sub(nmis)
 }
 

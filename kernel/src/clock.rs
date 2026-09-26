@@ -1,103 +1,23 @@
-//! The machine's clocks: monotonic since boot, calibrated from the HPET at
-//! boot and read off the TSC after; and wall-clock, read from the CMOS RTC
-//! exactly once — a CMOS read can block for up to a second — in
-//! [`init_wall`], and answered after as that reading plus [`nanos_since_boot`].
+//! The machine's clocks: monotonic since boot, read off the CPU's free-running
+//! counter at the period the architecture's boot gives [`set_counter`] (on
+//! x86-64, measured against the HPET); and wall-clock, read from the
+//! architecture's RTC exactly once — a CMOS read can block for up to a
+//! second — in [`init_wall`], and answered after as that reading plus
+//! [`nanos_since_boot`].
 
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 
-use crate::mm::paging::MmioPolicy;
 use crate::arch::cpu;
-use crate::time::{Delay, Duration, Instant};
-
-const HPET_CAP: u64 = 0x000;
-const HPET_CFG: u64 = 0x010;
-const HPET_COUNTER: u64 = 0x0F0;
+use crate::time::Instant;
 
 static TSC_BOOT: AtomicU64 = AtomicU64::new(0);
 static TSC_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
 
-pub fn init(hpet_base: u64) {
-    let hpet = crate::mm::paging::map_mmio(hpet_base, 0x1000, MmioPolicy::Uncacheable);
-
-    let cap = hpet.read_u64(HPET_CAP);
-    let hpet_period_fs = cap >> 32;
-    assert!(hpet_period_fs > 0, "HPET: invalid counter period");
-
-    let cfg = hpet.read_u64(HPET_CFG);
-    hpet.write_u64(HPET_CFG, cfg | 1);
-
-    const CALIBRATION: Delay = Delay::to_measure(
-        Duration::from_millis(50),
-        "TSC ticks counted against the HPET; longer is a better ratio and boot time is what it costs",
-    );
-    let calibration_ns = CALIBRATION.nanos();
-    let calibration_hpet_ticks = calibration_ns * 1_000_000 / hpet_period_fs;
-
-    let hpet_start = hpet.read_u64(HPET_COUNTER);
-    let tsc_start = cpu::rdtsc();
-    let hpet_target = hpet_start + calibration_hpet_ticks;
-    log!(
-        "clock: HPET at {:#x} enabled, period={}fs, counter reads {}, calibrating over {} ticks",
-        hpet_base,
-        hpet_period_fs,
-        hpet_start,
-        calibration_hpet_ticks,
-    );
-
-    // A main counter that does not advance would spin here forever, and this is
-    // the boot's last wait before it has a clock: the only unit available to
-    // bound it is the TSC's own, so the budget is the calibration converted at
-    // a frequency no x86-64 part reaches, which makes it an over-estimate of
-    // the cycles the calibration can legitimately take on any machine.
-    const TSC_CEILING_HZ: u64 = 10_000_000_000;
-    // Times two, so a machine merely slower than the ceiling is not refused for it.
-    let stall_budget_cycles = 2 * calibration_ns * (TSC_CEILING_HZ / 1_000_000_000);
-    while hpet.read_u64(HPET_COUNTER) < hpet_target {
-        assert!(
-            cpu::rdtsc().wrapping_sub(tsc_start) <= stall_budget_cycles,
-            "clock: the HPET main counter at {:#x} did not reach {} in {} TSC cycles (it started \
-             at {} and reads {}), so this machine offers no clock to calibrate against",
-            hpet_base,
-            hpet_target,
-            stall_budget_cycles,
-            hpet_start,
-            hpet.read_u64(HPET_COUNTER),
-        );
-    }
-    let tsc_end = cpu::rdtsc();
-    let hpet_end = hpet.read_u64(HPET_COUNTER);
-
-    let hpet_elapsed_fs = (hpet_end - hpet_start) as u128 * hpet_period_fs as u128;
-    let tsc_delta = tsc_end - tsc_start;
-    let tsc_period_fs = (hpet_elapsed_fs / tsc_delta as u128) as u64;
-
-    TSC_BOOT.store(tsc_start, Relaxed);
-    TSC_PERIOD_FS.store(tsc_period_fs, Relaxed);
-
-    let tsc_freq_mhz = 1_000_000_000_000_000u64 / tsc_period_fs / 1_000_000;
-    log!("TSC: {}MHz (period={}fs, calibrated over {}ms)", tsc_freq_mhz, tsc_period_fs, calibration_ns / 1_000_000);
-
-    // **The one cross-source check this machine offers.** Everything else the
-    // kernel times is derived from the measurement just taken, so it could only
-    // agree with itself; CPUID 15H/16H is the part's own statement of the same
-    // frequency, arrived at by neither the HPET nor this counting loop, and the
-    // parts-per-million between the two is what a metal profile can hold a
-    // ceiling against.
-    let measured_hz = 1_000_000_000_000_000u64 / tsc_period_fs;
-    match cpuid_tsc_hz() {
-        Some(stated) => {
-            let apart = measured_hz.abs_diff(stated);
-            log!(
-                "clock: TSC measured {measured_hz}Hz against the HPET, CPUID states {stated}Hz, \
-                 {}ppm apart",
-                apart * 1_000_000 / stated,
-            );
-        }
-        None => log!(
-            "clock: TSC measured {measured_hz}Hz against the HPET; CPUID leaves 15H and 16H \
-             stating no frequency, so nothing independent confirms it"
-        ),
-    }
+/// Start the clock on the counter: its reading at boot and its measured period.
+/// The architecture's boot calls this once, after it has the period.
+pub fn set_counter(boot: u64, period_fs: u64) {
+    TSC_BOOT.store(boot, Relaxed);
+    TSC_PERIOD_FS.store(period_fs, Relaxed);
 }
 
 /// Whether [`nanos_since_boot`] measures anything yet; false before [`init`].
@@ -105,54 +25,12 @@ pub fn calibrated() -> bool {
     TSC_PERIOD_FS.load(Relaxed) != 0
 }
 
-/// The TSC's frequency in hertz as CPUID *states* it, for the one caller that
-/// may run before [`init`] — the panic path, which has to bound a wait on a
-/// machine that never reached the HPET. Nothing calibrates against it and no
-/// third source is guessed at: a CPU that states neither leaf answers `None`
-/// and its caller says so rather than inventing a rate.
-pub fn cpuid_tsc_hz() -> Option<u64> {
-    let max_leaf = cpu::cpuid(0, 0).0;
-    tsc_hz_from(
-        (max_leaf >= 0x15).then(|| cpu::cpuid(0x15, 0)),
-        (max_leaf >= 0x16).then(|| cpu::cpuid(0x16, 0)),
-    )
-}
-
-/// SDM Vol. 2A, CPUID leaf 15H: EAX is the denominator and EBX the numerator of
-/// the core crystal's ratio to the TSC, ECX the crystal's hertz — any of the
-/// three reading zero means the leaf states nothing. Leaf 16H's EAX is the
-/// processor base frequency in MHz, which an invariant TSC counts at.
-const fn tsc_hz_from(
-    leaf15: Option<(u32, u32, u32, u32)>,
-    leaf16: Option<(u32, u32, u32, u32)>,
-) -> Option<u64> {
-    if let Some((denominator, numerator, crystal_hz, _)) = leaf15 {
-        if denominator != 0 && numerator != 0 && crystal_hz != 0 {
-            return Some(crystal_hz as u64 * numerator as u64 / denominator as u64);
-        }
-    }
-    if let Some((base_mhz, _, _, _)) = leaf16 {
-        if base_mhz != 0 {
-            return Some(base_mhz as u64 * 1_000_000);
-        }
-    }
-    None
-}
-
-const _: () = {
-    // The ratio, then the fall-through to the base frequency when the crystal
-    // is not enumerated, then the CPU that states neither.
-    assert!(matches!(tsc_hz_from(Some((2, 4, 25_000_000, 0)), None), Some(50_000_000)));
-    assert!(matches!(tsc_hz_from(Some((0, 0, 0, 0)), Some((2_400, 0, 0, 0))), Some(2_400_000_000)));
-    assert!(tsc_hz_from(None, Some((0, 0, 0, 0))).is_none());
-    assert!(tsc_hz_from(None, None).is_none());
-};
 
 /// Nanoseconds since boot; lock-free, no MMIO, and never panics — `log::emit`
 /// reads it from inside a bracket where panicking would reenter the log.
 /// Saturating, not wrapping: a trailing CPU reads as oldest, not lying newest after a 584-year wrap.
 pub fn nanos_since_boot() -> u64 {
-    let delta = cpu::rdtsc().saturating_sub(TSC_BOOT.load(Relaxed));
+    let delta = cpu::counter().saturating_sub(TSC_BOOT.load(Relaxed));
     let period_fs = TSC_PERIOD_FS.load(Relaxed);
     ((delta as u128 * period_fs as u128) / 1_000_000) as u64
 }
@@ -166,7 +44,7 @@ pub fn now() -> Instant {
 /// The [`cpu::rdtsc`] value `nanos` in the future, for a wait loop that must
 /// not call the nanosecond clock.
 pub fn tsc_deadline(nanos: u64) -> u64 {
-    cpu::rdtsc().saturating_add(tsc_ticks(nanos))
+    cpu::counter().saturating_add(tsc_ticks(nanos))
 }
 
 /// `nanos` as a count of TSC ticks: a span converted once and then compared
@@ -203,7 +81,7 @@ pub fn settles(nanos: u64, ready: impl Fn() -> bool) -> bool {
     }
     let until = tsc_deadline(nanos);
     while !ready() {
-        if cpu::rdtsc() >= until {
+        if cpu::counter() >= until {
             return false;
         }
         core::hint::spin_loop();

@@ -82,15 +82,15 @@ pub(super) extern "sysv64" fn timer_entry() {
         armed_ticks = const crate::arch::percpu::OFF_LAST_ARMED_TICKS,
         need_resched = const crate::arch::percpu::OFF_NEED_RESCHED,
         ring0_fires = const crate::arch::percpu::OFF_RING0_TIMER_FIRES,
-        irq_total = const crate::irq_census::slot_offset(crate::irq_census::TOTAL),
-        irq_timer = const crate::irq_census::slot_offset(
+        irq_total = const crate::arch::percpu::irq_slot_offset(crate::irq_census::TOTAL),
+        irq_timer = const crate::arch::percpu::irq_slot_offset(
             1 + crate::irq_census::Source::Timer as usize
         ),
     );
 }
 
 extern "sysv64" fn timer_handler() {
-    crate::irq_census::irq_took!(Timer);
+    crate::arch::percpu::irq_took!(Timer);
     // Before anything that can take a lock: a CPU running userland is the other
     // half of the coverage the Ring 0 branch above gives a CPU holding one.
     crate::deadline::poll();

@@ -12767,9 +12767,9 @@ fn run_machine_test(
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
             // the compiler cannot reach, because the container works. Its other
-            // two are unrepresented here — both CPU models carry `+rdrand`
-            // (`src/lib.rs:73-76`) and QEMU's DRNG always answers — so
-            // `NO_RDRAND` and `NO_ENTROPY` are mutation-measured.
+            // two are unrepresented here — both x86-64 CPU models carry `+rdrand`
+            // (`Arch::cpu`) and QEMU's DRNG always answers — so
+            // the no-source refusal and `NO_ENTROPY` are mutation-measured.
             const UNSEEDED: &str = "kernel hasher: a hash container was built before hasher::seed()";
             let qemu = QemuInstance::boot_with_options(
                 test_config,

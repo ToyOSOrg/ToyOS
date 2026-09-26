@@ -57,7 +57,7 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
 
 /// Counts the delivery, remembers the vector, and EOIs only if the ISR needs one.
 extern "sysv64" fn took() {
-    crate::irq_census::irq_took!(Unclaimed);
+    crate::arch::percpu::irq_took!(Unclaimed);
     match apic::in_service_highest() {
         Some(vector) => {
             TAKEN[(vector >> 6) as usize].fetch_or(1 << (vector & 63), Ordering::Relaxed);

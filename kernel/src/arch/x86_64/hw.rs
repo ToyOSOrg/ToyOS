@@ -13,7 +13,7 @@ use toyos_sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent};
 use toyos_sched::task::{TaskAccounting, TaskKey};
 
 use crate::arch::{apic, cpu, percpu};
-use crate::sched::driver::context_switch;
+use super::switch::context_switch;
 use crate::sched::payload::{KernelCtx, KernelPayload};
 
 /// The one instance; zero-sized, holds no per-CPU state.
@@ -290,7 +290,7 @@ fn switch_witness_capture(ctx: &KernelCtx, token: &RunToken<KernelPayload>, rsp:
 
 /// Compares the frame about to be popped against the one [`check_switch_frame`] validated.
 /// # Safety
-/// Must run from [`crate::sched::driver::context_switch`], with `rsp` equal to the live stack
+/// Must run from [`super::switch::context_switch`], with `rsp` equal to the live stack
 /// pointer and this CPU's shadow already filled by [`switch_witness_capture`].
 #[cfg(feature = "switch-witness")]
 pub(crate) unsafe extern "C" fn switch_witness_verify(rsp: u64) {

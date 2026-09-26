@@ -676,7 +676,7 @@ pub(super) fn look_for(index: usize) -> Option<Whereabouts> {
 /// caller that waits for a device on a CPU it holds with `IF` clear: the
 /// interrupt a connect raises may be this CPU's, and it takes none. `kick`
 /// wakes every other CPU, since a halted one has stopped its own timer; the
-/// kick is refused only before `apic::init`, and no other CPU has been started
+/// kick is refused only before `irqchip::init`, and no other CPU has been started
 /// before it.
 pub(super) fn ports_wanted(kick: bool) {
     PORT_WORK_AT.store(crate::clock::nanos_since_boot().max(1), Ordering::Relaxed);
@@ -686,7 +686,7 @@ pub(super) fn ports_wanted(kick: bool) {
     let me = crate::arch::percpu::cpu_id();
     for cpu in 0..crate::arch::smp::cpu_count() {
         if cpu != me {
-            crate::arch::apic::kick_cpu(cpu);
+            crate::arch::irqchip::kick_cpu(cpu);
         }
     }
 }
@@ -1726,7 +1726,7 @@ fn take_within(bound: u64) -> Option<crate::sync::LockGuard<'static, Vec<XhciCon
         if let Some(guard) = XHCI.try_lock() {
             return Some(guard);
         }
-        if crate::arch::cpu::rdtsc() >= until {
+        if crate::arch::cpu::counter() >= until {
             return None;
         }
         core::hint::spin_loop();

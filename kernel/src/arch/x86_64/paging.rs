@@ -15,6 +15,7 @@ use crate::hasher::HashMap;
 use toyos_pcid::{Alloc, Pcid, PcidPool};
 
 use crate::mm::{UserAddr, PAGE_2M};
+pub use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
 use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
 use crate::sync::Lock;
@@ -40,22 +41,6 @@ const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
 /// Every upper-level table entry's flags: present, writable, user.
 const TABLE_FLAGS: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
 
-/// 4 KiB pages in one 2 MiB page.
-const PAGES_PER_2M: usize = (PAGE_2M / 4096) as usize;
-
-/// What a user mapping may be used for: no variant is both writable and
-/// executable, and every variant implies read since `PAGE_USER` grants it
-/// unconditionally.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Prot {
-    /// Read-only: neither writable nor executable.
-    Read,
-    /// Data: readable and writable, never executable.
-    ReadWrite,
-    /// Code. Never writable.
-    ReadExec,
-}
-
 impl Prot {
     /// The permission bits a leaf entry carries; address and cache policy stay the caller's.
     fn leaf_bits(self) -> u64 {
@@ -68,45 +53,14 @@ impl Prot {
     }
 }
 
-/// What each 4 KiB page of a 2 MiB window may be used for: split because
-/// `toyos-ld` can align a window across the end of `.text` and start of `.data`.
-pub struct WindowProt([Prot; PAGES_PER_2M]);
-
-impl WindowProt {
-    /// A window whose pages all say the same thing.
-    pub const fn uniform(prot: Prot) -> Self {
-        Self([prot; PAGES_PER_2M])
-    }
-
-    /// Sets the 4 KiB page `offset` bytes in; an out-of-window offset panics.
-    pub fn set(&mut self, offset: u64, prot: Prot) {
-        self.0[(offset / 4096) as usize] = prot;
-    }
-
-    /// The one protection every page carries, or `None` where they disagree.
-    fn agreed(&self) -> Option<Prot> {
-        let first = self.0[0];
-        self.0.iter().all(|&p| p == first).then_some(first)
-    }
-}
-
-/// Which PAT entry a 2 MiB mapping selects, out of the three this kernel
-/// ever writes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CachePolicy {
-    /// PAT entry 0 (WB); the range's actual type is the MTRR's (SDM Vol. 3A Table 11-7).
-    DeferToMtrr,
-    /// PAT entry [`pat::UC_ENTRY`](crate::arch::pat::UC_ENTRY): UC under
-    /// every MTRR type (Table 11-7), whatever firmware set or forgot.
-    Uncacheable,
-    /// PAT entry [`pat::WC_ENTRY`](crate::arch::pat::WC_ENTRY).
-    WriteCombining,
-}
-
+/// Which PAT entry a 2 MiB mapping selects: `Normal` is entry 0 (WB), whose
+/// type for a range is the MTRR's (SDM Vol. 3A Table 11-7); `Uncacheable` is
+/// [`pat::UC_ENTRY`](crate::arch::pat::UC_ENTRY), UC under every MTRR type;
+/// `WriteCombining` is [`pat::WC_ENTRY`](crate::arch::pat::WC_ENTRY).
 impl CachePolicy {
     fn pde_bits(self) -> u64 {
         match self {
-            Self::DeferToMtrr => 0,
+            Self::Normal => 0,
             Self::Uncacheable => PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
             Self::WriteCombining => PAGE_PAT_2M,
         }
@@ -115,7 +69,7 @@ impl CachePolicy {
     /// Any other combination is an entry this code never wrote.
     fn from_pde(pde: u64) -> Self {
         match (pde & PAGE_PAT_2M != 0, pde & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH)) {
-            (false, 0) => Self::DeferToMtrr,
+            (false, 0) => Self::Normal,
             (true, 0) => Self::WriteCombining,
             (false, low) if low == PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH => Self::Uncacheable,
             _ => panic!(
@@ -135,26 +89,6 @@ const _: () = assert!(
     crate::arch::pat::UC_ENTRY == 3,
     "Uncacheable sets PCD and PWT and leaves the PAT bit clear, which is entry 3",
 );
-
-/// What an MMIO window may select — never PAT entry 0: device registers
-/// deferred to firmware's MTRR coverage were cacheable wherever an MTRR was
-/// missing, and this type removes that as a possibility.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum MmioPolicy {
-    /// Registers.
-    Uncacheable,
-    /// The scanout alone.
-    WriteCombining,
-}
-
-impl MmioPolicy {
-    fn cache(self) -> CachePolicy {
-        match self {
-            Self::Uncacheable => CachePolicy::Uncacheable,
-            Self::WriteCombining => CachePolicy::WriteCombining,
-        }
-    }
-}
 
 /// A 4KB-aligned page of 512 entries, matching the hardware page table format.
 #[repr(C, align(4096))]
@@ -556,8 +490,8 @@ impl AddressSpace {
         );
 
         let mut table = Box::new(PageTablePage([0; 512]));
-        for (i, &page_prot) in prot.0.iter().enumerate() {
-            // No cache bits: `DeferToMtrr` is the zero pattern at both granularities.
+        for (i, page_prot) in prot.pages().enumerate() {
+            // No cache bits: `Normal` is the zero pattern at both granularities.
             table.init_entry(i, (phys + i as u64 * 4096) | page_prot.leaf_bits());
         }
         let table_phys = table.phys();
@@ -789,7 +723,7 @@ impl AddressSpace {
             return None;
         }
         if pde & PAGE_SIZE_BIT == 0 {
-            // A split table: leaves have cache bits clear (`DeferToMtrr`),
+            // A split table: leaves have cache bits clear (`Normal`),
             // asserted since the two granularities put the PAT bit at different offsets.
             let pte = self.root.child(pml4_idx)?.child(pdpt_idx)?.child(pd_idx)?
                 [((virt >> 12) & 0x1FF) as usize];
@@ -798,7 +732,7 @@ impl AddressSpace {
                 "policy_at: the 4 KiB entry {pte:#x} at {virt:#x} selects a PAT entry \
                  outside 0",
             );
-            return Some(CachePolicy::DeferToMtrr);
+            return Some(CachePolicy::Normal);
         }
         Some(CachePolicy::from_pde(pde))
     }
@@ -875,7 +809,7 @@ impl AddressSpace {
             existing & PAGE_PRESENT == 0
                 || existing & !(PAGE_ACCESSED | PAGE_DIRTY) == entry
                 || (existing & PAGE_SIZE_BIT != 0
-                    && CachePolicy::from_pde(existing) == CachePolicy::DeferToMtrr),
+                    && CachePolicy::from_pde(existing) == CachePolicy::Normal),
             "map_2m: {phys:#x} is mapped {existing:#x} and cannot also be {entry:#x}"
         );
         // Neither caller wants the single address: [`map_mmio`] flushes every
@@ -1216,4 +1150,23 @@ pub fn debug_page_walk(addr: u64) {
         return;
     }
     log!("    -> 4KB page at {:#x}", pte & ADDR_MASK);
+}
+
+/// What a write-combining scanout at `[addr, addr + size)` actually is, as the
+/// GOP driver reports it: the effective type under PAT entry WC, the MTRRs'
+/// type for the range, and the entry.
+pub fn scanout_memory_type(addr: u64, size: u64) -> impl core::fmt::Display {
+    struct Report(crate::arch::mtrr::Effective);
+    impl core::fmt::Display for Report {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(
+                f,
+                "{} (MTRR {}, PAT entry {})",
+                crate::arch::mtrr::effective_under_wc(&self.0).map_or("unknown", |t| t.name()),
+                self.0.name(),
+                crate::arch::pat::WC_ENTRY,
+            )
+        }
+    }
+    Report(crate::arch::mtrr::range_type(addr, size))
 }

@@ -11,11 +11,15 @@
 
 pub mod apic;
 pub mod barrier;
+pub mod boot;
 pub mod cache;
 pub mod control_regs;
+pub mod console_uart;
 pub mod cpu;
+pub mod entropy;
 pub mod entry;
 pub mod fpu;
+pub mod hpet;
 pub mod hw;
 pub mod i8042;
 pub mod idt;
@@ -26,14 +30,19 @@ pub mod nmi_gate;
 pub mod paging;
 pub mod pat;
 pub mod percpu;
+pub mod pio;
+pub mod pmu;
 pub mod rtc;
 pub mod smp;
+pub mod switch;
 pub mod syscall;
 pub mod tlb;
 pub mod vtd;
 pub mod watchdog;
 
+pub use apic as irqchip;
 pub use i8042 as keyboard_controller;
+pub use idt as trap;
 pub use vtd as iommu_unit;
 
 pub use apic::{msi_message, MSI_DOORBELL};

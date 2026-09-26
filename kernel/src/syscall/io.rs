@@ -12,7 +12,6 @@ use crate::time::{Cadence, Deadline, Duration};
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::{device, pipe, process};
 
-use crate::arch::cpu;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::*;
 use toyos_sched::task::WaitClass;
@@ -279,13 +278,13 @@ pub(super) fn sys_write_nonblock(h: RawHandle, buf: &UserBytes) -> u64 {
 pub(super) fn sys_random(out: &mut UserBytesMut) -> u64 {
     let mut i = 0;
     while i + 8 <= out.len() {
-        let Some(drawn) = cpu::rdrand() else { return SyscallError::Io.to_u64() };
+        let Some(drawn) = crate::arch::entropy::draw() else { return SyscallError::Io.to_u64() };
         out.write_at(i, &drawn.to_ne_bytes());
         i += 8;
     }
     let remaining = out.len() - i;
     if remaining > 0 {
-        let Some(drawn) = cpu::rdrand() else { return SyscallError::Io.to_u64() };
+        let Some(drawn) = crate::arch::entropy::draw() else { return SyscallError::Io.to_u64() };
         out.write_at(i, &drawn.to_ne_bytes()[..remaining]);
     }
     0

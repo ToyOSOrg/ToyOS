@@ -1,10 +1,9 @@
 //! Loads a built process onto a CPU and builds the handle table it starts
-//! with. The two trampolines below are the loader's only per-architecture
-//! code; everything else here is architecture-neutral.
+//! with. The frame a new stack starts from and the trampolines it returns into
+//! are the architecture's (`arch::entry`).
 
 use alloc::vec::Vec;
 
-use crate::arch::entry::{initial_user_state, ring3_trampoline_asm};
 use crate::object::{HandleTable, Refusal};
 use crate::process::{
     process_data, Endowments, OwnedAlloc, ENDOW_ENTRY_LEN, KERNEL_STACK_SIZE,
@@ -27,90 +26,9 @@ pub(crate) fn alloc_kernel_stack(
     let alloc = OwnedAlloc::new(KERNEL_STACK_SIZE, 4096)?;
     scheduler::write_stack_canary(&alloc);
     let top = alloc.ptr() as u64 + KERNEL_STACK_SIZE as u64;
-    // Layout must match context_switch's pop sequence: pushfq, rbp..r15, return address.
-    let frame = (top - 8 * 8) as *mut u64;
-    // SAFETY: `alloc` is fresh and exclusively owned; the eight writes cover
-    // `[frame, frame + 64)`, the top 64 bytes of that allocation.
-    unsafe {
-        *frame.add(0) = 0; // r15
-        *frame.add(1) = arg; // r14
-        *frame.add(2) = user_sp; // r13
-        *frame.add(3) = user_entry; // r12
-        *frame.add(4) = 0; // rbx
-        *frame.add(5) = 0; // rbp
-        *frame.add(6) = 0x002; // RFLAGS (IF=0, AC=0)
-        *frame.add(7) = trampoline as usize as u64; // return address
-    }
-    Some((alloc, frame as u64))
-}
-
-/// Entry point for new processes, reached through `context_switch`'s `ret`. r12 = entry point, r13 = user stack pointer.
-// State loads after `unlock`, not before: earlier, registers hold the previous tenant's kernel context.
-#[unsafe(naked)]
-pub(crate) extern "C" fn process_start() {
-    ring3_trampoline_asm!(
-        "push r12",
-        "push r13",
-        "call {unlock}",
-        "pop r13",
-        "pop r12",
-        initial_user_state!(),
-        "push {user_ss}",
-        "push r13",         // RSP: user stack
-        "push 0x202",       // RFLAGS: IF=1
-        "push {user_cs}",
-        "push r12",         // RIP: entry point
-        "iretq",
-        unlock = sym crate::sched::driver::trampoline_entry,
-        user_ss = const crate::arch::percpu::USER_DS,
-        user_cs = const crate::arch::percpu::USER_CS,
-    );
-}
-
-/// Entry point for new threads. r14 carries the argument, which lands in rdi.
-#[unsafe(naked)]
-pub(crate) extern "C" fn thread_start() {
-    ring3_trampoline_asm!(
-        "push r12",
-        "push r13",
-        "push r14",
-        "call {unlock}",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        initial_user_state!(),
-        "mov rdi, r14",
-        "sub r13, 8",       // ABI: RSP must be 16n+8 at function entry
-        "push {user_ss}",
-        "push r13",
-        "push 0x202",
-        "push {user_cs}",
-        "push r12",
-        "iretq",
-        unlock = sym crate::sched::driver::trampoline_entry,
-        user_ss = const crate::arch::percpu::USER_DS,
-        user_cs = const crate::arch::percpu::USER_CS,
-    );
-}
-
-/// Entry point for a kernel thread: r12 = body, r14 = argument. Never reaches Ring 3.
-// The `sti` is load-bearing: `alloc_kernel_stack` leaves `IF` clear, and `trampoline_entry` requires it clear on entry.
-#[unsafe(naked)]
-pub(crate) extern "C" fn kernel_start() {
-    core::arch::naked_asm!(
-        "call {unlock}",
-        "sti",
-        "mov rdi, r14",
-        "call r12",
-        "call {returned}",
-        unlock = sym crate::sched::driver::trampoline_entry,
-        returned = sym kernel_thread_returned,
-    );
-}
-
-/// What [`kernel_start`] calls when a kernel thread's body returns: panics rather than halting silently.
-extern "C" fn kernel_thread_returned() -> ! {
-    panic!("a kernel thread's body returned; nothing runs on this stack now");
+    // SAFETY: `alloc` is fresh and exclusively owned, and `top` is its end.
+    let frame = unsafe { crate::arch::entry::initial_frame(top, trampoline, user_entry, user_sp, arg) };
+    Some((alloc, frame))
 }
 
 /// The last path component, truncated to what a process entry can hold.

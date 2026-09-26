@@ -49,7 +49,7 @@ pub fn vma_map(
     size: u64,
     prot: Prot,
 ) -> Option<(UserAddr, u64)> {
-    pt.lock().alloc_and_map(phys, size, prot, CachePolicy::DeferToMtrr)
+    pt.lock().alloc_and_map(phys, size, prot, CachePolicy::Normal)
 }
 
 
@@ -955,7 +955,7 @@ fn teardown_resources(
     crate::irq_census::log_census();
     // After the irq lines: the tlb conservation check reads deliveries first, issues second.
     crate::arch::tlb::log_census();
-    crate::arch::idt::unclaimed::log_vectors();
+    crate::arch::trap::unclaimed::log_vectors();
 
     ops::close_all(&mut data.handles);
     data.elf.elf_alloc.take();
@@ -1536,7 +1536,7 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     }
     dump_region("rip", rip);
 
-    let fs_base = crate::arch::cpu::read_fs_base();
+    let fs_base = crate::arch::cpu::thread_pointer();
     if fs_base != 0 {
         log!("  FS base: {:#x}", fs_base);
         if let Some(self_ptr) = read_user(fs_base) {

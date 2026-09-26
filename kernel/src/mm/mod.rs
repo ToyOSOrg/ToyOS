@@ -8,6 +8,7 @@ pub use crate::arch::paging;
 mod alloc;
 mod dma;
 mod mmio;
+pub mod policy;
 mod region;
 mod unmapped;
 

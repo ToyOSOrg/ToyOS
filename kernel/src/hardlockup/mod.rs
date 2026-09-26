@@ -47,7 +47,7 @@
 //!   is not spinning on anything, and one that is woken takes the interrupt
 //!   that wakes it.
 //! - **The span before `clock::init`,** which has no TSC period to convert a
-//!   bound with, and before `apic::init`, which has no LVT to arm. The same
+//!   bound with, and before `irqchip::init`, which has no LVT to arm. The same
 //!   floor `crate::deadline` states.
 //! - **A CPU with `IF` set that no timer ever interrupts.** Nothing resets it,
 //!   deliberately, and what keeps that from being a hole is
@@ -59,7 +59,7 @@
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
-use crate::arch::{apic, cpu, percpu, smp};
+use crate::arch::{cpu, percpu, pmu, smp, trap};
 use crate::sched::MAX_CPUS;
 
 /// The negative control, in a file of its own because it says what it staged
@@ -71,10 +71,6 @@ pub mod probe;
 /// under `Previous boot's panic:`. A constant because the harness judges the
 /// line and nothing links the two crates (`src/bootlog.rs`).
 pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
-
-/// `RFLAGS.IF` in the frame the NMI pushed: whether the CPU this landed on
-/// could have taken any other interrupt at that instant.
-const RFLAGS_IF: u64 = 1 << 9;
 
 /// How often an armed CPU samples itself, in nanoseconds of unhalted time.
 ///
@@ -99,10 +95,6 @@ static TICKS_PER_MS: AtomicU64 = AtomicU64::new(0);
 /// since fixed counter 2 counts the reference clock (SDM Vol. 3B §20.2.2).
 static PERIOD: AtomicU64 = AtomicU64::new(0);
 
-/// The counter's width as CPUID states it, as a mask: bits above it may not be
-/// written back.
-static WIDTH_MASK: AtomicU64 = AtomicU64::new(0);
-
 /// Whether the panic path has taken this machine. A panicked kernel holds its
 /// panel with `IF` clear for [`toyos_tco::PANIC_BOUND_MS`] and is not wedged —
 /// somebody is reading it — so the detector stands down rather than resetting a
@@ -125,26 +117,6 @@ static ARMED_PMU: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MA
 /// acquires. Zero is a CPU that is inside no contended acquisition.
 static SPIN_LOCK: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static SPIN_AT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-
-/// The architectural performance-monitoring MSRs this file writes, SDM Vol. 3B
-/// §20.2.2 and Vol. 4 Table 2-2. Nothing else in this kernel programs the PMU,
-/// which is why each control register below is declared whole and written
-/// whole rather than read, modified and written back.
-const IA32_FIXED_CTR2: u32 = 0x30B;
-const IA32_FIXED_CTR_CTRL: u32 = 0x38D;
-const IA32_PERF_GLOBAL_STATUS: u32 = 0x38E;
-const IA32_PERF_GLOBAL_CTRL: u32 = 0x38F;
-const IA32_PERF_GLOBAL_OVF_CTRL: u32 = 0x390;
-
-/// Fixed counter 2's nibble of `IA32_FIXED_CTR_CTRL` is bits 11:8: enable in
-/// ring 0 (bit 8) and ring 3 (bit 9), no AnyThread (bit 10), and PMI on
-/// overflow (bit 11). Counting in both rings, because a CPU that stops taking
-/// interrupts in either is the same defect.
-const FIXED_CTR2_ARMED: u64 = 0b1011 << 8;
-
-/// The fixed counters live in the high half of `IA32_PERF_GLOBAL_CTRL` and of
-/// the status and overflow-clear registers beside it, so counter 2 is bit 34.
-const GLOBAL_FIXED_CTR2: u64 = 1 << 34;
 
 /// Turn the bound this boot named into a bound on one CPU, and arm the BSP.
 ///
@@ -222,23 +194,16 @@ pub fn arm_this_cpu() {
     // is still sampled by any NMI that reaches it, and a sample against an
     // unwritten baseline would read as a CPU that has been stuck since boot.
     PROGRESS[me].store(crate::irq_census::taken_here(), Relaxed);
-    STILL_SINCE[me].store(cpu::rdtsc(), Relaxed);
-    let Some(width) = architectural_pmu() else { return };
-    WIDTH_MASK.store(mask_of(width), Relaxed);
-    // Stopped, then set up, then started: a counter enabled while its control
-    // register is half written can overflow into an LVT that is not armed yet.
-    write_msr(IA32_PERF_GLOBAL_CTRL, 0);
-    write_msr(IA32_FIXED_CTR_CTRL, FIXED_CTR2_ARMED);
-    write_msr(IA32_PERF_GLOBAL_OVF_CTRL, GLOBAL_FIXED_CTR2);
-    reload();
-    apic::arm_perf_nmi();
-    write_msr(IA32_PERF_GLOBAL_CTRL, GLOBAL_FIXED_CTR2);
+    STILL_SINCE[me].store(cpu::counter(), Relaxed);
+    if !pmu::arm(PERIOD.load(Relaxed)) {
+        return;
+    }
     ARMED_PMU[me].store(true, Relaxed);
 }
 
 /// Stand the detector down for the rest of this machine's life.
 ///
-/// Called from `apic::halt_all_cpus`, which is every fatal path's one funnel: a
+/// Called from `irqchip::halt_all_cpus`, which is every fatal path's one funnel: a
 /// panicked kernel pages its panel with `IF` clear, under a bound of its own,
 /// and a reader holding the machine open is not a machine to reset. One relaxed
 /// store, and the LVT then stays masked of its own accord — hardware masks it
@@ -257,7 +222,7 @@ pub fn bound_ms() -> u64 {
 /// One sample of the CPU this NMI landed on: where it is, whether it has taken
 /// anything since the last one, and whether that has gone on too long.
 ///
-/// Called from `arch::idt::nmi`'s `note` and nowhere else. Returns on every NMI
+/// Called from `arch::trap::nmi`'s `note` and nowhere else. Returns on every NMI
 /// that is not this CPU's own overflow, so the diagnostic senders — the blocked
 /// task dump's probe, the syscall-window storm — cost one load and one compare.
 pub fn sample(rip: u64, rsp: u64, rflags: u64) {
@@ -268,14 +233,14 @@ pub fn sample(rip: u64, rsp: u64, rflags: u64) {
     if me >= MAX_CPUS {
         return;
     }
-    let mine = ARMED_PMU[me].load(Relaxed) && overflowed();
+    let mine = ARMED_PMU[me].load(Relaxed) && pmu::overflowed();
     // A machine with no PMU has this bound only under the actuator that sends
     // the NMI the counter would have, which is how QEMU's guest reaches this
     // decision at all.
     if !mine && !crate::actuator::hard_lockup_probe() {
         return;
     }
-    let now = cpu::rdtsc();
+    let now = cpu::counter();
     AT_RIP[me].store(rip, Relaxed);
     AT_RSP[me].store(rsp, Relaxed);
     AT_RFLAGS[me].store(rflags, Relaxed);
@@ -286,7 +251,7 @@ pub fn sample(rip: u64, rsp: u64, rflags: u64) {
     // `IF` set is the whole difference between this bound and the deadline's: a
     // CPU that can still take an interrupt is one the timer entry's poll
     // reaches, and this mechanism is not about it.
-    if moved || rflags & RFLAGS_IF != 0 {
+    if moved || trap::frame_interrupts_enabled(rflags) {
         STILL_SINCE[me].store(now, Relaxed);
     } else if now.wrapping_sub(STILL_SINCE[me].load(Relaxed)) >= BOUND_TSC.load(Relaxed) {
         locked_up(me, rip, rsp, now)
@@ -294,12 +259,10 @@ pub fn sample(rip: u64, rsp: u64, rflags: u64) {
     // **After the decision and never before it.** Re-arming clears the mask
     // hardware set on delivery; leaving it set is what stops a second NMI
     // landing on the stack this one is still standing on while it seals, which
-    // `arch::idt::nmi`'s `nested_nmi` would answer by stopping the machine
+    // `arch::trap::nmi`'s `nested_nmi` would answer by stopping the machine
     // without resetting it.
     if mine {
-        write_msr(IA32_PERF_GLOBAL_OVF_CTRL, GLOBAL_FIXED_CTR2);
-        reload();
-        apic::arm_perf_nmi();
+        pmu::rearm(PERIOD.load(Relaxed));
     }
 }
 
@@ -367,57 +330,6 @@ pub fn spinning_on_nothing(was: Spinning) {
         SPIN_AT[me].store(was.at, Relaxed);
         SPIN_LOCK[me].store(was.lock, Relaxed);
     }
-}
-
-/// The counter's width, or `None` on a CPU with no architectural performance
-/// monitoring — which is every QEMU TCG guest.
-///
-/// SDM Vol. 2A, CPUID leaf 0AH: EAX[7:0] is the version, and version 2 is where
-/// the fixed-function counters and `IA32_PERF_GLOBAL_CTRL` appear; EDX[4:0] is
-/// how many fixed counters there are and EDX[12:5] how wide they are. Fixed
-/// counter 2 needs three of them.
-fn architectural_pmu() -> Option<u32> {
-    if cpu::cpuid(0, 0).0 < 0x0A {
-        return None;
-    }
-    let (eax, _, _, edx) = cpu::cpuid(0x0A, 0);
-    let version = eax & 0xff;
-    let counters = edx & 0x1f;
-    let width = (edx >> 5) & 0xff;
-    if version < 2 || counters < 3 || width == 0 || width > 64 {
-        return None;
-    }
-    Some(width)
-}
-
-const fn mask_of(width: u32) -> u64 {
-    match width >= 64 {
-        true => u64::MAX,
-        false => (1u64 << width) - 1,
-    }
-}
-
-/// Whether fixed counter 2 is the reason this NMI arrived, SDM Vol. 3B §20.2.2:
-/// `IA32_PERF_GLOBAL_STATUS` bit 34 is its overflow.
-fn overflowed() -> bool {
-    cpu::rdmsr(IA32_PERF_GLOBAL_STATUS) & GLOBAL_FIXED_CTR2 != 0
-}
-
-/// Set the counter one period below its own overflow.
-fn reload() {
-    let period = PERIOD.load(Relaxed);
-    let mask = WIDTH_MASK.load(Relaxed);
-    // Masked to the width CPUID stated: a fixed counter refuses a write of the
-    // bits above it, and the negative count is what makes the overflow land a
-    // period from here.
-    write_msr(IA32_FIXED_CTR2, 0u64.wrapping_sub(period) & mask);
-}
-
-fn write_msr(msr: u32, value: u64) {
-    // SAFETY: every MSR here is an architectural performance-monitoring counter
-    // or its control register, enumerated by CPUID leaf 0AH before this file
-    // writes any of them, and each value is that register's own field encoding.
-    unsafe { cpu::wrmsr(msr, value) };
 }
 
 /// Milliseconds, from a TSC span. One `div`, and only on the path that has
@@ -518,7 +430,7 @@ impl fmt::Display for Report {
                 "  cpu{cpu} irqs={irqs} (={} when sampled {} ago) if={} at {}{}",
                 PROGRESS[cpu].load(Relaxed),
                 Ms(now.wrapping_sub(at)),
-                u8::from(AT_RFLAGS[cpu].load(Relaxed) & RFLAGS_IF != 0),
+                u8::from(trap::frame_interrupts_enabled(AT_RFLAGS[cpu].load(Relaxed))),
                 At(AT_RIP[cpu].load(Relaxed)),
                 Waiting(cpu),
             )?;

@@ -92,7 +92,7 @@ pub(super) extern "sysv64" fn nmi_entry() {
 
 /// Loads all four words in both builds so the observer and shipping handler share one frame layout.
 extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64, rflags: u64) {
-    crate::irq_census::irq_took!(Nmi);
+    crate::arch::percpu::irq_took!(Nmi);
     #[cfg(not(feature = "boot-actuators"))]
     let _ = cs;
     #[cfg(feature = "boot-actuators")]

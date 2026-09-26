@@ -52,7 +52,7 @@ pub(super) extern "sysv64" fn spurious_entry() {
 
 /// Counts one delivery and acknowledges it if the ISR bit shows it needed one.
 extern "sysv64" fn took() {
-    crate::irq_census::irq_took!(Spurious);
+    crate::arch::percpu::irq_took!(Spurious);
     if apic::in_service(SPURIOUS_VECTOR) {
         apic::eoi();
     }

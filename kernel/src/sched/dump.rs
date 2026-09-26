@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::dump_request::{DumpRequest, Left};
 
-use crate::arch::{apic, percpu, smp};
+use crate::arch::{irqchip, percpu, smp};
 use crate::sched::payload::{SCHED_BLOCKED, SCHED_READY, SCHED_RUNNING};
 use crate::time::{Budget, Duration, Floor};
 
@@ -270,7 +270,7 @@ fn report(_proof: &UnderNothing) {
     // Every flag set before any kick, so an instant answer can't race its own flag.
     for cpu in 0..cpus {
         if cpu != me {
-            apic::kick_cpu(cpu as u32);
+            irqchip::kick_cpu(cpu as u32);
         }
     }
 
@@ -321,7 +321,7 @@ fn probe_silent(asked: &[bool; MAX_CPUS], cpus: usize) {
     #[allow(clippy::needless_range_loop)]
     for cpu in 0..cpus {
         if asked[cpu] {
-            apic::send_nmi(cpu as u32);
+            irqchip::send_nmi(cpu as u32);
         }
     }
 
@@ -387,7 +387,7 @@ pub(super) fn deaf_window() {
             // Not an `IrqGuard`: this must unconditionally set IF on exit, and
             // panic recovery may already have left IF clear.
             crate::arch::cpu::disable_interrupts();
-            while crate::arch::cpu::rdtsc() < until {
+            while crate::arch::cpu::counter() < until {
                 core::hint::spin_loop();
             }
             crate::arch::cpu::enable_interrupts();
@@ -406,7 +406,7 @@ pub(super) fn deaf_window() {
     }
     // Driven from here, not idle-loop iterations: cpu0 may halt between them.
     STAGE.store(ASKED, Ordering::Release);
-    apic::kick_cpu(victim as u32);
+    irqchip::kick_cpu(victim as u32);
     let deadline = crate::clock::nanos_since_boot().saturating_add(ACK_BUDGET_NS);
     while STAGE.load(Ordering::Acquire) != DEAF {
         if crate::clock::nanos_since_boot() >= deadline {

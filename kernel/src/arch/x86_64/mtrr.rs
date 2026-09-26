@@ -1,7 +1,7 @@
 //! What memory type firmware gave a physical range.
 //!
 //! Read-only: firmware owns these registers, the kernel programs none. A
-//! mapping with [`CachePolicy::DeferToMtrr`](crate::mm::paging::CachePolicy)
+//! mapping with [`CachePolicy::Normal`](crate::mm::paging::CachePolicy)
 //! selects PAT entry 0 (WB), so what this module reports is the effective
 //! type; the exception is [`effective_under_wc`], where WC outvotes the MTRR
 //! instead of deferring to it.

@@ -488,7 +488,7 @@ fn buffer_full(status: u8) -> bool {
 /// Rust half of the pin-interrupt handler. Read the module doc before adding
 /// anything to it.
 pub extern "sysv64" fn handler() {
-    crate::irq_census::irq_took!(I8042);
+    crate::arch::percpu::irq_took!(I8042);
     let timestamp = crate::clock::nanos_since_boot();
     // No compare-exchange: this handler cannot nest, so there's no second writer.
     let first = FIRST_IRQ_NS.load(Ordering::Relaxed) == 0;

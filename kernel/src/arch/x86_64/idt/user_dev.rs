@@ -13,7 +13,7 @@ use super::device_irq::device_irq_entry;
 use crate::irq_ring::IrqSource;
 
 fn took(slot: usize) {
-    crate::irq_census::irq_took!(UserDev);
+    crate::arch::percpu::irq_took!(UserDev);
     crate::pcidev::isr(slot);
     crate::irq_ring::isr_publish(IrqSource::UserDev, crate::clock::nanos_since_boot());
     // Force resched now, so `drain_irqs` turns the record into a wake before

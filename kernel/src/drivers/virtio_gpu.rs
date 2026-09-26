@@ -426,7 +426,7 @@ impl GpuController {
             Region {
                 phys: crate::DirectMap::from_phys(phys),
                 size: fb_aligned,
-                cache: CachePolicy::DeferToMtrr,
+                cache: CachePolicy::Normal,
                 pages: Some(alloc::sync::Arc::new(Pages::new(pages))),
             }
         });
@@ -658,7 +658,7 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     gpu.cursor = Region {
         phys: crate::DirectMap::from_phys(cursor_phys),
         size: PAGE_2M,
-        cache: CachePolicy::DeferToMtrr,
+        cache: CachePolicy::Normal,
         pages: Some(alloc::sync::Arc::new(Pages::new(cursor_pages))),
     };
     let cursor_backing = AttachedBacking::take(space, cursor_phys, PAGE_2M)

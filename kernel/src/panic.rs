@@ -24,7 +24,7 @@ static PANIC_DEPTH: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 
 /// This CPU's APIC id, from CPUID.
 ///
-/// Not `rdmsr(IA32_X2APIC_APICID)`: that MSR is `#GP` before `apic::init_ap`
+/// Not `rdmsr(IA32_X2APIC_APICID)`: that MSR is `#GP` before `irqchip::init_ap`
 /// has run, and a panic an AP takes before then must not fault inside the
 /// reentry guard.
 pub fn apic_id() -> u32 {

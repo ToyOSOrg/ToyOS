@@ -15,7 +15,8 @@ mod symbols;
 mod tls;
 
 pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
-pub(crate) use start::{alloc_kernel_stack, kernel_start, process_start, thread_start};
+pub(crate) use start::alloc_kernel_stack;
+pub(crate) use crate::arch::entry::{kernel_start, process_start, thread_start};
 pub use tls::{setup_combined_tls, setup_tls, DTV_INITIAL_CAPACITY};
 pub(crate) use tls::rebase_block;
 
@@ -502,7 +503,7 @@ pub fn spawn(
         // `Prot::ReadWrite`, never executable: a fixed-address W+X stack is the
         // shape stack-smashing payloads target.
         pt.map_range(stack_vaddr, stack_pages.phys(), USER_STACK_SIZE as u64,
-            Prot::ReadWrite, CachePolicy::DeferToMtrr);
+            Prot::ReadWrite, CachePolicy::Normal);
         pt.insert_region(stack_vaddr, crate::vma::Region {
             size: USER_STACK_SIZE as u64,
             kind: crate::vma::RegionKind::Anonymous { prot: Prot::ReadWrite },

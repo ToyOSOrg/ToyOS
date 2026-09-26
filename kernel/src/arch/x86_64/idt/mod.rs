@@ -519,3 +519,38 @@ fn install_actuator_gates(idt: &mut Idt) {
 pub fn enable_interrupts() {
     cpu::enable_interrupts();
 }
+
+pub(crate) use exceptions::try_recover_from_panic;
+#[cfg(feature = "boot-actuators")]
+pub(crate) use exceptions::kernel_backtrace;
+
+/// The crash report for a panic, from the frame pointer the panic handler stood on.
+pub(crate) fn report_panic(message: &core::panic::PanicInfo, frame: u64) {
+    exceptions::crash_report(&exceptions::CrashInfo::Panic { message, rbp: frame });
+}
+
+/// Whether the interrupted context a trap frame's flags word describes could
+/// have taken an interrupt: `RFLAGS.IF`.
+pub(crate) const fn frame_interrupts_enabled(rflags: u64) -> bool {
+    rflags & (1 << 9) != 0
+}
+
+/// A real `#DF`, not simulated: pushing to a non-canonical `rsp` raises `#SS`,
+/// and delivering that needs another push to the same `rsp` — the `#DF`
+/// condition. Non-canonical rather than unmapped: on a bigger machine an
+/// unmapped address can fall inside the direct map and simply get written to.
+/// Only `#DF` has an IST, so every fault on the way there lands on this same
+/// unusable stack. `SYS_DEBUG`'s alone.
+#[cfg(feature = "test-actuators")]
+pub(crate) fn provoke_double_fault() -> ! {
+    // SAFETY: unsound by design, like `SYS_DEBUG`'s null read; the #DF this
+    // raises never returns here.
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {bad}",
+            "push 0",
+            bad = in(reg) 0x0000_8000_0000_0000u64,
+            options(noreturn),
+        );
+    }
+}

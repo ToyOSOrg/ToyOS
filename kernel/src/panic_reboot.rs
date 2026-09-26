@@ -57,7 +57,7 @@ impl Bound {
     /// calls this, and it is the only place that decides the reset has come due.
     pub fn check(self) {
         if let Self::At(cycles) = self {
-            if cpu::rdtsc() >= cycles {
+            if cpu::counter() >= cycles {
                 reboot_now();
             }
         }
@@ -95,10 +95,10 @@ fn deadline(bound: Budget) -> Option<(u64, Source)> {
     if crate::clock::calibrated() {
         return Some((crate::clock::tsc_deadline(bound.nanos()), Source::Calibrated));
     }
-    let hz = crate::clock::cpuid_tsc_hz()?;
+    let hz = crate::arch::cpu::stated_counter_hz()?;
     // Nanoseconds first, so a bound under a second is not rounded to nothing.
     let cycles = (u128::from(bound.nanos()) * u128::from(hz) / 1_000_000_000) as u64;
-    Some((cpu::rdtsc().saturating_add(cycles), Source::Cpuid))
+    Some((cpu::counter().saturating_add(cycles), Source::Cpuid))
 }
 
 /// Arm the reboot and say so in one line — the panel's last, because the panic

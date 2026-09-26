@@ -122,7 +122,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
                     pages.phys(),
                     aligned as u64,
                     mapping_prot,
-                    CachePolicy::DeferToMtrr,
+                    CachePolicy::Normal,
                 );
             }
             data.mmap_regions.push(process::MmapRegion {
@@ -146,7 +146,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
         let pt = process::current_address_space();
         let vaddr = process::with_process_data(|data| {
             let placed = match &pages {
-                Some(pages) => pt.lock().alloc_and_map(pages.phys(), aligned as u64, mapping_prot, CachePolicy::DeferToMtrr).map(|(v, _)| v),
+                Some(pages) => pt.lock().alloc_and_map(pages.phys(), aligned as u64, mapping_prot, CachePolicy::Normal).map(|(v, _)| v),
                 None => pt.lock().alloc_region(aligned as u64, crate::vma::RegionKind::Mapped),
             };
             let Some(vaddr) = placed else { return Err(()) };

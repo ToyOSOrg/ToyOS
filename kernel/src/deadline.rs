@@ -28,7 +28,7 @@
 //!   that can name where the core is standing. Whichever fires takes the
 //!   machine's one seal through [`claim_the_reset`].
 //! - **A panic in progress**, which is not a gap but a stand-down:
-//!   `apic::halt_all_cpus` calls [`stand_down`] before it holds the panel, so a
+//!   `irqchip::halt_all_cpus` calls [`stand_down`] before it holds the panel, so a
 //!   panic report is never replaced by an expiry.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
@@ -72,7 +72,7 @@ pub fn claim_the_reset() -> bool {
 
 /// Stand this bound down for the rest of the machine's life.
 ///
-/// Called from `apic::halt_all_cpus` beside [`crate::hardlockup::stand_down`]:
+/// Called from `irqchip::halt_all_cpus` beside [`crate::hardlockup::stand_down`]:
 /// from there this machine holds a panic report under a bound of its own, and an
 /// expiry would seal a `WEDGED` record over it. Disarms rather than latching a
 /// second flag, so [`poll`] stays one relaxed load.
@@ -189,11 +189,11 @@ pub fn start() {
 /// pays a caller-saved prologue on every tick of every CPU armed or not, and
 /// that cost is the entry's rather than this function's.
 ///
-/// `extern "sysv64"` because the Ring 0 half of the timer entry calls it from
+/// `extern "C"` because the Ring 0 half of the timer entry calls it from
 /// naked assembly, where the ABI is written out rather than inferred.
-pub extern "sysv64" fn poll() {
+pub extern "C" fn poll() {
     let at = AT_TSC.load(Relaxed);
-    if at == 0 || crate::arch::cpu::rdtsc() < at {
+    if at == 0 || crate::arch::cpu::counter() < at {
         return;
     }
     expire()
@@ -243,7 +243,7 @@ pub fn stage_a_wedge() -> ! {
     log!("{WEDGE_STAGED}: every CPU stops taking scheduler passes from here");
     STAGED.store(true, Relaxed);
     // A core still asleep is not a core this control has wedged.
-    crate::arch::apic::kick_all_but_self();
+    crate::arch::irqchip::kick_all_but_self();
     this_cpu()
 }
 
@@ -278,7 +278,7 @@ fn this_cpu() -> ! {
     // claims.
     crate::preempt::disable();
     let arrived_awake = crate::arch::cpu::interrupts_enabled();
-    crate::arch::apic::arm_within(toyos_sched::fair::QUANTUM_NS);
+    crate::arch::irqchip::arm_within(toyos_sched::fair::QUANTUM_NS);
     crate::arch::cpu::enable_interrupts();
     log!(
         "wedge: cpu{} {}",
