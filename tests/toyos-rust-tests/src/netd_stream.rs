@@ -1,6 +1,6 @@
 //! The guest half of the netd stream tests' agreement with the harness's host
-//! server (`tests/common/tcppeer.rs`): a connection sends one [`Ask`], and
-//! the host serves it.
+//! server (`tests/common/tcppeer.rs`): a connection sends one request
+//! (`netd_ask`), and the host serves it.
 //!
 //! Each netd stream test includes this file whole and uses its own part of it.
 #![allow(dead_code)]
@@ -12,19 +12,12 @@ use toyos::{AsHandle, Pipe};
 use toyos_abi::ring::RingHeader;
 use toyos_abi::syscall::{self, SyscallError};
 
+#[path = "netd_ask.rs"]
+pub mod netd_ask;
+pub use netd_ask::{stream_byte, Mode};
+
 /// The host, as QEMU's slirp shows it to the guest.
 pub const HOST: [u8; 4] = [10, 0, 2, 2];
-
-/// Byte at absolute stream position `pos`. Every aligned 16-byte group carries
-/// its own index, so a lost, duplicated or reordered run shows up whether it is
-/// a multiple of 16 long (wrong stamp) or not (wrong filler).
-pub fn stream_byte(pos: u64) -> u8 {
-    let group = (pos >> 4) as u32;
-    match pos & 15 {
-        k @ 0..=3 => (group >> (8 * k)) as u8,
-        _ => 0xC3,
-    }
-}
 
 /// Fill a pipe through `write` until the kernel refuses a byte, and answer how
 /// many it took: the capacity, for a fresh pipe nobody reads.
@@ -89,21 +82,12 @@ pub enum Ask {
 /// connects to.
 pub const FORWARDED_PORT: u16 = 22;
 
-/// A request on the wire: a mode byte (`tcppeer::Mode`), then the length and
-/// the seed of the stream, each eight little-endian bytes.
-pub fn request(mode: u8, len: u64, seed: u64) -> [u8; 17] {
-    let mut request = [mode; 17];
-    request[1..9].copy_from_slice(&len.to_le_bytes());
-    request[9..].copy_from_slice(&seed.to_le_bytes());
-    request
-}
-
 /// `what` on the wire.
-pub fn ask_bytes(what: Ask) -> [u8; 17] {
+pub fn ask_bytes(what: Ask) -> [u8; netd_ask::REQUEST_LEN] {
     match what {
-        Ask::Stream(total) => request(4, total, 0),
-        Ask::Held(total) => request(7, total, 0),
-        Ask::Dial => request(8, 0, 0),
+        Ask::Stream(total) => Mode::Pattern.request(total, 0),
+        Ask::Held(total) => Mode::PatternHeld.request(total, 0),
+        Ask::Dial => Mode::Dial.request(0, 0),
     }
 }
 

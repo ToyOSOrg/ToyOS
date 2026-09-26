@@ -9,15 +9,22 @@
 //!
 //! - [`STALL_LIMIT`]: nothing the stream owes has moved for that long. While
 //!   bytes are owed smoltcp probes the peer and ends the stream once the peer
-//!   has been silent that long; a FIN owed alone, and anything an orphan owes,
-//!   is timed here from the last byte or state the peer acknowledged.
+//!   has been silent that long; a FIN owed alone is handed to the same
+//!   give-up once it has gone unacknowledged that long; anything an orphan
+//!   owes is timed here from the last byte or state the peer acknowledged.
 //! - [`FIN_WAIT_2_LIMIT`]: an orphan whose peer acknowledged its FIN and never
 //!   sends its own.
 //! - [`RST_LINGER`]: a reset stream whose RST cannot leave, because its
 //!   neighbour no longer answers.
 //!
+//! - The closing bound (`NetDaemon::max_closing`): [`PipedConnection::give_up`].
+//!
 //! A stream whose client is still there is never ended for a peer that keeps
-//! its window shut while it answers the probes (RFC 9293 §3.8.6.1).
+//! its window shut while it answers (RFC 9293 §3.8.6.1: "as long as the
+//! receiving TCP peer continues to send acknowledgments in response to the
+//! probe segments, the sending TCP peer MUST allow the connection to stay
+//! open") — whether what it holds back is bytes or a FIN, which a peer at a
+//! zero window may refuse as an unacceptable segment and answer with an ACK.
 
 use std::time::{Duration, Instant};
 
@@ -243,8 +250,7 @@ impl<T: ToClient, F: FromClient> PipedConnection<T, F> {
         self.rx_write.is_none() && self.tx_read.as_ref().is_none_or(FromClient::writer_gone)
     }
 
-    /// Whether this stream, its client gone, still owes its peer bytes or a
-    /// FIN: what a full closing table resets last.
+    /// Whether this stream still owes its peer bytes or a FIN.
     pub fn owes(&self, socket: &tcp::Socket) -> bool {
         socket.send_queue() > 0
             || matches!(socket.state(), tcp::State::FinWait1 | tcp::State::Closing | tcp::State::LastAck)
@@ -253,6 +259,27 @@ impl<T: ToClient, F: FromClient> PipedConnection<T, F> {
     /// When the client let go of both ends, if it has.
     pub fn orphaned_at(&self) -> Option<Instant> {
         self.orphaned_at
+    }
+
+    /// Whether the client has let go of both pipes and the stream is still
+    /// finishing, not reset: what the closing bound counts. A reset one is
+    /// gone within [`RST_LINGER`].
+    pub fn closing(&self) -> bool {
+        self.client_done() && self.reset_at.is_none()
+    }
+
+    /// Give this closing stream up, for the closing bound: one that still owes
+    /// its peer bytes or its FIN is reset and lingers as any reset does, so a
+    /// peer waiting on it is told; one that owes nothing is over at once, and a
+    /// peer that sends to it again is answered smoltcp's RST. Linux resets the
+    /// orphan it cannot keep, and keeps no TIME-WAIT past its bucket limit.
+    pub fn give_up(&mut self, socket: &mut tcp::Socket, now: Instant) -> Fate {
+        if !self.owes(socket) {
+            return Fate::Over;
+        }
+        self.reset(socket, now);
+        self.wake = Some(now + RST_LINGER);
+        Fate::Open
     }
 
     fn tail_left(&self) -> &[u8] {
@@ -409,11 +436,11 @@ impl<T: ToClient, F: FromClient> PipedConnection<T, F> {
     /// Decide, after a pass has moved what it could, whether this stream is
     /// over, is to be reset, or waits — and until when.
     pub fn tend(&mut self, socket: &mut tcp::Socket, now: Instant) -> Fate {
-        self.probe(socket);
         let acked = self.taken - socket.send_queue() as u64;
         if acked != self.progress.acked || socket.state() != self.progress.state {
             self.progress = Progress { acked, state: socket.state(), at: now };
         }
+        self.probe(socket, now);
         if self.client_gone() {
             self.orphaned_at.get_or_insert(now);
         }
@@ -440,17 +467,28 @@ impl<T: ToClient, F: FromClient> PipedConnection<T, F> {
                 say!("netd: resetting a connection — {why}");
                 self.reset(socket, now);
                 self.wake = Some(now + RST_LINGER);
+                return Fate::Open;
             }
+        }
+        if !self.probing && fin_alone(socket) {
+            let arm = self.progress.at + STALL_LIMIT;
+            self.wake = Some(self.wake.map_or(arm, |w| w.min(arm)));
         }
         Fate::Open
     }
 
-    /// Arm smoltcp's probes and its give-up while the socket owes bytes, and
-    /// disarm them when it does not. Armed before the pass that sends what
-    /// the client just wrote: smoltcp starts the timeout's clock at the first
+    /// Arm smoltcp's probes and its give-up while the socket owes bytes, or a
+    /// FIN alone that has gone unacknowledged for [`STALL_LIMIT`], and disarm
+    /// them when it does not. Armed before the pass that sends what the
+    /// client just wrote: smoltcp starts the timeout's clock at the first
     /// segment after its buffer was empty.
-    fn probe(&mut self, socket: &mut tcp::Socket) {
-        let owed = socket.send_queue() > 0;
+    ///
+    /// **A FIN owed alone is armed late, not at once**: nothing restarts
+    /// smoltcp's clock for a FIN, which it counts from the peer's last
+    /// segment, and on a stream idle before its close that is older than the
+    /// limit — armed then, the FIN would be aborted unsent.
+    fn probe(&mut self, socket: &mut tcp::Socket, now: Instant) {
+        let owed = socket.send_queue() > 0 || (fin_alone(socket) && now >= self.progress.at + STALL_LIMIT);
         if owed != self.probing {
             socket.set_timeout(owed.then(|| smoltcp_duration(STALL_LIMIT)));
             socket.set_keep_alive(owed.then(|| smoltcp_duration(PROBE_INTERVAL)));
@@ -460,8 +498,6 @@ impl<T: ToClient, F: FromClient> PipedConnection<T, F> {
 
     /// The moment this stream is reset unless it moves first, and why.
     fn limit(&self, socket: &tcp::Socket) -> Option<(Instant, &'static str)> {
-        let fin_alone = matches!(socket.state(), tcp::State::FinWait1 | tcp::State::Closing | tcp::State::LastAck)
-            && socket.send_queue() == 0;
         match self.orphaned_at {
             Some(at) if socket.state() == tcp::State::FinWait2 => {
                 Some((at.max(self.progress.at) + FIN_WAIT_2_LIMIT, "an orphan's peer never sent its FIN"))
@@ -469,10 +505,14 @@ impl<T: ToClient, F: FromClient> PipedConnection<T, F> {
             Some(at) if self.owes(socket) => {
                 Some((at.max(self.progress.at) + STALL_LIMIT, "an orphan's peer acknowledged nothing for its limit"))
             }
-            None if fin_alone => Some((self.progress.at + STALL_LIMIT, "its peer never acknowledged its FIN")),
             _ => None,
         }
     }
+}
+
+/// Whether `socket` owes its peer its FIN and nothing else.
+fn fin_alone(socket: &tcp::Socket) -> bool {
+    matches!(socket.state(), tcp::State::FinWait1 | tcp::State::Closing | tcp::State::LastAck) && socket.send_queue() == 0
 }
 
 /// Whether a socket in `state` can still be sent bytes by its peer.
@@ -492,12 +532,14 @@ pub fn send_room(socket: &tcp::Socket) -> bool {
     socket.can_send() && socket.send_capacity() > socket.send_queue()
 }
 
-/// Which closing stream a full closing table gives up: one that owes its peer
-/// nothing before one that does, and the oldest orphan first among either.
-/// `closing` is each candidate's index, when its client let go, and whether it
-/// still owes.
-pub fn victim(closing: impl Iterator<Item = (usize, Instant, bool)>) -> Option<usize> {
-    closing.min_by_key(|&(_, orphaned_at, owes)| (owes, orphaned_at)).map(|(i, _, _)| i)
+/// Which closing streams a closing table holding more than `bound` gives up:
+/// the newest, as Linux gives up the stream being orphaned rather than one it
+/// already keeps. `closing` is each one's index and when its client let go.
+pub fn past_bound(closing: impl Iterator<Item = (usize, Instant)>, bound: usize) -> Vec<usize> {
+    let mut closing: Vec<_> = closing.collect();
+    closing.sort_unstable_by_key(|&(_, orphaned_at)| std::cmp::Reverse(orphaned_at));
+    let excess = closing.len().saturating_sub(bound);
+    closing[..excess].iter().map(|&(i, _)| i).collect()
 }
 
 #[cfg(test)]

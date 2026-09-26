@@ -6,11 +6,10 @@
 //! judged against: it hashes exactly the bytes its sockets carried, and a test
 //! compares that with what the guest saw of the same stream.
 //!
-//! A connection opens with the guest's request — a mode byte, then the length
-//! and the seed of the stream, each eight little-endian bytes (`ask` in
-//! `netd_tcp`, `ask_bytes` in `netd_stream`) — and is served on a thread of
-//! its own. Every connection's outcome is kept, in the order they were
-//! accepted, for [`Peer::finish`] to hand back.
+//! A connection opens with the guest's request (`netd_ask`, which both sides
+//! include) and is served on a thread of its own. Every connection's outcome
+//! is kept, in the order they were accepted, for [`Peer::finish`] to hand
+//! back.
 //!
 //! **Nothing here outlives [`Peer::finish`].** `accept` is woken by a
 //! connection of the server's own, every held connection is let go, and every
@@ -26,56 +25,10 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-/// The modes a request names, the other half of `netd_tcp`'s and
-/// `netd_stream`'s constants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    /// Send `len` bytes of the stream `seed` names, then FIN.
-    Download,
-    /// Read to the end of the stream, then answer its length and hash, then FIN.
-    Upload,
-    /// Send `len` bytes, wait for the guest's one byte saying they arrived,
-    /// then end the connection with a reset.
-    Reset,
-    /// Read nothing and send nothing until [`Peer::finish`].
-    Hold,
-    /// Send `len` bytes of [`stream_byte`]'s pattern, then FIN: a stream the
-    /// guest can recognise in its receive ring before it reads it.
-    Pattern,
-    /// [`Mode::Upload`], but nothing is read until a [`Mode::Release`]
-    /// connection names the same seed: the guest's bytes pile up behind a
-    /// window this side keeps shut.
-    LateUpload,
-    /// Let the [`Mode::LateUpload`] with this seed start reading.
-    Release,
-    /// [`Mode::Pattern`]'s bytes, and then [`Mode::Hold`] with no FIN.
-    PatternHeld,
-    /// A connection of this host's own to the guest's forwarded port, written
-    /// until it is refused; then this connection's FIN, which is what tells
-    /// the guest the dialled one ended.
-    Dial,
-    /// Tell the wire (`super::middlebox`'s `Plan::Dark`) to carry nothing
-    /// more either way, ARP included: the guest's peers vanish at once.
-    Dark,
-}
-
-impl Mode {
-    fn of(byte: u8) -> Option<Self> {
-        match byte {
-            0 => Some(Self::Download),
-            1 => Some(Self::Upload),
-            2 => Some(Self::Reset),
-            3 => Some(Self::Hold),
-            4 => Some(Self::Pattern),
-            5 => Some(Self::LateUpload),
-            6 => Some(Self::Release),
-            7 => Some(Self::PatternHeld),
-            8 => Some(Self::Dial),
-            9 => Some(Self::Dark),
-            _ => None,
-        }
-    }
-}
+#[path = "../toyos-rust-tests/src/netd_ask.rs"]
+mod netd_ask;
+pub use netd_ask::{Mode, LATE_SHUTDOWN_SEED, ORPHAN_RELEASED_SEED, READER_LEAVES_SEED};
+use netd_ask::{stream_byte, REQUEST_LEN};
 
 /// How one connection went, from this host's side.
 #[derive(Debug)]
@@ -215,16 +168,6 @@ impl Stream {
     }
 }
 
-/// Byte at absolute stream position `pos`, the guest's `netd_stream::stream_byte`:
-/// every aligned 16-byte group carries its own index.
-fn stream_byte(pos: u64) -> u8 {
-    let group = (pos >> 4) as u32;
-    match pos & 15 {
-        k @ 0..=3 => (group >> (8 * k)) as u8,
-        _ => 0xC3,
-    }
-}
-
 fn hex(digest: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -260,7 +203,7 @@ impl Drop for Open {
 fn serve(mut stream: TcpStream, shared: &Shared, mut open: Open) -> Result<Served, String> {
     stream.set_read_timeout(Some(STALL)).map_err(|e| format!("read timeout: {e}"))?;
     stream.set_write_timeout(Some(STALL)).map_err(|e| format!("write timeout: {e}"))?;
-    let mut request = [0u8; 17];
+    let mut request = [0u8; REQUEST_LEN];
     if let Err(e) = stream.read_exact(&mut request) {
         // The acceptor's own wake, and nothing else, connects and says nothing.
         return Err(format!("read the guest's request: {e}"));

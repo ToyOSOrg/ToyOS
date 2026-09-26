@@ -11,7 +11,10 @@ use std::rc::Rc;
 use smoltcp::iface::{Config, Interface, PollResult, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
+use smoltcp::wire::{
+    EthernetAddress, EthernetFrame, EthernetProtocol, HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpProtocol,
+    Ipv4Address, Ipv4Packet, TcpPacket,
+};
 
 const NETD: (Ipv4Address, EthernetAddress) = (Ipv4Address::new(10, 0, 0, 2), EthernetAddress([2, 0, 0, 0, 0, 2]));
 const PEER: (Ipv4Address, EthernetAddress) = (Ipv4Address::new(10, 0, 0, 3), EthernetAddress([2, 0, 0, 0, 0, 3]));
@@ -26,6 +29,28 @@ enum Link {
     /// No frame can leave either stack: a neighbour that no longer answers,
     /// so nothing addressed to it is ever sent.
     Refused,
+    /// The peer refuses netd's FIN, as RFC 9293's acceptability test refuses
+    /// one at a shut window, and answers it with an ACK: the FIN reaches it
+    /// as a segment one before its window, which it answers the same way.
+    RefusesFins,
+}
+
+/// [`Link::RefusesFins`]' rewrite of a frame of netd's carrying a FIN and no
+/// bytes, and of nothing else.
+fn refuse_fin(frame: &mut [u8]) {
+    let mut ethernet = EthernetFrame::new_unchecked(frame);
+    if ethernet.ethertype() != EthernetProtocol::Ipv4 {
+        return;
+    }
+    let mut ip = Ipv4Packet::new_unchecked(ethernet.payload_mut());
+    let (src, dst) = (IpAddress::Ipv4(ip.src_addr()), IpAddress::Ipv4(ip.dst_addr()));
+    let carries_tcp = ip.next_header() == IpProtocol::Tcp;
+    let mut tcp = TcpPacket::new_unchecked(ip.payload_mut());
+    if carries_tcp && tcp.fin() && tcp.payload_mut().is_empty() {
+        tcp.set_fin(false);
+        tcp.set_seq_number(tcp.seq_number() - 1);
+        tcp.fill_checksum(&src, &dst);
+    }
 }
 
 #[derive(Default)]
@@ -57,7 +82,10 @@ impl phy::TxToken for Tx {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
         let mut frame = vec![0u8; len];
         let result = f(&mut frame);
-        if self.link == Link::Up {
+        if self.link == Link::RefusesFins && self.to == 1 {
+            refuse_fin(&mut frame);
+        }
+        if matches!(self.link, Link::Up | Link::RefusesFins) {
             self.queues.borrow_mut().to[self.to].push_back(frame);
         }
         result
@@ -396,27 +424,26 @@ fn a_clients_stream_at_a_shut_window_its_peer_answers_is_never_reset() {
     assert_eq!(w.client_write(&[1]), Ok(1), "its client can still write");
 }
 
+/// Pass until `told` says the client knows its stream is over, which has to
+/// be the stall limit after the link was lost.
+fn told_at_the_stall_limit(w: &mut World, told: impl Fn(&mut World) -> bool) {
+    let gone = w.since_born();
+    while !told(w) {
+        assert!(w.since_born() < gone + STALL_LIMIT * 2, "the client is never told its stream is over");
+        w.run(Duration::from_millis(100));
+    }
+    let at = w.since_born();
+    let limit = gone + STALL_LIMIT;
+    assert!(at >= limit && at <= limit + Duration::from_secs(1), "told {at:?} in; its peer went at {gone:?}");
+}
+
 #[test]
 fn a_stream_whose_peer_has_gone_is_reset_after_the_stall_limit() {
     let mut w = World::new(1 << 20);
     *w.link.borrow_mut() = Link::Lost;
-    let gone = w.since_born();
     assert_eq!(w.client_write(&[1u8; 4096]), Ok(4096));
-    let mut told = None;
-    while w.since_born() < gone + STALL_LIMIT * 2 {
-        w.run(Duration::from_millis(100));
-        if w.client_write(&[]) == Err(SyscallError::Gone) {
-            told = Some(w.since_born());
-            break;
-        }
-    }
-    let told = told.expect("the client is told its stream is over");
-    assert!(
-        told >= gone + STALL_LIMIT && told <= gone + STALL_LIMIT + Duration::from_secs(1),
-        "told {told:?} in; its peer went at {gone:?}"
-    );
-    let (_, ended) = w.client_read();
-    assert!(ended, "and its receive pipe ends, behind the send pipe: a reset");
+    told_at_the_stall_limit(&mut w, |w| w.client_write(&[]) == Err(SyscallError::Gone));
+    assert!(w.client_read().1, "and its receive pipe ends, behind the send pipe: a reset");
 }
 
 #[test]
@@ -424,28 +451,48 @@ fn a_fin_its_peer_never_acknowledges_ends_the_stream_after_the_stall_limit() {
     let mut w = World::new(1 << 20);
     *w.link.borrow_mut() = Link::Lost;
     w.conn.fin_after_drain = true;
-    let gone = w.since_born();
-    let mut told = None;
-    while w.since_born() < gone + STALL_LIMIT * 2 {
-        w.run(Duration::from_millis(100));
-        if w.client_read().1 {
-            told = Some(w.since_born());
-            break;
-        }
-    }
-    let told = told.expect("the client is told its stream is over");
-    assert!(
-        told >= gone + STALL_LIMIT && told <= gone + STALL_LIMIT + Duration::from_secs(1),
-        "told {told:?} in; its peer went at {gone:?}"
-    );
+    told_at_the_stall_limit(&mut w, |w| w.client_read().1);
     assert_eq!(*w.closed.borrow(), ["send", "receive"], "as a reset");
 }
 
 #[test]
-fn a_full_closing_table_gives_up_what_owes_nothing_before_what_owes_and_the_oldest_first() {
+fn a_clients_fin_its_peer_refuses_and_answers_is_never_reset() {
+    let mut w = World::new(1 << 20);
+    *w.link.borrow_mut() = Link::RefusesFins;
+    w.conn.fin_after_drain = true;
+    assert_eq!(w.run(STALL_LIMIT * 6), None);
+    assert_eq!(w.netd_socket().state(), tcp::State::FinWait1, "its FIN is still owed");
+    assert!(!w.client_read().1, "and its client told nothing");
+}
+
+#[test]
+fn a_given_up_stream_that_owes_its_peer_is_reset_and_one_that_owes_nothing_is_over_at_once() {
+    let mut w = World::new(1 << 20);
+    w.peer_reads = false;
+    assert_eq!(w.client_write(&[1u8; 256 * 1024]), Ok(256 * 1024));
+    w.run(Duration::from_secs(1));
+    w.client_leaves();
+    w.pass();
+    let (now, handle) = (w.now, w.conn.handle);
+    assert_eq!(w.conn.give_up(w.netd.2.get_mut::<tcp::Socket>(handle), now), Fate::Open);
+    w.poll();
+    assert_eq!(w.peer_socket().state(), tcp::State::Closed, "the peer it owed is told by a reset");
+    let over = w.run(RST_LINGER + Duration::from_secs(1)).expect("let go of once its RST has left");
+    assert!(over <= now - w.born + RST_LINGER, "let go of {over:?} in");
+
+    let mut w = World::new(1 << 20);
+    w.client_leaves();
+    w.run(Duration::from_secs(1));
+    assert_eq!(w.netd_socket().state(), tcp::State::FinWait2, "the premise: it owes nothing");
+    let (now, handle) = (w.now, w.conn.handle);
+    assert_eq!(w.conn.give_up(w.netd.2.get_mut::<tcp::Socket>(handle), now), Fate::Over);
+}
+
+#[test]
+fn a_closing_table_past_its_bound_gives_up_the_newest() {
     let t = Instant::now();
     let s = Duration::from_secs;
-    assert_eq!(victim([(0, t + s(1), true), (1, t + s(5), false), (2, t + s(3), false)].into_iter()), Some(2));
-    assert_eq!(victim([(0, t + s(4), true), (1, t + s(2), true)].into_iter()), Some(1));
-    assert_eq!(victim(std::iter::empty()), None);
+    let closing = [(0, t + s(1)), (1, t + s(5)), (2, t + s(3)), (3, t + s(4))];
+    assert_eq!(past_bound(closing.into_iter(), 2), [1, 3]);
+    assert_eq!(past_bound(closing.into_iter(), 4), [0usize; 0]);
 }

@@ -3379,7 +3379,7 @@ dependencies = [
 [[package]]
 name = "smoltcp"
 version = "0.12.0"
-source = "git+https://github.com/ToyOSOrg/smoltcp?branch=toyos#37ff3c5a9017687f6cc461cad5bdc6b585822e9a"
+source = "git+https://github.com/ToyOSOrg/smoltcp?branch=toyos#62cf979e6c1b67dbc1503afe44d0ee0ba476b6ab"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",

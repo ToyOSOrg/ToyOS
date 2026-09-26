@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use toyos_build::icmp::checksum;
 
 use super::segment::{dns_answer, read_frame, udp_in, write_frame, Udp, RESOLVER};
 
@@ -32,6 +34,11 @@ pub const SWAP_EVERY: u64 = 31;
 /// anyway: the last segment of a burst has none behind it.
 const HOLD_AT_MOST: Duration = Duration::from_millis(20);
 
+/// [`Plan::Answer`]'s flood: one echo request toward the guest this often,
+/// with this identifier.
+const FLOOD_EVERY: Duration = Duration::from_micros(500);
+const FLOOD_ID: u16 = 0x7f1d;
+
 /// What the wire does to the frames through it.
 #[derive(Clone, Debug)]
 pub enum Plan {
@@ -40,11 +47,13 @@ pub enum Plan {
     /// with the rest. Every other frame passes untouched and in order.
     Impair,
     /// Everything passes but a query to slirp's resolver, which is answered
-    /// here (`segment::dns_answer`) and goes no further; and where
+    /// here (`segment::dns_answer`) and goes no further; where
     /// `drop_guest_fins`, the first transmission of every FIN the guest sends,
     /// so each connection it closes finishes only on its own retransmission
-    /// timer.
-    Answer { drop_guest_fins: bool },
+    /// timer; and where `flood`, from the guest's first addressed frame until
+    /// the wire closes, an echo request from slirp's gateway toward it every
+    /// [`FLOOD_EVERY`], whose replies are counted here and go no further.
+    Answer { drop_guest_fins: bool, flood: bool },
     /// Everything passes until the switch is thrown, and nothing after it,
     /// either way, ARP included: every peer of the guest's vanishes at once.
     Dark(Arc<AtomicBool>),
@@ -136,6 +145,11 @@ pub struct Counts {
     pub resolved: u64,
     /// Frames the dark swallowed.
     pub darkened: u64,
+    /// Echo requests the flood sent, replies to them, and replies that came
+    /// after a later request's.
+    pub flooded: u64,
+    pub echoed: u64,
+    pub echoes_reordered: u64,
 }
 
 pub struct Impaired {
@@ -259,10 +273,14 @@ fn sort(
     let mut counts = Counts::default();
     let mut seen = HashSet::new();
     let mut held: Option<Vec<u8>> = None;
+    let (mut flood, mut last_echo) = (None, 0);
     loop {
         let frame = match next(from, held.as_ref().map(|_| HOLD_AT_MOST))? {
             Next::Frame(frame) => frame,
-            Next::Closed => return Ok(counts),
+            Next::Closed => {
+                counts.flooded = flood.map_or(Ok(0), JoinHandle::join).map_err(|_| "the flood panicked".to_string())?;
+                return Ok(counts);
+            }
             Next::Idle => {
                 send(held.take().expect("a timeout is set only while a segment is held"))?;
                 continue;
@@ -278,7 +296,19 @@ fn sort(
                     send(frame)?;
                 }
             }
-            Plan::Answer { drop_guest_fins } if from_guest => {
+            Plan::Answer { drop_guest_fins, flood: flooding } if from_guest => {
+                if let (true, None, Some(answer), Some(ip)) = (*flooding, &flood, answer, guest_ip(&frame)) {
+                    let (answer, macs) = (answer.clone(), [&frame[6..12], &frame[0..6]].concat());
+                    flood = Some(thread::spawn(move || flood_toward(&macs, ip, &answer)));
+                }
+                if let Some(seq) = echo_reply(&frame) {
+                    counts.echoed += 1;
+                    // RFC 1982's order, which a sequence number that wrapped keeps.
+                    let behind = (seq.wrapping_sub(last_echo) as i16) < 0;
+                    counts.echoes_reordered += behind as u64;
+                    last_echo = if behind { last_echo } else { seq };
+                    continue;
+                }
                 if let Some(query) = udp_in(&frame).filter(|u| u.dst == (RESOLVER, 53)) {
                     if let (Some(payload), Some(answer)) = (dns_answer(query.payload), answer) {
                         counts.resolved += 1;
@@ -320,4 +350,49 @@ fn sort(
             }
         }
     }
+}
+
+/// The guest's address, if `frame` is a unicast IPv4 frame it sent from one:
+/// its source and destination hardware addresses are then the guest's and
+/// its gateway's.
+fn guest_ip(frame: &[u8]) -> Option<[u8; 4]> {
+    let ip: [u8; 4] = frame.get(26..30)?.try_into().ok()?;
+    (frame.get(12..14)? == [0x08, 0x00] && frame[0] & 1 == 0 && ip != [0; 4]).then_some(ip)
+}
+
+/// [`Plan::Answer`]'s flood toward the guest at `ip_of_guest`, framed with
+/// `macs` (the guest's, then the gateway's), until the lane toward it closes;
+/// answers how many requests went. **The pace is the stimulus**, so each
+/// request is slept to at its own moment from the first.
+fn flood_toward(macs: &[u8], ip_of_guest: [u8; 4], to_guest: &Sender<Vec<u8>>) -> u64 {
+    let started = Instant::now();
+    for seq in 0u32.. {
+        thread::sleep((started + FLOOD_EVERY * seq).saturating_duration_since(Instant::now()));
+        // RFC 792's echo request, from slirp's gateway `10.0.2.2`.
+        let mut icmp = [8, 0, 0, 0, 0, 0, 0, 0];
+        icmp[4..6].copy_from_slice(&FLOOD_ID.to_be_bytes());
+        icmp[6..8].copy_from_slice(&(seq as u16).to_be_bytes());
+        let sum = checksum(&icmp).to_be_bytes();
+        icmp[2..4].copy_from_slice(&sum);
+        let mut ip = vec![0x45, 0, 0, 28, 0, 0, 0x40, 0, 64, 1, 0, 0, 10, 0, 2, 2];
+        ip.extend_from_slice(&ip_of_guest);
+        let sum = checksum(&ip).to_be_bytes();
+        ip[10..12].copy_from_slice(&sum);
+        let mut frame = [macs, &[0x08, 0x00], &ip, &icmp].concat();
+        // The shortest Ethernet frame, less its FCS.
+        frame.resize(60, 0);
+        if to_guest.send(frame).is_err() {
+            return seq.into();
+        }
+    }
+    unreachable!("a flood outlived four billion requests")
+}
+
+/// The sequence number of the reply to one of the flood's echo requests
+/// `frame` carries, if it carries one.
+fn echo_reply(frame: &[u8]) -> Option<u16> {
+    let be16 = |at: usize| frame.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let icmp = 14 + (*frame.get(14)? & 0x0f) as usize * 4;
+    let reply = be16(12)? == 0x0800 && *frame.get(23)? == 1 && *frame.get(icmp)? == 0 && be16(icmp + 4)? == FLOOD_ID;
+    reply.then_some(be16(icmp + 6)?)
 }

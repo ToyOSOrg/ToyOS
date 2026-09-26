@@ -299,12 +299,12 @@ not_pr_content = "`#![allow(unexpected_cfgs)]` in build.rs and src/lib.rs. build
 [smoltcp]
 upstream = "smoltcp-rs/smoltcp"
 base = "v0.12.0"
-delta = "+29/-10"
+delta = "+36/-10"
 tier = "fork"
 why = "The neighbour cache rate-limits discovery once for the whole cache, so a connect to an on-link address nothing answers starves every other address's resolution for as long as it asks. The fix keeps the silence per address; it is not ToyOS code and carries no cfg."
 pr = "none — upstream's LLM policy (CONTRIBUTING.txt, nlnetlabs.nl/llm-policy) refuses LLM-written code, so the branch below waits for a human author or goes to smoltcp-rs/smoltcp#1209 as a suggested fix"
 pr_branch = "neighbor-silence-per-address"
-pr_note = "On upstream main (efcba2e, after v0.14.0), +30/-11: the same hunks as `toyos` plus a CHANGELOG line."
+pr_note = "On upstream main (efcba2e, after v0.14.0), +37/-11: the same hunks as `toyos` plus a CHANGELOG line."
 
 [doomgeneric]
 upstream = "ozkl/doomgeneric"

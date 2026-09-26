@@ -296,14 +296,22 @@ impl Card {
 
 /// The driver, as smoltcp's `Device`.
 ///
-/// **Every frame smoltcp makes is sent, in the order it was made, and every
+/// **Every frame a socket makes is sent, in the order it was made, and every
 /// socket gets its turn.** smoltcp's egress visits the sockets in slot order,
 /// one segment each, and stops at the first token refused, so a device that
 /// said no whenever its ring was full would hand the ring to the lowest slots
 /// and never reach the rest — a lookup's query behind sixteen busy uploads.
 /// So nothing is refused: a frame with no transmit slot free waits in the
-/// [`Backlog`], and a pass starts only with none waiting, which bounds what
-/// can wait to one frame a socket and [`READ_WHILE_WAITING`] replies.
+/// [`Backlog`], and a pass of the sockets starts once none of the last pass's
+/// frames waits.
+///
+/// **A reply to a received frame is dropped once [`MAX_REPLIES_WAITING`]
+/// wait**, as a full queue drops on any stack: reading is never held back,
+/// because a frame left unread holds every frame behind it — a lookup's answer
+/// behind a ping flood that outruns the ring. So neither kind shuts the other
+/// out: a reply waits behind at most one pass's frames, a pass's frames behind
+/// at most that many replies, and what can wait is one frame a socket, one
+/// report a multicast group and [`MAX_REPLIES_WAITING`] replies.
 struct DmaNic {
     nic: Card,
     backlog: Backlog,
@@ -313,29 +321,48 @@ struct DmaNic {
 /// device's used-ring interrupt is the wake of what is owed to be sent.
 #[derive(Default)]
 struct Backlog {
-    frames: VecDeque<Vec<u8>>,
+    /// Each frame, and whether it is a reply to a received one.
+    frames: VecDeque<(Vec<u8>, bool)>,
+    /// How many of `frames` are replies.
+    replies: usize,
     /// Frames that have waited here since netd started, which `inspect`
     /// reports: the proof a ring was ever full.
     waited: u64,
+    /// The most that have waited at once, which `inspect` reports against
+    /// its bound.
+    most: usize,
+    /// Replies dropped with [`MAX_REPLIES_WAITING`] already waiting.
+    dropped: u64,
 }
 
-/// How many frames may wait for a transmit slot before no more are read: one
-/// transmit ring's worth, so what a full ring holds back is never more than
-/// the ring itself, and acknowledgements go on arriving while it drains.
-const READ_WHILE_WAITING: usize = 16;
+impl Backlog {
+    /// Whether a frame of the sockets' own waits, which holds back their
+    /// next pass.
+    fn sends_waiting(&self) -> bool {
+        self.frames.len() > self.replies
+    }
+}
+
+/// How many replies — frames made in answer to a received one — may wait for
+/// a transmit slot before the next is dropped.
+const MAX_REPLIES_WAITING: usize = 16;
+
+/// How many frames are read before the sockets are offered their turn to
+/// send, and the pass goes on: a flood read as fast as it comes holds the
+/// sockets back no longer than reading this many takes.
+const READ_A_TURN: usize = 64;
 
 impl DmaNic {
-    /// Hand the ring every waiting frame it has a slot for, oldest first,
-    /// and answer whether none still waits.
-    fn flush(&mut self) -> bool {
-        while let Some(frame) = self.backlog.frames.front() {
+    /// Hand the ring every waiting frame it has a slot for, oldest first.
+    fn flush(&mut self) {
+        while let Some((frame, reply)) = self.backlog.frames.front() {
             if !self.nic.tx_room() {
-                return false;
+                return;
             }
             self.nic.tx(frame.len(), |slot| slot.copy_from_slice(frame));
+            self.backlog.replies -= *reply as usize;
             self.backlog.frames.pop_front();
         }
-        true
     }
 }
 
@@ -343,13 +370,7 @@ impl Device for DmaNic {
     type RxToken<'a> = DmaRxToken<'a>;
     type TxToken<'a> = DmaTxToken<'a>;
 
-    /// Frames are read while fewer than [`READ_WHILE_WAITING`] wait to be sent:
-    /// the reply each could make would wait too, and a frame not read waits in
-    /// the device's own ring.
     fn receive(&mut self, _timestamp: SmoltcpInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if self.backlog.frames.len() >= READ_WHILE_WAITING {
-            return None;
-        }
         let Self { nic, backlog } = self;
         let token = match &*nic {
             Card::Virtio(nic) => {
@@ -357,11 +378,11 @@ impl Device for DmaNic {
             }
             Card::Intel(nic) => nic.poll_rx().map(|frame| DmaRxToken::Intel { nic, frame }),
         }?;
-        Some((token, DmaTxToken { nic, backlog }))
+        Some((token, DmaTxToken { nic, backlog, reply: true }))
     }
 
     fn transmit(&mut self, _timestamp: SmoltcpInstant) -> Option<Self::TxToken<'_>> {
-        Some(DmaTxToken { nic: &self.nic, backlog: &mut self.backlog })
+        Some(DmaTxToken { nic: &self.nic, backlog: &mut self.backlog, reply: false })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -406,6 +427,8 @@ impl phy::RxToken for DmaRxToken<'_> {
 struct DmaTxToken<'a> {
     nic: &'a Card,
     backlog: &'a mut Backlog,
+    /// Made in answer to a received frame, rather than by a socket's pass.
+    reply: bool,
 }
 
 impl phy::TxToken for DmaTxToken<'_> {
@@ -423,8 +446,14 @@ impl phy::TxToken for DmaTxToken<'_> {
         }
         let mut frame = vec![0u8; len];
         let result = f(&mut frame);
-        self.backlog.frames.push_back(frame);
+        if self.reply && self.backlog.replies >= MAX_REPLIES_WAITING {
+            self.backlog.dropped += 1;
+            return result;
+        }
+        self.backlog.frames.push_back((frame, self.reply));
+        self.backlog.replies += self.reply as usize;
         self.backlog.waited += 1;
+        self.backlog.most = self.backlog.most.max(self.backlog.frames.len());
         result
     }
 }
@@ -815,13 +844,12 @@ impl NetDaemon {
     /// Connections whose client has let go of both pipes and which are still
     /// finishing: an orphan sending what it owes, a FIN-WAIT-2 or a TIME-WAIT.
     fn closing(&self) -> usize {
-        self.piped_connections.iter().filter(|c| c.client_done()).count()
+        self.piped_connections.iter().filter(|c| c.closing()).count()
     }
 
     /// How many closing connections netd keeps: as many as live ones. Each
     /// costs netd its socket's two buffers and a local port; past this the
-    /// oldest is given up (`stream::victim`), as Linux does past
-    /// `tcp_max_tw_buckets` and `tcp_max_orphans`, rather than letting clients
+    /// newest are given up (`stream::past_bound`) rather than letting clients
     /// that come and go fill netd's memory.
     fn max_closing(&self) -> usize {
         self.max_piped_connections
@@ -868,6 +896,15 @@ impl NetDaemon {
         snap.put("piped.max_closing", self.max_closing());
         snap.put("piped.orphans", self.piped_connections.iter().filter(|c| c.orphaned_at().is_some()).count());
         snap.put("udp.waiting", self.pending_udp_recvs.len());
+        snap.put("udp.max_waiting", MAX_PENDING_RECVS);
+        // smoltcp visits its sockets in slot order: whether a connect's
+        // neighbour discovery goes ahead of a datagram's.
+        let connects = self.pending_piped_connects.iter().map(|c| c.handle).max();
+        let behind = self.sockets.values().filter(|k| matches!(k, SocketKind::Udp(h) if Some(*h) > connects)).count();
+        snap.put("udp.behind_connects", behind);
+        snap.put("limits.stall_s", stream::STALL_LIMIT.as_secs());
+        snap.put("limits.fin_wait_2_s", stream::FIN_WAIT_2_LIMIT.as_secs());
+        snap.put("limits.rst_linger_s", stream::RST_LINGER.as_secs());
     }
 
     fn alloc_id(&mut self) -> u32 {
@@ -1457,20 +1494,14 @@ impl NetDaemon {
                 over.push(i);
             }
         }
-        // Past the closing bound, the one `stream::victim` picks goes without
-        // its RST: a peer that still sends to it is answered one by smoltcp,
-        // as any segment for no socket is.
-        let mut excess = self.closing().saturating_sub(over.len()).saturating_sub(self.max_closing());
-        while excess > 0 {
-            let candidates = self.piped_connections.iter().enumerate().filter(|(i, c)| c.client_done() && !over.contains(i));
-            let victim = stream::victim(candidates.map(|(i, c)| {
-                let socket = socket_set.get::<tcp::Socket>(c.handle);
-                (i, c.orphaned_at().expect("netd: a closing connection has no orphan time"), c.owes(socket))
-            }))
-            .expect("netd: more closing connections than its bound, and none to give up");
+        let closing = self.piped_connections.iter().enumerate().filter(|(i, c)| c.closing() && !over.contains(i));
+        let closing = closing.map(|(i, c)| (i, c.orphaned_at().expect("netd: a closing connection has no orphan time")));
+        for i in stream::past_bound(closing, self.max_closing()) {
             say!("netd: giving up a closing connection, {} are already closing", self.max_closing());
-            over.push(victim);
-            excess -= 1;
+            let conn = &mut self.piped_connections[i];
+            if conn.give_up(socket_set.get_mut::<tcp::Socket>(conn.handle), now) == Fate::Over {
+                over.push(i);
+            }
         }
         over.sort_unstable();
         for i in over.into_iter().rev() {
@@ -1681,7 +1712,7 @@ fn answer_lookup(client: &Client, addrs: &[[u8; 4]]) {
 ///
 /// Here and not in [`NetDaemon::handle_message`] because the device and the
 /// lease are the loop's and not the socket table's.
-fn answer_inspect(request: &Request, daemon: &NetDaemon, device: &DmaNic, dhcp: &dhcp::Dhcp, socket_set: &SocketSet<'_>) {
+fn answer_inspect(request: &Request, daemon: &NetDaemon, device: &DmaNic, dhcp: &dhcp::Dhcp, socket_set: &SocketSet<'_>, passes: &Passes) {
     // The request is a bare header, and anything riding on one is not this
     // protocol.
     if request.payload_len != 0 {
@@ -1691,10 +1722,27 @@ fn answer_inspect(request: &Request, daemon: &NetDaemon, device: &DmaNic, dhcp: 
     let mut snap = Snapshot::new(toyos_inspect::NET);
     device.nic.inspect(&mut snap);
     snap.put("tx.waited", device.backlog.waited);
+    snap.put("tx.most_waiting", device.backlog.most);
+    snap.put("tx.max_replies_waiting", MAX_REPLIES_WAITING);
+    snap.put("tx.replies_dropped", device.backlog.dropped);
+    snap.put("sockets.most", passes.most_sockets);
+    snap.put("passes.spun", passes.spun);
     dhcp.inspect(&mut snap);
     daemon.inspect(&mut snap, socket_set);
     let encoded = snap.encode().unwrap_or_else(|why| panic!("netd: its snapshot: {why}"));
     request.client.snapshot(&encoded);
+}
+
+/// What the loop counts about its own passes, which `inspect` reports.
+#[derive(Default)]
+struct Passes {
+    /// The most sockets the stack has held at the end of a pass's poll: what
+    /// bounds the frames one pass of them can make.
+    most_sockets: usize,
+    /// Passes that asked to wait for nothing while a frame of the sockets'
+    /// waited for the ring and none was left unread: a pass then has nothing
+    /// to do before the ring's interrupt or a deadline, so each is a spin.
+    spun: u64,
 }
 
 const _: () = assert!(
@@ -1816,6 +1864,7 @@ fn main() {
     const TOKEN_WAITING_BASE: u64 = 0x2_0000;
 
     let mut pending: Vec<PendingConn> = Vec::new();
+    let mut passes = Passes::default();
 
     loop {
         // Before `iface.poll`, because it is what makes the interrupt taken and
@@ -1834,16 +1883,27 @@ fn main() {
             link_up = link.is_up();
         }
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
-        // Frames are read while the device takes them, and a pass of the
-        // sockets starts only with no frame waiting for a transmit slot, which
-        // is what bounds how many can wait.
-        loop {
-            while iface.poll_ingress_single(now, &mut device, &mut socket_set) != PollIngressSingleResult::None {}
-            if !device.flush() || iface.poll_egress(now, &mut device, &mut socket_set) == PollResult::None {
-                break;
+        // Frames are read a turn at a time, and a pass of the sockets starts
+        // once none of the last pass's frames waits: each has its turn
+        // whatever the other keeps making (`DmaNic`). A turn read whole may
+        // have left frames unread, and the pass after this one is owed now.
+        let unread = loop {
+            let mut read = 0;
+            while read < READ_A_TURN
+                && iface.poll_ingress_single(now, &mut device, &mut socket_set) != PollIngressSingleResult::None
+            {
+                read += 1;
             }
-        }
-        let backlogged = !device.flush();
+            device.flush();
+            let sent = !device.backlog.sends_waiting()
+                && iface.poll_egress(now, &mut device, &mut socket_set) != PollResult::None;
+            if read == READ_A_TURN || !sent {
+                break read == READ_A_TURN;
+            }
+        };
+        device.flush();
+        let backlogged = device.backlog.sends_waiting();
+        passes.most_sockets = passes.most_sockets.max(socket_set.iter().count());
         device.nic.report();
 
         // **After the poll and before anything is served.** The lease is what
@@ -1889,9 +1949,11 @@ fn main() {
         // client's bytes and room wake the watches below.
         let smoltcp_due =
             iface.poll_delay(now, &socket_set).map_or(u64::MAX, |d| d.total_micros().saturating_mul(1000));
-        // Nothing smoltcp is due to do can go out while a frame waits for a
-        // transmit slot, and the slot coming back raises the NIC's interrupt.
+        // Nothing smoltcp is due to do can go out while a frame of the last
+        // pass waits for a transmit slot, and the slot coming back raises the
+        // NIC's interrupt.
         let smoltcp_due = if backlogged { u64::MAX } else { smoltcp_due };
+        let smoltcp_due = if unread { 0 } else { smoltcp_due };
 
         // A pending connect's deadline and a stream's bounds are wakes of
         // their own; everything else a pass is owed for is an event.
@@ -1964,6 +2026,7 @@ fn main() {
         };
 
         let mut ready: Vec<u64> = Vec::new();
+        passes.spun += (timeout == 0 && backlogged && !unread) as u64;
         poller.wait(1, timeout, |token| ready.push(token));
 
         // A handshake that never completes is why this deadline exists, and the
@@ -2048,7 +2111,7 @@ fn main() {
 
         for request in requests {
             if request.msg_type == toyos_inspect::MSG_INSPECT {
-                answer_inspect(&request, &daemon, &device, &dhcp, &socket_set);
+                answer_inspect(&request, &daemon, &device, &dhcp, &socket_set, &passes);
                 continue;
             }
             daemon.handle_message(request, &mut socket_set, &mut iface);
