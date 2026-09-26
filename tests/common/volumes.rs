@@ -2421,8 +2421,14 @@ pub fn log_partition_layout(
         .open(&image_path)
         .map_err(|e| format!("the built image has no readable GPT: {e}"))?;
     let table: Vec<_> = disk.partitions().values().collect();
-    let [esp, root, log] = table.as_slice() else {
-        return Err(format!("the built image has {} partitions, wanted three", table.len()));
+    // In entry order: the log is third, where the metal loop reads it, and a
+    // test image carries one slot.
+    let [esp, slots, log, volume, root] = table.as_slice() else {
+        return Err(format!(
+            "the built image has {} partitions, wanted five: the ESP, the slot table, the log, and \
+             slot A's volume and ROOT",
+            table.len()
+        ));
     };
 
     let types = [
@@ -2434,32 +2440,32 @@ pub fn log_partition_layout(
             return Err(format!("the {what} is typed {got}, wanted {want}"));
         }
     }
-    // ROOT's type is read with the kernel's parser: the `gpt` crate answers the
-    // all-zero GUID for a type its own table does not name.
-    let mut found = [toyos_gpt::Partition {
-        index: 0,
-        type_guid: toyos_gpt::Guid::ZERO,
-        unique_guid: toyos_gpt::Guid::ZERO,
-        first_lba: 0,
-        last_lba: 0,
-    }; 4];
-    let scan = toyos_gpt::locate_type(
-        &mut ImageSectors { bytes: &image },
-        toyos_gpt::Guid::TOYOS_ROOT,
-        &mut found,
-    )
-    .map_err(|e| format!("the kernel's own GPT parser cannot read this table: {e:?}"))?;
-    if (scan.matched, scan.listed) != (1, 1) {
-        return Err(format!(
-            "the built image carries {} partitions typed {ROOT_TYPE}, wanted one",
-            scan.matched
-        ));
-    }
-    if found[0].first_lba != root.first_lba || found[0].last_lba != root.last_lba {
-        return Err(format!(
-            "the kernel's parser puts ROOT at LBA {}..{} and the table says {}..{}",
-            found[0].first_lba, found[0].last_lba, root.first_lba, root.last_lba
-        ));
+    // ROOT's, the slot table's and the slot volume's types are read with the
+    // kernel's parser: the `gpt` crate answers the all-zero GUID for a type its
+    // own table does not name.
+    for (kind, text, what, entry) in [
+        (toyos_gpt::Guid::TOYOS_ROOT, ROOT_TYPE, "ROOT", root),
+        (toyos_gpt::Guid::TOYOS_SLOTS, toyos_gpt::Guid::TOYOS_SLOTS_TEXT, "the slot table", slots),
+        (toyos_gpt::Guid::TOYOS_BOOT, toyos_gpt::Guid::TOYOS_BOOT_TEXT, "slot A's volume", volume),
+    ] {
+        let mut found = [toyos_gpt::Partition {
+            index: 0,
+            type_guid: toyos_gpt::Guid::ZERO,
+            unique_guid: toyos_gpt::Guid::ZERO,
+            first_lba: 0,
+            last_lba: 0,
+        }; 4];
+        let scan = toyos_gpt::locate_type(&mut ImageSectors { bytes: &image }, kind, &mut found)
+            .map_err(|e| format!("the kernel's own GPT parser cannot read this table: {e:?}"))?;
+        if (scan.matched, scan.listed) != (1, 1) {
+            return Err(format!("the built image carries {} partitions typed {text}, wanted one", scan.matched));
+        }
+        if found[0].first_lba != entry.first_lba || found[0].last_lba != entry.last_lba {
+            return Err(format!(
+                "the kernel's parser puts {what} at LBA {}..{} and the table says {}..{}",
+                found[0].first_lba, found[0].last_lba, entry.first_lba, entry.last_lba
+            ));
+        }
     }
 
     // The attribute field, spelled out. Bit 0 marks a partition the firmware
@@ -2477,7 +2483,7 @@ pub fn log_partition_layout(
     }
 
     let log_guid = log.part_guid;
-    let guids = [esp.part_guid, root.part_guid, log_guid];
+    let guids = [esp.part_guid, slots.part_guid, log_guid, volume.part_guid, root.part_guid];
     if guids.iter().any(uuid::Uuid::is_nil) {
         return Err("a partition was given the all-zero GUID, which GPT reads as unused".to_string());
     }
@@ -2488,14 +2494,16 @@ pub fn log_partition_layout(
     }
 
     // The alignment `create_gpt_disk` asserts, checked again from the table:
-    // the kernel mounts all three over one 4 KiB block device and caches
-    // device blocks per volume, so a block belonging to two would be held
-    // twice and go stale on the other's write.
+    // the kernel mounts several over one 4 KiB block device and caches device
+    // blocks per volume, so a block belonging to two would be held twice and go
+    // stale on the other's write.
     let extent = |p: &gpt::partition::Partition| (p.first_lba * 512, (p.last_lba + 1) * 512);
     let placed = [
         ("ESP", extent(esp)),
-        ("root partition", extent(root)),
+        ("slot table", extent(slots)),
         ("log partition", extent(log)),
+        ("slot A's volume", extent(volume)),
+        ("root partition", extent(root)),
     ];
     for (what, (start, end)) in placed {
         if start % 4096 != 0 || end % 4096 != 0 {
@@ -3268,7 +3276,11 @@ pub fn root_chunk_refused(
         BootOptions {
             boot_image: Some(qemu::Staged::Written(path.clone())),
             stick_read_error: Some(bad),
-            ready_marker: ROOT_REFUSED,
+            // The read's own line and not the refusal after it: the stick
+            // QEMU fails a read on answers the loader's next write to
+            // `loader.log` with nothing, and the console line before that
+            // write is the last this boot says.
+            ready_marker: CHUNK_REFUSED,
             ..Default::default()
         },
     );
@@ -3278,7 +3290,7 @@ pub fn root_chunk_refused(
 
     let verdict = log
         .lines()
-        .find(|l| l.contains("Slot A: ROOT: the read of "))
+        .find(|l| l.contains(CHUNK_REFUSED))
         .map(str::trim)
         .ok_or_else(|| format!("the loader did not refuse the unreadable chunk:\n{}", volume_lines(&log)))?;
     let number = |after: &str| -> Result<u64, String> {
@@ -3473,6 +3485,9 @@ const ROOT_REFUSED: &str = "Slot A: REFUSED, ";
 
 /// The loader's line for the one ROOT it read into memory.
 const READ_AT: &str = "ROOT: read into memory at";
+
+/// The loader's line for a chunk of the slot's ROOT the disk would not read.
+const CHUNK_REFUSED: &str = "Slot A: ROOT: the read of ";
 
 /// Boot an image whose ROOT the loader is expected to refuse, and hand back the
 /// log, which ends at the refusal.

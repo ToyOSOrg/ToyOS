@@ -21,8 +21,9 @@ guarantee — only by nobody having rewritten it in between. Two windows:
 - **For the service's life.** The kernel pages a binary in on demand, and a
   restore after a failed swap spawns the previous installed path again.
 
-Nothing in the tree does either; the authority to ask for a swap is sshd's
-alone, and this is the one step of it the capability model does not cover.
+Nothing in the tree does either; the authority to ask for a swap is
+`/system/bin/swap`'s alone, and this is the one step of it the capability
+model does not cover.
 
 **Exit condition.** The spawn takes what init verified rather than a path: a
 spawn from a file handle init holds, or from bytes init hands over — an ABI

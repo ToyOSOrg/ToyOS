@@ -288,11 +288,27 @@ pub fn slot_table_of(file: &mut std::fs::File) -> Result<toyos_update::slots::Ta
     table_on(file).map(|(table, _, _)| table)
 }
 
-/// Where the partition `guid` names is on the disk image `file`, in bytes.
+/// Where the partition `guid` names is on the disk image `file`, in bytes, as
+/// its table states it: checked to the entry array's CRC and not for range or
+/// overlap, which are the loader's to refuse — a test that bends them still
+/// has to read what the image says.
 pub fn partition_extent(file: &mut std::fs::File, guid: [u8; 16]) -> Result<(u64, u64), String> {
-    let located = toyos_gpt::locate(&mut FileSectors(file), toyos_gpt::Guid(guid))
-        .map_err(|e| format!("partition {}: {e:?}", toyos_gpt::Guid(guid)))?;
-    Ok((located.partition.first_lba * u64::from(LBA), located.partition.lba_count() * u64::from(LBA)))
+    let mut out = [BLANK_PARTITION; 16];
+    let scan = toyos_gpt::list(&mut FileSectors(file), &mut out)
+        .map_err(|e| format!("no readable partition table: {e:?}"))?;
+    let found: Vec<&toyos_gpt::Partition> =
+        out[..scan.listed].iter().filter(|p| p.unique_guid == toyos_gpt::Guid(guid)).collect();
+    match found[..] {
+        [p] if scan.listed == scan.matched as usize => {
+            Ok((p.first_lba * u64::from(LBA), p.lba_count() * u64::from(LBA)))
+        }
+        _ => Err(format!(
+            "partition {}: the table states it {} time(s) among {} entries",
+            toyos_gpt::Guid(guid),
+            found.len(),
+            scan.matched
+        )),
+    }
 }
 
 /// The file `name` on the FAT partition `guid` names, read with the driver the

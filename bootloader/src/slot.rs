@@ -96,7 +96,12 @@ pub fn choose(
         let slot = table.slot(which).expect("a slot `order` named");
         println!("{HEAD} {}: no slot verifies but this one, whose image died on its last boot; it boots again", which.letter());
         match verify(bs, &mut disk, which, slot, floor, None) {
-            Ok(chosen) => return Ok(chosen),
+            Ok(mut chosen) => {
+                if which != table.marked {
+                    chosen.refused = refused;
+                }
+                return Ok(chosen);
+            }
             Err(why) => println!("{HEAD} {}: REFUSED, {why}", which.letter()),
         }
     }
