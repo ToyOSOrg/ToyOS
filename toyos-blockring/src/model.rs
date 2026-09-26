@@ -495,15 +495,19 @@ mod tests {
         Failures { resets, crashes, errors }
     }
 
-    /// The failures [`SCRIPT`] is held under: none, each alone, and a reset
-    /// beside a death.
-    const BOUNDS: [Failures; 5] = [
-        at_most(0, 0, 0),
-        at_most(1, 0, 0),
-        at_most(0, 1, 0),
-        at_most(0, 0, 1),
-        at_most(1, 1, 0),
-    ];
+    /// The failures [`SCRIPT`] is held under: none, and each alone.
+    const BOUNDS: [Failures; 4] = [at_most(0, 0, 0), at_most(1, 0, 0), at_most(0, 1, 0), at_most(0, 0, 1)];
+
+    /// Two writes to one block with a flush after each: a write issued again
+    /// after a loss has an earlier one to keep behind and a flush to answer
+    /// for it.
+    const ONE_BLOCK: [Step; 4] =
+        [Step::Write { block: 0, value: 1 }, Step::Flush, Step::Write { block: 0, value: 3 }, Step::Flush];
+
+    /// What [`ONE_BLOCK`] is held under: a reset beside a death. Not
+    /// [`SCRIPT`], whose visited states under two failures outgrow the memory
+    /// of the host job that runs this.
+    const ONE_BLOCK_BOUND: Failures = at_most(1, 1, 0);
 
     /// One write and the flush after it, the shortest script a write can be
     /// given up in.
@@ -519,7 +523,11 @@ mod tests {
     ];
 
     fn every_bound() -> impl Iterator<Item = (&'static [Step], Failures)> {
-        BOUNDS.into_iter().map(|f| (&SCRIPT[..], f)).chain(GIVE_UP_BOUNDS.into_iter().map(|f| (&GIVE_UP[..], f)))
+        BOUNDS
+            .into_iter()
+            .map(|f| (&SCRIPT[..], f))
+            .chain([(&ONE_BLOCK[..], ONE_BLOCK_BOUND)])
+            .chain(GIVE_UP_BOUNDS.into_iter().map(|f| (&GIVE_UP[..], f)))
     }
 
     fn verdict(script: &[Step], failures: Failures) -> Explored {
