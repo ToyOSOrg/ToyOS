@@ -293,6 +293,11 @@ Each stage names its exit; "measured" means a number from a run.
    **Exit**: a user process takes a page fault and a syscall on one CPU; the
    timer drives preemption; an interrupt storm test ends with no lost timer
    tick; the longest interrupts-off window is measured against x86's.
+   The entry's EL2 writes of `CNTHCTL_EL2`, `CNTVOFF_EL2` and `CPTR_EL2`
+   (`kernel/src/arch/aarch64/boot.rs`) are untested until here: deleting any
+   one stays green in `virt_el2_drop`, because stage 3 reads no counter and
+   runs no FP. This stage's timer and FP tests run under that EL2 profile too,
+   and each of the three deletions is shown red.
 
 5. **SMP through PSCI.** `CPU_ON` from MADT GICC entries, SGIs as the IPI,
    broadcast TLBI behind the machine-wide invalidation contract. **Exit**:
@@ -301,7 +306,8 @@ Each stage names its exit; "measured" means a number from a run.
    pass; `CPU_OFF`/`SYSTEM_RESET`/`SYSTEM_OFF` replace ACPI reset and PM1a.
    The TLS-descriptor resolver lands here, in std with its loader half and a
    `dlopen` test; until it does the kernel refuses `R_AARCH64_TLSDESC` by name
-   (`toyos_elf::RelocError::TlsDescriptor`).
+   (`toyos_elf::rela::ExeRefusal::TlsDescriptor` for an executable,
+   `toyos_elf::RelocError::TlsDescriptor` for a library).
 
 6. **Virtio on `virt`.** virtio-pci (ECAM from MCFG) for blk, net, gpu,
    sound, input and rng. virtio-input replaces the i8042 as the
