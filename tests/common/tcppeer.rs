@@ -35,6 +35,12 @@ pub enum Mode {
     /// Send `len` bytes of [`stream_byte`]'s pattern, then FIN: a stream the
     /// guest can recognise in its receive ring before it reads it.
     Pattern,
+    /// [`Mode::Upload`], but nothing is read until a [`Mode::Release`]
+    /// connection names the same seed: the guest's bytes pile up behind a
+    /// window this side keeps shut.
+    LateUpload,
+    /// Let the [`Mode::LateUpload`] with this seed start reading.
+    Release,
 }
 
 impl Mode {
@@ -45,6 +51,8 @@ impl Mode {
             2 => Some(Self::Reset),
             3 => Some(Self::Hold),
             4 => Some(Self::Pattern),
+            5 => Some(Self::LateUpload),
+            6 => Some(Self::Release),
             _ => None,
         }
     }
@@ -88,6 +96,8 @@ impl Peer {
         let released = Arc::new(Mutex::new(released));
         let open = Arc::new((Mutex::new(0usize), Condvar::new()));
         let counted = open.clone();
+        // Seeds a `Mode::Release` has named.
+        let seeds = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
         let acceptor = thread::spawn(move || {
             let mut served = Vec::new();
             for stream in listener.incoming() {
@@ -96,9 +106,10 @@ impl Peer {
                 }
                 let released = released.clone();
                 let open = Open::count(&counted);
+                let seeds: Arc<(Mutex<Vec<u64>>, Condvar)> = seeds.clone();
                 served.push(thread::spawn(move || {
                     let stream = stream.map_err(|e| format!("accept: {e}"))?;
-                    serve(stream, &released, open)
+                    serve(stream, &released, &seeds, open)
                 }));
             }
             served
@@ -196,7 +207,12 @@ impl Drop for Open {
     }
 }
 
-fn serve(mut stream: TcpStream, released: &Mutex<mpsc::Receiver<()>>, mut open: Open) -> Result<Served, String> {
+fn serve(
+    mut stream: TcpStream,
+    released: &Mutex<mpsc::Receiver<()>>,
+    seeds: &(Mutex<Vec<u64>>, Condvar),
+    mut open: Open,
+) -> Result<Served, String> {
     stream.set_read_timeout(Some(STALL)).map_err(|e| format!("read timeout: {e}"))?;
     stream.set_write_timeout(Some(STALL)).map_err(|e| format!("write timeout: {e}"))?;
     let mut request = [0u8; 17];
@@ -236,7 +252,23 @@ fn serve(mut stream: TcpStream, released: &Mutex<mpsc::Receiver<()>>, mut open: 
                 served.ended = stream.shutdown(std::net::Shutdown::Write).map_err(|e| format!("FIN: {e}"));
             }
         }
-        Mode::Upload => {
+        Mode::Release => {
+            seeds.0.lock().expect("the released seeds").push(seed);
+            seeds.1.notify_all();
+        }
+        Mode::Upload | Mode::LateUpload => {
+            if mode == Mode::LateUpload {
+                let (named, waited) = seeds
+                    .1
+                    .wait_timeout_while(seeds.0.lock().expect("the released seeds"), STALL, |s| !s.contains(&seed))
+                    .expect("the released seeds");
+                drop(named);
+                if waited.timed_out() {
+                    served.ended = Err(format!("no release named seed {seed} within {STALL:?}"));
+                    served.sha = hex(&hash.finalize());
+                    return Ok(served);
+                }
+            }
             let mut buf = vec![0u8; 65536];
             loop {
                 match stream.read(&mut buf) {

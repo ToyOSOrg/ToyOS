@@ -34,6 +34,8 @@ const UPLOAD: u8 = 1;
 const RESET: u8 = 2;
 const HOLD: u8 = 3;
 const PATTERN: u8 = 4;
+const LATE_UPLOAD: u8 = 5;
+const RELEASE: u8 = 6;
 
 /// A liveness guard on every blocking step, said by name: the host has
 /// everything it needs the moment a request arrives, so a step that outlasts
@@ -51,6 +53,7 @@ fn main() {
         Some("unreachable") => unreachable(peer, number(3) as u16),
         Some("reset") => reset(peer, number(3)),
         Some("half_close") => half_close(peer, number(3)),
+        Some("late_shutdown") => late_shutdown(peer),
         Some("download") => download(peer, number(3), number(4)),
         Some("download_to_end") => download_to_end(peer, number(3)),
         Some("upload") => upload(peer, number(3), number(4)),
@@ -216,6 +219,49 @@ fn half_close(peer: SocketAddr, len: u64) {
     assert_eq!(count, len, "half_close: the host read {count} of {len} bytes");
     assert_eq!(host_sha, sha, "half_close: the host's hash of the {len} bytes differs from this side's");
     println!("netd_tcp: half_close ok bytes={len} sha={}", hex(&sha));
+}
+
+/// `shutdown(Write)` asked with the whole send pipe still unread: the peer
+/// holds its window shut until then, and every byte in the pipe still reaches
+/// it, ahead of the FIN.
+fn late_shutdown(peer: SocketAddr) {
+    /// Past every buffer between here and the host's socket: a pipe that never
+    /// fills is found here rather than by the runner.
+    const BOUND: u64 = 512 * 1024 * 1024;
+    const SEED: u64 = 19;
+    let mut stream = ask(peer, LATE_UPLOAD, 0, SEED);
+    stream.set_nonblocking(true).expect("late_shutdown: non-blocking");
+    let mut pattern = Pattern(SEED);
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 65536];
+    let mut written = 0u64;
+    let mut pending = 0..0;
+    // Until the send pipe will take nothing more: from there on, every byte
+    // this side wrote that the peer has not read is in the pipe or behind it.
+    loop {
+        assert!(written < BOUND, "late_shutdown: {written} bytes written into a window held shut");
+        if pending.is_empty() {
+            pattern.fill(&mut buf);
+            pending = 0..buf.len();
+        }
+        match stream.write(&buf[pending.clone()]) {
+            Ok(n) => {
+                hash.update(&buf[pending.start..pending.start + n]);
+                pending.start += n;
+                written += n as u64;
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(e) => panic!("late_shutdown: writing at {written}: {e}"),
+        }
+    }
+    stream.set_nonblocking(false).expect("late_shutdown: blocking");
+    stream.shutdown(Shutdown::Write).expect("late_shutdown: shut the sending half down");
+    drop(ask(peer, RELEASE, 0, SEED));
+    let (count, host_sha) = upload_answer(&mut stream, "late_shutdown");
+    let sha: [u8; 32] = hash.finalize().into();
+    assert_eq!(count, written, "late_shutdown: the host read {count} of {written} bytes");
+    assert_eq!(host_sha, sha, "late_shutdown: the host's hash of the {written} bytes differs from this side's");
+    println!("netd_tcp: late_shutdown ok bytes={written} sha={}", hex(&sha));
 }
 
 fn download(peer: SocketAddr, len: u64, seed: u64) {

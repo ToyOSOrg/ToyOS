@@ -9814,13 +9814,27 @@ fn netd_tcp_reset(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 }
 
 /// Every byte written before `shutdown(Write)` reaches the host, which says
-/// so on the half still open.
+/// so on the half still open — the second time with the host's window held
+/// shut until after the shutdown, so the whole send pipe is still unread when
+/// it is asked for — and no frame of netd's is dropped on the way.
 fn netd_tcp_half_close(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["half_close 4194304"], BootOptions::default())?;
-    let line = run.ok_line(0, "half_close")?;
-    same_stream(line, run.served(0)?)?;
+    let run = netd_tcp_run(rust_bins, &["half_close 4194304", "late_shutdown"], BootOptions::default())?;
+    for (i, case) in ["half_close", "late_shutdown"].into_iter().enumerate() {
+        let line = run.ok_line(i, case)?;
+        let served = run
+            .served
+            .iter()
+            .flatten()
+            .filter(|s| matches!(s.mode, tcppeer::Mode::Upload | tcppeer::Mode::LateUpload))
+            .nth(i)
+            .ok_or_else(|| format!("the host served no upload for {case}: {:?}", run.served))?;
+        same_stream(line, served)?;
+        eprintln!("  [netcase] {}", line.trim_end());
+    }
+    // The held window opens all at once, and what smoltcp sends into it is
+    // more frames than the transmit ring has slots.
+    run.no_frame_dropped()?;
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
-    eprintln!("  [netcase] {}", line.trim_end());
     Ok(())
 }
 
