@@ -1,6 +1,8 @@
-//! The three unkeyed checksums a bcachefs superblock may name, seeded as the
-//! format computes them: crc32c and crc64 seeded 0 and not inverted, and
-//! xxhash as XXH64 seeded 0.
+//! The unkeyed checksums a bcachefs superblock may name, seeded as the format
+//! computes them. `crc32c` and `crc64` are the bare Castagnoli and ECMA-182
+//! updates, seeded 0 and not inverted; their `nonzero` variants seed and
+//! finish with all ones, which is CRC-32C and CRC-64/WE. `xxhash` is XXH64
+//! seeded 0.
 
 use super::UpstreamError;
 
@@ -38,8 +40,8 @@ impl CsumType {
             Self::None => 0,
             Self::Crc32c => crc32c_update(0, data) as u64,
             Self::Crc32cNonzero => (crc32c_update(u32::MAX, data) ^ u32::MAX) as u64,
-            Self::Crc64 => crc64_ecma(0, data),
-            Self::Crc64Nonzero => crc64_ecma(u64::MAX, data) ^ u64::MAX,
+            Self::Crc64 => crc64_ecma_update(0, data),
+            Self::Crc64Nonzero => crc64_ecma_update(u64::MAX, data) ^ u64::MAX,
             Self::Xxhash => xxh64(data, 0),
         };
         (lo, 0)
@@ -99,8 +101,9 @@ const CRC64_TABLE: [u64; 256] = {
     table
 };
 
-/// CRC-64/ECMA-182 from `crc`, most significant bit first, not inverted.
-pub fn crc64_ecma(mut crc: u64, data: &[u8]) -> u64 {
+/// The ECMA-182 update from `crc`, most significant bit first, inverting
+/// nothing: seeded 0 it is CRC-64/ECMA-182.
+pub fn crc64_ecma_update(mut crc: u64, data: &[u8]) -> u64 {
     for &byte in data {
         crc = CRC64_TABLE[(((crc >> 56) ^ byte as u64) & 0xFF) as usize] ^ (crc << 8);
     }
@@ -191,7 +194,8 @@ mod tests {
     #[test]
     fn published_check_values() {
         assert_eq!(crc32c_update(u32::MAX, b"123456789") ^ u32::MAX, 0xE306_9283);
-        assert_eq!(crc64_ecma(0, b"123456789"), 0x6c40_df5f_0b49_7347);
+        assert_eq!(crc64_ecma_update(0, b"123456789"), 0x6c40_df5f_0b49_7347);
+        assert_eq!(CsumType::Crc64Nonzero.digest(b"123456789"), (0x62ec_59e3_f1a4_f00a, 0));
         assert_eq!(xxh64(b"", 0), 0xEF46_DB37_51D8_E999);
     }
 

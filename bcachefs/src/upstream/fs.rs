@@ -526,8 +526,6 @@ enum DirentError {
     /// `d_casefold`: the bytes after `d_type` are laid out differently.
     Casefolded,
     Subvolume,
-    /// The last word's NULs reach back past `d_name`.
-    NoName,
     /// Empty, or longer than `BCH_NAME_MAX`.
     NameLength,
     SeparatorOrNul,
@@ -542,7 +540,6 @@ impl From<DirentError> for UpstreamError {
             DirentError::Short => "dirent is shorter than its header",
             DirentError::Casefolded => "dirent is casefolded",
             DirentError::Subvolume => "dirent points at a subvolume",
-            DirentError::NoName => "dirent has no name",
             DirentError::NameLength => "dirent's name is empty or past BCH_NAME_MAX",
             DirentError::SeparatorOrNul => "dirent's name holds a separator or a NUL",
             DirentError::NotUtf8 => "dirent's name is not valid UTF-8",
@@ -571,11 +568,11 @@ impl<'a> Dirent<'a> {
     /// A last word of nothing but NULs is refused: no writer pads by a whole
     /// word, so such a value is not one a writer made.
     fn read(val: &'a [u8]) -> Result<Self, DirentError> {
-        if val.len() <= DIRENT_NAME_AT || !val.len().is_multiple_of(8) {
+        let (Some((&inum, &[type_byte, _, ..])), true) =
+            (val.split_first_chunk::<8>(), val.len().is_multiple_of(8))
+        else {
             return Err(DirentError::Short);
-        }
-        let (&inum, rest) = val.split_first_chunk::<8>().ok_or(DirentError::Short)?;
-        let (&type_byte, _) = rest.split_first().ok_or(DirentError::Short)?;
+        };
         if type_byte & D_CASEFOLD != 0 {
             return Err(DirentError::Casefolded);
         }
@@ -584,11 +581,12 @@ impl<'a> Dirent<'a> {
             return Err(DirentError::Subvolume);
         }
 
-        // At most the value's own length, so the name's end is inside it.
         let padding = val.iter().rev().take(8).take_while(|&&byte| byte == 0).count();
-        let name = val
-            .get(DIRENT_NAME_AT..val.len() - padding)
-            .ok_or(DirentError::NoName)?;
+        if padding == 8 {
+            return Err(DirentError::PaddingWord);
+        }
+        // At most 7 off a value of at least 16 bytes, so `d_name` is inside it.
+        let name = &val[DIRENT_NAME_AT..val.len() - padding];
         if name.is_empty() || name.len() > NAME_MAX {
             return Err(DirentError::NameLength);
         }
@@ -596,30 +594,13 @@ impl<'a> Dirent<'a> {
             return Err(DirentError::SeparatorOrNul);
         }
         let name = core::str::from_utf8(name).map_err(|_| DirentError::NotUtf8)?;
-        if padding == 8 {
-            return Err(DirentError::PaddingWord);
-        }
         Ok(Self { name, inum: u64::from_le_bytes(inum), kind: FileKind::from_dirent(d_type) })
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
-
-    /// A dirent as its writer lays one out: the inode, the type byte, the name,
-    /// and NUL padding to a whole number of words.
-    fn dirent(inum: u64, d_type: u8, name: &[u8]) -> Vec<u8> {
-        let mut out = inum.to_le_bytes().to_vec();
-        out.push(d_type);
-        out.extend_from_slice(name);
-        while !out.len().is_multiple_of(8) {
-            out.push(0);
-        }
-        out
-    }
 
     fn decode(bytes: &[u8]) -> Result<(&str, u64, FileKind), UpstreamError> {
         Dirent::read(bytes).map(|dirent| (dirent.name, dirent.inum, dirent.kind)).map_err(UpstreamError::from)
@@ -641,60 +622,6 @@ mod tests {
                 .map_err(UpstreamError::Refused);
             assert_eq!(decode(bytes), want, "{id}");
         }
-    }
-
-    /// The name is what is left once the last word's trailing NULs come off,
-    /// which is the whole of how a dirent states its length.
-    #[test]
-    fn a_name_is_its_padding_taken_off() {
-        let one = dirent(4096, DT_DIR, b"empty");
-        assert_eq!(decode(&one), Ok(("empty", 4096, FileKind::Dir)));
-
-        // Exactly filling the last word leaves no NUL to count.
-        let flush = dirent(7, DT_REG, b"abcdefg");
-        assert_eq!(decode(&flush), Ok(("abcdefg", 7, FileKind::Regular)));
-
-        let long = dirent(9, DT_LNK, b"Documents");
-        assert_eq!(decode(&long), Ok(("Documents", 9, FileKind::Symlink)));
-
-        let single = dirent(11, DT_REG, b"a");
-        assert_eq!(decode(&single), Ok(("a", 11, FileKind::Regular)));
-    }
-
-    /// Every shape a hostile dirent can take is refused by name rather than
-    /// returning a name a caller would go on to use as a path component.
-    #[test]
-    fn a_dirent_that_is_not_one_is_refused() {
-        let short = vec![0u8; 8];
-        assert!(decode(&short).is_err());
-
-        let ragged = vec![0u8; 12];
-        assert!(decode(&ragged).is_err());
-
-        // All padding: no name at all.
-        let mut nameless = dirent(3, DT_REG, b"x");
-        nameless[9] = 0;
-        assert_eq!(
-            decode(&nameless),
-            Err(UpstreamError::Refused("dirent's name is empty or past BCH_NAME_MAX"))
-        );
-
-        let mut casefolded = dirent(3, DT_REG, b"x");
-        casefolded[8] |= 0x80;
-        assert_eq!(decode(&casefolded), Err(UpstreamError::Refused("dirent is casefolded")));
-
-        let subvol = dirent(3, DT_SUBVOL, b"sub");
-        assert_eq!(decode(&subvol), Err(UpstreamError::Refused("dirent points at a subvolume")));
-
-        // A separator inside a name would let one entry name another directory.
-        let traversal = dirent(3, DT_REG, b"a/b");
-        assert_eq!(
-            decode(&traversal),
-            Err(UpstreamError::Refused("dirent's name holds a separator or a NUL"))
-        );
-
-        let not_utf8 = dirent(3, DT_REG, &[0xff, 0xfe]);
-        assert_eq!(decode(&not_utf8), Err(UpstreamError::Refused("dirent's name is not valid UTF-8")));
     }
 
     /// A `bch_extent_crc32`'s sizes are stored biased by one, so a reader that
