@@ -461,8 +461,7 @@ fn std_config(compiler: &Path, build_dir: &Path, host: &str, toyos_ld: &Path) ->
             let linker = if arch.links_through_toyos_ld() {
                 format!("linker = \"{linker}\"")
             } else {
-                let lld = compiler.join(format!("lib/rustlib/{host}/bin/rust-lld"));
-                format!("linker = \"{}\"\nrpath = false", lld.display())
+                format!("linker = \"{}\"\nrpath = false", toolchain::rust_lld(compiler).display())
             };
             format!("\n[target.{}]\n{linker}\n", arch.userland())
         })

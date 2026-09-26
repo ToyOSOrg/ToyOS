@@ -325,7 +325,8 @@ pub(crate) fn provision_toolchain_cargo(stage2: &Path) {
     });
 }
 
-/// Refuse a toolchain layout that would make rustup narrate.
+/// Refuse a toolchain layout that would make rustup narrate, or that has no
+/// linker for the guest targets that name `rust-lld`.
 ///
 /// Unconditional and after the step that provisions, because the defect being
 /// gated is a provisioning step that silently stopped running: a check that only
@@ -342,6 +343,21 @@ pub(crate) fn assert_toolchain_is_honest(stage2: &Path) {
         narrated.join(" and "),
         if narrated.len() == 1 { "it" } else { "them" },
     );
+    let lld = rust_lld(stage2);
+    assert!(
+        lld.is_file(),
+        "the toyos toolchain at {} carries no {}, the linker every guest target that does not \
+         link through toyos-ld names: bootstrap puts it there when `write_config` says \
+         `lld = true`, and it did not",
+        stage2.display(),
+        lld.display(),
+    );
+}
+
+/// The linker the guest targets name, as the toolchain at `toolchain` carries
+/// it: `lib/rustlib/<host>/bin/rust-lld`, where rustc itself looks for it.
+pub(crate) fn rust_lld(toolchain: &Path) -> PathBuf {
+    toolchain.join("lib/rustlib").join(host_triple()).join("bin/rust-lld")
 }
 
 /// Ensure the toolchain is up to date, and return the sysroot this checkout's
@@ -779,11 +795,40 @@ fn build_hosted_rustc(rust_dir: &Path, toyos_ld: &Path) {
     if !ok {
         tolerated_failure(&log, "the hosted rustc build");
     }
-    // No config restore needed — full_bootstrap writes the
-    // cross-only config before they run, so the next non-hosted build
-    // always starts with the correct config regardless of what's on disk.
+
+    // That build reassembled the host's `stage2` without `rust-lld`
+    // (`write_config` says why), so the host-only build runs once more to put
+    // it back: everything it would compile is already built.
+    write_config(rust_dir, &host_triple(), toyos_ld, false);
+    let (ok, log) = x_build(
+        rust_dir,
+        &["build", "--stage", "2", "--warnings", "warn"],
+        "the toolchain, reassembled",
+    );
+    refuse_on_compile_error(&log, "the toolchain, reassembled");
+    assert!(
+        rust_lld(&stage2(rust_dir)).is_file(),
+        "the toolchain's reassembly after the hosted rustc left no {}",
+        rust_lld(&stage2(rust_dir)).display()
+    );
+    if !ok {
+        tolerated_failure(&log, "the toolchain's reassembly");
+    }
 }
 
+/// `bootstrap.toml` for the host-only toolchain, or with the ToyOS-hosted rustc.
+///
+/// `lld = true` is what puts `rust-lld` in every stage's sysroot, where rustc
+/// finds the linker the targets that do not link through toyos-ld name. The
+/// hosted rustc's build cannot have it: bootstrap would then build LLD for the
+/// ToyOS host from C++, which nothing here can compile. Every assemble removes
+/// the host's `stage2` first, so [`build_hosted_rustc`] reassembles it under
+/// the host-only config after.
+///
+/// The host's `default-linker-linux-override` is pinned off because bootstrap
+/// otherwise ties it to `lld` for `x86_64-unknown-linux-gnu`, and a host rustc
+/// whose build environment flips with the config is rebuilt by each of those
+/// two builds.
 fn write_config(rust_dir: &Path, host: &str, toyos_ld: &Path, with_hosted_rustc: bool) {
     let linker = toyos_ld.display();
     let host_line = if with_hosted_rustc {
@@ -826,12 +871,20 @@ target = [{targets}]
 
 [rust]
 incremental = true
-lld = true
+lld = {lld}
 
-{userland}"#
+[target.{host}]
+{HOST_LINKER_PIN}
+
+{userland}"#,
+        lld = !with_hosted_rustc,
     );
     fs::write(rust_dir.join("bootstrap.toml"), config).unwrap();
 }
+
+/// What the host rustc links its own binaries with, held to one answer in every
+/// `bootstrap.toml` that builds a host compiler: [`write_config`] says why.
+pub(crate) const HOST_LINKER_PIN: &str = "default-linker-linux-override = \"off\"";
 
 /// Path to the host toyos-ld binary (stable location, never wiped by sysroot rebuilds).
 ///
@@ -1071,6 +1124,16 @@ mod tests {
         provision_toolchain_cargo(&stage2);
         assert!(narrated_binaries(&bin).is_empty());
         assert!(!cargo_link_stale(&stage2));
+
+        // Nothing narrates, and the toolchain is still refused: it has no linker.
+        let refused = std::panic::catch_unwind(|| assert_toolchain_is_honest(&stage2))
+            .expect_err("a toolchain with no rust-lld is refused");
+        let said = refused.downcast_ref::<String>().expect("a formatted refusal");
+        assert!(said.contains("rust-lld"), "the refusal names the linker: {said}");
+
+        let lld = rust_lld(&stage2);
+        fs::create_dir_all(lld.parent().unwrap()).unwrap();
+        fs::write(&lld, b"").unwrap();
         assert_toolchain_is_honest(&stage2);
     }
 
