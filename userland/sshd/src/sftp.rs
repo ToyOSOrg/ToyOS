@@ -592,6 +592,7 @@ pub fn next_packet(buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, Fatal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toyos_tmpdir::TempDir;
 
     /// A framed request, as a client sends it.
     fn packet(kind: u8, body: impl FnOnce(&mut Writer)) -> Vec<u8> {
@@ -640,15 +641,6 @@ mod tests {
                 name
             })
             .collect()
-    }
-
-    /// A directory of this test's own, emptied first so a previous run cannot
-    /// decide what a listing here contains.
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("toyos-sftp-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
-        dir
     }
 
     fn opendir(server: &mut Server, id: u32, dir: &std::path::Path) -> Vec<u8> {
@@ -749,7 +741,7 @@ mod tests {
     /// directory, so the reply encodings are judged by what comes back out.
     #[test]
     fn the_profile_moves_a_file_and_lists_it() {
-        let dir = scratch("profile");
+        let dir = TempDir::new("sftp-profile");
         let path = dir.join("payload");
         let path = path.to_str().expect("utf-8");
 
@@ -846,8 +838,6 @@ mod tests {
             }))
             .unwrap_or_else(|e| panic!("{}", e.0));
         assert_eq!(status_of(&reply), FX_EOF);
-
-        std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
     /// The cursor: a listing longer than one reply is handed over in batches
@@ -857,7 +847,7 @@ mod tests {
     /// that stayed put would hand a client the first batch forever.
     #[test]
     fn a_listing_longer_than_one_reply_continues_where_it_left_off() {
-        let dir = scratch("cursor");
+        let dir = TempDir::new("sftp-cursor");
         let want: Vec<String> =
             (0..NAMES_PER_REPLY + 17).map(|n| format!("entry-{n:04}")).collect();
         for name in &want {
@@ -886,15 +876,13 @@ mod tests {
         let mut got: Vec<String> = first.into_iter().chain(second).collect();
         got.sort();
         assert_eq!(got, want, "the two batches are not the directory");
-
-        std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
     /// The ceiling on a listing, refused by name rather than read into memory
     /// on a client's say-so.
     #[test]
     fn a_directory_past_the_ceiling_is_refused_by_name() {
-        let dir = scratch("ceiling");
+        let dir = TempDir::new("sftp-ceiling");
         for n in 0..=MAX_DIR_ENTRIES {
             std::fs::write(dir.join(format!("{n}")), b"").expect("an entry");
         }
@@ -908,8 +896,6 @@ mod tests {
             text.contains(&MAX_DIR_ENTRIES.to_string()),
             "the refusal does not name the ceiling: {text}"
         );
-
-        std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]

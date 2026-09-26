@@ -12,14 +12,6 @@ directory` and `usb_transport_break` with the same `NotFound`. Both pass alone
 (8 s and 4 s). Both are a staged disk image missing from the lane directory
 that the same test wrote it to.
 
-What is established, and it rules the obvious explanation out: `lane::dir()` is
-`$TMPDIR/toyos-tests-{pid}[/lane-N]`, keyed on the *test process* id, and
-**nothing in the tree removes a `toyos-tests-*` directory** — `git grep
-toyos-tests-` finds the constructor (`tests/common/lane.rs:47`) and one doc
-mention (`src/qemu.rs:31`), and no remover. So a second suite on the host cannot
-be deleting the first's scratch by name, and a stale directory from a dead suite
-cannot be collected onto a live pid.
-
 That leaves the failure without a mechanism. It is worth an hour from whoever
 next touches the harness's staging, because "re-run it" stops being an adequate
 answer once the failure can be a missing file rather than a slow one — a slow

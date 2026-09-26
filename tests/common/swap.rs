@@ -113,17 +113,14 @@ impl Rig {
         }
     }
 
-    /// `why`, where the guest's whole console is kept, and what `logd` and
-    /// init wrote about the stream and the swap into the `/log` the guest
-    /// leaves when it is stopped here.
+    /// `why`, the guest's whole console, and what `logd` and init wrote about
+    /// the stream and the swap into the `/log` the guest leaves when it is
+    /// stopped here. The console is in the red itself: the run's scratch goes
+    /// with the run, red or green.
     fn fail(mut self, why: String) -> String {
         self.console.push_str(&self.guest.drain_serial(Duration::from_secs(2)));
         drop(self.guest);
-        let at = self.staged.scratch.join("console.log");
-        let kept = match std::fs::write(&at, &self.console) {
-            Ok(()) => format!("the guest's console is {}", at.display()),
-            Err(e) => format!("the guest's console could not be kept at {}: {e}", at.display()),
-        };
+        let kept = format!("the guest's console:\n{}", self.console);
         let said = match super::volumes::whole_log(&self.staged.image, self.staged.start, self.staged.len) {
             Ok(file) => file
                 .into_iter()

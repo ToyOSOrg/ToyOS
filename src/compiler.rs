@@ -296,6 +296,8 @@ pub fn sweep(root: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+
+    use toyos_tmpdir::TempDir;
     use std::process::Command;
 
     use super::*;
@@ -338,11 +340,8 @@ mod tests {
     /// A primary whose `rust` pins fork commit `C0` and has built a compiler
     /// from it, and three linked worktrees: `same` pins `C0`, `a` and `b` each
     /// pin a commit whose `compiler/` is its own.
-    fn estate() -> (PathBuf, PathBuf, [PathBuf; 3]) {
-        let base = std::env::temp_dir().join(format!("toyos-compiler-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
-        let base = fs::canonicalize(&base).unwrap();
+    fn estate(scratch: &Path) -> (PathBuf, PathBuf, [PathBuf; 3]) {
+        let base = fs::canonicalize(scratch).unwrap();
 
         let fork = base.join("fork-src");
         fs::create_dir_all(&fork).unwrap();
@@ -396,7 +395,8 @@ mod tests {
     /// a sweep takes a compiler only once no worktree names it.
     #[test]
     fn worktrees_with_different_compilers_coexist_and_the_primary_s_is_untouched() {
-        let (primary, rust_dir, [same, a, b]) = estate();
+        let scratch = TempDir::new("compiler");
+        let (primary, rust_dir, [same, a, b]) = estate(&scratch);
         let before = snapshot(&rust_dir.join("build"));
         let link = toolchain::rustup_link();
         let builds = Cell::new(0);

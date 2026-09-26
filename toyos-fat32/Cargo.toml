@@ -28,3 +28,5 @@ toyos-wallclock = { path = "../toyos-wallclock" }
 # never a dependency: it is the outside judge of what this crate writes, and it
 # must not be reachable from the driver it judges.
 toyos-fat32-check = { path = "../toyos-fat32-check" }
+# Test scratch that is gone on every way out; `--ci host` reds on any left behind.
+toyos-tmpdir = { path = "../toyos-tmpdir" }

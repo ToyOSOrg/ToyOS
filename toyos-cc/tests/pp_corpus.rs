@@ -80,8 +80,8 @@ fn corpus_dir() -> PathBuf {
 /// Preprocess `source` from inside the corpus directory, with the output and
 /// the diagnostics on one stream in the order the compiler wrote them.
 fn preprocess(dir: &Path, source: &str) -> String {
-    let merged = std::env::temp_dir()
-        .join(format!("toyos-cc-pp-{}-{source}.out", std::process::id()));
+    let scratch = toyos_tmpdir::TempDir::new("cc-pp");
+    let merged = scratch.join("out");
     let sink = std::fs::File::create(&merged).unwrap();
     let dup = sink.try_clone().unwrap();
     Command::new(env!("CARGO_BIN_EXE_toyos-cc"))
@@ -91,9 +91,7 @@ fn preprocess(dir: &Path, source: &str) -> String {
         .stderr(Stdio::from(dup))
         .status()
         .unwrap();
-    let text = std::fs::read_to_string(&merged).unwrap();
-    let _ = std::fs::remove_file(&merged);
-    text
+    std::fs::read_to_string(&merged).unwrap()
 }
 
 /// Lines that count, with the whitespace question settled:
