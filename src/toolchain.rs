@@ -805,7 +805,15 @@ fn write_config(rust_dir: &Path, host: &str, toyos_ld: &Path, with_hosted_rustc:
         .iter()
         .map(|arch| {
             let backends = if *arch == HOSTED_ARCH { codegen_backends } else { "" };
-            format!("[target.{}]\nlinker = \"{linker}\"{backends}\n\n", arch.userland())
+            // rust-lld by name: rustc finds it in the sysroot of the stage that
+            // links, which `lld = true` puts it in. It takes no `-Wl,` rpath,
+            // and a guest std has no host library path to record.
+            let linker = if arch.links_through_toyos_ld() {
+                format!("linker = \"{linker}\"")
+            } else {
+                "linker = \"rust-lld\"\nrpath = false".to_string()
+            };
+            format!("[target.{}]\n{linker}{backends}\n\n", arch.userland())
         })
         .collect();
     let config = format!(
@@ -818,7 +826,7 @@ target = [{targets}]
 
 [rust]
 incremental = true
-lld = false
+lld = true
 
 {userland}"#
     );

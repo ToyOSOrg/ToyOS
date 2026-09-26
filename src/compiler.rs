@@ -44,7 +44,7 @@ use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is none of them: the
 /// build below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only; 1";
+const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld; 2";
 
 /// What a compiler's key is the identity of, in its fork checkout.
 const KEYED: [&str; 4] = ["compiler", "src/bootstrap", "src/stage0", "Cargo.lock"];
@@ -254,7 +254,7 @@ target = ["{host}"]
 
 [rust]
 incremental = true
-lld = false
+lld = true
 "#,
         build_dir = build_dir.display(),
     )

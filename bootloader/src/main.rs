@@ -369,10 +369,16 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     println!("Kernel stack size: {}", stack_size);
     // `vaddr_max` is the largest `p_vaddr + p_memsz` over the `PT_LOAD`
     // segments, and the image is laid out at its own vaddrs — so it is what the
-    // kernel's memory has to cover before the stack is added to it.
+    // kernel's memory has to cover before the stack is added to it. The stack
+    // starts on the next page: where the image ends is the linker's choice, and
+    // both ABIs want the stack pointer 16-byte aligned, which AArch64's
+    // `SCTLR_EL1.SA` enforces on every access through it.
+    const PAGE: u64 = 4096;
     let mem_size = layout
         .vaddr_max
-        .checked_add(stack_size as u64)
+        .checked_add(PAGE - 1)
+        .map(|end| end & !(PAGE - 1))
+        .and_then(|stack_base| stack_base.checked_add(stack_size as u64))
         .and_then(|n| usize::try_from(n).ok())
         .expect("kernel.elf: image plus stack does not fit an allocation");
 

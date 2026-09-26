@@ -10,7 +10,12 @@ linker = "toyos-ld"
 # the syscall gate, the interrupt controller and the scheduler a way in, every
 # item only those reach is unreachable there and nowhere else — and an
 # `#[expect(dead_code)]` cannot be met under it, hence the second `-A`. Exit:
-# both go when `issues/kernel/toyos-runs-on-arm64.md`'s stage 7 lands.
+# both go when `issues/kernel/toyos-runs-on-arm64.md`'s stage 7 lands. The
+# loader takes a static PIE at base 0 (`ET_DYN`, `R_AARCH64_RELATIVE` only),
+# which rust-lld makes of the target's static-model code with `-pie`: `-z
+# notext` lets absolute words stay in read-only sections, which the loader
+# relocates before anything runs. Position-independent codegen is not an
+# option: it reaches symbols through GOT slots holding virtual addresses,
+# which the entry cannot use while the MMU is off.
 [target.aarch64-unknown-none-softfloat]
-linker = "toyos-ld"
-rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes", "-Adead_code", "-Aunfulfilled_lint_expectations"]
+rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes", "-Adead_code", "-Aunfulfilled_lint_expectations", "-Clink-arg=-pie", "-Clink-arg=-znotext"]

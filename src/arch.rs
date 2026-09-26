@@ -93,6 +93,16 @@ impl Arch {
         }
     }
 
+    /// Whether this architecture's guest binaries link through toyos-ld, which
+    /// is frozen, rather than the rust-lld its targets name: x86-64's do until
+    /// its own switch to rust-lld.
+    pub const fn links_through_toyos_ld(self) -> bool {
+        match self {
+            Arch::X86_64 => true,
+            Arch::Aarch64 => false,
+        }
+    }
+
     /// Where on the ESP firmware looks for a removable medium's loader: UEFI
     /// 2.11 §3.5.1.1 names one file per architecture.
     pub const fn removable_loader(self) -> &'static str {

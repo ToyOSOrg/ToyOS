@@ -457,7 +457,15 @@ fn std_config(compiler: &Path, build_dir: &Path, host: &str, toyos_ld: &Path) ->
     let linker = toyos_ld.display();
     let userland: String = Arch::ALL
         .iter()
-        .map(|arch| format!("\n[target.{}]\nlinker = \"{linker}\"\n", arch.userland()))
+        .map(|arch| {
+            let linker = if arch.links_through_toyos_ld() {
+                format!("linker = \"{linker}\"")
+            } else {
+                let lld = compiler.join(format!("lib/rustlib/{host}/bin/rust-lld"));
+                format!("linker = \"{}\"\nrpath = false", lld.display())
+            };
+            format!("\n[target.{}]\n{linker}\n", arch.userland())
+        })
         .collect();
     format!(
         r#"change-id = "ignore"
