@@ -112,7 +112,7 @@ type PipedConnection = stream::PipedConnection<Pipe, stream::SendPipe>;
 
 use toyos::net::*;
 
-use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
+use smoltcp::iface::{Config, Interface, PollIngressSingleResult, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{dhcpv4, tcp, udp};
 use smoltcp::time::Instant as SmoltcpInstant;
@@ -303,14 +303,14 @@ impl Card {
 /// and never reach the rest — a lookup's query behind sixteen busy uploads.
 /// So nothing is refused: a frame with no transmit slot free waits in the
 /// [`Backlog`], and a pass starts only with none waiting, which bounds what
-/// can wait to one frame a socket and the one reply a received frame makes.
+/// can wait to one frame a socket and [`READ_WHILE_WAITING`] replies.
 struct DmaNic {
     nic: Card,
     backlog: Backlog,
 }
 
 /// Frames made with no transmit slot free, oldest first. While any wait, the
-/// device's used-ring interrupt is the wake, and no frame is read.
+/// device's used-ring interrupt is the wake of what is owed to be sent.
 #[derive(Default)]
 struct Backlog {
     frames: VecDeque<Vec<u8>>,
@@ -318,6 +318,11 @@ struct Backlog {
     /// reports: the proof a ring was ever full.
     waited: u64,
 }
+
+/// How many frames may wait for a transmit slot before no more are read: one
+/// transmit ring's worth, so what a full ring holds back is never more than
+/// the ring itself, and acknowledgements go on arriving while it drains.
+const READ_WHILE_WAITING: usize = 16;
 
 impl DmaNic {
     /// Hand the ring every waiting frame it has a slot for, oldest first,
@@ -338,10 +343,11 @@ impl Device for DmaNic {
     type RxToken<'a> = DmaRxToken<'a>;
     type TxToken<'a> = DmaTxToken<'a>;
 
-    /// No frame is read while one waits to be sent: the reply it could make
-    /// would wait too, and a frame not read waits in the device's own ring.
+    /// Frames are read while fewer than [`READ_WHILE_WAITING`] wait to be sent:
+    /// the reply each could make would wait too, and a frame not read waits in
+    /// the device's own ring.
     fn receive(&mut self, _timestamp: SmoltcpInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if !self.backlog.frames.is_empty() {
+        if self.backlog.frames.len() >= READ_WHILE_WAITING {
             return None;
         }
         let Self { nic, backlog } = self;
@@ -1828,9 +1834,15 @@ fn main() {
             link_up = link.is_up();
         }
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
-        // A pass starts only with no frame waiting for a transmit slot, which
+        // Frames are read while the device takes them, and a pass of the
+        // sockets starts only with no frame waiting for a transmit slot, which
         // is what bounds how many can wait.
-        while device.flush() && iface.poll(now, &mut device, &mut socket_set) != PollResult::None {}
+        loop {
+            while iface.poll_ingress_single(now, &mut device, &mut socket_set) != PollIngressSingleResult::None {}
+            if !device.flush() || iface.poll_egress(now, &mut device, &mut socket_set) == PollResult::None {
+                break;
+            }
+        }
         let backlogged = !device.flush();
         device.nic.report();
 
