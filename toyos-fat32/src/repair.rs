@@ -84,6 +84,31 @@ pub(crate) enum Repair {
     Entry { offset: u64, raw: RawEntry },
 }
 
+/// The [`Fat32::repair_episode`] a caller last announced, so a log names each
+/// pending repair once rather than at every call that meets it.
+#[derive(Debug, Default)]
+pub struct RepairNotice(Option<u64>);
+
+impl RepairNotice {
+    /// Whether a call answering `e` while `episode` ([`Fat32::repair_episode`])
+    /// is queued leaves the volume waiting on that repair: `RepairPending` is a
+    /// budget refusing its re-drive, and `Io` a device failure refusing either
+    /// the re-drive or the call's own write, which queues it the same way.
+    pub fn waits_on(e: Error, episode: Option<u64>) -> bool {
+        episode.is_some() && matches!(e, Error::RepairPending | Error::Io)
+    }
+
+    /// Whether `episode` is a pending repair not yet announced; from here it
+    /// is. `None`, nothing pending, is never one.
+    pub fn first_sight(&mut self, episode: Option<u64>) -> bool {
+        if episode.is_none() || episode == self.0 {
+            return false;
+        }
+        self.0 = episode;
+        true
+    }
+}
+
 impl<D: BlockAccess> Fat32<D> {
     /// Run one mutating call so that an `Err` leaves the volume where the
     /// repair takes it.
