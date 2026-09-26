@@ -274,7 +274,20 @@ pub fn update_falls_back_from_a_dying_kernel(_: &Path, _: &[(String, Vec<u8>)], 
         return Err(format!("`update` ended {status:?} saying {said:?}"));
     }
     let fell_back = format!("{SLOT_RECORD} A, because the marked slot B was refused: died");
-    let (from, uart) = rig.reboot_until(&mut guest, &mut console, &fell_back)?;
+    // Until slot A says it fell back, or slot B has booted a second time: a
+    // loader that does not fall back boots the dead slot again, and that is the
+    // answer, not a wait for one that never comes.
+    let again = format!("{SLOT_RECORD} B, ");
+    let (from, uart) = (console.len(), guest.uart_log().len());
+    ssh::ssh_fire(HOST, rig.port, &rig.identity, "reboot")?;
+    qemu::await_guest(&mut guest, &mut console, "slot A to fall back, or slot B to boot again", |c| {
+        let since = &c[from.min(c.len())..];
+        since.contains(&fell_back) || since.matches(&again).count() >= 2
+    })?;
+    let booted_b = console[from..].matches(&again).count();
+    if !console[from..].contains(&fell_back) {
+        return Err(format!("slot B booted {booted_b} times after the update and slot A never did"));
+    }
     qemu::await_marker_new(&mut guest, &mut console, DEFAULT_READY, from, "slot A's ready marker")?;
     loader_said(&guest, uart, "Previous boot's panic:")?;
     loader_said(&guest, uart, "died on its last boot, so no pass boots it again until an update replaces it")?;
