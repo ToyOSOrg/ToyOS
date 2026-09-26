@@ -15,16 +15,15 @@
 //! waiting side does between its registration and its park can be skipped:
 //! `park::prepare` consumes the flag, and the commit consumes the claim.
 //!
-//! **A post allocates nothing and frees nothing.** It walks two vectors that
-//! only a registration grows, and a ring entry that has fired, been withdrawn
-//! or lost its ring stays where it is until the next registration on this
-//! watch sweeps it — which also bounds the list by the entries live at the last
+//! **A post allocates nothing.** Every ring entry is one-shot, so a post takes
+//! them all out of the list and fires them with the list lock let go; what it
+//! frees is those entries. A registration sweeps the entries a withdrawal left
+//! behind, so the list never holds more than the polls live at its last post or
 //! registration, plus that one.
 //!
-//! **Lock order.** The list lock is a leaf the environment supplies, with one
-//! nesting allowed under it: a ring's own lock and the watch its submitters
-//! park on, which holds threads and never rings. So a post may be made under
-//! any lock but a ring's, and [`Ring::fire`] may take nothing but that ring's.
+//! **Lock order.** The list lock is a leaf the environment supplies, and nothing
+//! but a thread's notify runs under it: [`Ring::fire`] is always called with it
+//! let go. So a post may be made under any lock but a ring's own.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -50,8 +49,8 @@ pub enum Fire {
 pub trait Ring {
     /// Post this poll's completion. One-shot across every watch the poll is
     /// registered on: an entry that already fired, or whose poll was withdrawn,
-    /// posts nothing. May take only its ring's own lock and post only the watch
-    /// its ring's submitters park on.
+    /// posts nothing. Called with no watch's list lock held; may take only its
+    /// ring's own lock and post only the watch its ring's submitters park on.
     fn fire(&self, how: Fire);
     /// Whether a fire would still post anything. `false` is permanent.
     fn live(&self) -> bool;
@@ -149,16 +148,18 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
         });
     }
 
-    /// Something changed: wake every registered thread and fire every ring.
+    /// Something changed: wake every registered thread, and fire and let go of
+    /// every ring entry.
     pub fn post<K: Kicker, P: PreemptGuard>(&self, cause: WakeCause, env: &Poster<'_, M, K, P>) {
-        self.list.with(|w| {
+        let fired = self.list.with(|w| {
             for waiter in &w.threads {
                 notify(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
             }
-            for ring in &w.rings {
-                ring.fire(Fire::Ready);
-            }
+            core::mem::take(&mut w.rings)
         });
+        for ring in &fired {
+            ring.fire(Fire::Ready);
+        }
     }
 
     /// Wake at most `limit` threads registered with `token`, in registration
@@ -448,7 +449,7 @@ mod tests {
         withdrawn.withdraw();
         let fresh = Arc::new(Poll::default());
         w.add_ring(fresh.clone());
-        assert_eq!(Arc::strong_count(&fired), 1, "a fired entry is swept");
+        assert_eq!(Arc::strong_count(&fired), 1, "a post lets go of what it fired");
         assert_eq!(Arc::strong_count(&withdrawn), 1, "a withdrawn entry is swept");
         assert_eq!(w.live_rings(), 1);
     }

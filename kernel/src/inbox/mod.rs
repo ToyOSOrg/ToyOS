@@ -19,10 +19,9 @@
 //! process's ring or say something no object said. A post writes at most one
 //! entry, and a ring holds at most [`MAX_PENDING_WATCHES`] polls.
 //!
-//! **Lock order: an object's watch, then a ring's own lock, then the watch
-//! its submitters park on.** A ring's lock takes nothing under it, and a
-//! ring's watch holds only threads, because no handle names a ring as a thing
-//! to watch.
+//! **Locks.** A ring's own lock takes nothing under it and is never taken under
+//! a watch's: a post fires its polls with its list let go. A ring's own watch
+//! holds only threads, because no handle names a ring as a thing to watch.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -194,7 +193,7 @@ const MAX_PENDING_WATCHES: usize = 1024;
 pub struct Inbox {
     /// `None` once the ring's one reference let go of it.
     state: Lock<Option<RingState>>,
-    /// Threads parked in `submit`; never a poll — see the lock order above.
+    /// Threads parked in `submit`; never a poll — see the module header.
     watch: Watch,
 }
 
