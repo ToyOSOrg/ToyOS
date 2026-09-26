@@ -144,3 +144,49 @@ fn an_aarch64_pe_declares_arm64_and_patches_its_calls() {
     let bytes = data.data().unwrap();
     assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), data.address(), "ptr holds target");
 }
+
+/// The address an `adrp` at `pc` and the scaled `ldr` after it read.
+fn adrp_ldr_target(file: &object::File, pc: u64) -> u64 {
+    let adrp = word_at(file, pc);
+    let imm = (((adrp >> 29) & 3) | (((adrp >> 5) & 0x7ffff) << 2)) as i64;
+    let page = ((pc & !0xfff) as i64 + (((imm << 43) >> 43) << 12)) as u64;
+    page + (((word_at(file, pc + 4) >> 10) & 0xfff) as u64) * 8
+}
+
+/// **An AArch64 shared library reaches a function nobody in it defines
+/// through the GOT slot its GLOB_DAT names**, whether the code calls it or
+/// loads its address: the call goes through a stub that is AArch64 code,
+/// `adrp x16; ldr x16; br x16`, never the x86 `jmp *` a PLT used to be for
+/// every machine, and both read the one slot the loader fills.
+#[test]
+fn an_aarch64_shared_library_reaches_an_import_through_its_glob_dat_slot() {
+    let mut b = ObjBuilder::for_machine(BinaryFormat::Elf, Architecture::Aarch64);
+    let main = b.undefined("main", object::SymbolKind::Text);
+    let caller = b.text("caller", &words(&[AARCH64_BL, AARCH64_RET]), SymbolScope::Dynamic);
+    let at = b.symbol_offset(caller);
+    b.reloc(StandardSection::Text, at, main, 0, RelocationFlags::Elf { r_type: elf::R_AARCH64_CALL26 });
+    let loader = b.text("loader", &words(&[0x9000_0008, 0xf940_0108, AARCH64_RET]), SymbolScope::Dynamic);
+    let at = b.symbol_offset(loader);
+    b.reloc(StandardSection::Text, at, main, 0, RelocationFlags::Elf { r_type: elf::R_AARCH64_ADR_GOT_PAGE });
+    b.reloc(StandardSection::Text, at + 4, main, 0, RelocationFlags::Elf { r_type: elf::R_AARCH64_LD64_GOT_LO12_NC });
+    let out = Case::new("aarch64-so-import").arg("-shared").input("a.o", b.finish()).link();
+
+    let file = object::File::parse(&*out).unwrap();
+    let relocs: Vec<_> = file.dynamic_relocations().expect("a .rela.dyn").collect();
+    let glob: Vec<_> = relocs
+        .iter()
+        .filter(|(_, r)| r.flags() == RelocationFlags::Elf { r_type: elf::R_AARCH64_GLOB_DAT })
+        .collect();
+    assert_eq!(glob.len(), 1, "{relocs:?}");
+    let slot = glob[0].0;
+
+    assert_eq!(adrp_ldr_target(&file, symbol(&file, "loader")), slot, "the address load reads another slot");
+    let bl_at = symbol(&file, "caller");
+    let bl = word_at(&file, bl_at);
+    assert_eq!(bl & 0xfc00_0000, AARCH64_BL);
+    let stub = (bl_at as i64 + ((((bl & 0x03ff_ffff) as i64) << 38) >> 36)) as u64;
+    assert_eq!(word_at(&file, stub) & 0x9f00_001f, 0x9000_0010, "the stub is not `adrp x16`");
+    assert_eq!(word_at(&file, stub + 4) & !(0xfff << 10), 0xf940_0210, "the stub is not `ldr x16, [x16]`");
+    assert_eq!(word_at(&file, stub + 8), 0xd61f_0200, "the stub is not `br x16`");
+    assert_eq!(adrp_ldr_target(&file, stub), slot, "the stub jumps through another slot");
+}

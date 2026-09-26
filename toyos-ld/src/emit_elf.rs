@@ -2,7 +2,7 @@ use object::write::elf::{FileHeader, ProgramHeader, SectionHeader, SectionIndex,
 use object::write::StringId;
 use object::Endianness;
 use crate::collect::{collect_unique_symbols, Arch, InputSection, LinkState, RelocType, SectionKind, SymbolDef, SymbolRef};
-use crate::reloc::{RelocOutput, resolve_symbol, tpoff};
+use crate::reloc::{RelocOutput, resolve_symbol, tpoff, TLS_ALIGN};
 use crate::{align_up, classify_sections, LinkError, BASE_VADDR, PAGE_SIZE};
 use object::elf;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -303,9 +303,12 @@ pub(crate) fn layout_elf(state: &mut LinkState, base_addr: u64, entry_name: Opti
         }
     }
 
-    const PLT_STUB_SIZE: u64 = 6;
+    let plt_stub_size: u64 = match state.arch {
+        Arch::X86_64 => 6,
+        Arch::Aarch64 => 12,
+    };
     let plt_vaddr = if dyn_syms.is_empty() { cursor } else { align_up(cursor, 16) };
-    cursor = plt_vaddr + dyn_syms.len() as u64 * PLT_STUB_SIZE;
+    cursor = plt_vaddr + dyn_syms.len() as u64 * plt_stub_size;
 
     // .eh_frame_hdr: placed after PLT stubs, before page alignment
     let mut eh_frame_vaddr = 0u64;
@@ -370,9 +373,10 @@ pub(crate) fn layout_elf(state: &mut LinkState, base_addr: u64, entry_name: Opti
     let got_symbols = collect_unique_symbols(state.relocs.iter(), |r| {
         matches!(r.r_type,
             RelocType::X86Gotpcrel | RelocType::X86Gotpcrelx
-            | RelocType::X86RexGotpcrelx | RelocType::X86Gottpoff
+            | RelocType::X86RexGotpcrelx
             | RelocType::Aarch64AdrGotPage | RelocType::Aarch64Ld64GotLo12Nc)
-        || (r.r_type == RelocType::X86Tlsgd && !is_shared
+        || r.r_type.is_gottprel()
+        || ((r.r_type == RelocType::X86Tlsgd || r.r_type.is_tlsdesc()) && !is_shared
             && state.dynamic_imports.contains(r.target.name()))
     });
 
@@ -393,7 +397,7 @@ pub(crate) fn layout_elf(state: &mut LinkState, base_addr: u64, entry_name: Opti
     let mut gd_got: BTreeMap<SymbolRef, u64> = BTreeMap::new();
     if is_shared {
         let gd_symbols = collect_unique_symbols(state.relocs.iter(), |r| {
-            r.r_type == RelocType::X86Tlsgd
+            r.r_type == RelocType::X86Tlsgd || r.r_type.is_tlsdesc()
         });
         for sym in &gd_symbols {
             gd_got.insert(sym.clone(), cursor);
@@ -417,7 +421,7 @@ pub(crate) fn layout_elf(state: &mut LinkState, base_addr: u64, entry_name: Opti
 
     // TLS file-backed sections (.tdata) placed within RW segment for correct
     // PT_TLS p_offset. PT_TLS overlaps with PT_LOAD(RW) in the file.
-    let tls_start = if buckets.tls.is_empty() { cursor } else { align_up(cursor, 64) };
+    let tls_start = if buckets.tls.is_empty() { cursor } else { align_up(cursor, TLS_ALIGN) };
     let mut tls_cursor = tls_start;
     for &idx in &buckets.tls {
         if state.sections[idx].kind == SectionKind::TlsBss { continue; }
@@ -452,16 +456,33 @@ pub(crate) fn layout_elf(state: &mut LinkState, base_addr: u64, entry_name: Opti
 
     let rw_end = align_up(cursor, PAGE_SIZE);
 
-    // Build PLT stub code: `jmp *[rip + offset]` (FF 25 xx xx xx xx)
+    // Build PLT stub code, each an indirect jump through the import's GOT slot:
+    // x86-64 `jmp *[rip + offset]` (FF 25 disp32); AArch64 `adrp x16, slot;
+    // ldr x16, [x16, #lo12]; br x16`.
     let mut plt = BTreeMap::new();
     let mut plt_data = Vec::new();
     for (i, sym) in dyn_syms.iter().enumerate() {
-        let stub_vaddr = plt_vaddr + i as u64 * PLT_STUB_SIZE;
+        let stub_vaddr = plt_vaddr + i as u64 * plt_stub_size;
         plt.insert(sym.clone(), stub_vaddr);
-        let rip = stub_vaddr + 6;
-        let offset = (dyn_got[sym] as i64 - rip as i64) as i32;
-        plt_data.extend_from_slice(&[0xFF, 0x25]);
-        plt_data.extend_from_slice(&offset.to_le_bytes());
+        let slot = dyn_got[sym];
+        match state.arch {
+            Arch::X86_64 => {
+                let rip = stub_vaddr + 6;
+                let offset = (slot as i64 - rip as i64) as i32;
+                plt_data.extend_from_slice(&[0xFF, 0x25]);
+                plt_data.extend_from_slice(&offset.to_le_bytes());
+            }
+            Arch::Aarch64 => {
+                let pages = ((slot as i64 & !0xFFF) - (stub_vaddr as i64 & !0xFFF)) >> 12;
+                assert!((-(1 << 20)..(1 << 20)).contains(&pages), "a PLT stub cannot reach its GOT slot");
+                let pages = pages as u32;
+                let adrp = 0x9000_0010 | ((pages & 3) << 29) | (((pages >> 2) & 0x7FFFF) << 5);
+                let ldr = 0xF940_0210 | ((((slot & 0xFFF) >> 3) as u32) << 10);
+                for insn in [adrp, ldr, 0xD61F_0200] {
+                    plt_data.extend_from_slice(&insn.to_le_bytes());
+                }
+            }
+        }
     }
 
     ElfLayout {
@@ -725,6 +746,7 @@ pub(crate) fn emit_elf(
     let has_relocs = relocs.as_ref().is_some_and(|r| {
         !r.relatives.is_empty() || !r.glob_dats.is_empty() || !r.tpoff64s.is_empty()
             || !r.named_tpoff64s.is_empty() || !r.tpoff32s.is_empty()
+            || !r.tlsdescs.is_empty() || !r.named_tlsdescs.is_empty()
     });
     let needs_dynamic = is_shared || has_dynamic_libs
         || (is_pie && (layout.init_array_size > 0 || layout.fini_array_size > 0 || has_relocs));
@@ -735,7 +757,8 @@ pub(crate) fn emit_elf(
         || relocs.is_some_and(|r| !r.glob_dats.is_empty())
         || relocs.is_some_and(|r| !r.tpoff64s.is_empty())
         || relocs.is_some_and(|r| !r.named_tpoff64s.is_empty())
-        || relocs.is_some_and(|r| !r.tpoff32s.is_empty());
+        || relocs.is_some_and(|r| !r.tpoff32s.is_empty())
+        || relocs.is_some_and(|r| !r.tlsdescs.is_empty() || !r.named_tlsdescs.is_empty());
     let file_rw_end = layout.rw_start + layout.rw_filesz;
 
     let mut buf = Vec::new();
@@ -772,6 +795,7 @@ pub(crate) fn emit_elf(
                 .chain(relocs.named_tpoff64s.iter())
                 .chain(relocs.named_dtpmod64s.iter())
                 .chain(relocs.named_dtpoff64s.iter())
+                .chain(relocs.named_tlsdescs.iter())
             {
                 if !sym_to_writer_idx.contains_key(sym_name) {
                     let str_id = w.add_dynamic_string(sym_name.as_bytes());
@@ -807,6 +831,7 @@ pub(crate) fn emit_elf(
                 .chain(relocs.named_tpoff64s.iter())
                 .chain(relocs.named_dtpmod64s.iter())
                 .chain(relocs.named_dtpoff64s.iter())
+                .chain(relocs.named_tlsdescs.iter())
             {
                 if !sym_to_writer_idx.contains_key(sym_name) {
                     let str_id = w.add_dynamic_string(sym_name.as_bytes());
@@ -925,6 +950,7 @@ pub(crate) fn emit_elf(
             + relocs.tpoff64s.len() + relocs.named_tpoff64s.len() + relocs.tpoff32s.len()
             + relocs.dtpmod64s.len() + relocs.dtpoff64s.len()
             + relocs.named_dtpmod64s.len() + relocs.named_dtpoff64s.len()
+            + relocs.tlsdescs.len() + relocs.named_tlsdescs.len()
     } else { 0 };
     let rela_size = rela_count as u64 * 24;
 
@@ -1057,7 +1083,7 @@ pub(crate) fn emit_elf(
             p_paddr: layout.tls_start,
             p_filesz: layout.tls_filesz,
             p_memsz: layout.tls_memsz,
-            p_align: 64,
+            p_align: TLS_ALIGN,
         });
     }
     if has_eh_frame_hdr {
@@ -1137,7 +1163,7 @@ pub(crate) fn emit_elf(
     // Static mode: fill GOT entries directly (GOT is before TLS in the layout)
     if is_static {
         let gottpoff_syms: HashSet<SymbolRef> = state.relocs.iter()
-            .filter(|r| r.r_type == RelocType::X86Gottpoff)
+            .filter(|r| r.r_type.is_gottprel())
             .map(|r| r.target.clone()).collect();
         let mut got_entries: Vec<_> = layout.got.iter().collect();
         got_entries.sort_by_key(|(_, &vaddr)| vaddr);
@@ -1145,7 +1171,7 @@ pub(crate) fn emit_elf(
             let sym_addr = resolve_symbol(state, sym_ref, None)
                 .ok_or_else(|| LinkError::UndefinedSymbols(vec![sym_ref.name().to_string()]))?;
             let value = if gottpoff_syms.contains(sym_ref) {
-                tpoff(sym_addr, layout.tls_start, layout.tls_memsz) as u64
+                tpoff(state.arch, sym_addr, layout.tls_start, layout.tls_memsz) as u64
             } else { sym_addr };
             let file_off = (got_vaddr - base) as usize;
             w.pad_until(file_off);
@@ -1400,6 +1426,7 @@ enum DynReloc {
     TpOff32,
     DtpMod64,
     DtpOff64,
+    TlsDesc,
 }
 
 fn dyn_reloc_type(arch: Arch, kind: DynReloc) -> u32 {
@@ -1415,8 +1442,11 @@ fn dyn_reloc_type(arch: Arch, kind: DynReloc) -> u32 {
         (Arch::Aarch64, DynReloc::TpOff64) => elf::R_AARCH64_TLS_TPREL,
         (Arch::Aarch64, DynReloc::DtpMod64) => elf::R_AARCH64_TLS_DTPMOD,
         (Arch::Aarch64, DynReloc::DtpOff64) => elf::R_AARCH64_TLS_DTPREL,
+        (Arch::Aarch64, DynReloc::TlsDesc) => elf::R_AARCH64_TLSDESC,
         // Only an x86-64 `TPOFF32` input produces one.
         (Arch::Aarch64, DynReloc::TpOff32) => panic!("an AArch64 link produced a 32-bit TP offset"),
+        // Only an AArch64 descriptor sequence produces one.
+        (Arch::X86_64, DynReloc::TlsDesc) => panic!("an x86-64 link produced a TLS descriptor"),
     }
 }
 
@@ -1458,5 +1488,11 @@ fn write_dyn_relocs(
     }
     for (got_vaddr, name) in &relocs.named_dtpoff64s {
         write(*got_vaddr, named(name), DynReloc::DtpOff64, 0);
+    }
+    for &(pair, addend) in &relocs.tlsdescs {
+        write(pair, 0, DynReloc::TlsDesc, addend);
+    }
+    for (pair, name) in &relocs.named_tlsdescs {
+        write(*pair, named(name), DynReloc::TlsDesc, 0);
     }
 }

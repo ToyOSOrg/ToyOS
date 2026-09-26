@@ -116,6 +116,11 @@ pub enum RelocType {
     Aarch64Abs64,
     Aarch64Abs32,
     Aarch64Prel32,
+    Aarch64Prel64,
+    Aarch64LdPrelLo19,
+    Aarch64AdrPrelLo21,
+    Aarch64Condbr19,
+    Aarch64Tstbr14,
     Aarch64Call26,
     Aarch64Jump26,
     Aarch64AdrPrelPgHi21,
@@ -134,6 +139,38 @@ pub enum RelocType {
     Aarch64GotPcrel32,
     Aarch64TlvpLoadPage21,
     Aarch64TlvpLoadPageoff12,
+    Aarch64TlsdescAdrPage21,
+    Aarch64TlsdescLd64Lo12,
+    Aarch64TlsdescAddLo12,
+    Aarch64TlsdescCall,
+    Aarch64TlsieAdrGottprelPage21,
+    Aarch64TlsieLd64GottprelLo12Nc,
+    Aarch64TlsleAddTprelHi12,
+    Aarch64TlsleAddTprelLo12Nc,
+}
+
+impl RelocType {
+    /// One of the four relocations of an AArch64 TLS descriptor sequence
+    /// (`adrp`, `ldr`, `add`, `blr`), each patching its own instruction and all
+    /// four relaxed the same way for one symbol.
+    pub(crate) fn is_tlsdesc(self) -> bool {
+        matches!(
+            self,
+            Self::Aarch64TlsdescAdrPage21
+                | Self::Aarch64TlsdescLd64Lo12
+                | Self::Aarch64TlsdescAddLo12
+                | Self::Aarch64TlsdescCall
+        )
+    }
+
+    /// A reference to a GOT slot holding a symbol's offset from the thread
+    /// pointer: the initial-exec model.
+    pub(crate) fn is_gottprel(self) -> bool {
+        matches!(
+            self,
+            Self::X86Gottpoff | Self::Aarch64TlsieAdrGottprelPage21 | Self::Aarch64TlsieLd64GottprelLo12Nc
+        )
+    }
 }
 
 impl std::fmt::Display for RelocType {
@@ -156,6 +193,11 @@ impl std::fmt::Display for RelocType {
             RelocType::Aarch64Abs64 => write!(f, "R_AARCH64_ABS64"),
             RelocType::Aarch64Abs32 => write!(f, "R_AARCH64_ABS32"),
             RelocType::Aarch64Prel32 => write!(f, "R_AARCH64_PREL32"),
+            RelocType::Aarch64Prel64 => write!(f, "R_AARCH64_PREL64"),
+            RelocType::Aarch64LdPrelLo19 => write!(f, "R_AARCH64_LD_PREL_LO19"),
+            RelocType::Aarch64AdrPrelLo21 => write!(f, "R_AARCH64_ADR_PREL_LO21"),
+            RelocType::Aarch64Condbr19 => write!(f, "R_AARCH64_CONDBR19"),
+            RelocType::Aarch64Tstbr14 => write!(f, "R_AARCH64_TSTBR14"),
             RelocType::Aarch64Call26 => write!(f, "R_AARCH64_CALL26"),
             RelocType::Aarch64Jump26 => write!(f, "R_AARCH64_JUMP26"),
             RelocType::Aarch64AdrPrelPgHi21 => write!(f, "R_AARCH64_ADR_PREL_PG_HI21"),
@@ -174,6 +216,14 @@ impl std::fmt::Display for RelocType {
             RelocType::Aarch64GotPcrel32 => write!(f, "ARM64_RELOC_POINTER_TO_GOT"),
             RelocType::Aarch64TlvpLoadPage21 => write!(f, "ARM64_RELOC_TLVP_LOAD_PAGE21"),
             RelocType::Aarch64TlvpLoadPageoff12 => write!(f, "ARM64_RELOC_TLVP_LOAD_PAGEOFF12"),
+            RelocType::Aarch64TlsdescAdrPage21 => write!(f, "R_AARCH64_TLSDESC_ADR_PAGE21"),
+            RelocType::Aarch64TlsdescLd64Lo12 => write!(f, "R_AARCH64_TLSDESC_LD64_LO12"),
+            RelocType::Aarch64TlsdescAddLo12 => write!(f, "R_AARCH64_TLSDESC_ADD_LO12"),
+            RelocType::Aarch64TlsdescCall => write!(f, "R_AARCH64_TLSDESC_CALL"),
+            RelocType::Aarch64TlsieAdrGottprelPage21 => write!(f, "R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21"),
+            RelocType::Aarch64TlsieLd64GottprelLo12Nc => write!(f, "R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC"),
+            RelocType::Aarch64TlsleAddTprelHi12 => write!(f, "R_AARCH64_TLSLE_ADD_TPREL_HI12"),
+            RelocType::Aarch64TlsleAddTprelLo12Nc => write!(f, "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC"),
         }
     }
 }
@@ -832,6 +882,11 @@ fn elf_to_reloc_type(r_type: u32) -> Option<RelocType> {
         elf::R_AARCH64_ABS64 => RelocType::Aarch64Abs64,
         elf::R_AARCH64_ABS32 => RelocType::Aarch64Abs32,
         elf::R_AARCH64_PREL32 => RelocType::Aarch64Prel32,
+        elf::R_AARCH64_PREL64 => RelocType::Aarch64Prel64,
+        elf::R_AARCH64_LD_PREL_LO19 => RelocType::Aarch64LdPrelLo19,
+        elf::R_AARCH64_ADR_PREL_LO21 => RelocType::Aarch64AdrPrelLo21,
+        elf::R_AARCH64_CONDBR19 => RelocType::Aarch64Condbr19,
+        elf::R_AARCH64_TSTBR14 => RelocType::Aarch64Tstbr14,
         elf::R_AARCH64_CALL26 => RelocType::Aarch64Call26,
         elf::R_AARCH64_JUMP26 => RelocType::Aarch64Jump26,
         elf::R_AARCH64_ADR_PREL_PG_HI21 => RelocType::Aarch64AdrPrelPgHi21,
@@ -847,6 +902,14 @@ fn elf_to_reloc_type(r_type: u32) -> Option<RelocType> {
         elf::R_AARCH64_MOVW_UABS_G3 => RelocType::Aarch64MovwUabsG3,
         elf::R_AARCH64_ADR_GOT_PAGE => RelocType::Aarch64AdrGotPage,
         elf::R_AARCH64_LD64_GOT_LO12_NC => RelocType::Aarch64Ld64GotLo12Nc,
+        elf::R_AARCH64_TLSDESC_ADR_PAGE21 => RelocType::Aarch64TlsdescAdrPage21,
+        elf::R_AARCH64_TLSDESC_LD64_LO12 => RelocType::Aarch64TlsdescLd64Lo12,
+        elf::R_AARCH64_TLSDESC_ADD_LO12 => RelocType::Aarch64TlsdescAddLo12,
+        elf::R_AARCH64_TLSDESC_CALL => RelocType::Aarch64TlsdescCall,
+        elf::R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21 => RelocType::Aarch64TlsieAdrGottprelPage21,
+        elf::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC => RelocType::Aarch64TlsieLd64GottprelLo12Nc,
+        elf::R_AARCH64_TLSLE_ADD_TPREL_HI12 => RelocType::Aarch64TlsleAddTprelHi12,
+        elf::R_AARCH64_TLSLE_ADD_TPREL_LO12_NC => RelocType::Aarch64TlsleAddTprelLo12Nc,
         _ => return None,
     })
 }

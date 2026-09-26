@@ -84,6 +84,22 @@ impl ObjBuilder {
         })
     }
 
+    /// A thread-local variable with initial bytes, in `.tdata`.
+    pub fn tls(&mut self, name: &str, bytes: &[u8], scope: SymbolScope) -> object::write::SymbolId {
+        let section = self.obj.section_id(StandardSection::Tls);
+        let offset = self.obj.append_section_data(section, bytes, 8);
+        self.obj.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: offset,
+            size: bytes.len() as u64,
+            kind: SymbolKind::Tls,
+            scope,
+            weak: false,
+            section: SymbolSection::Section(section),
+            flags: SymbolFlags::None,
+        })
+    }
+
     pub fn undefined(&mut self, name: &str, kind: SymbolKind) -> object::write::SymbolId {
         self.obj.add_symbol(Symbol {
             name: name.as_bytes().to_vec(),
