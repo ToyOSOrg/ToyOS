@@ -24,7 +24,7 @@ use toyos_abi::clock::nanos_since_boot as clock_nanos;
 use toyos_abi::syscall::SYS_GETPID;
 
 /// Iterations between two clock reads. Large enough that the clock's own
-/// syscall is a rounding error in the mix, small enough to stop promptly.
+/// read is a rounding error in the mix, small enough to stop promptly.
 const CHUNK: u64 = 50_000;
 
 fn main() {
