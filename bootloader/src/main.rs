@@ -639,19 +639,34 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     //
     // Said before it is applied: a machine this refuses leaves the refusal in
     // `loader.log`, which is the artifact a machine with no console has.
-    let planned = Plan::new(gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
+    // Where firmware loaded this image, which is where the switch to the boot
+    // map runs from: the map holds it wherever that is.
+    let loader = {
+        let bs = system_table.boot_services();
+        let image = bs
+            .open_protocol_exclusive::<LoadedImage>(bs.image_handle())
+            .expect("firmware answers LoadedImage for the image it started");
+        let (base, size) = image.info();
+        (base as u64, size)
+    };
+    let planned = Plan::new(gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)), loader);
     match &planned {
-        Ok(plan) => match plan.scanout() {
-            Some((at, len)) => println!(
-                "Scanout: {at:#x}+{len:#x} mapped uncacheable in 2 MiB pages at identity and at \
-                 PHYS_OFFSET, in {} page directories",
-                plan.directories().len()
-            ),
-            None => println!("Scanout: this machine has none"),
-        },
-        Err(why) => println!("Scanout: NO BOOT MAP HOLDS IT, {why}"),
+        Ok(plan) => {
+            match plan.scanout() {
+                Some((at, len)) => println!(
+                    "Scanout: {at:#x}+{len:#x} mapped uncacheable in 2 MiB pages at identity and at \
+                     PHYS_OFFSET, in {} page directories",
+                    plan.directories().len()
+                ),
+                None => println!("Scanout: this machine has none"),
+            }
+            let (at, len) = plan.loader();
+            println!("Loader image: {:#x}+{:#x}, mapped at identity as {at:#x}+{len:#x}", loader.0, loader.1);
+        }
+        Err(why) => println!("Boot map: NO MAP HOLDS THIS MACHINE, {why}"),
     }
-    let plan = planned.unwrap_or_else(|why| panic!("the boot map cannot hold the scanout: {why}"));
+    let plan = planned
+        .unwrap_or_else(|why| panic!("the boot map cannot hold the scanout and the loader: {why}"));
 
     // SAFETY: `pt_mem` is the `MAX_PAGES * 4096`-byte, 4096-aligned, zeroed
     // allocation above, and a `Plan` never names more pages than that.
@@ -777,10 +792,11 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         memory_map.len() as u64 * mem::size_of::<MemoryMapEntry>() as u64;
 
     // Switch to new page tables. SAFETY: `pml4_phys` is the table built above,
-    // identity-mapping low memory (so the code and stack this instruction
-    // itself runs from stay mapped across the switch) and high-half-mapping
-    // the same range at `PHYS_OFFSET` for the jump below. The assert before the
-    // exit proved the whole kernel image is inside that range.
+    // identity-mapping low memory and this loader's own image (so the code
+    // this instruction runs from stays mapped across the switch, and the stack
+    // `kernel_args` lives on was proved inside the low map before the exit),
+    // and high-half-mapping the same at `PHYS_OFFSET` for the jump below. The
+    // assert before the exit proved the whole kernel image is inside it.
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack)) };
 
     let entry_virt = PHYS_OFFSET + kernel_phys + kernel.entry_offset as u64;

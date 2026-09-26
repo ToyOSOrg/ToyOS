@@ -3,9 +3,9 @@
 //! Between the loader's `mov cr3` and the kernel's `mm::init` there is one
 //! mapping in the machine, and everything the kernel touches in that window has
 //! to be in it — its own image, the boot parameter, and the panel it reports a
-//! wedge on.
+//! wedge on — and so is the loader's own code, which runs the switch.
 //!
-//! Pure: three numbers in, a [`Plan`] out. The loader allocates the pages and
+//! Pure: four numbers in, a [`Plan`] out. The loader allocates the pages and
 //! writes the entries.
 
 #![no_std]
@@ -41,8 +41,11 @@ const LOW_DIRECTORIES: usize = (BOOT_MAP_BYTES / GIB) as usize;
 /// one is [`Refusal::Directories`] rather than a silent overrun.
 const SCANOUT_DIRECTORIES: usize = 2;
 
+/// What the loader's own image adds, on the same terms.
+const LOADER_DIRECTORIES: usize = 2;
+
 /// Every page directory a [`Plan`] can name.
-pub const MAX_DIRECTORIES: usize = LOW_DIRECTORIES + SCANOUT_DIRECTORIES;
+pub const MAX_DIRECTORIES: usize = LOW_DIRECTORIES + SCANOUT_DIRECTORIES + LOADER_DIRECTORIES;
 
 /// The pool a builder needs: a PML4, a PDPT per view, and every directory.
 pub const MAX_PAGES: usize = 3 + MAX_DIRECTORIES;
@@ -118,51 +121,84 @@ pub struct Entry {
     pub cache: Cache,
 }
 
-/// Where a machine's memory and its scanout go in the loader's two views.
+/// Where a machine's memory, its scanout and the loader itself go in the
+/// loader's two views.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Plan {
     gibs: [u64; MAX_DIRECTORIES],
     directories: usize,
     scanout: Option<(u64, u64)>,
+    loader: (u64, u64),
+}
+
+/// `base .. base + len` as whole 2 MiB pages: `(first page, bytes covered)`,
+/// the end rounded up and, where `round_base`, the base rounded down. An empty
+/// range has no page to be in and is refused.
+fn pages(base: u64, len: u64, round_base: bool) -> Result<(u64, u64), Refusal> {
+    if len == 0 {
+        return Err(Refusal::Extent { base, len });
+    }
+    if !round_base && base % PAGE_2M != 0 {
+        return Err(Refusal::Unaligned(base));
+    }
+    let first = base - base % PAGE_2M;
+    let end = base.checked_add(len).ok_or(Refusal::Extent { base, len })?;
+    let end = end.checked_next_multiple_of(PAGE_2M).ok_or(Refusal::Extent { base, len })?;
+    let last = (end - PAGE_2M) / GIB;
+    if last >= GIB_PER_PDPT {
+        return Err(Refusal::PastPdpt(last));
+    }
+    Ok((first, end - first))
 }
 
 impl Plan {
-    /// Lay out [`BOOT_MAP_BYTES`] and `scanout`, or say why neither can be.
+    /// Lay out [`BOOT_MAP_BYTES`], `scanout` and `loader`, or say why they
+    /// cannot be.
     ///
     /// `scanout` is firmware's framebuffer as firmware reports it. Its base
     /// must be 2 MiB aligned; its length is rounded up, because a page cannot
     /// end anywhere else and what the last one covers past the framebuffer is
     /// the same aperture firmware put it in.
-    pub fn new(scanout: Option<(u64, u64)>) -> Result<Self, Refusal> {
-        let mut plan = Self { gibs: [0; MAX_DIRECTORIES], directories: 0, scanout: None };
+    ///
+    /// `loader` is the loader's own image, wherever firmware loaded it: its
+    /// code runs the `mov cr3` and the jump to the kernel, so it is mapped at
+    /// identity or the first fetch after the switch faults. It is plain memory,
+    /// so its pages are rounded out both ways — the rest of a page it shares
+    /// is mapped with the type the low map gives all memory.
+    pub fn new(scanout: Option<(u64, u64)>, loader: (u64, u64)) -> Result<Self, Refusal> {
+        let mut plan = Self {
+            gibs: [0; MAX_DIRECTORIES],
+            directories: 0,
+            scanout: None,
+            loader: pages(loader.0, loader.1, true)?,
+        };
         for gib in 0..BOOT_MAP_BYTES / GIB {
             plan.claim(gib);
         }
-        let Some((base, len)) = scanout else { return Ok(plan) };
-        if base % PAGE_2M != 0 {
-            return Err(Refusal::Unaligned(base));
-        }
-        let end = base.checked_add(len).ok_or(Refusal::Extent { base, len })?;
-        let covered =
-            end.checked_next_multiple_of(PAGE_2M).ok_or(Refusal::Extent { base, len })? - base;
-        let last = (base + covered - PAGE_2M) / GIB;
-        if last >= GIB_PER_PDPT {
-            return Err(Refusal::PastPdpt(last));
-        }
+        plan.scanout = scanout.map(|(base, len)| pages(base, len, false)).transpose()?;
         // Counted whole before one is claimed, so a machine needing fourteen is
         // told fourteen rather than that one more than the budget was wanted.
-        let low = LOW_DIRECTORIES as u64;
-        let fresh = if last < low { 0 } else { last - (base / GIB).max(low) + 1 };
-        let required = LOW_DIRECTORIES + fresh as usize;
+        let low = BOOT_MAP_BYTES / GIB;
+        let mut above = [0u64; MAX_DIRECTORIES];
+        let mut fresh = 0usize;
+        for (base, covered) in plan.scanout.into_iter().chain([plan.loader]) {
+            for gib in (base / GIB).max(low)..=(base + covered - PAGE_2M) / GIB {
+                if above[..fresh.min(MAX_DIRECTORIES)].contains(&gib) {
+                    continue;
+                }
+                if let Some(slot) = above.get_mut(fresh) {
+                    *slot = gib;
+                }
+                fresh += 1;
+            }
+        }
+        let required = LOW_DIRECTORIES + fresh;
         if required > MAX_DIRECTORIES {
             return Err(Refusal::Directories(required));
         }
-        let mut phys = base;
-        while phys < base + covered {
-            plan.claim(phys / GIB);
-            phys += PAGE_2M;
+        for gib in &above[..fresh] {
+            plan.claim(*gib);
         }
-        plan.scanout = Some((base, covered));
         Ok(plan)
     }
 
@@ -177,20 +213,33 @@ impl Plan {
         self.scanout
     }
 
+    /// The loader's image as this map covers it, in whole pages.
+    pub fn loader(&self) -> (u64, u64) {
+        self.loader
+    }
+
     /// Every entry the map holds, low memory first and each place once: a
     /// scanout inside the low map retypes the pages already there rather than
-    /// adding a second entry for them.
+    /// adding a second entry for them, and the loader adds only pages neither
+    /// the low map nor the scanout holds.
     pub fn entries(&self) -> impl Iterator<Item = Entry> + '_ {
         let plan = *self;
         let low = (0..BOOT_MAP_BYTES / PAGE_2M)
             .map(move |page| plan.entry(page * PAGE_2M, plan.cache_of(page * PAGE_2M)));
-        let scanout = self.scanout.into_iter().flat_map(move |(base, covered)| {
+        let above = move |(base, covered): (u64, u64)| {
             (0..covered / PAGE_2M)
                 .map(move |page| base + page * PAGE_2M)
                 .filter(|phys| *phys >= BOOT_MAP_BYTES)
-                .map(move |phys| plan.entry(phys, Cache::Uncacheable))
-        });
-        low.chain(scanout)
+        };
+        let scanout = self
+            .scanout
+            .into_iter()
+            .flat_map(above)
+            .map(move |phys| plan.entry(phys, Cache::Uncacheable));
+        let loader = above(self.loader)
+            .filter(move |phys| plan.cache_of(*phys) == Cache::DeferToMtrr)
+            .map(move |phys| plan.entry(phys, Cache::DeferToMtrr));
+        low.chain(scanout).chain(loader)
     }
 
     /// What a page of the low map selects: the scanout's type where the two
