@@ -14,3 +14,7 @@ doctest = false
 toyos-manifest = { path = "../../toyos-manifest" }
 sha2 = "0.10"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+# Test scratch that is gone on every way out; `--ci host` reds on any left behind.
+toyos-tmpdir = { path = "../../toyos-tmpdir" }

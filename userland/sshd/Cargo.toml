@@ -10,3 +10,7 @@ tokio = { version = "1", features = ["rt", "net", "macros", "io-util", "sync", "
 # The swap subsystem: init's port, reached through this daemon's namespace.
 toyos = { path = "../../toyos" }
 toyos-swap = { path = "../../toyos-swap" }
+
+[dev-dependencies]
+# Test scratch that is gone on every way out; `--ci host` reds on any left behind.
+toyos-tmpdir = { path = "../../toyos-tmpdir" }

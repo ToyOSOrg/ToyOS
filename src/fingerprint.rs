@@ -71,20 +71,22 @@ pub fn first_difference(before: &[u8], after: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom, Write};
+    use toyos_tmpdir::TempDir;
 
-    fn sparse(name: &str, len: u64) -> std::path::PathBuf {
-        let path = std::env::temp_dir()
-            .join(format!("toyos-fingerprint-{}-{name}", std::process::id()));
+    /// A sparse file of `len` bytes, and the directory that holds it.
+    fn sparse(len: u64) -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new("fingerprint");
+        let path = dir.join("device.img");
         let file = std::fs::File::create(&path).expect("create");
         file.set_len(len).expect("size");
-        path
+        (dir, path)
     }
 
     /// Every block is covered, and the failure says which one.
     #[test]
     fn a_write_anywhere_changes_the_fingerprint() {
         const LEN: u64 = 8 * BLOCK;
-        let path = sparse("midpoint", LEN);
+        let (_dir, path) = sparse(LEN);
         let before = whole_device(&path);
         assert_eq!(
             before.len() as u64,
@@ -101,7 +103,6 @@ mod tests {
         let diff = first_difference(&before, &whole_device(&path))
             .expect("a byte at the midpoint is a byte the device did not have");
         assert!(diff.contains(&format!("offset {}", LEN / 2)), "{diff}");
-        let _ = std::fs::remove_file(&path);
     }
 
     /// A device that came back a different size is a difference and not a
@@ -109,7 +110,7 @@ mod tests {
     #[test]
     fn a_device_that_changed_size_is_a_difference_either_way() {
         const LEN: u64 = 3 * BLOCK;
-        let path = sparse("resized", LEN);
+        let (_dir, path) = sparse(LEN);
         let before = whole_device(&path);
 
         std::fs::File::options().write(true).open(&path).unwrap().set_len(BLOCK).unwrap();
@@ -119,6 +120,5 @@ mod tests {
         std::fs::File::options().write(true).open(&path).unwrap().set_len(4 * BLOCK).unwrap();
         let longer = first_difference(&before, &whole_device(&path)).expect("longer");
         assert!(longer.contains("changed length"), "{longer}");
-        let _ = std::fs::remove_file(&path);
     }
 }

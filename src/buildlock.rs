@@ -706,6 +706,7 @@ mod tests {
     use super::*;
     use std::process::{Child, Command};
     use std::time::Duration;
+    use toyos_tmpdir::TempDir;
 
     // Two processes are the point. `flock` is per open file description, so a
     // single-process test would prove nothing about the thing that actually
@@ -718,11 +719,8 @@ mod tests {
     /// A git repository, because the global scope is keyed on the common
     /// directory and a scratch tree that is not one would exercise a path the
     /// build system never takes.
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("toyos-buildlock-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+    fn scratch(name: &str) -> TempDir {
+        let dir = TempDir::new(&format!("buildlock-{name}"));
         let ok = Command::new("git")
             .args(["init", "-q"])
             .current_dir(&dir)

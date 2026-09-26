@@ -14,8 +14,7 @@ fn a_linked_program_is_executable() {
     b.text("_start", &[RET], SymbolScope::Dynamic);
     let case = Case::new("mode").input("a.o", b.finish()).arg("-static");
 
-    let out = std::env::temp_dir().join(format!("toyos-ld-mode-{}", std::process::id()));
-    let _ = std::fs::remove_file(&out);
+    let out = case.dir().join("a.out");
     case.link_once(&out);
 
     let mode = std::fs::metadata(&out).unwrap().permissions().mode() & 0o777;

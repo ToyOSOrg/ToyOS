@@ -147,7 +147,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: serial-${{ github.job }}-${{ strategy.job-index }}
-          path: /tmp/toyos-tests-*/**/uart-*.log
+          path: target/red-run-serial/**/uart-*.log
           if-no-files-found: warn
           retention-days: 7
 

@@ -1217,8 +1217,7 @@ mod tests {
     /// not read as a boot that said nothing.
     #[test]
     fn a_stream_closed_before_a_byte_is_named_and_not_read_as_silence() {
-        let dir = std::env::temp_dir().join(format!("metaltalk-cut-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-cut");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
         let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
@@ -1242,7 +1241,6 @@ mod tests {
         assert!(bad.iter().any(|b| b.contains("before a byte arrived")), "{bad:?}");
         let lines = vec!["[---------- -------- 1.216 cpu0] Boot: complete (1216ms)\n".to_string()];
         assert!(judge(&cut, &lines).is_ok());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A boot file with no conversation is a boot that had none, and one with
@@ -1262,8 +1260,7 @@ mod tests {
     /// keeps every line whole and in order.
     #[test]
     fn the_stream_is_read_from_the_address_its_name_answers() {
-        let dir = std::env::temp_dir().join(format!("metaltalk-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = toyos_tmpdir::TempDir::new("metaltalk");
         let file = dir.join("stream.log");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
@@ -1283,7 +1280,6 @@ mod tests {
             assert_eq!(*line, format!("[kernel 0.{i:03} cpu0] line {i}\n"));
         }
         assert_eq!(std::fs::read_to_string(&file).unwrap(), lines.concat());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A first dial refused is asked again, counted, and ends at its
@@ -1293,8 +1289,7 @@ mod tests {
     #[test]
     fn a_refused_first_dial_is_asked_again_up_to_its_ceiling() {
         const CEILING: usize = 3;
-        let dir = std::env::temp_dir().join(format!("metaltalk-first-refused-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-first-refused");
         let probe = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = probe.local_addr().unwrap();
         drop(probe);
@@ -1303,7 +1298,6 @@ mod tests {
         let why = stream.unopened().expect("the dial gave up within 5 s of its 60 and said why");
         assert!(why.contains("ceiling") && why.contains("refused"), "{why}");
         assert_eq!(stream.turned_away(), CEILING, "every refused dial, and no more");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A machine rebooting behind the address this host's resolver still
@@ -1350,8 +1344,7 @@ mod tests {
     #[test]
     fn a_host_down_on_the_first_dial_is_asked_again_once_the_name_answers() {
         const UNANSWERED: usize = 3;
-        let dir = std::env::temp_dir().join(format!("metaltalk-down-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-down");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
         let net = Arc::new(Rebooting {
@@ -1371,7 +1364,6 @@ mod tests {
         assert_eq!(stream.turned_away(), 1, "the one dial before the machine answered");
         assert_eq!(net.resolved.load(std::sync::atomic::Ordering::SeqCst), 1, "the resolver's cache is asked once");
         assert_eq!(net.asked.load(std::sync::atomic::Ordering::SeqCst), UNANSWERED + 1);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A peer that has spoken and then says nothing is a stream, not an
@@ -1381,8 +1373,7 @@ mod tests {
     /// the peer said has been read.
     #[test]
     fn a_peer_quiet_after_connecting_is_still_read() {
-        let dir = std::env::temp_dir().join(format!("metaltalk-quiet-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-quiet");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
         let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
@@ -1399,7 +1390,6 @@ mod tests {
             stream.lines(),
             vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] init: started logd\n"]
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The next connection `server` takes, or a panic naming `what` once a
@@ -1423,8 +1413,7 @@ mod tests {
     /// reader, and only its new line is kept.
     #[test]
     fn a_redial_asks_past_a_refusal_and_keeps_each_line_once() {
-        let dir = std::env::temp_dir().join(format!("metaltalk-again-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-again");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
         let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
@@ -1450,7 +1439,6 @@ mod tests {
             0,
             "the connection the redial replaced was left open"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A machine whose first dial is taken and whose every later one is turned
@@ -1486,8 +1474,7 @@ mod tests {
     #[test]
     fn a_redial_counts_every_refusal_and_reset_and_gives_up_at_its_ceiling() {
         const CEILING: usize = 3;
-        let dir = std::env::temp_dir().join(format!("metaltalk-refused-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-refused");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
         let reach: Arc<dyn Reach> = Arc::new(TurnedAway { dials: 0.into() });
@@ -1501,7 +1488,6 @@ mod tests {
         let why = stream.unopened().expect("the redial gave up within 5 s of its 60 and said why");
         assert!(why.contains("ceiling") && why.contains("refused"), "{why}");
         assert_eq!(stream.turned_away(), CEILING, "every refused or reset dial, and no more");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A redial counts a dial that closes before a line, not only a
@@ -1513,8 +1499,7 @@ mod tests {
     #[test]
     fn a_redial_counts_every_close_before_a_line_and_gives_up_at_its_ceiling() {
         const CEILING: usize = 3;
-        let dir = std::env::temp_dir().join(format!("metaltalk-closed-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-closed");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
         let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5), 8)
@@ -1533,7 +1518,6 @@ mod tests {
         let why = stream.unopened().expect("the redial gave up within 5 s of its 60 and said why");
         assert!(why.contains("ceiling") && why.contains("ended before a line"), "{why}");
         assert_eq!(stream.turned_away(), CEILING, "every closed dial, and no more");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A reply macOS's mDNSResponder sent this host's legacy question for its

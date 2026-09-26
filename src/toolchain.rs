@@ -986,20 +986,13 @@ fn link_host_target(rust_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("toyos-toolchain-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use toyos_tmpdir::TempDir;
 
     /// **The judge, and the partial fix it must not pass**: taking any shipped
     /// binary takes one built from sources the release tag does not key on.
     #[test]
     fn the_shipped_linker_is_taken_only_where_it_is_this_tree_s() {
-        let dir = scratch("shipped-ld");
+        let dir = TempDir::new("shipped-ld");
         let at = dir.join("toyos-ld");
         fs::write(&at, b"a linker\n").unwrap();
 
@@ -1033,9 +1026,7 @@ mod tests {
     /// [`assert_toolchain_is_honest`] is this function over the real `bin/`.
     #[test]
     fn a_toolchain_bin_without_cargo_is_one_rustup_narrates() {
-        let stage2 =
-            std::env::temp_dir().join(format!("toyos-toolchain-layout-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&stage2);
+        let stage2 = TempDir::new("layout");
         let bin = stage2.join("bin");
         fs::create_dir_all(&bin).unwrap();
         assert_eq!(narrated_binaries(&bin), ["rustc", "cargo"]);

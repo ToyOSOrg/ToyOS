@@ -740,7 +740,7 @@ impl TalkBoot {
 
 /// Where this process writes the frames one boot put on its wire.
 fn wire_dump() -> std::path::PathBuf {
-    let at = std::env::temp_dir().join(format!("toyos-lan-{}.pcap", std::process::id()));
+    let at = super::lane::dir().join("lan.pcap");
     let _ = std::fs::remove_file(&at);
     at
 }

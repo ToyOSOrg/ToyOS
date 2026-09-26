@@ -101,8 +101,7 @@ fn the_tinycc_corpus_compiles_to_the_same_bytes() {
         .collect();
     sources.sort();
 
-    let scratch = std::env::temp_dir().join(format!("toyos-cc-determinism-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch).expect("scratch dir");
+    let scratch = toyos_tmpdir::TempDir::new("cc-determinism");
 
     let mut compiled = 0usize;
     let mut unstable = Vec::new();
@@ -137,8 +136,6 @@ fn the_tinycc_corpus_compiles_to_the_same_bytes() {
             unstable.push(name);
         }
     }
-    let _ = std::fs::remove_dir_all(&scratch);
-
     assert!(
         compiled * 2 > sources.len(),
         "only {compiled} of {} corpus cases compiled — this gate has gone vacuous",

@@ -999,8 +999,7 @@ mod tests {
     /// nothing. Both directions, because the reader is the writer's inverse.
     #[test]
     fn an_image_says_what_it_is_armed_with() {
-        let dir = std::env::temp_dir().join(format!("toyos-image-params-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let dir = toyos_tmpdir::TempDir::new("image-params");
         let root_image = tiny_root();
         let write = |name: &str, params: &str| {
             let path = dir.join(name);
@@ -1040,8 +1039,6 @@ mod tests {
                 "the refusal does not name {name}, which is the whole of what it is about: {why}"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **One ordering of one set is one image.** The judge below compares
@@ -1176,11 +1173,10 @@ mod tests {
         // And the kernel argument names *this* filesystem: the parameter comes
         // off the ESP through the FAT driver, the UUID out of the superblock
         // the mount above read.
-        let path = std::env::temp_dir()
-            .join(format!("toyos-root-oracle-{}.img", std::process::id()));
+        let scratch = toyos_tmpdir::TempDir::new("root-oracle");
+        let path = scratch.join("root-oracle.img");
         std::fs::write(&path, &disk).expect("stage the image");
         let cmdline = cmdline_of(&path).expect("the ESP carries a boot parameter");
-        let _ = std::fs::remove_file(&path);
         assert_eq!(
             toyos_abi::boot::root_uuid(&cmdline),
             Some(fs.uuid().to_string().as_str()),
