@@ -72,10 +72,8 @@ const MAP_MARGIN: usize = 64;
 fn alloc_kernel_memory(size: usize) -> vec::Vec<u8> {
     const KERNEL_ALIGN: usize = 2 * 1024 * 1024; // 2MB
     let layout = Layout::from_size_align(size, KERNEL_ALIGN).expect("invalid layout");
-    // SAFETY: `layout` has non-zero size — `size` is `vaddr_max + stack_size`
-    // at the one call site, and `stack_size` alone is a fixed 8 MiB — so
-    // `alloc_zeroed`'s "layout must have non-zero size" precondition always
-    // holds.
+    // SAFETY: `layout` has non-zero size so `alloc_zeroed`'s "layout must have
+    // non-zero size" precondition always holds.
     let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null(), "kernel allocation failed");
     // SAFETY: `ptr` was just returned by the global allocator for exactly

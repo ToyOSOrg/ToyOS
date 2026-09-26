@@ -451,8 +451,9 @@ pub unsafe fn run_on_stack(top: u64, func: extern "C" fn() -> !) -> ! {
 }
 
 /// `df-witness-mutate`'s staging: set `DF` one instruction before the reader
-/// that must refuse it.
+/// that must refuse it. Inlined, so `DF` crosses no `ret` to get there.
 #[cfg(feature = "df-witness-mutate")]
+#[inline(always)]
 pub fn df_witness_mutate() {
     // SAFETY: a build that exists to stage the defect, and the reader after it
     // panics before any `rep movs` can run. Nothing runs in between, so no

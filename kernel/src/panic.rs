@@ -161,7 +161,7 @@ fn copy_tail(dst: &[AtomicU8], len: &AtomicU8, cut: &AtomicU8, src: &[u8]) {
         slot.store(b, Ordering::Relaxed);
     }
     // `Release`: the bytes before the length, for a reader that interrupts
-    // this copy as much as for one on another CPU.
+    // this copy.
     len.store(tail.len() as u8, Ordering::Release);
     cut.store(u8::from(from > 0), Ordering::Relaxed);
 }

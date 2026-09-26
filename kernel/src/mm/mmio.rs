@@ -9,6 +9,10 @@
 //! forms: `arch::barrier::before_mmio_write` and `after_mmio_read` supply it,
 //! which is a compiler barrier on x86-64's TSO and a `dmb` on AArch64, where a
 //! plain `fence` is inner-shareable and orders nothing a device sees.
+//! A `write_*` orders prior *stores* only, as `writel` does: a doorbell that
+//! hands entries back to the device after this CPU *read* them (an NVMe
+//! completion queue head, xHCI's ERDP) is ordered after those loads only by
+//! its value depending on them.
 //!
 //! A store to device memory is not a store to plain memory, and `volatile`
 //! alone promises nothing about the two against each other: without the
