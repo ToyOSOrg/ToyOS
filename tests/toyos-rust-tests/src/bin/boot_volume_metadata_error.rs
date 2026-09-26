@@ -22,13 +22,13 @@
 use std::fs;
 
 /// Written by the image builder, so it is on every boot volume this project
-/// produces and it is the file `esp_files` reads back byte for byte.
-const KERNEL: &str = "/boot/toyos/kernel.elf";
+/// produces.
+const NAMED: &str = "/boot/toyos/log.guid";
 
 fn main() {
     // The defect in one line: this used to be `Option`, and `None` was both
     // "no such file" and "the volume would not say".
-    match fs::File::open(KERNEL) {
+    match fs::File::open(NAMED) {
         Ok(_) => println!("boot-io: open succeeded"),
         Err(e) => println!("boot-io: open failed: kind={:?}: {e}", e.kind()),
     }

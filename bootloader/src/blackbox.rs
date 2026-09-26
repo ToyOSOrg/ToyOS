@@ -86,6 +86,9 @@ pub struct Finding {
     /// True where the chain ends here: the last boot has been accounted for, so
     /// booting the kernel again would start the same loop over.
     pub ends_the_chain: bool,
+    /// How the boot that wrote it ended, as the slots' record takes it: a
+    /// handover on purpose proves its image, and every other state is a death.
+    pub ended: toyos_update::record::Ended,
 }
 
 /// Split a record's text into what a person at the machine reads and what only
@@ -229,7 +232,11 @@ pub fn harvest(
              the boot after this one will report the crash above a second time"
         ));
     }
-    (Some(Finding { lines, filed, ends_the_chain: true }), None)
+    let ended = match state {
+        State::Done => toyos_update::record::Ended::Proven,
+        State::Panic | State::Wedged | State::Armed | State::Fault => toyos_update::record::Ended::Died,
+    };
+    (Some(Finding { lines, filed, ends_the_chain: true, ended }), None)
 }
 
 /// When the boot this record came from was armed, as the loader stamped it.

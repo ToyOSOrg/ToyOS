@@ -1,5 +1,6 @@
 //! How many times this image has been handed the machine without reporting
-//! back, kept on the stick it boots from.
+//! back, and which slot's image it handed it to, kept on the stick it boots
+//! from.
 //!
 //! **The bound on a hang, and the machine has no other way out of one.**
 //! `bootnext::point_at_us` aims `BootNext` at this loader before every kernel
@@ -17,10 +18,19 @@
 //! it counts for is one a reader can be handed on its own.
 //!
 //! One hand per hang, never two: the second attempt of an image whose first
-//! never reported boots no kernel at all.
+//! never reported boots no kernel at all. **The same file is the slots'
+//! record** (`toyos_update::record`): the image a pass handed the machine to,
+//! and every image that died on a boot of its own, so the pass after a hang or
+//! a death boots the other slot rather than the one that died.
+//!
+//! Written twice a pass: before the log opens, with the count and whatever the
+//! last boot's end taught, so a pass that dies before its handoff has still
+//! counted; and after the slot is chosen, through the log's own open volume,
+//! with the image it chose.
 
 use alloc::string::String;
-use uefi::proto::media::file::{File, FileAttribute, FileMode};
+use toyos_update::record::{self, Record};
+use uefi::proto::media::file::{Directory, File, FileAttribute, FileMode};
 use uefi::prelude::*;
 use uefi::{cstr16, CStr16};
 
@@ -33,77 +43,69 @@ use crate::loaderlog;
 /// (`toyos_build::bootlog::split_listing`).
 const NAME: &CStr16 = cstr16!("attempts");
 
-/// What the file holds: the partition's signature, then the count.
-const BYTES: usize = 16 + 1;
-
 /// What the stick says about this image's attempts, or why it could not say.
 ///
 /// **`Err` is not zero.** A volume this cannot read is one the bound is off on,
 /// and the caller says so rather than treating an unreadable stick as a first
 /// attempt — which would be a bound that silently never fires.
-pub fn read(system_table: &SystemTable<Boot>, guid: &[u8; 16]) -> Result<u8, String> {
+pub fn read(system_table: &SystemTable<Boot>, guid: &[u8; 16]) -> Result<Record, String> {
     loaderlog::with_volume(system_table, guid, |root| {
         let file = match root.open(NAME, FileMode::Read, FileAttribute::empty()) {
             Ok(file) => file,
             // No file is a first attempt, which is every freshly flashed image.
-            Err(e) if e.status() == Status::NOT_FOUND => return Ok(0),
+            Err(e) if e.status() == Status::NOT_FOUND => return Ok(Record::default()),
             Err(e) => return Err(alloc::format!("{NAME} would not open ({e})")),
         };
         let Some(mut file) = file.into_regular_file() else {
             return Err(alloc::format!("{NAME} on the log partition is a directory"));
         };
-        let mut buffer = [0u8; BYTES];
-        match file.read(&mut buffer) {
-            Ok(BYTES) => {}
-            // Short, or longer than it should be: not this file, and a count
-            // guessed out of it would be a bound firing on nothing.
-            Ok(n) => return Err(alloc::format!("{NAME} holds {n} bytes, wanted {BYTES}")),
-            Err(e) => return Err(alloc::format!("{NAME} would not read ({e})")),
-        }
-        if buffer.get(..16) != Some(&guid[..]) {
-            return Err(alloc::format!(
-                "{NAME} counts for {:02x?} and this partition is {guid:02x?}",
-                &buffer[..16]
-            ));
-        }
-        Ok(buffer[16])
+        // One byte more than a record, so a longer file is told from a whole one.
+        let mut buffer = [0u8; record::BYTES + 1];
+        let n = file.read(&mut buffer).map_err(|e| alloc::format!("{NAME} would not read ({e})"))?;
+        // Short, longer, or another partition's: not this file, and a count
+        // guessed out of it would be a bound firing on nothing.
+        Record::decode(&buffer[..n], guid).map_err(|why| alloc::format!("{NAME} {why}"))
     })
     .and_then(|inner| inner)
 }
 
-/// Write `count` down, replacing whatever was there.
+/// Write `record` down before the log opens, replacing whatever was there.
 ///
 /// Written **before the kernel is handed the machine**, because a count written
 /// after it is a count a hang never gets to.
-pub fn write(system_table: &SystemTable<Boot>, guid: &[u8; 16], count: u8) -> Result<(), String> {
-    loaderlog::with_volume(system_table, guid, |root| {
-        // Deleted and recreated rather than rewound: a fixed-width record is
-        // still a record a shorter write would leave the tail of.
-        match root.open(NAME, FileMode::ReadWrite, FileAttribute::empty()) {
-            Ok(stale) => {
-                if let Err(e) = stale.delete() {
-                    return Err(alloc::format!("{NAME} would not delete ({e})"));
-                }
+pub fn write(system_table: &SystemTable<Boot>, guid: &[u8; 16], record: &Record) -> Result<(), String> {
+    loaderlog::with_volume(system_table, guid, |root| put(root, guid, record)).and_then(|inner| inner)
+}
+
+/// Write `record` down through the log's own open volume, once the slot this
+/// pass boots is chosen.
+pub fn write_chosen(guid: &[u8; 16], record: &Record) -> Result<(), String> {
+    loaderlog::with_open_volume(|root| put(root, guid, record)).and_then(|inner| inner)
+}
+
+fn put(root: &mut Directory, guid: &[u8; 16], record: &Record) -> Result<(), String> {
+    // Deleted and recreated rather than rewound: a fixed-width record is
+    // still a record a shorter write would leave the tail of.
+    match root.open(NAME, FileMode::ReadWrite, FileAttribute::empty()) {
+        Ok(stale) => {
+            if let Err(e) = stale.delete() {
+                return Err(alloc::format!("{NAME} would not delete ({e})"));
             }
-            Err(e) if e.status() == Status::NOT_FOUND => {}
-            Err(e) => return Err(alloc::format!("{NAME} would not open ({e})")),
         }
-        let file = root
-            .open(NAME, FileMode::CreateReadWrite, FileAttribute::empty())
-            .map_err(|e| alloc::format!("{NAME} would not be created ({e})"))?;
-        let Some(mut file) = file.into_regular_file() else {
-            return Err(alloc::format!("{NAME} on the log partition is a directory"));
-        };
-        let mut buffer = [0u8; BYTES];
-        buffer[..16].copy_from_slice(guid);
-        buffer[16] = count;
-        file.write(&buffer).map_err(|e| alloc::format!("{NAME} would not write ({e})"))?;
-        // **Flushed here and not at the handoff.** What this file exists to
-        // survive is a power cut, and a byte in a cache survives nothing.
-        file.flush().map_err(|e| alloc::format!("{NAME} would not flush ({e})"))?;
-        Ok(())
-    })
-    .and_then(|inner| inner)
+        Err(e) if e.status() == Status::NOT_FOUND => {}
+        Err(e) => return Err(alloc::format!("{NAME} would not open ({e})")),
+    }
+    let file = root
+        .open(NAME, FileMode::CreateReadWrite, FileAttribute::empty())
+        .map_err(|e| alloc::format!("{NAME} would not be created ({e})"))?;
+    let Some(mut file) = file.into_regular_file() else {
+        return Err(alloc::format!("{NAME} on the log partition is a directory"));
+    };
+    file.write(&record.encode(guid)).map_err(|e| alloc::format!("{NAME} would not write ({e})"))?;
+    // **Flushed here and not at the handoff.** What this file exists to
+    // survive is a power cut, and a byte in a cache survives nothing.
+    file.flush().map_err(|e| alloc::format!("{NAME} would not flush ({e})"))?;
+    Ok(())
 }
 
 /// The next count to write down, given what the stick said.
@@ -125,4 +127,3 @@ pub const fn next(previous: u8) -> u8 {
 pub const fn is_the_retry(has_a_page: bool, harvested: bool, previous: u8) -> bool {
     has_a_page && !harvested && previous >= 1
 }
-

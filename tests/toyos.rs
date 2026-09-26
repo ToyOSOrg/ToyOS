@@ -821,6 +821,21 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // guest's own `/log`; every clock is a liveness guard on a guest that
     // stopped talking, and probation is init's.
     ("swap_netd", Sched::Parallel, Tier::Fast),
+    // The machine updates itself: an image over `ssh … update` is written to
+    // the idle slot and is the kernel the next boot runs; every slot the loader
+    // must refuse is refused by name and the other boots; and a slot whose
+    // kernel dies falls back on its own, its death in the next boot's `/log`.
+    // The same machine's floor, grant and hang: a floor is its key's and its
+    // image's, init grants nothing the slot table names but an idle slot's
+    // partition, and a hang of an unproven image is a death. Each is 25 s or
+    // more of boots, past the fast tier's line, so they are nightly.
+    ("update_boots_the_new_kernel", Sched::Parallel, Tier::Nightly),
+    ("update_refusals_boot_the_other_slot", Sched::Parallel, Tier::Nightly),
+    ("update_falls_back_from_a_dying_kernel", Sched::Parallel, Tier::Nightly),
+    ("update_hang_kills_an_unproven_image", Sched::Parallel, Tier::Nightly),
+    ("update_grant_refuses_a_stray_partition", Sched::Parallel, Tier::Nightly),
+    ("update_floor_is_the_images_own", Sched::Parallel, Tier::Nightly),
+    ("update_refused_pass_credits_no_image", Sched::Parallel, Tier::Nightly),
     ("lan_swap", Sched::Parallel, Tier::Fast),
     ("swap_refusals", Sched::Parallel, Tier::Fast),
     ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
@@ -1459,19 +1474,16 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
-    // What the loader does with a ROOT set: a bad candidate, an absent name, an
-    // overlapping candidate, a twin on the boot disk, an unreadable superblock
-    // and an unreadable chunk refused by name, a bad primary superblock read
-    // past to its backup, and a twin on another disk never read. Serial, not by
-    // association: each stages a whole boot image, one a second 32 GiB stick
-    // beside it.
+    // What the loader does with a slot's ROOT: bytes its signature does not
+    // cover, a parameter naming another, an overlapping partition and an
+    // unreadable chunk refused by name, and a twin on the boot disk or on
+    // another disk never read. Serial, not by association: each stages a whole
+    // boot image, one a second 32 GiB stick beside it.
     ("root_candidate_malformed", Sched::Serial, Tier::Fast),
     ("root_named_but_absent", Sched::Serial, Tier::Fast),
     ("root_chunk_refused", Sched::Serial, Tier::Fast),
     ("root_candidate_overlaps", Sched::Serial, Tier::Fast),
     ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Fast),
-    ("root_backup_superblock", Sched::Serial, Tier::Fast),
-    ("root_superblock_unreadable", Sched::Serial, Tier::Fast),
     ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
@@ -1592,6 +1604,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// naming this table, and a row naming what the suite did not build panics
 /// before the boot.
 const CARRIES: &[(&str, &[&str])] = &[
+    // Each stages its own machine and carries no test binary: what is under
+    // test is the image itself.
+    ("update_boots_the_new_kernel", &[]),
+    ("update_refusals_boot_the_other_slot", &[]),
+    ("update_falls_back_from_a_dying_kernel", &[]),
+    ("update_hang_kills_an_unproven_image", &[]),
+    ("update_grant_refuses_a_stray_partition", &[]),
+    ("update_floor_is_the_images_own", &[]),
+    ("update_refused_pass_credits_no_image", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
@@ -4647,16 +4668,29 @@ fn run_screen_test(
                 ));
             }
             let printed = last - query;
+            // The rows those lines take on the firmware's console, whose glyph is
+            // eight pixels wide (UEFI 2.11 §12.9, `EFI_GLYPH_WIDTH`): a line
+            // wider than the mode's columns — the root bridges' descriptor dump
+            // is one — wraps onto a row per width it fills.
+            let columns = lines[query]
+                .split("GOP: mode ")
+                .nth(1)
+                .and_then(|mode| mode.split('x').next())
+                .and_then(|width| width.parse::<usize>().ok())
+                .map(|width| width / 8)
+                .filter(|&columns| columns > 0)
+                .ok_or_else(|| format!("the GOP line names no mode width: {:?}", lines[query]))?;
+            let rows: usize = lines[query + 1..=last].iter().map(|line| line.len().div_ceil(columns).max(1)).sum();
 
             // A range and not an equality: each panel is dumped after its marker
             // reached the console, so a line drawn in between is on the panel
             // and not in the count.
             let grew = after as i64 - before as i64;
-            if !(1..=printed as i64).contains(&grew) {
+            if !(1..=rows as i64).contains(&grew) {
                 return Err(format!(
                     "the panel carried {before} rows at the GOP query and {after} at the loader's \
                      last line, a growth of {grew}, where the loader printed {printed} lines \
-                     between them\n{console}"
+                     between them, {rows} rows at {columns} columns\n{console}"
                 ));
             }
             eprintln!(
@@ -11841,10 +11875,6 @@ fn run_machine_test(
         "root_named_twice_on_the_boot_disk" => {
             common::volumes::root_named_twice_on_the_boot_disk(test_config, c_bins, rust_bins)
         }
-        "root_backup_superblock" => common::volumes::root_backup_superblock(test_config, c_bins, rust_bins),
-        "root_superblock_unreadable" => {
-            common::volumes::root_superblock_unreadable(test_config, c_bins, rust_bins)
-        }
         "root_named_twice" => {
             common::volumes::root_named_twice(test_config, c_bins, rust_bins)
         }
@@ -15379,6 +15409,25 @@ fn run_machine_test(
         "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
         "lan_mdns_answer" => common::origin::mdns(c_bins, rust_bins),
         "swap_netd" => common::swap::swap_netd(test_config, c_bins, rust_bins),
+        "update_boots_the_new_kernel" => common::update::update_boots_the_new_kernel(test_config, c_bins, rust_bins),
+        "update_refusals_boot_the_other_slot" => {
+            common::update::update_refusals_boot_the_other_slot(test_config, c_bins, rust_bins)
+        }
+        "update_falls_back_from_a_dying_kernel" => {
+            common::update::update_falls_back_from_a_dying_kernel(test_config, c_bins, rust_bins)
+        }
+        "update_hang_kills_an_unproven_image" => {
+            common::update::update_hang_kills_an_unproven_image(test_config, c_bins, rust_bins)
+        }
+        "update_grant_refuses_a_stray_partition" => {
+            common::update::update_grant_refuses_a_stray_partition(test_config, c_bins, rust_bins)
+        }
+        "update_floor_is_the_images_own" => {
+            common::update::update_floor_is_the_images_own(test_config, c_bins, rust_bins)
+        }
+        "update_refused_pass_credits_no_image" => {
+            common::update::update_refused_pass_credits_no_image(test_config, c_bins, rust_bins)
+        }
         "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),
         "swap_crash_rolls_back" => common::swap::swap_crash_rolls_back(test_config, c_bins, rust_bins),

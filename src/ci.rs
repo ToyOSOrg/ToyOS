@@ -3,13 +3,13 @@
 //! verdict.
 //!
 //! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
-//! the merge queue and boots no guest, split so each half reads only the event
-//! it needs: [`Job::AbiSplit`] runs as its own job on the pull request, where
-//! the branch's own commits are; [`Job::Host`] and then [`Job::GateStage`] run
-//! as `host`, only in the merge queue, where every branch has already been
-//! judged as a pull request. A required check a workflow skips on the other
-//! event still reports, and a skip counts as passing — that is how each half
-//! enters the queue it does not itself run in. Every test that boots no guest
+//! the merge queue and boots no guest: [`Job::AbiSplit`] runs on both, against
+//! `main` on the pull request and against the group's base in the queue, where
+//! two branches that took one version meet; [`Job::Host`] and then
+//! [`Job::GateStage`] run as `host`, only in the merge queue, where every
+//! branch has already been judged as a pull request. A required check a
+//! workflow skips on the other event still reports, and a skip counts as
+//! passing — that is how `host` enters the queue. Every test that boots no guest
 //! is in [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
 //! everything that boots a guest, `host` again to write the cache the merge
 //! queue restores, and portability. `publish.yml` puts a landing's crates on
@@ -519,12 +519,14 @@ fn left_behind(tmp: &Path) -> Result<String, String> {
     ))
 }
 
-/// A pull request against `main`, run as its own `ci.yml` job because it reads
-/// the branch's own history against its merge base — a merge group's is
-/// several branches', each already judged this way as a pull request, which is
-/// why `abi-split` is not a job there at all. It keeps the name branch
-/// protection requires.
+/// The published crates' versions, on both events, keeping the name branch
+/// protection requires: a pull request is judged against `main`, and a merge
+/// group against the base the queue built it on (`sdkversion::judge_queued`)
+/// — the one place two branches that took the same version meet.
 fn abi_split(root: &Path) -> Result<String, String> {
+    if std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("merge_group") {
+        return sdkversion::judge_queued(root);
+    }
     pr::git(root, &["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])?;
     sdkversion::judge(root, "origin/main")
 }

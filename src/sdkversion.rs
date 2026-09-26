@@ -142,6 +142,26 @@ fn next_minor(version: &str) -> Option<String> {
     Some(format!("{major}.{}.0", minor + 1))
 }
 
+/// The rule over a merge queue's group at `root`: its tip is one branch merged
+/// onto the group's base — its first parent, which holds `main` and every
+/// branch queued ahead of it — and the branch is judged against that base.
+///
+/// **Not against `main`**: two branches that each take the same next version
+/// both pass as pull requests, git merges their identical bumps without a
+/// conflict, and the second ships a changed crate under the first's version.
+/// Only the base the queue built it on holds the first's bump.
+pub fn judge_queued(root: &Path) -> Result<String, String> {
+    let line = git(root, &["rev-list", "--parents", "-n", "1", "HEAD"])?;
+    let parents = line.split_whitespace().count().saturating_sub(1);
+    if parents != 2 {
+        return Err(format!(
+            "[sdk] the group's tip has {parents} parent(s), and a group is one merge onto its base, \
+             so there is no base to judge it against"
+        ));
+    }
+    judge(root, "HEAD^1")
+}
+
 /// The rule over the branch at `root` against `base`: the one-line verdict, or
 /// the refusal.
 pub fn judge(root: &Path, base: &str) -> Result<String, String> {
@@ -456,6 +476,52 @@ mod tests {
         commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
         let verdict = judge(&wt, "main").expect("nothing is published, so nothing is taken");
         assert!(verdict.contains("does not publish yet"), "{verdict}");
+    }
+
+    /// **Two branches that take one version**: each passes alone as a pull
+    /// request, git merges their identical bumps cleanly, and only the merge
+    /// queue's judge — the second branch against the base the queue built it
+    /// on — refuses the second. The same branch bumped once more passes there.
+    #[test]
+    fn two_branches_that_take_one_version_are_refused_in_the_queue() {
+        let (_dir, _origin, wt) = repo("sdk-queue-collision");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
+        commit(&wt, "toyos-abi/src/b.rs", "pub struct B;\n", "abi source");
+        publishing(&wt);
+        main_is_here(&wt);
+
+        sh(&wt, &["switch", "-q", "-c", "first", "main"]);
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
+        assert!(judge(&wt, "main").expect("the first alone").contains("toyos-abi 0.1.0 -> 0.2.0"));
+
+        sh(&wt, &["switch", "-q", "-c", "second", "main"]);
+        commit(&wt, "toyos-abi/src/b.rs", "pub struct B(pub u64);\n", "abi: widen B");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
+        assert!(judge(&wt, "main").expect("the second alone").contains("toyos-abi 0.1.0 -> 0.2.0"));
+
+        // The first lands; the queue's group for the second is its merge onto that.
+        sh(&wt, &["switch", "-q", "main"]);
+        sh(&wt, &["merge", "-q", "--no-ff", "first", "-m", "the first lands"]);
+        sh(&wt, &["switch", "-q", "--detach", "main"]);
+        sh(&wt, &["merge", "-q", "--no-ff", "second", "-m", "the queue's group for the second"]);
+        let refusal = judge_queued(&wt).expect_err("the second ships its change under the first's version");
+        assert!(refusal.contains("toyos-abi changed and its version did not"), "{refusal}");
+        assert!(refusal.contains("still says 0.2.0, and the next one is 0.3.0"), "{refusal}");
+
+        // What the second owes: main merged in, and the next version.
+        sh(&wt, &["switch", "-q", "second"]);
+        sh(&wt, &["merge", "-q", "--no-edit", "main"]);
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.3.0", &[]), "abi: 0.3.0");
+        sh(&wt, &["switch", "-q", "--detach", "main"]);
+        sh(&wt, &["merge", "-q", "--no-ff", "second", "-m", "the queue's group, again"]);
+        let verdict = judge_queued(&wt).expect("a bump past the first's");
+        assert!(verdict.contains("toyos-abi 0.2.0 -> 0.3.0"), "{verdict}");
+
+        // A tip that is no merge has no base to be judged against.
+        sh(&wt, &["switch", "-q", "--detach", "first"]);
+        assert!(judge_queued(&wt).unwrap_err().contains("has 1 parent(s)"));
     }
 
     /// The other half, which a bump alone passes: the dependent's pin.

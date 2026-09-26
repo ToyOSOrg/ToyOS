@@ -2294,6 +2294,12 @@ pub struct BootOptions {
     /// that the boot *after* a reset is this loader again, reading what the boot
     /// before it left — and a guest with it set runs until the harness kills it.
     pub takes_the_reset: bool,
+    /// Keep the firmware's variables in this file, writable, instead of the
+    /// shared read-only template: a copy the test made, so what one boot's
+    /// loader writes — the anti-rollback floor, `BootNext` — is what the next
+    /// boot of the same machine reads. `None` is every other boot, whose
+    /// variables live in firmware memory and die with the guest.
+    pub firmware_vars: Option<PathBuf>,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
     /// expected outcome rather than a boot failure -- the early-panic screen
@@ -2450,6 +2456,7 @@ impl Default for BootOptions {
             i8042: true,
             mute: false,
             takes_the_reset: false,
+            firmware_vars: None,
             ready_marker: DEFAULT_READY,
             nvme_image: None,
             boot_image: None,
@@ -3958,6 +3965,52 @@ impl QmpResets {
     }
 }
 
+/// A machine that takes its own resets, held at the next one: the guest's
+/// reset pauses it with its memory — the black box — as the reset left it, so
+/// a test can change what the next pass reads off the disk after the kernel's
+/// last write and before the loader's first read, and then let it go.
+pub struct QmpHold(Qmp);
+
+impl QmpHold {
+    /// The guest's next reset pauses the machine instead.
+    pub fn arm(socket: &Path) -> Self {
+        let mut qmp = Qmp::connect(socket);
+        qmp.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"shutdown\",\"shutdown\":\"pause\"}}");
+        Self(qmp)
+    }
+
+    /// Wait up to `budget` for the machine to stop at its reset.
+    pub fn held(&mut self, budget: Duration) -> Result<(), String> {
+        use std::io::Read;
+        let qmp = &mut self.0;
+        qmp.stream.set_read_timeout(Some(budget)).map_err(|e| format!("qmp: the hold's budget: {e}"))?;
+        let began = Instant::now();
+        loop {
+            if qmp.pending.windows(6).any(|w| w == b"\"STOP\"") {
+                return Ok(());
+            }
+            let mut buf = [0u8; 4096];
+            match qmp.stream.read(&mut buf) {
+                Ok(n) if n > 0 && began.elapsed() < budget => qmp.pending.extend_from_slice(&buf[..n]),
+                _ => {
+                    return Err(format!(
+                        "the machine did not stop at a reset within {} s: {}",
+                        budget.as_secs(),
+                        String::from_utf8_lossy(&qmp.pending)
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Take the held reset and run on, taking every later reset as before.
+    pub fn release(mut self) {
+        self.0.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"reset\",\"shutdown\":\"poweroff\"}}");
+        self.0.execute("{\"execute\":\"system_reset\"}");
+        self.0.execute("{\"execute\":\"cont\"}");
+    }
+}
+
 /// `RESET` events the *guest* caused, scanned rather than parsed like
 /// [`shutdown_reason`]. QEMU raises one for its own power-on reset too, which
 /// carries `"guest": false` and is not a claim about anything the guest did.
@@ -4307,10 +4360,13 @@ fn qemu_command(
             ovmf_dir.join("OVMF_CODE-pure-efi.fd").display()
         ))
         .arg("-drive")
-        .arg(format!(
-            "if=pflash,format=raw,unit=1,file={},readonly=on",
-            ovmf_dir.join("OVMF_VARS-pure-efi.fd").display()
-        ))
+        .arg(match &options.firmware_vars {
+            Some(vars) => format!("if=pflash,format=raw,unit=1,file={},readonly=off", vars.display()),
+            None => format!(
+                "if=pflash,format=raw,unit=1,file={},readonly=on",
+                ovmf_dir.join("OVMF_VARS-pure-efi.fd").display()
+            ),
+        })
         .arg("-drive")
         .arg(format!(
             "if=none,id=stick,{}{}",

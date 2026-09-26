@@ -110,6 +110,10 @@ pub fn run(root: &Path) -> Vec<String> {
         let status = Command::new("cargo")
             .arg("clippy")
             .args(shape.args())
+            // The loader will not compile without the key it embeds; a
+            // throwaway one, since nothing linted here is signed.
+            .env(crate::signing::KEY_ENV, crate::signing::key().public_hex())
+            .env(crate::signing::FLOOR_ENV, crate::signing::key().floor_scope().word())
             .current_dir(root.join(shape.dir))
             .status()
             .unwrap_or_else(|e| panic!("running cargo clippy in {scope}: {e}"));

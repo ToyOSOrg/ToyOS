@@ -1632,9 +1632,11 @@ version = "0.1.0"
 dependencies = [
  "toyos",
  "toyos-abi",
+ "toyos-gpt",
  "toyos-logstream",
  "toyos-manifest",
  "toyos-swap",
+ "toyos-update",
 ]
 
 [[package]]
@@ -3805,8 +3807,6 @@ dependencies = [
  "rand 0.10.0",
  "russh",
  "tokio",
- "toyos",
- "toyos-swap",
  "toyos-tmpdir",
 ]
 
@@ -3845,6 +3845,14 @@ checksum = "695b5790b3131dafa99b3bbfd25a216edb3d216dad9ca208d4657bfb8f2abc3d"
 dependencies = [
  "kurbo",
  "siphasher",
+]
+
+[[package]]
+name = "swap"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-swap",
 ]
 
 [[package]]
@@ -4032,14 +4040,14 @@ dependencies = [
 
 [[package]]
 name = "toyos"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "toyos-abi",
 ]
 
 [[package]]
 name = "toyos-abi"
-version = "0.14.0"
+version = "0.15.0"
 
 [[package]]
 name = "toyos-blockhold"
@@ -4062,6 +4070,13 @@ dependencies = [
 [[package]]
 name = "toyos-dns"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-fat32"
+version = "0.1.0"
+dependencies = [
+ "toyos-wallclock",
+]
 
 [[package]]
 name = "toyos-font"
@@ -4129,12 +4144,20 @@ name = "toyos-tmpdir"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-update"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "toyos-wallclock"
 version = "0.1.0"
 
 [[package]]
 name = "toyos-window"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "toyos",
  "toyos-abi",
@@ -4223,6 +4246,17 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
+
+[[package]]
+name = "update"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "toyos",
+ "toyos-abi",
+ "toyos-fat32",
+ "toyos-update",
+]
 
 [[package]]
 name = "ureq"

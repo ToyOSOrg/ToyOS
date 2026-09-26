@@ -1,0 +1,15 @@
+[package]
+name = "update"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../toyos" }
+toyos-abi = { path = "../../toyos-abi" }
+# The format, the verifier and the slot table the loader reads the same way.
+toyos-update = { path = "../../toyos-update" }
+# A slot's volume is FAT, written with the driver the kernel mounts FAT with.
+toyos-fat32 = { path = "../../toyos-fat32" }
+# ROOT is hashed as it streams onto its partition, never held whole.
+sha2 = { version = "0.10", default-features = false }

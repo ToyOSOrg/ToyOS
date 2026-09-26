@@ -16,6 +16,8 @@
 //!                                                → exit <n> | no-exit-status
 //! toyos_ssh feed    <host> <port> <key> <out> <err> <stdin> <command…>
 //!                                                → env <refused|accepted>, exit <n>
+//! toyos_ssh pipe    <host> <port> <key> <out> <err> <stdin> <command…>
+//!                                                → exit <n> | no-exit-status
 //! toyos_ssh abandon <host> <port> <key> <command…>       → ok <bytes>
 //! toyos_ssh fire    <host> <port> <key> <command…>
 //!                                                → accepted | refused | closed | silent
@@ -24,9 +26,11 @@
 //! toyos_ssh list    <host> <port> <key> <remote> → entry <name> <size>…, ok <n>
 //! toyos_ssh swap    <host> <port> <key> <service> <binary> <sha256>
 //!                                                → accepted <path> | refused <why>
-//!                                                | unanswered <what> | no-subsystem
-//!                                                  (after `accepted`, the channel is
-//!                                                  held until stdin closes)
+//!                                                | unasked <why> | unanswered <what>
+//!                                                  (`swap <service> <sha256> <length>`
+//!                                                  over `exec`; after `accepted`, the
+//!                                                  program's input is held until this
+//!                                                  one's stdin closes)
 //! ```
 //!
 //! A program's stdout and stderr go to files rather than to this process's own,
@@ -89,7 +93,10 @@ async fn run(args: &[String]) -> Result<(), String> {
             exec(host, port, key, out, err, &command.join(" "), None).await
         }
         ["feed", host, port, key, out, err, stdin, command @ ..] => {
-            exec(host, port, key, out, err, &command.join(" "), Some(stdin)).await
+            exec(host, port, key, out, err, &command.join(" "), Some((stdin, true))).await
+        }
+        ["pipe", host, port, key, out, err, stdin, command @ ..] => {
+            exec(host, port, key, out, err, &command.join(" "), Some((stdin, false))).await
         }
         ["abandon", host, port, key, command @ ..] => {
             abandon(host, port, key, &command.join(" ")).await
@@ -194,8 +201,8 @@ async fn auth(host: &str, port: &str, key: &str) -> Result<(), String> {
 
 /// Run a command and collect what came back on each of the channel's two
 /// streams. With `stdin`, the file's bytes are sent to the program first, and
-/// an environment request is made before the exec so the caller learns what
-/// the guest answers one with.
+/// where it asks, an environment request is made before the exec so the caller
+/// learns what the guest answers one with.
 async fn exec(
     host: &str,
     port: &str,
@@ -203,7 +210,7 @@ async fn exec(
     out: &str,
     err: &str,
     command: &str,
-    stdin: Option<&str>,
+    stdin: Option<(&str, bool)>,
 ) -> Result<(), String> {
     let session = connect(host, port, key).await?;
     let mut channel = session
@@ -211,10 +218,10 @@ async fn exec(
         .await
         .map_err(|e| format!("opening a session channel: {e}"))?;
     let feed = match stdin {
-        Some(path) => Some(std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?),
+        Some((path, _)) => Some(std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?),
         None => None,
     };
-    if feed.is_some() {
+    if stdin.is_some_and(|(_, probe)| probe) {
         channel
             .set_env(true, "TOYOS_SSH_PROBE", "1")
             .await
@@ -226,15 +233,19 @@ async fn exec(
         }
     }
     channel.exec(true, command).await.map_err(|e| format!("asking for {command:?}: {e}"))?;
-    if let Some(bytes) = feed {
-        channel
-            .data(&bytes[..])
-            .await
-            .map_err(|e| format!("sending the program its input: {e}"))?;
-    }
-    // A program reading stdin sees the end of it here: either right away, or
-    // after the bytes above.
-    channel.eof().await.map_err(|e| format!("closing the program's input: {e}"))?;
+    // **The input is sent beside the reading, never before it**: a program
+    // that refuses its input and exits closes the channel with most of it
+    // unsent, and a send waiting on a window that closed channel will never
+    // open again is a client that never reads the status it was answered.
+    // A program reading stdin sees its end when the writer shuts down: right
+    // away, or after the bytes.
+    let mut writer = channel.make_writer();
+    let feeding = tokio::spawn(async move {
+        if let Some(bytes) = feed {
+            writer.write_all(&bytes).await?;
+        }
+        writer.shutdown().await
+    });
 
     let (mut stdout, mut stderr, mut status) = (Vec::new(), Vec::new(), None);
     while let Some(message) = channel.wait().await {
@@ -245,6 +256,8 @@ async fn exec(
             _ => {}
         }
     }
+    // Whatever of the input the program never took is nobody's now.
+    feeding.abort();
     write(out, &stdout)?;
     write(err, &stderr)?;
     match status {
@@ -337,10 +350,14 @@ const SWAP_ANSWER: Duration = Duration::from_secs(60);
 /// Send `binary` as `service`'s replacement, naming `digest` for it, and
 /// report the guest's answer.
 ///
-/// `digest` is the caller's and is sent as given — never computed here — so a
-/// caller can name the wrong one and see it refused. **`unanswered` is an
-/// answer too**: the service being swapped may be the one carrying this
-/// connection, and whether it went is the machine's log's to say.
+/// An ordinary `exec` of `swap <service> <sha256> <length>` with the binary on
+/// its input. `digest` is the caller's and is sent as given — never computed
+/// here — so a caller can name the wrong one and see it refused. **The input
+/// is not closed after the binary**: the program answers, then waits for its
+/// input to close — this program's stdin closing is the caller's go — because
+/// the service being swapped may be the one carrying this connection.
+/// `unanswered` is an answer too: whether it went is the machine's log's to
+/// say.
 async fn swap(
     host: &str,
     port: &str,
@@ -350,66 +367,61 @@ async fn swap(
     digest: &str,
 ) -> Result<(), String> {
     let body = std::fs::read(binary).map_err(|e| format!("reading {binary}: {e}"))?;
-    let digest = toyos_swap::parse_hex(digest)
-        .ok_or_else(|| format!("{digest:?} is not a SHA-256 in lowercase hex"))?;
-    let header =
-        toyos_swap::Header { service: service.to_string(), digest, len: body.len() as u64 };
+    if toyos_swap::parse_hex(digest).is_none() {
+        return Err(format!("{digest:?} is not a SHA-256 in lowercase hex"));
+    }
     let session = connect(host, port, key).await?;
     let mut channel = session
         .channel_open_session()
         .await
         .map_err(|e| format!("opening a session channel: {e}"))?;
-    channel
-        .request_subsystem(true, toyos_swap::SUBSYSTEM)
-        .await
-        .map_err(|e| format!("asking for the {} subsystem: {e}", toyos_swap::SUBSYSTEM))?;
-    match channel.wait().await {
-        Some(ChannelMsg::Success) => {}
-        Some(ChannelMsg::Failure) => {
-            println!("no-subsystem");
-            drop(session);
-            return Ok(());
-        }
-        other => return Err(format!("the subsystem request was answered {other:?}")),
-    }
-    let mut sent = header.render().into_bytes();
-    sent.extend_from_slice(&body);
-    channel.data(&sent[..]).await.map_err(|e| format!("sending the binary: {e}"))?;
-    channel.eof().await.map_err(|e| format!("ending the binary: {e}"))?;
-    let (mut stdout, mut status) = (Vec::new(), None);
+    let command = format!("swap {service} {digest} {}", body.len());
+    channel.exec(true, command.as_str()).await.map_err(|e| format!("asking for {command:?}: {e}"))?;
+    channel.data(&body[..]).await.map_err(|e| format!("sending the binary: {e}"))?;
+    let (mut stdout, mut status, mut line) = (Vec::new(), None, None);
     let answered = tokio::time::timeout(SWAP_ANSWER, async {
-        // Until the guest's EOF, which follows its answer: the guest leaves
-        // the channel open for this program to close, and that close is the go.
+        // Until the answer's newline, or the channel's end for a program that
+        // exited without one.
         while let Some(message) = channel.wait().await {
             match message {
-                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                ChannelMsg::Data { data } => {
+                    stdout.extend_from_slice(&data);
+                    if let Some(end) = stdout.iter().position(|&b| b == b'\n') {
+                        line = Some(String::from_utf8_lossy(&stdout[..end]).to_string());
+                        return;
+                    }
+                }
                 ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
-                ChannelMsg::Eof => break,
+                ChannelMsg::Eof | ChannelMsg::Close => return,
                 _ => {}
             }
         }
     })
     .await;
-    let said = String::from_utf8_lossy(&stdout).trim_end().to_string();
-    match (answered, status, said.split_once(' ')) {
-        (Ok(()), Some(0), Some(("accepted", _))) => {
+    match (answered, &line) {
+        (Ok(()), Some(said)) if said.starts_with("accepted ") => {
             println!("{said}");
-            // **The close below is the go**: the guest stops the service that
-            // may be carrying this connection once it has it, so the caller —
-            // whose own connections that service may carry too — says when, by
-            // closing this program's stdin.
+            // **The program's input closing is the go**: it stops waiting and
+            // exits, and init stops the old service when it hangs up. The
+            // caller — whose own connections that service may carry too — says
+            // when, by closing this program's stdin.
             tokio::task::spawn_blocking(|| std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new()))
                 .await
                 .map_err(|e| format!("waiting for the go: {e}"))?
                 .map_err(|e| format!("reading the go: {e}"))?;
+            let _ = channel.eof().await;
         }
-        (Ok(()), Some(1), Some(("refused", _))) => println!("{said}"),
-        (Ok(()), _, _) => println!("unanswered the channel closed after {said:?}, status {status:?}"),
-        (Err(_), _, _) => println!("unanswered nothing in {}s after {said:?}", SWAP_ANSWER.as_secs()),
+        (Ok(()), Some(said)) if said.starts_with("refused ") || said.starts_with("unasked ") => println!("{said}"),
+        (Ok(()), _) => println!(
+            "unanswered the channel ended after {:?}, status {status:?}",
+            String::from_utf8_lossy(&stdout)
+        ),
+        (Err(_), _) => println!(
+            "unanswered nothing in {}s after {:?}",
+            SWAP_ANSWER.as_secs(),
+            String::from_utf8_lossy(&stdout)
+        ),
     }
-    // The guest waits for this close before it stops the service that may be
-    // carrying this connection: it is this client saying it has the answer.
-    let _ = channel.close().await;
     // Dropped rather than disconnected: the connection may be gone with the
     // service that carried it.
     drop(session);
