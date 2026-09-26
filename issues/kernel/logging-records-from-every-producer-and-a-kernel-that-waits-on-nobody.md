@@ -15,8 +15,8 @@ writer, with interrupts on, and a program's line reaches the console only
 through `logd`, under its name. The kernel waits on `logd` neither at a
 panic, which halts the other CPUs first and seals its tail in the black box,
 nor at a stop, which init sequences through `logd`'s flush. `logd` syncs on an
-alert or an interval, preallocates its parts, keeps every boot's first part,
-and holds each program to an allowance. Severity is an ordered ladder.
+alert or an interval, keeps every boot's first part, and holds each program
+to an allowance. Severity is an ordered ladder.
 
 What is left, in order:
 
@@ -53,6 +53,13 @@ puts a kernel context back to appending records to `/log` through the VFS —
 the coupling the design removed — and reds an I/O-depth measurement and an
 audio-latency A/B, neither of which is taken today.
 *Exit:* the control exists and both measurements red on it.
+
+**5. Preallocated parts.** A part created at its whole length moves no
+metadata on an append, but the zeros are a burst of writes to the stick, and
+that burst starves a tone playing beside it
+(`issues/audio/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`).
+*Exit:* that issue closed, and parts preallocated with `audio_tone_load`
+green at eight CPUs.
 
 Constraints a reader would otherwise re-derive:
 

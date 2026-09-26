@@ -1,17 +1,13 @@
-//! `/log` as this program's policy: one file per boot, continuations,
-//! preallocation, and retention.
+//! `/log` as this program's policy: one file per boot, continuations, and
+//! retention.
 //!
 //! Every byte goes through `SYS_WRITE` and `SYS_FSYNC` exactly as any other
 //! program's would.
 //!
-//! **A part is preallocated to its whole length when it is made.** An append
-//! extends the file: on FAT that is a cluster chain and a directory entry
-//! rewritten on every flush, and the in-place window a reset can land in is
-//! metadata as well as data. So a part is created at [`MAX_LOG_BYTES`] of
-//! zeros and written from its start; the flush that reaches its end moves no
-//! metadata, and a part is cut to what it holds when it is finished — at
-//! rotation, and at init's flush before the machine stops. A part a crash
-//! left is its lines and then zeros, which a reader of the volume stops at.
+//! **A part is not preallocated.** Its whole length in zeros is a burst of
+//! writes to the stick at every part's start, and a burst that size starves a
+//! tone playing beside it (`audio_tone_load` at eight CPUs); an append's
+//! cluster chain and directory entry are the price instead.
 //!
 //! **Every boot keeps its first part** ([`retire`]): a boot that floods the
 //! volume deletes older parts of its own and never another boot's start.
@@ -52,8 +48,7 @@ pub const EARLIER_BOOTS: usize = MAX_LOG_FILES / 2;
 /// fourth, putting retention in the wrong order.
 pub const MAX_LOG_PARTS: u32 = 9999;
 
-/// How large one file may get before the next part starts, and what a part is
-/// preallocated to.
+/// How large one file may get before the next part starts.
 ///
 /// One mebibyte: a boot that logs a hundred times more than any real one still
 /// fits, and sixteen of them fit the volume with room to spare. It also bounds
@@ -184,10 +179,9 @@ pub struct Volume {
     file: File,
     stem: String,
     part: u32,
-    /// Bytes in the current part so far — not the file's length, which is the
-    /// preallocation. Kept here rather than read back from the filesystem so a
-    /// disagreement shows up as a wrong length rather than being silently
-    /// corrected.
+    /// Bytes in the current part so far. Kept here rather than read back from
+    /// the filesystem so a disagreement shows up as a wrong length rather than
+    /// being silently corrected.
     size: u64,
     rotate_at: u64,
 }
@@ -227,7 +221,7 @@ impl Volume {
             return None;
         };
         let full = path(&stem, part);
-        let file = match create(&full, rotate_at) {
+        let file = match create(&full) {
             Ok(file) => file,
             Err(e) => {
                 say(format!("logd: cannot create {full}: {e}"));
@@ -256,13 +250,6 @@ impl Volume {
         self.file.sync_all()
     }
 
-    /// Cut the part to what it holds, and make that durable: what a part is
-    /// once nothing more will be written to it.
-    pub fn finish(&mut self) -> std::io::Result<()> {
-        self.file.set_len(self.size)?;
-        self.file.sync_all()
-    }
-
     /// Bytes in the current part so far.
     pub fn bytes(&self) -> u64 {
         self.size
@@ -285,25 +272,25 @@ impl Volume {
         if self.part >= MAX_LOG_PARTS {
             return Err(std::io::Error::other("this boot has no continuation left"));
         }
-        self.finish()?;
+        // Durable before it is let go: nothing syncs a part once the next is
+        // the one being written.
+        self.file.sync_all()?;
         sweep(&self.stem, &mut say);
         self.part += 1;
         self.size = 0;
         let next = self.path();
-        self.file = create(&next, self.rotate_at)?;
+        self.file = create(&next)?;
         say(format!("logd: {full} reached {bytes} bytes and this boot continues in {next}"));
         Ok(())
     }
 }
 
-/// Make a part, preallocated to `len`.
-fn create(path: &str, len: u64) -> std::io::Result<File> {
+/// Make a part.
+fn create(path: &str) -> std::io::Result<File> {
     // Truncating rather than appending: the name is this boot's alone — the
     // part search above is what makes that true — so anything already under it
     // is a name collision and not a log to continue.
-    let file = OpenOptions::new().write(true).create(true).truncate(true).open(PathBuf::from(path))?;
-    file.set_len(len)?;
-    Ok(file)
+    OpenOptions::new().write(true).create(true).truncate(true).open(PathBuf::from(path))
 }
 
 #[cfg(test)]

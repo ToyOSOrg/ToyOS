@@ -1441,7 +1441,7 @@ impl Driver {
         };
         let mut text = String::new();
         for name in logd {
-            text.push_str(bootlog::written(&self.cat(name)?));
+            text.push_str(&self.cat(name)?);
         }
         Ok((loader, text))
     }

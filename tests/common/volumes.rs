@@ -159,15 +159,6 @@ fn need(got: Option<Vec<u8>>, path: &str) -> Result<Vec<u8>, String> {
     got.ok_or_else(|| format!("{path} is not on the volume"))
 }
 
-/// A part of `logd`'s as its lines, less its preallocation's zeros
-/// (`bootlog::written`'s rule, on bytes).
-pub fn written(mut bytes: Vec<u8>) -> Vec<u8> {
-    if let Some(end) = bytes.iter().position(|&b| b == 0) {
-        bytes.truncate(end);
-    }
-    bytes
-}
-
 /// One directory entry, as the host's own FAT implementation reads it.
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -632,20 +623,6 @@ pub fn kernel_log_file(
     if !tail.contains("Shutting down.") {
         return Err(format!("the console never carried the shutdown's last word\n{tail}"));
     }
-    // The part was cut to its lines when `logd` finished it: no zeros of its
-    // preallocation are left on the volume past them.
-    let raw = read_files(&after[start..start + len], &[final_name.as_str()])?
-        .pop()
-        .flatten()
-        .ok_or_else(|| format!("{final_name} went missing on the way down"))?;
-    if raw.len() != final_log.len() {
-        return Err(format!(
-            "{final_name} is {} bytes on the volume and carries {} bytes of lines: the flush left \
-             its preallocation standing",
-            raw.len(),
-            final_log.len()
-        ));
-    }
     if final_log.len() <= running.len() {
         return Err(format!(
             "the file is {} bytes after the shutdown and was {} before it",
@@ -663,8 +640,8 @@ pub fn kernel_log_file(
         ));
     }
     eprintln!(
-        "  [log] {final_name}: {} bytes after the shutdown, cut to its lines and carrying init's \
-         flush; the checker still silent",
+        "  [log] {final_name}: {} bytes after the shutdown, carrying init's flush; the checker \
+         still silent",
         final_log.len()
     );
     let _ = std::fs::remove_file(&image_path);
@@ -687,7 +664,7 @@ pub fn newest_log(image_path: &Path, start: usize, len: usize) -> Result<(String
     let logs = log_names(volume)?;
     let newest = logs.last().ok_or("the log volume holds no .log file at all")?;
     let mut found = read_files(volume, &[newest.as_str()])?;
-    Ok((newest.clone(), written(need(found.pop().flatten(), newest)?)))
+    Ok((newest.clone(), need(found.pop().flatten(), newest)?))
 }
 
 /// The whole of this boot's log, oldest line first, across every file it was
@@ -711,7 +688,7 @@ pub fn whole_log(image_path: &Path, start: usize, len: usize) -> Result<Vec<Stri
     let asked: Vec<&str> = names.iter().map(String::as_str).collect();
     let mut lines = Vec::new();
     for (name, found) in names.iter().zip(read_files(volume, &asked)?) {
-        let bytes = written(need(found, name)?);
+        let bytes = need(found, name)?;
         lines.extend(String::from_utf8_lossy(&bytes).lines().map(|l| format!("{l}\n")));
     }
     Ok(lines)

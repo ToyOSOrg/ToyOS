@@ -686,17 +686,9 @@ impl Log {
     }
 
     /// init asked for the log whole before the machine stops: every line is
-    /// written by now, so the volume is made durable and cut to its length,
-    /// and init is told.
+    /// written by now, so the volume is made durable, and init is told.
     fn flushed(&mut self) {
         let refused = self.sync().err();
-        if refused.is_none() {
-            if let Some(v) = self.volume.as_mut() {
-                if let Err(e) = v.finish() {
-                    toyos::error!("logd: {} would not be cut to its length: {e}", v.path());
-                }
-            }
-        }
         self.answered(Instant::now(), refused);
         self.feed_console();
         if let Err(e) = self.from_init.signal(FLUSHED) {
