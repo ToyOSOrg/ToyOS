@@ -1253,9 +1253,16 @@ const ASSEMBLY: &[&str] = &["asm!", "global_asm!", "naked_asm!", "#[naked]", "un
 const ARCH_MODULE: &str = "core::arch/std::arch";
 
 /// The 0-based lines of `text` on which a path names `core::arch` or
-/// `std::arch`: `core::arch::asm!`, `use core::arch as isa;`, and an `arch`
-/// that begins an element of a `core::{…}` group, over any number of lines.
-/// Comments and string literals are not code ([`code_only`]).
+/// `std::arch`, or makes a name that can: `core::arch::asm!`,
+/// `use core::arch as isa;`, an `arch` that begins an element of a `core::{…}`
+/// group, over any number of lines — and any glob of `core`/`std` itself
+/// (`use core::*;`, `core::{*}`) or rename of it (`use core as k;`,
+/// `extern crate core as k;`, `core::{self as k}`).
+///
+/// **The glob and the rename are refused whole**, not followed to an `arch`
+/// after them: what they bring into scope is read by resolution, which a line
+/// scan does not have, and code outside an arch module has no other use for
+/// either. Comments and string literals are not code ([`code_only`]).
 #[cfg(test)]
 fn arch_module_lines(text: &str) -> Vec<usize> {
     let code: Vec<char> = text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect();
@@ -1273,15 +1280,71 @@ fn arch_module_lines(text: &str) -> Vec<usize> {
             && !code.get(end).is_some_and(|c| word(*c))
             && !at.checked_sub(1).and_then(|j| code.get(j)).is_some_and(|c| word(*c))
     };
+    // The identifier that ends before `at`, over whitespace and `::`.
+    let ident_before = |at: usize| {
+        let mut end = at;
+        while end > 0 && (code[end - 1].is_whitespace() || code[end - 1] == ':') {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && word(code[start - 1]) {
+            start -= 1;
+        }
+        (start, code[start..end].iter().collect::<String>())
+    };
+    // Whether `at` begins an item that imports: `use …`, or `extern crate …`,
+    // or an element of a `use` group.
+    let imported = |at: usize| {
+        let mut at = at;
+        loop {
+            let (start, ident) = ident_before(at);
+            match ident.as_str() {
+                "use" => return true,
+                "crate" => return ident_before(start).1 == "extern",
+                "" => {}
+                _ => return false,
+            }
+            // Not after an identifier: inside a group only if a `{` opens it.
+            let mut back = start;
+            while back > 0 && code[back - 1].is_whitespace() {
+                back -= 1;
+            }
+            match back.checked_sub(1).map(|j| code[j]) {
+                Some('{') => at = back - 1,
+                Some(',') => {
+                    let mut depth = 0usize;
+                    let mut j = back - 1;
+                    loop {
+                        let Some(k) = j.checked_sub(1) else { return false };
+                        j = k;
+                        match code[j] {
+                            '}' => depth += 1,
+                            '{' if depth == 0 => break,
+                            '{' => depth -= 1,
+                            ';' => return false,
+                            _ => {}
+                        }
+                    }
+                    at = j;
+                }
+                _ => return false,
+            }
+        }
+    };
     let mut lines = Vec::new();
     for at in 0..code.len() {
         let Some(root) = ["core", "std"].into_iter().find(|root| ident_at(at, root)) else { continue };
-        let colons = skip_space(at + root.len());
+        let after = skip_space(at + root.len());
+        if ident_at(after, "as") && imported(at) {
+            lines.push(line_of(at));
+            continue;
+        }
+        let colons = after;
         if code.get(colons..colons + 2) != Some(&[':', ':'][..]) {
             continue;
         }
         let next = skip_space(colons + 2);
-        if ident_at(next, "arch") {
+        if ident_at(next, "arch") || code.get(next) == Some(&'*') {
             lines.push(line_of(next));
         } else if code.get(next) == Some(&'{') {
             // Each element of the group begins after its `{` or a `,` at depth one.
@@ -1301,7 +1364,9 @@ fn arch_module_lines(text: &str) -> Vec<usize> {
                     ',' if depth == 1 => element = true,
                     c if c.is_whitespace() => {}
                     _ => {
-                        if element && depth == 1 && ident_at(i, "arch") {
+                        let renamed_self =
+                            ident_at(i, "self") && ident_at(skip_space(i + "self".len()), "as");
+                        if element && depth == 1 && (ident_at(i, "arch") || c == '*' || renamed_self) {
                             lines.push(line_of(i));
                         }
                         element = false;
@@ -1625,11 +1690,37 @@ mod tests {
             file("toyos-dma/src/lib.rs", "use crate::arch::aarch64::x;\n"),
             file("toyos-sched/src/lib.rs", "use core::arch as isa;\nfn f() { unsafe { isa::aarch64::vdupq_n_u8(0) }; }\n"),
             file("toyos-mixer/src/lib.rs", "use core::{arch::x86_64::_rdtsc};\n"),
+            // A glob or a rename of the root brings `arch` in under a name no
+            // line scan resolves; each is red at the import, and the use after
+            // it is spelled so that no other needle matches.
+            file("toyos-elide/src/lib.rs", "use core::*;\nuse arch::{aarch64::vdupq_n_u8};\n"),
+            file("toyos-hda/src/lib.rs", "use core as k;\nuse k::arch::{aarch64::vdupq_n_u8};\n"),
+            file("toyos-pci/src/lib.rs", "extern crate core as k;\nuse k::arch::{aarch64::vdupq_n_u8};\n"),
+            file("toyos-wallclock/src/lib.rs", "use core::{self as k};\nuse k::arch::{aarch64::vdupq_n_u8};\n"),
+            file("toyos-userbound/src/lib.rs", "use std::{\n    *,\n};\n"),
+            file("toyos-proclife/src/lib.rs", "use {alloc::vec, std as k};\n"),
         ];
         let said = place_violations(pure, &planted);
-        assert_eq!(said.len(), 5, "{said:?}");
+        assert_eq!(said.len(), 11, "{said:?}");
         assert!(said.iter().any(|s| s.starts_with("toyos-sched/src/lib.rs:1:")), "{said:?}");
+        for at in [
+            "toyos-elide/src/lib.rs:1:",
+            "toyos-hda/src/lib.rs:1:",
+            "toyos-pci/src/lib.rs:1:",
+            "toyos-wallclock/src/lib.rs:1:",
+            "toyos-userbound/src/lib.rs:2:",
+            "toyos-proclife/src/lib.rs:1:",
+        ] {
+            assert!(said.iter().any(|s| s.starts_with(at) && s.contains(ARCH_MODULE)), "{at} is not red: {said:?}");
+        }
         assert!(said.iter().all(|s| s.contains(pure.name) && s.contains("no file at all")), "{said:?}");
+
+        // What is not the root, or not an import, is not a rename of it.
+        let unrelated = [
+            file("toyos-sched/src/cpu.rs", "fn f(core: u8) -> u32 { g(1, core as u32) + { core as u32 } }\n"),
+            file("toyos-dma/src/lib.rs", "use crate::core as c;\nuse a::{b, core as k};\n"),
+        ];
+        assert_eq!(place_violations(pure, &unrelated), Vec::<String>::new());
     }
 
     /// **Two clauses, one rule each, and neither is checkable any other way.**
