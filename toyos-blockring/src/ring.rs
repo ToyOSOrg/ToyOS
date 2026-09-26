@@ -43,27 +43,41 @@ const PUBLISH: Ordering = Ordering::Release;
 #[cfg(feature = "mutate-ring-publish-relaxed")]
 const PUBLISH: Ordering = Ordering::Relaxed;
 
-/// The end of a ring that writes entries.
-pub struct Producer<'a, W, const N: usize> {
-    head: &'a W,
-    tail: &'a W,
-    entries: &'a [W],
+/// Where one ring is on the page, in words.
+#[derive(Clone, Copy, Debug)]
+struct Place {
+    head: usize,
+    tail: usize,
+    entries: usize,
+}
+
+const REQUESTS: Place = Place { head: SQ_HEAD, tail: SQ_TAIL, entries: SQ_BASE };
+const COMPLETIONS: Place = Place { head: CQ_HEAD, tail: CQ_TAIL, entries: CQ_BASE };
+
+fn checked<W>(page: &[W]) -> &[W] {
+    assert!(page.len() >= RING_WORDS, "a session page holds every ring word");
+    page
+}
+
+/// The end of a ring that writes entries. It holds its indices and not the
+/// page, so its owner keeps the mapping beside it; every call is given the
+/// page.
+#[derive(Debug)]
+pub struct Producer<const N: usize> {
+    place: Place,
     local: u32,
     published: u32,
 }
 
-impl<'a, W: Word, const N: usize> Producer<'a, W, N> {
-    /// Over `entries` (`DEPTH * N` words), starting from index 0; the shared
-    /// tail is written to say so.
-    pub fn new(head: &'a W, tail: &'a W, entries: &'a [W]) -> Self {
-        assert_eq!(entries.len(), DEPTH as usize * N, "a ring's entries are DEPTH of its width");
-        tail.store(0, Ordering::Release);
-        Self { head, tail, entries, local: 0, published: 0 }
+impl<const N: usize> Producer<N> {
+    fn new<W: Word>(page: &[W], place: Place) -> Self {
+        checked(page)[place.tail].store(0, Ordering::Release);
+        Self { place, local: 0, published: 0 }
     }
 
     /// How many entries may be pushed before the consumer frees more.
-    pub fn space(&self) -> Result<u32, Violation> {
-        let head = self.head.load(Ordering::Acquire);
+    pub fn space<W: Word>(&self, page: &[W]) -> Result<u32, Violation> {
+        let head = checked(page)[self.place.head].load(Ordering::Acquire);
         let used = self.local.wrapping_sub(head);
         if used > DEPTH {
             return Err(Violation);
@@ -75,48 +89,45 @@ impl<'a, W: Word, const N: usize> Producer<'a, W, N> {
     ///
     /// # Panics
     /// When the ring has no space: the caller asks [`Self::space`] first.
-    pub fn push(&mut self, words: [u32; N]) {
-        assert!(self.space().is_ok_and(|space| space > 0), "a push into a full ring");
-        let at = (self.local % DEPTH) as usize * N;
+    pub fn push<W: Word>(&mut self, page: &[W], words: [u32; N]) {
+        assert!(self.space(page).is_ok_and(|space| space > 0), "a push into a full ring");
+        let at = self.place.entries + (self.local % DEPTH) as usize * N;
         for (i, word) in words.into_iter().enumerate() {
-            self.entries[at + i].store(word, Ordering::Relaxed);
+            page[at + i].store(word, Ordering::Relaxed);
         }
         self.local = self.local.wrapping_add(1);
     }
 
     /// Publish every entry pushed so far; answers whether there was any.
-    pub fn publish(&mut self) -> bool {
+    pub fn publish<W: Word>(&mut self, page: &[W]) -> bool {
         if self.published == self.local {
             return false;
         }
-        self.tail.store(self.local, PUBLISH);
+        checked(page)[self.place.tail].store(self.local, PUBLISH);
         self.published = self.local;
         true
     }
 }
 
-/// The end of a ring that reads entries.
-pub struct Consumer<'a, W, const N: usize> {
-    head: &'a W,
-    tail: &'a W,
-    entries: &'a [W],
+/// The end of a ring that reads entries; like [`Producer`], it holds indices
+/// and is given the page.
+#[derive(Debug)]
+pub struct Consumer<const N: usize> {
+    place: Place,
     local: u32,
     released: u32,
 }
 
-impl<'a, W: Word, const N: usize> Consumer<'a, W, N> {
-    /// Over `entries`, starting from index 0; the shared head is written to
-    /// say so.
-    pub fn new(head: &'a W, tail: &'a W, entries: &'a [W]) -> Self {
-        assert_eq!(entries.len(), DEPTH as usize * N, "a ring's entries are DEPTH of its width");
-        head.store(0, Ordering::Release);
-        Self { head, tail, entries, local: 0, released: 0 }
+impl<const N: usize> Consumer<N> {
+    fn new<W: Word>(page: &[W], place: Place) -> Self {
+        checked(page)[place.head].store(0, Ordering::Release);
+        Self { place, local: 0, released: 0 }
     }
 
     /// The next published entry, `None` for none, or the producer's tail
     /// claiming more than the ring holds.
-    pub fn pop(&mut self) -> Result<Option<[u32; N]>, Violation> {
-        let tail = self.tail.load(Ordering::Acquire);
+    pub fn pop<W: Word>(&mut self, page: &[W]) -> Result<Option<[u32; N]>, Violation> {
+        let tail = checked(page)[self.place.tail].load(Ordering::Acquire);
         let ready = tail.wrapping_sub(self.local);
         if ready > DEPTH {
             return Err(Violation);
@@ -124,53 +135,39 @@ impl<'a, W: Word, const N: usize> Consumer<'a, W, N> {
         if ready == 0 {
             return Ok(None);
         }
-        let at = (self.local % DEPTH) as usize * N;
-        let words = core::array::from_fn(|i| self.entries[at + i].load(Ordering::Relaxed));
+        let at = self.place.entries + (self.local % DEPTH) as usize * N;
+        let words = core::array::from_fn(|i| page[at + i].load(Ordering::Relaxed));
         self.local = self.local.wrapping_add(1);
         Ok(Some(words))
     }
 
     /// Give every entry popped so far back to the producer.
-    pub fn release(&mut self) {
+    pub fn release<W: Word>(&mut self, page: &[W]) {
         if self.released != self.local {
-            self.head.store(self.local, Ordering::Release);
+            checked(page)[self.place.head].store(self.local, Ordering::Release);
             self.released = self.local;
         }
     }
 }
 
 /// A client's two ends: requests out, completions in.
-pub type ClientRings<'a, W> = (Producer<'a, W, SQE_WORDS>, Consumer<'a, W, CQE_WORDS>);
+pub type ClientRings = (Producer<SQE_WORDS>, Consumer<CQE_WORDS>);
 
 /// A server's two ends: requests in, completions out.
-pub type ServerRings<'a, W> = (Consumer<'a, W, SQE_WORDS>, Producer<'a, W, CQE_WORDS>);
-
-fn split<W>(page: &[W]) -> (&W, &W, &W, &W, &[W], &[W]) {
-    assert!(page.len() >= RING_WORDS, "a session page holds every ring word");
-    (
-        &page[SQ_HEAD],
-        &page[SQ_TAIL],
-        &page[CQ_HEAD],
-        &page[CQ_TAIL],
-        &page[SQ_BASE..CQ_BASE],
-        &page[CQ_BASE..RING_WORDS],
-    )
-}
+pub type ServerRings = (Consumer<SQE_WORDS>, Producer<CQE_WORDS>);
 
 /// The client's ends of a session page, both indices it owns set to 0. Done
 /// before the page is sent to a server, and again before it is sent to the
 /// next one.
-pub fn client<W: Word>(page: &[W]) -> ClientRings<'_, W> {
-    let (sq_head, sq_tail, cq_head, cq_tail, sq, cq) = split(page);
-    (Producer::new(sq_head, sq_tail, sq), Consumer::new(cq_head, cq_tail, cq))
+pub fn client<W: Word>(page: &[W]) -> ClientRings {
+    (Producer::new(page, REQUESTS), Consumer::new(page, COMPLETIONS))
 }
 
 /// The server's ends of a session page it was sent, both indices it owns set
 /// to 0. Whatever the client left in its own two is bounded by the first
 /// [`Consumer::pop`] and [`Producer::space`].
-pub fn server<W: Word>(page: &[W]) -> ServerRings<'_, W> {
-    let (sq_head, sq_tail, cq_head, cq_tail, sq, cq) = split(page);
-    (Consumer::new(sq_head, sq_tail, sq), Producer::new(cq_head, cq_tail, cq))
+pub fn server<W: Word>(page: &[W]) -> ServerRings {
+    (Consumer::new(page, REQUESTS), Producer::new(page, COMPLETIONS))
 }
 
 #[cfg(test)]
@@ -189,14 +186,14 @@ mod tests {
         let (mut sq, mut cq) = client(&page);
         let (mut rq, mut cp) = server(&page);
         let request = Request { op: Op::Write, tag: 3, lba: 8, blocks: 2, arena: 1 };
-        sq.push(request.encode());
-        assert_eq!(rq.pop(), Ok(None), "an entry is nobody's before it is published");
-        assert!(sq.publish());
-        assert_eq!(rq.pop().map(|w| w.map(|w| Request::decode(w, 100))), Ok(Some(Ok(request))));
-        rq.release();
-        cp.push(Completion { tag: 3, status: Status::Ok }.encode());
-        cp.publish();
-        assert_eq!(cq.pop().map(|w| w.and_then(Completion::decode)), Ok(Some(Completion { tag: 3, status: Status::Ok })));
+        sq.push(&page, request.encode());
+        assert_eq!(rq.pop(&page), Ok(None), "an entry is nobody's before it is published");
+        assert!(sq.publish(&page));
+        assert_eq!(rq.pop(&page).map(|w| w.map(|w| Request::decode(w, 100))), Ok(Some(Ok(request))));
+        rq.release(&page);
+        cp.push(&page, Completion { tag: 3, status: Status::Ok }.encode());
+        cp.publish(&page);
+        assert_eq!(cq.pop(&page).map(|w| w.and_then(Completion::decode)), Ok(Some(Completion { tag: 3, status: Status::Ok })));
     }
 
     /// The ring wraps many times over, and space is exactly what the consumer
@@ -211,20 +208,20 @@ mod tests {
             // Uneven batches both ways, so the two indices cross every slot
             // at every distance.
             for _ in 0..1 + round % 9 {
-                assert_eq!(sq.space(), Ok(DEPTH - (pushed - popped)));
+                assert_eq!(sq.space(&page), Ok(DEPTH - (pushed - popped)));
                 if pushed - popped == DEPTH {
                     break;
                 }
-                sq.push(Request { op: Op::Read, tag: pushed, lba: 0, blocks: 1, arena: 0 }.encode());
+                sq.push(&page, Request { op: Op::Read, tag: pushed, lba: 0, blocks: 1, arena: 0 }.encode());
                 pushed += 1;
             }
-            sq.publish();
+            sq.publish(&page);
             for _ in 0..1 + round % 7 {
-                let Ok(Some(words)) = rq.pop() else { break };
+                let Ok(Some(words)) = rq.pop(&page) else { break };
                 assert_eq!(words[1], popped, "entries come out in the order they went in");
                 popped += 1;
             }
-            rq.release();
+            rq.release(&page);
         }
         assert!(pushed > 2 * DEPTH, "the ring wrapped");
     }
@@ -237,8 +234,8 @@ mod tests {
         let (sq, _) = client(&page);
         let (mut rq, _) = server(&page);
         page[SQ_TAIL].store(DEPTH + 1, Ordering::Release);
-        assert_eq!(rq.pop(), Err(Violation));
+        assert_eq!(rq.pop(&page), Err(Violation));
         page[SQ_HEAD].store(5, Ordering::Release);
-        assert_eq!(sq.space(), Err(Violation));
+        assert_eq!(sq.space(&page), Err(Violation));
     }
 }

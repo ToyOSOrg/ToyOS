@@ -1,0 +1,21 @@
+[package]
+name = "blockd"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# The library is what a client of the service needs — the session region as a
+# process sees it, and the session itself — so a program that opens a
+# partition links it and nothing of the driver.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "blockd"
+path = "src/main.rs"
+
+[dependencies]
+toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../toyos" }
+toyos-blockring = { path = "../../toyos-blockring" }
+toyos-blockhold = { path = "../../toyos-blockhold" }
+toyos-gpt = { path = "../../toyos-gpt" }

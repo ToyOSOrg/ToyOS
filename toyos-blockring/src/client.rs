@@ -130,6 +130,8 @@ pub struct Client {
     attempts: BTreeMap<Ticket, u32>,
     answers: VecDeque<(Ticket, Outcome)>,
     released: VecDeque<(u32, u32)>,
+    /// Writes put on the wire again after a loss, over the client's life.
+    reissued: u64,
 }
 
 impl Client {
@@ -187,6 +189,9 @@ impl Client {
             }
         }
         self.outbox.pop_front();
+        if matches!(front.kind, Kind::Reissue(_)) {
+            self.reissued += 1;
+        }
         let tag = self.next_tag;
         self.next_tag = self.next_tag.wrapping_add(1);
         let (covers, losses) = (self.next_seq, self.losses);
@@ -336,6 +341,11 @@ impl Client {
     /// How many requests are on the wire.
     pub fn on_the_wire(&self) -> usize {
         self.wire.len()
+    }
+
+    /// How many writes have gone on the wire again after a loss.
+    pub fn reissued(&self) -> u64 {
+        self.reissued
     }
 
     fn bump(&mut self) -> u64 {

@@ -50,18 +50,18 @@ fn a_published_request_is_read_whole() {
             let (mut requests, _) = ring::server(&server_page);
             let mut read = Vec::new();
             while read.len() < 2 {
-                match requests.pop().expect("the client keeps the protocol") {
+                match requests.pop(&server_page).expect("the client keeps the protocol") {
                     Some(words) => read.push(Request::decode(words, PARTITION)),
                     None => loom::thread::yield_now(),
                 }
             }
-            requests.release();
+            requests.release(&server_page);
             read
         });
         let (mut requests, _) = ring::client(&page);
         for n in 0..2 {
-            requests.push(request(n).encode());
-            requests.publish();
+            requests.push(&page, request(n).encode());
+            requests.publish(&page);
         }
         let read = server.join().expect("the server thread");
         assert_eq!(read, [Ok(request(0)), Ok(request(1))], "a request was read before its words");
