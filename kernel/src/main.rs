@@ -706,7 +706,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     report_log_destination();
     let complete_tsc = cpu::rdtsc();
     boot_phase!("complete", 0);
-    report_power_on(&kernel_args, complete_tsc);
+    report_power_on(kernel_args, complete_tsc);
 
     // No current task here, so the handler's recovery predicate fails — the one panic no userland process can produce.
     #[cfg(feature = "boot-actuators")]
