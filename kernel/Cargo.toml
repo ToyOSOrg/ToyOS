@@ -96,7 +96,7 @@ boot-actuators = []
 # One name rather than seven, because a feature set is a whole kernel build and
 # builds that differ only in which unreachable arm they carry are several builds
 # of one kernel. The per-action justification — what nothing else can reach — now
-# lives beside each arm in `arch/syscall/dispatch.rs`, which is the file that
+# lives beside each arm in `syscall/dispatch.rs`, which is the file that
 # has to stay true when an arm changes.
 #
 # The one place it is not confined to the match: `arch::tlb::serve_ipi` loads one

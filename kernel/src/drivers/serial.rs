@@ -7,6 +7,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::cpu::{inb, outb};
+use crate::arch::IrqGuard;
 use crate::log;
 
 const PORT: u16 = 0x3f8; // COM1
@@ -89,33 +90,13 @@ static BACKEND_LOCKED: AtomicBool = AtomicBool::new(false);
 /// Exclusive access to the serial backend; interrupts are off for as long as the guard lives.
 /// Same-CPU re-entry from an IRQ handler deadlocks the spin.
 pub struct BackendGuard {
-    rflags: SavedFlags,
-}
-
-/// This CPU's own `RFLAGS`, captured by `pushfq`; the only value `popfq` may be given.
-/// Not `Copy`/`Clone`: one CPU's state at one instant, not to be duplicated.
-pub struct SavedFlags(u64);
-
-impl SavedFlags {
-    /// Restores the flags; `&self` because `Drop` cannot move a field out, and restoring twice is idempotent.
-    #[inline]
-    fn restore(&self) {
-        // SAFETY: `popfq` has no safe spelling; `self.0` came only from this
-        // CPU's own `pushfq` in `save_and_cli`, so no unintended bit reaches RFLAGS.
-        unsafe {
-            core::arch::asm!(
-                "push {}",
-                "popfq",
-                in(reg) self.0,
-                options(nomem),
-            );
-        }
-    }
+    // Dropped after `Drop::drop` releases the backend, so interrupts reopen last.
+    _irq: IrqGuard,
 }
 
 impl BackendGuard {
     pub fn lock() -> Self {
-        let rflags = save_and_cli();
+        let irq = IrqGuard::close();
         while BACKEND_LOCKED
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
@@ -124,21 +105,16 @@ impl BackendGuard {
                 core::hint::spin_loop();
             }
         }
-        Self { rflags }
+        Self { _irq: irq }
     }
 
     /// Non-blocking acquire: `None` if another CPU already holds the backend.
     pub fn try_lock() -> Option<Self> {
-        let rflags = save_and_cli();
-        if BACKEND_LOCKED
+        let irq = IrqGuard::close();
+        BACKEND_LOCKED
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
-        {
-            Some(Self { rflags })
-        } else {
-            rflags.restore();
-            None
-        }
+            .then_some(Self { _irq: irq })
     }
 
     /// Writes raw bytes with no escape stripping; callers must pre-strip via [`write_console`].
@@ -172,27 +148,7 @@ impl BackendGuard {
 impl Drop for BackendGuard {
     fn drop(&mut self) {
         BACKEND_LOCKED.store(false, Ordering::Release);
-        self.rflags.restore();
     }
-}
-
-/// This CPU's `RFLAGS`, captured with interrupts off in one instruction sequence:
-/// the value is stale if anything runs between the read and `cli`.
-#[inline]
-fn save_and_cli() -> SavedFlags {
-    let rflags: u64;
-    // SAFETY: irreducible — `pushfq`/`cli` have no safe spelling; the asm reads
-    // RFLAGS and clears IF only, writes no memory, and touches no other register.
-    unsafe {
-        core::arch::asm!(
-            "pushfq",
-            "pop {}",
-            "cli",
-            out(reg) rflags,
-            options(nomem),
-        );
-    }
-    SavedFlags(rflags)
 }
 
 pub fn has_data() -> bool {

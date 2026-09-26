@@ -41,7 +41,7 @@ fn record(seq: u64, len: usize) -> LogRecord {
 
 fn round_trip(len: usize) {
     let shard = Shard::new();
-    let guard = kernel_loom::arch::LogCommitGuard::close();
+    let guard = kernel_loom::arch::IrqGuard::close();
     // SAFETY: this host thread is the shard's only producer, and each sequence
     // number is committed once.
     let seq = unsafe { shard.reserve(&guard) };
@@ -86,7 +86,7 @@ fn every_field_survives_the_word_packing() {
 #[test]
 fn a_shorter_record_does_not_inherit_the_longer_one_it_replaced() {
     let shard = Shard::new();
-    let guard = kernel_loom::arch::LogCommitGuard::close();
+    let guard = kernel_loom::arch::IrqGuard::close();
     // SAFETY: sole producer, each number committed once.
     let first = unsafe { shard.reserve(&guard) };
     unsafe { shard.commit(first, &record(first, 64), &guard) };

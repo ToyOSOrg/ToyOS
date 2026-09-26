@@ -373,7 +373,7 @@ fn one_byte_past_a_sized_symbol_is_not_that_symbol() {
 /// A symbol with no size bounds nothing, so every address above it is inside
 /// it until a later symbol takes over. That is the assembly case — hand-written
 /// entry points carry `st_size` 0 — and losing it would leave every frame in
-/// `arch/entry.rs` unnamed.
+/// `arch/x86_64/entry.rs` unnamed.
 #[test]
 fn a_symbol_with_no_size_owns_everything_above_it() {
     let syms = [sym(0, 0, 0, 0), sym_sized(1, FUNC, 1, 0x1000, 0)].concat();

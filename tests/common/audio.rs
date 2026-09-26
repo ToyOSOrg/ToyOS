@@ -448,7 +448,7 @@ pub struct SounddCounters {
 
 /// The two numbers this boot drew for its clocks, off the kernel's own boot
 /// lines: the TSC period against the HPET (`kernel/src/clock.rs`) and the LAPIC
-/// timer's tick rate against that (`kernel/src/arch/apic.rs`).
+/// timer's tick rate against that (`kernel/src/arch/x86_64/apic.rs`).
 ///
 /// **They are here because they are the only per-boot draws that scale every
 /// armed timer for the boot's whole life**, which is the shape

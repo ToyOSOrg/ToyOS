@@ -1,4 +1,5 @@
-use crate::arch::{apic, cpu, syscall, percpu};
+use crate::arch::{apic, cpu, percpu};
+use crate::syscall;
 use crate::arch::percpu::CpuFaultState;
 use crate::{alert, log, mm, process, scheduler, symbols};
 

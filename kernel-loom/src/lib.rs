@@ -89,9 +89,9 @@ pub mod arch {
     /// The kernel implementation masks IF and TF across reservation and
     /// publication. Loom has no per-CPU flags; the model's sole-writer
     /// precondition is the corresponding witness here.
-    pub struct LogCommitGuard;
+    pub struct IrqGuard;
 
-    impl LogCommitGuard {
+    impl IrqGuard {
         pub fn close() -> Self {
             Self
         }
@@ -119,7 +119,7 @@ pub mod arch {
     #[cfg(feature = "loom")]
     pub unsafe fn percpu_fetch_add(
         counter: &loom::sync::atomic::AtomicU64,
-        _guard: &LogCommitGuard,
+        _guard: &IrqGuard,
     ) -> u64 {
         counter.fetch_add(1, loom::sync::atomic::Ordering::Relaxed)
     }
@@ -128,7 +128,7 @@ pub mod arch {
     #[cfg(not(feature = "loom"))]
     pub unsafe fn percpu_fetch_add(
         counter: &core::sync::atomic::AtomicU64,
-        _guard: &LogCommitGuard,
+        _guard: &IrqGuard,
     ) -> u64 {
         counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
     }

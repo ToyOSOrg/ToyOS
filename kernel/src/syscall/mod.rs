@@ -1,22 +1,18 @@
-//! The syscall ABI: the entry gate, [`dispatch`]'s argument-decode boundary,
-//! and the per-subsystem handlers.
+//! The syscall ABI: [`dispatch`]'s argument-decode boundary and the
+//! per-subsystem handlers. The entry that reaches it is the architecture's
+//! (`arch::syscall`).
 
 #[cfg(feature = "test-actuators")]
 mod debug;
 mod device;
-mod dispatch;
+pub(crate) mod dispatch;
 mod fs;
-mod gate;
 mod handles;
 mod io;
 mod ipc;
 mod machine;
 mod proc;
 mod vm;
-
-#[cfg(feature = "boot-actuators")]
-pub(crate) use gate::{entry_extent, hold_spin};
-pub use gate::init;
 
 use toyos_abi::handle::RawHandle;
 use toyos_abi::syscall::SyscallError;

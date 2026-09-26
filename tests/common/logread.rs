@@ -233,7 +233,7 @@ pub fn log_reserve_window(
 /// `log::nested`'s handler emits: exactly one shard generation.
 const BURST: u64 = 512;
 
-/// The negative control on [`log_reserve_window`], and on `LogCommitGuard`
+/// The negative control on [`log_reserve_window`], and on `arch::IrqGuard`
 /// itself: the same boot with the reserve bracket removed.
 ///
 /// **The one thing that can make the log's correctness claim fail on purpose.**

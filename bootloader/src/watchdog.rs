@@ -189,14 +189,14 @@ fn config_u32(ecam: u64, device: u8, function: u8, offset: u16) -> u32 {
 
 /// # Safety
 /// No fault in Ring 0; the caller owns which device answers at `port` and what
-/// the word commands it to do. `kernel/src/arch/cpu.rs` states the same
+/// the word commands it to do. `kernel/src/arch/x86_64/cpu.rs` states the same
 /// contract for the same instruction.
 unsafe fn outw(port: u16, value: u16) {
     core::arch::asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack, preserves_flags));
 }
 
 /// One word from an I/O port; safe because a read has no value a caller can get
-/// wrong, as `kernel/src/arch/cpu.rs`'s `inw` is.
+/// wrong, as `kernel/src/arch/x86_64/cpu.rs`'s `inw` is.
 fn inw(port: u16) -> u16 {
     let value: u16;
     // SAFETY: one instruction into the declared output, no memory operand.

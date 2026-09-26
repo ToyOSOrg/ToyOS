@@ -6,7 +6,7 @@
 
 use crate::object::ops;
 use crate::user_ptr::UserBytesMut;
-use crate::{log, process, vfs};
+use crate::{process, vfs};
 
 use toyos_abi::syscall::*;
 

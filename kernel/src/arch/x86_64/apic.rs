@@ -40,6 +40,18 @@ impl Reg {
 
 pub const TIMER_VECTOR: u8 = 0x20;
 
+/// Where a device writes a message-signalled interrupt: the local APIC's
+/// message window (SDM Vol. 3A §11.11.1). The one spelling of it — the
+/// compatibility format below, VT-d's remappable format and VT-d's own fault
+/// event all start here.
+pub const MSI_DOORBELL: u32 = 0xFEE0_0000;
+
+/// The compatibility-format message that raises `vector` on the CPU whose APIC
+/// ID is `dest`: the destination in address bits 19:12, the vector in the data.
+pub fn msi_message(dest: u32, vector: u8) -> (u32, u32) {
+    (MSI_DOORBELL | (dest << 12), vector as u32)
+}
+
 /// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs).
 static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
 

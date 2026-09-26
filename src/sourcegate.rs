@@ -193,10 +193,10 @@ const BANS: &[Ban] = &[
               with it",
         allowed: &[
             // Cache lines to walk, not bytes.
-            ("kernel/src/arch/control_regs.rs", 1),
+            ("kernel/src/arch/x86_64/control_regs.rs", 1),
             // Two guard-page sizes: the mapping is 4 KiB because a guard is one
             // hardware page, and `PAGE_SIZE` is 2 MiB territory here.
-            ("kernel/src/arch/percpu.rs", 2),
+            ("kernel/src/arch/x86_64/percpu.rs", 2),
             // A device's TX buffer.
             ("kernel/src/drivers/virtio_console.rs", 1),
             // A VT-d table is 4 KiB by the specification, not by this kernel.
@@ -409,7 +409,7 @@ const LOG_PRODUCERS: &[&str] = &["log!(", "alert!(", "boot_phase!(", "log::emit(
 /// `kernel/src/hardlockup/probe.rs`, which is why it is a file of its own — and
 /// neither is the line the arm writes, which its caller writes for it.
 const NMI_SILENT: &[&str] =
-    &["kernel/src/arch/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
+    &["kernel/src/arch/x86_64/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
 
 /// Every `enable_bus_master(` site `kernel/src` holds, by file and count.
 /// Arming DMA comes after a site's refusals — virtio parses its capability

@@ -12,9 +12,6 @@ use crate::object::{ops, KObjectRef};
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
 use crate::{device, process};
-// The macro, not the module: only `SYS_DEBUG`'s arms below spell `log!` unqualified.
-#[cfg(feature = "test-actuators")]
-use crate::log;
 
 use toyos_abi::handle::{RawHandle, Rights};
 #[cfg(feature = "test-actuators")]
@@ -99,7 +96,7 @@ retired_syscalls! {
     96 => "SYS_SET_RT_PRIORITY",
 }
 
-pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     // Placed first so `nmi_gate` counts the call whatever it turns out to be.
     #[cfg(feature = "boot-actuators")]
     crate::nmi_gate::note_syscall();

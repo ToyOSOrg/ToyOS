@@ -45,7 +45,7 @@ pub enum Died {
     /// dying", and the guest going quiet afterwards is what says it meant it.
     Kernel,
     /// A process the kernel killed: a Ring 3 fault, reported by name in
-    /// `kernel/src/arch/idt/exceptions.rs`. The machine is fine — a test whose
+    /// `kernel/src/arch/x86_64/idt/exceptions.rs`. The machine is fine — a test whose
     /// whole subject is a process dying (`handle_kill_policy` and every
     /// `faults.rs` probe) produces these deliberately. Before a boot's ready
     /// marker it still ends the boot: whatever died was `init` or one of its
@@ -93,7 +93,7 @@ pub enum Died {
 /// recursive kernel fault is still found by the guard, one silent ceiling later.
 const DEATHS: &[(&str, Died, Died)] = &[
     // spelling             the kernel wrote it   anybody else wrote it
-    // kernel/src/arch/idt/exceptions.rs — a Ring 0 exception. Always fatal.
+    // kernel/src/arch/x86_64/idt/exceptions.rs — a Ring 0 exception. Always fatal.
     ("KERNEL PANIC", Died::Kernel, Died::Kernel),
     // `double_fault_handler`, which is `-> !` and ends at `halt_all_cpus`. It
     // writes none of the words above it, which is how a staged `#DF` inside a
@@ -119,13 +119,13 @@ const DEATHS: &[(&str, Died, Died)] = &[
     // rather than the console, and is here so that a capture carrying it is
     // never read as anything else.
     ("PANIC REENTRY", Died::Kernel, Died::Kernel),
-    // kernel/src/arch/idt/exceptions.rs `crash_report_panic` — a Rust `panic!`.
+    // kernel/src/arch/x86_64/idt/exceptions.rs `crash_report_panic` — a Rust `panic!`.
     ("PANIC:", Died::Kernel, Died::Panicked),
     // `PanicInfo`'s `Display` newlines this out of the record above, so the
     // kernel writes it too — and so does every program's panic handler.
     ("panicked at", Died::Kernel, Died::Panicked),
     ("libc panic:", Died::Panicked, Died::Panicked),
-    // kernel/src/arch/idt/exceptions.rs — a Ring 3 fault, by name.
+    // kernel/src/arch/x86_64/idt/exceptions.rs — a Ring 3 fault, by name.
     ("SEGFAULT", Died::Faulted, Died::Faulted),
     ("SIGILL tid=", Died::Faulted, Died::Faulted),
     ("SIGFPE tid=", Died::Faulted, Died::Faulted),
@@ -613,7 +613,7 @@ pub fn self_check() -> Result<(), String> {
 
     // **The report, which is the artefact a verdict used to drop.** Staged as
     // the lines `double_fault_handler` really writes
-    // (`kernel/src/arch/idt/exceptions.rs`), with the ordinary run in front of
+    // (`kernel/src/arch/x86_64/idt/exceptions.rs`), with the ordinary run in front of
     // it and a daemon still talking after the header — a capture that begins at
     // the death would be a capture nobody has.
     const DF_HEADER: &str =

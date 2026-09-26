@@ -58,7 +58,6 @@ const VERIFY_SOURCE_ID: u64 = 1 << 18;
 const NARROW_DESTINATION_SHIFT: u64 = 8;
 const NARROW_DESTINATIONS: u32 = 0xFF;
 
-const MESSAGE_BASE: u32 = 0xFEE0_0000;
 const MESSAGE_REMAPPABLE: u32 = 1 << 4;
 const MESSAGE_SUBHANDLE_VALID: u32 = 1 << 3;
 const PIN_REMAPPABLE: u32 = 1 << 16;
@@ -183,7 +182,7 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16,
 pub fn msi(source: StreamId, vector: u8, dest: u32) -> Result<Msi, Refused> {
     let index = allocate(source, vector, dest, false)? as u32;
     Ok(Msi {
-        address: MESSAGE_BASE
+        address: crate::arch::MSI_DOORBELL
             | ((index & 0x7FFF) << 5)
             | MESSAGE_REMAPPABLE
             | MESSAGE_SUBHANDLE_VALID

@@ -607,7 +607,7 @@ pub fn service() {
         && is_irq_cpu()
     {
         SPLIT_RESCUED.store(true, Ordering::Relaxed);
-        let _irq = crate::hw::IrqGuard::close();
+        let _irq = crate::arch::IrqGuard::close();
         handler_poll();
     }
     if has_bytes() {
@@ -1043,7 +1043,7 @@ fn aux_command(bytes: &[u8], deadline: u64) -> bool {
 fn aux_reenable() {
     AUX_RESET_PENDING.store(false, Ordering::Relaxed);
     let ok = {
-        let _irq = crate::hw::IrqGuard::close();
+        let _irq = crate::arch::IrqGuard::close();
         let budget = deadline(ms(AUX_REENABLE));
         // Masking the line doesn't stop the device: port 1 is disabled so a
         // stray keystroke mid-handshake can't be consumed as the aux ack.

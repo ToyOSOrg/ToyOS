@@ -95,6 +95,7 @@ mod pcidev;
 mod gpu;
 mod user_ptr;
 mod vma;
+mod syscall;
 
 /// Nested generic forces a demangled symbol wider than the console grid,
 /// proving `screen_late_panic`'s renderer really wraps.
@@ -116,7 +117,7 @@ mod late_panic {
 use crate::mm::paging::MmioPolicy;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use arch::{apic, cpu, idt, pat, percpu, smp, syscall};
+use arch::{apic, cpu, idt, pat, percpu, smp};
 use drivers::{acpi, gop, i8042, ioapic, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
@@ -429,7 +430,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     percpu::init_bsp(apic::id());
     ioapic::init(&madt);
     idt::enable_interrupts();
-    syscall::init();
+    arch::syscall::init();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
     if !kernel_elf.is_empty() {
         symbols::load_kernel(kernel_elf, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);

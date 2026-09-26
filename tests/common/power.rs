@@ -2495,7 +2495,7 @@ pub fn blackbox_early_panic_sealed_muted(
     Ok(())
 }
 
-/// `kernel/src/arch/apic.rs`'s `LOG_DRAIN_EXPIRED`, which a boot that never had
+/// `kernel/src/arch/x86_64/apic.rs`'s `LOG_DRAIN_EXPIRED`, which a boot that never had
 /// a drainer may not print.
 const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
 

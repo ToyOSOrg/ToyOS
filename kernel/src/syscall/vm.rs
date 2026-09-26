@@ -10,7 +10,7 @@
 use crate::mm::paging::{CachePolicy, Occupancy, Prot};
 use crate::user_ptr::UserBytesMut;
 use crate::UserAddr;
-use crate::{log, process, vfs};
+use crate::{process, vfs};
 
 use toyos_abi::syscall::*;
 

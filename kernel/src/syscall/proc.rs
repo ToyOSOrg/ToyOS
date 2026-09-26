@@ -61,7 +61,7 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
     // First, so the answer is the bit and not the handle's own refusal — which
     // for an unheld handle is the kill policy, so a call carrying both returns
     // instead of ending the caller. `WNOHANG` is the whole of this word,
-    // hand-copied and unchecked (`arch/syscall/vm.rs`'s `MMAP_PROT_KNOWN`).
+    // hand-copied and unchecked (`syscall/vm.rs`'s `MMAP_PROT_KNOWN`).
     if flags & !WNOHANG != 0 {
         return SyscallError::InvalidArgument.to_u64();
     }

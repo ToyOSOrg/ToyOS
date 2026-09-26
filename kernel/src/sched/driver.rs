@@ -51,7 +51,7 @@ unsafe impl PreemptGuard for IrqOff {}
 
 /// Run `f` with interrupts masked, holding [`IrqOff`] for exactly that region.
 pub fn irq_off<R>(f: impl FnOnce(&IrqOff) -> R) -> R {
-    let _guard = crate::hw::IrqGuard::close();
+    let _guard = crate::arch::IrqGuard::close();
     f(&IrqOff(()))
 }
 

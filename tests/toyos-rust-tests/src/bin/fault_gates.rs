@@ -32,7 +32,7 @@ const ARMS: &[(&str, Expect)] = &[
     ("ss", Expect::Killed),
     ("ss_rsp", Expect::Killed),
     // Trappable at all only because `CR0.NE` is in the declaration every CPU
-    // is held to (`arch/control_regs.rs`): with it clear the exception is
+    // is held to (`arch/x86_64/control_regs.rs`): with it clear the exception is
     // signalled on FERR#, which nothing in a modern machine listens to.
     ("mf", Expect::Killed),
     // TCG raises no #XM whatever MXCSR says. `CR4.OSXMMEXCPT` is declared set,

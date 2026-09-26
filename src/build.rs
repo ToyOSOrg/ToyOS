@@ -1382,7 +1382,7 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
     );
 }
 
-/// The labels `arch::syscall::gate` defines inside `syscall_entry` for
+/// The labels `arch::syscall` defines inside `syscall_entry` for
 /// `nmi_gate`, which `toyos-ld` carries into `.strtab`.
 const ENTRY_LABELS: [&str; 3] =
     ["syscall_entry_hold_spin", "syscall_entry_hold_end", "syscall_entry_end"];
@@ -1397,15 +1397,15 @@ fn assert_entry_labels_match_features(features: &str, kernel: &[u8]) {
         kernel,
         TEST_KERNEL,
         &ENTRY_LABELS,
-        "labels `arch::syscall::gate` puts inside `syscall_entry`",
+        "labels `arch::syscall` puts inside `syscall_entry`",
         "They bound what `nmi_gate` holds and counts, and belong to a kernel built with \
          `boot-actuators`.",
     );
 }
 
-/// `arch::syscall::gate::syscall_entry`'s v0-mangled path, less the crate
+/// `arch::syscall::syscall_entry`'s v0-mangled path, less the crate
 /// disambiguator that stands in front of it.
-const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch7syscall4gate13syscall_entry";
+const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch6x86_647syscall13syscall_entry";
 
 /// `cld`, which `arch::entry::ring3_naked_asm` puts first in every Ring 0 entry.
 const CLD: u8 = 0xfc;
@@ -3360,7 +3360,7 @@ mod tests {
         file
     }
 
-    const ENTRY_NAME: &str = "_RNvNtNtNtCs2TF9wDo3GXK_6kernel4arch7syscall4gate13syscall_entry";
+    const ENTRY_NAME: &str = "_RNvNtNtNtCs2TF9wDo3GXK_6kernel4arch6x86_647syscall13syscall_entry";
 
     fn entry_with(between: &[u8]) -> Vec<u8> {
         [&ENTRY_OPENS[..], between, &SWITCH[..], &[0x90; 32][..]].concat()

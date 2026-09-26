@@ -26,35 +26,6 @@ pub fn now_ns() -> u64 {
     HW.now().0
 }
 
-/// RAII interrupt gate: restores the caller's `IF` rather than setting it, so nesting inside an already-closed region is safe.
-#[must_use = "the interrupt gate closes when the guard drops"]
-pub struct IrqGuard {
-    rflags: u64,
-}
-
-impl IrqGuard {
-    pub fn close() -> Self {
-        let rflags: u64;
-        // SAFETY: touches only RFLAGS and one pushed-and-popped stack slot; `cli` cannot fail in
-        // Ring 0 — reading the flags and closing them must be one uninterruptible sequence, which
-        // two safe calls could not guarantee.
-        unsafe {
-            asm!("pushfq", "pop {}", "cli", out(reg) rflags, options(nomem));
-        }
-        Self { rflags }
-    }
-}
-
-impl Drop for IrqGuard {
-    fn drop(&mut self) {
-        // SAFETY: `rflags` is the word this guard's own `close` read out of `RFLAGS` on this CPU —
-        // restoring it is not `sti`, and `arch::cpu` has no safe primitive for that.
-        unsafe {
-            asm!("push {}", "popfq", in(reg) self.rflags, options(nomem));
-        }
-    }
-}
-
 impl Kicker for KernelHw {
     fn kick(&self, target: CpuId) {
         apic::kick_cpu(target.0);
@@ -62,7 +33,7 @@ impl Kicker for KernelHw {
 }
 
 impl Machine for KernelHw {
-    type IrqGuard = IrqGuard;
+    type IrqGuard = crate::arch::IrqGuard;
 
     fn now(&self) -> Nanos {
         Nanos(crate::clock::nanos_since_boot())
@@ -79,8 +50,8 @@ impl Machine for KernelHw {
         apic::stop_timer();
     }
 
-    fn irq_guard(&self) -> IrqGuard {
-        IrqGuard::close()
+    fn irq_guard(&self) -> crate::arch::IrqGuard {
+        crate::arch::IrqGuard::close()
     }
 
     fn halt(&self) {

@@ -405,9 +405,9 @@ fn alloc_log_shard(cpu_id: u32) -> u64 {
 }
 
 /// This CPU's shard, its identity, and one sequence number out of that shard.
-/// The `xadd` has no `lock` prefix, sound only while the live [`crate::arch::LogCommitGuard`] proves ownership; the four reads are one `asm!` block, not four [`gs`] calls, so the absent `nomem` keeps shard selection inside the guard's barrier.
+/// The `xadd` has no `lock` prefix, sound only while the live [`crate::arch::IrqGuard`] proves ownership; the four reads are one `asm!` block, not four [`gs`] calls, so the absent `nomem` keeps shard selection inside the guard's barrier.
 pub fn reserve_log_slot(
-    guard: &crate::arch::LogCommitGuard,
+    guard: &crate::arch::IrqGuard,
 ) -> (*const log::Shard, u64, u32, u32, u32) {
     let shard: u64;
     let seq: u64;

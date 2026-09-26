@@ -1523,7 +1523,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("quarantine_exit_status", Sched::Parallel, Tier::Fast),
     ("quarantine_entries", Sched::Parallel, Tier::Fast),
     // Same: the control-register verdict, against the machine this tree
-    // actually booted before `arch/control_regs.rs`.
+    // actually booted before `arch/x86_64/control_regs.rs`.
     ("control_regs_verdict", Sched::Parallel, Tier::Fast),
     // Same: which of the two shared boots each binary belongs on, asked of the
     // binaries rather than of the list that claims to name them.
@@ -2463,7 +2463,7 @@ const T14_COLS: usize = 1920 / 8;
 /// The line `SYS_DEBUG` action 3 logs immediately before halting every CPU.
 /// It exists only on a `test-actuators` kernel — every other action costs the
 /// caller its own process, this one costs the machine. Kept in sync with
-/// `kernel/src/arch/syscall/debug.rs` by this comment and by screen_fatal_halt
+/// `kernel/src/syscall/debug.rs` by this comment and by screen_fatal_halt
 /// failing loudly if it drifts.
 const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 
@@ -2472,7 +2472,7 @@ const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 ///
 /// `screen_fatal_halt_composited` reads it off the *panel*, because the machine
 /// that wait exists for has no serial port and `/log` is the thing that did not
-/// answer. Kept in sync with `kernel/src/arch/apic.rs::LOG_DRAIN_EXPIRED` by
+/// answer. Kept in sync with `kernel/src/arch/x86_64/apic.rs::LOG_DRAIN_EXPIRED` by
 /// this comment and by that test turning every spent budget into a red if it
 /// drifts.
 const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
@@ -3095,7 +3095,7 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
 /// that held the lock rather than the scheduler that caught it — which is the
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
-/// A whole-buffer `contains("arch/syscall/dispatch.rs")` certifies none of that: the
+/// A whole-buffer `contains("syscall/dispatch.rs")` certifies none of that: the
 /// same boot's `test_syscall_panic` panics in that file too, so the needle is
 /// already present before the tripwire runs. Scope it instead to the window
 /// between this panic's header and its message — `panicked at <location>` is
@@ -3111,7 +3111,7 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
         .rfind(HEADER)
         .ok_or("tripwire message with no panic header before it")?;
     let location = &serial[header_at..msg_at];
-    if !location.contains("arch/syscall/dispatch.rs") {
+    if !location.contains("syscall/dispatch.rs") {
         return Err(format!(
             "expected the tripwire to name the guilty call site, not scheduler.rs; got: {}",
             location.trim()
@@ -13056,7 +13056,7 @@ fn run_machine_test(
             // touching it. With one CPU there is nowhere else.
             //
             // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
-            // an ordinary workload is beside them in `arch/syscall/dispatch.rs`: routes
+            // an ordinary workload is beside them in `syscall/dispatch.rs`: routes
             // past the ceiling do still exist,
             // and each of them holds the VFS lock when it dies, so the
             // machine wedges either way and the allocator's recovery cannot

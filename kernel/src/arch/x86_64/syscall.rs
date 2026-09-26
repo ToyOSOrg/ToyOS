@@ -1,6 +1,6 @@
 //! Where Ring 3 enters, and what the CPU is told to do when it does.
 //!
-//! `STAR` names the selectors, `LSTAR` is the one address `syscall` can reach, and `FMASK` masks the `RFLAGS` bits a Ring 3 thread may not hand the kernel; [`super::dispatch`] is the first code that interprets the syscall number.
+//! `STAR` names the selectors, `LSTAR` is the one address `syscall` can reach, and `FMASK` masks the `RFLAGS` bits a Ring 3 thread may not hand the kernel; [`crate::syscall::dispatch`] is the first code that interprets the syscall number.
 
 use crate::arch::cpu;
 use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state, Ring3Entry};
@@ -8,7 +8,7 @@ use crate::arch::percpu;
 #[cfg(feature = "boot-actuators")]
 use crate::arch::smp::asm_label_addr;
 
-use super::dispatch::syscall_dispatch;
+use crate::syscall::dispatch::syscall_dispatch;
 
 // `IA32_EFER.SCE` is `arch::control_regs`'s bit, decided in one place, not read back here.
 const MSR_STAR: u32 = 0xC000_0081;

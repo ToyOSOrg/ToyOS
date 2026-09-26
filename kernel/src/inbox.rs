@@ -116,7 +116,7 @@ impl WatchFlags {
     pub const READABLE: Self = Self(toyos_abi::inbox::READABLE);
     pub const WRITABLE: Self = Self(toyos_abi::inbox::WRITABLE);
     /// Every bit `toyos_abi::inbox` defines for `Submission::op_flags`;
-    /// hand-copied and unchecked, for the reason `arch/syscall/vm.rs`'s
+    /// hand-copied and unchecked, for the reason `syscall/vm.rs`'s
     /// `MMAP_PROT_KNOWN` gives for all four of these masks.
     const KNOWN: u32 = Self::READABLE.0 | Self::WRITABLE.0;
 

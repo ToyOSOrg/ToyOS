@@ -155,7 +155,7 @@ pub fn bench() {
     );
 }
 
-/// Never logs: `drivers::serial`'s lock under `save_and_cli` would deadlock a
+/// Never logs: `drivers::serial`'s lock under its `IrqGuard` would deadlock a
 /// target that cannot answer while blocked on it.
 fn wait_for(me: usize, cpu: u32, generation: Generation) {
     let mut spins = 0u32;

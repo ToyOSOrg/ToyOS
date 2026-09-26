@@ -61,7 +61,7 @@ const NMI_BUDGET: Budget = Budget::of(
 static REQUEST: DumpRequest = DumpRequest::new();
 static OWES: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
-/// NMI handshake: the handler (`arch/idt/nmi.rs`) may not allocate, log, or
+/// NMI handshake: the handler (`arch/x86_64/idt/nmi.rs`) may not allocate, log, or
 /// lock, so it only stores and clears; the asking CPU reads.
 static NMI_OWES: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static NMI_RIP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
@@ -567,7 +567,7 @@ pub mod staged {
     }
 }
 
-/// Where this CPU was, for the NMI probe. Called only from `arch/idt/nmi.rs`.
+/// Where this CPU was, for the NMI probe. Called only from `arch/x86_64/idt/nmi.rs`.
 /// Stores unconditionally: reading the flag first would race the requester that owns it.
 pub fn note_nmi(rip: u64) {
     let me = percpu::cpu_id() as usize;

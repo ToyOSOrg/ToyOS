@@ -11,7 +11,7 @@
 use std::fmt;
 
 /// The word the kernel writes as it hands the machine back to the firmware,
-/// in `kernel/src/arch/syscall/machine.rs`'s `quiesce`.
+/// in `kernel/src/syscall/machine.rs`'s `quiesce`.
 pub const REBOOTING: &str = "Rebooting.";
 
 /// What `userland/test-runner` says when its job list runs past
@@ -36,7 +36,7 @@ pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends t
 /// also in `kernel/src/deadline.rs`.
 ///
 /// **The one line that measures that control's own claim.** It arrives through
-/// the shutdown syscall, and `arch::syscall::gate` masks `IF` for the whole of a
+/// the shutdown syscall, and `arch::syscall` masks `IF` for the whole of a
 /// syscall — so a wedge that inherited its state leaves exactly one CPU per boot
 /// taking no interrupt at all, which is not a wedge but a hard lockup. A boot on
 /// which no CPU says this is a boot whose wedge never reached the CPU that asked
@@ -254,7 +254,7 @@ pub fn lines_of(log: &str, name: &str) -> String {
         .collect()
 }
 
-/// The AP bring-up record, in `kernel/src/arch/smp.rs`. A reader asks for the
+/// The AP bring-up record, in `kernel/src/arch/x86_64/smp.rs`. A reader asks for the
 /// trailing ` online` as a separate word: the same head carries the failure.
 pub const AP_BRINGUP: &str = "SMP: AP cpu";
 
@@ -564,7 +564,7 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         for (file, needle) in [
             ("kernel/src/process.rs", format!("log!(\"{EXIT}{{name}} pid=")),
-            ("kernel/src/arch/smp.rs", format!("log!(\"{AP_BRINGUP}")),
+            ("kernel/src/arch/x86_64/smp.rs", format!("log!(\"{AP_BRINGUP}")),
             ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
             ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
