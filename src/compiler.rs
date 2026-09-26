@@ -9,8 +9,8 @@
 //! built by bootstrap in its own fork checkout, under that checkout's
 //! `build/toyos-compiler/`, and placed at `rust/build/compilers/<key>/`, where
 //! the key ([`key`]) is the identity (`src/identity.rs`) of the checkout's
-//! `compiler/`, `src/bootstrap/`, `src/stage0` and `Cargo.lock`, with
-//! [`RECIPE`]. Nothing writes that directory after its [`SOURCE`] file exists,
+//! `compiler/`, `src/bootstrap/`, `src/tools/`, `src/stage0` and `Cargo.lock`,
+//! the `src/llvm-project` commit, and [`RECIPE`]. Nothing writes that directory after its [`SOURCE`] file exists,
 //! and two worktrees naming the same compiler share one copy.
 //!
 //! **A compiler of a worktree's own never touches what the others build with**:
@@ -47,7 +47,11 @@ use crate::toolchain::{self, host_triple};
 const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld; 2";
 
 /// What a compiler's key is the identity of, in its fork checkout.
-const KEYED: [&str; 4] = ["compiler", "src/bootstrap", "src/stage0", "Cargo.lock"];
+const KEYED: [&str; 5] = ["compiler", "src/bootstrap", "src/tools", "src/stage0", "Cargo.lock"];
+
+/// The submodule a compiler is built against by commit: its LLVM, which
+/// bootstrap takes prebuilt for that commit, so its content is never read.
+const LLVM: &str = "src/llvm-project";
 
 /// The file a finished compiler carries last, naming what it was built from. A
 /// directory without it is a build that did not finish.
@@ -147,8 +151,22 @@ pub fn record(rust_dir: &Path) {
 /// The key of the compiler `fork`'s sources name: their content, so committing
 /// what was built as local changes names the same compiler.
 pub fn key(fork: &Path) -> String {
-    let parts = [RECIPE.to_string(), tree_identity(fork, &KEYED)];
+    let parts = [RECIPE.to_string(), tree_identity(fork, &KEYED), llvm_commit(fork)];
     short(parts.join("\n\0\n").as_bytes())
+}
+
+/// The LLVM commit `fork` builds against: the one its index records and, where
+/// the submodule is checked out, the one it has, which a local checkout of
+/// another commit moves.
+fn llvm_commit(fork: &Path) -> String {
+    let recorded = git_out(fork, &["ls-files", "--stage", "--", LLVM]);
+    let checkout = fork.join(LLVM);
+    let held = if checkout.join(".git").exists() {
+        git_out(&checkout, &["rev-parse", "HEAD"])
+    } else {
+        String::new()
+    };
+    format!("{} {}", recorded.trim(), held.trim())
 }
 
 /// The compiler `root`'s fork checkout at `fork` names: the primary's where its
@@ -167,7 +185,15 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     if fork == rust_dir {
         return Compiler::primary(rust_dir);
     }
-    let built_from = fs::read_to_string(primary_record(rust_dir)).unwrap_or_default();
+    let record = primary_record(rust_dir);
+    let built_from = fs::read_to_string(&record).unwrap_or_else(|e| {
+        panic!(
+            "{} cannot be read ({e}), so nothing says which compiler the primary's stage2 is, \
+             and no worktree can know whether it names that one.\n\
+             The primary checkout writes it: run `cargo run -- --build-only` there once.",
+            record.display(),
+        )
+    });
     if built_from.trim() == source(fork) {
         let _ = fs::remove_file(&recorded);
         return Compiler::primary(rust_dir);
@@ -450,11 +476,50 @@ mod tests {
         assert_eq!(git(&rust_dir, &["rev-parse", "HEAD"]), git(&primary, &["rev-parse", "HEAD:rust"]));
         assert_eq!(toolchain::rustup_link(), link, "the machine-global toyos link moved");
 
-        // A sweep takes the compiler nobody names, and only that one.
+        // A sweep takes the compiler nobody names, and only that one — and
+        // not while it is still in use, though nobody names it any more.
         let orphan = ca2.stage2.parent().unwrap().to_path_buf();
+        choose(&a, &rust_dir, &a.join("rust"), fake);
+        assert_eq!(sweep(&primary), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
+        assert!(ca2.stage2.is_dir());
         drop((mine, ca, cb, again, ca2, committed));
         let kept = choose(&a, &rust_dir, &a.join("rust"), fake);
         assert_eq!(sweep(&primary), [orphan], "the sweep took a compiler a worktree names, or left one nobody does");
         assert!(kept.stage2.is_dir());
+    }
+    /// **A primary with no record of its compiler is refused by name**, never
+    /// read as "no compiler": that reading made every worktree build its own.
+    #[test]
+    fn a_missing_primary_record_is_refused_and_builds_nothing() {
+        let scratch = TempDir::new("compiler-record");
+        let (_primary, rust_dir, [same, _, _]) = estate(&scratch);
+        fs::remove_file(primary_record(&rust_dir)).unwrap();
+        let builds = Cell::new(0);
+        let fake = |fork: &Path| {
+            builds.set(builds.get() + 1);
+            fork.join("build/toyos-compiler/stage2")
+        };
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            choose(&same, &rust_dir, &same.join("rust"), fake);
+        }));
+        let why = refused.expect_err("a worktree resolved a compiler with no primary record");
+        let why = why.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(why.contains("toyos-compiler cannot be read"), "{why}");
+        assert_eq!(builds.get(), 0, "a missing record built a compiler");
+    }
+
+    /// Every source a compiler is built from moves its key: LLVM by commit,
+    /// the tools by content.
+    #[test]
+    fn llvm_and_the_tools_move_the_key() {
+        let scratch = TempDir::new("compiler-key");
+        let (_primary, _rust_dir, [same, _, _]) = estate(&scratch);
+        let fork = same.join("rust");
+        let before = key(&fork);
+        write(&fork.join("src/tools/lld-wrapper/src/main.rs"), "fn main() { 1; }\n");
+        let tools = key(&fork);
+        assert_ne!(tools, before, "a tool's source did not move the key");
+        git(&fork, &["update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,src/llvm-project"]);
+        assert_ne!(key(&fork), tools, "another LLVM commit did not move the key");
     }
 }
