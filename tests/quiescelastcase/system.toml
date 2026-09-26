@@ -4,6 +4,7 @@
 start = ["logd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 # `power` because the job ends the machine, `dup` because the runner passes a
