@@ -50,10 +50,6 @@ pub const CPACR: u64 = 0;
 /// no stage-2 translation, no trap, `E2H` clear.
 pub const HCR_EL2: u64 = 1 << 31;
 
-/// `HCR_EL2.E2H`'s position. Set, EL2's registers take EL1's names and
-/// layouts; the entry refuses a CPU on which it reads back set.
-pub const HCR_EL2_E2H: u64 = 34;
-
 /// `CNTHCTL_EL2` when entered at EL2: `EL1PCTEN` and `EL1PCEN`, so EL1 reads the
 /// physical counter and programs its timer without trapping.
 pub const CNTHCTL_EL2: u64 = 1 << 1 | 1 << 0;

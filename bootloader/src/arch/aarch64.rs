@@ -33,6 +33,39 @@ pub fn counter_origin() -> alloc::string::String {
     alloc::format!("CNTFRQ_EL0 {hz} Hz; the counter's origin is firmware's")
 }
 
+/// What the loader says about the CPU as firmware handed it over, or why the
+/// kernel cannot run on it: entered at EL2 on a CPU without FEAT_E2H0,
+/// `HCR_EL2.E2H` is RES1, so the kernel's entry cannot clear it and every
+/// `_el1` register its drop programs would be EL2's own. Refused here, where
+/// the console still prints; the entry's read-back of `HCR_EL2` stays as the
+/// last line of defence.
+pub fn cpu_as_entered() -> Result<Option<alloc::string::String>, alloc::string::String> {
+    let current: u64;
+    // SAFETY: reads `CurrentEL`, which EL1 and above may read.
+    unsafe { core::arch::asm!("mrs {}, currentel", out(reg) current, options(nomem, nostack, preserves_flags)) };
+    let el = (current >> 2) & 0b11;
+    if el != 2 {
+        return Ok(Some(alloc::format!("CPU: entered at EL{el}")));
+    }
+    let (hcr, mmfr4): (u64, u64);
+    // SAFETY: at EL2 both are readable. `ID_AA64MMFR4_EL1` by its encoding,
+    // `S3_0_C0_C7_4`, which sits in the ID space an older CPU reads as zero.
+    unsafe {
+        core::arch::asm!("mrs {}, hcr_el2", out(reg) hcr, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("mrs {}, S3_0_C0_C7_4", out(reg) mmfr4, options(nomem, nostack, preserves_flags));
+    }
+    let e2h = (hcr >> 34) & 1;
+    let e2h0 = (mmfr4 >> 24) & 0xF;
+    let state = alloc::format!("CPU: entered at EL2, HCR_EL2.E2H {e2h}, ID_AA64MMFR4_EL1.E2H0 {e2h0:#x}");
+    if e2h0 != 0 {
+        return Err(alloc::format!(
+            "{state}: REFUSED, HCR_EL2.E2H is RES1 on a CPU without FEAT_E2H0, and the kernel's \
+             drop to EL1 needs it clear"
+        ));
+    }
+    Ok(Some(alloc::format!("{state}: the kernel's entry writes E2H clear")))
+}
+
 /// The smallest data cache line on this machine, from `CTR_EL0.DminLine`.
 fn line() -> u64 {
     let ctr: u64;

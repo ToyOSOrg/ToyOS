@@ -5899,8 +5899,9 @@ fn run_screen_test(
             let serial = format!("{}\n{rest}", qemu.boot_log());
             eprintln!("  [virt] the panel is up {} ms after the boot began", started.elapsed().as_millis());
             // What stage 3 prints before it panics: every item is a record
-            // only the AArch64 side of the kernel writes.
+            // only the AArch64 side of the loader or the kernel writes.
             for want in [
+                "CPU: entered at EL1",
                 "serial: PL011 at",
                 "control registers: SCTLR_EL1=",
                 "as declared; entered at EL",
@@ -5933,10 +5934,11 @@ fn run_screen_test(
         "virt_el2_drop" => {
             // The entry's drop from EL2, which HVF never exercises: `virt` with
             // EL2 under TCG, where firmware hands the loader the CPU at EL2. A
-            // drop that leaves `HCR_EL2` other than declared halts in a named
-            // refusal and says nothing; one that lands anywhere but EL1 on
-            // `SP_EL1` panics in the declaration's read-back. Either way the
-            // line this waits for never comes.
+            // loader that refuses the CPU says so and stops; a drop that leaves
+            // `HCR_EL2` other than declared halts in a named refusal and says
+            // nothing; one that lands anywhere but EL1 on `SP_EL1` panics in the
+            // declaration's read-back. Each way the line this waits for never
+            // comes.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 &[],
@@ -5951,6 +5953,8 @@ fn run_screen_test(
             let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
+                "CPU: entered at EL2, HCR_EL2.E2H ",
+                "ID_AA64MMFR4_EL1.E2H0 0x0: the kernel's entry writes E2H clear",
                 "as declared; entered at EL2, HCR_EL2 read back as declared",
                 "EARLY PANIC: panicked at",
                 EARLY_PANIC_MESSAGE,

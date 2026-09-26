@@ -60,6 +60,13 @@ pub fn write_back(at: u64, len: usize) {
     unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 
+/// What the loader says about the CPU as firmware handed it over, or why the
+/// kernel cannot run on it. A UEFI x86-64 loader runs in long mode at CPL 0,
+/// the state the kernel's entry takes, so there is nothing to say or refuse.
+pub fn cpu_as_entered() -> Result<Option<alloc::string::String>, alloc::string::String> {
+    Ok(None)
+}
+
 /// The I/O port space the chipset's TCO block answers in.
 pub mod pio {
     /// Whether this architecture has an I/O port space at all.

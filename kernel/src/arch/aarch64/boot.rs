@@ -77,9 +77,6 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         "msr hcr_el2, x1",
         "isb",
         "mrs x6, hcr_el2",
-        "tbz x6, #{e2h}, 4f",
-        "b {refuse_e2h}",
-        "4:",
         "cmp x6, x1",
         "b.ne {refuse_hcr}",
         "msr mair_el1, x4",
@@ -128,8 +125,6 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
         sctlr = const regs::SCTLR,
         sctlr_off = const regs::SCTLR_MMU_OFF,
         hcr = const regs::HCR_EL2,
-        e2h = const regs::HCR_EL2_E2H,
-        refuse_e2h = sym refused_hcr_el2_e2h,
         refuse_hcr = sym refused_hcr_el2_readback,
         cnthctl = const regs::CNTHCTL_EL2,
         cptr = const regs::CPTR_EL2,
@@ -141,21 +136,12 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
     );
 }
 
-/// Where a CPU entered at EL2 halts when `HCR_EL2.E2H` reads back set after the
-/// entry wrote it clear: firmware's VHE it will not give up, or a CPU without
-/// FEAT_E2H0, whose `E2H` is RES1. There, every `_el1` register the drop
-/// programs would be EL2's own and `CPTR_EL2` has another layout, so the
-/// kernel does not run. Nothing can report yet: the console is found after the
-/// drop, so the refusal is this symbol, which the halted PC names.
-#[unsafe(naked)]
-#[no_mangle]
-unsafe extern "C" fn refused_hcr_el2_e2h() -> ! {
-    core::arch::naked_asm!("1:", "wfe", "b 1b")
-}
-
 /// Where a CPU entered at EL2 halts when `HCR_EL2` reads back anything but the
-/// declaration the entry wrote, for [`refused_hcr_el2_e2h`]'s reason and
-/// with its silence.
+/// declaration the entry wrote: `E2H` held set, which the loader refuses by
+/// name first (`bootloader/src/arch/aarch64.rs`), or any other bit. There the
+/// registers the drop programs are not the ones the declaration names, so the
+/// kernel does not run. Nothing can report yet: the console is found
+/// after the drop, so the refusal is this symbol, which the halted PC names.
 #[unsafe(naked)]
 #[no_mangle]
 unsafe extern "C" fn refused_hcr_el2_readback() -> ! {

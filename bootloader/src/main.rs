@@ -615,6 +615,16 @@ fn tsc() -> u64 {
 
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, root_image: Option<rootimage::RootImage>, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
+    // Said before it is refused, for `report_reach`'s reason.
+    match arch::cpu_as_entered() {
+        Ok(None) => {}
+        Ok(Some(line)) => println!("{line}"),
+        Err(why) => {
+            println!("{why}");
+            panic!("{why}");
+        }
+    }
+
     // The last of the firmware questions, and asked here for the same reason
     // the GOP's was asked before this: the protocol dies with boot services.
     //
