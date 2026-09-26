@@ -11,9 +11,12 @@
 //! [`ROOM`] bytes, so netd's write of a [`DATAGRAM`]-byte datagram takes
 //! exactly `ROOM`. A second, ordinary socket must then still get its datagram.
 //!
-//! **The socket that ended is gone whole**: its port binds again, and the pipe
-//! netd wrote into reads end-of-file once this program has let go of its own
-//! write end, because netd has let go of the one it was handed.
+//! **The socket that ended is gone whole**: netd's stack holds as many sockets
+//! as before it was bound (`net.sockets.stack`, read through netd's own
+//! `inspect`), its port binds again, and the pipe netd wrote into reads
+//! end-of-file once this program has let go of its own write end, because
+//! netd has let go of the one it was handed. The count is what sees a socket
+//! left in the stack: closing one already frees its port.
 //!
 //! argv[1] is the port of the harness's host server, which this program does
 //! not use; argv[2] is the port of the harness's UDP echo on `HOST`.
@@ -23,15 +26,18 @@
 mod netd_stream;
 
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use netd_stream::{fill, HOST};
+use toyos::ipc::{FrameRx, RxStep};
 use toyos::net::{
     udp_bind, udp_recv_from, udp_send_to, MsgType, NetError, NetdConn, UdpBindRequest,
     UdpBindResponse, UdpRecvResponse, UdpSocketId,
 };
+use toyos::poller::{Poller, READABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::{self, SyscallError};
+use toyos_inspect::{Value, MAX_SNAPSHOT_BYTES, MSG_INSPECT, MSG_SNAPSHOT};
 
 /// Both sockets bind every address, as an ordinary client's does.
 const ANY: [u8; 4] = [0, 0, 0, 0];
@@ -62,6 +68,7 @@ fn main() {
     let mut room = [0u8; ROOM];
     assert_eq!(rx.read_nonblock(&mut room), Ok(ROOM), "making room in the full pipe");
     let (from_client, tx) = toyos::pipe_pair().expect("a send pipe");
+    let before = stack_sockets();
     let full: UdpBindResponse = NetdConn::connect()
         .expect("netd is serving")
         .request_with_handles(
@@ -73,6 +80,7 @@ fn main() {
         .response()
         .expect("netd binds");
     let full_id = UdpSocketId(full.socket_id);
+    assert_eq!(stack_sockets(), before + 1, "the count did not see the socket bound");
     println!("netd_udp_refused: socket {} has {ROOM} bytes of room in a {capacity}-byte pipe", full.socket_id);
 
     send(full_id, &tx, echo, 0xA5);
@@ -86,6 +94,7 @@ fn main() {
         Some(NetError::NotConnected),
         "the socket that could not take a datagram whole is still there",
     );
+    assert_eq!(stack_sockets(), before, "netd's stack still holds the ended socket");
     println!("netd_udp_refused: the socket whose pipe would not take a datagram whole is gone");
 
     let again = udp_bind(ANY, full.bound_port)
@@ -122,6 +131,34 @@ fn send(socket: UdpSocketId, tx: &Pipe, echo: u16, byte: u8) {
     assert_eq!(tx.write(&datagram), Ok(DATAGRAM), "writing the datagram for netd");
     let sent = udp_send_to(socket, HOST, echo, DATAGRAM as u16).expect("netd sends the datagram");
     assert_eq!(sent as usize, DATAGRAM, "netd sent part of the datagram");
+}
+
+/// How many sockets netd's stack holds, as its own `inspect` answers, within
+/// [`WITHIN`].
+fn stack_sockets() -> u64 {
+    let conn = toyos::endow::service("netd").expect("a connection to netd");
+    conn.signal(MSG_INSPECT).expect("netd takes an inspect request");
+    let poller = Poller::new(1);
+    let mut rx: Box<FrameRx<MAX_SNAPSHOT_BYTES>> = Box::new(FrameRx::new());
+    let deadline = Instant::now() + WITHIN;
+    loop {
+        match rx.pump(&conn) {
+            RxStep::Frame { msg_type: MSG_SNAPSHOT, payload_len } => {
+                let snap = toyos_inspect::decode(rx.payload(payload_len), toyos_inspect::NET)
+                    .unwrap_or_else(|why| panic!("netd's snapshot: {why}"));
+                return match snap.get("net.sockets.stack") {
+                    Some(Value::U64(n)) => *n,
+                    other => panic!("netd's snapshot has net.sockets.stack as {other:?}"),
+                };
+            }
+            RxStep::Idle => {}
+            other => panic!("netd answered inspect with {other:?}, not a snapshot"),
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "netd did not answer inspect within {WITHIN:?}");
+        poller.watch(&conn, READABLE, 0);
+        poller.wait(1, left.as_nanos() as u64, |_| {});
+    }
 }
 
 /// Ask netd for `socket`'s next datagram, and panic by name if no answer

@@ -46,6 +46,7 @@ const NET: &[&str] = &[
     "net.piped.live",
     "net.piped.max",
     "net.sockets.listeners",
+    "net.sockets.stack",
     "net.sockets.tcp",
     "net.sockets.udp",
 ];

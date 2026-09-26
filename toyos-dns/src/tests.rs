@@ -170,6 +170,15 @@ fn rfc4343_names_compare_without_regard_to_case() {
     assert!(!name("a.bc").same(&name("ab.c")), "the label boundaries are part of the name");
 }
 
+#[test]
+fn rfc1035_5_1_a_name_off_the_wire_is_written_with_every_odd_byte_escaped() {
+    use std::string::ToString;
+    assert_eq!(name("www.Example.com.").to_string(), "www.Example.com");
+    let odd = Name { wire: vec![3, b'a', b'.', b'b', 2, b'\\', 0x07, 1, b' ', 0] };
+    assert_eq!(odd.to_string(), "a\\046b.\\092\\007.\\032");
+    assert_eq!(Name { wire: vec![0] }.to_string(), ".", "the root");
+}
+
 // --- Real replies ---
 
 #[test]

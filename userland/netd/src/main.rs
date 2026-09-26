@@ -726,7 +726,11 @@ impl NetDaemon {
 
     /// The socket table's size, as `inspect` reads it: counts, and no
     /// endpoint, because every client holding `netd` can ask.
-    fn inspect(&self, snap: &mut Snapshot) {
+    ///
+    /// `sockets.stack` is every socket the stack holds, netd's own among them:
+    /// a socket that outlived its table entry moves it and no other count.
+    fn inspect(&self, snap: &mut Snapshot, socket_set: &SocketSet<'_>) {
+        snap.put("sockets.stack", socket_set.iter().count());
         let (mut streams, mut listeners, mut udp) = (0u32, 0u32, 0u32);
         for kind in self.sockets.values() {
             match kind {
@@ -1532,7 +1536,7 @@ fn answer_lookup(client: &Client, addrs: &[[u8; 4]]) {
 ///
 /// Here and not in [`NetDaemon::handle_message`] because the card and the
 /// lease are the loop's and not the socket table's.
-fn answer_inspect(request: &Request, daemon: &NetDaemon, card: &Card, dhcp: &dhcp::Dhcp) {
+fn answer_inspect(request: &Request, daemon: &NetDaemon, card: &Card, dhcp: &dhcp::Dhcp, socket_set: &SocketSet<'_>) {
     // The request is a bare header, and anything riding on one is not this
     // protocol.
     if request.payload_len != 0 {
@@ -1542,7 +1546,7 @@ fn answer_inspect(request: &Request, daemon: &NetDaemon, card: &Card, dhcp: &dhc
     let mut snap = Snapshot::new(toyos_inspect::NET);
     card.inspect(&mut snap);
     dhcp.inspect(&mut snap);
-    daemon.inspect(&mut snap);
+    daemon.inspect(&mut snap, socket_set);
     let encoded = snap.encode().unwrap_or_else(|why| panic!("netd: its snapshot: {why}"));
     request.client.snapshot(&encoded);
 }
@@ -1868,7 +1872,7 @@ fn main() {
 
         for request in requests {
             if request.msg_type == toyos_inspect::MSG_INSPECT {
-                answer_inspect(&request, &daemon, &device.nic, &dhcp);
+                answer_inspect(&request, &daemon, &device.nic, &dhcp, &socket_set);
                 continue;
             }
             daemon.handle_message(request, &mut socket_set, &mut iface);

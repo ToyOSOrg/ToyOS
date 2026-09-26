@@ -1472,6 +1472,13 @@ name = "toyos-i219"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-inspect"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi 0.10.0",
+]
+
+[[package]]
 name = "toyos-keymap"
 version = "0.1.0"
 
@@ -1492,6 +1499,7 @@ dependencies = [
  "toyos 0.11.0",
  "toyos-abi 0.10.0",
  "toyos-i219",
+ "toyos-inspect",
  "toyos-quiesce",
  "toyos-tco",
  "toyos-window",
