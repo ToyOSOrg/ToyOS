@@ -182,7 +182,6 @@ fn a_post_racing_a_registration_leaves_nobody_parked() {
         };
         let producer = {
             let world = world.clone();
-            let ready = ready.clone();
             loom::thread::spawn(move || {
                 ready.store(true, Ordering::Release);
                 world.post();
@@ -271,14 +270,10 @@ fn a_poll_registered_racing_a_post_completes_exactly_once() {
                 }
             })
         };
-        let producer = {
-            let world = world.clone();
-            let ready = ready.clone();
-            loom::thread::spawn(move || {
-                ready.store(true, Ordering::Release);
-                world.post();
-            })
-        };
+        let producer = loom::thread::spawn(move || {
+            ready.store(true, Ordering::Release);
+            world.post();
+        });
         registrant.join().unwrap();
         producer.join().unwrap();
 
@@ -299,10 +294,7 @@ fn an_end_racing_a_post_answers_a_poll_once() {
             let world = world.clone();
             loom::thread::spawn(move || world.watch.cancel_rings())
         };
-        let poster = {
-            let world = world.clone();
-            loom::thread::spawn(move || world.post())
-        };
+        let poster = loom::thread::spawn(move || world.post());
         ender.join().unwrap();
         poster.join().unwrap();
 

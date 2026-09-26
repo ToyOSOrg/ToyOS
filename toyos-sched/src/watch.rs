@@ -448,7 +448,7 @@ mod tests {
         w.add_ring(withdrawn.clone());
         withdrawn.withdraw();
         let fresh = Arc::new(Poll::default());
-        w.add_ring(fresh.clone());
+        w.add_ring(fresh);
         assert_eq!(Arc::strong_count(&fired), 1, "a post lets go of what it fired");
         assert_eq!(Arc::strong_count(&withdrawn), 1, "a withdrawn entry is swept");
         assert_eq!(w.live_rings(), 1);
