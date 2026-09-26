@@ -54,6 +54,8 @@ const PAGE: usize = 4096;
 const ADMIN_DEPTH: u16 = 32;
 /// Entries per I/O queue; a queue holds one fewer command than it has entries.
 const IO_DEPTH: u16 = 64;
+/// The commands one I/O queue holds at once.
+pub const COMMANDS_PER_QUEUE: u16 = IO_DEPTH - 1;
 /// The most I/O queue pairs this driver asks for.
 const MAX_IO_QUEUES: u16 = 4;
 

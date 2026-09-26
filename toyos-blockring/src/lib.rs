@@ -51,6 +51,5 @@ pub use entry::{Completion, Op, Request, Status};
 pub use layout::{ARENA_BLOCKS, BLOCK_BYTES, DEPTH, MAX_REQUEST_BLOCKS, SESSION_BYTES};
 
 /// The name a block service is served under. A holder of its connector may
-/// open any partition the service has; one partition's grant is a port of its
-/// own ([`wire::MSG_BIND`]).
+/// open any partition the service has.
 pub const PORT: &str = "block";

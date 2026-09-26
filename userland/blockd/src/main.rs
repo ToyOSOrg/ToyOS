@@ -24,8 +24,8 @@
 //! carries twice, is listed and refused by name.
 //!
 //! **What this process does not know** is which of its partitions the machine
-//! is running from: it drives a disk the kernel does not, and nothing tells it
-//! the running slot's GUID yet.
+//! is running from, so it refuses none of them for that
+//! (`issues/filesystem/blockd-serves-the-slot-the-machine-runs-from.md`).
 //!
 //! **A server never blocks on a client.** Accept and the open frame are two
 //! events, the open is buffered until whole, every answer is one `try_send`,
@@ -444,7 +444,7 @@ fn main() {
         "blockd: NVMe up: {} I/O queues of {} commands, volatile write cache {}, {}-byte sectors, \
          {} sectors",
         ctrl.queues(),
-        63,
+        blockd::nvme::COMMANDS_PER_QUEUE,
         if ctrl.vwc { "present, so a flush issues Flush" } else { "absent, so a flush issues nothing" },
         ctrl.lba_bytes,
         ctrl.sectors

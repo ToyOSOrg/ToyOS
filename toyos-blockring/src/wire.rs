@@ -1,36 +1,24 @@
-//! The frames a session is opened and a grant is bound with, before the rings
-//! carry anything.
+//! The frames a session is opened with, before the rings carry anything.
 //!
-//! **Three ways in, one answer each.** On the service's own port a client
-//! opens any partition by its unique GUID ([`MSG_OPEN`]), sending the
-//! session's region with it; a holder of that port can also bind a fresh
-//! port's acceptor to one partition ([`MSG_BIND`]), and a connection on the
-//! bound port attaches to that partition and no other ([`MSG_ATTACH`]). Every
-//! one is answered [`MSG_OPENED`]/[`MSG_BOUND`] or [`MSG_REFUSED`] with a
-//! [`Refusal`], and after `MSG_OPENED` the connection carries nothing but
-//! doorbell bytes, each way.
+//! **One way in, one answer.** On the service's port a client opens a
+//! partition by its unique GUID ([`MSG_OPEN`]), sending the session's region
+//! with it, and is answered [`MSG_OPENED`] or [`MSG_REFUSED`] with a
+//! [`Refusal`]. After `MSG_OPENED` the connection carries nothing but doorbell
+//! bytes, each way.
 
 /// Open the partition whose unique GUID is the payload, over the region sent
 /// with it. Handles: the region.
 pub const MSG_OPEN: u32 = 1;
-/// Serve the partition whose unique GUID is the payload on the acceptor sent
-/// with it, for as long as this service runs. Handles: the acceptor.
-pub const MSG_BIND: u32 = 2;
-/// On a bound port: open its partition over the region sent with it. No
-/// payload. Handles: the region.
-pub const MSG_ATTACH: u32 = 3;
 /// The session is open; the payload is [`Opened`].
-pub const MSG_OPENED: u32 = 4;
-/// The port is bound; the payload is [`Opened`], for the partition it serves.
-pub const MSG_BOUND: u32 = 5;
+pub const MSG_OPENED: u32 = 2;
 /// Refused; the payload is a [`Refusal`]'s word.
-pub const MSG_REFUSED: u32 = 6;
+pub const MSG_REFUSED: u32 = 3;
 
 /// The bytes of a GUID payload.
 pub const GUID_BYTES: usize = 16;
 
-/// What an open or a bind was answered with: the partition's length in
-/// blocks, and its unique GUID as the table stores it.
+/// What an open was answered with: the partition's length in blocks, and its
+/// unique GUID as the table stores it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Opened {
     pub blocks: u64,
@@ -63,7 +51,7 @@ pub enum Refusal {
     /// No partition this service drives carries that GUID; the zero GUID is
     /// every unused entry's and names none.
     NotFound,
-    /// A session or a binding holds it already.
+    /// A session holds it already.
     Held,
     /// The partition is there and cannot be served: its range is not whole
     /// blocks, its GUID is on two entries, or its table did not read.
