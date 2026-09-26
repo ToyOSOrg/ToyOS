@@ -1,13 +1,16 @@
-//! The five crates ToyOS publishes, and the rule that keeps their versions
+//! The six crates ToyOS publishes, and the rule that keeps their versions
 //! moving.
 //!
 //! The winit, softbuffer and cpal forks name `toyos-abi`, `toyos` and
 //! `toyos-window` **by version**, because a path escaping a fork's own
 //! repository cannot resolve once cargo checks it out alone. So those and the
 //! two they pull in are published, and the ABI they carry is unstable by
-//! policy — a built program that breaks, breaks.
+//! policy — a built program that breaks, breaks. `toyos-ld` is published for a
+//! different reason and carries none of that ABI: the upstream
+//! `x86_64-unknown-toyos` Rust target names it as its linker, and `rustup`
+//! reaches it only through `cargo install toyos-ld`.
 //!
-//! **That policy is what this gate is for.** None of the five is
+//! **That policy is what this gate is for.** None of the six is
 //! compatible-by-construction, so a branch that changes what a file under one
 //! of them builds — its `src/identity.rs` identity, so a comment is no change —
 //! bumps its minor, `0.x.0` to `0.(x+1).0`, and every in-tree dependent's
@@ -24,7 +27,7 @@ use std::path::Path;
 use crate::identity;
 use crate::pr::git;
 
-/// One published crate: where its manifest is, and which of the five it names
+/// One published crate: where its manifest is, and which of the six it names
 /// by version.
 pub struct Crate {
     /// The package name, which is the crates.io name.
@@ -44,11 +47,12 @@ pub struct Crate {
 /// the rule cannot be turned off by deleting the publisher.
 const PUBLISHER: &str = ".github/workflows/publish.yml";
 
-/// The five, in the order a publisher must take them.
+/// The six, in the order a publisher must take them.
 pub const PUBLISHED: &[Crate] = &[
     Crate { name: "toyos-abi", dir: "toyos-abi", depends_on: &[] },
     Crate { name: "toyos-keymap", dir: "toyos-keymap", depends_on: &[] },
     Crate { name: "toyos-font", dir: "userland/toyos-font", depends_on: &[] },
+    Crate { name: "toyos-ld", dir: "toyos-ld", depends_on: &[] },
     Crate { name: "toyos", dir: "toyos", depends_on: &["toyos-abi"] },
     Crate {
         name: "toyos-window",
@@ -74,7 +78,7 @@ pub fn versions(root: &Path) -> Vec<(&'static str, String, String)> {
 }
 
 /// The `version = "…"` of the `[package]` table. A hand walk and not a parse:
-/// one key of one table, in five manifests this repository writes.
+/// one key of one table, in six manifests this repository writes.
 fn package_version(text: &str) -> Option<String> {
     let mut in_package = false;
     for line in text.lines() {
@@ -94,7 +98,7 @@ fn package_version(text: &str) -> Option<String> {
     None
 }
 
-/// Every `<dep> = { … version = "…" … }` line in `text` naming one of the five,
+/// Every `<dep> = { … version = "…" … }` line in `text` naming one of the six,
 /// as `(dependency, version)`. One line per dependency is the only spelling
 /// this reaches, which is why [`judge`] states the pin it read.
 fn version_pins(text: &str) -> Vec<(String, String)> {
@@ -219,7 +223,7 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
 
     if refusals.is_empty() {
         return Ok(match bumped.len() {
-            0 => "this branch changes none of the five published crates.".to_string(),
+            0 => "this branch changes none of the six published crates.".to_string(),
             _ => format!(
                 "bumped: {}",
                 bumped
@@ -231,10 +235,11 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
         });
     }
     refusals.push(
-        "[sdk] These five are on crates.io and the forks resolve them by version, so a change \
-         published under the version it already had is a fork silently building the old code. \
-         Every change may break by policy: the bump is the minor, and every in-tree dependent's \
-         pin moves with it."
+        "[sdk] These six are on crates.io — five resolved by the forks that name them by \
+         version, toyos-ld by `cargo install` — so a change published under the version it \
+         already had is silently building the old code, resolved or installed. Every change \
+         may break by policy: the bump is the minor, and every in-tree dependent's pin moves \
+         with it."
             .to_string(),
     );
     Err(refusals.join("\n"))
@@ -334,7 +339,7 @@ mod tests {
     use super::*;
     use crate::pr::tests::{commit, repo, sh};
 
-    /// A manifest for one of the five at `version`, with `pins` written the way
+    /// A manifest for one of the six at `version`, with `pins` written the way
     /// the tree writes them.
     fn manifest(name: &str, version: &str, pins: &[(&str, &str)]) -> String {
         let mut text = format!(
@@ -392,7 +397,7 @@ mod tests {
             "abi: reword A's doc",
         );
         let verdict = judge(&wt, "main").expect("a comment-only change owes no bump");
-        assert!(verdict.contains("changes none of the five"), "{verdict}");
+        assert!(verdict.contains("changes none of the six"), "{verdict}");
 
         commit(&wt, "toyos-abi/src/lib.rs", "/// One.\npub struct A(pub u64);\n", "abi: widen A");
         let refusal = judge(&wt, "main").expect_err("a signature change still owes one");
@@ -471,7 +476,7 @@ mod tests {
 
         commit(&wt, "toyos-abi/Cargo.lock", &lockfile("toyos-abi", "0.1.0", false), "abi: re-lock");
         let verdict = judge(&wt, "main").expect("a lock-only change owes no bump");
-        assert!(verdict.contains("changes none of the five"), "{verdict}");
+        assert!(verdict.contains("changes none of the six"), "{verdict}");
     }
 
     #[test]
@@ -530,18 +535,18 @@ mod tests {
         assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
     }
 
-    /// A branch that touches none of the five is every other branch, and the
+    /// A branch that touches none of the six is every other branch, and the
     /// rule has nothing to say about it.
     #[test]
-    fn a_branch_that_changes_none_of_the_five_passes() {
+    fn a_branch_that_changes_none_of_the_six_passes() {
         let (_origin, wt) = repo("sdk-elsewhere");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
         publishing(&wt);
         main_is_here(&wt);
 
         commit(&wt, "kernel/src/lib.rs", "// work\n", "kernel: work");
-        let verdict = judge(&wt, "main").expect("a branch outside the five must pass");
-        assert!(verdict.contains("changes none of the five"), "{verdict}");
+        let verdict = judge(&wt, "main").expect("a branch outside the six must pass");
+        assert!(verdict.contains("changes none of the six"), "{verdict}");
     }
 
     /// The arithmetic, and the versions it refuses to guess at.
@@ -567,14 +572,14 @@ mod tests {
         );
 
         // A `version` under another table is not the package's, and a
-        // dependency that is not one of the five is not a pin this rule holds.
+        // dependency that is not one of the six is not a pin this rule holds.
         let other = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
                      serde = { version = \"1.0\" }\n\n[lib]\nversion = \"9.9.9\"\n";
         assert_eq!(package_version(other).as_deref(), Some("0.1.0"));
         assert!(version_pins(other).is_empty());
     }
 
-    /// **The five are the five**, and the order is the one a publisher must
+    /// **The six are the six**, and the order is the one a publisher must
     /// take: nothing names a crate that comes after it.
     #[test]
     fn the_publish_order_is_a_dependency_order() {
