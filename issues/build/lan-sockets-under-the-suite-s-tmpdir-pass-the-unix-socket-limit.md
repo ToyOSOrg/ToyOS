@@ -24,8 +24,6 @@ failure, `QEMU died before ===READY=== (status … 256)`, is the other end of th
 same socket. The pid in the path also makes the harness's `ALONE` line call the
 two readings "a DIFFERENT failure".
 
-`qmp-{seq}.sock` sits one level shallower and fits today, by 11 bytes.
-
 **Exit condition**: every socket the harness makes has a path the platform's
 `sun_path` holds, checked where the path is made rather than at `connect`, and
 `lan_mdns_answer` is green again on the dev host.
