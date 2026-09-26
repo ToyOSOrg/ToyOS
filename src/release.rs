@@ -200,7 +200,7 @@ fn published(root: &Path, tag: &str) -> bool {
 pub fn ensure_published(root: &Path) -> Result<String, String> {
     let tag = tag(root)?;
     println!("this tree's toolchain: {tag}");
-    if !(cfg!(target_os = "linux") && cfg!(target_arch = "x86_64")) {
+    if !(cfg!(target_os = "linux") && crate::arch::Arch::HOST == Some(crate::arch::Arch::X86_64)) {
         return Err(format!(
             "the release is {HOST}'s and this host is not one; a tarball built here would \
              install nowhere"

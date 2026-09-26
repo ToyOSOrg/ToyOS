@@ -275,6 +275,9 @@ pub fn flush_tlb_all() {
 #[derive(Clone, Copy)]
 pub struct Cr3(u64);
 
+/// The address space a CPU runs in, as the architecture names its root: CR3.
+pub type Root = Cr3;
+
 impl Cr3 {
     pub fn current() -> Self {
         Self(crate::arch::cpu::read_cr3())
@@ -408,7 +411,7 @@ impl AddressSpace {
         })
     }
 
-    pub fn cr3(&self) -> Cr3 {
+    pub fn root(&self) -> Cr3 {
         Cr3(self.root.phys() | self.pcid.value() as u64)
     }
 
@@ -465,7 +468,7 @@ impl AddressSpace {
         );
 
         let pd_idx = indices(va).2;
-        let target = self.cr3();
+        let target = self.root();
         let pd = self.ensure_table(va, TABLE_FLAGS);
         pd.write_pde(pd_idx, va, phys | prot.leaf_bits() | PAGE_SIZE_BIT)
             .discharge(target);
@@ -498,7 +501,7 @@ impl AddressSpace {
         self.children.push(table);
 
         let pd_idx = indices(va).2;
-        let target = self.cr3();
+        let target = self.root();
         let pd = self.ensure_table(va, TABLE_FLAGS);
         // No `Prot` here: `NX` would make the whole window non-executable
         // whatever the leaves say.
@@ -534,7 +537,7 @@ impl AddressSpace {
         );
 
         let (pml4_idx, pdpt_idx, pd_idx) = indices(va);
-        let target = self.cr3();
+        let target = self.root();
 
         if let Some(pdpt) = self.root.child_mut(pml4_idx) {
             if let Some(pd) = pdpt.child_mut(pdpt_idx) {
@@ -822,7 +825,7 @@ impl AddressSpace {
     fn ensure_table(&mut self, va: u64, flags: u64) -> &mut PageTablePage {
         let flags = flags & TABLE_FLAGS;
         let (pml4_idx, pdpt_idx, _) = indices(va);
-        let target = self.cr3();
+        let target = self.root();
 
         if self.root[pml4_idx] & PAGE_PRESENT == 0 {
             let child = Box::new(PageTablePage([0; 512]));
@@ -875,7 +878,7 @@ pub fn kernel() -> &'static alloc::sync::Arc<Lock<AddressSpace>> {
 }
 
 /// Kernel CR3. Lock-free — safe to call from panic context.
-pub fn kernel_cr3() -> Cr3 {
+pub fn kernel_root() -> Cr3 {
     Cr3(KERNEL_CR3.load(core::sync::atomic::Ordering::Relaxed))
 }
 
@@ -886,7 +889,7 @@ pub fn kernel_cr3() -> Cr3 {
 pub fn activate_kernel() {
     // SAFETY: `KERNEL_CR3` names the boot-built tables, mapping the code and
     // stack this call returns onto.
-    unsafe { kernel_cr3().activate() };
+    unsafe { kernel_root().activate() };
 }
 
 /// [`activate_kernel`] for a CPU without `CR4.PCIDE` yet: `activate` sets the
@@ -894,7 +897,7 @@ pub fn activate_kernel() {
 /// reaches before setting it on itself.
 pub fn load_kernel_flush() {
     // SAFETY: same as `activate_kernel` above.
-    unsafe { kernel_cr3().load_flush() };
+    unsafe { kernel_root().load_flush() };
 }
 
 /// Free function (not a method): the lock and the shootdown are separate
@@ -947,7 +950,7 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry]) {
         addr += PAGE_2M;
     }
 
-    let cr3 = kernel.cr3();
+    let cr3 = kernel.root();
     KERNEL_CR3.store(cr3.0, core::sync::atomic::Ordering::Release);
     // Leaked, and `Release` after the space is built: see [`KERNEL`].
     let published: &'static alloc::sync::Arc<Lock<AddressSpace>> = Box::leak(Box::new(
@@ -973,7 +976,7 @@ fn has(entry: u64, flag: u64) -> u8 {
     }
 }
 
-/// The *currently loaded* CR3, not `kernel_cr3()` (a panic can run on a user
+/// The *currently loaded* CR3, not `kernel_root()` (a panic can run on a user
 /// space); lock-free and silent, for the panic path to prove a mapping
 /// before writing through it.
 pub fn present_in_current_cr3(addr: u64) -> bool {

@@ -455,13 +455,13 @@ impl Hw for KernelHw {
                     #[cfg(feature = "boot-actuators")]
                     crate::heartbeat::note_dispatch();
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
-                    incoming.cr3.activate();
+                    incoming.root.activate();
                     cpu::write_fs_base(incoming.fs_base);
                 }
                 // idle's stack top is per-CPU, unknowable at boot-time init, so it is read here instead.
                 None => {
                     percpu::set_kernel_stack(percpu::idle_stack_top());
-                    incoming.cr3.activate();
+                    incoming.root.activate();
                 }
             }
             RUNNING_CTX[percpu::cpu_id() as usize]

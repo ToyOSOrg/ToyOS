@@ -658,8 +658,8 @@ pub fn spawn(
     drop(guard);
 
     let t3 = crate::clock::nanos_since_boot();
-    log!("spawn: {} pid={} tid={} dst={} base={:#x} entry={:#x} cr3={:#x} symbols={}KiB (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
-        path, pid, tid, dst.0, base, entry, child_pt.lock().cr3().phys(), sym_bytes / 1024,
+    log!("spawn: {} pid={} tid={} dst={} base={:#x} entry={:#x} root={:#x} symbols={}KiB (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
+        path, pid, tid, dst.0, base, entry, child_pt.lock().root().phys(), sym_bytes / 1024,
         (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t_deps - t2) / 1_000_000,
         (t_tls - t_deps) / 1_000_000, (t3 - t0) / 1_000_000);
 

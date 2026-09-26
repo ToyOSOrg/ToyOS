@@ -955,7 +955,7 @@ fn teardown_resources(
     crate::irq_census::log_census();
     // After the irq lines: the tlb conservation check reads deliveries first, issues second.
     crate::arch::tlb::log_census();
-    crate::arch::trap::unclaimed::log_vectors();
+    crate::arch::trap::log_unclaimed();
 
     ops::close_all(&mut data.handles);
     data.elf.elf_alloc.take();

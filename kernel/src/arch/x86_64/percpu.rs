@@ -547,7 +547,7 @@ fn ist1_top() -> Option<u64> {
 /// Report how much of the double fault stack the crash report used, straight to the UART — bypassing the log ring, which is drained and may itself be corrupt.
 pub fn ist1_report() {
     let Some(top) = ist1_top() else { return };
-    let rsp = cpu::read_rsp();
+    let rsp = cpu::stack_pointer();
     let stack_bottom = top - IST_STACK_SIZE as u64;
     if rsp < stack_bottom || rsp > top {
         return;
@@ -590,9 +590,9 @@ pub fn init_bsp(lapic_id: u32) {
     // SAFETY: `alloc_percpu` just returned a live, initialised `PerCpu` with no other reference until the `wrmsr` below.
     let percpu = unsafe { &mut *ptr };
 
-    percpu.kernel_rsp = cpu::read_rsp();
+    percpu.kernel_rsp = cpu::stack_pointer();
     // SAFETY: `Tss` is `repr(C, packed)`; `rsp0` may be unaligned.
-    unsafe { core::ptr::write_unaligned(&raw mut percpu.tss.rsp0, cpu::read_rsp()); }
+    unsafe { core::ptr::write_unaligned(&raw mut percpu.tss.rsp0, cpu::stack_pointer()); }
     alloc_idle_stack(percpu);
     alloc_ist_stacks(percpu);
 

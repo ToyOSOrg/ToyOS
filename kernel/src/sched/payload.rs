@@ -13,7 +13,7 @@ use toyos_sched::task::{SchedPayload, TaskAccounting, TaskShared, WaitClass};
 use toyos_sched::park::WaitTicket;
 
 use crate::watch::Watch;
-use crate::mm::paging::Cr3;
+use crate::mm::paging::Root;
 use crate::scheduler::OperationSlot;
 use crate::process::{OwnedAlloc, PageTables, ProcessAccounting, TaskId};
 use crate::symbols::SymbolTable;
@@ -44,7 +44,7 @@ pub type RawTicket = WaitTicket<KMsg>;
 pub struct KernelCtx {
     /// Saved kernel stack pointer, written by the `context_switch` asm.
     pub rsp: u64,
-    pub cr3: Cr3,
+    pub root: Root,
     pub fs_base: u64,
     pub kernel_stack_top: u64,
     /// `None` is this CPU's idle context.

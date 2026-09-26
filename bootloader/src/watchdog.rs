@@ -54,6 +54,9 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
     if !toyos_abi::boot::actuators(cmdline).any(|token| token == toyos_tco::PARAM) {
         return;
     }
+    if !crate::arch::pio::EXISTS {
+        return refused(format_args!("this architecture has no I/O port space, where a TCO block answers"));
+    }
     let ecam = match toyos_acpi::ecam_base(Identity, rsdp_addr) {
         Ok((_, base)) => base,
         Err(e) => return refused(format_args!("this machine's tables name no ECAM ({e:?})")),
@@ -81,14 +84,14 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
     // SAFETY: `port` is `toyos_tco`'s answer for the row this machine's own PCI
     // ids matched, and every offset written is inside that row's block.
     unsafe {
-        outw(port + TCO_TMR, toyos_tco::TIMER);
-        outw(port + TCO1_CNT, TCO1_CNT_RUN);
+        crate::arch::pio::outw(port + TCO_TMR, toyos_tco::TIMER);
+        crate::arch::pio::outw(port + TCO1_CNT, TCO1_CNT_RUN);
         // Reloading is also what returns the expiry count to zero.
-        outw(port + TCO_RLD, 1);
+        crate::arch::pio::outw(port + TCO_RLD, 1);
     }
     // `TCO1_CNT` is judged whole apart from `TCO1_CNT_LOCK`, which the datasheet
     // says no write clears: one bit of it is not the register.
-    let cnt = inw(port + TCO1_CNT);
+    let cnt = crate::arch::pio::inw(port + TCO1_CNT);
     if !toyos_tco::cnt_took_the_write(cnt) {
         return refused(format_args!(
             "{port:#x} did not take TCO1_CNT={TCO1_CNT_RUN:#06x}, it reads {cnt:#06x}"
@@ -107,10 +110,10 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
 
 /// What the block holds once it is armed, as whole words.
 fn report(port: u16, cnt: u16) {
-    let rld = inw(port + TCO_RLD);
-    let tmr = inw(port + TCO_TMR);
-    let sts1 = inw(port + TCO1_STS);
-    let sts2 = inw(port + TCO2_STS);
+    let rld = crate::arch::pio::inw(port + TCO_RLD);
+    let tmr = crate::arch::pio::inw(port + TCO_TMR);
+    let sts1 = crate::arch::pio::inw(port + TCO1_STS);
+    let sts2 = crate::arch::pio::inw(port + TCO2_STS);
     println!(
         "watchdog: read back TCO_RLD={rld:#06x} TCO_TMR={tmr:#06x} TCO1_CNT={cnt:#06x} \
          TCO1_STS={sts1:#06x} TCO2_STS={sts2:#06x}"
@@ -185,25 +188,6 @@ fn config_u32(ecam: u64, device: u8, function: u8, offset: u16) -> u32 {
     // BUS_ZERO_BYTES)`, which `arm` refused to enter unless firmware's own
     // memory map describes it as one region.
     unsafe { read_volatile(at as *const u32) }
-}
-
-/// # Safety
-/// No fault in Ring 0; the caller owns which device answers at `port` and what
-/// the word commands it to do. `kernel/src/arch/x86_64/cpu.rs` states the same
-/// contract for the same instruction.
-unsafe fn outw(port: u16, value: u16) {
-    core::arch::asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack, preserves_flags));
-}
-
-/// One word from an I/O port; safe because a read has no value a caller can get
-/// wrong, as `kernel/src/arch/x86_64/cpu.rs`'s `inw` is.
-fn inw(port: u16) -> u16 {
-    let value: u16;
-    // SAFETY: one instruction into the declared output, no memory operand.
-    unsafe {
-        core::arch::asm!("in ax, dx", out("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    }
-    value
 }
 
 /// Why this machine is not watched, and that the boot goes on anyway.

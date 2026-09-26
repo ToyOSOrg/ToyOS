@@ -888,7 +888,7 @@ fn block_witness_holds(dev: &MscDevice, entered: BlockWitness) {
         dev.block,
         at.wrapping_sub(entered.at) as i64,
         top.wrapping_sub(at) as i64,
-        crate::arch::cpu::read_rsp(),
+        crate::arch::cpu::stack_pointer(),
     );
 }
 

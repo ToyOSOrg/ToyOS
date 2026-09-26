@@ -370,7 +370,7 @@ pub fn init() {
 fn idle_ctx() -> KernelCtx {
     KernelCtx {
         rsp: 0,
-        cr3: crate::mm::paging::kernel_cr3(),
+        root: crate::mm::paging::kernel_root(),
         fs_base: 0,
         kernel_stack_top: 0,
         id: None,
@@ -408,11 +408,11 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
     // A kernel thread's is the kernel address space, the one every CPU
     // sits in between user threads — why `idle_ctx` names the same `cr3`.
     // Nothing is released at teardown: this `Arc` clones a leaked, permanent kernel mapping.
-    let cr3 = new.address_space.lock().cr3();
+    let root = new.address_space.lock().root();
     let kernel_stack_top = new.kernel_stack.ptr() as u64 + KERNEL_STACK_SIZE as u64;
     let ctx = KernelCtx {
         rsp: new.entry_rsp,
-        cr3,
+        root,
         fs_base: new.fs_base,
         kernel_stack_top,
         id: Some(new.id),
@@ -686,8 +686,8 @@ pub fn enter_idle_loop() -> ! {
     percpu::set_current_pid(None);
     // SAFETY: `set_kernel_stack` requires the caller be the CPU its GS base belongs to — true here, on that CPU, after its base was set.
     unsafe { percpu::set_kernel_stack(percpu::idle_stack_top()) };
-    // SAFETY: `kernel_cr3` is the space this function's own code and stack already run in, so the write cannot unmap what executes it.
-    unsafe { crate::mm::paging::kernel_cr3().activate() };
+    // SAFETY: `kernel_root` is the space this function's own code and stack already run in, so the write cannot unmap what executes it.
+    unsafe { crate::mm::paging::kernel_root().activate() };
     // SAFETY: nothing on the outgoing stack is live past this — the function returns `!`, and the stack is this CPU's own idle stack.
     unsafe { crate::arch::cpu::run_on_stack(percpu::idle_stack_top(), idle_loop) }
 }
@@ -944,7 +944,7 @@ fn check_stack_ownership(payload: &KernelPayload) {
     let top = bottom + KERNEL_STACK_SIZE as u64;
     // SAFETY: a pass runs on the CPU whose GS base is its own `PerCpu`.
     let (kernel_rsp, rsp0) = unsafe { percpu::entry_stacks() };
-    let rsp = crate::arch::cpu::read_rsp();
+    let rsp = crate::arch::cpu::stack_pointer();
     if kernel_rsp == top && rsp0 == top && rsp <= top && rsp > bottom {
         return;
     }

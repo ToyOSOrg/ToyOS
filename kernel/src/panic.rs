@@ -22,30 +22,10 @@ const SLOTS: usize = 64;
 /// `halt_all_cpus` halts the second CPU anyway.
 static PANIC_DEPTH: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 
-/// This CPU's APIC id, from CPUID.
-///
-/// Not `rdmsr(IA32_X2APIC_APICID)`: that MSR is `#GP` before `irqchip::init_ap`
-/// has run, and a panic an AP takes before then must not fault inside the
-/// reentry guard.
-pub fn apic_id() -> u32 {
-    let (max_leaf, _, _, _) = cpu::cpuid(0, 0);
-    for leaf in [0x1F, 0x0B] {
-        if max_leaf >= leaf {
-            let (_, ebx, _, edx) = cpu::cpuid(leaf, 0);
-            // SDM Vol. 2A, CPUID leaf 0BH: EBX[15:0] == 0 means unimplemented,
-            // not id 0, so the leaf-1 fallback below must still run.
-            if ebx & 0xFFFF != 0 {
-                return edx;
-            }
-        }
-    }
-    let (_, ebx, _, _) = cpu::cpuid(1, 0);
-    ebx >> 24
-}
-
-/// This CPU's reentry depth.
+/// This CPU's reentry depth, indexed by the id the hardware gives the CPU
+/// (`arch::cpu::hardware_id`), which answers before any per-CPU state exists.
 pub fn depth_slot() -> &'static AtomicU32 {
-    &PANIC_DEPTH[apic_id() as usize & (SLOTS - 1)]
+    &PANIC_DEPTH[cpu::hardware_id() as usize & (SLOTS - 1)]
 }
 
 /// Path capture bound; overflow is cut from the front (see [`copy_tail`]).
@@ -117,7 +97,7 @@ impl Evidence {
 static FIRST: [Evidence; SLOTS] = [const { Evidence::new() }; SLOTS];
 
 fn evidence() -> &'static Evidence {
-    &FIRST[apic_id() as usize & (SLOTS - 1)]
+    &FIRST[cpu::hardware_id() as usize & (SLOTS - 1)]
 }
 
 /// Claims this CPU's slot for the first crash; declines if one is already claimed.
@@ -134,7 +114,7 @@ pub fn record_panic(info: &core::panic::PanicInfo) {
     if !claim(slot, Kind::Panic) {
         return;
     }
-    slot.apic.store(apic_id(), Ordering::Relaxed);
+    slot.apic.store(cpu::hardware_id(), Ordering::Relaxed);
     if let Some(location) = info.location() {
         copy_tail(&slot.file, &slot.file_len, &slot.file_cut, location.file().as_bytes());
         slot.line.store(location.line(), Ordering::Relaxed);
@@ -153,7 +133,7 @@ pub fn record_fault(name: &str, rip: u64, cr2: u64, error_code: u64) {
     if !claim(slot, Kind::Fault) {
         return;
     }
-    slot.apic.store(apic_id(), Ordering::Relaxed);
+    slot.apic.store(cpu::hardware_id(), Ordering::Relaxed);
     copy_head(&slot.msg, &slot.msg_len, name.as_bytes());
     slot.rip.store(rip, Ordering::Relaxed);
     slot.cr2.store(cr2, Ordering::Relaxed);
@@ -286,7 +266,7 @@ pub fn last_words(
     raw(b"\n!!! ");
     raw(header.as_bytes());
     raw(b" !!! (apic ");
-    serial::panic_raw_dec(u64::from(apic_id()));
+    serial::panic_raw_dec(u64::from(cpu::hardware_id()));
     if let Some(prev) = prev {
         raw(b", the cpu was already in ");
         raw(state_name(prev).as_bytes());

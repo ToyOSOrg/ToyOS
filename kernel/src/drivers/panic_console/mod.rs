@@ -1334,7 +1334,7 @@ fn write_num(out: &mut [u8], v: usize) -> usize {
 }
 
 /// Whether the first and last framebuffer pages resolve in the *current*
-/// CR3, not `kernel_cr3()`: a panic in syscall context runs on a user address space.
+/// CR3, not `kernel_root()`: a panic in syscall context runs on a user address space.
 /// Proves it rather than assuming it, so broken paging becomes no console, never a fault inside the panic handler.
 fn mapped(fb: &Fb) -> bool {
     let base = fb.ptr as u64;

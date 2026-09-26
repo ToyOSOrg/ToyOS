@@ -578,26 +578,9 @@ fn report_reach(what: &str, at: u64, len: u64) {
     );
 }
 
-/// The time-stamp counter, which counts from reset.
+/// The CPU's free-running counter, which counts from reset.
 fn tsc() -> u64 {
-    // SAFETY: RDTSC reads a counter and nothing else; every x86-64 has it.
-    unsafe { core::arch::x86_64::_rdtsc() }
-}
-
-/// `IA32_TSC_ADJUST`, where CPUID says the CPU has it: every write to the TSC
-/// since reset is added to it (Intel SDM Vol. 3B, "Time-Stamp Counter
-/// Adjustment"), so zero is a counter firmware never wrote and the TSC is time
-/// since power-on.
-fn tsc_adjust() -> Option<i64> {
-    let max = core::arch::x86_64::__cpuid(0).eax;
-    // Leaf 7 exists when the maximum leaf reaches it.
-    if max < 7 || core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 1) == 0 {
-        return None;
-    }
-    let (lo, hi): (u32, u32);
-    // SAFETY: the loader runs at CPL 0, and CPUID.07H:EBX[1] says the MSR exists.
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x3bu32, out("eax") lo, out("edx") hi, options(nomem, nostack)) };
-    Some(((u64::from(hi) << 32) | u64::from(lo)) as i64)
+    arch::counter()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -715,12 +698,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 
     kernel_args.loader_handoff_tsc = tsc();
     println!(
-        "Loader TSC: {entry_tsc} at entry, {} at the handoff; IA32_TSC_ADJUST {}",
+        "Loader TSC: {entry_tsc} at entry, {} at the handoff; {}",
         kernel_args.loader_handoff_tsc,
-        match tsc_adjust() {
-            Some(adjust) => alloc::format!("{adjust}"),
-            None => alloc::string::String::from("not on this CPU"),
-        }
+        arch::counter_origin(),
     );
 
     // Last, and after every line above: a console write, a FAT write and a
@@ -762,13 +742,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     kernel_args.memory_map_size =
         memory_map.len() as u64 * mem::size_of::<MemoryMapEntry>() as u64;
 
-    // Switch to new page tables. SAFETY: `pml4_phys` is the table built above,
-    // identity-mapping low memory (so the code and stack this instruction
-    // itself runs from stay mapped across the switch) and high-half-mapping
-    // the same range at `PHYS_OFFSET` for the jump below. The assert before the
-    // exit proved the whole kernel image is inside that range.
-    unsafe { core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack)) };
-
     let entry_virt = PHYS_OFFSET + kernel_phys + kernel.entry_offset as u64;
 
     mem::forget(memory_map);
@@ -776,15 +749,12 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     mem::forget(kernel_elf_bytes);
     mem::forget(cmdline);
 
-    // SAFETY: `entry_virt` is `kernel_phys + entry_offset` read through the
-    // high-half mapping just switched to, which the assert above proved
-    // covers the whole kernel image. `kernel.elf`'s entry point is `extern
-    // "sysv64" fn(&KernelArgs) -> !` by the boot protocol `toyos-abi::boot`
-    // and the kernel side of it define between them — this bootloader has no
-    // way to check the callee's signature, only to keep its own side of that
-    // contract.
-    let entry: extern "sysv64" fn(&KernelArgs) -> ! = unsafe { mem::transmute(entry_virt) };
-    entry(&kernel_args);
+    // SAFETY: `pml4_phys` is the table built above, identity-mapping low memory
+    // (so the code and stack the switch itself runs from stay mapped across it)
+    // and high-half-mapping the same range at `PHYS_OFFSET`; the assert before
+    // the exit proved the whole kernel image is inside that range, so
+    // `entry_virt` is `kernel_phys + entry_offset` read through it.
+    unsafe { arch::enter_kernel(pml4_phys, entry_virt, &kernel_args) }
 }
 
 /// When this pass armed the page, in Unix seconds, or 0 where firmware would

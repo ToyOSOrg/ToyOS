@@ -554,3 +554,5 @@ pub(crate) fn provoke_double_fault() -> ! {
         );
     }
 }
+
+pub(crate) use unclaimed::log_vectors as log_unclaimed;

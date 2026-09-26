@@ -77,7 +77,7 @@ pub fn rdrand() -> Option<u64> {
 }
 
 #[inline]
-pub fn read_rsp() -> u64 {
+pub fn stack_pointer() -> u64 {
     let rsp: u64;
     // SAFETY: register-to-register mov into the declared output; nostack holds because rsp is read, not used.
     unsafe {
@@ -107,7 +107,7 @@ pub fn df_witness(site: &str) {
     }
     // SAFETY: the observation is already made; only core::fmt and the log follow, which must not run with DF set.
     unsafe { asm!("cld", options(nomem, nostack)) };
-    crate::hw::report_contexts(read_rsp(), None);
+    crate::hw::report_contexts(stack_pointer(), None);
     panic!(
         "DF WITNESS: cpu{} reached {site} with the direction flag set. \
          `compiler_builtins::mem::memmove`'s overlapping-copy path holds it across \
@@ -458,4 +458,26 @@ pub fn df_witness_mutate() {
     // panics before any `rep movs` can run. Nothing runs in between, so no
     // string op ever executes with it set.
     unsafe { asm!("std", options(nomem, nostack)) };
+}
+
+/// This CPU's APIC id, from CPUID: the id the hardware gives it, readable
+/// before any per-CPU state exists.
+///
+/// Not `rdmsr(IA32_X2APIC_APICID)`: that MSR is `#GP` before `irqchip::init_ap`
+/// has run, and a panic an AP takes before then must not fault inside the
+/// reentry guard.
+pub fn hardware_id() -> u32 {
+    let (max_leaf, _, _, _) = cpuid(0, 0);
+    for leaf in [0x1F, 0x0B] {
+        if max_leaf >= leaf {
+            let (_, ebx, _, edx) = cpuid(leaf, 0);
+            // SDM Vol. 2A, CPUID leaf 0BH: EBX[15:0] == 0 means unimplemented,
+            // not id 0, so the leaf-1 fallback below must still run.
+            if ebx & 0xFFFF != 0 {
+                return edx;
+            }
+        }
+    }
+    let (_, ebx, _, _) = cpuid(1, 0);
+    ebx >> 24
 }
