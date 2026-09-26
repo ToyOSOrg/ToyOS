@@ -1,0 +1,38 @@
+# Where a fresh boot puts things, asked over the cable: `layout_fresh_boot`.
+#
+# `tests/sshdcase` plus a declared shell and the `locale` applet. The shell is
+# declared so that its `HOME` is init's row answer on the launcher path; the
+# judge (`test_rs_layout_paths`) is declared nowhere, so its `HOME` is init's
+# answer on the direct path, spawned by a service whose own `HOME` is
+# `/state/sshd`.
+
+[boot]
+start = ["logd", "netd", "sshd", "test-runner"]
+
+[programs.logd]
+service = true
+syscap = ["logread"]
+
+[programs.netd]
+service = true
+serves = ["netd"]
+devices = ["pci:1af4:1041"]
+
+[programs.sshd]
+service = true
+receives = ["netd", "launcher"]
+
+[programs.test-runner]
+receives = ["netd"]
+syscap = ["logread"]
+
+# A session program with no authority: what is asked of it is where its
+# `HOME` is and where it keeps its history.
+[programs.shell]
+
+# `echo` for the shell's `-c`, `locale` for the machine's keyboard layout.
+[programs.toybox]
+
+[symlinks]
+"bin/echo" = "/system/bin/toybox"
+"bin/locale" = "/system/bin/toybox"

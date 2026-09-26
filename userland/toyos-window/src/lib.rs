@@ -11,7 +11,7 @@ use toyos::surface;
 use toyos::Connection;
 use toyos::shm::SharedMemory;
 /// Re-exported because [`KeyPress`] is made of them and a client that holds
-/// its own translator — `/bin/console`, a test that stands in for a surface —
+/// its own translator — `console`, a test that stands in for a surface —
 /// should not have to name a second crate to do what this one does.
 pub use toyos_keymap::{Emit, Mods, Translator};
 

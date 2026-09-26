@@ -8,6 +8,7 @@
 start = ["logd", "test-runner"]
 
 [programs.logd]
+service = true
 args = ["--hold-ring-until=log hold: said after 192 records"]
 syscap = ["logread"]
 
