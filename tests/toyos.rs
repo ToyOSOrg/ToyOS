@@ -14747,16 +14747,16 @@ fn run_machine_test(
             // The layout as ruled, on a boot of its own with a blank DATA
             // volume: three services, each given a `/state` of its own, and a
             // session program whose child is the judge. sshd's identity is the
-            // one file a service writes on every such boot, and sshd's last line
-            // on a boot that stages no key follows it, so the listing waits for
-            // that line rather than for a clock.
+            // one file a service writes on every such boot, and on a boot that
+            // stages no key sshd then ends, however it fares; so the listing
+            // waits for the kernel's record of that end rather than for a clock.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sshdcase");
             let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
             let mut qemu = QemuInstance::boot_with_options(&config, &[], rust_bins, options);
             let mut console = qemu.boot_log().to_string();
             const MINTED: &str = "sshd: minted a new host identity at /state/sshd/host_ed25519";
-            await_guest(&mut qemu, &mut console, "sshd's last line", |c| {
-                c.contains("sshd: no file names a usable key")
+            await_guest(&mut qemu, &mut console, "sshd's end", |c| {
+                c.contains("exit: sshd pid=")
             })
             .map_err(|why| format!("{why}\n{console}"))?;
             if !console.contains(MINTED) {
