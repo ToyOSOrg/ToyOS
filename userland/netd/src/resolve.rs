@@ -307,16 +307,20 @@ fn send(socket: &mut udp::Socket, to: [u8; 4], query: &[u8]) {
 }
 
 /// The first port in [`EPHEMERAL`] no UDP socket holds, searched upward from
-/// `from` and wrapping; `None` once every one is held. `from` names
+/// `from` and wrapping; `None` once every one is held.
+pub fn free_port(socket_set: &SocketSet<'_>, from: u16) -> Option<u16> {
+    free_port_by(from, |port| udp_port_taken(socket_set, port))
+}
+
+/// The first port in [`EPHEMERAL`] that `taken` does not claim, searched
+/// upward from `from` and wrapping; `None` once every one is. `from` names
 /// `EPHEMERAL`'s start plus `from` modulo its size, which for a port already
 /// in it is that port: the range starts at a multiple of its size.
-pub fn free_port(socket_set: &SocketSet<'_>, from: u16) -> Option<u16> {
+pub fn free_port_by(from: u16, taken: impl Fn(u16) -> bool) -> Option<u16> {
     const SPAN: u32 = *EPHEMERAL.end() as u32 - *EPHEMERAL.start() as u32 + 1;
     const _: () = assert!(*EPHEMERAL.start() as u32 % SPAN == 0);
     let start = u32::from(from) % SPAN;
-    (0..SPAN)
-        .map(|k| EPHEMERAL.start() + ((start + k) % SPAN) as u16)
-        .find(|&port| !udp_port_taken(socket_set, port))
+    (0..SPAN).map(|k| EPHEMERAL.start() + ((start + k) % SPAN) as u16).find(|&port| !taken(port))
 }
 
 #[cfg(test)]

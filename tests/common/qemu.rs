@@ -2361,6 +2361,15 @@ pub struct BootOptions {
     /// it writes reach the NIC as if off the cable, and it sees every frame the
     /// guest sends. Refused by name on a profile with no NIC.
     pub segment: Option<super::segment::Tap>,
+    /// Pass every frame the guest's NIC sends or receives through
+    /// `super::middlebox`, which impairs them as its plan says.
+    /// Refused by name on a profile with no NIC.
+    pub middlebox: Option<super::middlebox::Wire>,
+    /// The virtio NIC drains the guest's transmit ring one frame a
+    /// millisecond (virtio-net's `tx=timer` with a burst of one), so the ring
+    /// fills whenever the guest has more to send than that, without holding
+    /// up anything else QEMU does. Refused by name on any other NIC.
+    pub slow_transmit: bool,
     /// Forward this host port to the guest's TCP 22. **slirp is one-way
     /// without it**: nothing on the host can open a connection into the guest
     /// unless QEMU is told which port to translate. A profile with no NIC
@@ -2444,6 +2453,8 @@ impl Default for BootOptions {
             extra_root_files: Vec::new(),
             log_port: None,
             segment: None,
+            middlebox: None,
+            slow_transmit: false,
             ssh_port: None,
             wire_dump: None,
         }
@@ -4500,11 +4511,16 @@ fn qemu_command(
     .into_iter()
     .flatten()
     .collect::<String>();
+    assert!(
+        !options.slow_transmit || matches!(shape.nic, Nic::Virtio),
+        "a slow transmit ring is virtio-net's `tx=timer`, and this profile's NIC is not virtio"
+    );
     match shape.nic {
         Nic::Absent => {}
         Nic::Virtio => {
+            let slow = if options.slow_transmit { ",tx=timer,x-txtimer=1000000,x-txburst=1" } else { "" };
             qemu.arg("-netdev").arg(format!("user,id=net0{forward}")).arg("-device").arg(format!(
-                "virtio-net-pci-non-transitional,netdev=net0{platform}"
+                "virtio-net-pci-non-transitional,netdev=net0{platform}{slow}"
             ));
         }
         Nic::VirtioWithoutMsix => {
@@ -4546,6 +4562,13 @@ fn qemu_command(
         );
         qemu.arg("-object")
             .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
+    }
+    if let Some(wire) = &options.middlebox {
+        assert!(
+            !matches!(shape.nic, Nic::Absent),
+            "this profile carries no NIC, so there is no `net0` wire to stand in"
+        );
+        qemu.args(wire.argv());
     }
     if let Some(tap) = &options.segment {
         assert!(

@@ -488,3 +488,15 @@ fn a_lookup_is_not_carried_by_a_later_ones_schedule() {
         "lookup 2 waited on lookup 1's schedule"
     );
 }
+
+/// A port drawn from a held run is the first free one past it, the search
+/// wraps from the range's top to its bottom, and a range held whole has none.
+#[test]
+fn a_drawn_port_passes_over_every_held_one() {
+    let start = *EPHEMERAL.start();
+    let end = *EPHEMERAL.end();
+    assert_eq!(free_port_by(start, |p| p < start + 3), Some(start + 3));
+    assert_eq!(free_port_by(end - 1, |p| p >= end - 1), Some(start));
+    assert_eq!(free_port_by(0, |p| p != start + 7), Some(start + 7));
+    assert_eq!(free_port_by(start, |_| true), None);
+}

@@ -57,6 +57,7 @@ socket2 = { git = "https://github.com/ToyOSOrg/socket2", branch = "toyos" }
 raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", branch = "toyos-0.6.2" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.2" }
 softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8-sdk-0.2" }
+smoltcp = { git = "https://github.com/ToyOSOrg/smoltcp", branch = "toyos" }
 winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.31.0-beta.2-sdk-0.2" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos" }
 

@@ -16,7 +16,8 @@ use toyos_build::metaldevices::exit_of;
 
 use super::logstream::{self, VIRTIO};
 use super::qemu::{self, BootOptions, QemuInstance};
-use super::{compile, segment, serial};
+use super::segment::{self, NEIGHBOUR, NEIGHBOUR_MAC};
+use super::{compile, serial};
 
 /// What `test_rs_log_origin` says, and the name its line goes in the log under:
 /// it runs as `test-runner`'s child, on `test-runner`'s pipe.
@@ -426,12 +427,8 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     Ok(())
 }
 
-/// The address slirp's DHCP gives the first guest on its network, and a
-/// neighbour on the same /24 that is none of slirp's own addresses.
+/// The address slirp's DHCP gives the first guest on its network.
 const GUEST: [u8; 4] = [10, 0, 2, 15];
-const NEIGHBOUR: [u8; 4] = [10, 0, 2, 7];
-/// A locally administered unicast address (IEEE 802 bit 1 of the first octet).
-const NEIGHBOUR_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x0a, 0x00, 0x07];
 /// RFC 6762 §3: the port every multicast DNS responder listens on.
 const MDNS_PORT: u16 = 5353;
 

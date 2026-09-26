@@ -18,11 +18,10 @@
 //! end, because netd has let go of the one it was handed. The count is what
 //! sees a socket left in the stack: closing one already frees its port.
 //!
-//! **A held port is not handed out twice**: binding the ordinary socket's port
-//! by number is refused as in use, and a port-0 bind passes over a port bound
-//! by number where its next pick would have been. smoltcp hands a datagram to
-//! the first socket that takes it, so a second socket on a port receives
-//! nothing, the resolver's among them.
+//! **A held port is not bound twice**: binding the ordinary socket's port by
+//! number is refused as in use. smoltcp hands a datagram to the first socket
+//! that takes it, so a second socket on a port receives nothing, the
+//! resolver's among them.
 //!
 //! argv[1] is the port of the harness's host server, which this program does
 //! not use; argv[2] is the port of the harness's UDP echo on `HOST`.
@@ -30,20 +29,20 @@
 
 #[path = "../netd_stream.rs"]
 mod netd_stream;
+#[path = "../netd_inspect.rs"]
+mod netd_inspect;
 
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use netd_inspect::Net;
 use netd_stream::{fill, HOST};
-use toyos::ipc::{FrameRx, RxStep};
 use toyos::net::{
     udp_bind, udp_recv_from, udp_send_to, MsgType, NetError, NetdConn, UdpBindRequest,
     UdpBindResponse, UdpRecvResponse, UdpSocketId,
 };
-use toyos::poller::{Poller, READABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_inspect::{Value, MAX_SNAPSHOT_BYTES, MSG_INSPECT, MSG_SNAPSHOT};
 
 /// Both sockets bind every address, as an ordinary client's does.
 const ANY: [u8; 4] = [0, 0, 0, 0];
@@ -71,13 +70,7 @@ fn main() {
         "port {} was bound a second time",
         healthy.bound_port
     );
-    // Where netd's next port-0 pick would be, unless another program took a
-    // port since, which leaves this check passing without having tested.
-    let next = if healthy.bound_port == u16::MAX { 49152 } else { healthy.bound_port + 1 };
-    let _by_number = udp_bind(ANY, next).unwrap_or_else(|e| panic!("binding port {next} by number: {e:?}"));
-    let picked = udp_bind(ANY, 0).expect("a port-0 bind");
-    assert_ne!(picked.bound_port, next, "a port-0 bind was handed port {next}, which another socket holds");
-    println!("netd_udp_refused: port {} is refused a second socket, and a port-0 bind passed over {next}", healthy.bound_port);
+    println!("netd_udp_refused: port {} is refused a second socket", healthy.bound_port);
 
     let (rx, kept) = toyos::pipe_pair().expect("a receive pipe");
     let handed = syscall::dup(kept.as_handle()).expect("a second handle to the receive pipe's write end");
@@ -157,29 +150,7 @@ fn send(socket: UdpSocketId, tx: &Pipe, echo: u16, byte: u8) {
 /// table and the resolver's are left out, so only netd's own and one that
 /// outlived its entry move it.
 fn untabled() -> u64 {
-    let conn = toyos::endow::service("netd").expect("a connection to netd");
-    conn.signal(MSG_INSPECT).expect("netd takes an inspect request");
-    let poller = Poller::new(1);
-    let mut rx: Box<FrameRx<MAX_SNAPSHOT_BYTES>> = Box::new(FrameRx::new());
-    let deadline = Instant::now() + WITHIN;
-    loop {
-        match rx.pump(&conn) {
-            RxStep::Frame { msg_type: MSG_SNAPSHOT, payload_len } => {
-                let snap = toyos_inspect::decode(rx.payload(payload_len), toyos_inspect::NET)
-                    .unwrap_or_else(|why| panic!("netd's snapshot: {why}"));
-                return match snap.get("net.sockets.untabled") {
-                    Some(Value::U64(n)) => *n,
-                    other => panic!("netd's snapshot has net.sockets.untabled as {other:?}"),
-                };
-            }
-            RxStep::Idle => {}
-            other => panic!("netd answered inspect with {other:?}, not a snapshot"),
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        assert!(!left.is_zero(), "netd did not answer inspect within {WITHIN:?}");
-        poller.watch(&conn, READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
-    }
+    Net::ask(WITHIN).count("net.sockets.untabled")
 }
 
 /// Ask netd for `socket`'s next datagram, and panic by name if no answer
