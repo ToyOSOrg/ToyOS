@@ -9172,13 +9172,17 @@ impl PatternServer {
     }
 }
 
+/// What one [`netcase_against_host`] run leaves: the guest's result, the
+/// console it ran beside, and how the host's sending ended on each connection.
+struct HostRun {
+    result: qemu::TestResult,
+    console: String,
+    sent: Vec<Result<u64, String>>,
+}
+
 /// Boot `tests/netcase` with the one guest program `name`, wait for netd, and
-/// run it against a fresh [`PatternServer`]. Answers the guest's result, the
-/// console it ran beside, and what the host sent each connection.
-fn netcase_against_host(
-    rust_bins: &[(String, Vec<u8>)],
-    name: &str,
-) -> Result<(qemu::TestResult, String, Vec<Result<u64, String>>), String> {
+/// run it against a fresh [`PatternServer`].
+fn netcase_against_host(rust_bins: &[(String, Vec<u8>)], name: &str) -> Result<HostRun, String> {
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
     let bins: Vec<(String, Vec<u8>)> = rust_bins.iter().filter(|(n, _)| n == name).cloned().collect();
     if bins.is_empty() {
@@ -9203,13 +9207,13 @@ fn netcase_against_host(
         return Err(format!("{name} exited {:?}:\n{}", result.exit_code, result.stdout));
     }
     console.push_str(&result.serial);
-    Ok((result, console, sent))
+    Ok(HostRun { result, console, sent })
 }
 
 /// A receiver that stops reading until its pipe is full still gets every byte
 /// of a stream past it, from the guest's own byte-for-byte comparison.
 fn netd_slow_reader(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (result, _, sent) = netcase_against_host(rust_bins, "netd_slow_reader")?;
+    let HostRun { result, sent, .. } = netcase_against_host(rust_bins, "netd_slow_reader")?;
     let [Ok(sent)] = sent.as_slice() else {
         return Err(format!("the host server's connections ended {sent:?}, not one whole stream"));
     };
@@ -9226,7 +9230,7 @@ fn netd_slow_reader(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// verdict that netd survived it. This side carries what the guest cannot
 /// see — that netd named each refusal and that no program panicked.
 fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (result, console, _) = netcase_against_host(rust_bins, "netd_refused_pipes")?;
+    let HostRun { result, console, .. } = netcase_against_host(rust_bins, "netd_refused_pipes")?;
     if !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_refused_pipes: ok")) {
         return Err(format!("the guest never said it was done:\n{}", result.stdout));
     }
