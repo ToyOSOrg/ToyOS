@@ -643,8 +643,16 @@ mod vars {
         Ok((header + STORE_HEADER, header + size))
     }
 
-    /// Every variable header in the store: its offset, state, name and data.
-    fn walk(bytes: &[u8]) -> Result<(Vec<(usize, u8, [u8; 16], String, Vec<u8>)>, usize), String> {
+    /// One variable header in the store.
+    struct Found {
+        state: u8,
+        vendor: [u8; 16],
+        var: Var,
+    }
+
+    /// Every variable header in the store, and where the erased space after
+    /// them begins.
+    fn walk(bytes: &[u8]) -> Result<(Vec<Found>, usize), String> {
         let (mut at, end) = store(bytes)?;
         let mut out = Vec::new();
         while at + HEADER <= end && u16::from_le_bytes([bytes[at], bytes[at + 1]]) == START_ID {
@@ -658,7 +666,7 @@ mod vars {
                 .take_while(|&u| u != 0)
                 .collect();
             let data = bytes[name_at + name_len..name_at + name_len + data_len].to_vec();
-            out.push((at, bytes[at + 2], vendor, String::from_utf16_lossy(&units), data));
+            out.push(Found { state: bytes[at + 2], vendor, var: Var { name: String::from_utf16_lossy(&units), data } });
             at = (name_at + name_len + data_len).next_multiple_of(4);
         }
         Ok((out, at))
@@ -670,8 +678,8 @@ mod vars {
         Ok(walk(&bytes)?
             .0
             .into_iter()
-            .filter(|(_, state, vendor, _, _)| *vendor == VENDOR && (*state == VAR_ADDED || *state == IN_TRANSITION))
-            .map(|(_, _, _, name, data)| Var { name, data })
+            .filter(|found| found.vendor == VENDOR && (found.state == VAR_ADDED || found.state == IN_TRANSITION))
+            .map(|found| found.var)
             .collect())
     }
 
