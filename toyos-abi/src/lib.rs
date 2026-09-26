@@ -115,12 +115,30 @@ unsafe impl Sync for FramebufferInfo {}
 // pointers, no interior mutability) covers `Send`.
 unsafe impl Send for FramebufferInfo {}
 
+/// Where each architecture's thread control block keeps the thread's [`Tid`],
+/// as an offset from TP, inside the TCB its psABI puts there.
+pub mod tcb {
+    /// x86-64, TLS variant II: the TCB is at and above TP, `TP + 0` the
+    /// psABI's self-pointer and `TP + 8` the DTV pointer, inside the
+    /// [`X86_64_BYTES`] the kernel reserves; TLS data is below TP.
+    pub const X86_64_TID: usize = 16;
+    pub const X86_64_BYTES: usize = 64;
+    /// AArch64, TLS variant I: the TCB is the [`AARCH64_BYTES`] at TP, `TP + 0`
+    /// the DTV pointer and `TP + 8` the word the psABI leaves to the
+    /// implementation, which is this; the first TLS block starts at
+    /// `TP + AARCH64_BYTES`, so nothing of the TCB may lie there.
+    pub const AARCH64_TID: usize = 8;
+    pub const AARCH64_BYTES: usize = 16;
+}
+
 /// Where a thread finds its own [`Tid`]: the kernel writes it into the thread
-/// control block at `TP + TCB_TID` before the thread's first instruction.
-/// `TP + 0` is the psABI's self-pointer and `TP + 8` the DTV pointer; the word
-/// is the thread's own memory, so what it says is the thread's word about
+/// control block at `TP + TCB_TID` before the thread's first instruction. The
+/// word is the thread's own memory, so what it says is the thread's word about
 /// itself and nothing more.
-pub const TCB_TID: usize = 16;
+#[cfg(target_arch = "x86_64")]
+pub const TCB_TID: usize = tcb::X86_64_TID;
+#[cfg(target_arch = "aarch64")]
+pub const TCB_TID: usize = tcb::AARCH64_TID;
 
 /// The calling thread's id, read off its control block without a syscall.
 #[cfg(target_arch = "x86_64")]
@@ -148,6 +166,25 @@ pub fn current_tid() -> Tid {
     let tp: u64;
     // SAFETY: a read of `TPIDR_EL0`, the thread pointer, into a register.
     unsafe { core::arch::asm!("mrs {tp}, tpidr_el0", tp = out(reg) tp, options(nomem, nostack)) };
-    // SAFETY: `TP + TCB_TID` lies inside the TCB the kernel reserves at TP.
+    // SAFETY: `TP + TCB_TID` lies inside the psABI's TCB at TP, below the
+    // first TLS block (`tcb::AARCH64_BYTES`).
     Tid(unsafe { core::ptr::read_volatile((tp as usize + TCB_TID) as *const u32) })
+}
+
+#[cfg(test)]
+mod tcb_tests {
+    use super::tcb::*;
+
+    /// Each architecture's tid word lies inside its TCB and on none of the
+    /// words its psABI already names: on AArch64 the first TLS block starts at
+    /// `TP + 16`, so a tid there would be the program's own TLS data.
+    #[test]
+    fn the_tid_word_is_inside_each_tcb_and_on_no_named_word() {
+        const TID: usize = core::mem::size_of::<u32>();
+        // Past the self-pointer and the DTV pointer.
+        assert!(X86_64_TID >= 16 && X86_64_TID + TID <= X86_64_BYTES);
+        // Past the DTV pointer, and wholly below the first TLS block.
+        assert!(AARCH64_TID >= 8 && AARCH64_TID + TID <= AARCH64_BYTES);
+        assert_eq!(AARCH64_BYTES, 16, "AArch64's psABI TCB is two words");
+    }
 }
