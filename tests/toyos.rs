@@ -1430,6 +1430,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // cache answers, and the other across a *spawn*, which is a device view and
     // does not. `writeback_durability` is a host-side volume oracle that shuts the
     // guest down and reads `/log` back with `toyos-fat32-check`.
+    // The watch's lost-wake window, staged: `watch-window` holds every waiter
+    // between reading its condition and parking, so the peer's post lands where
+    // only the notified bit carries it to the commit.
+    ("blocking_read_window", Sched::Parallel, Tier::Fast),
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Nightly),
     ("writeback_durability", Sched::Parallel, Tier::Nightly),
@@ -1521,6 +1525,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// naming this table, and a row naming what the suite did not build panics
 /// before the boot.
 const CARRIES: &[(&str, &[&str])] = &[
+    ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
@@ -10674,6 +10679,28 @@ fn run_machine_test(
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
         "quiesce_leaves_the_volume_whole" => common::volumes::quiesce_leaves_the_volume_whole(test_config, c_bins, rust_bins),
+        // The lost-wake canary with the window it guards held open: every wait
+        // reads its condition, spins, then parks, so the ping-pong's posts land
+        // between the two. A commit that ignored the notified bit parks for good
+        // and the canary counts it short.
+        "blocking_read_window" => {
+            let options = BootOptions {
+                kernel_params: &["watch-window"],
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let boot = qemu.boot_log().to_string();
+            serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+            let result = qemu.run_test("test_rs_blocking_read_stress", Duration::from_secs(30));
+            if !check_rust_result(&result) {
+                return Err(format!(
+                    "blocking_read_window failed:\n{}\nkernel log while it ran:\n{}{}",
+                    result.stdout, result.before, result.serial
+                ));
+            }
+            Ok(())
+        }
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.

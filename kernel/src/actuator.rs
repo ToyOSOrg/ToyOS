@@ -259,6 +259,10 @@ actuators! {
     /// Park `iod` before it drains so a closed file's write-back stays pending.
     writeback_stall = "writeback-stall";
 
+    /// Hold every thread that waits on a watch between reading its condition and
+    /// parking, so a post lands in the window its commit must refuse the park over.
+    watch_window = "watch-window";
+
     /// Starve the four xHCI bring-up register waits in `init_one`.
     xhci_deaf_controller = "xhci-deaf-controller";
 

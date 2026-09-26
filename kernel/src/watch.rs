@@ -165,9 +165,23 @@ pub fn wait_until(
         if deadline.reached(crate::clock::now()) {
             return Ok(());
         }
+        #[cfg(feature = "boot-actuators")]
+        hold_the_window();
         wait(p, &armed, deadline)?;
     }
     Ok(())
+}
+
+/// `watch-window`: widen the gap between a waiter reading its condition false and
+/// its phase 1, so a post lands there — the post only the notified bit carries.
+#[cfg(feature = "boot-actuators")]
+fn hold_the_window() {
+    if !crate::actuator::watch_window() {
+        return;
+    }
+    for _ in 0..20_000 {
+        core::hint::spin_loop();
+    }
 }
 
 /// Register, then park until `ready()` holds, for a wait a kill may not end
