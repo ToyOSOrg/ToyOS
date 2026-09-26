@@ -290,31 +290,36 @@ fn region() -> (Vec<u64>, Ring) {
     (words, ring)
 }
 
-/// **What soundd's mix thread does to log, allocating nothing.** A line of the
-/// stats line's shape composed on the stack and pushed into a claimed lane of
-/// a real ring layout — its refusal path included — and the same into the
-/// shared ring, is zero allocations on the writing thread.
+/// **What soundd's mix thread does to log, allocating nothing and waiting on
+/// nothing.** A line of the stats line's shape composed on the stack and
+/// pushed into a claimed lane of a real ring layout — its refusal path
+/// included — and the same into the shared ring, is zero allocations on the
+/// writing thread, which comes back with nobody reading.
 #[test]
 fn a_real_time_write_allocates_nothing() {
-    let (_words, ring) = region();
-    let lane = ring.claim_lane(7, 3).expect("a fresh ring has free lanes");
-    let before = allocations();
-    for window in 0..(LANE_SLOTS + 4) {
-        compose(
-            Severity::Info,
-            format_args!("soundd: wakes={} completions={} underruns={} late_wakes={}", window, 2, 0, 1),
-            &mut |body: &mut Body| {
-                body.at_ns = window;
-                let _ = lane.push(body);
-            },
-        );
-    }
-    for window in 0..(SHARED_SLOTS + 4) {
-        compose(Severity::Info, format_args!("x={window}"), &mut |body: &mut Body| {
-            let _ = ring.push(body);
-        });
-    }
-    assert_eq!(allocations() - before, 0, "a write allocated");
+    let (words, ring) = region();
+    let allocated = never_waits(move || {
+        let _words = words;
+        let lane = ring.claim_lane(7, 3).expect("a fresh ring has free lanes");
+        let before = allocations();
+        for window in 0..(LANE_SLOTS + 4) {
+            compose(
+                Severity::Info,
+                format_args!("soundd: wakes={} completions={} underruns={} late_wakes={}", window, 2, 0, 1),
+                &mut |body: &mut Body| {
+                    body.at_ns = window;
+                    let _ = lane.push(body);
+                },
+            );
+        }
+        for window in 0..(SHARED_SLOTS + 4) {
+            compose(Severity::Info, format_args!("x={window}"), &mut |body: &mut Body| {
+                let _ = ring.push(body);
+            });
+        }
+        allocations() - before
+    });
+    assert_eq!(allocated, 0, "a write allocated");
 }
 
 /// The real layout, end to end: what one view pushes the reader reads back
