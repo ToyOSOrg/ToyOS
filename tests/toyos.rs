@@ -4602,16 +4602,29 @@ fn run_screen_test(
                 ));
             }
             let printed = last - query;
+            // The rows those lines take on the firmware's console, whose glyph is
+            // eight pixels wide (UEFI 2.11 §12.9, `EFI_GLYPH_WIDTH`): a line
+            // wider than the mode's columns — the root bridges' descriptor dump
+            // is one — wraps onto a row per width it fills.
+            let columns = lines[query]
+                .split("GOP: mode ")
+                .nth(1)
+                .and_then(|mode| mode.split('x').next())
+                .and_then(|width| width.parse::<usize>().ok())
+                .map(|width| width / 8)
+                .filter(|&columns| columns > 0)
+                .ok_or_else(|| format!("the GOP line names no mode width: {:?}", lines[query]))?;
+            let rows: usize = lines[query + 1..=last].iter().map(|line| line.len().div_ceil(columns).max(1)).sum();
 
             // A range and not an equality: each panel is dumped after its marker
             // reached the console, so a line drawn in between is on the panel
             // and not in the count.
             let grew = after as i64 - before as i64;
-            if !(1..=printed as i64).contains(&grew) {
+            if !(1..=rows as i64).contains(&grew) {
                 return Err(format!(
                     "the panel carried {before} rows at the GOP query and {after} at the loader's \
                      last line, a growth of {grew}, where the loader printed {printed} lines \
-                     between them\n{console}"
+                     between them, {rows} rows at {columns} columns\n{console}"
                 ));
             }
             eprintln!(
