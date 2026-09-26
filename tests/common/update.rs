@@ -556,11 +556,11 @@ pub fn update_grant_refuses_a_stray_partition(_: &Path, _: &[(String, Vec<u8>)],
     Ok(())
 }
 
-/// **A floor is its key's and its image's**: this image's own floor stored in
-/// a shape its loader never writes is refused and boots nothing; the owner's
-/// floor and another image's, both at the highest version there is, hold
-/// this image to nothing — the other image's is deleted, the owner's never —
-/// and the clean reboot raises this image's own.
+/// **A floor is its key's and its image's**: the owner's floor and another
+/// image's, both at the highest version there is, hold this image to nothing
+/// — the other image's is deleted, the owner's never — and the clean reboot
+/// raises this image's own. And this image's own floor, stored in a shape its
+/// loader never writes, is refused and boots nothing.
 pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(String, Vec<u8>)]) -> Result<(), String> {
     let rig = Rig::stage("update-floor")?;
     let key = signing::key();
@@ -569,12 +569,6 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
     let other = floors::name(Scope::Image, &key.public(), &[0x55; 16]).as_str().to_string();
     let template = super::compile::repo_root().join("ovmf/OVMF_VARS-pure-efi.fd");
     let fresh = || std::fs::copy(&template, &rig.vars).map(|_| ()).map_err(|e| format!("{}: {e}", rig.vars.display()));
-
-    fresh()?;
-    vars::plant(&rig.vars, &own, floors::ATTRIBUTES, &[1; 9])?;
-    let refused = rig.launch(FLOOR_REFUSED);
-    said(refused.boot_log(), &[&format!("Anti-rollback floor: {own}: it holds 9 bytes where this loader writes 8")])?;
-    drop(refused);
 
     fresh()?;
     vars::plant(&rig.vars, &owner, floors::ATTRIBUTES, &u64::MAX.to_le_bytes())?;
@@ -596,6 +590,13 @@ pub fn update_floor_is_the_images_own(_: &Path, _: &[(String, Vec<u8>)], _: &[(S
         }
     }
     eprintln!("  [update] the owner's floor and another image's held this one to nothing; the other's went, the owner's stayed");
+
+    fresh()?;
+    vars::plant(&rig.vars, &own, floors::ATTRIBUTES, &[1; 9])?;
+    let refused = rig.launch(FLOOR_REFUSED);
+    said(refused.boot_log(), &[&format!("Anti-rollback floor: {own}: it holds 9 bytes where this loader writes 8")])?;
+    drop(refused);
+    eprintln!("  [update] this image's own floor in nine bytes was refused, and nothing booted");
     let _ = std::fs::remove_dir_all(&rig.scratch);
     Ok(())
 }
