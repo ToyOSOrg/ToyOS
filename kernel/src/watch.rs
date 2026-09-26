@@ -214,7 +214,7 @@ pub mod window {
             // staged nothing.
             if armed.shared.notified() {
                 let posted = POSTED.fetch_add(1, Relaxed) + 1;
-                if posted % STEP == 0 {
+                if posted.is_multiple_of(STEP) {
                     crate::log!("{HELD} {posted} times, {} lapsed", LAPSED.load(Relaxed));
                 }
                 return;

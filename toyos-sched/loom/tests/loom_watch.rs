@@ -416,7 +416,6 @@ fn a_transition_racing_an_opening_gate_is_never_missed() {
         let stop = {
             let world = world.clone();
             let stopper = stopper.clone();
-            let thread = thread.clone();
             loom::thread::spawn(move || {
                 gate.open(1);
                 world.watch.register(&stopper, 0);

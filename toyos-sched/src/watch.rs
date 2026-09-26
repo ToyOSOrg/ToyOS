@@ -568,7 +568,7 @@ mod tests {
         }
     }
 
-    struct SharedLock(Arc<Mutex<Waiters<Msg, Tattler>>>);
+    struct SharedLock(std::sync::Arc<Mutex<Waiters<Msg, Tattler>>>);
     impl LeafLock<Waiters<Msg, Tattler>> for SharedLock {
         fn with<U>(&self, f: impl FnOnce(&mut Waiters<Msg, Tattler>) -> U) -> U {
             f(&mut self.0.lock().unwrap())
@@ -577,10 +577,10 @@ mod tests {
 
     #[test]
     fn a_sweep_drops_what_it_took_out_with_the_list_lock_let_go() {
-        let list = Arc::new(Mutex::new(Waiters::new()));
+        let list = std::sync::Arc::new(Mutex::new(Waiters::new()));
         let w: Watch<Msg, Tattler, SharedLock> = Watch::new(SharedLock(list.clone()));
-        w.add_ring(Tattler { list: Arc::downgrade(&list) });
-        w.add_ring(Tattler { list: Arc::downgrade(&list) });
+        w.add_ring(Tattler { list: std::sync::Arc::downgrade(&list) });
+        w.add_ring(Tattler { list: std::sync::Arc::downgrade(&list) });
         let t = task(1);
         w.register(&t, 0);
         w.unregister(&t);
