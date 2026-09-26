@@ -42,9 +42,9 @@ impl ParsedRelaEntries {
 /// Groups both relocation tables, returning `None` when any one group would not fit a single kernel allocation.
 pub fn parse_rela_entries(rela_data: &[u8], jmprel_data: &[u8]) -> Option<ParsedRelaEntries> {
     let entries = || {
-        RelaTable::new(rela_data)
+        RelaTable::new(rela_data, crate::arch::ELF_MACHINE)
             .iter()
-            .chain(RelaTable::new(jmprel_data).iter())
+            .chain(RelaTable::new(jmprel_data, crate::arch::ELF_MACHINE).iter())
     };
     let counts = RelaCounts::of(entries());
     // Ceiling assumes the widest record type, since any one group could be the whole table.

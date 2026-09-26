@@ -1,4 +1,4 @@
-use crate::collect::{InputReloc, LinkState, RelocType, SectionIdx, SectionKind, SymbolDef, SymbolRef};
+use crate::collect::{Arch, InputReloc, LinkState, RelocType, SectionIdx, SectionKind, SymbolDef, SymbolRef};
 use crate::emit_pe::PeLayout;
 use crate::LinkError;
 use std::collections::{BTreeMap, HashSet};
@@ -1023,7 +1023,12 @@ pub(crate) fn apply_relocs_pe(
             }
         };
 
-        let is_abs = apply_one_reloc_x86(&mut state.sections[reloc.section].data, reloc, sym_addr, reloc_vaddr, &layout.got, &BTreeMap::new())?;
+        let arch = state.arch;
+        let data = &mut state.sections[reloc.section].data;
+        let is_abs = match arch {
+            Arch::X86_64 => apply_one_reloc_x86(data, reloc, sym_addr, reloc_vaddr, &layout.got, &BTreeMap::new())?,
+            Arch::Aarch64 => apply_one_reloc_aarch64(data, reloc, sym_addr, reloc_vaddr, &layout.got)?,
+        };
         if is_abs {
             abs_fixups.push(reloc_vaddr as u32);
         }

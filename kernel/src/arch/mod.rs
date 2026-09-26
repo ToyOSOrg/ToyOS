@@ -17,6 +17,9 @@ pub mod smp;
 pub mod syscall;
 pub mod tlb;
 
+/// The machine every program image this kernel loads must be built for.
+pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::X86_64;
+
 /// One log reservation and its publication, atomic against an interrupt on this CPU. TF is always clear in Ring 0, so this guard leaves it alone.
 #[must_use = "dropping the log commit guard reopens interrupts and single-step traps"]
 pub(crate) struct LogCommitGuard {

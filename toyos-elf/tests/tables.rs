@@ -18,6 +18,7 @@ use toyos_elf::gnu_hash::{self, GnuHash};
 use toyos_elf::rela::{self, RelaCounts, RelaTable, RelocError, RelocKind};
 use toyos_elf::section::{SectionTable, SHT_DYNSYM, SHT_RELA, SHT_SYMTAB};
 use toyos_elf::sym::SymTab;
+use toyos_elf::Machine;
 
 /// `st_info` for a global `STT_FUNC`, and for the data object it is told apart
 /// from.
@@ -80,7 +81,7 @@ fn everything_after_dt_null_is_ignored() {
 fn a_trailing_partial_relocation_is_not_a_relocation() {
     let mut bytes = rela(0x10, 0, 8, 4).to_vec();
     bytes.extend_from_slice(&[0u8; 23]);
-    let table = RelaTable::new(&bytes);
+    let table = RelaTable::new(&bytes, Machine::X86_64);
     assert_eq!(table.len(), 1);
     assert_eq!(table.get(1), None);
     assert_eq!(table.iter().count(), 1);
@@ -88,15 +89,15 @@ fn a_trailing_partial_relocation_is_not_a_relocation() {
 
 #[test]
 fn relocation_types_map_to_the_width_the_writers_use() {
-    assert_eq!(RelocKind::from_raw(8).write_width(), Some(8));
-    assert_eq!(RelocKind::from_raw(23).write_width(), Some(4));
-    assert_eq!(RelocKind::from_raw(0).write_width(), None);
-    assert_eq!(RelocKind::from_raw(42).write_width(), None);
+    assert_eq!(RelocKind::from_raw(Machine::X86_64, 8).write_width(), Some(8));
+    assert_eq!(RelocKind::from_raw(Machine::X86_64, 23).write_width(), Some(4));
+    assert_eq!(RelocKind::from_raw(Machine::X86_64, 0).write_width(), None);
+    assert_eq!(RelocKind::from_raw(Machine::X86_64, 42).write_width(), None);
     // RELATIVE is the one written type that resolves no symbol, so it is the
     // one whose `r_sym` needs no bound.
     assert!(!RelocKind::Relative.needs_symbol());
     for raw in [6u32, 7, 16, 17, 18, 23] {
-        assert!(RelocKind::from_raw(raw).needs_symbol(), "type {raw}");
+        assert!(RelocKind::from_raw(Machine::X86_64, raw).needs_symbol(), "type {raw}");
     }
 }
 
@@ -106,25 +107,25 @@ fn validation_refuses_a_write_outside_the_window_by_name() {
 
     let overflowing = [rela(u64::MAX - 3, 0, 8, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&overflowing).iter(), window, 4, None),
+        rela::validate(RelaTable::new(&overflowing, Machine::X86_64).iter(), window, 4, None),
         Err(RelocError::OffsetOverflows),
     );
 
     let below = [rela(0xFF8, 0, 8, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&below).iter(), window, 4, None),
+        rela::validate(RelaTable::new(&below, Machine::X86_64).iter(), window, 4, None),
         Err(RelocError::OutsideWindow),
     );
 
     // One byte of an eight-byte write past the end.
     let straddling = [rela(0x1FF9, 0, 8, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&straddling).iter(), window, 4, None),
+        rela::validate(RelaTable::new(&straddling, Machine::X86_64).iter(), window, 4, None),
         Err(RelocError::OutsideWindow),
     );
 
     let fits = [rela(0x1FF8, 0, 8, 0)].concat();
-    assert_eq!(rela::validate(RelaTable::new(&fits).iter(), window, 4, None), Ok(()));
+    assert_eq!(rela::validate(RelaTable::new(&fits, Machine::X86_64).iter(), window, 4, None), Ok(()));
 }
 
 /// A table the loader reads while it writes must not lie inside the range it
@@ -187,12 +188,12 @@ fn a_relocation_crossing_a_fill_page_is_refused_only_for_a_chunked_writer() {
     for off in 0xFF9u64..=0xFFF {
         let straddles = [rela(off, 0, 8, 0)].concat();
         assert_eq!(
-            rela::validate(RelaTable::new(&straddles).iter(), window, 4, Some(lattice)),
+            rela::validate(RelaTable::new(&straddles, Machine::X86_64).iter(), window, 4, Some(lattice)),
             Err(RelocError::StraddlesFillPage),
             "offset {off:#x} straddles the page but was accepted",
         );
         assert_eq!(
-            rela::validate(RelaTable::new(&straddles).iter(), window, 4, None),
+            rela::validate(RelaTable::new(&straddles, Machine::X86_64).iter(), window, 4, None),
             Ok(()),
             "offset {off:#x} refused for a contiguous writer",
         );
@@ -200,17 +201,17 @@ fn a_relocation_crossing_a_fill_page_is_refused_only_for_a_chunked_writer() {
 
     // A write ending at the boundary fits; a 4-byte TPOFF32 fits in the last 4.
     assert_eq!(
-        rela::validate(RelaTable::new(&[rela(0xFF8, 0, 8, 0)].concat()).iter(), window, 4, Some(lattice)),
+        rela::validate(RelaTable::new(&[rela(0xFF8, 0, 8, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(lattice)),
         Ok(()),
     );
     assert_eq!(
-        rela::validate(RelaTable::new(&[rela(0xFFC, 0, 23, 0)].concat()).iter(), window, 4, Some(lattice)),
+        rela::validate(RelaTable::new(&[rela(0xFFC, 0, 23, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(lattice)),
         Ok(()),
     );
 
     let shifted = rela::FillLattice { base: 3, granule: 4096 };
     assert_eq!(
-        rela::validate(RelaTable::new(&[rela(0x1000, 0, 8, 0)].concat()).iter(), window, 4, Some(shifted)),
+        rela::validate(RelaTable::new(&[rela(0x1000, 0, 8, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(shifted)),
         Err(RelocError::StraddlesFillPage),
     );
 }
@@ -224,14 +225,14 @@ fn every_written_type_is_validated_and_no_other_is() {
     for raw in [6u32, 7, 8, 16, 17, 18, 23] {
         let bytes = [rela(0x1000, 0, raw, 0)].concat();
         assert_eq!(
-            rela::validate(RelaTable::new(&bytes).iter(), window, 4, None),
+            rela::validate(RelaTable::new(&bytes, Machine::X86_64).iter(), window, 4, None),
             Err(RelocError::OutsideWindow),
             "type {raw} was not validated",
         );
     }
     // A type nobody patches may name any offset at all.
     let ignored = [rela(u64::MAX, 0, 42, 0)].concat();
-    assert_eq!(rela::validate(RelaTable::new(&ignored).iter(), window, 0, None), Ok(()));
+    assert_eq!(rela::validate(RelaTable::new(&ignored, Machine::X86_64).iter(), window, 0, None), Ok(()));
 }
 
 #[test]
@@ -240,20 +241,20 @@ fn a_symbol_index_past_the_table_is_refused_except_for_relative() {
 
     let bind = [rela(0x10, 4, 6, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&bind).iter(), window, 4, None),
+        rela::validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 4, None),
         Err(RelocError::SymbolPastTable),
     );
-    assert_eq!(rela::validate(RelaTable::new(&bind).iter(), window, 5, None), Ok(()));
+    assert_eq!(rela::validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 5, None), Ok(()));
 
     let relative = [rela(0x10, u32::MAX, 8, 0)].concat();
-    assert_eq!(rela::validate(RelaTable::new(&relative).iter(), window, 0, None), Ok(()));
+    assert_eq!(rela::validate(RelaTable::new(&relative, Machine::X86_64).iter(), window, 0, None), Ok(()));
 }
 
 #[test]
 fn counts_are_per_kind_over_every_table() {
     let a = [rela(0, 0, 8, 0), rela(8, 1, 6, 0), rela(16, 2, 18, 0)].concat();
     let b = [rela(24, 3, 7, 0), rela(32, 0, 23, 0), rela(40, 0, 99, 0)].concat();
-    let counts = RelaCounts::of(RelaTable::new(&a).iter().chain(RelaTable::new(&b).iter()));
+    let counts = RelaCounts::of(RelaTable::new(&a, Machine::X86_64).iter().chain(RelaTable::new(&b, Machine::X86_64).iter()));
     assert_eq!(
         counts,
         RelaCounts { relative: 1, bind: 2, tpoff64: 1, tpoff32: 1, dtpmod64: 0, dtpoff64: 0 },
@@ -481,8 +482,8 @@ fn rela_dyn_is_found_by_shape_and_only_by_shape() {
     .concat();
     let table = SectionTable::new(&bytes);
     let mut reader = |off: u64| match off {
-        0x300 => RelaTable::new(&rela(0, 1, 6, 0)).get(0),
-        0x400 => RelaTable::new(&rela(0, 0, 8, 0)).get(0),
+        0x300 => RelaTable::new(&rela(0, 1, 6, 0), Machine::X86_64).get(0),
+        0x400 => RelaTable::new(&rela(0, 0, 8, 0), Machine::X86_64).get(0),
         _ => None,
     };
     assert_eq!(table.rela_dyn(&mut reader), Some((0x400, 72)));
@@ -608,4 +609,27 @@ fn hash_table(
 
 fn bloom_word_for(h: u32, shift: u32) -> u64 {
     (1u64 << (h % 64)) | (1u64 << ((h as u64 >> shift) % 64))
+}
+
+#[test]
+fn each_machine_reads_its_own_relocation_numbers() {
+    // The AArch64 psABI's dynamic types, and one x86-64 number each machine
+    // must not read as the other's.
+    for (raw, kind) in [
+        (1025u32, RelocKind::GlobDat),
+        (1026, RelocKind::JumpSlot),
+        (1027, RelocKind::Relative),
+        (1028, RelocKind::DtpMod64),
+        (1029, RelocKind::DtpOff64),
+        (1030, RelocKind::Tpoff64),
+    ] {
+        assert_eq!(RelocKind::from_raw(Machine::Aarch64, raw), kind, "type {raw}");
+        assert_eq!(RelocKind::from_raw(Machine::X86_64, raw), RelocKind::Other(raw), "type {raw}");
+    }
+    assert_eq!(RelocKind::from_raw(Machine::Aarch64, 8), RelocKind::Other(8));
+    assert_eq!(RelocKind::from_raw(Machine::Aarch64, 23), RelocKind::Other(23));
+
+    let bytes = rela(0x10, 0, 1027, 4);
+    let entry = RelaTable::new(&bytes, Machine::Aarch64).get(0).unwrap();
+    assert_eq!((entry.kind, entry.addend), (RelocKind::Relative, 4));
 }

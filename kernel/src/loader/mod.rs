@@ -337,7 +337,7 @@ fn rela_dyn_from_sections(
     let shdrs = table(backing, path, "e_shnum", sections.file_offset, sections.byte_len())?;
     let mut first = |off: u64| {
         let head = read_file_range(backing, off, toyos_elf::rela::ENTRY_SIZE);
-        toyos_elf::RelaTable::new(&head).get(0)
+        toyos_elf::RelaTable::new(&head, crate::arch::ELF_MACHINE).get(0)
     };
     match SectionTable::new(&shdrs).rela_dyn(&mut first) {
         Some((off, size)) => table(backing, path, "SHT_RELA sh_size", off, size as usize),

@@ -298,6 +298,28 @@ pub(crate) fn collect(objects: &[(String, Vec<u8>)]) -> Result<LinkState, LinkEr
         .map(|(name, data)| parse_single_input(name, data))
         .collect::<Result<_, LinkError>>()?;
 
+    // One link is one machine: the first object names it, and an object built
+    // for the other is refused rather than merged into an image that runs on
+    // neither.
+    let mut arch = None;
+    for ((name, _), input) in flat.iter().zip(&parsed) {
+        let ParsedInput::Object(object) = input else { continue };
+        match arch {
+            None => arch = Some(object.arch),
+            Some(first) if first != object.arch => {
+                return Err(LinkError::Parse {
+                    file: name.clone(),
+                    message: format!("built for {:?}, but the link is {first:?}", object.arch),
+                })
+            }
+            Some(_) => {}
+        }
+    }
+    let arch = arch.ok_or_else(|| LinkError::Parse {
+        file: String::new(),
+        message: "no object file names the machine to link for".to_string(),
+    })?;
+
     // Phase 2: merge results sequentially.
     let mut state = LinkState {
         sections: Vec::new(),
@@ -308,7 +330,7 @@ pub(crate) fn collect(objects: &[(String, Vec<u8>)]) -> Result<LinkState, LinkEr
         metadata: Vec::new(),
         dynamic_imports: HashSet::new(),
         dynamic_libs: Vec::new(),
-        arch: Arch::Aarch64,
+        arch,
     };
 
     for (obj_idx, input) in parsed.into_iter().enumerate() {
@@ -367,11 +389,16 @@ fn parse_single_input(name: &str, data: &[u8]) -> Result<ParsedInput, LinkError>
 }
 
 /// Parse a single object file into a `ParsedObject` with local section indices.
-fn parse_object(obj: &object::File, _name: &str) -> Result<ParsedObject, LinkError> {
-    let arch = if matches!(obj.architecture(), object::Architecture::X86_64) {
-        Arch::X86_64
-    } else {
-        Arch::Aarch64
+fn parse_object(obj: &object::File, name: &str) -> Result<ParsedObject, LinkError> {
+    let arch = match obj.architecture() {
+        object::Architecture::X86_64 => Arch::X86_64,
+        object::Architecture::Aarch64 => Arch::Aarch64,
+        other => {
+            return Err(LinkError::Parse {
+                file: name.to_string(),
+                message: format!("built for {other:?}, which is neither x86_64 nor aarch64"),
+            })
+        }
     };
 
     let mut sections = Vec::new();
@@ -540,7 +567,11 @@ fn parse_object(obj: &object::File, _name: &str) -> Result<ParsedObject, LinkErr
                         symbol: local_sym_name(&target),
                     }),
                 },
-                RelocationFlags::Coff { typ } => match coff_to_reloc_type(typ) {
+                RelocationFlags::Coff { typ } => match coff_to_reloc_type(arch, typ, || {
+                    let data = &sections[local_sec.0].data;
+                    let off = offset as usize;
+                    u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
+                }) {
                     Some(r) => (r, false),
                     None => return Err(LinkError::UnsupportedRawRelocation {
                         raw_type: format!("COFF {typ}"),
@@ -576,6 +607,10 @@ fn parse_object(obj: &object::File, _name: &str) -> Result<ParsedObject, LinkErr
             // the addend at zero, for different reasons and by the same route.
             let addend = if subtrahend.is_some() || is_macho_instruction {
                 0
+            } else if let (RelocationFlags::Coff { .. }, Some(addend)) =
+                (reloc.flags(), coff_arm64_insn_addend(r_type, &sections[local_sec.0].data, offset))
+            {
+                addend
             } else if reloc.has_implicit_addend() {
                 let data = &sections[local_sec.0].data;
                 let off = offset as usize;
@@ -668,9 +703,7 @@ fn local_sym_name(sym: &LocalSymbolRef) -> String {
 
 /// Merge a parsed object into the global LinkState, remapping local section indices.
 fn merge_parsed_object(state: &mut LinkState, parsed: ParsedObject, obj_idx: ObjIdx) {
-    if matches!(parsed.arch, Arch::X86_64) {
-        state.arch = Arch::X86_64;
-    }
+    debug_assert_eq!(parsed.arch, state.arch, "`collect` refuses a mixed link before any merge");
 
     let base = state.sections.len();
     let remap = |local: LocalSectionIdx| -> SectionIdx { SectionIdx(base + local.0) };
@@ -813,8 +846,25 @@ fn elf_to_reloc_type(r_type: u32) -> Option<RelocType> {
     })
 }
 
-/// Map COFF x86_64 relocation types to RelocType.
-fn coff_to_reloc_type(typ: u16) -> Option<RelocType> {
+/// Map a COFF relocation type to RelocType. The numbers are per machine: ARM64
+/// and AMD64 reuse the same small integers for different things. `insn` reads
+/// the instruction an ARM64 page-offset load or store patches, whose access
+/// size decides the scale.
+fn coff_to_reloc_type(arch: Arch, typ: u16, insn: impl FnOnce() -> u32) -> Option<RelocType> {
+    if arch == Arch::Aarch64 {
+        return Some(match typ {
+            pe::IMAGE_REL_ARM64_ADDR64 => RelocType::Aarch64Abs64,
+            // The image base is 0, so an RVA and an address are one number.
+            pe::IMAGE_REL_ARM64_ADDR32 | pe::IMAGE_REL_ARM64_ADDR32NB => RelocType::Aarch64Abs32,
+            pe::IMAGE_REL_ARM64_BRANCH26 => RelocType::Aarch64Call26,
+            pe::IMAGE_REL_ARM64_PAGEBASE_REL21 => RelocType::Aarch64AdrPrelPgHi21,
+            pe::IMAGE_REL_ARM64_PAGEOFFSET_12A => RelocType::Aarch64AddAbsLo12Nc,
+            pe::IMAGE_REL_ARM64_PAGEOFFSET_12L => classify_pageoff12(insn()),
+            pe::IMAGE_REL_ARM64_REL32 => RelocType::Aarch64Prel32,
+            pe::IMAGE_REL_ARM64_SECREL => RelocType::Aarch64Abs32,
+            _ => return None,
+        });
+    }
     Some(match typ {
         pe::IMAGE_REL_AMD64_ADDR64 => RelocType::X86_64,
         pe::IMAGE_REL_AMD64_ADDR32 => RelocType::X86_32,
@@ -1444,4 +1494,28 @@ pub(crate) fn collect_unique_symbols<'a>(
         }
     }
     result
+}
+
+/// The addend an ARM64 COFF instruction relocation carries in the immediate it
+/// patches, in bytes, or `None` for a relocation that is not an instruction's.
+/// The linker writes the whole field afresh from symbol plus this, which is
+/// what LLD's `applyArm64Addr`, `applyArm64Imm` and `applyArm64Ldr` compute.
+fn coff_arm64_insn_addend(r_type: RelocType, data: &[u8], offset: u64) -> Option<i64> {
+    let off = offset as usize;
+    let insn = || u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+    let imm12 = |insn: u32| ((insn >> 10) & 0xfff) as i64;
+    Some(match r_type {
+        RelocType::Aarch64Call26 | RelocType::Aarch64Jump26 => (((insn() & 0x03ff_ffff) as i64) << 38) >> 36,
+        RelocType::Aarch64AdrPrelPgHi21 => {
+            let insn = insn();
+            (((insn >> 29) & 0x3) | ((insn >> 3) & 0x001f_fffc)) as i64
+        }
+        RelocType::Aarch64AddAbsLo12Nc => imm12(insn()),
+        RelocType::Aarch64Ldst8AbsLo12Nc => imm12(insn()),
+        RelocType::Aarch64Ldst16AbsLo12Nc => imm12(insn()) << 1,
+        RelocType::Aarch64Ldst32AbsLo12Nc => imm12(insn()) << 2,
+        RelocType::Aarch64Ldst64AbsLo12Nc => imm12(insn()) << 3,
+        RelocType::Aarch64Ldst128AbsLo12Nc => imm12(insn()) << 4,
+        _ => return None,
+    })
 }

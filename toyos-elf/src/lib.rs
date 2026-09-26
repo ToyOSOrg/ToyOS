@@ -24,11 +24,11 @@
 //!
 //! # Scope
 //!
-//! ELF64, little-endian, `ET_DYN`, `EM_X86_64`. Everything else is refused by
-//! name rather than tolerated: ToyOS emits PIE binaries only, has no 32-bit
-//! mode and no big-endian target. A second architecture adds a machine to
-//! [`header::Machine`] and a relocation set to [`rela`], not a class or an
-//! endianness.
+//! ELF64, little-endian, `ET_DYN`, `EM_X86_64` or `EM_AARCH64`. Everything else
+//! is refused by name rather than tolerated: ToyOS emits PIE binaries only, has
+//! no 32-bit mode and no big-endian target. A loader names the machine it runs
+//! ([`Layout::parse`]), so an image for the other one is refused as
+//! [`Error::WrongMachine`] before anything of it is mapped.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -44,7 +44,7 @@ pub mod tls;
 
 pub use dynamic::{Dynamic, Table};
 pub use gnu_hash::GnuHash;
-pub use header::FileHeader;
+pub use header::{FileHeader, Machine};
 pub use layout::{Layout, Segment, SegmentFlags, SectionTableRef, TlsSegment};
 pub use rela::{Rela, RelaCounts, RelaTable, RelocError, RelocKind};
 pub use section::{SectionHeader, SectionTable};
@@ -92,7 +92,9 @@ pub enum Error {
     BadVersion,
     /// Not `ET_DYN`. ToyOS loads position-independent executables only.
     NotPie,
-    /// Not `EM_X86_64`.
+    /// `e_machine` names no machine ToyOS runs.
+    UnknownMachine,
+    /// Built for a machine other than the one loading it.
     WrongMachine,
     /// `e_phnum` is zero: nothing to map.
     NoProgramHeaders,
@@ -140,7 +142,8 @@ impl Error {
             Error::NotLittleEndian => "ELF: not ELFDATA2LSB",
             Error::BadVersion => "ELF: e_ident version is not EV_CURRENT",
             Error::NotPie => "ELF: not PIE (expected ET_DYN)",
-            Error::WrongMachine => "ELF: not x86_64",
+            Error::UnknownMachine => "ELF: e_machine is neither x86_64 nor aarch64",
+            Error::WrongMachine => "ELF: built for another machine",
             Error::NoProgramHeaders => "ELF: no program headers",
             Error::BadProgramHeaderSize => "ELF: e_phentsize is not 56",
             Error::ProgramHeadersInsideFileHeader => "ELF: e_phoff points inside the file header",

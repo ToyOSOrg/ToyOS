@@ -36,6 +36,7 @@ macro_rules! println {
     };
 }
 
+mod arch;
 mod attempt;
 mod blackbox;
 mod bootnext;
@@ -341,7 +342,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     // every program image with reads the kernel's own image here. Refused by
     // name before anything is allocated — ELF32, big-endian, a version that is
     // not `EV_CURRENT`, an `e_type` that is not `ET_DYN`, a machine that is not
-    // x86-64, no program headers or a table outside the file, more than
+    // this loader's own, no program headers or a table outside the file, more than
     // `toyos_elf::MAX_LOAD_SEGMENTS` `PT_LOAD`s or none at all, a `PT_LOAD`
     // with `p_filesz > p_memsz` or a `p_vaddr + p_memsz` or `p_offset +
     // p_filesz` that overflows, and an `e_entry` no segment covers.
@@ -350,7 +351,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     // loader: the pair is a (copy length, destination size) pair here too, as
     // the image is sized from every `p_memsz` and each segment is then copied
     // in at `p_filesz`.
-    let layout = toyos_elf::Layout::parse(kernel_elf_bytes)
+    let layout = toyos_elf::Layout::parse(kernel_elf_bytes, arch::ELF_MACHINE)
         .unwrap_or_else(|e| panic!("kernel.elf: {e}"));
 
     // Section headers are optional to `toyos-elf`, which loads programs whose
@@ -399,7 +400,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     for section in sections.iter().filter(|section| section.kind == SHT_RELA) {
         let table = file_range(kernel_elf_bytes, section.offset, section.size)
             .expect("kernel.elf: SHT_RELA section is past the end of the file");
-        for rela in RelaTable::new(table).iter() {
+        for rela in RelaTable::new(table, arch::ELF_MACHINE).iter() {
             match rela.kind {
                 RelocKind::Relative => {
                     // Both fields index the image and both come out of the

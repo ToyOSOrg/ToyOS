@@ -34,9 +34,24 @@ pub struct ObjBuilder {
 
 impl ObjBuilder {
     pub fn new() -> Self {
-        ObjBuilder {
-            obj: Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little),
-        }
+        Self::for_machine(BinaryFormat::Elf, Architecture::X86_64)
+    }
+
+    pub fn for_machine(format: BinaryFormat, arch: Architecture) -> Self {
+        ObjBuilder { obj: Object::new(format, arch, Endianness::Little) }
+    }
+
+    /// Add a relocation of `flags` against `symbol` at `offset` in `section`'s bytes.
+    pub fn reloc(
+        &mut self,
+        section: StandardSection,
+        offset: u64,
+        symbol: object::write::SymbolId,
+        addend: i64,
+        flags: RelocationFlags,
+    ) {
+        let section = self.obj.section_id(section);
+        self.obj.add_relocation(section, Relocation { offset, symbol, addend, flags }).unwrap();
     }
 
     pub fn text(&mut self, name: &str, code: &[u8], scope: SymbolScope) -> object::write::SymbolId {

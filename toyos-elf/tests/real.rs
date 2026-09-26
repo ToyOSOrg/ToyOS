@@ -10,13 +10,13 @@
 //! of=toyos-elf/tests/fixtures/toyos-ld-headers.bin bs=1 count=4096`, and
 //! expect the entry point below to move.
 
-use toyos_elf::Layout;
+use toyos_elf::{Layout, Machine};
 
 const HEADERS: &[u8] = include_bytes!("fixtures/toyos-ld-headers.bin");
 
 #[test]
 fn a_toyos_ld_binary_parses_to_what_readelf_says() {
-    let layout = Layout::parse(HEADERS).expect("toyos-ld's own output");
+    let layout = Layout::parse(HEADERS, Machine::X86_64).expect("toyos-ld's own output");
 
     assert_eq!(layout.entry, 0x3261c);
     assert_eq!(layout.vaddr_min, 0);

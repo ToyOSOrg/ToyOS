@@ -22,15 +22,36 @@ const ELFDATA2LSB: u8 = 1;
 const EV_CURRENT: u8 = 1;
 const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
 
 /// The instruction set an image is built for.
 ///
-/// One variant, because one architecture boots. ARM64 adds a variant here and
-/// a relocation set to [`crate::rela`]; nothing else in this crate is
+/// Each machine names its own relocation numbers ([`crate::rela`]) and its own
+/// TLS variant ([`crate::tls`]); nothing else in this crate is
 /// per-architecture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Machine {
     X86_64,
+    Aarch64,
+}
+
+impl Machine {
+    /// The machine an `e_machine` names, or `None` for one ToyOS does not run.
+    pub const fn from_raw(e_machine: u16) -> Option<Machine> {
+        match e_machine {
+            EM_X86_64 => Some(Machine::X86_64),
+            EM_AARCH64 => Some(Machine::Aarch64),
+            _ => None,
+        }
+    }
+
+    /// The `e_machine` a file built for this machine carries.
+    pub const fn raw(self) -> u16 {
+        match self {
+            Machine::X86_64 => EM_X86_64,
+            Machine::Aarch64 => EM_AARCH64,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,9 +93,8 @@ impl FileHeader {
         if e_type != ET_DYN {
             return Err(Error::NotPie);
         }
-        if read::u16_at(data, 18).ok_or(Error::TooSmall)? != EM_X86_64 {
-            return Err(Error::WrongMachine);
-        }
+        let machine = Machine::from_raw(read::u16_at(data, 18).ok_or(Error::TooSmall)?)
+            .ok_or(Error::UnknownMachine)?;
         let phnum = read::u16_at(data, 56).ok_or(Error::TooSmall)?;
         if phnum == 0 {
             return Err(Error::NoProgramHeaders);
@@ -97,7 +117,7 @@ impl FileHeader {
         }
 
         Ok(FileHeader {
-            machine: Machine::X86_64,
+            machine,
             entry: read::u64_at(data, 24).ok_or(Error::TooSmall)?,
             phoff,
             phnum,

@@ -1,7 +1,7 @@
 use object::write::elf::{FileHeader, ProgramHeader, SectionHeader, SectionIndex, Sym, Rel, Writer, SymbolIndex};
 use object::write::StringId;
 use object::Endianness;
-use crate::collect::{collect_unique_symbols, InputSection, LinkState, RelocType, SectionKind, SymbolDef, SymbolRef};
+use crate::collect::{collect_unique_symbols, Arch, InputSection, LinkState, RelocType, SectionKind, SymbolDef, SymbolRef};
 use crate::reloc::{RelocOutput, resolve_symbol, tpoff};
 use crate::{align_up, classify_sections, LinkError, BASE_VADDR, PAGE_SIZE};
 use object::elf;
@@ -370,7 +370,8 @@ pub(crate) fn layout_elf(state: &mut LinkState, base_addr: u64, entry_name: Opti
     let got_symbols = collect_unique_symbols(state.relocs.iter(), |r| {
         matches!(r.r_type,
             RelocType::X86Gotpcrel | RelocType::X86Gotpcrelx
-            | RelocType::X86RexGotpcrelx | RelocType::X86Gottpoff)
+            | RelocType::X86RexGotpcrelx | RelocType::X86Gottpoff
+            | RelocType::Aarch64AdrGotPage | RelocType::Aarch64Ld64GotLo12Nc)
         || (r.r_type == RelocType::X86Tlsgd && !is_shared
             && state.dynamic_imports.contains(r.target.name()))
     });
@@ -1018,7 +1019,10 @@ pub(crate) fn emit_elf(
         os_abi: 0,
         abi_version: 0,
         e_type,
-        e_machine: elf::EM_X86_64,
+        e_machine: match state.arch {
+            Arch::X86_64 => elf::EM_X86_64,
+            Arch::Aarch64 => elf::EM_AARCH64,
+        },
         e_entry: entry,
         e_flags: 0,
     }).unwrap();
@@ -1220,83 +1224,7 @@ pub(crate) fn emit_elf(
         // Shared library RELA (reserved before dynamic section, must be written here)
         if let Some(relocs) = relocs {
             if rela_count > 0 {
-                w.write_align_relocation();
-                for &(offset, addend) in &relocs.relatives {
-                    w.write_relocation(true, &Rel {
-                        r_offset: offset,
-                        r_sym: 0,
-                        r_type: elf::R_X86_64_RELATIVE,
-                        r_addend: addend,
-                    });
-                }
-                for (got_vaddr, sym_name) in &relocs.glob_dats {
-                    let sym_idx = sym_to_writer_idx[sym_name];
-                    w.write_relocation(true, &Rel {
-                        r_offset: *got_vaddr,
-                        r_sym: sym_idx.0,
-                        r_type: elf::R_X86_64_GLOB_DAT,
-                        r_addend: 0,
-                    });
-                }
-                for &(got_vaddr, addend) in &relocs.tpoff64s {
-                    w.write_relocation(true, &Rel {
-                        r_offset: got_vaddr,
-                        r_sym: 0,
-                        r_type: elf::R_X86_64_TPOFF64,
-                        r_addend: addend,
-                    });
-                }
-                for (got_vaddr, sym_name) in &relocs.named_tpoff64s {
-                    let sym_idx = sym_to_writer_idx[sym_name];
-                    w.write_relocation(true, &Rel {
-                        r_offset: *got_vaddr,
-                        r_sym: sym_idx.0,
-                        r_type: elf::R_X86_64_TPOFF64,
-                        r_addend: 0,
-                    });
-                }
-                for &(vaddr, addend) in &relocs.tpoff32s {
-                    w.write_relocation(true, &Rel {
-                        r_offset: vaddr,
-                        r_sym: 0,
-                        r_type: elf::R_X86_64_TPOFF32,
-                        r_addend: addend,
-                    });
-                }
-                for &(got_vaddr, addend) in &relocs.dtpmod64s {
-                    w.write_relocation(true, &Rel {
-                        r_offset: got_vaddr,
-                        r_sym: 0,
-                        r_type: elf::R_X86_64_DTPMOD64,
-                        r_addend: addend,
-                    });
-                }
-                for &(got_vaddr, addend) in &relocs.dtpoff64s {
-                    w.write_relocation(true, &Rel {
-                        r_offset: got_vaddr,
-                        r_sym: 0,
-                        r_type: elf::R_X86_64_DTPOFF64,
-                        r_addend: addend,
-                    });
-                }
-                for (got_vaddr, sym_name) in &relocs.named_dtpmod64s {
-                    let sym_idx = sym_to_writer_idx[sym_name];
-                    w.write_relocation(true, &Rel {
-                        r_offset: *got_vaddr,
-                        r_sym: sym_idx.0,
-                        r_type: elf::R_X86_64_DTPMOD64,
-                        r_addend: 0,
-                    });
-                }
-                for (got_vaddr, sym_name) in &relocs.named_dtpoff64s {
-                    let sym_idx = sym_to_writer_idx[sym_name];
-                    w.write_relocation(true, &Rel {
-                        r_offset: *got_vaddr,
-                        r_sym: sym_idx.0,
-                        r_type: elf::R_X86_64_DTPOFF64,
-                        r_addend: 0,
-                    });
-                }
+                write_dyn_relocs(&mut w, state.arch, relocs, &sym_to_writer_idx);
             }
         }
     }
@@ -1305,49 +1233,7 @@ pub(crate) fn emit_elf(
     // section so relocations are within the PT_LOAD segment for the dynamic area.
     if rela_before_dynamic {
         if let Some(relocs) = relocs {
-            w.write_align_relocation();
-            for &(offset, addend) in &relocs.relatives {
-                w.write_relocation(true, &Rel {
-                    r_offset: offset,
-                    r_sym: 0,
-                    r_type: elf::R_X86_64_RELATIVE,
-                    r_addend: addend,
-                });
-            }
-            for (got_vaddr, sym_name) in &relocs.glob_dats {
-                let sym_idx = sym_to_writer_idx[sym_name];
-                w.write_relocation(true, &Rel {
-                    r_offset: *got_vaddr,
-                    r_sym: sym_idx.0,
-                    r_type: elf::R_X86_64_GLOB_DAT,
-                    r_addend: 0,
-                });
-            }
-            for &(got_vaddr, addend) in &relocs.tpoff64s {
-                w.write_relocation(true, &Rel {
-                    r_offset: got_vaddr,
-                    r_sym: 0,
-                    r_type: elf::R_X86_64_TPOFF64,
-                    r_addend: addend,
-                });
-            }
-            for (got_vaddr, sym_name) in &relocs.named_tpoff64s {
-                let sym_idx = sym_to_writer_idx[sym_name];
-                w.write_relocation(true, &Rel {
-                    r_offset: *got_vaddr,
-                    r_sym: sym_idx.0,
-                    r_type: elf::R_X86_64_TPOFF64,
-                    r_addend: 0,
-                });
-            }
-            for &(vaddr, addend) in &relocs.tpoff32s {
-                w.write_relocation(true, &Rel {
-                    r_offset: vaddr,
-                    r_sym: 0,
-                    r_type: elf::R_X86_64_TPOFF32,
-                    r_addend: addend,
-                });
-            }
+            write_dyn_relocs(&mut w, state.arch, relocs, &sym_to_writer_idx);
         }
     }
 
@@ -1391,49 +1277,7 @@ pub(crate) fn emit_elf(
     // Relocations (PIE / non-shared — shared writes RELA before dynamic section)
     if !is_shared && !rela_before_dynamic {
         if let Some(relocs) = relocs {
-            w.write_align_relocation();
-            for &(offset, addend) in &relocs.relatives {
-                w.write_relocation(true, &Rel {
-                    r_offset: offset,
-                    r_sym: 0,
-                    r_type: elf::R_X86_64_RELATIVE,
-                    r_addend: addend,
-                });
-            }
-            for (got_vaddr, sym_name) in &relocs.glob_dats {
-                let sym_idx = sym_to_writer_idx[sym_name];
-                w.write_relocation(true, &Rel {
-                    r_offset: *got_vaddr,
-                    r_sym: sym_idx.0,
-                    r_type: elf::R_X86_64_GLOB_DAT,
-                    r_addend: 0,
-                });
-            }
-            for &(got_vaddr, addend) in &relocs.tpoff64s {
-                w.write_relocation(true, &Rel {
-                    r_offset: got_vaddr,
-                    r_sym: 0,
-                    r_type: elf::R_X86_64_TPOFF64,
-                    r_addend: addend,
-                });
-            }
-            for (got_vaddr, sym_name) in &relocs.named_tpoff64s {
-                let sym_idx = sym_to_writer_idx[sym_name];
-                w.write_relocation(true, &Rel {
-                    r_offset: *got_vaddr,
-                    r_sym: sym_idx.0,
-                    r_type: elf::R_X86_64_TPOFF64,
-                    r_addend: 0,
-                });
-            }
-            for &(vaddr, addend) in &relocs.tpoff32s {
-                w.write_relocation(true, &Rel {
-                    r_offset: vaddr,
-                    r_sym: 0,
-                    r_type: elf::R_X86_64_TPOFF32,
-                    r_addend: addend,
-                });
-            }
+            write_dyn_relocs(&mut w, state.arch, relocs, &sym_to_writer_idx);
         }
     }
 
@@ -1544,4 +1388,75 @@ pub(crate) fn emit_elf(
     }
 
     Ok(buf)
+}
+
+/// What a dynamic relocation asks the loader for; each machine's psABI gives
+/// it a number ([`dyn_reloc_type`]).
+#[derive(Clone, Copy)]
+enum DynReloc {
+    Relative,
+    GlobDat,
+    TpOff64,
+    TpOff32,
+    DtpMod64,
+    DtpOff64,
+}
+
+fn dyn_reloc_type(arch: Arch, kind: DynReloc) -> u32 {
+    match (arch, kind) {
+        (Arch::X86_64, DynReloc::Relative) => elf::R_X86_64_RELATIVE,
+        (Arch::X86_64, DynReloc::GlobDat) => elf::R_X86_64_GLOB_DAT,
+        (Arch::X86_64, DynReloc::TpOff64) => elf::R_X86_64_TPOFF64,
+        (Arch::X86_64, DynReloc::TpOff32) => elf::R_X86_64_TPOFF32,
+        (Arch::X86_64, DynReloc::DtpMod64) => elf::R_X86_64_DTPMOD64,
+        (Arch::X86_64, DynReloc::DtpOff64) => elf::R_X86_64_DTPOFF64,
+        (Arch::Aarch64, DynReloc::Relative) => elf::R_AARCH64_RELATIVE,
+        (Arch::Aarch64, DynReloc::GlobDat) => elf::R_AARCH64_GLOB_DAT,
+        (Arch::Aarch64, DynReloc::TpOff64) => elf::R_AARCH64_TLS_TPREL,
+        (Arch::Aarch64, DynReloc::DtpMod64) => elf::R_AARCH64_TLS_DTPMOD,
+        (Arch::Aarch64, DynReloc::DtpOff64) => elf::R_AARCH64_TLS_DTPREL,
+        // Only an x86-64 `TPOFF32` input produces one.
+        (Arch::Aarch64, DynReloc::TpOff32) => panic!("an AArch64 link produced a 32-bit TP offset"),
+    }
+}
+
+/// Every dynamic relocation `relocs` holds, in the one order every mode writes.
+fn write_dyn_relocs(
+    w: &mut Writer,
+    arch: Arch,
+    relocs: &RelocOutput,
+    sym_to_writer_idx: &HashMap<String, SymbolIndex>,
+) {
+    w.write_align_relocation();
+    let mut write = |r_offset: u64, r_sym: u32, kind: DynReloc, r_addend: i64| {
+        w.write_relocation(true, &Rel { r_offset, r_sym, r_type: dyn_reloc_type(arch, kind), r_addend });
+    };
+    let named = |name: &String| sym_to_writer_idx[name].0;
+    for &(offset, addend) in &relocs.relatives {
+        write(offset, 0, DynReloc::Relative, addend);
+    }
+    for (got_vaddr, name) in &relocs.glob_dats {
+        write(*got_vaddr, named(name), DynReloc::GlobDat, 0);
+    }
+    for &(got_vaddr, addend) in &relocs.tpoff64s {
+        write(got_vaddr, 0, DynReloc::TpOff64, addend);
+    }
+    for (got_vaddr, name) in &relocs.named_tpoff64s {
+        write(*got_vaddr, named(name), DynReloc::TpOff64, 0);
+    }
+    for &(vaddr, addend) in &relocs.tpoff32s {
+        write(vaddr, 0, DynReloc::TpOff32, addend);
+    }
+    for &(got_vaddr, addend) in &relocs.dtpmod64s {
+        write(got_vaddr, 0, DynReloc::DtpMod64, addend);
+    }
+    for &(got_vaddr, addend) in &relocs.dtpoff64s {
+        write(got_vaddr, 0, DynReloc::DtpOff64, addend);
+    }
+    for (got_vaddr, name) in &relocs.named_dtpmod64s {
+        write(*got_vaddr, named(name), DynReloc::DtpMod64, 0);
+    }
+    for (got_vaddr, name) in &relocs.named_dtpoff64s {
+        write(*got_vaddr, named(name), DynReloc::DtpOff64, 0);
+    }
 }
