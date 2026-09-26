@@ -163,7 +163,7 @@ impl Rig {
         let file = super::volumes::whole_log(&self.staged.image, self.staged.start, self.staged.len)?;
         let streamed = self.stream.lines();
         super::logstream::is_prefix_of(&streamed, &file)?;
-        let boots = file.iter().filter(|l| l.contains("Boot: complete")).count();
+        let boots = file.iter().filter(|l| l.contains(bootlog::COMPLETE)).count();
         if boots != 1 {
             return Err(format!("/log holds {boots} `Boot: complete` record(s), where one boot owes one"));
         }
@@ -337,7 +337,7 @@ pub fn swapped_on_metal(back: &super::metal::Readback) -> Result<(), String> {
     if let Err(why) = super::logstream::is_prefix_of(&stream, &file) {
         bad.push(why);
     }
-    let boots = file.iter().filter(|l| l.contains("Boot: complete")).count();
+    let boots = file.iter().filter(|l| l.contains(bootlog::COMPLETE)).count();
     if boots != 1 {
         bad.push(format!("the stick's log holds {boots} `Boot: complete` record(s), where one boot owes one"));
     }
