@@ -302,7 +302,9 @@ branch = "toyos-0.23.0"
 delta = "+7"
 tier = "fork"
 why = "`load_system_fonts` scans `/system/share/fonts` on ToyOS, as it scans `/ui/fonts` on Redox — the arm it is modelled on line for line."
-pr = "none yet — see pr_branch"
+pr = "none — prepared, not opened: https://github.com/RazrFalcon/fontdb/compare/master...ToyOSOrg:fontdb:add-toyos-system-fonts"
+pr_branch = "add-toyos-system-fonts"
+pr_note = "On upstream master (v0.24), +7, the Redox arm's shape. `target_os = \"toyos\"` is not a value rustc knows, so it draws an `unexpected_cfgs` warning; fontdb's CI does not deny warnings."
 
 [parley]
 upstream = "linebender/parley"
@@ -312,7 +314,9 @@ branch = "toyos-0.11.1"
 delta = "+65"
 tier = "fork"
 why = "fontique's ToyOS system-font backend, `backend/toyos.rs`: the fonts in `/system/share/fonts`, with Open Sans as sans-serif, system-ui, ui-sans-serif and the fallback, in the Android backend's shape."
-pr = "none yet — see pr_branch"
+pr = "none — prepared, not opened: https://github.com/linebender/parley/compare/main...ToyOSOrg:parley:fontique-toyos-backend"
+pr_branch = "fontique-toyos-backend"
+pr_note = "On upstream main, +68: the backend and a workspace `unexpected_cfgs` check-cfg for `target_os = \"toyos\"`, which rustc does not know and parley's CI denies warnings. Linebender's LLM policy forbids LLM-written PR descriptions and asks for disclosure, so the owner writes this one."
 
 [slint]
 upstream = "slint-ui/slint"
@@ -322,7 +326,9 @@ branch = "toyos-1.18.1"
 delta = "+5/-2"
 tier = "fork"
 why = "The winit backend's dbus, clipboard, webbrowser and XDG-settings gates matched ToyOS as \"any other OS\"; ToyOS is excluded from them and answers `open_url` with the `Platform` default."
-pr = "none yet — see pr_branch"
+pr = "none — prepared, not opened: https://github.com/slint-ui/slint/compare/master...ToyOSOrg:slint:winit-toyos-desktop-integrations"
+pr_branch = "winit-toyos-desktop-integrations"
+pr_note = "On upstream master, +6/-2: `open_url` is gated by a `cfg_aliases` alias rather than a `target_os` the lint would call unknown. It only helps once winit 0.30 has a ToyOS backend, which upstream winit does not take."
 
 [wgpu]
 upstream = "gfx-rs/wgpu"
@@ -332,7 +338,9 @@ branch = "toyos-27.0.4"
 delta = "+5/-1"
 tier = "fork"
 why = "`Instance::new` panicked on a target wgpu implements no backend for; it now makes the instance, which finds no adapter, so iced's default features fall back to tiny-skia."
-pr = "none yet — see pr_branch"
+pr = "none — prepared, not opened: https://github.com/gfx-rs/wgpu/compare/trunk...ToyOSOrg:wgpu:instance-no-backend-target"
+pr_branch = "instance-no-backend-target"
+pr_note = "On trunk, +6/-1 with a CHANGELOG line whose PR number is filled in on opening. It names no ToyOS: any target wgpu has no backend for gets the instance instead of the panic."
 
 [stacker]
 upstream = "rust-lang/stacker"

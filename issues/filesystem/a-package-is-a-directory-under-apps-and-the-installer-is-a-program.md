@@ -96,6 +96,5 @@ The storage track's users and mount-protocol stages do not block this one.
    only the published SDK crates and the released toolchain, and published as
    a release archive with its `SHA256SUMS`, the shape gbae already has. The
    image then carries none of them; `pkg install <url>` brings them. Blocked
-   by the forks resolving an old published `toyos-window`
-   (`issues/build/fork-tier-crates-still-pin-toyos-abi-at-0.1.md`) and by stage 6.
+   by stage 6.
    Installing by name (`pkg install snake`) needs an index and is undesigned.

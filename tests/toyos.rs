@@ -8711,16 +8711,19 @@ fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// or so. A window with no text in it is far under this.
 const TEXT_SHADES: usize = 64;
 
-/// The client rectangle the compositor names in its `window opened` line, as
+/// The client and the content rectangle the compositor names in its first
+/// `window opened client=N content=X,Y WxH, …` line in `log`, the rectangle as
 /// `(x, y, width, height)` in panel pixels.
-fn opened_window_content(log: &str) -> Option<(usize, usize, usize, usize)> {
+fn opened_window(log: &str) -> Option<(u32, (usize, usize, usize, usize))> {
     let line = log.lines().find(|line| line.contains("compositor: window opened client="))?;
-    let rest = line.split("content=").nth(1)?;
-    let (at, size) = rest.split_once(' ')?;
+    let rest = line.split("client=").nth(1)?;
+    let (client, rest) = rest.split_once(" content=")?;
+    let (at, rest) = rest.split_once(' ')?;
     let (x, y) = at.split_once(',')?;
-    let (w, h) = size.trim_end_matches(|c: char| !c.is_ascii_digit()).split_once('x')?;
-    let h = h.split(|c: char| !c.is_ascii_digit()).next()?;
-    Some((x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?))
+    let (w, rest) = rest.split_once('x')?;
+    let h = rest.split(',').next()?;
+    let rect = (x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?);
+    Some((client.parse().ok()?, rect))
 }
 
 /// How many distinct colours `rect` of `dump` holds.
@@ -8773,7 +8776,7 @@ fn toolkit_app(app: &str) -> Result<(), String> {
         }
         log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
     }
-    let content = opened_window_content(&log[launched..])
+    let (client, content) = opened_window(&log[launched..])
         .ok_or_else(|| format!("the compositor's window line did not parse:\n{}", &log[launched..]))?;
 
     let by = qemu.budget(Duration::from_secs(30));
@@ -8789,9 +8792,23 @@ fn toolkit_app(app: &str) -> Result<(), String> {
         ));
     }
 
+    // The rectangle holds the app's pixels only while its window is open, so
+    // the close has to be of that same window, by this keystroke: an app that
+    // died after it opened leaves the rectangle to whatever is behind it.
+    log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    if log[launched..].contains(&exited) {
+        return Err(format!("{app} left before its window was judged:\n{}", &log[launched..]));
+    }
     let closing = log.len();
     if !close_focused_window(&mut qemu, log, closing) {
         return Err(format!("GUI+Q never reached the compositor:\n{}", &log[launched..]));
+    }
+    if !log[closing..].contains(&format!("compositor: window closed client={client} by GUI+Q")) {
+        return Err(format!(
+            "GUI+Q closed some other window than {app}'s (client {client}), so the colours were \
+             not its:\n{}",
+            &log[launched..]
+        ));
     }
     // `stats` prints the peak last, once the app is gone and waited for.
     let by = qemu.budget(Duration::from_secs(30));
