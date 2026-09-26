@@ -4,22 +4,23 @@
 //! that crossed, which the host computes over its own side of the same stream.
 //!
 //! `test_rs_netd_tcp <peer port> <case> [args]`. A connection opens with one
-//! request (`ask`): a mode byte, then the length and the seed of the stream,
-//! each eight little-endian bytes. Every case prints `netd_tcp: <case> ok ...`
+//! request (`netd_stream::request`). Every case prints `netd_tcp: <case> ok ...`
 //! as its only success line, and the fields the host judges on it.
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
+use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant};
 
 #[path = "../netd_stream.rs"]
 mod netd_stream;
+#[path = "../netd_inspect.rs"]
+mod netd_inspect;
 
+use netd_inspect::Net;
+use netd_stream::request;
 use sha2::{Digest, Sha256};
-use toyos::ipc::{FrameRx, RxStep};
-use toyos::poller::{Poller, READABLE};
-use toyos_inspect::{Value, MAX_SNAPSHOT_BYTES, MSG_INSPECT, MSG_SNAPSHOT};
 
 /// The host, as QEMU's slirp shows it to the guest.
 const HOST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
@@ -27,6 +28,10 @@ const HOST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 /// An address on slirp's own network that nothing answers: slirp replies to
 /// ARP for its own addresses alone, so a SYN to this one never leaves.
 const NOBODY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 99);
+
+/// The on-link neighbour the harness plays on the segment
+/// (`tests/common/segment.rs`'s `NEIGHBOUR`), which echoes a datagram.
+const NEIGHBOUR: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 7);
 
 /// The host peer's modes, the other half of `tcppeer::Mode`.
 const DOWNLOAD: u8 = 0;
@@ -36,11 +41,17 @@ const HOLD: u8 = 3;
 const PATTERN: u8 = 4;
 const LATE_UPLOAD: u8 = 5;
 const RELEASE: u8 = 6;
+const DARK: u8 = 9;
 
 /// A liveness guard on every blocking step, said by name: the host has
 /// everything it needs the moment a request arrives, so a step that outlasts
 /// this is a client or a netd that stopped moving.
 const STEP: Duration = Duration::from_secs(60);
+
+/// How long netd may take to let go of what a client left it that owes
+/// nothing: a pass, or an RST and a pass. Well under every bound netd holds a
+/// stream for, so a stream held to one of those instead is caught here.
+const LET_GO: Duration = Duration::from_secs(10);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -54,21 +65,31 @@ fn main() {
         Some("reset") => reset(peer, number(3)),
         Some("half_close") => half_close(peer, number(3)),
         Some("late_shutdown") => late_shutdown(peer),
+        Some("read_shut") => read_shut(peer),
         Some("download") => download(peer, number(3), number(4)),
         Some("download_to_end") => download_to_end(peer, number(3)),
         Some("upload") => upload(peer, number(3), number(4)),
         Some("upload_drop") => upload_drop(peer, number(3)),
         Some("timeouts") => timeouts(peer),
         Some("many") => many(peer, number(3) as usize, number(4)),
+        Some("many_up") => many_up(peer, number(3) as usize),
         Some("leaves") => leaves(peer),
         Some("reader_leaves") => reader_leaves(peer),
+        Some("receives") => receives(peer, number(3) as usize),
+        Some("closing") => closing(peer, number(3) as usize),
         Some("time_wait") => time_wait(peer),
         Some("ports") => ports(peer, number(3) as usize),
+        Some("neighbour") => neighbour(),
+        Some("waited") => waited(),
+        Some("orphan") => orphan(peer, number(3)),
+        Some("orphan_owes") => orphan_owes(peer, number(3), number(4)),
+        Some("vanish") => vanish(peer, number(3), number(4)),
         Some("child_connect") => child_connect(),
         Some("child_udp") => child_udp(),
         Some("child_receive") => child_receive(peer),
         Some("child_idle") => child_idle(peer),
-        Some("orphan") => orphan(peer, number(3)),
+        Some("child_upload") => child_upload(peer, number(3)),
+        Some("child_receives") => child_receives(number(3) as usize),
         other => panic!("netd_tcp: no case {other:?}"),
     }
 }
@@ -77,11 +98,7 @@ fn main() {
 /// stream `seed` names.
 fn ask(peer: SocketAddr, mode: u8, len: u64, seed: u64) -> TcpStream {
     let mut stream = TcpStream::connect_timeout(&peer, STEP).expect("connect to the host peer");
-    let mut request = [0u8; 17];
-    request[0] = mode;
-    request[1..9].copy_from_slice(&len.to_le_bytes());
-    request[9..].copy_from_slice(&seed.to_le_bytes());
-    stream.write_all(&request).expect("send the request");
+    stream.write_all(&request(mode, len, seed)).expect("send the request");
     stream
 }
 
@@ -144,6 +161,39 @@ fn send(stream: &mut TcpStream, len: u64, seed: u64, what: &str) -> [u8; 32] {
     hash.finalize().into()
 }
 
+/// Write the pattern `seed` names without blocking until the stream takes no
+/// more — its send pipe full, and everything behind it — answering how many
+/// bytes it took and their hash.
+fn fill_until_refused(stream: &mut TcpStream, seed: u64, what: &str) -> (u64, [u8; 32]) {
+    /// Past every buffer between here and the host's socket: a pipe that never
+    /// fills is found here rather than by the runner.
+    const BOUND: u64 = 512 * 1024 * 1024;
+    stream.set_nonblocking(true).expect("non-blocking");
+    let mut pattern = Pattern(seed);
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 65536];
+    let mut written = 0u64;
+    let mut pending = 0..0;
+    loop {
+        assert!(written < BOUND, "{what}: {written} bytes written into a window held shut");
+        if pending.is_empty() {
+            pattern.fill(&mut buf);
+            pending = 0..buf.len();
+        }
+        match stream.write(&buf[pending.clone()]) {
+            Ok(n) => {
+                hash.update(&buf[pending.start..pending.start + n]);
+                pending.start += n;
+                written += n as u64;
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(e) => panic!("{what}: writing at {written}: {e}"),
+        }
+    }
+    stream.set_nonblocking(false).expect("blocking");
+    (written, hash.finalize().into())
+}
+
 /// The host's answer to an upload: how many bytes it read to the end of the
 /// stream, and their hash.
 fn upload_answer(stream: &mut TcpStream, what: &str) -> (u64, [u8; 32]) {
@@ -172,7 +222,7 @@ fn unreachable(peer: SocketAddr, closed: u16) {
 
     let mut stream = TcpStream::connect(&[refused, peer][..]).expect("the second of two addresses answers");
     assert_eq!(stream.peer_addr().expect("its peer"), peer, "connected to the wrong address");
-    stream.write_all(&[HOLD; 17]).expect("the connection that answered takes a request");
+    stream.write_all(&request(HOLD, 0, 0)).expect("the connection that answered takes a request");
     println!("netd_tcp: unreachable ok timed_out_ms={}", took.as_millis());
 }
 
@@ -225,43 +275,37 @@ fn half_close(peer: SocketAddr, len: u64) {
 /// holds its window shut until then, and every byte in the pipe still reaches
 /// it, ahead of the FIN.
 fn late_shutdown(peer: SocketAddr) {
-    /// Past every buffer between here and the host's socket: a pipe that never
-    /// fills is found here rather than by the runner.
-    const BOUND: u64 = 512 * 1024 * 1024;
     const SEED: u64 = 19;
     let mut stream = ask(peer, LATE_UPLOAD, 0, SEED);
-    stream.set_nonblocking(true).expect("late_shutdown: non-blocking");
-    let mut pattern = Pattern(SEED);
-    let mut hash = Sha256::new();
-    let mut buf = vec![0u8; 65536];
-    let mut written = 0u64;
-    let mut pending = 0..0;
-    // Until the send pipe will take nothing more: from there on, every byte
-    // this side wrote that the peer has not read is in the pipe or behind it.
-    loop {
-        assert!(written < BOUND, "late_shutdown: {written} bytes written into a window held shut");
-        if pending.is_empty() {
-            pattern.fill(&mut buf);
-            pending = 0..buf.len();
-        }
-        match stream.write(&buf[pending.clone()]) {
-            Ok(n) => {
-                hash.update(&buf[pending.start..pending.start + n]);
-                pending.start += n;
-                written += n as u64;
-            }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-            Err(e) => panic!("late_shutdown: writing at {written}: {e}"),
-        }
-    }
-    stream.set_nonblocking(false).expect("late_shutdown: blocking");
+    // From here on, every byte this side wrote that the peer has not read is
+    // in the send pipe or behind it.
+    let (written, sha) = fill_until_refused(&mut stream, SEED, "late_shutdown");
     stream.shutdown(Shutdown::Write).expect("late_shutdown: shut the sending half down");
     drop(ask(peer, RELEASE, 0, SEED));
     let (count, host_sha) = upload_answer(&mut stream, "late_shutdown");
-    let sha: [u8; 32] = hash.finalize().into();
     assert_eq!(count, written, "late_shutdown: the host read {count} of {written} bytes");
     assert_eq!(host_sha, sha, "late_shutdown: the host's hash of the {written} bytes differs from this side's");
     println!("netd_tcp: late_shutdown ok bytes={written} sha={}", hex(&sha));
+}
+
+/// After `shutdown(Read)`, a read answers the end of the stream at once,
+/// whatever the peer is still sending; and netd refuses a shutdown that names
+/// no half.
+fn read_shut(peer: SocketAddr) {
+    let conn = toyos::net::tcp_connect(HOST.octets(), peer.port(), 60_000).expect("connect to the host peer");
+    assert_eq!(conn.tx.write(&request(HOLD, 0, 0)), Ok(17), "read_shut: the request");
+    assert!(
+        matches!(toyos::net::tcp_shutdown(conn.socket_id, 3), Err(toyos::net::NetError::InvalidInput)),
+        "read_shut: a shutdown of half 3 was not refused as invalid"
+    );
+    drop(conn);
+    let mut stream = ask(peer, DOWNLOAD, 1 << 20, 31);
+    stream.shutdown(Shutdown::Read).expect("read_shut: shut the receiving half down");
+    stream.set_read_timeout(Some(STEP)).expect("set the liveness guard");
+    let mut buf = [0u8; 64];
+    let n = stream.read(&mut buf).expect("read_shut: a read after shutdown(Read)");
+    assert_eq!(n, 0, "read_shut: a read after shutdown(Read) answered {n} bytes");
+    println!("netd_tcp: read_shut ok");
 }
 
 fn download(peer: SocketAddr, len: u64, seed: u64) {
@@ -362,7 +406,7 @@ fn timeouts(peer: SocketAddr) {
 /// `count` connections open at once, each downloading `len` bytes of its own
 /// stream; each prints its hash for the host to judge.
 fn many(peer: SocketAddr, count: usize, len: u64) {
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(count));
+    let barrier = Arc::new(Barrier::new(count));
     let threads: Vec<_> = (0..count as u64)
         .map(|seed| {
             let barrier = barrier.clone();
@@ -382,6 +426,58 @@ fn many(peer: SocketAddr, count: usize, len: u64) {
     println!("netd_tcp: many ok count={count} bytes={len}");
 }
 
+/// `count` connections uploading at once, and a lookup made while they all
+/// have bytes to send answered within its bound: a socket made after all of
+/// theirs still gets its turn. Each upload's bytes are judged by the host's
+/// answer.
+fn many_up(peer: SocketAddr, count: usize) {
+    /// A pass sends at most a frame a busy socket, and the ring takes one a
+    /// millisecond, so a pass over every upload is `count` milliseconds; the
+    /// lookup needs two — its server's link address, then its query — and the
+    /// wire answers at once. Ten passes, for a guest under TCG.
+    const ANSWERED: Duration = Duration::from_secs(1);
+    /// Each upload's bytes: few enough that the slow wire carries every
+    /// stream's within seconds, and so many between them that it is still
+    /// carrying them when the lookup is made.
+    const BYTES: u64 = 128 * 1024;
+    // Every connection open before any writes, and every one written before
+    // any shuts down.
+    let (open, looked_up) = (Arc::new(Barrier::new(count + 1)), Arc::new(Barrier::new(count + 1)));
+    // One shutdown at a time: each is a request of netd's, and netd takes at
+    // most `MAX_PENDING_CONNS` of those at once.
+    let asking = Arc::new(std::sync::Mutex::new(()));
+    let threads: Vec<_> = (0..count as u64)
+        .map(|seed| {
+            let (open, looked_up, asking) = (open.clone(), looked_up.clone(), asking.clone());
+            std::thread::spawn(move || {
+                let mut stream = ask(peer, UPLOAD, 0, 0);
+                open.wait();
+                let sha = send(&mut stream, BYTES, 2000 + seed, &format!("many_up {seed}"));
+                looked_up.wait();
+                {
+                    let _one = asking.lock().expect("the shutdown lock");
+                    stream.shutdown(Shutdown::Write).expect("many_up: shut down the sending half");
+                }
+                let (got, host_sha) = upload_answer(&mut stream, &format!("many_up {seed}"));
+                assert_eq!(got, BYTES, "many_up {seed}: the host read {got} of {BYTES} bytes");
+                assert_eq!(host_sha, sha, "many_up {seed}: the host's hash differs");
+            })
+        })
+        .collect();
+    open.wait();
+    let started = Instant::now();
+    let mut answers = [[0u8; 4]; 8];
+    let found = toyos::net::dns_lookup("fair.test", &mut answers);
+    let took = started.elapsed();
+    looked_up.wait();
+    let found = found.unwrap_or_else(|e| panic!("many_up: a lookup during {count} uploads ended {e:?} after {took:?}"));
+    assert!(took < ANSWERED, "many_up: a lookup during {count} uploads took {took:?}");
+    for thread in threads {
+        thread.join().expect("an upload's thread panicked");
+    }
+    println!("netd_tcp: many_up ok count={count} lookup_ms={} found={found} bytes={}", took.as_millis(), BYTES * count as u64);
+}
+
 /// Local ports of `count` connections held open at once.
 fn ports(peer: SocketAddr, count: usize) {
     let streams: Vec<TcpStream> = (0..count).map(|_| ask(peer, HOLD, 0, 0)).collect();
@@ -396,39 +492,27 @@ fn ports(peer: SocketAddr, count: usize) {
 struct Held {
     tcp: u64,
     udp: u64,
+    /// Connections whose client holds a pipe, and connects waiting.
     piped: u64,
+    /// Connections whose client let go of both pipes, still finishing.
+    closing: u64,
+    /// Connections whose client has gone, pipes held or not.
+    orphans: u64,
     untabled: u64,
+    /// UDP receives waiting for a datagram.
+    waiting: u64,
 }
 
 fn held() -> Held {
-    let conn = toyos::endow::service("netd").expect("a connection to netd");
-    conn.signal(MSG_INSPECT).expect("netd takes an inspect request");
-    let poller = Poller::new(1);
-    let mut rx: Box<FrameRx<MAX_SNAPSHOT_BYTES>> = Box::new(FrameRx::new());
-    let deadline = Instant::now() + STEP;
-    loop {
-        match rx.pump(&conn) {
-            RxStep::Frame { msg_type: MSG_SNAPSHOT, payload_len } => {
-                let snap = toyos_inspect::decode(rx.payload(payload_len), toyos_inspect::NET)
-                    .unwrap_or_else(|why| panic!("netd's snapshot: {why}"));
-                let get = |key: &str| match snap.get(key) {
-                    Some(Value::U64(n)) => *n,
-                    other => panic!("netd's snapshot has {key} as {other:?}"),
-                };
-                return Held {
-                    tcp: get("net.sockets.tcp"),
-                    udp: get("net.sockets.udp"),
-                    piped: get("net.piped.live"),
-                    untabled: get("net.sockets.untabled"),
-                };
-            }
-            RxStep::Idle => {}
-            other => panic!("netd answered inspect with {other:?}, not a snapshot"),
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        assert!(!left.is_zero(), "netd did not answer inspect within {STEP:?}");
-        poller.watch(&conn, READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
+    let net = Net::ask(STEP);
+    Held {
+        tcp: net.count("net.sockets.tcp"),
+        udp: net.count("net.sockets.udp"),
+        piped: net.count("net.piped.live"),
+        closing: net.count("net.piped.closing"),
+        orphans: net.count("net.piped.orphans"),
+        untabled: net.count("net.sockets.untabled"),
+        waiting: net.count("net.udp.waiting"),
     }
 }
 
@@ -438,10 +522,15 @@ fn held() -> Held {
 /// **A poll, because nothing announces a count**: netd frees a client's
 /// sockets on its own pass, which no event reaches this process from.
 fn await_held(what: &str, within: Duration, want: impl Fn(Held) -> bool) -> Held {
+    await_net(what, within, held, want)
+}
+
+/// [`await_held`] over any reading of netd's.
+fn await_net<T: Copy + std::fmt::Debug>(what: &str, within: Duration, read: impl Fn() -> T, want: impl Fn(T) -> bool) -> T {
     const POLL: Duration = Duration::from_millis(20);
     let started = Instant::now();
     loop {
-        let now = held();
+        let now = read();
         if want(now) {
             return now;
         }
@@ -455,9 +544,7 @@ fn await_held(what: &str, within: Duration, want: impl Fn(Held) -> bool) -> Held
 /// leave netd holding nothing of theirs.
 fn leaves(peer: SocketAddr) {
     // A connection of this process's own first, so the host's link address is
-    // known before the connect to nobody starts asking for its own: smoltcp
-    // rate-limits every address's ARP request by one clock, which the connect
-    // that is never answered then holds.
+    // known before the connect to nobody starts asking for its own.
     let before = held();
     let mut warm = ask(peer, DOWNLOAD, 0, 0);
     drain(&mut warm, "leaves: the connection before");
@@ -465,10 +552,10 @@ fn leaves(peer: SocketAddr) {
     await_held("leaves: the connection before, closed", STEP, |h| h == before);
     println!("netd_tcp: leaves before {before:?}");
     let children = [spawn(peer, "child_connect"), spawn(peer, "child_udp"), spawn(peer, "child_receive")];
-    // Two streams (the connect and the receive), one UDP socket, and two
-    // piped slots (a pending connect holds one).
+    // Two streams (the connect and the receive), one UDP socket waiting, and
+    // two piped slots (a pending connect holds one).
     let during = await_held("leaves: the children's requests", STEP, |h| {
-        h.tcp == before.tcp + 2 && h.udp == before.udp + 1 && h.piped == before.piped + 2
+        h.tcp == before.tcp + 2 && h.udp == before.udp + 1 && h.piped == before.piped + 2 && h.waiting == before.waiting + 1
     });
     println!("netd_tcp: leaves during {during:?}");
     for mut child in children {
@@ -476,33 +563,29 @@ fn leaves(peer: SocketAddr) {
         child.wait().expect("reap a child");
     }
     // The stream mid-receive had the peer's bytes unread, so netd resets it
-    // at once rather than waiting out a close.
-    let after = await_held("leaves: the killed children's sockets", STEP, |h| h == before);
+    // at once rather than holding it as an orphan.
+    let after = await_held("leaves: the killed children's sockets", LET_GO, |h| h == before);
     println!("netd_tcp: leaves ok after {after:?}");
 }
 
-/// The peer's last bytes outlive smoltcp's TIME-WAIT: a client that shut its
-/// sending half down and then fell a whole receive pipe behind reads every
-/// byte of a stream whose FIN arrived with part of it still in the socket.
-///
-/// **The one wait here is the premise, not a pace**: nothing tells a client
-/// that its socket's TIME-WAIT has ended, and smoltcp's is a fixed ten seconds
-/// (`CLOSE_DELAY`), after which it clears the socket's buffer.
+/// A stream's last bytes, behind a full receive pipe when the peer's FIN
+/// arrives, outlive smoltcp's TIME-WAIT, whose end clears the socket's buffer:
+/// a client that shut its sending half down and then fell a whole receive pipe
+/// behind reads every byte.
 fn time_wait(peer: SocketAddr) {
     /// Bytes past the ring's capacity: inside the socket's own buffer, so the
     /// FIN behind them is taken, and outside the full pipe.
     const TAIL: u64 = 32 * 1024;
-    const TIME_WAIT: Duration = Duration::from_secs(10);
+    let time_wait = || Net::ask(STEP).count("net.sockets.time_wait");
+    let before = time_wait();
     let capacity = netd_stream::ring_capacity();
     let len = capacity + TAIL;
     let conn = toyos::net::tcp_connect(HOST.octets(), peer.port(), 60_000).expect("connect to the host peer");
-    let mut request = [0u8; 17];
-    request[0] = PATTERN;
-    request[1..9].copy_from_slice(&len.to_le_bytes());
-    assert_eq!(conn.tx.write(&request), Ok(request.len()), "time_wait: the request");
+    assert_eq!(conn.tx.write(&request(PATTERN, len, 0)), Ok(17), "time_wait: the request");
     toyos::net::tcp_shutdown(conn.socket_id, 1).expect("time_wait: shut the sending half down");
     netd_stream::await_ring_full(&conn.rx, capacity, STEP);
-    std::thread::sleep(TIME_WAIT + Duration::from_secs(2));
+    await_net("time_wait: the stream's TIME-WAIT begun", STEP, time_wait, |n| n > before);
+    await_net("time_wait: the stream's TIME-WAIT over", STEP, time_wait, |n| n == before);
     let at = netd_stream::read_pattern(&conn.rx, STEP, "time_wait");
     assert_eq!(at, len, "time_wait: the stream ended after {at} of {len} bytes");
     println!("netd_tcp: time_wait ok bytes={len}");
@@ -520,15 +603,12 @@ const READER_LEAVES_SEED: u64 = 77;
 fn reader_leaves(peer: SocketAddr) {
     let before = held();
     let conn = toyos::net::tcp_connect(HOST.octets(), peer.port(), 60_000).expect("connect to the host peer");
-    let mut request = [0u8; 17];
-    request[0] = DOWNLOAD;
-    request[1..9].copy_from_slice(&u64::MAX.to_le_bytes());
-    request[9..].copy_from_slice(&READER_LEAVES_SEED.to_le_bytes());
-    assert_eq!(conn.tx.write(&request), Ok(request.len()), "reader_leaves: the request");
+    let asked = request(DOWNLOAD, u64::MAX, READER_LEAVES_SEED);
+    assert_eq!(conn.tx.write(&asked), Ok(asked.len()), "reader_leaves: the request");
     let mut first = [0u8; 4096];
     assert!(matches!(conn.rx.read(&mut first), Ok(n) if n > 0), "reader_leaves: the stream's first bytes");
     drop(conn.rx);
-    await_held("reader_leaves: the connection its reader left", STEP, |h| h == before);
+    await_held("reader_leaves: the connection its reader left", LET_GO, |h| h == before);
     assert_eq!(
         conn.tx.write(&[0]),
         Err(toyos_abi::syscall::SyscallError::Gone),
@@ -537,13 +617,112 @@ fn reader_leaves(peer: SocketAddr) {
     println!("netd_tcp: reader_leaves ok");
 }
 
+/// netd holds at most `waiting` UDP receives open at once and refuses the
+/// next by name, and goes on serving: a child blocks `waiting` receives, one
+/// more of this program's own is answered `ResourceExhausted`, netd still
+/// answers and carries a stream, and once the child is killed its receives
+/// are let go of.
+fn receives(peer: SocketAddr, waiting: usize) {
+    let before = held();
+    let mut child = spawn_with(peer, "child_receives", &[&waiting.to_string()]);
+    await_held("receives: the child's receives", STEP, |h| h.waiting == before.waiting + waiting as u64);
+    let one_more = toyos::net::udp_bind([0; 4], 0).expect("receives: bind one more socket");
+    let socket = one_more.socket_id;
+    let (answered, answer) = mpsc::channel();
+    std::thread::spawn(move || answered.send(toyos::net::udp_recv_from(socket, 64)));
+    let refused = answer
+        .recv_timeout(LET_GO)
+        .unwrap_or_else(|_| panic!("receives: receive {} of {waiting} was not refused within {LET_GO:?}", waiting + 1));
+    match refused {
+        Err(toyos::net::NetError::ResourceExhausted) => {}
+        Ok(r) => panic!("receives: receive {} of {waiting} was answered {} bytes", waiting + 1, r.len),
+        Err(e) => panic!("receives: receive {} of {waiting} was refused {e:?}", waiting + 1),
+    }
+    let mut stream = ask(peer, DOWNLOAD, 65536, 5);
+    let (got, _) = drain(&mut stream, "receives: a stream after the refusal");
+    assert_eq!(got, 65536, "receives: the stream after the refusal ended short");
+    drop(stream);
+    child.kill().expect("kill the child");
+    child.wait().expect("reap the child");
+    toyos::net::udp_close(socket).expect("receives: close the refused socket");
+    let after = await_held("receives: the killed child's receives", LET_GO, |h| h.waiting == before.waiting && h.udp == before.udp);
+    println!("netd_tcp: receives ok refused={} after {after:?}", waiting + 1);
+}
+
+/// Connections this client closes first, against a peer that never closes,
+/// cost it nothing: `count` of them — netd's cap on live connections, and on
+/// closing ones — and one more are each opened and dropped with every connect
+/// answered, and netd keeps no more of them closing than its bound.
+fn closing(peer: SocketAddr, count: usize) {
+    let before = held();
+    let bound = Net::ask(STEP).count("net.piped.max_closing");
+    assert_eq!(bound, count as u64, "closing: netd's closing bound is not its live cap");
+    for i in 0..=count {
+        let mut stream = TcpStream::connect_timeout(&peer, STEP).unwrap_or_else(|e| {
+            panic!("closing: connect {} of {} with {i} closed first: {e} ({:?})", i + 1, count + 1, e.kind())
+        });
+        // Held: the host never closes, so each waits in FIN-WAIT-2.
+        stream.write_all(&request(HOLD, 0, 0)).expect("closing: the request");
+        drop(stream);
+    }
+    // Every client has let go once none holds a pipe: from then on the count
+    // is what netd keeps.
+    let after = await_held("closing: every client let go", STEP, |h| h.piped == before.piped);
+    assert_eq!(after.closing, before.closing + bound, "closing: netd keeps {after:?} closing, and {bound} is its bound");
+    println!("netd_tcp: closing ok connects={} closing={}", count + 1, after.closing);
+}
+
+/// A connect to a silent on-link address, asking for its neighbour every
+/// second, delays no other address's resolution: a datagram to the harness's
+/// neighbour, whose address nothing has asked for yet, is echoed while the
+/// silent connect still asks.
+fn neighbour() {
+    /// ARP's own rate limit is a second an address: a bound, said by name.
+    const ANSWERED: Duration = Duration::from_secs(5);
+    /// Longer than [`ANSWERED`], so the silent connect is still asking when
+    /// the neighbour answers.
+    const SILENT_FOR: Duration = Duration::from_secs(20);
+    let before = held();
+    let silent = std::thread::spawn(|| {
+        TcpStream::connect_timeout(&SocketAddr::V4(SocketAddrV4::new(NOBODY, 9)), SILENT_FOR)
+    });
+    // Its socket made first, so smoltcp visits it first on every pass.
+    await_held("neighbour: the silent connect's socket", STEP, |h| h.tcp == before.tcp + 1);
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("bind a UDP socket");
+    let started = Instant::now();
+    socket.send_to(b"neighbour", SocketAddrV4::new(NEIGHBOUR, 7)).expect("send to the neighbour");
+    // Bounded on a thread of its own: std's UDP socket keeps no timeout
+    // (`issues/design-debt/std-udp-socket-ignores-its-timeouts.md`).
+    let (echoed, echo) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        let _ = echoed.send(socket.recv_from(&mut buf).map(|(n, from)| (buf[..n].to_vec(), from)));
+    });
+    let (got, from) = echo
+        .recv_timeout(ANSWERED)
+        .unwrap_or_else(|_| panic!("neighbour: no echo in {ANSWERED:?} beside a connect to nobody"))
+        .unwrap_or_else(|e| panic!("neighbour: the echo's receive failed: {e} ({:?})", e.kind()));
+    let took = started.elapsed();
+    assert_eq!(got, b"neighbour", "neighbour: the echo came back changed");
+    assert_eq!(from, SocketAddr::V4(SocketAddrV4::new(NEIGHBOUR, 7)), "neighbour: the echo came from elsewhere");
+    assert!(!silent.is_finished(), "neighbour: the premise — the silent connect was over before the echo");
+    let err = silent.join().expect("the silent connect's thread").expect_err("a connect to nobody succeeded");
+    assert_eq!(err.kind(), ErrorKind::TimedOut, "neighbour: the silent connect ended {err}");
+    println!("netd_tcp: neighbour ok echoed_ms={}", took.as_millis());
+}
+
 /// This program again, running `case`, once it has said it is at the call
 /// netd holds open.
 fn spawn(peer: SocketAddr, case: &str) -> Child {
+    spawn_with(peer, case, &[])
+}
+
+fn spawn_with(peer: SocketAddr, case: &str, args: &[&str]) -> Child {
     let exe = std::env::current_exe().expect("this program's path");
     let mut child = Command::new(&exe)
         .arg(peer.port().to_string())
         .arg(case)
+        .args(args)
         .stdout(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("spawn {case}: {e}"));
@@ -554,7 +733,8 @@ fn spawn(peer: SocketAddr, case: &str) -> Child {
 
 /// A client killed with its connection open and quiet both ways: netd sends
 /// the FIN it owes, and ends the connection itself once `limit_s` seconds —
-/// netd's `ORPHAN_LIMIT` — have passed with the peer still holding it open.
+/// netd's `FIN_WAIT_2_LIMIT` — have passed with the peer still holding it
+/// open.
 fn orphan(peer: SocketAddr, limit_s: u64) {
     let before = held();
     let mut child = spawn(peer, "child_idle");
@@ -568,6 +748,85 @@ fn orphan(peer: SocketAddr, limit_s: u64) {
     let took = killed.elapsed();
     assert!(took >= limit, "orphan: netd let go of a stream its peer still held open after {took:?}");
     println!("netd_tcp: orphan ok after {after:?} in {}ms", took.as_millis());
+}
+
+/// Two clients leave bytes behind a peer that keeps its window shut: netd
+/// delivers every byte of the one whose peer opens its window after
+/// `fin_wait_2_s` and a second more — the longest an orphan's peer is given
+/// to close — and resets the other once `stall_s` has passed with nothing
+/// acknowledged.
+fn orphan_owes(peer: SocketAddr, fin_wait_2_s: u64, stall_s: u64) {
+    const RELEASED: u64 = 91;
+    const HELD_SHUT: u64 = 92;
+    let before = held();
+    let upload = |seed: u64| {
+        let out = Command::new(std::env::current_exe().expect("this program's path"))
+            .args([peer.port().to_string(), "child_upload".into(), seed.to_string()])
+            .output()
+            .expect("run a child upload");
+        assert!(out.status.success(), "orphan_owes: child upload {seed} failed: {out:?}");
+        String::from_utf8(out.stdout).expect("its line")
+    };
+    let (released, held_shut) = (upload(RELEASED), upload(HELD_SHUT));
+    print!("{released}{held_shut}");
+    // Both children are gone and netd has seen them go: what they wrote is
+    // netd's to deliver, and its clocks on them run from here or earlier.
+    await_held("orphan_owes: the children's orphans", STEP, |h| h.orphans == before.orphans + 2);
+    let left = Instant::now();
+    // **The one wait here is the premise, not a pace**: the orphan's peer
+    // holds its window shut past the longest an orphan's peer is given to
+    // close, and nothing but time passing is that.
+    let premise = Duration::from_secs(fin_wait_2_s + 1);
+    std::thread::sleep(premise);
+    let now = held();
+    assert_eq!(now.piped, before.piped + 2, "orphan_owes: an orphan held shut for {premise:?} was given up: {now:?}");
+    drop(ask(peer, RELEASE, 0, RELEASED));
+    await_held("orphan_owes: the released orphan delivered", STEP, |h| h.piped + h.closing == before.piped + before.closing + 1);
+    let stall = Duration::from_secs(stall_s);
+    await_held("orphan_owes: the orphan held shut", stall + STEP, |h| h == before);
+    let took = left.elapsed();
+    assert!(took + Duration::from_secs(1) >= stall, "orphan_owes: the orphan held shut was reset after {took:?}");
+    // Its host connection waits on a release, which it is now given.
+    drop(ask(peer, RELEASE, 0, HELD_SHUT));
+    println!("netd_tcp: orphan_owes ok released_seed={RELEASED} held_shut_ms={}", took.as_millis());
+}
+
+/// The wire goes dark under three streams — one whose client is killed, one
+/// whose client keeps writing, and the one that asked for the dark — and netd
+/// gives up on each once `stall_s` has passed with nothing from its peer, the
+/// writer told by its write failing, and lets every one go within `linger_s`
+/// of its reset though no RST can leave: the peers' link address is forgotten
+/// by then, and asked for in the dark.
+fn vanish(peer: SocketAddr, stall_s: u64, linger_s: u64) {
+    let before = held();
+    let mut child = spawn(peer, "child_idle");
+    let mut writer = ask(peer, HOLD, 0, 0);
+    await_held("vanish: both streams", STEP, |h| h.tcp == before.tcp + 2);
+    drop(ask(peer, DARK, 0, 0));
+    let dark = Instant::now();
+    child.kill().expect("kill the child");
+    child.wait().expect("reap the child");
+    let stall = Duration::from_secs(stall_s);
+    let buf = vec![0u8; 65536];
+    // A write that blocks past the stall limit and its step is a writer
+    // never told, and times out by name.
+    writer.set_write_timeout(Some(stall + STEP)).expect("vanish: bound the writer");
+    let err = loop {
+        if let Err(e) = writer.write(&buf) {
+            break e;
+        }
+    };
+    let told = dark.elapsed();
+    assert!(
+        matches!(err.kind(), ErrorKind::ConnectionReset | ErrorKind::BrokenPipe),
+        "vanish: the writer was told {err} ({:?})",
+        err.kind()
+    );
+    assert!(told >= stall, "vanish: the writer was told after {told:?}");
+    drop(writer);
+    let linger = Duration::from_secs(linger_s);
+    let after = await_held("vanish: every stream in the dark", stall + linger + STEP, |h| h == before);
+    println!("netd_tcp: vanish ok told_ms={} after {after:?} in {}ms", told.as_millis(), dark.elapsed().as_millis());
 }
 
 /// A connect with no timeout to an address that never answers.
@@ -604,4 +863,37 @@ fn child_idle(peer: SocketAddr) {
     let mut buf = [0u8; 64];
     let _ = stream.read(&mut buf);
     panic!("a read of a silent peer answered");
+}
+
+/// Bytes into a peer that reads nothing until it is released, written until
+/// nothing more is taken, and left behind: this child's line says what.
+fn child_upload(peer: SocketAddr, seed: u64) {
+    let mut stream = ask(peer, LATE_UPLOAD, 0, seed);
+    let (written, sha) = fill_until_refused(&mut stream, seed, "child_upload");
+    println!("netd_tcp: child_upload seed={seed} bytes={written} sha={}", hex(&sha));
+}
+
+/// `count` receives, one a socket, on sockets nothing sends to.
+fn child_receives(count: usize) {
+    let sockets: Vec<UdpSocket> = (0..count).map(|_| UdpSocket::bind("0.0.0.0:0").expect("bind a UDP socket")).collect();
+    println!("q");
+    let threads: Vec<_> = sockets
+        .into_iter()
+        .map(|socket| {
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 64];
+                let _ = socket.recv_from(&mut buf);
+                panic!("a receive nothing sends to answered");
+            })
+        })
+        .collect();
+    for thread in threads {
+        let _ = thread.join();
+    }
+}
+
+/// How many frames have waited for netd's transmit ring since it started: the
+/// proof, for a case after it, that the ring filled.
+fn waited() {
+    println!("netd_tcp: waited ok frames={}", Net::ask(STEP).count("net.tx.waited"));
 }

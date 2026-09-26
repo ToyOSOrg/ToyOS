@@ -13,7 +13,7 @@ use common::qemu::{
 };
 use common::{
     audio, compile, devices, faults, hostload, lan, metal, partclaim, pkg, power, screen, serial,
-    middlebox, stats, storage, tcppeer, usb,
+    middlebox, segment, stats, storage, tcppeer, usb,
 };
 use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::heartbeat;
@@ -888,6 +888,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("netd_tcp_many", Sched::Parallel, Tier::Fast),
     ("netd_tcp_leaves", Sched::Parallel, Tier::Fast),
     ("netd_tcp_ports", Sched::Parallel, Tier::Fast),
+    ("netd_tcp_closing", Sched::Parallel, Tier::Fast),
+    // The same boot on a NIC that sends one frame a millisecond, across a wire
+    // that answers its lookups itself (`tests/common/middlebox.rs`).
+    ("netd_tcp_many_up", Sched::Parallel, Tier::Fast),
+    // The same boot with this host on its segment as a neighbour
+    // (`tests/common/segment.rs`), whose answers are the host's own and at once.
+    ("netd_tcp_neighbour", Sched::Parallel, Tier::Fast),
     // The same, across a wire this host impairs deterministically between
     // the guest and slirp (`tests/common/middlebox.rs`). Nightly: slirp's
     // TCP does no SACK and counts no duplicate ACK that moves the window, so
@@ -901,6 +908,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The same boot, a stream's last bytes read after smoltcp's ten-second
     // TIME-WAIT has passed. Nightly: that wait is its premise.
     ("netd_tcp_time_wait", Sched::Parallel, Tier::Nightly),
+    // The same boot, two orphans owing bytes behind a shut window: one
+    // released past netd's FIN-WAIT-2 limit, one never. Nightly: its verdicts
+    // are anchored to that minute and to netd's hundred-second stall limit.
+    ("netd_tcp_orphan_owes", Sched::Parallel, Tier::Nightly),
+    // The same boot on a wire that goes dark (`tests/common/middlebox.rs`).
+    // Nightly: its verdicts are anchored to netd's stall limit.
+    ("netd_tcp_vanish", Sched::Parallel, Tier::Nightly),
     // The netcase boot, whose user network forwards 10.0.2.3 to this host's
     // resolver: `host` resolves a real name to the addresses this host's
     // resolver gives it, and a `.invalid` name to none. The verdict is the
@@ -1623,6 +1637,11 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_tcp_loss", &["test_rs_netd_tcp"]),
     ("netd_tcp_orphan", &["test_rs_netd_tcp"]),
     ("netd_tcp_time_wait", &["test_rs_netd_tcp"]),
+    ("netd_tcp_closing", &["test_rs_netd_tcp"]),
+    ("netd_tcp_many_up", &["test_rs_netd_tcp"]),
+    ("netd_tcp_neighbour", &["test_rs_netd_tcp"]),
+    ("netd_tcp_orphan_owes", &["test_rs_netd_tcp"]),
+    ("netd_tcp_vanish", &["test_rs_netd_tcp"]),
     ("netd_lookup_let_go", &["test_rs_netd_lookup_let_go"]),
     ("netd_hostile_peer", &["test_rs_netd_hostile_peer"]),
     ("launcher_refusals", &["test_rs_launcher_refusals"]),
@@ -9318,173 +9337,6 @@ fn open_terminal(
     ))
 }
 
-/// The host server behind the netd stream tests, where slirp's `10.0.2.2`
-/// lands. Each connection asks in nine bytes — a mode, then a little-endian
-/// length — and is served by the mode (`Ask` in
-/// `tests/toyos-rust-tests/src/netd_stream.rs`, the other half of this
-/// agreement):
-///
-/// - [`Self::STREAM`]: exactly that many of the guest's `stream_byte` pattern,
-///   then its write side is closed.
-/// - [`Self::HELD`]: the same bytes, and the connection held open with no FIN
-///   until [`Self::finish`].
-/// - [`Self::DIAL`]: a connection of the host's own to the guest's forwarded
-///   port, written until it is refused; then this connection's write side is
-///   closed, which is what tells the guest the forwarded one ended.
-///
-/// The judgement is the guest's; this side reports only what it sent to each
-/// connection and how its sending ended.
-///
-/// **Nothing here outlives [`PatternServer::finish`].** `accept` is woken by a
-/// connection of the server's own, and every connection still reading or
-/// writing is shut down under it; the socket timeouts bound only a harness that
-/// never reaches `finish`.
-struct PatternServer {
-    port: u16,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    open: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
-    acceptor: thread::JoinHandle<Vec<thread::JoinHandle<Result<u64, String>>>>,
-}
-
-impl PatternServer {
-    /// Longest a connection's read or write may stall before `finish` exists
-    /// to end it: the guest's own run bound.
-    const STALL: Duration = Duration::from_secs(120);
-
-    const STREAM: u8 = 0;
-    const HELD: u8 = 1;
-    const DIAL: u8 = 2;
-
-    /// The guest program's `stream_byte`, the other half of one agreement.
-    fn stream_byte(pos: u64) -> u8 {
-        let group = (pos >> 4) as u32;
-        match pos & 15 {
-            k @ 0..=3 => (group >> (8 * k)) as u8,
-            _ => 0xC3,
-        }
-    }
-
-    /// `forward` is the host port QEMU forwards to the guest, which
-    /// [`Self::DIAL`] connects to.
-    fn start(forward: Option<u16>) -> Result<Self, String> {
-        use std::sync::atomic::Ordering;
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .map_err(|e| format!("bind the host server: {e}"))?;
-        let port = listener.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let open = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (stop_seen, open_kept) = (stop.clone(), open.clone());
-        let acceptor = thread::spawn(move || {
-            let mut served = Vec::new();
-            for stream in listener.incoming() {
-                if stop_seen.load(Ordering::Acquire) {
-                    break;
-                }
-                let stream = match stream {
-                    Ok(s) => s,
-                    Err(e) => {
-                        served.push(thread::spawn(move || Err(format!("accept: {e}"))));
-                        continue;
-                    }
-                };
-                match stream.try_clone() {
-                    Ok(kept) => open_kept.lock().expect("the open list").push(kept),
-                    Err(e) => {
-                        served.push(thread::spawn(move || Err(format!("keep the connection: {e}"))));
-                        continue;
-                    }
-                }
-                let open = open_kept.clone();
-                served.push(thread::spawn(move || Self::serve(stream, forward, &open)));
-            }
-            served
-        });
-        Ok(Self { port, stop, open, acceptor })
-    }
-
-    fn serve(
-        mut stream: std::net::TcpStream,
-        forward: Option<u16>,
-        open: &std::sync::Mutex<Vec<std::net::TcpStream>>,
-    ) -> Result<u64, String> {
-        use std::io::Read;
-        stream.set_read_timeout(Some(Self::STALL)).map_err(|e| format!("read timeout: {e}"))?;
-        stream.set_write_timeout(Some(Self::STALL)).map_err(|e| format!("write timeout: {e}"))?;
-        let mut ask = [0u8; 9];
-        stream.read_exact(&mut ask).map_err(|e| format!("read what the guest asks: {e}"))?;
-        let total = u64::from_le_bytes(ask[1..].try_into().expect("eight bytes"));
-        match ask[0] {
-            Self::STREAM | Self::HELD => {}
-            Self::DIAL => {
-                let forward = forward.ok_or("the guest asked for a dial and this boot forwards no port")?;
-                let written = Self::dial(forward, open)?;
-                stream.shutdown(std::net::Shutdown::Write).map_err(|e| format!("close the stream: {e}"))?;
-                return Ok(written);
-            }
-            mode => return Err(format!("the guest asked for mode {mode}, which this server does not serve")),
-        }
-        let mut chunk = vec![0u8; 65536];
-        let mut sent = 0u64;
-        while sent < total {
-            let n = chunk.len().min((total - sent) as usize);
-            for (i, b) in chunk[..n].iter_mut().enumerate() {
-                *b = Self::stream_byte(sent + i as u64);
-            }
-            stream.write_all(&chunk[..n]).map_err(|e| format!("send at {sent} of {total}: {e}"))?;
-            sent += n as u64;
-        }
-        if ask[0] == Self::STREAM {
-            stream.shutdown(std::net::Shutdown::Write).map_err(|e| format!("close the stream: {e}"))?;
-        }
-        Ok(sent)
-    }
-
-    /// Connect to the guest through `forward` and write until the connection
-    /// is refused, answering how many bytes it took first.
-    fn dial(forward: u16, open: &std::sync::Mutex<Vec<std::net::TcpStream>>) -> Result<u64, String> {
-        let mut dialled = std::net::TcpStream::connect(("127.0.0.1", forward))
-            .map_err(|e| format!("dial the guest's forwarded port: {e}"))?;
-        dialled.set_write_timeout(Some(Self::STALL)).map_err(|e| format!("write timeout: {e}"))?;
-        let kept = dialled.try_clone().map_err(|e| format!("keep the dialled connection: {e}"))?;
-        open.lock().expect("the open list").push(kept);
-        let chunk = [0u8; 4096];
-        let mut written = 0u64;
-        loop {
-            match dialled.write(&chunk) {
-                Ok(0) => return Ok(written),
-                Ok(n) => written += n as u64,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
-                    return Err(format!("the dialled connection took {written} bytes and then nothing for {:?}", Self::STALL));
-                }
-                Err(_) => return Ok(written),
-            }
-        }
-    }
-
-    /// Stop accepting, end every connection still open, and answer how each
-    /// one's sending ended, in the order they were accepted.
-    fn finish(self) -> Vec<Result<u64, String>> {
-        use std::sync::atomic::Ordering;
-        self.stop.store(true, Ordering::Release);
-        // The wake for `accept`: refused only if the listener is already gone,
-        // which means the acceptor has already returned.
-        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
-        let served = self.acceptor.join().expect("the host server's acceptor panicked");
-        for stream in self.open.lock().expect("the open list").iter() {
-            // One half at a time: once the peer has sent its FIN, macOS refuses
-            // `Both` whole (`ENOTCONN`) and shuts neither, leaving a writer
-            // blocked. A half refused here is one already ended, with nothing
-            // blocked on it.
-            let _ = stream.shutdown(std::net::Shutdown::Write);
-            let _ = stream.shutdown(std::net::Shutdown::Read);
-        }
-        served
-            .into_iter()
-            .map(|t| t.join().unwrap_or_else(|_| Err("a host connection's thread panicked".to_string())))
-            .collect()
-    }
-}
-
 /// A UDP echo on the host, where slirp's `10.0.2.2` lands: every datagram goes
 /// back to its sender as it came.
 ///
@@ -9501,7 +9353,7 @@ impl UdpEcho {
         use std::sync::atomic::Ordering;
         let socket = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("bind the UDP echo: {e}"))?;
         let port = socket.local_addr().map_err(|e| format!("the UDP echo's port: {e}"))?.port();
-        socket.set_read_timeout(Some(PatternServer::STALL)).map_err(|e| format!("read timeout: {e}"))?;
+        socket.set_read_timeout(Some(tcppeer::STALL)).map_err(|e| format!("read timeout: {e}"))?;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_seen = stop.clone();
         let echo = thread::spawn(move || {
@@ -9534,13 +9386,13 @@ impl UdpEcho {
 struct HostRun {
     result: qemu::TestResult,
     console: String,
-    sent: Vec<Result<u64, String>>,
+    sent: Vec<Result<tcppeer::Served, String>>,
 }
 
 /// Boot `tests/netcase` with the one guest program `name`, wait for netd, and
-/// run it against a fresh [`PatternServer`], whose port is its first argument
+/// run it against a fresh [`tcppeer::Peer`], whose port is its first argument
 /// and `args` the rest. `forward` forwards a host port to the guest's TCP 22
-/// for [`PatternServer::DIAL`].
+/// for [`tcppeer::Mode::Dial`].
 fn netcase_against_host(
     rust_bins: &[(String, Vec<u8>)],
     name: &str,
@@ -9560,7 +9412,7 @@ fn netcase_against_host(
     if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
         return Err("this test needs a NIC and the profile has none".to_string());
     }
-    let server = PatternServer::start(options.ssh_port)?;
+    let server = tcppeer::Peer::start(options.ssh_port, None)?;
     let port = server.port;
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
     let mut console = qemu.boot_log().to_string();
@@ -9585,7 +9437,7 @@ fn netcase_against_host(
 /// of a stream past it, from the guest's own byte-for-byte comparison.
 fn netd_slow_reader(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let HostRun { result, sent, .. } = netcase_against_host(rust_bins, "netd_slow_reader", false, "")?;
-    let [Ok(sent)] = sent.as_slice() else {
+    let [Ok(tcppeer::Served { bytes: sent, ended: Ok(()), .. })] = sent.as_slice() else {
         return Err(format!("the host server's connections ended {sent:?}, not one whole stream"));
     };
     let ok = format!("netd_slow_reader: ok bytes={sent}");
@@ -9601,7 +9453,7 @@ fn netd_slow_reader(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// so nothing but the pipe's own room can be what moved them.
 fn netd_held_open(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let HostRun { result, sent, .. } = netcase_against_host(rust_bins, "netd_held_open", false, "")?;
-    let [Ok(sent)] = sent.as_slice() else {
+    let [Ok(tcppeer::Served { bytes: sent, ended: Ok(()), .. })] = sent.as_slice() else {
         return Err(format!("the host server's connections ended {sent:?}, not one held stream"));
     };
     let ok = format!("netd_held_open: ok bytes={sent},");
@@ -9660,11 +9512,16 @@ fn netd_udp_any_address(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 }
 
 /// What one [`netd_tcp_run`] leaves: each case's result in the order run,
-/// the console beside them, and how every host connection went.
+/// the console beside them, how every host connection went, and what the wire
+/// did.
 struct TcpRun {
     results: Vec<qemu::TestResult>,
     console: String,
     served: Vec<Result<tcppeer::Served, String>>,
+    /// The middlebox's counts toward the guest and from it, where there was one.
+    wire: Option<[middlebox::Counts; 2]>,
+    /// What the host answered as a neighbour, where it stood on the segment.
+    answered: Option<segment::Answered>,
 }
 
 impl TcpRun {
@@ -9678,24 +9535,21 @@ impl TcpRun {
             .ok_or_else(|| format!("the guest never said {ok:?}:\n{}", self.results[i].stdout))
     }
 
-    /// No frame netd made was dropped for want of a transmit slot: its virtio
-    /// driver reports every such drop by name, in a line netd says to the
-    /// console while a case runs.
-    fn no_frame_dropped(&self) -> Result<(), String> {
-        const DROPPED: &str = "with no transmit descriptor free";
-        let said = self.results.iter().map(|r| r.stdout.as_str()).chain([self.console.as_str()]);
-        match said.flat_map(str::lines).find(|l| l.contains(DROPPED)) {
-            Some(line) => Err(format!("netd dropped frames it made itself: {line}")),
-            None => Ok(()),
-        }
-    }
-
     /// The host's record of the `i`th connection it served.
     fn served(&self, i: usize) -> Result<&tcppeer::Served, String> {
         match self.served.get(i) {
             Some(Ok(served)) => Ok(served),
             other => Err(format!("the host's connection {i} was {other:?}; every one: {:?}", self.served)),
         }
+    }
+
+    /// The host's record of the stream `mode` over `seed`.
+    fn served_as(&self, mode: tcppeer::Mode, seed: u64) -> Result<&tcppeer::Served, String> {
+        self.served
+            .iter()
+            .flatten()
+            .find(|s| s.mode == mode && s.seed == seed)
+            .ok_or_else(|| format!("the host served no {mode:?} over seed {seed}: {:?}", self.served))
     }
 }
 
@@ -9711,7 +9565,7 @@ fn field<'a>(line: &'a str, key: &str) -> Result<&'a str, String> {
 /// length, and the same SHA-256 over the bytes each side saw.
 fn same_stream(line: &str, served: &tcppeer::Served) -> Result<(), String> {
     let (bytes, sha) = (field(line, "bytes")?, field(line, "sha")?);
-    served.ended.clone().map_err(|e| format!("the host's side of {line:?} ended {e}"))?;
+    served.ended.clone().map_err(|(_, e)| format!("the host's side of {line:?} ended {e}"))?;
     if bytes != served.bytes.to_string() || sha != served.sha {
         return Err(format!(
             "the guest saw {bytes} bytes hashing {sha}; the host carried {} hashing {}",
@@ -9721,26 +9575,63 @@ fn same_stream(line: &str, served: &tcppeer::Served) -> Result<(), String> {
     Ok(())
 }
 
-/// Boot `tests/netcase` with `netd_tcp`, wait for netd, and run each case as
-/// `test_rs_netd_tcp <peer port> <case>` against one [`tcppeer::Peer`], with
-/// `{cap}` in a case the connection cap netd announced. Every case has to exit
-/// 0; the host's records come back once every connection has ended.
-fn netd_tcp_run(rust_bins: &[(String, Vec<u8>)], cases: &[&str], options: BootOptions) -> Result<TcpRun, String> {
+/// What stands on the guest's wire for a [`netd_tcp_run`].
+enum TcpWire {
+    /// slirp alone.
+    Plain,
+    /// `middlebox`, impairing as the plan says; a [`middlebox::Plan::Dark`]
+    /// switch is the host peer's to throw.
+    Impaired(middlebox::Plan),
+    /// The same, on a NIC whose transmit ring drains one frame a millisecond
+    /// (`BootOptions::slow_transmit`): netd's ring fills whenever it has
+    /// more to send than that.
+    Slow(middlebox::Plan),
+    /// The host on the segment as a neighbour (`segment::Segment::neighbour`).
+    Neighbour,
+}
+
+/// Boot `tests/netcase` with `netd_tcp` on `wire`, wait for netd, and run each
+/// case as `test_rs_netd_tcp <peer port> <case>` against one
+/// [`tcppeer::Peer`], with `{cap}` in a case the connection cap netd
+/// announced. Every case has to exit 0; the host's records come back once
+/// every connection has ended.
+fn netd_tcp_run(rust_bins: &[(String, Vec<u8>)], cases: &[&str], wire: TcpWire) -> Result<TcpRun, String> {
     const NAME: &str = "netd_tcp";
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
     let bins: Vec<(String, Vec<u8>)> = rust_bins.iter().filter(|(n, _)| n == NAME).cloned().collect();
     if bins.is_empty() {
         return Err(format!("{NAME} was not built"));
     }
+    let slow_transmit = matches!(wire, TcpWire::Slow(_));
+    let (options, impaired, dark, tap) = match wire {
+        TcpWire::Plain => (BootOptions::default(), None, None, None),
+        TcpWire::Impaired(plan) | TcpWire::Slow(plan) => {
+            let dark = match &plan {
+                middlebox::Plan::Dark(switch) => Some(switch.clone()),
+                _ => None,
+            };
+            let (wire, impaired) = middlebox::Wire::listen(plan)?;
+            let options = BootOptions { middlebox: Some(wire), slow_transmit, ..Default::default() };
+            (options, Some(impaired), dark, None)
+        }
+        TcpWire::Neighbour => {
+            let tap = segment::Tap::in_lane();
+            (BootOptions { segment: Some(tap.clone()), ..Default::default() }, None, None, Some(tap))
+        }
+    };
     if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
         return Err("this test needs a NIC and the profile has none".to_string());
     }
-    let peer = tcppeer::Peer::start()?;
+    let peer = tcppeer::Peer::start(None, dark)?;
     let port = peer.port;
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+    let neighbour = tap.map(|tap| tap.open().map(segment::Segment::neighbour)).transpose();
     let mut console = qemu.boot_log().to_string();
     let mut results = Vec::new();
-    let mut failed = await_marker(&mut qemu, &mut console, NETD_READY, "netd to come up").err();
+    let mut failed = neighbour.as_ref().err().cloned();
+    if failed.is_none() {
+        failed = await_marker(&mut qemu, &mut console, NETD_READY, "netd to come up").err();
+    }
     let cap = netd_cap(&console);
     for case in cases {
         if failed.is_some() {
@@ -9768,10 +9659,12 @@ fn netd_tcp_run(rust_bins: &[(String, Vec<u8>)], cases: &[&str], options: BootOp
     }
     drop(qemu);
     let served = peer.finish();
+    let wire = impaired.map(middlebox::Impaired::finish).transpose();
+    let answered = neighbour.ok().flatten().map(|h| h.join().expect("the neighbour's thread panicked"));
     if let Some(failed) = failed {
-        return Err(format!("{failed}\nthe host's connections: {served:?}"));
+        return Err(format!("{failed}\nthe host's connections: {served:?}\nthe wire: {wire:?}"));
     }
-    Ok(TcpRun { results, console, served })
+    Ok(TcpRun { results, console, served, wire: wire?, answered })
 }
 
 /// netd's line saying it serves, which carries its connection cap.
@@ -9795,7 +9688,7 @@ fn netd_tcp_unreachable(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         .and_then(|l| l.local_addr())
         .map_err(|e| format!("a closed port: {e}"))?
         .port();
-    let run = netd_tcp_run(rust_bins, &[&format!("unreachable {closed}")], BootOptions::default())?;
+    let run = netd_tcp_run(rust_bins, &[&format!("unreachable {closed}")], TcpWire::Plain)?;
     let line = run.ok_line(0, "unreachable")?;
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
     eprintln!("  [netcase] {}", line.trim_end());
@@ -9805,7 +9698,7 @@ fn netd_tcp_unreachable(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// The peer's reset reaches the client as `ConnectionReset`, after every byte
 /// the peer sent before it: the guest's hash of those bytes is the host's.
 fn netd_tcp_reset(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["reset 1048576"], BootOptions::default())?;
+    let run = netd_tcp_run(rust_bins, &["reset 1048576"], TcpWire::Plain)?;
     let line = run.ok_line(0, "reset")?;
     same_stream(line, run.served(0)?)?;
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
@@ -9816,9 +9709,19 @@ fn netd_tcp_reset(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// Every byte written before `shutdown(Write)` reaches the host, which says
 /// so on the half still open — first with the host's window held shut until
 /// after the shutdown, so the whole send pipe is still unread when it is
-/// asked for — and no frame of netd's is dropped on the way.
+/// asked for, and the window's opening fills the transmit ring. A read after
+/// `shutdown(Read)` answers the end at once.
+///
+/// **On a NIC that sends one frame a millisecond, across a wire that drops
+/// the first FIN of every connection the guest closes**: the ring fills
+/// whenever netd has more to send than that, and each close after it finishes on smoltcp's own
+/// retransmission timer, which nothing but netd's wake for it can fire: a
+/// netd that stopped honouring smoltcp's deadlines once its ring had filled
+/// never finishes a case here. The wire's count and netd's own count of
+/// frames that waited for the ring are the premise.
 fn netd_tcp_half_close(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["late_shutdown", "half_close 4194304"], BootOptions::default())?;
+    let cases = ["late_shutdown", "half_close 4194304", "read_shut", "waited"];
+    let run = netd_tcp_run(rust_bins, &cases, TcpWire::Slow(middlebox::Plan::Answer { drop_guest_fins: true }))?;
     for (i, case) in ["late_shutdown", "half_close"].into_iter().enumerate() {
         let line = run.ok_line(i, case)?;
         let served = run
@@ -9831,39 +9734,43 @@ fn netd_tcp_half_close(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         same_stream(line, served)?;
         eprintln!("  [netcase] {}", line.trim_end());
     }
-    // The held window opens all at once, and what smoltcp sends into it is
-    // more frames than the transmit ring has slots.
-    run.no_frame_dropped()?;
+    eprintln!("  [netcase] {}", run.ok_line(2, "read_shut")?.trim_end());
+    let waited: u64 = field(run.ok_line(3, "waited")?, "frames")?.parse().map_err(|e| format!("{e}"))?;
+    let [_, from_guest] = run.wire.ok_or("the run had no wire")?;
+    if waited == 0 || from_guest.fins_dropped == 0 {
+        return Err(format!(
+            "the premise is not met: {waited} frames waited for the ring, the wire dropped {} FINs",
+            from_guest.fins_dropped
+        ));
+    }
+    eprintln!("  [netcase] {waited} frames waited for the ring; {} FINs sent again", from_guest.fins_dropped);
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
     Ok(())
 }
 
 /// Tens of megabytes down, byte-exact by the host's hash, through `read` and
-/// through `read_to_end`, with no frame of netd's dropped on the way; the rate
-/// is reported, not judged.
+/// through `read_to_end`; the rate is reported, not judged.
 fn netd_tcp_download(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["download 33554432 5", "download_to_end 8388608"], BootOptions::default())?;
+    let run = netd_tcp_run(rust_bins, &["download 33554432 5", "download_to_end 8388608"], TcpWire::Plain)?;
     for (i, case) in ["download", "download_to_end"].into_iter().enumerate() {
         let line = run.ok_line(i, case)?;
         same_stream(line, run.served(i)?)?;
         eprintln!("  [netcase] {}", line.trim_end());
     }
-    run.no_frame_dropped()?;
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
     Ok(())
 }
 
-/// Tens of megabytes up, byte-exact by the host's hash, with no frame of
-/// netd's dropped on the way; then a stream the client drops the moment its
-/// last write returns, which the host must still get whole.
+/// Tens of megabytes up, byte-exact by the host's hash; then a stream the
+/// client drops the moment its last write returns, which the host must still
+/// get whole.
 fn netd_tcp_upload(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["upload 33554432 9", "upload_drop 8388608"], BootOptions::default())?;
+    let run = netd_tcp_run(rust_bins, &["upload 33554432 9", "upload_drop 8388608"], TcpWire::Plain)?;
     for (i, case) in ["upload", "upload_drop"].into_iter().enumerate() {
         let line = run.ok_line(i, case)?;
         same_stream(line, run.served(i)?)?;
         eprintln!("  [netcase] {}", line.trim_end());
     }
-    run.no_frame_dropped()?;
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
     Ok(())
 }
@@ -9871,7 +9778,7 @@ fn netd_tcp_upload(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// `set_read_timeout` and `set_write_timeout` each end a call that has
 /// nothing to do, against a peer holding the connection open.
 fn netd_tcp_timeouts(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["timeouts"], BootOptions::default())?;
+    let run = netd_tcp_run(rust_bins, &["timeouts"], TcpWire::Plain)?;
     let line = run.ok_line(0, "timeouts")?;
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
     eprintln!("  [netcase] {}", line.trim_end());
@@ -9881,7 +9788,7 @@ fn netd_tcp_timeouts(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// As many connections open at once as netd says it holds, each stream
 /// byte-exact by the host's hash of it.
 fn netd_tcp_many(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["many {cap} 262144"], BootOptions::default())?;
+    let run = netd_tcp_run(rust_bins, &["many {cap} 262144"], TcpWire::Plain)?;
     let count: usize = field(run.ok_line(0, "many")?, "count")?.parse().map_err(|e| format!("{e}"))?;
     if count != netd_cap(&run.console)? {
         return Err(format!("the guest opened {count} connections, not netd's cap"));
@@ -9901,6 +9808,39 @@ fn netd_tcp_many(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
+/// As many connections uploading at once as netd holds, on a NIC slow enough
+/// to keep netd's transmit ring full, and a lookup made while they
+/// all send answered within its bound: the lookup's socket, made after all
+/// of theirs, still gets its turn. Each upload is judged by the host's answer
+/// in the guest; the premise is the wire's answer to the lookup's query,
+/// which only a query that left can have.
+fn netd_tcp_many_up(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let run = netd_tcp_run(rust_bins, &["many_up {cap}"], TcpWire::Slow(middlebox::Plan::Answer { drop_guest_fins: false }))?;
+    let line = run.ok_line(0, "many_up")?;
+    let [_, from_guest] = run.wire.ok_or("the run had no wire")?;
+    if from_guest.resolved == 0 {
+        return Err(format!("the lookup was answered without its query reaching the wire: {from_guest:?}"));
+    }
+    serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] {}", line.trim_end());
+    Ok(())
+}
+
+/// A connect to a silent on-link address delays no other address's
+/// resolution: the neighbour the host plays is asked for and echoes a
+/// datagram while the silent connect still asks.
+fn netd_tcp_neighbour(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let run = netd_tcp_run(rust_bins, &["neighbour"], TcpWire::Neighbour)?;
+    let line = run.ok_line(0, "neighbour")?;
+    let answered = run.answered.ok_or("the run had no neighbour")?;
+    if answered.arp == 0 || answered.echoed == 0 {
+        return Err(format!("the neighbour was never asked for and echoed: {answered:?}"));
+    }
+    serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] {}", line.trim_end());
+    Ok(())
+}
+
 /// Four megabytes down and four up across a wire that drops every
 /// [`middlebox::DROP_EVERY`]th data segment each way and holds every
 /// [`middlebox::SWAP_EVERY`]th back behind the next: both streams byte-exact by
@@ -9908,18 +9848,14 @@ fn netd_tcp_many(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// dropped and swapped segments each way, and saw at least as many sent again
 /// as it dropped, so both stacks retransmitted.
 fn netd_tcp_loss(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (wire, impaired) = middlebox::Wire::listen()?;
-    let options = BootOptions { middlebox: Some(wire), ..Default::default() };
-    let run = netd_tcp_run(rust_bins, &["download 4194304 21", "upload 4194304 22"], options);
-    let counts = impaired.finish();
-    let run = run.map_err(|e| format!("{e}\nthe wire's counts: {counts:?}"))?;
-    let counts = counts?;
+    let cases = ["download 4194304 21", "upload 4194304 22"];
+    let run = netd_tcp_run(rust_bins, &cases, TcpWire::Impaired(middlebox::Plan::Impair))?;
     for (i, case) in ["download", "upload"].into_iter().enumerate() {
         let line = run.ok_line(i, case)?;
         same_stream(line, run.served(i)?)?;
         eprintln!("  [netcase] {}", line.trim_end());
     }
-    for (way, c) in ["toward the guest", "from the guest"].into_iter().zip(counts) {
+    for (way, c) in ["toward the guest", "from the guest"].into_iter().zip(run.wire.ok_or("the run had no wire")?) {
         if c.dropped == 0 || c.swapped == 0 || c.resent < c.dropped {
             return Err(format!("the wire {way} did not impair what it claims: {c:?}"));
         }
@@ -9930,47 +9866,101 @@ fn netd_tcp_loss(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 }
 
 /// Clients killed mid-connect, mid-UDP-receive and mid-receive leave netd
-/// holding nothing of theirs, and a client whose reader leaves with the peer
-/// still sending has its connection reset: the guest's verdict, from netd's
-/// own counts, and the host's, from its sender seeing the reset.
+/// holding nothing of theirs, a client whose reader leaves with the peer
+/// still sending has its connection reset, and a UDP receive past netd's
+/// bound is refused by name with netd still serving: the guest's verdicts,
+/// from netd's own counts, and the host's, from its sender seeing the reset.
 fn netd_tcp_leaves(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     // `netd_tcp`'s `READER_LEAVES_SEED`.
     const READER_LEAVES_SEED: u64 = 77;
-    let run = netd_tcp_run(rust_bins, &["leaves", "reader_leaves"], BootOptions::default())?;
-    for (i, case) in ["leaves", "reader_leaves"].into_iter().enumerate() {
+    // netd's `MAX_PENDING_RECVS`.
+    const MAX_PENDING_RECVS: u64 = 16;
+    let cases = ["leaves", "reader_leaves", &format!("receives {MAX_PENDING_RECVS}")];
+    let run = netd_tcp_run(rust_bins, &cases, TcpWire::Plain)?;
+    for (i, case) in ["leaves", "reader_leaves", "receives"].into_iter().enumerate() {
         eprintln!("  [netcase] {}", run.ok_line(i, case)?.trim_end());
     }
-    let left = run
-        .served
-        .iter()
-        .flatten()
-        .find(|s| s.seed == READER_LEAVES_SEED && s.mode == tcppeer::Mode::Download)
-        .ok_or_else(|| format!("the host served no stream for reader_leaves: {:?}", run.served))?;
+    let left = run.served_as(tcppeer::Mode::Download, READER_LEAVES_SEED)?;
     match &left.ended {
-        Err(e) => eprintln!("  [netcase] the host's sender saw the reset: {e}"),
-        Ok(()) => return Err(format!("the host sent a stream with no end to a reader that left: {left:?}")),
+        Err((std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe, e)) => {
+            eprintln!("  [netcase] the host's sender saw the reset: {e}")
+        }
+        other => return Err(format!("the host's sender to a reader that left did not see a reset: {other:?}")),
     }
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
     Ok(())
 }
 
+/// Connections the client closes first cost it nothing: netd's whole cap and
+/// one more, each opened and closed first against a peer that never closes,
+/// are every one connected, and netd keeps no more of them than its bound.
+fn netd_tcp_closing(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let run = netd_tcp_run(rust_bins, &["closing {cap}"], TcpWire::Plain)?;
+    let line = run.ok_line(0, "closing")?;
+    serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] {}", line.trim_end());
+    Ok(())
+}
+
 /// A client killed with its stream open and quiet both ways, its peer
 /// holding it open: netd sends the FIN it owes and lets the connection go
-/// once its orphan limit has passed, and not before.
+/// once the peer has left its FIN unsent for netd's limit, and not before.
 fn netd_tcp_orphan(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    // netd's `ORPHAN_LIMIT`, in seconds.
-    const ORPHAN_LIMIT_S: u64 = 60;
-    let run = netd_tcp_run(rust_bins, &[&format!("orphan {ORPHAN_LIMIT_S}")], BootOptions::default())?;
+    let run = netd_tcp_run(rust_bins, &[&format!("orphan {FIN_WAIT_2_LIMIT_S}")], TcpWire::Plain)?;
     let line = run.ok_line(0, "orphan")?;
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
     eprintln!("  [netcase] {}", line.trim_end());
     Ok(())
 }
 
+/// netd's `FIN_WAIT_2_LIMIT`, `STALL_LIMIT` and `RST_LINGER`, in seconds.
+const FIN_WAIT_2_LIMIT_S: u64 = 60;
+const STALL_LIMIT_S: u64 = 100;
+const RST_LINGER_S: u64 = 3;
+
+/// Two clients leave bytes behind a peer that keeps its window shut: the
+/// bytes of the one whose peer opens its window after an orphan's FIN-WAIT-2
+/// limit reach the host whole, by its hash against the child's; the other is
+/// reset once nothing has moved for the stall limit.
+fn netd_tcp_orphan_owes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    // `netd_tcp`'s `orphan_owes` seeds.
+    const RELEASED: u64 = 91;
+    let case = format!("orphan_owes {FIN_WAIT_2_LIMIT_S} {STALL_LIMIT_S}");
+    let run = netd_tcp_run(rust_bins, &[&case], TcpWire::Plain)?;
+    let line = run.ok_line(0, "orphan_owes")?;
+    let child = run.results[0]
+        .stdout
+        .lines()
+        .find(|l| l.contains(&format!("netd_tcp: child_upload seed={RELEASED} ")))
+        .ok_or_else(|| format!("the released child never said what it wrote:\n{}", run.results[0].stdout))?;
+    same_stream(child, run.served_as(tcppeer::Mode::LateUpload, RELEASED)?)?;
+    serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] {}", child.trim_end());
+    eprintln!("  [netcase] {}", line.trim_end());
+    Ok(())
+}
+
+/// The wire goes dark under three streams: netd tells the one whose client
+/// writes on once its peer has been silent for the stall limit, and lets
+/// every one go though no RST can leave.
+fn netd_tcp_vanish(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let case = format!("vanish {STALL_LIMIT_S} {RST_LINGER_S}");
+    let run = netd_tcp_run(rust_bins, &[&case], TcpWire::Impaired(middlebox::Plan::Dark(switch)))?;
+    let line = run.ok_line(0, "vanish")?;
+    let [_, from_guest] = run.wire.ok_or("the run had no wire")?;
+    if from_guest.darkened == 0 {
+        return Err(format!("the wire swallowed nothing the guest sent: {from_guest:?}"));
+    }
+    serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] {}; the dark swallowed {} of the guest's frames", line.trim_end(), from_guest.darkened);
+    Ok(())
+}
+
 /// The peer's last bytes, behind a full receive pipe when its FIN arrives,
 /// outlive smoltcp's TIME-WAIT: the guest's own byte-for-byte comparison.
 fn netd_tcp_time_wait(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["time_wait"], BootOptions::default())?;
+    let run = netd_tcp_run(rust_bins, &["time_wait"], TcpWire::Plain)?;
     let line = run.ok_line(0, "time_wait")?;
     serial::Serial::named("boot console", run.console.as_str()).must_be_clean()?;
     eprintln!("  [netcase] {}", line.trim_end());
@@ -9980,7 +9970,7 @@ fn netd_tcp_time_wait(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// The local ports of connections opened one after another are not the next
 /// port each time (RFC 6056 §2.1).
 fn netd_tcp_ports(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let run = netd_tcp_run(rust_bins, &["ports 8"], BootOptions::default())?;
+    let run = netd_tcp_run(rust_bins, &["ports 8"], TcpWire::Plain)?;
     let line = run.ok_line(0, "ports")?;
     let ports: Vec<u32> = field(line, "ports")?
         .split(',')
@@ -15497,6 +15487,11 @@ fn run_machine_test(
         "netd_tcp_loss" => netd_tcp_loss(rust_bins),
         "netd_tcp_orphan" => netd_tcp_orphan(rust_bins),
         "netd_tcp_time_wait" => netd_tcp_time_wait(rust_bins),
+        "netd_tcp_closing" => netd_tcp_closing(rust_bins),
+        "netd_tcp_many_up" => netd_tcp_many_up(rust_bins),
+        "netd_tcp_neighbour" => netd_tcp_neighbour(rust_bins),
+        "netd_tcp_orphan_owes" => netd_tcp_orphan_owes(rust_bins),
+        "netd_tcp_vanish" => netd_tcp_vanish(rust_bins),
         "dns_resolve" => dns_resolve(),
         "netd_lookup_let_go" => netd_lookup_let_go(rust_bins),
         "netd_seeds_its_stack" => netd_seeds_its_stack(),

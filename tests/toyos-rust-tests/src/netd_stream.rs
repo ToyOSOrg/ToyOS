@@ -1,6 +1,6 @@
 //! The guest half of the netd stream tests' agreement with the harness's host
-//! server (`PatternServer` in `tests/toyos.rs`): a connection sends one
-//! [`Ask`], and the host serves it.
+//! server (`tests/common/tcppeer.rs`): a connection sends one [`Ask`], and
+//! the host serves it.
 //!
 //! Each netd stream test includes this file whole and uses its own part of it.
 #![allow(dead_code)]
@@ -89,16 +89,22 @@ pub enum Ask {
 /// connects to.
 pub const FORWARDED_PORT: u16 = 22;
 
-/// `what` on the wire: a mode byte, then eight little-endian bytes of length.
-pub fn ask_bytes(what: Ask) -> [u8; 9] {
-    let (mode, total) = match what {
-        Ask::Stream(total) => (0u8, total),
-        Ask::Held(total) => (1, total),
-        Ask::Dial => (2, 0),
-    };
-    let mut ask = [mode; 9];
-    ask[1..].copy_from_slice(&total.to_le_bytes());
-    ask
+/// A request on the wire: a mode byte (`tcppeer::Mode`), then the length and
+/// the seed of the stream, each eight little-endian bytes.
+pub fn request(mode: u8, len: u64, seed: u64) -> [u8; 17] {
+    let mut request = [mode; 17];
+    request[1..9].copy_from_slice(&len.to_le_bytes());
+    request[9..].copy_from_slice(&seed.to_le_bytes());
+    request
+}
+
+/// `what` on the wire.
+pub fn ask_bytes(what: Ask) -> [u8; 17] {
+    match what {
+        Ask::Stream(total) => request(4, total, 0),
+        Ask::Held(total) => request(7, total, 0),
+        Ask::Dial => request(8, 0, 0),
+    }
 }
 
 /// Send `what` on a fresh connection.

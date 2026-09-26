@@ -46,10 +46,15 @@ const NET: &[&str] = &[
     "net.piped.closing",
     "net.piped.live",
     "net.piped.max",
+    "net.piped.max_closing",
+    "net.piped.orphans",
     "net.sockets.listeners",
     "net.sockets.tcp",
+    "net.sockets.time_wait",
     "net.sockets.udp",
     "net.sockets.untabled",
+    "net.tx.waited",
+    "net.udp.waiting",
 ];
 
 pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {

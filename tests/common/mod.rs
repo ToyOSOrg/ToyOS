@@ -34,7 +34,7 @@ pub mod lan;
 pub mod logread;
 #[allow(dead_code)]
 pub mod logstream;
-/// A wire between the guest and slirp that drops and reorders TCP data.
+/// A wire between the guest and slirp that this host impairs.
 #[allow(dead_code)]
 pub mod middlebox;
 pub mod metal;

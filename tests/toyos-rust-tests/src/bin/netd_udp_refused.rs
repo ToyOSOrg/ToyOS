@@ -29,20 +29,20 @@
 
 #[path = "../netd_stream.rs"]
 mod netd_stream;
+#[path = "../netd_inspect.rs"]
+mod netd_inspect;
 
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use netd_inspect::Net;
 use netd_stream::{fill, HOST};
-use toyos::ipc::{FrameRx, RxStep};
 use toyos::net::{
     udp_bind, udp_recv_from, udp_send_to, MsgType, NetError, NetdConn, UdpBindRequest,
     UdpBindResponse, UdpRecvResponse, UdpSocketId,
 };
-use toyos::poller::{Poller, READABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_inspect::{Value, MAX_SNAPSHOT_BYTES, MSG_INSPECT, MSG_SNAPSHOT};
 
 /// Both sockets bind every address, as an ordinary client's does.
 const ANY: [u8; 4] = [0, 0, 0, 0];
@@ -150,29 +150,7 @@ fn send(socket: UdpSocketId, tx: &Pipe, echo: u16, byte: u8) {
 /// table and the resolver's are left out, so only netd's own and one that
 /// outlived its entry move it.
 fn untabled() -> u64 {
-    let conn = toyos::endow::service("netd").expect("a connection to netd");
-    conn.signal(MSG_INSPECT).expect("netd takes an inspect request");
-    let poller = Poller::new(1);
-    let mut rx: Box<FrameRx<MAX_SNAPSHOT_BYTES>> = Box::new(FrameRx::new());
-    let deadline = Instant::now() + WITHIN;
-    loop {
-        match rx.pump(&conn) {
-            RxStep::Frame { msg_type: MSG_SNAPSHOT, payload_len } => {
-                let snap = toyos_inspect::decode(rx.payload(payload_len), toyos_inspect::NET)
-                    .unwrap_or_else(|why| panic!("netd's snapshot: {why}"));
-                return match snap.get("net.sockets.untabled") {
-                    Some(Value::U64(n)) => *n,
-                    other => panic!("netd's snapshot has net.sockets.untabled as {other:?}"),
-                };
-            }
-            RxStep::Idle => {}
-            other => panic!("netd answered inspect with {other:?}, not a snapshot"),
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        assert!(!left.is_zero(), "netd did not answer inspect within {WITHIN:?}");
-        poller.watch(&conn, READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
-    }
+    Net::ask(WITHIN).count("net.sockets.untabled")
 }
 
 /// Ask netd for `socket`'s next datagram, and panic by name if no answer

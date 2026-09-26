@@ -56,7 +56,7 @@ const CONNECT_ATTEMPTS: usize = 200;
 
 /// One netd event-loop pass, which is what an attempt is waiting for.
 ///
-/// netd accepts one connection per pass, and a pass here is about this long,
+/// netd accepts one connection per pass,
 /// so this paces the client to the rate the queue drains at. **The bound is [`CONNECT_ATTEMPTS`], not this** — a slow host makes the
 /// attempts cheaper, never fewer.
 const PASS_NANOS: u64 = 1_000_000;
