@@ -341,6 +341,21 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(SCHED_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
         "parked with the condition true and no wake owed: the post was lost",
     ]),
+    // The notify's flagged arm answering off a load: a second post reads the
+    // word from before the waiter consumed the first flag.
+    red(SCHED_LOOM, "notify-flag-load-only", Some("loom_watch"), &[
+        "parked with both conditions true and no wake owed: a post answered off a load",
+    ]),
+    // The stop's store-buffering pair with the gate's fences gone.
+    red(SCHED_LOOM, "gate-fence-off", Some("loom_watch"), &[
+        "the stop parked over a thread that had parked, and nothing posted it",
+    ]),
+    // `kernel-loom`'s control, over the kernel's `Once` as the watch models'
+    // ring entry.
+    red(SCHED_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
+        "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
+        "a_poll_on_two_watches_racing_both_posts_completes_exactly_once ... FAILED",
+    ]),
     // Reproduces an open defect
     // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
     // proving a lie is caught, and goes with its fix.

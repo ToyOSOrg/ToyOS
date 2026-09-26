@@ -51,7 +51,7 @@ pub struct SleepLock<T> {
     now: AtomicTicket,
     /// [`FREE`], [`NOT_A_TASK`], or the holder's packed [`TaskId`]; not part of the ticket pair's exclusion.
     holder: AtomicU64,
-    /// Contenders arm here with their own ticket as token; `watch::arm` refuses a second arm per inbox, so [`Self::lock`] must not be called from inside an armed wait's predicate.
+    /// Contenders arm here with their own ticket as token.
     watch: Watch,
     data: UnsafeCell<T>,
 }

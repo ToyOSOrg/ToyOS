@@ -142,9 +142,11 @@ pub fn wait_uncancellable(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) {
     }
 }
 
-/// Register, then park until `ready()` holds, the deadline passes, or this
-/// thread is cancelled. `Ok` on the deadline too: the deadline is the
-/// caller's, and it reads its own condition again to tell the two apart.
+/// Register, then park until `ready()` holds, the deadline passes, a revoke
+/// ends the registration, or this thread is cancelled. `Ok` on the deadline
+/// and the revoke too: the deadline is the caller's, a revoked subject cannot
+/// be waited on again safely, and the caller reads its own condition again to
+/// tell them apart.
 #[track_caller]
 pub fn wait_until(
     p: &Parkable,
@@ -162,30 +164,62 @@ pub fn wait_until(
         return Ok(());
     };
     while !ready() {
-        if deadline.reached(crate::clock::now()) {
+        if armed.shared.revoked() || deadline.reached(crate::clock::now()) {
             return Ok(());
         }
         #[cfg(feature = "boot-actuators")]
-        hold_the_window(&armed);
+        window::hold(&armed);
         wait(p, &armed, deadline)?;
     }
     Ok(())
 }
 
-/// `watch-window`: hold a waiter between reading its condition false and its
-/// phase 1 until a post lands there — the post only the notified bit carries.
-/// The bound is for the waits nothing posts, a sleep's: past it the hold has
-/// staged nothing and the wait goes on as it would have.
+/// `watch-window`: hold a pipe waiter between reading its condition false and
+/// its phase 1 until a post lands there — the post only the notified bit
+/// carries to the commit — or its budget lapses. The holds a post ended are
+/// counted, and every [`window::STEP`]th is a line the harness reads: a boot
+/// whose count did not move staged nothing, however green its canary.
 #[cfg(feature = "boot-actuators")]
-fn hold_the_window(armed: &Armed<'_>) {
-    if !crate::actuator::watch_window() {
-        return;
-    }
-    for _ in 0..20_000 {
-        if armed.shared.notified() {
+pub mod window {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    use toyos_sched::task::WaitClass;
+
+    use super::Armed;
+    use crate::time::{Budget, Deadline, Duration};
+
+    /// What `blocking_read_window` counts: the line's words, then the count.
+    pub const HELD: &str = "watch-window: a post landed in the held window";
+
+    /// One line per this many holds a post ended.
+    pub const STEP: u64 = 64;
+
+    /// A pipe wait nothing posts — a reader whose writer is idle — ends its
+    /// hold here and waits on unstaged; the count of those is on every line.
+    const WINDOW: Budget = Budget::of(
+        Duration::from_millis(50),
+        "the wait goes on unstaged, counted as lapsed",
+    );
+
+    static POSTED: AtomicU64 = AtomicU64::new(0);
+    static LAPSED: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn hold(armed: &Armed<'_>) {
+        if !crate::actuator::watch_window() || armed.class != WaitClass::Pipe {
             return;
         }
-        core::hint::spin_loop();
+        let deadline = Deadline::at(crate::clock::now() + WINDOW.duration());
+        while !armed.shared.notified() {
+            if deadline.reached(crate::clock::now()) {
+                LAPSED.fetch_add(1, Relaxed);
+                return;
+            }
+            core::hint::spin_loop();
+        }
+        let posted = POSTED.fetch_add(1, Relaxed) + 1;
+        if posted % STEP == 0 {
+            crate::log!("{HELD} {posted} times, {} lapsed", LAPSED.load(Relaxed));
+        }
     }
 }
 
@@ -204,6 +238,7 @@ pub fn wait_uncancellable_until(p: &Parkable, watch: &Watch, token: u64, ready: 
     // Exits only on the predicate: returning without it here means returning
     // without the lock held.
     while !ready() {
+        assert!(!armed.shared.revoked(), "watch: a revoke reached a wait only its predicate ends");
         wait_uncancellable(p, &armed, Deadline::never());
     }
 }

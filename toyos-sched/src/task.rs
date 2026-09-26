@@ -187,8 +187,13 @@ const MID_UPDATE: u64 = 1 << 60;
 /// recheck rather than a lost wake. Written only by read-modify-writes of this
 /// word, so a post and a commit are ordered by the one location both write.
 const NOTIFIED: u64 = 1 << 59;
+/// A revoke took this task's registration out of its watch: no post can reach
+/// the wait any more, so no commit may park for it. Set in the same
+/// read-modify-write as the revoke's claim or flag, never consumed by a
+/// commit, and cleared only by the task's own next registration.
+const REVOKED: u64 = 1 << 58;
 /// What every transition carries over.
-const KEPT: u64 = STICKY | MID_UPDATE | NOTIFIED;
+const KEPT: u64 = STICKY | MID_UPDATE | NOTIFIED | REVOKED;
 
 /// What a thread standing at a Ring 3 boundary does instead of returning to
 /// userland.
@@ -475,9 +480,10 @@ impl<M> TaskShared<M> {
 
     /// Phase 1 of the wait handshake: `Running(cpu) → Committing(cpu, gen)`,
     /// or [`Notified`] — the bit consumed and the word left `Running` — when a
-    /// post reached this task since it registered. The generation advances on
-    /// every registration, so a claim that raced an earlier registration
-    /// cannot commit this one.
+    /// post reached this task since it registered. A revoked registration is
+    /// refused the same way on every call, without consuming anything. The
+    /// generation advances on every registration, so a claim that raced an
+    /// earlier registration cannot commit this one.
     pub fn begin_commit(&self, cpu: CpuId) -> Result<Gen, Notified> {
         let mut cur = self.state.load(Ordering::Acquire);
         loop {
@@ -486,6 +492,9 @@ impl<M> TaskShared<M> {
                 TaskState::Running(cpu),
                 "park::prepare outside the running task's own CPU",
             );
+            if cur & REVOKED != 0 {
+                return Err(Notified);
+            }
             // `commit-ignores-notify` is the negative control: blind to the bit, a
             // post between registration and commit is lost, and `loom_watch` reds.
             let notified = cfg!(not(feature = "commit-ignores-notify")) && cur & NOTIFIED != 0;
@@ -543,10 +552,8 @@ impl<M> TaskShared<M> {
         ParkOutcome::AlreadyWoken
     }
 
-    /// The one arbitration point every wake goes through — remote wakers,
-    /// local deadline fires, join, device ISR tails. There is no second path.
-    /// A claim on anything but a waiter is lost: this is the deadline's claim,
-    /// which must not flag a task it did not park. A post uses [`Self::notify`].
+    /// The deadline's claim: one on anything but a waiter is lost, because it
+    /// must not flag a task it did not park. A post uses [`Self::notify`].
     pub fn claim_wake(&self) -> Claim {
         loop {
             match self.state() {
@@ -578,20 +585,45 @@ impl<M> TaskShared<M> {
     /// followed by a load of another location — the one reordering that loses
     /// a wake — so it is never allowed to answer without a write.
     pub fn notify(&self) -> Notify {
+        self.post(0)
+    }
+
+    /// [`Self::notify`], and the task's registration is gone for good: every
+    /// [`Self::begin_commit`] refuses until the task registers again, so the
+    /// waiter re-reads its condition and cannot park where no post reaches.
+    pub fn revoke(&self) -> Notify {
+        self.post(REVOKED)
+    }
+
+    /// Whether a revoke ended this task's current registration.
+    pub fn revoked(&self) -> bool {
+        self.state.load(Ordering::Acquire) & REVOKED != 0
+    }
+
+    fn post(&self, also: u64) -> Notify {
         let mut cur = self.state.load(Ordering::Acquire);
         loop {
             let (next, outcome) = match unpack(cur) {
                 TaskState::Blocked(cpu) => {
-                    (retarget(cur, TaskState::WakeQueued(cpu)), Notify::Parked(cpu))
+                    (retarget(cur, TaskState::WakeQueued(cpu)) | also, Notify::Parked(cpu))
                 }
                 TaskState::Committing(cpu, _) => {
-                    (retarget(cur, TaskState::WakeQueued(cpu)), Notify::PrePark)
+                    (retarget(cur, TaskState::WakeQueued(cpu)) | also, Notify::PrePark)
                 }
                 TaskState::Dead => return Notify::Dead,
                 TaskState::Running(_)
                 | TaskState::Ready(_)
                 | TaskState::WakeQueued(_)
-                | TaskState::InTransit(_) => (cur | NOTIFIED, Notify::Flagged),
+                | TaskState::InTransit(_) => {
+                    let next = cur | NOTIFIED | also;
+                    // `notify-flag-load-only` is the negative control: a post
+                    // that finds its bits set answers off a load, and
+                    // `loom_watch`'s two-producer model reds.
+                    if cfg!(feature = "notify-flag-load-only") && next == cur {
+                        return Notify::Flagged;
+                    }
+                    (next, Notify::Flagged)
+                }
             };
             match self
                 .state
@@ -603,11 +635,11 @@ impl<M> TaskShared<M> {
         }
     }
 
-    /// Forget a post that reached an earlier wait: called at registration,
-    /// before the watch can see this task, so no post for the new wait can be
-    /// the one forgotten.
-    pub fn clear_notified(&self) {
-        self.state.fetch_and(!NOTIFIED, Ordering::AcqRel);
+    /// Forget a post or a revoke that reached an earlier wait: called at
+    /// registration, before the watch can see this task, so nothing for the
+    /// new wait can be the one forgotten.
+    pub fn forget_posts(&self) {
+        self.state.fetch_and(!(NOTIFIED | REVOKED), Ordering::AcqRel);
     }
 
     /// Whether a post is waiting to be consumed by this task's next commit.
@@ -1373,12 +1405,14 @@ mod tests {
         assert!(s.notified(), "the bit rides the wake to the next commit");
     }
 
-    /// Registration forgets what reached an earlier wait.
+    /// Registration forgets what reached an earlier wait, a revoke included.
     #[test]
-    fn clearing_forgets_a_post_to_an_earlier_wait() {
+    fn registration_forgets_a_post_or_revoke_to_an_earlier_wait() {
         let s = running(C0);
-        s.notify();
-        s.clear_notified();
+        s.revoke();
+        assert_eq!(s.begin_commit(C0), Err(Notified));
+        assert_eq!(s.begin_commit(C0), Err(Notified), "a revoke is not spent by a refusal");
+        s.forget_posts();
         assert!(s.begin_commit(C0).is_ok());
     }
 

@@ -39,13 +39,11 @@
 //!
 //! Lock order: [`process::PROCESS_TABLE`] alone.
 
-use core::sync::atomic::{
-    AtomicBool, AtomicU32, AtomicU8, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
-    Ordering::Release,
-};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Relaxed};
 
 use toyos_quiesce::{Record, Stage, Sweep, Thread, ThreadId};
 use toyos_sched::task::WaitClass;
+use toyos_sched::watch::Gate;
 
 use crate::arch::percpu;
 use crate::watch::{self, Watch};
@@ -68,14 +66,16 @@ const PARK: Budget = Budget::of(
      the record names how many",
 );
 
-const RUNNING: u8 = 0;
-const EXCEPT_LOG: u8 = 1;
-const ALL: u8 = 2;
+const RUNNING: u32 = 0;
+const EXCEPT_LOG: u32 = 1;
+const ALL: u32 = 2;
 
 /// Which stage this machine is in. **The one word every other read here hangs
-/// off**: it is stored last with `Release` and loaded first with `Acquire`, so
-/// a gate that sees a stage sees the caller that goes with it.
-static STAGE: AtomicU8 = AtomicU8::new(RUNNING);
+/// off**: it is opened last and read first, so a reader that sees a stage sees
+/// the caller that goes with it. A [`Gate`], because [`note_progress`] reads it
+/// after the transition [`stop`]'s sweep reads, and the stop opens it before
+/// that sweep: the gate's fences are what keep both from reading stale.
+static STAGE: Gate = Gate::new(RUNNING);
 
 /// The thread running the stop, which never stops itself; no thread at all
 /// until [`stop`] stores one, spelt as `percpu` spells idle.
@@ -83,7 +83,11 @@ static CALLER_PID: AtomicU32 = AtomicU32::new(u32::MAX);
 static CALLER_TID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 fn stage() -> Option<Stage> {
-    match STAGE.load(Acquire) {
+    decode(STAGE.read())
+}
+
+fn decode(stage: u32) -> Option<Stage> {
+    match stage {
         EXCEPT_LOG => Some(Stage::ExceptLog),
         ALL => Some(Stage::All),
         _ => None,
@@ -97,7 +101,11 @@ fn caller() -> ThreadId {
 /// Whether the machine's stop names the running thread, for the one Ring 3
 /// boundary that ranks this against the kill mark.
 pub fn stops_this_thread() -> bool {
-    let Some(stage) = stage() else { return false };
+    stops(stage())
+}
+
+fn stops(stage: Option<Stage>) -> bool {
+    let Some(stage) = stage else { return false };
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
         return false;
     };
@@ -131,7 +139,7 @@ static PROGRESS: Watch = Watch::new();
 /// before one: a sweep woken first would find it still running and wait for a
 /// post that has already come.
 pub fn note_progress() {
-    if stops_this_thread() {
+    if stops(decode(STAGE.after_write())) {
         PROGRESS.post();
     }
 }
@@ -172,15 +180,11 @@ pub fn stop(stage: Stage) -> Record {
     };
     CALLER_PID.store(caller.pid, Relaxed);
     CALLER_TID.store(caller.tid, Relaxed);
-    // Last, and `Release`: a gate that sees this stage sees the caller it must
-    // not stop.
-    STAGE.store(
-        match stage {
-            Stage::ExceptLog => EXCEPT_LOG,
-            Stage::All => ALL,
-        },
-        Release,
-    );
+    // Last: a gate that sees this stage sees the caller it must not stop.
+    STAGE.open(match stage {
+        Stage::ExceptLog => EXCEPT_LOG,
+        Stage::All => ALL,
+    });
 
     // Armed before the first sweep, so a transition landing between a sweep
     // and the park after it is a post that park returns on at once.

@@ -4,15 +4,16 @@
 //! There is no queue here. What a task waits *for* is a [`crate::watch::Watch`]
 //! it registered on; where it parks is itself. Every wake in the system — a
 //! post, a direct notify, a remote waker — terminates in
-//! [`TaskShared::notify`]'s read-modify-write of that word, and the local
-//! deadline fire in [`TaskShared::claim_wake`]'s. There is no third path.
+//! [`TaskShared::notify`]'s read-modify-write of that word (a revoke is the
+//! same write with one more bit), and the local deadline fire in
+//! [`TaskShared::claim_wake`]'s. There is no third path.
 //!
 //! The shape a blocking site must have:
 //!
 //! ```text
 //! watch.register(task)
 //! loop {
-//!     if ready() { break }
+//!     if ready() || task.revoked() { break }   // a revoke ends the wait
 //!     let Ok(t) = prepare(cur) else { continue };   // a post since registering
 //!     match t.commit() { Parked => block, AlreadyWoken => continue, Killed => unwind }
 //! }
@@ -86,7 +87,30 @@ pub fn notify<M: SchedMsg>(
     kicker: &impl Kicker,
     preempt: &impl PreemptGuard,
 ) -> Notify {
-    let outcome = shared.notify();
+    deliver(shared, shared.notify(), cause, cpus, kicker, preempt)
+}
+
+/// [`notify`] for a registration a watch has taken out: the task is woken or
+/// flagged the same way, and it cannot park again until it registers again,
+/// because no post can reach that park.
+pub fn revoke<M: SchedMsg>(
+    shared: &Arc<TaskShared<M>>,
+    cause: WakeCause,
+    cpus: &CpuHandles<M>,
+    kicker: &impl Kicker,
+    preempt: &impl PreemptGuard,
+) -> Notify {
+    deliver(shared, shared.revoke(), cause, cpus, kicker, preempt)
+}
+
+fn deliver<M: SchedMsg>(
+    shared: &Arc<TaskShared<M>>,
+    outcome: Notify,
+    cause: WakeCause,
+    cpus: &CpuHandles<M>,
+    kicker: &impl Kicker,
+    preempt: &impl PreemptGuard,
+) -> Notify {
     if let Notify::Parked(cpu) = outcome {
         // The claim CAS admits exactly one poster, so the node is free (I12).
         let slot = shared

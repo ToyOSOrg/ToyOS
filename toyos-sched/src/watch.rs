@@ -21,9 +21,10 @@
 //! behind, so the list never holds more than the polls live at its last post or
 //! registration, plus that one.
 //!
-//! **Lock order.** The list lock is a leaf the environment supplies, and nothing
-//! but a thread's notify runs under it: [`Ring::fire`] is always called with it
-//! let go. So a post may be made under any lock but a ring's own.
+//! **Lock order.** The list lock is a leaf the environment supplies:
+//! [`Ring::fire`] is always called with it let go, and so is the drop of every
+//! entry the list lets go of, because an entry's last reference may own another
+//! watch. So a post may be made under any lock but a ring's own.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -31,8 +32,8 @@ use core::marker::PhantomData;
 use crate::cpu::CpuHandles;
 use crate::hw::Kicker;
 use crate::mailbox::{PreemptGuard, SchedMsg};
-use crate::park::notify;
-use crate::sync::{Arc, LeafLock};
+use crate::park::{notify, revoke};
+use crate::sync::{fence, Arc, AtomicU32, LeafLock, Ordering};
 use crate::task::{TaskShared, WakeCause};
 
 /// Why a ring entry is posted.
@@ -117,14 +118,15 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
     /// any post for this one can find it.
     pub fn register(&self, task: &Arc<TaskShared<M>>, token: u64) {
         assert!(task.set_waiting(), "a task waits on at most one watch");
-        task.clear_notified();
-        self.list.with(|w| {
-            w.rings.retain(Ring::live);
+        task.forget_posts();
+        let dead = self.list.with(|w| {
             w.threads.push(Waiter {
                 task: task.clone(),
                 token,
             });
+            sweep(&mut w.rings)
         });
+        drop(dead);
     }
 
     /// End one wait. Idempotent against [`Self::revoke`], which may have taken
@@ -142,10 +144,12 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
     /// after this returns and fires the entry itself if the object is already
     /// ready — the ring's half of the same order a thread keeps.
     pub fn add_ring(&self, entry: R) {
-        self.list.with(|w| {
-            w.rings.retain(Ring::live);
+        let dead = self.list.with(|w| {
+            let dead = sweep(&mut w.rings);
             w.rings.push(entry);
+            dead
         });
+        drop(dead);
     }
 
     /// Something changed: wake every registered thread, and fire and let go of
@@ -194,8 +198,9 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
 
     /// End every wait whose token `names`, taking the registrations out before
     /// posting so no later post for a token that now names something else can
-    /// reach them; answer how many there were. Each woken thread finds its own
-    /// condition changed and unregisters, which is then a no-op.
+    /// reach them; answer how many there were. A revoked thread cannot park
+    /// again in this wait, whatever its condition reads, and its unregister is
+    /// then a no-op.
     pub fn revoke<K: Kicker, P: PreemptGuard>(
         &self,
         names: impl Fn(u64) -> bool,
@@ -211,7 +216,7 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
                     continue;
                 }
                 let waiter = w.threads.remove(at);
-                notify(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
+                revoke(&waiter.task, cause, env.cpus, env.kicker, env.preempt);
                 ended += 1;
             }
             ended
@@ -237,6 +242,65 @@ impl<M: SchedMsg, R: Ring, L: LeafLock<Waiters<M, R>>> Watch<M, R, L> {
     pub fn live_rings(&self) -> usize {
         self.list.with(|w| w.rings.iter().filter(|r| r.live()).count())
     }
+}
+
+/// A word in front of a watch that its posters read to learn whether a post is
+/// owed at all, for a waiter whose condition is a sweep of words the posters
+/// write: the machine's stop, whose posters are every thread's park, band and
+/// exit, and whose watch no poster may take a lock for until a stop begins.
+///
+/// **Each side is a store followed by a load of another location**: the waiter
+/// opens the gate and then sweeps the posters' words; a poster writes its own
+/// word and then reads the gate. So each side puts a `SeqCst` fence between the
+/// two, and either the poster sees the gate open and posts, or the sweep sees
+/// the poster's write. Without the fences both may read the old value, which
+/// x86's locked read-modify-writes hide and ARM64 does not.
+/// `loom_watch`'s `a_transition_racing_an_opening_gate_is_never_missed` is the
+/// model and `gate-fence-off` its control.
+pub struct Gate(AtomicU32);
+
+impl Gate {
+    #[cfg(not(feature = "loom"))]
+    pub const fn new(value: u32) -> Self {
+        Self(AtomicU32::new(value))
+    }
+
+    // Loom's atomics have no const constructor, so this arm alone drops `const`.
+    #[cfg(feature = "loom")]
+    pub fn new(value: u32) -> Self {
+        Self(AtomicU32::new(value))
+    }
+
+    /// The waiter's side: publish `value`, then sweep.
+    pub fn open(&self, value: u32) {
+        self.0.store(value, Ordering::Release);
+        gate_fence();
+    }
+
+    /// The poster's side, after the write its waiter sweeps for.
+    pub fn after_write(&self) -> u32 {
+        gate_fence();
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// A reader that owes nobody a post.
+    pub fn read(&self) -> u32 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+fn gate_fence() {
+    // `gate-fence-off` is the negative control: without the fence either side
+    // may read the other's old value, and `loom_watch` reds.
+    if cfg!(not(feature = "gate-fence-off")) {
+        fence(Ordering::SeqCst);
+    }
+}
+
+/// Take out the entries that can no longer fire, for the caller to drop once
+/// the list lock is let go.
+fn sweep<R: Ring>(rings: &mut Vec<R>) -> Vec<R> {
+    rings.extract_if(.., |r| !r.live()).collect()
 }
 
 /// An object that ends with polls still registered answers them: dropping a
@@ -433,6 +497,94 @@ mod tests {
         w.unregister(&inside);
         w.unregister(&outside);
         assert!(!inside.is_waiting() && !outside.is_waiting());
+    }
+
+    /// Phase 1, for a waiter that must not get past it: a ticket it did begin
+    /// is withdrawn before the test fails, so the failure is this one.
+    fn refused(t: &Arc<TaskShared<Msg>>, why: &str) {
+        if let Ok(ticket) = prepare(&CurrentTask::new(t, C0), Cancel::Answers, WaitClass::Other) {
+            let _ = ticket.cancel();
+            panic!("{why}");
+        }
+    }
+
+    /// A revoke ends the wait. The waiter it woke re-reads a condition the
+    /// revoke did not make true — a futex word whose frame came back zeroed at
+    /// the same address — and no later iteration of its loop may park: the
+    /// registration is gone, so no post could ever reach that park.
+    #[test]
+    fn a_revoked_waiter_cannot_park_again() {
+        let (handles, mut rx) = cpus();
+        let env = Poster { cpus: &handles, kicker: &NoKick, preempt: &NoPreempt };
+        let w = watch();
+        let t = task(1);
+        w.register(&t, 0x1000);
+        parked(&t);
+        assert_eq!(w.revoke(|token| token == 0x1000, woken(), &env), 1);
+        assert_eq!(rx.pop(&NoPreempt), Some(Msg::Wake(TaskKey(1))));
+        assert!(t.finish_wake(C0));
+        assert!(t.transition(TaskState::Ready(C0), TaskState::Running(C0)));
+        for _ in 0..2 {
+            refused(&t, "a revoked waiter began a park no post can end");
+        }
+        w.unregister(&t);
+    }
+
+    /// The same, for a revoke that finds the waiter still running between its
+    /// registration and its park: the refusal it causes is not spent by one
+    /// iteration.
+    #[test]
+    fn a_waiter_revoked_before_it_parks_cannot_park() {
+        let (handles, _rx) = cpus();
+        let env = Poster { cpus: &handles, kicker: &NoKick, preempt: &NoPreempt };
+        let w = watch();
+        let t = task(1);
+        w.register(&t, 0x1000);
+        assert_eq!(w.revoke(|token| token == 0x1000, woken(), &env), 1);
+        for _ in 0..2 {
+            refused(&t, "a revoked waiter began a park no post can end");
+        }
+        w.unregister(&t);
+    }
+
+    /// A spent entry whose drop reports whether its watch's list lock is held:
+    /// the kernel's last reference to a poll can own a second watch, whose own
+    /// drop takes that watch's lock.
+    struct Tattler {
+        list: std::sync::Weak<Mutex<Waiters<Msg, Tattler>>>,
+    }
+
+    impl Ring for Tattler {
+        fn fire(&self, _how: Fire) {}
+        fn live(&self) -> bool {
+            false
+        }
+    }
+
+    impl Drop for Tattler {
+        fn drop(&mut self) {
+            let list = self.list.upgrade().expect("the watch outlives its entries");
+            assert!(list.try_lock().is_ok(), "an entry was dropped under its watch's list lock");
+        }
+    }
+
+    struct SharedLock(Arc<Mutex<Waiters<Msg, Tattler>>>);
+    impl LeafLock<Waiters<Msg, Tattler>> for SharedLock {
+        fn with<U>(&self, f: impl FnOnce(&mut Waiters<Msg, Tattler>) -> U) -> U {
+            f(&mut self.0.lock().unwrap())
+        }
+    }
+
+    #[test]
+    fn a_sweep_drops_what_it_took_out_with_the_list_lock_let_go() {
+        let list = Arc::new(Mutex::new(Waiters::new()));
+        let w: Watch<Msg, Tattler, SharedLock> = Watch::new(SharedLock(list.clone()));
+        w.add_ring(Tattler { list: Arc::downgrade(&list) });
+        w.add_ring(Tattler { list: Arc::downgrade(&list) });
+        let t = task(1);
+        w.register(&t, 0);
+        w.unregister(&t);
+        assert_eq!(w.live_rings(), 0);
     }
 
     /// Dead entries do not accumulate: every registration sweeps them.

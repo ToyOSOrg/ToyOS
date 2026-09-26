@@ -212,8 +212,7 @@ struct Run {
     /// one is, which is what leaves an ordinary boot's gate on the quiet reads
     /// alone.
     last_producer_at: Option<Instant>,
-    /// Times the log's readiness source completed a poll. The `Source::Log`
-    /// half of L4, asserted rather than assumed.
+    /// Times the log's readiness source completed a poll.
     completions: u64,
 }
 
@@ -330,11 +329,11 @@ fn gate(cap: &SysCap) -> Result<(), String> {
     // Every completion above is a `klogd` post landing while this poll happened
     // to be pending, and during a storm that is a race against eight producers:
     // it measured `wakes=1` at `--smp 4` and **zero** at `--smp 8` once
-    // `/system/bin/logd` was reading the cursor too, which is a red about scheduling
-    // and not about `Source::Log`. So if the storm produced none, make one —
-    // the shape `log_poll_outlives_a_close` already proves on this tree: a child
-    // that runs and exits commits `process.rs`'s `exit:` line, which is one
-    // kernel record from userland with no actuator and no privilege behind it.
+    // `/system/bin/logd` was reading the cursor too, which is a red about
+    // scheduling. So if the storm produced none, make one — the shape
+    // `log_poll_outlives_a_close` already proves on this tree: a child that
+    // runs and exits commits `process.rs`'s `exit:` line, which is one kernel
+    // record from userland with no actuator and no privilege behind it.
     if run.completions == 0 {
         let mut child = std::process::Command::new("/system/bin/echo")
             .arg("log-gate")

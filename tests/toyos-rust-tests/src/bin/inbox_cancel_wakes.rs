@@ -1,12 +1,5 @@
 //! A cancelled `OP_WATCH` must wake the thread that is waiting for it.
 //!
-//! `io_uring::cancel_by_source` cancels every pending poll on a source that is going
-//! away and posts `-NotFound` for each, so the caller knows to look at the
-//! handle again. It posted them into the ring and woke nobody — and nothing
-//! else can end that wait: the poll is gone, so the source's own wake path
-//! finds no watcher for it, and a `u64::MAX` wait therefore never returns.
-//! Every server in the tree waits that way.
-//!
 //! Two descriptors on one pipe, which is what an ordinary `dup`/`dup2` of
 //! stdio leaves behind, and closing one of them is the whole stimulus. The
 //! pipe keeps a reader either way, so `close_read`'s own wake path is not

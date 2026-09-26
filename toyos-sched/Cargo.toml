@@ -62,3 +62,14 @@ placement-ignores-staleness = []
 # `loom/tests/loom_watch.rs` must red when it does. No kernel build reaches it;
 # the crate declares it only so `cfg` checking knows the name.
 commit-ignores-notify = []
+# Declared, never enabled here: `toyos-sched-loom` turns this on to let
+# `task.rs`'s notify answer a post that finds its bits already set off a load
+# rather than a read-modify-write, and `loom/tests/loom_watch.rs` must red when
+# it does. No kernel build reaches it; the crate declares it only so `cfg`
+# checking knows the name.
+notify-flag-load-only = []
+# Declared, never enabled here: `toyos-sched-loom` turns this on to remove the
+# two `SeqCst` fences of `watch.rs`'s `Gate`, and `loom/tests/loom_watch.rs`
+# must red when it does — the stop's store-buffering pair. No kernel build
+# reaches it; the crate declares it only so `cfg` checking knows the name.
+gate-fence-off = []
