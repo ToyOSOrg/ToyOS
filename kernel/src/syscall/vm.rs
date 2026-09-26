@@ -283,12 +283,12 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         let data = data_arc.lock();
         crate::elf::resolve_dlopen_relocs(&lib, &data.elf.loaded_libs);
 
-        if data.elf.tls_total_memsz > 0 {
+        if data.elf.tls.total_memsz() > 0 {
             let tls_info = crate::elf::TlsModuleInfo {
                 libs: &data.elf.loaded_libs,
                 modules: &data.elf.tls_modules,
             };
-            crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls_total_memsz, &tls_info);
+            crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls, &tls_info);
         }
 
         // init_info layout: [init_array_vaddr, init_array_count], vaddr rebased to user_base.

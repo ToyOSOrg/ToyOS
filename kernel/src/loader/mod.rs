@@ -17,7 +17,7 @@ mod tls;
 pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
 pub(crate) use start::alloc_kernel_stack;
 pub(crate) use crate::arch::entry::{kernel_start, process_start, thread_start};
-pub use tls::{setup_combined_tls, setup_tls, DTV_INITIAL_CAPACITY};
+pub use tls::{setup_combined_tls, setup_tls, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
 pub(crate) use tls::rebase_block;
 
 use alloc::string::String;
@@ -536,7 +536,7 @@ pub fn spawn(
         None => None,
     };
 
-    let Some((tls_modules, tls_total_memsz, max_tls_align, next_tls_module_id)) =
+    let Some((tls_modules, tls, next_tls_module_id)) =
         tls::build_tls_layout(&loaded_libs.libs, &layout, exe_tls_template.as_ref())
     else {
         log!("spawn: {}: the TLS modules do not fit one block", path);
@@ -544,7 +544,7 @@ pub fn spawn(
     };
 
     apply_tls_relocs(&exe, backing.as_ref(), &loaded_libs.libs, &tls_modules,
-        tls_total_memsz, &mut reloc_index);
+        tls, &mut reloc_index);
 
     reloc_index.finalize();
     let reloc_index = if reloc_index.len() > 0 {
@@ -554,11 +554,11 @@ pub fn spawn(
         None
     };
 
-    log!("spawn: TLS {} modules, total_memsz={}", tls_modules.len(), tls_total_memsz);
+    log!("spawn: TLS {} modules, total_memsz={}", tls_modules.len(), tls.total_memsz());
     let Some((tls_pages, fs_base)) =
-        tls::map_block(&child_pt, &tls_modules, tls_total_memsz, max_tls_align)
+        tls::map_block(&child_pt, &tls_modules, tls)
     else {
-        log!("spawn: {}: failed to allocate TLS ({} bytes)", path, tls_total_memsz);
+        log!("spawn: {}: failed to allocate TLS ({} bytes)", path, tls.total_memsz());
         return Err(SyscallError::ResourceExhausted.into());
     };
 
@@ -594,8 +594,7 @@ pub fn spawn(
         elf: ElfInfo {
             elf_alloc: exe_tls_template,
             tls_modules,
-            tls_total_memsz,
-            tls_max_align: max_tls_align,
+            tls,
             next_tls_module_id,
             dynamic_tls_blocks: alloc::collections::BTreeMap::new(),
             loaded_libs,
@@ -795,7 +794,7 @@ fn apply_tls_relocs(
     backing: &dyn crate::file_backing::FileBacking,
     loaded_libs: &[elf::LoadedLib],
     tls_modules: &[elf::TlsModule],
-    tls_total_memsz: usize,
+    tls: toyos_elf::tls::Static,
     reloc_index: &mut elf::RelocationIndex,
 ) {
     let tls_info = elf::TlsModuleInfo { libs: loaded_libs, modules: tls_modules };
@@ -804,7 +803,7 @@ fn apply_tls_relocs(
         let module = tls_modules.iter().find(|m| m.template == lib.tls_template);
         let base_offset = module.map_or(0, |m| m.base_offset);
         // Initial-exec: references to TLS in the static block.
-        elf::apply_tpoff_relocs(lib, base_offset, tls_total_memsz, &tls_info);
+        elf::apply_tpoff_relocs(lib, base_offset, tls, &tls_info);
         // General-dynamic: this lib's own TLS, reached through the DTV.
         if let Some(m) = module {
             elf::apply_dtpmod_relocs(lib, m.module_id, &tls_info);
@@ -817,12 +816,12 @@ fn apply_tls_relocs(
         .map_or(0, |m| m.base_offset);
     for &(r_offset, r_sym, r_addend) in &exe.relas.tpoff64 {
         let tpoff = exe_tpoff(exe, backing, r_sym, r_addend, exe_base_offset,
-            tls_total_memsz, &tls_info);
+            tls, &tls_info);
         reloc_index.add_u64(r_offset, tpoff as u64);
     }
     for &(r_offset, r_sym, r_addend) in &exe.relas.tpoff32 {
         let tpoff = exe_tpoff(exe, backing, r_sym, r_addend, exe_base_offset,
-            tls_total_memsz, &tls_info);
+            tls, &tls_info);
         reloc_index.add_i32(r_offset, tpoff as i32);
     }
 }
@@ -838,10 +837,10 @@ fn exe_tpoff(
     r_sym: u32,
     r_addend: i64,
     exe_base_offset: usize,
-    total_memsz: usize,
+    tls: toyos_elf::tls::Static,
     tls_info: &elf::TlsModuleInfo,
 ) -> i64 {
-    let unnamed = toyos_elf::tls::tpoff(exe_base_offset as u64, r_addend, total_memsz);
+    let unnamed = tls.tpoff(exe_base_offset as u64, r_addend);
     if r_sym == 0 {
         return unnamed;
     }
@@ -849,7 +848,7 @@ fn exe_tpoff(
         return unnamed;
     };
     if sym.is_defined() {
-        return toyos_elf::tls::tpoff(exe_base_offset as u64 + sym.value, r_addend, total_memsz);
+        return tls.tpoff(exe_base_offset as u64 + sym.value, r_addend);
     }
 
     let name = toyos_elf::cstr(&exe.dynstr, sym.name as u64);
@@ -858,7 +857,7 @@ fn exe_tpoff(
     // rather than guessed at with base_offset 0.
     match elf::defining_module(name, tls_info) {
         Some((module, sym_offset)) => {
-            toyos_elf::tls::tpoff(module.base_offset as u64 + sym_offset, r_addend, total_memsz)
+            tls.tpoff(module.base_offset as u64 + sym_offset, r_addend)
         }
         None => {
             log!("tpoff: unresolved exe TLS symbol: {}", name);

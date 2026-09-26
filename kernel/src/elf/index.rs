@@ -17,6 +17,8 @@ pub struct ParsedRelaEntries {
     pub glob_dat: Vec<(u64, u32, i64)>,
     pub tpoff64: Vec<(u64, u32, i64)>,
     pub tpoff32: Vec<(u64, u32, i64)>,
+    /// `R_AARCH64_TLSDESC`, kept only so `rela::validate` refuses the image by name.
+    pub tlsdesc: Vec<(u64, u32, i64)>,
 }
 
 impl ParsedRelaEntries {
@@ -35,7 +37,10 @@ impl ParsedRelaEntries {
         let t32 = self.tpoff32.iter().map(|&(offset, sym, addend)| Rela {
             offset, sym, kind: RelocKind::Tpoff32, addend,
         });
-        rel.chain(bind).chain(t64).chain(t32)
+        let desc = self.tlsdesc.iter().map(|&(offset, sym, addend)| Rela {
+            offset, sym, kind: RelocKind::TlsDesc, addend,
+        });
+        rel.chain(bind).chain(t64).chain(t32).chain(desc)
     }
 }
 
@@ -49,7 +54,7 @@ pub fn parse_rela_entries(rela_data: &[u8], jmprel_data: &[u8]) -> Option<Parsed
     let counts = RelaCounts::of(entries());
     // Ceiling assumes the widest record type, since any one group could be the whole table.
     let widest = core::mem::size_of::<(u64, u32, i64)>();
-    let kept = [RelocKind::Relative, RelocKind::GlobDat, RelocKind::Tpoff64, RelocKind::Tpoff32];
+    let kept = [RelocKind::Relative, RelocKind::GlobDat, RelocKind::Tpoff64, RelocKind::Tpoff32, RelocKind::TlsDesc];
     if counts.max_of(&kept).checked_mul(widest).is_none_or(|b| b > MAX_HEAP_ALLOC) {
         log!("ELF: {:?} will not fit one allocation", counts);
         return None;
@@ -59,6 +64,7 @@ pub fn parse_rela_entries(rela_data: &[u8], jmprel_data: &[u8]) -> Option<Parsed
         glob_dat: Vec::with_capacity(counts.bind),
         tpoff64: Vec::with_capacity(counts.tpoff64),
         tpoff32: Vec::with_capacity(counts.tpoff32),
+        tlsdesc: Vec::with_capacity(counts.tlsdesc),
     };
     for r in entries() {
         match r.kind {
@@ -68,6 +74,7 @@ pub fn parse_rela_entries(rela_data: &[u8], jmprel_data: &[u8]) -> Option<Parsed
             }
             RelocKind::Tpoff64 => out.tpoff64.push((r.offset, r.sym, r.addend)),
             RelocKind::Tpoff32 => out.tpoff32.push((r.offset, r.sym, r.addend)),
+            RelocKind::TlsDesc => out.tlsdesc.push((r.offset, r.sym, r.addend)),
             _ => {}
         }
     }

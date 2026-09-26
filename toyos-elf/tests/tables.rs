@@ -235,6 +235,24 @@ fn every_written_type_is_validated_and_no_other_is() {
     assert_eq!(rela::validate(RelaTable::new(&ignored, Machine::X86_64).iter(), window, 0, None), Ok(()));
 }
 
+/// A TLS descriptor is filled by a resolver this loader does not have, so an
+/// AArch64 image that needs one is refused by name rather than left with a
+/// descriptor nobody wrote. The same number on x86-64 is a type nobody patches.
+#[test]
+fn an_aarch64_tls_descriptor_is_refused_by_name() {
+    let window = (0u64, 0x100u64);
+    let desc = [rela(0x10, 1, 1031, 0)].concat();
+    assert_eq!(RelocKind::from_raw(Machine::Aarch64, 1031), RelocKind::TlsDesc);
+    assert_eq!(
+        rela::validate(RelaTable::new(&desc, Machine::Aarch64).iter(), window, 4, None),
+        Err(RelocError::TlsDescriptor),
+    );
+    assert!(RelocError::TlsDescriptor.as_str().contains("R_AARCH64_TLSDESC"));
+    assert_eq!(rela::validate(RelaTable::new(&desc, Machine::X86_64).iter(), window, 4, None), Ok(()));
+    let counts = RelaCounts::of(RelaTable::new(&desc, Machine::Aarch64).iter());
+    assert_eq!(counts.count_of(RelocKind::TlsDesc), 1);
+}
+
 #[test]
 fn a_symbol_index_past_the_table_is_refused_except_for_relative() {
     let window = (0u64, 0x100u64);
@@ -257,7 +275,7 @@ fn counts_are_per_kind_over_every_table() {
     let counts = RelaCounts::of(RelaTable::new(&a, Machine::X86_64).iter().chain(RelaTable::new(&b, Machine::X86_64).iter()));
     assert_eq!(
         counts,
-        RelaCounts { relative: 1, bind: 2, tpoff64: 1, tpoff32: 1, dtpmod64: 0, dtpoff64: 0 },
+        RelaCounts { relative: 1, bind: 2, tpoff64: 1, tpoff32: 1, dtpmod64: 0, dtpoff64: 0, tlsdesc: 0 },
     );
     // The ceiling is over the kinds a caller reserves for, never over every
     // kind: a bound on one nothing stores refuses a file for a collection that

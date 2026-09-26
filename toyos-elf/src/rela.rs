@@ -35,6 +35,9 @@ pub enum RelocKind {
     Tpoff64,
     /// `R_X86_64_TPOFF32`; AArch64 has no 32-bit thread-pointer offset.
     Tpoff32,
+    /// `R_AARCH64_TLSDESC`: a TLS descriptor, whose resolver this loader does
+    /// not have, so [`validate`] refuses it.
+    TlsDesc,
     Other(u32),
 }
 
@@ -48,6 +51,7 @@ impl RelocKind {
             (Machine::X86_64, 17) | (Machine::Aarch64, 1029) => RelocKind::DtpOff64,
             (Machine::X86_64, 18) | (Machine::Aarch64, 1030) => RelocKind::Tpoff64,
             (Machine::X86_64, 23) => RelocKind::Tpoff32,
+            (Machine::Aarch64, 1031) => RelocKind::TlsDesc,
             (_, other) => RelocKind::Other(other),
         }
     }
@@ -63,7 +67,7 @@ impl RelocKind {
             | RelocKind::DtpOff64
             | RelocKind::Tpoff64 => Some(8),
             RelocKind::Tpoff32 => Some(4),
-            RelocKind::Other(_) => None,
+            RelocKind::TlsDesc | RelocKind::Other(_) => None,
         }
     }
 
@@ -149,6 +153,7 @@ pub struct RelaCounts {
     pub tpoff32: usize,
     pub dtpmod64: usize,
     pub dtpoff64: usize,
+    pub tlsdesc: usize,
 }
 
 impl RelaCounts {
@@ -162,6 +167,7 @@ impl RelaCounts {
                 RelocKind::Tpoff32 => &mut counts.tpoff32,
                 RelocKind::DtpMod64 => &mut counts.dtpmod64,
                 RelocKind::DtpOff64 => &mut counts.dtpoff64,
+                RelocKind::TlsDesc => &mut counts.tlsdesc,
                 RelocKind::Other(_) => continue,
             };
             *slot += 1;
@@ -188,6 +194,7 @@ impl RelaCounts {
             RelocKind::Tpoff32 => self.tpoff32,
             RelocKind::DtpMod64 => self.dtpmod64,
             RelocKind::DtpOff64 => self.dtpoff64,
+            RelocKind::TlsDesc => self.tlsdesc,
             RelocKind::Other(_) => 0,
         }
     }
@@ -217,6 +224,9 @@ pub enum RelocError {
     SymbolPastTable,
     /// The write would cross a fill page, so a chunked writer would drop it.
     StraddlesFillPage,
+    /// A TLS descriptor, which only a resolver this loader does not have can
+    /// fill.
+    TlsDescriptor,
 }
 
 impl RelocError {
@@ -226,6 +236,7 @@ impl RelocError {
             RelocError::OutsideWindow => "ELF: relocation r_offset outside the writable image",
             RelocError::SymbolPastTable => "ELF: relocation r_sym past .dynsym",
             RelocError::StraddlesFillPage => "ELF: relocation crosses a fill-page boundary",
+            RelocError::TlsDescriptor => "ELF: R_AARCH64_TLSDESC has no resolver in this loader",
         }
     }
 }
@@ -296,6 +307,9 @@ pub fn validate(
 ) -> Result<(), RelocError> {
     let (lo, hi) = window;
     for rela in entries {
+        if rela.kind == RelocKind::TlsDesc {
+            return Err(RelocError::TlsDescriptor);
+        }
         let Some(width) = rela.kind.write_width() else {
             continue;
         };
