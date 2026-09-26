@@ -11,17 +11,15 @@ publish = false
 # adapter here and falls back to tiny-skia. A package of its own and not a
 # userland crate: `toolkit_iced` builds it and carries it into the toolkit
 # desktop, so no image and no userland resolve pays for iced's tree, and
-# upstream's `it_counts`, a test of iced's own simulator, joins no host lane.
+# upstream's `it_counts`, a test of iced's own simulator, is never built:
+# `iced_test` is not a dependency.
 [dependencies]
 iced = "0.14"
-
-[dev-dependencies]
-iced_test = "0.14"
 
 [workspace]
 
 # The forks iced's graph reaches on ToyOS (`forks.toml`), and the tree's own
-# SDK crates, which the forks name by version.
+# SDK crates.
 [patch.crates-io]
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
