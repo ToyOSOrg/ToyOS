@@ -3084,7 +3084,7 @@ impl QemuInstance {
         // let instances read each other's early boot.
         let uart_log = test_dir.join(format!("uart-{seq}.log"));
         let _ = fs::remove_file(&uart_log);
-        let console_file = options.console_file.then(|| ConsoleFile::make(&test_dir, seq));
+        let console_file = options.console_file.then(|| ConsoleFile::of(&uart_log).made());
 
         let qemu = qemu_command(
             &boot_image,
@@ -3093,7 +3093,6 @@ impl QemuInstance {
             &audio_wav,
             &uart_log,
             qmp_socket.as_deref(),
-            console_file.as_ref(),
             &options,
         );
         spawn_and_wait_ready(
@@ -4203,7 +4202,7 @@ impl QmpDevices {
 pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
     let usb: Vec<PathBuf> = options.profile.usb_disks().iter().map(|_| p.to_path_buf()).collect();
-    qemu_command(p, p, &usb, p, p, None, None, options)
+    qemu_command(p, p, &usb, p, p, None, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
@@ -4230,10 +4229,10 @@ fn qemu_command(
     audio_wav: &Path,
     uart_log: &Path,
     qmp_socket: Option<&Path>,
-    console_file: Option<&ConsoleFile>,
     options: &BootOptions,
 ) -> Command {
     let shape = options.profile.shape();
+    let console_file = options.console_file.then(|| ConsoleFile::of(uart_log));
     assert!(
         !options.mute || !shape.virtio.present(),
         "mute removes the only console a virtio profile has"
@@ -4605,7 +4604,7 @@ fn qemu_command(
             .arg("-serial")
             .arg(format!("file:{}", uart_log.display()))
             .arg("-chardev")
-            .arg(match console_file {
+            .arg(match &console_file {
                 Some(file) => format!("file,id=cs0,path={},input-path={}", file.out.display(), file.input.display()),
                 None => "stdio,id=cs0,signal=off".to_string(),
             })
@@ -4654,26 +4653,29 @@ struct Files {
     console_file: Option<ConsoleFile>,
 }
 
-/// [`BootOptions::console_file`]'s two paths: the file QEMU writes the console
-/// into, and the FIFO it reads the console's input from.
+/// [`BootOptions::console_file`]'s two paths, beside the boot's UART log: the
+/// file QEMU writes the console into, and the FIFO it reads its input from.
 struct ConsoleFile {
     out: PathBuf,
     input: PathBuf,
 }
 
 impl ConsoleFile {
-    fn make(dir: &Path, seq: u32) -> Self {
-        let out = dir.join(format!("console-{seq}.log"));
-        let input = dir.join(format!("console-{seq}.in"));
-        // Made here so the follower can open it before QEMU does.
-        fs::File::create(&out).unwrap_or_else(|e| panic!("create {}: {e}", out.display()));
-        let _ = fs::remove_file(&input);
-        let c = std::ffi::CString::new(input.as_os_str().as_encoded_bytes()).expect("a path holds no NUL");
+    fn of(uart_log: &Path) -> Self {
+        Self { out: uart_log.with_extension("console"), input: uart_log.with_extension("in") }
+    }
+
+    /// The two made: the file, so the follower can open it before QEMU does,
+    /// and the FIFO.
+    fn made(self) -> Self {
+        fs::File::create(&self.out).unwrap_or_else(|e| panic!("create {}: {e}", self.out.display()));
+        let _ = fs::remove_file(&self.input);
+        let c = std::ffi::CString::new(self.input.as_os_str().as_encoded_bytes()).expect("a path holds no NUL");
         // SAFETY: a NUL-terminated path this call owns.
         if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
-            panic!("mkfifo {}: {}", input.display(), std::io::Error::last_os_error());
+            panic!("mkfifo {}: {}", self.input.display(), std::io::Error::last_os_error());
         }
-        Self { out, input }
+        self
     }
 }
 

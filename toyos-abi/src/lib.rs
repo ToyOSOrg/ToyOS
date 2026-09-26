@@ -129,6 +129,14 @@ pub mod tcb {
     /// `TP + AARCH64_BYTES`, so nothing of the TCB may lie there.
     pub const AARCH64_TID: usize = 8;
     pub const AARCH64_BYTES: usize = 16;
+
+    /// Each tid word lies inside its TCB and on none of the words its psABI
+    /// already names: past x86-64's self-pointer and DTV pointer, and past
+    /// AArch64's DTV pointer and wholly below its first TLS block.
+    const TID: usize = core::mem::size_of::<u32>();
+    const _: () = assert!(X86_64_TID >= 16 && X86_64_TID + TID <= X86_64_BYTES);
+    const _: () = assert!(AARCH64_TID >= 8 && AARCH64_TID + TID <= AARCH64_BYTES);
+    const _: () = assert!(AARCH64_BYTES == 16, "AArch64's psABI TCB is two words");
 }
 
 /// Where a thread finds its own [`Tid`]: the kernel writes it into the thread
@@ -171,20 +179,3 @@ pub fn current_tid() -> Tid {
     Tid(unsafe { core::ptr::read_volatile((tp as usize + TCB_TID) as *const u32) })
 }
 
-#[cfg(test)]
-mod tcb_tests {
-    use super::tcb::*;
-
-    /// Each architecture's tid word lies inside its TCB and on none of the
-    /// words its psABI already names: on AArch64 the first TLS block starts at
-    /// `TP + 16`, so a tid there would be the program's own TLS data.
-    #[test]
-    fn the_tid_word_is_inside_each_tcb_and_on_no_named_word() {
-        const TID: usize = core::mem::size_of::<u32>();
-        // Past the self-pointer and the DTV pointer.
-        assert!(X86_64_TID >= 16 && X86_64_TID + TID <= X86_64_BYTES);
-        // Past the DTV pointer, and wholly below the first TLS block.
-        assert!(AARCH64_TID >= 8 && AARCH64_TID + TID <= AARCH64_BYTES);
-        assert_eq!(AARCH64_BYTES, 16, "AArch64's psABI TCB is two words");
-    }
-}
