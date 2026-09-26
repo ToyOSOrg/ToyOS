@@ -90,3 +90,22 @@ was red the same way in both of its runs, each re-run red too; at `eef19bd1`
 it had been green. One
 `main` run is not a rate, but it is this sentence on a tree without the
 branch.
+
+## A fourth way: the hung boot takes the disk before soundd is paged in
+
+The `[hung]` boot (`usb-transport-break` + `usb-reset-break`) reds as
+
+    [qemu] Init process crashed during boot:
+    SEGFAULT tid=0: execute unmapped address at 0x10000056b7c  _start+0x0
+    exit: soundd pid=5 code=-1
+
+followed by `usb-storage: read of 1 blocks at … failed on disk 0` for the
+root: the first WRITE(10) broke the transport, the reset ladder took the disk
+offline, and soundd's first page was never read. The `[retry]` and `[deadman]`
+arms were green in every one of these runs. Measured in one session on the dev
+host, sequentially, while gating #510 (`toyos-fat32`'s refused-write repair;
+its kernel diff is `fat32_adapter.rs`'s logging of a pending repair): that
+branch's `b5eaed62` sources for `kernel/src/fat32_adapter.rs` and
+`toyos-fat32/src`, 2 red of 4; its `5c73eca0`, 4 red of 4. Each red's alone
+re-run was red on the same assertion. The same failure on the base arm puts
+it before this branch; four runs a side do not separate the two rates.
