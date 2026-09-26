@@ -16360,8 +16360,8 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         // Vol. 3A §2.5, Vol. 2 `WRGSBASE`), so no Ring 3 thread aims `GS.base`.
         (16, "FSGSBASE", false),
         (18, "OSXSAVE", false),
-        // Not a bit the machine may withhold: `toyos_build::qemu::CPU_KVM` and
-        // `CPU_TCG` are the only two CPUs this repository launches and both name
+        // Not a bit the machine may withhold: `Arch::cpu`'s two x86-64 CPUs
+        // are the only x86-64 CPUs this repository launches and both name
         // `+smep`, so a boot without supervisor-mode execution prevention is a
         // kernel that stopped enabling it or a launcher that stopped asking.
         (20, "SMEP", true),
@@ -16992,7 +16992,7 @@ fn control_regs_negative(
     }
     // Where the host does leave `CD` set, it is demanded, so the arm that *can*
     // see the caching defect does not quietly become the weaker of the two.
-    if !toyos_build::kvm_usable() && !refusal.contains("CD") {
+    if !common::qemu::SUITE_ARCH.accel().is_hardware() && !refusal.contains("CD") {
         return Err(format!(
             "TCG leaves an AP's `CD` set and the refusal does not name it: {refusal}"
         ));
@@ -17581,7 +17581,8 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
 
     let repo = compile::repo_root();
     let kernel_elf = repo.join(format!(
-        "kernel/target/x86_64-unknown-none/{}/kernel",
+        "kernel/target/{}/{}/kernel",
+        common::qemu::SUITE_ARCH.kernel(),
         toyos_build::build::PROFILE
     ));
 

@@ -4,6 +4,7 @@ pub mod actuatorstate;
 /// What the suite's isolated re-run is allowed to call one failure; read by
 /// `tests/toyos.rs` and by its own tests.
 pub mod alone;
+pub mod arch;
 pub mod assets;
 pub mod bootlog;
 pub mod build;
@@ -52,36 +53,6 @@ pub mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Whether this host will actually let a guest run on KVM.
-///
-/// **Presence is not permission**, and `Path::exists` cannot tell the two
-/// apart. A GitHub runner ships `/dev/kvm` as `crw-rw---- root:kvm` with the
-/// build user outside the group, so a check on existence puts `-accel kvm` on
-/// every boot and every boot dies on `failed to initialize kvm: Permission
-/// denied` — a whole suite red for a reason no test names. Any Linux box whose
-/// user is not in `kvm` is that machine. Opening it is the question QEMU is
-/// about to ask.
-pub fn kvm_usable() -> bool {
-    cfg!(target_arch = "x86_64")
-        && std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/kvm")
-            .is_ok()
-}
-
-/// The CPU every guest this repository launches gets, accelerated and not.
-///
-/// **One declaration, read by `cargo run` and by the harness both**, because
-/// the two drifted: the harness gained `+smep` and the interactive path did
-/// not, so the machine an owner looked at differed from the machine the suite
-/// judged in exactly the dimension the suite had been changed for. The kernel's
-/// own `CR4` comes from one declaration for the same reason.
-pub const CPU_KVM: &str = "host,+rdrand,+smap,+fsgsbase,+x2apic,+smep";
-/// [`CPU_KVM`]'s emulated twin — the same features off a base model, because a
-/// TCG guest that withholds one is a feature this tree stops exercising.
-pub const CPU_TCG: &str = "qemu64,+rdrand,+smap,+fsgsbase,+x2apic,+smep";
 
 /// The `.git` directory every worktree of this repository shares.
 ///

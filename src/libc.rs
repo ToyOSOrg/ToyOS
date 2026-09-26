@@ -2,11 +2,13 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::arch::Arch;
+
 /// Build toyos-libc against the toolchain at `toolchain`, in `target_dir`, and
 /// install it there as `libtoyos_c.a`. Part of making a sysroot
 /// (`src/sysroot.rs`), whose key `userland/libc/src` is one of.
-pub fn build(root: &Path, toolchain: &Path, target_dir: &Path) {
-    let dest = toolchain.join("lib/rustlib/x86_64-unknown-toyos/lib/libtoyos_c.a");
+pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
+    let dest = toolchain.join(format!("lib/rustlib/{}/lib/libtoyos_c.a", arch.userland()));
 
     eprintln!("Building toyos-libc for sysroot...");
 
@@ -24,7 +26,7 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path) {
             "build",
             "--release",
             "--target",
-            "x86_64-unknown-toyos",
+            arch.userland(),
             "--features",
             "std-runtime",
             "--message-format=json",

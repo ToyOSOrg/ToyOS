@@ -28,7 +28,7 @@ fn libc_archive_toyos() -> PathBuf {
     ARCHIVE
         .get_or_init(|| {
             let libc_dir = libc_dir();
-            let target = "x86_64-unknown-toyos";
+            let target = super::qemu::SUITE_ARCH.userland();
 
             let _slot = toyos_build::buildlock::build_slot(&repo_root(), "the libc archive");
             let mut lock = toyos_build::buildlock::shared(&repo_root(), "toyos-libc archive");
@@ -85,7 +85,7 @@ pub fn compile_c(name: &str) -> (Vec<u8>, Vec<Vec<u8>>) {
     let opts = toyos_cc::CompileOptions {
         include_paths,
         defines: Vec::new(),
-        target: Some("x86_64-unknown-toyos".to_string()),
+        target: Some(super::qemu::SUITE_ARCH.userland().to_string()),
         opt_level: 0,
         force_includes: Vec::new(),
     };

@@ -4,11 +4,14 @@
 //! host` runs the same list as one of its steps, so the local command and
 //! the merge gate cannot verify different sets.
 //!
-//! Userland is not here: `x86_64-unknown-toyos` is a custom target, and the
-//! fork's `toyos` toolchain ships no clippy.
+//! Userland is not here: its targets are the fork's own, and the fork's
+//! `toyos` toolchain ships no clippy. The kernel and the bootloader are linted
+//! for every architecture.
 
 use std::path::Path;
 use std::process::Command;
+
+use crate::arch::Arch;
 
 /// The pedantic/nursery lints adopted one at a time, each on a measured finding
 /// (`issues/build/clippy-stage-two-is-lints-one-at-a-time.md`).
@@ -46,22 +49,42 @@ const SHAPES: &[Shape] = &[
     },
     Shape {
         dir: "kernel",
-        before: &["--target", "x86_64-unknown-none"],
+        before: &["--target", Arch::X86_64.kernel()],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
         dir: "kernel",
-        before: &["--target", "x86_64-unknown-none", "--features", "boot-actuators,test-actuators"],
+        before: &["--target", Arch::X86_64.kernel(), "--features", "boot-actuators,test-actuators"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
         dir: "kernel",
-        before: &["--target", "x86_64-unknown-none", "--features", "boot-actuators"],
+        before: &["--target", Arch::X86_64.kernel(), "--features", "boot-actuators"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
+        before: &["--target", Arch::Aarch64.kernel()],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
+        before: &["--target", Arch::Aarch64.kernel(), "--features", "boot-actuators,test-actuators"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "kernel",
+        before: &["--target", Arch::Aarch64.kernel(), "--features", "boot-actuators"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
         dir: "bootloader",
-        before: &["--target", "x86_64-unknown-uefi"],
+        before: &["--target", Arch::X86_64.loader()],
+        after: &["$ADOPTED", "-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
+    },
+    Shape {
+        dir: "bootloader",
+        before: &["--target", Arch::Aarch64.loader()],
         after: &["$ADOPTED", "-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
     },
     Shape {
@@ -70,6 +93,11 @@ const SHAPES: &[Shape] = &[
         after: &["-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
     },
 ];
+
+/// The bare targets the kernel and bootloader shapes lint against, which
+/// `rustup target add` installs: every architecture's.
+pub const BARE_TARGETS: [&str; 4] =
+    [Arch::X86_64.kernel(), Arch::X86_64.loader(), Arch::Aarch64.kernel(), Arch::Aarch64.loader()];
 
 impl Shape {
     /// The command as a reader writes it, `$ADOPTED` unexpanded.

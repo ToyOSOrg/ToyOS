@@ -51,6 +51,8 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::process::Command;
 
+use toyos_build::arch::Arch;
+
 /// The hardware shape QEMU presents to the guest.
 ///
 /// Not a display setting: each variant is a whole machine. `Virtio` and `Gop`
@@ -105,6 +107,7 @@ impl Profile {
 }
 
 pub struct Options {
+    pub arch: Arch,
     pub debug: bool,
     pub dump_audio: bool,
     pub profile: Profile,
@@ -122,7 +125,8 @@ pub struct Options {
 
 pub fn launch(opts: &Options) {
     let shape = opts.profile.shape();
-    let mut qemu = Command::new("qemu-system-x86_64");
+    let arch = opts.arch;
+    let mut qemu = Command::new(arch.qemu());
 
     // Without this QEMU runs its default-device pass whenever no network
     // option is given, which is exactly and only the Metal profile: measured
@@ -132,29 +136,28 @@ pub fn launch(opts: &Options) {
     // leaves i8042/ps2-kbd/ps2-mouse alone.
     qemu.arg("-nodefaults");
 
-    if toyos_build::kvm_usable() {
-        qemu.arg("-accel").arg("kvm");
-        qemu.arg("-cpu").arg(toyos_build::CPU_KVM);
-    } else {
-        qemu.arg("-cpu").arg(toyos_build::CPU_TCG);
+    let accel = arch.accel();
+    if accel.is_hardware() {
+        qemu.arg("-accel").arg(accel.name());
     }
+    qemu.arg("-cpu").arg(arch.cpu(accel));
 
+    let (code, vars) = arch.firmware();
     qemu.arg("-machine")
-        .arg(if shape.iommu { "q35,kernel-irqchip=split" } else { "q35" })
+        .arg(machine(arch, shape.iommu))
         .arg("-smp")
         .arg(format!("cores={}", opts.smp))
         .arg("-m")
         .arg("2G")
         .arg("-drive")
-        .arg("if=pflash,format=raw,unit=0,file=ovmf/OVMF_CODE-pure-efi.fd,readonly=on")
+        .arg(format!("if=pflash,format=raw,unit=0,file={code},readonly=on"))
         .arg("-drive")
-        .arg("if=pflash,format=raw,unit=1,file=ovmf/OVMF_VARS-pure-efi.fd,readonly=on");
+        .arg(format!("if=pflash,format=raw,unit=1,file={vars},readonly=on"));
 
     // Before every other `-device`: a PCI function created ahead of the unit
     // gets QEMU's bypassing address space and is never decoded by it.
-    if shape.iommu {
-        qemu.arg("-device")
-            .arg("intel-iommu,intremap=on,caching-mode=on,aw-bits=48");
+    if let (true, Some(unit)) = (shape.iommu, iommu_device(arch)) {
+        qemu.arg("-device").arg(unit);
     }
     // Without this a virtio function keeps the machine's own address space and
     // the unit never sees it, whatever the tables say.
@@ -191,7 +194,12 @@ pub fn launch(opts: &Options) {
             .arg("-device")
             .arg(format!("virtio-gpu-pci,xres=1280,yres=720{platform}"));
     } else {
-        qemu.arg("-vga").arg("std");
+        match arch {
+            Arch::X86_64 => qemu.arg("-vga").arg("std"),
+            // A framebuffer in guest memory that firmware publishes as its
+            // GOP and that needs no driver after it: `virt` has no VGA.
+            Arch::Aarch64 => qemu.arg("-device").arg("ramfb"),
+        };
     }
 
     if shape.virtio {
@@ -267,6 +275,27 @@ pub fn launch(opts: &Options) {
 
     eprintln!("QEMU stderr log: /tmp/toyos-qemu-stderr.log");
     qemu.status().expect("failed to execute QEMU");
+}
+
+/// The machine a profile runs on, with its IOMMU where the machine carries one
+/// as a property rather than a device.
+fn machine(arch: Arch, iommu: bool) -> &'static str {
+    match (arch, iommu) {
+        (Arch::X86_64, true) => "q35,kernel-irqchip=split",
+        (Arch::X86_64, false) => "q35",
+        (Arch::Aarch64, true) => "virt,gic-version=3,iommu=smmuv3",
+        (Arch::Aarch64, false) => "virt,gic-version=3",
+    }
+}
+
+/// The IOMMU as a device, in the one configuration this project builds
+/// against: interrupt remapping on, caching mode on, 48-bit addresses. `virt`'s
+/// SMMUv3 is a machine property ([`machine`]) and has none.
+fn iommu_device(arch: Arch) -> Option<&'static str> {
+    match arch {
+        Arch::X86_64 => Some("intel-iommu,intremap=on,caching-mode=on,aw-bits=48"),
+        Arch::Aarch64 => None,
+    }
 }
 
 fn audio_backend() -> &'static str {

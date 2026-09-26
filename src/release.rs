@@ -19,6 +19,8 @@ use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
 
+use crate::toolchain::HOSTED_ARCH;
+
 /// What the tag hashes, as `git rev-parse HEAD:<tree>` names them. The last is
 /// this file.
 pub const TREES: [&str; 7] = [
@@ -268,10 +270,10 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     let mut tar = Command::new("tar")
         .arg("-C")
         .arg(&build)
-        .arg(format!("--exclude=x86_64-unknown-toyos/stage2/lib/rustlib/{HOST}"))
+        .arg(format!("--exclude={}/stage2/lib/rustlib/{HOST}", HOSTED_ARCH.userland()))
         .arg(format!("--exclude={sysroot}/bin/cargo"))
         .arg(format!("--transform=s,^{sysroot},{HOST}/stage2,"))
-        .args(["-c", &sysroot, "x86_64-unknown-toyos/stage2"])
+        .args(["-c", &sysroot, &format!("{}/stage2", HOSTED_ARCH.userland())])
         .args(["toyos-sysroot-witness", "toyos-ld-witness", "TOOLCHAIN"])
         .stdout(Stdio::piped())
         .spawn()

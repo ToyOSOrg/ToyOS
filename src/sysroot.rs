@@ -60,7 +60,7 @@ const SOURCES: &str = "SOURCES";
 
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, targets toyos none uefi, \
+const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, \
                       libtoyos_c merged, libraries from the stamp; 2";
 
 /// Where each build records the key it compiled against, for [`sweep`].
@@ -258,7 +258,7 @@ fn check_compiler(rust_dir: &Path, fork: &Path) {
 /// The key of the sysroot `root` builds against with its std fork at `fork`.
 pub fn key(root: &Path, rust_dir: &Path, fork: &Path) -> String {
     let parts = [
-        format!("{RECIPE}; cargo {STAGE0_CARGO}"),
+        format!("{RECIPE}; cargo {STAGE0_CARGO}; targets {}", GUEST_TARGETS.join(" ")),
         witness(root),
         tree_identity(fork, &["library", "src/bootstrap"]),
         compiler_identity(rust_dir),
@@ -416,7 +416,9 @@ fn build(root: &Path, rust_dir: &Path, fork: &Path, key: &str, dir: &Path) {
         place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
     }
     let libc_target = dir.with_extension("libc-target");
-    crate::libc::build(root, &partial, &libc_target);
+    for arch in toolchain::USERLAND_ARCHS {
+        crate::libc::build(root, &partial, &libc_target, arch);
+    }
     let _ = fs::remove_dir_all(&libc_target);
 
     // The sources the key named are the ones built, or this is not that key's.
@@ -464,7 +466,9 @@ fn build_std(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
     let (ok, log) = toolchain::x_build(fork, &args, "std");
     toolchain::refuse_on_compile_error(&log, "std");
     assert!(ok, "the std build failed, and nothing in its output was a compile error");
-    toolchain::assert_std_built_from(root, &build_dir.join(&host).join("stage0-std/x86_64-unknown-toyos"));
+    for arch in toolchain::USERLAND_ARCHS {
+        toolchain::assert_std_built_from(root, &build_dir.join(&host).join("stage0-std").join(arch.userland()));
+    }
     build_dir.join(&host).join("stage0-std")
 }
 
@@ -519,6 +523,11 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// so these libraries are built with the options `stage2`'s own were.
 fn std_config(rust_dir: &Path, build_dir: &Path, host: &str, toyos_ld: &Path) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
+    let linker = toyos_ld.display();
+    let userland: String = toolchain::USERLAND_ARCHS
+        .iter()
+        .map(|arch| format!("\n[target.{}]\nlinker = \"{linker}\"\n", arch.userland()))
+        .collect();
     format!(
         r#"change-id = "ignore"
 profile = "compiler"
@@ -533,14 +542,10 @@ target = [{targets}]
 
 [rust]
 lld = false
-
-[target.x86_64-unknown-toyos]
-linker = "{linker}"
-"#,
+{userland}"#,
         rustc = toolchain::stage2(rust_dir).join("bin/rustc").display(),
         cargo = bootstrap_cargo().display(),
         build_dir = build_dir.display(),
-        linker = toyos_ld.display(),
     )
 }
 

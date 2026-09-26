@@ -540,9 +540,15 @@ const HOST_SPAWNS: &[Spawn] = &[
         why: "how the toolchain is installed and linked, and `REQUIRED`",
     },
     Spawn {
-        arg: "\"qemu-system-x86_64\"",
-        sites: &[],
-        why: "QEMU, the other half of the bar, and `REQUIRED`",
+        arg: "arch.qemu()",
+        sites: &[("src/qemu.rs", 1), ("src/ci.rs", 2)],
+        why: "QEMU, the other half of the bar: `Arch::qemu` names `qemu-system-x86_64` and \
+              `qemu-system-aarch64`, and `check_prerequisites` requires the one being booted",
+    },
+    Spawn {
+        arg: "SUITE_ARCH.qemu()",
+        sites: &[("tests/common/qemu.rs", 1)],
+        why: "QEMU for the suite's machines, through `Arch::qemu` as `cargo run`'s is",
     },
     Spawn {
         arg: "\"gh\"",
@@ -1829,7 +1835,7 @@ mod tests {
             }
         }
         assert!(
-            found.iter().any(|(arg, _, _)| arg == "\"qemu-system-x86_64\""),
+            found.iter().any(|(arg, _, _)| arg == "arch.qemu()"),
             "the walk did not find the QEMU launch, so it is reading no host tree"
         );
         assert!(

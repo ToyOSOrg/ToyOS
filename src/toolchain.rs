@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use crate::arch::Arch;
 use crate::buildlock;
 use crate::buildlock::Scope;
 use crate::stamps;
@@ -85,8 +86,23 @@ const STD_SOURCES: [&str; 2] = ["toyos-abi/src", "toyos/src"];
 /// `src/build.rs`'s external fingerprint. A fifth spelling would silently leave
 /// one of them building or fingerprinting a different set of targets than the
 /// others.
-pub const GUEST_TARGETS: [&str; 3] =
-    ["x86_64-unknown-toyos", "x86_64-unknown-none", "x86_64-unknown-uefi"];
+pub const GUEST_TARGETS: [&str; 5] = [
+    Arch::X86_64.userland(),
+    Arch::X86_64.kernel(),
+    Arch::X86_64.loader(),
+    Arch::Aarch64.kernel(),
+    Arch::Aarch64.loader(),
+];
+
+/// The architectures whose userland target the compiler this tree pins
+/// carries, in [`GUEST_TARGETS`]. A userland target is a target spec in the
+/// fork's `compiler/`, so a new one is a compiler change: it lands, and the
+/// primary's next build makes the compiler every sysroot is cloned from.
+pub const USERLAND_ARCHS: [Arch; 1] = [Arch::X86_64];
+
+/// The one ToyOS the hosted rustc (`system.toml`'s `hosted-rustc`) is built to
+/// run on.
+pub const HOSTED_ARCH: Arch = Arch::X86_64;
 
 /// The primary's compiler, which every sysroot is cloned from and compiled by.
 pub(crate) fn stage2(rust_dir: &Path) -> PathBuf {
@@ -479,7 +495,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         |()| sysroot::record_compiler(&rust_dir),
     );
 
-    let hosted_rustc = rust_dir.join("build/x86_64-unknown-toyos/stage2/bin/rustc");
+    let hosted_rustc = rust_dir.join(format!("build/{}/stage2/bin/rustc", HOSTED_ARCH.userland()));
     lock.act_if(
         Scope::Global,
         "build the ToyOS-hosted rustc",
@@ -733,10 +749,12 @@ fn full_bootstrap(root: &Path, rust_dir: &Path) {
         );
         tolerated_failure(&log, "the toolchain build");
     }
-    assert_std_built_from(
-        root,
-        &rust_dir.join(format!("build/{host}/stage1-std/x86_64-unknown-toyos")),
-    );
+    for arch in USERLAND_ARCHS {
+        assert_std_built_from(
+            root,
+            &rust_dir.join(format!("build/{host}/stage1-std/{}", arch.userland())),
+        );
+    }
 }
 
 fn build_hosted_rustc(rust_dir: &Path, toyos_ld: &Path) {
@@ -748,7 +766,7 @@ fn build_hosted_rustc(rust_dir: &Path, toyos_ld: &Path) {
     refuse_on_compile_error(&log, "the hosted rustc");
 
     // rustdoc for ToyOS may fail to link; rustc and librustc_driver may not.
-    let toyos_stage2 = rust_dir.join("build/x86_64-unknown-toyos/stage2");
+    let toyos_stage2 = rust_dir.join(format!("build/{}/stage2", HOSTED_ARCH.userland()));
     assert!(
         toyos_stage2.join("bin/rustc").exists(),
         "the hosted rustc build failed and {} is not there.\n\
@@ -774,7 +792,7 @@ fn build_hosted_rustc(rust_dir: &Path, toyos_ld: &Path) {
 fn write_config(rust_dir: &Path, host: &str, toyos_ld: &Path, with_hosted_rustc: bool) {
     let linker = toyos_ld.display();
     let host_line = if with_hosted_rustc {
-        format!("host = [\"{host}\", \"x86_64-unknown-toyos\"]")
+        format!("host = [\"{host}\", \"{}\"]", HOSTED_ARCH.userland())
     } else {
         format!("host = [\"{host}\"]")
     };
@@ -788,6 +806,13 @@ fn write_config(rust_dir: &Path, host: &str, toyos_ld: &Path, with_hosted_rustc:
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    let userland: String = USERLAND_ARCHS
+        .iter()
+        .map(|arch| {
+            let backends = if *arch == HOSTED_ARCH { codegen_backends } else { "" };
+            format!("[target.{}]\nlinker = \"{linker}\"{backends}\n\n", arch.userland())
+        })
+        .collect();
     let config = format!(
         r#"change-id = "ignore"
 profile = "compiler"
@@ -800,10 +825,7 @@ target = [{targets}]
 incremental = true
 lld = false
 
-[target.x86_64-unknown-toyos]
-linker = "{linker}"{codegen_backends}
-
-"#
+{userland}"#
     );
     fs::write(rust_dir.join("bootstrap.toml"), config).unwrap();
 }
@@ -955,14 +977,14 @@ fn host_sysroot() -> PathBuf {
 
 /// Whether the ToyOS sysroot is missing the host target proc-macros compile against.
 fn host_target_missing(rust_dir: &Path) -> bool {
-    let toyos_sysroot = rust_dir.join("build/x86_64-unknown-toyos/stage2/lib/rustlib");
+    let toyos_sysroot = rust_dir.join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()));
     toyos_sysroot.exists() && !toyos_sysroot.join(host_triple()).exists()
 }
 
 fn link_host_target(rust_dir: &Path) {
     let host = host_triple();
     let host_target_dir = rust_dir
-        .join("build/x86_64-unknown-toyos/stage2/lib/rustlib")
+        .join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()))
         .join(&host);
 
     let source = host_sysroot().join("lib/rustlib").join(&host);

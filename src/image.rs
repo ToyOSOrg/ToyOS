@@ -4,6 +4,8 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use bcachefs::{BlockBuf, Formatted, FsUuid, Superblock, VecBlockIO};
+
+use crate::arch::Arch;
 use sha2::{Digest, Sha256};
 use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
 
@@ -119,6 +121,7 @@ fn superblock_of(bytes: &[u8]) -> Superblock {
 /// under a build-key-derived name first, because cargo's own path is shared by
 /// every config and is overwritten by any concurrent build (see `build.rs`).
 pub fn create_boot_image(
+    arch: Arch,
     kernel_bytes: &[u8],
     bl_bytes: &[u8],
     root_bytes: &[u8],
@@ -134,7 +137,7 @@ pub fn create_boot_image(
     // superblock's UUID picks one, because a release puts several ROOTs on one
     // disk and the bootloader chooses by writing this argument.
     let cmdline = cmdline_with_root(root_uuid_of(root_bytes), params);
-    let esp_volume = create_esp_volume(kernel_bytes, bl_bytes, log_guid, &cmdline);
+    let esp_volume = create_esp_volume(arch, kernel_bytes, bl_bytes, log_guid, &cmdline);
     let log_volume = create_log_volume();
     create_gpt_disk(esp_volume, root_bytes, log_volume, esp_guid, log_guid)
 }
@@ -413,6 +416,7 @@ fn populate(volume: &mut [u8], label: &str, files: &[(&str, &[u8])]) {
 /// The partition firmware boots from: the bootloader, the kernel, the kernel's
 /// arguments, and the name of the partition the kernel's log goes on.
 fn create_esp_volume(
+    arch: Arch,
     kernel: &[u8],
     bootloader: &[u8],
     log_guid: uuid::Uuid,
@@ -429,7 +433,7 @@ fn create_esp_volume(
         &mut volume,
         "TOYOS-BOOT",
         &[
-            ("EFI/BOOT/BOOTx64.EFI", bootloader),
+            (arch.removable_loader(), bootloader),
             ("toyos/kernel.elf", kernel),
             // Mirrored in `bootloader/src/main.rs` as `\toyos\log.guid`, which
             // reads it beside the two files above and refuses the volume if it
@@ -890,7 +894,7 @@ mod tests {
     #[test]
     fn the_volumes_this_build_writes_break_no_format_rule() {
         for (what, volume) in [
-            ("ESP", create_esp_volume(b"kernel", b"bootloader", uuid::Uuid::new_v4(), "")),
+            ("ESP", create_esp_volume(Arch::X86_64, b"kernel", b"bootloader", uuid::Uuid::new_v4(), "")),
             ("log volume", create_log_volume()),
         ] {
             let complaints = toyos_fat32_check::check(&volume);
@@ -908,7 +912,7 @@ mod tests {
     #[test]
     fn a_damaged_image_is_refused_by_the_reader_that_caught_it() {
         let log_uuid = uuid::Uuid::new_v4();
-        let esp = create_esp_volume(b"kernel", b"bootloader", log_uuid, "");
+        let esp = create_esp_volume(Arch::X86_64, b"kernel", b"bootloader", log_uuid, "");
         let root_image = tiny_root();
         let disk =
             create_gpt_disk(esp, &root_image, create_log_volume(), uuid::Uuid::new_v4(), log_uuid);
@@ -968,7 +972,7 @@ mod tests {
     /// one the volume pays for and nothing loads.
     #[test]
     fn the_esp_carries_what_the_bootloader_looks_for() {
-        let mut esp = create_esp_volume(b"kernel", b"bootloader", uuid::Uuid::new_v4(), "");
+        let mut esp = create_esp_volume(Arch::X86_64, b"kernel", b"bootloader", uuid::Uuid::new_v4(), "");
         let mut fs = Fat32::mount(VolumeIo(&mut esp)).expect("mount the ESP we just built");
         let mut found: Vec<String> = fs
             .walk("", 64)
@@ -1004,7 +1008,7 @@ mod tests {
         let root_image = tiny_root();
         let write = |name: &str, params: &str| {
             let path = dir.join(name);
-            std::fs::write(&path, create_boot_image(b"kernel", b"bootloader", &root_image, params))
+            std::fs::write(&path, create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &root_image, params))
                 .expect("write an image");
             path
         };
@@ -1118,7 +1122,7 @@ mod tests {
         let symlinks = vec![("bin/ls".to_string(), "/system/bin/toybox".to_string())];
 
         let root_image = create_root_image(&files, &symlinks, true);
-        let disk = create_boot_image(b"kernel", b"bootloader", &root_image, "");
+        let disk = create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &root_image, "");
 
         // Located by *type*, through the parser the kernel uses, at the offset
         // the table gives — never at the one the writer computed.
@@ -1218,6 +1222,7 @@ mod tests {
         files.push((toyos_manifest::PATH.to_string(), manifest.clone()));
 
         let disk = create_boot_image(
+            Arch::X86_64,
             b"kernel",
             b"bootloader",
             &create_root_image(&files, &symlinks, true),

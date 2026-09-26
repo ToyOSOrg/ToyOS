@@ -175,7 +175,7 @@ impl Rig {
 /// rehearsal sends as that service's rebuild.
 fn rebuilt(name: &str, dir: &Path) -> Result<std::path::PathBuf, String> {
     let to = dir.join(format!("{name}.rebuilt"));
-    toyos_build::build::copy_guest_program(&super::compile::repo_root(), name, &to)?;
+    toyos_build::build::copy_guest_program(&super::compile::repo_root(), super::qemu::SUITE_ARCH, name, &to)?;
     Ok(to)
 }
 

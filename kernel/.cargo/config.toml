@@ -4,3 +4,6 @@ rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes"]
 
 [target.x86_64-unknown-none]
 linker = "toyos-ld"
+
+[target.aarch64-unknown-none-softfloat]
+linker = "toyos-ld"

@@ -9,6 +9,12 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use super::compile;
+use toyos_build::arch::Arch;
+
+/// The architecture every machine this suite builds and boots is: the suite's
+/// q35 shapes, i8042 and VT-d are x86-64's, and the aarch64 bring-up boots
+/// through its own launcher ([`boot_bringup`]).
+pub const SUITE_ARCH: Arch = Arch::X86_64;
 
 /// When true, serial output is printed to stderr as it arrives.
 pub static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -2862,7 +2868,7 @@ fn build_boot_image_with(
     );
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    let plan = toyos_build::build::Plan::new(&config_path, kernel_features, kernel_params);
+    let plan = toyos_build::build::Plan::new(SUITE_ARCH, &config_path, kernel_features, kernel_params);
     toyos_build::build::build_test_image(&compile::repo_root(), &plan, quiet, &extra_files)
 }
 
@@ -2870,7 +2876,7 @@ fn build_boot_image_with(
 pub fn build_toyos_bins(crate_path: &Path) -> Vec<(String, Vec<u8>)> {
     let repo = compile::repo_root();
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    toyos_build::build::build_toyos_bins(&repo, crate_path, quiet)
+    toyos_build::build::build_toyos_bins(&repo, SUITE_ARCH, crate_path, quiet)
 }
 
 /// All kernel serial output goes through log!() which prepends "[kernel ...]".
@@ -4241,13 +4247,13 @@ fn qemu_command(
     );
 
     let repo = compile::repo_root();
-    let ovmf_dir = repo.join("ovmf");
+    let (firmware_code, firmware_vars) = SUITE_ARCH.firmware();
 
-    let mut qemu = Command::new("qemu-system-x86_64");
+    let mut qemu = Command::new(SUITE_ARCH.qemu());
 
-    let kvm = toyos_build::kvm_usable();
-    if kvm {
-        qemu.arg("-accel").arg("kvm");
+    let accel = SUITE_ARCH.accel();
+    if accel.is_hardware() {
+        qemu.arg("-accel").arg(accel.name());
     }
 
     // Without this QEMU runs its default-device pass whenever no network
@@ -4278,7 +4284,7 @@ fn qemu_command(
     qemu.arg("-machine")
         .arg(&machine)
         .arg("-cpu")
-        .arg(if kvm { toyos_build::CPU_KVM } else { toyos_build::CPU_TCG })
+        .arg(SUITE_ARCH.cpu(accel))
         .arg("-smp")
         .arg(options.smp.to_string())
         .arg("-m")
@@ -4286,12 +4292,12 @@ fn qemu_command(
         .arg("-drive")
         .arg(format!(
             "if=pflash,format=raw,unit=0,file={},readonly=on",
-            ovmf_dir.join("OVMF_CODE-pure-efi.fd").display()
+            repo.join(firmware_code).display()
         ))
         .arg("-drive")
         .arg(format!(
             "if=pflash,format=raw,unit=1,file={},readonly=on",
-            ovmf_dir.join("OVMF_VARS-pure-efi.fd").display()
+            repo.join(firmware_vars).display()
         ))
         .arg("-drive")
         .arg(format!(
