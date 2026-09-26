@@ -370,31 +370,12 @@ enum SocketKind {
 struct UdpPipes {
     tx_read: Pipe,
     rx_write: Pipe,
-    /// A datagram taken off the socket whose bytes the pipe has not all taken
-    /// yet. Its client is answered once the last byte is in, and no other
-    /// datagram is written to this pipe before then: the answer names a length,
-    /// and a pipe holding part of one datagram and then the next is a splice.
-    owed: Option<OwedDatagram>,
-}
-
-struct OwedDatagram {
-    client: Client,
-    answer: UdpRecvResponse,
-    bytes: Vec<u8>,
-    written: usize,
 }
 
 struct PendingUdpRecv {
     client: Client,
     socket_id: u32,
     max_len: u32,
-}
-
-/// What became of one receive a client asked for: `Taken` is answered, or
-/// holding a datagram its pipe is still taking.
-enum Delivery {
-    Taken,
-    Waiting(Client),
 }
 
 struct PendingDns {
@@ -483,6 +464,12 @@ impl DataPipes {
             from_client: unsafe { Pipe::from_raw(from_client) },
         })
     }
+}
+
+/// Whether `socket` takes a client's bytes now: it is sending, and its send
+/// buffer has room.
+fn send_room(socket: &tcp::Socket) -> bool {
+    socket.can_send() && socket.send_capacity() > socket.send_queue()
 }
 
 fn piped_connection(handle: SocketHandle, pipes: DataPipes) -> PipedConnection {
@@ -891,7 +878,7 @@ impl NetDaemon {
         let handle = socket_set.add(socket);
         let socket_id = self.alloc_id();
         self.sockets.insert(socket_id, SocketKind::Udp(handle));
-        self.udp_pipes.insert(socket_id, UdpPipes { tx_read, rx_write, owed: None });
+        self.udp_pipes.insert(socket_id, UdpPipes { tx_read, rx_write });
 
         msg.client.result(&UdpBindResponse {
             socket_id,
@@ -943,23 +930,32 @@ impl NetDaemon {
         }
     }
 
-    /// Take one waiting datagram off the socket for `client`, once the client's
-    /// pipe holds no part of an earlier one.
+    /// Take one waiting datagram off `socket_id` for `client`, or hand the
+    /// client back when none has arrived.
     ///
-    /// **The client is answered only once its pipe holds the whole datagram.**
-    /// The answer names a length, so a client reading that many bytes out of a
-    /// pipe holding fewer would splice the next datagram onto this one; and a
-    /// write takes as much as the pipe has room for, which cannot be taken back.
-    /// So what the pipe did not take is held with the client in
-    /// [`UdpPipes::owed`] and written on a later pass.
+    /// **A datagram goes into the client's pipe whole, or its socket ends.**
+    /// The answer names a length, and a write takes as much as the pipe has
+    /// room for and cannot be taken back: a client reading that length out of
+    /// a pipe holding part of this datagram would splice the next one onto it.
+    /// So a pipe that will not take one whole — full, gone, or not a pipe netd
+    /// can write — ends the socket by name and answers its client a reset, and
+    /// nothing can follow the part it did take.
     fn deliver_datagram(
+        &mut self,
         client: Client,
-        socket: &mut udp::Socket,
+        socket_id: u32,
         max_len: u32,
-        pipes: &mut UdpPipes,
-    ) -> Delivery {
-        if pipes.owed.is_some() || !socket.can_recv() {
-            return Delivery::Waiting(client);
+        socket_set: &mut SocketSet<'_>,
+    ) -> Option<Client> {
+        let (Some(&SocketKind::Udp(handle)), Some(pipes)) =
+            (self.sockets.get(&socket_id), self.udp_pipes.get(&socket_id))
+        else {
+            client.error(ERR_NOT_CONNECTED);
+            return None;
+        };
+        let socket = socket_set.get_mut::<udp::Socket>(handle);
+        if !socket.can_recv() {
+            return Some(client);
         }
         // `max_len` is the client's number. Clamped rather than trusted: the
         // socket's own receive buffer is 65536 bytes, so no datagram it can hand
@@ -970,49 +966,25 @@ impl NetDaemon {
             Ok(got) => got,
             Err(_) => {
                 client.error(ERR_OTHER);
-                return Delivery::Taken;
+                return None;
             }
         };
-        bytes.truncate(n);
-        let IpAddress::Ipv4(addr) = meta.endpoint.addr;
-        let answer = UdpRecvResponse { addr: addr.octets(), port: meta.endpoint.port, len: n as u16 };
-        pipes.owed = Some(OwedDatagram { client, answer, bytes, written: 0 });
-        Self::write_owed(pipes);
-        Delivery::Taken
-    }
-
-    /// Write as much of an owed datagram as its pipe has room for, and answer
-    /// its client once the last byte is in.
-    ///
-    /// A refusal other than a full pipe is answered and the datagram dropped:
-    /// a reader that is gone reads nothing, and a pipe whose page could not be
-    /// allocated or a handle netd cannot write took none of it.
-    fn write_owed(pipes: &mut UdpPipes) {
-        use toyos_abi::syscall::SyscallError;
-        let Some(owed) = pipes.owed.as_mut() else { return };
-        if owed.written < owed.bytes.len() {
-            match toyos_abi::syscall::write_nonblock(pipes.rx_write.as_handle(), &owed.bytes[owed.written..]) {
-                Ok(n) => owed.written += n,
-                Err(SyscallError::WouldBlock) => return,
-                Err(e) => {
-                    let owed = pipes.owed.take().expect("the datagram just written");
-                    let code = match e {
-                        SyscallError::Gone => ERR_NOT_CONNECTED,
-                        SyscallError::ResourceExhausted => ERR_RESOURCE_EXHAUSTED,
-                        _ => {
-                            say!("netd: dropping a datagram — its client's receive pipe refused netd: {e:?}");
-                            ERR_INVALID_INPUT
-                        }
-                    };
-                    owed.client.error(code);
-                    return;
-                }
-            }
+        let wrote = toyos_abi::syscall::write_nonblock(pipes.rx_write.as_handle(), &bytes[..n]);
+        if wrote == Ok(n) {
+            let IpAddress::Ipv4(addr) = meta.endpoint.addr;
+            client.result(&UdpRecvResponse { addr: addr.octets(), port: meta.endpoint.port, len: n as u16 });
+            return None;
         }
-        if owed.written == owed.bytes.len() {
-            let owed = pipes.owed.take().expect("the datagram just written");
-            owed.client.result(&owed.answer);
+        match wrote {
+            Ok(took) => say!("netd: ending UDP socket {socket_id} — its receive pipe took {took} of a {n}-byte datagram"),
+            Err(e) => say!("netd: ending UDP socket {socket_id} — its receive pipe refused a {n}-byte datagram: {e:?}"),
         }
+        socket.close();
+        socket_set.remove(handle);
+        self.sockets.remove(&socket_id);
+        self.udp_pipes.remove(&socket_id);
+        client.error(ERR_CONNECTION_RESET);
+        None
     }
 
     fn handle_udp_recv_from(&mut self, msg: Request, socket_set: &mut SocketSet<'_>) {
@@ -1020,18 +992,7 @@ impl NetDaemon {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let Some(SocketKind::Udp(handle)) = self.sockets.get(&req.socket_id) else {
-            msg.client.error(ERR_NOT_CONNECTED);
-            return;
-        };
-        let handle = *handle;
-        let Some(pipes) = self.udp_pipes.get_mut(&req.socket_id) else {
-            msg.client.error(ERR_NOT_CONNECTED);
-            return;
-        };
-        let socket = socket_set.get_mut::<udp::Socket>(handle);
-
-        if let Delivery::Waiting(client) = Self::deliver_datagram(msg.client, socket, req.max_len, pipes) {
+        if let Some(client) = self.deliver_datagram(msg.client, req.socket_id, req.max_len, socket_set) {
             // Nothing has arrived yet: keep the connection open until one does.
             self.pending_udp_recvs.push(PendingUdpRecv {
                 client,
@@ -1356,8 +1317,10 @@ impl NetDaemon {
 
             // pipe read → smoltcp tx. Ok(0) is the kernel's EOF — ring drained,
             // no writer — which says the client stopped writing; not the
-            // forgeable closed flags.
-            while socket.can_send() {
+            // forgeable closed flags. [`send_room`] and never `can_send` alone:
+            // a zero-length read answers `Ok(0)`, which the arm below reads as
+            // the client hanging up.
+            while send_room(socket) {
                 if let Some(ref pipe) = conn.tx_read {
                     // **No more is taken out of the pipe than the socket will
                     // take from us.** `send_slice` answers how many bytes it
@@ -1367,12 +1330,6 @@ impl NetDaemon {
                     // where the rest belongs until there is room.
                     let mut buf = [0u8; 4096];
                     let want = (socket.send_capacity() - socket.send_queue()).min(buf.len());
-                    // A zero-length read answers `Ok(0)`, which the arm below
-                    // reads as the client hanging up; asked for no bytes, this
-                    // loop has nothing to do instead.
-                    if want == 0 {
-                        break;
-                    }
                     match toyos_abi::syscall::read_nonblock(pipe.as_handle(), &mut buf[..want]) {
                         Ok(0) => {
                             socket.close();
@@ -1480,20 +1437,8 @@ impl NetDaemon {
     fn process_pending(&mut self, socket_set: &mut SocketSet<'_>) {
         let now = Instant::now();
 
-        // Owed datagrams first, so a pipe that took the rest of one is free for
-        // the next receive in the same pass.
-        for pipes in self.udp_pipes.values_mut() {
-            Self::write_owed(pipes);
-        }
         for pr in std::mem::take(&mut self.pending_udp_recvs) {
-            let (Some(SocketKind::Udp(handle)), Some(pipes)) =
-                (self.sockets.get(&pr.socket_id), self.udp_pipes.get_mut(&pr.socket_id))
-            else {
-                pr.client.error(ERR_NOT_CONNECTED);
-                continue;
-            };
-            let socket = socket_set.get_mut::<udp::Socket>(*handle);
-            if let Delivery::Waiting(client) = Self::deliver_datagram(pr.client, socket, pr.max_len, pipes) {
+            if let Some(client) = self.deliver_datagram(pr.client, pr.socket_id, pr.max_len, socket_set) {
                 self.pending_udp_recvs.push(PendingUdpRecv { client, ..pr });
             }
         }
@@ -1764,25 +1709,21 @@ fn main() {
 
         daemon.process_pending(&mut socket_set);
 
-        let delay = iface.poll_delay(now, &socket_set);
+        // smoltcp's own next deadline — a retransmit, a persist probe, a
+        // delayed ACK — and zero when it has a frame to send now. A piped
+        // connection needs nothing else: its peer's bytes wake the NIC, and its
+        // client's bytes and room wake the watches below.
+        let smoltcp_due =
+            iface.poll_delay(now, &socket_set).map_or(u64::MAX, |d| d.total_micros().saturating_mul(1000));
 
+        // A pending UDP receive, DNS query or connect has no wake of its own.
         let has_pending_async = !daemon.pending_udp_recvs.is_empty()
             || !daemon.pending_dns.is_empty()
             || !daemon.pending_piped_connects.is_empty();
-        let has_piped = !daemon.piped_connections.is_empty();
-
-        // Use 1ms polling when piped connections are active. This is the network
-        // equivalent of NAPI polling — during active I/O, poll frequently to
-        // bridge data between smoltcp and kernel pipes without relying solely on
-        // interrupt-driven wakeups.
-        let timeout_nanos = if has_pending_async || has_piped {
-            Some(Duration::from_millis(1).as_nanos() as u64)
+        let timeout = if has_pending_async {
+            smoltcp_due.min(Duration::from_millis(1).as_nanos() as u64)
         } else {
-            match delay {
-                Some(d) if d.total_millis() > 0 => Some(Duration::from_millis(d.total_millis() as u64).as_nanos() as u64),
-                Some(_) => Some(Duration::from_millis(1).as_nanos() as u64),
-                None => None,
-            }
+            smoltcp_due
         };
 
         poller.watch(&acceptor, READABLE, TOKEN_LISTENER);
@@ -1791,7 +1732,12 @@ fn main() {
         // The client's bytes to send, and room in a receive pipe that is
         // holding the peer's back: either is a pass's worth of work.
         for (i, conn) in daemon.piped_connections.iter().enumerate() {
-            if let Some(ref pipe) = conn.tx_read {
+            // Only while the socket can take them: a pipe holding bytes is
+            // readable until read, so its watch would complete on every pass
+            // while the peer's window is shut. The ACK that makes room wakes
+            // the NIC.
+            let room = send_room(socket_set.get::<tcp::Socket>(conn.handle));
+            if let (true, Some(pipe)) = (room, &conn.tx_read) {
                 poller.watch(pipe, READABLE, TOKEN_TX_PIPE_BASE + i as u64);
             }
             if let (true, Some(pipe)) = (conn.held, &conn.rx_write) {
@@ -1803,10 +1749,6 @@ fn main() {
             poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
         }
 
-        let timeout = match timeout_nanos {
-            None => u64::MAX,
-            Some(n) => n,
-        };
         let timeout = match mdns.wake_in(Instant::now()) {
             Some(left) => timeout.min(left.as_nanos() as u64),
             None => timeout,

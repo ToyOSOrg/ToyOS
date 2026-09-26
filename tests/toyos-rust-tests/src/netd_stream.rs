@@ -1,11 +1,13 @@
 //! The guest half of the netd stream tests' agreement with the harness's host
-//! server (`PatternServer` in `tests/toyos.rs`): a connection sends eight
-//! little-endian bytes naming a length, and the host sends exactly that many
-//! [`stream_byte`]s and closes its side.
+//! server (`PatternServer` in `tests/toyos.rs`): a connection sends one
+//! [`Ask`], and the host serves it.
+//!
+//! Each netd stream test includes this file whole and uses its own part of it.
+#![allow(dead_code)]
 
 use std::time::{Duration, Instant};
 
-use toyos::poller::{Poller, READABLE};
+use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::ring::RingHeader;
 use toyos_abi::syscall::{self, SyscallError};
@@ -71,10 +73,56 @@ pub fn await_until<T>(
     }
 }
 
-/// Tell the host how many bytes to send on this connection.
-pub fn ask(tx: &Pipe, total: u64) {
-    let ask = total.to_le_bytes();
-    assert_eq!(tx.write(&ask), Ok(ask.len()), "telling the host how much to send");
+/// What one connection asks the host server for.
+#[derive(Clone, Copy)]
+pub enum Ask {
+    /// Exactly this many [`stream_byte`]s, and then the host's FIN.
+    Stream(u64),
+    /// The same bytes, and the connection held open with no FIN.
+    Held(u64),
+    /// A connection of the host's own to this guest's TCP [`FORWARDED_PORT`],
+    /// written until it is refused; then this connection's FIN.
+    Dial,
+}
+
+/// The guest port the harness forwards a host port to, which [`Ask::Dial`]
+/// connects to.
+pub const FORWARDED_PORT: u16 = 22;
+
+/// `what` on the wire: a mode byte, then eight little-endian bytes of length.
+pub fn ask_bytes(what: Ask) -> [u8; 9] {
+    let (mode, total) = match what {
+        Ask::Stream(total) => (0u8, total),
+        Ask::Held(total) => (1, total),
+        Ask::Dial => (2, 0),
+    };
+    let mut ask = [mode; 9];
+    ask[1..].copy_from_slice(&total.to_le_bytes());
+    ask
+}
+
+/// Send `what` on a fresh connection.
+pub fn ask(tx: &Pipe, what: Ask) {
+    let ask = ask_bytes(what);
+    assert_eq!(tx.write(&ask), Ok(ask.len()), "telling the host what to send");
+}
+
+/// Keep the pipe `write` feeds full until its reader is gone, looking again
+/// each time the pipe reports room, and panic by name if `within` passes
+/// first.
+///
+/// **A reader's departure is an event only for a full pipe**: one with room is
+/// writable already, so its watch would complete at once, every time.
+pub fn keep_full_until_released(write: &Pipe, within: Duration, what: &str) {
+    let chunk = [0u8; 65536];
+    await_until(write, WRITABLE, within, what, || loop {
+        match write.write_nonblock(&chunk) {
+            Ok(_) => {}
+            Err(SyscallError::WouldBlock) => return None,
+            Err(SyscallError::Gone) => return Some(()),
+            Err(e) => panic!("{what}: filling the pipe: {e:?}"),
+        }
+    });
 }
 
 /// Wait until `rx`'s ring holds a whole `capacity` of unread stream: its last
@@ -110,11 +158,17 @@ pub fn await_ring_full(rx: &Pipe, capacity: u64, within: Duration) {
 /// name at the first byte that is not the pattern's. Answers how many bytes
 /// came.
 pub fn read_pattern(rx: &Pipe, within: Duration, what: &str) -> u64 {
+    read_pattern_upto(rx, u64::MAX, within, what)
+}
+
+/// [`read_pattern`], ending once `limit` bytes have come.
+pub fn read_pattern_upto(rx: &Pipe, limit: u64, within: Duration, what: &str) -> u64 {
     let mut buf = vec![0u8; 65536];
     let mut at = 0u64;
-    loop {
+    while at < limit {
+        let want = buf.len().min((limit - at) as usize);
         let waiting = format!("{what}: the stream after byte {at}");
-        let n = await_until(rx, READABLE, within, &waiting, || match rx.read_nonblock(&mut buf) {
+        let n = await_until(rx, READABLE, within, &waiting, || match rx.read_nonblock(&mut buf[..want]) {
             Ok(n) => Some(n),
             Err(SyscallError::WouldBlock) => None,
             Err(e) => panic!("{what}: reading the stream at {at}: {e:?}"),
@@ -132,4 +186,5 @@ pub fn read_pattern(rx: &Pipe, within: Duration, what: &str) -> u64 {
         }
         at += n as u64;
     }
+    at
 }

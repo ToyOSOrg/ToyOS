@@ -22,7 +22,7 @@ mod netd_stream;
 
 use std::time::Duration;
 
-use netd_stream::{ask, await_ring_full, read_pattern, ring_capacity, HOST};
+use netd_stream::{ask, await_ring_full, read_pattern, ring_capacity, Ask, HOST};
 
 /// Bytes the host sends past the ring's capacity. Anything over the socket's
 /// own buffer makes a pipe that drops bytes when full drop some.
@@ -46,7 +46,7 @@ fn main() {
     let conn = toyos::net::tcp_connect(HOST, port, 30_000).expect("connect to the host server");
     // The host learns how much to send from here, before it sends anything,
     // so the two ends cannot disagree about the length being judged.
-    ask(&conn.tx, total);
+    ask(&conn.tx, Ask::Stream(total));
     await_ring_full(&conn.rx, capacity, FILL_BOUND);
     println!("netd_slow_reader: the ring is full at {capacity} bytes unread; reading");
 
