@@ -103,9 +103,7 @@ impl Scanout {
     /// Every write is in the fill buffers until this runs: a weakly-ordered
     /// mapping owes a fence before anything reads what was put there.
     fn fence(&self) {
-        // SAFETY: `sfence` has no operands and no memory it can misuse; the
-        // target is x86-64, where the instruction always exists.
-        unsafe { std::arch::x86_64::_mm_sfence() };
+        crate::arch::drain_stores();
     }
 
     /// Paint the whole scanout black, so the kernel's panel is legible again

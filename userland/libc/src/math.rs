@@ -230,36 +230,10 @@ pub extern "C" fn floorf(x: f32) -> f32 {
 pub extern "C" fn ceilf(x: f32) -> f32 { -floorf(-x) }
 
 #[no_mangle]
-pub extern "C" fn sqrt(x: f64) -> f64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let result: f64;
-        unsafe { core::arch::asm!("sqrtsd {0}, {0}", inout(xmm_reg) x => result); }
-        return result;
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        let result: f64;
-        unsafe { core::arch::asm!("fsqrt {0:d}, {0:d}", inout(vreg) x => result); }
-        return result;
-    }
-}
+pub extern "C" fn sqrt(x: f64) -> f64 { crate::arch::sqrt_f64(x) }
 
 #[no_mangle]
-pub extern "C" fn sqrtf(x: f32) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let result: f32;
-        unsafe { core::arch::asm!("sqrtss {0}, {0}", inout(xmm_reg) x => result); }
-        return result;
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        let result: f32;
-        unsafe { core::arch::asm!("fsqrt {0:s}, {0:s}", inout(vreg) x => result); }
-        return result;
-    }
-}
+pub extern "C" fn sqrtf(x: f32) -> f32 { crate::arch::sqrt_f32(x) }
 
 #[no_mangle]
 pub extern "C" fn fabs(x: f64) -> f64 { f64::from_bits(x.to_bits() & !(1u64 << 63)) }

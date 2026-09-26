@@ -134,12 +134,11 @@ impl Screen {
             }
         }
         // A scanout is write-combining, so the tail of the last row can sit in
-        // a partly filled WC buffer until something unrelated evicts it — a
-        // sliver of the previous frame left on the panel for as long as its
-        // owner has nothing else to draw. SFENCE is what drains one (SDM
-        // Vol. 3A §11.3.1), and this is the call that says the pixels are the
+        // a store buffer until something unrelated evicts it — a sliver of the
+        // previous frame left on the panel for as long as its owner has nothing
+        // else to draw. This is the call that says the pixels are the
         // surface's now.
-        unsafe { core::arch::x86_64::_mm_sfence() };
+        crate::arch::drain_stores();
         self.written.set(self.written.get() + (row_bytes * h) as u64);
         self.blits.set(self.blits.get() + 1);
         let painted = Rect { x: x as u32, y: y as u32, w: w as u32, h: h as u32 };

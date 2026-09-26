@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-09-26
 ---
 
-# Assembly outside an arch module: userland's libc, two framebuffers, and the guest probes
+# Assembly outside an arch module: two framebuffers and the guest probes
 
 The owner's ruling of 2026-09-26 puts every `asm!`, `global_asm!`,
 `naked_asm!`, naked function and `core::arch::*` intrinsic inside an
@@ -14,10 +14,6 @@ architecture's own module: `kernel/src/arch/<arch>/`, the bootloader's
 those; what is left is declared in that table as an exception, each row
 pointing here:
 
-- `userland/libc/src/math.rs` (`sqrtsd`/`sqrtss` and their AArch64 `fsqrt`),
-  `userland/libc/src/memory.rs` (three `rep` string operations) and
-  `userland/libc/src/lib.rs` (the naked `_start`). `userland/libc/src` is
-  only changed under an ABI brief.
 - `userland/toyos-window/src/framebuffer.rs` and `userland/metalprobe/src/fb.rs`:
   `_mm_sfence` after writing a write-combining framebuffer. Userland has no
   portable way to say "drain my stores to the scanout"; the SDK (`toyos/src`)
@@ -34,8 +30,7 @@ pointing here:
   outside the inner-shareable domain observes (the kernel's `arch::barrier`
   says why, and `Mmio` carries `writel`/`readl` ordering there).
 
-**Exit condition**: the SDK and libc gain per-architecture modules (as
-`toyos-abi`'s syscall entry is one) holding a scanout flush, DMA barriers, the
-square roots and the string moves; the guest probes move under a per-arch
+**Exit condition**: the SDK gains a per-architecture module (as `toyos-abi`'s
+syscall entry and libc's `arch/` are) holding a scanout flush and DMA barriers; the guest probes move under a per-arch
 directory the harness selects by `Arch`; and every row in `ARCH_RULES` that
 cites this file is deleted.

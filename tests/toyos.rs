@@ -5837,8 +5837,8 @@ fn run_screen_test(
         "virt_early_panic" => {
             // The AArch64 port's stage 3, whole: the loader on AAVMF, the entry's
             // drop and declaration, the PL011 SPCR names, the boot's survey of
-            // the machine, and a panic on both channels. No userland: that
-            // architecture has none to put on ROOT yet.
+            // the machine, and a panic on both channels, before the kernel
+            // reaches the AArch64 userland its ROOT carries.
             let started = std::time::Instant::now();
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,

@@ -42,6 +42,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+use crate::arch::Arch;
 use crate::buildlock::{self, Guard, Held, Keyed};
 use crate::compiler::{self, Compiler};
 use crate::identity;
@@ -348,7 +349,7 @@ fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
         place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
     }
     let libc_target = dir.with_extension("libc-target");
-    for arch in toolchain::USERLAND_ARCHS {
+    for arch in Arch::ALL {
         crate::libc::build(root, &partial, &libc_target, arch);
     }
     let _ = fs::remove_dir_all(&libc_target);
@@ -396,7 +397,7 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
     let (ok, log) = toolchain::x_build(fork, &args, "std");
     toolchain::refuse_on_compile_error(&log, "std");
     assert!(ok, "the std build failed, and nothing in its output was a compile error");
-    for arch in toolchain::USERLAND_ARCHS {
+    for arch in Arch::ALL {
         toolchain::assert_std_built_from(root, &build_dir.join(&host).join("stage0-std").join(arch.userland()));
     }
     build_dir.join(&host).join("stage0-std")
@@ -454,7 +455,7 @@ fn place_std(stamp: &Path, lib: &Path) {
 fn std_config(compiler: &Path, build_dir: &Path, host: &str, toyos_ld: &Path) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
     let linker = toyos_ld.display();
-    let userland: String = toolchain::USERLAND_ARCHS
+    let userland: String = Arch::ALL
         .iter()
         .map(|arch| format!("\n[target.{}]\nlinker = \"{linker}\"\n", arch.userland()))
         .collect();
@@ -505,13 +506,13 @@ fn bootstrap_cargo() -> PathBuf {
 }
 
 /// A file put back to its bytes when this drops, however the scope ends.
-struct Restore {
+pub(crate) struct Restore {
     path: PathBuf,
     bytes: Vec<u8>,
 }
 
 impl Restore {
-    fn holding(path: &Path) -> Self {
+    pub(crate) fn holding(path: &Path) -> Self {
         let bytes = fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         Self { path: path.to_path_buf(), bytes }
     }

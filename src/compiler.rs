@@ -39,7 +39,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::buildlock::{self, Guard, Held, Keyed};
-use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity};
+use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity, Restore};
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is none of them: the
@@ -144,9 +144,10 @@ pub fn record(rust_dir: &Path) {
     }
 }
 
-/// The key of the compiler `fork`'s sources name.
+/// The key of the compiler `fork`'s sources name: their content, so committing
+/// what was built as local changes names the same compiler.
 pub fn key(fork: &Path) -> String {
-    let parts = [RECIPE.to_string(), source(fork), tree_identity(fork, &KEYED)];
+    let parts = [RECIPE.to_string(), tree_identity(fork, &KEYED)];
     short(parts.join("\n\0\n").as_bytes())
 }
 
@@ -208,7 +209,7 @@ fn place(root: &Path, fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path)
         "the fork's compiler sources moved while compiler {key} was being built (they are now \
          {again}); nothing was kept, and the next build makes the one they name"
     );
-    fs::write(partial.join(SOURCE), format!("{key} {}\n", source(fork)))
+    fs::write(partial.join(SOURCE), format!("{key}\n"))
         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCE).display()));
     fs::rename(&partial, dir).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", partial.display(), dir.display()));
 }
@@ -223,6 +224,10 @@ fn build_in_fork(fork: &Path) -> PathBuf {
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, config_text(&build_dir, &host)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
+    // Bootstrap re-locks both lockfiles to this worktree's `toyos-abi` and
+    // `toyos`; the fork's own are put back, so the checkout stays clean and the
+    // key stays the one it was built for.
+    let _locks = (Restore::holding(&fork.join("Cargo.lock")), Restore::holding(&fork.join("library/Cargo.lock")));
     let args = ["build", "--stage", "2", "--config", config, "--warnings", "warn", "compiler/rustc", "library"];
     let (ok, log) = toolchain::x_build(fork, &args, "the compiler");
     toolchain::refuse_on_compile_error(&log, "the compiler");
@@ -424,11 +429,17 @@ mod tests {
         assert_eq!((again.stage2.clone(), builds.get()), (ca.stage2.clone(), 2));
         assert!(ca.stage2.join("bin/rustc").is_file() && cb.stage2.join("bin/rustc").is_file());
 
-        // An uncommitted file in `compiler/` is a new compiler too.
+        // An uncommitted file in `compiler/` is a new compiler too, and
+        // committing it is not another one.
+        let pinned = git(&a.join("rust"), &["rev-parse", "HEAD"]);
         write(&a.join("rust/compiler/rustc_target/src/new_target.rs"), "pub fn t() {}\n");
         let ca2 = choose(&a, &rust_dir, &a.join("rust"), fake);
         assert_ne!(ca2.stage2, ca.stage2, "an untracked target spec kept the old compiler");
-        fs::remove_file(a.join("rust/compiler/rustc_target/src/new_target.rs")).unwrap();
+        git(&a.join("rust"), &["add", "-A"]);
+        git(&a.join("rust"), &["commit", "-qm", "the target, committed"]);
+        let committed = choose(&a, &rust_dir, &a.join("rust"), fake);
+        assert_eq!((committed.stage2.clone(), builds.get()), (ca2.stage2.clone(), 3), "a commit rebuilt the compiler");
+        git(&a.join("rust"), &["checkout", "-q", &pinned]);
 
         // The primary's own: nothing under its `build/` but `compilers/` moved.
         let after: Vec<_> = snapshot(&rust_dir.join("build"))
@@ -441,7 +452,7 @@ mod tests {
 
         // A sweep takes the compiler nobody names, and only that one.
         let orphan = ca2.stage2.parent().unwrap().to_path_buf();
-        drop((mine, ca, cb, again, ca2));
+        drop((mine, ca, cb, again, ca2, committed));
         let kept = choose(&a, &rust_dir, &a.join("rust"), fake);
         assert_eq!(sweep(&primary), [orphan], "the sweep took a compiler a worktree names, or left one nobody does");
         assert!(kept.stage2.is_dir());

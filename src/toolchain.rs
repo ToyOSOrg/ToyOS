@@ -86,19 +86,14 @@ const STD_SOURCES: [&str; 2] = ["toyos-abi/src", "toyos/src"];
 /// `src/build.rs`'s external fingerprint. A fifth spelling would silently leave
 /// one of them building or fingerprinting a different set of targets than the
 /// others.
-pub const GUEST_TARGETS: [&str; 5] = [
+pub const GUEST_TARGETS: [&str; 6] = [
     Arch::X86_64.userland(),
     Arch::X86_64.kernel(),
     Arch::X86_64.loader(),
+    Arch::Aarch64.userland(),
     Arch::Aarch64.kernel(),
     Arch::Aarch64.loader(),
 ];
-
-/// The architectures whose userland target the compiler this tree pins
-/// carries, in [`GUEST_TARGETS`]. A userland target is a target spec in the
-/// fork's `compiler/`, so a new one is a compiler change: it lands, and the
-/// primary's next build makes the compiler every sysroot is cloned from.
-pub const USERLAND_ARCHS: [Arch; 1] = [Arch::X86_64];
 
 /// The one ToyOS the hosted rustc (`system.toml`'s `hosted-rustc`) is built to
 /// run on.
@@ -749,7 +744,7 @@ fn full_bootstrap(root: &Path, rust_dir: &Path) {
         );
         tolerated_failure(&log, "the toolchain build");
     }
-    for arch in USERLAND_ARCHS {
+    for arch in Arch::ALL {
         assert_std_built_from(
             root,
             &rust_dir.join(format!("build/{host}/stage1-std/{}", arch.userland())),
@@ -806,7 +801,7 @@ fn write_config(rust_dir: &Path, host: &str, toyos_ld: &Path, with_hosted_rustc:
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let userland: String = USERLAND_ARCHS
+    let userland: String = Arch::ALL
         .iter()
         .map(|arch| {
             let backends = if *arch == HOSTED_ARCH { codegen_backends } else { "" };

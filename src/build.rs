@@ -727,15 +727,12 @@ fn build_and_assemble(
     extra_files: &[(String, Vec<u8>)],
     quiet: bool,
     arch: Arch,
-    userland: Userland,
 ) -> Vec<u8> {
     let mut root_files: Vec<(String, Vec<u8>)> = Vec::new();
-    if userland == Userland::Built {
-        build_programs(root, config, env, quiet, arch, &mut root_files);
-    }
+    build_programs(root, config, env, quiet, arch, &mut root_files);
     root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
 
-    if userland == Userland::Built && config.hosted_rustc {
+    if config.hosted_rustc {
         assert!(
             arch == toolchain::HOSTED_ARCH,
             "hosted-rustc is built to run on {}, and this image is for {}",
@@ -783,6 +780,29 @@ fn build_and_assemble(
     image::create_root_image(&root_files, &symlinks, quiet)
 }
 
+/// The programs an architecture cannot build yet, each with why. Such a program
+/// is left off that architecture's ROOT, said by name at build time; its row
+/// goes when its reason does.
+const NOT_YET_BUILT: &[(Arch, &str, &str)] = &[
+    (Arch::Aarch64, "calc", TOOLKIT_FORKS),
+    (Arch::Aarch64, "snake", TOOLKIT_FORKS),
+    (
+        Arch::Aarch64,
+        "doom",
+        "its C is compiled by toyos-cc, which no AArch64 build has run, and softbuffer's toyos \
+         fork stops it first (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)",
+    ),
+];
+
+const TOOLKIT_FORKS: &str = "softbuffer's and winit's toyos forks resolve the published \
+     toyos-window 0.2.0, whose framebuffer is x86-64 only \
+     (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)";
+
+/// Why `arch`'s userland leaves `program` out, if it does.
+fn not_built_for(arch: Arch, program: &str) -> Option<&'static str> {
+    NOT_YET_BUILT.iter().find(|(a, name, _)| *a == arch && *name == program).map(|(_, _, why)| *why)
+}
+
 /// Build `config`'s programs and init for `arch`, and add each to `root_files`.
 fn build_programs(
     root: &Path,
@@ -798,6 +818,13 @@ fn build_programs(
     let programs: Vec<ConfigCrate> = config_crates(root, config)
         .into_iter()
         .filter(|c| matches!(c.built, Built::Member | Built::Standalone))
+        .filter(|c| match not_built_for(arch, &c.name) {
+            Some(why) => {
+                eprintln!("{}: not built for {}, and not on this ROOT: {why}", c.name, arch.name());
+                false
+            }
+            None => true,
+        })
         .collect();
     for c in &programs {
         assert!(
@@ -903,27 +930,6 @@ pub struct Plan {
     pub config: PathBuf,
     pub features: Vec<String>,
     pub params: Vec<String>,
-    pub userland: Userland,
-}
-
-/// Whether ROOT carries the config's programs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Userland {
-    /// init and every program the config names, built for the plan's
-    /// architecture.
-    Built,
-    /// The manifest and the config's assets, and no program: the image of a
-    /// boot that ends before the kernel starts one, which pays for no userland
-    /// build. A kernel that does reach init finds none, and panics saying so.
-    Absent,
-}
-
-impl Userland {
-    /// What a plan for `arch` carries unless it asks for less: the programs,
-    /// where the toolchain builds a userland for that architecture at all.
-    pub fn of(arch: Arch) -> Self {
-        if crate::toolchain::USERLAND_ARCHS.contains(&arch) { Self::Built } else { Self::Absent }
-    }
 }
 
 impl Plan {
@@ -933,13 +939,7 @@ impl Plan {
             config: config.to_path_buf(),
             features: features.iter().map(|f| (*f).to_string()).collect(),
             params: params.iter().map(|p| (*p).to_string()).collect(),
-            userland: Userland::of(arch),
         }
-    }
-
-    /// This plan with a ROOT that carries no program.
-    pub fn without_userland(self) -> Self {
-        Self { userland: Userland::Absent, ..self }
     }
 }
 
@@ -966,7 +966,6 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
         config: boot.config.clone(),
         features: features.split(',').filter(|f| !f.is_empty()).map(Into::into).collect(),
         params: param,
-        userland: Userland::of(arch),
     }
 }
 
@@ -1794,7 +1793,7 @@ pub fn build(
         )
     };
 
-    let root_bytes = build_and_assemble(root, &config, &env, &[], false, arch, plan.userland);
+    let root_bytes = build_and_assemble(root, &config, &env, &[], false, arch);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
     let disk_bytes = image::create_boot_image(arch, &kernel_bytes, &bl_bytes, &root_bytes, &params);
@@ -1905,7 +1904,6 @@ fn root_image_key(plan: &Plan, extra_files: &[(String, Vec<u8>)]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     plan.config.hash(&mut h);
     plan.arch.hash(&mut h);
-    plan.userland.hash(&mut h);
     for (name, data) in extra_files {
         name.hash(&mut h);
         data.hash(&mut h);
@@ -2002,7 +2000,7 @@ pub fn build_test_image(
     };
 
     let root_bytes = ROOT_IMAGE.get_or_build(root_image_key, || {
-        build_and_assemble(root, &config, &env, extra_files, quiet, arch, plan.userland)
+        build_and_assemble(root, &config, &env, extra_files, quiet, arch)
     });
 
     drop(build_timer);
@@ -2695,6 +2693,22 @@ mod tests {
             implied.is_empty(),
             "`test-actuators` implies {implied:?}, so it is several kernel builds again"
         );
+    }
+
+    /// **An architecture leaves out only what the shipped config builds**, and
+    /// each reason names the issue file that owns it.
+    #[test]
+    fn every_program_an_architecture_leaves_out_is_one_the_shipped_config_builds() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let programs = parse_config(&Boot::shipped(root).config).programs;
+        for (arch, name, why) in NOT_YET_BUILT {
+            assert!(programs.contains_key(*name), "{name} is left out for {arch:?} and the shipped config builds no such program");
+            assert_eq!(not_built_for(*arch, name), Some(*why));
+            let issue = why.split("issues/").nth(1).map(|rest| rest.split(')').next().unwrap_or(rest));
+            let issue = issue.unwrap_or_else(|| panic!("{name}'s reason names no issue file: {why}"));
+            assert!(root.join("issues").join(issue).is_file(), "{name}'s reason cites issues/{issue}, which does not exist");
+        }
+        assert_eq!(not_built_for(Arch::X86_64, "calc"), None, "x86-64 builds every program");
     }
 
     /// No image this repository ships starts sshd.
