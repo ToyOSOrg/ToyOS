@@ -362,9 +362,8 @@ changes.
   none of `main`'s, each `ALONE … GREEN`, all under `quiesce-fsync-refuse`: twice
   `FAT 1 differs from FAT 0 at entry 45` in the volume the stop left, once with
   a cluster no entry reaches, and twice `log-volume: … was left with a chain its
-  entry does not reach: corrupt cluster chain` — the second stage
-  `issues/kernel/nothing-bounds-the-log-writer-below-the-boots-last-word.md`
-  describes, on a boot that now carries 13 MiB of ROOT where it carried 619.
+  entry does not reach: corrupt cluster chain` — the stop's second stage, since
+  removed, on a boot that now carries 13 MiB of ROOT where it carried 619.
   Not the host: `main`'s own FAT refusal defects at `b0adc600`, which the
   branch reaches by timing: a refused link write leaked the cluster
   `append_cluster` had just claimed, and a refused free split the FATs; a

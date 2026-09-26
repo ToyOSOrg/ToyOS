@@ -279,11 +279,12 @@ const HOLD_RECORDS: usize = 192;
 /// The kernel's record of each of those.
 const RETIRED: &str = "syscall 26 is retired";
 
-/// **A program's line lands after every record written before it.**
-/// `test_rs_log_hold` has the kernel write three batches of records and then
-/// says its line: `logd` reads the program's ring before the kernel's records
-/// in every round, so the line is in its hands before the last of them are,
-/// and only the stamp each was written with puts it after them all in `/log`.
+/// **A program's line lands between the records written before and after
+/// it.** `test_rs_log_hold` has the kernel write three batches of records,
+/// says its line and exits: `logd` reads the program's ring before the
+/// kernel's records in every round, so the line is in its hands before the
+/// last of them are, and only the stamp each was written with puts it after
+/// them all in `/log` — and before the kernel's record of its exit.
 pub fn after_records(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (ran, log) =
         one_job("tests/testcases", "log-hold", HOLD_JOB, Duration::from_secs(60), c_bins, rust_bins)?;
@@ -311,7 +312,20 @@ pub fn after_records(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>
              /log"
         ));
     }
-    eprintln!("  [origin] {HOLD_LINE:?} is after every one of its {HOLD_RECORDS} records in /log");
+    let exit = format!("{}{} pid=", bootlog::EXIT, bootlog::recorded_name(HOLD_JOB));
+    let exited = lines
+        .iter()
+        .position(|l| !toyos_logstream::is_program_line(l) && l.contains(&exit))
+        .ok_or_else(|| format!("/log carries no {exit:?} record"))?;
+    if exited < said {
+        return Err(format!(
+            "the kernel's record of {HOLD_JOB}'s exit is before the line it said first, in /log"
+        ));
+    }
+    eprintln!(
+        "  [origin] {HOLD_LINE:?} is after every one of its {HOLD_RECORDS} records in /log, and \
+         before its exit"
+    );
     Ok(())
 }
 

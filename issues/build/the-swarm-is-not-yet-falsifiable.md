@@ -208,7 +208,6 @@ issues/build/there-is-no-network-gate.md
 issues/build/toyos-cc-has-never-compiled-tcc.md
 issues/design-debt/redesign-the-log-subsystem.md
 issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md
-issues/diagnostics/the-log-staged-three-things-it-never-built.md
 issues/hardware/a-metal-session-runs-a-pre-flash-gate-first.md
 issues/hardware/device-shape-and-lifecycle-have-no-coverage.md
 issues/hardware/the-bot-scsi-machine-is-still-hand-written-in-the-kernel.md
@@ -219,6 +218,7 @@ issues/kernel/arm64-is-a-decision-nobody-has-made.md
 issues/kernel/cpu-time-is-a-band-and-not-a-reservation.md
 issues/kernel/every-driver-is-still-in-the-kernel.md
 issues/kernel/every-interrupt-lands-on-the-boot-cpu.md
+issues/kernel/logging-records-from-every-producer-and-a-kernel-that-waits-on-nobody.md
 issues/kernel/nothing-charges-kernel-memory-to-a-process.md
 issues/kernel/page-global-is-a-decision-nobody-has-made.md
 issues/kernel/scheduler-policy-behavior-has-no-quantified-suite.md

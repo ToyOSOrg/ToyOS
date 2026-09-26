@@ -173,6 +173,10 @@ impl<T> Drop for SleepGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.holder.store(FREE, Ordering::Relaxed);
         let next = self.lock.now.fetch_advance(Ordering::Release).succ();
-        let _ = self.lock.watch.post_n(u64::from(next.raw()), 1);
+        // Before the scheduler exists no task can have queued, and a post
+        // needs the scheduler: the boot's console takes this lock that early.
+        if crate::sched::driver::started() {
+            let _ = self.lock.watch.post_n(u64::from(next.raw()), 1);
+        }
     }
 }
