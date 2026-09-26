@@ -1,7 +1,7 @@
 //! Key events down the surface tree.
 //!
 //! A **surface** is something with a screen and a keyboard: the compositor's
-//! windows, `/system/bin/terminal`, `/system/bin/console`. Its owner reads key transitions
+//! windows, `terminal`, `console`. Its owner reads key transitions
 //! from whatever is above it and decides what they mean — which for a terminal
 //! is bytes on its child's stdin, through a [`toyos_keymap::Translator`] it
 //! owns alone.
