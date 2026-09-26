@@ -286,8 +286,9 @@ const RUST_SKIP: &[&str] = &[
     // `netd_listener_forgery` runs it there.
     "netd_listener_forgery",
     // Needs a NIC in front of netd and a host server behind it.
-    // `netd_slow_reader` runs it on `tests/netcase`.
+    // `netd_slow_reader` and `netd_refused_pipes` run them on `tests/netcase`.
     "netd_slow_reader",
+    "netd_refused_pipes",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
     // shared boot it would be twenty seconds of nothing.
@@ -830,6 +831,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // is full still gets every byte of a stream past it. The verdict is the
     // guest's byte-for-byte comparison; its clocks are liveness guards.
     ("netd_slow_reader", Sched::Parallel, Tier::Fast),
+    // The netcase boot again: client pipes netd cannot use, or loses under
+    // it, cost that client its connection and never netd. The verdict is a
+    // round trip after each case, a named line per refusal and a clean
+    // console; its clocks are liveness guards.
+    ("netd_refused_pipes", Sched::Parallel, Tier::Fast),
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
     ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
@@ -9054,6 +9060,186 @@ fn open_terminal(
     ))
 }
 
+/// The host server behind the netd stream tests, where slirp's `10.0.2.2`
+/// lands. Each connection names how many bytes it wants in eight
+/// little-endian bytes and is sent exactly that many of the guest's
+/// `stream_byte` pattern (`tests/toyos-rust-tests/src/netd_stream.rs`), then
+/// its write side is closed. The judgement is the guest's; this side reports
+/// only what it sent to each connection and how its sending ended.
+///
+/// **Nothing here outlives [`PatternServer::finish`].** `accept` is woken by a
+/// connection of the server's own, and every connection still reading or
+/// writing is shut down under it; the socket timeouts bound only a harness that
+/// never reaches `finish`.
+struct PatternServer {
+    port: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    open: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+    acceptor: thread::JoinHandle<Vec<thread::JoinHandle<Result<u64, String>>>>,
+}
+
+impl PatternServer {
+    /// Longest a connection's read or write may stall before `finish` exists
+    /// to end it: the guest's own run bound.
+    const STALL: Duration = Duration::from_secs(120);
+
+    /// The guest program's `stream_byte`, the other half of one agreement.
+    fn stream_byte(pos: u64) -> u8 {
+        let group = (pos >> 4) as u32;
+        match pos & 15 {
+            k @ 0..=3 => (group >> (8 * k)) as u8,
+            _ => 0xC3,
+        }
+    }
+
+    fn start() -> Result<Self, String> {
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|e| format!("bind the host server: {e}"))?;
+        let port = listener.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let open = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (stop_seen, open_kept) = (stop.clone(), open.clone());
+        let acceptor = thread::spawn(move || {
+            let mut served = Vec::new();
+            for stream in listener.incoming() {
+                if stop_seen.load(Ordering::Acquire) {
+                    break;
+                }
+                let stream = match stream {
+                    Ok(s) => s,
+                    Err(e) => {
+                        served.push(thread::spawn(move || Err(format!("accept: {e}"))));
+                        continue;
+                    }
+                };
+                match stream.try_clone() {
+                    Ok(kept) => open_kept.lock().expect("the open list").push(kept),
+                    Err(e) => {
+                        served.push(thread::spawn(move || Err(format!("keep the connection: {e}"))));
+                        continue;
+                    }
+                }
+                served.push(thread::spawn(move || Self::serve(stream)));
+            }
+            served
+        });
+        Ok(Self { port, stop, open, acceptor })
+    }
+
+    fn serve(mut stream: std::net::TcpStream) -> Result<u64, String> {
+        use std::io::Read;
+        stream.set_read_timeout(Some(Self::STALL)).map_err(|e| format!("read timeout: {e}"))?;
+        stream.set_write_timeout(Some(Self::STALL)).map_err(|e| format!("write timeout: {e}"))?;
+        let mut ask = [0u8; 8];
+        stream.read_exact(&mut ask).map_err(|e| format!("read how much the guest wants: {e}"))?;
+        let total = u64::from_le_bytes(ask);
+        let mut chunk = vec![0u8; 65536];
+        let mut sent = 0u64;
+        while sent < total {
+            let n = chunk.len().min((total - sent) as usize);
+            for (i, b) in chunk[..n].iter_mut().enumerate() {
+                *b = Self::stream_byte(sent + i as u64);
+            }
+            stream.write_all(&chunk[..n]).map_err(|e| format!("send at {sent} of {total}: {e}"))?;
+            sent += n as u64;
+        }
+        stream.shutdown(std::net::Shutdown::Write).map_err(|e| format!("close the stream: {e}"))?;
+        Ok(sent)
+    }
+
+    /// Stop accepting, end every connection still open, and answer how each
+    /// one's sending ended, in the order they were accepted.
+    fn finish(self) -> Vec<Result<u64, String>> {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::Release);
+        // The wake for `accept`: refused only if the listener is already gone,
+        // which means the acceptor has already returned.
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        let served = self.acceptor.join().expect("the host server's acceptor panicked");
+        for stream in self.open.lock().expect("the open list").iter() {
+            // Refused only by a connection the peer already ended.
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        served
+            .into_iter()
+            .map(|t| t.join().unwrap_or_else(|_| Err("a host connection's thread panicked".to_string())))
+            .collect()
+    }
+}
+
+/// Boot `tests/netcase` with the one guest program `name`, wait for netd, and
+/// run it against a fresh [`PatternServer`]. Answers the guest's result, the
+/// console it ran beside, and what the host sent each connection.
+fn netcase_against_host(
+    rust_bins: &[(String, Vec<u8>)],
+    name: &str,
+) -> Result<(qemu::TestResult, String, Vec<Result<u64, String>>), String> {
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+    let bins: Vec<(String, Vec<u8>)> = rust_bins.iter().filter(|(n, _)| n == name).cloned().collect();
+    if bins.is_empty() {
+        return Err(format!("{name} was not built"));
+    }
+    let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+        return Err("this test needs a NIC and the profile has none".to_string());
+    }
+    let server = PatternServer::start()?;
+    let port = server.port;
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+    let mut console = qemu.boot_log().to_string();
+    let up = await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
+    let result = up.map(|_| qemu.run_test(&format!("test_rs_{name} {port}"), Duration::from_secs(120)));
+    let sent = server.finish();
+    let result = result.map_err(|e| format!("netd never came up, so nothing below means anything: {e}"))?;
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("{name} exited {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    console.push_str(&result.serial);
+    Ok((result, console, sent))
+}
+
+/// A receiver that stops reading until its pipe is full still gets every byte
+/// of a stream past it, from the guest's own byte-for-byte comparison.
+fn netd_slow_reader(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (result, _, sent) = netcase_against_host(rust_bins, "netd_slow_reader")?;
+    let [Ok(sent)] = sent.as_slice() else {
+        return Err(format!("the host server's connections ended {sent:?}, not one whole stream"));
+    };
+    let ok = format!("netd_slow_reader: ok bytes={sent}");
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with(&ok)) {
+        return Err(format!("the host sent {sent} bytes and the guest never said {ok:?}:\n{}", result.stdout));
+    }
+    eprintln!("  [netcase] a reader a whole pipe behind got all {sent} bytes, each right");
+    Ok(())
+}
+
+/// Client pipes netd cannot use, or loses under it, end that client's
+/// connection and never netd: the guest's round trip after each case is the
+/// verdict that netd survived it. This side carries what the guest cannot
+/// see — that netd named each refusal and that no program panicked.
+fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (result, console, _) = netcase_against_host(rust_bins, "netd_refused_pipes")?;
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_refused_pipes: ok")) {
+        return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    for named in [
+        "netd: resetting a connection — its receive pipe refused netd",
+        "netd: resetting a connection — its send pipe refused netd",
+        "its notify pipe refused netd",
+    ] {
+        if !console.contains(named) {
+            return Err(format!("netd refused a client's pipe without a `{named}` line:\n{console}"));
+        }
+    }
+    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    eprintln!("  [netcase] four refused client pipes cost netd nothing, and each was named");
+    Ok(())
+}
+
 /// Ctrl+Alt+D at a live desktop: every CPU answers, and the two halves of the
 /// report agree.
 ///
@@ -9074,79 +9260,6 @@ fn open_terminal(
 /// is that the report is complete and that its halves cannot disagree: every
 /// CPU is present, the deadline classes sum to the parked count, and the
 /// process table knows at least as many threads as the schedulers hold.
-/// `netd_slow_reader`'s host half: one connection from the guest, which names
-/// how many bytes it wants, is sent exactly that many of the guest program's
-/// pattern and then closed. The judgement is the guest's; this side reports
-/// only what it sent and how its sending ended.
-fn netd_slow_reader(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    use std::io::{Read, Write as _};
-
-    /// The guest program's `stream_byte`, the other half of one agreement.
-    fn stream_byte(pos: u64) -> u8 {
-        let group = (pos >> 4) as u32;
-        match pos & 15 {
-            k @ 0..=3 => (group >> (8 * k)) as u8,
-            _ => 0xC3,
-        }
-    }
-
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
-    let bins: Vec<(String, Vec<u8>)> =
-        rust_bins.iter().filter(|(name, _)| name == "netd_slow_reader").cloned().collect();
-    if bins.is_empty() {
-        return Err("netd_slow_reader was not built".to_string());
-    }
-    let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
-    if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
-        return Err("this test needs a NIC and the profile has none".to_string());
-    }
-
-    // Where slirp's `10.0.2.2` lands on the host.
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|e| format!("bind the host server: {e}"))?;
-    let port = listener.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
-    let server = thread::spawn(move || -> Result<u64, String> {
-        let (mut stream, _) = listener.accept().map_err(|e| format!("accept the guest: {e}"))?;
-        let mut ask = [0u8; 8];
-        stream.read_exact(&mut ask).map_err(|e| format!("read how much the guest wants: {e}"))?;
-        let total = u64::from_le_bytes(ask);
-        let mut chunk = vec![0u8; 65536];
-        let mut sent = 0u64;
-        while sent < total {
-            let n = chunk.len().min((total - sent) as usize);
-            for (i, b) in chunk[..n].iter_mut().enumerate() {
-                *b = stream_byte(sent + i as u64);
-            }
-            stream
-                .write_all(&chunk[..n])
-                .map_err(|e| format!("send at {sent} of {total}: {e}"))?;
-            sent += n as u64;
-        }
-        stream.shutdown(std::net::Shutdown::Write).map_err(|e| format!("close the stream: {e}"))?;
-        Ok(sent)
-    });
-
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
-    let mut console = qemu.boot_log().to_string();
-    await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")
-        .map_err(|e| format!("netd never came up, so nothing below means anything: {e}"))?;
-    let result = qemu.run_test(&format!("test_rs_netd_slow_reader {port}"), Duration::from_secs(120));
-    if let Some(err) = &result.error {
-        return Err(format!("{err}\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!("netd_slow_reader exited {:?}:\n{}", result.exit_code, result.stdout));
-    }
-    // The guest has read to the end, so the server has finished sending.
-    let sent = server.join().map_err(|_| "the host server panicked".to_string())??;
-    let ok = format!("netd_slow_reader: ok bytes={sent}");
-    if !result.stdout.lines().any(|l| l.trim_end().ends_with(&ok)) {
-        return Err(format!("the host sent {sent} bytes and the guest never said {ok:?}:\n{}", result.stdout));
-    }
-    eprintln!("  [netcase] a reader a whole pipe behind got all {sent} bytes, each right");
-    Ok(())
-}
-
 fn blocked_dump() -> Result<(), String> {
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/desktopaudiocase");
     let options = BootOptions {
@@ -14390,6 +14503,7 @@ fn run_machine_test(
             Ok(())
         }
         "netd_slow_reader" => netd_slow_reader(rust_bins),
+        "netd_refused_pipes" => netd_refused_pipes(rust_bins),
         "netd_hostile_peer" => {
             // The netcase boot again, and for the same reason: netd's `main`
             // returns on a machine with no NIC, so this is the only config

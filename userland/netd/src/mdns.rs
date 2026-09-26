@@ -84,10 +84,16 @@ impl Responder {
     }
 }
 
-/// A full send buffer is a burst of queries this pass cannot answer; the
-/// asker retries, and nothing here waits.
 fn send(socket: &mut udp::Socket, bytes: &[u8], to: IpEndpoint) {
-    let _ = socket.send_slice(bytes, to);
+    match socket.send_slice(bytes, to) {
+        Ok(()) => {}
+        // A burst of queries this pass cannot answer; the asker retries, and
+        // nothing here waits.
+        Err(udp::SendError::BufferFull) => {}
+        // Only an asker's own source can be this, an address or a port of
+        // zero, and nothing on the wire reaches it.
+        Err(udp::SendError::Unaddressable) => {}
+    }
 }
 
 #[cfg(test)]
