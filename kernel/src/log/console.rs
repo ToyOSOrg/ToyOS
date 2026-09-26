@@ -13,14 +13,14 @@ use alloc::sync::Arc;
 
 use toyos_abi::log::LogRecord;
 use toyos_sched::task::{WaitClass, WakeCause, WakeReason};
-use toyos_sched::waitq::wake_direct;
+use toyos_sched::park::notify;
 
 use crate::drivers::serial::{self, BackendGuard};
 use crate::hw::HW;
 use crate::sched::driver::{cpus, irq_off};
 use crate::sched::kthread::{self, OnPanic};
-use crate::completion;
-use crate::sched::payload::{KShared, TaskHandle};
+use crate::watch;
+use crate::sched::payload::KShared;
 use crate::scheduler;
 
 use super::read::{drain_ordered, Published, RecordSink};
@@ -31,10 +31,6 @@ const NAME: &str = "klogd";
 
 // `emit` finds `klogd` through this, not the process table: the lookup takes a lock, and `emit` runs inside IRQ handlers and every syscall's locked region.
 static KLOGD: AtomicPtr<Arc<KShared>> = AtomicPtr::new(core::ptr::null_mut());
-
-// Separate from `KLOGD`: the spawner publishes `KLOGD`, `klogd` itself publishes this before its first park.
-// Null between that spawn and `klogd`'s first loop: `Drain::Thread` is already set, and the wake alone covers the gap.
-static KLOGD_INBOX: AtomicPtr<Arc<TaskHandle>> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Who puts a committed record on the wire.
 pub enum Drain {
@@ -75,16 +71,10 @@ pub fn post_wake() {
     }
     // SAFETY: leaked once from a `Box`, never cleared; live for the machine's life.
     let shared = unsafe { &*ptr };
-    // Preserves invariant W's store-before-claim order (`completion::post_n`), in the one shape that may take no lock.
-    // signal, not post: two producers can win the same wake epoch, and post's write would race on one `UnsafeCell<Record>`.
-    let inbox = KLOGD_INBOX.load(Ordering::Acquire);
-    if !inbox.is_null() {
-        // SAFETY: leaked once by `klogd` before its first park, never cleared.
-        let handle = unsafe { &*inbox };
-        handle.inbox().signal();
-    }
+    // One read-modify-write of `klogd`'s own word and no lock: it claims a parked or committing `klogd`
+    // and flags a running one, whose next commit refuses — the post a producer holding any lock may make.
     irq_off(|guard| {
-        wake_direct(shared, WakeCause::new(WakeReason::Woken), cpus(), &HW, guard);
+        notify(shared, WakeCause::new(WakeReason::Woken), cpus(), &HW, guard);
     });
 }
 
@@ -264,12 +254,9 @@ extern "C" fn body(_arg: u64) -> ! {
 
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("klogd runs as a task");
-    // Signals without a lock or watch list; `post_wake` explains why a record can't be written here instead.
-    KLOGD_INBOX.store(
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(handle.clone())) as *const Arc<TaskHandle>
-            as *mut _,
-        Ordering::Release,
-    );
+    // Registered once: `post_wake` notifies this thread's word directly, and the registration is what the
+    // park is made on. Nothing else posts this watch but the thread's own end.
+    let armed = watch::arm(handle.watch(), 0, WaitClass::Other).expect("klogd runs as a task");
     loop {
         // Bounded per chunk so interrupts stay off for at most `CHUNK_RECORDS` lines; `discard_pending` covers machines with no backend.
         if serial::has_console() {
@@ -279,17 +266,9 @@ extern "C" fn body(_arg: u64) -> ! {
         }
 
         // The one point with committed records just observed that may take a lock; `emit` may not.
-        // Outside `drain_inline`: that function's other callers (a producer mid-`emit`, the panic path) may not touch `INBOXES`.
+        // Outside `drain_inline`: that function's other callers (a producer mid-`emit`, the panic path) may not take a watch's lock.
         super::user::post_readiness();
 
-        // A completion post cannot drop a wake: it stores the record before claiming, so a miss here is caught by `wait`'s own recheck.
-        let Some(armed) = completion::arm(
-            completion::Subject::of(handle.watch()),
-            completion::Token::new(0),
-            WaitClass::Other,
-        ) else {
-            continue;
-        };
         // Safe with no backend because `discard_pending` still advances the position each pass.
         if shard::arm_waiter(shard::log_waiter(), || DRAINED.any_pending()) {
             continue;
@@ -297,7 +276,7 @@ extern "C" fn body(_arg: u64) -> ! {
         // No deadline: a spurious wake costs a re-drain; a missing one is what W3's fences prevent.
         PARKS.fetch_add(1, Ordering::Relaxed);
         // `klogd` is never killed, so this cancel arm is unreachable.
-        let _ = completion::wait(&parkable, &armed, crate::time::Deadline::never());
+        let _ = watch::wait(&parkable, &armed, crate::time::Deadline::never());
     }
 }
 

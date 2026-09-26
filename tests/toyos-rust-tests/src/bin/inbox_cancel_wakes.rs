@@ -38,7 +38,7 @@ static RETURNED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     let pipe = syscall::pipe().expect("the pipe the waiter parks on");
-    // The second descriptor. Closing this one is what `cancel_by_source` acts on,
+    // The second descriptor. Closing this one is what `ops::close` answers polls for,
     // while `pipe.read` keeps the pipe's reader count above zero.
     let dup = syscall::dup(pipe.read).expect("dup the read end");
 

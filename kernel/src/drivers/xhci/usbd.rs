@@ -2,7 +2,7 @@
 
 use toyos_sched::task::WaitClass;
 
-use crate::completion::{self, Subject, Token};
+use crate::watch;
 use crate::sched::kthread::{self, OnPanic};
 use crate::scheduler;
 use crate::time::Deadline;
@@ -26,15 +26,15 @@ extern "C" fn body(_arg: u64) -> ! {
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("usbd runs as a task");
     // Armed once for the loop: rearming here would drop a pending wake.
-    let armed = completion::arm(
-        Subject::of(handle.watch()),
-        Token::new(0),
+    let armed = watch::arm(
+        handle.watch(),
+        0,
         WaitClass::Io,
     )
     .expect("a kernel thread is a task and can arm");
     loop {
         // No deadline: only an interrupt or a port's own deadline should wake this.
         // The cancel arm never fires: nothing retires a kernel thread.
-        let _ = completion::wait(&parkable, &armed, Deadline::never());
+        let _ = watch::wait(&parkable, &armed, Deadline::never());
     }
 }

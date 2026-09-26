@@ -129,13 +129,11 @@ const BANS: &[Ban] = &[
             // and never gives it back so none can start, which is what the
             // reset that follows stands on.
             ("kernel/src/drivers/xhci/mod.rs", 1),
-            // Both in `cpu.rs`'s test module, and both are the drop bomb
-            // rather than a leak: `Task`'s "the only legal death is
-            // `DeadTask::finalize`" is a scheduler invariant, so a test that
-            // deliberately ends with a live task — which is what most of these
-            // arms do — may not drop its world, and a registration held
-            // past a park it staged by hand is the same statement.
-            ("toyos-sched/src/cpu.rs", 2),
+            // In `cpu.rs`'s test module, and the drop bomb rather than a leak:
+            // `Task`'s "the only legal death is `DeadTask::finalize`" is a
+            // scheduler invariant, so a test that deliberately ends with a live
+            // task — which is what most of these arms do — may not drop its world.
+            ("toyos-sched/src/cpu.rs", 1),
         ],
     },
     // `toyos_untrusted::Untrusted` has no accessor, no cast, no arithmetic and
@@ -461,7 +459,6 @@ const SENTINEL_ALLOWED: &[(&str, usize)] = &[
 /// compiling with nobody asked. Per file *and* per count, so an added impl
 /// reds beside a permitted one and a deleted one reds its own stale row.
 const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
-    ("kernel/src/completion/inbox.rs", 1),
     ("kernel/src/drivers/hda.rs", 1),
     ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/drivers/virtio_console.rs", 1),

@@ -56,3 +56,9 @@ push-fence-relaxed = []
 # selects it, and one that did would place tasks onto CPUs that never pick
 # them up.
 placement-ignores-staleness = []
+# Declared, never enabled here: `toyos-sched-loom` turns this on to make
+# `task.rs`'s `begin_commit` blind to the notified bit — a post landing between
+# a waiter's registration on a watch and its commit is lost — and
+# `loom/tests/loom_watch.rs` must red when it does. No kernel build reaches it;
+# the crate declares it only so `cfg` checking knows the name.
+commit-ignores-notify = []

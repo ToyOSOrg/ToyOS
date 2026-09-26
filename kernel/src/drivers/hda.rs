@@ -177,24 +177,6 @@ pub fn has_pending() -> bool {
     ISR.mask.load(Ordering::Acquire) != 0
 }
 
-static INBOX_WATCHERS: Lock<alloc::vec::Vec<crate::inbox::InboxId>> =
-    Lock::new(alloc::vec::Vec::new());
-
-pub fn add_inbox_watcher(id: crate::inbox::InboxId) {
-    let mut watchers = INBOX_WATCHERS.lock();
-    if !watchers.contains(&id) {
-        watchers.push(id);
-    }
-}
-
-pub fn remove_inbox_watcher(id: crate::inbox::InboxId) {
-    INBOX_WATCHERS.lock().retain(|&x| x != id);
-}
-
-pub fn inbox_watchers() -> alloc::vec::Vec<crate::inbox::InboxId> {
-    INBOX_WATCHERS.lock().clone()
-}
-
 /// Take the pending completions, or `None`.
 fn take_completions() -> Option<AudioCompletionRecord> {
     let mask = ISR.mask.swap(0, Ordering::AcqRel);

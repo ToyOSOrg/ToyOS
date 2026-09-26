@@ -48,7 +48,7 @@ use toyos_quiesce::{Record, Stage, Sweep, Thread, ThreadId};
 use toyos_sched::task::WaitClass;
 
 use crate::arch::percpu;
-use crate::completion::{self, Outcome, Subject, Token, Watch};
+use crate::watch::{self, Watch};
 use crate::process;
 use crate::scheduler::TaskId;
 use crate::time::{Budget, Deadline, Duration};
@@ -132,7 +132,7 @@ static PROGRESS: Watch = Watch::new();
 /// post that has already come.
 pub fn note_progress() {
     if stops_this_thread() {
-        completion::post(Subject::of(&PROGRESS), Outcome::Ready);
+        PROGRESS.post();
     }
 }
 
@@ -183,9 +183,9 @@ pub fn stop(stage: Stage) -> Record {
     );
 
     // Armed before the first sweep, so a transition landing between a sweep
-    // and the park after it leaves a record that park returns on at once.
+    // and the park after it is a post that park returns on at once.
     let parkable = crate::scheduler::Parkable::at_entry();
-    let armed = completion::arm(Subject::of(&PROGRESS), Token::new(0), WaitClass::Other)
+    let armed = watch::arm(&PROGRESS, 0, WaitClass::Other)
         .expect("quiesce::stop: the caller holds no task to park");
     // The kick is the timer vector, whose return to Ring 3 is the gate.
     crate::arch::apic::kick_all_but_self();
@@ -204,7 +204,7 @@ pub fn stop(stage: Stage) -> Record {
             // Uncancellable: the claim is taken, and a caller that left here
             // would leave a machine nothing else may turn off. The deadline is
             // `keep_waiting`'s own, so an expiry ends the loop at the next sweep.
-            let _ = completion::wait_uncancellable(&parkable, &armed, deadline);
+            watch::wait_uncancellable(&parkable, &armed, deadline);
             continue;
         }
         // Read here and not by the caller: the question is what was open at the
@@ -277,7 +277,7 @@ pub mod last {
     use toyos_quiesce::Sweep;
     use toyos_sched::task::WaitClass;
 
-    use crate::completion::{self, Outcome, Subject, Token, Watch};
+    use crate::watch::{self, Watch};
     use crate::time::{Budget, Deadline, Duration};
 
     /// The transition the held thread makes once it is released.
@@ -336,7 +336,7 @@ pub mod last {
             last.name(),
             toyos_quiesce::LAST_THREAD,
         );
-        completion::post(Subject::of(&ARRIVED), Outcome::Ready);
+        ARRIVED.post();
         let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
         // Yields and never parks: a park is the transition this hold exists to
         // place, and a sweep would stop this thread at the first one.
@@ -357,10 +357,10 @@ pub mod last {
         let Some(last) = armed() else { return };
         let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
         let parkable = crate::scheduler::Parkable::at_entry();
-        let _ = completion::wait_until(
+        let _ = watch::wait_until(
             &parkable,
-            Subject::of(&ARRIVED),
-            Token::new(0),
+            &ARRIVED,
+            0,
             WaitClass::Other,
             deadline,
             || HELD.load(Acquire),

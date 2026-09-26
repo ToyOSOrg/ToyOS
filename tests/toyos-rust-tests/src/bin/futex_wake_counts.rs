@@ -213,7 +213,7 @@ const ATTEMPTS: usize = 6;
 /// The claim arithmetic, on a schedule this test arranges rather than one it
 /// hopes for.
 ///
-/// Two things `completion::post_n` must do are invisible unless a woken waiter
+/// Two things `Watch::post_n` must do are invisible unless a woken waiter
 /// is **still on the bucket** when the next call walks it: a claim another call
 /// already took must not be *counted*, and it must not *spend* the caller's
 /// `limit`. A waiter leaves the bucket when it runs and returns, so both

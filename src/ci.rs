@@ -304,11 +304,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "shard-publish-relaxed", Some("log_publish"), &[
         "a_reader_that_finds_a_shard_finds_it_built ... FAILED",
     ]),
-    red(KERNEL_LOOM, "inbox-release-off", Some("inbox"), &[
-        "a_record_reaches_its_taker_intact ... FAILED",
-    ]),
-    red(KERNEL_LOOM, "inbox-signal-as-post", Some("inbox"), &[
-        "two_unlocked_producers_are_a_race_and_a_signal_is_not ... FAILED",
+    red(KERNEL_LOOM, "poll-fire-load-store", Some("poll_once"), &[
+        "a_post_and_a_recheck_answer_a_poll_once ... FAILED",
+        "a_withdrawal_and_a_post_never_both_take_a_poll ... FAILED",
     ]),
     red(KERNEL_LOOM, "sleeplock-acquire-off", Some("sleep_lock"), &[
         "a_parking_contender_observes_the_holders_writes ... FAILED",
@@ -338,6 +336,11 @@ pub(crate) const CONTROLS: &[Control] = &[
         "halted with 2 of 2 messages queued and no IPI in flight",
     ]),
     red(SCHED_LOOM, "push-fence-relaxed", Some("loom_push"), &["published and no push behind it"]),
+    // The watch's lost wake, staged: the waiter parks over a post it was flagged
+    // with. A double panic, so the verdict is the first one's message.
+    red(SCHED_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
+        "parked with the condition true and no wake owed: the post was lost",
+    ]),
     // Reproduces an open defect
     // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
     // proving a lie is caught, and goes with its fix.

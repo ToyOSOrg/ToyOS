@@ -2345,11 +2345,6 @@ mod tests {
                 // other is a miscomputed base address. No suite builds it, so a
                 // full run pays nothing and a boot storm asks for it by name.
                 "heap-tripwire",
-                // `wake-fence-off`'s twin, for the completion core: turned on
-                // only by `kernel-loom`, to make the inbox's record
-                // publication relaxed and prove `inbox` reds without the
-                // release.
-                "inbox-release-off",
                 // The five below cost no kernel build at all, for
                 // `wake-fence-off`'s reason: each is declared only so `cfg`
                 // checking knows the name, and turned on only by
@@ -2362,6 +2357,10 @@ mod tests {
                 // for the same span, without the allocator's lock.
                 "pass-spin",
                 "poison-overwrite",
+                // `wake-fence-off`'s twin, for a poll ring's one-shot answer:
+                // turned on only by `kernel-loom`, to split `inbox/once.rs`'s
+                // exchange and prove `poll_once` reds without it.
+                "poll-fire-load-store",
                 "reap-raise-relaxed",
                 // `smp_roster.rs`'s count relaxed; `smp_bringup.rs` reds.
                 "roster-commit-relaxed",

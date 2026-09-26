@@ -39,6 +39,11 @@ times:
    **Exit**: the machine boots in QEMU and on the T14 with the kernel's NVMe and
    USB storage paths never touched before init runs. The boot-time cost on the
    stick and on NVMe is measured.
+   **Done** (#506; T14 run 143 green): on the stick the loader reads ROOT in
+   1160 ms, the kernel reaches `Boot: complete` 1229 ms after it starts, and
+   the kernel issues 0 storage commands before init. The NVMe cost is not
+   measured and cannot be on the T14: nothing is ever written to its NVMe, so
+   there is no ROOT there to read.
 2. **One way to wait.** Every waitable object has one `Watch`, and a waiter is
    either a thread (woken) or a user poll ring (posted). The multi-waiter queue,
    the per-thread record ring, the `Source` double dispatch and the per-module

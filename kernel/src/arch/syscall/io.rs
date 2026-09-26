@@ -1,4 +1,4 @@
-//! Blocking `read`/`write` register on the wait queue before re-checking the
+//! Blocking `read`/`write` register on the object's watch before re-checking the
 //! condition — closing the check-then-block window — and never park while
 //! holding a `with_process_data` guard.
 //!
@@ -6,7 +6,7 @@
 //! pointer and length into a [`UserBytes`]/[`UserBytesMut`] window before
 //! this module runs.
 
-use crate::completion;
+use crate::watch;
 use crate::object::{ops, KObjectRef};
 use crate::time::{Cadence, Deadline, Duration};
 use crate::user_ptr::{UserBytes, UserBytesMut};
@@ -31,7 +31,7 @@ enum WriteBlock {
 
 /// What `sys_read` parks on when the handle has nothing to give.
 enum ReadBlock {
-    Pipe(pipe::PipeEnd, pipe::PipeId),
+    Pipe(alloc::sync::Arc<crate::watch::Watch>, pipe::PipeId),
     VirtioSound,
     Hda,
     /// A claimed keyboard, woken by its own IRQ.
@@ -67,13 +67,13 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
                 if let Some(id) = pipe_id { process::wake_pipe_readers(id); }
                 return n;
             }
-            Err(WriteBlock::Pipe(id)) => match pipe::writers_queue(id) {
+            Err(WriteBlock::Pipe(id)) => match pipe::write_watch(id) {
                 Some(end) => {
                     let parkable = crate::scheduler::Parkable::at_entry();
-                    if completion::wait_until(
+                    if watch::wait_until(
                         &parkable,
-                        completion::Subject::of(&end.watch),
-                        completion::Token::new(0),
+                        &end,
+                        0,
                         WaitClass::Pipe,
                         Deadline::never(),
                         || pipe::has_space(id),
@@ -106,7 +106,7 @@ fn read_block(object: &KObjectRef) -> ReadBlock {
     match object {
         KObjectRef::Device(_) => unreachable!("a device claim blocks via `read_block_device`"),
         KObjectRef::Console(_) => {
-            // Parks on `waitqs::KEYBOARD` and re-polls: nothing posts a
+            // Parks on `keyboard::WATCH` and re-polls: nothing posts a
             // serial-console key, so the timer alone wakes it.
             const CONSOLE_REPOLL: Cadence = Cadence::every(
                 Duration::from_millis(10),
@@ -115,7 +115,7 @@ fn read_block(object: &KObjectRef) -> ReadBlock {
             ReadBlock::Console(Deadline::at(crate::clock::now() + CONSOLE_REPOLL.duration()))
         }
         _ => match ops::pipe_id_read(object).and_then(|id| {
-            pipe::readers_queue(id).map(|end| ReadBlock::Pipe(end, id))
+            pipe::read_watch(id).map(|end| ReadBlock::Pipe(end, id))
         }) {
             Some(block) => block,
             None => ReadBlock::Refused(SyscallError::NotFound.to_u64()),
@@ -156,10 +156,10 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
             }
             Err(ReadBlock::Pipe(end, id)) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
-                if completion::wait_until(
+                if watch::wait_until(
                     &parkable,
-                    completion::Subject::of(&end.watch),
-                    completion::Token::new(0),
+                    &end,
+                    0,
                     WaitClass::Pipe,
                     Deadline::never(),
                     || pipe::has_data(id),
@@ -171,10 +171,10 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
             }
             Err(ReadBlock::VirtioSound) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
-                if completion::wait_until(
+                if watch::wait_until(
                     &parkable,
-                    completion::Subject::of(&crate::sched::waitqs::AUDIO_WATCH),
-                    completion::Token::new(0),
+                    &crate::drivers::AUDIO_WATCH,
+                    0,
                     WaitClass::Io,
                     Deadline::never(),
                     crate::drivers::virtio_sound::has_pending,
@@ -186,10 +186,10 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
             }
             Err(ReadBlock::Hda) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
-                if completion::wait_until(
+                if watch::wait_until(
                     &parkable,
-                    completion::Subject::of(&crate::sched::waitqs::AUDIO_WATCH),
-                    completion::Token::new(0),
+                    &crate::drivers::AUDIO_WATCH,
+                    0,
                     WaitClass::Io,
                     Deadline::never(),
                     crate::drivers::hda::has_pending,
@@ -201,10 +201,10 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
             }
             Err(ReadBlock::Keyboard(deadline)) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
-                if completion::wait_until(
+                if watch::wait_until(
                     &parkable,
-                    completion::Subject::of(&crate::sched::waitqs::KEYBOARD_WATCH),
-                    completion::Token::new(0),
+                    &crate::keyboard::WATCH,
+                    0,
                     WaitClass::Io,
                     deadline,
                     crate::keyboard::has_data,
@@ -216,10 +216,10 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
             }
             Err(ReadBlock::Console(deadline)) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
-                if completion::wait_until(
+                if watch::wait_until(
                     &parkable,
-                    completion::Subject::of(&crate::sched::waitqs::KEYBOARD_WATCH),
-                    completion::Token::new(0),
+                    &crate::keyboard::WATCH,
+                    0,
                     WaitClass::Io,
                     deadline,
                     crate::drivers::serial::has_data,

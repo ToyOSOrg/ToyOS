@@ -18,14 +18,15 @@ use toyos_sched::hw::{CpuId, Hw, Kicker, Machine, Nanos};
 use toyos_sched::mailbox::{mailbox, Kick, PreemptGuard, Urgency};
 use toyos_sched::msg::Msg;
 use toyos_sched::task::{RtState, TaskBuilder, TaskKey, WaitClass};
-use toyos_sched::waitq::{Cancel, Cancelled, Commit, CurrentTask};
+use toyos_sched::park::{prepare, Cancel, Commit, CurrentTask};
+use toyos_sched::task::Notified;
 
 use crate::arch::percpu;
 use crate::hw::HW;
 use crate::process::{OwnedAlloc, PageTables, TaskId, KERNEL_STACK_SIZE};
 
 use super::payload::{
-    KMsg, KShare, KShared, KWaitQueue, KernelCtx, KernelPayload, RawTicket, TaskHandle, ThreadSched,
+    KMsg, KShare, KShared, KernelCtx, KernelPayload, RawTicket, TaskHandle, ThreadSched,
 };
 use super::MAX_CPUS;
 
@@ -547,33 +548,31 @@ pub fn pass(dispose: Dispose) {
     crate::preempt::enable_no_resched();
 }
 
-/// A wait registration, holding preemption off for the whole window between phase 1 and phase 2 of the wait handshake.
+/// A wait's phase 1, holding preemption off for the whole window between phase 1 and phase 2 of the wait handshake.
 ///
 /// The window must stay closed: a preemption here lets a waker find `Committing` instead of `Ready` and report a lost wake.
 #[must_use = "a wait ticket must be blocked on or cancelled"]
-pub struct Ticket<'q>(RawTicket<'q>);
+pub struct Ticket(RawTicket);
 
-impl<'q> Ticket<'q> {
-    /// Phase 1: register the running thread on `queue`. The count goes up before the task is read, or a
-    /// preemption in between leaves `CurrentTask` naming a CPU it no longer runs on.
-    pub fn register(queue: &'q KWaitQueue, cancel: Cancel, class: WaitClass) -> Self {
+impl Ticket {
+    /// Phase 1 on the running thread's own word, or [`Notified`] when a post reached it since it registered on a
+    /// watch. The count goes up before the task is read, or a preemption in between leaves `CurrentTask` naming a
+    /// CPU it no longer runs on.
+    pub fn register(cancel: Cancel, class: WaitClass) -> Result<Self, Notified> {
         crate::preempt::disable();
         let shared = current_shared().expect("prepare_wait: no running thread");
         let current = CurrentTask::new(&shared, current_cpu());
-        // The class is the wait's, not the queue's — the queue is this
-        // thread's own parking place and has no subject of its own.
-        Self(queue.prepare_wait_as(&current, cancel, class))
+        match prepare(&current, cancel, class) {
+            Ok(ticket) => Ok(Self(ticket)),
+            Err(notified) => {
+                crate::preempt::enable();
+                Err(notified)
+            }
+        }
     }
 
-    /// The condition became true after registering: withdraw, and take the deferred preemption.
-    pub fn cancel(self) -> Cancelled {
-        let outcome = self.0.cancel();
-        crate::preempt::enable();
-        outcome
-    }
-
-    /// Hand the registration to the blocking pass. The count stays raised — see [`pass_block`].
-    fn into_raw(self) -> RawTicket<'q> {
+    /// Hand the ticket to the blocking pass. The count stays raised — see [`pass_block`].
+    fn into_raw(self) -> RawTicket {
         self.0
     }
 }
@@ -582,27 +581,24 @@ impl<'q> Ticket<'q> {
 ///
 /// Committing after the drain puts a remote waker's claim on one side of it or the other, so neither a lost
 /// wake nor a double park.
-pub fn pass_block(ticket: Ticket<'_>, deadline: Option<Nanos>) {
+pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
     // No `preempt::disable()` of its own: the ticket has held the count raised since registration; that guard is this bracket.
     let ticket = ticket.into_raw();
     crate::preempt::clear_need_resched();
     drain_irqs(super::dump::Entered::Blocking);
     let now = HW.now();
-    let (action, registration) = with_cpu(|cpu| {
+    let (action, parked) = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
         if let Some(current) = pass.cpu().running() {
             check_stack_canary(current.ext());
             current.ext().handle.publish(current.acct(), None);
         }
         match ticket.commit() {
-            Commit::Parked(committed, registration) => (
-                pass.dispose_block(committed, deadline).finish(),
-                Some(registration),
-            ),
-            // A wake landed between registration and commit: do not park; the quantum may still have expired.
-            Commit::AlreadyWoken => (pass.dispose_none().finish(), None),
+            Commit::Parked(committed) => (pass.dispose_block(committed, deadline).finish(), true),
+            // A post landed between phase 1 and the commit: do not park; the quantum may still have expired.
+            Commit::AlreadyWoken => (pass.dispose_none().finish(), false),
             // A retire landed while deciding to park: the thread keeps running and unwinds rather than exit through a dead switch.
-            Commit::Killed => (pass.dispose_none().finish(), None),
+            Commit::Killed => (pass.dispose_none().finish(), false),
         }
     });
     charge_cpu_time(now);
@@ -612,16 +608,11 @@ pub fn pass_block(ticket: Ticket<'_>, deadline: Option<Nanos>) {
         }
     });
     // After the commit, before the switch: the running task is still this one.
-    if registration.is_some() {
+    if parked {
         crate::quiesce::note_progress();
     }
     execute(action);
     crate::preempt::enable_no_resched();
-    if let Some(registration) = registration {
-        // The node must leave the queue before this thread registers
-        // anywhere else, or a later `wake_one` finds a waiter not waiting.
-        registration.finish();
-    }
 }
 
 /// Per-CPU busy time, for `sysinfo`, derived from the pass's own `now`.
@@ -689,11 +680,9 @@ fn drain_irqs(entered: super::dump::Entered) {
         crate::pcidev::drain_pending();
     }
     if crate::irq_ring::take(crate::irq_ring::IrqSource::Audio).is_some() {
-        // Both backends share one wait queue — `Source::wake` posts `AUDIO_WATCH`
-        // for either — so a second would need the parking side to know which
-        // driver bound, which it doesn't.
-        crate::inbox::Source::VirtioSound.wake();
-        crate::inbox::Source::Hda.wake();
+        // Both backends share one watch, so a second would need the parking side
+        // to know which driver bound, which it doesn't.
+        crate::drivers::AUDIO_WATCH.post();
     }
 }
 

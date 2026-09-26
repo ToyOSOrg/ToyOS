@@ -67,6 +67,15 @@ placement-ignores-staleness = []
 #
 # `toyos-sched` declares no twin, because this decides nothing in `../src`.
 victim-retires-mid-probe = []
+# The negative control for the watch. It makes `task.rs`'s `begin_commit`
+# blind to the notified bit, which is a waiter that registers, checks and parks
+# without the post that landed in between being able to stop it — the lost wake
+# the watch exists to make unrepresentable — and `loom_watch.rs` must red:
+#
+#   cargo test -p toyos-sched-loom --features commit-ignores-notify --test loom_watch
+#
+# Never on by default and never reachable from a kernel build.
+commit-ignores-notify = []
 
 [dependencies]
 loom = "0.7"

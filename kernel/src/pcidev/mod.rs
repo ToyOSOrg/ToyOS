@@ -97,12 +97,12 @@ use toyos_pci::{af, aperture, bar, express, msix, placement, pm, probe};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{NoCapability, PciDevice, Unarmed};
-use crate::inbox::InboxId;
 use crate::iommu::{DeviceSpace, IommuError};
 use crate::mm::paging::{CachePolicy, MmioPolicy};
 use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
 use crate::sync::Lock;
+use crate::watch::Watch;
 
 /// How many functions this machine can hand out at once.
 ///
@@ -220,8 +220,9 @@ struct Bound {
 static BOUND: [Lock<Option<Bound>>; MAX_FUNCTIONS] =
     [const { Lock::new(None) }; MAX_FUNCTIONS];
 
-static WATCHERS: [Lock<Vec<InboxId>>; MAX_FUNCTIONS] =
-    [const { Lock::new(Vec::new()) }; MAX_FUNCTIONS];
+/// What a claimed function's poll waits on, one per slot: two processes each driving a
+/// function must not learn when the other's device is busy.
+static WATCHES: [Watch; MAX_FUNCTIONS] = [const { Watch::new() }; MAX_FUNCTIONS];
 
 /// Every function this machine enumerated, and the two windows a BAR may be
 /// moved into.
@@ -1431,7 +1432,7 @@ fn alone_in_its_page(claimed: &PciDevice, index: u8, at: u64, span: u64) {
 pub fn release(slot: usize) {
     // Two statements, because edition 2021 keeps an `if let`'s scrutinee
     // temporaries alive to the end of its block: `BOUND[slot]`'s guard would be
-    // held across the unmaps, the reset and `WATCHERS`.
+    // held across the unmaps, the reset and the watch's answer.
     let bound = BOUND[slot].lock().take();
     if let Some(bound) = bound {
         tear_down(slot, bound);
@@ -1489,7 +1490,8 @@ fn tear_down(slot: usize, mut bound: Bound) {
         }
     }
     IRQ[slot].clear();
-    WATCHERS[slot].lock().clear();
+    // The function is gone from this slot, so a poll on it is answered rather than left for the next holder's interrupts.
+    WATCHES[slot].cancel_polls();
     log!(
         "pcidev: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] released from slot {slot}; reset by {how}",
         bound.pci.bus,
@@ -1686,7 +1688,7 @@ pub fn drain_pending() {
                 VECTORS[slot]
             );
         }
-        crate::inbox::Source::PciFunction(slot as u8).wake();
+        WATCHES[slot].post();
     }
 }
 
@@ -1702,17 +1704,7 @@ pub fn note_fault(slot: usize) {
     crate::preempt::set_need_resched();
 }
 
-pub fn add_inbox_watcher(slot: usize, id: InboxId) {
-    let mut watchers = WATCHERS[slot].lock();
-    if !watchers.contains(&id) {
-        watchers.push(id);
-    }
-}
-
-pub fn remove_inbox_watcher(slot: usize, id: InboxId) {
-    WATCHERS[slot].lock().retain(|held| *held != id);
-}
-
-pub fn inbox_watchers(slot: usize) -> Vec<InboxId> {
-    WATCHERS[slot].lock().clone()
+/// The watch of the function a claim holds at `slot`.
+pub fn watch(slot: usize) -> &'static Watch {
+    &WATCHES[slot]
 }

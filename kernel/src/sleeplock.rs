@@ -20,7 +20,7 @@ use loom::sync::atomic::{AtomicU64, Ordering};
 
 use core::ops::{Deref, DerefMut};
 
-use crate::completion::{self, Outcome, Subject, Token, Watch};
+use crate::watch::{self, Watch};
 use crate::scheduler::{current_task, Parkable, TaskId};
 use crate::sync::{AtomicTicket, Ticket};
 
@@ -51,7 +51,7 @@ pub struct SleepLock<T> {
     now: AtomicTicket,
     /// [`FREE`], [`NOT_A_TASK`], or the holder's packed [`TaskId`]; not part of the ticket pair's exclusion.
     holder: AtomicU64,
-    /// Contenders arm here with their own ticket as token; `completion::arm` refuses a second arm per inbox, so [`Self::lock`] must not be called from inside an armed wait's predicate.
+    /// Contenders arm here with their own ticket as token; `watch::arm` refuses a second arm per inbox, so [`Self::lock`] must not be called from inside an armed wait's predicate.
     watch: Watch,
     data: UnsafeCell<T>,
 }
@@ -100,10 +100,10 @@ impl<T> SleepLock<T> {
         // Arms before re-reading `now`, so a release landing in between is not lost.
         let mine = self.ticket.fetch_advance(Ordering::Relaxed);
         // Uncancellable: a killed holder still releases via `Drop` on unwind, so the wait is bounded.
-        completion::wait_uncancellable_until(
+        watch::wait_uncancellable_until(
             p,
-            Subject::of(&self.watch),
-            Token::new(u64::from(mine.raw())),
+            &self.watch,
+            u64::from(mine.raw()),
             || self.now.load(TURN) == mine,
         );
         self.holder.store(owner, Ordering::Relaxed);
@@ -170,11 +170,6 @@ impl<T> Drop for SleepGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.holder.store(FREE, Ordering::Relaxed);
         let next = self.lock.now.fetch_advance(Ordering::Release).succ();
-        let _ = completion::post_n(
-            Subject::of(&self.lock.watch),
-            Outcome::Ready,
-            Token::new(u64::from(next.raw())),
-            1,
-        );
+        let _ = self.lock.watch.post_n(u64::from(next.raw()), 1);
     }
 }

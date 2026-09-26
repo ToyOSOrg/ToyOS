@@ -14,7 +14,7 @@ use crate::hw::{CpuId, Nanos};
 use crate::mailbox::MailboxNode;
 use crate::msg::Msg;
 use crate::sync::{Arc, AtomicBool, AtomicU64, LeafLock, Ordering};
-use crate::waitq::CommittedTicket;
+use crate::park::CommittedTicket;
 
 /// Monotonic, never reused. Stale messages keyed by `TaskKey` are provably
 /// about a dead task and are benign no-ops.
@@ -124,7 +124,7 @@ impl WaitClass {
     }
 }
 
-/// Distinguishes one `prepare_wait` from the next on the same task, so a
+/// Distinguishes one `park::prepare` from the next on the same task, so a
 /// claim that raced an earlier, already-cancelled registration cannot be
 /// mistaken for a claim on the current one.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -136,8 +136,7 @@ pub struct Gen(pub u32);
 pub enum TaskState {
     Running(CpuId),
     Ready(CpuId),
-    /// Registered on a wait queue, not yet parked: the two-phase commit's
-    /// first phase.
+    /// Deciding to park, not yet parked: the two-phase commit's first phase.
     Committing(CpuId, Gen),
     Blocked(CpuId),
     /// A waker won the claim and a `Wake` message is queued to the home CPU.
@@ -182,8 +181,14 @@ const STICKY: u64 = KILL | RETIRE_QUEUED | STOP;
 /// In the word so that read and that mark cannot come apart; set and cleared
 /// only by the task itself, while it runs.
 const MID_UPDATE: u64 = 1 << 60;
+/// A post reached this task while it was neither parked nor committing. The
+/// next [`TaskShared::begin_commit`] consumes it and refuses the park, so a post
+/// landing between a waiter's registration on a watch and its commit is a
+/// recheck rather than a lost wake. Written only by read-modify-writes of this
+/// word, so a post and a commit are ordered by the one location both write.
+const NOTIFIED: u64 = 1 << 59;
 /// What every transition carries over.
-const KEPT: u64 = STICKY | MID_UPDATE;
+const KEPT: u64 = STICKY | MID_UPDATE | NOTIFIED;
 
 /// What a thread standing at a Ring 3 boundary does instead of returning to
 /// userland.
@@ -297,11 +302,38 @@ pub enum Claim {
     /// The waiter had registered but not yet parked. Its own commit will
     /// observe the claim and refuse to park — no message needed.
     PrePark,
-    /// Somebody else (a local deadline fire, a retire) got there first; this
-    /// waiter is no longer waiting. A `wake_one` must try the next one — a
-    /// wake may never be satisfied by a corpse.
+    /// Somebody else (a post, a retire) got there first, or the task is not
+    /// waiting at all.
     Lost,
 }
+
+/// What a post did to one task: the outcome of [`TaskShared::notify`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Notify {
+    /// The task was parked on `CpuId`: this post owns the wake and must post
+    /// `Msg::Wake` to that CPU.
+    Parked(CpuId),
+    /// The task was committing; its own commit observes the claim and refuses
+    /// to park, so no message is owed.
+    PrePark,
+    /// The task was not waiting yet, or a wake is already on its way: the bit
+    /// is set, and the task's next commit rechecks instead of parking.
+    Flagged,
+    /// The task is dead.
+    Dead,
+}
+
+impl Notify {
+    /// Whether this post is what ends the task's park — the count a bounded
+    /// post spends. A flagged task was not parked, so it spends nothing.
+    pub fn woke(self) -> bool {
+        matches!(self, Self::Parked(_) | Self::PrePark)
+    }
+}
+
+/// A commit refused because a post reached the task after it last registered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Notified;
 
 /// The outcome of the second phase of the wait handshake.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -325,9 +357,9 @@ pub struct TaskShared<M> {
     wake_node: MailboxNode<M>,
     /// ≤1 in flight, guaranteed by the sticky RETIRE_QUEUED bit.
     retire_node: MailboxNode<M>,
-    /// Membership in at most one wait queue (multi-wait is io_uring's job).
-    /// The queue holds the `Arc`; this flag is the fail-fast check that a
-    /// task never registers on two queues.
+    /// Registered on at most one watch (multi-wait is a poll ring's job). The
+    /// watch holds the `Arc`; this flag is the fail-fast check that a task
+    /// never registers on two.
     waiting: AtomicBool,
 }
 
@@ -441,24 +473,34 @@ impl<M> TaskShared<M> {
         }
     }
 
-    /// Phase 1 of the wait handshake: `Running(cpu) → Committing(cpu, gen)`.
-    /// The generation advances on every registration, so a claim that raced
-    /// an earlier registration cannot commit this one.
-    pub fn begin_commit(&self, cpu: CpuId) -> Gen {
+    /// Phase 1 of the wait handshake: `Running(cpu) → Committing(cpu, gen)`,
+    /// or [`Notified`] — the bit consumed and the word left `Running` — when a
+    /// post reached this task since it registered. The generation advances on
+    /// every registration, so a claim that raced an earlier registration
+    /// cannot commit this one.
+    pub fn begin_commit(&self, cpu: CpuId) -> Result<Gen, Notified> {
         let mut cur = self.state.load(Ordering::Acquire);
         loop {
             assert_eq!(
                 unpack(cur),
                 TaskState::Running(cpu),
-                "prepare_wait outside the running task's own CPU",
+                "park::prepare outside the running task's own CPU",
             );
+            // `commit-ignores-notify` is the negative control: blind to the bit, a
+            // post between registration and commit is lost, and `loom_watch` reds.
+            let notified = cfg!(not(feature = "commit-ignores-notify")) && cur & NOTIFIED != 0;
             let generation = Gen((((cur >> GEN_SHIFT) & GEN_MASK) as u32).wrapping_add(1));
-            let next = retarget(cur, TaskState::Committing(cpu, generation));
+            let next = if notified {
+                cur & !NOTIFIED
+            } else {
+                retarget(cur, TaskState::Committing(cpu, generation))
+            };
             match self
                 .state
                 .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => return generation,
+                Ok(_) if notified => return Err(Notified),
+                Ok(_) => return Ok(generation),
                 Err(observed) => cur = observed,
             }
         }
@@ -503,6 +545,8 @@ impl<M> TaskShared<M> {
 
     /// The one arbitration point every wake goes through — remote wakers,
     /// local deadline fires, join, device ISR tails. There is no second path.
+    /// A claim on anything but a waiter is lost: this is the deadline's claim,
+    /// which must not flag a task it did not park. A post uses [`Self::notify`].
     pub fn claim_wake(&self) -> Claim {
         loop {
             match self.state() {
@@ -524,13 +568,60 @@ impl<M> TaskShared<M> {
         }
     }
 
+    /// A post to this task: claim it if it is parked or committing, and set
+    /// [`NOTIFIED`] in every other live state so its next commit rechecks.
+    ///
+    /// **Every arm writes the word**, the flagged one included when the bit is
+    /// already set: the poster's state change reaches the task only through a
+    /// read-modify-write the task's own next transition reads from. A post
+    /// that merely *loaded* a `Running` word would be a store of the subject
+    /// followed by a load of another location — the one reordering that loses
+    /// a wake — so it is never allowed to answer without a write.
+    pub fn notify(&self) -> Notify {
+        let mut cur = self.state.load(Ordering::Acquire);
+        loop {
+            let (next, outcome) = match unpack(cur) {
+                TaskState::Blocked(cpu) => {
+                    (retarget(cur, TaskState::WakeQueued(cpu)), Notify::Parked(cpu))
+                }
+                TaskState::Committing(cpu, _) => {
+                    (retarget(cur, TaskState::WakeQueued(cpu)), Notify::PrePark)
+                }
+                TaskState::Dead => return Notify::Dead,
+                TaskState::Running(_)
+                | TaskState::Ready(_)
+                | TaskState::WakeQueued(_)
+                | TaskState::InTransit(_) => (cur | NOTIFIED, Notify::Flagged),
+            };
+            match self
+                .state
+                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return outcome,
+                Err(observed) => cur = observed,
+            }
+        }
+    }
+
+    /// Forget a post that reached an earlier wait: called at registration,
+    /// before the watch can see this task, so no post for the new wait can be
+    /// the one forgotten.
+    pub fn clear_notified(&self) {
+        self.state.fetch_and(!NOTIFIED, Ordering::AcqRel);
+    }
+
+    /// Whether a post is waiting to be consumed by this task's next commit.
+    pub fn notified(&self) -> bool {
+        self.state.load(Ordering::Acquire) & NOTIFIED != 0
+    }
+
     /// The home CPU handling `Msg::Wake`: `WakeQueued(cpu) → Ready(cpu)`.
     pub fn finish_wake(&self, cpu: CpuId) -> bool {
         self.transition(TaskState::WakeQueued(cpu), TaskState::Ready(cpu))
     }
 
-    /// Wait-queue membership, one queue at a time. `false` means the task is
-    /// already registered somewhere — a caller bug.
+    /// Watch membership, one watch at a time. `false` means the task is already
+    /// registered somewhere — a caller bug.
     pub fn set_waiting(&self) -> bool {
         !self.waiting.swap(true, Ordering::AcqRel)
     }
@@ -1146,7 +1237,7 @@ mod tests {
     fn sticky_bits_survive_transitions() {
         let s = running(C0);
         assert!(s.claim_retire());
-        let generation = s.begin_commit(C0);
+        let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.state(), TaskState::Committing(C0, generation));
         assert!(s.kill_pending() && s.retire_queued());
         assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
@@ -1184,7 +1275,7 @@ mod tests {
     fn a_task_parked_mid_update_refuses_the_parked_mark() {
         let s = running(C0);
         s.begin_update();
-        let generation = s.begin_commit(C0);
+        let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
         assert_eq!(s.state(), TaskState::Blocked(C0));
         assert!(!s.stop_if_blocked(), "the update is open across this park");
@@ -1196,7 +1287,7 @@ mod tests {
     #[test]
     fn park_then_wake_is_the_ordinary_path() {
         let s = running(C0);
-        let generation = s.begin_commit(C0);
+        let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
         assert_eq!(s.claim_wake(), Claim::Parked(C0));
         assert_eq!(s.state(), TaskState::WakeQueued(C0));
@@ -1207,7 +1298,7 @@ mod tests {
     #[test]
     fn a_wake_between_registration_and_commit_refuses_the_park() {
         let s = running(C0);
-        let generation = s.begin_commit(C0);
+        let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.claim_wake(), Claim::PrePark);
         assert_eq!(s.commit_park(C0, generation), ParkOutcome::AlreadyWoken);
         assert_eq!(s.state(), TaskState::Running(C0), "no switch, keep running");
@@ -1216,11 +1307,11 @@ mod tests {
     #[test]
     fn cancel_reports_a_claim_it_lost() {
         let s = running(C0);
-        let generation = s.begin_commit(C0);
+        let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.cancel_commit(C0, generation), ParkOutcome::Parked);
         assert_eq!(s.state(), TaskState::Running(C0));
 
-        let generation = s.begin_commit(C0);
+        let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.claim_wake(), Claim::PrePark);
         assert_eq!(s.cancel_commit(C0, generation), ParkOutcome::AlreadyWoken);
         assert_eq!(s.state(), TaskState::Running(C0));
@@ -1229,9 +1320,9 @@ mod tests {
     #[test]
     fn a_stale_generation_cannot_park_the_task() {
         let s = running(C0);
-        let stale = s.begin_commit(C0);
+        let stale = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.cancel_commit(C0, stale), ParkOutcome::Parked);
-        let fresh = s.begin_commit(C0);
+        let fresh = s.begin_commit(C0).expect("nothing notified this task");
         assert_ne!(stale, fresh);
         assert!(!s.transition(TaskState::Committing(C0, stale), TaskState::Blocked(C0)));
         assert_eq!(s.state(), TaskState::Committing(C0, fresh));
@@ -1241,7 +1332,7 @@ mod tests {
     fn claims_on_anything_but_a_waiter_are_lost() {
         let s = running(C0);
         assert_eq!(s.claim_wake(), Claim::Lost, "running");
-        let generation = s.begin_commit(C0);
+        let generation = s.begin_commit(C0).expect("nothing notified this task");
         assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
         assert_eq!(s.claim_wake(), Claim::Parked(C0));
         assert_eq!(s.claim_wake(), Claim::Lost, "already claimed");
@@ -1254,11 +1345,56 @@ mod tests {
         s.transition(TaskState::Running(C0), TaskState::Blocked(C0));
     }
 
+    /// A post to a task that has registered but not yet committed is the
+    /// window a check-then-register waiter loses: the bit carries it to the
+    /// commit, which refuses the park and leaves the word `Running`.
     #[test]
-    fn wait_membership_is_single_queue() {
+    fn a_post_before_the_commit_refuses_it() {
+        let s = running(C0);
+        assert_eq!(s.notify(), Notify::Flagged);
+        assert_eq!(s.begin_commit(C0), Err(Notified));
+        assert_eq!(s.state(), TaskState::Running(C0));
+        assert!(!s.notified(), "the refusal consumed the post");
+        let generation = s.begin_commit(C0).expect("consumed once, not twice");
+        assert_eq!(s.state(), TaskState::Committing(C0, generation));
+    }
+
+    #[test]
+    fn a_post_claims_a_waiter_it_finds_parked_or_committing() {
+        let s = running(C0);
+        let generation = s.begin_commit(C0).expect("nothing notified this task");
+        assert_eq!(s.notify(), Notify::PrePark);
+        assert_eq!(s.commit_park(C0, generation), ParkOutcome::AlreadyWoken);
+        let generation = s.begin_commit(C0).expect("a claim sets no bit");
+        assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
+        assert_eq!(s.notify(), Notify::Parked(C0));
+        assert_eq!(s.notify(), Notify::Flagged, "a second post finds the wake queued");
+        assert!(s.finish_wake(C0));
+        assert!(s.notified(), "the bit rides the wake to the next commit");
+    }
+
+    /// Registration forgets what reached an earlier wait.
+    #[test]
+    fn clearing_forgets_a_post_to_an_earlier_wait() {
+        let s = running(C0);
+        s.notify();
+        s.clear_notified();
+        assert!(s.begin_commit(C0).is_ok());
+    }
+
+    #[test]
+    fn a_dead_task_takes_no_post() {
+        let s = running(C0);
+        assert!(s.transition(TaskState::Running(C0), TaskState::Dead));
+        assert_eq!(s.notify(), Notify::Dead);
+        assert!(!s.notified());
+    }
+
+    #[test]
+    fn wait_membership_is_single_watch() {
         let s = running(C0);
         assert!(s.set_waiting());
-        assert!(!s.set_waiting(), "a task waits on at most one queue");
+        assert!(!s.set_waiting(), "a task waits on at most one watch");
         s.clear_waiting();
         assert!(s.set_waiting());
     }

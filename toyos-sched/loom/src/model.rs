@@ -8,7 +8,8 @@ use crate::hw::{CpuId, Kicker};
 use crate::mailbox::{PreemptGuard, SchedMsg};
 use crate::sync::Arc;
 use crate::task::{TaskKey, TaskShared, WakeCause, WakeReason};
-use crate::waitq::{LeafLock, WaitList};
+use crate::sync::LeafLock;
+use crate::watch::Waiters;
 
 pub const CPU0: CpuId = CpuId(0);
 pub const CPU1: CpuId = CpuId(1);
@@ -112,7 +113,7 @@ pub struct RemoteGuard;
 #[allow(unsafe_code)]
 unsafe impl PreemptGuard for RemoteGuard {}
 
-/// `LeafLock` over loom's mutex, so the wait-queue models exercise the real
+/// `LeafLock` over loom's mutex, so the watch models exercise the real
 /// critical sections.
 pub struct LoomLock<T>(Mutex<T>);
 
@@ -128,11 +129,11 @@ impl<T: Send> LeafLock<T> for LoomLock<T> {
     }
 }
 
-pub fn wait_list<M>() -> LoomLock<WaitList<M>>
+pub fn watch_list<M, R>() -> LoomLock<Waiters<M, R>>
 where
-    WaitList<M>: Send,
+    Waiters<M, R>: Send,
 {
-    LoomLock::new(WaitList::new())
+    LoomLock::new(Waiters::new())
 }
 
 /// Counts targeted IPIs. In these models an IPI's only observable effect is
