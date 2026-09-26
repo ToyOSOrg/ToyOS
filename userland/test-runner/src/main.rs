@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::power::Stop;
 use toyos::process::Process;
 use toyos::syscap::SysCap;
 
@@ -34,7 +35,7 @@ const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
 
 /// Jobs started holding this program's console as stdin rather than a pipe:
 /// a job whose subject is the console object has no other way to hold one, its
-/// stdout being a pipe to `logd`. The kernel mints the job a console of its
+/// stdout being this program's log ring. The kernel mints the job a console of its
 /// own from this one, and a job that never reads it takes none of the serial
 /// commands.
 const CONSOLE_JOBS: &[&str] = &["test_rs_console_line_atomicity"];
@@ -111,17 +112,17 @@ fn main() {
         jobs.remove(0);
     }
     if !jobs.is_empty() {
-        deadline(bound_ms, cap.as_ref());
+        deadline(bound_ms);
         for job in &jobs {
             // Fatal by name: nobody is reading this console, so a job that did not run must end the boot.
             if job.split_whitespace().count() != 1 {
-                give_the_machine_back(&format!("job {job:?} is not one binary name"), cap.as_ref());
+                give_the_machine_back(&format!("job {job:?} is not one binary name"));
             }
             *RUNNING.lock().expect("the deadline thread does not panic holding this") =
                 job.clone();
             match run_one(job, &[], cap.as_ref()) {
                 Ran::No => {
-                    give_the_machine_back(&format!("job {job:?} did not run"), cap.as_ref())
+                    give_the_machine_back(&format!("job {job:?} did not run"))
                 }
                 // **A builtin's exit code reaches no kernel record.** A spawned
                 // job's does — `process::exit_process` logs one — so a host
@@ -129,10 +130,9 @@ fn main() {
                 // process and its code is only this program's own text. So a
                 // failing builtin ends the boot: the missing `Rebooting.` is
                 // the channel the kernel writes for it.
-                Ran::Builtin(code) if code != 0 => give_the_machine_back(
-                    &format!("the builtin {job:?} exited {code}"),
-                    cap.as_ref(),
-                ),
+                Ran::Builtin(code) if code != 0 => {
+                    give_the_machine_back(&format!("the builtin {job:?} exited {code}"))
+                }
                 Ran::Builtin(_) | Ran::Spawned => {}
             }
             if STOPPING.load(Ordering::Acquire) {
@@ -156,12 +156,12 @@ fn main() {
 /// **The line below is this program's own text**, in the log under its name;
 /// the evidence a judge reads that this fired is the kernel's own reboot line
 /// and the boot's elapsed time, not this.
-fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
-    let Some(power) = cap.and_then(|cap| cap.duplicate().ok()) else {
-        // A boot list with no way back to the firmware would sit here forever
-        // whatever this thread did, so it is refused where it is asked for.
-        fatal("no capability to reboot with, so the job list has no deadline");
-    };
+fn deadline(bound_ms: u64) {
+    // A boot list with no way back to the firmware would sit here forever
+    // whatever this thread did, so it is refused where it is asked for.
+    if toyos::endow::service(toyos::power::PORT).is_err() {
+        fatal("no `power` connector to reboot with, so the job list has no deadline");
+    }
     std::thread::spawn(move || {
         // A deadline that fired before the loop named a job would say the bound
         // and nothing about what was inside it, so it waits for the name.
@@ -184,7 +184,7 @@ fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
              ({bound_ms} ms)"
         );
         let _ = io::stdout().flush();
-        // **The job goes before the reboot.** `SYS_REBOOT` syncs the machine
+        // **The job goes before the reboot.** the reboot syncs the machine
         // and then resets it, and a job still running is a process that can
         // start a device transfer after that sync. Killing it and waiting for
         // it to be gone leaves the driver to finish or abandon what it had in
@@ -195,7 +195,7 @@ fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
             let _ = job.kill();
             let _ = job.wait();
         }
-        fatal(&format!("the reboot was refused: {:?}", power.reboot()));
+        fatal(&format!("the reboot was refused: {:?}", toyos::power::stop(Stop::Reboot)));
     });
 }
 
@@ -213,14 +213,12 @@ fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
 /// wrong is on the console for a QEMU run, and on the stick it is the *absence*
 /// of the boot's own last records — which is why the boot ends here rather than
 /// hanging: an absence at a known point is a verdict, and a hang is not.
-fn give_the_machine_back(why: &str, cap: Option<&SysCap>) -> ! {
+fn give_the_machine_back(why: &str) -> ! {
     println!("test-runner: {why}");
     let _ = io::stdout().flush();
-    if let Some(power) = cap.and_then(|cap| cap.duplicate().ok()) {
-        let refused = power.reboot();
-        println!("test-runner: the reboot was refused: {refused:?}");
-        let _ = io::stdout().flush();
-    }
+    let refused = toyos::power::stop(Stop::Reboot);
+    println!("test-runner: the reboot was refused: {refused:?}");
+    let _ = io::stdout().flush();
     std::process::exit(1);
 }
 
@@ -325,13 +323,10 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
             // here instead, by handing the machine back.
             match toyos_abi::syscall::dup(toyos_abi::RawHandle(child.as_raw_handle())) {
                 Ok(watch) => JOB.store(watch.0, Ordering::Release),
-                Err(e) => give_the_machine_back(
-                    &format!(
-                        "job {name:?} started and its handle would not duplicate ({e:?}), so the \
-                         deadline has nothing to end it with"
-                    ),
-                    cap,
-                ),
+                Err(e) => give_the_machine_back(&format!(
+                    "job {name:?} started and its handle would not duplicate ({e:?}), so the \
+                     deadline has nothing to end it with"
+                )),
             }
             let outcome = child.wait();
             drop(claim_the_job());

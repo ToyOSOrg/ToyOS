@@ -499,8 +499,9 @@ fn volume_lines(log: &str) -> String {
 ///   is logged after that, so requiring it requires a write after the open.
 /// - **The shutdown path standing in for the continuous one.** The mid-run read
 ///   happens before `run shutdown` and must already have `Boot: complete`; the
-///   post-shutdown read must additionally have the shutdown's own last line,
-///   which only the bounded wait on `LOG_DURABLE_NS` can deliver.
+///   post-shutdown read must additionally have init's word that the machine
+///   stops, which reaches the file only through the flush init has `logd` make
+///   before it asks the kernel.
 ///
 /// A second boot, from `tests/logrotatecase`, drives the bound: rotation is
 /// what stops the file filling the owner's stick, and at the shipped mebibyte
@@ -1855,30 +1856,29 @@ pub fn fs_dirs_durable(
 /// **The machine's stop leaves no filesystem update half made**, and
 /// `toyos-fat32-check` is who says so.
 ///
-/// `quiesce-fsync-refuse` refuses `/system/bin/logd`'s flush from the moment
-/// the shutdown begins: each attempt writes a new cluster's entry into the
-/// mirror FAT and is refused the active one, and the caller parks in
-/// `block::between_attempts` for longer than the shutdown waits for `/log`. So
-/// the stop's second stage meets a thread parked over two FATs that disagree,
-/// with every other userland thread already stopped and nothing left that
-/// could allocate that cluster and heal it by accident. A stop that bands the
-/// thread where it is parked leaves that volume at the reset; one that lets the
-/// update close leaves it whole, and the kernel's own `fsync:` line says which
-/// attempt closed it.
+/// `quiesce-fsync-refuse` refuses one staged file's flush: each attempt writes
+/// a new cluster's entry into the mirror FAT and is refused the active one, and
+/// the caller parks in `block::between_attempts`. The job asks init for the
+/// shutdown once the attempt that parks is refused, so the stop meets a thread
+/// parked over two FATs that disagree. A stop that bands the thread where it is
+/// parked leaves that volume at the reset; one that lets the update close
+/// leaves it whole, and the kernel's own `fsync:` line says which attempt
+/// closed it — inside the stop, by the stop record's own clock.
 pub fn quiesce_leaves_the_volume_whole(
     test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     // The kernel's `mirror_refuse::FSYNC_REFUSALS`, spelt here because the
     // harness cannot link the kernel.
-    const REFUSALS: usize = 9;
+    const REFUSALS: usize = 8;
     const REFUSED: &str = "quiesce-fsync-refuse: refusing a SYS_FSYNC flush's active-FAT write";
-    const GAVE_UP: &str = "shutdown: /log did not answer in";
+    const CLOSED: &str = "fsync: /log/quiesce-fsync.bin durable on attempt 9";
+    const SYNCING: &str = "Syncing filesystems...";
     const PARAMS: &[&str] = &["quiesce-fsync-refuse"];
 
     let image_path = test_dir().join("quiesce-volume-whole.img");
-    let image = qemu::build_boot_image(test_config, &[], &[], PARAMS);
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
     std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
     let (start, len) = log_extent(&image, &image_path)?;
 
@@ -1893,8 +1893,8 @@ pub fn quiesce_leaves_the_volume_whole(
 
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
-        &[],
-        &[],
+        c_bins,
+        rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
             boot_image: Some(qemu::Staged::Written(image_path.clone())),
@@ -1911,7 +1911,7 @@ pub fn quiesce_leaves_the_volume_whole(
         ));
     }
 
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    writeln!(qemu.stdin_mut(), "run test_rs_quiesce_fsync").expect("write to QEMU stdin");
     qemu.flush_stdin();
     let tail = qemu.drain_serial(Duration::from_secs(20));
     drop(qemu);
@@ -1940,43 +1940,49 @@ pub fn quiesce_leaves_the_volume_whole(
         ));
     }
 
-    // The arm fired as many times as the kernel declares and the shutdown gave
-    // up waiting inside that ladder, or the silence above is about a stop that
-    // met nobody parked.
-    let refusals = tail.lines().filter(|line| line.contains(REFUSED)).count();
-    if refusals != REFUSALS {
+    // The arm fired as many times as the kernel declares, or the silence above
+    // is about a stop that met nobody parked.
+    let lines: Vec<&str> = tail.lines().collect();
+    let refusals: Vec<&str> = lines.iter().copied().filter(|l| l.contains(REFUSED)).collect();
+    if refusals.len() != REFUSALS {
         return Err(format!(
-            "the quiesce-fsync-refuse actuator refused {refusals} attempt(s), not the \
-             {REFUSALS} the kernel declares, so no thread was parked where this boot says one \
-             was\n{tail}"
+            "the quiesce-fsync-refuse actuator refused {} attempt(s), not the {REFUSALS} the \
+             kernel declares, so no thread was parked where this boot says one was\n{tail}",
+            refusals.len()
         ));
     }
-    let lines: Vec<&str> = tail.lines().collect();
-    let last_refusal = lines.iter().rposition(|line| line.contains(REFUSED));
-    let gave_up = lines.iter().position(|line| line.contains(GAVE_UP));
-    let closed_by = format!("durable on attempt {}", REFUSALS + 1);
-    let closed = lines.iter().position(|line| line.contains(&closed_by));
-    let (Some(last_refusal), Some(gave_up), Some(closed)) = (last_refusal, gave_up, closed) else {
+    // **Where the stop began, by its own record**: it says how long it took,
+    // and says so after the sync line it writes the moment it is over.
+    let ms = |line: &str| {
+        bootlog::record_millis(line).ok_or_else(|| format!("{line:?} carries no kernel time"))
+    };
+    let synced = lines.iter().position(|l| l.contains(SYNCING));
+    let closed = lines.iter().position(|l| l.contains(CLOSED));
+    let record = lines.iter().find_map(|l| toyos_quiesce::Record::parse(l));
+    let (Some(synced), Some(closed), Some(record)) = (synced, closed, record) else {
         return Err(format!(
-            "the volume is whole, but this boot does not say the stop's second stage met the \
-             parked flush and let it close: the shutdown's give-up line is at {gave_up:?} and \
-             the kernel's `fsync: … {closed_by}` at {closed:?}, so something else healed the \
-             FATs\n{tail}"
+            "the volume is whole, but this boot does not say the stop met the parked flush and \
+             let it close: the sync is at {synced:?}, the kernel's `{CLOSED}` at {closed:?}, and \
+             the stop record {}\n{tail}",
+            if record.is_some() { "is there" } else { "is missing" },
         ));
     };
-    if !(last_refusal < gave_up && gave_up < closed) {
+    let began = ms(lines[synced])?.saturating_sub(record.elapsed_ms);
+    let first_refusal = ms(refusals[0])?;
+    let closed_at = ms(lines[closed])?;
+    if !(first_refusal < began && began <= closed_at && closed < synced) {
         return Err(format!(
-            "the last refusal, the shutdown's give-up and the flush's close are at console \
-             lines {last_refusal}, {gave_up} and {closed}; the second stage did not begin while \
-             the flush was parked\n{tail}"
+            "the first refusal at {first_refusal} ms, the stop's start at {began} ms and the \
+             flush's close at {closed_at} ms (console line {closed}, the sync at {synced}): the \
+             stop did not begin while the flush was parked, or did not wait for it to close\n{tail}"
         ));
     }
 
     let _ = std::fs::remove_file(&image_path);
     eprintln!(
-        "  [fat] the stop's second stage met a flush parked over split FATs and let it close; \
-         the checker is silent:\n    {}\n    {}",
-        lines[gave_up], lines[closed],
+        "  [fat] the stop began at {began} ms over a flush parked on split FATs and let it close \
+         at {closed_at} ms; the checker is silent:\n    {}",
+        lines[closed],
     );
     Ok(())
 }

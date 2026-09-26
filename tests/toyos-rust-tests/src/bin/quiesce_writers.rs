@@ -16,8 +16,7 @@ use std::io::Write;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::syscap::SysCap;
+use toyos::power::Stop;
 
 /// Threads writing when the reset is asked for. More than one CPU's worth on
 /// the harness's guest, so the reset cannot simply find them all descheduled.
@@ -38,11 +37,6 @@ const SPIN_UP: Duration = Duration::from_secs(5);
 const WRITING: &str = "quiesce-writer:";
 
 fn main() {
-    let Some(cap) = Endowments::get().take::<SysCap>(SYSCAP_LABEL) else {
-        eprintln!("quiesce_writers: this program was endowed no system capability");
-        std::process::exit(1);
-    };
-
     // One word per writer that has finished a pass. **The reset is asked for
     // over a machine every writer is known to be working on**: a writer still
     // being spawned when the last word is written puts no line above it, which
@@ -101,7 +95,7 @@ fn main() {
 
     // Comes back only refused: on the other path the machine is already at its
     // firmware, and every writer above is still mid-loop when it goes.
-    let refused = cap.reboot();
+    let refused = toyos::power::stop(Stop::Reboot);
     eprintln!("quiesce_writers: the reboot was refused ({refused:?})");
     std::process::exit(1);
 }

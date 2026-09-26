@@ -653,10 +653,13 @@ impl AddressSpace {
         Some(super::DirectMap::from_phys(page_phys + offset))
     }
 
-    /// Find a free gap of at least `size` bytes (2MB-aligned), searching top-down.
+    /// Find a free gap of at least `size` bytes (2MB-aligned), searching
+    /// top-down and never below the floor: a region the kernel placed under
+    /// it, the clock page, bounds no gap.
     fn find_gap(&self, size: u64) -> Option<UserAddr> {
         let aligned = align_up_2m(size);
         let total = aligned + vma::GUARD_SIZE;
+        let floor = vma::alloc_floor();
 
         let mut top = vma::ALLOC_CEILING;
         for (&start, region) in self
@@ -669,14 +672,16 @@ impl AddressSpace {
                 top = start.raw();
                 continue;
             }
-            let gap = top - region_end;
-            if gap >= total {
+            if top.saturating_sub(region_end.max(floor)) >= total {
                 return Some(UserAddr::new(top - total));
             }
             top = start.raw();
+            if top <= floor {
+                return None;
+            }
         }
         // Gap below all regions
-        if top >= total + vma::alloc_floor() {
+        if top >= total + floor {
             return Some(UserAddr::new(top - total));
         }
         None

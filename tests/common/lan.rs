@@ -2,8 +2,8 @@
 //! answering the development host on it.
 //!
 //! Every line read here is a line of a boot's log — the kernel's records, and
-//! netd's own lines, which reach the stick under netd's name through its pipe
-//! to `logd` — or the one file netd leaves beside them, the lease probe's
+//! netd's own lines, which reach the stick under netd's name through its log
+//! ring — or the one file netd leaves beside them, the lease probe's
 //! report. The judge reads netd's lines by that name and no other program's.
 
 use std::net::Ipv4Addr;

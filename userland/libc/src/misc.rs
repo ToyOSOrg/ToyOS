@@ -165,8 +165,8 @@ pub unsafe extern "C" fn exit(status: i32) -> ! {
 /// stream holds unended in the SDK's sink goes out as the process leaves.
 #[no_mangle]
 pub unsafe extern "C" fn _exit(status: i32) -> ! {
-    toyos::log::stdio::flush(toyos::log::stdio::Stream::Out);
-    toyos::log::stdio::flush(toyos::log::stdio::Stream::Err);
+    toyos::log::stdio::end(toyos::log::stdio::Stream::Out);
+    toyos::log::stdio::end(toyos::log::stdio::Stream::Err);
     syscall::exit(status)
 }
 

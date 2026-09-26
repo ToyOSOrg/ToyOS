@@ -660,7 +660,7 @@ impl Vfs {
         self.point(name).is_some()
     }
 
-    /// `/system/bin/logd` publishes `LOG_DURABLE_NS` off this call's result and a panicking kernel waits on that word, so `sync_for_path` must reach the device's write cache, not stop at the page cache.
+    /// `/system/bin/logd` calls a line durable off this call's result, so `sync_for_path` must reach the device's write cache, not stop at the page cache.
     pub fn sync_for_path(&mut self, path: &str) -> Result<(), SyscallError> {
         let (mount, _) = self.resolve_path("/", path);
         // Nothing mounted is not an error: the write being made durable cannot have happened.

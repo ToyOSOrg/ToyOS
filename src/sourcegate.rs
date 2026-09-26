@@ -112,6 +112,9 @@ const BANS: &[Ban] = &[
         why: "a resource with no giver-back is a leak unless the reason is at \
               the call site",
         allowed: &[
+            // The clock page is mapped read-only into every address space for
+            // the machine's life, so nothing gives its frame back.
+            ("kernel/src/clock.rs", 1),
             // The GPU is never torn down, so the cursor pages outlive every
             // process that could name them.
             ("kernel/src/drivers/gop.rs", 1),

@@ -122,13 +122,8 @@ pub const RECORDS: &[Record] = &[
     Record { about: "nvme", needle: "NVMe: NS1 size=", presence: Says },
     Record { about: "nvme-refused", needle: "NVMe: NOT INITIALISED", presence: NeverSays },
     Record { about: "nvme-offline", needle: "NVMe: this controller is offline", presence: NeverSays },
-    Record { about: "nvme-census", needle: "nvme: commands ", presence: Says },
     // The boot ended the way the loop's verdict needs it to.
     Record { about: "boot", needle: "Boot: complete (", presence: Says },
-    // Every disk's write cache, emptied before anything was taken down. This
-    // one *is* a log record: it is made above the boot's last word, while the
-    // volume that carries it is still there.
-    Record { about: "usb-flush", needle: "usb-quiesce: disk ", presence: Says },
 ];
 
 /// The one census field a boot may not have moved: a write to a disk this
@@ -140,11 +135,15 @@ pub const NVME_NO_WRITES: &[&str] = &["write=0", "io-other=0"];
 /// reader.
 ///
 /// **The end of the shutdown is here and nowhere else.** Everything the kernel
-/// does after `log::wait_for_durable` is done to the volume that would have
-/// carried the record, so it reaches no file: it is sealed into the black box
-/// and printed by the next loader pass under that pass's `|` prefix.
+/// does inside its stop comes after `logd` has stopped, so it reaches no file:
+/// it is sealed into the black box and printed by the next loader pass under
+/// that pass's `|` prefix.
 pub const LOADER_RECORDS: &[Record] = &[
     Record { about: "chain", needle: "the last boot read DONE", presence: Says },
+    // The stop's census and every disk's write cache emptied before anything
+    // was taken down: records of the stop, sealed in its tail.
+    Record { about: "nvme-census", needle: NVME_CENSUS, presence: Says },
+    Record { about: "usb-flush", needle: "usb-quiesce: disk ", presence: Says },
     Record { about: "usb-quiesce", needle: QUIESCE_HEAD, presence: Says },
     // What the stop did about the command a device was inside when it ran. On
     // this machine that is the difference between a stick the next boot reads
@@ -354,7 +353,7 @@ pub fn unmet(loader: &str, log: &str) -> Vec<String> {
             _ => {}
         }
     }
-    if let Some(census) = log.lines().find(|l| l.contains(NVME_CENSUS)) {
+    if let Some(census) = loader.lines().find(|l| l.contains(NVME_CENSUS)) {
         for want in NVME_NO_WRITES {
             if !census.contains(want) {
                 out.push(format!("nvme-census: {census:?}, and this boot owed {want}"));
@@ -402,19 +401,22 @@ mod tests {
             line("0.368", "Boot: complete (368ms)"),
             line("1.100", "exit: usbwrite pid=6 code=402000 cpu=140ms"),
             line("2.100", "exit: usbread pid=7 code=30500 cpu=90ms"),
-            line("3.950", "nvme: commands identify=2 admin-other=2 read=1 write=0 io-other=0"),
-            line("3.955", "usb-quiesce: disk 0 SYNCHRONIZE CACHE ok"),
-            line("3.960", "Rebooting."),
         ]
         .concat()
     }
 
-    /// `loader.log`'s pass after the reset, with the shutdown's own account
-    /// under the `|` the loader prefixes a report's lines with.
+    /// `loader.log`'s pass after the reset, with the stop's tail and the
+    /// shutdown's own account under the `|` the loader prefixes a report's
+    /// lines with.
     fn a_good_loader() -> String {
         "ToyOS Bootloader 1.0\n\
          Black box: the last boot read DONE, so it handed the machine back on purpose and this \
          chain ends here\n\
+         | log: this boot's newest records follow, newest first (16)\n\
+         | log-tail: [kernel 3.960 cpu0] Rebooting.\n\
+         | log-tail: [kernel 3.955 cpu0] usb-quiesce: disk 0 SYNCHRONIZE CACHE ok\n\
+         | log-tail: [kernel 3.950 cpu0] nvme: commands identify=2 admin-other=2 read=1 write=0 \
+         io-other=0\n\
          | usb-quiesce: no Bulk-Only command was open, so this reset cuts none\n\
          | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
          | usb-quiesce: 2/2 disk cache(s) flushed, 1 with no cache to flush, \
@@ -500,15 +502,15 @@ mod tests {
         let uncached = a_good_boot().replace("memory type WC ", "memory type UC ");
         assert_eq!(about(unmet(&a_good_loader(), &uncached)), ["scanout"]);
         // One write to the disk this project never writes.
-        let wrote = a_good_boot().replace("write=0 io-other=0", "write=1 io-other=0");
-        assert_eq!(about(unmet(&a_good_loader(), &wrote)), ["nvme-census"]);
+        let wrote = a_good_loader().replace("write=0 io-other=0", "write=1 io-other=0");
+        assert_eq!(about(unmet(&wrote, &a_good_boot())), ["nvme-census"]);
         // A shutdown that never emptied a cache.
-        let unflushed = a_good_boot()
+        let unflushed = a_good_loader()
             .lines()
             .filter(|l| !l.contains("SYNCHRONIZE"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(about(unmet(&a_good_loader(), &unflushed)), ["usb-flush"]);
+        assert_eq!(about(unmet(&unflushed, &a_good_boot())), ["usb-flush"]);
 
         // And the loader's file, which carries what no log record can.
         let no_quiesce = a_good_loader()
@@ -518,7 +520,7 @@ mod tests {
             .join("\n");
         assert_eq!(
             about(unmet(&no_quiesce, &a_good_boot())),
-            ["usb-quiesce", "usb-open-command", "usb-quiesce"]
+            ["usb-flush", "usb-quiesce", "usb-open-command", "usb-quiesce"]
         );
         // A stop that touched the registers without settling the command a
         // device was inside: every other line of the account is unchanged, and

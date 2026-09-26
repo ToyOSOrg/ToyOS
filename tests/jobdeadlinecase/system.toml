@@ -17,7 +17,6 @@ receives = ["power"]
 # stand-down the loop starts this one, into a shutdown that has already written
 # the boot's last word.
 args = ["--bound-ms=3000", "spin", "echo"]
-syscap = ["dup", "power"]
 
 [programs.toybox]
 

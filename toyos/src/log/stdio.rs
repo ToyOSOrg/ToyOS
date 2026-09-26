@@ -23,7 +23,7 @@ use core::fmt;
 
 use toyos_abi::log::Severity;
 
-use super::region::{Body, FLAG_UNENDED, TEXT_BYTES};
+use super::region::{Body, FLAG_CLOSES, FLAG_UNENDED, TEXT_BYTES};
 
 /// A standard stream, by the slot it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,13 +48,15 @@ impl Stream {
 /// goes on in the next one.
 pub struct Composer {
     body: Body,
+    /// The last record handed out was marked unended: a line is open.
+    open: bool,
 }
 
 impl Composer {
     pub const fn new(severity: Severity) -> Self {
         let mut body = Body::EMPTY;
         body.severity = severity as u8;
-        Self { body }
+        Self { body, open: false }
     }
 
     /// Take `bytes`, and hand every record they complete to `emit`.
@@ -73,10 +75,14 @@ impl Composer {
     }
 
     /// Hand what is held to `emit`, if anything: `ended` says whether the
-    /// writer ended its line there.
+    /// writer ended its line there. A line ended with nothing held, whose
+    /// earlier records went out unended, is ended by a record that says only
+    /// that.
     pub fn finish(&mut self, ended: bool, emit: &mut impl FnMut(&mut Body)) {
         if self.body.len > 0 {
             self.close(if ended { 0 } else { FLAG_UNENDED }, emit);
+        } else if ended && self.open {
+            self.close(FLAG_CLOSES, emit);
         }
     }
 
@@ -89,6 +95,7 @@ impl Composer {
         self.body.flags = flags;
         emit(&mut self.body);
         self.body.len = 0;
+        self.open = flags & FLAG_UNENDED != 0;
     }
 }
 
@@ -106,7 +113,7 @@ impl<E: FnMut(&mut Body)> fmt::Write for Formatter<'_, E> {
 }
 
 /// One whole line, formatted on the stack and handed to `emit` as records.
-pub fn compose(severity: Severity, args: fmt::Arguments, emit: &mut impl FnMut(&mut Body)) {
+pub fn compose(severity: Severity, args: fmt::Arguments<'_>, emit: &mut impl FnMut(&mut Body)) {
     let mut composer = Composer::new(severity);
     let _ = fmt::write(&mut Formatter { composer: &mut composer, emit }, args);
     composer.finish(true, emit);
@@ -311,10 +318,26 @@ mod target {
         }
     }
 
-    /// Whatever part of a line a stream holds, as a record of its own.
+    /// Whatever part of a line a stream holds, as a record the line goes on
+    /// from. Never asks the slot: a stream nothing was written to holds
+    /// nothing, and a process spawned with an empty slot is ended for naming
+    /// it.
     pub fn flush(stream: Stream) {
-        if let Sink::Ring(ring) = sink(stream) {
-            PENDING[index(stream)].with(|composer| composer.finish(false, &mut push(&ring)));
+        finish(stream, false);
+    }
+
+    /// Whatever part of a line a stream holds, as the line's end: the
+    /// process is leaving, so the line is as long as it gets.
+    pub fn end(stream: Stream) {
+        finish(stream, true);
+    }
+
+    fn finish(stream: Stream, ended: bool) {
+        let at = SINKS[index(stream)].load(Ordering::Acquire);
+        if at > HANDLE {
+            // SAFETY: as in `sink`, only a ring's base is stored above `HANDLE`.
+            let ring = unsafe { Ring::at(NonNull::new_unchecked(at as *mut u8)) };
+            PENDING[index(stream)].with(|composer| composer.finish(ended, &mut push(&ring)));
         }
     }
 
@@ -331,7 +354,7 @@ mod target {
 
     /// One line into a lane the calling thread claimed. Wait-free: a
     /// formatting pass on the stack and a lane push.
-    pub fn say_lane(lane: &Lane, severity: Severity, args: core::fmt::Arguments) {
+    pub fn say_lane(lane: &Lane, severity: Severity, args: core::fmt::Arguments<'_>) {
         compose(severity, args, &mut |body: &mut Body| {
             stamp(body);
             let _ = lane.push(body);
@@ -339,7 +362,7 @@ mod target {
     }
 
     /// One line of this program's own, at `severity`, onto its stderr.
-    pub fn say(severity: Severity, args: core::fmt::Arguments) {
+    pub fn say(severity: Severity, args: core::fmt::Arguments<'_>) {
         match sink(Stream::Err) {
             Sink::Ring(ring) => compose(severity, args, &mut push(&ring)),
             Sink::Handle(handle) => compose(severity, args, &mut |body: &mut Body| {
@@ -409,6 +432,27 @@ mod tests {
         assert_eq!(joined, long);
     }
 
+    /// A flush mid-line sends what is held as a piece the line goes on
+    /// from; the process ending it with nothing more to say sends a record
+    /// that only ends it, and one with no line open sends nothing.
+    #[test]
+    fn a_line_a_flush_opened_is_closed_at_its_end() {
+        let mut out = Vec::new();
+        let mut emit = |body: &mut Body| out.push((body.text().to_vec(), body.unended(), body.closes()));
+        let mut composer = Composer::new(Severity::Info);
+        composer.feed(b"prompt> ", &mut emit);
+        composer.finish(false, &mut emit);
+        composer.finish(true, &mut emit);
+        composer.finish(true, &mut emit);
+        composer.feed(b"whole\n", &mut emit);
+        composer.finish(true, &mut emit);
+        assert_eq!(out, [
+            (b"prompt> ".to_vec(), true, false),
+            (Vec::new(), false, true),
+            (b"whole".to_vec(), false, false),
+        ]);
+    }
+
     #[test]
     fn a_formatted_line_is_one_ended_record() {
         let mut out = Vec::new();
@@ -472,11 +516,11 @@ mod host {
         None
     }
 
-    pub fn say(severity: Severity, args: fmt::Arguments) {
+    pub fn say(severity: Severity, args: fmt::Arguments<'_>) {
         compose(severity, args, &mut |_: &mut Body| {});
     }
 
-    pub fn say_lane(_lane: &Lane, severity: Severity, args: fmt::Arguments) {
+    pub fn say_lane(_lane: &Lane, severity: Severity, args: fmt::Arguments<'_>) {
         compose(severity, args, &mut |_: &mut Body| {});
     }
 }

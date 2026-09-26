@@ -304,6 +304,11 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "shard-publish-relaxed", Some("log_publish"), &[
         "a_reader_that_finds_a_shard_finds_it_built ... FAILED",
     ]),
+    red(KERNEL_LOOM, "log-ring-publish-relaxed", Some("log_ring"), &[
+        "a_published_record_is_whole_and_read_once ... FAILED",
+        "a_slot_is_reused_only_after_its_record_was_read ... FAILED",
+        "a_lane_publishes_whole_and_reuses_only_after_a_read ... FAILED",
+    ]),
     red(KERNEL_LOOM, "inbox-release-off", Some("inbox"), &[
         "a_record_reaches_its_taker_intact ... FAILED",
     ]),

@@ -11,11 +11,9 @@ start = ["logd", "test-runner"]
 args = ["--hold-ring-until=log hold: said after 192 records"]
 syscap = ["logread"]
 
-# `power` is what `run shutdown` needs and `dup` is what carries it to the
-# applet, which test-runner spawns directly.
+# `power` is what `run shutdown` asks init through.
 [programs.test-runner]
 receives = ["power"]
-syscap = ["dup", "power"]
 
 [programs.toybox]
 

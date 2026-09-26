@@ -87,7 +87,6 @@ use std::time::{Duration, Instant};
 
 use toyos::endow::{self, Endowments, SYSCAP_LABEL};
 use toyos::ipc::{self, Connection, RxStep};
-use toyos::log::region::Body;
 use toyos::log::{LogTail, Record, Severity};
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::port::Acceptor;
@@ -101,7 +100,7 @@ use toyos_logstream::{
 };
 use toyos_wallclock::Civil;
 
-use origin::{Origin, Read};
+use origin::{Origin, Said};
 use policy::{fate, Fate, Step, LOG_WRITE_BUDGET};
 use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES, ROTATE_FAST_BYTES};
 
@@ -250,7 +249,7 @@ enum Kind {
     Kernel(Box<Record>),
     /// A program's record; its origin is named by the tag and pid init
     /// registered, never by anything in the record.
-    Program { tag: Arc<str>, owner: u32, body: Box<Body> },
+    Program { tag: Arc<str>, owner: u32, said: Box<Said> },
 }
 
 impl Log {
@@ -289,11 +288,14 @@ impl Log {
             });
 
             let flush = self.from_init();
-            let mut read_any = self.round(&mut ended, flush);
+            let asked = toyos_abi::clock::nanos_since_boot();
+            let mut read_any = self.round(&mut ended, flush).is_some();
             if flush {
-                // Every ring whole, whatever a round's bound: a round that read
-                // nothing is the rings empty.
-                while self.round(&mut ended, true) {}
+                // Every ring whole up to the flush, whatever a round's bound: a
+                // round that read nothing stamped before it is the rings drained
+                // of what init asked for, and a writer that never stops does not
+                // hold the flush.
+                while self.round(&mut ended, true).is_some_and(|oldest| oldest <= asked) {}
                 self.flushed();
                 read_any = true;
             }
@@ -378,17 +380,21 @@ impl Log {
     /// One round: every ring, then the kernel's records, then everything
     /// stamped before the round began written in stamp order — every line
     /// held, whatever its stamp, where `all` asks it for a flush. A program
-    /// whose end `ended` names is swept whole and let go. Whether any ring had
-    /// a record.
-    fn round(&mut self, ended: &mut Vec<usize>, all: bool) -> bool {
+    /// whose end `ended` names is swept whole and let go. The oldest stamp any
+    /// ring had, or `None` where none had a line.
+    fn round(&mut self, ended: &mut Vec<usize>, all: bool) -> Option<u64> {
         let cut = toyos_abi::clock::nanos_since_boot();
-        let mut read: Vec<Read> = Vec::new();
+        let mut read: Vec<Said> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         for (i, origin) in self.origins.iter_mut().enumerate() {
             if self.stall.as_ref().is_some_and(|s| s.origin == origin.tag) {
                 continue;
             }
             let counted = origin.read(i, cut, &mut read);
+            // The machine stops after a flush: a line begun is said as far as it got.
+            if all {
+                origin.say_held(&mut read);
+            }
             if counted.refused > 0 {
                 notes.push(format!(
                     "logd: {} record(s) of {}'s found its ring full and went unwritten",
@@ -411,7 +417,7 @@ impl Log {
                 ));
             }
         }
-        let read_any = !read.is_empty();
+        let oldest = read.iter().map(|said| said.at_ns).min();
 
         // A program's end, after its reads: what its writers left is swept
         // whole. A byte on a pipe nothing writes is the program's own doing
@@ -446,8 +452,8 @@ impl Log {
         lines.extend(read.into_iter().map(|r| {
             let (tag, owner) = &tags[r.origin];
             Line {
-                at_ns: r.body.at_ns,
-                kind: Kind::Program { tag: Arc::clone(tag), owner: *owner, body: Box::new(r.body) },
+                at_ns: r.at_ns,
+                kind: Kind::Program { tag: Arc::clone(tag), owner: *owner, said: Box::new(r) },
             }
         }));
         lines.extend(self.kernel_records());
@@ -461,7 +467,7 @@ impl Log {
             lines.into_iter().partition(|line| all || line.at_ns <= cut);
         self.waiting = later;
         self.write(now);
-        read_any
+        oldest
     }
 
     /// Whatever the kernel's ring has for this cursor, as lines.
@@ -510,20 +516,20 @@ impl Log {
                     self.alert_unsynced |= record.severity() >= Some(Severity::Alert);
                     file.push_str(&format!("{}\n", record.tagged(&stamp(self.boot_local, record.at_ns))));
                 }
-                Kind::Program { tag, owner, body } => {
-                    let severity = body.severity().unwrap_or(Severity::Info);
+                Kind::Program { tag, owner, said } => {
+                    let severity = said.severity;
                     self.alert_unsynced |= severity >= Severity::Alert;
                     let tag = Tag::new(tag).expect("an origin's name is a tag");
-                    let pid = (body.pid != *owner).then_some(body.pid);
-                    let at = stamp(self.boot_local, body.at_ns);
+                    let pid = (said.pid != *owner).then_some(said.pid);
+                    let at = stamp(self.boot_local, said.at_ns);
                     let mut line = ProgramLine {
                         stamp: &at,
-                        at_ns: body.at_ns,
+                        at_ns: said.at_ns,
                         severity,
-                        tid: body.tid,
+                        tid: said.tid,
                         pid,
                         tag,
-                        text: body.text(),
+                        text: &said.text,
                     };
                     file.push_str(&format!("{line}\n"));
                     line.stamp = "";
@@ -532,8 +538,10 @@ impl Log {
                 }
             }
         }
-        self.hub.append(file.as_bytes());
+        // The file first: a reader is served only what /log already holds,
+        // whenever the machine stops between the two.
         self.to_volume(file.as_bytes());
+        self.hub.append(file.as_bytes());
     }
 
     /// One rendered program line for the console, held whole until it takes it.
@@ -691,9 +699,9 @@ impl Log {
     }
 
     /// End a `--stall` once any program has said its `--stall-until` line.
-    fn release_stall(&mut self, read: &[Read]) {
+    fn release_stall(&mut self, read: &[Said]) {
         let Some(stall) = &self.stall else { return };
-        if read.iter().any(|r| r.body.text() == stall.until.as_bytes()) {
+        if read.iter().any(|r| r.text == stall.until.as_bytes()) {
             let origin = stall.origin.clone();
             self.stall = None;
             say!("logd: reading {origin} again, as `--stall-until` asked");

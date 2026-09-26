@@ -8,12 +8,11 @@ start = ["logd", "test-runner"]
 syscap = ["logread"]
 
 # One binary name per job, never a command line: the stdin path's `run <name>`
-# has the only parser. `dup` because the applet is spawned holding a duplicate,
-# and `power` because the one job ends the machine.
+# has the only parser. `power` because the one job ends the machine, asking
+# init.
 [programs.test-runner]
 receives = ["power"]
 args = ["reboot"]
-syscap = ["dup", "power"]
 
 [programs.toybox]
 

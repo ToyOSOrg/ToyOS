@@ -24,7 +24,8 @@ syscap = ["rt"]
 
 # `device` because every framebuffer job mints its own claim and no manifest row
 # can name what a spawned job holds; `dup` because the capability is handed down
-# to each job in turn; `power` because the last job hands the machine back.
+# to each job in turn. `power` is the connector the last job asks init through
+# to hand the machine back.
 #
 # **The order is by where the bound's expiry may land.** One bound covers the
 # whole list (`toyos_tco::JOB_BOUND_MS`, measured from boot) and its expiry is a
@@ -36,7 +37,7 @@ syscap = ["rt"]
 [programs.test-runner]
 args = ["usbwrite", "usbread", "fbcheck", "fbfill", "fbread", "reboot"]
 receives = ["soundd", "power"]
-syscap = ["device", "dup", "power"]
+syscap = ["device", "dup"]
 
 [programs.metalprobe]
 

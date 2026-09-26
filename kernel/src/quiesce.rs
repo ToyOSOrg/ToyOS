@@ -122,18 +122,11 @@ pub fn note_progress() {
     }
 }
 
-/// Whether the machine's stop has begun: what the `quiesce-fsync-refuse`
-/// actuator refuses from.
-#[cfg(feature = "boot-actuators")]
-pub fn stopping() -> bool {
-    STOPPING.load(Acquire)
-}
-
 /// Whether the running thread is the one performing the shutdown: what the
 /// `quiesce-drain-refuse` actuator refuses by.
 #[cfg(feature = "boot-actuators")]
 pub fn runs_the_shutdown() -> bool {
-    if !stopping() {
+    if !STOPPING.load(Acquire) {
         return false;
     }
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
@@ -333,6 +326,11 @@ pub mod last {
     /// only once the thread it is staged around is inside its syscall.
     pub fn await_the_held_thread() {
         let Some(last) = armed() else { return };
+        crate::log!(
+            "{}: the stop waits for {} to reach its syscall",
+            last.name(),
+            toyos_quiesce::LAST_THREAD,
+        );
         let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
         let parkable = crate::scheduler::Parkable::at_entry();
         let _ = completion::wait_until(

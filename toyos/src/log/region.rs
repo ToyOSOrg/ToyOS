@@ -67,6 +67,9 @@ const CLAIMED: u64 = 1 << 63;
 
 /// The writer's line continues in its next record.
 pub const FLAG_UNENDED: u8 = 1 << 0;
+/// The record ends a line its writer's earlier records began, and carries
+/// nothing of its own: where no line is open it is not one.
+pub const FLAG_CLOSES: u8 = 1 << 1;
 
 /// One record: stamped by its writer at the moment it wrote it.
 #[repr(C)]
@@ -113,6 +116,10 @@ impl Body {
 
     pub fn unended(&self) -> bool {
         self.flags & FLAG_UNENDED != 0
+    }
+
+    pub fn closes(&self) -> bool {
+        self.flags & FLAG_CLOSES != 0
     }
 }
 

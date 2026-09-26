@@ -50,9 +50,6 @@ toyos-cc = { path = "toyos-cc" }
 [programs.logd]
 syscap = ["logread"]
 serves = ["log"]
-# What lets `logd` serve this boot's log on the network, to whoever connects:
-# without it the log is served on this machine only.
-receives = ["netd"]
 
 [programs.compositor]
 serves = ["compositor"]
@@ -120,13 +117,13 @@ receives = ["compositor", "filepicker"]
 [programs.files]
 receives = ["compositor", "filepicker"]
 
-# `power` is `/system/bin/shutdown`'s and `/system/bin/reboot`'s, `roster` is
-# `/system/bin/ps`'s, and each of those is
-# this binary under another name: init resolves the symlink to this row, so the
-# applets are endowed a `SysCap` carrying `Rights::POWER | Rights::ROSTER` and
-# nothing else in the image is. The row's granularity is the binary, so every
-# other applet is endowed both too — the same shape as `soundd` reaching `ls`,
-# one authority larger.
+# `power` is `/system/bin/shutdown`'s and `/system/bin/reboot`'s: the
+# connector to init's port, which has `logd` make the log whole and then stops
+# the machine with a `SysCap` no program in the image holds. `roster` is
+# `/system/bin/ps`'s. Each of those is this binary under another name: init
+# resolves the symlink to this row, so the applets are endowed both and nothing
+# else in the image is. The row's granularity is the binary, so every other
+# applet is endowed both too — the same shape as `soundd` reaching `ls`.
 #
 # `free` is the same syscall as `ps` and is named by neither: the machine header
 # is ambient and the process roster is not.

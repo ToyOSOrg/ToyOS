@@ -188,6 +188,8 @@ const QUEUED_LINES: usize = 64;
 struct Queue {
     lines: [[u8; MAX_CONSOLE_LINE]; QUEUED_LINES],
     lens: [u16; QUEUED_LINES],
+    /// Whether the entry is a piece of a line the next entry goes on with.
+    continues: [bool; QUEUED_LINES],
     head: usize,
     len: usize,
 }
@@ -195,9 +197,22 @@ struct Queue {
 static QUEUE: Lock<Queue> = Lock::new(Queue {
     lines: [[0; MAX_CONSOLE_LINE]; QUEUED_LINES],
     lens: [0; QUEUED_LINES],
+    continues: [false; QUEUED_LINES],
     head: 0,
     len: 0,
 });
+
+/// Whether the wire's last bytes are a queued line's piece its holder goes on
+/// with, so a record put on the wire first ends that line. Read and written
+/// only by the holder of the wire.
+static MID_LINE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// End a queued line left mid-way on the wire, before anything else goes on it.
+fn end_the_line(wire: &SleepGuard<'_, ()>) {
+    if MID_LINE.swap(false, Ordering::Relaxed) {
+        serial::write_wire(wire, b"\n");
+    }
+}
 
 /// Lines in [`QUEUE`], readable without its lock for `klogd`'s park test.
 static QUEUED: AtomicU64 = AtomicU64::new(0);
@@ -205,10 +220,10 @@ static QUEUED: AtomicU64 = AtomicU64::new(0);
 /// Lines refused a full [`QUEUE`] since `klogd` last said so.
 static UNSHOWN: AtomicU64 = AtomicU64::new(0);
 
-/// One console holder's line, for `klogd` to put on the wire; `false` is a
-/// full queue, which the holder's write answers as bytes it did not take.
-/// Never waits.
-pub fn queue(line: &[u8]) -> bool {
+/// One console holder's line, or a piece of one it `continues` in the next,
+/// for `klogd` to put on the wire; `false` is a full queue, which the holder's
+/// write answers as bytes it did not take. Never waits.
+pub fn queue(line: &[u8], continues: bool) -> bool {
     let line = &line[..line.len().min(MAX_CONSOLE_LINE)];
     {
         let mut queue = QUEUE.lock();
@@ -218,6 +233,7 @@ pub fn queue(line: &[u8]) -> bool {
         let at = (queue.head + queue.len) % QUEUED_LINES;
         queue.lines[at][..line.len()].copy_from_slice(line);
         queue.lens[at] = line.len() as u16;
+        queue.continues[at] = continues;
         queue.len += 1;
     }
     QUEUED.fetch_add(1, Ordering::SeqCst);
@@ -259,12 +275,16 @@ pub fn space_watchers() -> alloc::vec::Vec<crate::inbox::InboxId> {
 
 /// At most `budget` queued lines onto the wire the caller holds, each ended
 /// with a newline, so a line a holder left unended is not joined to the next.
-/// Answers whether it freed room.
+/// A line's pieces go on together, whatever the budget: they are one line,
+/// and a queue's worth past it at most. Answers whether it freed room.
 fn drain_queue(wire: &SleepGuard<'_, ()>, budget: usize) -> bool {
     let mut line = [0u8; MAX_CONSOLE_LINE + 1];
     let mut freed = false;
-    for _ in 0..budget {
-        let len = {
+    let (mut ended, mut taken) = (0, 0);
+    // A holder that never ends its line gets a queue's worth past the budget.
+    while (ended < budget || MID_LINE.load(Ordering::Relaxed)) && taken < budget.saturating_add(QUEUED_LINES) {
+        taken += 1;
+        let (len, continues) = {
             let mut queue = QUEUE.lock();
             if queue.len == 0 {
                 break;
@@ -274,17 +294,21 @@ fn drain_queue(wire: &SleepGuard<'_, ()>, budget: usize) -> bool {
             line[..len].copy_from_slice(&queue.lines[at][..len]);
             queue.head = (at + 1) % QUEUED_LINES;
             queue.len -= 1;
-            len
+            (len, queue.continues[at])
         };
         QUEUED.fetch_sub(1, Ordering::SeqCst);
         freed = true;
-        let end = if line[..len].ends_with(b"\n") {
+        let end = if continues || line[..len].ends_with(b"\n") {
             len
         } else {
             line[len] = b'\n';
             len + 1
         };
         serial::write_wire(wire, &line[..end]);
+        MID_LINE.store(continues, Ordering::Relaxed);
+        if !continues {
+            ended += 1;
+        }
     }
     freed
 }
@@ -366,6 +390,7 @@ impl RecordSink for Wire<'_, '_> {
         if self.records >= self.budget {
             return false;
         }
+        end_the_line(self.wire);
         write_line(record, |bytes| serial::write_wire(self.wire, bytes));
         self.records += 1;
         true

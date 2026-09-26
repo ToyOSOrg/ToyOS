@@ -6,6 +6,14 @@
 //! writer's word inside that identity, shown in the line only where the writer
 //! is not the process init started — a child it spawned into its own slots.
 //!
+//! **A line is what a writer ended, not what a record held.** A record the
+//! writer marked unended — its text was full, or the stream was flushed
+//! mid-line — is held under its writer's pid and thread until the record that
+//! ends the line, and the line is said whole. What is held is bounded: past
+//! [`JOIN_BYTES`] a writer's line is said as far as it got, past
+//! [`JOINS`] writers the oldest held line is, and a program's end or init's
+//! flush says every held line.
+//!
 //! A ring's memory is the writer's to scribble, so everything read from it is
 //! input: `toyos::log::ring` trusts only equalities and bounds, and this reads
 //! at most [`ROUND_RECORDS`] records a round from each program so none can hold
@@ -13,6 +21,7 @@
 
 use toyos::log::region::{Body, Ring, LANES, RING_BYTES};
 use toyos::log::ring::Reader;
+use toyos::log::Severity;
 use toyos::shm::SharedMemory;
 use toyos::Pipe;
 use toyos_elide::limit::{Admit, Limit};
@@ -32,14 +41,23 @@ pub const ROUND_RECORDS: usize = 512;
 pub const ALLOWANCE: u64 = 4096;
 pub const ALLOWANCE_WINDOW_NS: u64 = 1_000_000_000;
 
-/// A record read, and whose it is.
-pub struct Read {
-    pub body: Body,
+/// The longest line held for its end: past it, what is held is said.
+pub const JOIN_BYTES: usize = 64 * 1024;
+/// Writers of one program whose lines are held at once.
+pub const JOINS: usize = 16;
+
+/// One line a writer ended, or that this program ended for it.
+pub struct Said {
+    pub at_ns: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub severity: Severity,
+    pub text: Vec<u8>,
     /// Index into the caller's origins.
     pub origin: usize,
 }
 
-/// What reading one program found beyond its records, for the caller to say.
+/// What reading one program found beyond its lines, for the caller to say.
 #[derive(Default)]
 pub struct Counted {
     /// Records the ring had no room for when they were written.
@@ -48,6 +66,61 @@ pub struct Counted {
     pub suppressed: u64,
     /// Whether the allowance began suppressing this round.
     pub began_suppressing: bool,
+}
+
+/// A writer's line so far.
+struct Held {
+    pid: u32,
+    tid: u32,
+    said: Said,
+}
+
+/// Lines begun and not yet ended, oldest first.
+#[derive(Default)]
+pub struct Joins {
+    held: Vec<Held>,
+}
+
+impl Joins {
+    /// One record onto its writer's line: the line said once the record ends
+    /// it, or once it is as long as a line is held.
+    pub fn join(&mut self, index: usize, body: &Body, out: &mut Vec<Said>) {
+        let at = self.held.iter().position(|h| (h.pid, h.tid) == (body.pid, body.tid));
+        let mut held = match at {
+            Some(at) => self.held.remove(at),
+            // It ends a line this program does not hold: one said already at
+            // its bound, or begun in records the ring had no room for.
+            None if body.closes() => return,
+            None => Held {
+                pid: body.pid,
+                tid: body.tid,
+                said: Said {
+                    at_ns: body.at_ns,
+                    pid: body.pid,
+                    tid: body.tid,
+                    severity: body.severity().unwrap_or(Severity::Info),
+                    text: Vec::new(),
+                    origin: index,
+                },
+            },
+        };
+        held.said.text.extend_from_slice(body.text());
+        // The line is as late as its last piece.
+        held.said.at_ns = held.said.at_ns.max(body.at_ns);
+        if !body.unended() || held.said.text.len() >= JOIN_BYTES {
+            out.push(held.said);
+            return;
+        }
+        if self.held.len() == JOINS {
+            out.push(self.held.remove(0).said);
+        }
+        self.held.push(held);
+    }
+
+    /// Every line held for its end, said as far as it got.
+    pub fn say_held(&mut self, out: &mut Vec<Said>) {
+        out.extend(self.held.drain(..).map(|held| held.said));
+    }
 }
 
 pub struct Origin {
@@ -62,6 +135,7 @@ pub struct Origin {
     /// The allowance of the process init started, and of every other writer.
     own: Limit,
     children: Limit,
+    joins: Joins,
 }
 
 impl Origin {
@@ -86,54 +160,144 @@ impl Origin {
             lanes: [Reader::new(); LANES],
             own: Limit::new(ALLOWANCE, ALLOWANCE_WINDOW_NS),
             children: Limit::new(ALLOWANCE, ALLOWANCE_WINDOW_NS),
+            joins: Joins::default(),
         })
     }
 
-    /// Up to [`ROUND_RECORDS`] records into `out`, the allowance applied at
-    /// `now_ns`. Answers what it counted instead of reading.
-    pub fn read(&mut self, index: usize, now_ns: u64, out: &mut Vec<Read>) -> Counted {
+    /// Up to [`ROUND_RECORDS`] records, the allowance applied at `now_ns`,
+    /// and every line they end into `out`. Answers what it counted instead of
+    /// reading.
+    pub fn read(&mut self, index: usize, now_ns: u64, out: &mut Vec<Said>) -> Counted {
         let mut counted = Counted::default();
         let mut left = ROUND_RECORDS;
-        let (pid, own, children) = (self.pid, &self.own, &self.children);
-        let mut take = |body: Body, counted: &mut Counted| {
-            let limit = if body.pid == pid { own } else { children };
-            match limit.admit(now_ns) {
-                Admit::Say { suppressed, last } => {
-                    counted.suppressed += suppressed;
-                    counted.began_suppressing |= last;
-                    out.push(Read { body, origin: index });
-                }
-                Admit::Suppress => {}
-            }
-        };
+        let mut bodies: Vec<Body> = Vec::new();
         for (i, reader) in self.lanes.iter_mut().enumerate() {
             let lane = self.ring.lane(i);
             while left > 0 {
                 let Some(body) = reader.next_lane(&lane) else { break };
-                take(body, &mut counted);
+                bodies.push(body);
                 left -= 1;
             }
             counted.refused += reader.refused(&lane);
         }
         while left > 0 {
             let Some(body) = self.shared.next(&self.ring) else { break };
-            take(body, &mut counted);
+            bodies.push(body);
             left -= 1;
         }
         counted.refused += self.shared.refused(&self.ring);
+        for body in bodies {
+            let limit = if body.pid == self.pid { &self.own } else { &self.children };
+            match limit.admit(now_ns) {
+                Admit::Say { suppressed, last } => {
+                    counted.suppressed += suppressed;
+                    counted.began_suppressing |= last;
+                    self.joins.join(index, &body, out);
+                }
+                Admit::Suppress => {}
+            }
+        }
         counted
     }
 
     /// Everything its writers left, once none is left to write: the records a
-    /// lane or the shared ring still holds, and a count of the positions taken
-    /// and never published. No allowance: these are a program's last words.
-    pub fn sweep(&mut self, index: usize, out: &mut Vec<Read>) -> u64 {
+    /// lane or the shared ring still holds, every line held for its end, and a
+    /// count of the positions taken and never published. No allowance: these
+    /// are a program's last words.
+    pub fn sweep(&mut self, index: usize, out: &mut Vec<Said>) -> u64 {
+        let mut bodies: Vec<Body> = Vec::new();
         for (i, reader) in self.lanes.iter_mut().enumerate() {
             let lane = self.ring.lane(i);
             while let Some(body) = reader.next_lane(&lane) {
-                out.push(Read { body, origin: index });
+                bodies.push(body);
             }
         }
-        self.shared.sweep(&self.ring, |body| out.push(Read { body, origin: index }))
+        let abandoned = self.shared.sweep(&self.ring, |body| bodies.push(body));
+        for body in bodies {
+            self.joins.join(index, &body, out);
+        }
+        self.joins.say_held(out);
+        abandoned
+    }
+
+    /// Every line held for its end, said as far as it got.
+    pub fn say_held(&mut self, out: &mut Vec<Said>) {
+        self.joins.say_held(out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toyos::log::region::FLAG_UNENDED;
+
+    fn body(pid: u32, tid: u32, at_ns: u64, text: &[u8], unended: bool) -> Body {
+        let mut body = Body::EMPTY;
+        body.pid = pid;
+        body.tid = tid;
+        body.at_ns = at_ns;
+        body.text[..text.len()].copy_from_slice(text);
+        body.len = text.len() as u16;
+        body.flags = if unended { FLAG_UNENDED } else { 0 };
+        body
+    }
+
+    /// A line the writer ended with a record that says only that is said
+    /// whole, and such a record with no line open says nothing.
+    #[test]
+    fn a_closing_record_ends_its_writers_line_and_nothing_else() {
+        let (mut joins, mut out) = (Joins::default(), Vec::new());
+        let mut closes = body(7, 0, 12, b"", false);
+        closes.flags = toyos::log::region::FLAG_CLOSES;
+        joins.join(0, &closes, &mut out);
+        assert!(out.is_empty());
+        joins.join(0, &body(7, 0, 10, b"prompt> ", true), &mut out);
+        joins.join(0, &closes, &mut out);
+        assert_eq!(texts(&out), [(0, &b"prompt> "[..])]);
+    }
+
+    fn texts(out: &[Said]) -> Vec<(u32, &[u8])> {
+        out.iter().map(|s| (s.tid, s.text.as_slice())).collect()
+    }
+
+    /// Two writers' pieces interleaved in the ring are two lines, each whole,
+    /// said when its own end arrives and stamped by its last piece.
+    #[test]
+    fn a_writers_pieces_are_its_line_whoever_wrote_between_them() {
+        let (mut joins, mut out) = (Joins::default(), Vec::new());
+        joins.join(0, &body(7, 1, 10, b"one ", true), &mut out);
+        joins.join(0, &body(7, 2, 11, b"two ", true), &mut out);
+        joins.join(0, &body(7, 1, 12, b"line", false), &mut out);
+        assert_eq!(texts(&out), [(1, &b"one line"[..])]);
+        assert_eq!(out[0].at_ns, 12);
+        joins.join(0, &body(7, 2, 13, b"lines", false), &mut out);
+        assert_eq!(texts(&out), [(1, &b"one line"[..]), (2, &b"two lines"[..])]);
+        joins.say_held(&mut out);
+        assert_eq!(out.len(), 2);
+    }
+
+    /// A line that never ends is said at its bound, and one begun and left is
+    /// said when its writers are gone — nothing held is lost.
+    #[test]
+    fn what_is_held_is_bounded_and_said() {
+        let (mut joins, mut out) = (Joins::default(), Vec::new());
+        let piece = [b'x'; 984];
+        let mut pieces = 0;
+        while out.is_empty() {
+            joins.join(0, &body(7, 0, pieces, &piece, true), &mut out);
+            pieces += 1;
+        }
+        assert!(out[0].text.len() >= JOIN_BYTES && out[0].text.len() < JOIN_BYTES + piece.len());
+        out.clear();
+        for tid in 0..=JOINS as u32 {
+            joins.join(0, &body(7, tid + 100, 0, b"begun", true), &mut out);
+        }
+        // One past the writers held says the oldest.
+        assert_eq!(texts(&out), [(100, &b"begun"[..])]);
+        out.clear();
+        joins.say_held(&mut out);
+        assert_eq!(out.len(), JOINS);
+        joins.say_held(&mut out);
+        assert_eq!(out.len(), JOINS);
     }
 }

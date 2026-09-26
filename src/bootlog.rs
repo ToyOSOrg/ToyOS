@@ -11,8 +11,15 @@
 use std::fmt;
 
 /// The word the kernel writes as it hands the machine back to the firmware,
-/// in `kernel/src/arch/syscall/machine.rs`'s `quiesce`.
+/// in `kernel/src/arch/syscall/machine.rs`'s `quiesce`. On the console and in
+/// the black-box page's [`LOG_TAIL`], and never in `/log`: nothing is left
+/// running to write it there.
 pub const REBOOTING: &str = "Rebooting.";
+
+/// What `/system/bin/init` says as it asks `logd` to make the log whole, before
+/// it stops the machine: the last line a passing boot's log is owed, because
+/// nothing after it waits for the file.
+pub const STOPPING: &str = toyos_logstream::STOPPING;
 
 /// What `userland/test-runner` says when its job list runs past
 /// `toyos_tco::JOB_BOUND_MS`, with the job it was inside as the next word.
@@ -88,31 +95,25 @@ pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 /// that this machine was ended by the control that was staged on it.
 pub const LOCKUP_STAGED: &str = "hard-lockup: staged, and only the lockup detector ends this cpu";
 
-/// What the kernel seals under its own `DONE` record about the log volume, in
-/// `kernel/src/log/mod.rs`'s `account_for_durability`. The next loader pass
-/// prints it back under [`PREVIOUS_PANIC`].
+/// What the kernel seals under its own `DONE` record, in
+/// `kernel/src/log/mod.rs`'s `seal_tail`: the head of the boot's newest
+/// records. The next loader pass prints it back under [`PREVIOUS_PANIC`].
 ///
-/// **The one reader a boot's own tail has.** `logd` writes the file, so
-/// everything said after the volume stopped taking bytes — `logd`'s give-up
-/// line, the kernel's own `shutdown: /log did not answer` record, every later
-/// `exit:` — is written where no file can carry it, and on a machine with no
-/// serial port a console is nothing.
-pub const LOG_COMPLETE: &str = "log: /log holds every record this boot committed";
-/// The other half of [`LOG_COMPLETE`]: how far the volume got, and how many
-/// records committed after that reached it. The newest of them follow under
-/// [`LOG_TAIL`].
-pub const LOG_SHORT: &str = "log: /log holds this boot to";
-/// One record the volume never got, on the black-box page.
+/// **The one reader a boot's own tail has.** The stop stops `logd` with every
+/// other thread, so what the kernel says from there on — the stop's record,
+/// its census, [`REBOOTING`] — is on the console and here, and on a machine
+/// with no serial port a console is nothing.
+pub const LOG_TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
+/// One of them, on the black-box page.
 pub const LOG_TAIL: &str = "log-tail: ";
 
 /// What the loader says about a boot that reached its own shutdown, in
 /// `bootloader/src/blackbox.rs`'s `State::Done` arm.
 ///
-/// **The only boot that owes a log account.** A boot ended by its own deadline
-/// or by the lockup detector never reaches `quiesce`, so its log stops early by
-/// construction and its record is `Wedged` rather than `Done`; asking such a
-/// boot for [`LOG_COMPLETE`] would red the two registrations whose whole
-/// subject is that it stopped.
+/// **The only boot that owes a log tail.** A boot ended by its own deadline or
+/// by the lockup detector never finishes `quiesce`, so its record is `Wedged`
+/// rather than `Done`; asking such a boot for [`LOG_TAIL_HEAD`] would red the
+/// two registrations whose whole subject is that it stopped.
 pub const HANDED_BACK: &str = "the last boot read DONE";
 
 /// The bootloader's own file at the root of the log partition.
@@ -170,9 +171,10 @@ pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot
 /// What the on-screen panel cost the boot, in
 /// `kernel/src/drivers/panic_console/mod.rs`.
 ///
-/// **Two channels carry it**, because the panel is the window a boot that ends
-/// in a wedge still has: the shutdown census reaches `logd`'s file, and the
-/// same line is sealed into the black-box page for a boot no `logd` outlived.
+/// **One channel carries it after the console**: the black-box page, where a
+/// boot that handed the machine back seals it among its [`LOG_TAIL`] records
+/// and a boot a bound ended seals it with its record. The stop writes it after
+/// `logd` has stopped, so no file does.
 pub const PANEL_CENSUS: &str = "panel: paints=";
 
 /// What one boot's panel census says: how often the panel painted, how many
@@ -245,7 +247,7 @@ pub fn kernel_records(log: &str) -> String {
 }
 
 /// One program's lines, by the name init started it under, as `logd` read them
-/// out of its pipe: each line's text, newline-terminated.
+/// out of its log ring: each line's text, newline-terminated.
 pub fn lines_of(log: &str, name: &str) -> String {
     log.lines()
         .filter_map(toyos_logstream::program_line)
@@ -318,8 +320,12 @@ pub const COMPLETE: &str = "Boot: complete (";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unfit {
     NoBootRecord,
-    /// The log does not end at the reset: the last line it carries instead.
+    /// The log carries no word from init that the machine stops: the last
+    /// line it carries instead.
     Unfinished(String),
+    /// The loader pass after the reset read no `DONE`, or read one with no
+    /// [`REBOOTING`] in its tail: the stop never finished.
+    NotHandedBack,
 }
 
 impl fmt::Display for Unfit {
@@ -328,11 +334,37 @@ impl fmt::Display for Unfit {
             Self::NoBootRecord => write!(f, "the log carries no `{COMPLETE}Nms)` record"),
             Self::Unfinished(saw) => write!(
                 f,
-                "the log's last line is {saw:?} and not {REBOOTING:?}: either the boot never \
-                 handed the machine back to the firmware, or the reset outran logd"
+                "the log's last line is {saw:?} and init never said {STOPPING:?}: either the \
+                 boot never asked to hand the machine back to the firmware, or logd never made \
+                 the log whole before it did"
+            ),
+            Self::NotHandedBack => write!(
+                f,
+                "the loader's pass after the reset carries no {HANDED_BACK:?} with {REBOOTING:?} \
+                 under {LOG_TAIL:?}: the stop this boot asked for never reached the reset"
             ),
         }
     }
+}
+
+/// The loader's half of a passing boot: the pass after the reset read the
+/// boot's `DONE`, and the tail sealed under it ends in the kernel's own last
+/// word.
+pub fn handed_back(loader: &str) -> Result<(), Unfit> {
+    let tail_says_it = loader.lines().any(|line| line.contains(LOG_TAIL) && line.contains(REBOOTING));
+    if loader.contains(HANDED_BACK) && tail_says_it {
+        Ok(())
+    } else {
+        Err(Unfit::NotHandedBack)
+    }
+}
+
+/// Init's line saying the machine stops, the last one `log` carries.
+pub fn stopping_line(log: &str) -> Option<&str> {
+    log.lines().rfind(|line| {
+        toyos_logstream::program_line(line)
+            .is_some_and(|said| said.tag == "init" && said.text.starts_with(STOPPING))
+    })
 }
 
 /// The milliseconds since boot one record line carries.
@@ -423,9 +455,9 @@ pub fn host_second_inside_this_boot(
     let dated = |line: Option<&str>| line.and_then(record_unix_secs).map(i128::from);
     let began = dated(log.lines().find(|l| l.contains(after)))
         .ok_or_else(|| format!("this log carries no dated {after:?} record"))?;
-    let ended = dated(log.lines().rfind(|l| !is_program_line(l) && l.contains(REBOOTING))).ok_or_else(|| {
+    let ended = dated(stopping_line(log)).ok_or_else(|| {
         format!(
-            "this log carries no dated {REBOOTING:?} record, so nothing in it says when this boot \
+            "this log carries no dated {STOPPING:?} line, so nothing in it says when this boot \
              handed the machine back"
         )
     })?;
@@ -443,8 +475,8 @@ pub fn host_second_inside_this_boot(
     }
     if ended - at < i128::from(MARGIN) {
         return Err(format!(
-            "the host saw it at {at} on this machine's clock and this boot's {REBOOTING:?} record \
-             is at {ended}, {} s apart: nothing closer than {MARGIN} s before that record is this \
+            "the host saw it at {at} on this machine's clock and this boot's {STOPPING:?} line \
+             is at {ended}, {} s apart: nothing closer than {MARGIN} s before that line is this \
              boot's, so it belongs to the operating system on the other side of the reset",
             ended - at
         ));
@@ -463,17 +495,15 @@ pub fn boot_millis(log: &str) -> Option<u64> {
     tail.split("ms)").next()?.parse().ok()
 }
 
-/// A boot's duration if its log is a passing boot's, which takes both records:
-/// a log ending anywhere but the reset is a machine that did not come back on
-/// its own, so the word is looked for as the last line and not in the text.
+/// A boot's duration if its log is a passing boot's, which takes both lines:
+/// the kernel's boot record, and init's word that the machine stops — said
+/// before `logd` made the log whole, so a log that carries it is whole to it.
+/// That the reset then came is the console's to say, or the next loader
+/// pass's ([`HANDED_BACK`], and [`REBOOTING`] under [`LOG_TAIL`]).
 pub fn verdict(log: &str) -> Result<u64, Unfit> {
     let boot_ms = boot_millis(log).ok_or(Unfit::NoBootRecord)?;
-    let last = log
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty() && !is_program_line(line))
-        .unwrap_or_default();
-    if !last.contains(REBOOTING) {
+    if stopping_line(log).is_none() {
+        let last = log.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
         return Err(Unfit::Unfinished(last.trim().to_string()));
     }
     Ok(boot_ms)
@@ -484,24 +514,42 @@ mod tests {
     use super::*;
 
     /// The half-told boot: the kernel got all the way up and the log stops
-    /// there, so the machine either never asked for the reset or the reset
-    /// outran `logd`.
+    /// there, so the machine either never asked for the reset or `logd` never
+    /// made the log whole before it.
     #[test]
-    fn a_boot_record_without_the_reset_word_is_not_a_pass() {
+    fn a_boot_record_without_inits_stop_is_not_a_pass() {
         let booted = "[kernel 1.151 cpu0] Boot: complete (1151ms)\n";
-        let ended = format!("{booted}[logd 1.203 cpu1] {REBOOTING}\n");
+        let stopping = format!("{{1.203 init}} {STOPPING} (Reboot)\n");
+        let ended = format!("{booted}{stopping}");
         assert_eq!(verdict(&ended), Ok(1151));
-        // Trailing blank lines are not the last line.
-        assert_eq!(verdict(&format!("{ended}\n  \n")), Ok(1151));
+        // What `logd` wrote between the flush and the stop is no refusal.
+        assert_eq!(verdict(&format!("{ended}[kernel 1.210 cpu0] exit: reboot pid=6\n")), Ok(1151));
 
         assert_eq!(
             verdict(booted),
             Err(Unfit::Unfinished("[kernel 1.151 cpu0] Boot: complete (1151ms)".to_string()))
         );
-        let carried_on = format!("{ended}[kernel 1.400 cpu0] hda: codec 0 reset\n");
-        assert!(matches!(verdict(&carried_on), Err(Unfit::Unfinished(_))));
-        assert_eq!(verdict(&format!("[logd 0.9 cpu1] {REBOOTING}\n")), Err(Unfit::NoBootRecord));
+        // The words, from anyone but init, and from init as anything but its
+        // line, are not init's stop.
+        let forged = format!("{booted}{{1.203 test-runner}} {STOPPING}\n");
+        assert!(matches!(verdict(&forged), Err(Unfit::Unfinished(_))));
+        let quoted = format!("{booted}{{1.203 init}} init: said {STOPPING}\n");
+        assert!(matches!(verdict(&quoted), Err(Unfit::Unfinished(_))));
+        assert_eq!(verdict(&stopping), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
+    }
+
+    /// The reset is the next pass's to say: its `DONE`, and the kernel's last
+    /// word in the tail sealed under it — neither alone.
+    #[test]
+    fn a_boot_is_handed_back_by_its_done_and_its_last_word() {
+        let done = format!("Black box: {HANDED_BACK} at 2026-09-08-160844\n");
+        let tail = format!("| {LOG_TAIL}[kernel 23.340 cpu1] {REBOOTING}\n");
+        assert_eq!(handed_back(&format!("{done}{tail}")), Ok(()));
+        assert_eq!(handed_back(&done), Err(Unfit::NotHandedBack));
+        assert_eq!(handed_back(&tail), Err(Unfit::NotHandedBack));
+        let elsewhere = format!("{done}| [kernel 23.340 cpu1] {REBOOTING}\n");
+        assert_eq!(handed_back(&elsewhere), Err(Unfit::NotHandedBack));
     }
 
     #[test]
@@ -593,8 +641,7 @@ mod tests {
                 "kernel/src/drivers/panic_console/mod.rs",
                 format!("CENSUS: &str = \"{PANEL_CENSUS}\""),
             ),
-            ("kernel/src/log/mod.rs", format!("\"{LOG_COMPLETE}")),
-            ("kernel/src/log/mod.rs", format!("\"{LOG_SHORT}")),
+            ("kernel/src/log/mod.rs", format!("TAIL_HEAD: &str = \"{LOG_TAIL_HEAD}\"")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
         ] {
             let at = root.join(file);
@@ -723,7 +770,8 @@ mod record_time_tests {
         "[2026-09-08 16:08:21 0.000 cpu0 boot] panic console: armed 1920x1080 stride=1920 \
          format=1 at 0x4000000000\n",
         "[2026-09-08 16:08:22 1.258 cpu0] Boot: complete (1258ms)\n",
-        "[2026-09-08 16:08:44 23.340 cpu1] Rebooting.\n",
+        "{2026-09-08 16:08:44 23.340 init} init: power: the machine stops, and logd makes the log \
+         whole first (Reboot)\n",
     );
 
     /// That boot's first record, which every second below is placed against.
@@ -771,7 +819,7 @@ mod record_time_tests {
         let unfinished: String = BOOT.lines().take(2).map(|l| format!("{l}\n")).collect();
         let why = host_second_inside_this_boot(&unfinished, 0, "Boot: complete", first + 10)
             .expect_err("a log with no reset says nothing about when this boot ended");
-        assert!(why.contains(&format!("no dated {REBOOTING:?} record")), "{why}");
+        assert!(why.contains(&format!("no dated {STOPPING:?} line")), "{why}");
         let why = host_second_inside_this_boot(BOOT, 0, "netd: DHCP: lease ", first + 10)
             .expect_err("this boot took no lease");
         assert!(why.contains("no dated \"netd: DHCP: lease \" record"), "{why}");

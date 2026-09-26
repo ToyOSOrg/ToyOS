@@ -46,6 +46,9 @@ pub unsafe fn publish_ap_shard(cpu: u32, shard: *mut Shard) {
 /// reset's own account under it nowhere to go.
 const TAIL_RECORDS: usize = 16;
 
+/// The head the tail is sealed under, read back by `src/bootlog.rs`.
+const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
+
 /// Seal the newest of this boot's records onto the black box, the one channel
 /// a boot's own tail has once the stop has begun.
 ///
@@ -72,7 +75,7 @@ pub fn seal_tail() {
         }
     }
     crate::blackbox::append(|out| {
-        let _ = writeln!(out, "log: the newest {TAIL_RECORDS} records of this boot follow, newest first");
+        let _ = writeln!(out, "{TAIL_HEAD} ({TAIL_RECORDS})");
         let mut tail = Tail { out, left: TAIL_RECORDS };
         read::snapshot_committed(0, read::newest_committed_at_ns(), &mut tail);
     });

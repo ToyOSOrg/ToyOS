@@ -2650,6 +2650,25 @@ mod tests {
         }
     }
 
+    /// **An image a user boots serves no log on the network.** `logd` answers
+    /// `toyos_logstream::PORT` to whoever connects, with nothing to authenticate
+    /// them, once it holds a `netd` connector: the test configs that read the
+    /// stream give it one, and these do not.
+    #[test]
+    fn no_shipped_image_serves_the_log_on_the_network() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ["system.toml", "console/system.toml", "diag/system.toml"] {
+            let parsed = parse_config(&root.join(config));
+            let logd = parsed.programs.get("logd").expect("every config runs logd");
+            assert!(
+                logd.receives.is_empty(),
+                "{config}: `logd` receives {:?}, and a `netd` connector is what serves this \
+                 machine's log to anyone on its network",
+                logd.receives,
+            );
+        }
+    }
+
     /// One prefix and no other, so a doc naming `/etc/logd` or `/apps/logd` is a
     /// token the filter below drops and an assertion that reds. Still `/bin/`
     /// because `toyos-abi/src` is the tree the sweep did not reach;

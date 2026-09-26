@@ -2097,7 +2097,9 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let ms = if stages_a_wedge(&armed) {
         wedged_boot(&loader, &log)?
     } else {
-        bootlog::verdict(&log).map_err(Refusal::Log)?
+        let ms = bootlog::verdict(&log).map_err(Refusal::Log)?;
+        bootlog::handed_back(&loader).map_err(Refusal::Log)?;
+        ms
     };
     // After the stick's own verdict, which stays the one that names a boot
     // that never reached its network.
@@ -2158,7 +2160,7 @@ fn talk_verdict(
 /// failure for exactly that reason — this judge knew one line and the page
 /// carried the other.
 fn wedged_boot(loader: &str, log: &str) -> Result<u64, Refusal> {
-    if bootlog::kernel_records(log).contains(bootlog::REBOOTING) {
+    if bootlog::handed_back(loader).is_ok() {
         return Err(Refusal::Wedge {
             why: "it reached the shutdown's own last word, so nothing about it was wedged",
         });
@@ -2200,15 +2202,13 @@ pub fn deadline_lateness_ms(loader: &str) -> Option<u64> {
     reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
 }
 
-/// What the kernel's stop wrote about itself in this boot's own kernel log.
+/// What the kernel's stop wrote about itself in `text`: the loader's pass after
+/// the reset, which prints the tail the stop sealed.
 ///
 /// `None` on a boot that wrote none, which is every boot that reset without
 /// going through `quiesce`.
-pub fn park(kernel: &str) -> Option<toyos_quiesce::Record> {
-    kernel
-        .lines()
-        .find(|line| line.contains(toyos_quiesce::STOPPED))
-        .and_then(toyos_quiesce::Record::parse)
+pub fn park(text: &str) -> Option<toyos_quiesce::Record> {
+    text.lines().find_map(toyos_quiesce::Record::parse)
 }
 
 /// The same for the other bound: how far past its own bound the hard-lockup
@@ -3293,8 +3293,13 @@ mod tests {
         let booted = "[kernel 1.198 cpu0] Boot: complete (1198ms)\n";
         assert_eq!(wedged_boot(&sealed, booted), Ok(1198));
 
-        let rebooted = format!("{booted}[kernel 1.3 cpu0] {}\n", bootlog::REBOOTING);
-        let why = wedged_boot(&sealed, &rebooted).unwrap_err().to_string();
+        let done = format!(
+            "Black box: {}\n| {}[kernel 1.3 cpu0] {}\n",
+            bootlog::HANDED_BACK,
+            bootlog::LOG_TAIL,
+            bootlog::REBOOTING
+        );
+        let why = wedged_boot(&done, booted).unwrap_err().to_string();
         assert!(why.contains("nothing about it was wedged"), "{why}");
 
         let why = wedged_boot("no record here\n", booted).unwrap_err().to_string();

@@ -218,6 +218,9 @@ const RUST_SKIP: &[&str] = &[
     // The same, and its verdict is the stop record of a boot staged around it.
     // `quiesce_wakes_on_the_last_park` and `quiesce_wakes_on_the_last_exit` run it.
     "quiesce_last",
+    // The same, and its verdict is the log volume the stop leaves.
+    // `quiesce_leaves_the_volume_whole` runs it.
+    "quiesce_fsync",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
     // holds, and five megabytes of it. `log_program_flood` runs it.
     "log_flood",
@@ -1661,6 +1664,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
     ("quiesce_wakes_on_the_last_exit", &["test_rs_quiesce_last"]),
     ("quiesce_dump_holds_the_stopped", &["test_rs_quiesce_writers"]),
+    ("quiesce_leaves_the_volume_whole", &["test_rs_quiesce_fsync"]),
     ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
     ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),

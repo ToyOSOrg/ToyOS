@@ -543,7 +543,15 @@ mod tests {
     fn line(tag: &str, text: &str) -> String {
         let tag = toyos_logstream::Tag::new(tag).expect("a tag");
         let stamp = "2026-09-24 22:01:37";
-        format!("{}\n", toyos_logstream::ProgramLine { stamp, at_ns: 2_940_000_000, tag, text: text.as_bytes() })
+        format!("{}\n", toyos_logstream::ProgramLine {
+            stamp,
+            at_ns: 2_940_000_000,
+            severity: toyos_logstream::Severity::Info,
+            tid: 0,
+            pid: None,
+            tag,
+            text: text.as_bytes(),
+        })
     }
 
     /// init's words, sshd's refusal and `logd`'s carrier line count only under

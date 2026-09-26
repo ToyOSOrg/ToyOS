@@ -5,9 +5,10 @@ start = ["logd", "test-runner"]
 [programs.logd]
 syscap = ["logread"]
 
-# `power` because the job ends the machine, `logread` because the second
-# caller has to still be running when it calls, `dup` because the runner
-# passes a duplicate of what it holds to the job and the job to its child.
+# `power` twice: the connector is how the job has init make the first call,
+# and the right is the job's own second call. `logread` because the job reads
+# the kernel's word that the first call waits, and `dup` because the runner
+# passes the job a duplicate of what it holds.
 [programs.test-runner]
 receives = ["power"]
 args = ["test_rs_quiesce_twice"]

@@ -342,7 +342,7 @@ pub fn write_console(src: &crate::user_ptr::UserBytes) -> usize {
     while off < src.len() {
         let n = chunk.len().min(src.len() - off);
         src.read_at(off, &mut chunk[..n]);
-        if !crate::log::console::queue(&chunk[..n]) {
+        if !crate::log::console::queue(&chunk[..n], false) {
             crate::log::console::unshown();
         }
         off += n;
@@ -369,11 +369,13 @@ pub struct ConsoleLine {
     len: usize,
     /// `buf` holds a whole line the queue had no room for, which goes first.
     held: bool,
+    /// What `buf` holds is a piece of a line the next one goes on with.
+    continues: bool,
 }
 
 impl ConsoleLine {
     pub const fn new() -> Self {
-        Self { buf: [0; MAX_CONSOLE_LINE], len: 0, held: false }
+        Self { buf: [0; MAX_CONSOLE_LINE], len: 0, held: false, continues: false }
     }
 
     /// Take as much of a userland write as ends in lines the queue has room
@@ -388,12 +390,12 @@ impl ConsoleLine {
             let n = chunk.len().min(src.len() - off);
             src.read_at(off, &mut chunk[..n]);
             for (i, &b) in chunk[..n].iter().enumerate() {
-                if self.len == MAX_CONSOLE_LINE && !self.close() {
+                if self.len == MAX_CONSOLE_LINE && !self.close(true) {
                     return off + i;
                 }
                 self.buf[self.len] = b;
                 self.len += 1;
-                if b == b'\n' && !self.close() {
+                if b == b'\n' && !self.close(false) {
                     // Taken: the line is this holder's to send, and it goes
                     // ahead of the next write.
                     return off + i + 1;
@@ -404,14 +406,16 @@ impl ConsoleLine {
         src.len()
     }
 
-    /// Queue the line `buf` holds; `false` keeps it held for the next write.
-    fn close(&mut self) -> bool {
+    /// Queue the line `buf` holds, or the piece of one that `continues` in the
+    /// next; `false` keeps it held for the next write.
+    fn close(&mut self, continues: bool) -> bool {
         self.held = true;
+        self.continues = continues;
         self.release()
     }
 
     fn release(&mut self) -> bool {
-        if !crate::log::console::queue(&self.buf[..self.len]) {
+        if !crate::log::console::queue(&self.buf[..self.len], self.continues) {
             return false;
         }
         self.len = 0;
@@ -422,7 +426,7 @@ impl ConsoleLine {
     /// Queues whatever is held, whether or not a newline came, as the holder
     /// goes. With the queue full it is counted unshown: nothing waits here.
     pub fn finish(&mut self) {
-        if self.len > 0 && !crate::log::console::queue(&self.buf[..self.len]) {
+        if self.len > 0 && !crate::log::console::queue(&self.buf[..self.len], false) {
             crate::log::console::unshown();
         }
         self.len = 0;
