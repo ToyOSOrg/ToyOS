@@ -2465,7 +2465,7 @@ mod tests {
 
     /// **A control nobody runs is a control nobody has shown can fail.** Every
     /// name [`declared_model_controls`] finds is a row of `crate::ci::CONTROLS`,
-    /// which `cargo run -- --ci host-full` runs, and every row names a declared
+    /// which `cargo run -- --ci host` runs, and every row names a declared
     /// control — or a new control can be declared and run nowhere, silently.
     #[test]
     fn every_model_control_is_run() {
