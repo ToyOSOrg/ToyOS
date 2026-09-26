@@ -360,9 +360,7 @@ bcachefs/tests/fixtures/ — volumes upstream's tools wrote
     144,978 bytes gzip -9, of a 33,554,432-byte raw volume
     sha256 7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e
     raw    021c816a064fc2fca2402c8b2a87a9e6124e0b2f4a32779ef14654e908bcacff
-    Terms: pending the owner with the crate itself,
-    issues/filesystem/whether-bcachefs-is-ours-to-license-is-the-owners.md
-    SPDX-License-Identifier: NOASSERTION
+    SPDX-License-Identifier: MIT OR Apache-2.0
 
 `bcachefs/src/upstream` implements upstream's on-disk format, and the only
 honest judge of a format reader is bytes the format's own implementation wrote.
