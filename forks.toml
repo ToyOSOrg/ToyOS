@@ -198,8 +198,8 @@ branch_note = """
 A refused `SYS_RANDOM` is answered as `Error::UNEXPECTED` rather than
 discarded on all three. 0.4 is one branch. 0.2 and 0.3 are two each until the
 toolchain re-locks: `rust/Cargo.lock` pins `toyos-0.2` and `toyos-0.3` at the
-commit before that answer, so userland consumes the branch that carries it,
-and `toyos-0.N` moves onto it when the toolchain does
+commit before that answer, so the tree's workspaces consume the branch that
+carries it, and `toyos-0.N` moves onto it when the toolchain does
 (`issues/build/the-toolchain-pins-an-older-commit-of-three-userland-forks.md`).
 """
 delta = "+13 / +18 / +18"
@@ -221,10 +221,11 @@ pr = "none — sendable once toyos-abi is on crates.io"
 upstream = "RazrFalcon/memmap2-rs"
 base = "v0.9.10"
 branch_note = """
-The toolchain consumes `toyos`. `userland/` and `tests/toyos-rust-tests`
-consume `toyos-0.9.11`, which is the same `src/toyos.rs` on the v0.9.11
-release, with no version relabel and none of the lint allowances the rustc
-build needs: fontdb reads every font through a read-only `Mmap::map`, so on
+The toolchain consumes `toyos`. `tests/iced-counter` and
+`tests/toyos-rust-tests` consume `toyos-0.9.11`, which is the same
+`src/toyos.rs` on the v0.9.11 release, with no version relabel and none of
+the lint allowances the rustc build needs, and with `make_exec` refused as
+`map_exec` is: fontdb reads every font through a read-only `Mmap::map`, so on
 the stub iced found no system font at all. +167/-1 off v0.9.11.
 """
 base_note = "Cargo.toml version is relabelled 0.2.1 to satisfy rustc_data_structures' pin"
