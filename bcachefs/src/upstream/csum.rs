@@ -1,6 +1,6 @@
-//! The three unkeyed checksums a bcachefs superblock may name, in upstream's
-//! seeding: `bch2_checksum_init`/`_update`/`_final` seed crc32c and crc64 with
-//! 0 and do not invert, and xxhash is XXH64 seeded 0.
+//! The three unkeyed checksums a bcachefs superblock may name, seeded as the
+//! format computes them: crc32c and crc64 seeded 0 and not inverted, and
+//! xxhash as XXH64 seeded 0.
 
 use super::UpstreamError;
 
@@ -38,8 +38,8 @@ impl CsumType {
             Self::None => 0,
             Self::Crc32c => crc32c_update(0, data) as u64,
             Self::Crc32cNonzero => (crc32c_update(u32::MAX, data) ^ u32::MAX) as u64,
-            Self::Crc64 => crc64_be(0, data),
-            Self::Crc64Nonzero => crc64_be(u64::MAX, data) ^ u64::MAX,
+            Self::Crc64 => crc64_ecma(0, data),
+            Self::Crc64Nonzero => crc64_ecma(u64::MAX, data) ^ u64::MAX,
             Self::Xxhash => xxh64(data, 0),
         };
         (lo, 0)
@@ -70,8 +70,8 @@ const CRC32C_TABLE: [u32; 256] = {
     table
 };
 
-/// Linux's `crc32c(seed, data, len)`: the Castagnoli update with neither the
-/// pre- nor the post-inversion the standalone CRC-32C carries.
+/// The Castagnoli update from `crc`, with neither the pre- nor the
+/// post-inversion the standalone CRC-32C carries.
 pub fn crc32c_update(mut crc: u32, data: &[u8]) -> u32 {
     for &byte in data {
         crc = (crc >> 8) ^ CRC32C_TABLE[((crc ^ byte as u32) & 0xFF) as usize];
@@ -99,8 +99,8 @@ const CRC64_TABLE: [u64; 256] = {
     table
 };
 
-/// Linux's `crc64_be`: CRC-64/ECMA-182, most significant bit first.
-pub fn crc64_be(mut crc: u64, data: &[u8]) -> u64 {
+/// CRC-64/ECMA-182 from `crc`, most significant bit first, not inverted.
+pub fn crc64_ecma(mut crc: u64, data: &[u8]) -> u64 {
     for &byte in data {
         crc = CRC64_TABLE[(((crc >> 56) ^ byte as u64) & 0xFF) as usize] ^ (crc << 8);
     }
@@ -121,7 +121,7 @@ fn xxh_merge(acc: u64, val: u64) -> u64 {
     (acc ^ xxh_round(0, val)).wrapping_mul(XXH_P1).wrapping_add(XXH_P4)
 }
 
-/// XXH64, the one-shot form; `xxh64_update` over a whole buffer is this.
+/// XXH64 over the whole buffer.
 pub fn xxh64(data: &[u8], seed: u64) -> u64 {
     let mut rest = data;
     let mut hash;
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn published_check_values() {
         assert_eq!(crc32c_update(u32::MAX, b"123456789") ^ u32::MAX, 0xE306_9283);
-        assert_eq!(crc64_be(0, b"123456789"), 0x6c40_df5f_0b49_7347);
+        assert_eq!(crc64_ecma(0, b"123456789"), 0x6c40_df5f_0b49_7347);
         assert_eq!(xxh64(b"", 0), 0xEF46_DB37_51D8_E999);
     }
 

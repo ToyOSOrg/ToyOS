@@ -1,5 +1,11 @@
-//! Keys: the position they sort by, the per-node packing, and the unpacking
-//! `__bch2_bkey_unpack_key` defines.
+//! Keys: the position they sort by, the per-node packing, and unpacking.
+//!
+//! A packed key's first `key_u64s` words, read little-endian, are one integer.
+//! Its three header bytes are the low 24 bits; the node's `bkey_format` lays
+//! the six fields end to end below the integer's top bit, `INODE` highest and
+//! `VERSION_LO` lowest, each `bits_per_field` wide, and each unpacks to its
+//! packed value plus its `field_offset`. The bits between the header and the
+//! lowest field mean nothing, and a field crosses word boundaries freely.
 
 use super::raw::Raw;
 use super::UpstreamError;
@@ -62,16 +68,110 @@ impl Bpos {
 
 pub const BPOS_BYTES: usize = 20;
 
+/// One field of a `bkey_format`: its packed width, and what unpacking adds to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FieldPacking {
+    bits: u8,
+    offset: u64,
+}
+
+impl FieldPacking {
+    /// A field packed at its unpacked width, with nothing added back.
+    const fn whole(bits: u8) -> Self {
+        Self { bits, offset: 0 }
+    }
+
+    /// Whether every value this field can unpack to, `offset + 2^bits - 1` at
+    /// the most, fits in an unpacked field `unpacked_bits` wide.
+    fn fits(self, unpacked_bits: u8) -> bool {
+        // A span past `u128` is past any unpacked field.
+        let top = 2u128
+            .checked_pow(self.bits.into())
+            .and_then(|span| span.checked_add(self.offset.into()));
+        top.is_some_and(|top| top <= 2u128.pow(unpacked_bits.into()))
+    }
+}
+
 /// A btree node's key format: how many bits each field is packed into, and
 /// what is added back to each on the way out.
+///
+/// **Holding one is proof it is valid**: the only way to make one from disk
+/// bytes is `TryFrom<StoredFormat>`, so unpacking never meets a field wider
+/// than the one it fills or a key length its fields do not add up to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BkeyFormat {
-    pub key_u64s: u8,
-    bits_per_field: [u8; NR_FIELDS],
-    field_offset: [u64; NR_FIELDS],
+    key_u64s: u8,
+    fields: [FieldPacking; NR_FIELDS],
 }
 
 pub const FORMAT_BYTES: usize = 56;
+
+/// `BKEY_FORMAT_CURRENT`'s widths: what each packed field is unpacked into.
+const UNPACKED_BITS: [u8; NR_FIELDS] = [64, 64, 32, 32, 32, 64];
+
+/// A `struct bkey_format` exactly as stored, before anything in it is believed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoredFormat {
+    key_u64s: u8,
+    nr_fields: u8,
+    fields: [FieldPacking; NR_FIELDS],
+}
+
+impl StoredFormat {
+    fn parse(bytes: &[u8; FORMAT_BYTES]) -> Self {
+        let [key_u64s, nr_fields, b0, b1, b2, b3, b4, b5, offsets @ ..] = *bytes;
+        let mut fields = [b0, b1, b2, b3, b4, b5].map(|bits| FieldPacking { bits, offset: 0 });
+        for (field, word) in fields.iter_mut().zip(offsets.as_chunks::<8>().0) {
+            field.offset = u64::from_le_bytes(*word);
+        }
+        Self { key_u64s, nr_fields, fields }
+    }
+}
+
+/// Each way a stored `bkey_format` describes keys this reader cannot unpack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatError {
+    /// `nr_fields` is not `BKEY_NR_FIELDS`.
+    FieldCount,
+    /// A field's largest value, `field_offset + 2^bits_per_field - 1`, is past
+    /// what the unpacked field holds.
+    FieldTooWide,
+    /// `key_u64s` is not the words the header and the fields' bits fill.
+    WordCount,
+}
+
+impl From<FormatError> for UpstreamError {
+    fn from(err: FormatError) -> Self {
+        UpstreamError::Refused(match err {
+            FormatError::FieldCount => "btree node's key format has the wrong field count",
+            FormatError::FieldTooWide => "btree node's key format packs a field wider than the one it fills",
+            FormatError::WordCount => "btree node's key format is not as many words as its fields need",
+        })
+    }
+}
+
+impl TryFrom<StoredFormat> for BkeyFormat {
+    type Error = FormatError;
+
+    /// **A field wider than the unpacked one it fills is the refusal that
+    /// matters here**: without it a 64-bit packed snapshot unpacks into a
+    /// 32-bit field, and a key from any snapshot is served as one from the
+    /// root subvolume. `key_u64s` is required to be exactly the words the
+    /// fields need, so a format cannot carry slack a key could hide in.
+    fn try_from(stored: StoredFormat) -> Result<Self, FormatError> {
+        if usize::from(stored.nr_fields) != NR_FIELDS {
+            return Err(FormatError::FieldCount);
+        }
+        if !stored.fields.iter().zip(UNPACKED_BITS).all(|(field, unpacked)| field.fits(unpacked)) {
+            return Err(FormatError::FieldTooWide);
+        }
+        let field_bits: u32 = stored.fields.iter().map(|field| u32::from(field.bits)).sum();
+        if u32::from(stored.key_u64s) != (PACKED_BITS_START + field_bits).div_ceil(64) {
+            return Err(FormatError::WordCount);
+        }
+        Ok(Self { key_u64s: stored.key_u64s, fields: stored.fields })
+    }
+}
 
 impl BkeyFormat {
     /// `BKEY_FORMAT_CURRENT`: what a key outside any btree node — a journal
@@ -79,61 +179,32 @@ impl BkeyFormat {
     pub const fn unpacked() -> Self {
         Self {
             key_u64s: BKEY_U64S as u8,
-            bits_per_field: [64, 64, 32, 32, 32, 64],
-            field_offset: [0; NR_FIELDS],
+            fields: [
+                FieldPacking::whole(64),
+                FieldPacking::whole(64),
+                FieldPacking::whole(32),
+                FieldPacking::whole(32),
+                FieldPacking::whole(32),
+                FieldPacking::whole(64),
+            ],
         }
     }
 
-    /// Read a node's format, refusing exactly what `bch2_bkey_format_invalid`
-    /// refuses.
-    ///
-    /// **A field wider than the unpacked one it fills is the refusal that
-    /// matters here**: without it a 64-bit packed snapshot unpacks into a
-    /// 32-bit field, and a key from any snapshot is served as one from the
-    /// root subvolume. `key_u64s` is required to be exactly the words the
-    /// fields need, so a format cannot carry slack a key could hide in.
+    /// Read the `bkey_format` stored at `off`, refusing one whose keys could
+    /// not be unpacked into `struct bkey`.
     pub fn read(raw: &Raw<'_>, off: usize) -> Result<Self, UpstreamError> {
-        let key_u64s = raw.u8(off)?;
-        let nr_fields = raw.u8(off + 1)?;
-        if nr_fields as usize != NR_FIELDS {
-            return Err(UpstreamError::Refused("btree node's key format has the wrong field count"));
-        }
-        let mut bits_per_field = [0u8; NR_FIELDS];
-        let mut field_offset = [0u64; NR_FIELDS];
-        let mut total = PACKED_BITS_START;
-        for (i, bits) in bits_per_field.iter_mut().enumerate() {
-            *bits = raw.u8(off + 2 + i)?;
-            field_offset[i] = raw.u64(off + 8 + i * 8)?;
-            if field_overflows(*bits, field_offset[i], UNPACKED_BITS[i]) {
-                return Err(UpstreamError::Refused("btree node's key format packs a field wider than the one it fills"));
-            }
-            total += *bits as u32;
-        }
-        // No separate bound against an unpacked key's length: every field is
-        // capped at the width it unpacks into, so `total` cannot pass 312 bits
-        // and this equality already forces five words or fewer.
-        if key_u64s as u32 != total.div_ceil(64) {
-            return Err(UpstreamError::Refused("btree node's key format is not as many words as its fields need"));
-        }
-        Ok(Self { key_u64s, bits_per_field, field_offset })
+        let bytes = raw
+            .bytes()
+            .get(off..)
+            .and_then(<[u8]>::first_chunk)
+            .ok_or(UpstreamError::Refused("btree node's key format runs past the node"))?;
+        Ok(Self::try_from(StoredFormat::parse(bytes))?)
     }
-}
 
-/// `BKEY_FORMAT_CURRENT`'s widths: what each packed field is unpacked into.
-const UNPACKED_BITS: [u8; NR_FIELDS] = [64, 64, 32, 32, 32, 64];
-
-/// `bch2_bkey_format_field_overflows`: whether this field could unpack to a
-/// value the unpacked key cannot hold.
-fn field_overflows(bits: u8, offset: u64, unpacked_bits: u8) -> bool {
-    if bits > unpacked_bits {
-        return true;
+    /// A packed key's key part, header included, in u64s.
+    pub fn key_u64s(&self) -> u8 {
+        self.key_u64s
     }
-    if bits == unpacked_bits && offset != 0 {
-        return true;
-    }
-    let unpacked_mask = !((!0u64 << 1) << (unpacked_bits - 1));
-    let field_mask = if bits == 0 { 0 } else { !((!0u64 << (bits - 1)) << 1) };
-    (offset.wrapping_add(field_mask) & unpacked_mask) < offset
 }
 
 /// A key, unpacked, and where its value sits inside the same window.
@@ -172,7 +243,7 @@ impl Key {
         let packed_format = fmt_byte & 0x7F;
 
         let key_u64s = match packed_format {
-            KEY_FORMAT_LOCAL_BTREE => format.key_u64s as usize,
+            KEY_FORMAT_LOCAL_BTREE => usize::from(format.key_u64s),
             KEY_FORMAT_CURRENT => BKEY_U64S,
             _ => return Err(UpstreamError::Refused("key names a format the node does not define")),
         };
@@ -185,53 +256,54 @@ impl Key {
         let (size, pos) = if packed_format == KEY_FORMAT_CURRENT {
             (whole.u32(16)?, Bpos::read(&whole, 20)?)
         } else {
-            unpack(&whole, format)?
+            PackedKey::new(&whole, format)?.unpack()?
         };
 
         Ok(Self { u64s, kind, size, pos, val_at: key_u64s * 8, base: 0 })
     }
 }
 
-/// `get_inc_field` over all six fields, in the order `bkey_fields()` names.
-///
-/// Little-endian word order: the highest word of the packed key is the last
-/// one, and `next_word` walks down toward the header.
-fn unpack(whole: &Raw<'_>, format: &BkeyFormat) -> Result<(u32, Bpos), UpstreamError> {
-    let mut word = format.key_u64s as usize - 1;
-    let mut w = whole.u64(word * 8)?;
-    let mut avail = 64u32;
-    let mut out = [0u64; NR_FIELDS];
+/// A key packed in a node's format: its first `key_u64s` words, header
+/// included, read little-endian as one integer.
+struct PackedKey<'a> {
+    bytes: &'a [u8],
+    format: &'a BkeyFormat,
+}
 
-    for (field, slot) in out.iter_mut().enumerate() {
-        let mut bits = format.bits_per_field[field] as u32;
-        let mut v = 0u64;
-        if bits >= avail {
-            v = if bits == 0 { 0 } else { w >> (64 - bits) };
-            bits -= avail;
-            word = word
-                .checked_sub(1)
-                .ok_or(UpstreamError::Refused("packed key ran out of words"))?;
-            w = whole.u64(word * 8)?;
-            avail = 64;
-        }
-        // `bits` is never 64 here, which is what makes the paired shift safe.
-        v |= (w >> 1) >> (63 - bits);
-        w <<= bits;
-        avail -= bits;
-        *slot = v.wrapping_add(format.field_offset[field]);
+const FIELD_DOES_NOT_FIT: UpstreamError =
+    UpstreamError::Refused("packed key's field does not fit the one it unpacks into");
+
+impl<'a> PackedKey<'a> {
+    /// The key part of `whole`; the value past it is not the key's.
+    fn new(whole: &Raw<'a>, format: &'a BkeyFormat) -> Result<Self, UpstreamError> {
+        let bytes = whole.slice(0, usize::from(format.key_u64s) * 8)?;
+        Ok(Self { bytes, format })
     }
 
-    // The format check above makes neither of these narrowings lossy; they are
-    // refused rather than truncated so the two cannot drift apart.
-    let narrow = |v: u64| {
-        u32::try_from(v).map_err(|_| UpstreamError::Refused("packed key's field does not fit the one it unpacks into"))
-    };
-    let pos = Bpos {
-        inode: out[FIELD_INODE],
-        offset: out[FIELD_OFFSET],
-        snapshot: narrow(out[FIELD_SNAPSHOT])?,
-    };
-    Ok((narrow(out[FIELD_SIZE])?, pos))
+    /// Bits `[lo, lo + width)` of the key as an integer, for `width <= 64`.
+    fn bit_range(&self, lo: u16, width: u8) -> u128 {
+        // Nine bytes from the one holding bit `lo` cover any 64-bit field.
+        let mut window = [0u8; 16];
+        for (dst, src) in window.iter_mut().zip(self.bytes.iter().skip(usize::from(lo / 8))) {
+            *dst = *src;
+        }
+        u128::from_le_bytes(window) / 2u128.pow(u32::from(lo % 8)) % 2u128.pow(width.into())
+    }
+
+    /// `(size, pos)`: every field's packed value plus its `field_offset`.
+    fn unpack(&self) -> Result<(u32, Bpos), UpstreamError> {
+        // The format's validity puts the lowest field at bit 24 or above, so
+        // `top` never passes below the header.
+        let mut top = u16::from(self.format.key_u64s) * 64;
+        let [inode, offset, snapshot, size, _version_hi, _version_lo] =
+            self.format.fields.map(|field| {
+                top -= u16::from(field.bits);
+                self.bit_range(top, field.bits) + u128::from(field.offset)
+            });
+        let wide = |value: u128| u64::try_from(value).map_err(|_| FIELD_DOES_NOT_FIT);
+        let narrow = |value: u128| u32::try_from(value).map_err(|_| FIELD_DOES_NOT_FIT);
+        Ok((narrow(size)?, Bpos { inode: wide(inode)?, offset: wide(offset)?, snapshot: narrow(snapshot)? }))
+    }
 }
 
 #[cfg(test)]
@@ -250,16 +322,16 @@ mod tests {
     }
 
     /// The format `BKEY_FORMAT_CURRENT` is: every field at its natural width,
-    /// no offsets. A key packed in it unpacks to what an unpacked key holds,
-    /// which is the property `bch2_bkey_transform` rests on.
+    /// no offsets. A key packed in it unpacks to what an unpacked key holds:
+    /// its fields land on exactly the bytes of `struct bkey`.
     #[test]
     fn the_identity_format_round_trips_a_position() {
         let bits = [64u8, 64, 32, 32, 32, 64];
         let raw = format_bytes(BKEY_U64S as u8, bits, [0; 6]);
         let format = BkeyFormat::read(&Raw::new(&raw, "format"), 0).expect("a valid format");
 
-        // Pack (inode, offset, snapshot, size, version) MSB-first from the last
-        // word down, exactly as `set_inc_field` writes it.
+        // Pack (inode, offset, snapshot, size, version) most significant bit
+        // first, from the top of the last word down.
         let want = Bpos::new(0x1122_3344_5566_7788, 0x99AA_BBCC_DDEE_FF00, 0x1234_5678);
         let size = 0x0BAD_F00Du32;
         let mut bitstring: Vec<bool> = Vec::new();
@@ -397,5 +469,70 @@ mod tests {
         alien[0] = BKEY_U64S as u8;
         alien[1] = 42;
         assert!(Key::read(&Raw::new(&alien, "key"), &format).is_err());
+    }
+
+    mod vectors {
+        /// `(inode, offset, snapshot, size)`.
+        type Unpacked = (u64, u64, u32, u32);
+        include!("bkey_vectors.rs");
+    }
+
+    fn stored(bytes: &[u8]) -> StoredFormat {
+        StoredFormat::parse(bytes.first_chunk().expect("a whole format"))
+    }
+
+    /// Every format vector: valid ones read back unchanged, and each invalid
+    /// one is refused for the first condition it fails.
+    #[test]
+    fn format_vectors() {
+        for &(id, bytes, want) in vectors::FORMAT_CASES {
+            let got = BkeyFormat::read(&Raw::new(bytes, "format"), 0);
+            match want {
+                None => {
+                    let format = got.unwrap_or_else(|err| panic!("{id}: refused a valid format: {err:?}"));
+                    let stored = stored(bytes);
+                    assert_eq!((format.key_u64s, format.fields), (stored.key_u64s, stored.fields), "{id}");
+                }
+                Some(refusal) => assert_eq!(got, Err(UpstreamError::Refused(refusal)), "{id}"),
+            }
+        }
+    }
+
+    /// A format one byte short of its 56 is refused, not read past.
+    #[test]
+    fn a_truncated_format_is_refused() {
+        let (_, bytes, _) = vectors::FORMAT_CASES[0];
+        assert!(BkeyFormat::read(&Raw::new(&bytes[..FORMAT_BYTES - 1], "format"), 0).is_err());
+        assert!(BkeyFormat::read(&Raw::new(bytes, "format"), 1).is_err());
+    }
+
+    /// `field_offset + 2^bits <= 2^unpacked`, decided over the integers for
+    /// every width a byte can state.
+    #[test]
+    fn field_fit_vectors() {
+        for &(bits, offset, unpacked, overflows) in vectors::OVERFLOW_CASES {
+            assert_eq!(
+                FieldPacking { bits, offset }.fits(unpacked),
+                !overflows,
+                "{bits} bits at offset {offset:#x} into {unpacked}"
+            );
+        }
+    }
+
+    #[test]
+    fn unpack_vectors() {
+        for &(id, format, key, (inode, offset, snapshot, size)) in vectors::UNPACK_CASES {
+            let format = BkeyFormat::read(&Raw::new(format, "format"), 0).expect(id);
+            let got = PackedKey::new(&Raw::new(key, "key"), &format).and_then(|key| key.unpack());
+            assert_eq!(got, Ok((size, Bpos::new(inode, offset, snapshot))), "{id}");
+        }
+    }
+
+    /// The identity format read off a disk is the one `unpacked` states.
+    #[test]
+    fn the_identity_format_is_the_unpacked_one() {
+        let (id, bytes, _) = vectors::FORMAT_CASES[0];
+        assert_eq!(id, "F1");
+        assert_eq!(BkeyFormat::read(&Raw::new(bytes, "format"), 0), Ok(BkeyFormat::unpacked()));
     }
 }
