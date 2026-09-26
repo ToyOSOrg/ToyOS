@@ -75,10 +75,6 @@ impl Static {
         Some(Static { variant, total_memsz, max_align: effective(max_align)?, first_align: effective(first_align)? })
     }
 
-    pub fn variant(self) -> Variant {
-        self.variant
-    }
-
     pub fn total_memsz(self) -> usize {
         self.total_memsz
     }

@@ -272,10 +272,13 @@ fn read_exe_tables(
         }
         None => Vec::new(),
     };
-    let Some(relas) = elf::parse_rela_entries(&rela_data, &jmprel_data) else {
-        log!("spawn: {}: relocation tables do not fit one allocation", path);
-        return Err(SyscallError::ResourceExhausted);
-    };
+    let relas = elf::parse_rela_entries(&rela_data, &jmprel_data).map_err(|refused| {
+        log!("spawn: {}: {}", path, refused.as_str());
+        match refused {
+            toyos_elf::rela::ExeRefusal::TooLarge => SyscallError::ResourceExhausted,
+            toyos_elf::rela::ExeRefusal::TlsDescriptor => SyscallError::InvalidArgument,
+        }
+    })?;
 
     let dynstr = match dyn_info.strtab_table() {
         Some(t) => {
