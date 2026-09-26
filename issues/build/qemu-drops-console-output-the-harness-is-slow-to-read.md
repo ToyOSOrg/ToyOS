@@ -40,8 +40,11 @@ shootdown panic on a starved vCPU
 (`issues/kernel/a-shootdown-panicked-on-a-cpu-the-host-starved.md`), which
 killed a `logd` reader thread so it was never let go, and one had `logd` let
 none of the eight stalled readers go in 90 s while every host guest slot was
-held by other worktrees, green alone. Neither lost a console line. Every other
-test still reads the stdio console.
+held by other worktrees, green alone. Neither lost a console line. Once
+`logd` synced every round the test's stimulus was too small for its readers
+to stall, and its flood was made four times wider; twenty runs after that, at
+host loads of 3.9 to 9.0, were 20 green. Every other test still reads the
+stdio console.
 
 ## Exit condition
 
