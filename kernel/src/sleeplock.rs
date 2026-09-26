@@ -18,7 +18,7 @@ use loom::sync::atomic::{AtomicU64, Ordering};
 use core::ops::{Deref, DerefMut};
 
 use crate::watch::{self, Watch};
-use crate::scheduler::{current_task, Parkable, TaskId};
+use crate::scheduler::{current_task, started, Parkable, TaskId};
 use crate::sync::{AtomicTicket, Ticket};
 
 /// Acquire: orders the previous holder's writes before this read; `sleeplock-acquire-off` flips it to `Relaxed` so `kernel-loom` can prove the gap is real.
@@ -175,7 +175,7 @@ impl<T> Drop for SleepGuard<'_, T> {
         let next = self.lock.now.fetch_advance(Ordering::Release).succ();
         // Before the scheduler exists no task can have queued, and a post
         // needs the scheduler: the boot's console takes this lock that early.
-        if crate::sched::driver::started() {
+        if started() {
             let _ = self.lock.watch.post_n(u64::from(next.raw()), 1);
         }
     }

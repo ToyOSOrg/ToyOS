@@ -273,7 +273,7 @@ pub mod watch {
 /// What `sleeplock.rs` names of the scheduler: the right to park, and who is
 /// asking.
 ///
-/// Three items, and the arithmetic in [`TaskId`] is the whole of what is
+/// Four items, and the arithmetic in [`TaskId`] is the whole of what is
 /// restated here rather than compiled — `kernel/src/scheduler.rs` names the
 /// process table, the `toyos-sched` driver and half the kernel besides, so it
 /// cannot be a `#[path]` module the way `sync.rs` and `inbox/once.rs` are.
@@ -337,6 +337,12 @@ pub mod scheduler {
 
     pub fn current_task() -> Option<TaskId> {
         WHO.with(|who| who.get())
+    }
+
+    /// Whether the scheduler exists. Always, in a model: the one lock taken
+    /// before it does is the kernel's boot console, on one CPU with no task.
+    pub fn started() -> bool {
+        true
     }
 }
 
