@@ -2294,6 +2294,12 @@ pub struct BootOptions {
     /// that the boot *after* a reset is this loader again, reading what the boot
     /// before it left — and a guest with it set runs until the harness kills it.
     pub takes_the_reset: bool,
+    /// Keep the firmware's variables in this file, writable, instead of the
+    /// shared read-only template: a copy the test made, so what one boot's
+    /// loader writes — the anti-rollback floor, `BootNext` — is what the next
+    /// boot of the same machine reads. `None` is every other boot, whose
+    /// variables live in firmware memory and die with the guest.
+    pub firmware_vars: Option<PathBuf>,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
     /// expected outcome rather than a boot failure -- the early-panic screen
@@ -2434,6 +2440,7 @@ impl Default for BootOptions {
             i8042: true,
             mute: false,
             takes_the_reset: false,
+            firmware_vars: None,
             ready_marker: DEFAULT_READY,
             nvme_image: None,
             boot_image: None,
@@ -4289,10 +4296,13 @@ fn qemu_command(
             ovmf_dir.join("OVMF_CODE-pure-efi.fd").display()
         ))
         .arg("-drive")
-        .arg(format!(
-            "if=pflash,format=raw,unit=1,file={},readonly=on",
-            ovmf_dir.join("OVMF_VARS-pure-efi.fd").display()
-        ))
+        .arg(match &options.firmware_vars {
+            Some(vars) => format!("if=pflash,format=raw,unit=1,file={},readonly=off", vars.display()),
+            None => format!(
+                "if=pflash,format=raw,unit=1,file={},readonly=on",
+                ovmf_dir.join("OVMF_VARS-pure-efi.fd").display()
+            ),
+        })
         .arg("-drive")
         .arg(format!(
             "if=none,id=stick,{}{}",

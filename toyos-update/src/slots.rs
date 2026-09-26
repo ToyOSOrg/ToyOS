@@ -1,6 +1,6 @@
 //! The slot table: which partitions make each slot, and which slot is marked.
 //!
-//! It lives on its own partition of type [`TYPE_TEXT`], in two copies at
+//! It lives on its own partition of type `toyos_gpt::Guid::TOYOS_SLOTS`, in two copies at
 //! blocks 0 and 1, and **a writer writes the copy that is not the current
 //! one**, with a sequence one past it. A write that tears leaves that copy
 //! unreadable and the current one standing, so moving the mark is atomic on a
@@ -17,12 +17,6 @@
 //! updater's to compare against; the loader trusts nothing here but which
 //! partitions to read and which slot is marked, and judges each slot by its
 //! own signed header.
-
-/// `94464329-E06E-4288-A9DA-7FC7154F5E92`, the slot table's partition type.
-pub const TYPE_TEXT: &str = "94464329-E06E-4288-A9DA-7FC7154F5E92";
-
-/// `037719D7-DEA5-481A-AA07-6AF8BE6D51E2`, a slot's FAT partition type.
-pub const BOOT_TYPE_TEXT: &str = "037719D7-DEA5-481A-AA07-6AF8BE6D51E2";
 
 /// The unit the table's copies are written in.
 pub const BLOCK: usize = 4096;
@@ -196,6 +190,47 @@ pub fn next_write(current: (Table, usize), mut next: Table) -> (usize, [u8; BLOC
     (1 - current.1, next.encode())
 }
 
+/// The labels `/system/bin/init` endows a `slots` grant under, and
+/// `/system/bin/update` takes it by: the slot table's partition, and the idle
+/// slot's FAT volume and ROOT, each a partition claim.
+pub const TABLE_LABEL: &str = "slots:table";
+pub const BOOT_LABEL: &str = "slots:boot";
+pub const ROOT_LABEL: &str = "slots:root";
+
+/// The one program a build lets hold the grant: `/system/bin/update`.
+pub const HOLDER: &str = "update";
+
+/// Why a machine has no slot to write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoIdle {
+    /// The table carries one slot, and that is the one running.
+    OneSlot,
+    /// Neither slot's ROOT is the one the kernel holds: this table is not
+    /// the one this boot came from.
+    NotThisBoot,
+}
+
+impl core::fmt::Display for NoIdle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::OneSlot => write!(f, "the slot table carries one slot, and the machine runs it"),
+            Self::NotThisBoot => write!(f, "neither slot's ROOT is the one this boot runs"),
+        }
+    }
+}
+
+/// The slot the machine is not running, given the ROOT the kernel holds —
+/// **what makes the running slot unwritable by construction**: the grant is
+/// only ever the other one.
+pub fn idle(table: &Table, running_root: &[u8; 16]) -> Result<(Which, Slot), NoIdle> {
+    let running = [Which::A, Which::B]
+        .into_iter()
+        .find(|&w| table.slot(w).is_some_and(|s| s.root == *running_root))
+        .ok_or(NoIdle::NotThisBoot)?;
+    let idle = running.other();
+    table.slot(idle).map(|slot| (idle, slot)).ok_or(NoIdle::OneSlot)
+}
+
 /// CRC-32 (IEEE 802.3, reflected), the checksum GPT uses; a torn write is what
 /// it catches, not an adversary.
 fn crc32(bytes: &[u8]) -> u32 {
@@ -258,5 +293,17 @@ mod tests {
         torn[100] ^= 0xFF;
         assert_eq!(current([&a, &torn]).expect("a table"), (old, 0));
         assert_eq!(current([&[0; BLOCK], &[0; BLOCK]]), Err(Unreadable::Magic));
+    }
+
+    /// The grant is the slot the kernel is not running from, and a table this
+    /// boot did not come from, or one with nothing idle, grants nothing.
+    #[test]
+    fn the_idle_slot_is_the_one_whose_root_the_kernel_does_not_hold() {
+        let t = table(Which::A, 1);
+        assert_eq!(idle(&t, &[2; 16]).map(|(w, _)| w), Ok(Which::B));
+        assert_eq!(idle(&t, &[4; 16]).map(|(w, _)| w), Ok(Which::A));
+        assert_eq!(idle(&t, &[9; 16]), Err(NoIdle::NotThisBoot));
+        let one = Table { slots: [t.slots[0], None], ..t };
+        assert_eq!(idle(&one, &[2; 16]), Err(NoIdle::OneSlot));
     }
 }

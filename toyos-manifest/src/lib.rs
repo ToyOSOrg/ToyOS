@@ -20,6 +20,7 @@
 //! receive <name>            a connector in this program's namespace
 //! device <class>            a claim init mints and endows
 //! syscap <right>            a right on the SysCap dup init endows
+//! slots                     the idle slot's partitions and the slot table, claimed by init
 //! init-serve <name>         a name init serves itself
 //! start <name>              init starts this program at boot
 //! app-receive <name>        a connector every program launched from /apps holds
@@ -121,6 +122,13 @@ pub struct Program {
     /// the system may enter the RT band, mint a device claim, read the machine
     /// log, list every process in the machine, or power the machine off.
     pub syscap: Vec<String>,
+    /// The machine's idle slot, granted as claims: the slot table's partition
+    /// and the idle slot's FAT volume and ROOT, which init resolves against
+    /// the ROOT the kernel holds and mints (`toyos_update::slots`). The
+    /// authority to write the next image and nothing else: the slot a boot
+    /// runs is never among them. One program holds it — `src/build.rs` gates
+    /// which.
+    pub slots: bool,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -219,6 +227,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
                 out.push_str(&format!("{word} {value}\n"));
             }
         }
+        if program.slots {
+            out.push_str("slots\n");
+        }
     }
     for name in &manifest.init_serves {
         check("init", "init_serves", name)?;
@@ -301,6 +312,7 @@ pub fn parse(text: &str) -> Manifest {
                     "receive" => program.receives.push(rest.to_string()),
                     "device" => program.devices.push(rest.to_string()),
                     "syscap" => program.syscap.push(rest.to_string()),
+                    "slots" if rest.is_empty() => program.slots = true,
                     other => panic!("manifest: unknown record `{other}`"),
                 }
             }
@@ -330,6 +342,12 @@ mod tests {
                     serves: vec!["soundd".into()],
                     devices: vec!["hda-audio".into(), "virtio-sound".into()],
                     syscap: vec!["rt".into()],
+                    ..Program::default()
+                },
+                Program {
+                    name: "update".into(),
+                    path: "/system/bin/update".into(),
+                    slots: true,
                     ..Program::default()
                 },
                 Program {

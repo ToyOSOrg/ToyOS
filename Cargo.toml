@@ -138,6 +138,11 @@ toyos-swap = { path = "toyos-swap" }
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "toyos-tco" }
 toyos-blackbox = { path = "toyos-blackbox" }
+# The signed image, the slot table and the signer: `src/signing.rs` signs with
+# the same crate the loader and `/system/bin/update` verify with.
+toyos-update = { path = "toyos-update", features = ["sign"] }
+# A throwaway key's seed, from the operating system. Already resolved here.
+getrandom = "0.3"
 # `classify`, so the host reading a log volume and `logd` writing it cannot
 # disagree about which files on it are `logd`'s.
 toyos-wallclock = { path = "toyos-wallclock" }

@@ -1,0 +1,33 @@
+# The machine updates itself, rehearsed in QEMU: sshd runs `update` for the
+# host's login with the image on its input, `update` writes the slot this boot
+# is not running, and the reboot after it boots that slot — or, where the loader
+# refuses it or it dies, the other one. `tests/common/update.rs` stages every
+# image and judges every boot.
+
+[boot]
+start = ["logd", "netd", "sshd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.netd]
+serves = ["netd"]
+devices = ["pci:1af4:1041"]
+
+[programs.sshd]
+receives = ["netd", "launcher"]
+
+# The idle slot, which init claims against the ROOT the kernel holds; the
+# owner's signature on the image is the authority to install it.
+[programs.update]
+slots = true
+
+[programs.test-runner]
+syscap = ["logread"]
+
+# `reboot` is how the host hands the machine to the slot `update` marked.
+[programs.toybox]
+syscap = ["power"]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"

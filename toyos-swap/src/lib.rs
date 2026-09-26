@@ -1,23 +1,26 @@
-//! Replacing a running service's binary: every word sshd, `/system/bin/init`
-//! and the host say about it, and every decision init makes about one. Pure.
+//! Replacing a running service's binary: every word `/system/bin/swap`,
+//! `/system/bin/init` and the host say about it, and every decision init makes
+//! about one. Pure.
 //!
-//! **A swap is asked over ssh and done by init, and nothing else can do
-//! either.** sshd serves the [`SUBSYSTEM`] on an authenticated channel only; it
-//! stages the bytes it was sent under [`STAGING`] and asks init over the
-//! [`PORT`] init serves, which the build gate lets no program but sshd
-//! receive. init is the only process holding the system capability, so it is
-//! the only one that can stop a service, give its device claims back and start
-//! it again holding exactly its manifest row.
+//! **A swap is asked by `/system/bin/swap` and done by init, and nothing else
+//! can do either.** `swap` is an ordinary program — `ssh <machine> swap netd <
+//! netd` runs it over a plain `exec` channel, for a login sshd has already
+//! authenticated — and it stages the bytes it was given under [`STAGING`] and
+//! asks init over the [`PORT`] init serves, which the build gate lets no
+//! program but [`HOLDER`] receive. init is the only process holding the system
+//! capability, so it is the only one that can stop a service, give its device
+//! claims back and start it again holding exactly its manifest row.
 //!
 //! **The order is fixed and every refusal leaves the old service running.**
 //! init reads the staged file, holds its bytes against the requester's
 //! [`Digest`] ([`verify`]), writes them to the [`installed_path`] — a
 //! temporary name and one rename, so the place a service is started from is
 //! never half-written — answers [`MSG_ACCEPTED`], and waits for the requester
-//! to hang up, at most [`HANGUP_MS`]. sshd hangs up once its client has closed
-//! the channel the answer came on, which is that client's proof it has the
-//! answer: the service being swapped may be the one carrying it, and is not
-//! stopped before it has arrived. Then init stops the old
+//! to hang up, at most [`HANGUP_MS`]. `swap` hangs up when it exits, which
+//! for a caller that named the binary's length is once that caller has closed
+//! its input — its proof it has the answer: the service being swapped may be
+//! the one carrying it, and is not stopped before it has arrived. Then init
+//! stops the old
 //! process, starts the new binary, and holds it on probation for
 //! [`PROBATION_MS`]. A binary that does not spawn, is refused a device the
 //! process it replaces held, or ends inside probation, is [`Word::Failed`], and
@@ -42,18 +45,15 @@ pub const PORT: &str = "swap";
 /// name in it is a name whatever the holder runs undeclared would hold too.
 pub const LABEL: &str = "swap";
 
-/// The one program a build may let receive [`PORT`]: it serves the request
-/// only on a channel whose key it has already accepted.
-pub const HOLDER: &str = "sshd";
-
-/// The SSH subsystem a client opens to ask for a swap.
-pub const SUBSYSTEM: &str = "toyos-swap";
+/// The one program a build may let receive [`PORT`]: `/system/bin/swap`,
+/// which a login runs and nothing starts at boot.
+pub const HOLDER: &str = "swap";
 
 /// Where a swap's bytes are staged and where a swapped binary is started from.
 pub const STAGING: &str = "/tmp/swap";
 
-/// The largest binary a swap carries. A bound on the memory sshd and init each
-/// spend on one request; a service binary in this tree is a few megabytes.
+/// The largest binary a swap carries. A bound on the memory `swap` and init
+/// each spend on one request; a service binary in this tree is a few megabytes.
 pub const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// How long a new binary must keep running before init calls it in service.
@@ -63,9 +63,9 @@ pub const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 /// did not start, and one that ends after it is a service that died.
 pub const PROBATION_MS: u64 = 5_000;
 
-/// How long sshd waits for its client to close the channel it answered on —
-/// the client's proof that it has the answer, and its word that the swap may
-/// go — before it hangs up on init anyway.
+/// How long `swap` waits for its caller to close its input once it has
+/// answered — the caller's proof that it has the answer, and its word that the
+/// swap may go — before it hangs up on init anyway.
 pub const ANSWER_MS: u64 = 2_000;
 
 /// How long init waits for the requester to hang up once it has answered
@@ -76,7 +76,7 @@ pub const HANGUP_MS: u64 = 2 * ANSWER_MS;
 
 const _: () = assert!(HANGUP_MS > ANSWER_MS);
 
-/// The request, sshd to init: [`Request::encode`]'s bytes.
+/// The request, `swap` to init: [`Request::encode`]'s bytes.
 pub const MSG_SWAP: u32 = 1;
 /// init's answer: verified and installed; the payload is the installed path.
 pub const MSG_ACCEPTED: u32 = 2;
@@ -86,7 +86,7 @@ pub const MSG_REFUSED: u32 = 3;
 /// A SHA-256 digest.
 pub type Digest = [u8; 32];
 
-/// The digest of `bytes`: the one definition the host, sshd and init share.
+/// The digest of `bytes`: the one definition the host, `swap` and init share.
 pub fn digest(bytes: &[u8]) -> Digest {
     Sha256::digest(bytes).into()
 }
@@ -138,7 +138,7 @@ pub enum Refusal {
     AlreadyRuns(String),
     /// init could not put the verified bytes where a service is started from.
     Install { path: String, why: String },
-    /// This sshd was given no [`PORT`]: the image does not let it swap.
+    /// This process was given no [`PORT`]: the image does not let it swap.
     NoAuthority,
 }
 
@@ -159,7 +159,7 @@ impl core::fmt::Display for Refusal {
             }
             Self::AlreadyRuns(path) => write!(f, "the service already runs {path}"),
             Self::Install { path, why } => write!(f, "{path} could not be written: {why}"),
-            Self::NoAuthority => write!(f, "this sshd holds no `{PORT}` connector"),
+            Self::NoAuthority => write!(f, "this process holds no `{PORT}` connector"),
         }
     }
 }
@@ -174,54 +174,7 @@ pub fn verify(bytes: &[u8], want: &Digest) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// What a client sends first on the [`SUBSYSTEM`] channel, one line:
-/// `<service> <sha256 hex> <length>\n`, then exactly `<length>` bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Header {
-    pub service: String,
-    pub digest: Digest,
-    pub len: u64,
-}
-
-/// The longest header line, newline included; a longer one is refused rather
-/// than buffered.
-pub const MAX_HEADER: usize = toyos_manifest::MAX_PROGRAM_NAME + 1 + 64 + 1 + 20 + 1;
-
-impl Header {
-    pub fn render(&self) -> String {
-        format!("{} {} {}\n", self.service, hex(&self.digest), self.len)
-    }
-
-    /// The header at the front of `buf`, and how many bytes it took; `Ok(None)`
-    /// while no newline has arrived and the line could still be one.
-    pub fn take(buf: &[u8]) -> Result<Option<(Self, usize)>, Refusal> {
-        let Some(end) = buf.iter().position(|&b| b == b'\n') else {
-            if buf.len() >= MAX_HEADER {
-                return Err(Refusal::Malformed(format!("no header in the first {MAX_HEADER} bytes")));
-            }
-            return Ok(None);
-        };
-        let line = core::str::from_utf8(&buf[..end])
-            .map_err(|_| Refusal::Malformed("the header is not UTF-8".into()))?;
-        let words: Vec<&str> = line.split(' ').collect();
-        let [service, digest, len] = words[..] else {
-            return Err(Refusal::Malformed(format!("{line:?} is not `<service> <sha256> <length>`")));
-        };
-        if !is_service_name(service) {
-            return Err(Refusal::Malformed(format!("{service:?} is not a service name")));
-        }
-        let digest = parse_hex(digest)
-            .ok_or_else(|| Refusal::Malformed(format!("{digest:?} is not a SHA-256 in hex")))?;
-        let len: u64 =
-            len.parse().map_err(|_| Refusal::Malformed(format!("{len:?} is not a length")))?;
-        if len > MAX_BINARY_BYTES {
-            return Err(Refusal::TooLarge(len));
-        }
-        Ok(Some((Self { service: service.to_string(), digest, len }, end + 1)))
-    }
-}
-
-/// Where sshd stages one request's bytes. `nonce` keeps two sessions' files
+/// Where `swap` stages one request's bytes. `nonce` keeps two requests' files
 /// apart; the name is never one a service is started from.
 pub fn staged_path(service: &str, nonce: u64) -> String {
     format!("{STAGING}/incoming-{service}-{nonce}")
@@ -265,7 +218,7 @@ pub fn installed_digest(path: &str) -> Option<Digest> {
     parse_hex(dir)
 }
 
-/// The request sshd sends init: the service, the staged path and the digest the
+/// The request `swap` sends init: the service, the staged path and the digest the
 /// client named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -357,22 +310,6 @@ pub fn said(service: &str, word: Word, detail: &str) -> String {
     format!("init: swap {service}: {}: {detail}", word.as_str())
 }
 
-/// sshd's own line about one ask, before or instead of asking init:
-/// `sshd: <peer>: swap <service>: <answer>` — `<service>` is `?` while sshd has
-/// not yet read the request's header. What sshd prints (`userland/sshd`) and
-/// what [`sshd_refused`] reads back are the same spelling.
-pub fn sshd_said(peer: &str, service: &str, answer: &str) -> String {
-    format!("sshd: {peer}: swap {service}: {answer}")
-}
-
-/// sshd's own refusal inside `line` — [`sshd_said`]'s form, for whichever peer
-/// and service it named, in any form the log renders it — or `None`.
-pub fn sshd_refused(line: &str) -> Option<&str> {
-    let (_, rest) = line.split_once(": swap ")?;
-    let (_, answer) = rest.split_once(": ")?;
-    answer.trim_end_matches(['\n', '\r']).strip_prefix("refused ")
-}
-
 /// init's line about `service` inside `line` — a console line or a record in
 /// any of the forms the log renders one in — as `(word, detail)`.
 pub fn heard<'a>(line: &'a str, service: &str) -> Option<(Word, &'a str)> {
@@ -418,33 +355,6 @@ mod tests {
         let refused = verify(b"abd", &digest(b"abc")).unwrap_err();
         assert!(refused.to_string().contains(ABC), "{refused}");
         assert!(matches!(refused, Refusal::Mismatch { .. }));
-    }
-
-    #[test]
-    fn a_header_round_trips_and_waits_for_its_newline() {
-        let header = Header { service: "netd".into(), digest: digest(b"abc"), len: 2_317_912 };
-        let line = header.render();
-        let mut buf = line.clone().into_bytes();
-        buf.extend_from_slice(b"\x7fELF");
-        assert_eq!(Header::take(&buf), Ok(Some((header, line.len()))));
-        assert_eq!(Header::take(&line.as_bytes()[..10]), Ok(None));
-        assert!(line.len() <= MAX_HEADER);
-    }
-
-    #[test]
-    fn a_header_that_is_not_one_is_refused() {
-        let ok_digest = ABC;
-        for line in [
-            format!("netd {ok_digest}\n"),
-            format!("netd {ok_digest} 12 extra\n"),
-            format!("../netd {ok_digest} 12\n"),
-            format!("netd {} 12\n", &ok_digest[1..]),
-            format!("netd {ok_digest} twelve\n"),
-            format!("netd {ok_digest} {}\n", MAX_BINARY_BYTES + 1),
-        ] {
-            assert!(Header::take(line.as_bytes()).is_err(), "{line:?}");
-        }
-        assert!(Header::take(&[b'x'; MAX_HEADER]).is_err());
     }
 
     #[test]
@@ -520,20 +430,6 @@ mod tests {
         );
         for word in [Word::Accepted, Word::Stopping, Word::Started, Word::Failed] {
             assert!(!word.is_final());
-        }
-    }
-
-    #[test]
-    fn sshd_refused_reads_back_what_sshd_said() {
-        let line = sshd_said("10.0.2.2:60872", "?", "refused x");
-        assert_eq!(line, "sshd: 10.0.2.2:60872: swap ?: refused x");
-        assert_eq!(sshd_refused(&line), Some("x"));
-        let accepted = sshd_said("10.0.2.2:60872", "netd", "accepted /tmp/swap/abc/netd");
-        assert_eq!(sshd_refused(&accepted), None);
-        for rendered in
-            [format!("{line}\n"), format!("[2026-09-24 22:01:36 2.612 cpu0] @{line}\n")]
-        {
-            assert_eq!(sshd_refused(&rendered), Some("x"), "{rendered:?}");
         }
     }
 

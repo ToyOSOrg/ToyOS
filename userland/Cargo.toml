@@ -24,11 +24,13 @@ members = [
     "soundd",
     "sprite",
     "sshd",
+    "swap",
     "terminal",
     "test-runner",
     "toybox",
     "toyos-font",
     "toyos-window",
+    "update",
 ]
 exclude = [
     # no_std C runtime — uses panic=abort (own Cargo.toml profile)

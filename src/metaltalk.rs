@@ -769,6 +769,33 @@ impl Ssh {
         Ok(Exec { stdout, status })
     }
 
+    /// Run `command` with `stdin`'s bytes on its input, and collect its stdout
+    /// and status: `ssh <machine> update < image`, for one.
+    pub fn pipe(&self, at: SocketAddr, command: &str, stdin: &Path, scratch: &Path) -> Result<Exec, String> {
+        let (out, err) = (scratch.join("pipe.out"), scratch.join("pipe.err"));
+        let (host, port) = (at.ip().to_string(), at.port().to_string());
+        let said = self.run(&[
+            "pipe",
+            &host,
+            &port,
+            path_str(&self.key)?,
+            path_str(&out)?,
+            path_str(&err)?,
+            path_str(stdin)?,
+            command,
+        ])?;
+        let status = match said.lines().last().unwrap_or("") {
+            "no-exit-status" => None,
+            line => Some(
+                line.strip_prefix("exit ")
+                    .and_then(|code| code.parse().ok())
+                    .ok_or_else(|| format!("the client answered {said:?}"))?,
+            ),
+        };
+        let stdout = std::fs::read(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+        Ok(Exec { stdout, status })
+    }
+
     /// Ask for `command` and answer the machine's reply to the request, without
     /// waiting for the program.
     pub fn fire(&self, at: SocketAddr, command: &str) -> Result<String, String> {
@@ -777,15 +804,16 @@ impl Ssh {
         Ok(said.lines().last().unwrap_or("").to_string())
     }
 
-    /// Send `binary` as `service`'s replacement, naming `digest` for it, and
-    /// answer the machine's word: `accepted <path>`, `refused <why>`,
-    /// `unanswered <what>` or `no-subsystem`.
+    /// Send `binary` as `service`'s replacement, naming `digest` for it — an
+    /// `exec` of `/system/bin/swap` with the binary on its input — and answer
+    /// the machine's word: `accepted <path>`, `refused <why>` (init's),
+    /// `unasked <why>` (`swap`'s own), or `unanswered <what>`.
     ///
-    /// **An `accepted` is answered with the channel still open**: closing it is
-    /// the go — sshd hangs up on init once its client has closed it, and init
-    /// stops the old service then ([`toyos_swap::ANSWER_MS`] bounds the wait) —
-    /// and it is [`Answered::go`]'s, so a caller whose own connection that
-    /// service carries can see to it first.
+    /// **An `accepted` is answered with the program's input still open**:
+    /// closing it is the go — `swap` hangs up on init once its input closes,
+    /// and init stops the old service then ([`toyos_swap::ANSWER_MS`] bounds
+    /// the wait) — and it is [`Answered::go`]'s, so a caller whose own
+    /// connection that service carries can see to it first.
     pub fn swap(
         &self,
         at: SocketAddr,

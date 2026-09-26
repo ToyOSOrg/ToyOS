@@ -21,6 +21,8 @@ use uefi::{
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
+use toyos_update::policy;
+use toyos_update::record::{self, Booted, Ended, Record};
 
 /// Every line this loader prints: the firmware's console, and the file on the
 /// stick once [`loaderlog::open`] has one. The arguments are evaluated once, so
@@ -39,10 +41,12 @@ macro_rules! println {
 mod attempt;
 mod blackbox;
 mod bootnext;
+mod floor;
 mod gcd;
 mod loaderlog;
 mod rootbridge;
 mod rootimage;
+mod slot;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
@@ -216,28 +220,19 @@ fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Bo
     })
 }
 
-/// The boot parameter the kernel takes ROOT's name and its actuators from,
-/// byte for byte as `src/image.rs` wrote it.
-///
-/// Missing panics, for [`log_partition_guid`]'s reason: one function writes all
-/// four files, so a volume with three of them was not assembled by this project.
-fn cmdline(handle: Handle, system_table: &SystemTable<Boot>) -> vec::Vec<u8> {
-    load_file_bytes(handle, system_table, cstr16!("\\toyos\\cmdline"))
-}
-
 /// Name the partition the kernel's log goes on, without reading it.
 ///
-/// Written beside `kernel.elf` by `src/image.rs`, which draws the GUID and
+/// Written beside this loader by `src/image.rs`, which draws the GUID and
 /// stamps the same sixteen bytes into the GPT entry. Read here because this is
 /// the volume firmware designated and because the kernel has no filesystem yet:
 /// the identity is *given* all the way down, and nothing at any level scans for
 /// a partition of the right type or format.
 ///
 /// A missing or short file panics, like every other check in this file. The
-/// same function writes all four, so a volume with three of them was assembled
-/// by something that is not this project — and booting it anyway would mean a
-/// kernel that quietly has nowhere to write its log, on the machine that has no
-/// other channel.
+/// same function writes the loader and this file, so a volume with one of them
+/// was assembled by something that is not this project — and booting it anyway
+/// would mean a kernel that quietly has nowhere to write its log, on the
+/// machine that has no other channel.
 fn log_partition_guid(handle: Handle, system_table: &SystemTable<Boot>) -> [u8; 16] {
     let bytes = load_file_bytes(handle, system_table, cstr16!("\\toyos\\log.guid"));
     <[u8; 16]>::try_from(bytes.as_slice()).unwrap_or_else(|_| {
@@ -866,18 +861,31 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // so this is the one window there is to read and write it.
     let previous = attempt::read(&system_table, &log_guid);
     let retry = match &previous {
-        Ok(previous) => attempt::is_the_retry(page.is_some(), finding.is_some(), *previous),
+        Ok(previous) => attempt::is_the_retry(page.is_some(), finding.is_some(), previous.count),
         Err(_) => false,
     };
+    // **How the last boot ended is a fact about the image it ran**: a hang the
+    // count caught and every death the page recorded mark that image dead in
+    // its slot, and a handover on purpose proves it.
+    let ended = match (&finding, retry) {
+        (Some(finding), _) => finding.ended,
+        (None, true) => Ended::Hung,
+        (None, false) => Ended::Unknown,
+    };
+    // Read here and not where it is used: a hang is a death only for an image
+    // above it, and this is the pass that has to know which.
+    let (mut image_floor, floor_note) = floor::read(&system_table);
+    let accounted = record::account(previous.clone().unwrap_or_default(), ended, image_floor);
     // Cleared where the last boot is accounted for, and where this pass is
     // about to hand the machine back: both leave the next boot of this image a
     // first attempt, which is what one hand per hang means.
     let next = if finding.is_some() || retry {
         0
     } else {
-        attempt::next(previous.clone().unwrap_or(0))
+        attempt::next(previous.as_ref().map_or(0, |previous| previous.count))
     };
-    let wrote = attempt::write(&system_table, &log_guid, next);
+    let mut record = Record { count: next, ..accounted.record };
+    let wrote = attempt::write(&system_table, &log_guid, &record);
     loaderlog::open(&system_table, &log_guid, finding.is_none() && !retry);
     println!("{}", loaderlog::BEGINS_AT);
     if let Some(line) = claim_refused {
@@ -890,7 +898,24 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // see of it: a stick this could not count on is a machine with no bound.
     match (&previous, &wrote) {
         (Err(why), _) | (_, Err(why)) => println!("{ATTEMPTS} {why}, so this boot is not counted and a hang here needs a hand"),
-        (Ok(previous), Ok(())) => println!("{ATTEMPTS} this image has had the machine {previous} time(s) without reporting; now {next}"),
+        (Ok(previous), Ok(())) => println!("{ATTEMPTS} this image has had the machine {} time(s) without reporting; now {next}", previous.count),
+    }
+    if let (Some(died), Some(booted)) = (accounted.died, previous.as_ref().ok().and_then(|p| p.booted)) {
+        let mut hex = [0u8; 64];
+        println!(
+            "Slot {}: its image {} died on its last boot, so no pass boots it again until an update replaces it",
+            died.letter(),
+            toyos_update::hex(&booted.digest, &mut hex)
+        );
+    }
+    if let Some(note) = floor_note {
+        println!("{note}");
+    }
+    // Raised before either end of the chain below: the pass that reads a
+    // handover on purpose is the one pass that knows the image proved itself.
+    if let Some(proven) = accounted.proven {
+        floor::raise(&system_table, image_floor, policy::raised(image_floor, proven));
+        image_floor = policy::raised(image_floor, proven);
     }
     if retry {
         // **The hang, and the only bound there is on one.** The last boot of
@@ -945,30 +970,53 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         None => println!("Boot partition: this machine has none"),
     }
 
-    println!("Loading kernel...");
-    let kernel_bytes = load_file_bytes(handle, &system_table, cstr16!("\\toyos\\kernel.elf"));
-    println!("Kernel: {} bytes", kernel_bytes.len());
-
     println!("Log partition: signature {:02x?}", log_guid);
 
-    // The word naming the page is appended to what the ESP carried, because
-    // whether there is a page is a fact only this loader has: the kernel is
+    // Every byte the kernel is handed below — its ELF, its parameter and ROOT —
+    // is one the chosen slot's signed header names. ROOT is read before the
+    // kernel is loaded and not after: it is the allocation the image pages come
+    // from, and a slot whose ROOT is refused has no use for the kernel's.
+    let chosen = slot::choose(handle, &system_table, image_floor, &record)
+        .unwrap_or_else(|why| panic!("Slots: {why}"));
+    record.booted = Some(Booted { slot: chosen.which, version: chosen.version, digest: chosen.digest });
+    match attempt::write_chosen(&log_guid, &record) {
+        Ok(()) => println!("{ATTEMPTS} slot {}'s image is written down as the one this pass boots", chosen.which.letter()),
+        Err(why) => println!(
+            "{ATTEMPTS} {why}, so a death of slot {}'s image is not seen by the next pass",
+            chosen.which.letter()
+        ),
+    }
+    let kernel_bytes = chosen.kernel;
+    println!("Kernel: {} bytes", kernel_bytes.len());
+
+    // The words naming the slot and the page are appended to what the slot
+    // carried, because each is a fact only this loader has: the kernel is
     // handed one line and reads its own parameters out of it.
-    let mut cmdline = cmdline(handle, &system_table);
-    if let Some(word) = blackbox::param(page) {
+    let mut cmdline = chosen.cmdline;
+    let mut append = |word: &str| {
         if !cmdline.is_empty() {
             cmdline.push(b',');
         }
         cmdline.extend_from_slice(word.as_bytes());
+    };
+    append(&alloc::format!("{}{}", toyos_abi::boot::SLOT_PARAM, chosen.which.letter()));
+    if let Some((refused, why)) = chosen.refused {
+        append(&alloc::format!("{}{}:{}", toyos_abi::boot::SLOT_REFUSED_PARAM, refused.letter(), why.word()));
+    }
+    if let Some(word) = blackbox::param(page) {
+        append(&word);
     }
     let params = core::str::from_utf8(&cmdline)
-        .unwrap_or_else(|e| panic!("\\toyos\\cmdline is not UTF-8: {e}"));
+        .unwrap_or_else(|e| panic!("slot {}'s cmdline is not UTF-8: {e}", chosen.which.letter()));
     println!("Boot parameter: {params:?}");
 
-    // Before the kernel is loaded and not after: this is the allocation the
-    // image pages come from, and a machine whose ROOT is refused has no use for
-    // the kernel's.
-    let root_image = rootimage::read(handle, &system_table, params);
+    let root_image = if toyos_abi::boot::actuators(params).any(|token| token == toyos_abi::boot::WITHHOLD_ROOT_PARAM) {
+        println!("ROOT: withheld on {}; the kernel is handed no image", toyos_abi::boot::WITHHOLD_ROOT_PARAM);
+        chosen.root.free(system_table.boot_services());
+        None
+    } else {
+        Some(chosen.root)
+    };
 
     println!("Loading kernel elf...");
     let loaded_kernel = load_kernel_elf(&kernel_bytes);

@@ -58,10 +58,10 @@ fn blob() -> Vec<u8> {
 }
 
 /// The files the build put on the ESP, which the guest must not have touched.
-/// `BOOTx64.EFI` is the one firmware reads and `kernel.elf` the one the
+/// `BOOTx64.EFI` is the one firmware reads and `log.guid` the one the
 /// bootloader does. Damaging either makes the stick unbootable, so
 /// "still byte-identical" is the assertion that matters most here.
-const UNTOUCHED: [&str; 2] = ["EFI/BOOT/BOOTx64.EFI", "toyos/kernel.elf"];
+const UNTOUCHED: [&str; 2] = ["EFI/BOOT/BOOTx64.EFI", "toyos/log.guid"];
 
 fn test_dir() -> PathBuf {
     super::lane::dir()
@@ -391,7 +391,7 @@ pub fn esp_filesystem(
     }
 
     // The assertion this test exists for. A guest test once wrote five bytes
-    // over `kernel.elf` through the VFS; `esp_files` tries exactly that, and
+    // over the kernel through the VFS; `esp_files` tries that on the loader, and
     // this is where the answer comes from — the image the device received,
     // not the guest's opinion of what it did.
     for (name, want) in UNTOUCHED.iter().zip(&before) {
@@ -3111,12 +3111,11 @@ fn root_twin(
     Ok(())
 }
 
-/// **A ROOT candidate the loader cannot read a superblock from is refused by
-/// name.** Disk contents crossed a trust boundary, so a partition wearing the
-/// ROOT type over bytes that are not a filesystem is named with what it holds
-/// and never handed to the kernel. The boot disk's own ROOT has both
-/// superblocks — block 0, which the loader reads, and the backup at the
-/// volume's last block — inverted, so it is the one candidate and it is bad.
+/// **A ROOT whose bytes are not the ones its slot's signed header names is
+/// refused by name, and never handed to the kernel.** Disk contents crossed a
+/// trust boundary: the boot disk's own ROOT has both superblocks — block 0 and
+/// the backup at the volume's last block — inverted, so the image's one slot
+/// is bad and the machine has nothing else to boot.
 pub fn root_candidate_malformed(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3134,26 +3133,19 @@ pub fn root_candidate_malformed(
     let log = boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path)?;
     let _ = std::fs::remove_file(&path);
 
-    let seen = log
-        .lines()
-        .find(|l| l.contains("ROOT: candidate ") && l.contains("no superblock this loader can read"))
-        .ok_or_else(|| format!("the malformed candidate was not named:\n{}", volume_lines(&log)))?
-        .trim()
-        .to_string();
     let verdict = root_refusal(&log)?;
-    if !verdict.contains("matches 0 of the 1") {
-        return Err(format!("the loader did not refuse a boot disk with no good ROOT: {verdict}"));
+    if !verdict.contains("its root is not the bytes its signed header names") {
+        return Err(format!("the loader did not refuse a ROOT its signature does not cover: {verdict}"));
     }
-    eprintln!("  [root] {seen}");
     eprintln!("  [root] {verdict}");
     Ok(())
 }
 
-/// **A boot disk that carries no filesystem the boot parameter names is a
-/// boot the loader refuses, saying which one and what it saw.** One hex digit
-/// of `root=` on the ESP is flipped, which is a byte-for-byte edit inside a
-/// file of the same length — so the FAT volume is untouched and only the name
-/// changes.
+/// **A boot parameter naming a ROOT its slot does not carry is a boot the
+/// loader refuses before the kernel reads it**: the parameter is one of the
+/// slot's signed sections. One hex digit of `root=` on the slot's volume is
+/// flipped, which is a byte-for-byte edit inside a file of the same length —
+/// so the FAT volume is untouched and only the name changes.
 pub fn root_named_but_absent(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3162,24 +3154,30 @@ pub fn root_named_but_absent(
     let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
     let path = test_dir().join("root-absent.img");
     std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    // `root=` alone appears five times on the ESP, because `kernel.elf` carries
-    // the token as a literal. The search is for the whole argument, whose
-    // sixteen bytes are read out of ROOT's own superblock.
+    // `root=` alone appears several times on the slot's volume, because
+    // `kernel.elf` carries the token as a literal. The search is for the whole
+    // argument, whose sixteen bytes are read out of ROOT's own superblock.
     let (root_at, _) = root_extent(&image)?;
     let named: String =
         image[root_at + 106..root_at + 122].iter().map(|b| format!("{b:02x}")).collect();
     let want = format!("root={named}");
-    let (esp_at, esp_len) = esp_extent(&image, &path)?;
-    let esp = &image[esp_at..esp_at + esp_len];
-    let hits: Vec<usize> = (0..esp.len().saturating_sub(want.len()))
-        .filter(|&i| &esp[i..i + want.len()] == want.as_bytes())
+    let (slot_at, slot_len) = {
+        let mut file = std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let table = toyos_build::image::slot_table_of(&mut file)?;
+        let slot = table.slot(table.marked).ok_or("the table marks no slot it carries")?;
+        toyos_build::image::partition_extent(&mut file, slot.boot)?
+    };
+    let (slot_at, slot_len) = (slot_at as usize, slot_len as usize);
+    let volume = &image[slot_at..slot_at + slot_len];
+    let hits: Vec<usize> = (0..volume.len().saturating_sub(want.len()))
+        .filter(|&i| &volume[i..i + want.len()] == want.as_bytes())
         .collect();
     let [at] = hits[..] else {
-        return Err(format!("the ESP carries {} {want:?} tokens, wanted one", hits.len()));
+        return Err(format!("the slot's volume carries {} {want:?} tokens, wanted one", hits.len()));
     };
     // The last digit, so the flip cannot collide with the first: two names that
     // differ in one place are still two names.
-    let digit = esp_at + at + want.len() - 1;
+    let digit = slot_at + at + want.len() - 1;
     let was = image[digit];
     image[digit] = if was == b'0' { b'1' } else { b'0' };
 
@@ -3188,25 +3186,18 @@ pub fn root_named_but_absent(
     let _ = std::fs::remove_file(&path);
 
     let verdict = root_refusal(&log)?;
-    if !verdict.contains("matches 0 of the 1") {
-        return Err(format!("the loader did not report a disk with no such ROOT: {verdict}"));
+    if !verdict.contains("its cmdline is not the bytes its signed header names") {
+        return Err(format!("the loader did not refuse a parameter its signature does not cover: {verdict}"));
     }
-    let seen = log
-        .lines()
-        .find(|l| l.contains("ROOT: candidate ") && l.contains(" at LBA "))
-        .ok_or_else(|| format!("the refusal named no candidate:\n{}", volume_lines(&log)))?
-        .trim()
-        .to_string();
     eprintln!("  [root] {verdict}");
-    eprintln!("  [root] {seen}");
     Ok(())
 }
 
 /// **A second disk answering to the same name is not the boot's business.** A
 /// second stick carries an untouched copy of the boot image, so the machine
-/// has two TOYOS-ROOT partitions whose superblocks carry one UUID. The loader
-/// looks on the disk it was loaded from and on no other: it names one
-/// candidate, and the kernel mounts that one from memory.
+/// has two slot tables and two ROOTs whose superblocks carry one UUID. The
+/// loader reads the slot table on the disk it was loaded from and on no other:
+/// it reads one ROOT, and the kernel mounts that one from memory.
 pub fn root_named_twice(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3233,12 +3224,12 @@ pub fn root_named_twice(
 
     let named: Vec<&str> = log
         .lines()
-        .filter(|l| l.contains("ROOT: candidate ") && l.contains(" at LBA "))
+        .filter(|l| l.contains(READ_AT))
         .map(str::trim)
         .collect();
     if named.len() != 1 {
         return Err(format!(
-            "the loader named {} candidates and the boot disk carries one:\n{}",
+            "the loader read {} ROOTs and the boot disk's slot names one:\n{}",
             named.len(),
             volume_lines(&log)
         ));
@@ -3287,7 +3278,7 @@ pub fn root_chunk_refused(
 
     let verdict = log
         .lines()
-        .find(|l| l.contains(ROOT_REFUSED) && l.contains("the read of "))
+        .find(|l| l.contains("Slot A: ROOT: the read of "))
         .map(str::trim)
         .ok_or_else(|| format!("the loader did not refuse the unreadable chunk:\n{}", volume_lines(&log)))?;
     let number = |after: &str| -> Result<u64, String> {
@@ -3316,13 +3307,13 @@ pub fn root_chunk_refused(
     Ok(())
 }
 
-/// **A ROOT candidate its own table refuses is a boot the loader refuses,
-/// naming why.** The partition after ROOT on the boot disk has its first LBA
-/// moved eight blocks inside ROOT's end, both copies of the table rewritten
-/// and their checksums recomputed, so the table is well-formed and ROOT
-/// overlaps its neighbour: `toyos_gpt::locate` refuses it, and a loader that
-/// read the candidate without asking would hand the kernel blocks another
-/// partition also claims.
+/// **A ROOT its own table refuses is a boot the loader refuses, naming why.**
+/// The partition before ROOT on the boot disk has its last LBA moved eight
+/// blocks inside ROOT's start, both copies of the table rewritten and their
+/// checksums recomputed, so the table is well-formed and ROOT overlaps its
+/// neighbour: `toyos_gpt::locate` refuses it before a byte of the slot is
+/// read, and a loader that read it without asking would hand the kernel
+/// blocks another partition also claims.
 pub fn root_candidate_overlaps(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3330,17 +3321,18 @@ pub fn root_candidate_overlaps(
 ) -> Result<(), String> {
     let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
     let (at, len) = root_extent(&image)?;
-    let root_last = ((at + len) / GPT_LBA - 1) as u64;
+    let root_first = (at / GPT_LBA) as u64;
+    let _ = len;
     let size = image.len();
     rewrite_gpt(&mut image, size, |entries, entry_bytes| {
-        let next = entries
+        let before = entries
             .chunks(entry_bytes)
             .enumerate()
-            .filter(|(_, entry)| entry[..16] != [0; 16] && entry_lba(entry, 32) > root_last)
-            .min_by_key(|(_, entry)| entry_lba(entry, 32))
+            .filter(|(_, entry)| entry[..16] != [0; 16] && entry_lba(entry, 40) < root_first)
+            .max_by_key(|(_, entry)| entry_lba(entry, 40))
             .map(|(index, _)| index)
-            .ok_or("no partition follows ROOT on the boot disk")?;
-        entries[next * entry_bytes + 32..][..8].copy_from_slice(&(root_last - 7).to_le_bytes());
+            .ok_or("no partition comes before ROOT on the boot disk")?;
+        entries[before * entry_bytes + 40..][..8].copy_from_slice(&(root_first + 7).to_le_bytes());
         Ok(())
     })?;
     let path = test_dir().join("root-overlaps.img");
@@ -3350,7 +3342,7 @@ pub fn root_candidate_overlaps(
 
     let verdict = log
         .lines()
-        .find(|l| l.contains(ROOT_REFUSED))
+        .find(|l| l.contains("Slot A: partition "))
         .map(str::trim)
         .ok_or_else(|| format!("the loader did not refuse an overlapping ROOT:\n{}", volume_lines(&log)))?;
     if !verdict.contains("PartitionOverlap") {
@@ -3360,11 +3352,12 @@ pub fn root_candidate_overlaps(
     Ok(())
 }
 
-/// **Two filesystems answering to one name on the boot disk is a boot the
-/// loader refuses rather than one it guesses at.** The boot disk grows by a
-/// second TOYOS-ROOT partition holding a byte-for-byte copy of ROOT under its
-/// own unique GUID, so both candidates carry the name `root=` gives and both
-/// are equally good.
+/// **A second filesystem answering to ROOT's name on the boot disk is not a
+/// candidate at all**: the slot table names ROOT by its partition's unique
+/// GUID, and the loader reads that partition and no other. The boot disk grows
+/// by a second TOYOS-ROOT partition holding a byte-for-byte copy of ROOT under
+/// its own unique GUID, so both carry the name `root=` gives, and the boot
+/// reads the one the table names.
 pub fn root_named_twice_on_the_boot_disk(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -3394,33 +3387,6 @@ pub fn root_named_twice_on_the_boot_disk(
     image[twin_at..twin_at + len].copy_from_slice(&root);
     let path = test_dir().join("root-twice-one-disk.img");
     std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let log = boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path)?;
-    let _ = std::fs::remove_file(&path);
-
-    let verdict = root_refusal(&log)?;
-    if !verdict.contains("matches 2 of the 2") {
-        return Err(format!("the loader did not refuse two filesystems under one name: {verdict}"));
-    }
-    eprintln!("  [root] {verdict}");
-    Ok(())
-}
-
-/// **A ROOT whose primary superblock is bad and whose backup is good boots,
-/// because the loader decides the superblock as the kernel's mount does.**
-/// Block 0 of the boot disk's ROOT is inverted and the backup at its last
-/// block is left alone.
-pub fn root_backup_superblock(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
-    let (at, _) = root_extent(&image)?;
-    for byte in &mut image[at..at + 4096] {
-        *byte = !*byte;
-    }
-    let path = test_dir().join("root-backup-superblock.img");
-    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
     let qemu = qemu::QemuInstance::boot_with_options(
         test_config,
         c_bins,
@@ -3431,69 +3397,12 @@ pub fn root_backup_superblock(
     drop(qemu);
     let _ = std::fs::remove_file(&path);
 
-    let seen = log
-        .lines()
-        .find(|l| l.contains("ROOT: candidate ") && l.contains(" at LBA "))
-        .map(str::trim)
-        .ok_or_else(|| format!("the loader named no candidate:\n{}", volume_lines(&log)))?;
-    if seen.contains("no superblock") {
-        return Err(format!("the loader did not read the backup superblock: {seen}"));
+    let read: Vec<&str> = log.lines().filter(|l| l.contains(READ_AT)).map(str::trim).collect();
+    let from_the_table = format!("from LBA {}+", at / GPT_LBA);
+    match read[..] {
+        [one] if one.contains(&from_the_table) => eprintln!("  [root] {one}"),
+        _ => return Err(format!("the loader read {read:?}, where one read {from_the_table} is owed")),
     }
-    let mounted = log
-        .lines()
-        .find(|l| l.contains("root: mounted read-only from memory at"))
-        .map(str::trim)
-        .ok_or_else(|| format!("ROOT did not mount from memory:\n{}", volume_lines(&log)))?;
-    eprintln!("  [root] {seen}");
-    eprintln!("  [root] {mounted}");
-    Ok(())
-}
-
-/// **A ROOT candidate whose superblock the disk will not read is a boot the
-/// loader refuses, naming the firmware's status.** Block 0 of the boot disk's
-/// ROOT is inverted, so the loader reads on to the backup at its last block,
-/// and the boot stick fails with EIO every read covering that block's last
-/// sector. Block 0 itself is left readable: firmware reads it when it connects
-/// the partition, and an unreadable one stalls it before the loader runs.
-pub fn root_superblock_unreadable(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
-    let (at, len) = root_extent(&image)?;
-    for byte in &mut image[at..at + 4096] {
-        *byte = !*byte;
-    }
-    let backup = len / 4096 - 1;
-    let path = test_dir().join("root-superblock-unreadable.img");
-    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let qemu = qemu::QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            boot_image: Some(qemu::Staged::Written(path.clone())),
-            stick_read_error: Some(((at + len) / GPT_LBA - 1) as u64),
-            ready_marker: ROOT_REFUSED,
-            ..Default::default()
-        },
-    );
-    let log = format!("{}{}", qemu.boot_log(), qemu.uart_log());
-    drop(qemu);
-    let _ = std::fs::remove_file(&path);
-
-    let verdict = log
-        .lines()
-        .find(|l| l.contains(ROOT_REFUSED))
-        .map(str::trim)
-        .ok_or_else(|| format!("the loader did not refuse an unreadable superblock:\n{}", volume_lines(&log)))?;
-    if !verdict.contains(&format!("the read of block {backup} of the TOYOS-ROOT candidate"))
-        || !verdict.contains("DEVICE_ERROR")
-    {
-        return Err(format!("the refusal does not name the superblock's read and the firmware's status: {verdict}"));
-    }
-    eprintln!("  [root] {verdict}");
     Ok(())
 }
 
@@ -3558,9 +3467,12 @@ fn rewrite_gpt(
     Ok(())
 }
 
-/// The loader's refusal line: the first word a boot whose ROOT is refused
-/// says, and so the marker the boot is waited on.
-const ROOT_REFUSED: &str = "ROOT: REFUSED, ";
+/// The loader's refusal of the image's one slot: the line a boot whose ROOT
+/// is refused says, and so the marker the boot is waited on.
+const ROOT_REFUSED: &str = "Slot A: REFUSED, ";
+
+/// The loader's line for the one ROOT it read into memory.
+const READ_AT: &str = "ROOT: read into memory at";
 
 /// Boot an image whose ROOT the loader is expected to refuse, and hand back the
 /// log, which ends at the refusal.
@@ -3588,7 +3500,7 @@ fn boot_expecting_root_refusal(
 /// The loader's refusal line, or what the boot said instead.
 fn root_refusal(log: &str) -> Result<String, String> {
     log.lines()
-        .find(|l| l.contains(ROOT_REFUSED) && l.contains("TOYOS-ROOT partition"))
+        .find(|l| l.contains(ROOT_REFUSED))
         .map(|l| l.trim().to_string())
         .ok_or_else(|| format!("the loader did not refuse this ROOT set:\n{}", volume_lines(log)))
 }

@@ -80,6 +80,14 @@ declare_flags!(pub CARGO_RUN = {
     pub REGEN_SOUNDFONT = "--regen-soundfont", Next;
     pub WORKTREE = "--worktree", Rest;
     pub CHECK_FORKS = "--check-forks", None;
+    /// Mint the owner's image-signing key where `signing::owner_key_path`
+    /// says, refusing to replace one.
+    pub SIGNING_KEY_NEW = "--signing-key-new", None;
+    /// Sign what this run builds with the owner's key, not a throwaway.
+    pub OWNER_KEY = "--owner-key", None;
+    /// Write the image `ssh <machine> update` takes to this path, signed with
+    /// the owner's key.
+    pub UPDATE_IMAGE = "--update-image", Next;
 });
 
 /// What became of a command line, checked before anything else in `main` runs.

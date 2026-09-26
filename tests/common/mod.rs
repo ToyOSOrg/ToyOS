@@ -63,6 +63,7 @@ pub mod storage;
 pub mod swap;
 #[allow(dead_code)]
 pub mod toybox;
+pub mod update;
 #[allow(dead_code)]
 pub mod usb;
 #[allow(dead_code)]

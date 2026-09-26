@@ -808,6 +808,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // guest's own `/log`; every clock is a liveness guard on a guest that
     // stopped talking, and probation is init's.
     ("swap_netd", Sched::Parallel, Tier::Fast),
+    // The machine updates itself: an image over `ssh … update` is written to
+    // the idle slot and is the kernel the next boot runs; every slot the loader
+    // must refuse is refused by name and the other boots; and a slot whose
+    // kernel dies falls back on its own, its death in the next boot's `/log`.
+    ("update_boots_the_new_kernel", Sched::Parallel, Tier::Fast),
+    ("update_refusals_boot_the_other_slot", Sched::Parallel, Tier::Fast),
+    ("update_falls_back_from_a_dying_kernel", Sched::Parallel, Tier::Fast),
     ("lan_swap", Sched::Parallel, Tier::Fast),
     ("swap_refusals", Sched::Parallel, Tier::Fast),
     ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
@@ -1434,19 +1441,16 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
-    // What the loader does with a ROOT set: a bad candidate, an absent name, an
-    // overlapping candidate, a twin on the boot disk, an unreadable superblock
-    // and an unreadable chunk refused by name, a bad primary superblock read
-    // past to its backup, and a twin on another disk never read. Serial, not by
-    // association: each stages a whole boot image, one a second 32 GiB stick
-    // beside it.
+    // What the loader does with a slot's ROOT: bytes its signature does not
+    // cover, a parameter naming another, an overlapping partition and an
+    // unreadable chunk refused by name, and a twin on the boot disk or on
+    // another disk never read. Serial, not by association: each stages a whole
+    // boot image, one a second 32 GiB stick beside it.
     ("root_candidate_malformed", Sched::Serial, Tier::Fast),
     ("root_named_but_absent", Sched::Serial, Tier::Fast),
     ("root_chunk_refused", Sched::Serial, Tier::Fast),
     ("root_candidate_overlaps", Sched::Serial, Tier::Fast),
     ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Fast),
-    ("root_backup_superblock", Sched::Serial, Tier::Fast),
-    ("root_superblock_unreadable", Sched::Serial, Tier::Fast),
     ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
@@ -1552,6 +1556,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// naming this table, and a row naming what the suite did not build panics
 /// before the boot.
 const CARRIES: &[(&str, &[&str])] = &[
+    // Each stages its own machine and carries no test binary: what is under
+    // test is the image itself.
+    ("update_boots_the_new_kernel", &[]),
+    ("update_refusals_boot_the_other_slot", &[]),
+    ("update_falls_back_from_a_dying_kernel", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
@@ -11283,10 +11292,6 @@ fn run_machine_test(
         "root_named_twice_on_the_boot_disk" => {
             common::volumes::root_named_twice_on_the_boot_disk(test_config, c_bins, rust_bins)
         }
-        "root_backup_superblock" => common::volumes::root_backup_superblock(test_config, c_bins, rust_bins),
-        "root_superblock_unreadable" => {
-            common::volumes::root_superblock_unreadable(test_config, c_bins, rust_bins)
-        }
         "root_named_twice" => {
             common::volumes::root_named_twice(test_config, c_bins, rust_bins)
         }
@@ -14741,6 +14746,13 @@ fn run_machine_test(
         "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
         "lan_mdns_answer" => common::origin::mdns(c_bins, rust_bins),
         "swap_netd" => common::swap::swap_netd(test_config, c_bins, rust_bins),
+        "update_boots_the_new_kernel" => common::update::update_boots_the_new_kernel(test_config, c_bins, rust_bins),
+        "update_refusals_boot_the_other_slot" => {
+            common::update::update_refusals_boot_the_other_slot(test_config, c_bins, rust_bins)
+        }
+        "update_falls_back_from_a_dying_kernel" => {
+            common::update::update_falls_back_from_a_dying_kernel(test_config, c_bins, rust_bins)
+        }
         "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),
         "swap_crash_rolls_back" => common::swap::swap_crash_rolls_back(test_config, c_bins, rust_bins),

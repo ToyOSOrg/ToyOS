@@ -380,6 +380,16 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         kernel_args.rtc_utc_offset_minutes, kernel_args.rtc_utc_offset_known,
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
+    // Before `mm::init`, which may hand the parameter's memory out. This record
+    // is how a slot that died or was refused reaches the next boot's `/log`.
+    match params::slot(cmdline) {
+        (Some(slot), None) => log!("{} {slot}, the one the slot table marks", params::SLOT_RECORD),
+        (Some(slot), Some(refused)) => match refused.split_once(':') {
+            Some((marked, why)) => log!("{} {slot}, because the marked slot {marked} was refused: {why}", params::SLOT_RECORD),
+            None => log!("{} {slot}, because the marked slot was refused: {refused}", params::SLOT_RECORD),
+        },
+        (None, _) => log!("{} none: the loader named no slot", params::SLOT_RECORD),
+    }
 
     let kernel_elf = core::slice::from_raw_parts(
         DirectMap::from_phys(kernel_args.kernel_elf_addr).as_ptr::<u8>(),

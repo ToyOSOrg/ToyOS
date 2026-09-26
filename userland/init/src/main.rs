@@ -1060,6 +1060,65 @@ fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
     Resolved::Package(system.app_row(name, path))
 }
 
+/// The slot table's partition and the idle slot's two, claimed: the grant a
+/// `slots` row is endowed (`toyos_update::slots`).
+///
+/// **Which slot is idle is the kernel's word, not the table's**: the running
+/// ROOT is the TOYOS-ROOT partition the kernel holds, the table is the one on
+/// that ROOT's disk, and the idle slot is the one whose ROOT is not it.
+fn slot_grant(syscap: &SysCap) -> Result<[(&'static str, toyos::Device); 3], String> {
+    use toyos_abi::inventory::{PartState, Partition, RawRecord, Record};
+    let asked = syscap.inventory(&mut []).map_err(|e| format!("the inventory would not count: {e:?}"))?;
+    let mut raw = vec![RawRecord::EMPTY; asked];
+    let n = syscap.inventory(&mut raw).map_err(|e| format!("the inventory would not read: {e:?}"))?;
+    let parts: Vec<Partition> = raw[..n]
+        .iter()
+        .filter_map(|r| match Record::decode(r) {
+            Ok(Record::Partition(p)) => Some(p),
+            _ => None,
+        })
+        .collect();
+    let one = |what: &str, found: Vec<&Partition>| match found[..] {
+        [p] => Ok(*p),
+        _ => Err(format!("the machine has {} {what}, and a grant needs one", found.len())),
+    };
+    let running = one(
+        "ROOT partitions the kernel holds",
+        parts
+            .iter()
+            .filter(|p| p.type_guid == toyos_gpt::Guid::TOYOS_ROOT.0 && p.state == PartState::Kernel)
+            .collect(),
+    )?;
+    let table_part = one(
+        "slot tables on the running ROOT's disk",
+        parts
+            .iter()
+            .filter(|p| p.device == running.device && p.type_guid == toyos_gpt::Guid::TOYOS_SLOTS.0)
+            .collect(),
+    )?;
+    let claim = |guid: [u8; 16], what: &str| {
+        syscap
+            .claim_partition::<toyos::Device>(toyos_abi::part::PartGuid(guid))
+            .map_err(|e| refused(&format!("the {what}"), e))
+    };
+    let table_claim = claim(table_part.unique_guid, "slot table")?;
+    let mut copies: [toyos_abi::part::Block; 2] = [[0; toyos_abi::part::BLOCK_BYTES]; 2];
+    toyos_abi::syscall::partition_read(table_claim.as_handle(), 0, &mut copies)
+        .map_err(|e| format!("the slot table would not read: {e:?}"))?;
+    let (table, _) = toyos_update::slots::current([&copies[0], &copies[1]])
+        .map_err(|why| format!("the slot table's partition holds {why}"))?;
+    let (idle, slot) =
+        toyos_update::slots::idle(&table, &running.unique_guid).map_err(|why| why.to_string())?;
+    let boot = claim(slot.boot, "idle slot's volume")?;
+    let root = claim(slot.root, "idle slot's ROOT")?;
+    say!("init: the idle slot is {}, granted with the slot table", idle.letter());
+    Ok([
+        (toyos_update::slots::TABLE_LABEL, table_claim),
+        (toyos_update::slots::BOOT_LABEL, boot),
+        (toyos_update::slots::ROOT_LABEL, root),
+    ])
+}
+
 /// What init says about a device it could not mint a claim for.
 ///
 /// One arm per refusal the kernel distinguishes (`kernel/src/device.rs`'s
@@ -1270,6 +1329,22 @@ fn start<'a>(
             // and one sentence for all six sends whoever reads the line looking
             // in the wrong place.
             Err(e) => say!("init: {}: {}", program.name, refused(name, e)),
+        }
+    }
+    // The idle slot, for the one program whose row asks for it: minted here,
+    // against the ROOT the kernel holds, so the slot this boot runs is never
+    // among what is endowed. A machine with none says so and the program
+    // starts holding nothing, which it refuses by name.
+    if program.slots {
+        match slot_grant(syscap) {
+            Ok(claims) => {
+                for (label, claim) in claims {
+                    let raw = claim.into_raw();
+                    command.endow(label, raw.0);
+                    held.0.push(raw);
+                }
+            }
+            Err(why) => say!("init: {}: no slot to grant: {why}", program.name),
         }
     }
     // Nothing was spawned, so everything minted goes back with `held`.

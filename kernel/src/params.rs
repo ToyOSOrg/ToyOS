@@ -38,6 +38,18 @@ pub fn claims(token: &str) -> bool {
     PARAMS.iter().any(|(name, _)| *name == token)
         || token.starts_with(toyos_blackbox::PARAM)
         || token.starts_with(toyos_tco::DEADLINE_PARAM)
+        || token.starts_with(toyos_abi::boot::SLOT_PARAM)
+        || token.starts_with(toyos_abi::boot::SLOT_REFUSED_PARAM)
+}
+
+/// The head of the record naming the slot this boot came from.
+pub const SLOT_RECORD: &str = "boot: slot";
+
+/// The slot the loader booted, and the marked slot it refused and why, as the
+/// loader wrote them.
+pub fn slot(cmdline: &str) -> (Option<&str>, Option<&str>) {
+    let word = |prefix: &str| toyos_abi::boot::actuators(cmdline).find_map(|t| t.strip_prefix(prefix));
+    (word(toyos_abi::boot::SLOT_PARAM), word(toyos_abi::boot::SLOT_REFUSED_PARAM))
 }
 
 pub fn watchdog() -> bool {

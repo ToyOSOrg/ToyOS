@@ -1,5 +1,6 @@
-//! The machine's SSH server: a shell, a command, files both ways, and a running
-//! service's binary swapped for another (`swap`).
+//! The machine's SSH server: a shell, a command, and files both ways. A
+//! program run over `exec` is an ordinary one — `update` and `swap` are two —
+//! and holds its own manifest row, not this daemon's.
 //!
 //! Two rules run through every path below. **Nothing this daemon starts
 //! outlives the connection that asked for it**: the thread feeding a program
@@ -10,7 +11,6 @@
 
 mod command;
 mod sftp;
-mod swap;
 
 use std::fs;
 use std::io::{Read, Write};
@@ -172,7 +172,6 @@ impl Server for SshServer {
             input: None,
             alive: watch::channel(()).0,
             is_pty: false,
-            answered: None,
         }
     }
 }
@@ -190,9 +189,6 @@ struct SshSession {
     /// session does — is what ends them and kills the program they serve.
     alive: watch::Sender<()>,
     is_pty: bool,
-    /// Told when the client closes a swap's channel, which it does once it has
-    /// read the answer and is ready for the swap to go.
-    answered: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// Which of a child's two output streams a chunk came off.
@@ -358,71 +354,6 @@ impl SshSession {
             out.exit_status(status).await.ok();
             out.eof().await.ok();
             out.close().await.ok();
-        });
-    }
-
-    /// Serve the `toyos-swap` subsystem on this channel: take one binary,
-    /// hand it to init, answer on the channel, and only then let init go —
-    /// [`swap`]'s own header is the order and why.
-    fn run_swap(&mut self) {
-        let Some(channel) = self.take_channel("subsystem request") else { return };
-        let (_, out) = channel.split();
-        let (input, mut input_rx) = mpsc::channel::<Vec<u8>>(16);
-        self.input = Some(input);
-        let (answered, taken_in) = tokio::sync::oneshot::channel();
-        self.answered = Some(answered);
-        let peer = self.peer.clone();
-
-        tokio::spawn(async move {
-            let mut buf: Vec<u8> = Vec::new();
-            let taken = loop {
-                match swap::take(&buf) {
-                    Ok(swap::Taken::More) => {}
-                    Ok(swap::Taken::Whole(header, body)) => break Ok((header, body)),
-                    Err(why) => break Err(why.to_string()),
-                }
-                match input_rx.recv().await {
-                    Some(chunk) => buf.extend_from_slice(&chunk),
-                    None => {
-                        break Err(format!(
-                            "the channel ended after {} bytes, before the request was whole",
-                            buf.len()
-                        ));
-                    }
-                }
-            };
-            drop(buf);
-            let (service, answer, init) = match taken {
-                Err(why) => (String::from("?"), Err(why), None),
-                Ok((header, body)) => {
-                    let service = header.service.clone();
-                    match tokio::task::spawn_blocking(move || swap::ask(&header, &body)).await {
-                        Ok((answer, init)) => (service, answer, init),
-                        Err(_) => (service, Err("the request task did not finish".into()), None),
-                    }
-                }
-            };
-            let (line, status) = match &answer {
-                Ok(path) => (format!("accepted {path}\n"), 0),
-                Err(why) => (format!("refused {why}\n"), 1),
-            };
-            println!("{}", toyos_swap::sshd_said(&peer, &service, line.trim_end()));
-            out.data(line.as_bytes()).await.ok();
-            out.exit_status(status).await.ok();
-            out.eof().await.ok();
-            // **The client's close is the go**, and this daemon does not close
-            // first: a client answers a peer's close with its own at once, so
-            // a close that followed this one would say only that the answer
-            // arrived, not that the client — whose own connections the service
-            // being swapped may carry — is ready for it to stop. Only then is
-            // init told to go, by this connection ending, and a client that
-            // never closes is waited for no longer than the bound.
-            if init.is_some() {
-                let bound = std::time::Duration::from_millis(toyos_swap::ANSWER_MS);
-                let _ = tokio::time::timeout(bound, taken_in).await;
-            }
-            out.close().await.ok();
-            drop(init);
         });
     }
 
@@ -645,9 +576,6 @@ impl russh::server::Handler for SshSession {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.input = None;
-        if let Some(answered) = self.answered.take() {
-            let _ = answered.send(());
-        }
         Ok(())
     }
 
@@ -713,16 +641,7 @@ impl russh::server::Handler for SshSession {
             self.run_sftp();
             return Ok(());
         }
-        if name == toyos_swap::SUBSYSTEM {
-            session.channel_success(channel_id)?;
-            self.run_swap();
-            return Ok(());
-        }
-        println!(
-            "sshd: {}: refused the {name:?} subsystem; this daemon serves sftp and {}",
-            self.peer,
-            toyos_swap::SUBSYSTEM
-        );
+        println!("sshd: {}: refused the {name:?} subsystem; this daemon serves sftp alone", self.peer);
         session.channel_failure(channel_id)?;
         Ok(())
     }

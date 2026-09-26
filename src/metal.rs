@@ -10,8 +10,10 @@
 //!
 //! Two admission checks stand before any write: the image is a whole number of
 //! [`LBA`]-byte sectors carrying `EFI PART` in its final one, and the disk
-//! answers with the identity this loop was given. A node that is not
-//! `/dev/sd<letter>` cannot be written down, so the machine's NVMe is unnameable.
+//! answers with the identity this loop was given. A node is a whole SCSI or
+//! NVMe disk, `/dev/sd<letter>` or `/dev/nvme<n>n<m>`, and nothing else: the
+//! T14 is a playground whose internal NVMe ToyOS may be installed on and a
+//! broken driver may wipe, so it is nameable like the stick.
 
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -211,7 +213,8 @@ impl fmt::Display for Refusal {
         match self {
             Self::Node(got) => write!(
                 f,
-                "{got:?} is not /dev/sd<letter>; this loop writes a USB disk and can name no other"
+                "{got:?} is not /dev/sd<letter> or /dev/nvme<n>n<m>; this loop writes a whole disk \
+                 and names no partition and no other device"
             ),
             Self::Word(got) => {
                 write!(f, "{got:?} cannot be written into a sudoers command line unambiguously")
@@ -346,37 +349,62 @@ impl fmt::Display for Refusal {
     }
 }
 
-/// A SCSI disk node, `/dev/sd` and one lower-case letter.
-///
-/// **An NVMe node cannot be written down.** The T14's Ubuntu install is on
-/// `nvme0n1`, and this type is what keeps that true whatever a caller passes.
+/// A whole disk's node: a SCSI disk, `/dev/sd` and one lower-case letter, or
+/// an NVMe namespace, `/dev/nvme<controller>n<namespace>` with one digit each.
+/// A partition is spelled from one and never passed as one, so no job can be
+/// aimed at a partition of a disk it was not given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Node(u8);
+enum Node {
+    Scsi(u8),
+    Nvme { controller: u8, namespace: u8 },
+}
 
 impl Node {
     fn parse(path: &str) -> Result<Self, Refusal> {
-        let letter = path.strip_prefix("/dev/sd").and_then(|rest| {
+        let scsi = path.strip_prefix("/dev/sd").and_then(|rest| {
             let [byte] = rest.as_bytes() else { return None };
-            byte.is_ascii_lowercase().then_some(*byte)
+            byte.is_ascii_lowercase().then_some(Node::Scsi(*byte))
         });
-        letter.map(Node).ok_or_else(|| Refusal::Node(path.to_string()))
+        let nvme = path.strip_prefix("/dev/nvme").and_then(|rest| {
+            let [controller, b'n', namespace] = rest.as_bytes() else { return None };
+            (controller.is_ascii_digit() && (b'1'..=b'9').contains(namespace))
+                .then_some(Node::Nvme { controller: *controller, namespace: *namespace })
+        });
+        scsi.or(nvme).ok_or_else(|| Refusal::Node(path.to_string()))
+    }
+
+    /// The disk's own name, as `/dev` and `/sys/class/block` spell it.
+    fn name(&self) -> String {
+        match *self {
+            Node::Scsi(letter) => format!("sd{}", letter as char),
+            Node::Nvme { controller, namespace } => format!("nvme{}n{}", controller as char, namespace as char),
+        }
+    }
+
+    /// A partition's name: `sda3`, and `nvme0n1p3` where the disk's own name
+    /// ends in a digit.
+    fn part_name(&self, index: u32) -> String {
+        match self {
+            Node::Scsi(_) => format!("{}{index}", self.name()),
+            Node::Nvme { .. } => format!("{}p{index}", self.name()),
+        }
     }
 
     fn whole(&self) -> String {
-        format!("/dev/sd{}", self.0 as char)
+        format!("/dev/{}", self.name())
     }
 
     fn partition(&self, index: u32) -> String {
-        format!("{}{index}", self.whole())
+        format!("/dev/{}", self.part_name(index))
     }
 
     /// Where `/sys` answers for the disk, and for one of its partitions.
     fn sysfs(&self) -> String {
-        format!("/sys/class/block/sd{}", self.0 as char)
+        format!("/sys/class/block/{}", self.name())
     }
 
     fn part_sysfs(&self, index: u32) -> String {
-        format!("{}/sd{}{index}", self.sysfs(), self.0 as char)
+        format!("{}/{}", self.sysfs(), self.part_name(index))
     }
 }
 
@@ -545,7 +573,7 @@ impl Target {
             user: "t14".to_string(),
             host: "t14".to_string(),
             key: PathBuf::from(home).join(".ssh/id_ed25519_toyos_runner"),
-            node: Node(b'a'),
+            node: Node::Scsi(b'a'),
             esp_part: 1,
             log_part: 3,
             mount: "/home/t14/toyos-log".to_string(),
@@ -574,9 +602,7 @@ impl Target {
             // The log partition read whole, as bytes rather than as files: what
             // `toyos-fat32-check` judges is the volume `logd` wrote, and a
             // `mount` has already had a driver's opinion about it. Read-only, and
-            // the partition is the only node named — `/dev/sd<letter>` plus an
-            // index is all `Node` can spell, so the internal NVMe is unnameable
-            // here as everywhere.
+            // the partition is the only node named, spelled from the disk's.
             Job::ReadLog => literal(&[DD, &read_log, "bs=4M"]),
             // `--create-only`, never `--create`: the latter "add[s] to
             // bootorder" (efibootmgr(8)) at the top, so the boot after the one
@@ -694,9 +720,11 @@ struct Flashable {
 ///
 /// **The metal profile flashes test images**, so an actuator is admissible here
 /// where `build::flashable_params` refuses it for the owner's own flash path.
-/// What is not admissible is an arm that would leave the machine changed: the
-/// internal NVMe is never written, and firmware state a reboot does not undo is
-/// a machine somebody has to open a lid to repair.
+/// What is not admissible is an arm that would leave the machine changed where
+/// a flash cannot put it back: firmware state a reboot does not undo is a
+/// machine somebody has to open a lid to repair. The internal NVMe is not such
+/// state — the T14 is a playground, and a disk a broken driver wipes is a disk
+/// the next install writes again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flash {
     /// The T14 survives it: the boot ends and the machine is what it was.
@@ -772,7 +800,7 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     (LOAD_ARM, Flash::Ok),
     // It withholds transfers to the boot stick so the transport breaks on
     // purpose. Admissible because it writes nothing the stick did not already
-    // hold, reaches neither the internal NVMe nor firmware state, and the worst
+    // hold, reaches no firmware state, and the worst
     // it leaves is a stick a replug clears — the defect the arm exists to stage.
     ("usb-transport-break", Flash::Ok),
     (
@@ -2811,14 +2839,26 @@ mod tests {
     }
 
     #[test]
-    fn an_nvme_node_cannot_be_written_down() {
-        for name in ["/dev/nvme0n1", "/dev/nvme0n1p3", "/dev/sda1", "/dev/sdaa", "/dev/SDA", "sda"]
-        {
+    fn a_node_is_a_whole_scsi_or_nvme_disk_and_nothing_else() {
+        for name in [
+            "/dev/nvme0n1p3",
+            "/dev/nvme0n0",
+            "/dev/nvme10n1",
+            "/dev/nvme0",
+            "/dev/sda1",
+            "/dev/sdaa",
+            "/dev/SDA",
+            "sda",
+        ] {
             assert_eq!(Node::parse(name), Err(Refusal::Node(name.to_string())), "{name}");
         }
         assert_eq!(Node::parse("/dev/sda").unwrap().whole(), "/dev/sda");
         assert_eq!(Node::parse("/dev/sdb").unwrap().partition(3), "/dev/sdb3");
         assert_eq!(Node::parse("/dev/sda").unwrap().part_sysfs(1), "/sys/class/block/sda/sda1");
+        let nvme = Node::parse("/dev/nvme0n1").unwrap();
+        assert_eq!(nvme.whole(), "/dev/nvme0n1");
+        assert_eq!(nvme.partition(3), "/dev/nvme0n1p3");
+        assert_eq!(nvme.part_sysfs(1), "/sys/class/block/nvme0n1/nvme0n1p1");
     }
 
     #[test]
@@ -2884,8 +2924,7 @@ mod tests {
         assert!(rule.contains("/usr/sbin/wipefs --all /dev/sdb"), "{rule}");
         assert_eq!(moved.argv(Job::Wipe, None).unwrap(), ["/usr/sbin/wipefs", "--all", "/dev/sdb"]);
         // The outside judge's read moves with the same field the mount does,
-        // and it is a *partition* — the one thing on this machine that can
-        // never be spelled `/dev/nvme0n1`.
+        // and it is a *partition*, spelled from the disk's own name.
         assert!(rule.contains("/usr/bin/dd if\\=/dev/sdb2 bs\\=4M"), "{rule}");
         assert_eq!(
             moved.argv(Job::ReadLog, None).unwrap(),
@@ -3100,7 +3139,7 @@ mod tests {
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
         assert!(Refusal::Silent { what: "come back", secs: return_secs() }.about_the_boot());
-        assert!(!Refusal::Node("/dev/nvme0n1".to_string()).about_the_boot());
+        assert!(!Refusal::Node("/dev/nvme0n1p1".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
         assert!(!Refusal::NoHome.about_the_boot());
@@ -3166,7 +3205,9 @@ mod tests {
         assert_eq!(args.target.host, "box");
 
         let nvme = ["--device".to_string(), "/dev/nvme0n1".to_string()];
-        assert_eq!(Args::parse(&nvme), Err(Refusal::Node("/dev/nvme0n1".to_string())));
+        assert_eq!(Args::parse(&nvme).unwrap().target.node.whole(), "/dev/nvme0n1");
+        let part = ["--device".to_string(), "/dev/nvme0n1p2".to_string()];
+        assert_eq!(Args::parse(&part), Err(Refusal::Node("/dev/nvme0n1p2".to_string())));
         assert!(matches!(Args::parse(&["--image".to_string()]), Err(Refusal::Usage(_))));
         assert!(matches!(Args::parse(&["--flash".to_string()]), Err(Refusal::Usage(_))));
         assert!(matches!(

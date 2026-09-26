@@ -3,11 +3,16 @@
 //!
 //! It extends the loader's attempt count (`bootloader/src/attempt.rs`, a file
 //! on the log partition) rather than standing beside it: the count is the
-//! bound on a hang, and **a hang, a panic and a boot that never reached its
-//! kernel's panic path are one fact about a slot** — its image had the
-//! machine and gave nothing back. The pass that learns it records the image's
-//! signed-header digest as dead in its slot, and every later pass boots the
-//! other slot instead, until an update puts a different image there.
+//! bound on a hang, and **a panic, a fault, a wedge, a boot that never reached
+//! its kernel's panic path, and a hang of an image no boot has proven are one
+//! fact about a slot** — its image had the machine and gave nothing back. The
+//! pass that learns it records the image's signed-header digest as dead in its
+//! slot, and every later pass prefers the other slot, until an update puts a
+//! different image there.
+//!
+//! **A hang of a proven image is not a death**: the count cannot tell a hang
+//! from a power cut, and a power cut is no reason to leave an image the
+//! machine has run well for an older one.
 //!
 //! ```text
 //! partition guid [16] | count u8 | booted u8 ('A', 'B' or 0) | 0 [6]
@@ -48,9 +53,11 @@ pub struct Record {
 pub enum Ended {
     /// It handed the machine back on purpose.
     Proven,
-    /// It panicked, faulted, wedged, never reached its own panic path, or hung
-    /// until a hand cut the power.
+    /// It panicked, faulted, wedged, or never reached its own panic path.
     Died,
+    /// It had the machine and the black box says nothing, twice: a hang, or a
+    /// power cut, which the loader cannot tell apart.
+    Hung,
     /// Nothing says: a first boot, a power cut on a machine with no black
     /// box, or a boot this record did not see.
     Unknown,
@@ -66,17 +73,23 @@ pub struct Accounted {
     pub died: Option<Which>,
 }
 
-/// Fold how the last boot ended into the record.
-pub fn account(record: Record, ended: Ended) -> Accounted {
+/// Fold how the last boot ended into the record, given the anti-rollback
+/// `floor` a boot has proven: an image at or below it has run well before.
+pub fn account(record: Record, ended: Ended, floor: u64) -> Accounted {
     let mut out = Accounted { record, proven: None, died: None };
     let Some(booted) = record.booted else { return out };
-    match ended {
-        Ended::Proven => out.proven = Some(booted.version),
-        Ended::Died => {
-            out.record.dead[booted.slot.index()] = Some(booted.digest);
-            out.died = Some(booted.slot);
+    let dies = match ended {
+        Ended::Proven => {
+            out.proven = Some(booted.version);
+            false
         }
-        Ended::Unknown => {}
+        Ended::Died => true,
+        Ended::Hung => booted.version > floor,
+        Ended::Unknown => false,
+    };
+    if dies {
+        out.record.dead[booted.slot.index()] = Some(booted.digest);
+        out.died = Some(booted.slot);
     }
     out
 }
@@ -174,17 +187,27 @@ mod tests {
     #[test]
     fn how_a_boot_ended_is_what_it_is_recorded_as() {
         let last = booted(Which::A);
-        let died = account(last, Ended::Died);
+        let died = account(last, Ended::Died, 42);
         assert_eq!(died.died, Some(Which::A));
         assert!(super::died(&died.record, Which::A, &[9; 32]));
         assert!(!super::died(&died.record, Which::A, &[8; 32]), "another image in the same slot");
         assert!(super::died(&died.record, Which::B, &[3; 32]), "the other slot's record stands");
         assert_eq!(died.proven, None);
 
-        let proven = account(last, Ended::Proven);
+        let proven = account(last, Ended::Proven, 0);
         assert_eq!((proven.proven, proven.died, proven.record), (Some(42), None, last));
-        let unknown = account(last, Ended::Unknown);
+        let unknown = account(last, Ended::Unknown, 0);
         assert_eq!((unknown.proven, unknown.died, unknown.record), (None, None, last));
-        assert_eq!(account(Record::default(), Ended::Died).died, None, "nothing was booted");
+        assert_eq!(account(Record::default(), Ended::Died, 0).died, None, "nothing was booted");
+    }
+
+    /// A hang is a death only for an image no boot has proven: at or below the
+    /// floor it is a power cut as far as anything here can tell.
+    #[test]
+    fn a_hang_kills_only_an_unproven_image() {
+        let last = booted(Which::B);
+        assert_eq!(account(last, Ended::Hung, 41).died, Some(Which::B), "version 42 over a floor of 41");
+        assert_eq!(account(last, Ended::Hung, 42).died, None, "version 42 at a floor of 42");
+        assert_eq!(account(last, Ended::Died, 100).died, Some(Which::B), "a panic is a death whatever the floor");
     }
 }

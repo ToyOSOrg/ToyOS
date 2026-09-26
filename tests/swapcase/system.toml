@@ -20,10 +20,13 @@ receives = ["netd"]
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
-# `swap` is the authority to replace a service's binary, and no other program
-# may hold it.
 [programs.sshd]
-receives = ["netd", "launcher", "swap"]
+receives = ["netd", "launcher"]
+
+# `swap` is the authority to replace a service's binary, and no other program
+# may hold it: the host runs it over ssh.
+[programs.swap]
+receives = ["swap"]
 
 [programs.test-runner]
 syscap = ["logread"]

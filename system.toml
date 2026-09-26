@@ -72,10 +72,23 @@ syscap = ["rt"]
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
-# `swap` is the authority to replace a running service's binary; the build
-# refuses it to any other program (`src/build.rs`).
+# `launcher` is how a login's program is started holding its own row: `update`
+# and `swap` below are two such programs.
 [programs.sshd]
-receives = ["netd", "launcher", "swap"]
+receives = ["netd", "launcher"]
+
+# `swap` is the authority to replace a running service's binary; the build
+# refuses it to any other program (`src/build.rs`). `ssh <machine> swap netd <
+# netd` runs it for a login.
+[programs.swap]
+receives = ["swap"]
+
+# The idle slot: the slot table and the idle slot's two partitions, which init
+# claims against the ROOT the kernel holds. The build refuses it to any other
+# program; the owner's signature on the image is the authority to install it.
+# `ssh <machine> update < image` runs it for a login.
+[programs.update]
+slots = true
 
 # A name's addresses, asked of netd's resolver: `netd` is the whole of what it
 # holds.

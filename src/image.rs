@@ -115,31 +115,117 @@ fn superblock_of(bytes: &[u8]) -> Superblock {
     Superblock::parse(&BlockBuf(block)).expect("the ROOT image this build wrote carries a superblock")
 }
 
+/// What an image is signed with: the key, and the monotonic version the
+/// signed header names.
+#[derive(Clone, Copy)]
+pub struct Signing<'a> {
+    pub key: &'a crate::signing::Key,
+    pub version: u64,
+}
+
+/// The version a build that names none signs its image with: its Unix time in
+/// seconds, which the owner's one Mac only moves forward.
+pub fn version_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("this host's clock is past 1970")
+        .as_secs()
+}
+
+/// An image's second slot: empty, with room for an update's ROOT of up to
+/// `root_bytes`. An image without one is a machine that cannot update itself,
+/// which is every QEMU guest but the ones whose subject is the update.
+#[derive(Clone, Copy, Debug)]
+pub struct SecondSlot {
+    pub root_bytes: u64,
+}
+
+/// The sections of one image, as a slot carries them and an update sends them.
+struct Sections {
+    kernel: Vec<u8>,
+    cmdline: Vec<u8>,
+    signed: [u8; toyos_update::image::SIGNED_BYTES],
+}
+
+fn sections(kernel: &[u8], root: &[u8], params: &str, signing: Signing<'_>) -> Sections {
+    let cmdline = cmdline_with_root(root_uuid_of(root), params).into_bytes();
+    let header = toyos_update::image::Header::of(signing.version, kernel, &cmdline, root);
+    Sections { kernel: kernel.to_vec(), signed: signing.key.sign(&header), cmdline }
+}
+
+/// The image `ssh <machine> update` takes on its standard input: the signed
+/// header, then the kernel, the boot parameter and ROOT, in the order the
+/// header names them (`toyos_update::image`).
+pub fn update_image(kernel: &[u8], root: &[u8], params: &str, signing: Signing<'_>) -> Vec<u8> {
+    let s = sections(kernel, root, params, signing);
+    let mut out = s.signed.to_vec();
+    out.extend_from_slice(&s.kernel);
+    out.extend_from_slice(&s.cmdline);
+    out.extend_from_slice(root);
+    out
+}
+
 /// Takes the artifacts as bytes rather than reading them: the caller stages them
 /// under a build-key-derived name first, because cargo's own path is shared by
 /// every config and is overwritten by any concurrent build (see `build.rs`).
+///
+/// The disk: the ESP (the loader and the log partition's name), the slot
+/// table, the log partition — third, where the metal loop finds it — and then
+/// slot A's FAT and ROOT, marked, and slot B's where `second` asks for one.
 pub fn create_boot_image(
     kernel_bytes: &[u8],
     bl_bytes: &[u8],
     root_bytes: &[u8],
     params: &str,
+    signing: Signing<'_>,
+    second: Option<SecondSlot>,
 ) -> Vec<u8> {
     // Drawn here and written twice: into the GPT entry that *is* the log
     // partition, and into a file on the ESP that the bootloader hands the
     // kernel. The kernel is given the partition by name; nothing anywhere goes
-    // looking for one by type or by format.
-    let log_guid = uuid::Uuid::new_v4();
-    let esp_guid = uuid::Uuid::new_v4();
-    // ROOT is the one exception: its *type* selects candidates and its
-    // superblock's UUID picks one, because a release puts several ROOTs on one
-    // disk and the bootloader chooses by writing this argument.
-    let cmdline = cmdline_with_root(root_uuid_of(root_bytes), params);
-    let esp_volume = create_esp_volume(kernel_bytes, bl_bytes, log_guid, &cmdline);
-    let log_volume = create_log_volume();
-    create_gpt_disk(esp_volume, root_bytes, log_volume, esp_guid, log_guid)
+    // looking for one by type or by format. Every slot partition is named the
+    // same way, by the slot table.
+    let guid = uuid::Uuid::new_v4;
+    let (log_guid, esp_guid, table_guid) = (guid(), guid(), guid());
+    let a = (guid(), guid());
+    let b = second.map(|room| (guid(), guid(), room));
+    let raw = |g: uuid::Uuid| g.to_bytes_le();
+
+    let s = sections(kernel_bytes, root_bytes, params, signing);
+    // Room for a kernel twice this one's size beside it, so an update can
+    // write a new kernel into a slot's volume before the old one is gone.
+    let slot_bytes = round_up_sectors(((kernel_bytes.len() * 2 + ESP_FREE_BYTES) * 64 / 63).max(FAT32_MIN_BYTES));
+    let a_boot = create_slot_volume(Some(&s), slot_bytes);
+    let slot = |(boot, root): (uuid::Uuid, uuid::Uuid), version| toyos_update::slots::Slot { boot: raw(boot), root: raw(root), version };
+    let table = toyos_update::slots::Table {
+        sequence: 1,
+        marked: toyos_update::slots::Which::A,
+        slots: [Some(slot(a, signing.version)), b.map(|(boot, root, _)| slot((boot, root), 0))],
+    };
+    let mut table_volume = vec![0u8; PARTITION_ALIGN];
+    table_volume[..toyos_update::slots::BLOCK].copy_from_slice(&table.encode());
+
+    let mut parts = vec![
+        Part::full("ESP", "EFI System", gpt::partition_types::EFI, esp_guid, create_esp_volume(bl_bytes, log_guid), Some(Volume::Fat32)),
+        Part::full("slot table", "ToyOS slots", TOYOS_SLOTS, table_guid, table_volume, None),
+        // Microsoft Basic Data, and that type is the whole reason this is a
+        // partition of its own: macOS never auto-mounts an EFI-typed partition
+        // and this host refuses even a manual non-root mount of one, so a log on
+        // the ESP is unreachable without the admin account. This type mounts in
+        // Finder, in Windows and in Linux on plug-in, with nothing configured.
+        Part::full("log partition", "ToyOS log", gpt::partition_types::BASIC, log_guid, create_log_volume(), Some(Volume::Fat32)),
+        Part::full("slot A's volume", "ToyOS slot A", TOYOS_BOOT, a.0, a_boot, Some(Volume::Fat32)),
+        Part::full("slot A's ROOT", "ToyOS root A", TOYOS_ROOT, a.1, root_bytes.to_vec(), Some(Volume::Root)),
+    ];
+    if let Some((boot, root, room)) = b {
+        parts.push(Part::full("slot B's volume", "ToyOS slot B", TOYOS_BOOT, boot, create_slot_volume(None, slot_bytes), Some(Volume::Fat32)));
+        let len = align_up(room.root_bytes as usize, PARTITION_ALIGN) as u64;
+        parts.push(Part { what: "slot B's ROOT", name: "ToyOS root B", kind: TOYOS_ROOT, guid: root, bytes: Vec::new(), len, judge: None });
+    }
+    create_gpt_disk(&parts)
 }
 
-/// The boot parameter as [`CMDLINE`] carries it: ROOT's name, then `params`.
+/// The boot parameter as a slot carries it: ROOT's name, then `params`.
 fn cmdline_with_root(root: FsUuid, params: &str) -> String {
     if params.is_empty() {
         format!("root={root}")
@@ -148,21 +234,15 @@ fn cmdline_with_root(root: FsUuid, params: &str) -> String {
     }
 }
 
-/// The file on the ESP that says which actuators an image is armed with.
-///
-/// Written by [`create_esp_volume`] and read back by [`params_of`], from this
-/// one name: the writer and its inverse cannot drift apart while they share it.
-/// The bootloader spells it `\toyos\cmdline`.
-const CMDLINE: &str = "toyos/cmdline";
-
 /// Why a boot may not arm `asked` on the image at `path`, or `None` because
 /// that image is armed with exactly that list.
 ///
-/// **An image carries the actuators it was built with**, in [`CMDLINE`] on its
-/// own ESP — the file the bootloader reads and hands the kernel in
-/// `KernelArgs`. So what a guest will be armed with is a fact about the image,
-/// answerable before anything starts and without asking the guest; a caller
-/// that has an image and a list can be told it is holding two different boots.
+/// **An image carries the actuators it was built with**, in the boot parameter
+/// on its marked slot's volume — the file the bootloader reads, holds to the
+/// slot's signature and hands the kernel in `KernelArgs`. So what a guest will
+/// be armed with is a fact about the image, answerable before anything starts
+/// and without asking the guest; a caller that has an image and a list can be
+/// told it is holding two different boots.
 ///
 /// Pure, and every input a parameter, so both directions can be staged without
 /// a guest — which is what `an_image_says_what_it_is_armed_with` does.
@@ -190,57 +270,136 @@ pub fn params_of(path: &Path) -> Result<Vec<String>, String> {
     Ok(toyos_abi::boot::actuators(&text).map(str::to_string).collect())
 }
 
-/// The whole boot parameter an image carries, read back off the image.
-///
-/// The ESP is located through the partition table rather than at the offset
-/// [`create_gpt_disk`] happens to place it at: the writer asks `add_partition`
-/// where the partition went, and so does this.
+/// The whole boot parameter the image's marked slot carries, read back off
+/// the image: the slot table through the partition table, then the slot's
+/// volume, rather than at the offsets [`create_gpt_disk`] happens to place
+/// them at.
 fn cmdline_of(path: &Path) -> Result<String, String> {
-    let (start, len) = {
-        let disk = gpt::GptConfig::new()
-            .writable(false)
-            .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
-            .open(path)
-            .map_err(|e| format!("{} has no readable GPT: {e}", path.display()))?;
-        let esps: Vec<_> = disk
-            .partitions()
-            .values()
-            .filter(|p| p.part_type_guid == gpt::partition_types::EFI)
-            .collect();
-        let [esp] = esps.as_slice() else {
-            return Err(format!(
-                "{} has {} ESPs, and a boot image has one",
-                path.display(),
-                esps.len()
-            ));
-        };
-        (esp.first_lba * 512, (esp.last_lba - esp.first_lba + 1) * 512)
-    };
+    let mut file = std::fs::File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let table = slot_table_of(&mut file).map_err(|why| format!("{}: {why}", path.display()))?;
+    let slot = table.slot(table.marked).expect("a table marks a slot it carries");
+    let bytes = read_file_on(&mut file, slot.boot, toyos_update::slots::CMDLINE_FILE)
+        .map_err(|why| format!("{}: {why}", path.display()))?;
+    String::from_utf8(bytes).map_err(|e| format!("the boot parameter on {} is not text: {e}", path.display()))
+}
 
-    // The ESP alone, and never the whole image: a test image is a quarter of a
-    // gigabyte and this runs once per boot that stages one.
-    let len = usize::try_from(len).map_err(|_| format!("{} has a {len}-byte ESP", path.display()))?;
+/// The slot table on the disk image `file`, as the loader reads it.
+pub fn slot_table_of(file: &mut std::fs::File) -> Result<toyos_update::slots::Table, String> {
+    table_on(file).map(|(table, _, _)| table)
+}
+
+/// Where the partition `guid` names is on the disk image `file`, in bytes.
+pub fn partition_extent(file: &mut std::fs::File, guid: [u8; 16]) -> Result<(u64, u64), String> {
+    let located = toyos_gpt::locate(&mut FileSectors(file), toyos_gpt::Guid(guid))
+        .map_err(|e| format!("partition {}: {e:?}", toyos_gpt::Guid(guid)))?;
+    Ok((located.partition.first_lba * u64::from(LBA), located.partition.lba_count() * u64::from(LBA)))
+}
+
+/// The file `name` on the FAT partition `guid` names, read with the driver the
+/// kernel mounts such a volume with rather than the crate that formatted it —
+/// [`populate`]'s argument, in the other direction. The volume alone, and never
+/// the whole image: a test image is a quarter of a gigabyte.
+pub fn read_file_on(file: &mut std::fs::File, guid: [u8; 16], name: &str) -> Result<Vec<u8>, String> {
+    let (start, len) = partition_extent(file, guid)?;
+    let len = usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?;
     let mut volume = vec![0u8; len];
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| format!("opening {}: {e}", path.display()))?;
     file.seek(SeekFrom::Start(start))
-        .map_err(|e| format!("seeking to the ESP of {}: {e}", path.display()))?;
-    file.read_exact(&mut volume)
-        .map_err(|e| format!("reading the ESP of {}: {e}", path.display()))?;
+        .and_then(|_| file.read_exact(&mut volume))
+        .map_err(|e| format!("reading the volume at byte {start}: {e}"))?;
+    let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("the volume does not mount: {e}"))?;
+    let mut found = fs.open(name).map_err(|e| format!("the volume has no {name}: {e}"))?;
+    let mut bytes = vec![0u8; usize::try_from(found.len()).unwrap_or(usize::MAX)];
+    fs.read(&mut found, 0, &mut bytes).map_err(|e| format!("reading {name}: {e}"))?;
+    Ok(bytes)
+}
 
-    // Read with the driver the kernel mounts this very volume with, rather than
-    // with the crate that formatted it — [`populate`]'s argument, in the other
-    // direction.
-    let mut fs = Fat32::mount(VolumeIo(&mut volume))
-        .map_err(|e| format!("the ESP of {} does not mount: {e}", path.display()))?;
-    let mut file = fs
-        .open(CMDLINE)
-        .map_err(|e| format!("{} has no {CMDLINE} on its ESP: {e}", path.display()))?;
-    let mut text = vec![0u8; usize::try_from(file.len()).unwrap_or(usize::MAX)];
-    fs.read(&mut file, 0, &mut text)
-        .map_err(|e| format!("reading {CMDLINE} from {}: {e}", path.display()))?;
-    String::from_utf8(text)
-        .map_err(|e| format!("{CMDLINE} on {} is not text: {e}", path.display()))
+/// Put `update`'s sections into slot `which` of the disk image at `path` and
+/// mark it — what `/system/bin/update` does on a machine, **with nothing
+/// checked**: a test's way to put a slot in front of the loader that the
+/// updater would refuse to write. `signed: false` leaves the slot without its
+/// signed header.
+pub fn stage_slot(path: &Path, which: toyos_update::slots::Which, update: &[u8], signed: bool) -> Result<(), String> {
+    use std::io::Write;
+    let parts = toyos_update::image::Parts::split(update).map_err(|why| format!("the update image: {why}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let (table, copy, table_at) = table_on(&mut file)?;
+    let slot = table.slot(which).ok_or_else(|| format!("{} carries no slot {}", path.display(), which.letter()))?;
+
+    let (root_at, root_len) = partition_extent(&mut file, slot.root)?;
+    if parts.root.len() as u64 > root_len {
+        return Err(format!("ROOT is {} bytes and slot {}'s partition {root_len}", parts.root.len(), which.letter()));
+    }
+    file.seek(SeekFrom::Start(root_at))
+        .and_then(|_| file.write_all(parts.root))
+        .map_err(|e| format!("writing slot {}'s ROOT: {e}", which.letter()))?;
+
+    let (boot_at, boot_len) = partition_extent(&mut file, slot.boot)?;
+    let mut volume = vec![0u8; boot_len as usize];
+    file.seek(SeekFrom::Start(boot_at))
+        .and_then(|_| file.read_exact(&mut volume))
+        .map_err(|e| format!("reading slot {}'s volume: {e}", which.letter()))?;
+    {
+        let time = build_time();
+        let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("slot {}'s volume: {e}", which.letter()))?;
+        fs.create_dir_all("toyos", time).map_err(|e| format!("toyos/: {e}"))?;
+        let mut files: Vec<(&str, &[u8])> = vec![
+            (toyos_update::slots::KERNEL_FILE, parts.kernel),
+            (toyos_update::slots::CMDLINE_FILE, parts.cmdline),
+        ];
+        if signed {
+            files.push((toyos_update::slots::SIGNED_FILE, &parts.signed[..]));
+        }
+        for name in [toyos_update::slots::KERNEL_FILE, toyos_update::slots::CMDLINE_FILE, toyos_update::slots::SIGNED_FILE] {
+            if fs.exists(name).map_err(|e| format!("{name}: {e}"))? {
+                fs.remove(name).map_err(|e| format!("removing {name}: {e}"))?;
+            }
+        }
+        for (name, bytes) in files {
+            let mut f = fs.create(name, time).map_err(|e| format!("creating {name}: {e}"))?;
+            fs.write(&mut f, 0, bytes).map_err(|e| format!("writing {name}: {e}"))?;
+            fs.flush_meta(&mut f, time).map_err(|e| format!("recording {name}: {e}"))?;
+        }
+        fs.sync().map_err(|e| format!("syncing slot {}'s volume: {e}", which.letter()))?;
+    }
+    file.seek(SeekFrom::Start(boot_at))
+        .and_then(|_| file.write_all(&volume))
+        .map_err(|e| format!("writing slot {}'s volume: {e}", which.letter()))?;
+
+    let mut next = table;
+    next.marked = which;
+    let mut marked = slot;
+    marked.version = parts.header.version;
+    next.slots[which.index()] = Some(marked);
+    let (to, block) = toyos_update::slots::next_write((table, copy), next);
+    file.seek(SeekFrom::Start(table_at + (to * toyos_update::slots::BLOCK) as u64))
+        .and_then(|_| file.write_all(&block))
+        .and_then(|_| file.sync_all())
+        .map_err(|e| format!("writing the slot table: {e}"))
+}
+
+/// The slot table on the disk image `file`, which copy is current, and where
+/// its partition starts.
+fn table_on(file: &mut std::fs::File) -> Result<(toyos_update::slots::Table, usize, u64), String> {
+    let mut out = [BLANK_PARTITION; 2];
+    let scan = toyos_gpt::locate_type(&mut FileSectors(file), toyos_gpt::Guid::TOYOS_SLOTS, &mut out)
+        .map_err(|e| format!("no readable partition table: {e:?}"))?;
+    if scan.matched != 1 {
+        return Err(format!("{} slot tables, and a boot image has one", scan.matched));
+    }
+    let mut copies = [[0u8; toyos_update::slots::BLOCK]; 2];
+    let at = out[0].first_lba * u64::from(LBA);
+    for (i, copy) in copies.iter_mut().enumerate() {
+        file.seek(SeekFrom::Start(at + (i * toyos_update::slots::BLOCK) as u64))
+            .and_then(|_| file.read_exact(copy))
+            .map_err(|e| format!("reading the slot table's copy {i}: {e}"))?;
+    }
+    let (table, copy) = toyos_update::slots::current([&copies[0], &copies[1]])
+        .map_err(|why| format!("the slot table's partition holds {why}"))?;
+    Ok((table, copy, at))
 }
 
 /// A raw block device rejects a write that is not a whole number of sectors, so
@@ -410,45 +569,50 @@ fn populate(volume: &mut [u8], label: &str, files: &[(&str, &[u8])]) {
     fs.sync().unwrap_or_else(|e| panic!("syncing the {label} volume: {e}"));
 }
 
-/// The partition firmware boots from: the bootloader, the kernel, the kernel's
-/// arguments, and the name of the partition the kernel's log goes on.
-fn create_esp_volume(
-    kernel: &[u8],
-    bootloader: &[u8],
-    log_guid: uuid::Uuid,
-    cmdline: &str,
-) -> Vec<u8> {
-    let content_size = kernel.len() + bootloader.len();
-    let total_size = round_up_sectors(
-        ((content_size + ESP_FREE_BYTES) * 64 / 63).max(FAT32_MIN_BYTES),
-    );
-
+/// The partition firmware boots from: the bootloader, and the name of the
+/// partition the kernel's log goes on. The kernel and its parameter are a
+/// slot's (`create_slot_volume`), because the loader is the one part of the
+/// machine that is not slotted.
+fn create_esp_volume(bootloader: &[u8], log_guid: uuid::Uuid) -> Vec<u8> {
+    let total_size = round_up_sectors(((bootloader.len() + ESP_FREE_BYTES) * 64 / 63).max(FAT32_MIN_BYTES));
     let mut volume = format_fat32(total_size, "TOYOS-BOOT");
-
     populate(
         &mut volume,
         "TOYOS-BOOT",
         &[
             ("EFI/BOOT/BOOTx64.EFI", bootloader),
-            ("toyos/kernel.elf", kernel),
             // Mirrored in `bootloader/src/main.rs` as `\toyos\log.guid`, which
-            // reads it beside the two files above and refuses the volume if it
-            // is not there. The sixteen bytes are the GPT entry's own, in the
-            // entry's own order: nothing converts them on the way to the kernel
-            // and nothing converts the table's, so the comparison that decides
-            // which partition holds the log cannot be got backwards.
+            // reads it beside itself and refuses the volume if it is not there.
+            // The sixteen bytes are the GPT entry's own, in the entry's own
+            // order: nothing converts them on the way to the kernel and nothing
+            // converts the table's, so the comparison that decides which
+            // partition holds the log cannot be got backwards.
             ("toyos/log.guid", &log_guid.to_bytes_le()),
-            // ROOT's name and then the actuators this boot arms, comma-
-            // separated. Read by the bootloader beside the two above and handed
-            // to the kernel in `KernelArgs`, because the earliest actuator
-            // fires before `mm::init` and there is nowhere later to fetch it
-            // from. `kernel/src/actuator.rs` is the actuator list, and
-            // [`params_of`] is how the host asks a finished image which of them
-            // a guest booting it would arm.
-            (CMDLINE, cmdline.as_bytes()),
         ],
     );
+    volume
+}
 
+/// A slot's FAT volume of `bytes`: the kernel, its boot parameter and the
+/// signed header naming both and ROOT (`toyos_update::slots`), or nothing for
+/// a slot no image has been installed in yet.
+///
+/// The parameter is ROOT's name and then the actuators this boot arms,
+/// comma-separated: handed to the kernel in `KernelArgs`, because the earliest
+/// actuator fires before `mm::init` and there is nowhere later to fetch it
+/// from. [`params_of`] is how the host asks a finished image which of them a
+/// guest booting it would arm.
+fn create_slot_volume(image: Option<&Sections>, bytes: usize) -> Vec<u8> {
+    let mut volume = format_fat32(bytes, "TOYOS-SLOT");
+    let files: Vec<(&str, &[u8])> = match image {
+        Some(s) => vec![
+            (toyos_update::slots::KERNEL_FILE, &s.kernel),
+            (toyos_update::slots::CMDLINE_FILE, &s.cmdline),
+            (toyos_update::slots::SIGNED_FILE, &s.signed),
+        ],
+        None => Vec::new(),
+    };
+    populate(&mut volume, "TOYOS-SLOT", &files);
     volume
 }
 
@@ -468,7 +632,7 @@ fn create_log_volume() -> Vec<u8> {
 ///
 /// `toyos_gpt::Guid::TOYOS_ROOT` is the same sixteen bytes as the kernel
 /// matches them, and `toyos_root_text_is_the_type_guid` is what keeps the two
-/// spellings one constant.
+/// spellings one constant — and the same for each type below.
 const TOYOS_ROOT: gpt::partition_types::Type = gpt::partition_types::Type {
     guid: toyos_gpt::Guid::TOYOS_ROOT_TEXT,
     os: gpt::partition_types::OperatingSystem::None,
@@ -477,6 +641,18 @@ const TOYOS_ROOT: gpt::partition_types::Type = gpt::partition_types::Type {
 /// `064E3777-…`, the TOYOS-DATA partition type, the same way round.
 const TOYOS_DATA: gpt::partition_types::Type = gpt::partition_types::Type {
     guid: toyos_gpt::Guid::TOYOS_DATA_TEXT,
+    os: gpt::partition_types::OperatingSystem::None,
+};
+
+/// `94464329-…`, the slot table's partition type.
+const TOYOS_SLOTS: gpt::partition_types::Type = gpt::partition_types::Type {
+    guid: toyos_gpt::Guid::TOYOS_SLOTS_TEXT,
+    os: gpt::partition_types::OperatingSystem::None,
+};
+
+/// `037719D7-…`, a slot's FAT volume.
+const TOYOS_BOOT: gpt::partition_types::Type = gpt::partition_types::Type {
+    guid: toyos_gpt::Guid::TOYOS_BOOT_TEXT,
     os: gpt::partition_types::OperatingSystem::None,
 };
 
@@ -631,20 +807,45 @@ impl toyos_gpt::Sectors for FileSectors<'_> {
     }
 }
 
-fn create_gpt_disk(
-    esp_volume: Vec<u8>,
-    root_volume: &[u8],
-    log_volume: Vec<u8>,
-    esp_guid: uuid::Uuid,
-    log_guid: uuid::Uuid,
-) -> Vec<u8> {
+/// One partition of an image: what it is called in a refusal and in the table,
+/// its type and unique GUID, its bytes, its length — at least its bytes', the
+/// rest zero — and the reader that judges it before the image is published.
+struct Part {
+    what: &'static str,
+    name: &'static str,
+    kind: gpt::partition_types::Type,
+    guid: uuid::Uuid,
+    bytes: Vec<u8>,
+    len: u64,
+    judge: Option<Volume>,
+}
+
+impl Part {
+    /// A partition exactly as long as its bytes.
+    fn full(
+        what: &'static str,
+        name: &'static str,
+        kind: gpt::partition_types::Type,
+        guid: uuid::Uuid,
+        bytes: Vec<u8>,
+        judge: Option<Volume>,
+    ) -> Self {
+        let len = bytes.len() as u64;
+        Self { what, name, kind, guid, bytes, len, judge }
+    }
+}
+
+fn create_gpt_disk(parts: &[Part]) -> Vec<u8> {
     // `add_partition` places each partition itself; this is the size the disk
     // has to be for it to have somewhere to put them — an aligned gap before
-    // the ESP, an aligned gap between each pair, and one after the last for the
-    // backup table.
-    let root_at = align_up(PARTITION_ALIGN + esp_volume.len(), PARTITION_ALIGN);
-    let log_at = align_up(root_at + root_volume.len(), PARTITION_ALIGN);
-    let total_size = round_up_sectors(log_at + log_volume.len() + PARTITION_ALIGN);
+    // the first, each one aligned after the last, and a gap after the last for
+    // the backup table.
+    let mut end = PARTITION_ALIGN;
+    for part in parts {
+        assert!(part.bytes.len() as u64 <= part.len, "the {} is {} bytes in a {}-byte partition", part.what, part.bytes.len(), part.len);
+        end = align_up(end, PARTITION_ALIGN) + part.len as usize;
+    }
+    let total_size = round_up_sectors(align_up(end, PARTITION_ALIGN) + PARTITION_ALIGN);
     assert_eq!(total_size % 512, 0, "image must be a whole number of 512-byte sectors to be flashable");
     let mut disk = vec![0u8; total_size];
 
@@ -667,93 +868,50 @@ fn create_gpt_disk(
         .expect("failed to initialize partition table");
 
     let align = Some((PARTITION_ALIGN / 512) as u64);
-    let esp_id = gdisk
-        .add_partition("EFI System", esp_volume.len() as u64, gpt::partition_types::EFI, 0, align)
-        .expect("failed to add ESP partition");
-    // The one partition selected by *type*: which ROOT a boot mounts is decided
-    // by the UUID in its own superblock, against the `root=` on the ESP.
-    let root_id = gdisk
-        .add_partition("ToyOS root", root_volume.len() as u64, TOYOS_ROOT, 0, align)
-        .expect("failed to add the root partition");
-    // Microsoft Basic Data, and that type is the whole reason this is a second
-    // partition at all: macOS never auto-mounts an EFI-typed partition and this
-    // host refuses even a manual non-root mount of one, so a log on the ESP is
-    // unreachable without the admin account. This type mounts in Finder, in
-    // Windows and in Linux on plug-in, with nothing configured.
-    let log_id = gdisk
-        .add_partition("ToyOS log", log_volume.len() as u64, gpt::partition_types::BASIC, 0, align)
-        .expect("failed to add the log partition");
-
-    // The GUID `add_partition` drew for each of these is discarded: the log's
-    // for the one already written to the ESP, and the ESP's own because a
-    // firmware boot entry names a partition by GUID and every name is drawn once.
-    let mut table = gdisk.partitions().clone();
-    table.get_mut(&esp_id).expect("the ESP was just added").part_guid = esp_guid;
-    table
-        .get_mut(&log_id)
-        .expect("the log partition was just added")
-        .part_guid = log_guid;
-    gdisk
-        .update_partitions(table)
-        .expect("failed to stamp the ESP's and the log partition's unique GUIDs");
-
-    let start_of = |id: u32| {
-        gdisk
-            .partitions()
-            .get(&id)
-            .expect("a partition that was just added")
-            .bytes_start(gpt::disk::LogicalBlockSize::Lb512)
-            .expect("failed to get a partition's start") as usize
-    };
-    let esp_start = start_of(esp_id);
-    let root_start = start_of(root_id);
-    let log_start = start_of(log_id);
-
-    // `Superblock::check` refuses a superblock whose block count is not its
-    // device's, so a partition wider than the image it carries is one the
-    // kernel cannot mount. Checked here rather than left to a boot: this is the
-    // writer, and the failure there is a machine with no userland.
-    let root_bytes = gdisk
-        .partitions()
-        .get(&root_id)
-        .expect("the root partition was just added")
-        .bytes_len(gpt::disk::LogicalBlockSize::Lb512)
-        .expect("failed to get the root partition's length");
-    assert_eq!(
-        root_bytes,
-        root_volume.len() as u64,
-        "the table gives ROOT {root_bytes} bytes for a {}-byte image",
-        root_volume.len()
-    );
-
-    let named = |id: u32| {
-        toyos_gpt::Guid(
+    let ids: Vec<u32> = parts
+        .iter()
+        .map(|part| {
             gdisk
-                .partitions()
-                .get(&id)
-                .expect("a partition that was just added")
-                .part_guid
-                .to_bytes_le(),
-        )
-    };
-    let esp_guid = named(esp_id);
-    let root_partition_guid = named(root_id);
-    let log_partition_guid = named(log_id);
+                .add_partition(part.name, part.len, part.kind.clone(), 0, align)
+                .unwrap_or_else(|e| panic!("failed to add the {}: {e}", part.what))
+        })
+        .collect();
+
+    // The GUID `add_partition` drew for each is discarded for the one this
+    // image already wrote down: the log's on the ESP, every slot partition's in
+    // the slot table, and the ESP's own because a firmware boot entry names a
+    // partition by GUID and every name is drawn once.
+    let mut table = gdisk.partitions().clone();
+    for (part, id) in parts.iter().zip(&ids) {
+        table.get_mut(id).expect("a partition that was just added").part_guid = part.guid;
+    }
+    gdisk.update_partitions(table).expect("failed to stamp the partitions' unique GUIDs");
+
+    let placed: Vec<(&str, usize, usize)> = parts
+        .iter()
+        .zip(&ids)
+        .map(|(part, id)| {
+            let entry = gdisk.partitions().get(id).expect("a partition that was just added");
+            let start = entry.bytes_start(gpt::disk::LogicalBlockSize::Lb512).expect("a partition's start") as usize;
+            let len = entry.bytes_len(gpt::disk::LogicalBlockSize::Lb512).expect("a partition's length");
+            // A slot's ROOT is read for exactly its signed length, and a
+            // partition the table made any other length than asked is one
+            // whose contents nothing here placed.
+            assert_eq!(len, part.len, "the table gives the {} {len} bytes for a {}-byte partition", part.what, part.len);
+            (part.what, start, part.len as usize)
+        })
+        .collect();
 
     // The invariant [`PARTITION_ALIGN`] exists for, checked rather than
-    // assumed: the kernel mounts all three at once over one 4 KiB block
-    // device, and a device block belonging to two volumes would be cached
-    // twice.
-    let placed = [
-        ("ESP", esp_start, esp_volume.len()),
-        ("root partition", root_start, root_volume.len()),
-        ("log partition", log_start, log_volume.len()),
-    ];
-    for (what, start, len) in placed {
+    // assumed: the kernel mounts several at once over one 4 KiB block device,
+    // and a device block belonging to two volumes would be cached twice.
+    for (what, start, len) in &placed {
         assert_eq!(start % SECTOR, 0, "the {what} starts at byte {start}, off a {SECTOR}-byte block");
         assert_eq!(len % SECTOR, 0, "the {what} is {len} bytes, not whole {SECTOR}-byte blocks");
     }
-    for (before, after) in placed.iter().zip(&placed[1..]) {
+    let mut by_start = placed.clone();
+    by_start.sort_by_key(|(_, start, _)| *start);
+    for (before, after) in by_start.iter().zip(&by_start[1..]) {
         assert!(
             before.1 + before.2 <= after.1,
             "the {} runs to {} and the {} starts at {}",
@@ -770,19 +928,15 @@ fn create_gpt_disk(
     let mut final_bytes = vec![0u8; total_size];
     disk_device.read_exact(&mut final_bytes).expect("failed to read disk");
 
-    final_bytes[esp_start..esp_start + esp_volume.len()].copy_from_slice(&esp_volume);
-    final_bytes[root_start..root_start + root_volume.len()].copy_from_slice(root_volume);
-    final_bytes[log_start..log_start + log_volume.len()].copy_from_slice(&log_volume);
+    for (part, (_, start, _)) in parts.iter().zip(&placed) {
+        final_bytes[*start..*start + part.bytes.len()].copy_from_slice(&part.bytes);
+    }
 
-    certify(
-        &final_bytes,
-        &[
-            ("ESP", esp_guid, Volume::Fat32),
-            ("root partition", root_partition_guid, Volume::Root),
-            ("log partition", log_partition_guid, Volume::Fat32),
-        ],
-    )
-    .unwrap_or_else(|refusal| panic!("{refusal}"));
+    let judged: Vec<(&str, toyos_gpt::Guid, Volume)> = parts
+        .iter()
+        .filter_map(|part| part.judge.map(|kind| (part.what, toyos_gpt::Guid(part.guid.to_bytes_le()), kind)))
+        .collect();
+    certify(&final_bytes, &judged).unwrap_or_else(|refusal| panic!("{refusal}"));
 
     final_bytes
 }
@@ -870,6 +1024,15 @@ mod tests {
         create_root_image(&[("bin/init".to_string(), b"init".to_vec())], &[], true)
     }
 
+    /// A fixed key: what these tests judge is the image, not whose it is.
+    fn key() -> crate::signing::Key {
+        crate::signing::Key::throwaway_from([0x42; 32])
+    }
+
+    fn signing(key: &crate::signing::Key) -> Signing<'_> {
+        Signing { key, version: 7 }
+    }
+
     /// ROOT carries its contents and less than one alignment unit of free
     /// blocks: the loader reads every block of it and the kernel keeps them.
     #[test]
@@ -882,15 +1045,19 @@ mod tests {
         assert!(sb.free_blocks < (PARTITION_ALIGN / 4096) as u64, "{} free blocks", sb.free_blocks);
     }
 
-    /// The two volumes this build writes break no rule of the format, and the
+    /// The volumes this build writes break no rule of the format, and the
     /// gate is silence rather than sameness: a suite that could only ask the
     /// guest to add no *new* complaint hides every complaint the writer left.
     /// Here rather than in the boot suite because it needs no guest, no QEMU and
     /// no kernel — a claim about the writer, failing in seconds.
     #[test]
     fn the_volumes_this_build_writes_break_no_format_rule() {
+        let key = key();
+        let s = sections(b"kernel", &tiny_root(), "", signing(&key));
         for (what, volume) in [
-            ("ESP", create_esp_volume(b"kernel", b"bootloader", uuid::Uuid::new_v4(), "")),
+            ("ESP", create_esp_volume(b"bootloader", uuid::Uuid::new_v4())),
+            ("slot volume", create_slot_volume(Some(&s), FAT32_MIN_BYTES)),
+            ("empty slot volume", create_slot_volume(None, FAT32_MIN_BYTES)),
             ("log volume", create_log_volume()),
         ] {
             let complaints = toyos_fat32_check::check(&volume);
@@ -902,17 +1069,24 @@ mod tests {
         }
     }
 
+    /// The one partition of `kind` on `disk`.
+    fn only(disk: &[u8], kind: toyos_gpt::Guid) -> toyos_gpt::Guid {
+        let mut out = [BLANK_PARTITION; 2];
+        let scan = toyos_gpt::locate_type(&mut ImageSectors(disk), kind, &mut out)
+            .expect("the image has a partition table");
+        assert_eq!(scan.matched, 1, "the image carries {} partitions of type {kind}", scan.matched);
+        out[0].unique_guid
+    }
+
     /// Publishing a flash target runs every reader over the assembled image, and
     /// a damaged one is refused by name: each mutation is staged on an image
     /// [`create_gpt_disk`] just certified, so each refusal is its own.
     #[test]
     fn a_damaged_image_is_refused_by_the_reader_that_caught_it() {
-        let log_uuid = uuid::Uuid::new_v4();
-        let esp = create_esp_volume(b"kernel", b"bootloader", log_uuid, "");
         let root_image = tiny_root();
-        let disk =
-            create_gpt_disk(esp, &root_image, create_log_volume(), uuid::Uuid::new_v4(), log_uuid);
-        let log = toyos_gpt::Guid(log_uuid.to_bytes_le());
+        let key = key();
+        let disk = create_boot_image(b"kernel", b"bootloader", &root_image, "", signing(&key), None);
+        let log = only(&disk, toyos_gpt::Guid::MICROSOFT_BASIC);
         let root = root_partition_guid_of(&disk);
         let parts =
             [("log partition", log, Volume::Fat32), ("root partition", root, Volume::Root)];
@@ -948,45 +1122,85 @@ mod tests {
 
     /// The unique GUID the table drew for the one TOYOS-ROOT-typed partition.
     fn root_partition_guid_of(disk: &[u8]) -> toyos_gpt::Guid {
-        let mut out = [toyos_gpt::Partition {
-            index: 0,
-            type_guid: toyos_gpt::Guid::ZERO,
-            unique_guid: toyos_gpt::Guid::ZERO,
-            first_lba: 0,
-            last_lba: 0,
-        }; 2];
-        let scan =
-            toyos_gpt::locate_type(&mut ImageSectors(disk), toyos_gpt::Guid::TOYOS_ROOT, &mut out)
-                .expect("the image has a partition table");
-        assert_eq!(scan.matched, 1, "a boot image carries one ROOT");
-        out[0].unique_guid
+        only(disk, toyos_gpt::Guid::TOYOS_ROOT)
     }
 
-    /// And it is clean because it is right, not because it is empty: a
-    /// `populate` that wrote nothing at all would satisfy the gate above.
-    /// Exactly these and nothing else, because an unnamed file on the ESP is
-    /// one the volume pays for and nothing loads.
-    #[test]
-    fn the_esp_carries_what_the_bootloader_looks_for() {
-        let mut esp = create_esp_volume(b"kernel", b"bootloader", uuid::Uuid::new_v4(), "");
-        let mut fs = Fat32::mount(VolumeIo(&mut esp)).expect("mount the ESP we just built");
+    /// Every file on `volume`, sorted.
+    fn files_of(mut volume: Vec<u8>) -> Vec<String> {
+        let mut fs = Fat32::mount(VolumeIo(&mut volume)).expect("mount a volume we just built");
         let mut found: Vec<String> = fs
             .walk("", 64)
-            .expect("walk the ESP")
+            .expect("walk the volume")
             .into_iter()
             .map(|(path, _)| path.trim_start_matches('/').to_string())
             .filter(|path| !path.ends_with('/'))
             .collect();
         found.sort();
+        found
+    }
+
+    /// And it is clean because it is right, not because it is empty: a
+    /// `populate` that wrote nothing at all would satisfy the gate above.
+    /// Exactly these and nothing else, because an unnamed file on a volume is
+    /// one the volume pays for and nothing loads.
+    #[test]
+    fn the_esp_and_a_slot_carry_what_the_bootloader_looks_for() {
         assert_eq!(
-            found,
-            [
-                "EFI/BOOT/BOOTx64.EFI",
-                "toyos/cmdline",
-                "toyos/kernel.elf",
-                "toyos/log.guid",
-            ]
+            files_of(create_esp_volume(b"bootloader", uuid::Uuid::new_v4())),
+            ["EFI/BOOT/BOOTx64.EFI", "toyos/log.guid"]
         );
+        let key = key();
+        let s = sections(b"kernel", &tiny_root(), "", signing(&key));
+        assert_eq!(
+            files_of(create_slot_volume(Some(&s), FAT32_MIN_BYTES)),
+            [toyos_update::slots::CMDLINE_FILE, toyos_update::slots::SIGNED_FILE, toyos_update::slots::KERNEL_FILE]
+        );
+        assert!(files_of(create_slot_volume(None, FAT32_MIN_BYTES)).is_empty());
+    }
+
+    /// **The host's own reading of what the loader checks**: the marked slot's
+    /// signed header verifies under the key the image was signed with and names
+    /// the kernel, the boot parameter and ROOT the image carries, byte for
+    /// byte; the table names the slot's partitions; and an update image for the
+    /// same parts splits into the same header and sections. A second slot is
+    /// present, empty, and not marked.
+    #[test]
+    fn an_image_s_marked_slot_is_signed_over_exactly_what_it_carries() {
+        let key = key();
+        let root = tiny_root();
+        let dir = std::env::temp_dir().join(format!("toyos-image-slot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("slotted.img");
+        let disk = create_boot_image(b"\x7fELF kernel", b"bootloader", &root, "sched-fast-health", signing(&key), Some(SecondSlot { root_bytes: 8 << 20 }));
+        std::fs::write(&path, &disk).expect("write the image");
+        let mut file = std::fs::File::open(&path).expect("open the image");
+        let table = slot_table_of(&mut file).expect("the slot table");
+        assert_eq!(table.marked, toyos_update::slots::Which::A);
+        let a = table.slots[0].expect("slot A");
+        let b = table.slots[1].expect("slot B");
+        assert_eq!(a.version, 7);
+        assert!(read_file_on(&mut file, b.boot, toyos_update::slots::SIGNED_FILE).is_err(), "an empty slot is unsigned");
+        assert_eq!(partition_extent(&mut file, b.root).expect("slot B's ROOT").1, 8 << 20);
+
+        let signed = read_file_on(&mut file, a.boot, toyos_update::slots::SIGNED_FILE).expect("the signed header");
+        let signed: [u8; toyos_update::image::SIGNED_BYTES] = signed.try_into().expect("a signed header's length");
+        let header = toyos_update::image::Header::parse(&signed).expect("a header");
+        let bytes: [u8; toyos_update::image::HEADER_BYTES] = signed[..toyos_update::image::HEADER_BYTES].try_into().unwrap();
+        toyos_update::sig::verify(&key.public(), &bytes, &toyos_update::image::signature_of(&signed)).expect("the signature");
+        let kernel = read_file_on(&mut file, a.boot, toyos_update::slots::KERNEL_FILE).expect("the kernel");
+        let cmdline = read_file_on(&mut file, a.boot, toyos_update::slots::CMDLINE_FILE).expect("the cmdline");
+        let (at, _) = partition_extent(&mut file, a.root).expect("slot A's ROOT");
+        let on_disk = &disk[at as usize..at as usize + header.root().len as usize];
+        assert_eq!(kernel, b"\x7fELF kernel");
+        assert_eq!(on_disk, &root[..]);
+        assert_eq!(header, toyos_update::image::Header::of(7, &kernel, &cmdline, on_disk));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let update = update_image(b"\x7fELF kernel", &root, "sched-fast-health", signing(&key));
+        let parts = toyos_update::image::Parts::split(&update).expect("an update image splits");
+        assert_eq!(parts.header, header);
+        assert_eq!(parts.mismatched(), None);
+        assert_eq!(parts.signed, &signed);
     }
 
     /// An image says which actuators a guest booting it would arm, and the
@@ -1004,7 +1218,7 @@ mod tests {
         let root_image = tiny_root();
         let write = |name: &str, params: &str| {
             let path = dir.join(name);
-            std::fs::write(&path, create_boot_image(b"kernel", b"bootloader", &root_image, params))
+            std::fs::write(&path, create_boot_image(b"kernel", b"bootloader", &root_image, params, signing(&key()), None))
                 .expect("write an image");
             path
         };
@@ -1118,7 +1332,8 @@ mod tests {
         let symlinks = vec![("bin/ls".to_string(), "/system/bin/toybox".to_string())];
 
         let root_image = create_root_image(&files, &symlinks, true);
-        let disk = create_boot_image(b"kernel", b"bootloader", &root_image, "");
+        let key = key();
+        let disk = create_boot_image(b"kernel", b"bootloader", &root_image, "", signing(&key), None);
 
         // Located by *type*, through the parser the kernel uses, at the offset
         // the table gives — never at the one the writer computed.
@@ -1222,6 +1437,8 @@ mod tests {
             b"bootloader",
             &create_root_image(&files, &symlinks, true),
             "",
+            signing(&key()),
+            None,
         );
 
         let mut out = [BLANK_PARTITION; 2];
