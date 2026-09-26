@@ -20,8 +20,8 @@ use super::UpstreamError;
 /// `BCACHEFS_ROOT_SUBVOL` and `BCACHEFS_ROOT_INO`.
 const ROOT_SUBVOL: u64 = 1;
 const ROOT_INO: u64 = 4096;
-/// The snapshot id `bch2_fs_initialize` gives the root subvolume and every key
-/// under it, and the only one this reader serves a key from.
+/// The snapshot id a new volume gives the root subvolume and every key under
+/// it, and the only one this reader serves a key from.
 const NO_SNAPSHOT: u32 = u32::MAX;
 /// `BCH_NAME_MAX`.
 pub const NAME_MAX: usize = 512;
@@ -195,14 +195,14 @@ impl<IO: BlockIO> Volume<IO> {
                 return Err(UpstreamError::Refused("dirents btree holds a key that is not a dirent"));
             }
             let val = node.value(key)?;
-            let (name, inum, kind) = match decode_dirent(&val) {
-                Ok(parts) => parts,
+            let dirent = match Dirent::read(val.bytes()) {
+                Ok(dirent) => dirent,
                 Err(err) => {
-                    failure = Some(err);
+                    failure = Some(err.into());
                     return Ok(false);
                 }
             };
-            Ok(visit(name, inum, kind))
+            Ok(visit(dirent.name, dirent.inum, dirent.kind))
         })?;
         match failure {
             Some(err) => Err(err),
@@ -412,10 +412,9 @@ fn output_buffer(size: u64, device_bytes: u64) -> Result<Vec<u8>, UpstreamError>
 ///
 /// **Each entry's length comes from the volume's own table, and one word of
 /// error here is arbitrary device blocks served as file contents.** An entry
-/// can precede the checksum and the pointer: `bch2_bkey_extent_flags_set`
-/// inserts a `flags` entry at `ptrs.start` through `__extent_entry_insert`, so
-/// a value is `[flags, crc32, ptr]` and a walk that oversizes the first entry
-/// lands somewhere other than the pointer.
+/// can precede the checksum and the pointer: a `flags` entry is written first
+/// in the value, so a value is `[flags, crc32, ptr]` and a walk that oversizes
+/// the first entry lands somewhere other than the pointer.
 fn find_ptr<'a>(
     val: &Raw<'a>,
     sizes: &[u8; EXTENT_TYPES_MAX],
@@ -519,115 +518,110 @@ impl Crc {
     }
 }
 
-/// `bch2_dirent_get_name`: the name is what is left after the header once the
-/// last word's trailing NULs are taken off.
-fn decode_dirent<'a>(val: &Raw<'a>) -> Result<(&'a str, u64, FileKind), UpstreamError> {
-    let short = UpstreamError::Refused("dirent is shorter than its header");
-    if val.bytes().len() < DIRENT_NAME_AT + 1 || !val.bytes().len().is_multiple_of(8) {
-        return Err(short);
-    }
-    let d_type_byte = val.u8(8)?;
-    if d_type_byte & 0x80 != 0 {
-        return Err(UpstreamError::Refused("dirent is casefolded"));
-    }
-    let d_type = d_type_byte & 0x1F;
-    if d_type == DT_SUBVOL {
-        return Err(UpstreamError::Refused("dirent points at a subvolume"));
-    }
-
-    let last = val.u64(val.bytes().len() - 8)?;
-    let trailing_nuls = if last == 0 { 8 } else { last.leading_zeros() as usize / 8 };
-    let len = val
-        .bytes()
-        .len()
-        .checked_sub(DIRENT_NAME_AT + trailing_nuls)
-        .ok_or(UpstreamError::Refused("dirent has no name"))?;
-    if len == 0 || len > NAME_MAX {
-        return Err(UpstreamError::Refused("dirent's name is empty or past BCH_NAME_MAX"));
-    }
-    let bytes = val.slice(DIRENT_NAME_AT, len)?;
-    if bytes.contains(&b'/') || bytes.contains(&0) {
-        return Err(UpstreamError::Refused("dirent's name holds a separator or a NUL"));
-    }
-    let name = core::str::from_utf8(bytes)
-        .map_err(|_| UpstreamError::Refused("dirent's name is not valid UTF-8"))?;
-    Ok((name, val.u64(0)?, FileKind::from_dirent(d_type)))
+/// Each way a `bch_dirent` value is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirentError {
+    /// Not whole words, or no room for `d_inum`, `d_type` and a name byte.
+    Short,
+    /// `d_casefold`: the bytes after `d_type` are laid out differently.
+    Casefolded,
+    Subvolume,
+    /// Empty, or longer than `BCH_NAME_MAX`.
+    NameLength,
+    SeparatorOrNul,
+    NotUtf8,
+    /// The last word is all NUL: no writer pads a name by a whole word.
+    PaddingWord,
 }
 
+impl From<DirentError> for UpstreamError {
+    fn from(err: DirentError) -> Self {
+        UpstreamError::Refused(match err {
+            DirentError::Short => "dirent is shorter than its header",
+            DirentError::Casefolded => "dirent is casefolded",
+            DirentError::Subvolume => "dirent points at a subvolume",
+            DirentError::NameLength => "dirent's name is empty or past BCH_NAME_MAX",
+            DirentError::SeparatorOrNul => "dirent's name holds a separator or a NUL",
+            DirentError::NotUtf8 => "dirent's name is not valid UTF-8",
+            DirentError::PaddingWord => "dirent's last word is all padding",
+        })
+    }
+}
+
+/// One directory entry, borrowed from its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Dirent<'a> {
+    name: &'a str,
+    inum: u64,
+    kind: FileKind,
+}
+
+const D_TYPE_MASK: u8 = 0x1F;
+const D_CASEFOLD: u8 = 0x80;
+
+impl<'a> Dirent<'a> {
+    /// Decode a `bch_dirent` value.
+    ///
+    /// The name's length is not stored: a writer pads the name with 0 to 7
+    /// NULs to a whole word, so the name is what lies between `d_name` and the
+    /// NULs that end the last word. A NUL before that word is not padding.
+    /// A last word of nothing but NULs is refused: no writer pads by a whole
+    /// word, so such a value is not one a writer made.
+    fn read(val: &'a [u8]) -> Result<Self, DirentError> {
+        let (Some((&inum, &[type_byte, _, ..])), true) =
+            (val.split_first_chunk::<8>(), val.len().is_multiple_of(8))
+        else {
+            return Err(DirentError::Short);
+        };
+        if type_byte & D_CASEFOLD != 0 {
+            return Err(DirentError::Casefolded);
+        }
+        let d_type = type_byte & D_TYPE_MASK;
+        if d_type == DT_SUBVOL {
+            return Err(DirentError::Subvolume);
+        }
+
+        let padding = val.iter().rev().take(8).take_while(|&&byte| byte == 0).count();
+        if padding == 8 {
+            return Err(DirentError::PaddingWord);
+        }
+        // At most 7 off a value of at least 16 bytes, so `d_name` is inside it.
+        let name = &val[DIRENT_NAME_AT..val.len() - padding];
+        if name.is_empty() || name.len() > NAME_MAX {
+            return Err(DirentError::NameLength);
+        }
+        if name.iter().any(|&byte| byte == b'/' || byte == 0) {
+            return Err(DirentError::SeparatorOrNul);
+        }
+        let name = core::str::from_utf8(name).map_err(|_| DirentError::NotUtf8)?;
+        Ok(Self { name, inum: u64::from_le_bytes(inum), kind: FileKind::from_dirent(d_type) })
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
-
-    /// A dirent as upstream lays one out: the inode, the type byte, the name,
-    /// and NUL padding to a whole number of words.
-    fn dirent(inum: u64, d_type: u8, name: &[u8]) -> Vec<u8> {
-        let mut out = inum.to_le_bytes().to_vec();
-        out.push(d_type);
-        out.extend_from_slice(name);
-        while !out.len().is_multiple_of(8) {
-            out.push(0);
-        }
-        out
-    }
 
     fn decode(bytes: &[u8]) -> Result<(&str, u64, FileKind), UpstreamError> {
-        decode_dirent(&Raw::new(bytes, "dirent"))
+        Dirent::read(bytes).map(|dirent| (dirent.name, dirent.inum, dirent.kind)).map_err(UpstreamError::from)
     }
 
-    /// The name is what is left once the last word's trailing NULs come off,
-    /// which is the whole of how a dirent states its length.
-    #[test]
-    fn a_name_is_its_padding_taken_off() {
-        let one = dirent(4096, DT_DIR, b"empty");
-        assert_eq!(decode(&one), Ok(("empty", 4096, FileKind::Dir)));
-
-        // Exactly filling the last word leaves no NUL to count.
-        let flush = dirent(7, DT_REG, b"abcdefg");
-        assert_eq!(decode(&flush), Ok(("abcdefg", 7, FileKind::Regular)));
-
-        let long = dirent(9, DT_LNK, b"Documents");
-        assert_eq!(decode(&long), Ok(("Documents", 9, FileKind::Symlink)));
-
-        let single = dirent(11, DT_REG, b"a");
-        assert_eq!(decode(&single), Ok(("a", 11, FileKind::Regular)));
+    mod vectors {
+        /// `(name, d_inum, d_type)`, or the refusal.
+        type Decoded = Result<(&'static str, u64, u8), &'static str>;
+        include!("dirent_vectors.rs");
     }
 
-    /// Every shape a hostile dirent can take is refused by name rather than
-    /// returning a name a caller would go on to use as a path component.
+    /// Every dirent vector, names that fill their words and names padded by
+    /// one to seven NULs, and each refusal in the order it is checked.
     #[test]
-    fn a_dirent_that_is_not_one_is_refused() {
-        let short = vec![0u8; 8];
-        assert!(decode(&short).is_err());
-
-        let ragged = vec![0u8; 12];
-        assert!(decode(&ragged).is_err());
-
-        // All padding: no name at all.
-        let mut nameless = dirent(3, DT_REG, b"x");
-        nameless[9] = 0;
-        assert_eq!(
-            decode(&nameless),
-            Err(UpstreamError::Refused("dirent's name is empty or past BCH_NAME_MAX"))
-        );
-
-        let mut casefolded = dirent(3, DT_REG, b"x");
-        casefolded[8] |= 0x80;
-        assert_eq!(decode(&casefolded), Err(UpstreamError::Refused("dirent is casefolded")));
-
-        let subvol = dirent(3, DT_SUBVOL, b"sub");
-        assert_eq!(decode(&subvol), Err(UpstreamError::Refused("dirent points at a subvolume")));
-
-        // A separator inside a name would let one entry name another directory.
-        let traversal = dirent(3, DT_REG, b"a/b");
-        assert_eq!(
-            decode(&traversal),
-            Err(UpstreamError::Refused("dirent's name holds a separator or a NUL"))
-        );
-
-        let not_utf8 = dirent(3, DT_REG, &[0xff, 0xfe]);
-        assert_eq!(decode(&not_utf8), Err(UpstreamError::Refused("dirent's name is not valid UTF-8")));
+    fn dirent_vectors() {
+        for &(id, bytes, want) in vectors::DIRENT_CASES {
+            let want = want
+                .map(|(name, inum, d_type)| (name, inum, FileKind::from_dirent(d_type)))
+                .map_err(UpstreamError::Refused);
+            assert_eq!(decode(bytes), want, "{id}");
+        }
     }
 
     /// A `bch_extent_crc32`'s sizes are stored biased by one, so a reader that
@@ -681,8 +675,8 @@ mod tests {
     /// An entry ahead of the checksum and the pointer, sized right and sized
     /// one word out.
     ///
-    /// `bch2_bkey_extent_flags_set` inserts a `flags` entry at `ptrs.start`, so
-    /// `[flags, crc32, ptr]` is a value upstream writes; one word of size error
+    /// A `flags` entry is written first in an extent's value, so
+    /// `[flags, crc32, ptr]` is a value a volume holds; one word of size error
     /// on it puts the walk on the checksum entry and the pointer out of reach.
     #[test]
     fn an_entry_before_the_checksum_does_not_move_the_pointer() {

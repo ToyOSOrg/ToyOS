@@ -150,9 +150,9 @@ impl Node {
         if min_key > max_key {
             return Err(UpstreamError::Refused("btree node's key range runs backwards"));
         }
-        // `bch2_btree_node_read_done` holds the node's own low bound against
-        // its parent's: a node that starts below where its pointer says covers
-        // keys the parent gave to its sibling. Upstream instead *overwrites*
+        // A node's own low bound is held against its parent's: a node that
+        // starts below where its pointer says covers keys the parent gave to
+        // its sibling. Upstream instead *overwrites*
         // `min_key` where the pointer sets `BTREE_PTR_RANGE_UPDATED`, so a
         // volume that has been through topology repair is refused here.
         if min_key != ptr.min_key {
