@@ -10,7 +10,6 @@ members = [
     "filepicker-api",
     "files",
     "host",
-    "iced-counter",
     "init",
     "input-test",
     "inspect",
@@ -60,9 +59,6 @@ cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
 softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8" }
 winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
-memmap2 = { git = "https://github.com/ToyOSOrg/memmap2-rs", branch = "toyos-0.9.11" }
-fontdb = { git = "https://github.com/ToyOSOrg/fontdb", branch = "toyos-0.23.0" }
-wgpu = { git = "https://github.com/ToyOSOrg/wgpu", branch = "toyos-27.0.4" }
 
 
 # The one profile every guest binary is built with.

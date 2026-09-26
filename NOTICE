@@ -221,8 +221,8 @@ and forbids selling them by themselves. The licence reserves no font name, and
 none of these files is modified.
 
 
-userland/iced-counter/src/main.rs — iced's own counter example, MIT
--------------------------------------------------------------------
+tests/iced-counter/src/bin/iced-counter.rs — iced's own counter example, MIT
+----------------------------------------------------------------------------
 
     iced's `examples/counter/src/main.rs` at tag 0.14.0
     (commit 3997291f318a8bc06fa522f5579836fb3feb94df), https://github.com/iced-rs/iced,
@@ -232,8 +232,8 @@ userland/iced-counter/src/main.rs — iced's own counter example, MIT
     Licence text: licenses/MIT-iced.txt (upstream's LICENSE at that tag)
     SPDX-License-Identifier: MIT
 
-`toolkit_iced` runs it. It ships only in `tests/toolkitcase`, never in an
-image a `system.toml` builds.
+`toolkit_iced` builds it and carries it into `tests/toolkitcase`; no image a
+`system.toml` builds ships it.
 
 
 ovmf/*.fd — EDK II firmware, BSD-2-Clause-Patent

@@ -1,0 +1,44 @@
+[package]
+name = "iced-counter"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# iced's own `counter` example, its `src/main.rs` carried byte for byte from
+# iced 0.14.0 as `src/bin/iced-counter.rs` (NOTICE names it), where the
+# harness's build collects a binary. Default features: wgpu first, which finds no
+# adapter here and falls back to tiny-skia. A package of its own and not a
+# userland crate: `toolkit_iced` builds it and carries it into the toolkit
+# desktop, so no image and no userland resolve pays for iced's tree, and
+# upstream's `it_counts`, a test of iced's own simulator, joins no host lane.
+[dependencies]
+iced = "0.14"
+
+[dev-dependencies]
+iced_test = "0.14"
+
+[workspace]
+
+# The forks iced's graph reaches on ToyOS (`forks.toml`), and the tree's own
+# SDK crates, which the forks name by version.
+[patch.crates-io]
+toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../toyos" }
+toyos-window = { path = "../../userland/toyos-window" }
+getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3-sdk-0.12", package = "getrandom" }
+getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4", package = "getrandom" }
+raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", branch = "toyos-0.6.2" }
+softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8" }
+winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13" }
+memmap2 = { git = "https://github.com/ToyOSOrg/memmap2-rs", branch = "toyos-0.9.11" }
+fontdb = { git = "https://github.com/ToyOSOrg/fontdb", branch = "toyos-0.23.0" }
+wgpu = { git = "https://github.com/ToyOSOrg/wgpu", branch = "toyos-27.0.4" }
+
+# The guest profile every ToyOS program is built with.
+[profile.toyos]
+inherits = "dev"
+opt-level = 2
+debug = true
+debug-assertions = true
+overflow-checks = true

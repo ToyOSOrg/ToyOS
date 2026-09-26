@@ -1,9 +1,5 @@
-# A desktop with a shell, and an unmodified iced app — the toolkit's own
-# window, event loop, text and renderer, on the system fonts — beside the
-# winit and waiter clients the `toolkit_` tests carry.
-#
-# The app is here and not in the shipping `system.toml`: it is a fixture for
-# `toolkit_iced`.
+# A desktop with a shell, for the clients the `toolkit_` tests carry and
+# launch from it: an unmodified iced app, and the winit and waiter probes.
 
 assets = ["assets"]
 
@@ -30,9 +26,6 @@ receives = ["compositor", "surface", "launcher"]
 # `stats` spawns the app and reports its CPU and peak memory once it leaves.
 [programs.toybox]
 receives = ["compositor", "surface"]
-
-[programs.iced-counter]
-receives = ["compositor"]
 
 [symlinks]
 "bin/echo" = "/system/bin/toybox"

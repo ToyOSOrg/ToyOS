@@ -8887,8 +8887,8 @@ fn best_text_match(
     best
 }
 
-/// iced's own counter example, unmodified, launched from the desktop's shell
-/// under `stats`: its window opens, its first button's label is on the panel
+/// iced's own counter example, unmodified, built here from `tests/iced-counter`
+/// and launched from the desktop's shell under `stats`: its window opens, its first button's label is on the panel
 /// in the system font, it presents only what it has to while nothing happens
 /// to it, and it leaves with code 0 when the compositor closes the window.
 ///
@@ -8899,9 +8899,14 @@ fn best_text_match(
 /// compositor's count, not the app's. `stats` reports the app's CPU time and
 /// peak memory after it leaves.
 fn toolkit_iced() -> Result<(), String> {
-    let app = "iced-counter";
+    let app = "test_rs_iced-counter";
     let label = rendered_text(COUNTER_LABEL, COUNTER_LABEL_PX);
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toolkitcase");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let bins = qemu::build_toyos_bins(&root.join("tests/iced-counter"));
+    if !bins.iter().any(|(name, _)| name == "iced-counter") {
+        return Err("the iced-counter build produced no iced-counter".to_string());
+    }
+    let config = root.join("tests/toolkitcase");
     let options = BootOptions {
         profile: qemu::Profile::Metal,
         qmp: true,
@@ -8912,7 +8917,7 @@ fn toolkit_iced() -> Result<(), String> {
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
     let mut log = qemu.boot_log().to_string();
     let log = &mut log;
     let ack = Drained::Bytes;
@@ -9053,7 +9058,10 @@ fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
             eprintln!("  [toolkit] every wake ended a wait that also watched four windows");
             return Ok(());
         }
-        if said.contains("WINDOW-WAKE-LOST") || said.contains("WINDOW-WAKE-REFUSED") {
+        if said.contains("WINDOW-WAKE-LOST")
+            || said.contains("WINDOW-WAKE-REFUSED")
+            || said.contains("panicked")
+        {
             return Err(format!("a wake did not end the windows' wait:\n{said}"));
         }
         log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
