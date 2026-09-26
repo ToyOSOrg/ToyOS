@@ -697,7 +697,7 @@ fn reconcile(role: Role, fs: &mut Fat32<FatVolume>, named: &mut RepairNotice, in
     match fs.reconcile(&mut info.file, now()) {
         Ok(()) => {}
         Err(e) => {
-            if !name_pending(role, fs, named, &format!("reconcile of {}", info.name), e) {
+            if !name_pending(role, fs, named, || format!("reconcile of {}", info.name), e) {
                 log!("{role}-volume: {} was left with a chain its entry does not reach: {e}", info.name)
             }
         }
@@ -705,15 +705,25 @@ fn reconcile(role: Role, fs: &mut Fat32<FatVolume>, named: &mut RepairNotice, in
 }
 
 /// Whether `e` is the volume waiting on an unlanded repair, logged once per
-/// repair, since otherwise it reads as whatever call met it failing.
-fn name_pending(role: Role, fs: &Fat32<FatVolume>, named: &mut RepairNotice, what: &str, e: Error) -> bool {
+/// repair, since otherwise it reads as whatever call met it failing. `what` is
+/// only called to build the logged name once there is something to log, so a
+/// call that is neither pending nor its repair's first sighting allocates
+/// nothing.
+fn name_pending(
+    role: Role,
+    fs: &Fat32<FatVolume>,
+    named: &mut RepairNotice,
+    what: impl FnOnce() -> String,
+    e: Error,
+) -> bool {
     let episode = fs.repair_episode();
     if !RepairNotice::waits_on(e, episode) {
         return false;
     }
     if named.first_sight(episode) {
         log!(
-            "{role}-volume: {what} refused, a repair pending with {} step(s) queued: {e}",
+            "{role}-volume: {} refused, a repair pending with {} step(s) queued: {e}",
+            what(),
             fs.pending_repair()
         );
     }
@@ -731,7 +741,7 @@ fn refused(
     name: &str,
     e: Error,
 ) -> SyscallError {
-    if e != Error::NotFound && !name_pending(role, fs, named, &format!("{op} of {name}"), e) {
+    if e != Error::NotFound && !name_pending(role, fs, named, || format!("{op} of {name}"), e) {
         log!("{role}-volume: {op} of {name}: {e}");
     }
     as_syscall_error(e)
@@ -1083,7 +1093,7 @@ impl FileSystem for FatFs {
             reconcile(*role, fs, repair_named, info);
         }
         self.fs.sync().map_err(|e| {
-            name_pending(self.role, &self.fs, &mut self.repair_named, "sync", e);
+            name_pending(self.role, &self.fs, &mut self.repair_named, || String::from("sync"), e);
             as_syscall_error(e)
         })
     }

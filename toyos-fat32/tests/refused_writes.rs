@@ -930,6 +930,7 @@ fn a_remove_whose_free_the_device_fails_answers_ok_and_the_next_call_the_failure
     fs.device().plan = None;
     fs.create("after.txt", stamp()).expect("create once the device answers");
     assert_eq!(fs.pending_repair(), 0);
+    assert!(!RepairNotice::waits_on(Error::Io, fs.repair_episode()));
     fs.sync().expect("sync");
     assert_clean(&mut fs, true, "after the failed free landed");
     (s.verify)(&mut fs, &mut None);
