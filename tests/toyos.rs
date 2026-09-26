@@ -17056,7 +17056,8 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
 /// and drain one console between them.
 #[derive(Clone)]
 enum Task<'a> {
-    /// Rust and C tests on one guest, and the kernel that guest boots.
+    /// Rust and C tests on one lane's guests in turn ([`shared_boots`]), and
+    /// the kernel they boot.
     ///
     /// Two blocks rather than one: [`ACTUATOR_TESTS`] needs `SYS_DEBUG` and
     /// everything else must not have it, which is what makes the second list

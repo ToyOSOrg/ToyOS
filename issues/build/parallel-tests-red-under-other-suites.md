@@ -353,6 +353,25 @@ changes.
   `launcher_refusals`, each `ALONE … GREEN`, its QEMU RSS peaking at 10591 MiB
   with no swap. `syscall_window_nmi` is red in two of four branch runs and none
   of three on `main`; not investigated.
+  Once each boot carried only the test binaries it runs (`c81940f2` and after),
+  six more branch runs against six of `main`: `syscall_window_nmi` passed in all
+  twelve. `screen_loader_lines` grows 12 or 13 rows there for 14 or 15 lines;
+  the lines between its two markers are the same on both trees, so what moves
+  its growth is how far the loader has got when the GOP-query dump lands.
+  `quiesce_leaves_the_volume_whole` was red in four of the six branch runs and
+  none of `main`'s, each `ALONE … GREEN`, all under `quiesce-fsync-refuse`: twice
+  `FAT 1 differs from FAT 0 at entry 45` in the volume the stop left, once with
+  a cluster no entry reaches, and twice `log-volume: … was left with a chain its
+  entry does not reach: corrupt cluster chain` — the second stage
+  `issues/kernel/nothing-bounds-the-log-writer-below-the-boots-last-word.md`
+  describes, on a boot that now carries 13 MiB of ROOT where it carried 619.
+  `metal_job_reboot` was red in one of the six, `ALONE` red too, and in one
+  further branch run (`the job drain carried no kernel output at all (24
+  bytes)`), and green alone three times on each tree, alternating;
+  `swap_crash_rolls_back` in one of the six; and in that further run
+  `quiesce_wakes_on_the_last_park`, on a kernel panic at
+  `arch/tlb.rs:171` (`issues/kernel/a-shootdown-panicked-on-a-cpu-the-host-starved.md`).
+  None investigated.
 
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
