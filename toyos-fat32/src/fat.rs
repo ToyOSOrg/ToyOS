@@ -2,11 +2,12 @@ use crate::boot::Cluster;
 use crate::device::BlockAccess;
 use crate::error::Error;
 use crate::fs::Fat32;
+use crate::repair::Repair;
 
 /// What this crate writes to terminate a chain. Any value at or above
 /// `0x0FFF_FFF8` reads as end-of-chain; there is no reason to prefer one, so
 /// this is the one that is obviously not a cluster number.
-const END_OF_CHAIN: u32 = 0x0FFF_FFFF;
+pub(crate) const END_OF_CHAIN: u32 = 0x0FFF_FFFF;
 
 /// A FAT32 entry is 28 bits. The top four belong to whoever formatted the
 /// volume and are preserved across every write, which is why `set_fat_entry`
@@ -26,29 +27,14 @@ impl<D: BlockAccess> Fat32<D> {
         Ok(u32::from_le_bytes(raw) & ENTRY_MASK)
     }
 
-    /// Set one FAT entry in every live FAT, **writing the active FAT last**.
+    /// Set one FAT entry in every live FAT, the active FAT last.
     ///
-    /// The copies are separate device writes, and the device may refuse the
-    /// second on its own bound ([`crate::device::IoError::BudgetExpired`]) after
-    /// the first is durable — a starved host descheduling the vCPU past the
-    /// block layer's operation budget mid-update. Written in storage order the
-    /// active FAT would take the update while a mirror was left behind, and the
-    /// split would survive at rest: a volume that reads differently the moment
-    /// firmware consults the other copy, which is what mirroring exists to
-    /// prevent.
-    ///
-    /// So the active FAT — the one [`Self::fat_entry`] and the allocator's scan
-    /// read — is written last. A refusal partway leaves it exactly as it was, so
-    /// the read path and a re-scan see the pre-update state and a retry re-drives
-    /// the identical update: an allocator re-picks the same still-free cluster,
-    /// and the rewrite reaches both copies. The invariant is **`set_fat_entry`
-    /// returning `Err` ⟹ the active FAT for this entry is unchanged**, which is
-    /// what makes the caller's budget retry idempotent — it heals the mirror an
-    /// interrupted write left stale rather than accumulating splits, and leaks no
-    /// cluster in the active FAT. It is the ordering discipline of
-    /// [`Self::append_cluster`] (terminate before link) in the mirror dimension:
-    /// commit the copy a reader trusts last, so a partial failure is invisible
-    /// and redoable.
+    /// The copies are separate device writes and either may be refused with an
+    /// unknown outcome, so an `Err` says nothing about either. The caller has
+    /// already queued the value this entry must end up holding
+    /// ([`crate::repair`]), and re-driving it rewrites every copy. The active
+    /// copy goes last so that a refusal of the first write leaves the copy
+    /// every read serves from as it was until the repair lands.
     pub(crate) fn set_fat_entry(&mut self, cluster: Cluster, value: u32) -> Result<(), Error> {
         self.invalidate_sector();
         let active = self.geom.active_fat.unwrap_or(0);
@@ -163,7 +149,8 @@ impl<D: BlockAccess> Fat32<D> {
         Err(Error::CorruptChain)
     }
 
-    /// Claim one free cluster and mark it end-of-chain.
+    /// Claim one free cluster and mark it end-of-chain, leaving its release
+    /// queued in the repair for the caller to keep or fold into its own.
     ///
     /// Scans the FAT a sector at a time from the FSInfo hint, wrapping once.
     /// The hint is only a starting point: a hostile FSInfo can make the scan
@@ -193,29 +180,39 @@ impl<D: BlockAccess> Fat32<D> {
                 if u32::from_le_bytes(bytes) & ENTRY_MASK != 0 {
                     continue;
                 }
-                self.set_fat_entry(cluster, END_OF_CHAIN)?;
+                // Counted before the write: the release this queues counts it
+                // back when it lands, whatever became of the claim.
+                self.queue(Repair::Put { cluster, value: 0 });
                 self.fsinfo.next_free = self.geom.cluster(number.saturating_add(1));
                 self.fsinfo.free_count = self.fsinfo.free_count.map(|n| n.saturating_sub(1));
                 self.fsinfo.dirty = true;
+                self.set_fat_entry(cluster, END_OF_CHAIN)?;
                 return Ok(cluster);
             }
         }
         Err(Error::NoSpace)
     }
 
-    /// Allocate a cluster and link it onto the end of an existing chain.
+    /// Allocate a cluster and link it onto the end of an existing chain,
+    /// queueing both undos: `last` terminated again, then the claim released.
     ///
     /// The link is written after the new cluster is claimed and terminated, so
-    /// a failure between the two leaks a cluster rather than producing a chain
-    /// that runs into free space. Leaked clusters are recoverable by `fsck`; a
-    /// chain pointing at a free cluster is a filesystem two files can share.
+    /// a stop between the two leaks a cluster rather than producing a chain
+    /// that runs into free space, which is a filesystem two files can share.
     pub(crate) fn append_cluster(&mut self, last: Cluster) -> Result<Cluster, Error> {
         let new = self.alloc_cluster()?;
+        self.queue(Repair::Put { cluster: last, value: END_OF_CHAIN });
         self.set_fat_entry(last, new.raw())?;
         Ok(new)
     }
 
     /// Free every cluster of a chain, refusing if the walk reaches `anchor`.
+    ///
+    /// **A commit**: the first free is past undoing, so a refusal leaves the
+    /// rest of the walk queued in the repair — the refused cluster's free, then
+    /// the chain after it, which is still intact because the walk frees from
+    /// the head. A link that is not one ends the walk with nothing queued: a
+    /// corrupt tail is refused, never followed.
     ///
     /// The anchor is what makes truncation sound, and it is the second half of
     /// the cycle story [`Self::advance`] tells. `free_chain` on its own is
@@ -235,18 +232,27 @@ impl<D: BlockAccess> Fat32<D> {
         start: Cluster,
         anchor: Option<Cluster>,
     ) -> Result<(), Error> {
+        let mark = self.repair.len();
         let mut c = start;
         for _ in 0..self.geom.cluster_count as u64 {
             if Some(c) == anchor {
                 return Err(Error::CorruptChain);
             }
-            let next = self.next_cluster(c)?;
-            self.set_fat_entry(c, 0)?;
-            self.fsinfo.free_count = self.fsinfo.free_count.map(|n| n.saturating_add(1));
-            if self.fsinfo.next_free.is_none_or(|n| c < n) {
-                self.fsinfo.next_free = Some(c);
+            let next = match self.next_cluster(c) {
+                Ok(next) => next,
+                Err(Error::CorruptChain) => return Err(Error::CorruptChain),
+                Err(e) => {
+                    self.queue(Repair::Free { start: c, anchor });
+                    return Err(e);
+                }
+            };
+            if let Some(n) = next {
+                self.queue(Repair::Free { start: n, anchor });
             }
-            self.fsinfo.dirty = true;
+            self.queue(Repair::Put { cluster: c, value: 0 });
+            self.set_fat_entry(c, 0)?;
+            self.repair.truncate(mark);
+            self.released(c);
             match next {
                 Some(n) => c = n,
                 None => return Ok(()),
@@ -286,14 +292,18 @@ impl<D: BlockAccess> Fat32<D> {
         Err(Error::CorruptChain)
     }
 
-    /// Drop everything after `cluster`, leaving it as the new end of chain.
-    pub(crate) fn truncate_chain(&mut self, cluster: Cluster) -> Result<(), Error> {
-        let tail = self.next_cluster(cluster)?;
+    /// Drop `tail`, the chain after `cluster`, leaving `cluster` as the new end
+    /// of chain.
+    ///
+    /// A commit from its first write, like [`Self::free_chain`]: a refused
+    /// terminator leaves itself and then the tail's free queued.
+    pub(crate) fn truncate_chain(&mut self, cluster: Cluster, tail: Cluster) -> Result<(), Error> {
+        let mark = self.repair.len();
+        self.queue(Repair::Free { start: tail, anchor: Some(cluster) });
+        self.queue(Repair::Put { cluster, value: END_OF_CHAIN });
         self.set_fat_entry(cluster, END_OF_CHAIN)?;
-        match tail {
-            Some(t) => self.free_chain(t, Some(cluster)),
-            None => Ok(()),
-        }
+        self.repair.truncate(mark);
+        self.free_chain(tail, Some(cluster))
     }
 
     /// Allocate a cluster with its contents zeroed, for a new directory.

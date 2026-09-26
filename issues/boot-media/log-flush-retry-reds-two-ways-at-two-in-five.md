@@ -90,3 +90,70 @@ was red the same way in both of its runs, each re-run red too; at `eef19bd1`
 it had been green. One
 `main` run is not a rate, but it is this sentence on a tree without the
 branch.
+
+## A fourth way: the hung boot takes the disk before soundd is paged in
+
+The `[hung]` boot (`usb-transport-break` + `usb-reset-break`) reds as
+
+    [qemu] Init process crashed during boot:
+    SEGFAULT tid=0: execute unmapped address at 0x10000056b7c  _start+0x0
+    exit: soundd pid=5 code=-1
+
+followed by `usb-storage: read of 1 blocks at … failed on disk 0` for the
+root: the first WRITE(10) broke the transport, the reset ladder took the disk
+offline, and soundd's first page was never read. The `[retry]` and `[deadman]`
+arms were green in every one of these runs. Measured in one session on the dev
+host, sequentially, while gating #510 (`toyos-fat32`'s refused-write repair;
+its kernel diff is `fat32_adapter.rs`'s logging of a pending repair): that
+branch's `b5eaed62` sources for `kernel/src/fat32_adapter.rs` and
+`toyos-fat32/src`, 2 red of 4; its `5c73eca0`, 4 red of 4. Each red's alone
+re-run was red on the same assertion. The same failure on the base arm puts
+it before this branch; four runs a side do not separate the two rates.
+
+### Root cause of the fourth way: the arm breaks the disk root is paged from
+
+The `[hung]` boot's image carries ROOT, the ESP and `/log` on the one USB stick
+(`gpt: device 16 carries the ROOT candidate … at LBA 71680+1392640` and `…the
+log partition … at LBA 1464320+69632`), and `usb-transport-break` breaks *the
+boot's first WRITE(10)* on whatever disk takes it. That write is logd creating
+`/log/<stamp>.log`, which runs while init is still spawning soundd and
+test-runner, whose text is demand-paged off that same stick. Once the ladder
+takes the disk offline, the next page-in of either is refused
+(`kernel/src/process.rs:1387`, `fault: … is backed by a file byte … that the
+device would not read`) and the process dies as a `SEGFAULT` at `_start`
+(`kernel/src/arch/idt/exceptions.rs:213`); before the ready marker, that is
+`Died::Faulted` and `tests/common/qemu.rs:4684` ends the boot. From a red boot
+on #510's head, `--nocapture`:
+
+    [kernel 0.491 cpu0] spawn: /system/bin/test-runner pid=6 … entry=0x100000215fc
+    [kernel 0.499 cpu0] usb-storage: 00:02.0 slot 1 transport broke on SCSI 0x2a: a staged break skipped the data phase wait; break 1 of 3 running
+    [kernel 0.551 cpu0] usb-storage: 00:02.0 slot 1 is offline: …
+    [kernel 0.551 cpu1] root: read of block 2032 failed
+    [kernel 0.552 cpu1] fault: 0x100000215fc is backed by a file byte 348160 that the device would not read; leaving the fault unhandled
+    [kernel 0.552 cpu0] log-volume: create of 2026-09-26-043306.log: device I/O failed
+    [kernel 0.552 cpu1] SEGFAULT tid=0: execute unmapped address at 0x100000215fc
+
+So the arm is green only when the break lands after soundd's and
+test-runner's pages are resident. Across both trees, every hung boot whose
+break came at or before 0.500 s was red and every one at or after 0.513 s was
+green. Whichever of the two had not paged in yet is the one that dies: soundd
+when the break is near 0.455 s, test-runner near 0.50 s.
+
+**Not #510.** On the same host in one session, run one guest at a time,
+`--nightly log_flush_retry --nocapture`: `main` `fb7bc2aa` 5 red of 6 runs
+(10 of 11 hung boots red), #510 `4d4ad4df` 4 red of 4 runs (5 of 8 hung
+boots red). Every red had the mechanism above. #510 moves which block the
+create writes first (183175 against `main`'s 185991), not when the first
+write goes out: the break came at 0.454–0.523 s on #510 and 0.455–0.513 s on
+`main`.
+
+**The harness verdict is right; the arm's premise is not.** A process did
+die. What cannot hold is the arm's claim that a boot keeps its userland while
+the disk it pages from goes offline. **Fix at the owner, the arm in
+`tests/common/volumes.rs` (`log_flush_retry`, boot 3 from line 3007):** give
+the hung boot its ROOT on a second disk, which the kernel accepts because it
+selects ROOT candidates across every device (`kernel/src/gpt.rs:180`). `/log`
+has to stay on the boot stick (`gpt.rs:435`, `locate_log`), so the first
+WRITE(10), logd's, still breaks that stick, and nothing is paged from it.
+Arming the break later cannot fix this, because logd's create comes before
+the ready marker.

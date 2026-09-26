@@ -8,7 +8,9 @@ use crate::boot::{Cluster, FsInfo, Geometry};
 use crate::device::BlockAccess;
 use crate::dir::{DirScan, RawEntry, ATTR_ARCHIVE, ATTR_DIRECTORY, ATTR_READ_ONLY, MAX_DIR_ENTRIES};
 use crate::error::Error;
+use crate::fat::END_OF_CHAIN;
 use crate::name;
+use crate::repair::{Repair, MAX_REPAIR_STEPS};
 use crate::time::FatTime;
 
 /// FAT32's file size field is 32 bits wide. Not a policy this crate could
@@ -36,6 +38,20 @@ pub struct Fat32<D: BlockAccess> {
     /// directory scan reads one sector per sixteen entries instead of one per
     /// entry, and every write invalidates it, so it cannot go stale.
     pub(crate) scratch_at: Option<u64>,
+    /// The writes that make the volume consistent from wherever the running
+    /// call has reached, re-driven from the end — see [`crate::repair`]. Empty
+    /// between calls unless one of its writes was itself refused, and then no
+    /// mutating call starts until it lands. Never past
+    /// [`MAX_REPAIR_STEPS`], and allocated at that capacity once.
+    pub(crate) repair: Vec<Repair>,
+    /// Calls that left a repair queued, counted from mount: which one the
+    /// queue belongs to, see [`Fat32::repair_episode`].
+    pub(crate) episodes: u64,
+    /// A mutating call is running; a second one inside it panics.
+    pub(crate) in_call: bool,
+    /// The running call has passed its commit, so what the repair holds is
+    /// its remaining work rather than its rollback.
+    pub(crate) committed: bool,
 }
 
 /// What a path names, once resolved.
@@ -230,7 +246,17 @@ impl<D: BlockAccess> Fat32<D> {
         let geom = Self::probe(&mut dev)?;
         let mut scratch = vec![0u8; geom.bytes_per_sector as usize];
         let fsinfo = FsInfo::read(&mut dev, &geom, &mut scratch);
-        Ok(Fat32 { dev, geom, fsinfo, scratch, scratch_at: None })
+        Ok(Fat32 {
+            dev,
+            geom,
+            fsinfo,
+            scratch,
+            scratch_at: None,
+            repair: Vec::with_capacity(MAX_REPAIR_STEPS),
+            episodes: 0,
+            in_call: false,
+            committed: false,
+        })
     }
 
     pub fn geometry(&self) -> &Geometry {
@@ -580,17 +606,27 @@ impl<D: BlockAccess> Fat32<D> {
     /// stopped costs no chain traversal at all. A chain already longer than
     /// `need` is adopted rather than trimmed — another writer's file may carry
     /// slack, and shrinking it is not what a write asked for.
+    ///
+    /// The repair it leaves is two steps however far it grew: terminate the
+    /// chain where it ended, then free what was grown past it.
     fn ensure_capacity(&mut self, f: &mut File, need: u64) -> Result<(), Error> {
         if need == 0 {
             return Ok(());
         }
         let bpc = self.geom.bytes_per_cluster() as u64;
         let want = need.div_ceil(bpc);
+        let mark = self.repair.len();
+        // Where the chain ended before this call, and the first cluster it
+        // grew past that end.
+        let mut grown: Option<(Option<Cluster>, Cluster)> = None;
 
         let first = match f.first_cluster {
             Some(c) => c,
             None => {
                 let c = self.alloc_cluster()?;
+                self.repair.truncate(mark);
+                self.queue(Repair::Free { start: c, anchor: None });
+                grown = Some((None, c));
                 f.first_cluster = Some(c);
                 f.hint = Some((0, c));
                 c
@@ -600,7 +636,16 @@ impl<D: BlockAccess> Fat32<D> {
         while (index as u64) + 1 < want {
             cluster = match self.next_cluster(cluster)? {
                 Some(next) => next,
-                None => self.append_cluster(cluster)?,
+                None => {
+                    let new = self.append_cluster(cluster)?;
+                    let (end, head) = *grown.get_or_insert((Some(cluster), new));
+                    self.repair.truncate(mark);
+                    self.queue(Repair::Free { start: head, anchor: None });
+                    if let Some(end) = end {
+                        self.queue(Repair::Put { cluster: end, value: END_OF_CHAIN });
+                    }
+                    new
+                }
             };
             index += 1;
         }
@@ -646,12 +691,14 @@ impl<D: BlockAccess> Fat32<D> {
 
     /// Write `data` at `offset`, allocating and zero-filling as needed.
     ///
-    /// All or nothing. A write that fails part way — running out of clusters
-    /// is the one that happens — gives back everything it took, so the handle
-    /// still describes the file it described before. Without that rollback a
-    /// failed write leaves a chain longer than the size that will be recorded
-    /// for it, which is what `fsck_msdos` calls "too many clusters allocated"
-    /// and is a real inconsistency, not a cosmetic one.
+    /// All or nothing on the chain. A write that fails part way — out of
+    /// clusters, or a device write refused — gives back every cluster it took
+    /// (see [`crate::repair`]), so the handle still describes the file it
+    /// described before; bytes it wrote into space the file already held stay
+    /// written. Without that rollback a failed write leaves a chain longer
+    /// than the size that will be recorded for it, which is what `fsck_msdos`
+    /// calls "too many clusters allocated" and is a real inconsistency, not a
+    /// cosmetic one.
     ///
     /// The alternative — reporting how many bytes did fit — was rejected: a
     /// caller that must handle a short write correctly is a caller that will
@@ -669,15 +716,12 @@ impl<D: BlockAccess> Fat32<D> {
         if data.is_empty() {
             return Ok(());
         }
-        self.live_entry(f)?;
-        let old_size = f.size as u64;
-        match self.write_inner(f, offset, data, end, old_size) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.rollback_to(f, old_size);
-                Err(e)
-            }
-        }
+        let before = *f;
+        self.atomic(|fs| {
+            fs.live_entry(f)?;
+            fs.write_inner(f, offset, data, end, before.size as u64)
+        })
+        .inspect_err(|_| *f = before)
     }
 
     fn write_inner(
@@ -701,52 +745,62 @@ impl<D: BlockAccess> Fat32<D> {
 
     /// Set a file's length, allocating and zeroing on growth and releasing
     /// clusters on shrink.
+    ///
+    /// A growth that fails is undone like a failed [`Self::write`]. A shrink
+    /// that fails once it has begun freeing has shrunk: the handle says so,
+    /// and the rest of the free is queued (see [`Self::free_chain`]).
     pub fn set_len(&mut self, f: &mut File, len: u64) -> Result<(), Error> {
         if len > MAX_FILE_SIZE {
             return Err(Error::TooLarge);
         }
-        self.live_entry(f)?;
-        let old = f.size as u64;
-        if len > old {
-            if let Err(e) = self.ensure_capacity(f, len).and_then(|()| self.zero_range(f, old, len)) {
-                self.rollback_to(f, old);
-                return Err(e);
+        let before = *f;
+        self.atomic(|fs| {
+            fs.live_entry(f)?;
+            let old = f.size as u64;
+            if len > old {
+                fs.ensure_capacity(f, len)?;
+                fs.zero_range(f, old, len)?;
+                f.size = len as u32;
+            } else if len < old {
+                fs.shrink_chain(f, len)?;
             }
-            f.size = len as u32;
-            return Ok(());
-        }
-        if len < old {
-            self.shrink_chain(f, len)?;
-        }
-        f.size = len as u32;
-        Ok(())
+            Ok(())
+        })
+        .inspect_err(|_| {
+            if len > before.size as u64 {
+                *f = before;
+            }
+        })
     }
 
-    /// Release every cluster past what `len` bytes need.
+    /// Release every cluster past what `len` bytes need, recording `len` in
+    /// the handle once the repair carries the shrink: a refusal before that
+    /// has written nothing, and the handle's old size is what makes the retry
+    /// shrink again.
     fn shrink_chain(&mut self, f: &mut File, len: u64) -> Result<(), Error> {
         let bpc = self.geom.bytes_per_cluster() as u64;
         let keep = len.div_ceil(bpc);
         f.hint = None;
-        let Some(first) = f.first_cluster else { return Ok(()) };
+        let Some(first) = f.first_cluster else {
+            f.size = len as u32;
+            return Ok(());
+        };
         // Before anything is written: this is the one operation that keeps
         // part of a chain and frees the rest, and a loop between the two
         // halves is how live clusters reach the allocator.
         self.verify_acyclic(first)?;
         if keep == 0 {
-            self.free_chain(first, None)?;
             f.first_cluster = None;
-            return Ok(());
+            f.size = len as u32;
+            return self.free_chain(first, None);
         }
         let last = self.advance(first, keep - 1)?.ok_or(Error::CorruptChain)?;
-        self.truncate_chain(last)
-    }
-
-    /// Undo a failed growth. Best effort by necessity: the failure being
-    /// undone is usually a device that has stopped answering, and there is
-    /// nothing better to return than the error that started it.
-    fn rollback_to(&mut self, f: &mut File, size: u64) {
-        let _ = self.shrink_chain(f, size);
-        f.size = size as u32;
+        let tail = self.next_cluster(last)?;
+        f.size = len as u32;
+        match tail {
+            Some(tail) => self.truncate_chain(last, tail),
+            None => Ok(()),
+        }
     }
 
     /// Record a handle's size, first cluster and modification time in its
@@ -755,6 +809,10 @@ impl<D: BlockAccess> Fat32<D> {
     /// Refuses if the entry no longer holds the cluster this handle last saw
     /// written there — see [`File`].
     pub fn flush_meta(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
+        self.atomic(|fs| fs.record_meta(f, time))
+    }
+
+    fn record_meta(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
         let mut raw = self.live_entry(f)?;
         raw.set_first_cluster(f.first_cluster.map_or(0, Cluster::raw));
         raw.set_size(f.size);
@@ -781,12 +839,14 @@ impl<D: BlockAccess> Fat32<D> {
     /// inconsistency, which is the honest limit: FAT has no journal and this
     /// crate does not pretend to one.
     pub fn reconcile(&mut self, f: &mut File, time: FatTime) -> Result<(), Error> {
-        self.live_entry(f)?;
-        // Before the entry: an entry naming a size the chain does not cover is
-        // a reader walking off the end of a chain, which is worse than the
-        // slack this is here to remove.
-        self.shrink_chain(f, f.size as u64)?;
-        self.flush_meta(f, time)
+        self.atomic(|fs| {
+            fs.live_entry(f)?;
+            // Before the entry: an entry naming a size the chain does not cover
+            // is a reader walking off the end of a chain, which is worse than
+            // the slack this is here to remove.
+            fs.shrink_chain(f, f.size as u64)?;
+            fs.record_meta(f, time)
+        })
     }
 
     /// The device byte ranges holding a file's data, coalesced.
@@ -840,6 +900,10 @@ impl<D: BlockAccess> Fat32<D> {
     /// a create that silently opened an existing file would let a caller
     /// believe it owns bytes another writer put there.
     pub fn create(&mut self, path: &str, time: FatTime) -> Result<File, Error> {
+        self.atomic(|fs| fs.create_file(path, time))
+    }
+
+    fn create_file(&mut self, path: &str, time: FatTime) -> Result<File, Error> {
         let (dir, name) = self.parent_of(path)?;
         if self.find_in_dir(dir, &name)?.is_some() {
             return Err(Error::AlreadyExists);
@@ -861,6 +925,10 @@ impl<D: BlockAccess> Fat32<D> {
     }
 
     pub fn create_dir(&mut self, path: &str, time: FatTime) -> Result<(), Error> {
+        self.atomic(|fs| fs.make_dir(path, time))
+    }
+
+    fn make_dir(&mut self, path: &str, time: FatTime) -> Result<(), Error> {
         let (dir, name) = self.parent_of(path)?;
         if self.find_in_dir(dir, &name)?.is_some() {
             return Err(Error::AlreadyExists);
@@ -868,7 +936,7 @@ impl<D: BlockAccess> Fat32<D> {
         name::validate_component(&name)?;
 
         // The cluster is prepared before the entry that names it exists, so a
-        // failure here leaks a cluster rather than leaving a directory entry
+        // stop here leaks a cluster rather than leaving a directory entry
         // pointing at uninitialised bytes that would read as entries.
         let cluster = self.alloc_zeroed_cluster()?;
         self.init_dot_entries(cluster, dir, time)?;
@@ -878,13 +946,8 @@ impl<D: BlockAccess> Fat32<D> {
         template.set_first_cluster(cluster.raw());
         template.set_create_time(time);
         template.set_write_time(time);
-        match self.insert_entry(dir, &name, &template) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let _ = self.free_chain(cluster, None);
-                Err(e)
-            }
-        }
+        self.insert_entry(dir, &name, &template)?;
+        Ok(())
     }
 
     /// Create every missing directory along a path.
@@ -907,59 +970,67 @@ impl<D: BlockAccess> Fat32<D> {
 
     /// Delete a file.
     ///
-    /// Two orderings matter here and both were wrong.
-    ///
     /// The final component is looked up in its parent rather than resolved,
     /// so an entry whose first cluster is outside the volume can still be
     /// deleted. Resolving it would refuse — correctly, for a read — and leave
     /// a crafted entry that no amount of deleting could remove, which on the
     /// ESP is a log rotation that wedges permanently on one bad entry.
     ///
-    /// And the entry is erased *before* the chain is freed. A failure now
-    /// leaks clusters, which `fsck` reclaims; the other order left a live
-    /// entry naming freed clusters, which `fsck` can only repair by guessing
-    /// who owns them, and which the next allocation turns into a cross-link.
-    /// This is the ordering `append_cluster` and `create_dir` already argue
-    /// for; `remove` was the one place it was not applied.
+    /// The entry is erased *before* the chain is freed, so a stop between
+    /// leaks clusters; the other order leaves a live entry naming freed
+    /// clusters, which the next allocation turns into a cross-link. A refusal
+    /// while erasing restores the entry and answers `Err`. Once it is erased
+    /// the delete has happened and answers `Ok`: a refusal of the free leaves
+    /// the rest of it queued for the next call to finish first. A chain found
+    /// corrupt part way through the free is the one `Err` after the erase —
+    /// the name is gone, what could not be followed leaks, and that answer is
+    /// its only record.
     pub fn remove(&mut self, path: &str) -> Result<(), Error> {
-        let (dir, name) = self.parent_of(path)?;
-        let Some((raw, loc)) = self.find_in_dir(dir, &name)? else {
-            return Err(Error::NotFound);
-        };
-        if raw.is_dir() {
-            return Err(Error::IsADirectory);
-        }
-        self.erase_entries(loc)?;
-        match self.geom.cluster(raw.first_cluster()) {
-            Some(c) => self.free_chain(c, None),
-            None => Ok(()),
-        }
+        self.atomic(|fs| {
+            let (dir, name) = fs.parent_of(path)?;
+            let Some((raw, loc)) = fs.find_in_dir(dir, &name)? else {
+                return Err(Error::NotFound);
+            };
+            if raw.is_dir() {
+                return Err(Error::IsADirectory);
+            }
+            fs.erase_committed(loc, fs.geom.cluster(raw.first_cluster()))
+        })
     }
 
     /// Delete an empty directory.
     ///
-    /// Same two orderings as [`Self::remove`]. A directory entry whose cluster
-    /// is outside the volume has no contents to check and none to free, so it
-    /// is simply erased — refusing would make it permanent.
+    /// Same order as [`Self::remove`]. A directory entry whose cluster is
+    /// outside the volume has no contents to check and none to free, so it is
+    /// simply erased — refusing would make it permanent.
     pub fn remove_dir(&mut self, path: &str) -> Result<(), Error> {
-        let (dir, name) = self.parent_of(path)?;
-        let Some((raw, loc)) = self.find_in_dir(dir, &name)? else {
-            return Err(Error::NotFound);
-        };
-        if !raw.is_dir() {
-            return Err(Error::NotADirectory);
-        }
-        let cluster = self.geom.cluster(raw.first_cluster());
-        if let Some(c) = cluster {
-            if !self.dir_is_empty(c)? {
-                return Err(Error::DirectoryNotEmpty);
+        self.atomic(|fs| {
+            let (dir, name) = fs.parent_of(path)?;
+            let Some((raw, loc)) = fs.find_in_dir(dir, &name)? else {
+                return Err(Error::NotFound);
+            };
+            if !raw.is_dir() {
+                return Err(Error::NotADirectory);
             }
-        }
+            let cluster = fs.geom.cluster(raw.first_cluster());
+            if let Some(c) = cluster {
+                if !fs.dir_is_empty(c)? {
+                    return Err(Error::DirectoryNotEmpty);
+                }
+            }
+            fs.erase_committed(loc, cluster)
+        })
+    }
+
+    /// Erase an entry run, then queue the free of the chain it named: undone
+    /// up to the last erase, carried forward from it by [`Self::atomic`].
+    fn erase_committed(&mut self, loc: Loc, chain: Option<Cluster>) -> Result<(), Error> {
         self.erase_entries(loc)?;
-        match cluster {
-            Some(c) => self.free_chain(c, None),
-            None => Ok(()),
+        self.commit();
+        if let Some(c) = chain {
+            self.queue(Repair::Free { start: c, anchor: None });
         }
+        Ok(())
     }
 
     /// Move a file or directory.
@@ -969,6 +1040,10 @@ impl<D: BlockAccess> Fat32<D> {
     /// a window in which neither name resolves — which is worse than an error
     /// the caller can act on.
     pub fn rename(&mut self, from: &str, to: &str) -> Result<(), Error> {
+        self.atomic(|fs| fs.move_entry(from, to))
+    }
+
+    fn move_entry(&mut self, from: &str, to: &str) -> Result<(), Error> {
         let node = self.resolve(from)?;
         let loc = node.loc.ok_or(Error::IsADirectory)?;
         let (new_dir, new_name) = self.parent_of(to)?;
@@ -1067,10 +1142,17 @@ impl<D: BlockAccess> Fat32<D> {
 
     /// Make every write durable and record the free-cluster hints.
     ///
-    /// FSInfo is written before the flush so the flush covers it.
+    /// Finishes a refused call's repair first, and refuses while it cannot:
+    /// a sync is a caller about to rely on the volume as it stands. A volume
+    /// mounted with no count has it taken from the FAT rather than written as
+    /// unknown. FSInfo is written before the flush so the flush covers it.
     pub fn sync(&mut self) -> Result<(), Error> {
+        self.settle_first()?;
         if self.fsinfo.dirty {
-            let Fat32 { dev, geom, fsinfo, scratch, scratch_at } = self;
+            if self.fsinfo.free_count.is_none() {
+                self.fsinfo.free_count = Some(self.count_free()?);
+            }
+            let Fat32 { dev, geom, fsinfo, scratch, scratch_at, .. } = self;
             *scratch_at = None;
             fsinfo.write(dev, geom, scratch)?;
             fsinfo.dirty = false;
@@ -1082,11 +1164,13 @@ impl<D: BlockAccess> Fat32<D> {
     /// Free space, in bytes.
     ///
     /// Uses the FSInfo hint when the volume had one and counts the FAT when it
-    /// did not. The count is cached in the hint so the scan happens once.
+    /// did not. The count is cached in the hint so the scan happens once, over
+    /// a FAT whose refused writes have been re-driven.
     pub fn free_bytes(&mut self) -> Result<u64, Error> {
         let free = match self.fsinfo.free_count {
             Some(n) => n,
             None => {
+                self.settle_first()?;
                 let n = self.count_free()?;
                 self.fsinfo.free_count = Some(n);
                 self.fsinfo.dirty = true;
