@@ -9121,22 +9121,26 @@ fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     while live.working(log) {
         let said = &log[launched..];
         if said.contains("WINIT-LOOP-OK") {
-            let lives = window_lives(said);
+            // Up to the kept window's close: a window the app still held is
+            // closed by its exit, which follows that.
+            let Some(gui_q) = said.find(" by GUI+Q, ") else {
+                return Err(format!("the winit loop's kept window was never closed by GUI+Q:\n{said}"));
+            };
+            let upto = said[gui_q..].find('\n').map_or(said.len(), |end| gui_q + end);
+            let lives = window_lives(&said[..upto]);
             let Some(((_, kept), dropped)) = lives.split_last() else {
                 return Err(format!("the compositor opened no window for the winit loop:\n{said}"));
             };
             if kept.as_deref() != Some("GUI+Q") {
                 return Err(format!(
-                    "the window the winit loop kept was closed by {kept:?}, not GUI+Q:\n{said}"
+                    "GUI+Q closed a window other than the one the winit loop opened last:\n{said}"
                 ));
             }
-            // Closed before the kept window was, so by its drop and not by
-            // the app's exit.
             if let Some(at) = dropped.iter().position(|(_, by)| by.as_deref() != Some("the client itself")) {
                 let (client, by) = &dropped[at];
                 return Err(format!(
                     "window {at} (client {client}) of the {} the winit loop dropped was not closed \
-                     by its drop before the kept one was, but by {by:?}:\n{said}",
+                     by its drop before the kept one was closed, but by {by:?}:\n{said}",
                     dropped.len()
                 ));
             }
