@@ -263,10 +263,12 @@ fn trace_events(trace: &Path) -> Result<Vec<Did>, String> {
 /// whose writes to `span` did not end in a flush and after which another
 /// lifetime wrote to it; its last write is the one blockd withheld the answer
 /// to, and the ones before it since its last flush are the acknowledged ones.
-/// The lifetime after it must write exactly those, in that order, before any
-/// other write to `span` — which is what reissue means, and what a client
-/// that forgot them cannot do by accident. Every Flush in the trace is
-/// blockd's: the kernel's driver issues none.
+/// The lifetime after it must write exactly those before any other write to
+/// `span`, each after every one of them it overlaps that came before it —
+/// which is what reissue means, and what a client that forgot them cannot do
+/// by accident. Two writes that do not overlap may be in flight together, so
+/// the device's order between them is neither lifetime's to keep. Every Flush
+/// in the trace is blockd's: the kernel's driver issues none.
 fn reissued_after(trace: &Path, span: Span) -> Result<Vec<u64>, String> {
     let mut lives: Vec<Vec<Did>> = Vec::new();
     for did in trace_events(trace)? {
@@ -281,9 +283,12 @@ fn reissued_after(trace: &Path, span: Span) -> Result<Vec<u64>, String> {
     }
     let wrote = |life: &[Did]| life.iter().any(|d| matches!(d, Did::Wrote { .. }));
     let volume: Vec<&[Did]> = lives.iter().map(Vec::as_slice).filter(|l| wrote(l)).collect();
-    let tail = |life: &[Did]| -> Vec<u64> {
+    let writes = |dids: &[Did]| -> Vec<(u64, u64)> {
+        dids.iter().filter_map(|d| match d { Did::Wrote { lba, sectors } => Some((*lba, *sectors)), _ => None }).collect()
+    };
+    let tail = |life: &[Did]| -> Vec<(u64, u64)> {
         let after = life.iter().rposition(|d| *d == Did::Flushed).map_or(0, |at| at + 1);
-        life[after..].iter().filter_map(|d| match d { Did::Wrote { lba, .. } => Some(*lba), _ => None }).collect()
+        writes(&life[after..])
     };
     let died: Vec<usize> = (0..volume.len().saturating_sub(1)).filter(|&i| !tail(volume[i]).is_empty()).collect();
     let [died] = died[..] else {
@@ -295,7 +300,7 @@ fn reissued_after(trace: &Path, span: Span) -> Result<Vec<u64>, String> {
         ));
     };
     let mut unflushed = tail(volume[died]);
-    let withheld = unflushed.pop().expect("a tail is not empty");
+    let (withheld, _) = unflushed.pop().expect("a tail is not empty");
     // An empty prefix equals anything, so a loss with nothing acknowledged
     // before it would pass with no write to reissue.
     if unflushed.is_empty() {
@@ -304,12 +309,17 @@ fn reissued_after(trace: &Path, span: Span) -> Result<Vec<u64>, String> {
              acknowledged was left to reissue"
         ));
     }
-    let next: Vec<u64> = volume[died + 1]
-        .iter()
-        .filter_map(|d| match d { Did::Wrote { lba, .. } => Some(*lba), _ => None })
-        .take(unflushed.len())
-        .collect();
-    if next != unflushed {
+    let next: Vec<(u64, u64)> = writes(volume[died + 1]).into_iter().take(unflushed.len()).collect();
+    let overlaps = |a: (u64, u64), b: (u64, u64)| a.0 < b.0 + b.1 && b.0 < a.0 + a.1;
+    // Every write that overlaps one of them, in the order it went out.
+    let around = |w: (u64, u64), ws: &[(u64, u64)]| ws.iter().copied().filter(|&o| overlaps(o, w)).collect::<Vec<_>>();
+    let (mut want, mut got) = (unflushed.clone(), next.clone());
+    want.sort_unstable();
+    got.sort_unstable();
+    let same = want == got && unflushed.iter().all(|&w| around(w, &unflushed) == around(w, &next));
+    let lbas = |ws: &[(u64, u64)]| ws.iter().map(|w| w.0).collect::<Vec<_>>();
+    let (unflushed, next) = (lbas(&unflushed), lbas(&next));
+    if !same {
         return Err(format!(
             "blockd died with the writes at sectors {unflushed:?} acknowledged and no flush after them \
              (and {withheld} withheld); the blockd after it wrote {next:?} first"
