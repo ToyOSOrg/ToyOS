@@ -2765,6 +2765,18 @@ mod tests {
         }
     }
 
+    /// Every config renders, so a row the manifest refuses — one that serves a
+    /// port and is not marked `service` — reds here rather than at a build.
+    #[test]
+    fn every_config_renders_its_manifest() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ALL_CONFIGS {
+            let parsed = parse_config(&root.join(config));
+            let rendered = std::panic::catch_unwind(|| render_manifest(&parsed));
+            assert!(rendered.is_ok(), "{config} does not render; the panic above says why");
+        }
+    }
+
     /// One prefix and no other, so a doc naming `/etc/logd` or `/apps/logd` is a
     /// token the filter below drops and an assertion that reds.
     const LOG_DOC_BIN: &str = "/system/bin/";
@@ -2844,6 +2856,7 @@ mod tests {
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
+        "tests/layoutcase/system.toml",
         "tests/logholdcase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",

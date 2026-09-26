@@ -8,9 +8,10 @@ use std::sync::OnceLock;
 
 use toyos::port::Connector;
 
-/// Where the history lives under `$HOME`: this program's own `State` in the
-/// session's `Apps`, never a dotfile in the user's home.
-const HISTORY: &str = "Apps/shell/State/history";
+/// This program's own folder, whose `State` keeps the history: `$HOME` itself
+/// once init makes that folder the shell's `HOME`, and `$HOME/Apps/shell`
+/// while `HOME` is the session's. Never a dotfile in the user's home.
+const OWN_FOLDER: [&str; 2] = ["Apps", "shell"];
 const HISTORY_MAX: usize = 200;
 
 static mut LAST_STATUS: i32 = 0;
@@ -796,7 +797,10 @@ fn print_help() {
 // --- History ---
 
 fn history_path() -> Option<std::path::PathBuf> {
-    env::var_os("HOME").map(|home| Path::new(&home).join(HISTORY))
+    let home = std::path::PathBuf::from(env::var_os("HOME")?);
+    let own: std::path::PathBuf = OWN_FOLDER.iter().collect();
+    let folder = if home.ends_with(&own) { home } else { home.join(own) };
+    Some(folder.join("State").join("history"))
 }
 
 fn load_history() -> Vec<String> {

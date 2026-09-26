@@ -480,8 +480,8 @@ const RUST_SKIP: &[&str] = &[
     "ftruncate_flush_race",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
-    // Its listings are exact against `tests/sshdcase`'s services, and every
-    // boot but that one runs others. `layout_fresh_boot` runs it.
+    // Its listings are exact against `tests/layoutcase`, and it takes what that
+    // boot wrote as its argv. `layout_fresh_boot` runs it over ssh.
     "layout_paths",
     // Needs a package installed under `/apps` and a config whose `[apps]` row
     // is what a launch out of it holds; `pkg_install_gbae` gives both, and on
@@ -907,8 +907,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
-    // The same boot with a blank DATA volume, read for where everything it
-    // wrote went. Every verdict is a listing; no clock in any.
+    // Its own boot with a blank DATA volume, asked over ssh where everything
+    // it wrote went. Every verdict is a listing or a line; no clock in any.
     ("layout_fresh_boot", Sched::Parallel, Tier::Fast),
     // One `SSHD_LOGIN` boot for the three, driven by `tests/ssh-client-host`.
     // Adjacent because `group_of` makes adjacency load-bearing, and one tier
@@ -14751,31 +14751,65 @@ fn run_machine_test(
         }
         "layout_fresh_boot" => {
             // The layout as ruled, on a boot of its own with a blank DATA
-            // volume: three services, each given a `/state` of its own, and a
-            // session program whose child is the judge. sshd's identity is the
-            // one file a service writes on every such boot, and on a boot that
-            // stages no key sshd then ends, however it fares; so the listing
-            // waits for the kernel's record of that end rather than for a clock.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sshdcase");
-            let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
-            let mut qemu = QemuInstance::boot_with_options(&config, &[], rust_bins, options);
-            let mut console = qemu.boot_log().to_string();
+            // volume, asked over the cable because sshd is the service that
+            // starts programs: a declared shell's `HOME` is init's row answer,
+            // and the judge, declared nowhere, is spawned by sshd directly with
+            // the `HOME` init answered for it. Before the judge, `locale` and
+            // an interactive shell write the two files a session writes.
+            use common::ssh::{self, HOST};
             const MINTED: &str = "sshd: minted a new host identity at /state/sshd/host_ed25519";
-            await_guest(&mut qemu, &mut console, "sshd's end", |c| {
-                c.contains("exit: sshd pid=")
-            })
-            .map_err(|why| format!("{why}\n{console}"))?;
+            const LAYOUT: &str = "de";
+            const TYPED: &str = "echo layout history";
+            let (guest, console) = ssh::boot_case("tests/layoutcase", rust_bins);
             if !console.contains(MINTED) {
                 return Err(format!("{MINTED:?} never reached the console:\n{console}"));
             }
-            let result = qemu.run_test("test_rs_layout_paths", Duration::from_secs(60));
-            if result.exit_code != Some(0) {
+            let identity = ssh::Identity::mint(ssh::KEY)?;
+            let port = guest.ssh_port();
+
+            let home = ssh::ssh_exec(HOST, port, &identity, "shell -c 'echo $HOME'")?;
+            if home.stdout != b"/home/toy\n" || home.status != Some(0) {
                 return Err(format!(
-                    "layout_paths guest failed:\n{}\nkernel log while it ran:\n{}{}",
-                    result.stdout, result.before, result.serial
+                    "a launched shell's HOME is {:?} (ended {:?}, stderr {:?}), not /home/toy",
+                    home.stdout_text(),
+                    home.status,
+                    home.stderr_text()
                 ));
             }
-            eprintln!("  [layout] {}", result.stdout.trim());
+            let set = ssh::ssh_exec(HOST, port, &identity, &format!("locale {LAYOUT}"))?;
+            if set.status != Some(0) || !set.stdout_text().contains("Keyboard layout set to") {
+                return Err(format!(
+                    "`locale {LAYOUT}` ended {:?} saying {:?} {:?}",
+                    set.status,
+                    set.stdout_text(),
+                    set.stderr_text()
+                ));
+            }
+            let (typed, _) =
+                ssh::ssh_feed(HOST, port, &identity, "shell", format!("{TYPED}\r").as_bytes())?;
+            if typed.status != Some(0) || !typed.stdout_text().contains("layout history") {
+                return Err(format!(
+                    "the interactive shell ended {:?} saying {:?} {:?}",
+                    typed.status,
+                    typed.stdout_text(),
+                    typed.stderr_text()
+                ));
+            }
+            let judge = ssh::ssh_exec(
+                HOST,
+                port,
+                &identity,
+                &format!("test_rs_layout_paths {LAYOUT} '{TYPED}'"),
+            )?;
+            if judge.status != Some(0) {
+                return Err(format!(
+                    "layout_paths ended {:?} over ssh:\n{}\n{}",
+                    judge.status,
+                    judge.stdout_text(),
+                    judge.stderr_text()
+                ));
+            }
+            eprintln!("  [layout] a launched shell's HOME is /home/toy; {}", judge.stdout_text().trim());
             Ok(())
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),

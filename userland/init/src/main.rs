@@ -30,6 +30,8 @@
 //! **Every program it starts gets `HOME` from its row** (`Program::home`), over
 //! anything a launching caller carried: a service its own `/state/<name>`, made
 //! before it runs, and everything else the session user's home, made at boot.
+//! A launch of a program no row names is answered with the session's, which
+//! the caller's direct spawn carries in place of its own.
 
 /// One line, one `write`, into init's own pipe to `logd` ([`Log`]): a line of
 /// init's is a line in the log under init's name, whether or not `logd` has run
@@ -190,12 +192,14 @@ impl Log {
 /// not mount has no `/home`, which the kernel has already said; this says what
 /// it cost and starts the machine without it.
 fn make_session_home() {
-    let home = format!("/home/{}", toyos_manifest::USER);
-    let folders = HOME_FOLDERS.iter().map(|folder| format!("{home}/{folder}"));
-    for path in std::iter::once(home.clone()).chain(folders) {
-        if let Err(e) = make_dir(&path) {
-            say!("init: {path} could not be made, so this boot has no session home: {e}");
-            return;
+    let home = toyos_manifest::session_home();
+    if let Err(e) = make_dir(&home) {
+        say!("init: {home} could not be made, so this boot has no session home: {e}");
+        return;
+    }
+    for folder in HOME_FOLDERS {
+        if let Err(e) = make_dir(&format!("{home}/{folder}")) {
+            say!("init: {home}/{folder} could not be made, so the session home has no {folder}: {e}");
         }
     }
 }
@@ -919,11 +923,12 @@ fn serve_launch<'a>(
             &installed
         }
         Resolved::NotDeclared => {
-            // **`try_signal` and not `send`.** A bare header is what every
-            // answer here is, and a blocking write is the other half of the
-            // rule that made the read side an event loop: a client that never
-            // drains its end decides when init runs again.
-            let _ = conn.try_signal(launch::MSG_NOT_DECLARED);
+            // **`try_send_bytes` and not `send`.** A blocking write is the
+            // other half of the rule that made the read side an event loop: a
+            // client that never drains its end decides when init runs again.
+            // The `HOME` is the session's: a program no row names is no service.
+            let home = toyos_manifest::session_home();
+            let _ = conn.try_send_bytes(launch::MSG_NOT_DECLARED, home.as_bytes());
             return;
         }
         Resolved::Refused(why) => {

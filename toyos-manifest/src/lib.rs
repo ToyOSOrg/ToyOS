@@ -46,6 +46,12 @@ pub const MAX_PROGRAM_NAME: usize = 32;
 /// The dev image's one user, until the users track gives init a login row.
 pub const USER: &str = "toy";
 
+/// The session user's home: every program's `HOME` that no service row claims,
+/// a program no row names included.
+pub fn session_home() -> String {
+    format!("/home/{USER}")
+}
+
 /// Where each system service keeps its own persistent data, one directory per
 /// program key.
 pub const STATE: &str = "/state";
@@ -141,7 +147,7 @@ impl Program {
     pub fn home(&self) -> String {
         match self.service {
             true => format!("{STATE}/{}", self.name),
-            false => format!("/home/{USER}"),
+            false => session_home(),
         }
     }
 }
@@ -208,6 +214,10 @@ pub enum RenderError {
     NameTooLong(String),
     /// A field whose bytes would not survive the round trip.
     Unrepresentable { program: String, field: &'static str, value: String },
+    /// A row that serves a machine-wide port and is not marked a service, so
+    /// init would start it in the session user's home. A service that serves
+    /// nothing (`sshd`) cannot be told from its row, and is marked by hand.
+    ServesWithoutService(String),
 }
 
 pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
@@ -218,6 +228,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         }
         check(&program.name, "name", &program.name)?;
         check(&program.name, "path", &program.path)?;
+        if !program.serves.is_empty() && !program.service {
+            return Err(RenderError::ServesWithoutService(program.name.clone()));
+        }
         out.push_str(&format!("program {} {}\n", program.name, program.path));
         for arg in &program.args {
             reject_newline(&program.name, "args", arg)?;
@@ -349,6 +362,7 @@ mod tests {
                     serves: vec!["compositor".into()],
                     receives: vec!["soundd".into(), "launcher".into()],
                     devices: vec!["framebuffer".into(), "keyboard".into()],
+                    service: true,
                     ..Program::default()
                 },
                 Program {
@@ -394,6 +408,18 @@ mod tests {
         let manifest = sample();
         let rendered = render(&manifest).expect("render");
         assert_eq!(parse(std::str::from_utf8(&rendered).unwrap()), manifest);
+    }
+
+    /// A row that serves a machine-wide port is a service, and one not marked
+    /// so is refused rather than started in the session user's home.
+    #[test]
+    fn a_row_that_serves_a_port_and_is_no_service_is_refused() {
+        let mut manifest = sample();
+        manifest.programs[0].service = false;
+        assert_eq!(
+            render(&manifest),
+            Err(RenderError::ServesWithoutService("compositor".into()))
+        );
     }
 
     /// A service keeps machine state under its own name, everything else is

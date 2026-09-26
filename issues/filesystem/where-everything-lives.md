@@ -11,7 +11,7 @@ The owner ruled this layout on 2026-09-26. This file is where it is recorded:
 backs each name, and
 `issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md` and
 `issues/isolation/every-program-sees-only-the-files-it-was-given.md` say who
-may reach it.
+may reach it. Every line below is the owner's ruling.
 
 ## The tree
 
@@ -27,20 +27,26 @@ may reach it.
 /tmp                   private per program
 ```
 
+`/system` is signed because the image is:
+`issues/boot-media/the-machine-updates-itself-without-ubuntu.md` signs it, and
+until that lands nothing verifies it.
+
 ## The rules
 
 - **No drive letters, no `/usr`, `/var`, `/opt`, `/dev`, `/proc` or `/sys`**:
   devices and processes are capabilities and syscalls here, not files.
 - **No dotfile and no hidden folder anywhere in the layout.** A third-party
   program that hard-codes `~/.something` may still create one, but only inside
-  its own app folder.
+  its own app folder: the owner accepted that as the honest limit.
 - **English names, never translated.**
 - **A path means the same file in every view.** `/tmp` is the one exception:
   it is private per program. A view hides names and never renames one.
 - **A program learns a location from an environment variable init sets**
   (`HOME` and those like it). A location grants nothing, because the view
   decides what a program can reach. On ToyOS `std::env::home_dir()` is `$HOME`
-  or `None`, with no fallback, and `temp_dir()` is `/tmp`.
+  or `None`, with no fallback, and `temp_dir()` is `/tmp`. A program init did
+  not start carries the `HOME` its caller named or init answered for it, never
+  its parent's own.
 - **`/home/<user>/Apps/<name>` is one app's private data for that user**, and
   it is that app's `HOME`. Inside it ToyOS answers config, data, cache and
   state as the visible `Config`, `Data`, `Cache` and `State`.
@@ -59,22 +65,38 @@ may reach it.
 1. **Everything that needs no isolation.** `/config` and `/state` are DATA
    names; init makes `/home/toy`, its eight folders, and each service's
    `/state/<name>`, and it sets `HOME` from each row (`service = true` in
-   `system.toml`); the kernel makes no home; the keyboard layout is
-   `/config/keyboard-layout`; sshd keeps its identity and key list in
-   `/state/sshd`; the shell's history is `$HOME/Apps/shell/State/history`;
-   std's `home_dir` reads `$HOME`; JetBrains Mono ships as a TTF with its OFL
-   text. **Exit**: `layout_fresh_boot` is green.
+   `system.toml`, which a row that serves a port must say); a program no row
+   names carries the `HOME` init answers for it, never its spawner's own;
+   the kernel makes no home, and lists a directory it carries; the keyboard
+   layout is `/config/keyboard-layout`; sshd keeps its identity and key list
+   in `/state/sshd`; the shell's history is in `Apps/shell/State`; std's
+   `home_dir` reads `$HOME`. **Exit**: `layout_fresh_boot` is green.
 2. **An app's `HOME` is its folder.** init launches an app from `/apps` (and
    each desktop app in the image) with `HOME=/home/<user>/Apps/<name>`, makes
    the folder and its `Config Data Cache State`, and puts nothing else of the
    home in that app's view. It needs
    `issues/isolation/every-program-sees-only-the-files-it-was-given.md` stage 2.
-   **Exit**: a launched app's `home_dir()` is its folder, and it cannot name
-   another app's folder.
+   **Exit**: a launched app's `home_dir()` is its folder, it cannot name
+   another app's folder, and the shell's history is still
+   `/home/<user>/Apps/shell/State/history` (`OWN_FOLDER` in `userland/shell`).
 3. **Users.** The users track creates `/home/<user>` and its folders from a
    login row, and `toy` stops being a constant in `toyos-manifest`.
    **Exit**: init names no user.
-4. **The upstream arms**, none opened until the owner opens it:
+4. **The time zone.** One file in `/config` names the machine's zone, one
+   program writes it, and local time is read through it rather than recovered
+   by subtracting `SYS_CLOCK_REALTIME` from `SYS_CLOCK_EPOCH`. **Exit**: a
+   guest test sets the zone and reads its local time back, and nothing
+   recovers the zone by subtraction.
+5. **The language.** One file in `/config` names the machine's default
+   language, one program writes it, and init sets it on every program it
+   starts. **Exit**: a guest test sets the language and a program init starts
+   reads it back.
+6. **Fonts ship as files.** JetBrains Mono and Open Sans ship as TTFs under
+   `/system/share/fonts` from `assets/fonts/`, the console's raster stays its
+   own asset, and each OFL text ships once, under `/system/share/licenses`.
+   **Exit**: an image carries both families there and their licence texts
+   under `/system/share/licenses`, and none under `/system/share/fonts`.
+7. **The upstream arms**, none opened until the owner opens it:
    - fontdb and fontique scan `/system/share/fonts` and `$HOME/Fonts` from the
      start, and fontique maps the families above. **Exit**: both prepared
      branches carry both folders and the family table.

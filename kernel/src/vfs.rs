@@ -385,6 +385,20 @@ impl Vfs {
             }
         }
 
+        // A directory the VFS carries is its parent's entry whether or not a
+        // file is under it yet.
+        let parent = format!("{}/", directory(&mount, &subdir));
+        for dir in self.created_dirs.range(parent.clone()..) {
+            let Some(rest) = dir.strip_prefix(parent.as_str()) else { break };
+            let child = rest.split('/').next().unwrap_or(rest);
+            if !child.is_empty() {
+                let dir_name = format!("{child}/");
+                if seen_dirs.insert(dir_name.clone()) {
+                    result.push((dir_name, 0));
+                }
+            }
+        }
+
         // An empty directory's witnesses: its own listing entry on a mount
         // that represents directories, `created_dirs` on one the VFS carries.
         if result.is_empty()
