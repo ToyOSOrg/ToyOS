@@ -186,8 +186,8 @@ pub fn partition_claim(
     // did to the neighbours is the half of the verdict it cannot give itself.
     let run = format!("test_rs_partition_claimant main {esp} {log} {root}");
     let result = qemu.run_test(&run, Duration::from_secs(180));
-    let guest = guest_verdict(&result, REFUSALS).and_then(|kernel| main_kernel_lines(&kernel));
     let tail = shut_down(qemu);
+    let guest = guest_verdict(&result, &tail, REFUSALS).and_then(|kernel| main_kernel_lines(&kernel));
     no_panic("on the way down", &tail)?;
 
     let after = std::fs::read(&nvme).map_err(|e| format!("read the disk back: {e}"))?;
@@ -262,13 +262,13 @@ pub fn partition_claim_gives_up(
         no_panic(role, &boot)?;
         let result =
             qemu.run_test(&format!("test_rs_partition_claimant {role}"), Duration::from_secs(180));
-        let kernel = guest_verdict(&result, refusals).map_err(|e| format!("{role}: {e}"))?;
+        let tail = shut_down(qemu);
+        let kernel = guest_verdict(&result, &tail, refusals).map_err(|e| format!("{role}: {e}"))?;
         for want in wants {
             if !kernel.contains(want) {
                 return Err(format!("{role}: the kernel never said {want:?}:\n{kernel}"));
             }
         }
-        let tail = shut_down(qemu);
         no_panic(role, &tail)?;
         for want in wants {
             let line = kernel.lines().find(|l| l.contains(want)).unwrap_or_default();
@@ -343,8 +343,9 @@ pub fn partition_claim_departure(
 }
 
 /// One departure boot running the guest's `role`, which says `refusals`
-/// refusals: the kernel's log while it ran, what the shutdown said, and the
-/// stick's partitions — `DEPARTING`, `STAYING`, `EARLIER`.
+/// refusals: the kernel's log from the test's start through the shutdown,
+/// what the shutdown said, and the stick's partitions — `DEPARTING`,
+/// `STAYING`, `EARLIER`.
 fn departed(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -392,22 +393,25 @@ fn departed(
             );
         },
     );
-    let kernel = guest_verdict(&result, refusals).map_err(|e| format!("{role}: {e}"))?;
+    let tail = shut_down(qemu);
+    let kernel = guest_verdict(&result, &tail, refusals).map_err(|e| format!("{role}: {e}"))?;
     for want in [MOVE_NOW, CAME_BACK] {
         if !kernel.contains(want) {
             return Err(format!("{role}: the kernel never said {want:?}:\n{kernel}"));
         }
     }
-    let tail = shut_down(qemu);
     no_panic(role, &tail)?;
     Ok((kernel, tail, spans))
 }
 
 /// What the guest said: exit 0, `refusals` refusals said by name — an exit
 /// code alone is also what a binary that asserted nothing leaves — and the
-/// kernel's log while it ran, which is returned.
-fn guest_verdict(result: &qemu::TestResult, refusals: usize) -> Result<String, String> {
-    let kernel = format!("{}{}", result.before, result.serial);
+/// kernel's log from the test's start through the shutdown's `tail`, which is
+/// returned. The runner's end marker reaches the console through `logd` and
+/// the kernel's records through `klogd`, so a record the kernel made before
+/// the test ended can arrive after the marker; the shutdown's drain carries it.
+fn guest_verdict(result: &qemu::TestResult, tail: &str, refusals: usize) -> Result<String, String> {
+    let kernel = format!("{}{}{tail}", result.before, result.serial);
     if result.exit_code != Some(0) {
         return Err(format!(
             "the guest failed:\n{}\nkernel log while it ran:\n{kernel}",
