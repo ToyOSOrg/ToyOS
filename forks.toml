@@ -296,6 +296,16 @@ pr_branch = "add-toyos-os"
 pr_note = "Unlike raw-window-handle the two branches cannot be made identical: `add-toyos-os` sits on a later upstream (it carries #131 and #133) and is +5/-1, while `toyos` stays on v0.13.5 and is +7/-1. The ToyOS hunks in src/targets.rs and src/triple.rs are the same on both; the extra two lines are `not_pr_content`."
 not_pr_content = "`#![allow(unexpected_cfgs)]` in build.rs and src/lib.rs. build.rs:56 emits `cargo:rustc-cfg=feature=\"rust_1_40\"`, a feature the manifest never declares, so the lint fires on a crate that denies warnings. It is an upstream lint debt, not ToyOS content — fixing it upstream is its own PR, and doing so would let this fork drop to +5/-1."
 
+[smoltcp]
+upstream = "smoltcp-rs/smoltcp"
+base = "v0.12.0"
+delta = "+29/-10"
+tier = "fork"
+why = "The neighbour cache rate-limits discovery once for the whole cache, so a connect to an on-link address nothing answers starves every other address's resolution for as long as it asks. The fix keeps the silence per address; it is not ToyOS code and carries no cfg."
+pr = "none — upstream's LLM policy (CONTRIBUTING.txt, nlnetlabs.nl/llm-policy) refuses LLM-written code, so the branch below waits for a human author or goes to smoltcp-rs/smoltcp#1209 as a suggested fix"
+pr_branch = "neighbor-silence-per-address"
+pr_note = "On upstream main (efcba2e, after v0.14.0), +30/-11: the same hunks as `toyos` plus a CHANGELOG line."
+
 [doomgeneric]
 upstream = "ozkl/doomgeneric"
 base = "fc601639494e089702a1ada082eb51aaafc03722"
