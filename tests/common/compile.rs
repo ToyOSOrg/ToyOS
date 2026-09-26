@@ -145,10 +145,12 @@ pub fn link_toyos(obj: &[u8], extra_objs: &[Vec<u8>], name: &str) -> Vec<u8> {
     for p in &inputs {
         let _ = fs::remove_file(p);
     }
+    // One line: the harness reads a failed link's first line for the symbol a
+    // declared case stops on, and LLD reports each undefined symbol on its own.
     assert!(
         output.status.success(),
-        "rust-lld could not link {name}:\n{}",
-        String::from_utf8_lossy(&output.stderr),
+        "rust-lld could not link {name}: {}",
+        String::from_utf8_lossy(&output.stderr).lines().collect::<Vec<_>>().join(" | "),
     );
     let linked = fs::read(&out).unwrap_or_else(|e| panic!("read {}: {e}", out.display()));
     let _ = fs::remove_file(&out);
