@@ -209,16 +209,21 @@ pub mod window {
             return;
         }
         let deadline = Deadline::at(crate::clock::now() + WINDOW.duration());
-        while !armed.shared.notified() {
+        loop {
+            // Counted only on the bit itself: a hold that ended any other way
+            // staged nothing.
+            if armed.shared.notified() {
+                let posted = POSTED.fetch_add(1, Relaxed) + 1;
+                if posted % STEP == 0 {
+                    crate::log!("{HELD} {posted} times, {} lapsed", LAPSED.load(Relaxed));
+                }
+                return;
+            }
             if deadline.reached(crate::clock::now()) {
                 LAPSED.fetch_add(1, Relaxed);
                 return;
             }
             core::hint::spin_loop();
-        }
-        let posted = POSTED.fetch_add(1, Relaxed) + 1;
-        if posted % STEP == 0 {
-            crate::log!("{HELD} {posted} times, {} lapsed", LAPSED.load(Relaxed));
         }
     }
 }
