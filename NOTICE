@@ -236,6 +236,7 @@ aavmf/*.fd — EDK II firmware for QEMU `virt`, BSD-2-Clause-Patent
 
     Copyright (c) 2019, TianoCore and contributors
     Licence text: licenses/BSD-2-Clause-Patent-EDK2.txt
+    SPDX-License-Identifier: BSD-2-Clause-Patent
 
 QEMU's own prebuilt ArmVirtQemu firmware, unmodified: `edk2-aarch64-code.fd`
 and `edk2-arm-vars.fd` as QEMU 11.1.0 installs them under `share/qemu/`,

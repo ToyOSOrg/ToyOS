@@ -2828,6 +2828,8 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     toyos_build::build::TEST_KERNEL.to_vec()
 }
 
+// Eight, because an image is its architecture as much as its files and its kernel.
+#[allow(clippy::too_many_arguments)]
 fn build_boot_image_with(
     arch: Arch,
     test_crate: &Path,

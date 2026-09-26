@@ -1218,9 +1218,6 @@ fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<Str
         .collect()
 }
 
-/// The third-party C corpus, whose attribution is per *population* rather than
-/// per file: `tests/testcases/LICENSE` states how many files each of these
-/// directories holds, and `NOTICE` points at that file for the terms.
 // ── Architecture rules ──────────────────────────────────────────────────────
 
 /// One architecture rule, stated as where its spellings may appear: a set of
@@ -1403,6 +1400,9 @@ fn every_rust_file() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The third-party C corpus, whose attribution is per *population* rather than
+/// per file: `tests/testcases/LICENSE` states how many files each of these
+/// directories holds, and `NOTICE` points at that file for the terms.
 #[cfg(test)]
 const CORPUS: &str = "tests/testcases";
 

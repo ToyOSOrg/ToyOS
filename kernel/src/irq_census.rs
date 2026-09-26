@@ -59,8 +59,8 @@ pub const SLOTS: usize = 1 + Source::COUNT;
 /// Index of the machine's own total inside a CPU's block.
 pub const TOTAL: usize = 0;
 
-/// Counted where each is taken, by the architecture's handlers
-/// (`arch::percpu::irq_took!`), into this CPU's own block.
+// Counted where each is taken, by the architecture's handlers
+// (`arch::percpu::irq_took!`), into this CPU's own block.
 
 /// Each CPU's counter-array address; only the array is published, so a reader never touches the rest of the block the owning CPU writes through raw pointers.
 static BLOCKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];

@@ -2556,6 +2556,10 @@ mod tests {
                 // not in `TEST_SUITE_KERNEL_BUILDS`, so a full run pays nothing
                 // for it and a boot storm asks for it by name.
                 "sched-tripwire",
+                // Costs no kernel build, for `wake-fence-off`'s reason: turned on
+                // only by `kernel-loom`, to drop the panic console publisher's
+                // `Release` fence and prove `panic_console_publish` reds without it.
+                "seqlock-writer-fence-off",
                 "shard-publish-relaxed",
                 "shootdown-serve-relaxed",
                 // The eighth loom control, and the first over a *contended*

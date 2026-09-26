@@ -236,7 +236,7 @@ impl<'a> Plan<'a> {
             Typing::Firmware => PAGE_2M,
             Typing::ByMap(_) => PAGE_4K,
         };
-        if base % granule != 0 {
+        if !base.is_multiple_of(granule) {
             return Err(Refusal::Unaligned(base));
         }
         let end = base.checked_add(len).ok_or(Refusal::Extent { base, len })?;

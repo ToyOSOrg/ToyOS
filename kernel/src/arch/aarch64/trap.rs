@@ -26,7 +26,7 @@ pub struct Frame {
 }
 
 const FRAME_BYTES: usize = core::mem::size_of::<Frame>();
-const _: () = assert!(FRAME_BYTES == 288 && FRAME_BYTES % 16 == 0);
+const _: () = assert!(FRAME_BYTES == 288 && FRAME_BYTES.is_multiple_of(16));
 
 /// Which of the table's sixteen entries was taken: Arm ARM K.a, D1.3.1,
 /// Table D1-7 — four groups by where the exception came from, and in each the
