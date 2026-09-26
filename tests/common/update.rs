@@ -140,11 +140,47 @@ impl Rig {
         let (from, uart) = (console.len(), guest.uart_log().len());
         let asked = ssh::ssh_fire(HOST, self.port, &self.identity, "reboot")?;
         eprintln!("  [update] `reboot` answered {asked:?}");
-        qemu::await_marker_new(guest, console, marker, from, &format!("{marker:?} after the reboot")).map_err(|why| {
-            let all = guest.uart_log();
-            format!("{why}\nthe 16550 since the reboot:\n{}", &all[uart.min(all.len())..])
-        })?;
+        await_machine(guest, console, &format!("{marker:?} after the reboot"), |c| c[from.min(c.len())..].contains(marker))
+            .map_err(|why| {
+                let all = guest.uart_log();
+                format!("{why}\nthe 16550 since the reboot:\n{}", &all[uart.min(all.len())..])
+            })?;
         Ok((from, uart))
+    }
+}
+
+/// Wait until `done` holds of the console, while the machine is talking on
+/// either of its channels.
+///
+/// **Not the harness's own wait**: that one hears the console alone, and
+/// between a kernel's reset and the next kernel's first line the machine
+/// talks only on the 16550 — the loader's passes, one of which hashes ROOT —
+/// so a machine working through two of them reads as one gone quiet. Its
+/// bounds are the harness's, [`qemu::GUEST_QUIET`] of silence on both and
+/// [`qemu::GUEST_WEDGED`] in all.
+fn await_machine(guest: &mut QemuInstance, console: &mut String, doing: &str, done: impl Fn(&str) -> bool) -> Result<(), String> {
+    let began = Instant::now();
+    let (mut heard, mut grew) = (0usize, Instant::now());
+    loop {
+        if done(console) {
+            return Ok(());
+        }
+        let more = guest.drain_serial(std::time::Duration::from_millis(200));
+        console.push_str(&more);
+        let now = console.len() + guest.uart_log().len();
+        if now != heard {
+            (heard, grew) = (now, Instant::now());
+        }
+        if grew.elapsed() >= qemu::GUEST_QUIET {
+            return Err(format!(
+                "{} waiting for {doing}: the console and the 16550 both went quiet for {} s",
+                qemu::STALLED,
+                qemu::GUEST_QUIET.as_secs()
+            ));
+        }
+        if began.elapsed() >= qemu::GUEST_WEDGED {
+            return Err(format!("{} waiting for {doing}: it never stopped talking and never got there", qemu::STALLED));
+        }
     }
 }
 
@@ -188,7 +224,7 @@ pub fn update_boots_the_new_kernel(_: &Path, _: &[(String, Vec<u8>)], _: &[(Stri
         return Err(format!("`update` ended {status:?} saying {said:?}"));
     }
     let (from, uart) = rig.reboot_until(&mut guest, &mut console, &format!("{SLOT_RECORD} B, the one the slot table marks"))?;
-    qemu::await_marker_new(&mut guest, &mut console, DEFAULT_READY, from, "the new slot's ready marker")?;
+    await_machine(&mut guest, &mut console, "the new slot's ready marker", |c| c[from..].contains(DEFAULT_READY))?;
     let booted = asked.elapsed();
     loader_said(&guest, uart, &format!("Anti-rollback floor: {BASE}, raised from 0 by the boot that proved it"))?;
     loader_said(&guest, uart, &format!("Slot B: {VERIFIED}"))?;
@@ -280,7 +316,7 @@ pub fn update_falls_back_from_a_dying_kernel(_: &Path, _: &[(String, Vec<u8>)], 
     let again = format!("{SLOT_RECORD} B, ");
     let (from, uart) = (console.len(), guest.uart_log().len());
     ssh::ssh_fire(HOST, rig.port, &rig.identity, "reboot")?;
-    qemu::await_guest(&mut guest, &mut console, "slot A to fall back, or slot B to boot again", |c| {
+    await_machine(&mut guest, &mut console, "slot A to fall back, or slot B to boot again", |c| {
         let since = &c[from.min(c.len())..];
         since.contains(&fell_back) || since.matches(&again).count() >= 2
     })?;
@@ -288,7 +324,7 @@ pub fn update_falls_back_from_a_dying_kernel(_: &Path, _: &[(String, Vec<u8>)], 
     if !console[from..].contains(&fell_back) {
         return Err(format!("slot B booted {booted_b} times after the update and slot A never did"));
     }
-    qemu::await_marker_new(&mut guest, &mut console, DEFAULT_READY, from, "slot A's ready marker")?;
+    await_machine(&mut guest, &mut console, "slot A's ready marker", |c| c[from..].contains(DEFAULT_READY))?;
     loader_said(&guest, uart, "Previous boot's panic:")?;
     loader_said(&guest, uart, "died on its last boot, so no pass boots it again until an update replaces it")?;
 
