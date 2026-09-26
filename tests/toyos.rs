@@ -250,6 +250,8 @@ const RUST_SKIP: &[&str] = &[
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
     "gsbase_probe",
     "test_panic_child",
+    // It takes the machine down; `panic_halts_the_others_first` runs it.
+    "panic_halts_first",
     // A binary that panics at once, sent over ssh as a service's replacement;
     // `swap_crash_rolls_back` stages it from the host and never runs it as a job.
     "swap_crash",
@@ -1098,6 +1100,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
+    // A fatal path with other CPUs running userland that makes kernel records:
+    // none is stamped past the fatal record by more than an IPI takes.
+    ("panic_halts_the_others_first", Sched::Parallel, Tier::Fast),
     // A kernel log line from PCI enumeration; no clock and no real device in it.
     ("pci_capability_walk", Sched::Parallel, Tier::Fast),
     // What QEMU was told to create against what the guest enumerated: two
@@ -1701,6 +1706,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
+    ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
     ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
     ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
 ];
@@ -13818,6 +13824,81 @@ fn run_machine_test(
                 },
             );
             lapic_vectors(qemu.boot_log())
+        }
+        "panic_halts_the_others_first" => {
+            // **A kernel that has declared itself corrupt runs nothing else.**
+            // `halt_all_cpus` sends the halt IPI before anything else it does;
+            // a fatal path that waited first — for a log, a drain, anything —
+            // would leave every other CPU running userland under it.
+            // `test_rs_panic_halts_first` keeps three siblings making kernel
+            // records while its main thread goes fatal, and every record is
+            // stamped on the kernel's clock with its CPU: none of another CPU
+            // may be stamped past the fatal record by more than a sibling can
+            // take to reach its next instruction boundary with `IF` set.
+            //
+            // **The bound is 100 ms, against the derivation**: an IPI is
+            // taken at the sibling's next instruction boundary with `IF` set,
+            // so a sibling runs past the fatal record by at most the longest
+            // window this kernel holds `IF` clear, and every such window is
+            // bounded in milliseconds.
+            const BOUND_MS: u64 = 100;
+            const RECORD: &str = "syscall 26 is retired";
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { smp: 4, kernel_features: ACTUATOR_KERNEL, ..Default::default() },
+            );
+            writeln!(qemu.stdin_mut(), "run test_rs_panic_halts_first").map_err(|e| format!("stdin: {e}"))?;
+            qemu.flush_stdin();
+            let mut console =
+                qemu.drain_until(Duration::from_secs(30), |l| l.contains(FATAL_HALT_NONCE));
+            if !console.contains(FATAL_HALT_NONCE) {
+                return Err(format!("{FATAL_HALT_NONCE:?} never reached the console\n{console}"));
+            }
+            // What the fatal path flushes after the nonce. The machine is
+            // halted and says nothing more, so this is a pace, not a guard.
+            console.push_str(&qemu.drain_serial(Duration::from_secs(3)));
+            let stamp = |line: &str| -> Option<(u64, u32)> {
+                let head = line.split_once("[kernel ")?.1.split_once(']')?.0;
+                let (secs, cpu) = head.split_once(" cpu")?;
+                let (s, ms) = secs.split_once('.')?;
+                let cpu = cpu.split(' ').next()?;
+                Some((s.parse::<u64>().ok()? * 1000 + ms.parse::<u64>().ok()?, cpu.parse().ok()?))
+            };
+            let Some((fatal_ms, fatal_cpu)) =
+                console.lines().find(|l| l.contains(FATAL_HALT_NONCE)).and_then(stamp)
+            else {
+                return Err(format!("no stamped {FATAL_HALT_NONCE:?} record on the console\n{console}"));
+            };
+            let siblings: Vec<(u64, u32, &str)> = console
+                .lines()
+                .filter(|l| l.contains(RECORD))
+                .filter_map(|l| stamp(l).map(|(ms, cpu)| (ms, cpu, l)))
+                .filter(|&(_, cpu, _)| cpu != fatal_cpu)
+                .collect();
+            // Non-vacuity: another CPU was making records up to the fatal one.
+            if !siblings.iter().any(|&(ms, _, _)| ms + 1000 >= fatal_ms) {
+                return Err(format!(
+                    "no other CPU's record in the second before the fatal one at {fatal_ms} ms, so \
+                     nothing was running to be halted\n{console}"
+                ));
+            }
+            if let Some(&(ms, cpu, line)) = siblings.iter().max_by_key(|&&(ms, _, _)| ms) {
+                if ms > fatal_ms + BOUND_MS {
+                    return Err(format!(
+                        "cpu{cpu} made a record {} ms after the fatal one on cpu{fatal_cpu}: the \
+                         fatal path let it run\n  {line}",
+                        ms - fatal_ms
+                    ));
+                }
+            }
+            eprintln!(
+                "  [panic] {} record(s) of other CPUs; the last {} ms after the fatal one",
+                siblings.len(),
+                siblings.iter().map(|&(ms, _, _)| ms.saturating_sub(fatal_ms)).max().unwrap_or(0)
+            );
+            Ok(())
         }
         "virtio_used_ring" => {
             // Both fields of a virtqueue used-ring element are written by the
