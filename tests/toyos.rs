@@ -222,7 +222,7 @@ const RUST_SKIP: &[&str] = &[
     // `quiesce_leaves_the_volume_whole` runs it.
     "quiesce_fsync",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
-    // holds, and five megabytes of it. `log_program_flood` runs it.
+    // holds, and megabytes of it. `log_program_flood` runs it.
     "log_flood",
     // It exits 7 on purpose; its verdict is which exit a judge of `/log` reads.
     // `log_program_forgery` runs it.
@@ -231,9 +231,9 @@ const RUST_SKIP: &[&str] = &[
     // console — which only a boot of its own reads back. `log_program_line`
     // and `log_stream` run it.
     "log_origin",
-    // Its verdict is where its line lands among the kernel's records, on a
-    // boot whose `logd` holds the ring until it speaks.
-    // `log_program_line_after_its_records` runs it on `tests/logholdcase`.
+    // Its verdict is where its line lands among the kernel's records, which
+    // every other binary's records would crowd. `log_program_line_after_its_records`
+    // runs it.
     "log_hold",
     // It prints init's word accepting a swap of netd; its verdict is that a
     // `logd` serving the network changed nothing. `log_carrier_forgery` runs it.
@@ -400,7 +400,7 @@ const RUST_SKIP: &[&str] = &[
     // other config should pay 19 MiB of ROOT for. `doom_music` runs it on
     // `tests/doommusiccase`.
     "doom_music",
-    // Needs a `logd` that leaves soundd's pipe unread until it says so, and a
+    // Needs a `logd` that leaves soundd's ring unread until it says so, and a
     // capture of the tone it plays into that. `soundd_log_stall` runs it on
     // `tests/logstallcase`.
     "soundd_log_stall",
@@ -759,7 +759,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // only machine in reach that runs that driver.
     ("log_stream_e1000e", Sched::Parallel, Tier::Nightly),
     // A reader that never reads, beside a flood: the file and a second reader
-    // are whole regardless. Nightly for the flood's five megabytes.
+    // are whole regardless. Nightly for the flood's megabytes.
     ("log_stream_stalled_reader", Sched::Parallel, Tier::Nightly),
     // A program's line in `/log`, on the served log and on the console, under
     // the name of the pipe it came out of. Lines and a comparison; no clock.
@@ -767,14 +767,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // A program writing the kernel's words and another program's head: every
     // judge of `/log` reads the truth. Lines, and the exit judge; no clock.
     ("log_program_forgery", Sched::Parallel, Tier::Fast),
-    // A program's line read while three batches of records written before it
-    // are unread: `/log` carries it after every one. Lines and positions; no clock.
+    // A program's line said after three batches of records, read before them:
+    // `/log` carries it after every one. Lines and positions; no clock.
     ("log_program_line_after_its_records", Sched::Parallel, Tier::Fast),
     // A program printing init's word accepting a swap of netd: logd turns
     // nobody away, and a reader after it is admitted. Lines; no clock.
     ("log_carrier_forgery", Sched::Parallel, Tier::Fast),
-    // A flood two and a half times its pipe: every line in `/log`, in order,
-    // once. Nightly for its five megabytes through a TCG guest's volume.
+    // A flood many times its ring: every line in `/log` in order or counted.
+    // Nightly for its megabytes through a TCG guest's volume.
     ("log_program_flood", Sched::Parallel, Tier::Nightly),
     // netd taking this machine's address from the network instead of carrying
     // one written down. The DHCP server it is judged against is QEMU's own, an

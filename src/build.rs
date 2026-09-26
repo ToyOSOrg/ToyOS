@@ -2751,7 +2751,6 @@ mod tests {
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
-        "tests/logholdcase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",
         "tests/logstreamcase/system.toml",

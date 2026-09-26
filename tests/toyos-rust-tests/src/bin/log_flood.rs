@@ -1,19 +1,20 @@
-//! A program that writes its output far faster than the log can take it, for
-//! the pipe's backpressure: every line must reach `/log`, in order, once.
+//! A program that writes its output far faster than the log can take it: no
+//! write waits, and every line reaches `/log` in order or is counted by `logd`.
 //!
 //! One `write` per whole line, numbered, so the host can count them in the
-//! file. The total is several times what one pipe holds, so a `logd` that fell
-//! behind makes this program wait rather than lose a line. The verdict is the
-//! host's; `log_program_flood` runs it.
+//! file. The total is many times what one ring holds, so a `logd` that fell
+//! behind has lines refused rather than this program waiting. The verdict is
+//! the host's; `log_program_flood` runs it.
 
 use std::io::Write;
 use std::time::Instant;
 
-/// Lines written. Each is [`WIDTH`] bytes, so the whole is 5 MiB — two and a
-/// half times the 2 MiB a pipe's ring holds (`kernel/src/pipe.rs`'s
-/// `PIPE_SIZE`).
-const LINES: usize = 81_920;
-const WIDTH: usize = 64;
+/// Lines written, many times the records one log ring holds. Each is
+/// [`WIDTH`] bytes — one record's text, nearly — so the lines `logd` does
+/// take are megabytes a second, more than the readers of the served log it is
+/// also run against can hold unread.
+const LINES: usize = 16_384;
+const WIDTH: usize = 960;
 
 fn main() {
     let mut out = std::io::stdout().lock();
@@ -23,8 +24,8 @@ fn main() {
         let head = format!("flood {i:06} ");
         let line = format!("{head}{}\n", "x".repeat(WIDTH - head.len() - 1));
         let at = Instant::now();
-        out.write_all(line.as_bytes()).expect("the log takes every line");
-        out.flush().expect("the log takes every line");
+        out.write_all(line.as_bytes()).expect("a write to the log never fails");
+        out.flush().expect("a write to the log never fails");
         slowest = slowest.max(at.elapsed().as_micros());
     }
     let _ = writeln!(

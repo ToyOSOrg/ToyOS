@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use std::vec::Vec;
 
 use super::region::{Body, Ring, LANE_SLOTS, RING_BYTES, SHARED_SLOTS};
-use super::ring::{push, push_lane, Pushed, Reader, Shared, Slots};
+use super::ring::{push, push_lane, push_leaving, Pushed, Reader, Shared, Slots};
 use super::stdio::compose;
 use toyos_abi::log::Severity;
 
@@ -200,6 +200,22 @@ fn a_full_ring_or_lane_refuses_at_once_and_never_waits() {
     let mut reader = Reader::new();
     assert_eq!(std::iter::from_fn(|| reader.next_lane(&*lane)).count(), 16);
     assert_eq!(reader.refused(&*lane), 32);
+}
+
+/// A writer that leaves slots to others is refused while they are still free,
+/// and the writer it left them for takes them.
+#[test]
+fn slots_left_to_others_are_theirs() {
+    let ring = Heap::new(8);
+    let child: Vec<Pushed> = (0..8).map(|seq| push_leaving(&ring, &(1, seq), 3)).collect();
+    assert_eq!(child.iter().filter(|p| **p == Pushed::Written).count(), 5);
+    assert!(child[5..].iter().all(|p| *p == Pushed::Refused));
+    let owner: Vec<Pushed> = (0..4).map(|seq| push(&ring, &(0, seq))).collect();
+    assert_eq!(owner, [Pushed::Written, Pushed::Written, Pushed::Written, Pushed::Refused]);
+    let mut reader = Reader::new();
+    let order: Vec<(u32, u64)> = std::iter::from_fn(|| reader.next(&ring)).collect();
+    assert_eq!(order.len(), 8);
+    assert_eq!(reader.refused(&ring), 4);
 }
 
 /// A writer's position that never lands holds the reader there, and the sweep

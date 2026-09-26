@@ -243,9 +243,9 @@ const LET_GO: &str = "logd: letting ";
 /// **A reader that stops reading costs nobody else anything, and its slot is
 /// not kept.** Every network slot `logd` has is taken by a connection that
 /// never reads, while a program floods its output past every buffer between
-/// them; the file takes every line, `logd` lets each stalled reader go, and a
-/// reader that connects after that is handed the whole boot, the flood's last
-/// line included.
+/// them; `logd` lets each stalled reader go, and a reader that connects after
+/// that is handed the whole boot — every line the file took, to the kernel's
+/// record of the flood's end.
 pub fn stalled_reader(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -267,7 +267,7 @@ pub fn stalled_reader(
     console.push_str(&flood.before);
     console.push_str(&flood.serial);
     // Every stalled reader's writes stopped being taken during the flood, whose
-    // five megabytes outrun every buffer between it and logd, so each let-go is
+    // megabytes outrun every buffer between it and logd, so each let-go is
     // owed `STALLED_SECS` after the flood's end at the latest. Twice that,
     // widened by this host, is logd's promise judged; a guest that stays quiet
     // past it has broken the promise, which is this test's verdict and not a
@@ -297,10 +297,13 @@ pub fn stalled_reader(
         ));
     }
     let second = reader(port, "logstream-stalled-second.txt")?;
-    if !second.wait_for(super::origin::FLOOD_DONE, FLOOD_CEILING) {
+    // The kernel's word and not the flood's last line, which its ring may
+    // have had no room for.
+    let ended = format!("exit: {} pid=", super::origin::FLOODER);
+    if !second.wait_for(&ended, FLOOD_CEILING) {
         return Err(format!(
             "a reader that connected after the flood, once every stalled reader was let go, did \
-             not receive the flood's last line: {} line(s)",
+             not receive the kernel's record of its end: {} line(s)",
             second.lines().len()
         ));
     }

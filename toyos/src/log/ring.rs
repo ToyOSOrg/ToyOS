@@ -89,7 +89,14 @@ fn room(position: u64, consumed: u64, slots: u64) -> bool {
 
 /// Write one record into the shared ring. Lock-free: see the module doc.
 pub fn push<S: Shared>(ring: &S, body: &S::Body) -> Pushed {
+    push_leaving(ring, body, 0)
+}
+
+/// [`push`], for a writer that leaves the last `keep` slots to others: it
+/// finds no room once fewer than those are free.
+pub fn push_leaving<S: Shared>(ring: &S, body: &S::Body, keep: u64) -> Pushed {
     let slots = ring.slots();
+    let limit = slots.saturating_sub(keep).max(1);
     let position = loop {
         // `tail` first, `Acquire`: it pairs with the reader's `Release` of its
         // progress, so the reader's copy of the slot a lap back precedes this
@@ -99,7 +106,7 @@ pub fn push<S: Shared>(ring: &S, body: &S::Body) -> Pushed {
         // would look like no room.
         let consumed = ring.tail().load(Ordering::Acquire);
         let position = ring.head().load(Ordering::Relaxed);
-        if !room(position, consumed, slots) {
+        if !room(position, consumed, limit) {
             ring.refused().fetch_add(1, Ordering::Relaxed);
             return Pushed::Refused;
         }

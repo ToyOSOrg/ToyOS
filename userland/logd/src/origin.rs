@@ -19,8 +19,8 @@
 //! at most [`ROUND_RECORDS`] records a round from each program so none can hold
 //! the loop.
 
-use toyos::log::region::{Body, Ring, LANES, RING_BYTES};
-use toyos::log::ring::Reader;
+use toyos::log::region::{Body, Ring, LANES, RING_BYTES, SHARED_SLOTS};
+use toyos::log::ring::{Reader, Slots};
 use toyos::log::Severity;
 use toyos::shm::SharedMemory;
 use toyos::Pipe;
@@ -60,8 +60,10 @@ pub struct Said {
 /// What reading one program found beyond its lines, for the caller to say.
 #[derive(Default)]
 pub struct Counted {
-    /// Records the ring had no room for when they were written.
+    /// Records the shared ring had no room for when they were written.
     pub refused: u64,
+    /// The same for the lanes, whose writers may not retry.
+    pub refused_lanes: u64,
     /// Records past the allowance, counted this round.
     pub suppressed: u64,
     /// Whether the allowance began suppressing this round.
@@ -150,6 +152,7 @@ impl Origin {
         if !ring.is_laid_out() {
             return Err(format!("{}'s region is not a log ring", tag.as_str()));
         }
+        ring.own(pid);
         Ok(Self {
             tag: tag.as_str().to_string(),
             pid,
@@ -178,7 +181,7 @@ impl Origin {
                 bodies.push(body);
                 left -= 1;
             }
-            counted.refused += reader.refused(&lane);
+            counted.refused_lanes += reader.refused(&lane);
         }
         while left > 0 {
             let Some(body) = self.shared.next(&self.ring) else { break };
@@ -223,6 +226,13 @@ impl Origin {
     /// Every line held for its end, said as far as it got.
     pub fn say_held(&mut self, out: &mut Vec<Said>) {
         self.joins.say_held(out);
+    }
+
+    /// Records its shared ring holds unread, as its writers' `head` says, of
+    /// the ring's slots: a report, bounded, never a position.
+    pub fn waiting(&self) -> (u64, u64) {
+        let head = self.ring.head().load(core::sync::atomic::Ordering::Relaxed);
+        (head.saturating_sub(self.shared.position()).min(SHARED_SLOTS), SHARED_SLOTS)
     }
 }
 

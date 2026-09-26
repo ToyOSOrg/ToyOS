@@ -401,6 +401,12 @@ impl Log {
                     counted.refused, origin.tag
                 ));
             }
+            if counted.refused_lanes > 0 {
+                notes.push(format!(
+                    "logd: {} record(s) of {}'s found its lane full and went unwritten",
+                    counted.refused_lanes, origin.tag
+                ));
+            }
             if counted.suppressed > 0 {
                 notes.push(format!(
                     "logd: {} record(s) of {}'s past its {} a second went unwritten",
@@ -704,7 +710,15 @@ impl Log {
         if read.iter().any(|r| r.text == stall.until.as_bytes()) {
             let origin = stall.origin.clone();
             self.stall = None;
-            say!("logd: reading {origin} again, as `--stall-until` asked");
+            let (waiting, slots) = self
+                .origins
+                .iter()
+                .find(|o| o.tag == origin)
+                .map_or((0, 0), |o| o.waiting());
+            say!(
+                "logd: reading {origin} again, as `--stall-until` asked, with {waiting} of its \
+                 ring's {slots} records waiting"
+            );
         }
     }
 }

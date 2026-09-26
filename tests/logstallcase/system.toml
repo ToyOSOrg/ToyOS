@@ -1,7 +1,7 @@
-# The shared boot's shape with `/system/bin/logd` leaving soundd's pipe unread
-# until `test_rs_soundd_log_stall` says the tone has played: soundd's pipe fills
-# and stays full while it plays, which is the state its mix thread must never
-# wait in. `soundd_log_stall` runs it, and reads the verdict off `/log` after
+# The shared boot's shape with `/system/bin/logd` leaving soundd's log ring
+# unread until `test_rs_soundd_log_stall` says the tone has played: the ring
+# fills and stays full while it plays, which is the state its mix thread must
+# never wait in. `soundd_log_stall` runs it, and reads the verdict off `/log` after
 # `run shutdown`.
 
 [boot]

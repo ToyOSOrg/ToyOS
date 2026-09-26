@@ -1,7 +1,6 @@
 //! A program that has the kernel write three batches of records and then says
-//! one line, on a boot whose `logd` reads no record until that line
-//! (`tests/logholdcase`'s `--hold-ring-until`): the line is read while every
-//! one of those records is unread, and must land in `/log` after them all.
+//! one line, which must land in `/log` after them all: `logd` reads a
+//! program's ring before the kernel's records, so only the stamps order them.
 //! `log_program_line_after_its_records` runs it.
 
 /// Three times what `logd` asks of the ring at once (`BATCH`, 64).

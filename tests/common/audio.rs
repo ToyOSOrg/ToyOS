@@ -1039,32 +1039,33 @@ pub fn null_sink_real_rate(
 /// Gate: soundd's mix thread never waits on the log.
 ///
 /// `tests/logstallcase` boots a `logd` that reads nothing of soundd's until the
-/// guest says the tone has played. The guest fills soundd's pipe with soundd's
-/// own refusals and then plays the tone into it, so every line the mix thread
-/// says while it plays is said to a full pipe. Judged off `/log`, the sink of
+/// guest says the tone has played. The guest fills soundd's log ring with
+/// soundd's own refusals and then plays the tone, so every line soundd says
+/// while it plays is said to a full ring. Judged off `/log`, the sink of
 /// record, after `run shutdown`:
 ///
 /// 1. **The tone played whole**: the capture carries it with no underrun and no
-///    click. A mix thread parked on the pipe stops at the client's first line,
+///    click. A mix thread that waited on its log would stop at its first line,
 ///    and the tone never plays at all.
-/// 2. **The pipe was full** — the premise: `logd` found it holding its whole
-///    capacity when the stall ended, and had read none of it before.
-/// 3. **Nothing went unsaid silently**: every line soundd's control thread
-///    said after the boot is in `/log` or among the lines soundd counted
-///    unsaid, exactly, and some were counted — the flood is larger than the
-///    pipe.
+/// 2. **The ring was full** — the premise: `logd` found every one of its slots
+///    waiting when the stall ended, and had read none of them before.
+/// 3. **Nothing went unwritten silently**: every line soundd's control thread
+///    said after the boot is in `/log` or among the records `logd` counted
+///    unwritten, exactly, and some were counted — the flood is larger than the
+///    ring.
 pub fn soundd_log_stall(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     use std::cell::Cell;
 
     const REFUSAL: &str = "soundd: refusing connection,";
-    const UNSAID: &str = " line(s) went unsaid:";
+    // `logd`'s counts of soundd's shared-ring records it could not write: its
+    // lanes are the mix thread's, counted apart.
+    const UNWRITTEN: [&str; 2] =
+        [" record(s) of soundd's found its ring full", " record(s) of soundd's past its"];
     const RELEASED: &str = "logd: reading soundd again, as `--stall-until` asked, with ";
+    const OF_SLOTS: &str = " of its ring's ";
     // The control thread's lines after the flood that are not refusals: the
     // probe it accepted, and the tone's stream. Either is in `/log` or counted.
     const AFTER_FLOOD: [&str; 2] = ["soundd: protocol violation (msg ", "soundd: opening stream: "];
-    // `kernel/src/pipe.rs`'s one 2 MiB page, less the 64-byte `RingHeader`
-    // (`toyos-abi/src/ring.rs`) at its start.
-    const PIPE_CAPACITY: u64 = 2 * 1024 * 1024 - 64;
     let number_before = |line: &str, marker: &str| -> Option<u64> {
         let at = line.find(marker)?;
         line[..at].rsplit(' ').next()?.parse().ok()
@@ -1098,24 +1099,26 @@ pub fn soundd_log_stall(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     // Every refusal the guest heard or provoked is one line soundd said.
     let owed = said_by_guest("flooded soundd with ")? + said_by_guest("soundd refused ")?;
 
-    // What the ledger reads over a log so far: refusals present, lines counted
-    // unsaid, the other control lines present, and `logd`'s word on the pipe.
+    // What the ledger reads over a log so far: refusals present, records
+    // counted unwritten, the other control lines present, and `logd`'s word
+    // on the ring: how many of its slots were waiting, of how many.
     struct Ledger {
         refusals: Cell<u64>,
         unsaid: Cell<u64>,
         others: Cell<u64>,
-        waiting: Cell<Option<u64>>,
+        waiting: Cell<Option<(u64, u64)>>,
     }
     let read = |ledger: &Ledger, line: &str| {
         if line.contains(REFUSAL) {
             ledger.refusals.set(ledger.refusals.get() + 1);
         }
-        ledger.unsaid.set(ledger.unsaid.get() + number_before(line, UNSAID).unwrap_or(0));
+        let unwritten: u64 = UNWRITTEN.iter().filter_map(|m| number_before(line, m)).sum();
+        ledger.unsaid.set(ledger.unsaid.get() + unwritten);
         if AFTER_FLOOD.iter().any(|m| line.contains(m)) {
             ledger.others.set(ledger.others.get() + 1);
         }
-        if let Some(bytes) = number_after(line, RELEASED) {
-            ledger.waiting.set(Some(bytes));
+        if let (Some(waiting), Some(slots)) = (number_after(line, RELEASED), number_after(line, OF_SLOTS)) {
+            ledger.waiting.set(Some((waiting, slots)));
         }
     };
     let new_ledger =
@@ -1156,23 +1159,23 @@ pub fn soundd_log_stall(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         read(&log, line);
     }
 
-    match log.waiting.get() {
-        Some(PIPE_CAPACITY) => {}
-        Some(bytes) => {
+    let slots = match log.waiting.get() {
+        Some((waiting, slots)) if waiting == slots && slots > 0 => slots,
+        Some((waiting, slots)) => {
             return Err(format!(
-                "logd found {bytes} bytes in soundd's pipe when its stall ended, not the \
-                 {PIPE_CAPACITY} a full one holds: the tone was not played to a full pipe"
+                "logd found {waiting} of soundd's {slots} ring slots waiting when its stall \
+                 ended: the tone was not played to a full ring"
             ))
         }
         None => return Err("/log never says logd's stall on soundd ended".to_string()),
-    }
+    };
     let said = owed + AFTER_FLOOD.len() as u64;
     let accounted = log.refusals.get() + log.others.get() + log.unsaid.get();
     if accounted != said || log.unsaid.get() == 0 {
         return Err(format!(
             "soundd's control thread said {said} lines after the boot ({owed} refusals and \
-             {} others); /log holds {} refusals and {} of the others, and soundd counted {} \
-             unsaid",
+             {} others); /log holds {} refusals and {} of the others, and logd counted {} \
+             unwritten",
             AFTER_FLOOD.len(),
             log.refusals.get(),
             log.others.get(),
@@ -1195,8 +1198,8 @@ pub fn soundd_log_stall(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
 
     eprintln!(
-        "  [logstallcase] {said} lines said to a full pipe of {PIPE_CAPACITY} bytes: {} in /log, \
-         {} counted unsaid; the tone played {signal_secs:.2} s with no underrun",
+        "  [logstallcase] {said} lines said to a full ring of {slots} records: {} in /log, {} \
+         counted unwritten; the tone played {signal_secs:.2} s with no underrun",
         log.refusals.get() + log.others.get(),
         log.unsaid.get()
     );

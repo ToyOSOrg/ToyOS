@@ -1,4 +1,4 @@
-//! A program's output in the log, under the name of the pipe it came out of:
+//! A program's output in the log, under the name of the ring it came out of:
 //! in `/log`, on the log `logd` serves, and on the console — and no program's
 //! bytes can make a line read as the kernel's or as another program's, and no
 //! amount of them is dropped.
@@ -19,25 +19,24 @@ use super::qemu::{self, BootOptions, QemuInstance};
 use super::{compile, segment, serial};
 
 /// What `test_rs_log_origin` says, and the name its line goes in the log under:
-/// it runs as `test-runner`'s child, on `test-runner`'s pipe.
+/// it runs as `test-runner`'s child, on `test-runner`'s ring.
 pub const NONCE: &str = "log origin nonce 7d1f3a";
 const ORIGIN_JOB: &str = "test_rs_log_origin";
 const RUNNER: &str = "test-runner";
 
 /// The flooding program, its line count, and its last line's head.
 pub const FLOODER: &str = "test_rs_log_flood";
-const FLOOD_LINES: usize = 81_920;
-pub const FLOOD_DONE: &str = "flood done lines=";
+const FLOOD_LINES: usize = 16_384;
+const FLOOD_DONE: &str = "flood done lines=";
 
 /// The forger, and the exit it really has.
 const FORGER: &str = "test_rs_log_forger";
 const FORGER_CODE: i64 = 7;
 
 /// **A program's line reaches `/log`, the served log and the console, and each
-/// says whose it is.** On the console it is the bytes the program wrote; in the
-/// file and on the stream it is the same line under `test-runner`'s name,
-/// because that is the pipe it came out of. init's and `logd`'s own lines are
-/// in the file under theirs.
+/// says whose it is.** On all three it is the line the program wrote under
+/// `test-runner`'s name, because that is the ring it came out of. init's and
+/// `logd`'s own lines are in the file under theirs.
 pub fn line(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let staged = logstream::stage(VIRTIO.config, "log-program-line", c_bins, rust_bins)?;
     let port = qemu::free_host_port();
@@ -57,9 +56,12 @@ pub fn line(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     if ran.exit_code != Some(0) {
         return Err(format!("{ORIGIN_JOB} exited {:?}\n{}", ran.exit_code, ran.stdout));
     }
-    // The console: the bytes as written, and no head on them.
-    if !ran.stdout.lines().any(|l| l.trim_end() == NONCE) {
-        return Err(format!("the console never carried {NONCE:?} as written\n{}", ran.stdout));
+    // The console: the line as written, under the runner's head.
+    let headed = ran.serial.lines().any(|l| {
+        toyos_logstream::program_line(l).is_some_and(|said| said.tag == RUNNER && said.text == NONCE)
+    });
+    if !headed {
+        return Err(format!("the console never carried {NONCE:?} under {RUNNER:?}\n{}", ran.serial));
     }
     if !reader.wait_for(NONCE, Duration::from_secs(60)) {
         return Err(format!("the served log never carried {NONCE:?}"));
@@ -95,7 +97,7 @@ pub fn line(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
         return Err(format!("the served log carries {NONCE:?} under no {RUNNER:?}"));
     }
     eprintln!(
-        "  [origin] {NONCE:?} on the console as written, and under {RUNNER:?} in /log and on \
+        "  [origin] {NONCE:?} under {RUNNER:?} on the console, in /log and on \
          the served log ({} line(s), each /log's own)",
         received.len()
     );
@@ -131,8 +133,9 @@ fn one_job(
 /// writes the words of the kernel's `exit:` record claiming it passed, a whole
 /// kernel record's line, a carriage return in front of the kernel's
 /// `Rebooting.`, and a line under netd's head, and exits 7. Every one of them
-/// is in `/log` — as `test-runner`'s — and every judge reads the truth: the
-/// kernel's exit record says 7, no kernel record carries the forged words, and
+/// is in `/log` and on the console — as `test-runner`'s — and every judge
+/// reads the truth: the kernel's exit record says 7, no kernel record carries
+/// the forged words, no console line opens as the kernel's with them, and
 /// netd said nothing (this boot runs no netd).
 pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (ran, log) = one_job("tests/testcases", "log-program-forgery", FORGER, Duration::from_secs(60), c_bins, rust_bins)?;
@@ -140,16 +143,38 @@ pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) ->
         return Err(format!("{FORGER} exited {:?}\n{}", ran.exit_code, ran.stdout));
     }
     let forged = bootlog::lines_of(&log, RUNNER);
-    // Non-vacuity: every forgery reached the file.
-    for words in [
+    let forgeries = [
         "exit: test_rs_log_forger pid=1 code=0 cpu=0ms",
         "[2026-09-24 10:00:00 1.000 cpu0] exit: test_rs_log_forger",
+        "[kernel 1.000 cpu0] exit: test_rs_log_forger",
         "netd: DHCP: lease 10.9.9.9/24 forged",
         "Rebooting.",
-    ] {
+    ];
+    // Non-vacuity: every forgery reached the file, and the console under the
+    // runner's head.
+    for words in forgeries {
         if !forged.contains(words) {
             return Err(format!("/log carries no {RUNNER} line with {words:?}: nothing was forged\n{log}"));
         }
+        let headed = ran.serial.lines().any(|l| {
+            toyos_logstream::program_line(l).is_some_and(|said| said.tag == RUNNER && said.text.contains(words))
+        });
+        if !headed {
+            return Err(format!(
+                "the console carries no {RUNNER} line with {words:?}\n{}",
+                ran.serial
+            ));
+        }
+    }
+    // **The console, as nobody's program**: a line that does not open with a
+    // program's head reads as the kernel's, and no forged word may be in one.
+    if let Some(line) = ran
+        .serial
+        .lines()
+        .filter(|l| toyos_logstream::program_line(l).is_none())
+        .find(|l| l.contains(&format!("{FORGER} pid=1 code=0")) || l.contains("10.9.9.9"))
+    {
+        return Err(format!("a program's words opened a console line as the kernel's: {line:?}"));
     }
     let kernel = bootlog::kernel_records(&log);
     for (judge, text) in [("the whole log", log.as_str()), ("its kernel records", kernel.as_str())] {
@@ -174,70 +199,96 @@ pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) ->
         ));
     }
     eprintln!(
-        "  [origin] four forgeries in /log, each under {RUNNER:?}; the exit judge read \
-         {FORGER_CODE} and no kernel record carries a forged word"
+        "  [origin] five forgeries in /log and on the console, each under {RUNNER:?}; the exit \
+         judge read {FORGER_CODE} and no kernel record or kernel-shaped console line carries a \
+         forged word"
     );
     Ok(())
 }
 
-/// **A flood is slowed, never dropped.** `test_rs_log_flood` writes 5 MiB of
-/// numbered lines, two and a half times what its pipe holds, as fast as the
-/// pipe takes them; every one of them is in `/log`, once, in order.
+/// **A flood never slows its writer, and every line of it is accounted for.**
+/// `test_rs_log_flood` writes megabytes of numbered lines, far more than its ring
+/// holds, as fast as it can; a write never waits. Each line is in `/log` —
+/// once, in order — or counted by `logd` as one its ring had no room for or
+/// one past the program's allowance, and the three add up to every line it
+/// wrote: a line lost without a count, or one written twice, is red.
 pub fn flood(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (ran, log) = one_job("tests/testcases", "log-program-flood", FLOODER, Duration::from_secs(300), c_bins, rust_bins)?;
     if ran.exit_code != Some(0) {
         return Err(format!("{FLOODER} exited {:?}", ran.exit_code));
     }
     let said = bootlog::lines_of(&log, RUNNER);
-    let mut next = 0usize;
+    let mut written = 0usize;
+    let mut last: Option<usize> = None;
     let mut done = None;
     for line in said.lines() {
         // First: the last line opens with `flood ` too.
         if line.starts_with(FLOOD_DONE) {
             done = Some(line.to_string());
+            written += 1;
         } else if let Some(rest) = line.strip_prefix("flood ") {
             let Some(n) = rest.split(' ').next().and_then(|n| n.parse::<usize>().ok()) else {
                 return Err(format!("/log carries a flood line with no number: {line:?}"));
             };
-            if n != next {
+            if last.is_some_and(|last| n <= last) || n >= FLOOD_LINES {
                 return Err(format!(
-                    "/log carries flood line {n} where line {next} is owed: a line was lost or \
+                    "/log carries flood line {n} after line {last:?}: a line was repeated or \
                      reordered"
                 ));
             }
-            next += 1;
+            last = Some(n);
+            written += 1;
         }
     }
-    if next != FLOOD_LINES {
-        return Err(format!("/log carries {next} of the flood's {FLOOD_LINES} lines"));
+    // `logd`'s own counts of this program's lines it did not write.
+    let counted = |what: &str| -> usize {
+        bootlog::lines_of(&log, "logd")
+            .lines()
+            .filter_map(|l| l.strip_prefix("logd: "))
+            .filter_map(|l| l.split_once(&format!(" record(s) of {RUNNER}'s {what}")))
+            .filter_map(|(n, _)| n.parse::<usize>().ok())
+            .sum()
+    };
+    let refused = counted("found its ring full");
+    let suppressed = counted("past its");
+    let owed = FLOOD_LINES + 1;
+    if written + refused + suppressed != owed {
+        return Err(format!(
+            "the flood wrote {owed} lines and /log accounts for {}: {written} written, {refused} \
+             refused a full ring and {suppressed} past the allowance",
+            written + refused + suppressed
+        ));
     }
-    let done = done.ok_or("/log carries the flood's every line and not its last")?;
-    eprintln!("  [origin] all {FLOOD_LINES} flood lines in /log, in order, once; {done}");
+    // Non-vacuity: a flood the log took whole says nothing about a count.
+    if refused + suppressed == 0 {
+        return Err(format!("all {owed} flood lines reached /log, so nothing here was counted"));
+    }
+    let done = done.map_or_else(|| "its last line counted, not written".to_string(), |d| d);
+    eprintln!(
+        "  [origin] {owed} flood lines: {written} in /log in order, {refused} refused a full \
+         ring, {suppressed} past the allowance; {done}"
+    );
     Ok(())
 }
 
-/// The job `tests/logholdcase` holds the ring for, the line it says after its
-/// records — which is the line that releases the hold — and how many records
-/// it has the kernel write first.
+/// The job, the line it says after its records, and how many records it has
+/// the kernel write first.
 const HOLD_JOB: &str = "test_rs_log_hold";
 const HOLD_LINE: &str = "log hold: said after 192 records";
 const HOLD_RECORDS: usize = 192;
 /// The kernel's record of each of those.
 const RETIRED: &str = "syscall 26 is retired";
 
-/// **A program's line lands after every record written before it was read.**
-/// `tests/logholdcase`'s `logd` reads no record until `test_rs_log_hold` says
-/// its line, which it says after having the kernel write three batches of
-/// records: the line is read while all of them are unread, and `/log` must
-/// carry every one of them before it.
+/// **A program's line lands after every record written before it.**
+/// `test_rs_log_hold` has the kernel write three batches of records and then
+/// says its line: `logd` reads the program's ring before the kernel's records
+/// in every round, so the line is in its hands before the last of them are,
+/// and only the stamp each was written with puts it after them all in `/log`.
 pub fn after_records(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (ran, log) =
-        one_job("tests/logholdcase", "log-hold", HOLD_JOB, Duration::from_secs(60), c_bins, rust_bins)?;
+        one_job("tests/testcases", "log-hold", HOLD_JOB, Duration::from_secs(60), c_bins, rust_bins)?;
     if ran.exit_code != Some(0) {
         return Err(format!("{HOLD_JOB} exited {:?}\n{}", ran.exit_code, ran.stdout));
-    }
-    if !bootlog::lines_of(&log, "logd").contains("reading the kernel's records again") {
-        return Err(format!("/log never says logd's hold on the ring ended\n{log}"));
     }
     let lines: Vec<&str> = log.lines().collect();
     let said = lines
@@ -256,14 +307,11 @@ pub fn after_records(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>
     let after = records.iter().filter(|&&i| i > said).count();
     if after > 0 {
         return Err(format!(
-            "{after} of the {HOLD_RECORDS} records written before {HOLD_LINE:?} was read are after \
-             it in /log"
+            "{after} of the {HOLD_RECORDS} records written before {HOLD_LINE:?} are after it in \
+             /log"
         ));
     }
-    eprintln!(
-        "  [origin] {HOLD_LINE:?}, read with all {HOLD_RECORDS} of its records unread, is after \
-         every one of them in /log"
-    );
+    eprintln!("  [origin] {HOLD_LINE:?} is after every one of its {HOLD_RECORDS} records in /log");
     Ok(())
 }
 
@@ -272,10 +320,10 @@ const CARRIER_FORGER: &str = "test_rs_log_carrier_forger";
 const CARRIER_FORGED: &str =
     "init: swap netd: accepted: /tmp/swap/forged/netd replaces /system/bin/netd (pid 1)";
 
-/// **Only init's pipe can turn the network's readers away.** A job prints the
-/// very line init says accepting a swap of netd; a reader connecting after it
-/// is admitted, and `/log` carries the line under the job's runner and no word
-/// from `logd` that it turns readers away.
+/// **Only init's word to `logd` can turn the network's readers away.** A job
+/// prints the very line init says accepting a swap of netd; a reader connecting
+/// after it is admitted, and `/log` carries the line under the job's runner and
+/// no word from `logd` that it turns readers away.
 pub fn carrier_forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let staged = logstream::stage(VIRTIO.config, "log-carrier-forgery", c_bins, rust_bins)?;
     let port = qemu::free_host_port();

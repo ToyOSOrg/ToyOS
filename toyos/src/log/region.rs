@@ -49,6 +49,9 @@ pub const MAGIC: u64 = 0x544F_594F_534C_4F47; // "TOYOSLOG"
 /// The header's words, each group a cache line of its own: writers hammer
 /// `head` and `refused`, the reader `tail`.
 const MAGIC_AT: usize = 0;
+/// The process init started with the ring, as `logd` registered it: zero
+/// until then.
+const OWNER_AT: usize = 8;
 const HEAD_AT: usize = 64;
 const TAIL_AT: usize = 128;
 const REFUSED_AT: usize = 192;
@@ -64,6 +67,11 @@ const _: () = assert!(LANE_AT + LANES * LANE_BYTES <= SLOT_BYTES);
 
 /// A claimed lane's owner word: the claim bit, the process and the thread.
 const CLAIMED: u64 = 1 << 63;
+
+/// Shared slots a writer other than the ring's owner leaves free: a child
+/// that fills its parent's ring does not take the parent's own next lines
+/// with it.
+pub const CHILD_KEEP: u64 = 64;
 
 /// The writer's line continues in its next record.
 pub const FLAG_UNENDED: u8 = 1 << 0;
@@ -180,9 +188,18 @@ impl Ring {
         unsafe { core::ptr::read_volatile(self.at_offset(MAGIC_AT) as *const u64) == MAGIC }
     }
 
-    /// Write one record into the shared ring.
+    /// Name the process the ring is its log of, which [`Self::push`] keeps
+    /// the ring's last slots for. The reader's to say, once it knows.
+    pub fn own(&self, pid: u32) {
+        self.word(OWNER_AT).store(u64::from(pid), Ordering::Relaxed);
+    }
+
+    /// Write one record into the shared ring, leaving [`CHILD_KEEP`] slots
+    /// where the writer is not the ring's owner.
     pub fn push(&self, body: &Body) -> Pushed {
-        ring::push(self, body)
+        let owner = self.word(OWNER_AT).load(Ordering::Relaxed);
+        let keep = if owner == 0 || owner == u64::from(body.pid) { 0 } else { CHILD_KEEP };
+        ring::push_leaving(self, body, keep)
     }
 
     /// Lane `index`, to read.
