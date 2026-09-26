@@ -416,18 +416,21 @@ mod mirror_refuse {
     /// Eight, because the ladder parks from attempt 2.
     pub const SHUTDOWN_REFUSALS: u32 = 8;
 
-    /// Enough that the caller's ladder outlasts the shutdown's wait for the
-    /// log, so the second stage of the stop meets it parked.
-    pub const FSYNC_REFUSALS: u32 = 9;
+    /// Enough that the stop's sweeps meet the caller parked between two
+    /// refused attempts, and few enough that the ladder closes inside the
+    /// stop's budget.
+    pub const FSYNC_REFUSALS: u32 = 8;
 
     /// The parks between [`FSYNC_REFUSALS`] refused attempts: none after the
-    /// first, then `RETRY_SOONEST` doubling, never reaching its ceiling.
+    /// first, then `RETRY_SOONEST` doubling, never reaching its ceiling — and
+    /// all of them inside the stop's budget, so the stop waits the update out
+    /// rather than resetting over a half-made one.
     const _: () = assert!(
         crate::block::RETRY_SOONEST.nanos() * ((1 << (FSYNC_REFUSALS - 1)) - 1)
-            > crate::log::SHUTDOWN_DURABLE.nanos()
+            < crate::quiesce::PARK.nanos()
             && crate::block::RETRY_SOONEST.nanos() << (FSYNC_REFUSALS - 2)
                 <= crate::block::RETRY_SLOWEST.nanos(),
-        "quiesce-fsync-refuse: the refused ladder ends before the shutdown stops waiting for /log",
+        "quiesce-fsync-refuse: the refused ladder outlasts the stop's budget",
     );
 
     /// The active FAT's byte range, captured beside the mirror's.

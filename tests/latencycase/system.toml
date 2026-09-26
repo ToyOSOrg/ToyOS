@@ -17,6 +17,7 @@ start = ["logd", "test-runner"]
 syscap = ["logread"]
 
 [programs.test-runner]
+receives = ["power"]
 args = ["test_rs_cyclictest", "test_rs_sched_stress", "reboot"]
 syscap = ["rt", "dup", "power"]
 

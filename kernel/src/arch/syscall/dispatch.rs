@@ -131,7 +131,6 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
             sys_random(&mut buf)
         }
-        SYS_CLOCK => crate::clock::nanos_since_boot(),
         SYS_OPEN => {
             let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             sys_open(&path, OpenFlags(a3))

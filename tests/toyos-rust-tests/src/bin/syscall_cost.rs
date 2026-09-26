@@ -17,7 +17,7 @@
 //! is the run with the least interference, and on a host running eleven other
 //! guests interference is all the mean measures.
 
-use toyos_abi::syscall::clock_nanos;
+use toyos_abi::clock::nanos_since_boot as clock_nanos;
 
 const REPS: usize = 9;
 const SYSCALLS_PER_REP: u64 = 20_000;
@@ -37,12 +37,12 @@ fn rdtsc() -> u64 {
     ((hi as u64) << 32) | lo as u64
 }
 
-/// Cycles per `SYS_CLOCK`, the cheapest syscall there is: it reads one counter
+/// Cycles per `SYS_GETPID`, the cheapest syscall there is: it reads one word
 /// and returns, so what it measures is the entry and the exit.
 fn syscall_cycles() -> u64 {
     let start = rdtsc();
     for _ in 0..SYSCALLS_PER_REP {
-        std::hint::black_box(clock_nanos());
+        std::hint::black_box(toyos_abi::syscall::getpid());
     }
     let end = rdtsc();
     (end - start) / SYSCALLS_PER_REP

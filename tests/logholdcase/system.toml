@@ -14,6 +14,7 @@ syscap = ["logread"]
 # `power` is what `run shutdown` needs and `dup` is what carries it to the
 # applet, which test-runner spawns directly.
 [programs.test-runner]
+receives = ["power"]
 syscap = ["dup", "power"]
 
 [programs.toybox]

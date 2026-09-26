@@ -10,5 +10,6 @@ syscap = ["logread"]
 # `power` because the job ends the machine, `dup` because the runner passes a
 # duplicate of what it holds to the binary it spawns.
 [programs.test-runner]
+receives = ["power"]
 args = ["test_rs_quiesce_writers"]
 syscap = ["dup", "power"]

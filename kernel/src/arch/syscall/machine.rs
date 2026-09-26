@@ -30,13 +30,6 @@ pub(super) fn sys_log_read(
     if let Err(e) = demand_syscap(syscap, Rights::LOG) {
         return e.refuse();
     }
-    // **The shutdown's carve-out is this capability, learned here where it is
-    // checked and nowhere a caller's own words reach.** `wait_for_durable` ends
-    // only when a userland process makes the boot's last records durable, and
-    // `publish_durable` is reachable only through this syscall — so a holder of
-    // this right is exactly what can end that wait, and the first stage of the
-    // machine's stop leaves exactly those running.
-    log::user::note_log_holder(process::current_process().raw());
     let mut cursor = match ctx.copy_in::<toyos_abi::log::LogCursor>(cursor_ptr) {
         Ok(cursor) => cursor,
         Err(e) => return e.to_u64(),
@@ -91,12 +84,12 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     crate::drivers::watchdog::disarm();
     // **Before the sync, because the sync is a claim about a machine.** A
     // process that issues a `write` after `sync_all` returns has dirty pages
-    // nothing will flush. The log's holders run on until `wait_for_durable`
-    // below returns, and what they put on the volume in between is made
-    // durable by the `fsync` they publish after.
+    // nothing will flush. Every userland thread stops here, the log's writer
+    // with the rest: `/system/bin/init` had it flush before it asked for this
+    // stop, and what it wrote since is in the page cache the sync below takes.
     #[cfg(feature = "boot-actuators")]
     crate::quiesce::last::await_the_held_thread();
-    let stopped = crate::quiesce::stop(toyos_quiesce::Stage::ExceptLog);
+    let stopped = crate::quiesce::stop();
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::quiesce_dump() {
         crate::sched::dump::serve_for_the_stop();
@@ -130,37 +123,25 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
             crate::scheduler::yield_now();
         }
     }
-    // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
-    let durability = crate::log::wait_for_durable();
-    // The carve-out's reason is spent: the last word is on the volume, so the
-    // processes still running stop here. Nothing they could write from now on
-    // would reach a file anyway, and everything below takes their device away.
-    let stopped_all = crate::quiesce::stop(toyos_quiesce::Stage::All);
+    // Order is load-bearing: the console drain, the seal, then the caller's
+    // non-returning call.
     crate::log::console::drain_inline();
-    // After the log is durable: the next boot's loader reads this page to learn
-    // how the last one ended, and a machine that was asked to stop is the one
-    // answer that is not a death. Without it the loader would find the loader's
-    // own `ARMED` and report a kernel that vanished. The reset's own account is
-    // appended under it.
+    // The next boot's loader reads this page to learn how the last one ended,
+    // and a machine that was asked to stop is the one answer that is not a
+    // death. Without it the loader would find the loader's own `ARMED` and
+    // report a kernel that vanished. The reset's own account is appended under
+    // it.
     crate::blackbox::record_done();
-    // **The second stage's only reader.** It runs below the boot's last word,
-    // so a record of it in the log would be the very thing this path exists to
-    // prevent; the page the next loader pass prints is the one channel left.
-    crate::blackbox::append(|account| {
-        let _ = writeln!(account, "{stopped_all}");
-    });
-    // Under that seal, because it extends it: how much of this boot's log the
-    // volume got, and the newest of what it did not. A file cannot report on
-    // its own tail, and on a machine with no serial port this is the only
-    // reader left for the lines written past the point `/log` stopped taking
-    // them.
-    crate::log::account_for_durability(durability);
+    // Under that seal, because it extends it: the boot's newest records, the
+    // stop's own and the last word among them. Nothing wrote them to `/log`,
+    // and on a machine with no serial port this is their only reader.
+    crate::log::seal_tail();
     // Whether or not the volume got them: a stick this boot's transport broke
     // on is a stick the next host may not be able to read the log off.
     crate::blackbox::append_recovery();
-    // **The barrier, and last of all.** Below the log volume's last durable
-    // byte, because before it `logd` still has that volume to write and this
-    // takes the controller away from it; and after everything else here,
+    // **The barrier, and last of all.** Below the sync, because before it the
+    // volumes still have bytes to take and this takes the controller away from
+    // them; and after everything else here,
     // because nothing may run between it and the register stop
     // `acpi::reboot`/`acpi::shutdown` do — which every reset this kernel
     // performs goes through. It is bounded, and the reset follows either way.

@@ -279,6 +279,15 @@ pub fn is_logd_file(name: &str) -> bool {
     toyos_wallclock::classify(name).is_some()
 }
 
+/// What one of `logd`'s files holds: its lines, and not the zeros its
+/// preallocation left past them. A part is cut to its length only once it is
+/// finished; a boot that ended any other way leaves it at its whole length. A
+/// line carries no NUL — `toyos_logstream::Text` writes one as text — so the
+/// first is where the lines end.
+pub fn written(text: &str) -> &str {
+    text.split('\0').next().unwrap_or("")
+}
+
 /// The names on a mounted log volume, split into the loader's file and
 /// `logd`'s in the order theirs sort.
 ///

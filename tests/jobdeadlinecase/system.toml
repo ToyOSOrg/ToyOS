@@ -10,6 +10,7 @@ start = ["logd", "test-runner"]
 syscap = ["logread"]
 
 [programs.test-runner]
+receives = ["power"]
 # **`echo` is the job the deadline must never reach.** The deadline kills the
 # job it was watching so the driver can end what it had in flight, and that kill
 # releases the loop `spin` was blocking — so without `userland/test-runner`'s

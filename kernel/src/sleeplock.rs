@@ -3,10 +3,7 @@
 //! CPU back; the release posts to the ticket whose turn it now is. Unlike a
 //! [`crate::sync::Lock`] guard, a [`SleepGuard`] does not raise the preempt
 //! count. Compiled a second time by `kernel-loom`, which drives the real
-//! acquire; `#[allow(dead_code)]` until a kernel static converts to it.
-
-// Unused until a kernel static converts to it — see kernel-loom/tests/sleep_lock.rs.
-#![allow(dead_code)]
+//! acquire. The console's wire (`drivers::serial`) is one.
 
 #[cfg(not(feature = "loom"))]
 use core::cell::UnsafeCell;
@@ -113,6 +110,12 @@ impl<T> SleepLock<T> {
     /// Takes the lock if free, from any context — an interrupt handler, the panic path, boot, or a caller already holding a [`crate::sync::Lock`].
     pub fn try_lock(&self) -> Option<SleepGuard<'_, T>> {
         self.take(word_of(current_task()))
+    }
+
+    /// [`Self::try_lock`] for a context that cannot ask which task it is: the
+    /// boot before per-CPU state exists, where there is no task to be.
+    pub fn try_lock_untasked(&self) -> Option<SleepGuard<'_, T>> {
+        self.take(NOT_A_TASK)
     }
 
     /// Fails whenever anyone is queued, because `ticket` has already moved past `now`.

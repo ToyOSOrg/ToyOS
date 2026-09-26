@@ -74,7 +74,9 @@ pub fn setup_combined_tls(
     let tp_user = block_phys + plan.tp_offset as u64;
     // SAFETY: the plan reserves `TCB_SIZE` bytes at `tp_offset` inside `alloc_size`.
     let tp_kernel = unsafe { block.add(plan.tp_offset) } as *mut u64;
-    // TP+0 is the psABI self-pointer, TP+8 the DTV pointer.
+    // TP+0 is the psABI self-pointer, TP+8 the DTV pointer; TP+16 is the
+    // thread's id (`toyos_abi::TCB_TID`), zero here — a process's first thread
+    // is tid 0 — and written by `process::spawn_thread` for every other.
     // SAFETY: two words of the `TCB_SIZE` reserved at `tp_kernel`; `block` is still unpublished.
     unsafe {
         *tp_kernel = tp_user;

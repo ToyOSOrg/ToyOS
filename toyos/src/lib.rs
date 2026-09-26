@@ -17,6 +17,7 @@ pub mod device;
 pub mod endow;
 pub mod gpu;
 pub mod poller;
+pub mod power;
 pub mod ipc;
 pub mod namespace;
 pub mod launch;
@@ -166,5 +167,24 @@ impl Pipe {
 }
 
 impl AsHandle for Pipe {
+    fn as_handle(&self) -> RawHandle { self.0.raw() }
+}
+
+/// A console handle: the one `/system/bin/init` endows `/system/bin/logd` with,
+/// the only one in the machine that may write.
+///
+/// **A write takes whole lines and says how many bytes that was.** The
+/// kernel queues each line for its console writer and takes only what its
+/// queue has room for, so a short count is a writer ahead of the console —
+/// poll for `WRITABLE` and send the rest.
+pub struct Console(pub(crate) OwnedHandle);
+
+impl Console {
+    pub fn write_nonblock(&self, buf: &[u8]) -> Result<usize, toyos_abi::syscall::SyscallError> {
+        self.0.write_nonblock(buf)
+    }
+}
+
+impl AsHandle for Console {
     fn as_handle(&self) -> RawHandle { self.0.raw() }
 }

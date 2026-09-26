@@ -1,13 +1,19 @@
-//! The 16550 and the virtio-console, and the one lock that serialises them.
-//! Every writer takes [`BackendGuard`] once per whole unit (a record, a
-//! userland `write`, a panic report) and holds it for that whole unit; that
-//! is the only source of line atomicity. Every unit taken under the guard is
-//! bounded, except the panic path's `drain_locked`. Nothing that holds a
-//! kernel lock formats here.
+//! The 16550 and the virtio-console, and the two locks that serialise them.
+//!
+//! **One writer puts lines on the wire: whoever holds [`WIRE`]**, which is
+//! `klogd` — the kernel's records and the lines console holders queue for it —
+//! and the few drains that stand in for it. It is held for a whole line, so
+//! a line is one writer's, and with interrupts on. [`BackendGuard`] is the
+//! registers' lock, held with interrupts off for one burst: a FIFO's worth
+//! to a 16550, a transmit buffer's to virtio-console, a byte read. The panic
+//! path takes the registers alone, and bypasses them once they stay held.
+//! Nothing that holds a kernel lock formats here.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::cpu::{inb, outb};
 use crate::log;
+use crate::scheduler::Parkable;
+use crate::sleeplock::{SleepGuard, SleepLock};
 
 const PORT: u16 = 0x3f8; // COM1
 
@@ -243,61 +249,184 @@ pub unsafe fn panic_flush() {
 /// Drains the ring before the machine powers off, so the tail of a shutdown
 /// is not lost to `acpi::shutdown()` cutting power with logs still queued.
 ///
-/// Bounded on the lock like `panic_flush`, but never bypasses: every CPU is
+/// Bounded on the wire like `panic_flush`, but never bypasses: every CPU is
 /// still live here, and reading the ring unsynchronized is only safe once
 /// nothing else runs. Losing the tail is better than not powering off.
 pub fn flush_final() {
     for _ in 0..PANIC_LOCK_SPIN_LIMIT {
-        if let Some(mut g) = BackendGuard::try_lock() {
-            crate::log::console::drain_locked(&mut g);
+        if let Some(wire) = try_wire() {
+            crate::log::console::drain_all(&wire);
             return;
         }
         core::hint::spin_loop();
     }
 }
 
-/// A userland `write` to the console, unbuffered and ANSI-stripped.
-pub fn write_console(src: &crate::user_ptr::UserBytes) {
-    let mut line = ConsoleLine::new();
-    line.out.on_newline = false;
-    line.write(src);
-    // Nothing held back: a trailing ESC is the caller's own byte, emitted here too.
-    line.finish();
+/// Who may put a line on the wire: `klogd`, and the few drains that stand in
+/// for it (boot before it runs, the stop, the power-off). **Held with
+/// interrupts on and preemption allowed**, for a whole line, so a line is one
+/// holder's; [`BackendGuard`] is taken inside it once per burst, which is the
+/// only interrupts-off window the console costs.
+static WIRE: SleepLock<()> = SleepLock::new(());
+
+/// The wire, for a task that may park until it is free.
+pub fn wire(parkable: &Parkable) -> SleepGuard<'_, ()> {
+    WIRE.lock(parkable)
+}
+
+/// The wire, if it is free, from any context — the boot before per-CPU state
+/// exists included, which has no task to hold it as.
+pub fn try_wire() -> Option<SleepGuard<'static, ()>> {
+    if crate::log::PERCPU_READY.load(Ordering::Acquire) {
+        WIRE.try_lock()
+    } else {
+        WIRE.try_lock_untasked()
+    }
+}
+
+/// A 16550's transmit FIFO: once `LSR.THRE` reads set in FIFO mode the FIFO is
+/// empty, and this many bytes may go in before it is asked again (PC16550D
+/// data sheet, FIFO mode; `init` enables the FIFO).
+const UART_FIFO: usize = 16;
+
+/// `bytes` onto the wire the caller holds, in bursts: one FIFO's worth to a
+/// 16550, one transmit buffer's to virtio-console, each under its own
+/// [`BackendGuard`] and interrupts on between two.
+pub fn write_wire(_wire: &SleepGuard<'_, ()>, bytes: &[u8]) {
+    match backend() {
+        Backend::Virtio => {
+            for chunk in bytes.chunks(super::virtio_console::TX_BUF_SIZE) {
+                let _burst = BackendGuard::lock();
+                super::virtio_console::write_bytes_locked(chunk);
+            }
+        }
+        Backend::Uart => uart_write_fifo(bytes),
+        Backend::None => {}
+    }
+}
+
+/// The FIFO burst writer: each burst waits for `THRE` with interrupts on, and
+/// takes the register lock only to test the flag and fill the FIFO.
+fn uart_write_fifo(bytes: &[u8]) {
+    for chunk in bytes.chunks(UART_FIFO) {
+        let mut asked = 0;
+        loop {
+            let burst = BackendGuard::lock();
+            if inb(PORT + 5) & 0x20 != 0 {
+                for &b in chunk {
+                    // SAFETY: COM1's own data register; the FIFO is empty and
+                    // takes `UART_FIFO` bytes, and a chunk is no more.
+                    unsafe { outb(PORT, b) };
+                }
+                break;
+            }
+            drop(burst);
+            asked += 1;
+            // A UART that never empties its FIFO takes the rest of this write
+            // with it rather than holding the wire for ever.
+            if asked == THRE_SPIN_LIMIT {
+                return;
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// A userland `write` to the console as it arrives, with no line kept: only
+/// the `console-unbuffered` actuator's, which is the negative control on the
+/// line buffer every console otherwise is. Whatever finds the queue full is
+/// counted unshown.
+pub fn write_console(src: &crate::user_ptr::UserBytes) -> usize {
+    let mut chunk = [0u8; MAX_CONSOLE_LINE];
+    let mut off = 0;
+    while off < src.len() {
+        let n = chunk.len().min(src.len() - off);
+        src.read_at(off, &mut chunk[..n]);
+        if !crate::log::console::queue(&chunk[..n]) {
+            crate::log::console::unshown();
+        }
+        off += n;
+    }
+    src.len()
 }
 
 /// One console holder's partly-written line. Must live per holder, never
 /// shared: one buffer used by two processes splices their output.
+///
+/// **A console holder does not write the wire.** A whole line goes to
+/// `klogd`'s queue ([`crate::log::console::queue`]), and `klogd` puts it on
+/// the wire between its own records — so the kernel has one console writer,
+/// and a write here never waits on a device. The bytes go as they came: the
+/// only holder that writes is `/system/bin/logd`, which renders every control
+/// byte a program wrote as text before it gets here.
+///
+/// **A write takes the whole lines the queue has room for and no more**, and
+/// says how many bytes that was, so a writer that is ahead of the console is
+/// told so rather than losing lines it cannot see; its poll for `WRITABLE` is
+/// answered when `klogd` frees room.
 pub struct ConsoleLine {
-    out: Stripped,
-    csi: Csi,
+    buf: [u8; MAX_CONSOLE_LINE],
+    len: usize,
+    /// `buf` holds a whole line the queue had no room for, which goes first.
+    held: bool,
 }
 
 impl ConsoleLine {
     pub const fn new() -> Self {
-        Self {
-            out: Stripped { buf: [0; MAX_CONSOLE_LINE], len: 0, on_newline: true },
-            csi: Csi::Text,
-        }
+        Self { buf: [0; MAX_CONSOLE_LINE], len: 0, held: false }
     }
 
-    /// Accumulate a userland write, emitting every whole line it completes.
-    pub fn write(&mut self, src: &crate::user_ptr::UserBytes) {
+    /// Take as much of a userland write as ends in lines the queue has room
+    /// for, and a trailing partial line; answer how many bytes were taken.
+    pub fn write(&mut self, src: &crate::user_ptr::UserBytes) -> usize {
+        if self.held && !self.release() {
+            return 0;
+        }
         let mut chunk = [0u8; STRIP_CHUNK];
         let mut off = 0;
         while off < src.len() {
             let n = chunk.len().min(src.len() - off);
             src.read_at(off, &mut chunk[..n]);
-            self.csi.feed(&mut self.out, &chunk[..n]);
+            for (i, &b) in chunk[..n].iter().enumerate() {
+                if self.len == MAX_CONSOLE_LINE && !self.close() {
+                    return off + i;
+                }
+                self.buf[self.len] = b;
+                self.len += 1;
+                if b == b'\n' && !self.close() {
+                    // Taken: the line is this holder's to send, and it goes
+                    // ahead of the next write.
+                    return off + i + 1;
+                }
+            }
             off += n;
         }
+        src.len()
     }
 
-    /// Emits whatever is held back, whether or not a newline came; dropping
-    /// it here would lose output the process already wrote.
+    /// Queue the line `buf` holds; `false` keeps it held for the next write.
+    fn close(&mut self) -> bool {
+        self.held = true;
+        self.release()
+    }
+
+    fn release(&mut self) -> bool {
+        if !crate::log::console::queue(&self.buf[..self.len]) {
+            return false;
+        }
+        self.len = 0;
+        self.held = false;
+        true
+    }
+
+    /// Queues whatever is held, whether or not a newline came, as the holder
+    /// goes. With the queue full it is counted unshown: nothing waits here.
     pub fn finish(&mut self) {
-        let csi = core::mem::replace(&mut self.csi, Csi::Text);
-        csi.finish(&mut self.out);
-        self.out.flush();
+        if self.len > 0 && !crate::log::console::queue(&self.buf[..self.len]) {
+            crate::log::console::unshown();
+        }
+        self.len = 0;
+        self.held = false;
     }
 }
 
@@ -307,74 +436,11 @@ impl Default for ConsoleLine {
     }
 }
 
-/// Size of one copy out of user memory; not the backend's unit — see [`MAX_CONSOLE_LINE`].
+/// Size of one copy out of user memory.
 const STRIP_CHUNK: usize = 256;
 
-/// The most written to the backend under one [`BackendGuard`], bounding a write's interrupts-off window.
-const MAX_CONSOLE_LINE: usize = 1024;
-
-/// Buffers bytes for the backend: a per-byte filter must not become a per-byte device write or lock acquisition.
-/// Holds no guard of its own; interrupts are on between two chunks of one write.
-struct Stripped {
-    buf: [u8; MAX_CONSOLE_LINE],
-    len: usize,
-    /// Whether a newline ends a unit; true for a line buffer, false for [`write_console`]'s unbuffered chunking.
-    on_newline: bool,
-}
-
-impl Stripped {
-    fn push_byte(&mut self, b: u8) {
-        if self.len == MAX_CONSOLE_LINE {
-            self.flush();
-        }
-        self.buf[self.len] = b;
-        self.len += 1;
-        if self.on_newline && b == b'\n' {
-            self.flush();
-        }
-    }
-
-    fn flush(&mut self) {
-        if self.len > 0 {
-            BackendGuard::lock().write_raw(&self.buf[..self.len]);
-            self.len = 0;
-        }
-    }
-}
-
-/// Strips ANSI CSI sequences; a state machine because writes and flushes arrive in different-sized chunks.
-enum Csi {
-    Text,
-    /// An ESC held back: only the start of a sequence if `[` follows.
-    Esc,
-    Body,
-}
-
-impl Csi {
-    fn feed(&mut self, out: &mut Stripped, bytes: &[u8]) {
-        for &b in bytes {
-            match self {
-                Self::Text if b == 0x1B => *self = Self::Esc,
-                Self::Text => out.push_byte(b),
-                Self::Esc if b == b'[' => *self = Self::Body,
-                Self::Esc => {
-                    out.push_byte(0x1B);
-                    *self = Self::Text;
-                    if b == 0x1B { *self = Self::Esc } else { out.push_byte(b) }
-                }
-                Self::Body if (0x40..=0x7E).contains(&b) => *self = Self::Text,
-                Self::Body => {}
-            }
-        }
-    }
-
-    /// A sequence the input ended mid-way: a lone ESC is emitted, a started CSI body is not.
-    fn finish(self, out: &mut Stripped) {
-        if matches!(self, Self::Esc) {
-            out.push_byte(0x1B);
-        }
-    }
-}
+/// The longest piece of a line one queue entry carries.
+pub const MAX_CONSOLE_LINE: usize = 1024;
 
 /// Bounded, not belt-and-braces: a UART wedged with THRE clear would spin
 /// forever here, on `panic_flush`'s bypass path where nothing else can help.

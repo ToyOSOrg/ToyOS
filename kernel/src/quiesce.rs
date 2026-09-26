@@ -20,8 +20,8 @@
 //! **Tasks stop; CPUs do not.** Every CPU keeps `IF` set, keeps taking its
 //! LAPIC timer and every device interrupt, and keeps taking scheduler passes —
 //! it simply has no userland left to dispatch. That is what the USB stop below
-//! the boot's last word needs, and what the kernel threads that carry the log
-//! to its volume need. Freezing CPUs inside a pass instead would strand
+//! the boot's last word needs, and what the kernel threads that carry the
+//! sync to its volumes need. Freezing CPUs inside a pass instead would strand
 //! whatever lock the thread on that CPU was holding, and `sync_all` is the
 //! first thing that would wait on it.
 //!
@@ -40,11 +40,11 @@
 //! Lock order: [`process::PROCESS_TABLE`] alone.
 
 use core::sync::atomic::{
-    AtomicBool, AtomicU32, AtomicU8, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
+    AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
     Ordering::Release,
 };
 
-use toyos_quiesce::{Record, Stage, Sweep, Thread, ThreadId};
+use toyos_quiesce::{must_stop, Record, Sweep, ThreadId};
 use toyos_sched::task::WaitClass;
 
 use crate::arch::percpu;
@@ -62,33 +62,21 @@ use crate::time::{Budget, Deadline, Duration};
 /// parking between them inside a `block::OpenUpdate` this stop waits out, and
 /// `block::DEADMAN` is what bounds that sequence. A thread can therefore
 /// outlast this, which is why its expiry is a clause in the record.
-const PARK: Budget = Budget::of(
+pub(crate) const PARK: Budget = Budget::of(
     Duration::from_nanos(toyos_sched::fair::QUANTUM_NS + crate::block::OPERATION.nanos()),
     "the reset lands wherever the threads that never reached a safe point are, and \
      the record names how many",
 );
 
-const RUNNING: u8 = 0;
-const EXCEPT_LOG: u8 = 1;
-const ALL: u8 = 2;
-
-/// Which stage this machine is in. **The one word every other read here hangs
+/// Whether the machine is stopping. **The one word every other read here hangs
 /// off**: it is stored last with `Release` and loaded first with `Acquire`, so
-/// a gate that sees a stage sees the caller that goes with it.
-static STAGE: AtomicU8 = AtomicU8::new(RUNNING);
+/// a gate that sees it sees the caller that goes with it.
+static STOPPING: AtomicBool = AtomicBool::new(false);
 
 /// The thread running the stop, which never stops itself; no thread at all
 /// until [`stop`] stores one, spelt as `percpu` spells idle.
 static CALLER_PID: AtomicU32 = AtomicU32::new(u32::MAX);
 static CALLER_TID: AtomicU32 = AtomicU32::new(u32::MAX);
-
-fn stage() -> Option<Stage> {
-    match STAGE.load(Acquire) {
-        EXCEPT_LOG => Some(Stage::ExceptLog),
-        ALL => Some(Stage::All),
-        _ => None,
-    }
-}
 
 fn caller() -> ThreadId {
     ThreadId { pid: CALLER_PID.load(Relaxed), tid: CALLER_TID.load(Relaxed) }
@@ -97,21 +85,19 @@ fn caller() -> ThreadId {
 /// Whether the machine's stop names the running thread, for the one Ring 3
 /// boundary that ranks this against the kill mark.
 pub fn stops_this_thread() -> bool {
-    let Some(stage) = stage() else { return false };
+    if !STOPPING.load(Acquire) {
+        return false;
+    }
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
         return false;
     };
     // A kernel thread reaches this boundary on its first dispatch and has no
-    // Ring 3 to be stopped from; `klogd` and `iod` are also what carries the
-    // log to its volume while userland is being stopped around them.
+    // Ring 3 to be stopped from; `iod` is also what carries the sync to its
+    // volume while userland is being stopped around it.
     if crate::sched::kthread::is_kernel_task(TaskId(pid, tid)) {
         return false;
     }
-    let thread = Thread {
-        id: ThreadId { pid: pid.raw(), tid: tid.raw() },
-        holds_the_log: crate::log::user::holds_the_log(pid.raw()),
-    };
-    stage.must_stop(thread, caller())
+    must_stop(ThreadId { pid: pid.raw(), tid: tid.raw() }, caller())
 }
 
 /// Whether this thread is the one shutdown this boot gets: a second caller's
@@ -140,7 +126,7 @@ pub fn note_progress() {
 /// actuator refuses from.
 #[cfg(feature = "boot-actuators")]
 pub fn stopping() -> bool {
-    stage().is_some()
+    STOPPING.load(Acquire)
 }
 
 /// Whether the running thread is the one performing the shutdown: what the
@@ -156,14 +142,14 @@ pub fn runs_the_shutdown() -> bool {
     ThreadId { pid: pid.raw(), tid: tid.raw() } == caller()
 }
 
-/// Stop every userland thread `stage` names, and answer with what it took.
+/// Stop every userland thread but the caller, and answer with what it took.
 ///
 /// Returns when the machine is stopped or when [`PARK`] is spent, never
 /// otherwise: an expiry is a line in the record and a reset that lands where
 /// it lands, because a machine nobody can turn off is worse than one whose
 /// last word overlapped somebody's syscall.
 #[must_use]
-pub fn stop(stage: Stage) -> Record {
+pub fn stop() -> Record {
     // Refused by name rather than defaulted: a caller with no task identity is
     // not a reboot syscall.
     let caller = ThreadId {
@@ -172,15 +158,9 @@ pub fn stop(stage: Stage) -> Record {
     };
     CALLER_PID.store(caller.pid, Relaxed);
     CALLER_TID.store(caller.tid, Relaxed);
-    // Last, and `Release`: a gate that sees this stage sees the caller it must
+    // Last, and `Release`: a gate that sees the stop sees the caller it must
     // not stop.
-    STAGE.store(
-        match stage {
-            Stage::ExceptLog => EXCEPT_LOG,
-            Stage::All => ALL,
-        },
-        Release,
-    );
+    STOPPING.store(true, Release);
 
     // Armed before the first sweep, so a transition landing between a sweep
     // and the park after it leaves a record that park returns on at once.
@@ -195,7 +175,7 @@ pub fn stop(stage: Stage) -> Record {
     let deadline = Deadline::at(began + PARK.duration());
     let mut sweeps = 0;
     loop {
-        let swept = sweep(stage, caller);
+        let swept = sweep(caller);
         sweeps += 1;
         #[cfg(feature = "boot-actuators")]
         last::note_sweep(swept);
@@ -223,20 +203,18 @@ pub fn stop(stage: Stage) -> Record {
     }
 }
 
-/// Mark every parked thread `stage` names and count the rest.
+/// Mark every parked thread but the caller and count the rest.
 ///
 /// The table lock is held for the walk and given up before the park: a thread
 /// on another CPU finishing its own teardown takes this same lock.
-fn sweep(stage: Stage, caller: ThreadId) -> Sweep {
+fn sweep(caller: ThreadId) -> Sweep {
     let mut out = Sweep::default();
     let guard = process::PROCESS_TABLE.lock();
     let Some(table) = guard.as_ref() else { return out };
     for (_, proc) in table.iter() {
         let pid = proc.pid();
-        let holds_the_log = crate::log::user::holds_the_log(pid.raw());
         for (tid, thread) in proc.threads().iter() {
-            let who = Thread { id: ThreadId { pid: pid.raw(), tid: tid.raw() }, holds_the_log };
-            if !stage.must_stop(who, caller) {
+            if !must_stop(ThreadId { pid: pid.raw(), tid: tid.raw() }, caller) {
                 continue;
             }
             // A zombie has already written its `exit:` record and holds no

@@ -42,7 +42,7 @@ syscap = ["rt"]
 # this binary under another name — the host ends the guest with `run shutdown`
 # and then reads `/apps` off the volume.
 [programs.toybox]
-syscap = ["power"]
+receives = ["power"]
 
 # The half that knows a cwd: `relative-path` drives this binary with `-c` and
 # asks it to run a dotted path the launcher refuses raw.

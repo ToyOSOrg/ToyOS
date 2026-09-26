@@ -3,18 +3,22 @@
 //! a program's output on, and the replay a reader who connects late is served
 //! from.
 //!
-//! **Whose line a line is, is decided by the pipe it came out of, never by its
-//! words.** init creates one pipe per program it starts, hands the program the
-//! write end as its stdout and stderr, and moves the read end to `logd` under
-//! the manifest's name for the program ([`REGISTER`]). `logd` alone writes a
-//! line's head, so the head is structure no program's bytes can reach:
+//! **Whose line a line is, is decided by the ring it came out of, never by its
+//! words.** init creates one log ring per program it starts, hands the program
+//! the ring as its stdout and stderr, and sends `logd` the ring under the
+//! manifest's name for the program and its pid ([`REGISTER`]). `logd` alone
+//! writes a line's head, so the head is structure no program's bytes can
+//! reach:
 //!
 //! - a kernel record opens with `[` — `toyos_abi::log::LogRecord::tagged`;
 //! - a program's line opens with [`OPEN`], carries its [`Tag`] as the last word
 //!   before [`CLOSE`], and its text after — [`ProgramLine`];
 //! - any other line continues the kernel record above it, whose message held a
-//!   newline. A program's text never does: [`Lines`] ends a line at every
-//!   newline and [`Text`] writes every control byte as text.
+//!   newline. A program's text never does: a record ends at a newline, and
+//!   [`Text`] writes every control byte as text.
+//!
+//! The same form goes to the console, where `logd` is the one writer of
+//! program lines, without the wall-clock stamp.
 //!
 //! Pure: `core` and `alloc`, no `unsafe`, no I/O.
 
@@ -29,14 +33,19 @@ extern crate std;
 use alloc::vec::Vec;
 use core::fmt::{self, Display, Write};
 
-/// The TCP port `logd` serves this boot's log on, from its first line.
+pub use toyos_abi::log::Severity;
+
+/// The TCP port `logd` serves this boot's log on, from its first line, on a
+/// boot whose manifest gives `logd` a `netd` connector. **No shipping image
+/// does**: the port answers whoever connects, with no authentication, so it is
+/// the test estates' and the metal bench's alone.
 pub const PORT: u16 = 41337;
 
 /// The service every connection on [`PORT`] is carried by. A swap of it ends
 /// each one with no FIN and no reset, which no reader could tell from a boot
-/// with nothing to say — so `logd` turns new readers away from init's word
-/// accepting that swap until the process it listened through is gone, and says
-/// so ([`CARRIER_LEAVING`]) before the swap may go.
+/// with nothing to say — so `logd` turns new readers away from init's
+/// [`SWAP`] frame accepting that swap until the process it listened through is
+/// gone, and says so ([`CARRIER_LEAVING`]) before the swap may go.
 pub const CARRIER: &str = "netd";
 
 /// `logd`'s line once it turns new readers away for a swap of [`CARRIER`]. A
@@ -55,17 +64,28 @@ pub const SERVICE: &str = "log";
 pub const READ: u32 = 3;
 
 /// The manifest's name for the program that is the log: init endows it the
-/// [`ORIGINS`] acceptor and gives it no pipe, since its own lines are its to
-/// write.
+/// [`ORIGINS`] acceptor and a console it may write ([`CONSOLE`]), and gives
+/// it a ring like every other program's, which it reads like every other.
 pub const LOGD: &str = "logd";
 
-/// The endowment label of the acceptor init hands `logd` for [`REGISTER`]
-/// frames. **Named by no manifest row**, so the one connector to it is init's
-/// own and no program can register a pipe under a name of its choosing.
+/// The endowment label of the acceptor init hands `logd` for its frames.
+/// **Named by no manifest row**, so the one connector to it is init's own and
+/// no program can register a ring under a name of its choosing.
 pub const ORIGINS: &str = "log-origins";
 
-/// A program's output: the payload is its [`Tag`], and the frame carries one
-/// handle, the read end of the pipe the program writes its stdout and stderr to.
+/// The endowment label of the one console init gives a writable handle to:
+/// `logd`'s, where it puts every program's line with its head.
+pub const CONSOLE: &str = "log-console";
+
+/// The endowment label of a program's end of the pipe [`REGISTER`] hands
+/// `logd` the other end of: nothing is written to it, and the program's end
+/// closing — which only its exit does — is how `logd` knows the ring has no
+/// writer left to wait for. A label and not a slot, so no child inherits it.
+pub const ALIVE: &str = "log-alive";
+
+/// init → `logd`: a program's log ring. The payload is [`Registration`]; the
+/// frame carries two handles — the ring, and the read end of a pipe whose
+/// only writer is the program, so its end is the ring's.
 pub const REGISTER: u32 = 1;
 
 /// `logd`'s answer to a reader on [`SERVICE`]: one handle, the read end of the
@@ -74,14 +94,56 @@ pub const REGISTER: u32 = 1;
 /// what arrives after it.
 pub const SERVED: u32 = 2;
 
+/// init → `logd`: a word on a swap of [`CARRIER`], one byte of payload —
+/// [`SWAP_LEAVING`] once init has accepted it, [`SWAP_BACK`] once the process
+/// it replaced is gone and another serves or none will.
+pub const SWAP: u32 = 4;
+pub const SWAP_LEAVING: u8 = b'L';
+pub const SWAP_BACK: u8 = b'B';
+
+/// init → `logd`: the machine is about to be stopped. `logd` reads every ring
+/// and the kernel's records, writes them, makes the volume durable, and
+/// answers [`FLUSHED`]; init asks for the stop once it has, or once its bound
+/// is spent.
+pub const FLUSH: u32 = 5;
+pub const FLUSHED: u32 = 6;
+
+/// init's line before it asks `logd` to flush for a stop: the last line of a
+/// boot `/log` is owed, since `logd` answers only once it is durable.
+pub const STOPPING: &str = "init: power: the machine stops, and logd makes the log whole first";
+
+/// What a [`REGISTER`] frame says: the pid init started, and its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Registration<'a> {
+    pub pid: u32,
+    pub tag: Tag<'a>,
+}
+
+impl<'a> Registration<'a> {
+    /// The frame's payload, into `out`; answers its length.
+    pub fn encode(&self, out: &mut [u8; 4 + MAX_TAG]) -> usize {
+        out[..4].copy_from_slice(&self.pid.to_le_bytes());
+        let tag = self.tag.as_str().as_bytes();
+        out[4..4 + tag.len()].copy_from_slice(tag);
+        4 + tag.len()
+    }
+
+    /// `None` for a payload no [`Registration::encode`] made.
+    pub fn decode(payload: &'a [u8]) -> Option<Self> {
+        let pid = u32::from_le_bytes(payload.get(..4)?.try_into().ok()?);
+        let tag = Tag::new(core::str::from_utf8(payload.get(4..)?).ok()?)?;
+        Some(Self { pid, tag })
+    }
+}
+
 /// What opens a program's line, and no kernel record's.
 pub const OPEN: char = '{';
 
 /// What closes a program's line's head.
 pub const CLOSE: char = '}';
 
-/// The longest line a program's line carries; a longer one is written in
-/// pieces of this, each a line of its own.
+/// The longest line a byte stream's line carries; a longer one is let go in
+/// pieces of this, each a line of its own ([`Lines`]).
 pub const MAX_LINE: usize = 1024;
 
 /// The longest name a [`Tag`] holds.
@@ -132,12 +194,24 @@ impl Display for Text<'_> {
 }
 
 /// One program's line as `logd` writes it:
-/// `{<stamp> <secs>.<mmm> <tag>} <text>` — the wall clock `logd` stamps every
-/// line with, the monotonic time it read the line, the program's [`Tag`], and
-/// its [`Text`]. No newline: the writer ends the line.
+/// `{<stamp> <secs>.<mmm>[ <severity>][ tid=<n>][ pid=<n>] <tag>} <text>` — the
+/// wall clock `logd` stamps every line of `/log` with (the console's lines
+/// carry none), the monotonic time the program wrote it, its severity above
+/// `Info`, the thread that wrote it where that is not the first, the process
+/// where it is not the one init registered the ring for, the program's
+/// [`Tag`], and its [`Text`]. No newline: the writer ends the line.
+///
+/// **The head is `logd`'s words about the record; only the text is the
+/// program's.** The time, thread and process are what the program stamped,
+/// and the tag is what init named the ring.
 pub struct ProgramLine<'a> {
+    /// Empty for none.
     pub stamp: &'a str,
     pub at_ns: u64,
+    pub severity: Severity,
+    pub tid: u32,
+    /// The writing process, where it is not the ring's own.
+    pub pid: Option<u32>,
     pub tag: Tag<'a>,
     pub text: &'a [u8],
 }
@@ -146,20 +220,29 @@ impl Display for ProgramLine<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let secs = self.at_ns / 1_000_000_000;
         let millis = self.at_ns % 1_000_000_000 / 1_000_000;
-        write!(
-            f,
-            "{OPEN}{} {secs}.{millis:03} {}{CLOSE} {}",
-            self.stamp,
-            self.tag.as_str(),
-            Text(self.text)
-        )
+        f.write_char(OPEN)?;
+        if !self.stamp.is_empty() {
+            write!(f, "{} ", self.stamp)?;
+        }
+        write!(f, "{secs}.{millis:03}")?;
+        if let Some(word) = self.severity.word() {
+            write!(f, " {word}")?;
+        }
+        if self.tid != 0 {
+            write!(f, " tid={}", self.tid)?;
+        }
+        if let Some(pid) = self.pid {
+            write!(f, " pid={pid}")?;
+        }
+        write!(f, " {}{CLOSE} {}", self.tag.as_str(), Text(self.text))
     }
 }
 
-/// A line of the log read back as a program's: its tag and its text.
+/// A line of the log read back as a program's: its tag, severity and text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Said<'a> {
     pub tag: &'a str,
+    pub severity: Severity,
     pub text: &'a str,
 }
 
@@ -170,9 +253,17 @@ pub fn program_line(line: &str) -> Option<Said<'_>> {
     let rest = line.strip_prefix(OPEN)?;
     let (head, text) = rest.split_once(CLOSE)?;
     let text = text.strip_prefix(' ')?;
-    let tag = head.rsplit(' ').next()?;
+    let mut words = head.rsplit(' ');
+    let tag = words.next()?;
     Tag::new(tag)?;
-    Some(Said { tag, text })
+    let severity = words
+        .find_map(|word| {
+            [Severity::Warn, Severity::Error, Severity::Alert]
+                .into_iter()
+                .find(|s| s.word() == Some(word))
+        })
+        .unwrap_or(Severity::Info);
+    Some(Said { tag, severity, text })
 }
 
 /// The milliseconds since boot a kernel record's line carries, or `None` for
@@ -337,7 +428,18 @@ mod tests {
 
     fn line(tag: &str, text: &[u8]) -> String {
         let tag = Tag::new(tag).expect("a tag");
-        format!("{}", ProgramLine { stamp: "2026-09-24 10:00:00", at_ns: 12_345_678_901, tag, text })
+        format!(
+            "{}",
+            ProgramLine {
+                stamp: "2026-09-24 10:00:00",
+                at_ns: 12_345_678_901,
+                severity: Severity::Info,
+                tid: 0,
+                pid: None,
+                tag,
+                text,
+            }
+        )
     }
 
     #[test]
@@ -352,11 +454,22 @@ mod tests {
         assert_eq!(written, "{2026-09-24 10:00:00 12.345 netd} netd: MAC 52:54:00:12:34:56");
         assert_eq!(
             program_line(&format!("{written}\n")),
-            Some(Said { tag: "netd", text: "netd: MAC 52:54:00:12:34:56" })
+            Some(Said { tag: "netd", severity: Severity::Info, text: "netd: MAC 52:54:00:12:34:56" })
         );
         let tag = Tag::new("logd").expect("a tag");
-        let undated = format!("{}", ProgramLine { stamp: "---------- --------", at_ns: 5, tag, text: b"x" });
-        assert_eq!(program_line(&undated), Some(Said { tag: "logd", text: "x" }));
+        let undated = format!(
+            "{}",
+            ProgramLine {
+                stamp: "---------- --------",
+                at_ns: 5,
+                severity: Severity::Info,
+                tid: 0,
+                pid: None,
+                tag,
+                text: b"x",
+            }
+        );
+        assert_eq!(program_line(&undated), Some(Said { tag: "logd", severity: Severity::Info, text: "x" }));
     }
 
     /// **The forgery the form exists to refuse**: whatever a program writes —
@@ -380,6 +493,38 @@ mod tests {
             assert_eq!(read.tag, "test-runner", "{said:?}");
             assert!(!read.text.contains('\r') && !read.text.contains('\x1b'), "{said:?}");
         }
+    }
+
+    /// The head carries what the record says beyond `Info` and the first thread,
+    /// and a console line carries no wall clock; every form reads back.
+    #[test]
+    fn a_head_names_severity_thread_and_process_and_reads_back() {
+        let tag = Tag::new("soundd").expect("a tag");
+        let line = |stamp, severity, tid, pid| {
+            format!("{}", ProgramLine { stamp, at_ns: 1_234_000_000, severity, tid, pid, tag, text: b"hi" })
+        };
+        assert_eq!(line("", Severity::Info, 0, None), "{1.234 soundd} hi");
+        assert_eq!(line("", Severity::Error, 3, None), "{1.234 error tid=3 soundd} hi");
+        assert_eq!(
+            line("2026-09-24 10:00:00", Severity::Warn, 0, Some(9)),
+            "{2026-09-24 10:00:00 1.234 warn pid=9 soundd} hi"
+        );
+        let said = program_line("{1.234 alert tid=2 soundd} hi").expect("a program's line");
+        assert_eq!((said.tag, said.severity, said.text), ("soundd", Severity::Alert, "hi"));
+        // A severity word in the text is the text's.
+        let said = program_line("{1.234 soundd} error").expect("a program's line");
+        assert_eq!(said.severity, Severity::Info);
+    }
+
+    #[test]
+    fn a_registration_round_trips_and_a_malformed_one_is_refused() {
+        let tag = Tag::new("netd").expect("a tag");
+        let mut out = [0u8; 4 + MAX_TAG];
+        let len = Registration { pid: 7, tag }.encode(&mut out);
+        assert_eq!(Registration::decode(&out[..len]), Some(Registration { pid: 7, tag }));
+        assert_eq!(Registration::decode(&out[..3]), None);
+        assert_eq!(Registration::decode(b"\x07\0\0\0a b"), None);
+        assert_eq!(Registration::decode(b"\x07\0\0\0"), None);
     }
 
     #[test]
@@ -410,7 +555,7 @@ mod tests {
         assert_eq!(program_line("[2026-09-24 10:00:00 1.216 cpu0] Boot: complete (1216ms)"), None);
         assert_eq!(program_line("  its second line"), None);
         assert!(!is_program_line("[x] y"));
-        assert_eq!(program_line("{a b c d} x"), Some(Said { tag: "d", text: "x" }));
+        assert_eq!(program_line("{a b c d} x"), Some(Said { tag: "d", severity: Severity::Info, text: "x" }));
         assert_eq!(program_line("{a b c!} x"), None, "a head whose last word is no tag is nobody's");
     }
 

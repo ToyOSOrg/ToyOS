@@ -325,6 +325,9 @@ const RETIRED_ABI_NAMES: &[&str] = &[
     // vocabularies.
     "IORING_OP_CLOSE",
     "OP_CLOSE",
+    // Syscall 8. The monotonic clock is a page every address space maps
+    // read-only (`toyos_abi::clock`), so reading it is no transition at all.
+    "SYS_CLOCK",
 ];
 
 /// Everything this repository compiles into the guest.

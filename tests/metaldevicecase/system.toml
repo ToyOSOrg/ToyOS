@@ -35,7 +35,7 @@ syscap = ["rt"]
 # copy run after them.
 [programs.test-runner]
 args = ["usbwrite", "usbread", "fbcheck", "fbfill", "fbread", "reboot"]
-receives = ["soundd"]
+receives = ["soundd", "power"]
 syscap = ["device", "dup", "power"]
 
 [programs.metalprobe]

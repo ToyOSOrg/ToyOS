@@ -18,10 +18,9 @@ pub mod user;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use toyos_abi::log::{LogRecord, FLAG_EARLY, MAX_LOG_SHARDS, MAX_RECORD_MESSAGE};
-use crate::time::{Budget, Duration};
 
 pub use shard::Shard;
-pub use toyos_abi::log::Level;
+pub use toyos_abi::log::Severity;
 
 /// Set once GS base is valid; before that, reading `gs:` faults.
 pub static PERCPU_READY: AtomicBool = AtomicBool::new(false);
@@ -42,71 +41,23 @@ pub unsafe fn publish_ap_shard(cpu: u32, shard: *mut Shard) {
     unsafe { registry::publish(registry::kernel_slots(), cpu, shard) };
 }
 
-// Distinct from `apic`'s `LOG_FILE_DRAIN`: this bounds an orderly shutdown, not a panic.
-pub(crate) const SHUTDOWN_DURABLE: Budget = Budget::of(
-    Duration::from_secs(2),
-    "the shutdown's last lines are on the console only, and it says so",
-);
+/// The newest records the stop's account carries whole. The page's account
+/// reserve is what bounds it: a tail that spent the reserve would leave the
+/// reset's own account under it nowhere to go.
+const TAIL_RECORDS: usize = 16;
 
-/// How much of this boot's log the volume had when the machine was given back.
-#[derive(Clone, Copy)]
-pub struct Durability {
-    /// The newest record committed when the wait began.
-    want: u64,
-    /// The newest record the volume was known to hold when it ended.
-    had: u64,
-}
-
-/// Waits, bounded, for `/system/bin/logd` to make committed records durable.
-#[must_use]
-pub fn wait_for_durable() -> Durability {
-    // Snapshotted once: a re-read would never be satisfied while still committing.
-    let want = read::newest_committed_at_ns();
-    let deadline = crate::clock::nanos_since_boot().saturating_add(SHUTDOWN_DURABLE.nanos());
-    loop {
-        let had = user::durable_ns();
-        if had >= want {
-            return Durability { want, had };
-        }
-        if crate::clock::nanos_since_boot() >= deadline {
-            crate::log!(
-                "shutdown: /log did not answer in {}ms, so this shutdown's last lines are on the \
-                 console only",
-                SHUTDOWN_DURABLE.duration().millis()
-            );
-            return Durability { want, had };
-        }
-        // Yields, never spins: at `--smp 1` this is the only CPU logd can run on.
-        crate::scheduler::yield_now();
-    }
-}
-
-/// The newest records the account carries whole. The rest are a count: a page
-/// that spent itself on a log tail has none left for the reset's own account,
-/// which is written under this one.
-const ACCOUNTED_RECORDS: usize = 16;
-
-/// Seal what the log volume did not get onto the black box, which is the one
-/// channel a boot's own tail has left.
+/// Seal the newest of this boot's records onto the black box, the one channel
+/// a boot's own tail has once the stop has begun.
 ///
-/// **A file cannot report on its tail.** Every line saying `/log` stopped
-/// taking bytes — `logd`'s give-up line, [`wait_for_durable`]'s own record —
-/// is written after the point it stopped taking them, and on a machine with no
-/// serial port a console reaches nothing. So the count, the span and the newest
-/// records the volume never got go on the page the next loader pass prints, and
-/// a boot whose log is complete says that in the same words rather than by
-/// silence.
+/// **The kernel does not wait for `/system/bin/logd`, so it does not know what
+/// reached `/log`.** `/system/bin/init` has `logd` flush before it asks for the
+/// stop; everything committed after that — the stop's own record, `Syncing
+/// filesystems...`, the last word — is on the console, and here, where the next
+/// loader pass prints it into `loader.log`.
 ///
 /// Called from the quiesce path under [`crate::blackbox::record_done`], where
 /// the page already carries this boot's seal and every lock is still ordinary.
-pub fn account_for_durability(seen: Durability) {
-    struct Count(usize);
-    impl read::RecordSink for Count {
-        fn put(&mut self, _record: &LogRecord) -> bool {
-            self.0 += 1;
-            true
-        }
-    }
+pub fn seal_tail() {
     struct Tail<'a> {
         out: &'a mut dyn core::fmt::Write,
         left: usize,
@@ -120,36 +71,10 @@ pub fn account_for_durability(seen: Durability) {
             self.left > 0
         }
     }
-
-    // Nothing committed above what the volume holds is the whole account: the
-    // window below is empty and the count would be zero.
-    if seen.had >= seen.want {
-        crate::blackbox::append(|out| {
-            let _ = writeln!(
-                out,
-                "log: /log holds every record this boot committed, to {} ms",
-                seen.want / 1_000_000
-            );
-        });
-        return;
-    }
-    // Exclusive of `had`: that record is on the volume. Counted in its own pass
-    // because the tail below stops early and a count that stopped with it would
-    // report the bound rather than the shortfall.
-    let from = seen.had.saturating_add(1);
-    let mut count = Count(0);
-    read::snapshot_committed(from, seen.want, &mut count);
     crate::blackbox::append(|out| {
-        let _ = writeln!(
-            out,
-            "log: /log holds this boot to {} ms and {} record(s) committed after that reached no \
-             volume; the newest {} follow",
-            seen.had / 1_000_000,
-            count.0,
-            count.0.min(ACCOUNTED_RECORDS),
-        );
-        let mut tail = Tail { out, left: ACCOUNTED_RECORDS };
-        read::snapshot_committed(from, seen.want, &mut tail);
+        let _ = writeln!(out, "log: the newest {TAIL_RECORDS} records of this boot follow, newest first");
+        let mut tail = Tail { out, left: TAIL_RECORDS };
+        read::snapshot_committed(0, read::newest_committed_at_ns(), &mut tail);
     });
 }
 
@@ -241,8 +166,8 @@ fn on_a_thread(id: u32) -> u32 {
 }
 
 /// The only producer: formats, then stamps, reserves and publishes under one bracket.
-pub fn emit(level: Level, args: core::fmt::Arguments) {
-    let mut record = LogRecord { level: level as u8, ..LogRecord::EMPTY };
+pub fn emit(severity: Severity, args: core::fmt::Arguments) {
+    let mut record = LogRecord { severity: severity as u8, ..LogRecord::EMPTY };
 
     // Formatting runs outside every critical section: no lock, device or gs: access.
     let mut message = Message { msg: &mut record.msg, len: 0, elided: 0 };
@@ -308,15 +233,15 @@ pub fn halt_before_the_next_repaint() {
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {
-        $crate::log::emit($crate::log::Level::Info, format_args!($($arg)*))
+        $crate::log::emit($crate::log::Severity::Info, format_args!($($arg)*))
     };
 }
 
-/// A refusal, a corruption, or a fault; the panel paints the row red for this level.
+/// A refusal, a corruption, or a fault; the panel paints the row red for it.
 #[macro_export]
 macro_rules! alert {
     ($($arg:tt)*) => {
-        $crate::log::emit($crate::log::Level::Alert, format_args!($($arg)*))
+        $crate::log::emit($crate::log::Severity::Alert, format_args!($($arg)*))
     };
 }
 
@@ -328,7 +253,7 @@ macro_rules! alert {
 macro_rules! boot_phase {
     ($name:literal, $since:expr) => {{
         $crate::log::emit(
-            $crate::log::Level::Phase,
+            $crate::log::Severity::Info,
             format_args!(
                 "Boot: {} ({}ms)",
                 $name,
@@ -340,4 +265,50 @@ macro_rules! boot_phase {
         // for it: a phase not in `deadline::PHASES` does not compile.
         $crate::deadline::reached($crate::deadline::index_of($name));
     }};
+}
+
+/// Records one site may say in [`LIMIT_WINDOW_NS`] before the rest of the
+/// window's are counted instead ([`log_limited!`]).
+pub const LIMIT_BURST: u64 = 16;
+pub const LIMIT_WINDOW_NS: u64 = 1_000_000_000;
+
+/// `log!` for a site a program can drive at any rate: past [`LIMIT_BURST`]
+/// records a second the site's records are counted, the last one said before
+/// that says so, and the next one said carries the count
+/// (`toyos_elide::limit`).
+#[macro_export]
+macro_rules! log_limited {
+    ($($arg:tt)*) => {{
+        static LIMIT: toyos_elide::limit::Limit =
+            toyos_elide::limit::Limit::new($crate::log::LIMIT_BURST, $crate::log::LIMIT_WINDOW_NS);
+        match LIMIT.admit($crate::clock::nanos_since_boot()) {
+            toyos_elide::limit::Admit::Suppress => {}
+            toyos_elide::limit::Admit::Say { suppressed, last } => $crate::log::emit(
+                $crate::log::Severity::Info,
+                format_args!(
+                    "{}{}",
+                    format_args!($($arg)*),
+                    $crate::log::Limited { suppressed, last },
+                ),
+            ),
+        }
+    }};
+}
+
+/// What a limited site's record adds to its line: nothing, or what the limit did.
+pub struct Limited {
+    pub suppressed: u64,
+    pub last: bool,
+}
+
+impl core::fmt::Display for Limited {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.suppressed > 0 {
+            write!(f, " (after {} like it suppressed)", self.suppressed)?;
+        }
+        if self.last {
+            write!(f, " (the rest like it this second are suppressed)")?;
+        }
+        Ok(())
+    }
 }

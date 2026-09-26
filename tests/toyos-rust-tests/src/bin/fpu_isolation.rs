@@ -26,7 +26,7 @@ use std::sync::Arc;
 use core::mem::offset_of;
 
 use toyos_abi::syscall::{
-    mmap, nanosleep, thread_join, thread_spawn, MmapFlags, MmapProt, SYS_CLOCK, SYS_EXIT,
+    mmap, nanosleep, thread_join, thread_spawn, MmapFlags, MmapProt, SYS_EXIT, SYS_GETPID,
     SYS_THREAD_EXIT,
 };
 
@@ -406,7 +406,7 @@ fn preservation_arm() -> Result<(), String> {
             // `syscall` that clobbers every caller-saved one.
             "mov r13, {nsys}",
             "2:",
-            "mov rdi, {clock}",
+            "mov rdi, {getpid}",
             "syscall",
             "dec r13",
             "jnz 2b",
@@ -440,7 +440,7 @@ fn preservation_arm() -> Result<(), String> {
             npages = const FAULT_TOUCHES,
             nsys = const SYSCALLS,
             spin = const SPIN,
-            clock = const SYS_CLOCK,
+            getpid = const SYS_GETPID,
             out("r13") _,
             out("r14") _,
             clobber_abi("sysv64"),

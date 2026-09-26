@@ -159,6 +159,15 @@ fn need(got: Option<Vec<u8>>, path: &str) -> Result<Vec<u8>, String> {
     got.ok_or_else(|| format!("{path} is not on the volume"))
 }
 
+/// A part of `logd`'s as its lines, less its preallocation's zeros
+/// (`bootlog::written`'s rule, on bytes).
+pub fn written(mut bytes: Vec<u8>) -> Vec<u8> {
+    if let Some(end) = bytes.iter().position(|&b| b == 0) {
+        bytes.truncate(end);
+    }
+    bytes
+}
+
 /// One directory entry, as the host's own FAT implementation reads it.
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -606,11 +615,34 @@ pub fn kernel_log_file(
         ));
     }
     let final_text = String::from_utf8_lossy(&final_log).into_owned();
-    if !final_text.contains("Shutting down.") {
+    // **The stop is init's to sequence, and the file ends where init had
+    // `logd` make it whole**: init says it before it asks `logd`, and `logd`
+    // answers only once that line is durable. What the kernel says after —
+    // the stop's record and `Shutting down.` — is on the console and in the
+    // black box, and never waited for by anyone.
+    const FLUSHED: &str = toyos_logstream::STOPPING;
+    if !final_text.contains(FLUSHED) {
         return Err(format!(
-            "the shutdown's own last line never reached the file: {} bytes, ending {:?}",
+            "the shutdown's flush never reached the file: {} bytes, ending {:?}",
             final_log.len(),
             final_text.lines().rev().take(3).collect::<Vec<_>>().join(" | ")
+        ));
+    }
+    if !tail.contains("Shutting down.") {
+        return Err(format!("the console never carried the shutdown's last word\n{tail}"));
+    }
+    // The part was cut to its lines when `logd` finished it: no zeros of its
+    // preallocation are left on the volume past them.
+    let raw = read_files(&after[start..start + len], &[final_name.as_str()])?
+        .pop()
+        .flatten()
+        .ok_or_else(|| format!("{final_name} went missing on the way down"))?;
+    if raw.len() != final_log.len() {
+        return Err(format!(
+            "{final_name} is {} bytes on the volume and carries {} bytes of lines: the flush left \
+             its preallocation standing",
+            raw.len(),
+            final_log.len()
         ));
     }
     if final_log.len() <= running.len() {
@@ -630,8 +662,8 @@ pub fn kernel_log_file(
         ));
     }
     eprintln!(
-        "  [log] {final_name}: {} bytes after the shutdown, carrying its last line; the checker \
-         still silent",
+        "  [log] {final_name}: {} bytes after the shutdown, cut to its lines and carrying init's \
+         flush; the checker still silent",
         final_log.len()
     );
     let _ = std::fs::remove_file(&image_path);
@@ -654,7 +686,7 @@ pub fn newest_log(image_path: &Path, start: usize, len: usize) -> Result<(String
     let logs = log_names(volume)?;
     let newest = logs.last().ok_or("the log volume holds no .log file at all")?;
     let mut found = read_files(volume, &[newest.as_str()])?;
-    Ok((newest.clone(), need(found.pop().flatten(), newest)?))
+    Ok((newest.clone(), written(need(found.pop().flatten(), newest)?)))
 }
 
 /// The whole of this boot's log, oldest line first, across every file it was
@@ -678,7 +710,7 @@ pub fn whole_log(image_path: &Path, start: usize, len: usize) -> Result<Vec<Stri
     let asked: Vec<&str> = names.iter().map(String::as_str).collect();
     let mut lines = Vec::new();
     for (name, found) in names.iter().zip(read_files(volume, &asked)?) {
-        let bytes = need(found, name)?;
+        let bytes = written(need(found, name)?);
         lines.extend(String::from_utf8_lossy(&bytes).lines().map(|l| format!("{l}\n")));
     }
     Ok(lines)
@@ -787,25 +819,18 @@ fn rotation(
             ));
         }
     }
-    // **The claim is that the shutdown's own last line reached the volume**, so
-    // the search is every part of this boot and not a guess at which one it
-    // landed in. The image is built fresh for this arm, so every `.log` here is
-    // this boot's.
-    //
-    // It used to look at the two newest and that was an assumption about the
-    // *writer*: the kernel sink drained everything it was owed in one flush and
-    // then looked at the size, so the tail was in the last part or in the one
-    // before it. `/system/bin/logd` writes a batch, syncs it, publishes `durable` and
-    // then looks at the size, and at a 256-byte bound a batch is a part — so
-    // records the machine emits while `SYS_SHUTDOWN` is waiting push the line
-    // several parts back. That is the bound doing what it is set to do, and an
-    // assertion that reads it as a failure is an assertion about the old code.
+    // **The claim is that the shutdown's flush reached the volume**, so the
+    // search is every part of this boot and not a guess at which one it landed
+    // in: at a 256-byte bound a round is a part, and whatever the machine says
+    // while init waits on `logd` pushes the line a part back. The image is built
+    // fresh for this arm, so every `.log` here is this boot's.
+    const FLUSHED: &str = toyos_logstream::STOPPING;
     let names: Vec<&str> = logs.iter().map(|e| e.name.as_str()).collect();
     let tail_at = read_files(&image[start..start + len], &names)?
         .into_iter()
         .enumerate()
         .find(|(_, bytes)| {
-            bytes.as_ref().is_some_and(|b| String::from_utf8_lossy(b).contains("Shutting down."))
+            bytes.as_ref().is_some_and(|b| String::from_utf8_lossy(b).contains(FLUSHED))
         })
         .map(|(i, _)| i);
     let Some(tail_at) = tail_at else {
@@ -815,9 +840,8 @@ fn rotation(
             .unwrap_or_default();
         let newest = String::from_utf8_lossy(&newest).into_owned();
         return Err(format!(
-            "the shutdown's last line is in none of the {} parts on the volume ({}), so the \
-             bounded wait on LOG_DURABLE_NS did not deliver it.\nthe newest part ends:\n{}\nwhat \
-             the guest said:\n{}",
+            "the shutdown's flush is in none of the {} parts on the volume ({}).\nthe newest part \
+             ends:\n{}\nwhat the guest said:\n{}",
             logs.len(),
             names.join(", "),
             newest.lines().rev().take(4).collect::<Vec<_>>().join("\n"),
@@ -827,7 +851,7 @@ fn rotation(
     let _ = std::fs::remove_file(&image_path);
     eprintln!(
         "  [log] continued {continuations} times at the 256-byte bound, leaving {} parts at the \
-         {}-file bound, newest {}; the shutdown's last line is in part {} of {}",
+         {}-file bound, newest {}; the shutdown's flush is in part {} of {}",
         logs.len(),
         super::wallclock::MAX_LOG_FILES,
         logs.last().map_or("none", |e| e.name.as_str()),

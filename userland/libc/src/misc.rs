@@ -158,17 +158,21 @@ unsafe fn run_atexit() {
 pub unsafe extern "C" fn exit(status: i32) -> ! {
     run_atexit();
     super::stdio::fflush(ptr::null_mut());
-    syscall::exit(status)
+    _exit(status)
 }
 
+/// Out without `atexit` or `fflush`, but not without the log: a line either
+/// stream holds unended in the SDK's sink goes out as the process leaves.
 #[no_mangle]
 pub unsafe extern "C" fn _exit(status: i32) -> ! {
+    toyos::log::stdio::flush(toyos::log::stdio::Stream::Out);
+    toyos::log::stdio::flush(toyos::log::stdio::Stream::Err);
     syscall::exit(status)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn _Exit(status: i32) -> ! {
-    syscall::exit(status)
+    _exit(status)
 }
 
 #[no_mangle]

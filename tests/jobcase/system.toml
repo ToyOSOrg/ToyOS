@@ -11,6 +11,7 @@ syscap = ["logread"]
 # has the only parser. `dup` because the applet is spawned holding a duplicate,
 # and `power` because the one job ends the machine.
 [programs.test-runner]
+receives = ["power"]
 args = ["reboot"]
 syscap = ["dup", "power"]
 

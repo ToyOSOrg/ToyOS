@@ -43,6 +43,7 @@ dependencies = [
  "toyos-blockhold",
  "toyos-dma",
  "toyos-elf",
+ "toyos-elide",
  "toyos-fat32",
  "toyos-gpt",
  "toyos-hda",

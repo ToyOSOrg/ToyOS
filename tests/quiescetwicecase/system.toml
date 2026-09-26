@@ -9,5 +9,6 @@ syscap = ["logread"]
 # caller has to still be running when it calls, `dup` because the runner
 # passes a duplicate of what it holds to the job and the job to its child.
 [programs.test-runner]
+receives = ["power"]
 args = ["test_rs_quiesce_twice"]
 syscap = ["dup", "logread", "power"]

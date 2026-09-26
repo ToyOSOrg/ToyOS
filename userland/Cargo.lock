@@ -1818,9 +1818,9 @@ version = "0.1.0"
 dependencies = [
  "toyos 0.13.0",
  "toyos-abi 0.12.0",
+ "toyos-elide",
  "toyos-inspect",
  "toyos-logstream",
- "toyos-swap",
  "toyos-wallclock",
 ]
 
@@ -3781,6 +3781,10 @@ name = "toyos-dns"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-elide"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-font"
 version = "0.1.0"
 
@@ -3818,6 +3822,9 @@ checksum = "06db3c1cb438056c9b9a766c8f0dbbfdf3331e723a5bc7f287badc0cfb2f7f78"
 [[package]]
 name = "toyos-logstream"
 version = "0.1.0"
+dependencies = [
+ "toyos-abi 0.12.0",
+]
 
 [[package]]
 name = "toyos-manifest"

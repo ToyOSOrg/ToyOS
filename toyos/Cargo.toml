@@ -8,6 +8,18 @@ repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [features]
 rustc-dep-of-std = ["core", "toyos-abi/rustc-dep-of-std"]
+# The negative control for the log ring's publication. It makes the store that
+# publishes a record `Relaxed`, and `kernel-loom`'s `log_ring` model must red:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features log-ring-publish-relaxed \
+#     --test log_ring
+#
+# Declared here only so `cfg` checking knows the name; nothing enables it.
+log-ring-publish-relaxed = []
+
+[lints.rust]
+# The guest's target: its stream sinks are compiled only for it.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos"))'] }
 
 [dependencies]
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }

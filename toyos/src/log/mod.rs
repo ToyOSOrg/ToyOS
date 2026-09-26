@@ -1,7 +1,53 @@
-//! Reading the kernel's log, for the three programs endowed to.
+//! The machine's log from userland: a program's own lines, and the kernel's
+//! records for the programs endowed to read them.
 //!
-//! The kernel keeps no per-reader state, so all a reader is is a cursor and a
-//! buffer. Two readers see the same records and neither consumes the stream.
+//! **A program's lines are records in a ring of its own** ([`region`],
+//! [`ring`]): its stdout and stderr, and what it says with [`say!`](crate::say),
+//! [`warn!`](crate::warn) and [`error!`](crate::error), each stamped with its
+//! time, severity and thread as it is written ([`stdio`]). Writing never waits,
+//! allocates or makes a syscall; a full ring drops the record and its reader
+//! counts the drop. Whose lines they are is decided where the ring was made:
+//! `/system/bin/init` names each ring to `/system/bin/logd`, and nothing a
+//! program writes can change the name.
+//!
+//! **The kernel's records** are read with [`LogTail`]. The kernel keeps no
+//! per-reader state, so all a reader is is a cursor and a buffer. Two readers
+//! see the same records and neither consumes the stream.
+
+pub mod region;
+pub mod ring;
+pub mod stdio;
+
+#[cfg(test)]
+mod proof;
+
+pub use stdio::{bind, claim_lane, say, say_lane};
+pub use toyos_abi::log::Severity;
+
+/// One line of this program's own, at [`Severity::Info`], onto its stderr:
+/// a record in its ring, or a line on whatever else its stderr is.
+#[macro_export]
+macro_rules! say {
+    ($($arg:tt)*) => {
+        $crate::log::say($crate::log::Severity::Info, format_args!($($arg)*))
+    };
+}
+
+/// [`say!`](crate::say) at [`Severity::Warn`].
+#[macro_export]
+macro_rules! warn {
+    ($($arg:tt)*) => {
+        $crate::log::say($crate::log::Severity::Warn, format_args!($($arg)*))
+    };
+}
+
+/// [`say!`](crate::say) at [`Severity::Error`].
+#[macro_export]
+macro_rules! error {
+    ($($arg:tt)*) => {
+        $crate::log::say($crate::log::Severity::Error, format_args!($($arg)*))
+    };
+}
 
 use toyos_abi::log::{LogCursor, LogRecord};
 use toyos_abi::syscall::{self, SyscallError};
@@ -9,7 +55,7 @@ use toyos_abi::syscall::{self, SyscallError};
 /// The record and its shape, re-exported so a reader names them through the
 /// SDK. Userland does not depend on `toyos-abi` directly, and a program that
 /// had to would be one this module had forgotten to finish.
-pub use toyos_abi::log::{Level, MAX_LOG_SHARDS, MAX_RECORD_MESSAGE, RECORD_BYTES};
+pub use toyos_abi::log::{MAX_LOG_SHARDS, MAX_RECORD_MESSAGE, RECORD_BYTES};
 /// `LogRecord` is what a read fills, so a caller has to be able to size a
 /// buffer of them.
 pub use toyos_abi::log::LogRecord as Record;
@@ -50,18 +96,6 @@ impl LogTail {
     /// Shards the machine has, once a read has answered. Zero before that.
     pub fn shards(&self) -> u32 {
         self.cursor.shards
-    }
-
-    /// Tell the kernel how far this reader has made the log **durable** — the
-    /// `at_ns` of the newest record now on the device, not merely written.
-    ///
-    /// It travels on the next read rather than on a syscall of its own, because
-    /// the one caller reads every loop anyway. What it buys is a panicking
-    /// kernel that can wait for its own report to reach `/log` instead of
-    /// guessing; the kernel clamps it, so a wrong value here shortens that wait
-    /// and can never lengthen it.
-    pub fn publish_durable(&mut self, at_ns: u64) {
-        self.cursor.durable = self.cursor.durable.max(at_ns);
     }
 
     /// Fill as much of `out` as there is, oldest first, merged by timestamp.

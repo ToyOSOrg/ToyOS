@@ -169,7 +169,7 @@ fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
             if FINISHED.load(Ordering::Acquire) {
                 return;
             }
-            let since_boot = toyos_abi::syscall::clock_nanos() / 1_000_000;
+            let since_boot = toyos_abi::clock::nanos_since_boot() / 1_000_000;
             let named = RUNNING.lock().map(|job| job.clone()).unwrap_or_default();
             match bound_ms.checked_sub(since_boot) {
                 Some(left) => std::thread::sleep(Duration::from_millis(left.max(1))),

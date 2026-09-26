@@ -377,3 +377,11 @@ pub mod capture_latch;
 
 #[path = "../../kernel/src/drivers/panic_console/access.rs"]
 pub mod capture_access;
+
+/// A program's log ring: not the kernel's, and here because it is the one
+/// other lock-free protocol on shared memory in the tree, and a model of it
+/// needs the same loom this crate already carries. `tests/log_ring.rs` drives
+/// its two protocols against loom's atomics; the file names nothing outside
+/// itself, so it needs no shim.
+#[path = "../../toyos/src/log/ring.rs"]
+pub mod log_ring;

@@ -10,12 +10,17 @@
 //! spawned, there is no instant at which a name is not bound yet, and there is
 //! nothing anywhere to retry.
 //!
-//! **Every program it starts at boot writes its stdout and stderr into a pipe
-//! of its own, whose read end init moves to `logd` under the manifest's name
-//! for it** ([`Log`]). That is what makes a line's origin structure rather than
-//! a claim: the name travels beside the pipe, and no program holds the
-//! connection it travels on. A program launched later writes wherever its
-//! caller's slots say, which for a caller init started is that caller's pipe.
+//! **Every program it starts writes its stdout and stderr into a log ring of its
+//! own, which init hands `logd` under the manifest's name for it and its pid**
+//! ([`Log`]). That is what makes a line's origin structure rather than a claim:
+//! the name travels beside the ring, and no program holds the connection it
+//! travels on. A program launched through `launcher` gets a ring of its own in
+//! place of any ring its caller passed as its stdout or stderr, and keeps
+//! anything else the caller passed — a terminal's pipes stay the terminal's.
+//!
+//! **init sequences the machine's stop** ([`toyos::power`]): a holder of the
+//! `power` connector asks, init has `logd` flush and answer, and only then
+//! asks the kernel, which stops every process at once and waits for none.
 //!
 //! **A service init starts at boot outlives any one process serving it.** init
 //! keeps each of its acceptors and endows a duplicate, so a swap
@@ -27,21 +32,10 @@
 //! server nothing keeps. A program started through `launcher` still gets its
 //! acceptor by move and is started once per boot.
 
-/// One line, one `write`, into init's own pipe to `logd` ([`Log`]): a line of
-/// init's is a line in the log under init's name, whether or not `logd` has run
-/// yet, and nothing if it has stopped.
-macro_rules! say {
-    ($($arg:tt)*) => {{
-        let mut line = format!($($arg)*);
-        line.push('\n');
-        $crate::said(line.as_bytes());
-    }};
-}
-
 use std::collections::BTreeMap;
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use toyos_swap::{Refusal, Request as SwapRequest, Word};
@@ -54,11 +48,19 @@ use toyos::launch::{self, Request};
 use toyos::namespace::{self, Namespace};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor, Connector};
+use toyos::log::region::{Ring, RING_BYTES};
+use toyos::power::{self, Stop};
+use toyos::say;
+use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
 use toyos::{AsHandle, Pipe};
-use toyos_logstream::{Tag, LOGD, ORIGINS, REGISTER};
+use toyos_abi::Rights;
+use toyos_logstream::{
+    Registration, Tag, ALIVE, CONSOLE, FLUSH, FLUSHED, LOGD, MAX_TAG, ORIGINS, REGISTER, STOPPING,
+    SWAP, SWAP_BACK, SWAP_LEAVING,
+};
 use toyos_abi::syscall::{
-    DeviceRequest, SyscallError, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL,
+    DeviceRequest, FileType, SyscallError, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL,
     SYSCAP_LABEL,
 };
 
@@ -111,41 +113,59 @@ struct Pending {
 enum Port {
     Launcher,
     Swap,
+    Power,
 }
 
-/// The poll tokens for the `launcher` and `swap` acceptors, and for the one
-/// connection whose swap has been answered and whose hang-up is awaited. A
+/// The poll tokens for the `launcher`, `swap` and `power` acceptors, and for the
+/// one connection whose swap has been answered and whose hang-up is awaited. A
 /// pending connection's token is [`TOKEN_PENDING_BASE`] plus its handle, which
 /// is unique among the connections init holds at once.
 const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_SWAP_ACCEPTOR: u64 = 1;
 const TOKEN_HANGUP: u64 = 2;
-const TOKEN_PENDING_BASE: u64 = 3;
+const TOKEN_POWER_ACCEPTOR: u64 = 3;
+const TOKEN_PENDING_BASE: u64 = 4;
 
-/// Where init's own lines go: the write end of its pipe to `logd`.
-static OWN: OnceLock<Pipe> = OnceLock::new();
-
-/// `say!`'s one write. A refusal is `logd` gone, and there is nowhere left to
-/// say that.
-fn said(line: &[u8]) {
-    if let Some(own) = OWN.get() {
-        let mut rest = line;
-        while let Ok(n @ 1..) = own.write(rest) {
-            rest = &rest[n..];
-        }
-    }
-}
-
-/// The connection init moves every program's output pipe to `logd` on.
+/// How long a stop waits for `logd` to say the log is whole.
 ///
-/// **Blocking sends, bounded by construction**: each is one small frame and one
-/// handle, sent once per program `[boot] start` names and once for init
-/// itself, so the connection's queues hold them all before `logd` has read one.
-/// A refusal is therefore a broken invariant and ends init loudly.
+/// **A policy number**: the flush is a read of every ring, a write and a
+/// device flush, and a stick that takes longer than this is one whose
+/// last lines this boot gives up on rather than the stop it was asked for.
+/// Past it the stop goes ahead, and the lines are on the console.
+const FLUSH_BOUND: Duration = Duration::from_secs(5);
+
+/// The connection init hands `logd` every program's ring on, and the rest of
+/// what init owns of the log.
+///
+/// **Blocking sends, bounded by construction**: each is one small frame and
+/// two handles, sent once per program init starts and once for init itself,
+/// so the connection's queues hold them all before `logd` has read one. A
+/// refusal is therefore a broken invariant and ends init loudly.
 struct Log {
     conn: Connection,
     /// The acceptor end, until `logd` is started holding it.
     acceptor: Option<Acceptor>,
+    /// init's console as every program but `logd` gets it for its stdin: one
+    /// it may read and not write, so no program puts a line on the console but
+    /// through `logd` and under its name.
+    stdin: toyos::RawHandle,
+}
+
+/// The rights a program's stdin console keeps: it reads it and polls it, and a
+/// spawn duplicates it; it does not write it.
+const STDIN_RIGHTS: Rights =
+    Rights::READ.union(Rights::WAIT).union(Rights::DUP).union(Rights::TRANSFER);
+
+/// A fresh log ring, laid out before any other process can map it: init's
+/// handle, which a spawn duplicates into the program and [`Log::register`]
+/// moves to `logd`.
+fn new_ring() -> toyos::RawHandle {
+    let region = SharedMemory::create(RING_BYTES).expect("init: no memory for a log ring");
+    let base = core::ptr::NonNull::new(region.as_ptr()).expect("a mapped region is not null");
+    // SAFETY: `region` maps `RING_BYTES` here and stays mapped until the
+    // handle below is the only one left, which this function returns.
+    unsafe { Ring::at(base) }.lay_out();
+    region.share().expect("init: a log ring would not duplicate")
 }
 
 impl Log {
@@ -156,30 +176,83 @@ impl Log {
             .finish()
             .expect("init: no namespace for the log's origins");
         let conn = names.open(ORIGINS).expect("init: the log's origins port refused init");
-        let log = Self { conn, acceptor: Some(acceptor) };
-        let (read, write) = toyos::pipe_pair().expect("init: no pipe for its own lines");
-        log.register("init", read);
-        if OWN.set(write).is_err() {
-            unreachable!("init's own pipe is made once");
+        let stdin = toyos_abi::syscall::dup_narrowed(toyos::RawHandle(0), STDIN_RIGHTS)
+            .expect("init: its console would not narrow");
+        let log = Self { conn, acceptor: Some(acceptor), stdin };
+        // init's own lines: a ring like every program's, in the two slots the
+        // kernel filled with its console.
+        let ring = new_ring();
+        for slot in [1, 2] {
+            toyos_abi::syscall::dup2(ring, slot).expect("init: its ring would not take its own slot");
         }
+        let (alive, keep) = toyos::pipe_pair().expect("init: no pipe to say it lives");
+        // Held for the machine's life: init's end is the machine's.
+        core::mem::forget(keep);
+        log.register("init", toyos_abi::syscall::getpid().0, ring, alive);
         log
     }
 
-    /// Move `read`, a program's output, to `logd` under `name`.
-    fn register(&self, name: &str, read: Pipe) {
+    /// Move `ring`, program `pid`'s log, to `logd` under `name`, with the read
+    /// end of the pipe whose only writer is that program.
+    fn register(&self, name: &str, pid: u32, ring: toyos::RawHandle, alive: Pipe) {
         let Some(tag) = Tag::new(name) else {
             panic!("init: `{name}` is not a name a line of the log can carry");
         };
-        let raw = read.into_raw();
-        if let Err(e) = self.conn.send_bytes_with_handles(&[raw], REGISTER, tag.as_str().as_bytes()) {
-            panic!("init: logd's origins connection refused {name}'s output: {e:?}");
+        let mut payload = [0u8; 4 + MAX_TAG];
+        let len = Registration { pid, tag }.encode(&mut payload);
+        let handles = [ring, alive.into_raw()];
+        if let Err(e) = self.conn.send_bytes_with_handles(&handles, REGISTER, &payload[..len]) {
+            panic!("init: logd's origins connection refused {name}'s ring: {e:?}");
+        }
+    }
+
+    /// Tell `logd` a word on a swap of the service its readers are carried by.
+    fn carrier(&self, word: u8) {
+        if let Err(e) = self.conn.send_bytes(SWAP, &[word]) {
+            panic!("init: logd's origins connection refused a swap's word: {e:?}");
+        }
+    }
+
+    /// Have `logd` make the log whole, and wait for it to say so, bounded.
+    fn flush(&self) {
+        if let Err(e) = self.conn.signal(FLUSH) {
+            toyos::warn!("init: logd could not be asked to flush ({e:?}); stopping without it");
+            return;
+        }
+        let poller = Poller::new(1);
+        let began = Instant::now();
+        let mut rx = ipc::FrameRx::<8>::new();
+        loop {
+            match rx.pump(&self.conn) {
+                RxStep::Frame { msg_type: FLUSHED, .. } => return,
+                RxStep::Frame { msg_type, .. } => {
+                    panic!("init: logd answered a flush with frame type {msg_type}")
+                }
+                RxStep::Eof => {
+                    toyos::warn!("init: logd is gone, so this stop has no log to flush");
+                    return;
+                }
+                RxStep::Malformed => panic!("init: logd answered a flush with a malformed frame"),
+                RxStep::Idle => {}
+            }
+            let left = FLUSH_BOUND.saturating_sub(began.elapsed());
+            if left.is_zero() {
+                toyos::warn!(
+                    "init: logd did not answer the flush in {} ms; this stop's last lines are on \
+                     the console only",
+                    FLUSH_BOUND.as_millis()
+                );
+                return;
+            }
+            poller.watch(&self.conn, READABLE, 0);
+            poller.wait(1, left.as_nanos() as u64, |_| {});
         }
     }
 }
 
 fn main() {
-    // Before anything is started, so every program's first line has a pipe to
-    // go into, and before init says anything.
+    // Before anything is started, and before init says anything: from here
+    // init's own lines are records in its ring.
     let mut log = Log::open();
 
     let syscap: SysCap = Endowments::get()
@@ -226,7 +299,7 @@ fn main() {
             .collect();
         let mut service = Service::new(program, kept);
         if let Err(e) =
-            service.spawn(&program.path, &[], &system, &syscap, &connectors, Some(&mut log))
+            service.spawn(&program.path, &[], &system, &syscap, &connectors, &mut log)
         {
             panic!("init: cannot start {}: {e}", program.name);
         }
@@ -242,8 +315,11 @@ fn main() {
     let swap = acceptors
         .remove(toyos_swap::PORT)
         .expect("init: the manifest declares init serves `swap`");
+    let power = acceptors
+        .remove(power::PORT)
+        .expect("init: the manifest declares init serves `power`");
     let mut init = Init { system: &system, syscap: &syscap, acceptors, connectors, services, log };
-    init.serve_forever(&launcher, &swap);
+    init.serve_forever(&launcher, &swap, &power);
 }
 
 /// Everything init's loop acts on, for the machine's life.
@@ -309,7 +385,7 @@ impl<'a> Service<'a> {
         system: &Manifest,
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
-        log: Option<&mut Log>,
+        log: &mut Log,
     ) -> std::io::Result<u32> {
         // **Checked again at every start, not only on arrival**: the installed
         // file lives in an ambient directory, so what init verified when it
@@ -329,8 +405,16 @@ impl<'a> Service<'a> {
             0 => Served::Keep(&kept.acceptors),
             _ => Served::Restart { acceptors: &kept.acceptors, owed },
         };
-        let (child, devices) =
-            start(Command::new(path), self.program, system, syscap, served, connectors, &[], log)?;
+        let (child, devices) = start(
+            Command::new(path),
+            self.program,
+            system,
+            syscap,
+            served,
+            connectors,
+            &[],
+            Output::Boot(log),
+        )?;
         kept.generation += 1;
         if !kept.acceptors.is_empty() {
             let process = toyos_abi::syscall::dup(toyos::RawHandle(child.as_raw_handle()))
@@ -416,14 +500,15 @@ impl<'a> Init<'a> {
     /// the wait wakes for. The one wait init makes outside the loop is for a
     /// service it has just killed to finish ending, which is the kernel's
     /// teardown and no client's.
-    fn serve_forever(&mut self, launcher: &Acceptor, swap: &Acceptor) -> ! {
-        let poller = Poller::new(3 + MAX_PENDING_LAUNCHES as u32);
+    fn serve_forever(&mut self, launcher: &Acceptor, swap: &Acceptor, power: &Acceptor) -> ! {
+        let poller = Poller::new(4 + MAX_PENDING_LAUNCHES as u32);
         let mut pending: Vec<Pending> = Vec::new();
         let mut flight: Option<Flight> = None;
         let mut ready: Vec<u64> = Vec::new();
         loop {
             poller.watch(launcher, READABLE, TOKEN_ACCEPTOR);
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
+            poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
             if let Some(Flight { phase: Phase::Answered { conn, .. }, .. }) = &flight {
                 poller.watch(conn, READABLE, TOKEN_HANGUP);
             }
@@ -465,6 +550,7 @@ impl<'a> Init<'a> {
             for (token, acceptor, port) in [
                 (TOKEN_ACCEPTOR, launcher, Port::Launcher),
                 (TOKEN_SWAP_ACCEPTOR, swap, Port::Swap),
+                (TOKEN_POWER_ACCEPTOR, power, Port::Power),
             ] {
                 if !ready.contains(&token) {
                     continue;
@@ -524,7 +610,9 @@ impl<'a> Init<'a> {
                                 self.syscap,
                                 &mut self.acceptors,
                                 &self.connectors,
+                                &mut self.log,
                             ),
+                            Port::Power => self.stop(&p.conn, msg_type),
                             Port::Swap => {
                                 let payload = p.rx.payload(payload_len).to_vec();
                                 if let Some(accepted) =
@@ -556,7 +644,7 @@ impl<'a> Init<'a> {
         flight: Option<&Flight>,
     ) -> Option<Flight> {
         let refuse = |service: &str, why: Refusal| {
-            say!("{}", toyos_swap::said(service, Word::Refused, &why.to_string()));
+            swapped(&self.log, service, Word::Refused, &why.to_string());
             let _ = conn.try_send_bytes(toyos_swap::MSG_REFUSED, why.to_string().as_bytes());
             None
         };
@@ -602,19 +690,17 @@ impl<'a> Init<'a> {
         if let Err(why) = install(&installed, &request.digest, &bytes) {
             return refuse(name, why);
         }
-        say!(
-            "{}",
-            toyos_swap::said(
-                name,
-                Word::Accepted,
-                &format!(
-                    "{installed} ({} bytes, sha256 {}) replaces {} (pid {})",
-                    bytes.len(),
-                    toyos_swap::hex(&request.digest),
-                    service.path,
-                    service.pid().map_or(0, |p| p)
-                ),
-            )
+        swapped(
+            &self.log,
+            name,
+            Word::Accepted,
+            &format!(
+                "{installed} ({} bytes, sha256 {}) replaces {} (pid {})",
+                bytes.len(),
+                toyos_swap::hex(&request.digest),
+                service.path,
+                service.pid().map_or(0, |p| p)
+            ),
         );
         // A requester that cannot take the answer has hung up, which is the go
         // either way.
@@ -657,13 +743,11 @@ impl<'a> Init<'a> {
         // binary a failed swap starts again are each owed.
         let owed = self.services[index].devices.clone();
         let service = &mut self.services[index];
-        say!(
-            "{}",
-            toyos_swap::said(
-                &name,
-                Word::Stopping,
-                &format!("pid {} ({previous})", service.pid().map_or(0, |p| p)),
-            )
+        swapped(
+            &self.log,
+            &name,
+            Word::Stopping,
+            &format!("pid {} ({previous})", service.pid().map_or(0, |p| p)),
         );
         service.kept.lock().expect("init: a service's state is poisoned").swapping = true;
         if let Some(mut old) = service.child.take() {
@@ -675,25 +759,23 @@ impl<'a> Init<'a> {
             let _ = old.wait();
         }
         let started =
-            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, Some(&mut self.log));
+            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &mut self.log);
         match started {
             Ok(pid) => {
-                say!(
-                    "{}",
-                    toyos_swap::said(
-                        &name,
-                        Word::Started,
-                        &format!(
-                            "{path} as pid {pid}; in service if it runs {} ms",
-                            toyos_swap::PROBATION_MS
-                        ),
-                    )
+                swapped(
+                    &self.log,
+                    &name,
+                    Word::Started,
+                    &format!(
+                        "{path} as pid {pid}; in service if it runs {} ms",
+                        toyos_swap::PROBATION_MS
+                    ),
                 );
                 let until = Instant::now() + Duration::from_millis(toyos_swap::PROBATION_MS);
                 Some(Flight { service: index, path, phase: Phase::Probation { until, previous, owed } })
             }
             Err(e) => {
-                say!("{}", toyos_swap::said(&name, Word::Failed, &format!("{path} did not start: {e}")));
+                swapped(&self.log, &name, Word::Failed, &format!("{path} did not start: {e}"));
                 forget(&path);
                 self.restore(index, &previous, &owed);
                 None
@@ -719,13 +801,11 @@ impl<'a> Init<'a> {
         };
         match status {
             Some(Ok(None)) => {
-                say!(
-                    "{}",
-                    toyos_swap::said(
-                        &name,
-                        Word::InService,
-                        &format!("{path} as pid {}", service.pid().map_or(0, |p| p)),
-                    )
+                swapped(
+                    &self.log,
+                    &name,
+                    Word::InService,
+                    &format!("{path} as pid {}", service.pid().map_or(0, |p| p)),
                 );
                 if previous != path {
                     forget(previous);
@@ -737,13 +817,11 @@ impl<'a> Init<'a> {
                     Some(Err(e)) => format!("could not be asked whether it runs ({e})"),
                     _ => "is not running".to_string(),
                 };
-                say!(
-                    "{}",
-                    toyos_swap::said(
-                        &name,
-                        Word::Failed,
-                        &format!("{path} {how} inside {} ms", toyos_swap::PROBATION_MS),
-                    )
+                swapped(
+                    &self.log,
+                    &name,
+                    Word::Failed,
+                    &format!("{path} {how} inside {} ms", toyos_swap::PROBATION_MS),
                 );
                 service.child = None;
                 forget(path);
@@ -752,27 +830,43 @@ impl<'a> Init<'a> {
         }
     }
 
+    /// A request on `power`: `logd` flushed, then the kernel asked with the
+    /// machine's capability. Answers only a refusal: a stop that happens takes
+    /// init, and the requester, with it.
+    fn stop(&self, conn: &Connection, msg_type: u32) {
+        let Some(how) = Stop::from_message(msg_type) else {
+            say!("init: power: dropping client {} — frame {msg_type} is no stop", conn.as_handle().0);
+            return;
+        };
+        say!("{STOPPING} ({how:?})");
+        self.log.flush();
+        let refused = match how {
+            Stop::Reboot => self.syscap.reboot(),
+            Stop::Shutdown => self.syscap.shutdown(),
+        };
+        toyos::error!("init: power: the kernel refused {how:?}: {refused:?}");
+        let _ = conn.try_send_bytes(power::MSG_REFUSED, &refused.to_u64().to_le_bytes());
+    }
+
     /// Start the binary a failed swap replaced, or close the service's ports
     /// when that will not start either.
     fn restore(&mut self, index: usize, previous: &str, owed: &[String]) {
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, Some(&mut self.log)) {
+        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &mut self.log) {
             Ok(pid) => {
                 service.kept.lock().expect("init: a service's state is poisoned").swapping = false;
-                say!("{}", toyos_swap::said(&name, Word::Restored, &format!("{previous} as pid {pid}")));
+                swapped(&self.log, &name, Word::Restored, &format!("{previous} as pid {pid}"));
             }
             Err(e) => {
                 let mut kept = service.kept.lock().expect("init: a service's state is poisoned");
                 kept.swapping = false;
                 kept.acceptors.clear();
-                say!(
-                    "{}",
-                    toyos_swap::said(
-                        &name,
-                        Word::Gone,
-                        &format!("{previous} did not start either ({e}); its ports are closed"),
-                    )
+                swapped(
+                    &self.log,
+                    &name,
+                    Word::Gone,
+                    &format!("{previous} did not start either ({e}); its ports are closed"),
                 );
             }
         }
@@ -828,6 +922,7 @@ fn serve_launch<'a>(
     syscap: &SysCap,
     acceptors: &mut BTreeMap<&'a str, Acceptor>,
     connectors: &BTreeMap<&str, Connector>,
+    log: &mut Log,
 ) {
     if msg_type != launch::MSG_LAUNCH {
         return;
@@ -911,9 +1006,8 @@ fn serve_launch<'a>(
     // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
     // was never told which applet it is.
     let mut command = Command::new(request.program);
-    for (slot, handle) in request.slot_numbers().zip(slots.0.iter().copied()) {
-        command.inherit_handle(slot, handle.0);
-    }
+    let caller_slots: Vec<(u32, toyos::RawHandle)> =
+        request.slot_numbers().zip(slots.0.iter().copied()).collect();
     // **Carried, not inherited.** A child of the launcher would otherwise get
     // init's environment and init's working directory, so `cd /tmp && ls` would
     // list `/`. The launcher is a spawn service, not a session.
@@ -935,8 +1029,16 @@ fn serve_launch<'a>(
 
     // `inherit_handle` duplicates into the child, so init's own copies go with
     // `slots` when this returns.
-    let started =
-        start(command, program, system, syscap, Served::Move(acceptors), connectors, &extras, None);
+    let started = start(
+        command,
+        program,
+        system,
+        syscap,
+        Served::Move(acceptors),
+        connectors,
+        &extras,
+        Output::Launch { log, slots: &caller_slots },
+    );
     match started {
         Ok((child, _)) => {
             let handle = toyos::RawHandle(child.into_raw_handle());
@@ -1127,10 +1229,10 @@ fn start<'a>(
     served: Served<'_, 'a>,
     connectors: &BTreeMap<&str, Connector>,
     extras: &[(&str, Connector)],
-    log: Option<&mut Log>,
+    output: Output<'_>,
 ) -> std::io::Result<(Child, Vec<String>)> {
     command.args(&program.args);
-    let booting = log.is_some();
+    let booting = matches!(output, Output::Boot(_));
 
     // **Everything endowed stays owned until the spawn that moves it
     // succeeds.** `endow` records a number; a refused spawn moves nothing
@@ -1291,32 +1393,62 @@ fn start<'a>(
         held.0.push(raw);
     }
 
-    // At boot, every program but `logd` gets a pipe of its own for stdout and
-    // stderr — one pipe for both, so the two keep their order — and `logd` gets
-    // the acceptor the pipes' read ends reach it on. Last before the spawn, so
-    // nothing above can refuse with either in flight.
-    let mut origins: Option<(&mut Log, Acceptor)> = None;
-    // The log, the read end for `logd`, and the write end, which init closes
-    // once the child holds its two copies.
-    let mut output: Option<(&Log, Pipe, Pipe)> = None;
-    match log {
-        Some(log) if program.name == LOGD => {
-            let Some(acceptor) = log.acceptor.take() else {
-                panic!("init: `{LOGD}` is started twice, and the log's origins are the first's");
-            };
-            command.endow(ORIGINS, acceptor.as_handle().0);
-            origins = Some((log, acceptor));
+    // Where the program's output goes. Last before the spawn, so nothing above
+    // can refuse with a ring or `logd`'s acceptor in flight.
+    //
+    // A service init starts gets a ring of its own as its stdout and stderr
+    // and init's console to read as its stdin; `logd` also gets the acceptor
+    // the rings reach it on and the one console handle that may write. A
+    // launch keeps the slots its caller sent, but for a ring among them —
+    // the caller's own log — which is replaced by the program's.
+    let mut ring: Option<toyos::RawHandle> = None;
+    let mut origins: Option<Acceptor> = None;
+    let log: &mut Log = match output {
+        Output::Boot(log) => {
+            let own = new_ring();
+            command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            command.inherit_handle(0, log.stdin.0);
+            command.inherit_handle(1, own.0);
+            command.inherit_handle(2, own.0);
+            ring = Some(own);
+            if program.name == LOGD {
+                let Some(acceptor) = log.acceptor.take() else {
+                    panic!("init: `{LOGD}` is started twice, and the log's origins are the first's");
+                };
+                command.endow(ORIGINS, acceptor.as_handle().0);
+                origins = Some(acceptor);
+                let console = toyos_abi::syscall::dup(toyos::RawHandle(0))
+                    .expect("init: its console would not duplicate for logd");
+                command.endow(CONSOLE, console.0);
+                held.0.push(console);
+            }
+            log
         }
-        Some(log) => {
-            let log: &Log = log;
-            let (read, write) = toyos::pipe_pair()
-                .map_err(|e| std::io::Error::other(format!("no pipe for its output: {e:?}")))?;
-            command.stdout(Stdio::null()).stderr(Stdio::null());
-            command.inherit_handle(1, write.as_handle().0);
-            command.inherit_handle(2, write.as_handle().0);
-            output = Some((log, read, write));
+        Output::Launch { log, slots } => {
+            for &(slot, handle) in slots {
+                let caller_ring = matches!(slot, 1 | 2)
+                    && toyos_abi::syscall::fstat(handle)
+                        .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
+                if caller_ring {
+                    let own = *ring.get_or_insert_with(new_ring);
+                    command.inherit_handle(slot, own.0);
+                } else {
+                    command.inherit_handle(slot, handle.0);
+                }
+            }
+            log
         }
-        None => {}
+    };
+    // The ring's end is its writer's: a pipe whose one write end the program
+    // holds under a label no child inherits.
+    let mut alive = None;
+    if ring.is_some() {
+        let (read, write) = toyos::pipe_pair()
+            .map_err(|e| std::io::Error::other(format!("no pipe for its log's end: {e:?}")))?;
+        let write = write.into_raw();
+        command.endow(ALIVE, write.0);
+        held.0.push(write);
+        alive = Some(read);
     }
 
     match command.spawn() {
@@ -1327,11 +1459,11 @@ fn start<'a>(
             for (_, acceptor) in taken {
                 let _ = acceptor.into_raw();
             }
-            if let Some((_, acceptor)) = origins {
+            if let Some(acceptor) = origins {
                 let _ = acceptor.into_raw();
             }
-            if let Some((log, read, _write)) = output {
-                log.register(&program.name, read);
+            if let (Some(ring), Some(alive)) = (ring, alive) {
+                log.register(&program.name, child.id(), ring, alive);
             }
             // A launch is answered to its caller and recorded in the kernel's
             // `spawn:`; a line of init's for each would be a line on the
@@ -1347,12 +1479,22 @@ fn start<'a>(
                     acceptors.insert(name, acceptor);
                 }
             }
-            if let Some((log, acceptor)) = origins {
+            if let Some(acceptor) = origins {
                 log.acceptor = Some(acceptor);
+            }
+            if let Some(ring) = ring {
+                toyos_abi::syscall::close(ring);
             }
             Err(e)
         }
     }
+}
+
+/// Where a started program's output goes: a service's own ring, or a
+/// launch's caller's slots with any ring among them replaced.
+enum Output<'l> {
+    Boot(&'l mut Log),
+    Launch { log: &'l mut Log, slots: &'l [(u32, toyos::RawHandle)] },
 }
 
 /// The namespace this program's `receives` names, [`toyos_swap::PORT`] apart.
@@ -1420,4 +1562,19 @@ fn swap_namespace(program: &Program, connectors: &BTreeMap<&str, Connector>) -> 
         .finish()
         .unwrap_or_else(|e| panic!("init: no swap namespace for {}: {e:?}", program.name));
     Some(ns)
+}
+
+/// One of init's words on a swap: its line in the log, and — for the service
+/// `logd`'s network readers are carried by — the frame `logd` acts on. The
+/// frame and not the line: nothing a program writes is a word `logd` obeys.
+fn swapped(log: &Log, service: &str, word: Word, detail: &str) {
+    say!("{}", toyos_swap::said(service, word, detail));
+    if service == toyos_logstream::CARRIER {
+        match word {
+            Word::Accepted => log.carrier(SWAP_LEAVING),
+            // Each said once the netd it replaces has been waited for.
+            Word::Started | Word::Failed | Word::Restored | Word::Gone => log.carrier(SWAP_BACK),
+            Word::Refused | Word::Stopping | Word::InService => {}
+        }
+    }
 }

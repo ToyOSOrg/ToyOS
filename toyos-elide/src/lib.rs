@@ -1,4 +1,8 @@
-//! A value too wide for its line keeps both of its ends.
+//! What the log leaves out, decided before a record is written: the bytes of a
+//! value too wide for its line (its two ends survive), and whole records past a
+//! site's allowance ([`limit`]).
+//!
+//! **A value too wide for its line keeps both of its ends.**
 //!
 //! **No bound on the record fixes an unbounded name.** A demangled Rust symbol
 //! is bounded by nothing the kernel controls — `late_panic::Nest` is a generic
@@ -18,8 +22,8 @@
 //! needs it — and `toyos-abi` is a dependency of `std`, so a formatter that
 //! reaches no reader would ship in every program.
 //!
-//! Pure: `core::fmt` and nothing else — no allocation, no `unsafe`, and no
-//! record. The one caller is `toyos-symbols`, which spends the budget
+//! Pure: `core` and nothing else — no allocation, no `unsafe`, and no record.
+//! [`Elided`]'s one caller is `toyos-symbols`, which spends the budget
 //! `MAX_RECORD_MESSAGE` leaves a backtrace frame on behalf of
 //! `kernel/src/symbols.rs`, and everything it decides is
 //! checked here on the host, where a seam falling inside a four-byte character
@@ -37,6 +41,8 @@
 extern crate std;
 
 use core::fmt::{self, Display, Write};
+
+pub mod limit;
 
 /// The widest `...[N bytes elided]...` this can write.
 ///

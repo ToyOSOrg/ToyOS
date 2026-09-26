@@ -2873,38 +2873,33 @@ pub fn build_toyos_bins(crate_path: &Path) -> Vec<(String, Vec<u8>)> {
     toyos_build::build::build_toyos_bins(&repo, crate_path, quiet)
 }
 
-/// All kernel serial output goes through log!() which prepends "[kernel ...]".
-/// User program output goes through serial::write directly with no prefix.
+/// A kernel record's console line: `klogd` renders every one with this head,
+/// and nothing else writes it — a program's line reaches the console only
+/// through `logd`, under the program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
     line.starts_with("[kernel ")
 }
 
-/// File the userland half of one captured console line under `stdout`.
-///
-/// The kernel drains its own records straight to the backend rather than
-/// through any process's line buffer, so a record can follow bytes a program
-/// left unterminated and the host's splitter joins the two. Splitting the
-/// record back off is what has always let a `printf` with no newline reach a
-/// capture at all — and it is why `71_macro_empty_arg` passes most runs and
-/// not all: when the next writer is *userland* rather than the kernel there is
-/// no `[kernel ` to cut at. That half is `common::console`'s, on the boot
-/// config's own list of who else may speak; this is only the kernel's.
+/// A console line's text as its program wrote it: a program's line without
+/// the head `logd` gives it (`toyos_logstream::program_line`), and any other
+/// line as it is.
+pub fn user_text(line: &str) -> &str {
+    toyos_logstream::program_line(line).map_or(line, |said| said.text)
+}
+
+/// File the userland half of one captured console line under `stdout`: a
+/// program's text, and nothing of the kernel's. Every console line is one
+/// writer's whole — `klogd` is the wire's one writer — so a line is one or
+/// the other.
 fn push_user_half(line: &str, stdout: &mut String) {
     if is_kernel_line(line) {
         return;
     }
-    match line.find("[kernel ") {
-        Some(idx) => stdout.push_str(&line[..idx]),
-        None => stdout.push_str(line),
-    }
+    stdout.push_str(user_text(line));
     stdout.push('\n');
 }
 
-/// The in-guest runner's end-of-test marker. Matched anywhere in the line, not
-/// as a prefix: the virtio-console is shared and not line-atomic, so a daemon
-/// mid-`println!` pushes the marker into the middle of its line. Anchoring on
-/// the prefix made the harness miss the marker and time out — measured at 1 in
-/// 120 audio boots, where it looked like a guest hang rather than a lost line.
+/// The in-guest runner's end-of-test marker, which opens its line's text.
 const END_MARKER: &str = "===TEST_END ";
 
 impl QemuInstance {
@@ -3608,8 +3603,7 @@ impl QemuInstance {
                                 push_user_half(early, &mut stdout);
                             }
                         }
-                    } else if let Some(at) = line.find(END_MARKER) {
-                        let rest = &line[at + END_MARKER.len()..];
+                    } else if let Some(rest) = user_text(&line).strip_prefix(END_MARKER) {
                         let rest = rest.split_once("===").map_or(rest, |(head, _)| head);
                         let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                         // **A marker naming another test is the previous one's**,
@@ -3624,30 +3618,6 @@ impl QemuInstance {
                             window.push_str(&line);
                             window.push('\n');
                             continue;
-                        }
-                        // Everything before the marker is what some console
-                        // writer had said without a newline when the runner
-                        // printed; it is still real output and the audio gate
-                        // reads soundd's stats out of it.
-                        //
-                        // **And it goes to `stdout` as well, because the writer
-                        // is usually the test's own child.** A program whose
-                        // output does not end in a newline — `printf("%d", …)`
-                        // and nothing after it — has its last bytes flushed by
-                        // `ConsoleObject::drop` with no terminator, so the
-                        // runner's `===TEST_END` lands on the same line the
-                        // host's splitter builds. Filing that head under
-                        // `serial` alone is how `71_macro_empty_arg` came back
-                        // with an *empty* capture against an expected `17` —
-                        // the half no filter over whole lines reaches, and
-                        // `common::console` has the rest of it. Nothing is
-                        // dropped either way; this only stops the capture from
-                        // losing its own tail.
-                        if at > 0 && in_test {
-                            let head = &line[..at];
-                            serial.push_str(head);
-                            serial.push('\n');
-                            push_user_half(head, &mut stdout);
                         }
                         let (exit_code, error) = if parts.len() > 1 {
                             if let Some(code_str) = parts[1].strip_prefix("exit=") {

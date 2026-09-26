@@ -55,7 +55,7 @@ pub struct Monotonic;
 
 impl Clock for Monotonic {
     fn nanos(&self) -> u64 {
-        toyos_abi::syscall::clock_nanos()
+        toyos_abi::clock::nanos_since_boot()
     }
 
     fn pause(&self, nanos: u64) {

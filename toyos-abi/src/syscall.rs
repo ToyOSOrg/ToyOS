@@ -5,7 +5,9 @@ pub const SYS_READ: u64 = 1;
 pub const SYS_THREAD_EXIT: u64 = 5;
 pub const SYS_RANDOM: u64 = 6;
 // Syscall number 7 unused (formerly SYS_SCREEN_SIZE).
-pub const SYS_CLOCK: u64 = 8;
+// Syscall number 8 is retired and unused: it was `SYS_CLOCK`, the monotonic
+// clock as a kernel transition. A process reads it off its clock page
+// (`crate::clock`) with no transition at all.
 pub const SYS_OPEN: u64 = 9;
 pub const SYS_CLOSE: u64 = 10;
 pub const SYS_SEEK: u64 = 13;
@@ -561,6 +563,9 @@ pub enum FileType {
     // 9 was `Nic`, the type a claim on the kernel's own NIC driver reported.
     // A claim on a PCI function reports `Unknown`: what it is, is the driver's
     // to know, and this kernel does not know it.
+    /// A shared-memory region; `size` is its length. A program's stdout and
+    /// stderr are one when they are its log ring (`toyos::log`).
+    SharedMemory = 10,
 }
 
 impl FileType {
@@ -575,6 +580,7 @@ impl FileType {
             6 => Some(Self::Tty),
             7 => Some(Self::Mouse),
             8 => Some(Self::Socket),
+            10 => Some(Self::SharedMemory),
             _ => None,
         }
     }
@@ -1080,11 +1086,6 @@ pub fn getcwd(buf: &mut [u8]) -> usize {
 /// because a value drawn from a refused source is a predictable one.
 pub fn random(buf: &mut [u8]) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0))
-}
-
-/// Nanoseconds since boot (monotonic clock).
-pub fn clock_nanos() -> u64 {
-    syscall(SYS_CLOCK, 0, 0, 0, 0)
 }
 
 /// The time of day in the zone the machine keeps its clock in.

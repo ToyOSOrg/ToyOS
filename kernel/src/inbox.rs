@@ -150,6 +150,9 @@ pub enum Source {
     Hda,
     /// Edge-triggered: [`Source::is_ready`] is always `false` here; completions come only from `log::user::post_readiness`.
     Log,
+    /// Room in `klogd`'s queue of console holders' lines: a writer that found it
+    /// full polls a console for `WRITABLE` on this.
+    ConsoleSpace,
 }
 
 /// A source whose whole lifetime is one object's; [`cancel_by_source`] takes only these.
@@ -161,6 +164,8 @@ impl Source {
         // Keyboard is matched separately: a keyboard *claim* closing is the stimulus, not a `SysCap`.
         let ends = match self {
             Self::Log => crate::actuator::log_close_cancels_any_syscap(),
+            // The machine's one queue, which no handle ends.
+            Self::ConsoleSpace => false,
             Self::Keyboard => crate::actuator::keyboard_close_cancels_every_console(),
             Self::Mouse
             | Self::PciFunction(_)
@@ -181,6 +186,7 @@ impl PartialEq for Source {
             | (Self::Mouse, Self::Mouse)
             | (Self::VirtioSound, Self::VirtioSound)
             | (Self::Log, Self::Log)
+            | (Self::ConsoleSpace, Self::ConsoleSpace)
             | (Self::Hda, Self::Hda) => true,
             // Two claims are one source only where they are one slot.
             (Self::PciFunction(a), Self::PciFunction(b)) => a == b,
@@ -830,6 +836,7 @@ impl Source {
             Self::Hda => crate::drivers::hda::has_pending(),
             // Always false: the kernel holds no reader cursor to answer readiness with.
             Self::Log => false,
+            Self::ConsoleSpace => crate::log::console::has_room(),
         }
     }
 
@@ -844,6 +851,7 @@ impl Source {
             Self::VirtioSound => crate::drivers::virtio_sound::add_inbox_watcher(inbox_id),
             Self::Hda => crate::drivers::hda::add_inbox_watcher(inbox_id),
             Self::Log => crate::log::user::add_inbox_watcher(inbox_id),
+            Self::ConsoleSpace => crate::log::console::add_space_watcher(inbox_id),
             Self::Port(p) => p.add_watcher(inbox_id),
         }
     }
@@ -859,6 +867,7 @@ impl Source {
             Self::VirtioSound => crate::drivers::virtio_sound::remove_inbox_watcher(inbox_id),
             Self::Hda => crate::drivers::hda::remove_inbox_watcher(inbox_id),
             Self::Log => crate::log::user::remove_inbox_watcher(inbox_id),
+            Self::ConsoleSpace => crate::log::console::remove_space_watcher(inbox_id),
             Self::Port(p) => p.remove_watcher(inbox_id),
         }
     }
@@ -874,6 +883,7 @@ impl Source {
             Self::VirtioSound => crate::drivers::virtio_sound::inbox_watchers(),
             Self::Hda => crate::drivers::hda::inbox_watchers(),
             Self::Log => crate::log::user::inbox_watchers(),
+            Self::ConsoleSpace => crate::log::console::space_watchers(),
             Self::Port(p) => p.watchers(),
         }
     }
@@ -896,6 +906,8 @@ impl Source {
             // claim's record read answers `WouldBlock`, and the log is
             // edge-triggered on the reader's own cursor.
             Self::Mouse | Self::PciFunction(_) | Self::Log => {}
+            // A console write never blocks: it takes what fits and says so.
+            Self::ConsoleSpace => {}
         }
     }
 

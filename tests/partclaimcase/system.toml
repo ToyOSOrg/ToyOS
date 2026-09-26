@@ -40,7 +40,7 @@ syscap = ["rt"]
 # also what `endowment_denied` narrows *away* to prove the refusal, so an estate
 # without it would make that arm vacuous rather than red.
 [programs.test-runner]
-receives = ["soundd"]
+receives = ["soundd", "power"]
 syscap = ["device", "dup", "logread", "power", "roster"]
 devices = ["part:A94F0E6D-3B2C-4E1A-8C7D-6E5F4A3B2C1D"]
 

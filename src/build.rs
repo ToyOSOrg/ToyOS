@@ -551,7 +551,7 @@ const INIT_PROGRAM: &str = "init";
 /// declaration to come from. They travel in the manifest so init creates
 /// exactly the ports the build-time gate counted as provided — one producer,
 /// rather than a constant here and a string in init.
-const INIT_SERVED: &[&str] = &["launcher", toyos_swap::PORT];
+const INIT_SERVED: &[&str] = &["launcher", toyos_swap::PORT, "power"];
 
 /// Who may hold the swap port in `config`: [`toyos_swap::HOLDER`] and nothing
 /// else — no other `[programs]` row and never `[apps]`.

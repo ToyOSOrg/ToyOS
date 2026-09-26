@@ -841,7 +841,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     } else {
         setup_tls(None, 0, tls_max_align)?
     };
-    let (tls_alloc, fs_base) = {
+    let (tls_alloc, fs_base, tcb_phys) = {
         let addr_space = &parent_addr_space;
         let parent_data = process_data_arc.lock();
         let tls_phys = tls_alloc.phys();
@@ -854,7 +854,8 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
             rebase_block(tls_phys, (fs_base - tls_vaddr.raw()) as usize, fs_base, tls_rebase);
         }
         drop(parent_data);
-        (MappedPages::new(tls_vaddr, tls_alloc), fs_base)
+        let tcb_phys = tls_phys + (fs_base - tls_vaddr.raw());
+        (MappedPages::new(tls_vaddr, tls_alloc), fs_base, tcb_phys)
     };
 
     let (ks_alloc, ks_rsp) = match alloc_kernel_stack(thread_start, entry, stack_ptr, arg) {
@@ -892,6 +893,17 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     // Every thread names the same symbols, so a crash report never asks this table.
     let symbols = Arc::clone(&proc.symbols);
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
+    // Before the thread's first instruction, which is the enqueue below: the
+    // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
+    // SAFETY: `tcb_phys` is this thread's TCB inside the TLS block the table
+    // now owns, which no thread has run on yet; a 4-byte store inside the
+    // TCB the builder reserved.
+    unsafe {
+        core::ptr::write_volatile(
+            crate::DirectMap::from_phys(tcb_phys + toyos_abi::TCB_TID as u64).as_mut_ptr::<u32>(),
+            tid.raw(),
+        );
+    }
 
     // Enqueue while still holding the table lock: this thread is fully visible to the scheduler before any retire sweep can start.
     let (sched, _dst) = scheduler::enqueue_new(
@@ -1197,7 +1209,7 @@ fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
     }
     if let Some(proc) = table.get(process_pid) {
         let name = proc.name_str();
-        log!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
+        crate::log_limited!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
     }
 }
 

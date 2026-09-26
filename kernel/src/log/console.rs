@@ -1,9 +1,17 @@
-//! The kernel's console sink: two drain phases (inline boot, then `klogd`'s
-//! thread) and the `klogd` thread itself.
+//! The kernel's console sink: the one writer of the console wire, `klogd`,
+//! and its two drain phases (inline at boot, then the thread).
+//!
+//! **One writer.** `klogd` puts the kernel's records on the wire, and between
+//! them the lines console holders write ([`queue`]) — which on this machine is
+//! `/system/bin/logd` alone, rendering each program's line with its tag.
+//! Nothing else writes the wire but the few drains that stand in for it and
+//! the panic path. It holds the wire ([`serial::wire`]) with interrupts on and
+//! preemption allowed, and the registers only for one burst at a time.
+//!
 //! `klogd`'s row in `sched::kthread` is [`OnPanic::Halt`]: it is the only
-//! console drainer, and its death must not go silent.
-//! Records keep committing to their shards regardless of `klogd`; only the
-//! live console is lost while it is down.
+//! console drainer, and its death must not go silent. Records keep committing
+//! to their shards regardless of `klogd`; only the live console is lost while
+//! it is down.
 //! [`Drain::Inline`] and [`Drain::Thread`] are phases, not fallbacks: exactly
 //! one is active, and `Drain::Inline` *is* [`KLOGD`] being null.
 
@@ -15,13 +23,15 @@ use toyos_abi::log::LogRecord;
 use toyos_sched::task::{WaitClass, WakeCause, WakeReason};
 use toyos_sched::waitq::wake_direct;
 
-use crate::drivers::serial::{self, BackendGuard};
+use crate::drivers::serial::{self, BackendGuard, MAX_CONSOLE_LINE};
 use crate::hw::HW;
 use crate::sched::driver::{cpus, irq_off};
 use crate::sched::kthread::{self, OnPanic};
+use crate::sleeplock::SleepGuard;
 use crate::completion;
 use crate::sched::payload::{KShared, TaskHandle};
 use crate::scheduler;
+use crate::sync::Lock;
 
 use super::read::{drain_ordered, Published, RecordSink};
 use super::shard;
@@ -42,7 +52,7 @@ pub enum Drain {
     /// Nothing else runs yet: no thread exists before `klogd`'s spawn, and no CPU takes a scheduler pass this early.
     Inline,
     /// `klogd`, woken at the commit of the record it will drain.
-    /// Only a commit wakes it — no idle loop, no timer — and `i8042_no_spurious_wake` depends on that.
+    /// Only a commit or a queued line wakes it — no idle loop, no timer — and `i8042_no_spurious_wake` depends on that.
     Thread,
 }
 
@@ -55,7 +65,8 @@ pub fn mode() -> Drain {
     }
 }
 
-/// One position for every drain context, so a record never reaches the wire twice.
+/// One position for every drain context, so a record never reaches the wire
+/// twice. Moved only by the holder of the wire, or by the panic path.
 static DRAINED: Published = Published::new();
 
 /// Start the thread. Called once, from `kernel_main`, before the scheduler starts.
@@ -67,7 +78,7 @@ pub fn start() {
     KLOGD.store(shared as *const _ as *mut _, Ordering::Release);
 }
 
-/// Post the wake this producer owns; called from `emit` after its publication bracket has closed.
+/// Post the wake this producer owns; called from `emit` after its publication bracket has closed, and from [`queue`].
 pub fn post_wake() {
     let ptr = KLOGD.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -88,34 +99,40 @@ pub fn post_wake() {
     });
 }
 
-/// Put every committed record this machine has not yet spoken on the wire.
+/// Put every committed record this machine has not yet spoken on the wire,
+/// where the wire is free: the boot before `klogd` runs, and the few contexts
+/// that stand in for it. Declining loses nothing: the record stays committed,
+/// and whoever holds the wire drains it too.
 pub fn drain_inline() {
     if !serial::has_console() {
         return;
     }
-    loop {
-        // try_lock, not lock: `BackendGuard::lock` is not reentrant on this CPU, and a Ring 0 exception inside the backend write would spin forever with interrupts off.
-        // Declining loses nothing: the record stays committed, and whichever holder scans next drains it too.
-        let Some(mut guard) = BackendGuard::try_lock() else { return };
-        let records = drain_bounded(&mut guard, CHUNK_RECORDS);
-        drop(guard);
-        if records < CHUNK_RECORDS {
-            return;
-        }
-    }
+    let Some(wire) = serial::try_wire() else { return };
+    drain_records(&wire, u64::MAX);
 }
 
-/// Interrupt-off latency bound, not a batch size: `BackendGuard` holds IF off for its whole life.
-const CHUNK_RECORDS: u64 = 8;
+/// Everything owed to the wire — records and queued lines — for a caller that
+/// holds it and is about to take the machine down.
+pub fn drain_all(wire: &SleepGuard<'_, ()>) {
+    drain_records(wire, u64::MAX);
+    drain_queue(wire, usize::MAX);
+}
 
-/// The whole backlog under one guard, for a caller that already holds it (panic and shutdown flush).
-/// Unbounded because interrupt latency doesn't matter while halting or cutting power, and the report should be whole.
+/// Records and queued lines `klogd` takes per hold of the wire, so a console
+/// holder's line is never behind the whole backlog of records, nor the other
+/// way round.
+const CHUNK: u64 = 8;
+
+/// The whole record backlog through the registers the panic path holds.
+/// Unbounded because interrupt latency doesn't matter while halting, and the report should be whole.
 pub fn drain_locked(guard: &mut BackendGuard) {
-    drain_bounded(guard, u64::MAX);
+    let mut cursor = DRAINED.take();
+    let mut sink = Registers { out: guard };
+    drain_ordered(&mut cursor, &mut sink);
+    DRAINED.put(&cursor);
 }
 
 /// Advances the position with no backend: standing still, an armed waiter would find the same record on every rescan and spin.
-/// Not in `drain_inline`: that function's other callers (a producer mid-`emit`, the panic path) would pay a per-record shard walk with no backend to justify it.
 /// Safe to advance: shards keep every record for the panel regardless, and a backend arriving later rewinds this position whole.
 fn discard_pending() {
     let mut cursor = DRAINED.take();
@@ -125,10 +142,10 @@ fn discard_pending() {
     LOST.store(DRAINED.lost(), Ordering::Relaxed);
 }
 
-/// At most `budget` records to a held backend. Returns how many went.
-fn drain_bounded(guard: &mut BackendGuard, budget: u64) -> u64 {
+/// At most `budget` records onto the wire the caller holds. Returns how many went.
+fn drain_records(wire: &SleepGuard<'_, ()>, budget: u64) -> u64 {
     let mut cursor = DRAINED.take();
-    let mut sink = Wire { out: guard, records: 0, budget };
+    let mut sink = Wire { wire, records: 0, budget };
     drain_ordered(&mut cursor, &mut sink);
     let records = sink.records;
     DRAINED.put(&cursor);
@@ -152,7 +169,7 @@ pub unsafe fn drain_bypassed() {
 static SPOKEN_TO: AtomicU8 = AtomicU8::new(serial::Backend::None as u8);
 
 /// A backend has appeared or changed. Rewind and drain the boot again into the current one.
-/// Fires only on an actual change, and `write_raw` targets one backend at a time, so the replay never duplicates onto the backend already spoken to.
+/// Fires only on an actual change, and the wire targets one backend at a time, so the replay never duplicates onto the backend already spoken to.
 pub fn backend_changed() {
     let now = serial::backend() as u8;
     if SPOKEN_TO.swap(now, Ordering::Relaxed) != now {
@@ -161,6 +178,125 @@ pub fn backend_changed() {
     drain_inline();
     // post_wake: the rewind above moved the position backwards under a parked `klogd`, with no new commit to wake it.
     post_wake();
+}
+
+/// Lines console holders queued for the wire. Fixed, because a console
+/// holder's write may neither allocate nor wait: a line that finds it full is
+/// counted in [`UNSHOWN`] and said by `klogd`.
+const QUEUED_LINES: usize = 64;
+
+struct Queue {
+    lines: [[u8; MAX_CONSOLE_LINE]; QUEUED_LINES],
+    lens: [u16; QUEUED_LINES],
+    head: usize,
+    len: usize,
+}
+
+static QUEUE: Lock<Queue> = Lock::new(Queue {
+    lines: [[0; MAX_CONSOLE_LINE]; QUEUED_LINES],
+    lens: [0; QUEUED_LINES],
+    head: 0,
+    len: 0,
+});
+
+/// Lines in [`QUEUE`], readable without its lock for `klogd`'s park test.
+static QUEUED: AtomicU64 = AtomicU64::new(0);
+
+/// Lines refused a full [`QUEUE`] since `klogd` last said so.
+static UNSHOWN: AtomicU64 = AtomicU64::new(0);
+
+/// One console holder's line, for `klogd` to put on the wire; `false` is a
+/// full queue, which the holder's write answers as bytes it did not take.
+/// Never waits.
+pub fn queue(line: &[u8]) -> bool {
+    let line = &line[..line.len().min(MAX_CONSOLE_LINE)];
+    {
+        let mut queue = QUEUE.lock();
+        if queue.len == QUEUED_LINES {
+            return false;
+        }
+        let at = (queue.head + queue.len) % QUEUED_LINES;
+        queue.lines[at][..line.len()].copy_from_slice(line);
+        queue.lens[at] = line.len() as u16;
+        queue.len += 1;
+    }
+    QUEUED.fetch_add(1, Ordering::SeqCst);
+    // The same wake a committed record takes: the store above precedes the
+    // fence `signal_after_commit` runs, which `klogd`'s re-scan pairs with.
+    if shard::signal_after_commit(shard::log_waiter()) {
+        post_wake();
+    }
+    true
+}
+
+/// A line a holder let go of with no room for it: the one kind of console
+/// loss, counted and said by `klogd`.
+pub fn unshown() {
+    UNSHOWN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Whether a console holder's next line would be taken.
+pub fn has_room() -> bool {
+    QUEUED.load(Ordering::SeqCst) < QUEUED_LINES as u64
+}
+
+static SPACE_WATCHERS: Lock<alloc::vec::Vec<crate::inbox::InboxId>> = Lock::new(alloc::vec::Vec::new());
+
+pub fn add_space_watcher(id: crate::inbox::InboxId) {
+    let mut watchers = SPACE_WATCHERS.lock();
+    if !watchers.contains(&id) {
+        watchers.push(id);
+    }
+}
+
+pub fn remove_space_watcher(id: crate::inbox::InboxId) {
+    SPACE_WATCHERS.lock().retain(|&w| w != id);
+}
+
+pub fn space_watchers() -> alloc::vec::Vec<crate::inbox::InboxId> {
+    SPACE_WATCHERS.lock().clone()
+}
+
+/// At most `budget` queued lines onto the wire the caller holds, each ended
+/// with a newline, so a line a holder left unended is not joined to the next.
+/// Answers whether it freed room.
+fn drain_queue(wire: &SleepGuard<'_, ()>, budget: usize) -> bool {
+    let mut line = [0u8; MAX_CONSOLE_LINE + 1];
+    let mut freed = false;
+    for _ in 0..budget {
+        let len = {
+            let mut queue = QUEUE.lock();
+            if queue.len == 0 {
+                break;
+            }
+            let at = queue.head;
+            let len = queue.lens[at] as usize;
+            line[..len].copy_from_slice(&queue.lines[at][..len]);
+            queue.head = (at + 1) % QUEUED_LINES;
+            queue.len -= 1;
+            len
+        };
+        QUEUED.fetch_sub(1, Ordering::SeqCst);
+        freed = true;
+        let end = if line[..len].ends_with(b"\n") {
+            len
+        } else {
+            line[len] = b'\n';
+            len + 1
+        };
+        serial::write_wire(wire, &line[..end]);
+    }
+    freed
+}
+
+/// Empty the queue with no backend to put it on; whether it freed room.
+fn discard_queue() -> bool {
+    let mut queue = QUEUE.lock();
+    let dropped = queue.len;
+    queue.len = 0;
+    drop(queue);
+    QUEUED.fetch_sub(dropped as u64, Ordering::SeqCst);
+    dropped > 0
 }
 
 /// Sized for the tag, the ABI's widest bracket, the message, and the elision note.
@@ -218,20 +354,32 @@ pub fn write_line(record: &LogRecord, emit: impl FnMut(&[u8])) {
     line.finish();
 }
 
-/// Records through a backend the caller holds, up to a budget; `put` returns false before the refused record, so the next acquisition starts there.
-struct Wire<'a> {
-    out: &'a mut BackendGuard,
+/// Records onto a held wire, up to a budget; `put` returns false before the refused record, so the next hold starts there.
+struct Wire<'w, 'g> {
+    wire: &'w SleepGuard<'g, ()>,
     records: u64,
     budget: u64,
 }
 
-impl RecordSink for Wire<'_> {
+impl RecordSink for Wire<'_, '_> {
     fn put(&mut self, record: &LogRecord) -> bool {
         if self.records >= self.budget {
             return false;
         }
-        write_line(record, |bytes| self.out.write_raw(bytes));
+        write_line(record, |bytes| serial::write_wire(self.wire, bytes));
         self.records += 1;
+        true
+    }
+}
+
+/// Records through the registers the panic path holds.
+struct Registers<'a> {
+    out: &'a mut BackendGuard,
+}
+
+impl RecordSink for Registers<'_> {
+    fn put(&mut self, record: &LogRecord) -> bool {
+        write_line(record, |bytes| self.out.write_raw(bytes));
         true
     }
 }
@@ -271,11 +419,25 @@ extern "C" fn body(_arg: u64) -> ! {
         Ordering::Release,
     );
     loop {
-        // Bounded per chunk so interrupts stay off for at most `CHUNK_RECORDS` lines; `discard_pending` covers machines with no backend.
-        if serial::has_console() {
-            drain_inline();
+        let freed = if serial::has_console() {
+            // A chunk of each per hold, with interrupts on throughout.
+            let wire = serial::wire(&parkable);
+            drain_records(&wire, CHUNK);
+            drain_queue(&wire, CHUNK as usize)
         } else {
             discard_pending();
+            discard_queue()
+        };
+        // A holder that found the queue full waits on room; this is the room.
+        if freed {
+            crate::inbox::Source::ConsoleSpace.wake();
+        }
+        let unshown = UNSHOWN.swap(0, Ordering::Relaxed);
+        if unshown > 0 {
+            crate::log!(
+                "console: {unshown} line(s) a console holder wrote went unshown: they came faster \
+                 than this console takes them, and the log has them"
+            );
         }
 
         // The one point with committed records just observed that may take a lock; `emit` may not.
@@ -291,7 +453,9 @@ extern "C" fn body(_arg: u64) -> ! {
             continue;
         };
         // Safe with no backend because `discard_pending` still advances the position each pass.
-        if shard::arm_waiter(shard::log_waiter(), || DRAINED.any_pending()) {
+        if shard::arm_waiter(shard::log_waiter(), || {
+            DRAINED.any_pending() || QUEUED.load(Ordering::SeqCst) > 0
+        }) {
             continue;
         }
         // No deadline: a spurious wake costs a re-drain; a missing one is what W3's fences prevent.

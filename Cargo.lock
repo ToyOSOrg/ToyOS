@@ -1237,6 +1237,9 @@ dependencies = [
 [[package]]
 name = "toyos-logstream"
 version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
 
 [[package]]
 name = "toyos-manifest"

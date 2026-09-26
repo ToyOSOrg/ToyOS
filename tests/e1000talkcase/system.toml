@@ -27,7 +27,7 @@ syscap = ["logread"]
 # binary under another name and it is the host's way of handing the machine
 # back; `echo` is the command whose answer the host compares.
 [programs.toybox]
-syscap = ["power"]
+receives = ["power"]
 
 [symlinks]
 "bin/echo" = "/system/bin/toybox"

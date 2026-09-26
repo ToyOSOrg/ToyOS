@@ -17,7 +17,7 @@ const VIRTIO_VENDOR: u16 = 0x1AF4;
 const VIRTIO_CONSOLE_DEVICE: u16 = 0x1043; // 0x1040 + device_id 3
 
 const QUEUE_SIZE: u16 = 16;
-const TX_BUF_SIZE: usize = 4096;
+pub(crate) const TX_BUF_SIZE: usize = 4096;
 const RX_BUF_SIZE: u32 = 256;
 const RX_BUF_COUNT: usize = 8;
 

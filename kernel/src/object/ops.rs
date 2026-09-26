@@ -253,8 +253,9 @@ pub fn write_source(object: &KObjectRef) -> Option<Source> {
     match object {
         KObjectRef::PipeWrite(w) => Some(Source::PipeWritable(w.id())),
         KObjectRef::Connection(c) => Some(Source::PipeWritable(c.tx())),
+        KObjectRef::Console(_) => Some(Source::ConsoleSpace),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
-        | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
@@ -476,11 +477,9 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
         }),
         KObjectRef::PipeWrite(w) => write_pipe(w.id(), buf),
         KObjectRef::Connection(c) => write_pipe(c.tx(), buf),
-        KObjectRef::Console(c) => {
-            // The whole write is always accepted: a short count would make a caller re-send bytes.
-            c.write(buf);
-            Some(buf.len() as u64)
-        }
+        // The whole lines `klogd`'s queue has room for, and a trailing partial one:
+        // a short count is a writer ahead of the console, told so.
+        KObjectRef::Console(c) => Some(c.write(buf) as u64),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
@@ -537,7 +536,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         KObjectRef::Console(_) => plain(FileType::Serial),
         KObjectRef::Acceptor(_) => plain(FileType::Pipe),
         KObjectRef::SharedMem(m) => Stat {
-            file_type: FileType::Unknown as u64,
+            file_type: FileType::SharedMemory as u64,
             size: m.size(),
             mtime: 0,
         },
@@ -770,7 +769,8 @@ pub fn has_space(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::PipeWrite(w) => pipe::has_space(w.id()),
         KObjectRef::Connection(c) => pipe::has_space(c.tx()),
-        KObjectRef::File(_) | KObjectRef::Console(_) => true,
+        KObjectRef::File(_) => true,
+        KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)

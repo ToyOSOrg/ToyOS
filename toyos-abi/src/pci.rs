@@ -90,7 +90,7 @@ const _: () = assert!(core::mem::size_of::<DmaGrant>() == 4 + 4 + 8 + 8);
 /// slow reader to overflow. The count says how many messages arrived, never
 /// what any of them meant — and it is the whole record, because what a message
 /// meant is in the device's own rings and a driver that wanted a time has
-/// `SYS_CLOCK`.
+/// its clock page (`crate::clock`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DeviceIrqRecord {

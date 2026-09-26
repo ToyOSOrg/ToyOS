@@ -18,8 +18,8 @@
 //!
 //! **A swap of netd ([`toyos_logstream::CARRIER`]) ends every network reader's
 //! connection without a word**, and a connection the netd being stopped
-//! accepts ends the same way, so from init's line accepting one until its
-//! word that the old netd is gone — started, failed, restored or gone — this
+//! accepts ends the same way, so from init's frame accepting one until its
+//! frame that the old netd is gone — started, failed, restored or gone — this
 //! program holds no listener ([`Carrier`]). It closes the listener before it says so
 //! ([`CARRIER_LEAVING`]), and netd has answered the close by then: a reader
 //! that asks after reading that line is refused by the old netd or answered by
@@ -36,7 +36,8 @@ use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
-use toyos_logstream::{Next, ProgramLine, Replay, Tag, CARRIER_LEAVING, LOGD, PORT, SERVED};
+use toyos::say;
+use toyos_logstream::{Next, ProgramLine, Replay, Severity, Tag, CARRIER_LEAVING, LOGD, PORT, SERVED};
 
 /// The most bytes one reader is handed per wake: bounds how long the replay's
 /// lock is held for a copy, not how far a reader may fall behind.
@@ -350,11 +351,20 @@ fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
 
 /// The line a reader gets in place of what the replay no longer holds.
 fn evicted(boot_local: Option<u64>, lost: u64) -> Vec<u8> {
-    let at_ns = toyos_abi::syscall::clock_nanos();
+    let at_ns = toyos_abi::clock::nanos_since_boot();
     let text = format!("logd: the first {lost} bytes of this boot are no longer held here; /log has them");
     let tag = Tag::new(LOGD).expect("logd's own name is a tag");
     let stamp = crate::stamp(boot_local, at_ns);
-    format!("{}\n", ProgramLine { stamp: &stamp, at_ns, tag, text: text.as_bytes() }).into_bytes()
+    let line = ProgramLine {
+        stamp: &stamp,
+        at_ns,
+        severity: Severity::Warn,
+        tid: 0,
+        pid: None,
+        tag,
+        text: text.as_bytes(),
+    };
+    format!("{line}\n").into_bytes()
 }
 
 /// A pipe as a byte sink: one `write` takes what fits, and a full pipe is

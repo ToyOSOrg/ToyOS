@@ -64,7 +64,7 @@ receives = ["netd", "launcher"]
 # `/system/bin/shutdown` directly and endows it a duplicate of this cap — which a cap
 # without `dup` refuses to make, leaving the applet with no capability at all.
 [programs.test-runner]
-receives = ["compositor", "soundd", "netd"]
+receives = ["compositor", "soundd", "netd", "power"]
 syscap = ["dup", "logread", "power"]
 
 # `run shutdown` is what closes `kernel_log_file`'s second arm, and it spawns

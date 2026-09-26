@@ -131,8 +131,8 @@ receives = ["compositor", "filepicker"]
 # `free` is the same syscall as `ps` and is named by neither: the machine header
 # is ambient and the process roster is not.
 [programs.toybox]
-receives = ["compositor", "soundd", "surface"]
-syscap = ["power", "roster"]
+receives = ["compositor", "soundd", "surface", "power"]
+syscap = ["roster"]
 
 # Symlinks created on ROOT at build time.
 # Keys are ROOT-relative; targets are the guest paths they resolve to.

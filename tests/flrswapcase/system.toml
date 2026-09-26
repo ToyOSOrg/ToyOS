@@ -25,7 +25,7 @@ syscap = ["logread"]
 # `reboot` is this binary under another name and the host's way of ending the
 # boot.
 [programs.toybox]
-syscap = ["power"]
+receives = ["power"]
 
 [symlinks]
 "bin/echo" = "/system/bin/toybox"
