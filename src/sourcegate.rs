@@ -1233,6 +1233,9 @@ fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<Str
 struct PlaceRule {
     name: &'static str,
     needles: &'static [&'static str],
+    /// Whether a path to `core::arch` or `std::arch`, in any spelling
+    /// ([`arch_module_lines`]), is a needle too.
+    arch_module: bool,
     /// Repository-relative prefixes the rule reads; empty is every `.rs` file
     /// this repository holds outside [`NOT_OURS`].
     scope: &'static [&'static str],
@@ -1240,10 +1243,88 @@ struct PlaceRule {
     places: &'static [(&'static str, &'static str)],
 }
 
-/// Every spelling of assembly and of an architecture's own intrinsics.
+/// Every spelling of assembly; an architecture's own intrinsics are
+/// [`PlaceRule::arch_module`].
 #[cfg(test)]
-const ASSEMBLY: &[&str] =
-    &["asm!", "global_asm!", "naked_asm!", "#[naked]", "unsafe(naked)", "core::arch::", "std::arch::"];
+const ASSEMBLY: &[&str] = &["asm!", "global_asm!", "naked_asm!", "#[naked]", "unsafe(naked)"];
+
+/// What a red names when [`PlaceRule::arch_module`] matched.
+#[cfg(test)]
+const ARCH_MODULE: &str = "core::arch/std::arch";
+
+/// The 0-based lines of `text` on which a path names `core::arch` or
+/// `std::arch`: `core::arch::asm!`, `use core::arch as isa;`, and an `arch`
+/// that begins an element of a `core::{…}` group, over any number of lines.
+/// Comments and string literals are not code ([`code_only`]).
+#[cfg(test)]
+fn arch_module_lines(text: &str) -> Vec<usize> {
+    let code: Vec<char> = text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect();
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let line_of = |at: usize| code[..at].iter().filter(|c| **c == '\n').count();
+    let skip_space = |mut at: usize| {
+        while code.get(at).is_some_and(|c| c.is_whitespace()) {
+            at += 1;
+        }
+        at
+    };
+    let ident_at = |at: usize, name: &str| {
+        let end = at + name.len();
+        code.get(at..end).is_some_and(|s| s.iter().copied().eq(name.chars()))
+            && !code.get(end).is_some_and(|c| word(*c))
+            && !at.checked_sub(1).and_then(|j| code.get(j)).is_some_and(|c| word(*c))
+    };
+    let mut lines = Vec::new();
+    for at in 0..code.len() {
+        let Some(root) = ["core", "std"].into_iter().find(|root| ident_at(at, root)) else { continue };
+        let colons = skip_space(at + root.len());
+        if code.get(colons..colons + 2) != Some(&[':', ':'][..]) {
+            continue;
+        }
+        let next = skip_space(colons + 2);
+        if ident_at(next, "arch") {
+            lines.push(line_of(next));
+        } else if code.get(next) == Some(&'{') {
+            // Each element of the group begins after its `{` or a `,` at depth one.
+            let (mut depth, mut i, mut element) = (0usize, next, true);
+            while let Some(&c) = code.get(i) {
+                match c {
+                    '{' => {
+                        depth += 1;
+                        element = depth == 1;
+                    }
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    ',' if depth == 1 => element = true,
+                    c if c.is_whitespace() => {}
+                    _ => {
+                        if element && depth == 1 && ident_at(i, "arch") {
+                            lines.push(line_of(i));
+                        }
+                        element = false;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    lines
+}
+
+/// The spelling of the first needle of `rule` that line `n` of a file holds,
+/// `code` being that line's code and `arch_lines` the file's
+/// [`arch_module_lines`].
+#[cfg(test)]
+fn needle_on(rule: &PlaceRule, code: &str, n: usize, arch_lines: &[usize]) -> Option<&'static str> {
+    rule.needles
+        .iter()
+        .copied()
+        .find(|needle| code.contains(needle))
+        .or_else(|| (rule.arch_module && arch_lines.contains(&n)).then_some(ARCH_MODULE))
+}
 
 /// The spellings that name one architecture's module from outside it.
 #[cfg(test)]
@@ -1277,6 +1358,7 @@ const ARCH_RULES: &[PlaceRule] = &[
     PlaceRule {
         name: "assembly lives in an architecture's own module",
         needles: ASSEMBLY,
+        arch_module: true,
         scope: &[],
         places: &[
             ("kernel/src/arch/x86_64/", "the kernel's x86-64 module"),
@@ -1308,6 +1390,7 @@ const ARCH_RULES: &[PlaceRule] = &[
     PlaceRule {
         name: "an architecture is selected in one place",
         needles: &["target_arch"],
+        arch_module: false,
         scope: &[],
         places: &[
             ("kernel/src/arch/mod.rs", "the kernel's one selector"),
@@ -1332,15 +1415,17 @@ const ARCH_RULES: &[PlaceRule] = &[
     PlaceRule {
         name: "generic kernel code reaches the machine through the arch interface",
         needles: ARCH_PATHS,
+        arch_module: false,
         scope: &["kernel/src/"],
         places: &[("kernel/src/arch/", "the architecture's own modules")],
     },
     PlaceRule {
         name: "a pure crate names no architecture",
         needles: &[
-            "asm!", "global_asm!", "naked_asm!", "#[naked]", "unsafe(naked)", "core::arch::",
-            "std::arch::", "target_arch", "arch::x86_64", "arch::aarch64",
+            "asm!", "global_asm!", "naked_asm!", "#[naked]", "unsafe(naked)", "target_arch", "arch::x86_64",
+            "arch::aarch64",
         ],
+        arch_module: true,
         scope: PURE_CRATES,
         places: &[],
     },
@@ -1357,9 +1442,10 @@ fn place_violations(rule: &PlaceRule, files: &[(String, String)]) -> Vec<String>
         if !in_scope(at) || placed(at) {
             continue;
         }
+        let arch_lines = if rule.arch_module { arch_module_lines(text) } else { Vec::new() };
         for (n, line) in text.lines().enumerate() {
             let code = code_only(line);
-            if let Some(needle) = rule.needles.iter().find(|needle| code.contains(**needle)) {
+            if let Some(needle) = needle_on(rule, &code, n, &arch_lines) {
                 let places: Vec<String> =
                     rule.places.iter().map(|(place, why)| format!("{place} ({why})")).collect();
                 found.push(format!(
@@ -1461,12 +1547,9 @@ mod tests {
             // A module is a place a needle may stand; a file is an exception
             // somebody declared, and one that holds nothing any more is stale.
             for (place, _) in rule.places.iter().filter(|(place, _)| !place.ends_with('/')) {
-                let used = files.iter().any(|(at, text)| {
-                    at.starts_with(place)
-                        && text.lines().any(|l| {
-                            let code = code_only(l);
-                            rule.needles.iter().any(|n| code.contains(n))
-                        })
+                let used = files.iter().filter(|(at, _)| at.starts_with(place)).any(|(_, text)| {
+                    let arch_lines = if rule.arch_module { arch_module_lines(text) } else { Vec::new() };
+                    text.lines().enumerate().any(|(n, l)| needle_on(rule, &code_only(l), n, &arch_lines).is_some())
                 });
                 if !used {
                     complaints.push(format!(
@@ -1497,15 +1580,21 @@ mod tests {
             file("kernel/src/sched/driver.rs", "    unsafe { core::arch::asm!(\"nop\") };\n"),
             file("bootloader/src/main.rs", "#[unsafe(naked)]\n"),
             file("toyos/src/window.rs", "    let t = core::arch::x86_64::_rdtsc();\n"),
+            // The module named by any path: renamed, grouped, over lines.
+            file("toyos/src/net.rs", "use core::arch as isa;\n"),
+            file("toyos/src/shm.rs", "use core::{arch::x86_64::_rdtsc};\n"),
+            file("toyos/src/ipc.rs", "use ::std::{\n    fmt,\n    arch::asm,\n};\n"),
         ];
         let said = place_violations(asm, &planted);
-        assert_eq!(said.len(), 3, "{said:?}");
+        assert_eq!(said.len(), 6, "{said:?}");
+        assert!(said.iter().any(|s| s.starts_with("toyos/src/ipc.rs:3:")), "{said:?}");
         assert!(said.iter().all(|s| s.contains(asm.name) && s.contains("kernel/src/arch/x86_64/")), "{said:?}");
         let placed = [
             file("kernel/src/arch/aarch64/cpu.rs", "    unsafe { core::arch::asm!(\"wfi\") };\n"),
             file("kernel/src/sched/driver.rs", "    // core::arch::asm! is the architecture's.\n"),
+            file("toyos/src/lib.rs", "use core::{fmt::{self, arch}, ptr};\nlet s = \"core::arch\";\nuse mycore::arch;\n"),
         ];
-        assert!(place_violations(asm, &placed).is_empty());
+        assert_eq!(place_violations(asm, &placed), Vec::<String>::new());
     }
 
     #[test]
@@ -1534,9 +1623,12 @@ mod tests {
             file("toyos-sched/src/cpu.rs", "#[cfg(target_arch = \"aarch64\")]\n"),
             file("toyos-desktop/src/lib.rs", "    core::arch::asm!(\"nop\");\n"),
             file("toyos-dma/src/lib.rs", "use crate::arch::aarch64::x;\n"),
+            file("toyos-sched/src/lib.rs", "use core::arch as isa;\nfn f() { unsafe { isa::aarch64::vdupq_n_u8(0) }; }\n"),
+            file("toyos-mixer/src/lib.rs", "use core::{arch::x86_64::_rdtsc};\n"),
         ];
         let said = place_violations(pure, &planted);
-        assert_eq!(said.len(), 3, "{said:?}");
+        assert_eq!(said.len(), 5, "{said:?}");
+        assert!(said.iter().any(|s| s.starts_with("toyos-sched/src/lib.rs:1:")), "{said:?}");
         assert!(said.iter().all(|s| s.contains(pure.name) && s.contains("no file at all")), "{said:?}");
     }
 
