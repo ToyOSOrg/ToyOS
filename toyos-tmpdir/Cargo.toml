@@ -1,6 +1,5 @@
-# A member of the host workspace (root `Cargo.toml`), and a dev-dependency of
-# every crate whose tests write to `$TMPDIR`: the one scratch directory the tree
-# takes, which is gone on every way out of the process that made it.
+# A member of the host workspace (root `Cargo.toml`): the one scratch directory
+# the tree takes, which is gone on every way out of the process that made it.
 
 [package]
 name = "toyos-tmpdir"

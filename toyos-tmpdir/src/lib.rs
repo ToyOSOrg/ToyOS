@@ -2,7 +2,7 @@
 //!
 //! [`TempDir::new`] makes a fresh, empty directory under `$TMPDIR`, and its
 //! `Drop` removes it: on a return and on a panic's unwind alike. Every test and
-//! the QEMU harness take their scratch here and nowhere else, and
+//! the QEMU harness take their scratch here, and
 //! `cargo run -- --ci host` runs every host test against a `$TMPDIR` of its own
 //! and reds on anything left in it.
 //!
@@ -20,13 +20,21 @@
 //! is the lock and never the pid, so a reused pid cannot make a dead root look
 //! live or a live one look dead; the pid only keeps two roots' names apart.
 //! Every process that shares a `$TMPDIR` — every worktree on the host — shares
-//! the lock file, because it is in that `$TMPDIR`.
+//! the lock file, because it is in that `$TMPDIR`. A hold on it past
+//! `GLOBAL_PATIENCE` panics naming the pid that holds it, rather than hanging
+//! every worktree on the host behind a stopped process.
+//!
+//! **A directory the sweep cannot remove does not cost any process but this
+//! one.** It is moved back out of this process's root under a name no sweep
+//! reads as a root, and reported; the next process on the host still makes its
+//! first directory.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 /// What every root's name starts with; the rest is `<pid>-<n>`.
 pub const ROOT_PREFIX: &str = "toyos-tmp-";
@@ -68,13 +76,15 @@ impl TempDir {
         root.made += 1;
         fs::create_dir(&path).unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
         root.holders += 1;
+        let tmp = root.tmp.clone();
         // Swept with this directory already counted, so the root the gone
         // processes' scratch is moved into cannot be removed under the reaping.
         let reap = if state.swept { Vec::new() } else { state.sweep() };
         drop(state);
         for dir in reap {
-            fs::remove_dir_all(&dir)
-                .unwrap_or_else(|e| panic!("remove a gone process's scratch {}: {e}", dir.display()));
+            if let Err(e) = fs::remove_dir_all(&dir) {
+                stuck(&tmp, &dir, e);
+            }
         }
         TempDir { path }
     }
@@ -128,6 +138,30 @@ fn fail(what: String) {
         eprintln!("toyos-tmpdir: {what}");
     } else {
         panic!("{what}");
+    }
+}
+
+/// A gone process's directory the sweep moved into this process's own root but
+/// could not then remove: reported once, and moved back out to `$TMPDIR` under
+/// a name no sweep reads as a root — `ROOT_PREFIX` is not a prefix of it — so
+/// this is the only process it ever costs, and no later process on the host
+/// inherits it and panics in turn. `tmp` is the shared directory the reap
+/// happened under, not `dir`'s own parent, so this never guesses at the layout
+/// a future reap chooses.
+fn stuck(tmp: &Path, dir: &Path, e: std::io::Error) {
+    let name = dir.file_name().expect("a reaped directory has a name");
+    let out = tmp.join(format!("stuck-{}", name.to_string_lossy()));
+    match fs::rename(dir, &out) {
+        Ok(()) => eprintln!(
+            "toyos-tmpdir: could not remove a gone process's scratch {}: {e}; left for a human at {}",
+            dir.display(),
+            out.display()
+        ),
+        Err(e2) => eprintln!(
+            "toyos-tmpdir: could not remove {} ({e}) or move it out of the way ({e2}); left in \
+             place, which will keep this process's own root from removing itself too",
+            dir.display()
+        ),
     }
 }
 
@@ -242,16 +276,85 @@ fn gone(dir: &Path) -> bool {
     }
 }
 
+/// How long [`global`] waits before it gives up on a stuck holder: far past a
+/// directory listing and some renames, so nothing legitimate ever meets it.
+const GLOBAL_PATIENCE: Duration = Duration::from_secs(15);
+
 /// [`GLOBAL`] under `tmp`, held until the file is dropped. A blocking lock:
 /// every holder keeps it for a directory listing and some renames at most.
 fn global(tmp: &Path) -> File {
+    global_within(tmp, GLOBAL_PATIENCE)
+}
+
+/// [`global`], bounded by `patience` rather than the production constant, so a
+/// test can make a holder that never lets go look stuck without waiting for it.
+fn global_within(tmp: &Path, patience: Duration) -> File {
     let path = tmp.join(GLOBAL);
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
+        .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(&path)
         .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
-    file.lock().unwrap_or_else(|e| panic!("lock {}: {e}", path.display()));
+    let start = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(e)) => panic!("lock {}: {e}", path.display()),
+        }
+        if start.elapsed() > patience {
+            let holder = fs::read_to_string(&path).unwrap_or_default();
+            let holder = holder.trim();
+            let holder =
+                if holder.is_empty() { "an unknown process".to_string() } else { format!("pid {holder}") };
+            panic!(
+                "{} has been held over {patience:?} by {holder}: every worktree sharing this \
+                 $TMPDIR is stuck behind it — find and end that process, or wait for it to move on",
+                path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Named while held, so a waiter that times out on the next line can say who
+    // it is waiting for instead of just how long it has waited.
+    file.set_len(0).unwrap_or_else(|e| panic!("truncate {}: {e}", path.display()));
+    write!(file, "{}", std::process::id()).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
     file
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lock held past its patience fails loudly instead of hanging, and
+    /// names the pid that is holding it.
+    #[test]
+    fn a_held_global_lock_times_out_naming_its_holder() {
+        let tmp = TempDir::new("global-timeout");
+        let path = tmp.join(GLOBAL);
+        let mut holder = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+        holder.lock().unwrap_or_else(|e| panic!("lock {}: {e}", path.display()));
+        write!(holder, "999999999").unwrap();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            global_within(&tmp, Duration::from_millis(50))
+        }))
+        .expect_err("a lock held past its patience must not be granted");
+        let message = panic
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(message.contains("999999999"), "the holder's pid is not named: {message}");
+        assert!(message.contains("held over"), "{message}");
+
+        drop(holder);
+    }
 }

@@ -66,15 +66,20 @@ static RUN: OnceLock<PathBuf> = OnceLock::new();
 /// it, and it is gone when the run is, green or red (`toyos_tmpdir` is the
 /// policy, and what reclaims the directory of a run that was killed).
 ///
-/// A red run's serial logs are the one part of it read afterwards — by an agent
-/// and by the nightly's artifact — so they are copied to [`RED_RUN_SERIAL`] first,
-/// replacing the last red run's: megabytes, where the images are gigabytes.
+/// A red run's serial logs, and any suspect audio capture already renamed to
+/// keep (`audio-*-smp*.wav`), are the parts of it read afterwards — by an agent
+/// and by the nightly's artifact — so they are copied to a directory of their
+/// own under [`RED_RUN_SERIAL`] first: megabytes, where the images are
+/// gigabytes. Named for this run's own root — unique across every process a
+/// shared `$TMPDIR` ever holds — so two red runs of one worktree never share,
+/// and neither overwrites, a destination.
 ///
 /// [`Run::exit`] is the one way out of the suite with a status; returning from
 /// `main` drops this as green, and unwinding out of it as red.
 pub struct Run(TempDir);
 
-/// Where a red run's `uart-*.log` files are kept, under the repository root.
+/// Where a red run's `uart-*.log` files and suspect audio captures are kept,
+/// one directory per run, under the repository root.
 pub const RED_RUN_SERIAL: &str = "target/red-run-serial";
 
 impl Run {
@@ -109,24 +114,42 @@ impl Drop for Run {
     }
 }
 
-/// Copy every `uart-*.log` under `run` to [`RED_RUN_SERIAL`], keeping each
-/// one's path below the run, in place of what was there.
+/// This run's own directory under [`RED_RUN_SERIAL`], named for the
+/// `toyos_tmpdir` root this run's directory sits under — unique, because only
+/// one live process ever holds that root at once.
+fn kept_root(run: &Path) -> Result<PathBuf, String> {
+    let name = run
+        .parent()
+        .and_then(Path::file_name)
+        .ok_or_else(|| format!("{} has no root to name this run's kept copy for", run.display()))?;
+    Ok(super::compile::repo_root().join(RED_RUN_SERIAL).join(name))
+}
+
+/// Where `path`, somewhere under this run's directory, ends up if the run ends
+/// red: mirrored under [`kept_root`], as [`keep_serial`] would copy it there.
+pub fn kept_path(path: &Path) -> PathBuf {
+    let run = RUN.get().expect("`Run::begin` comes before any scratch");
+    let rel = path
+        .strip_prefix(run)
+        .unwrap_or_else(|_| panic!("{} is not under this run's directory {}", path.display(), run.display()));
+    kept_root(run).unwrap_or_else(|e| panic!("{e}")).join(rel)
+}
+
+/// Copy every `uart-*.log` and suspect `audio-*-smp*.wav` under `run` to a
+/// directory of its own under [`RED_RUN_SERIAL`], keeping each one's path
+/// below the run.
 fn keep_serial(run: &Path) -> Result<PathBuf, String> {
-    let root = super::compile::repo_root();
-    let kept = root.join(RED_RUN_SERIAL);
-    // Made beside it and moved into place, so what is there is one run's whole
-    // set; a second run of this worktree ending red in the same instant finds
-    // the rename refused, and says so.
-    let fresh = root.join(format!("{RED_RUN_SERIAL}.{}", std::process::id()));
-    copy_serial(run, &fresh)?;
-    match std::fs::remove_dir_all(&kept) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("remove the last red run's serial logs {}: {e}", kept.display())),
-    }
-    std::fs::rename(&fresh, &kept)
-        .map_err(|e| format!("move {} to {}: {e}", fresh.display(), kept.display()))?;
+    let kept = kept_root(run)?;
+    copy_serial(run, &kept)?;
     Ok(kept)
+}
+
+/// A serial log, or a suspect audio capture already renamed for keeping
+/// (`tests/toyos.rs`'s `measure_audio_run`) — everything [`keep_serial`]
+/// rescues from a run's scratch before it goes.
+fn worth_keeping(name: &str) -> bool {
+    (name.starts_with("uart-") && name.ends_with(".log"))
+        || (name.starts_with("audio-") && name.contains("-smp") && name.ends_with(".wav"))
 }
 
 fn copy_serial(dir: &Path, into: &Path) -> Result<(), String> {
@@ -138,7 +161,7 @@ fn copy_serial(dir: &Path, into: &Path) -> Result<(), String> {
         let name = entry.file_name();
         if entry.file_type().map_err(|e| format!("{}: {e}", path.display()))?.is_dir() {
             copy_serial(&path, &into.join(&name))?;
-        } else if name.to_str().is_some_and(|n| n.starts_with("uart-") && n.ends_with(".log")) {
+        } else if name.to_str().is_some_and(worth_keeping) {
             std::fs::copy(&path, into.join(&name))
                 .map_err(|e| format!("copy {}: {e}", path.display()))?;
         }

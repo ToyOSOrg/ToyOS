@@ -16,8 +16,11 @@
 //! crates.io.
 //!
 //! A host job runs every step and reds if any failed; a guest job stops at the
-//! first failure, because what follows a wrong instrument or a missing
-//! toolchain measures nothing. Each step's verdict goes to
+//! first failure among the instrument, the toolchain and the suite, because
+//! what follows a wrong instrument or a missing toolchain measures nothing —
+//! but its last step, the private `$TMPDIR` it shares [`host`]'s rule for,
+//! always runs, because a leak past a failing suite is still a leak. Each
+//! step's verdict goes to
 //! `$GITHUB_STEP_SUMMARY` where a runner provides one.
 //!
 //! **The instrument is declared once.** `.github/qemu-version` is the QEMU
@@ -467,12 +470,26 @@ fn host(root: &Path) -> Vec<Step> {
 }
 
 /// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, as a refusal.
+///
+/// Refuses if `tmp` holds no [`toyos_tmpdir::GLOBAL`] at all: every step above
+/// makes at least one `toyos_tmpdir::TempDir`, which always writes that lock
+/// file first, so its absence means this `$TMPDIR` never saw the steps at
+/// all — the guard reading an empty directory it was never given, rather than
+/// one every test actually cleaned.
 fn left_behind(tmp: &Path) -> Result<String, String> {
     let mut left: Vec<String> = std::fs::read_dir(tmp)
         .map_err(|e| format!("read {}: {e}", tmp.display()))?
         .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect::<Result<_, _>>()
         .map_err(|e| format!("read {}: {e}", tmp.display()))?;
+    if !left.iter().any(|name| name == toyos_tmpdir::GLOBAL) {
+        return Err(format!(
+            "{} holds no {}: every step above makes a `toyos_tmpdir::TempDir`, so its absence \
+             means this $TMPDIR was never the one the steps actually wrote to",
+            tmp.display(),
+            toyos_tmpdir::GLOBAL
+        ));
+    }
     left.retain(|name| name != toyos_tmpdir::GLOBAL);
     left.sort();
     if left.is_empty() {
@@ -577,7 +594,15 @@ fn suite_args(args: &[&str]) -> Vec<String> {
     all.into_iter().map(String::from).collect()
 }
 
+/// A guest job's own `$TMPDIR`, same rule as [`host`]: nothing the suite
+/// writes past a `toyos_tmpdir::TempDir` — the harness's own `Run`, its lanes,
+/// every boot image — survives past the last step, which reds on it.
 fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
+    let tmp = toyos_tmpdir::TempDir::new("ci-guest");
+    // Before any thread, same as `host`: every child this process spawns below
+    // inherits this, and nothing here reads the environment concurrently with
+    // the write.
+    std::env::set_var("TMPDIR", tmp.path());
     let mut steps = vec![step("the instrument", || instrument(root))];
     if steps.iter().all(|s| s.verdict.is_ok()) {
         steps.push(step("the toolchain", || release::install(root)));
@@ -594,6 +619,9 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
             }
         }));
     }
+    // Unconditional: whatever stopped earlier, this $TMPDIR is still this
+    // process's own to judge, and a leak past a failing suite is still a leak.
+    steps.push(step("nothing left in $TMPDIR", || left_behind(&tmp)));
     steps
 }
 
@@ -837,6 +865,17 @@ fn indexed(body: &str, version: &str) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// A deterministic control on `host`'s `std::env::set_var("TMPDIR", ...)`:
+    /// delete that line and every child writes to the real `$TMPDIR` instead of
+    /// this job's private one, which never gains the lock a real step always
+    /// makes — this refuses instead of reading an empty directory as clean.
+    #[test]
+    fn left_behind_refuses_a_tmpdir_that_never_saw_the_lock() {
+        let tmp = toyos_tmpdir::TempDir::new("left-behind-blind");
+        let refusal = left_behind(&tmp).expect_err("an untouched $TMPDIR is a red, not a pass");
+        assert!(refusal.contains(toyos_tmpdir::GLOBAL), "{refusal}");
+    }
 
     /// The lock is the one thing a `$TMPDIR` keeps; anything else is named.
     #[test]

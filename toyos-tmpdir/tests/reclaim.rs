@@ -2,6 +2,7 @@
 //! processes whose scratch is judged are this binary run again as a holder,
 //! which makes a directory, says where, and holds it until it is told to go.
 
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -181,4 +182,105 @@ fn a_directory_goes_on_a_return_and_on_a_panic() {
     assert!(caught.is_err());
     let unwound = unwound.unwrap();
     assert!(!unwound.exists(), "{} outlived an unwind", unwound.display());
+}
+
+/// A deterministic control on `Root::make`'s `let _global = global(tmp);`:
+/// deleting that line lets a holder's first directory appear while this test
+/// still holds `GLOBAL`, which turns the first assertion here red.
+#[test]
+fn making_a_root_waits_for_global() {
+    let _spawning = spawning();
+    let tmp = TempDir::new("global-gate-make");
+    let lock_path = tmp.join(GLOBAL);
+    let held = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap_or_else(|e| panic!("open {}: {e}", lock_path.display()));
+    held.lock().unwrap_or_else(|e| panic!("lock {}: {e}", lock_path.display()));
+
+    let tmp_path = tmp.to_path_buf();
+    let handle = std::thread::spawn(move || Holder::start(&tmp_path));
+    std::thread::sleep(Duration::from_millis(500));
+    let before: Vec<String> =
+        entries(&tmp).into_iter().filter(|n| n.starts_with(ROOT_PREFIX)).collect();
+    assert!(before.is_empty(), "a root was made while GLOBAL was held: {before:?}");
+    assert!(!handle.is_finished(), "the holder made its directory without GLOBAL");
+
+    drop(held);
+    let holder = handle.join().expect("the holder thread panicked");
+    holder.finish();
+}
+
+/// A deterministic control on `Root::remove`'s `let global = global(&self.tmp);`:
+/// deleting that line lets a returning holder's root disappear while this test
+/// still holds `GLOBAL`, which turns the first assertion here red.
+#[test]
+fn removing_a_root_waits_for_global() {
+    let _spawning = spawning();
+    let tmp = TempDir::new("global-gate-remove");
+    let holder = Holder::start(&tmp);
+    let root = holder.root();
+
+    let lock_path = tmp.join(GLOBAL);
+    let held = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap_or_else(|e| panic!("open {}: {e}", lock_path.display()));
+    held.lock().unwrap_or_else(|e| panic!("lock {}: {e}", lock_path.display()));
+
+    let handle = std::thread::spawn(move || holder.finish());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(root.exists(), "a root was removed while GLOBAL was held: {}", root.display());
+    assert!(!handle.is_finished(), "the holder's exit finished without GLOBAL");
+
+    drop(held);
+    handle.join().expect("the holder's exit panicked");
+    assert!(!root.exists(), "{} survived once GLOBAL was released", root.display());
+}
+
+/// A dead root the sweep cannot fully remove — its owner file sits in a
+/// directory with no write permission, so unlinking it fails — is reported and
+/// moved aside rather than panicking the process that met it, and the next
+/// process still gets its own directory.
+///
+/// The dead root itself keeps ordinary permissions, so the sweep's own
+/// cross-directory rename (which needs to rewrite the moved directory's `..`)
+/// still succeeds; what blocks `remove_dir_all` is a directory *inside* it with
+/// no write permission, so unlinking the file below it fails.
+#[cfg(unix)]
+#[test]
+fn a_directory_the_sweep_cannot_remove_is_reported_and_the_next_process_still_works() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _spawning = spawning();
+    let tmp = TempDir::new("stuck");
+    let dead = tmp.join(format!("{ROOT_PREFIX}999999-0"));
+    let locked = dead.join("locked");
+    std::fs::create_dir(&dead).unwrap();
+    std::fs::write(dead.join(OWNER), b"").unwrap();
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("f"), b"").unwrap();
+    let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&locked, perms).unwrap();
+
+    // The dead root's owner is unlocked, so the holder's first directory
+    // sweeps it; it cannot remove what it cannot unlink, and must report and
+    // move on rather than panic — the holder still says where its own
+    // directory is and exits clean.
+    Holder::start(&tmp).finish();
+
+    let stuck: Vec<String> = entries(&tmp).into_iter().filter(|n| n.starts_with("stuck-")).collect();
+    assert_eq!(stuck.len(), 1, "the unremovable root was not reported and moved aside: {:?}", entries(&tmp));
+    assert!(!dead.exists(), "the dead root was left where the sweep found it");
+
+    // Restore permissions so this test's own `tmp` can remove itself.
+    let stuck_locked = tmp.join(&stuck[0]).join("locked");
+    let mut perms = std::fs::metadata(&stuck_locked).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stuck_locked, perms).unwrap();
 }

@@ -3976,14 +3976,20 @@ fn measure_audio_run(
         } else {
             format!("-{tag}")
         };
-        let kept = qemu
+        // Renamed in the lane so `keep_serial` recognises and copies it out if
+        // this run ends red; the lane itself is gone on every exit, so the path
+        // worth printing is where that copy lands, not this one.
+        let suspect = qemu
             .audio_wav_path()
             .with_file_name(format!("audio-{name}-smp{smp}{suffix}.wav"));
-        match fs::rename(qemu.audio_wav_path(), &kept) {
-            Ok(()) => eprintln!("        {label}{name} smp={smp} wav kept at {}", kept.display()),
+        match fs::rename(qemu.audio_wav_path(), &suspect) {
+            Ok(()) => eprintln!(
+                "        {label}{name} smp={smp} wav kept at {} if this run ends red",
+                common::lane::kept_path(&suspect).display()
+            ),
             Err(e) => eprintln!(
                 "        {label}{name} smp={smp} could not keep {}: {e}",
-                kept.display()
+                suspect.display()
             ),
         }
     }
