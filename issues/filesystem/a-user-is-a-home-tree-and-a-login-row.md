@@ -9,15 +9,15 @@ opened: 2026-09-05
 A stage of `issues/filesystem/storage-is-layers-and-a-role-is-a-filesystem.md`;
 where a program's own data goes depends on it.
 
-A user is two things: `/home/<user>`, a directory on DATA holding Documents,
-Downloads, `.config/<app>` and `.local/<app>`; and a row in the manifest from
+A user is two things: `/home/<user>`, a directory on DATA laid out as
+`issues/filesystem/where-everything-lives.md` rules; and a row in the manifest from
 which init builds a login session's namespace, the way it builds every system
 program's from `system.toml`. Nothing else names a user: no numeric id the
 kernel checks, no password file, no ambient "current user" a process can ask
 for. A session holds its home tree because init moved that directory's handle
 into it, and a program launched inside the session holds what the session's
-launcher row grants it. Until this lands there is one implicit user and a
-package writes under `/apps/<name>/` only.
+launcher row grants it. Until this lands there is one user, `toy`, whose home
+init makes at boot.
 
 Stage 3 of `issues/isolation/every-program-sees-only-the-files-it-was-given.md`, and blocked on its first two stages: a user is isolated only
 once a session's view is all it can name. The mount protocol and real bcachefs

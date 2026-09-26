@@ -11,18 +11,21 @@
 start = ["logd", "netd", "sshd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 # The record stream's authority: the address on the parameter line is
 # information, and this row is the whole of what can act on it.
 receives = ["netd"]
 
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
 # `swap` is the authority to replace a service's binary, and no other program
 # may hold it.
 [programs.sshd]
+service = true
 receives = ["netd", "launcher", "swap"]
 
 [programs.test-runner]

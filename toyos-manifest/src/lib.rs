@@ -20,6 +20,7 @@
 //! receive <name>            a connector in this program's namespace
 //! device <class>            a claim init mints and endows
 //! syscap <right>            a right on the SysCap dup init endows
+//! service                   a system service: its `HOME` is `/state/<name>`, not the session's
 //! init-serve <name>         a name init serves itself
 //! start <name>              init starts this program at boot
 //! app-receive <name>        a connector every program launched from /apps holds
@@ -41,6 +42,19 @@ pub const GUEST_PATH: &str = "/system/etc/system.manifest";
 /// carries one in a message, and a longer one is refused by name rather than
 /// truncated into some other program's.
 pub const MAX_PROGRAM_NAME: usize = 32;
+
+/// The dev image's one user, until the users track gives init a login row.
+pub const USER: &str = "toy";
+
+/// The session user's home: every program's `HOME` that no service row claims,
+/// a program no row names included.
+pub fn session_home() -> String {
+    format!("/home/{USER}")
+}
+
+/// Where each system service keeps its own persistent data, one directory per
+/// program key.
+pub const STATE: &str = "/state";
 
 pub use toyos_abi::handle::Rights;
 pub use toyos_abi::syscall::{DeviceRequest, DeviceType};
@@ -121,6 +135,21 @@ pub struct Program {
     /// the system may enter the RT band, mint a device claim, read the machine
     /// log, list every process in the machine, or power the machine off.
     pub syscap: Vec<String>,
+    /// A system service: its `HOME` is its own [`STATE`] directory rather
+    /// than the session user's home, so what it keeps is machine state and no
+    /// user's.
+    pub service: bool,
+}
+
+impl Program {
+    /// The `HOME` init starts this row with. A location grants nothing: what
+    /// the program can reach is its view's business, never this string's.
+    pub fn home(&self) -> String {
+        match self.service {
+            true => format!("{STATE}/{}", self.name),
+            false => session_home(),
+        }
+    }
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -185,6 +214,10 @@ pub enum RenderError {
     NameTooLong(String),
     /// A field whose bytes would not survive the round trip.
     Unrepresentable { program: String, field: &'static str, value: String },
+    /// A row that serves a machine-wide port and is not marked a service, so
+    /// init would start it in the session user's home. A service that serves
+    /// nothing (`sshd`) cannot be told from its row, and is marked by hand.
+    ServesWithoutService(String),
 }
 
 pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
@@ -195,6 +228,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         }
         check(&program.name, "name", &program.name)?;
         check(&program.name, "path", &program.path)?;
+        if !program.serves.is_empty() && !program.service {
+            return Err(RenderError::ServesWithoutService(program.name.clone()));
+        }
         out.push_str(&format!("program {} {}\n", program.name, program.path));
         for arg in &program.args {
             reject_newline(&program.name, "args", arg)?;
@@ -218,6 +254,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
                 check(&program.name, field, value)?;
                 out.push_str(&format!("{word} {value}\n"));
             }
+        }
+        if program.service {
+            out.push_str("service\n");
         }
     }
     for name in &manifest.init_serves {
@@ -301,6 +340,7 @@ pub fn parse(text: &str) -> Manifest {
                     "receive" => program.receives.push(rest.to_string()),
                     "device" => program.devices.push(rest.to_string()),
                     "syscap" => program.syscap.push(rest.to_string()),
+                    "service" => program.service = true,
                     other => panic!("manifest: unknown record `{other}`"),
                 }
             }
@@ -322,6 +362,7 @@ mod tests {
                     serves: vec!["compositor".into()],
                     receives: vec!["soundd".into(), "launcher".into()],
                     devices: vec!["framebuffer".into(), "keyboard".into()],
+                    service: true,
                     ..Program::default()
                 },
                 Program {
@@ -330,6 +371,7 @@ mod tests {
                     serves: vec!["soundd".into()],
                     devices: vec!["hda-audio".into(), "virtio-sound".into()],
                     syscap: vec!["rt".into()],
+                    service: true,
                     ..Program::default()
                 },
                 Program {
@@ -366,6 +408,31 @@ mod tests {
         let manifest = sample();
         let rendered = render(&manifest).expect("render");
         assert_eq!(parse(std::str::from_utf8(&rendered).unwrap()), manifest);
+    }
+
+    /// A row that serves a machine-wide port is a service, and one not marked
+    /// so is refused rather than started in the session user's home.
+    #[test]
+    fn a_row_that_serves_a_port_and_is_no_service_is_refused() {
+        let mut manifest = sample();
+        manifest.programs[0].service = false;
+        assert_eq!(
+            render(&manifest),
+            Err(RenderError::ServesWithoutService("compositor".into()))
+        );
+    }
+
+    /// A service keeps machine state under its own name, everything else is
+    /// the session's; and a package's synthesized row is never a service.
+    #[test]
+    fn a_service_s_home_is_its_state_and_every_other_row_s_the_session_s() {
+        let m = sample();
+        assert_eq!(m.program("soundd").unwrap().home(), "/state/soundd");
+        assert_eq!(m.program("terminal").unwrap().home(), "/home/toy");
+        assert_eq!(m.app_row("gbae", "/apps/gbae/gbae").home(), "/home/toy");
+        let m = parse("program sshd /system/bin/sshd\nservice\nprogram shell /system/bin/shell\n");
+        assert!(m.program("sshd").unwrap().service);
+        assert!(!m.program("shell").unwrap().service);
     }
 
     #[test]
