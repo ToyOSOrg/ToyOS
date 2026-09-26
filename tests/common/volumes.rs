@@ -534,9 +534,15 @@ pub fn kernel_log_file(
             ..Default::default()
         },
     );
-    let boot = qemu.boot_log().to_string();
+    let mut boot = qemu.boot_log().to_string();
     serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    if !boot.contains("logd: this boot's kernel log is") {
+    // Waited for past the ready marker: logd names the file once the stick is
+    // up, and a stick slower than the runner puts its line after the marker.
+    let opened = "logd: this boot's kernel log is";
+    if !boot.contains(opened) {
+        boot.push_str(&qemu.drain_until(Duration::from_secs(10), |line| line.contains(opened)));
+    }
+    if !boot.contains(opened) {
         return Err(format!("logd never opened a file:\n{}", volume_lines(&boot)));
     }
 
