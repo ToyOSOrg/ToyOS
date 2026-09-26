@@ -61,9 +61,7 @@ fn rela_dyn_relatives() {
 /// `ElfLayout::dyn_got` is walked, and the import strings follow it.
 #[test]
 fn rela_dyn_glob_dat() {
-    let dir = std::env::temp_dir().join(format!("toyos-ld-det-{}-solib", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = toyos_tmpdir::TempDir::new("ld-solib");
 
     let mut provider = ObjBuilder::new();
     for i in 0..150 {

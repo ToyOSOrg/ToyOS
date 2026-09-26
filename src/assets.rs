@@ -402,8 +402,7 @@ mod tests {
     /// suite green.
     #[test]
     fn root_carries_what_the_repository_declares() {
-        let dir = std::env::temp_dir().join(format!("toyos-assets-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = toyos_tmpdir::TempDir::new("assets");
         fs::create_dir_all(dir.join("icons")).expect("make the asset tree");
         fs::create_dir_all(dir.join("target")).expect("make a stray target/");
 
@@ -449,7 +448,6 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         let named = absentees(&dir, &BTreeSet::from([PathBuf::from("music.sf2")]));
-        fs::remove_dir_all(&dir).ok();
 
         assert_eq!(
             without,
@@ -470,9 +468,7 @@ mod tests {
     /// to no other, and an asset it does not name ships to both.
     #[test]
     fn an_owned_asset_ships_only_where_its_reader_does() {
-        let dir = std::env::temp_dir().join(format!("toyos-owned-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("make the asset tree");
+        let dir = toyos_tmpdir::TempDir::new("owned");
         for name in ["doom1.wad", "soundfont.sf2", "wallpaper.rgb"] {
             fs::write(dir.join(name), b"tracked").unwrap_or_else(|e| panic!("write {name}: {e}"));
         }
@@ -495,7 +491,6 @@ mod tests {
         };
         let with = shipped(BTreeSet::from(["doom", "compositor"]));
         let without = shipped(BTreeSet::from(["compositor"]));
-        fs::remove_dir_all(&dir).ok();
 
         assert_eq!(
             with,

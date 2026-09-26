@@ -3993,14 +3993,20 @@ fn measure_audio_run(
         } else {
             format!("-{tag}")
         };
-        let kept = qemu
+        // Renamed in the lane so `keep_serial` recognises and copies it out if
+        // this run ends red; the lane itself is gone on every exit, so the path
+        // worth printing is where that copy lands, not this one.
+        let suspect = qemu
             .audio_wav_path()
             .with_file_name(format!("audio-{name}-smp{smp}{suffix}.wav"));
-        match fs::rename(qemu.audio_wav_path(), &kept) {
-            Ok(()) => eprintln!("        {label}{name} smp={smp} wav kept at {}", kept.display()),
+        match fs::rename(qemu.audio_wav_path(), &suspect) {
+            Ok(()) => eprintln!(
+                "        {label}{name} smp={smp} wav kept at {} if this run ends red",
+                common::lane::kept_path(&suspect).display()
+            ),
             Err(e) => eprintln!(
                 "        {label}{name} smp={smp} could not keep {}: {e}",
-                kept.display()
+                suspect.display()
             ),
         }
     }
@@ -10234,7 +10240,7 @@ fn netd_seeds_its_stack() -> Result<(), String> {
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
     let mut firsts = Vec::new();
     for boot in 0..2 {
-        let dump = std::env::temp_dir().join(format!("toyos-seed-{}-{boot}.pcap", std::process::id()));
+        let dump = common::lane::dir().join(format!("seed-{boot}.pcap"));
         let _ = fs::remove_file(&dump);
         let options =
             BootOptions { profile: qemu::Profile::Headless, wire_dump: Some(dump.clone()), ..Default::default() };
@@ -20442,7 +20448,7 @@ fn main() {
     };
 
     // Before anything boots: every exit below goes through `run`, which removes
-    // this run's scratch or keeps a red one's, and sweeps what older runs left.
+    // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
 
     // How many guests may be up on the *host* at once, across every worktree.

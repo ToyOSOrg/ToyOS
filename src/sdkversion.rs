@@ -406,7 +406,7 @@ mod tests {
     /// dependency the registry has not got. That half is the test below.
     #[test]
     fn a_changed_crate_that_did_not_move_its_version_is_refused_by_name() {
-        let (_origin, wt) = repo("sdk-unbumped");
+        let (_dir, _origin, wt) = repo("sdk-unbumped");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
         commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
         publishing(&wt);
@@ -423,7 +423,7 @@ mod tests {
     /// the next commit still does.
     #[test]
     fn a_comment_only_change_owes_no_bump_and_a_signature_change_still_does() {
-        let (_origin, wt) = repo("sdk-comment-only");
+        let (_dir, _origin, wt) = repo("sdk-comment-only");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
         commit(&wt, "toyos-abi/src/lib.rs", "/// One.\npub struct A;\n", "abi source");
         publishing(&wt);
@@ -448,7 +448,7 @@ mod tests {
     /// nothing, because there is no taken version on crates.io to collide with.
     #[test]
     fn a_base_that_does_not_publish_yet_has_no_taken_version() {
-        let (_origin, wt) = repo("sdk-unpublished");
+        let (_dir, _origin, wt) = repo("sdk-unpublished");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
         commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
         main_is_here(&wt);
@@ -461,7 +461,7 @@ mod tests {
     /// The other half, which a bump alone passes: the dependent's pin.
     #[test]
     fn a_bump_that_leaves_a_dependents_pin_behind_is_refused_by_name() {
-        let (_origin, wt) = repo("sdk-stale-pin");
+        let (_dir, _origin, wt) = repo("sdk-stale-pin");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
         commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
         commit(
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn a_lock_only_change_to_a_published_crate_passes_without_a_bump() {
-        let (_origin, wt) = repo("sdk-lock-only");
+        let (_dir, _origin, wt) = repo("sdk-lock-only");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
         commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
         publishing(&wt);
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn a_bump_with_a_stale_path_dependency_lock_entry_is_refused_by_name() {
-        let (_origin, wt) = repo("sdk-stale-lock");
+        let (_dir, _origin, wt) = repo("sdk-stale-lock");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
         commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
         commit(
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn a_registry_entry_at_the_old_version_passes() {
-        let (_origin, wt) = repo("sdk-fork-pin");
+        let (_dir, _origin, wt) = repo("sdk-fork-pin");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
         commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
         commit(&wt, "userland/snake/Cargo.lock", &lockfile("toyos-abi", "0.1.0", true), "fork lock");
@@ -606,7 +606,7 @@ mod tests {
     /// rule has nothing to say about it.
     #[test]
     fn a_branch_that_changes_none_of_the_six_passes() {
-        let (_origin, wt) = repo("sdk-elsewhere");
+        let (_dir, _origin, wt) = repo("sdk-elsewhere");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
         publishing(&wt);
         main_is_here(&wt);
