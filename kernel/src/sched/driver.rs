@@ -7,7 +7,6 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::arch::{asm, naked_asm};
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
@@ -52,7 +51,7 @@ unsafe impl PreemptGuard for IrqOff {}
 
 /// Run `f` with interrupts masked, holding [`IrqOff`] for exactly that region.
 pub fn irq_off<R>(f: impl FnOnce(&IrqOff) -> R) -> R {
-    let _guard = crate::hw::IrqGuard::close();
+    let _guard = crate::arch::IrqGuard::close();
     f(&IrqOff(()))
 }
 
@@ -371,7 +370,7 @@ pub fn init() {
 fn idle_ctx() -> KernelCtx {
     KernelCtx {
         rsp: 0,
-        cr3: crate::mm::paging::kernel_cr3(),
+        root: crate::mm::paging::kernel_root(),
         fs_base: 0,
         kernel_stack_top: 0,
         id: None,
@@ -409,11 +408,11 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
     // A kernel thread's is the kernel address space, the one every CPU
     // sits in between user threads — why `idle_ctx` names the same `cr3`.
     // Nothing is released at teardown: this `Arc` clones a leaked, permanent kernel mapping.
-    let cr3 = new.address_space.lock().cr3();
+    let root = new.address_space.lock().root();
     let kernel_stack_top = new.kernel_stack.ptr() as u64 + KERNEL_STACK_SIZE as u64;
     let ctx = KernelCtx {
         rsp: new.entry_rsp,
-        cr3,
+        root,
         fs_base: new.fs_base,
         kernel_stack_top,
         id: Some(new.id),
@@ -490,12 +489,7 @@ fn env(preempt: &PreemptOff) -> Env<'_, crate::hw::KernelHw, PreemptOff> {
 pub fn pass(dispose: Dispose) {
     // The witness's negative control: sets DF one instruction before the reader that must refuse it.
     #[cfg(feature = "df-witness-mutate")]
-    // SAFETY: a build that exists to stage the defect, and the reader below
-    // panics before any `rep movs` can run. Nothing runs in between, so no
-    // string op ever executes with it set.
-    unsafe {
-        core::arch::asm!("std", options(nomem, nostack))
-    };
+    crate::arch::cpu::df_witness_mutate();
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("a scheduler pass");
     // Read before this pass's own level goes on top of it.
@@ -510,7 +504,7 @@ pub fn pass(dispose: Dispose) {
     // posts is in the run queue by the time the pass chooses.
     crate::object::drain_zero_handles();
     let now = HW.now();
-    crate::drivers::watchdog::feed(now.0);
+    crate::arch::watchdog::feed(now.0);
     #[cfg(feature = "heap-sweep")]
     maybe_sweep(now);
     #[cfg(feature = "pass-spin")]
@@ -643,7 +637,7 @@ fn execute(action: Action<KernelPayload>) {
                 || crate::irq_ring::any_pending_self()
                 || !with_cpu(|c| c.mailbox_is_empty())
                 // The i8042 verdict needs a pass to notice its deadline; a quiet machine after boot runs none otherwise.
-                || crate::drivers::i8042::verdict_due()
+                || crate::arch::keyboard_controller::verdict_due()
                 // No log condition here: a log to write means a runnable process, covered above. A pending
                 // root-hub port needs a pass too — no interrupt is coming.
                 || crate::drivers::xhci::port_work_pending();
@@ -664,7 +658,7 @@ fn drain_irqs(entered: super::dump::Entered) {
     #[cfg(feature = "boot-actuators")]
     crate::heartbeat::note_pass();
     crate::drivers::xhci::poll_if_pending();
-    crate::drivers::i8042::service();
+    crate::arch::keyboard_controller::service();
     // Here, not at the keystroke: the keystroke's decoding driver's guard is done by this point.
     super::dump::serve_request(entered);
     // A CPU cannot read a sibling's `CpuSched`, so the dump reaches every CPU
@@ -692,23 +686,10 @@ pub fn enter_idle_loop() -> ! {
     percpu::set_current_pid(None);
     // SAFETY: `set_kernel_stack` requires the caller be the CPU its GS base belongs to — true here, on that CPU, after its base was set.
     unsafe { percpu::set_kernel_stack(percpu::idle_stack_top()) };
-    // SAFETY: `kernel_cr3` is the space this function's own code and stack already run in, so the write cannot unmap what executes it.
-    unsafe { crate::mm::paging::kernel_cr3().activate() };
-    let sp = percpu::idle_stack_top();
-    // SAFETY: nothing on the outgoing stack is live past this — the function returns `!`, and `sp` is this CPU's own idle stack top.
-    unsafe {
-        asm!(
-            "mov rsp, {sp}",
-            // Zeroes the frame chain, so a panic here can backtrace instead of walking off the top of this stack;
-            // `push` also leaves `rsp` where a function entry expects it.
-            "xor ebp, ebp",
-            "push rbp",
-            "jmp {func}",
-            sp = in(reg) sp,
-            func = in(reg) idle_loop as *const () as usize,
-            options(noreturn),
-        );
-    }
+    // SAFETY: `kernel_root` is the space this function's own code and stack already run in, so the write cannot unmap what executes it.
+    unsafe { crate::mm::paging::kernel_root().activate() };
+    // SAFETY: nothing on the outgoing stack is live past this — the function returns `!`, and the stack is this CPU's own idle stack.
+    unsafe { crate::arch::cpu::run_on_stack(percpu::idle_stack_top(), idle_loop) }
 }
 
 extern "C" fn idle_loop() -> ! {
@@ -723,7 +704,7 @@ extern "C" fn idle_loop() -> ! {
         // while the one under observation spins on `syscall` from Ring 3.
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::syscall_window_nmi() {
-            crate::nmi_gate::storm();
+            crate::arch::syscall::window_storm();
         }
         // Here, not from a syscall: the panic handler recovers, not paints, when a userland
         // thread is current, and the idle loop has none.
@@ -878,9 +859,9 @@ pub fn for_each_parked(mut f: impl FnMut(ParkedInfo)) -> bool {
 
 /// Tail of the first switch into a fresh task. No lock to release, no outgoing task to park: only the
 /// preempt-count bracket's other half is owed.
-pub extern "sysv64" fn trampoline_entry() {
+pub extern "C" fn trampoline_entry() {
     crate::preempt::enable_no_resched();
-    crate::arch::idt::kernel_exit_to_user_check();
+    crate::arch::trap::kernel_exit_to_user_check();
 }
 
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
@@ -963,7 +944,7 @@ fn check_stack_ownership(payload: &KernelPayload) {
     let top = bottom + KERNEL_STACK_SIZE as u64;
     // SAFETY: a pass runs on the CPU whose GS base is its own `PerCpu`.
     let (kernel_rsp, rsp0) = unsafe { percpu::entry_stacks() };
-    let rsp = crate::arch::cpu::read_rsp();
+    let rsp = crate::arch::cpu::stack_pointer();
     if kernel_rsp == top && rsp0 == top && rsp <= top && rsp > bottom {
         return;
     }
@@ -1004,55 +985,3 @@ fn stack_depth(payload: &KernelPayload) {
     DEEPEST.fetch_max(used, Ordering::Relaxed);
 }
 
-/// The outgoing half of [`context_switch`]. A macro, not inlined twice, so both builds share one instruction sequence.
-macro_rules! switch_save {
-    () => {
-        "pushfq
-         push rbp
-         push rbx
-         push r12
-         push r13
-         push r14
-         push r15
-         mov [rdi], rsp
-         mov rsp, rsi"
-    };
-}
-
-/// The incoming half: the seven words a resumed context stands on, ending in `ret`.
-macro_rules! switch_restore {
-    () => {
-        "pop r15
-         pop r14
-         pop r13
-         pop r12
-         pop rbx
-         pop rbp
-         popfq
-         ret"
-    };
-}
-
-/// Callee-saved register save/restore.
-#[cfg(not(feature = "switch-witness"))]
-#[unsafe(naked)]
-pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
-    naked_asm!(switch_save!(), switch_restore!());
-}
-
-/// The same switch with [`crate::hw::switch_witness_verify`] between the stack move and the first `pop`; never fired.
-///
-/// Placed after `mov rsp, rsi`, reading the incoming frame through the register the machine will use. Sound
-/// to `call`: the return lands inside the incoming task's own stack, and every register `verify` may clobber
-/// is caller-saved and already dead here.
-#[cfg(feature = "switch-witness")]
-#[unsafe(naked)]
-pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
-    naked_asm!(
-        switch_save!(),
-        "mov rdi, rsp",
-        "call {verify}",
-        switch_restore!(),
-        verify = sym crate::hw::switch_witness_verify,
-    );
-}

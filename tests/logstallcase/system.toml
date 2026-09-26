@@ -8,6 +8,7 @@
 start = ["logd", "soundd", "test-runner"]
 
 [programs.logd]
+service = true
 args = [
     "--stall=soundd",
     "--stall-until=soundd_log_stall: the tone has played, and logd may read soundd again",
@@ -15,6 +16,7 @@ args = [
 syscap = ["logread"]
 
 [programs.soundd]
+service = true
 serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]

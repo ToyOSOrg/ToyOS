@@ -298,6 +298,36 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Font("OFL-1.1"),
     ),
     (
+        "assets/fonts/OFL.txt",
+        "01cd5ffb3a528c219a86e49a814c6c53bd8a69b9a3c305dd237074ba1c811af7",
+        "NOTICE",
+        Terms::Font("OFL-1.1"),
+    ),
+    (
+        "assets/fonts/OpenSans-Bold.ttf",
+        "27da758f4dcac9a65abe914c13b463b42982b9909bc65713424099f4810bd1e6",
+        "NOTICE",
+        Terms::Font("OFL-1.1"),
+    ),
+    (
+        "assets/fonts/OpenSans-BoldItalic.ttf",
+        "d672a770037104b6af45e1336b3d3c1729c8aea940f81e010f5a8a7319c29a21",
+        "NOTICE",
+        Terms::Font("OFL-1.1"),
+    ),
+    (
+        "assets/fonts/OpenSans-Italic.ttf",
+        "93bc1bb6abf4e6b7c75d7131714061d5b57cc478abcabe4cb3519bb38fb917aa",
+        "NOTICE",
+        Terms::Font("OFL-1.1"),
+    ),
+    (
+        "assets/fonts/OpenSans-Regular.ttf",
+        "c53aceea2dcf5b4098099c0c4d0a061d17e178a049317b42a422b1a9f7f8eb59",
+        "NOTICE",
+        Terms::Font("OFL-1.1"),
+    ),
+    (
         "assets/icons/arrow-down-right-bold.svg",
         "8e107bfe4c746c762c97a7dbb6472db4669947ccdb5498fa843448ce8f6b69f4",
         "NOTICE",
@@ -381,6 +411,18 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "e1bea9791e07a0e2509196c6cb4563d44cafca1f19b0ef660319b0fa53546a3e",
         "NOTICE",
         Terms::Font("OFL-1.1"),
+    ),
+    (
+        "aavmf/AAVMF_CODE.fd",
+        "47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d",
+        "NOTICE",
+        Terms::Spdx("BSD-2-Clause-Patent AND Apache-2.0"),
+    ),
+    (
+        "aavmf/AAVMF_VARS.fd",
+        "b3b855c5a80310168051164986855692d1bdb06e67619856177965cd87c6774f",
+        "NOTICE",
+        Terms::Spdx("BSD-2-Clause-Patent AND Apache-2.0"),
     ),
     (
         "ovmf/DEBUGX64_OVMF.fd",

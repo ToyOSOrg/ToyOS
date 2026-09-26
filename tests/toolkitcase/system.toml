@@ -1,0 +1,33 @@
+# A desktop with a shell, for the clients the `toolkit_` tests carry and
+# launch from it: an unmodified iced app, and the winit and waiter probes.
+
+assets = ["assets"]
+
+[boot]
+start = ["logd", "compositor", "terminal"]
+
+# **Every image that carries a `TOYOS-LOG` partition runs this**, and every
+# image does — `every_boot_config_runs_logd` is what refuses one without.
+[programs.logd]
+syscap = ["logread"]
+
+[programs.compositor]
+service = true
+serves = ["compositor"]
+receives = ["launcher"]
+devices = ["framebuffer", "keyboard", "mouse"]
+
+[programs.terminal]
+provides = ["surface"]
+receives = ["compositor", "launcher"]
+
+[programs.shell]
+receives = ["compositor", "surface", "launcher"]
+
+# `stats` spawns the app and reports its CPU and peak memory once it leaves.
+[programs.toybox]
+receives = ["compositor", "surface"]
+
+[symlinks]
+"bin/echo" = "/system/bin/toybox"
+"bin/stats" = "/system/bin/toybox"

@@ -19,14 +19,17 @@ start = ["logd", "compositor", "soundd", "terminal"]
 # which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and init hands
 # it every program's output beside that.
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 [programs.compositor]
+service = true
 serves = ["compositor"]
 receives = ["soundd", "launcher"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.soundd]
+service = true
 serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]

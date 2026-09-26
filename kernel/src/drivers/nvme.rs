@@ -7,7 +7,7 @@
 //! `read_sectors`/`write_sectors`; `admin` takes none and is bounded by
 //! [`COMMAND`] alone. A refusal is taken between commands, never inside one.
 
-use core::sync::atomic::{fence, Ordering};
+use crate::arch::barrier;
 use toyos_untrusted::{Refused, Untrusted};
 use crate::mm::Mmio;
 use super::pci::PciDevice;
@@ -202,10 +202,10 @@ impl NvmeQueue {
 
     fn submit(&mut self, bar: &Mmio, cmd: SqEntry) {
         // Bounded by `sq_tail % QUEUE_DEPTH` against the page `init` allocated;
-        // the fence and doorbell below are what tell the device it happened.
+        // the doorbell below is what tells the device it happened, and as an
+        // `Mmio` write it is ordered after the entry.
         self.sq.write(self.sq_tail as usize * core::mem::size_of::<SqEntry>(), cmd);
         self.sq_tail = (self.sq_tail + 1) % QUEUE_DEPTH as u16;
-        fence(Ordering::Release);
         bar.write_u32(self.sq_doorbell, self.sq_tail as u32);
     }
 
@@ -238,6 +238,9 @@ impl NvmeQueue {
         if !answered {
             return Err(Unanswered::Silent);
         }
+        // The entry, and the data it completes, read after the phase tag that
+        // says they are there.
+        barrier::dma_rmb();
         let cq: CqEntry = self.cq.read(at(self.cq_head));
         let status = cq.status >> 1;
         let cid = Untrusted::new(cq.cid);

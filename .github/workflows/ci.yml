@@ -4,12 +4,11 @@ name: ci
 # is `cargo run -- --ci <job>` (src/ci.rs), which runs the same on a dev host;
 # nightly.yml boots the guests.
 #
-# The two required checks read different events, and neither is absent on the
-# other — it is skipped, which a required check counts as passing: `abi-split`
-# runs on the pull request alone, where the branch's own commits are; `host`
-# runs only in the merge queue, where every branch has already been judged as
-# a pull request. That is how each half enters the queue it does not itself
-# run in.
+# `abi-split` runs on both events: against main on the pull request, and in
+# the merge queue against the group's base, where two branches that took one
+# version meet. `host` runs only in the merge queue, where every branch has
+# already been judged as a pull request; on the pull request it is skipped,
+# which a required check counts as passing.
 
 on:
   pull_request:
@@ -21,15 +20,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The published crates' versions, read from the branch against its merge
-  # base — a merge group's branches were each already judged this way as a
-  # pull request, so this does not run there. The name is the required check's.
+  # The published crates' versions; `src/ci.rs`'s `abi_split` reads which
+  # event it judges. The name is the required check's.
   abi-split:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # Full history: `sdkversion::judge` needs the merge base with origin/main.
+      # Full history: the judge needs the merge base with origin/main, or the
+      # group's base.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0

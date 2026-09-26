@@ -10,9 +10,11 @@ start = ["logd", "soundd", "test-runner"]
 # which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and init hands
 # it every program's output beside that.
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 [programs.soundd]
+service = true
 serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]

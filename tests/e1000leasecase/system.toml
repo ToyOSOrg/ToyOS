@@ -7,9 +7,11 @@
 start = ["logd", "netd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:8086:10d3"]
 args = ["--exit-with-lease"]

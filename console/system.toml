@@ -27,6 +27,7 @@ start = ["logd", "console"]
 # reads the kernel's records with `logread`, which is `Rights::LOG |
 # Rights::WAIT` on a `SysCap` duplicate, and serves `log` to the console.
 [programs.logd]
+service = true
 syscap = ["logread"]
 serves = ["log"]
 

@@ -5,6 +5,7 @@
 start = ["logd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 # One binary name per job, never a command line: the stdin path's `run <name>`

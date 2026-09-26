@@ -11,6 +11,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use crate::arch::cpu;
 use crate::arch::percpu::CpuFaultState;
 use crate::drivers::serial;
+use crate::time::{Budget, Duration};
 
 /// Slots in every per-CPU array here: an APIC id masked to six bits.
 const SLOTS: usize = 64;
@@ -22,30 +23,10 @@ const SLOTS: usize = 64;
 /// `halt_all_cpus` halts the second CPU anyway.
 static PANIC_DEPTH: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 
-/// This CPU's APIC id, from CPUID.
-///
-/// Not `rdmsr(IA32_X2APIC_APICID)`: that MSR is `#GP` before `apic::init_ap`
-/// has run, and a panic an AP takes before then must not fault inside the
-/// reentry guard.
-pub fn apic_id() -> u32 {
-    let (max_leaf, _, _, _) = cpu::cpuid(0, 0);
-    for leaf in [0x1F, 0x0B] {
-        if max_leaf >= leaf {
-            let (_, ebx, _, edx) = cpu::cpuid(leaf, 0);
-            // SDM Vol. 2A, CPUID leaf 0BH: EBX[15:0] == 0 means unimplemented,
-            // not id 0, so the leaf-1 fallback below must still run.
-            if ebx & 0xFFFF != 0 {
-                return edx;
-            }
-        }
-    }
-    let (_, ebx, _, _) = cpu::cpuid(1, 0);
-    ebx >> 24
-}
-
-/// This CPU's reentry depth.
+/// This CPU's reentry depth, indexed by the id the hardware gives the CPU
+/// (`arch::cpu::hardware_id`), which answers before any per-CPU state exists.
 pub fn depth_slot() -> &'static AtomicU32 {
-    &PANIC_DEPTH[apic_id() as usize & (SLOTS - 1)]
+    &PANIC_DEPTH[cpu::hardware_id() as usize & (SLOTS - 1)]
 }
 
 /// Path capture bound; overflow is cut from the front (see [`copy_tail`]).
@@ -72,11 +53,12 @@ impl Kind {
     }
 }
 
-/// One CPU's first unfinished crash. Every field is `Relaxed`: one CPU writes
-/// its own slot and the same CPU reads it, with interrupts masked throughout,
-/// and no other CPU ever looks. Lengths are stored after the bytes, so a slot
-/// read mid-fill — an NMI panicking between the claim and the copy — reports
-/// a short string rather than the previous crash's tail.
+/// One CPU's first unfinished crash. One CPU writes its own slot and the same
+/// CPU reads it, with interrupts masked throughout, and no other CPU ever looks.
+/// Lengths are stored `Release` after the bytes and loaded `Acquire` before
+/// them, so a slot read mid-fill — an NMI panicking between the claim and the
+/// copy — reports a short string rather than the previous crash's tail; every
+/// other field is `Relaxed`.
 struct Evidence {
     kind: AtomicU8,
     file_len: AtomicU8,
@@ -117,7 +99,7 @@ impl Evidence {
 static FIRST: [Evidence; SLOTS] = [const { Evidence::new() }; SLOTS];
 
 fn evidence() -> &'static Evidence {
-    &FIRST[apic_id() as usize & (SLOTS - 1)]
+    &FIRST[cpu::hardware_id() as usize & (SLOTS - 1)]
 }
 
 /// Claims this CPU's slot for the first crash; declines if one is already claimed.
@@ -134,7 +116,7 @@ pub fn record_panic(info: &core::panic::PanicInfo) {
     if !claim(slot, Kind::Panic) {
         return;
     }
-    slot.apic.store(apic_id(), Ordering::Relaxed);
+    slot.apic.store(cpu::hardware_id(), Ordering::Relaxed);
     if let Some(location) = info.location() {
         copy_tail(&slot.file, &slot.file_len, &slot.file_cut, location.file().as_bytes());
         slot.line.store(location.line(), Ordering::Relaxed);
@@ -153,7 +135,7 @@ pub fn record_fault(name: &str, rip: u64, cr2: u64, error_code: u64) {
     if !claim(slot, Kind::Fault) {
         return;
     }
-    slot.apic.store(apic_id(), Ordering::Relaxed);
+    slot.apic.store(cpu::hardware_id(), Ordering::Relaxed);
     copy_head(&slot.msg, &slot.msg_len, name.as_bytes());
     slot.rip.store(rip, Ordering::Relaxed);
     slot.cr2.store(cr2, Ordering::Relaxed);
@@ -178,7 +160,9 @@ fn copy_tail(dst: &[AtomicU8], len: &AtomicU8, cut: &AtomicU8, src: &[u8]) {
     for (slot, &b) in dst.iter().zip(tail) {
         slot.store(b, Ordering::Relaxed);
     }
-    len.store(tail.len() as u8, Ordering::Relaxed);
+    // `Release`: the bytes before the length, for a reader that interrupts
+    // this copy.
+    len.store(tail.len() as u8, Ordering::Release);
     cut.store(u8::from(from > 0), Ordering::Relaxed);
 }
 
@@ -191,12 +175,15 @@ fn copy_head(dst: &[AtomicU8], len: &AtomicU8, src: &[u8]) {
     for (slot, &b) in dst.iter().zip(src.get(..n).unwrap_or(&[])) {
         slot.store(b, Ordering::Relaxed);
     }
-    len.store(n as u8, Ordering::Relaxed);
+    // `Release`, as in [`copy_tail`].
+    len.store(n as u8, Ordering::Release);
 }
 
 /// A slot's bytes as text, in the caller's own buffer.
 fn read<'a>(src: &[AtomicU8], len: &AtomicU8, out: &'a mut [u8]) -> &'a str {
-    let n = (len.load(Ordering::Relaxed) as usize).min(out.len()).min(src.len());
+    // `Acquire`: pairs with the copy's `Release`, so the bytes read are at
+    // least the ones that length was stored after.
+    let n = (len.load(Ordering::Acquire) as usize).min(out.len()).min(src.len());
     for (byte, slot) in out.iter_mut().zip(src.iter()) {
         *byte = slot.load(Ordering::Relaxed);
     }
@@ -286,7 +273,7 @@ pub fn last_words(
     raw(b"\n!!! ");
     raw(header.as_bytes());
     raw(b" !!! (apic ");
-    serial::panic_raw_dec(u64::from(apic_id()));
+    serial::panic_raw_dec(u64::from(cpu::hardware_id()));
     if let Some(prev) = prev {
         raw(b", the cpu was already in ");
         raw(state_name(prev).as_bytes());
@@ -349,4 +336,96 @@ pub fn last_words(
              second: panic at {second_file}:{second_line}:{second_column}: {second_message}"
         ),
     }
+}
+
+/// Time `/system/bin/logd` gets to durably write the panic report before halt;
+/// a `Budget` (not a `Bound`) because expiry degrades gracefully instead of panicking.
+const LOG_FILE_DRAIN: Budget = Budget::of(
+    Duration::from_millis(500),
+    "the report reaches the panel and not /log",
+);
+
+// Read by tests/toyos.rs — keep in sync or its drift check fails.
+const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
+
+/// Whether `/log` still owes this boot the report.
+// True only before durable_ns passes `want` — logd publishes it after fsync returns, never before.
+fn log_file_owed(want: u64) -> bool {
+    crate::log::user::durable_ns() < want
+}
+
+/// Give `/system/bin/logd` a chance to put this report on the stick before the machine stops.
+// The panic path never writes /log directly — every lock a write needs may already be held by the panicking thread itself.
+fn wait_for_log_file() {
+    // Skip when serial exists: panic_flush already got the report off the box, and waiting here would only delay the pager.
+    if serial::has_console() {
+        return;
+    }
+    // INVARIANT: nothing below runs before both facts this wait rests on hold.
+    // The deadline is read off the calibrated clock, so an uncalibrated one
+    // makes it unreachable; and what the wait is owed by is `logd`, which only
+    // a released machine can run. On a boot that crashes before either — the
+    // one this whole path exists for on a machine with no serial port — waiting
+    // costs the seal and buys nothing, so it is skipped and not shortened.
+    if !crate::clock::calibrated() || !crate::arch::smp::is_ready() {
+        return;
+    }
+    // Sampled once — a sibling still logging on its way down must not be able to push this deadline out indefinitely.
+    let want = crate::log::read::newest_committed_at_ns();
+    if !log_file_owed(want) {
+        return;
+    }
+    // Wake siblings first: one may be halted waiting for an interrupt with no timer armed to wake it otherwise.
+    crate::arch::irqchip::kick_all_but_self();
+    let deadline = crate::clock::now() + LOG_FILE_DRAIN.duration();
+    while log_file_owed(want) {
+        if crate::clock::now() >= deadline {
+            // /log has failed to answer, so fold this into the still-unpainted panel snapshot — the panel is the only channel left.
+            crate::log!(
+                "panic: {LOG_DRAIN_EXPIRED} in {}ns; the panel is the only copy",
+                LOG_FILE_DRAIN.nanos()
+            );
+            crate::drivers::panic_console::refresh_capture();
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Halt all CPUs: stop the others, flush pending log output, then hold this
+/// machine's panel until a key retires the reboot bound or the bound returns it
+/// to firmware. Every fatal path's one funnel.
+// panic_flush bypasses the log-ring and serial locks — once the others are stopped a wedged holder never releases them, so taking them normally could deadlock.
+pub fn halt_all_cpus() -> ! {
+    // Before the wait and the panel: from here this machine holds a report for
+    // whoever is in front of it, with interrupts masked and under a bound of its
+    // own — which to a hard-lockup sample or a deadline poll is
+    // indistinguishable from a wedge, and is the opposite of one. Both bounds,
+    // because a `WEDGED` record either of them sealed would replace the report
+    // this path exists to deliver.
+    crate::hardlockup::stand_down();
+    crate::deadline::stand_down();
+    wait_for_log_file();
+    crate::arch::irqchip::stop_other_cpus();
+    let bound = crate::panic_reboot::arm(true);
+    // Folded into the still-unpainted capture only where the panel is this
+    // boot's only account of itself, exactly as `wait_for_log_file`'s own line
+    // is: a refresh re-freezes the ring, and `screen_late_panic` reads the
+    // panel for a record written *after* `capture()` to prove the paint comes
+    // from the frozen snapshot. A machine with a console gets the arm line on it.
+    if !serial::has_console() {
+        crate::drivers::panic_console::refresh_capture();
+    }
+    // Render before the flush: it can't fail the proven serial channel, and a serial line then proves the paint already finished.
+    let painted = crate::drivers::panic_console::render();
+    // SAFETY: sound only once nothing else will run — the other CPUs are already stopped.
+    unsafe { serial::panic_flush(); }
+    // Must follow the flush — it's the deepest stack this path reaches.
+    crate::arch::trap::report_fault_stack();
+    // page_forever runs strictly after the flush: it is an unbounded loop and may only run once the serial report is out.
+    // Only the CPU that painted watches the bound; the rest halt below, since two CPUs polling one keyboard would split every key.
+    if painted {
+        crate::drivers::panic_console::page_forever(bound);
+    }
+    cpu::halt();
 }

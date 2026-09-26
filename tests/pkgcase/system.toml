@@ -22,14 +22,17 @@ receives = ["compositor", "soundd"]
 # boot config without `logd` is a boot whose `/log` is empty —
 # `every_boot_config_runs_logd` is what refuses one.
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 [programs.compositor]
+service = true
 serves = ["compositor"]
 receives = ["soundd", "launcher"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.soundd]
+service = true
 serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]

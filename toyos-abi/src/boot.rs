@@ -137,6 +137,17 @@ pub struct KernelArgs {
 /// negative control on the kernel's refusal, and read by both of them.
 pub const WITHHOLD_ROOT_PARAM: &str = "loader-withholds-root";
 
+/// The word the loader appends naming the slot it booted, `A` or `B`: the
+/// signed boot parameter is the slot's own, and which slot carried it is a
+/// fact only the loader has.
+pub const SLOT_PARAM: &str = "boot-slot=";
+
+/// The word the loader appends when it booted the other slot than the one the
+/// slot table marks: the marked slot and why it was refused, `B:died`. The
+/// kernel logs it, which is how a dead or refused boot reaches the next boot's
+/// log.
+pub const SLOT_REFUSED_PARAM: &str = "slot-refused=";
+
 /// The most windows the loader will carry.
 pub const MAX_ROOT_BRIDGE_WINDOWS: usize = 64;
 

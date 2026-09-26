@@ -1,6 +1,6 @@
 # Kernel
 
-The module header at the site owns its subsystem — read it before changing a module. The scheduler core is `toyos-sched/`, driven from `kernel/src/sched/`; every Ring 3 transition's machine state is `kernel/src/arch/fpu.rs`; every syscall is `kernel/src/arch/syscall/`, and `dispatch.rs` decodes every user pointer the ABI takes.
+The module header at the site owns its subsystem — read it before changing a module. The scheduler core is `toyos-sched/`, driven from `kernel/src/sched/`; every Ring 3 transition's machine state is `kernel/src/arch/x86_64/fpu.rs`; every syscall is `kernel/src/syscall/`, and `dispatch.rs` decodes every user pointer the ABI takes.
 
 ## Caveats that bite every agent
 
@@ -12,7 +12,7 @@ The module header at the site owns its subsystem — read it before changing a m
 - **No disk wait in this kernel can park** — at the moment a transfer is waited for, the CPU is four ticket spinlocks deep, each disabling preemption.
 - **`crate::log!` may not be called inside `with_cpu`'s exclusive region unless a `panic!` follows it** — the log's readiness path re-enters `driver::pass` and wedges the machine.
 - **`drain_irqs` is the drivers' engine and nothing on it may wait** — a blocking call there empties the audio pipeline on every plug.
-- **A syscall that can block resolves its handle and clones the object out before it blocks** — a `with_object`/`with_process_data` guard held across a park is a runtime panic no compile check catches; the `SYS_FSYNC` arm in `arch/syscall/dispatch.rs` is the pattern.
+- **A syscall that can block resolves its handle and clones the object out before it blocks** — a `with_object`/`with_process_data` guard held across a park is a runtime panic no compile check catches; the `SYS_FSYNC` arm in `syscall/dispatch.rs` is the pattern.
 - **A block-layer `BudgetExpired` is not-durable-yet and never a loss** — it is retried on a fresh budget above every lock; a flush that discards its pages on one splits a FAT mirror.
 - **A decision the process table makes lives in `toyos-proclife`, never in `process.rs`** — its defects are interleavings and that crate is the only machine that can enumerate one.
 - **A task holds at most one watch registration** — a standing registration across a loop must not call anything that registers again. A double registration panics only at attempt ≥ 2, so the contention depth is the coverage.

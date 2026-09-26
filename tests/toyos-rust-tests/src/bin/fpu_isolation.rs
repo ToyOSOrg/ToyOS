@@ -1,7 +1,7 @@
 //! What a transition out of Ring 3 preserves.
 //!
 //! Three arms, all positive assertions, and each one fails on the tree that
-//! came before the bracket in `kernel/src/arch/entry.rs`:
+//! came before the bracket in `kernel/src/arch/x86_64/entry.rs`:
 //!
 //! 1. **Leak.** One process pins a distinctive FP state and exits without
 //!    restoring it; the next asserts the *declared* state at its own entry.

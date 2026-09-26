@@ -16,9 +16,11 @@ start = ["logd", "soundd", "test-runner"]
 # It claims no device and serves no port: its whole authority
 # is `logread`, which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate.
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 [programs.soundd]
+service = true
 serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]

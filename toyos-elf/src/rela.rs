@@ -7,45 +7,52 @@
 //! a type in it that no writer handles would be validated for a write that
 //! never happens. Neither can drift, because there is one table.
 
+use crate::header::Machine;
 use crate::read;
 
 /// Bytes in one `Elf64_Rela`.
 pub const ENTRY_SIZE: usize = 24;
 
-/// The x86-64 relocations this loader knows about.
+/// The dynamic relocations this loader knows about, by what they ask for
+/// rather than by any one machine's number: [`RelocKind::from_raw`] is the
+/// only place a number is read.
 ///
 /// `Other` carries the raw type rather than dropping it, so a log line can name
 /// what it skipped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelocKind {
-    /// `R_X86_64_GLOB_DAT`
+    /// `R_X86_64_GLOB_DAT`, `R_AARCH64_GLOB_DAT`
     GlobDat,
-    /// `R_X86_64_JUMP_SLOT`
+    /// `R_X86_64_JUMP_SLOT`, `R_AARCH64_JUMP_SLOT`
     JumpSlot,
-    /// `R_X86_64_RELATIVE`
+    /// `R_X86_64_RELATIVE`, `R_AARCH64_RELATIVE`
     Relative,
-    /// `R_X86_64_DTPMOD64`
+    /// `R_X86_64_DTPMOD64`, `R_AARCH64_TLS_DTPMOD`
     DtpMod64,
-    /// `R_X86_64_DTPOFF64`
+    /// `R_X86_64_DTPOFF64`, `R_AARCH64_TLS_DTPREL`
     DtpOff64,
-    /// `R_X86_64_TPOFF64`
+    /// `R_X86_64_TPOFF64`, `R_AARCH64_TLS_TPREL`
     Tpoff64,
-    /// `R_X86_64_TPOFF32`
+    /// `R_X86_64_TPOFF32`; AArch64 has no 32-bit thread-pointer offset.
     Tpoff32,
+    /// `R_AARCH64_TLSDESC`: a TLS descriptor, whose resolver this loader does
+    /// not have, so [`validate`] refuses it.
+    TlsDesc,
     Other(u32),
 }
 
 impl RelocKind {
-    pub const fn from_raw(r_type: u32) -> RelocKind {
-        match r_type {
-            6 => RelocKind::GlobDat,
-            7 => RelocKind::JumpSlot,
-            8 => RelocKind::Relative,
-            16 => RelocKind::DtpMod64,
-            17 => RelocKind::DtpOff64,
-            18 => RelocKind::Tpoff64,
-            23 => RelocKind::Tpoff32,
-            other => RelocKind::Other(other),
+    pub const fn from_raw(machine: Machine, r_type: u32) -> RelocKind {
+        match (machine, r_type) {
+            (Machine::X86_64, 6) | (Machine::Aarch64, 1025) => RelocKind::GlobDat,
+            (Machine::X86_64, 7) | (Machine::Aarch64, 1026) => RelocKind::JumpSlot,
+            (Machine::X86_64, 8) | (Machine::Aarch64, 1027) => RelocKind::Relative,
+            (Machine::X86_64, 16) | (Machine::Aarch64, 1028) => RelocKind::DtpMod64,
+            (Machine::X86_64, 17) | (Machine::Aarch64, 1029) => RelocKind::DtpOff64,
+            (Machine::X86_64, 18) | (Machine::Aarch64, 1030) => RelocKind::Tpoff64,
+            (Machine::X86_64, 23) => RelocKind::Tpoff32,
+            (Machine::Aarch64, 1031) => RelocKind::TlsDesc,
+            (_, other) => RelocKind::Other(other),
         }
     }
 
@@ -60,7 +67,7 @@ impl RelocKind {
             | RelocKind::DtpOff64
             | RelocKind::Tpoff64 => Some(8),
             RelocKind::Tpoff32 => Some(4),
-            RelocKind::Other(_) => None,
+            RelocKind::TlsDesc | RelocKind::Other(_) => None,
         }
     }
 
@@ -93,11 +100,13 @@ pub struct Rela {
 #[derive(Clone, Copy, Debug)]
 pub struct RelaTable<'a> {
     data: &'a [u8],
+    machine: Machine,
 }
 
 impl<'a> RelaTable<'a> {
-    pub const fn new(data: &'a [u8]) -> RelaTable<'a> {
-        RelaTable { data }
+    /// `machine` decides what each entry's type number means.
+    pub const fn new(data: &'a [u8], machine: Machine) -> RelaTable<'a> {
+        RelaTable { data, machine }
     }
 
     /// Whole entries the bytes hold. A trailing partial entry is not an entry.
@@ -118,7 +127,7 @@ impl<'a> RelaTable<'a> {
         Some(Rela {
             offset: read::u64_at(self.data, off)?,
             sym: (info >> 32) as u32,
-            kind: RelocKind::from_raw(info as u32),
+            kind: RelocKind::from_raw(self.machine, info as u32),
             addend: read::i64_at(self.data, off + 16)?,
         })
     }
@@ -144,6 +153,7 @@ pub struct RelaCounts {
     pub tpoff32: usize,
     pub dtpmod64: usize,
     pub dtpoff64: usize,
+    pub tlsdesc: usize,
 }
 
 impl RelaCounts {
@@ -157,6 +167,7 @@ impl RelaCounts {
                 RelocKind::Tpoff32 => &mut counts.tpoff32,
                 RelocKind::DtpMod64 => &mut counts.dtpmod64,
                 RelocKind::DtpOff64 => &mut counts.dtpoff64,
+                RelocKind::TlsDesc => &mut counts.tlsdesc,
                 RelocKind::Other(_) => continue,
             };
             *slot += 1;
@@ -175,6 +186,26 @@ impl RelaCounts {
         kinds.iter().map(|&k| self.count_of(k)).max().unwrap_or(0)
     }
 
+    /// What an executable's loader reserves for each group it keeps, at `width`
+    /// bytes an entry, or why it keeps none: a TLS descriptor, which only a
+    /// resolver this loader does not have can fill, or a group that would
+    /// not fit `max_bytes`. The reservation is had only through this refusal.
+    pub fn for_executable(&self, width: usize, max_bytes: usize) -> Result<ExeReservation, ExeRefusal> {
+        if self.tlsdesc != 0 {
+            return Err(ExeRefusal::TlsDescriptor);
+        }
+        let kept = [RelocKind::Relative, RelocKind::GlobDat, RelocKind::Tpoff64, RelocKind::Tpoff32];
+        if self.max_of(&kept).checked_mul(width).is_none_or(|b| b > max_bytes) {
+            return Err(ExeRefusal::TooLarge);
+        }
+        Ok(ExeReservation {
+            relative: self.relative,
+            bind: self.bind,
+            tpoff64: self.tpoff64,
+            tpoff32: self.tpoff32,
+        })
+    }
+
     pub fn count_of(&self, kind: RelocKind) -> usize {
         match kind {
             RelocKind::Relative => self.relative,
@@ -183,6 +214,7 @@ impl RelaCounts {
             RelocKind::Tpoff32 => self.tpoff32,
             RelocKind::DtpMod64 => self.dtpmod64,
             RelocKind::DtpOff64 => self.dtpoff64,
+            RelocKind::TlsDesc => self.tlsdesc,
             RelocKind::Other(_) => 0,
         }
     }
@@ -201,6 +233,36 @@ pub struct FillLattice {
 /// The demand-fault page an executable's relocations are filled in.
 pub const FILL_GRANULE: u64 = 4096;
 
+/// How many entries of each group an executable's loader keeps: made only by
+/// [`RelaCounts::for_executable`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ExeReservation {
+    pub relative: usize,
+    /// `GLOB_DAT` and `JUMP_SLOT`.
+    pub bind: usize,
+    pub tpoff64: usize,
+    pub tpoff32: usize,
+}
+
+/// Why an executable's relocations are refused before any is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExeRefusal {
+    /// [`RelocError::TlsDescriptor`]'s reason.
+    TlsDescriptor,
+    /// A group would not fit one allocation.
+    TooLarge,
+}
+
+impl ExeRefusal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ExeRefusal::TlsDescriptor => RelocError::TlsDescriptor.as_str(),
+            ExeRefusal::TooLarge => "ELF: a relocation group does not fit one allocation",
+        }
+    }
+}
+
 /// Why a relocation cannot be applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelocError {
@@ -212,6 +274,9 @@ pub enum RelocError {
     SymbolPastTable,
     /// The write would cross a fill page, so a chunked writer would drop it.
     StraddlesFillPage,
+    /// A TLS descriptor, which only a resolver this loader does not have can
+    /// fill.
+    TlsDescriptor,
 }
 
 impl RelocError {
@@ -221,6 +286,7 @@ impl RelocError {
             RelocError::OutsideWindow => "ELF: relocation r_offset outside the writable image",
             RelocError::SymbolPastTable => "ELF: relocation r_sym past .dynsym",
             RelocError::StraddlesFillPage => "ELF: relocation crosses a fill-page boundary",
+            RelocError::TlsDescriptor => "ELF: R_AARCH64_TLSDESC has no resolver in this loader",
         }
     }
 }
@@ -291,6 +357,9 @@ pub fn validate(
 ) -> Result<(), RelocError> {
     let (lo, hi) = window;
     for rela in entries {
+        if rela.kind == RelocKind::TlsDesc {
+            return Err(RelocError::TlsDescriptor);
+        }
         let Some(width) = rela.kind.write_width() else {
             continue;
         };

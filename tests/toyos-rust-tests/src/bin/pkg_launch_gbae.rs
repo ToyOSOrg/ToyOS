@@ -85,7 +85,7 @@ fn symlink_row() -> std::process::ExitCode {
 /// The real shell binary through `shell -c`, rather than a second copy of what
 /// it does. `-c` roots the cwd at `/`, so the dotted forms are rooted there.
 fn relative_path() -> std::process::ExitCode {
-    const DIR: &str = "/home/root/reltest";
+    const DIR: &str = "/home/toy/reltest";
     const NONCE: &str = "relpath-ran-9c41";
     std::fs::create_dir_all(DIR).expect("/home is writable");
     let link = format!("{DIR}/echo");
@@ -94,7 +94,7 @@ fn relative_path() -> std::process::ExitCode {
         .expect("a symlink under /home is allowed");
 
     let mut ran = 0;
-    for typed in ["./home/root/reltest/echo", "../home/root/reltest/echo"] {
+    for typed in ["./home/toy/reltest/echo", "../home/toy/reltest/echo"] {
         let out = Command::new("/system/bin/shell")
             .arg("-c")
             .arg(format!("{typed} {NONCE}"))

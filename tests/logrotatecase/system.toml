@@ -33,15 +33,18 @@ start = ["logd", "compositor", "soundd", "netd", "sshd", "test-runner"]
 # which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and init hands
 # it every program's output beside that.
 [programs.logd]
+service = true
 args = ["--rotate-fast"]
 syscap = ["logread"]
 
 [programs.compositor]
+service = true
 serves = ["compositor"]
 receives = ["soundd", "launcher"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.soundd]
+service = true
 serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]
@@ -49,10 +52,12 @@ syscap = ["rt"]
 # netd holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
 [programs.sshd]
+service = true
 receives = ["netd", "launcher"]
 
 # The union its guest binaries need on this machine shape.

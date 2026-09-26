@@ -32,6 +32,9 @@ start = ["logd", "compositor", "soundd", "netd", "filepicker"]
 [apps]
 receives = ["compositor", "soundd", "filepicker"]
 
+# `service = true` makes a row a system service: init starts it with `HOME` at
+# its own `/state/<name>` and makes that directory first. Every other row runs
+# with the session user's home.
 [programs]
 input-test = {}
 proctest = {}
@@ -48,6 +51,7 @@ toyos-cc = { path = "toyos-cc" }
 # `every_boot_config_runs_logd` is what refuses one. It claims no device, and
 # `log` is the port it answers `inspect` on.
 [programs.logd]
+service = true
 syscap = ["logread"]
 serves = ["log"]
 # What lets `logd` serve this boot's log on the network, to whoever connects:
@@ -55,11 +59,13 @@ serves = ["log"]
 receives = ["netd"]
 
 [programs.compositor]
+service = true
 serves = ["compositor"]
 receives = ["soundd", "filepicker", "launcher"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.soundd]
+service = true
 serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]
@@ -69,13 +75,28 @@ syscap = ["rt"]
 # Named by vendor and device rather than by slot, so one row finds the card
 # wherever firmware put it.
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
-# `swap` is the authority to replace a running service's binary; the build
-# refuses it to any other program (`src/build.rs`).
+# `launcher` is how a login's program is started holding its own row: `update`
+# and `swap` below are two such programs.
 [programs.sshd]
-receives = ["netd", "launcher", "swap"]
+service = true
+receives = ["netd", "launcher"]
+
+# `swap` is the authority to replace a running service's binary; the build
+# refuses it to any other program (`src/build.rs`). `ssh <machine> swap netd
+# <sha256> <length> < netd` runs it for a login.
+[programs.swap]
+receives = ["swap"]
+
+# The idle slot: the slot table and the idle slot's two partitions, which init
+# claims against the ROOT the kernel holds. The build refuses it to any other
+# program; the owner's signature on the image is the authority to install it.
+# `ssh <machine> update < image` runs it for a login.
+[programs.update]
+slots = true
 
 # A name's addresses, asked of netd's resolver: `netd` is the whole of what it
 # holds.
@@ -90,6 +111,7 @@ receives = ["netd", "soundd", "log", "compositor"]
 syscap = ["inventory"]
 
 [programs.filepicker]
+service = true
 serves = ["filepicker"]
 receives = ["compositor"]
 

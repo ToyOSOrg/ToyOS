@@ -65,6 +65,30 @@ impl Guid {
 
     pub const TOYOS_DATA_TEXT: &'static str = "064E3777-5076-4C71-8E07-90AD24CFE8D6";
 
+    /// `94464329-E06E-4288-A9DA-7FC7154F5E92` — the slot table's partition
+    /// type: which partitions make each slot, and which slot is marked
+    /// (`toyos_update::slots`). A disk carries one.
+    pub const TOYOS_SLOTS: Self = Self::from_fields(
+        0x9446_4329,
+        0xE06E,
+        0x4288,
+        [0xA9, 0xDA, 0x7F, 0xC7, 0x15, 0x4F, 0x5E, 0x92],
+    );
+
+    pub const TOYOS_SLOTS_TEXT: &'static str = "94464329-E06E-4288-A9DA-7FC7154F5E92";
+
+    /// `037719D7-DEA5-481A-AA07-6AF8BE6D51E2` — a slot's FAT partition: its
+    /// kernel, its boot parameter and its signed header. A *type*, so it
+    /// selects nothing; the slot table names each one by its unique GUID.
+    pub const TOYOS_BOOT: Self = Self::from_fields(
+        0x0377_19D7,
+        0xDEA5,
+        0x481A,
+        [0xAA, 0x07, 0x6A, 0xF8, 0xBE, 0x6D, 0x51, 0xE2],
+    );
+
+    pub const TOYOS_BOOT_TEXT: &'static str = "037719D7-DEA5-481A-AA07-6AF8BE6D51E2";
+
     pub const fn from_fields(a: u32, b: u16, c: u16, d: [u8; 8]) -> Self {
         let a = a.to_le_bytes();
         let b = b.to_le_bytes();
@@ -133,6 +157,10 @@ mod tests {
         assert_eq!(&text[..], Guid::TOYOS_ROOT_TEXT.as_bytes());
         let text = heapless_format(Guid::TOYOS_DATA);
         assert_eq!(&text[..], Guid::TOYOS_DATA_TEXT.as_bytes());
+        let text = heapless_format(Guid::TOYOS_SLOTS);
+        assert_eq!(&text[..], Guid::TOYOS_SLOTS_TEXT.as_bytes());
+        let text = heapless_format(Guid::TOYOS_BOOT);
+        assert_eq!(&text[..], Guid::TOYOS_BOOT_TEXT.as_bytes());
         assert_ne!(Guid::TOYOS_ROOT, Guid::TOYOS_DATA);
     }
 

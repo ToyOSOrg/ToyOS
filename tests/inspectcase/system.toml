@@ -16,19 +16,23 @@ start = ["logd", "compositor", "soundd", "netd", "test-runner"]
 # `every_boot_config_runs_logd` refuses a config without it. `log` is the port
 # it answers `inspect` on.
 [programs.logd]
+service = true
 syscap = ["logread"]
 serves = ["log"]
 
 [programs.compositor]
+service = true
 serves = ["compositor"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.soundd]
+service = true
 serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]
 
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 

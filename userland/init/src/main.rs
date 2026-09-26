@@ -26,6 +26,12 @@
 //! once, so a client's next connect is `ServerGone` exactly as it is for a
 //! server nothing keeps. A program started through `launcher` still gets its
 //! acceptor by move and is started once per boot.
+//!
+//! **Every program it starts gets `HOME` from its row** (`Program::home`), over
+//! anything a launching caller carried: a service its own `/state/<name>`, made
+//! before it runs, and everything else the session user's home, made at boot.
+//! A launch of a program no row names is answered with the session's, which
+//! the caller's direct spawn carries in place of its own.
 
 /// One line, one `write`, into init's own pipe to `logd` ([`Log`]): a line of
 /// init's is a line in the log under init's name, whether or not `logd` has run
@@ -65,6 +71,11 @@ use toyos_abi::syscall::{
 /// The service init answers on. Its own, so it has no `[programs]` row and the
 /// manifest carries it as an `init-serve` record.
 const LAUNCHER: &str = "launcher";
+
+/// What init makes in the session user's home before anything runs. English on
+/// disk in every locale: a translation is a label, never a rename.
+const HOME_FOLDERS: [&str; 8] =
+    ["Apps", "Desktop", "Documents", "Downloads", "Fonts", "Music", "Pictures", "Videos"];
 
 /// Connections accepted and not yet carrying a whole launch.
 ///
@@ -177,6 +188,32 @@ impl Log {
     }
 }
 
+/// The session user's home and [`HOME_FOLDERS`]. A boot whose DATA volume did
+/// not mount has no `/home`, which the kernel has already said; this says what
+/// it cost and starts the machine without it.
+fn make_session_home() {
+    let home = toyos_manifest::session_home();
+    if let Err(e) = make_dir(&home) {
+        say!("init: {home} could not be made, so this boot has no session home: {e}");
+        return;
+    }
+    for folder in HOME_FOLDERS {
+        if let Err(e) = make_dir(&format!("{home}/{folder}")) {
+            say!("init: {home}/{folder} could not be made, so the session home has no {folder}: {e}");
+        }
+    }
+}
+
+/// One directory, whose parent is there already. Not `create_dir_all`: DATA
+/// keeps no directories, and the VFS's own record of one takes a child whose
+/// parent it never made, so every level is made in turn.
+fn make_dir(path: &str) -> std::io::Result<()> {
+    match std::fs::create_dir(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),
+        _ => Ok(()),
+    }
+}
+
 fn main() {
     // Before anything is started, so every program's first line has a pipe to
     // go into, and before init says anything.
@@ -185,6 +222,8 @@ fn main() {
     let syscap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("init: the kernel spawns this program holding the system capability");
+
+    make_session_home();
 
     let text = std::fs::read_to_string(toyos_manifest::GUEST_PATH)
         .unwrap_or_else(|e| panic!("init: cannot read {}: {e}", toyos_manifest::GUEST_PATH));
@@ -884,11 +923,12 @@ fn serve_launch<'a>(
             &installed
         }
         Resolved::NotDeclared => {
-            // **`try_signal` and not `send`.** A bare header is what every
-            // answer here is, and a blocking write is the other half of the
-            // rule that made the read side an event loop: a client that never
-            // drains its end decides when init runs again.
-            let _ = conn.try_signal(launch::MSG_NOT_DECLARED);
+            // **`try_send_bytes` and not `send`.** A blocking write is the
+            // other half of the rule that made the read side an event loop: a
+            // client that never drains its end decides when init runs again.
+            // The `HOME` is the session's: a program no row names is no service.
+            let home = toyos_manifest::session_home();
+            let _ = conn.try_send_bytes(launch::MSG_NOT_DECLARED, home.as_bytes());
             return;
         }
         Resolved::Refused(why) => {
@@ -1060,6 +1100,76 @@ fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
     Resolved::Package(system.app_row(name, path))
 }
 
+/// The slot table's partition and the idle slot's two, claimed: the grant a
+/// `slots` row is endowed (`toyos_update::slots`).
+///
+/// **Which slot is idle is the kernel's word, not the table's**: the running
+/// ROOT is the TOYOS-ROOT partition the kernel holds, the table is the one on
+/// that ROOT's disk, and the idle slot is the one whose ROOT is not it — and
+/// its two partitions are claimed only as `toyos_update::slots::grant` admits
+/// them.
+fn slot_grant(syscap: &SysCap) -> Result<[(&'static str, toyos::Device); 3], String> {
+    use toyos_abi::inventory::{PartState, Partition, RawRecord, Record};
+    let asked = syscap.inventory(&mut []).map_err(|e| format!("the inventory would not count: {e:?}"))?;
+    let mut raw = vec![RawRecord::EMPTY; asked];
+    let n = syscap.inventory(&mut raw).map_err(|e| format!("the inventory would not read: {e:?}"))?;
+    let parts: Vec<Partition> = raw[..n]
+        .iter()
+        .filter_map(|r| match Record::decode(r) {
+            Ok(Record::Partition(p)) => Some(p),
+            _ => None,
+        })
+        .collect();
+    let one = |what: &str, found: Vec<&Partition>| match found[..] {
+        [p] => Ok(*p),
+        _ => Err(format!("the machine has {} {what}, and a grant needs one", found.len())),
+    };
+    let running = one(
+        "ROOT partitions the kernel holds",
+        parts
+            .iter()
+            .filter(|p| p.type_guid == toyos_gpt::Guid::TOYOS_ROOT.0 && p.state == PartState::Kernel)
+            .collect(),
+    )?;
+    let table_part = one(
+        "slot tables on the running ROOT's disk",
+        parts
+            .iter()
+            .filter(|p| p.device == running.device && p.type_guid == toyos_gpt::Guid::TOYOS_SLOTS.0)
+            .collect(),
+    )?;
+    let claim = |guid: [u8; 16], what: &str| {
+        syscap
+            .claim_partition::<toyos::Device>(toyos_abi::part::PartGuid(guid))
+            .map_err(|e| refused(&format!("the {what}"), e))
+    };
+    let table_claim = claim(table_part.unique_guid, "slot table")?;
+    let mut copies: [toyos_abi::part::Block; 2] = [[0; toyos_abi::part::BLOCK_BYTES]; 2];
+    toyos_abi::syscall::partition_read(table_claim.as_handle(), 0, &mut copies)
+        .map_err(|e| format!("the slot table would not read: {e:?}"))?;
+    let (table, _) = toyos_update::slots::current([&copies[0], &copies[1]])
+        .map_err(|why| format!("the slot table's partition holds {why}"))?;
+    // The table is the grantee's to write, so what it names is held to the
+    // inventory before anything is claimed.
+    let listed = |p: &Partition| toyos_update::slots::Listed {
+        device: p.device,
+        type_guid: p.type_guid,
+        unique_guid: p.unique_guid,
+    };
+    let kinds = toyos_update::slots::Kinds { boot: toyos_gpt::Guid::TOYOS_BOOT.0, root: toyos_gpt::Guid::TOYOS_ROOT.0 };
+    let all: Vec<_> = parts.iter().map(listed).collect();
+    let (idle, slot) =
+        toyos_update::slots::grant(&table, &listed(&running), &all, kinds).map_err(|why| why.to_string())?;
+    let boot = claim(slot.boot, "idle slot's volume")?;
+    let root = claim(slot.root, "idle slot's ROOT")?;
+    say!("init: the idle slot is {}, granted with the slot table", idle.letter());
+    Ok([
+        (toyos_update::slots::TABLE_LABEL, table_claim),
+        (toyos_update::slots::BOOT_LABEL, boot),
+        (toyos_update::slots::ROOT_LABEL, root),
+    ])
+}
+
 /// What init says about a device it could not mint a claim for.
 ///
 /// One arm per refusal the kernel distinguishes (`kernel/src/device.rs`'s
@@ -1131,6 +1241,16 @@ fn start<'a>(
 ) -> std::io::Result<(Child, Vec<String>)> {
     command.args(&program.args);
     let booting = log.is_some();
+
+    // **Set here, over whatever a launching caller carried**: the row decides
+    // where a program's home is, and a service's is made before it first runs.
+    let home = program.home();
+    if program.service {
+        if let Err(e) = make_dir(&home) {
+            say!("init: {}: {home} could not be made: {e}", program.name);
+        }
+    }
+    command.env("HOME", &home);
 
     // **Everything endowed stays owned until the spawn that moves it
     // succeeds.** `endow` records a number; a refused spawn moves nothing
@@ -1270,6 +1390,22 @@ fn start<'a>(
             // and one sentence for all six sends whoever reads the line looking
             // in the wrong place.
             Err(e) => say!("init: {}: {}", program.name, refused(name, e)),
+        }
+    }
+    // The idle slot, for the one program whose row asks for it: minted here,
+    // against the ROOT the kernel holds, so the slot this boot runs is never
+    // among what is endowed. A machine with none says so and the program
+    // starts holding nothing, which it refuses by name.
+    if program.slots {
+        match slot_grant(syscap) {
+            Ok(claims) => {
+                for (label, claim) in claims {
+                    let raw = claim.into_raw();
+                    command.endow(label, raw.0);
+                    held.0.push(raw);
+                }
+            }
+            Err(why) => say!("init: {}: no slot to grant: {why}", program.name),
         }
     }
     // Nothing was spawned, so everything minted goes back with `held`.
