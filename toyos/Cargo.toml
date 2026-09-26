@@ -1,6 +1,6 @@
 [package]
 name = "toyos"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "The ToyOS userland SDK: typed handles, IPC, ports, namespaces, surfaces and net."
@@ -23,4 +23,4 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos")
 
 [dependencies]
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
-toyos-abi = { path = "../toyos-abi", version = "0.12.0", default-features = false }
+toyos-abi = { path = "../toyos-abi", version = "0.13.0", default-features = false }
