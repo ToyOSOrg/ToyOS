@@ -579,7 +579,7 @@ mod tests {
     /// is refused by name whatever else it changed; one version passes.
     #[test]
     fn a_lockfile_holding_two_versions_of_a_published_crate_is_refused_by_name() {
-        let (_origin, wt) = repo("sdk-split-lock");
+        let (_dir, _origin, wt) = repo("sdk-split-lock");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi manifest");
         commit(&wt, "userland/Cargo.lock", &lockfile("toyos-abi", "0.2.0", false), "one version");
         publishing(&wt);
