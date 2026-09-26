@@ -443,9 +443,6 @@ actuators! {
     /// Let a handle close cancel every poll on the keyboard's watch in the machine.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
 
-    /// Bypass `ConsoleObject`'s line buffer so writes interleave as they arrive.
-    console_unbuffered = "console-unbuffered";
-
     /// Panic inside `klogd` on its first instruction.
     klogd_panic = "klogd-panic";
 

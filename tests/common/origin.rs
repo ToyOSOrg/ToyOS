@@ -349,8 +349,22 @@ pub fn refused_stop(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)
     Ok(())
 }
 
-/// What init says when it stops the machine without `logd`'s answer.
+/// What init says when it stops the machine without `logd`'s answer, and how
+/// long it waits first (`userland/init`'s `FLUSH_BOUND`).
 const FLUSH_WAITED_OUT: &str = "init: logd did not answer the flush in";
+const FLUSH_BOUND_MS: u64 = 5_000;
+/// The kernel's record as a stop begins its sync, after every thread stopped.
+const SYNCING: &str = "Syncing filesystems...";
+
+/// The milliseconds since boot a program's line in `/log` carries: the one
+/// field of its head with a decimal point.
+fn program_millis(line: &str) -> Option<u64> {
+    let (head, _) = line.strip_prefix(toyos_logstream::OPEN)?.split_once(toyos_logstream::CLOSE)?;
+    head.split_whitespace().find_map(|field| {
+        let (secs, millis) = field.split_once('.')?;
+        secs.parse::<u64>().ok()?.checked_mul(1_000)?.checked_add(millis.parse().ok()?)
+    })
+}
 
 /// **A resume that reaches `logd` with its flush unrun answers that flush.**
 /// `tests/logflushcase` holds `logd`'s first flush until init speaks again, so
@@ -455,8 +469,23 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
     let _ = std::fs::remove_file(&staged.image);
     // A stop that went ahead before the flush answered cuts `/log` short
     // whatever the slots did, so that is its own verdict and not this one's.
-    if tail.contains(FLUSH_WAITED_OUT) {
-        return Err(format!("the stop's flush was cut, so /log says nothing of the slots\n{tail}"));
+    // init's word is in its ring when the machine stops, so the console
+    // rarely carries it; the kernel's sync starting a flush bound or more
+    // after init's stop line is the same fact on two records of one clock.
+    let stop = bootlog::stopping_line(&log)
+        .and_then(program_millis)
+        .ok_or_else(|| format!("/log carries no stop line with a time\n{log}"))?;
+    let sync = tail
+        .lines()
+        .find(|l| l.contains(SYNCING))
+        .and_then(bootlog::record_millis)
+        .ok_or_else(|| format!("the console carries no {SYNCING:?} with a time\n{tail}"))?;
+    if tail.contains(FLUSH_WAITED_OUT) || sync.saturating_sub(stop) >= FLUSH_BOUND_MS {
+        return Err(format!(
+            "the stop's flush was waited out ({} ms from init's stop line to the kernel's sync), \
+             so /log says nothing of the slots\n{tail}",
+            sync.saturating_sub(stop)
+        ));
     }
     let runner = bootlog::lines_of(&log, RUNNER);
     // Non-vacuity: the flood met a full ring, so the slots were contested.
@@ -470,7 +499,11 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
              ({flooded} flood lines in /log)\n{log}"
         ));
     }
-    eprintln!("  [origin] {flooded} flood lines filled the ring, and test-runner's {ENDED:?} is in /log");
+    eprintln!(
+        "  [origin] {flooded} flood lines filled the ring, and test-runner's {ENDED:?} is in /log; \
+         the kernel synced {} ms after init's stop line",
+        sync.saturating_sub(stop)
+    );
     Ok(())
 }
 

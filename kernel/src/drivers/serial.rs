@@ -145,7 +145,7 @@ impl BackendGuard {
         }
     }
 
-    /// Writes raw bytes with no escape stripping; callers must pre-strip via [`write_console`].
+    /// Writes raw bytes with no escape stripping.
     pub fn write_raw(&mut self, bytes: &[u8]) {
         match backend() {
             Backend::Virtio => super::virtio_console::write_bytes_locked(bytes),
@@ -345,24 +345,6 @@ fn uart_write_fifo(bytes: &[u8]) {
             core::hint::spin_loop();
         }
     }
-}
-
-/// A userland `write` to the console as it arrives, with no line kept: only
-/// the `console-unbuffered` actuator's, which is the negative control on the
-/// line buffer every console otherwise is. Whatever finds the queue full is
-/// counted unshown.
-pub fn write_console(src: &crate::user_ptr::UserBytes) -> usize {
-    let mut chunk = [0u8; MAX_CONSOLE_LINE];
-    let mut off = 0;
-    while off < src.len() {
-        let n = chunk.len().min(src.len() - off);
-        src.read_at(off, &mut chunk[..n]);
-        if !crate::log::console::queue(&chunk[..n], false) {
-            crate::log::console::unshown();
-        }
-        off += n;
-    }
-    src.len()
 }
 
 /// One console holder's partly-written line. Must live per holder, never

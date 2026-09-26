@@ -249,10 +249,6 @@ impl ConsoleObject {
     /// Take a userland write, queueing every whole line it completes that the
     /// console has room for; answers the bytes taken.
     pub fn write(&self, buf: &crate::user_ptr::UserBytes) -> usize {
-        // Negative control: bypasses buffering so console_line_atomicity reds if this breaks.
-        if crate::actuator::console_unbuffered() {
-            return crate::drivers::serial::write_console(buf);
-        }
         self.line.lock().write(buf)
     }
 }
