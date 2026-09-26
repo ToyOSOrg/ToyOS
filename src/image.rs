@@ -397,6 +397,74 @@ pub fn stage_slot(path: &Path, which: toyos_update::slots::Which, update: &[u8],
         .map_err(|e| format!("writing the slot table: {e}"))
 }
 
+/// Make `edit` of the slot table the disk image at `path` carries, as a writer
+/// does — the copy that is not current, one sequence past it — **with nothing
+/// checked**: a test's way to put a table in front of init that the updater
+/// holding the grant could write.
+pub fn restage_table(path: &Path, edit: impl FnOnce(&mut toyos_update::slots::Table)) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let (table, copy, at) = table_on(&mut file)?;
+    let mut next = table;
+    edit(&mut next);
+    let (to, block) = toyos_update::slots::next_write((table, copy), next);
+    file.seek(SeekFrom::Start(at + (to * toyos_update::slots::BLOCK) as u64))
+        .and_then(|_| file.write_all(&block))
+        .and_then(|_| file.sync_all())
+        .map_err(|e| format!("writing the slot table: {e}"))
+}
+
+/// The unique GUID of the one partition of type `kind` on the disk image
+/// `file`, as a GPT entry stores it.
+pub fn unique_guid_of(file: &mut std::fs::File, kind: toyos_gpt::Guid) -> Result<[u8; 16], String> {
+    let mut out = [BLANK_PARTITION; 2];
+    let scan = toyos_gpt::locate_type(&mut FileSectors(file), kind, &mut out)
+        .map_err(|e| format!("no readable partition table: {e:?}"))?;
+    match scan.matched {
+        1 => Ok(out[0].unique_guid.0),
+        n => Err(format!("{n} partitions of type {kind}, and this asks for one")),
+    }
+}
+
+/// Overwrite the file `name` on the FAT partition `guid` of the disk image at
+/// `path` with `bytes`, exactly its length, **writing its data clusters and
+/// nothing else** — so a guest running on the image that does not write that
+/// file sees nothing else of its volume move.
+pub fn overwrite_file_on(path: &Path, guid: [u8; 16], name: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let (start, len) = partition_extent(&mut file, guid)?;
+    let mut volume = vec![0u8; usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?];
+    file.seek(SeekFrom::Start(start))
+        .and_then(|_| file.read_exact(&mut volume))
+        .map_err(|e| format!("reading the volume at byte {start}: {e}"))?;
+    let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("the volume does not mount: {e}"))?;
+    let found = fs.open(name).map_err(|e| format!("the volume has no {name}: {e}"))?;
+    if found.len() != bytes.len() as u64 {
+        return Err(format!("{name} is {} bytes, and this writes {} in place", found.len(), bytes.len()));
+    }
+    let mut rest = bytes;
+    for extent in fs.extents(name, usize::MAX).map_err(|e| format!("{name}'s clusters: {e}"))? {
+        let n = rest.len().min(extent.len as usize);
+        file.seek(SeekFrom::Start(start + extent.offset))
+            .and_then(|_| file.write_all(&rest[..n]))
+            .map_err(|e| format!("writing {name} at byte {}: {e}", start + extent.offset))?;
+        rest = &rest[n..];
+    }
+    if !rest.is_empty() {
+        return Err(format!("{name}'s clusters hold {} bytes fewer than its length", rest.len()));
+    }
+    file.sync_all().map_err(|e| format!("syncing {}: {e}", path.display()))
+}
+
 /// The slot table on the disk image `file`, which copy is current, and where
 /// its partition starts.
 fn table_on(file: &mut std::fs::File) -> Result<(toyos_update::slots::Table, usize, u64), String> {
@@ -1215,7 +1283,7 @@ mod tests {
         let update = update_image(b"\x7fELF kernel", &root, "sched-fast-health", signing(&key));
         let parts = toyos_update::image::Parts::split(&update).expect("an update image splits");
         assert_eq!(parts.header, header);
-        assert_eq!(parts.mismatched(), None);
+        assert_eq!(toyos_update::image::Header::of(7, parts.kernel, parts.cmdline, parts.root), header);
         assert_eq!(parts.signed, &signed);
     }
 

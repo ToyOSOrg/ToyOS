@@ -1,14 +1,17 @@
 //! The key an image is signed with, and the one place a private key is held.
 //!
-//! **Two keys, chosen by what the image is for.** An image that stays on this
-//! Mac — a QEMU guest of `cargo run` or `cargo test`, or a CI run — is signed
-//! with a throwaway key minted in this process and never written anywhere:
-//! its loader embeds the throwaway's public half, so only this process can
-//! make an update it accepts, and the next run mints another. An image that
-//! leaves the Mac to be installed on a machine (`--owner-key`,
-//! `--update-image`) is signed with the owner's key, read from
-//! [`owner_key_path`], and a build that asks for it where there is none is
-//! refused by name before anything is built.
+//! **Two keys, chosen by what the image is for.** An image for a QEMU guest
+//! of `cargo run` or `cargo test`, a CI run or a metal-loop stick is signed
+//! with this checkout's throwaway key: minted once into [`THROWAWAY_FILE`]
+//! under the checkout's `target/` and kept there, so an unchanged tree
+//! rebuilds nothing that embeds it, and never committed, since `target/` is
+//! not. Its loader keeps a floor per image
+//! (`toyos_update::floor::Scope::Image`), so no image this key signs holds
+//! another to a floor. An image to be installed on the owner's machine
+//! (`--owner-key`, `--update-image`) is signed with the owner's key, read
+//! from [`owner_key_path`], and a build that asks for it where there is none
+//! is refused by name before anything is built; its loader keeps the
+//! machine's floor (`Scope::Machine`).
 //!
 //! **The owner's key never reaches the machine and is never printed**: the
 //! loader and `/system/bin/update` carry the public half ([`KEY_ENV`] at their
@@ -25,6 +28,14 @@ use toyos_update::image::{Header, HEADER_BYTES, SIGNATURE_BYTES, SIGNED_BYTES};
 /// The variable the loader and `/system/bin/update` take the public key from
 /// at compile time: 64 lowercase hex digits.
 pub const KEY_ENV: &str = "TOYOS_IMAGE_KEY";
+
+/// The variable the loader takes its floor's scope from at compile time:
+/// `toyos_update::floor::Scope`'s word for whose key it embeds.
+pub const FLOOR_ENV: &str = "TOYOS_IMAGE_FLOOR";
+
+/// This checkout's throwaway key, under its `target/`: the seed, in 64 hex
+/// digits.
+pub const THROWAWAY_FILE: &str = "target/image-signing-throwaway";
 
 /// The variable naming the owner's private key, where it is not at
 /// [`DEFAULT_OWNER_KEY`] under `$HOME`.
@@ -43,7 +54,7 @@ pub struct Key {
 /// Whose key it is, which is what every line about it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Whose {
-    /// Minted in this process, and gone with it.
+    /// This checkout's, from [`THROWAWAY_FILE`], or one a test minted.
     Throwaway,
     /// The owner's, read from this file.
     Owner(PathBuf),
@@ -65,6 +76,14 @@ impl Key {
 
     pub fn whose(&self) -> &Whose {
         &self.whose
+    }
+
+    /// Whose floor a loader embedding this key keeps.
+    pub fn floor_scope(&self) -> toyos_update::floor::Scope {
+        match self.whose {
+            Whose::Owner(_) => toyos_update::floor::Scope::Machine,
+            Whose::Throwaway => toyos_update::floor::Scope::Image,
+        }
     }
 
     /// `SHA256:<base64>` of the OpenSSH public key blob, as `ssh-keygen -l`
@@ -101,10 +120,63 @@ impl Key {
 
 static KEY: OnceLock<Key> = OnceLock::new();
 
-/// This process's key: the owner's where [`use_owner`] was asked first, a
-/// throwaway otherwise.
+/// This process's key: the owner's where [`use_owner`] was asked first, this
+/// checkout's throwaway otherwise.
 pub fn key() -> &'static Key {
-    KEY.get_or_init(Key::mint)
+    KEY.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        checkout_throwaway(root).unwrap_or_else(|why| panic!("this checkout's throwaway image key: {why}"))
+    })
+}
+
+/// The throwaway key at [`THROWAWAY_FILE`] under `root`, minted there first
+/// where there is none. Two processes minting at once agree: each writes its
+/// own file and links it into place, and the one that loses reads the
+/// winner's.
+fn checkout_throwaway(root: &Path) -> Result<Key, String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = root.join(THROWAWAY_FILE);
+    if !path.exists() {
+        let dir = path.parent().expect("a file under target/");
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let mine = dir.join(format!("image-signing-throwaway.{}", std::process::id()));
+        let key = Key::mint();
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&mine)
+            .and_then(|mut file| {
+                file.write_all(format!("{}\n", hex_of(&key.seed)).as_bytes())?;
+                file.sync_all()
+            });
+        let linked = written.and_then(|()| match std::fs::hard_link(&mine, &path) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            other => other,
+        });
+        let _ = std::fs::remove_file(&mine);
+        linked.map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let seed = seed_of_hex(text.trim())
+        .ok_or_else(|| format!("{} is not 64 hex digits; delete it and the next build mints another", path.display()))?;
+    Ok(Key::throwaway_from(seed))
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn seed_of_hex(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.is_ascii() {
+        return None;
+    }
+    let mut seed = [0u8; 32];
+    for (i, byte) in seed.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(seed)
 }
 
 /// Sign everything this process builds with the owner's key, or say why not.
@@ -128,8 +200,21 @@ pub fn owner_key_path() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(DEFAULT_OWNER_KEY))
 }
 
-/// The owner's key at `path`, refused by name where it is not one.
+/// The owner's key at `path`, refused by name where it is not one — or where
+/// anyone but its owner may read it, as `ssh` refuses such a key.
 fn read_owner_key(path: &Path) -> Result<Key, String> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "{} is mode {mode:04o}, which lets more than its owner read it, and a signing key is \
+                 refused unless it is 0600 or narrower: `chmod 600 {}`",
+                path.display(),
+                path.display()
+            ));
+        }
+    }
     let text = std::fs::read_to_string(path).map_err(|e| {
         format!(
             "the owner's image-signing key is not at {} ({e}). Mint one with \
@@ -322,6 +407,42 @@ mod tests {
         let bytes: [u8; HEADER_BYTES] = signed[..HEADER_BYTES].try_into().unwrap();
         assert_eq!(toyos_update::sig::verify(&key.public, &bytes, &sig), Ok(()));
         assert!(Key::mint().public != key.public, "two mints made one key");
+    }
+
+    /// **A checkout's throwaway key is one key for the checkout**: minted
+    /// `0600` once, read back the same by every later process, so nothing that
+    /// embeds it rebuilds; and a bent file is refused, never replaced.
+    #[test]
+    fn a_checkouts_throwaway_key_is_minted_once_and_read_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = toyos_tmpdir::TempDir::new("throwaway-key");
+        let first = checkout_throwaway(dir.path()).expect("minted");
+        let again = checkout_throwaway(dir.path()).expect("read back");
+        assert_eq!(first.public, again.public);
+        assert_eq!(first.floor_scope(), toyos_update::floor::Scope::Image);
+        let file = dir.path().join(THROWAWAY_FILE);
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::write(&file, "not a seed\n").unwrap();
+        assert!(checkout_throwaway(dir.path()).err().unwrap().contains("is not 64 hex digits"));
+    }
+
+    /// An owner's key anyone else may read is refused by its mode, before its
+    /// contents are read; the same key `0600` reads.
+    #[test]
+    fn an_owner_key_wider_than_0600_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = toyos_tmpdir::TempDir::new("owner-key-mode");
+        let path = dir.path().join("key");
+        let key = Key::mint();
+        std::fs::write(&path, openssh_private(&key.seed, &key.public)).unwrap();
+        for mode in [0o644, 0o640, 0o604] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let refusal = read_owner_key(&path).err().expect("a key others may read");
+            assert!(refusal.contains(&format!("is mode {mode:04o}")), "{refusal}");
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let owner = read_owner_key(&path).expect("a 0600 key reads");
+        assert_eq!((owner.public, owner.floor_scope()), (key.public, toyos_update::floor::Scope::Machine));
     }
 
     /// Everything that is not an unencrypted Ed25519 `openssh-key-v1` key is

@@ -31,9 +31,10 @@ stdin — and the machine installs nothing the owner did not sign.
   init claims against the ROOT the kernel holds, writes the image and moves the
   mark last, after an fsync of its own writes. **`swap`** replaced sshd's
   subsystem the same way.
-- **Keys**: a throwaway per build process for everything that stays on the Mac;
-  the owner's (`--owner-key`, `--update-image`, minted by `--signing-key-new`)
-  for what leaves it.
+- **Keys**: a throwaway per checkout, kept in its `target/`, for QEMU, CI and
+  the metal loop, whose loaders keep a floor per image; the owner's
+  (`--owner-key`, `--update-image`, minted by `--signing-key-new`) for an image
+  installed on the owner's machine, whose loader keeps the machine's floor.
 
 ## Stage 2 — the T14 installs ToyOS on its NVMe and updates without Ubuntu
 

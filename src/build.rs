@@ -428,6 +428,8 @@ struct GuestEnv {
     /// (`signing::KEY_ENV`): every guest build carries it, so no crate that
     /// names it can be built without it.
     image_key: String,
+    /// Whose floor the loader keeps (`signing::FLOOR_ENV`), which follows the key.
+    floor_scope: &'static str,
 }
 
 impl GuestEnv {
@@ -436,6 +438,7 @@ impl GuestEnv {
             toolchain: sysroot.dir.clone(),
             path: toolchain::path_with_toyos_ld(root),
             image_key: crate::signing::key().public_hex(),
+            floor_scope: crate::signing::key().floor_scope().word(),
         }
     }
 }
@@ -460,6 +463,7 @@ fn cargo_build(
         .env_remove("RUSTFLAGS")
         .env("PATH", &env.path)
         .env(crate::signing::KEY_ENV, &env.image_key)
+        .env(crate::signing::FLOOR_ENV, env.floor_scope)
         .env_remove("RUSTC");
     for (k, v) in extra_env {
         cmd.env(k, v);
@@ -1703,7 +1707,7 @@ fn said_key(plan: &Plan) -> &'static crate::signing::Key {
         "Signed with {} {} at version {}",
         match key.whose() {
             crate::signing::Whose::Owner(_) => "the owner's key",
-            crate::signing::Whose::Throwaway => "this run's throwaway key",
+            crate::signing::Whose::Throwaway => "this checkout's throwaway key",
         },
         key.fingerprint(),
         plan.version
@@ -1775,7 +1779,7 @@ fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan)
                     "bootloader/target/x86_64-unknown-uefi/{PROFILE}/bootloader.efi"
                 )),
                 "bootloader.efi",
-                key_hash(&[PROFILE, &env.image_key]),
+                key_hash(&[PROFILE, &env.image_key, env.floor_scope]),
             ),
         )
     };
@@ -1957,7 +1961,7 @@ pub fn build_test_parts(
     // The loader and ROOT (whose `/system/bin/update` embeds it) are each a
     // function of the key this process signs with.
     let image_key = crate::signing::key().public_hex();
-    let bl_key = key_hash(&[PROFILE, &image_key]);
+    let bl_key = key_hash(&[PROFILE, &image_key, crate::signing::key().floor_scope().word()]);
     let root_image_key = root_image_key(config_path, &image_key, extra_files);
 
     // Nothing left to build, so nothing for the lock, the toolchain check or the

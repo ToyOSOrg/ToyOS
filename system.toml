@@ -78,8 +78,8 @@ devices = ["pci:1af4:1041"]
 receives = ["netd", "launcher"]
 
 # `swap` is the authority to replace a running service's binary; the build
-# refuses it to any other program (`src/build.rs`). `ssh <machine> swap netd <
-# netd` runs it for a login.
+# refuses it to any other program (`src/build.rs`). `ssh <machine> swap netd
+# <sha256> <length> < netd` runs it for a login.
 [programs.swap]
 receives = ["swap"]
 

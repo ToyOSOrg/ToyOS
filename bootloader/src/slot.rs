@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use toyos_update::image::{Header, SIGNATURE_BYTES, SIGNED_BYTES};
 use toyos_update::policy::{self, Refusal};
-use toyos_update::record::{self, Record};
+use toyos_update::record::{self, Booted, Record};
 use toyos_update::slots::{self, Slot, Which};
 use toyos_update::{sig, Digest};
 use uefi::prelude::*;
@@ -130,6 +130,35 @@ fn verify(
         println!("{HEAD} {letter}: {why}");
         Refusal::Unreadable("root")
     })?;
+    let (header, digest) = signed_header(bs, which, &slot)?;
+    if record.is_some_and(|record| record::died(record, which, &digest)) {
+        return Err(Refusal::Died);
+    }
+    policy::admits(floor, header.version)?;
+
+    let kernel = read_section(bs, &slot.boot, slots::KERNEL_FILE, header.kernel().len, "kernel")?;
+    held(&kernel, header.kernel().sha256, "kernel")?;
+    let cmdline = read_section(bs, &slot.boot, slots::CMDLINE_FILE, header.cmdline().len, "cmdline")?;
+    held(&cmdline, header.cmdline().sha256, "cmdline")?;
+
+    let root = disk.read_root(bs, &part, header.root().len).map_err(|why| {
+        println!("{HEAD} {letter}: ROOT: {why}");
+        Refusal::Unreadable("root")
+    })?;
+    let began = crate::tsc();
+    let root_hash = toyos_update::sha256(root.bytes());
+    println!("{HEAD} {letter}: ROOT hashed in {} TSC cycles", crate::tsc().wrapping_sub(began));
+    if root_hash != header.root().sha256 {
+        root.free(bs);
+        return Err(Refusal::Hash("root"));
+    }
+    println!("{HEAD} {letter}: kernel, cmdline and ROOT are the bytes the signed header names");
+    Ok(Chosen { which, version: header.version, digest, kernel, cmdline, root, refused: None })
+}
+
+/// `slot`'s signed header, held to [`KEY`], and its SHA-256.
+fn signed_header(bs: &BootServices, which: Which, slot: &Slot) -> Result<(Header, Digest), Refusal> {
+    let letter = which.letter();
     let signed = match read_file(bs, &slot.boot, slots::SIGNED_FILE, SIGNED_BYTES as u64) {
         Ok(bytes) => bytes,
         Err(FileRefused::Missing) => return Err(Refusal::Unsigned),
@@ -157,29 +186,30 @@ fn verify(
         toyos_update::hex(&digest, &mut hex),
         header.version
     );
-    if record.is_some_and(|record| record::died(record, which, &digest)) {
-        return Err(Refusal::Died);
-    }
-    policy::admits(floor, header.version)?;
+    Ok((header, digest))
+}
 
-    let kernel = read_section(bs, &slot.boot, slots::KERNEL_FILE, header.kernel().len, "kernel")?;
-    held(&kernel, header.kernel().sha256, "kernel")?;
-    let cmdline = read_section(bs, &slot.boot, slots::CMDLINE_FILE, header.cmdline().len, "cmdline")?;
-    held(&cmdline, header.cmdline().sha256, "cmdline")?;
-
-    let root = disk.read_root(bs, &part, header.root().len).map_err(|why| {
-        println!("{HEAD} {letter}: ROOT: {why}");
-        Refusal::Unreadable("root")
-    })?;
-    let began = crate::tsc();
-    let root_hash = toyos_update::sha256(root.bytes());
-    println!("{HEAD} {letter}: ROOT hashed in {} TSC cycles", crate::tsc().wrapping_sub(began));
-    if root_hash != header.root().sha256 {
-        root.free(bs);
-        return Err(Refusal::Hash("root"));
+/// The version the image the record says the last boot proved carries, read
+/// out of its slot's signed header, verified in this pass; or why no version
+/// is: **the record is on a partition the running system writes**, so its
+/// word is only which slot to read and the digest that slot's header must
+/// hash to.
+pub fn proven(handle: Handle, system_table: &SystemTable<Boot>, booted: &Booted) -> Result<u64, String> {
+    let bs = system_table.boot_services();
+    let letter = booted.slot.letter();
+    let mut disk = Disk::open(bs, crate::rootimage::boot_disk(handle, bs)?)?;
+    let table = disk.slot_table()?;
+    let slot = table.slot(booted.slot).ok_or_else(|| alloc::format!("the slot table carries no slot {letter}"))?;
+    let (header, digest) = signed_header(bs, booted.slot, &slot).map_err(|why| alloc::format!("slot {letter}: {why}"))?;
+    if digest != booted.digest {
+        let (mut have, mut want) = ([0u8; 64], [0u8; 64]);
+        return Err(alloc::format!(
+            "slot {letter}'s signed header is {}, and the record names {}",
+            toyos_update::hex(&digest, &mut have),
+            toyos_update::hex(&booted.digest, &mut want)
+        ));
     }
-    println!("{HEAD} {letter}: kernel, cmdline and ROOT are the bytes the signed header names");
-    Ok(Chosen { which, version: header.version, digest, kernel, cmdline, root, refused: None })
+    Ok(header.version)
 }
 
 /// `bytes` is the section whose header entry names `want`.

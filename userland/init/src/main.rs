@@ -1065,7 +1065,9 @@ fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
 ///
 /// **Which slot is idle is the kernel's word, not the table's**: the running
 /// ROOT is the TOYOS-ROOT partition the kernel holds, the table is the one on
-/// that ROOT's disk, and the idle slot is the one whose ROOT is not it.
+/// that ROOT's disk, and the idle slot is the one whose ROOT is not it — and
+/// its two partitions are claimed only as `toyos_update::slots::grant` admits
+/// them.
 fn slot_grant(syscap: &SysCap) -> Result<[(&'static str, toyos::Device); 3], String> {
     use toyos_abi::inventory::{PartState, Partition, RawRecord, Record};
     let asked = syscap.inventory(&mut []).map_err(|e| format!("the inventory would not count: {e:?}"))?;
@@ -1107,8 +1109,17 @@ fn slot_grant(syscap: &SysCap) -> Result<[(&'static str, toyos::Device); 3], Str
         .map_err(|e| format!("the slot table would not read: {e:?}"))?;
     let (table, _) = toyos_update::slots::current([&copies[0], &copies[1]])
         .map_err(|why| format!("the slot table's partition holds {why}"))?;
+    // The table is the grantee's to write, so what it names is held to the
+    // inventory before anything is claimed.
+    let listed = |p: &Partition| toyos_update::slots::Listed {
+        device: p.device,
+        type_guid: p.type_guid,
+        unique_guid: p.unique_guid,
+    };
+    let kinds = toyos_update::slots::Kinds { boot: toyos_gpt::Guid::TOYOS_BOOT.0, root: toyos_gpt::Guid::TOYOS_ROOT.0 };
+    let all: Vec<_> = parts.iter().map(listed).collect();
     let (idle, slot) =
-        toyos_update::slots::idle(&table, &running.unique_guid).map_err(|why| why.to_string())?;
+        toyos_update::slots::grant(&table, &listed(&running), &all, kinds).map_err(|why| why.to_string())?;
     let boot = claim(slot.boot, "idle slot's volume")?;
     let root = claim(slot.root, "idle slot's ROOT")?;
     say!("init: the idle slot is {}, granted with the slot table", idle.letter());

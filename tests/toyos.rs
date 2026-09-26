@@ -812,9 +812,16 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the idle slot and is the kernel the next boot runs; every slot the loader
     // must refuse is refused by name and the other boots; and a slot whose
     // kernel dies falls back on its own, its death in the next boot's `/log`.
-    ("update_boots_the_new_kernel", Sched::Parallel, Tier::Fast),
-    ("update_refusals_boot_the_other_slot", Sched::Parallel, Tier::Fast),
-    ("update_falls_back_from_a_dying_kernel", Sched::Parallel, Tier::Fast),
+    // The same machine's floor, grant and hang: a floor is its key's and its
+    // image's, init grants nothing the slot table names but an idle slot's
+    // partition, and a hang of an unproven image is a death. Each is 25 s or
+    // more of boots, past the fast tier's line, so they are nightly.
+    ("update_boots_the_new_kernel", Sched::Parallel, Tier::Nightly),
+    ("update_refusals_boot_the_other_slot", Sched::Parallel, Tier::Nightly),
+    ("update_falls_back_from_a_dying_kernel", Sched::Parallel, Tier::Nightly),
+    ("update_hang_kills_an_unproven_image", Sched::Parallel, Tier::Nightly),
+    ("update_grant_refuses_a_stray_partition", Sched::Parallel, Tier::Nightly),
+    ("update_floor_is_the_images_own", Sched::Parallel, Tier::Nightly),
     ("lan_swap", Sched::Parallel, Tier::Fast),
     ("swap_refusals", Sched::Parallel, Tier::Fast),
     ("swap_crash_rolls_back", Sched::Parallel, Tier::Fast),
@@ -1561,6 +1568,9 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_boots_the_new_kernel", &[]),
     ("update_refusals_boot_the_other_slot", &[]),
     ("update_falls_back_from_a_dying_kernel", &[]),
+    ("update_hang_kills_an_unproven_image", &[]),
+    ("update_grant_refuses_a_stray_partition", &[]),
+    ("update_floor_is_the_images_own", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
@@ -14771,6 +14781,15 @@ fn run_machine_test(
         }
         "update_falls_back_from_a_dying_kernel" => {
             common::update::update_falls_back_from_a_dying_kernel(test_config, c_bins, rust_bins)
+        }
+        "update_hang_kills_an_unproven_image" => {
+            common::update::update_hang_kills_an_unproven_image(test_config, c_bins, rust_bins)
+        }
+        "update_grant_refuses_a_stray_partition" => {
+            common::update::update_grant_refuses_a_stray_partition(test_config, c_bins, rust_bins)
+        }
+        "update_floor_is_the_images_own" => {
+            common::update::update_floor_is_the_images_own(test_config, c_bins, rust_bins)
         }
         "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),

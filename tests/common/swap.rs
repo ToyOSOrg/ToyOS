@@ -235,10 +235,11 @@ pub fn lan_swap(
     netd_in_service("lan-swap", super::lan::TALK_BENCH)
 }
 
-/// **Two asks that must change nothing**: the right binary under the wrong
-/// digest, and the right binary under the right digest from a key the image
-/// does not authorize. Each leaves netd as it was — no `stopping` word, the
-/// machine answering over the same netd — and `/log` shows netd spawned once.
+/// **Asks that must change nothing**: the right binary under the wrong digest,
+/// the right binary under the right digest from a key the image does not
+/// authorize, and half the binary — under its whole length, and with none.
+/// Each leaves netd as it was — no `stopping` word, the machine answering over
+/// the same netd — and `/log` shows netd spawned once.
 pub fn swap_refusals(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -266,6 +267,27 @@ pub fn swap_refusals(
             eprintln!("  [swap] a key the image does not authorize: {why}")
         }
         other => return Err(format!("a stranger's swap was answered {other:?}")),
+    }
+
+    // **An input that ends early is no binary**: half of netd under its whole
+    // length and digest, and half of netd with no length at all — the form a
+    // cut connection could not be told apart in, which is gone. Each is
+    // refused before init hears of it.
+    let whole = std::fs::read(&binary).map_err(|e| e.to_string())?;
+    let cut = rig.staged.scratch.join("netd.cut");
+    std::fs::write(&cut, &whole[..whole.len() / 2]).map_err(|e| e.to_string())?;
+    let hex: String = toyos_swap::digest(&whole).iter().map(|b| format!("{b:02x}")).collect();
+    let port = rig.forward.port();
+    for (command, owed) in [
+        (format!("swap netd {hex} {}", whole.len()), format!("the input ended before the {} bytes it promised", whole.len())),
+        ("swap netd".to_string(), "usage: swap <service> <sha256> <length>".to_string()),
+    ] {
+        let exec = super::ssh::ssh_pipe(super::ssh::HOST, port, &rig.staged.identity, &command, &cut)?;
+        if exec.status != Some(1) || !exec.stdout_text().starts_with("unasked ") || !exec.stdout_text().contains(&owed) {
+            let said = exec.stdout_text();
+            return Err(rig.fail(format!("`{command}` with half of netd ended {:?} saying {said:?}, where {owed:?} is owed", exec.status)));
+        }
+        eprintln!("  [swap] `{command}` with half of netd: {owed}");
     }
     let (file, streamed, staged) = rig.finish(None)?;
     let stopped: Vec<&String> =

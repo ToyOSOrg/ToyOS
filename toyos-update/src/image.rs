@@ -205,8 +205,8 @@ pub fn signature_of(signed: &[u8; SIGNED_BYTES]) -> [u8; SIGNATURE_BYTES] {
 }
 
 /// An image whose layout adds up, split into its parts. Nothing here is
-/// vouched for until the header's signature and each section's hash are
-/// checked ([`crate::sig::verify`], [`Parts::matches`]).
+/// vouched for until the header's signature ([`crate::sig::verify`]) and
+/// each section's hash against its header entry are checked.
 pub struct Parts<'a> {
     pub header: Header,
     pub signed: &'a [u8; SIGNED_BYTES],
@@ -227,17 +227,6 @@ impl<'a> Parts<'a> {
         let (k, c) = (header.kernel().len as usize, header.cmdline().len as usize);
         let rest = &bytes[SIGNED_BYTES..];
         Ok(Self { header, signed, kernel: &rest[..k], cmdline: &rest[k..k + c], root: &rest[k + c..] })
-    }
-
-    /// The first section whose bytes are not the ones the header names, or
-    /// `None` where every one is.
-    pub fn mismatched(&self) -> Option<&'static str> {
-        [self.kernel, self.cmdline, self.root]
-            .iter()
-            .zip(self.header.sections)
-            .zip(SECTIONS)
-            .find(|((bytes, section), _)| crate::sha256(bytes) != section.sha256)
-            .map(|(_, name)| name)
     }
 }
 
@@ -296,15 +285,6 @@ mod tests {
         bytes.extend_from_slice(&root);
         let parts = Parts::split(&bytes).expect("an image");
         assert_eq!((parts.kernel, parts.cmdline, parts.root), (&kernel[..], &cmdline[..], &root[..]));
-        assert_eq!(parts.mismatched(), None);
-
-        let mut flipped = bytes.clone();
-        let last = flipped.len() - 1;
-        flipped[last] ^= 1;
-        assert_eq!(Parts::split(&flipped).expect("an image").mismatched(), Some(ROOT));
-        flipped[SIGNED_BYTES] ^= 1;
-        assert_eq!(Parts::split(&flipped).expect("an image").mismatched(), Some(KERNEL));
-
         let want = bytes.len() as u64;
         bytes.push(0);
         assert_eq!(Parts::split(&bytes).err(), Some(Malformed::Length { have: want + 1, want }));

@@ -873,9 +873,18 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         (None, false) => Ended::Unknown,
     };
     // Read here and not where it is used: a hang is a death only for an image
-    // above it, and this is the pass that has to know which.
-    let (mut image_floor, floor_note) = floor::read(&system_table);
-    let accounted = record::account(previous.clone().unwrap_or_default(), ended, image_floor);
+    // above it, and this is the pass that has to know which. A floor refused
+    // boots nothing, and is said on the stick before it is said anywhere else.
+    let (mut image_floor, floor_notes) = match floor::read(&system_table, &log_guid) {
+        Ok(read) => read,
+        Err(why) => {
+            loaderlog::open(&system_table, &log_guid, false);
+            println!("{}", loaderlog::BEGINS_AT);
+            println!("{why}");
+            panic!("{why}");
+        }
+    };
+    let accounted = record::account(previous.clone().unwrap_or_default(), ended, image_floor.value);
     // Cleared where the last boot is accounted for, and where this pass is
     // about to hand the machine back: both leave the next boot of this image a
     // first attempt, which is what one hand per hang means.
@@ -884,6 +893,8 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     } else {
         attempt::next(previous.as_ref().map_or(0, |previous| previous.count))
     };
+    // Names no booted image: the slot this pass boots is written down once it
+    // is chosen, and only then.
     let mut record = Record { count: next, ..accounted.record };
     let wrote = attempt::write(&system_table, &log_guid, &record);
     loaderlog::open(&system_table, &log_guid, finding.is_none() && !retry);
@@ -908,14 +919,21 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
             toyos_update::hex(&booted.digest, &mut hex)
         );
     }
-    if let Some(note) = floor_note {
+    for note in floor_notes {
         println!("{note}");
     }
     // Raised before either end of the chain below: the pass that reads a
-    // handover on purpose is the one pass that knows the image proved itself.
-    if let Some(proven) = accounted.proven {
-        floor::raise(&system_table, image_floor, policy::raised(image_floor, proven));
-        image_floor = policy::raised(image_floor, proven);
+    // handover on purpose is the one pass that knows the image proved itself —
+    // and raised to the version its slot's signed header carries, verified
+    // here, never to the one the record on the disk names.
+    if let Some(booted) = accounted.proven {
+        match slot::proven(handle, &system_table, &booted) {
+            Ok(version) => {
+                let to = policy::raised(image_floor.value, version);
+                floor::raise(&system_table, &mut image_floor, to);
+            }
+            Err(why) => println!("Anti-rollback floor: not raised, because the proven image is not verified: {why}"),
+        }
     }
     if retry {
         // **The hang, and the only bound there is on one.** The last boot of
@@ -976,7 +994,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // is one the chosen slot's signed header names. ROOT is read before the
     // kernel is loaded and not after: it is the allocation the image pages come
     // from, and a slot whose ROOT is refused has no use for the kernel's.
-    let chosen = slot::choose(handle, &system_table, image_floor, &record)
+    let chosen = slot::choose(handle, &system_table, image_floor.value, &record)
         .unwrap_or_else(|why| panic!("Slots: {why}"));
     record.booted = Some(Booted { slot: chosen.which, version: chosen.version, digest: chosen.digest });
     match attempt::write_chosen(&log_guid, &record) {

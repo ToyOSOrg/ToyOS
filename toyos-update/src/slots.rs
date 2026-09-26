@@ -208,6 +208,21 @@ pub enum NoIdle {
     /// Neither slot's ROOT is the one the kernel holds: this table is not
     /// the one this boot came from.
     NotThisBoot,
+    /// The idle slot names a partition that is no idle slot's.
+    Stray { part: &'static str, why: Stray },
+}
+
+/// Why a partition the idle slot names is not one a grant may claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stray {
+    /// It is one of the running slot's.
+    Running,
+    /// The machine lists no partition with its GUID.
+    Unlisted,
+    /// It is on another disk than the one this boot runs from.
+    OtherDisk,
+    /// Its type is not the one a slot's partition of that kind carries.
+    Type,
 }
 
 impl core::fmt::Display for NoIdle {
@@ -215,8 +230,61 @@ impl core::fmt::Display for NoIdle {
         match self {
             Self::OneSlot => write!(f, "the slot table carries one slot, and the machine runs it"),
             Self::NotThisBoot => write!(f, "neither slot's ROOT is the one this boot runs"),
+            Self::Stray { part, why } => {
+                let why = match why {
+                    Stray::Running => "is one of the running slot's",
+                    Stray::Unlisted => "is no partition this machine lists",
+                    Stray::OtherDisk => "is on another disk than the one this boot runs from",
+                    Stray::Type => "is not of the type a slot's partition of that kind carries",
+                };
+                write!(f, "the idle slot's {part} {why}")
+            }
         }
     }
+}
+
+/// A partition as the machine's inventory lists it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub device: u32,
+    pub type_guid: [u8; 16],
+    pub unique_guid: [u8; 16],
+}
+
+/// The partition types a slot's volume and its ROOT carry, as a GPT entry
+/// stores them (`toyos_gpt::Guid::TOYOS_BOOT` and `TOYOS_ROOT`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Kinds {
+    pub boot: [u8; 16],
+    pub root: [u8; 16],
+}
+
+/// The idle slot a grant may claim, given the ROOT the kernel holds
+/// (`running`) and every partition the machine lists.
+///
+/// **The table is the grantee's to write**, so nothing it names is taken on
+/// its word: each of the idle slot's two partitions must be on the running
+/// ROOT's disk, of its kind's type, and neither of the running slot's — else
+/// the holder of one grant could name its next one anywhere.
+pub fn grant(table: &Table, running: &Listed, listed: &[Listed], kinds: Kinds) -> Result<(Which, Slot), NoIdle> {
+    let (idle, slot) = idle(table, &running.unique_guid)?;
+    let runs = table.slot(idle.other()).expect("`idle` found the running slot in the table");
+    for (part, guid, kind) in [("volume", slot.boot, kinds.boot), ("ROOT", slot.root, kinds.root)] {
+        let mut named = listed.iter().filter(|p| p.unique_guid == guid);
+        let why = match (named.next(), named.next()) {
+            _ if guid == runs.boot || guid == runs.root => Some(Stray::Running),
+            (None, _) => Some(Stray::Unlisted),
+            (Some(p), None) if p.device != running.device => Some(Stray::OtherDisk),
+            (Some(p), None) if p.type_guid != kind => Some(Stray::Type),
+            (Some(_), None) => None,
+            // The kernel refuses a claim of a GUID two tables carry; so does this.
+            (Some(_), Some(_)) => Some(Stray::OtherDisk),
+        };
+        if let Some(why) = why {
+            return Err(NoIdle::Stray { part, why });
+        }
+    }
+    Ok((idle, slot))
 }
 
 /// The slot the machine is not running, given the ROOT the kernel holds —
@@ -305,5 +373,42 @@ mod tests {
         assert_eq!(idle(&t, &[9; 16]), Err(NoIdle::NotThisBoot));
         let one = Table { slots: [t.slots[0], None], ..t };
         assert_eq!(idle(&one, &[2; 16]), Err(NoIdle::OneSlot));
+    }
+
+    /// **A table the grantee wrote names nothing outside an idle slot**: a
+    /// partition of the running slot, another disk's, another type's — the
+    /// ESP's or the log partition's — or one the machine does not list is
+    /// refused by name, and the table the build wrote is granted.
+    #[test]
+    fn a_grant_claims_only_an_idle_slot_on_the_running_disk() {
+        const KINDS: Kinds = Kinds { boot: [0xB0; 16], root: [0xA0; 16] };
+        const ESP: [u8; 16] = [0xE5; 16];
+        let at = |device, type_guid, unique_guid| Listed { device, type_guid, unique_guid };
+        let running = at(0, KINDS.root, [2; 16]);
+        let listed = [
+            running,
+            at(0, KINDS.boot, [1; 16]),
+            at(0, KINDS.boot, [3; 16]),
+            at(0, KINDS.root, [4; 16]),
+            at(0, [0xEF; 16], ESP),
+            at(1, KINDS.boot, [5; 16]),
+        ];
+        let t = table(Which::A, 1);
+        assert_eq!(grant(&t, &running, &listed, KINDS).map(|(w, _)| w), Ok(Which::B));
+        let bent = |boot: [u8; 16], root: [u8; 16]| {
+            let mut t = t;
+            t.slots[1] = Some(Slot { boot, root, version: 0 });
+            grant(&t, &running, &listed, KINDS)
+        };
+        let stray = |part, why| Err(NoIdle::Stray { part, why });
+        assert_eq!(bent([1; 16], [4; 16]), stray("volume", Stray::Running), "the running slot's volume");
+        assert_eq!(bent([3; 16], [2; 16]), stray("ROOT", Stray::Running), "the running ROOT");
+        assert_eq!(bent(ESP, [4; 16]), stray("volume", Stray::Type), "the ESP");
+        assert_eq!(bent([3; 16], [3; 16]), stray("ROOT", Stray::Type), "a volume named as ROOT");
+        assert_eq!(bent([5; 16], [4; 16]), stray("volume", Stray::OtherDisk), "another disk's");
+        assert_eq!(bent([9; 16], [4; 16]), stray("volume", Stray::Unlisted));
+        let mut twice = listed.to_vec();
+        twice.push(at(1, KINDS.boot, [3; 16]));
+        assert_eq!(grant(&t, &running, &twice, KINDS), stray("volume", Stray::OtherDisk), "a GUID two disks carry");
     }
 }

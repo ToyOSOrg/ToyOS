@@ -1,20 +1,24 @@
-//! `/system/bin/swap <service> [<sha256> <length>]`: a running service's
-//! binary replaced by the one on standard input, handed to `/system/bin/init`,
-//! which alone can swap it.
+//! `/system/bin/swap <service> <sha256> <length>`: a running service's binary
+//! replaced by the one on standard input, handed to `/system/bin/init`, which
+//! alone can swap it.
 //!
-//! An ordinary program: `ssh <machine> swap netd < netd` runs it over a plain
-//! `exec` channel, and a local shell runs it the same way. It holds the one
-//! connector to init's [`toyos_swap::PORT`] the build lets any program hold,
-//! so what it can do is ask; every decision is init's
+//! An ordinary program: `ssh <machine> swap netd <sha256> <length> < netd`
+//! runs it over a plain `exec` channel, and a local shell runs it the same
+//! way. It holds the one connector to init's [`toyos_swap::PORT`] the build
+//! lets any program hold, so what it can do is ask; every decision is init's
 //! ([`toyos_swap`]'s header is the order).
 //!
-//! **The two forms differ in when init is told to go.** The binary alone is
-//! read to the end of the input, and init goes the moment this program exits
-//! with its answer. With a digest and a length the input is exactly that
-//! many bytes, the digest is the caller's end-to-end word on them, and after
-//! the answer this program waits for the input to close — the caller's proof
-//! that it has the answer, which matters when the service being swapped is the
-//! one carrying the caller's connection — at most [`toyos_swap::ANSWER_MS`].
+//! **The length is not optional, because an input's end says nothing.** A
+//! connection that drops mid-upload ends this program's input exactly as the
+//! end of the file does, so a binary read to the end of its input is whatever
+//! arrived. The input is exactly `<length>` bytes, an input that ends sooner
+//! is refused by name before init hears of it, and the digest is the caller's
+//! end-to-end word on the bytes.
+//!
+//! After the answer this program waits for the input to close — the caller's
+//! proof that it has the answer, which matters when the service being swapped
+//! is the one carrying the caller's connection — at most
+//! [`toyos_swap::ANSWER_MS`], and then lets init go.
 //!
 //! The answer is one line on standard output: `accepted <path>` with exit
 //! status 0; `refused <why>`, init's refusal, with 1; or `unasked <why>`, this
@@ -38,8 +42,8 @@ fn main() {
     };
     println!("{line}");
     std::io::stdout().flush().expect("the answer reaches standard output");
-    if let Some(go) = held {
-        go.wait();
+    if let Some(init) = held {
+        go(init);
     }
     std::process::exit(if matches!(answer, Answer::Accepted(_)) { 0 } else { 1 });
 }
@@ -59,67 +63,37 @@ struct Asked {
     service: String,
     digest: toyos_swap::Digest,
     body: Vec<u8>,
-    /// Whether the caller named the length, and so holds the input open for
-    /// the go.
-    held: bool,
 }
 
-/// The answer, and the connection to init held until the go where there is one.
-fn run(args: &[String]) -> (Answer, Option<Go>) {
-    let asked = match take(args) {
-        Ok(asked) => asked,
-        Err(why) => return (Answer::Unasked(why.to_string()), None),
-    };
-    let (answer, init) = ask(&asked);
-    let go = init.map(|init| Go { init, held: asked.held });
-    (answer, go)
+/// The answer, and the connection to init held until the go where init
+/// accepted.
+fn run(args: &[String]) -> (Answer, Option<toyos::ipc::Connection>) {
+    match take(args) {
+        Ok(asked) => ask(&asked),
+        Err(why) => (Answer::Unasked(why.to_string()), None),
+    }
 }
 
-/// The request out of the argument vector and the input.
+/// The request out of the argument vector and exactly the input's promised
+/// bytes.
 fn take(args: &[String]) -> Result<Asked, Refusal> {
-    let (service, named) = match args {
-        [service] => (service, None),
-        [service, digest, len] => {
-            let digest = toyos_swap::parse_hex(digest)
-                .ok_or_else(|| Refusal::Malformed(format!("{digest:?} is not a SHA-256 in lowercase hex")))?;
-            let len: u64 = len.parse().map_err(|_| Refusal::Malformed(format!("{len:?} is not a length")))?;
-            (service, Some((digest, len)))
-        }
-        _ => return Err(Refusal::Malformed("usage: swap <service> [<sha256> <length>]".into())),
+    let [service, digest, len] = args else {
+        return Err(Refusal::Malformed("usage: swap <service> <sha256> <length>".into()));
     };
+    let digest = toyos_swap::parse_hex(digest)
+        .ok_or_else(|| Refusal::Malformed(format!("{digest:?} is not a SHA-256 in lowercase hex")))?;
+    let len: u64 = len.parse().map_err(|_| Refusal::Malformed(format!("{len:?} is not a length")))?;
     if !toyos_swap::is_service_name(service) {
         return Err(Refusal::Malformed(format!("{service:?} is not a service name")));
     }
-    let mut input = std::io::stdin().lock();
-    let body = match named {
-        None => {
-            let mut body = Vec::new();
-            input
-                .by_ref()
-                .take(toyos_swap::MAX_BINARY_BYTES + 1)
-                .read_to_end(&mut body)
-                .map_err(|e| Refusal::Malformed(format!("the input would not read: {e}")))?;
-            if body.len() as u64 > toyos_swap::MAX_BINARY_BYTES {
-                return Err(Refusal::TooLarge(body.len() as u64));
-            }
-            body
-        }
-        Some((_, len)) => {
-            if len > toyos_swap::MAX_BINARY_BYTES {
-                return Err(Refusal::TooLarge(len));
-            }
-            let mut body = vec![0u8; len as usize];
-            input.read_exact(&mut body).map_err(|e| {
-                Refusal::Malformed(format!("the input ended before the {len} bytes it promised: {e}"))
-            })?;
-            body
-        }
-    };
-    let digest = match named {
-        Some((digest, _)) => digest,
-        None => toyos_swap::digest(&body),
-    };
-    Ok(Asked { service: service.clone(), digest, body, held: named.is_some() })
+    if len > toyos_swap::MAX_BINARY_BYTES {
+        return Err(Refusal::TooLarge(len));
+    }
+    let mut body = vec![0u8; len as usize];
+    std::io::stdin().lock().read_exact(&mut body).map_err(|e| {
+        Refusal::Malformed(format!("the input ended before the {len} bytes it promised: {e}"))
+    })?;
+    Ok(Asked { service: service.clone(), digest, body })
 }
 
 /// Stage the binary and ask init: its answer, and the connection this program
@@ -160,33 +134,23 @@ fn ask(asked: &Asked) -> (Answer, Option<toyos::ipc::Connection>) {
     }
 }
 
-/// init, held until the caller's go: **this program hanging up on init is
-/// what tells it to stop the old service**.
-struct Go {
-    init: toyos::ipc::Connection,
-    /// Whether the caller holds its input open for the go.
-    held: bool,
-}
-
-impl Go {
-    /// Wait for the go, and let init go by dropping the connection.
-    fn wait(self) {
-        if self.held {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let mut rest = Vec::new();
-                let _ = tx.send(std::io::stdin().read_to_end(&mut rest).map(|_| rest.len()));
-            });
-            match rx.recv_timeout(Duration::from_millis(toyos_swap::ANSWER_MS)) {
-                Ok(Ok(0)) => {}
-                Ok(Ok(n)) => eprintln!("swap: {n} bytes arrived after the binary; the swap goes regardless"),
-                Ok(Err(e)) => eprintln!("swap: the input would not read to its end ({e}); the swap goes"),
-                Err(_) => eprintln!(
-                    "swap: the input was not closed within {} ms of the answer; the swap goes",
-                    toyos_swap::ANSWER_MS
-                ),
-            }
-        }
-        drop(self.init);
+/// Wait for the caller's go — its input closing — and let init go by
+/// dropping the connection: **this program hanging up on init is what tells
+/// it to stop the old service**.
+fn go(init: toyos::ipc::Connection) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut rest = Vec::new();
+        let _ = tx.send(std::io::stdin().read_to_end(&mut rest).map(|_| rest.len()));
+    });
+    match rx.recv_timeout(Duration::from_millis(toyos_swap::ANSWER_MS)) {
+        Ok(Ok(0)) => {}
+        Ok(Ok(n)) => eprintln!("swap: {n} bytes arrived after the binary; the swap goes regardless"),
+        Ok(Err(e)) => eprintln!("swap: the input would not read to its end ({e}); the swap goes"),
+        Err(_) => eprintln!(
+            "swap: the input was not closed within {} ms of the answer; the swap goes",
+            toyos_swap::ANSWER_MS
+        ),
     }
+    drop(init);
 }

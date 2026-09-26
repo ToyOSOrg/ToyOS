@@ -60,7 +60,7 @@ fn grant() -> Result<(PartitionDev, PartitionDev, PartitionDev), String> {
     let take = |label: &str| {
         Endowments::get()
             .take::<PartitionDev>(label)
-            .ok_or_else(|| format!("this process holds no `{label}`: init grants the idle slot to one program, and a second update running holds nothing"))
+            .ok_or_else(|| format!("this process holds no `{label}`: init grants the idle slot to one update at a time, and says why where it grants none"))
     };
     Ok((take(slots::TABLE_LABEL)?, take(slots::BOOT_LABEL)?, take(slots::ROOT_LABEL)?))
 }

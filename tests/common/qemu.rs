@@ -3947,6 +3947,52 @@ impl QmpResets {
     }
 }
 
+/// A machine that takes its own resets, held at the next one: the guest's
+/// reset pauses it with its memory — the black box — as the reset left it, so
+/// a test can change what the next pass reads off the disk after the kernel's
+/// last write and before the loader's first read, and then let it go.
+pub struct QmpHold(Qmp);
+
+impl QmpHold {
+    /// The guest's next reset pauses the machine instead.
+    pub fn arm(socket: &Path) -> Self {
+        let mut qmp = Qmp::connect(socket);
+        qmp.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"shutdown\",\"shutdown\":\"pause\"}}");
+        Self(qmp)
+    }
+
+    /// Wait up to `budget` for the machine to stop at its reset.
+    pub fn held(&mut self, budget: Duration) -> Result<(), String> {
+        use std::io::Read;
+        let qmp = &mut self.0;
+        qmp.stream.set_read_timeout(Some(budget)).map_err(|e| format!("qmp: the hold's budget: {e}"))?;
+        let began = Instant::now();
+        loop {
+            if qmp.pending.windows(6).any(|w| w == b"\"STOP\"") {
+                return Ok(());
+            }
+            let mut buf = [0u8; 4096];
+            match qmp.stream.read(&mut buf) {
+                Ok(n) if n > 0 && began.elapsed() < budget => qmp.pending.extend_from_slice(&buf[..n]),
+                _ => {
+                    return Err(format!(
+                        "the machine did not stop at a reset within {} s: {}",
+                        budget.as_secs(),
+                        String::from_utf8_lossy(&qmp.pending)
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Take the held reset and run on, taking every later reset as before.
+    pub fn release(mut self) {
+        self.0.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"reset\",\"shutdown\":\"poweroff\"}}");
+        self.0.execute("{\"execute\":\"system_reset\"}");
+        self.0.execute("{\"execute\":\"cont\"}");
+    }
+}
+
 /// `RESET` events the *guest* caused, scanned rather than parsed like
 /// [`shutdown_reason`]. QEMU raises one for its own power-on reset too, which
 /// carries `"guest": false` and is not a claim about anything the guest did.

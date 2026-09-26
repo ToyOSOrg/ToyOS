@@ -7,8 +7,9 @@ opened: 2026-09-26
 # The anti-rollback floor is a firmware variable, which the machine in hand can reset
 
 The loader refuses an image whose version is below the highest version a boot
-has proven, and keeps that floor in `ToyOSImageFloor`, a UEFI variable it
-creates non-volatile and boot-services-only (`bootloader/src/floor.rs`). That
+has proven, and keeps that floor in a UEFI variable per signing key
+(`toyos_update::floor`) that it creates non-volatile and boot-services-only
+(`bootloader/src/floor.rs`). That
 holds against everything after the handoff: no kernel, no program and no write
 to the disk can lower it, because the variable is unreachable once
 `ExitBootServices` has run. It does not hold against:
@@ -22,6 +23,10 @@ to the disk can lower it, because the variable is unreachable once
 - **a floor that never rises** — it rises only on a boot that hands the machine
   back on purpose, so a machine that is only ever powered off keeps the floor of
   its last clean reboot, and the old slot beside it stays bootable.
+- **an image signed by a throwaway key** — its floor is per image, keyed by
+  the log partition's GUID, so a running system that rewrites that GUID
+  resets it; that is the price of an old stick or a bisect still booting, and
+  a throwaway key signs nothing the owner's machine runs.
 
 `/system/bin/update`'s own check — newer than the running image — reads the
 versions in the slot table, which is on the disk and is advisory; the loader's

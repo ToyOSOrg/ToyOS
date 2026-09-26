@@ -3,8 +3,8 @@
 //! about one. Pure.
 //!
 //! **A swap is asked by `/system/bin/swap` and done by init, and nothing else
-//! can do either.** `swap` is an ordinary program — `ssh <machine> swap netd <
-//! netd` runs it over a plain `exec` channel, for a login sshd has already
+//! can do either.** `swap` is an ordinary program — `ssh <machine> swap netd <sha256>
+//! <length> < netd` runs it over a plain `exec` channel, for a login sshd has already
 //! authenticated — and it stages the bytes it was given under [`STAGING`] and
 //! asks init over the [`PORT`] init serves, which the build gate lets no
 //! program but [`HOLDER`] receive. init is the only process holding the system
@@ -16,9 +16,9 @@
 //! [`Digest`] ([`verify`]), writes them to the [`installed_path`] — a
 //! temporary name and one rename, so the place a service is started from is
 //! never half-written — answers [`MSG_ACCEPTED`], and waits for the requester
-//! to hang up, at most [`HANGUP_MS`]. `swap` hangs up when it exits, which
-//! for a caller that named the binary's length is once that caller has closed
-//! its input — its proof it has the answer: the service being swapped may be
+//! to hang up, at most [`HANGUP_MS`]. `swap` hangs up once its caller has closed
+//! its input, or [`ANSWER_MS`] after its answer — the close is the caller's
+//! proof it has the answer: the service being swapped may be
 //! the one carrying it, and is not stopped before it has arrived. Then init
 //! stops the old
 //! process, starts the new binary, and holds it on probation for

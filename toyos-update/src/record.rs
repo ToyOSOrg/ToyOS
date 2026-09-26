@@ -20,8 +20,10 @@
 //! ```
 //!
 //! A boot that hands the machine back on purpose proves its image, and the
-//! pass that reads so raises the anti-rollback floor to its version
-//! ([`crate::policy`]).
+//! pass that reads so raises the anti-rollback floor ([`crate::policy`]) —
+//! **never to a version read here**: the file is on a partition the running
+//! system writes, so what it names is only which slot's signed header the
+//! loader verifies again, and the digest that header must hash to.
 
 use crate::slots::Which;
 use crate::Digest;
@@ -66,9 +68,14 @@ pub enum Ended {
 /// What the loader learns from how the last boot ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Accounted {
+    /// The record this pass writes first, before it has chosen a slot: it
+    /// names no booted image, so a pass whose second write fails leaves no
+    /// earlier pass's image on the disk for the next pass to credit.
     pub record: Record,
-    /// The version the last boot proved, which the floor rises to.
-    pub proven: Option<u64>,
+    /// The image the record says the last boot ran, where that boot handed
+    /// the machine back on purpose: a claim the loader verifies before the
+    /// floor moves.
+    pub proven: Option<Booted>,
     /// The slot whose image died, now recorded dead.
     pub died: Option<Which>,
 }
@@ -76,11 +83,11 @@ pub struct Accounted {
 /// Fold how the last boot ended into the record, given the anti-rollback
 /// `floor` a boot has proven: an image at or below it has run well before.
 pub fn account(record: Record, ended: Ended, floor: u64) -> Accounted {
-    let mut out = Accounted { record, proven: None, died: None };
+    let mut out = Accounted { record: Record { booted: None, ..record }, proven: None, died: None };
     let Some(booted) = record.booted else { return out };
     let dies = match ended {
         Ended::Proven => {
-            out.proven = Some(booted.version);
+            out.proven = Some(booted);
             false
         }
         Ended::Died => true,
@@ -195,10 +202,26 @@ mod tests {
         assert_eq!(died.proven, None);
 
         let proven = account(last, Ended::Proven, 0);
-        assert_eq!((proven.proven, proven.died, proven.record), (Some(42), None, last));
+        assert_eq!((proven.proven, proven.died), (last.booted, None));
         let unknown = account(last, Ended::Unknown, 0);
-        assert_eq!((unknown.proven, unknown.died, unknown.record), (None, None, last));
+        assert_eq!((unknown.proven, unknown.died), (None, None));
+        assert_eq!(unknown.record.dead, last.dead);
         assert_eq!(account(Record::default(), Ended::Died, 0).died, None, "nothing was booted");
+    }
+
+    /// **The first write names no image, however the last boot ended**: a pass
+    /// whose second write — the slot it chose — fails boots with this on the
+    /// disk, and a clean end of that boot must credit nothing rather than the
+    /// image an earlier pass booted.
+    #[test]
+    fn the_first_write_credits_no_image() {
+        let last = booted(Which::B);
+        for ended in [Ended::Proven, Ended::Died, Ended::Hung, Ended::Unknown] {
+            let first = account(last, ended, 0).record;
+            assert_eq!(first.booted, None, "{ended:?}");
+            let next = account(Record::decode(&first.encode(&GUID), &GUID).expect("a record"), Ended::Proven, 0);
+            assert_eq!((next.proven, next.died), (None, None), "{ended:?}: the pass after credits nothing");
+        }
     }
 
     /// A hang is a death only for an image no boot has proven: at or below the

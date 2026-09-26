@@ -7,7 +7,14 @@
 //! never for one merely booted, because a new image that dies must leave the
 //! old one bootable. The loader keeps the floor in a UEFI variable it creates
 //! without runtime access, so no kernel it hands the machine to, however
-//! compromised, can lower it; the disk holds nothing the floor rests on.
+//! compromised, can lower it ([`crate::floor`]).
+//!
+//! **What it rises to is a signed version**: the record on the log partition
+//! ([`crate::record`]), which the running system can write, names only the
+//! slot and the digest of the header it booted, and the pass that raises the
+//! floor verifies that slot's signed header again and takes the version out
+//! of it. So the running system can raise the floor to no version the owner
+//! did not sign — which is no more than `update` installing that image does.
 //!
 //! **What that cannot defend**: firmware variables are the firmware's, so an
 //! EFI program booted instead of this loader (anything, until Secure Boot is
