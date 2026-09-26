@@ -367,38 +367,52 @@ pub fn write_console(src: &crate::user_ptr::UserBytes) -> usize {
 pub struct ConsoleLine {
     buf: [u8; MAX_CONSOLE_LINE],
     len: usize,
-    /// `buf` holds a whole line the queue had no room for, which goes first.
+    /// `buf` is a whole piece of a line the queue had no room for, which goes
+    /// before anything after it; the holder still has the rest of the line.
     held: bool,
-    /// What `buf` holds is a piece of a line the next one goes on with.
-    continues: bool,
 }
 
 impl ConsoleLine {
     pub const fn new() -> Self {
-        Self { buf: [0; MAX_CONSOLE_LINE], len: 0, held: false, continues: false }
+        Self { buf: [0; MAX_CONSOLE_LINE], len: 0, held: false }
     }
 
     /// Take as much of a userland write as ends in lines the queue has room
     /// for, and a trailing partial line; answer how many bytes were taken.
+    ///
+    /// **A line that does not fit is not taken**: its bytes in this write go
+    /// back to the holder, which writes them again once it has room. Taken and
+    /// held here, the last line of a holder with nothing more to say would
+    /// wait for a write that never comes.
     pub fn write(&mut self, src: &crate::user_ptr::UserBytes) -> usize {
-        if self.held && !self.release() {
+        if self.held && !self.piece() {
             return 0;
         }
         let mut chunk = [0u8; STRIP_CHUNK];
         let mut off = 0;
+        // Where this write's part of the line `buf` holds begins.
+        let mut line = 0;
         while off < src.len() {
             let n = chunk.len().min(src.len() - off);
             src.read_at(off, &mut chunk[..n]);
             for (i, &b) in chunk[..n].iter().enumerate() {
-                if self.len == MAX_CONSOLE_LINE && !self.close(true) {
-                    return off + i;
+                let at = off + i;
+                if self.len == MAX_CONSOLE_LINE {
+                    self.held = true;
+                    if !self.piece() {
+                        return at;
+                    }
+                    line = at;
                 }
                 self.buf[self.len] = b;
                 self.len += 1;
-                if b == b'\n' && !self.close(false) {
-                    // Taken: the line is this holder's to send, and it goes
-                    // ahead of the next write.
-                    return off + i + 1;
+                if b == b'\n' {
+                    if !crate::log::console::queue(&self.buf[..self.len], false) {
+                        self.len -= at + 1 - line;
+                        return line;
+                    }
+                    self.len = 0;
+                    line = at + 1;
                 }
             }
             off += n;
@@ -406,16 +420,9 @@ impl ConsoleLine {
         src.len()
     }
 
-    /// Queue the line `buf` holds, or the piece of one that `continues` in the
-    /// next; `false` keeps it held for the next write.
-    fn close(&mut self, continues: bool) -> bool {
-        self.held = true;
-        self.continues = continues;
-        self.release()
-    }
-
-    fn release(&mut self) -> bool {
-        if !crate::log::console::queue(&self.buf[..self.len], self.continues) {
+    /// Queue the whole piece `buf` holds, which the next goes on from.
+    fn piece(&mut self) -> bool {
+        if !crate::log::console::queue(&self.buf[..self.len], true) {
             return false;
         }
         self.len = 0;

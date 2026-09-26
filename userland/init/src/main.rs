@@ -537,15 +537,6 @@ impl<'a> Init<'a> {
             ready.clear();
             poller.wait(1, timeout, |token| ready.push(token));
 
-            let now = Instant::now();
-            for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
-                say!(
-                    "init: launcher: dropping client {} — it never finished its launch",
-                    p.conn.as_handle().0
-                );
-            }
-            pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
-
             // Accept and the request are two events. Nothing is read here.
             for (token, acceptor, port) in [
                 (TOKEN_ACCEPTOR, launcher, Port::Launcher),
@@ -625,6 +616,18 @@ impl<'a> Init<'a> {
                     }
                 }
             }
+
+            // **After the requests that arrived are served**: a client whose
+            // request is here is answered however late this loop came round to
+            // it, and only one that has said nothing in its bound is let go.
+            let now = Instant::now();
+            for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
+                say!(
+                    "init: launcher: dropping client {} — it never finished its launch",
+                    p.conn.as_handle().0
+                );
+            }
+            pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
             flight = flight.and_then(|f| self.advance(f, ready.contains(&TOKEN_HANGUP)));
         }
