@@ -1155,6 +1155,7 @@ dependencies = [
  "toyos-swap",
  "toyos-symbols",
  "toyos-tco",
+ "toyos-tmpdir",
  "toyos-userbound",
  "toyos-wallclock",
  "toyos-xhci",
@@ -1172,6 +1173,7 @@ dependencies = [
  "object 0.38.1",
  "target-lexicon",
  "toyos-ld",
+ "toyos-tmpdir",
 ]
 
 [[package]]
@@ -1202,6 +1204,7 @@ name = "toyos-fat32"
 version = "0.1.0"
 dependencies = [
  "toyos-fat32-check",
+ "toyos-tmpdir",
  "toyos-wallclock",
 ]
 
@@ -1234,11 +1237,12 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-ld"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "object 0.38.1",
  "sha2",
  "thiserror",
+ "toyos-tmpdir",
  "zerocopy",
 ]
 
@@ -1332,6 +1336,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-tco"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-tmpdir"
 version = "0.1.0"
 
 [[package]]

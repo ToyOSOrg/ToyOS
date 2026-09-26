@@ -284,8 +284,7 @@ mod tests {
     /// apart.
     #[test]
     fn the_survey_gates_what_cargo_test_runs_and_names_the_rest() {
-        let dir = std::env::temp_dir().join(format!("toyos-userlandhost-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = toyos_tmpdir::TempDir::new("userlandhost");
         let put = |path: &str, text: &str| {
             let path = dir.join(path);
             fs::create_dir_all(path.parent().expect("a parent")).expect("make the fixture tree");
@@ -317,7 +316,6 @@ mod tests {
         put("switched/target/debug/x.rs", escape);
 
         let found = survey(&dir);
-        fs::remove_dir_all(&dir).ok();
         assert_eq!(
             found,
             Ok(Survey {

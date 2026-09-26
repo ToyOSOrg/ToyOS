@@ -2506,6 +2506,7 @@ dependencies = [
  "flate2",
  "sha2 0.10.9",
  "toyos-manifest",
+ "toyos-tmpdir",
 ]
 
 [[package]]
@@ -3528,6 +3529,7 @@ dependencies = [
  "tokio",
  "toyos 0.14.0",
  "toyos-swap",
+ "toyos-tmpdir",
 ]
 
 [[package]]
@@ -3873,6 +3875,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-tco"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-tmpdir"
 version = "0.1.0"
 
 [[package]]
