@@ -6,9 +6,11 @@
 //! mastering, programs the interrupt vector into whichever of the function's two
 //! message mechanisms it has, and hands out every device address a descriptor
 //! may carry. Nothing the holder writes into a descriptor can make the device
-//! touch memory the kernel did not grant it: the domain maps the grants and
-//! nothing else, and an address outside them is refused at the unit and
-//! recorded against that claim.
+//! touch memory the kernel did not grant it: the domain maps the grants — the
+//! claim's own, and the regions of ordinary memory its holder lends it
+//! ([`dma_map`]), each at a fresh address and until [`dma_unmap`] or the claim's
+//! end — and nothing else, and an address outside them is refused at the unit
+//! and recorded against that claim.
 //!
 //! **A window is 2 MiB because that is the only page this kernel maps**, so a
 //! BAR a process may see is re-assigned onto a 2 MiB boundary of its own.
