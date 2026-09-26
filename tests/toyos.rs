@@ -8826,12 +8826,14 @@ fn toolkit_app(app: &str) -> Result<(), String> {
     if !exit.contains(" code=0 ") {
         return Err(format!("{app} did not exit cleanly: {exit}\n{after}"));
     }
-    let cpu = exit.split("cpu=").nth(1).unwrap_or("?");
+    let cpu = exit
+        .split_once("cpu=")
+        .map(|(_, cpu)| cpu.trim())
+        .ok_or_else(|| format!("{app}'s exit record names no CPU time: {exit}"))?;
     let peak = after
         .lines()
-        .find_map(|line| line.trim_start().strip_prefix("peak mem"))
-        .map(str::trim)
-        .unwrap_or("?");
+        .find_map(|line| line.split_once("peak mem").map(|(_, peak)| peak.trim()))
+        .ok_or_else(|| format!("`stats` reported no peak for {app}:\n{after}"))?;
     eprintln!(
         "  [toolkit] {app}: window at {content:?} with {shades} colours in it, exit 0, \
          cpu {cpu}, peak mem {peak}"
