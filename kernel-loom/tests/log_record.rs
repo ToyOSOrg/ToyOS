@@ -47,7 +47,7 @@ use toyos_abi::log::{LogRecord, MAX_RECORD_MESSAGE};
 
 /// The model's witness for the production IF/TF-off bracket.
 fn commit_one(shard: &Shard) -> u64 {
-    let guard = kernel_loom::arch::LogCommitGuard::close();
+    let guard = kernel_loom::arch::IrqGuard::close();
     // SAFETY: every caller is this model's sole producer for the shard. The
     // real witness additionally prevents that producer being preempted between
     // these two operations.
@@ -106,7 +106,7 @@ fn a_committed_record_is_whole_or_absent() {
         let w = loom::thread::spawn(move || {
             // SAFETY: this thread is the shard's sole writer, which is the
             // precondition the shim's own doc states.
-            let guard = kernel_loom::arch::LogCommitGuard::close();
+            let guard = kernel_loom::arch::IrqGuard::close();
             let seq = unsafe { writer.reserve(&guard) };
             let r = record(seq);
             unsafe { writer.commit(seq, &r, &guard) };
@@ -188,7 +188,7 @@ fn a_recycled_slot_does_not_answer_for_the_record_it_replaced() {
         // from the moment `head` moves, before a byte of its body is written —
         // which is the guarantee the reader's lower bound rests on.
         // SAFETY: sole writer.
-        let guard = kernel_loom::arch::LogCommitGuard::close();
+        let guard = kernel_loom::arch::IrqGuard::close();
         let recycling = unsafe { shard.reserve(&guard) };
         assert_eq!(recycling % SHARD_RECORDS as u64, FIRST_SEQ % SHARD_RECORDS as u64);
         assert!(
@@ -250,7 +250,7 @@ fn a_reader_racing_a_recycle_gets_nothing_rather_than_a_mixture() {
         let writer = shard.clone();
         let w = loom::thread::spawn(move || {
             // SAFETY: this thread is the shard's sole writer.
-            let guard = kernel_loom::arch::LogCommitGuard::close();
+            let guard = kernel_loom::arch::IrqGuard::close();
             let seq = unsafe { writer.reserve(&guard) };
             let r = record(seq);
             unsafe { writer.commit(seq, &r, &guard) };
@@ -344,7 +344,7 @@ fn a_key_and_the_record_it_names_come_from_one_generation() {
         let writer = shard.clone();
         let w = loom::thread::spawn(move || {
             // SAFETY: this thread is the shard's sole writer.
-            let guard = kernel_loom::arch::LogCommitGuard::close();
+            let guard = kernel_loom::arch::IrqGuard::close();
             let seq = unsafe { writer.reserve(&guard) };
             let r = record(seq);
             unsafe { writer.commit(seq, &r, &guard) };

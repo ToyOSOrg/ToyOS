@@ -1,0 +1,281 @@
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+use super::{cpu, percpu};
+use crate::log;
+use crate::time::{Delay, Duration, Floor};
+
+/// The local APIC registers and MSRs this file may name.
+// Every variant is an architectural local-APIC register touching no memory or control transfer, so none can make `Reg::write`'s unsafe wrmsr unsound.
+// Addresses are x2APIC's: 0x800 plus the xAPIC MMIO offset shifted right four; ApicBase is the one exception, the MSR that turns x2APIC on.
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum Reg {
+    ApicBase = 0x1B,
+    Id = 0x802,
+    Eoi = 0x80B,
+    Svr = 0x80F,
+    /// First of the eight in-service words (0x810..=0x817); see `in_service`.
+    Isr0 = 0x810,
+    Icr = 0x830,
+    LvtTimer = 0x832,
+    /// The performance-monitoring counters' LVT entry, xAPIC offset 0x340.
+    LvtPmc = 0x834,
+    TimerInit = 0x838,
+    TimerCurrent = 0x839,
+    TimerDivide = 0x83E,
+}
+
+impl Reg {
+    #[inline]
+    fn read(self) -> u64 {
+        cpu::rdmsr(self as u32)
+    }
+
+    #[inline]
+    fn write(self, value: u64) {
+        // SAFETY: every value written here is a local-APIC word built in this module from architectural field encodings, so no reserved-bit #GP is possible.
+        unsafe { cpu::wrmsr(self as u32, value) };
+    }
+}
+
+pub const TIMER_VECTOR: u8 = 0x20;
+
+/// Where a device writes a message-signalled interrupt: the local APIC's
+/// message window (SDM Vol. 3A §11.11.1). The one spelling of it — the
+/// compatibility format below, VT-d's remappable format and VT-d's own fault
+/// event all start here.
+pub const MSI_DOORBELL: u32 = 0xFEE0_0000;
+
+/// The compatibility-format message that raises `vector` on the CPU whose APIC
+/// ID is `dest`: the destination in address bits 19:12, the vector in the data.
+pub fn msi_message(dest: u32, vector: u8) -> (u32, u32) {
+    (MSI_DOORBELL | (dest << 12), vector as u32)
+}
+
+/// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs).
+static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
+
+/// Guards IPI sends before the APIC is enabled.
+static X2APIC_ENABLED: AtomicBool = AtomicBool::new(false);
+
+fn enable_x2apic() {
+    let mut base = Reg::ApicBase.read();
+    base |= (1 << 11) | (1 << 10);
+    Reg::ApicBase.write(base);
+
+    // The low byte must match arch::idt::spurious's gate vector.
+    let svr = Reg::Svr.read();
+    Reg::Svr.write(svr | (1 << 8) | super::idt::spurious::SPURIOUS_VECTOR as u64);
+}
+
+/// Initialize the BSP's Local APIC in x2APIC mode.
+pub fn init() {
+    enable_x2apic();
+    X2APIC_ENABLED.store(true, Ordering::Release);
+    log!("LAPIC: x2APIC enabled (ID {})", id());
+}
+
+/// Enable the AP's local APIC in x2APIC mode.
+pub fn init_ap() {
+    enable_x2apic();
+}
+
+pub fn id() -> u32 {
+    Reg::Id.read() as u32
+}
+
+/// Send INIT IPI to the specified APIC ID.
+pub fn send_init(apic_id: u32) {
+    // ICR write: destination in the high 32 bits, 0x4500 = delivery INIT, level assert.
+    Reg::Icr.write(((apic_id as u64) << 32) | 0x4500);
+}
+
+/// Send Startup IPI (SIPI) with the given vector (trampoline page number).
+pub fn send_sipi(apic_id: u32, vector: u8) {
+    Reg::Icr.write(((apic_id as u64) << 32) | 0x4600 | vector as u64);
+}
+
+/// Send EOI.
+#[inline]
+pub fn eoi() {
+    Reg::Eoi.write(0);
+}
+
+/// Whether `vector` is in service on this CPU.
+pub fn in_service(vector: u8) -> bool {
+    // ISR is eight 32-bit words (SDM Vol. 3A §12.8.4): word = vector >> 5, bit = vector & 31.
+    let word = cpu::rdmsr(Reg::Isr0 as u32 + (vector as u32 >> 5));
+    (word >> (vector & 31)) & 1 != 0
+}
+
+/// The highest vector in service — the one being handled, since the LAPIC only
+/// delivers above the ISR top (SDM Vol. 3A §12.8.4). `None` outside a handler.
+pub fn in_service_highest() -> Option<u8> {
+    for word_index in (0..8u32).rev() {
+        let word = cpu::rdmsr(Reg::Isr0 as u32 + word_index) as u32;
+        if word != 0 {
+            return Some((word_index * 32 + (31 - word.leading_zeros())) as u8);
+        }
+    }
+    None
+}
+
+/// Send an IPI to this CPU (self shorthand).
+#[cfg(feature = "boot-actuators")]
+pub fn send_self(vector: u8) {
+    if !X2APIC_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    // Destination shorthand = self (0b01 << 18), fixed delivery, level assert.
+    Reg::Icr.write(0x0004_4000 | vector as u64);
+}
+
+fn ipi_all_excluding_self(vector: u8) {
+    // destination shorthand = all-excluding-self (0b11 << 18), fixed delivery
+    Reg::Icr.write(0x000C_0000 | vector as u64);
+}
+
+/// Ask every other CPU to flush its TLB.
+pub(super) fn tlb_ipi() {
+    if X2APIC_ENABLED.load(Ordering::Relaxed) {
+        ipi_all_excluding_self(0xFE);
+    }
+}
+
+/// Send the timer-vector IPI to one CPU, waking it if halted.
+// Targeted, not broadcast: a broadcast kick would preempt every sibling per wake and cannot scale.
+pub fn kick_cpu(cpu_id: u32) {
+    if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
+    let apic_id = crate::arch::smp::apic_id_for(cpu_id);
+    Reg::Icr.write(((apic_id as u64) << 32) | 0x4000 | TIMER_VECTOR as u64);
+}
+
+// Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the next scheduler pass.
+pub fn kick_all_but_self() {
+    let me = percpu::cpu_id();
+    for cpu in 0..crate::arch::smp::cpu_count() {
+        if cpu != me {
+            kick_cpu(cpu);
+        }
+    }
+}
+
+/// Send a non-maskable interrupt to one CPU — for a CPU that failed to answer `kick_cpu`, since IF cannot mask NMI.
+// Diagnostic only: an NMI can land inside any critical section, which this kernel cannot make NMI-safe.
+pub fn send_nmi(cpu_id: u32) {
+    if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
+    let apic_id = crate::arch::smp::apic_id_for(cpu_id);
+    Reg::Icr.write(((apic_id as u64) << 32) | 0x4400);
+}
+
+/// Point this CPU's performance-counter LVT entry at NMI delivery, unmasked —
+/// the one interrupt a CPU that has cleared `IF` still takes, and so the only
+/// way `crate::hardlockup` can sample one.
+///
+/// **Written again after every delivery, not once at arm.** SDM Vol. 3A §12.5.1:
+/// the local APIC sets this entry's mask flag when it handles a
+/// performance-monitoring interrupt, and only software clears it, so a handler
+/// that does not write this gets exactly one NMI for the machine's life.
+///
+/// Declared whole: delivery mode 100b (NMI) in bits 10:8, mask clear, and a
+/// vector field the CPU ignores under that delivery mode.
+pub fn arm_perf_nmi() {
+    if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
+    Reg::LvtPmc.write(0b100 << 8);
+}
+
+/// Send every other CPU the halt IPI, where the machine has released any: before
+/// that no sibling has been sent its `SIPI`, so there are only CPUs still waiting
+/// for one rather than CPUs that need halting.
+pub fn stop_other_cpus() {
+    if X2APIC_ENABLED.load(Ordering::Relaxed) && crate::arch::smp::is_ready() {
+        Reg::Icr.write(0x000C_0000 | 0xFD);
+    }
+}
+
+/// Calibrate the LAPIC timer on the BSP (requires HPET); does not start it.
+pub fn init_timer() {
+    // Divide by 1 for maximum resolution.
+    Reg::TimerDivide.write(0b1011);
+
+    // Masked one-shot mode for calibration.
+    Reg::LvtTimer.write(1 << 16);
+    Reg::TimerInit.write(0xFFFF_FFFF);
+
+    const CALIBRATION: Delay = Delay::to_measure(
+        Duration::from_millis(10),
+        "LAPIC ticks counted against the monotonic clock, and the tick figure is reported per 10ms",
+    );
+    let start = crate::clock::nanos_since_boot();
+    while crate::clock::nanos_since_boot() - start < CALIBRATION.nanos() {}
+    let elapsed = crate::clock::nanos_since_boot() - start;
+
+    let remaining = Reg::TimerCurrent.read() as u32;
+    let ticks_elapsed = 0xFFFF_FFFFu32.wrapping_sub(remaining);
+    let ticks_10ms = (ticks_elapsed as u64 * 10_000_000 / elapsed) as u32;
+
+    Reg::TimerInit.write(0);
+    TIMER_TICKS.store(ticks_10ms, Ordering::Release);
+    // Fallback for any Ring 0 fire before the scheduler arms its first quantum.
+    percpu::set_last_armed_ticks(OneShot::ticks(ticks_10ms as u64).0);
+    // The implied hertz is the machine's third timebase, and it is *not* a
+    // check on the TSC: this count was measured against the TSC-derived clock,
+    // so agreement between them is arithmetic. What it is is a number of the
+    // part's own — the bus clock the LAPIC counts — stable across boots of one
+    // machine, so a profile can hold a ceiling against a boot that moved it.
+    log!("LAPIC timer: {} ticks/10ms, so {}Hz", ticks_10ms, ticks_10ms as u64 * 100);
+}
+
+// Floor on every arm: a count that expires before the interrupt it schedules retires cannot outlast itself and livelocks the CPU forever.
+const MIN_ONE_SHOT: Floor = Floor::policy(
+    Duration::from_micros(10),
+    "above an interrupt entry and iretq, a thousandth of QUANTUM_NS",
+);
+
+// The only path to Reg::TimerInit / last_armed_ticks — the floor is enforced once here, not at each of the three call sites.
+struct OneShot(u32);
+
+impl OneShot {
+    fn ticks(ticks: u64) -> Self {
+        let per_10ms = TIMER_TICKS.load(Ordering::Relaxed) as u64;
+        let floor = (MIN_ONE_SHOT.nanos() * per_10ms / 10_000_000).max(1);
+        // Zero means stop_timer, not a valid count — `min` alone would let a small calibration write it.
+        Self(ticks.clamp(floor, u32::MAX as u64) as u32)
+    }
+
+    fn after(nanos: u64) -> Self {
+        let per_10ms = TIMER_TICKS.load(Ordering::Relaxed) as u128;
+        Self::ticks((nanos as u128 * per_10ms / 10_000_000) as u64)
+    }
+
+    fn arm(self) {
+        Reg::TimerDivide.write(0b1011);
+        // LVT resets masked; an AP may reach here before this register was ever written.
+        Reg::LvtTimer.write(TIMER_VECTOR as u64);
+        percpu::set_last_armed_ticks(self.0);
+        Reg::TimerInit.write(self.0 as u64);
+    }
+}
+
+/// Arm a one-shot timer to fire after `nanos` nanoseconds, or after [`MIN_ONE_SHOT`] if that is longer.
+pub fn arm_one_shot(nanos: u64) {
+    OneShot::after(nanos).arm();
+    crate::trace::trace(crate::trace::Kind::TimerArm, nanos as u32);
+}
+
+/// Shorten this CPU's armed interval to at most `nanos`, arming it if stopped.
+// Traces nothing, unlike arm_one_shot: no scheduler deadline is being set here, and a TimerArm record would misreport one.
+pub fn arm_within(nanos: u64) {
+    let want = OneShot::after(nanos);
+    // Zero here means stop_timer, not an imminent expiry — a running count never reaches zero on its own.
+    let remaining = Reg::TimerCurrent.read() as u32;
+    let ticks = if remaining == 0 { want.0 } else { want.0.min(remaining) };
+    OneShot::ticks(ticks as u64).arm();
+}
+
+/// Stop the timer. No more interrupts until re-armed.
+pub fn stop_timer() {
+    percpu::set_last_armed_ticks(0);
+    Reg::TimerInit.write(0);
+    crate::trace::trace(crate::trace::Kind::TimerStop, 0);
+}

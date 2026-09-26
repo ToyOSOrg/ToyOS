@@ -19,6 +19,15 @@ loom = []
 # with either fence removed behaves identically, which is the whole reason the
 # obligation is a model.
 wake-fence-off = []
+# The same for the panic console's published descriptor: `kernel-loom` turns it on
+# to drop the publisher's `Release` fence from `drivers/panic_console/published.rs`,
+# and `kernel-loom/tests/panic_console_publish.rs` must red — a reader keeping a
+# descriptor that is half one publication and half the next.
+seqlock-writer-fence-off = []
+# The same for the console backend's lock: `kernel-loom` turns it on to build
+# `drivers/serial_lock.rs`'s `try_lock` with `then_some`, whose lost exchange
+# releases the holder's lock, and `kernel-loom/tests/serial_lock.rs` must red.
+serial-try-lock-then-some = []
 # The same arrangement for a poll ring's one-shot answer: `kernel-loom` turns it
 # on to split `inbox/once.rs`'s exchange into a load and a store, and
 # `kernel-loom/tests/poll_once.rs` must red when it does — a poll two posts
@@ -95,7 +104,7 @@ boot-actuators = []
 # One name rather than seven, because a feature set is a whole kernel build and
 # builds that differ only in which unreachable arm they carry are several builds
 # of one kernel. The per-action justification — what nothing else can reach — now
-# lives beside each arm in `arch/syscall/dispatch.rs`, which is the file that
+# lives beside each arm in `syscall/dispatch.rs`, which is the file that
 # has to stay true when an arm changes.
 #
 # The one place it is not confined to the match: `arch::tlb::serve_ipi` loads one
@@ -268,7 +277,7 @@ stack-witness = []
 # lands eight bytes below the frame, so the frame has to be inside a real stack
 # before the call happens. `stack-witness`'s third test is what establishes that.
 switch-witness = ["stack-witness"]
-# The negative controls — `kernel/src/hw.rs`'s `switch_witness_mutate` carries
+# The negative controls — `kernel/src/arch/x86_64/hw.rs`'s `switch_witness_mutate` carries
 # what each stages. One write per boot, at the ninth switch (`MUTATE_AT`, and
 # small because it was measured): `frame` writes the `rbx` slot of a frame the
 # check has just validated, and is the control for the instrument — a witness that
@@ -386,6 +395,7 @@ toyos-acpi = { path = "../toyos-acpi" }
 toyos-dma = { path = "../toyos-dma" }
 toyos-blackbox = { path = "../toyos-blackbox" }
 toyos-blockhold = { path = "../toyos-blockhold" }
+toyos-bootmap = { path = "../toyos-bootmap" }
 toyos-fat32 = { path = "../toyos-fat32" }
 toyos-elf = { path = "../toyos-elf" }
 toyos-gpt = { path = "../toyos-gpt" }

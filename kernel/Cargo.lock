@@ -41,6 +41,7 @@ dependencies = [
  "toyos-acpi",
  "toyos-blackbox",
  "toyos-blockhold",
+ "toyos-bootmap",
  "toyos-dma",
  "toyos-elf",
  "toyos-fat32",
@@ -90,6 +91,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-blockhold"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-bootmap"
 version = "0.1.0"
 
 [[package]]

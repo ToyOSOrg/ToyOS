@@ -20,3 +20,9 @@ Not shown: where the loaded run's stop went, since its capture has no `stop:`
 record.
 
 **Exit**: the stop's record, or its absence, explained on a loaded run.
+
+Again in the fast tier on PR #524's branch at `235c5a5b`: the same `QEMU
+never reported stopping: the guest asked for a reboot and stayed up`, after
+266 s, and the harness's re-run alone was green. The host was loaded
+throughout by another worktree's spinner at 397% CPU, with the load average
+between 20 and 28.

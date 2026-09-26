@@ -18,3 +18,16 @@ The boot's console shows the stick's transport breaking twice on `SCSI 0x2a`
 console, not the USB stack, quiesce or its config.
 
 Exit: a cause, or a recurrence that shows it is not load-bound.
+
+**Recurrence, PR #524's fast tier at `396f5b4d`, dev host.** Red wide after
+325 s with the same `QEMU never reported stopping: the guest asked for a
+reboot and stayed up`, then `ALONE ... GREEN` in 4 s. The capture has the same
+`quiesce_writers: 4 of 6 writers reached their loop in 5s` and
+`test_rs_quiesce_writers exit=1`, and this time no transport break on the
+stick. While it ran, the host's 12 guest slots were full, shared with the
+suites of five other worktrees (`toyos-lld`, `toyos-tcp`, `toyos-update`,
+`toyos-logtrack`, `toyos-guiplat`).
+The branch reorders xHCI ring writes (`dma_wmb`) but touches no quiesce code.
+A same-session A/B then gave 5 of 5 green on each arm, main at `e48604c0` and
+the branch: the red did not come back alone or beside the other arm, so it
+is still not shown to be anything but load-bound.

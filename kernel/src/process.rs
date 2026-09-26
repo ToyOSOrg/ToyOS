@@ -49,7 +49,7 @@ pub fn vma_map(
     size: u64,
     prot: Prot,
 ) -> Option<(UserAddr, u64)> {
-    pt.lock().alloc_and_map(phys, size, prot, CachePolicy::DeferToMtrr)
+    pt.lock().alloc_and_map(phys, size, prot, CachePolicy::Normal)
 }
 
 
@@ -436,8 +436,8 @@ impl PageFaultTrace {
 pub struct ElfInfo {
     pub elf_alloc: Option<OwnedAlloc>,
     pub tls_modules: Vec<crate::elf::TlsModule>,
-    pub tls_total_memsz: usize,
-    pub tls_max_align: usize,
+    /// Every static module's TLS, as a thread's block is laid out from it.
+    pub tls: toyos_elf::tls::Static,
     /// Next module ID to assign on dlopen (1-based, exe=1).
     pub next_tls_module_id: u64,
     /// Dynamically allocated TLS blocks for dlopen'd modules, keyed by (Tid, module_id).
@@ -462,8 +462,7 @@ impl ElfInfo {
         Self {
             elf_alloc: None,
             tls_modules: Vec::new(),
-            tls_total_memsz: 0,
-            tls_max_align: 0,
+            tls: toyos_elf::tls::Static::empty(crate::loader::TLS_VARIANT),
             next_tls_module_id: 1,
             dynamic_tls_blocks: alloc::collections::BTreeMap::new(),
             loaded_libs: Vec::new(),
@@ -830,16 +829,16 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
             .expect("spawn_thread: the spawning thread runs in an address space");
         (addr_space, Arc::clone(&proc.process_data))
     };
-    let (tls_modules, tls_total_memsz, tls_max_align) = {
+    let (tls_modules, tls) = {
         let data = process_data_arc.lock();
-        (data.elf.tls_modules.clone(), data.elf.tls_total_memsz, data.elf.tls_max_align)
+        (data.elf.tls_modules.clone(), data.elf.tls)
     };
 
     // Phase 2: allocate TLS outside any lock. An empty module set still gets a DTV+TCB block via `setup_tls(None, 0, ..)`.
     let (tls_alloc, fs_base) = if !tls_modules.is_empty() {
-        setup_combined_tls(&tls_modules, tls_total_memsz, tls_max_align)?
+        setup_combined_tls(&tls_modules, tls)?
     } else {
-        setup_tls(None, 0, tls_max_align)?
+        setup_tls(None, 0, tls.max_align())?
     };
     let (tls_alloc, fs_base) = {
         let addr_space = &parent_addr_space;
@@ -955,7 +954,7 @@ fn teardown_resources(
     crate::irq_census::log_census();
     // After the irq lines: the tlb conservation check reads deliveries first, issues second.
     crate::arch::tlb::log_census();
-    crate::arch::idt::unclaimed::log_vectors();
+    crate::arch::trap::log_unclaimed();
 
     ops::close_all(&mut data.handles);
     data.elf.elf_alloc.take();
@@ -1536,7 +1535,7 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     }
     dump_region("rip", rip);
 
-    let fs_base = crate::arch::cpu::read_fs_base();
+    let fs_base = crate::arch::cpu::thread_pointer();
     if fs_base != 0 {
         log!("  FS base: {:#x}", fs_base);
         if let Some(self_ptr) = read_user(fs_base) {

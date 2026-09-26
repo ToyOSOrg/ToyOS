@@ -1,7 +1,7 @@
 //! Loom harness for the kernel's memory-ordering primitives.
 //!
 //! `kernel/src/sync.rs`, `kernel/src/shootdown.rs`,
-//! `kernel/src/sched/reap_gate.rs` and `kernel/src/drivers/i8042/tally.rs` are
+//! `kernel/src/sched/reap_gate.rs` and `kernel/src/arch/x86_64/i8042/tally.rs` are
 //! compiled into this crate with `feature = "loom"` on, so their atomics and
 //! cells resolve to loom's instrumented ones and the models drive the real
 //! primitives rather than transliterations of them — a transliteration is
@@ -89,9 +89,9 @@ pub mod arch {
     /// The kernel implementation masks IF and TF across reservation and
     /// publication. Loom has no per-CPU flags; the model's sole-writer
     /// precondition is the corresponding witness here.
-    pub struct LogCommitGuard;
+    pub struct IrqGuard;
 
-    impl LogCommitGuard {
+    impl IrqGuard {
         pub fn close() -> Self {
             Self
         }
@@ -119,7 +119,7 @@ pub mod arch {
     #[cfg(feature = "loom")]
     pub unsafe fn percpu_fetch_add(
         counter: &loom::sync::atomic::AtomicU64,
-        _guard: &LogCommitGuard,
+        _guard: &IrqGuard,
     ) -> u64 {
         counter.fetch_add(1, loom::sync::atomic::Ordering::Relaxed)
     }
@@ -128,7 +128,7 @@ pub mod arch {
     #[cfg(not(feature = "loom"))]
     pub unsafe fn percpu_fetch_add(
         counter: &core::sync::atomic::AtomicU64,
-        _guard: &LogCommitGuard,
+        _guard: &IrqGuard,
     ) -> u64 {
         counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
     }
@@ -350,7 +350,7 @@ pub mod sleeplock;
 /// subject is a *driver*, and it is here for the reason the others are: the
 /// property is "no reader ever sees this pair disagree", which is a claim about
 /// instants that no guest test can express and that x86's TSO hides.
-#[path = "../../kernel/src/drivers/i8042/tally.rs"]
+#[path = "../../kernel/src/arch/x86_64/i8042/tally.rs"]
 pub mod i8042_tally;
 
 /// The panic snapshot's owner and access state, driven together by
@@ -360,3 +360,12 @@ pub mod capture_latch;
 
 #[path = "../../kernel/src/drivers/panic_console/access.rs"]
 pub mod capture_access;
+
+/// The panic console's published framebuffer descriptor, driven by
+/// `tests/panic_console_publish.rs`.
+#[path = "../../kernel/src/drivers/panic_console/published.rs"]
+pub mod panic_console_published;
+
+/// The console backend's lock, driven by `tests/serial_lock.rs`.
+#[path = "../../kernel/src/drivers/serial_lock.rs"]
+pub mod serial_lock;

@@ -72,7 +72,7 @@ struct Rig {
 /// The plan for this config's image: `features` is the kernel build, `params`
 /// the actuators its slot arms, `version` its signed header's.
 fn plan(features: &[&str], params: &[&str], version: u64, second: Option<SecondSlot>) -> Plan {
-    let mut plan = Plan::new(&super::compile::repo_root().join(CONFIG).join("system.toml"), features, params);
+    let mut plan = Plan::new(toyos_build::arch::Arch::X86_64, &super::compile::repo_root().join(CONFIG).join("system.toml"), features, params);
     plan.version = version;
     plan.second = second;
     plan
@@ -98,6 +98,7 @@ impl Rig {
         let parts = build::build_test_parts(&root, &base, true, &files);
         let room = SecondSlot { root_bytes: 2 * parts.root.len() as u64 };
         let disk = image::create_boot_image(
+            toyos_build::arch::Arch::X86_64,
             &parts.kernel,
             &parts.bootloader,
             &parts.root,
