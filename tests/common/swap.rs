@@ -1,7 +1,7 @@
 //! A running service's binary replaced with no reboot, rehearsed in QEMU: netd
-//! swapped for its own rebuild while `logd` streams to this host and sshd
-//! carries the ask — and the three ways a swap must leave the old service
-//! running.
+//! swapped for its own rebuild while `logd` streams to this host and
+//! `/system/bin/swap`, run over ssh, carries the ask — and the three ways a swap
+//! must leave the old service running.
 //!
 //! **The machine's own `/log` is the oracle**, read off the image behind the
 //! guest's back once `reboot` over ssh has ended the boot: one `Boot:

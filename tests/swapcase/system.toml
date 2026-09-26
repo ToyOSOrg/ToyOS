@@ -1,6 +1,6 @@
 # A running service's binary replaced with no reboot, rehearsed on QEMU's
-# virtio-net: `logd` streams every record to the host's listener, sshd takes the
-# swap on an authenticated channel and hands it to init, and netd is the
+# virtio-net: `logd` streams every record to the host's listener, sshd runs
+# `swap` for an authenticated login and it hands the binary to init, and netd is the
 # service swapped — the one whose restart the stream and the ssh connection
 # asking for it both have to outlive.
 #

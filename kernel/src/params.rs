@@ -46,9 +46,10 @@ pub fn claims(token: &str) -> bool {
 pub const SLOT_RECORD: &str = "boot: slot";
 
 /// The slot the loader booted, and the marked slot it refused and why, as the
-/// loader wrote them.
+/// loader wrote them: the last of each, because the loader appends its words
+/// after the slot's own parameter and so has the last one.
 pub fn slot(cmdline: &str) -> (Option<&str>, Option<&str>) {
-    let word = |prefix: &str| toyos_abi::boot::actuators(cmdline).find_map(|t| t.strip_prefix(prefix));
+    let word = |prefix: &str| toyos_abi::boot::actuators(cmdline).filter_map(|t| t.strip_prefix(prefix)).last();
     (word(toyos_abi::boot::SLOT_PARAM), word(toyos_abi::boot::SLOT_REFUSED_PARAM))
 }
 

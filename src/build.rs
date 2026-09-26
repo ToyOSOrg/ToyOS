@@ -1154,6 +1154,10 @@ fn check_params(root: &Path, params: &[String]) {
 const VALUED_PARAMS: &[(&str, &str)] = &[
     ("toyos_blackbox::PARAM", toyos_blackbox::PARAM),
     ("toyos_tco::DEADLINE_PARAM", toyos_tco::DEADLINE_PARAM),
+    // The loader's words about the slot it booted, appended as it appends the
+    // black box's.
+    ("toyos_abi::boot::SLOT_PARAM", toyos_abi::boot::SLOT_PARAM),
+    ("toyos_abi::boot::SLOT_REFUSED_PARAM", toyos_abi::boot::SLOT_REFUSED_PARAM),
 ];
 
 /// The names in [`VALUED_PARAMS`], for a refusal that says what it would have
@@ -2975,6 +2979,7 @@ mod tests {
         "tests/sshdcase/system.toml",
         "tests/swapcase/system.toml",
         "tests/testcases/system.toml",
+        "tests/updatecase/system.toml",
     ];
 
     fn load(cfg: &str) -> SystemConfig {
