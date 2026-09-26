@@ -956,7 +956,7 @@ dependencies = [
 [[package]]
 name = "dpi"
 version = "0.1.1"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#bd99e726782ef6f62ddf93bee4c3b793c101a50d"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#f58e1f3bca784d97056fe47475c2dca8c6386816"
 
 [[package]]
 name = "ecdsa"
@@ -4693,7 +4693,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#bd99e726782ef6f62ddf93bee4c3b793c101a50d"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#f58e1f3bca784d97056fe47475c2dca8c6386816"
 dependencies = [
  "android-activity",
  "atomic-waker",
