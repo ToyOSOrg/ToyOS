@@ -1,4 +1,4 @@
-use crate::collect::{collect_unique_symbols, Arch, LinkState, RelocType, SymbolDef, SymbolRef};
+use crate::collect::{collect_unique_symbols, LinkState, RelocType, SymbolDef, SymbolRef};
 use crate::reloc::resolve_symbol;
 use crate::{align_up, classify_sections, LinkError};
 use object::write::pe::{NtHeaders, Writer};
@@ -140,10 +140,7 @@ pub(crate) fn emit_pe_bytes(
 
     w.write_empty_dos_header().unwrap();
     w.write_nt_headers(NtHeaders {
-        machine: match state.arch {
-            Arch::X86_64 => pe::IMAGE_FILE_MACHINE_AMD64,
-            Arch::Aarch64 => pe::IMAGE_FILE_MACHINE_ARM64,
-        },
+        machine: pe::IMAGE_FILE_MACHINE_AMD64,
         time_date_stamp: 0,
         characteristics: pe::IMAGE_FILE_EXECUTABLE_IMAGE | pe::IMAGE_FILE_LARGE_ADDRESS_AWARE,
         major_linker_version: 0,

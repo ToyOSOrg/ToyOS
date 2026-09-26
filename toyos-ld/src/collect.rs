@@ -116,11 +116,6 @@ pub enum RelocType {
     Aarch64Abs64,
     Aarch64Abs32,
     Aarch64Prel32,
-    Aarch64Prel64,
-    Aarch64LdPrelLo19,
-    Aarch64AdrPrelLo21,
-    Aarch64Condbr19,
-    Aarch64Tstbr14,
     Aarch64Call26,
     Aarch64Jump26,
     Aarch64AdrPrelPgHi21,
@@ -139,38 +134,6 @@ pub enum RelocType {
     Aarch64GotPcrel32,
     Aarch64TlvpLoadPage21,
     Aarch64TlvpLoadPageoff12,
-    Aarch64TlsdescAdrPage21,
-    Aarch64TlsdescLd64Lo12,
-    Aarch64TlsdescAddLo12,
-    Aarch64TlsdescCall,
-    Aarch64TlsieAdrGottprelPage21,
-    Aarch64TlsieLd64GottprelLo12Nc,
-    Aarch64TlsleAddTprelHi12,
-    Aarch64TlsleAddTprelLo12Nc,
-}
-
-impl RelocType {
-    /// One of the four relocations of an AArch64 TLS descriptor sequence
-    /// (`adrp`, `ldr`, `add`, `blr`), each patching its own instruction and all
-    /// four relaxed the same way for one symbol.
-    pub(crate) fn is_tlsdesc(self) -> bool {
-        matches!(
-            self,
-            Self::Aarch64TlsdescAdrPage21
-                | Self::Aarch64TlsdescLd64Lo12
-                | Self::Aarch64TlsdescAddLo12
-                | Self::Aarch64TlsdescCall
-        )
-    }
-
-    /// A reference to a GOT slot holding a symbol's offset from the thread
-    /// pointer: the initial-exec model.
-    pub(crate) fn is_gottprel(self) -> bool {
-        matches!(
-            self,
-            Self::X86Gottpoff | Self::Aarch64TlsieAdrGottprelPage21 | Self::Aarch64TlsieLd64GottprelLo12Nc
-        )
-    }
 }
 
 impl std::fmt::Display for RelocType {
@@ -193,11 +156,6 @@ impl std::fmt::Display for RelocType {
             RelocType::Aarch64Abs64 => write!(f, "R_AARCH64_ABS64"),
             RelocType::Aarch64Abs32 => write!(f, "R_AARCH64_ABS32"),
             RelocType::Aarch64Prel32 => write!(f, "R_AARCH64_PREL32"),
-            RelocType::Aarch64Prel64 => write!(f, "R_AARCH64_PREL64"),
-            RelocType::Aarch64LdPrelLo19 => write!(f, "R_AARCH64_LD_PREL_LO19"),
-            RelocType::Aarch64AdrPrelLo21 => write!(f, "R_AARCH64_ADR_PREL_LO21"),
-            RelocType::Aarch64Condbr19 => write!(f, "R_AARCH64_CONDBR19"),
-            RelocType::Aarch64Tstbr14 => write!(f, "R_AARCH64_TSTBR14"),
             RelocType::Aarch64Call26 => write!(f, "R_AARCH64_CALL26"),
             RelocType::Aarch64Jump26 => write!(f, "R_AARCH64_JUMP26"),
             RelocType::Aarch64AdrPrelPgHi21 => write!(f, "R_AARCH64_ADR_PREL_PG_HI21"),
@@ -216,14 +174,6 @@ impl std::fmt::Display for RelocType {
             RelocType::Aarch64GotPcrel32 => write!(f, "ARM64_RELOC_POINTER_TO_GOT"),
             RelocType::Aarch64TlvpLoadPage21 => write!(f, "ARM64_RELOC_TLVP_LOAD_PAGE21"),
             RelocType::Aarch64TlvpLoadPageoff12 => write!(f, "ARM64_RELOC_TLVP_LOAD_PAGEOFF12"),
-            RelocType::Aarch64TlsdescAdrPage21 => write!(f, "R_AARCH64_TLSDESC_ADR_PAGE21"),
-            RelocType::Aarch64TlsdescLd64Lo12 => write!(f, "R_AARCH64_TLSDESC_LD64_LO12"),
-            RelocType::Aarch64TlsdescAddLo12 => write!(f, "R_AARCH64_TLSDESC_ADD_LO12"),
-            RelocType::Aarch64TlsdescCall => write!(f, "R_AARCH64_TLSDESC_CALL"),
-            RelocType::Aarch64TlsieAdrGottprelPage21 => write!(f, "R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21"),
-            RelocType::Aarch64TlsieLd64GottprelLo12Nc => write!(f, "R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC"),
-            RelocType::Aarch64TlsleAddTprelHi12 => write!(f, "R_AARCH64_TLSLE_ADD_TPREL_HI12"),
-            RelocType::Aarch64TlsleAddTprelLo12Nc => write!(f, "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC"),
         }
     }
 }
@@ -348,28 +298,6 @@ pub(crate) fn collect(objects: &[(String, Vec<u8>)]) -> Result<LinkState, LinkEr
         .map(|(name, data)| parse_single_input(name, data))
         .collect::<Result<_, LinkError>>()?;
 
-    // One link is one machine: the first object names it, and an object built
-    // for the other is refused rather than merged into an image that runs on
-    // neither.
-    let mut arch = None;
-    for ((name, _), input) in flat.iter().zip(&parsed) {
-        let ParsedInput::Object(object) = input else { continue };
-        match arch {
-            None => arch = Some(object.arch),
-            Some(first) if first != object.arch => {
-                return Err(LinkError::Parse {
-                    file: name.clone(),
-                    message: format!("built for {:?}, but the link is {first:?}", object.arch),
-                })
-            }
-            Some(_) => {}
-        }
-    }
-    let arch = arch.ok_or_else(|| LinkError::Parse {
-        file: String::new(),
-        message: "no object file names the machine to link for".to_string(),
-    })?;
-
     // Phase 2: merge results sequentially.
     let mut state = LinkState {
         sections: Vec::new(),
@@ -380,7 +308,7 @@ pub(crate) fn collect(objects: &[(String, Vec<u8>)]) -> Result<LinkState, LinkEr
         metadata: Vec::new(),
         dynamic_imports: HashSet::new(),
         dynamic_libs: Vec::new(),
-        arch,
+        arch: Arch::Aarch64,
     };
 
     for (obj_idx, input) in parsed.into_iter().enumerate() {
@@ -439,16 +367,11 @@ fn parse_single_input(name: &str, data: &[u8]) -> Result<ParsedInput, LinkError>
 }
 
 /// Parse a single object file into a `ParsedObject` with local section indices.
-fn parse_object(obj: &object::File, name: &str) -> Result<ParsedObject, LinkError> {
-    let arch = match obj.architecture() {
-        object::Architecture::X86_64 => Arch::X86_64,
-        object::Architecture::Aarch64 => Arch::Aarch64,
-        other => {
-            return Err(LinkError::Parse {
-                file: name.to_string(),
-                message: format!("built for {other:?}, which is neither x86_64 nor aarch64"),
-            })
-        }
+fn parse_object(obj: &object::File, _name: &str) -> Result<ParsedObject, LinkError> {
+    let arch = if matches!(obj.architecture(), object::Architecture::X86_64) {
+        Arch::X86_64
+    } else {
+        Arch::Aarch64
     };
 
     let mut sections = Vec::new();
@@ -546,11 +469,6 @@ fn parse_object(obj: &object::File, name: &str) -> Result<ParsedObject, LinkErro
         };
         if symbol.is_undefined() { continue; }
         if symbol.kind() == read::SymbolKind::Section { continue; }
-        // AArch64 ELF mapping symbols (AAELF64 §5.5.1): `$x` and `$d`, with or
-        // without a `.suffix`, mark where code and data begin inside a section.
-        // Local, repeated, never a relocation's target, and nothing this
-        // output carries.
-        if !is_macho && !symbol.is_global() && is_mapping_symbol(&sym_name) { continue; }
         let sec_idx = match symbol.section() {
             read::SymbolSection::Section(idx) => idx,
             _ => continue,
@@ -622,11 +540,7 @@ fn parse_object(obj: &object::File, name: &str) -> Result<ParsedObject, LinkErro
                         symbol: local_sym_name(&target),
                     }),
                 },
-                RelocationFlags::Coff { typ } => match coff_to_reloc_type(arch, typ, || {
-                    let data = &sections[local_sec.0].data;
-                    let off = offset as usize;
-                    u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
-                }) {
+                RelocationFlags::Coff { typ } => match coff_to_reloc_type(typ) {
                     Some(r) => (r, false),
                     None => return Err(LinkError::UnsupportedRawRelocation {
                         raw_type: format!("COFF {typ}"),
@@ -662,10 +576,6 @@ fn parse_object(obj: &object::File, name: &str) -> Result<ParsedObject, LinkErro
             // the addend at zero, for different reasons and by the same route.
             let addend = if subtrahend.is_some() || is_macho_instruction {
                 0
-            } else if let (RelocationFlags::Coff { .. }, Some(addend)) =
-                (reloc.flags(), coff_arm64_insn_addend(r_type, &sections[local_sec.0].data, offset))
-            {
-                addend
             } else if reloc.has_implicit_addend() {
                 let data = &sections[local_sec.0].data;
                 let off = offset as usize;
@@ -758,7 +668,9 @@ fn local_sym_name(sym: &LocalSymbolRef) -> String {
 
 /// Merge a parsed object into the global LinkState, remapping local section indices.
 fn merge_parsed_object(state: &mut LinkState, parsed: ParsedObject, obj_idx: ObjIdx) {
-    debug_assert_eq!(parsed.arch, state.arch, "`collect` refuses a mixed link before any merge");
+    if matches!(parsed.arch, Arch::X86_64) {
+        state.arch = Arch::X86_64;
+    }
 
     let base = state.sections.len();
     let remap = |local: LocalSectionIdx| -> SectionIdx { SectionIdx(base + local.0) };
@@ -882,11 +794,6 @@ fn elf_to_reloc_type(r_type: u32) -> Option<RelocType> {
         elf::R_AARCH64_ABS64 => RelocType::Aarch64Abs64,
         elf::R_AARCH64_ABS32 => RelocType::Aarch64Abs32,
         elf::R_AARCH64_PREL32 => RelocType::Aarch64Prel32,
-        elf::R_AARCH64_PREL64 => RelocType::Aarch64Prel64,
-        elf::R_AARCH64_LD_PREL_LO19 => RelocType::Aarch64LdPrelLo19,
-        elf::R_AARCH64_ADR_PREL_LO21 => RelocType::Aarch64AdrPrelLo21,
-        elf::R_AARCH64_CONDBR19 => RelocType::Aarch64Condbr19,
-        elf::R_AARCH64_TSTBR14 => RelocType::Aarch64Tstbr14,
         elf::R_AARCH64_CALL26 => RelocType::Aarch64Call26,
         elf::R_AARCH64_JUMP26 => RelocType::Aarch64Jump26,
         elf::R_AARCH64_ADR_PREL_PG_HI21 => RelocType::Aarch64AdrPrelPgHi21,
@@ -902,37 +809,12 @@ fn elf_to_reloc_type(r_type: u32) -> Option<RelocType> {
         elf::R_AARCH64_MOVW_UABS_G3 => RelocType::Aarch64MovwUabsG3,
         elf::R_AARCH64_ADR_GOT_PAGE => RelocType::Aarch64AdrGotPage,
         elf::R_AARCH64_LD64_GOT_LO12_NC => RelocType::Aarch64Ld64GotLo12Nc,
-        elf::R_AARCH64_TLSDESC_ADR_PAGE21 => RelocType::Aarch64TlsdescAdrPage21,
-        elf::R_AARCH64_TLSDESC_LD64_LO12 => RelocType::Aarch64TlsdescLd64Lo12,
-        elf::R_AARCH64_TLSDESC_ADD_LO12 => RelocType::Aarch64TlsdescAddLo12,
-        elf::R_AARCH64_TLSDESC_CALL => RelocType::Aarch64TlsdescCall,
-        elf::R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21 => RelocType::Aarch64TlsieAdrGottprelPage21,
-        elf::R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC => RelocType::Aarch64TlsieLd64GottprelLo12Nc,
-        elf::R_AARCH64_TLSLE_ADD_TPREL_HI12 => RelocType::Aarch64TlsleAddTprelHi12,
-        elf::R_AARCH64_TLSLE_ADD_TPREL_LO12_NC => RelocType::Aarch64TlsleAddTprelLo12Nc,
         _ => return None,
     })
 }
 
-/// Map a COFF relocation type to RelocType. The numbers are per machine: ARM64
-/// and AMD64 reuse the same small integers for different things. `insn` reads
-/// the instruction an ARM64 page-offset load or store patches, whose access
-/// size decides the scale.
-fn coff_to_reloc_type(arch: Arch, typ: u16, insn: impl FnOnce() -> u32) -> Option<RelocType> {
-    if arch == Arch::Aarch64 {
-        return Some(match typ {
-            pe::IMAGE_REL_ARM64_ADDR64 => RelocType::Aarch64Abs64,
-            // The image base is 0, so an RVA and an address are one number.
-            pe::IMAGE_REL_ARM64_ADDR32 | pe::IMAGE_REL_ARM64_ADDR32NB => RelocType::Aarch64Abs32,
-            pe::IMAGE_REL_ARM64_BRANCH26 => RelocType::Aarch64Call26,
-            pe::IMAGE_REL_ARM64_PAGEBASE_REL21 => RelocType::Aarch64AdrPrelPgHi21,
-            pe::IMAGE_REL_ARM64_PAGEOFFSET_12A => RelocType::Aarch64AddAbsLo12Nc,
-            pe::IMAGE_REL_ARM64_PAGEOFFSET_12L => classify_pageoff12(insn()),
-            pe::IMAGE_REL_ARM64_REL32 => RelocType::Aarch64Prel32,
-            pe::IMAGE_REL_ARM64_SECREL => RelocType::Aarch64Abs32,
-            _ => return None,
-        });
-    }
+/// Map COFF x86_64 relocation types to RelocType.
+fn coff_to_reloc_type(typ: u16) -> Option<RelocType> {
     Some(match typ {
         pe::IMAGE_REL_AMD64_ADDR64 => RelocType::X86_64,
         pe::IMAGE_REL_AMD64_ADDR32 => RelocType::X86_32,
@@ -1562,36 +1444,4 @@ pub(crate) fn collect_unique_symbols<'a>(
         }
     }
     result
-}
-
-/// The addend an ARM64 COFF instruction relocation carries in the immediate it
-/// patches, in bytes, or `None` for a relocation that is not an instruction's.
-/// The linker writes the whole field afresh from symbol plus this, which is
-/// what LLD's `applyArm64Addr`, `applyArm64Imm` and `applyArm64Ldr` compute.
-fn coff_arm64_insn_addend(r_type: RelocType, data: &[u8], offset: u64) -> Option<i64> {
-    let off = offset as usize;
-    let insn = || u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
-    let imm12 = |insn: u32| ((insn >> 10) & 0xfff) as i64;
-    Some(match r_type {
-        RelocType::Aarch64Call26 | RelocType::Aarch64Jump26 => (((insn() & 0x03ff_ffff) as i64) << 38) >> 36,
-        RelocType::Aarch64AdrPrelPgHi21 => {
-            let insn = insn();
-            (((insn >> 29) & 0x3) | ((insn >> 3) & 0x001f_fffc)) as i64
-        }
-        RelocType::Aarch64AddAbsLo12Nc => imm12(insn()),
-        RelocType::Aarch64Ldst8AbsLo12Nc => imm12(insn()),
-        RelocType::Aarch64Ldst16AbsLo12Nc => imm12(insn()) << 1,
-        RelocType::Aarch64Ldst32AbsLo12Nc => imm12(insn()) << 2,
-        RelocType::Aarch64Ldst64AbsLo12Nc => imm12(insn()) << 3,
-        RelocType::Aarch64Ldst128AbsLo12Nc => imm12(insn()) << 4,
-        _ => return None,
-    })
-}
-
-/// An AArch64 (or Arm) mapping symbol's name: `$x`, `$d`, `$a` or `$t`,
-/// alone or followed by `.` and anything.
-fn is_mapping_symbol(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix('$') else { return false };
-    let mut chars = rest.chars();
-    matches!(chars.next(), Some('x' | 'd' | 'a' | 't')) && matches!(chars.next(), None | Some('.'))
 }

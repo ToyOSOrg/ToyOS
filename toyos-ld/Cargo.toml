@@ -1,6 +1,6 @@
 [package]
 name = "toyos-ld"
-version = "0.3.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "ToyOS's linker: resolves libraries, combines object files and produces executables, for the ToyOS C toolchain and the upstream x86_64-unknown-toyos Rust target."

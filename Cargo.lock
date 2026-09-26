@@ -1226,7 +1226,7 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-ld"
-version = "0.3.0"
+version = "0.2.0"
 dependencies = [
  "object 0.38.1",
  "sha2",

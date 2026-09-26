@@ -34,24 +34,9 @@ pub struct ObjBuilder {
 
 impl ObjBuilder {
     pub fn new() -> Self {
-        Self::for_machine(BinaryFormat::Elf, Architecture::X86_64)
-    }
-
-    pub fn for_machine(format: BinaryFormat, arch: Architecture) -> Self {
-        ObjBuilder { obj: Object::new(format, arch, Endianness::Little) }
-    }
-
-    /// Add a relocation of `flags` against `symbol` at `offset` in `section`'s bytes.
-    pub fn reloc(
-        &mut self,
-        section: StandardSection,
-        offset: u64,
-        symbol: object::write::SymbolId,
-        addend: i64,
-        flags: RelocationFlags,
-    ) {
-        let section = self.obj.section_id(section);
-        self.obj.add_relocation(section, Relocation { offset, symbol, addend, flags }).unwrap();
+        ObjBuilder {
+            obj: Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little),
+        }
     }
 
     pub fn text(&mut self, name: &str, code: &[u8], scope: SymbolScope) -> object::write::SymbolId {
@@ -77,22 +62,6 @@ impl ObjBuilder {
             value: offset,
             size: bytes.len() as u64,
             kind: SymbolKind::Data,
-            scope,
-            weak: false,
-            section: SymbolSection::Section(section),
-            flags: SymbolFlags::None,
-        })
-    }
-
-    /// A thread-local variable with initial bytes, in `.tdata`.
-    pub fn tls(&mut self, name: &str, bytes: &[u8], scope: SymbolScope) -> object::write::SymbolId {
-        let section = self.obj.section_id(StandardSection::Tls);
-        let offset = self.obj.append_section_data(section, bytes, 8);
-        self.obj.add_symbol(Symbol {
-            name: name.as_bytes().to_vec(),
-            value: offset,
-            size: bytes.len() as u64,
-            kind: SymbolKind::Tls,
             scope,
             weak: false,
             section: SymbolSection::Section(section),
