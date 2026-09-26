@@ -116,10 +116,6 @@ pub fn compile_c(name: &str) -> (Vec<u8>, Vec<Vec<u8>>) {
 }
 
 /// Link object bytes as a PIE ELF for ToyOS. Returns the linked binary bytes.
-///
-/// The arguments are the ones rustc passes `rust-lld` for an
-/// `x86_64-unknown-toyos` executable, with the entry and the C library named
-/// because no Rust crate is there to name them.
 pub fn link_toyos(obj: &[u8], extra_objs: &[Vec<u8>], name: &str) -> Vec<u8> {
     let (libc_path, rust_lld) = libc_archive_toyos();
 
