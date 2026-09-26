@@ -272,13 +272,14 @@ mod tests {
         // The waker wins the claim; the retirer sets the kill bit. Both
         // messages are in flight at once, which is well-formed by
         // construction: they ride two distinct embedded nodes.
-        assert!(crate::waitq::wake_direct(
+        assert!(crate::park::notify(
             &t,
             WakeCause::new(WakeReason::Woken),
             &cpus,
             &kicks,
             &NoPreempt,
-        ));
+        )
+        .woke());
         assert_eq!(t.claim_wake(), Claim::Lost, "the wake is already owned");
         assert_eq!(begin(&t).post(&cpus, &kicks, &NoPreempt), Some(C0));
         assert!(t.wake_node().in_flight() && t.retire_node().in_flight());

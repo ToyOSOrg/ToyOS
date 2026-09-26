@@ -50,7 +50,7 @@ pub fn disable() {
     gs::lock_inc_u32::<OFF_PREEMPT_COUNT>();
 }
 
-/// Drops the count without polling `need_resched`, for a caller about to reschedule anyway (see `waitq`'s park).
+/// Drops the count without polling `need_resched`, for a caller about to reschedule anyway (see `sched::driver::pass_block`).
 #[inline]
 pub fn enable_no_resched() {
     if !percpu_ready() { return; }

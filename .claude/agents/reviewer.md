@@ -44,8 +44,12 @@ above; otherwise it is a NOTE.
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
   legacy: no shim, no workaround, no silent default. No new
   dependency, host binary or fetch. Nothing outside the brief's fence.
-- **Growth.** What could be deleted, merged into what exists, or made smaller? An abstraction with
-  one caller, a parameter with one value, dead code. A compromise the branch found is removed or
+- **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
+  (`git diff --shortstat origin/main...HEAD`), production and tests apart. Production code that grows
+  needs a reason you accept; a branch that could delete more than it adds and does not goes back
+  with the deletion named. What could be deleted, merged into what exists, or made smaller? An
+  abstraction with one caller, a parameter with one value, dead code. Size is never bought with a
+  weaker check: tests are cut only when they test nothing. A compromise the branch found is removed or
   recorded in `issues/` with an owner, evidence and an exit condition.
 - **Tests.** The refusals and the boundary, not the happy path. Write down the partial fix or
   one-field mutation that would still pass, as a patch the implementer can apply. High-risk code names a negative control, the whole change reverted onto a named commit

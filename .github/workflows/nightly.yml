@@ -1,7 +1,7 @@
 name: nightly
 
-# Everything that boots a guest, the host checks a pull request does not run,
-# and portability: on main every night, and on any branch by
+# Everything that boots a guest, the host gate again to write the cache the
+# merge queue restores, and portability: on main every night, and on any branch by
 # `gh workflow run nightly.yml --ref <branch>`. Every job's logic is
 # `cargo run -- --ci <job>` (src/ci.rs); this file says where each one runs.
 
@@ -38,7 +38,7 @@ jobs:
           key: host-${{ github.run_id }}
           restore-keys: host-
 
-      - run: cargo run -- --ci host-full
+      - run: cargo run -- --ci host
 
       # The host cache's one writer. Only main's entries are readable from
       # every branch.

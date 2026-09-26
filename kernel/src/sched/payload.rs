@@ -10,9 +10,9 @@ use toyos_sched::hw::Nanos;
 use toyos_sched::msg::Msg;
 use toyos_sched::sync::LeafLock;
 use toyos_sched::task::{SchedPayload, TaskAccounting, TaskShared, WaitClass};
-use toyos_sched::waitq::{WaitList, WaitQueue, WaitTicket};
+use toyos_sched::park::WaitTicket;
 
-use crate::completion::{Inbox, Watch};
+use crate::watch::Watch;
 use crate::mm::paging::Cr3;
 use crate::scheduler::OperationSlot;
 use crate::process::{OwnedAlloc, PageTables, ProcessAccounting, TaskId};
@@ -37,15 +37,8 @@ impl<T: Send> LeafLock<T> for KernelLock<T> {
 pub type KMsg = Msg<KernelPayload>;
 pub type KShared = TaskShared<KMsg>;
 pub type KShare = FairShare<KernelLock<ShareState>>;
-pub type KWaitList = KernelLock<WaitList<KMsg>>;
-pub type KWaitQueue = WaitQueue<KMsg, KWaitList>;
 /// The core's wait ticket; blocking sites use `driver::Ticket`, which wraps it in the needed preempt guard.
-pub type RawTicket<'q> = WaitTicket<'q, KMsg, KWaitList>;
-
-/// A queue in a `static` — the device queues and the futex/park buckets.
-pub const fn static_queue(class: WaitClass) -> KWaitQueue {
-    KWaitQueue::new(class, KernelLock::new(WaitList::new()))
-}
+pub type RawTicket = WaitTicket<KMsg>;
 
 /// The saved callee context; everything `Hw::switch` must load without dereferencing anything else.
 pub struct KernelCtx {
@@ -92,15 +85,10 @@ pub struct TaskHandle {
     acct: Lock<TaskAccounting>,
     /// Set by `Hw::release`; the one fact a retirer needs, that the thread is off every CPU.
     released: AtomicBool,
-    /// Where this thread parks: its own one-waiter queue, never woken as a queue — a post claims the rendezvous word directly.
-    /// One list of one, not shared hashed buckets — those would make `Registration::finish` scan past every unrelated sleeper.
-    park: KWaitQueue,
     /// What another thread arms on to be told this one moved: its exit, for `SYS_THREAD_JOIN`, and its release, for the retirer.
     watch: Watch,
     /// Cancels reported to this thread; a second one means a caller swallowed the first, so it panics rather than spinning.
     cancels: AtomicU32,
-    /// This thread's completions inbox; kept on the cross-CPU handle so a post never asks the process table.
-    inbox: Inbox,
     /// The operation this thread is inside, if any; kept here so it survives a mid-operation migration. `scheduler::Operation` owns the rules.
     operation: OperationSlot,
 }
@@ -112,10 +100,8 @@ impl TaskHandle {
             running_since: AtomicU64::new(0),
             acct: Lock::new(TaskAccounting::default()),
             released: AtomicBool::new(false),
-            park: static_queue(WaitClass::Other),
             watch: Watch::new(),
             cancels: AtomicU32::new(0),
-            inbox: Inbox::new(),
             operation: OperationSlot::new(),
         }
     }
@@ -137,10 +123,7 @@ impl TaskHandle {
     pub(crate) fn publish_released(&self) {
         self.released.store(true, Ordering::Release);
         // The retirer arms on this thread's own watch, the same subject a joiner uses.
-        crate::completion::post(
-            crate::completion::Subject::of(&self.watch),
-            crate::completion::Outcome::Gone(crate::completion::Reason::Closed),
-        );
+        self.watch.post();
     }
 
     /// Has `Hw::release` run for this thread? The retire wait's condition.
@@ -148,17 +131,9 @@ impl TaskHandle {
         self.released.load(Ordering::Acquire)
     }
 
-    pub fn inbox(&self) -> &Inbox {
-        &self.inbox
-    }
-
     /// Where this thread's establishment lives; `scheduler::Operation` owns every rule about it.
     pub fn operation(&self) -> &OperationSlot {
         &self.operation
-    }
-
-    pub fn park_queue(&self) -> &KWaitQueue {
-        &self.park
     }
 
     /// What this thread's own transitions are posted to.
@@ -175,7 +150,7 @@ impl TaskHandle {
         let reported = self.cancels.fetch_add(1, Ordering::Relaxed);
         assert!(
             reported == 0,
-            "completion: a second cancel reported to one thread — the first was \
+            "watch: a second cancel reported to one thread — the first was \
              swallowed by a caller that waited again instead of returning",
         );
         true

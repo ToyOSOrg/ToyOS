@@ -1,19 +1,15 @@
-//! The handle-facing object for an inbox.
-//!
-//! Distinct from [`completion::inbox`](crate::completion::inbox)'s `Inbox`: that is a
-//! task's bounded record ring, never handle-named; this is what `SYS_INBOX_SETUP`
-//! installs, a counted reference to [`crate::inbox::Inbox`].
+//! The handle-facing object for an inbox: what `SYS_INBOX_SETUP` installs, the
+//! one owner of a [`crate::inbox::InboxRef`].
 
 use alloc::sync::Arc;
 
-use crate::inbox::InboxRef;
+use crate::inbox::{Inbox, InboxRef};
 
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
-/// The ring's pages belong to the instance keyed by [`InboxId`](crate::inbox::InboxId); this holds only the counted reference.
+/// The ring's pages belong to the [`Inbox`]; this holds its one owning reference.
 pub struct InboxObject {
     pub(super) core: ObjectCore,
-    id: crate::inbox::InboxId,
     reference: Held<InboxRef>,
 }
 
@@ -21,13 +17,13 @@ impl InboxObject {
     pub fn new(ring: InboxRef) -> Arc<Self> {
         Arc::new(Self {
             core: Self::new_core(),
-            id: ring.id(),
             reference: Held::new(ring),
         })
     }
 
-    pub fn id(&self) -> crate::inbox::InboxId {
-        self.id
+    /// The ring, for as long as a handle names it.
+    pub fn inbox(&self) -> Option<Arc<Inbox>> {
+        self.reference.with(InboxRef::inbox)
     }
 }
 

@@ -74,7 +74,7 @@ pub(crate) fn backoff_step(attempt: u32) -> Duration {
 }
 
 /// Parks the calling task between two refused block-operation attempts; the first call only yields.
-/// Must not be called by a caller already holding a completion arm — arming a second one panics.
+/// Must not be called by a caller already registered on a watch — a second registration panics.
 pub(crate) fn between_attempts(attempt: u32) {
     if attempt <= 1 {
         crate::scheduler::yield_now();
@@ -85,10 +85,10 @@ pub(crate) fn between_attempts(attempt: u32) {
         return;
     };
     let deadline = Deadline::at(crate::clock::now() + backoff_step(attempt));
-    let _ = crate::completion::wait_until(
+    let _ = crate::watch::wait_until(
         &parkable,
-        crate::completion::Subject::of(handle.watch()),
-        crate::completion::Token::new(0),
+        handle.watch(),
+        0,
         toyos_sched::task::WaitClass::Other,
         deadline,
         || false,

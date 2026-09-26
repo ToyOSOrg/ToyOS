@@ -223,24 +223,6 @@ pub fn drain_completed(buf: &mut crate::user_ptr::UserBytesMut) -> usize {
     written
 }
 
-static INBOX_WATCHERS: Lock<alloc::vec::Vec<crate::inbox::InboxId>> =
-    Lock::new(alloc::vec::Vec::new());
-
-pub fn add_inbox_watcher(id: crate::inbox::InboxId) {
-    let mut watchers = INBOX_WATCHERS.lock();
-    if !watchers.contains(&id) {
-        watchers.push(id);
-    }
-}
-
-pub fn remove_inbox_watcher(id: crate::inbox::InboxId) {
-    INBOX_WATCHERS.lock().retain(|&x| x != id);
-}
-
-pub fn inbox_watchers() -> alloc::vec::Vec<crate::inbox::InboxId> {
-    INBOX_WATCHERS.lock().clone()
-}
-
 
 /// Notify region only; virtqueues and DMA pools are leaked at bring-up because
 /// `TX_ISR` holds a used-ring consumer into one of them for the life of the boot.

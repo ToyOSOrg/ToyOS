@@ -1,13 +1,13 @@
 //! The workload script DSL — the opcode set a thread script is written in; see
 //! [`Op`].
 //!
-//! A scenario is *data*: CPUs, wait queues, processes and their thread
+//! A scenario is *data*: CPUs, waitable objects, processes and their thread
 //! scripts. Everything a scenario can express is something the kernel's own
 //! blocking sites do, so a scenario that passes is a statement about the
 //! protocol rather than about the harness.
 //!
-//! Futexes get no opcode of their own: a futex bucket *is* a `WaitQueue`, so a
-//! futex storm is `Block`/`Wake` on a queue whose class is `Futex`. Giving it a
+//! Futexes get no opcode of their own: a futex bucket *is* a `Watch`, so a
+//! futex storm is `Block`/`Wake` on an object whose class is `Futex`. Giving it a
 //! second opcode would be modelling a second wake path, and there is exactly
 //! one.
 

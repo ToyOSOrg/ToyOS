@@ -1,8 +1,8 @@
 //! Identifiers a tree may not name, and the exceptions that are named instead.
 //!
 //! **Clippy runs now, and these scans are what it cannot say.** `cargo run --
-//! --ci host-full` runs default clippy with warnings denied over three trees
-//! every night — the host workspace
+//! --ci host` runs default clippy with warnings denied over three trees
+//! on every merge — the host workspace
 //! (`--workspace --all-targets`), the kernel (`--target x86_64-unknown-none`)
 //! and the bootloader (`--target x86_64-unknown-uefi`) — so a `clippy.toml` is
 //! no longer a wall with nothing behind it.
@@ -132,13 +132,11 @@ const BANS: &[Ban] = &[
             // and never gives it back so none can start, which is what the
             // reset that follows stands on.
             ("kernel/src/drivers/xhci/mod.rs", 1),
-            // Both in `cpu.rs`'s test module, and both are the drop bomb
-            // rather than a leak: `Task`'s "the only legal death is
-            // `DeadTask::finalize`" is a scheduler invariant, so a test that
-            // deliberately ends with a live task — which is what most of these
-            // arms do — may not drop its world, and a registration held
-            // past a park it staged by hand is the same statement.
-            ("toyos-sched/src/cpu.rs", 2),
+            // In `cpu.rs`'s test module, and the drop bomb rather than a leak:
+            // `Task`'s "the only legal death is `DeadTask::finalize`" is a
+            // scheduler invariant, so a test that deliberately ends with a live
+            // task — which is what most of these arms do — may not drop its world.
+            ("toyos-sched/src/cpu.rs", 1),
         ],
     },
     // `toyos_untrusted::Untrusted` has no accessor, no cast, no arithmetic and
@@ -467,7 +465,6 @@ const SENTINEL_ALLOWED: &[(&str, usize)] = &[
 /// compiling with nobody asked. Per file *and* per count, so an added impl
 /// reds beside a permitted one and a deleted one reds its own stale row.
 const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
-    ("kernel/src/completion/inbox.rs", 1),
     ("kernel/src/drivers/hda.rs", 1),
     ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/drivers/virtio_console.rs", 1),
@@ -784,6 +781,11 @@ const CI_ACTIONS: &[Action] = &[
     Action {
         name: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
         why: "how a red guest job keeps its boots' serial logs (v4.6.2)",
+    },
+    Action {
+        name: "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18",
+        why: "the Rust project's own crates.io trusted-publishing exchange: the publish job's \
+              only registry credential, a token that lives for one run (v1.0.5)",
     },
 ];
 

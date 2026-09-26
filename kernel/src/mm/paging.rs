@@ -618,7 +618,7 @@ impl AddressSpace {
                     // `write_pde`: a PDE naming a page table owes the context.
                     pd.write_pde(pd_idx, va, 0).discharge(target);
                     // Before the frame is freed, so waiters stay findable.
-                    crate::sched::waitqs::revoke_futex_range(phys, PAGE_2M);
+                    crate::sched::futex::revoke_range(phys, PAGE_2M);
                     self.pages.remove(&phys);
                 }
             }

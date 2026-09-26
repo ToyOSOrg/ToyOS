@@ -46,6 +46,7 @@ pub mod sysroot;
 pub mod testargs;
 pub mod tiers;
 pub mod toolchain;
+pub mod userlandhost;
 pub mod wallpaper;
 pub mod worktree;
 

@@ -59,5 +59,5 @@ extern "C" fn body(thread: u64) -> ! {
     crate::log!("logstorm done t={thread} emitted={STORM_RECORDS}");
 
     // Parks rather than exits: kthread rows are never removed, and spinning here would compete with the reader for the rest of the boot.
-    crate::completion::park_forever();
+    crate::watch::park_forever();
 }

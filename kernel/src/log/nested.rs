@@ -63,7 +63,7 @@ mod armed {
         }
         crate::log!("lognest done emitted={SHARD_RECORDS}");
 
-        crate::completion::park_forever();
+        crate::watch::park_forever();
     }
 
     /// Consumes the one-shot and sends this CPU its own IPI; `true` if this call sent it.

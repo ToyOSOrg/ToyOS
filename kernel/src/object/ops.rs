@@ -4,6 +4,7 @@
 //! object type is a compile error here. Authorization is not here: the
 //! caller has already resolved the handle with the rights the call needs.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
@@ -12,10 +13,10 @@ use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError};
 use crate::drivers::serial;
 use crate::file_cache;
 use crate::time::Deadline;
-use crate::inbox::Source;
 use crate::pipe::{self, PipeId};
 use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
+use crate::watch::Watch;
 use crate::{device as device_registry, keyboard, mouse};
 
 use super::device::DeviceClaim;
@@ -160,7 +161,7 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
 
 /// Release one handle.
 ///
-/// What the object holds is released by its own zero-handle hook; `close` releases only the two things that are the process's, not the object's (pipe-map windows, ended sources).
+/// What the object holds is released by its own zero-handle hook; `close` releases only the two things that are the process's, not the object's (pipe-map windows, polls on a watch it ends).
 pub fn close(
     table: &mut HandleTable,
     h: RawHandle,
@@ -181,12 +182,12 @@ pub fn close(
             }
         }
     }
-    // Only `EndedSource` reaches `cancel_by_source`: a source this handle does not solely own
-    // (e.g. `Console` and `Device(Keyboard)` both naming `Source::Keyboard`) cannot cancel another's poll.
-    let sources = [read_source(&object), write_source(&object)]
-        .map(|s| s.and_then(Source::ended_by_its_last_handle));
-    if sources.iter().any(|s| s.is_some()) {
-        crate::inbox::cancel_by_source(&sources);
+    // Only a watch this handle's object ends is answered: one it shares (every `Console` and a
+    // `Device(Keyboard)` name the keyboard's) cannot cancel another's poll.
+    if close_ends_polls(&object) {
+        for watch in [read_watch(&object), write_watch(&object)].into_iter().flatten() {
+            watch.cancel_polls();
+        }
     }
     Ok(())
 }
@@ -225,40 +226,90 @@ pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
     }
 }
 
-pub fn read_source(object: &KObjectRef) -> Option<Source> {
+/// A watch as a poll registration holds it: a static one's reference, or a
+/// share of one that goes with its object.
+pub enum WatchRef {
+    Static(&'static Watch),
+    Shared(Arc<Watch>),
+}
+
+impl core::ops::Deref for WatchRef {
+    type Target = Watch;
+    fn deref(&self) -> &Watch {
+        match self {
+            Self::Static(watch) => watch,
+            Self::Shared(watch) => watch,
+        }
+    }
+}
+
+/// The watch a readable poll on this object registers on, or `None` when no
+/// readiness of that direction exists.
+pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
-        KObjectRef::PipeRead(r) => Some(Source::PipeReadable(r.id())),
-        KObjectRef::Connection(c) => Some(Source::PipeReadable(c.rx())),
-        KObjectRef::Acceptor(a) => Some(Source::Port(a.port())),
-        KObjectRef::Console(_) => Some(Source::Keyboard),
+        KObjectRef::PipeRead(r) => pipe::read_watch(r.id()).map(WatchRef::Shared),
+        KObjectRef::Connection(c) => pipe::read_watch(c.rx()).map(WatchRef::Shared),
+        KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
+        KObjectRef::Console(_) => Some(WatchRef::Static(&keyboard::WATCH)),
         KObjectRef::Device(d) => match d.class() {
-            device_registry::DeviceType::Keyboard => Some(Source::Keyboard),
-            device_registry::DeviceType::Mouse => Some(Source::Mouse),
-            device_registry::DeviceType::PciFunction => d.pci_slot().map(|slot| Source::PciFunction(slot as u8)),
-            device_registry::DeviceType::HdaAudio => Some(Source::Hda),
-            device_registry::DeviceType::VirtioSound => Some(Source::VirtioSound),
+            device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
+            device_registry::DeviceType::Mouse => Some(WatchRef::Static(&mouse::WATCH)),
+            device_registry::DeviceType::PciFunction => {
+                d.pci_slot().map(|slot| WatchRef::Static(crate::pcidev::watch(slot)))
+            }
+            device_registry::DeviceType::HdaAudio | device_registry::DeviceType::VirtioSound => {
+                Some(WatchRef::Static(&crate::drivers::AUDIO_WATCH))
+            }
             device_registry::DeviceType::Framebuffer => None,
             // A partition answers its description and has nothing to wait for.
             device_registry::DeviceType::Partition => None,
         },
-        // Named unconditionally: the source alone cannot enforce rights.
-        KObjectRef::SysCap(_) => Some(Source::Log),
+        // Named unconditionally: the watch alone cannot enforce rights.
+        KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
     }
 }
 
-pub fn write_source(object: &KObjectRef) -> Option<Source> {
+/// The watch a writable poll on this object registers on.
+pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
-        KObjectRef::PipeWrite(w) => Some(Source::PipeWritable(w.id())),
-        KObjectRef::Connection(c) => Some(Source::PipeWritable(c.tx())),
-        KObjectRef::Console(_) => Some(Source::ConsoleSpace),
+        KObjectRef::PipeWrite(w) => pipe::write_watch(w.id()).map(WatchRef::Shared),
+        KObjectRef::Connection(c) => pipe::write_watch(c.tx()).map(WatchRef::Shared),
+        KObjectRef::Console(_) => Some(WatchRef::Static(&crate::log::console::SPACE)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
+    }
+}
+
+/// Whether closing one handle to this object ends what its watches watch, so
+/// every poll on them — in any ring — is answered as gone. `false` for the log
+/// and the keyboard, which the machine ends on its own and which other handles
+/// share: a console closing is not every console's keyboard going away.
+fn close_ends_polls(object: &KObjectRef) -> bool {
+    match object {
+        KObjectRef::SysCap(_) => crate::actuator::log_close_cancels_any_syscap(),
+        // A keyboard *claim* closing is the stimulus, not a `SysCap`.
+        KObjectRef::Console(_) => crate::actuator::keyboard_close_cancels_every_console(),
+        KObjectRef::Device(d) => match d.class() {
+            device_registry::DeviceType::Keyboard => {
+                crate::actuator::keyboard_close_cancels_every_console()
+            }
+            device_registry::DeviceType::Mouse
+            | device_registry::DeviceType::PciFunction
+            | device_registry::DeviceType::HdaAudio
+            | device_registry::DeviceType::VirtioSound
+            | device_registry::DeviceType::Framebuffer
+            | device_registry::DeviceType::Partition => true,
+        },
+        KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
+        | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => true,
     }
 }
 

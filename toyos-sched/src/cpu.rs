@@ -37,7 +37,7 @@ use crate::task::{
     TaskState, TransitTask, WaitClass, WakeCause, WakeReason,
 };
 use crate::timer::{TimerApplied, TimerPlan};
-use crate::waitq::{CommittedTicket, CurrentTask};
+use crate::park::{CommittedTicket, CurrentTask};
 
 /// Permission to switch. Holds pointers into the stable Box-backed task
 /// records; constructed only by safe code in
@@ -372,7 +372,7 @@ impl<X: SchedPayload> CpuSched<X> {
         self.running.as_ref()
     }
 
-    /// The handle `WaitQueue::prepare_wait` needs. Only the running task can
+    /// The handle `park::prepare` needs. Only the running task can
     /// be produced, so registering somebody else's task has no expression.
     pub fn current_task(&self) -> Option<CurrentTask<'_, Msg<X>>> {
         self.running
@@ -1137,7 +1137,7 @@ impl<X: SchedPayload> CpuSched<X> {
             // safe point honours it. **The pick reaps nothing.** What ends the
             // task:
             //
-            // * `completion::wait` answers `Cancelled` and the caller `?`s it
+            // * `watch::wait` answers `Cancelled` and the caller `?`s it
             //   out, dropping every guard on the way, so the unwind reaches the
             //   thread's own exit;
             // * `WaitTicket::commit` still refuses to park a killed task, which
@@ -2457,7 +2457,6 @@ mod tests {
     use crate::mailbox::{mailbox, NoPreempt};
     use crate::sync::LeafLock;
     use crate::task::{RtState, TaskAccounting, TaskBuilder};
-    use crate::waitq::{WaitList, WaitQueue};
     use std::sync::Mutex;
 
     struct TestLock<T>(Mutex<T>);
@@ -2639,21 +2638,21 @@ mod tests {
             let _ = pass.dispose_none().finish();
         }
 
-        fn park_running(&mut self, cpu: CpuId, queue: &WaitQueue<Msg<TestPayload>, TestLock<WaitList<Msg<TestPayload>>>>) {
+        fn park_running(&mut self, cpu: CpuId) {
             let (cpus, env) = self.split();
             let sched = &mut cpus[cpu.0 as usize];
             let current = CurrentTask::new(
                 sched.running().expect("a running task to park").shared(),
                 cpu,
             );
-            let ticket = queue.prepare_wait(&current);
-            let (committed, registration) = match ticket.commit() {
-                crate::waitq::Commit::Parked(c, r) => (c, r),
+            let ticket = crate::park::prepare(&current, crate::park::Cancel::Answers, WaitClass::Other)
+                .expect("nothing notified this task");
+            let committed = match ticket.commit() {
+                crate::park::Commit::Parked(c) => c,
                 _ => panic!("the commit refused an uncontended park"),
             };
             let pass = SchedPass::begin(sched, env, NOW);
             let _ = pass.dispose_block(committed, None).finish();
-            core::mem::forget(registration);
         }
 
         fn released(&self) -> Vec<TaskKey> {
@@ -2661,7 +2660,7 @@ mod tests {
         }
 
         /// Push the `Msg::Wake` for a task whose claim has **already** been
-        /// won — `waitq::deliver_wake`'s second half, split from its first.
+        /// won — `park::notify`'s second half, split from its first.
         ///
         /// A waker is two steps: the claim CAS, then the push. They are not one
         /// instruction and nothing makes them one, so a message posted by
@@ -2702,10 +2701,6 @@ mod tests {
         }
     }
 
-    fn queue() -> WaitQueue<Msg<TestPayload>, TestLock<WaitList<Msg<TestPayload>>>> {
-        WaitQueue::new(WaitClass::Other, TestLock(Mutex::new(WaitList::new())))
-    }
-
     /// A task reaches `running` through the ordinary route: adopt, pass, pick.
     #[test]
     fn a_spawned_task_is_adopted_and_dispatched() {
@@ -2725,10 +2720,9 @@ mod tests {
     #[test]
     fn a_retire_wakes_a_parked_task_so_it_can_unwind() {
         let mut w = World::new(1);
-        let q = queue();
         let (key, shared) = w.spawn(C0);
         w.run_a_pass(C0);
-        w.park_running(C0, &q);
+        w.park_running(C0);
         assert_eq!(shared.state(), TaskState::Blocked(C0));
 
         crate::retire::begin(&shared).post(&w.handles, &w.hw, &NoPreempt);
@@ -2767,10 +2761,9 @@ mod tests {
     #[test]
     fn a_retire_that_loses_the_claim_leaves_the_wake_in_flight() {
         let mut w = World::new(1);
-        let q = queue();
         let (key, shared) = w.spawn(C0);
         w.run_a_pass(C0);
-        w.park_running(C0, &q);
+        w.park_running(C0);
 
         // A waker wins the claim; its message has not been pushed yet.
         assert_eq!(shared.claim_wake(), Claim::Parked(C0), "the waker owns it");
@@ -2965,12 +2958,11 @@ mod tests {
     /// which is exactly what this asserts against.
     #[test]
     fn a_wake_for_a_stopped_task_lands_in_the_band_and_not_the_run_queue() {
-        let q = queue();
         let mut w = World::new(1);
         let (parked, parked_shared) = w.spawn(C0);
         w.run_a_pass(C0);
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(parked));
-        w.park_running(C0, &q);
+        w.park_running(C0);
         assert_eq!(parked_shared.state(), TaskState::Blocked(C0));
 
         assert!(parked_shared.stop_if_blocked(), "a parked task takes the mark");
@@ -3017,11 +3009,10 @@ mod tests {
     /// is what writes the `exit:` record this whole path is about.
     #[test]
     fn stopping_outranks_killing() {
-        let q = queue();
         let mut w = World::new(1);
         let (key, shared) = w.spawn(C0);
         w.run_a_pass(C0);
-        w.park_running(C0, &q);
+        w.park_running(C0);
         assert!(shared.stop_if_blocked());
         shared.mark_kill();
 

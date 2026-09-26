@@ -1,6 +1,6 @@
 //! **What raising a wake storm costs the thread that raises it.**
 //!
-//! `completion::post_n` walks the waiters armed on one word, claims each one
+//! `Watch::post_n` walks the waiters registered on one word, claims each one
 //! and posts a message to its home CPU — one loop, on the caller's CPU, before
 //! the syscall returns. `toyos-sched/sim`'s wakeup-storm case measures how long
 //! the *waiters* then take to reach a CPU and can say nothing whatever about
@@ -8,8 +8,8 @@
 //! storm of any size is free there. The cost is a guest measurement, and this
 //! is it.
 //!
-//! **The derivation, off the loop itself.** The body is a token comparison, a
-//! record store and one `claim_wake` per waiter, so the cost is
+//! **The derivation, off the loop itself.** The body is a token comparison and
+//! one `notify` of the waiter's word per waiter, so the cost is
 //! `fixed + N × per-waiter` — linear in the waiters on the word, with a
 //! constant that has nothing to do with N. That shape is what is asserted:
 //! quadrupling the storm may cost four times the loop, and a quarter more on

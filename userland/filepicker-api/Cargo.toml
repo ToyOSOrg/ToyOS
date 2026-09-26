@@ -6,3 +6,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos = { path = "../../toyos" }
+
+[lib]
+doctest = false

@@ -59,3 +59,13 @@ guest whose own last line is not the periodic reporter.
 300s, with the guest still talking 2s ago (366 console line(s) while it ran)`, and then
 passed alone in 641 ms. The capture's last 60 lines are only the periodic `sched:` / `PMM:`
 reporter (`parked=5 current=None`), so this sighting also does not meet the exit condition.
+
+**Sighting, 2026-09-26.** The fast tier on `wt/toyos-onewait` (PR #513) at
+`5f04cb62`, 12 wide, dev host load 24–28: `port_poll_churn` stalled, `60s of
+guard expired, and the guest had said nothing for the last 60s`, its capture
+two lines — the spawn at 13.925 and `exit: test_rs_port_poll_churn tid=2
+code=0` at 14.295 — then `ALONE … GREEN` in 539 ms. That branch replaces the
+thread join's wait and wake (`Watch::post` on the thread's watch). Ten paired
+runs of this name after it, the branch and its merge base `f8b77f1b` launched
+together, were green on both sides, so it does not meet the exit condition
+either, and it does not separate the two trees.

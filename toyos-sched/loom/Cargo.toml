@@ -67,6 +67,39 @@ placement-ignores-staleness = []
 #
 # `toyos-sched` declares no twin, because this decides nothing in `../src`.
 victim-retires-mid-probe = []
+# The negative control for the watch. It makes `task.rs`'s `begin_commit`
+# blind to the notified bit, which is a waiter that registers, checks and parks
+# without the post that landed in between being able to stop it — the lost wake
+# the watch exists to make unrepresentable — and `loom_watch.rs` must red:
+#
+#   cargo test -p toyos-sched-loom --features commit-ignores-notify --test loom_watch
+#
+# Never on by default and never reachable from a kernel build.
+commit-ignores-notify = []
+# The negative control for the notify's flagged arm. A post that finds its
+# bits already set answers off a load instead of a read-modify-write, so a
+# second post can read the word from before the waiter consumed the first, and
+# `loom_watch.rs` must red:
+#
+#   cargo test -p toyos-sched-loom --release --features notify-flag-load-only --test loom_watch
+#
+# Never on by default and never reachable from a kernel build.
+notify-flag-load-only = []
+# The negative control for the stop's gate. It removes the two `SeqCst` fences
+# of `watch.rs`'s `Gate`, so a poster's transition and the stop's sweep may
+# each miss the other, and `loom_watch.rs` must red:
+#
+#   cargo test -p toyos-sched-loom --release --features gate-fence-off --test loom_watch
+#
+# Never on by default and never reachable from a kernel build.
+gate-fence-off = []
+# `kernel-loom`'s control for a poll's one-shot answer, declared here too
+# because `loom_watch.rs` compiles `kernel/src/inbox/once.rs` as its ring entry;
+# both poll models there must red under it:
+#
+#   cargo test -p toyos-sched-loom --release --features poll-fire-load-store --test loom_watch
+#
+poll-fire-load-store = []
 
 [dependencies]
 loom = "0.7"

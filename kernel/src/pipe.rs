@@ -3,12 +3,10 @@ use crate::mm::pmm;
 use toyos_abi::ring::Ring;
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 
 use crate::mm::PAGE_2M;
-use crate::completion::Watch;
-use crate::inbox::InboxId;
+use crate::watch::Watch;
 use crate::id_map::{IdKey, IdMap};
 use crate::sync::Lock;
 use crate::user_ptr::{UserBytes, UserBytesMut};
@@ -117,10 +115,10 @@ struct Pipe {
     backing: Option<Backing>,
     readers: u32,
     writers: u32,
-    inbox_watchers: Vec<InboxId>,
-    /// Held by `Arc` so a blocking site can clone it out from under the table lock and hold it across its own park.
-    readers_watch: Arc<Watch>,
-    writers_watch: Arc<Watch>,
+    /// The read end's and the write end's watches. Held by `Arc` so a blocking site or a
+    /// poll registration can clone one out from under the table lock and hold it across its own park.
+    read_watch: Arc<Watch>,
+    write_watch: Arc<Watch>,
     /// Set when a write should hand the next reader transient RT priority — covers readers already runnable, which the wake-time boost misses.
     rt_boost_pending: bool,
 }
@@ -135,9 +133,8 @@ impl Pipe {
             backing: None,
             readers: 0,
             writers: 0,
-            inbox_watchers: Vec::new(),
-            readers_watch: Arc::new(Watch::new()),
-            writers_watch: Arc::new(Watch::new()),
+            read_watch: Arc::new(Watch::new()),
+            write_watch: Arc::new(Watch::new()),
             rt_boost_pending: false,
         }
     }
@@ -294,7 +291,7 @@ fn close_read(pipe_id: PipeId) {
         }
     });
     if wake_writers {
-        crate::inbox::Source::PipeWritable(pipe_id).wake();
+        crate::scheduler::wake_pipe_writers(pipe_id);
     }
 }
 
@@ -313,7 +310,7 @@ fn close_write(pipe_id: PipeId) {
         }
     });
     if wake_readers {
-        crate::inbox::Source::PipeReadable(pipe_id).wake();
+        crate::scheduler::wake_pipe_readers(pipe_id);
     }
 }
 
@@ -321,48 +318,12 @@ fn free_pipe(pipe: Pipe) {
     drop(pipe); // PhysPage freed via Drop
 }
 
-pub fn add_inbox_watcher(pipe_id: PipeId, inbox_id: InboxId) {
-    with_pipes_mut(|pipes| {
-        if let Some(pipe) = pipes.get_mut(pipe_id) {
-            if !pipe.inbox_watchers.contains(&inbox_id) {
-                pipe.inbox_watchers.push(inbox_id);
-            }
-        }
-    });
+/// The read end's watch, cloned out for a blocking site, a post or a poll to hold on its own stack.
+pub fn read_watch(pipe_id: PipeId) -> Option<Arc<Watch>> {
+    with_pipes(|pipes| pipes.get(pipe_id).map(|p| p.read_watch.clone()))
 }
 
-pub fn remove_inbox_watcher(pipe_id: PipeId, inbox_id: InboxId) {
-    with_pipes_mut(|pipes| {
-        if let Some(pipe) = pipes.get_mut(pipe_id) {
-            pipe.inbox_watchers.retain(|&id| id != inbox_id);
-        }
-    });
-}
-
-/// The waiter set of this pipe's read end, cloned out for a blocking or wake path to hold on its own stack.
-pub fn readers_queue(pipe_id: PipeId) -> Option<PipeEnd> {
-    with_pipes(|pipes| {
-        pipes.get(pipe_id).map(|p| PipeEnd {
-            watch: p.readers_watch.clone(),
-        })
-    })
-}
-
-pub fn writers_queue(pipe_id: PipeId) -> Option<PipeEnd> {
-    with_pipes(|pipes| {
-        pipes.get(pipe_id).map(|p| PipeEnd {
-            watch: p.writers_watch.clone(),
-        })
-    })
-}
-
-/// One end of a pipe: the queue a blocking site registers on and the subject it arms.
-pub struct PipeEnd {
-    pub watch: Arc<Watch>,
-}
-
-pub fn inbox_watchers(pipe_id: PipeId) -> Vec<InboxId> {
-    with_pipes(|pipes| {
-        pipes.get(pipe_id).map_or(Vec::new(), |p| p.inbox_watchers.clone())
-    })
+/// The write end's watch, the same way.
+pub fn write_watch(pipe_id: PipeId) -> Option<Arc<Watch>> {
+    with_pipes(|pipes| pipes.get(pipe_id).map(|p| p.write_watch.clone()))
 }

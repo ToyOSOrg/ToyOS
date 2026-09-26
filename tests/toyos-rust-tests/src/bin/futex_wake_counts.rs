@@ -22,7 +22,7 @@
 //! is not a shared wake. A page-aligned static is what makes their physical
 //! offset equal their virtual one.
 //!
-//! **Three questions, and each one had to be given a schedule rather than
+//! **Four questions, and each one had to be given a schedule rather than
 //! offered a race.**
 //!
 //! 1. [`counts`] — a count-limited wake names its word and answers how many.
@@ -39,14 +39,20 @@
 //!    and leaves the real waiter parked for good. The sweeper below is another
 //!    process asking exactly that question about frames this one just gave
 //!    back.
+//! 4. [`revoked_while_still_mapped`] — a wait that unmap ended stays ended
+//!    when the waiter's own mapping of the word survives: another process's
+//!    unmap of the same frame is the revoke, and the word still reads
+//!    `expected`.
 
 use std::io::Write;
+use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use toyos_abi::syscall::{self, MmapFlags, MmapProt};
+use toyos_abi::RawHandle;
 
 /// Two futex words in one page, `FUTEX_BUCKETS * 4` bytes apart, so
 /// `(phys >> 2) % 64` is the same for both.
@@ -80,6 +86,10 @@ static SIBLING_RETURNED: AtomicU32 = AtomicU32::new(0);
 const SELF: &str = "/system/bin/test_rs_futex_wake_counts";
 /// `argv[1]` the sweeper is spawned with.
 const SWEEP: &str = "sweep";
+/// `argv[1]` of [`revoked_while_still_mapped`]'s child, and the slot it finds
+/// the pipe in.
+const LET_GO: &str = "let-go";
+const INHERITED_PIPE: RawHandle = RawHandle(3);
 
 /// How many 2 MiB frames the third arm parks a waiter on and then unmaps.
 ///
@@ -95,12 +105,15 @@ const SWEEP_FRAMES: usize = 12;
 const PAGE_2M: usize = 2 * 1024 * 1024;
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some(SWEEP) {
-        return sweep();
+    match std::env::args().nth(1).as_deref() {
+        Some(SWEEP) => return sweep(),
+        Some(LET_GO) => return let_go(),
+        _ => {}
     }
     counts();
     claim_semantics();
     orphaned_by_unmap();
+    revoked_while_still_mapped();
     timeout_is_its_own_answer();
     println!("futex_wake respects its count, names its word, says how many it woke, and ends");
 }
@@ -213,7 +226,7 @@ const ATTEMPTS: usize = 6;
 /// The claim arithmetic, on a schedule this test arranges rather than one it
 /// hopes for.
 ///
-/// Two things `completion::post_n` must do are invisible unless a woken waiter
+/// Two things `Watch::post_n` must do are invisible unless a woken waiter
 /// is **still on the bucket** when the next call walks it: a claim another call
 /// already took must not be *counted*, and it must not *spend* the caller's
 /// `limit`. A waiter leaves the bucket when it runs and returns, so both
@@ -450,6 +463,73 @@ fn wait_until_parked_raw(word: *const u32, want: u64) {
         thread::sleep(Duration::from_millis(10));
     }
     panic!("{want} waiters never parked on a mapped word");
+}
+
+static REVOKED_RETURNED: AtomicU32 = AtomicU32::new(0);
+
+/// A wait a revoke ended stays ended while its word still reads `expected`.
+///
+/// The revoke is another process letting go of its own window onto the same
+/// frame: that unmap ends every wait on the frame, but this process's window
+/// is still there and its word unchanged, so the waiter re-reads a condition
+/// that is still false. Its registration is gone and no post can reach it
+/// again, so it must return rather than park — or, as the kernel's loop once
+/// could, go round its phase 1 forever.
+fn revoked_while_still_mapped() {
+    let ends = syscall::pipe().expect("a pipe");
+    let window = syscall::pipe_map(ends.read).expect("map the pipe here");
+    // Ring data nothing writes: nothing is ever written to this pipe.
+    let word = window.wrapping_add(4096) as usize;
+    let expected = unsafe { (word as *const u32).read_volatile() };
+
+    let waiter = thread::spawn(move || {
+        let answer = unsafe { syscall::futex_wait(word as *const u32, expected, None) };
+        REVOKED_RETURNED.store(1, Ordering::SeqCst);
+        answer
+    });
+    // A wake to an unchanged word re-parks inside the call, so the
+    // registration the revoke must find is still there.
+    wait_until_parked_raw(word as *const u32, 1);
+
+    let child = Command::new(SELF)
+        .arg(LET_GO)
+        .inherit_handle(INHERITED_PIPE.0, ends.read.0)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn the child that lets go: {e}"));
+    let out = child.wait_with_output().expect("wait for the child that lets go");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && said.contains("mapped and let go"),
+        "the child never mapped the pipe and let go of it, so nothing was revoked \
+         (exit={:?}):\n{said}",
+        out.status.code(),
+    );
+
+    for _ in 0..500 {
+        if REVOKED_RETURNED.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        REVOKED_RETURNED.load(Ordering::SeqCst),
+        1,
+        "a waiter whose registration a revoke ended is still in futex_wait 5 s after it, \
+         its word still mapped and still {expected:#x}: nothing can ever post to that wait",
+    );
+    waiter.join().expect("the revoked waiter panicked");
+    syscall::close(ends.read);
+    syscall::close(ends.write);
+    println!("  revoke: a revoked wait ended with its word still mapped and unchanged");
+}
+
+/// The other process of [`revoked_while_still_mapped`]: map the pipe it
+/// inherited, then close its only handle to it, which unmaps its window.
+fn let_go() {
+    syscall::pipe_map(INHERITED_PIPE).expect("map the inherited pipe");
+    syscall::close(INHERITED_PIPE);
+    println!("mapped and let go");
 }
 
 /// The other process: map fresh frames and ask each one's first word how many

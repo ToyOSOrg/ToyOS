@@ -617,7 +617,8 @@ pub fn audio_pipeline(cpus: usize) -> Scenario {
 }
 
 /// Many waiters, few tokens, every wait on a deadline: the shape where a
-/// `wake_one` that lets a corpse consume it strands somebody forever.
+/// bounded post that lets a waiter on its way out consume it strands somebody
+/// forever.
 pub fn futex_storm() -> Scenario {
     scenario(
         "futex_storm",
@@ -897,7 +898,7 @@ fn fair_workload(name: &'static str, cpus: usize, work: u64) -> Scenario {
     let mut scenario = scenario(
         name,
         cpus,
-        // No wait queues: a queue nobody blocks on would only be scaffolding.
+        // No waitable objects: one nobody blocks on would only be scaffolding.
         Vec::new(),
         vec![
             process("solo", vec![0; cpus], vec![hog(3 * work)]),
@@ -945,7 +946,7 @@ pub fn sibling_storm() -> Scenario {
 /// re-inserted after a dispatch carries a key strictly above every sibling
 /// queued before it and the ordering is already insertion order *without* the
 /// tie-break doing anything. Exact ties survive only where no charge separates
-/// two inserts — a `wake_all` of siblings, or the spawn burst — and one
+/// two inserts — a post that wakes siblings, or the spawn burst — and one
 /// dispatch dissolves them. Measured, not argued: 300 seeds of
 /// [`sibling_storm`] under this ordering are clean, and the same 300 under
 /// [`fair_identity_within_share`] fail on I13 every time.
@@ -1228,7 +1229,7 @@ pub fn share_gain(threads: usize, work: u64) -> Scenario {
     let mut scenario = scenario(
         "share_gain",
         1,
-        // No wait queues: a queue nobody blocks on would only be scaffolding.
+        // No waitable objects: one nobody blocks on would only be scaffolding.
         Vec::new(),
         vec![
             process("solo", vec![0], vec![hog(work)]),
@@ -1321,7 +1322,7 @@ pub const INTERACTIVE_ROUNDS: usize = 20;
 /// What it measures is the *drain* — how long the last of them waits for a CPU —
 /// and whether that time falls when the machine gets wider. A storm that drains
 /// no faster on four CPUs than on one is a storm being serialized somewhere, and
-/// the wake path has two places it could be: `wake_all` claims every waiter in
+/// the wake path has two places it could be: a post claims every waiter in
 /// one loop on the waker's CPU, and each claim posts a `Msg::Wake` to the
 /// waiter's *home* CPU, which is where spawn placement put it.
 ///
@@ -1412,7 +1413,7 @@ pub fn lopsided_placement(cpus: usize, threads: usize, work: u64) -> Scenario {
     let mut scenario = scenario(
         "lopsided_placement",
         cpus,
-        // No wait queues: a queue nobody blocks on would only be scaffolding.
+        // No waitable objects: one nobody blocks on would only be scaffolding.
         Vec::new(),
         vec![process("crowd", vec![0; threads], vec![Script::new(vec![Op::Run(work)])])],
     )

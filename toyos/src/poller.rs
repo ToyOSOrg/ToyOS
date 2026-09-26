@@ -342,8 +342,8 @@ impl Poller {
             let completion = self.rings.completion_at(idx);
             // Do not filter on `completion.result`. A negative result is the
             // kernel saying the registration is over and will never fire
-            // (`cancel_by_source` posts `-NotFound` when a watched handle
-            // closes, i.e. on any peer disconnect), and the caller must react
+            // (a watched handle's close answers every poll on a watch it ends
+            // with `-NotFound`, i.e. on any peer disconnect), and the caller must react
             // to that exactly as to readiness — by looking at the handle again.
             // A zero result is meaningful too: `OP_ACCEPT` reports handle 0
             // that way.

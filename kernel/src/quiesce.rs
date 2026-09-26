@@ -39,16 +39,14 @@
 //!
 //! Lock order: [`process::PROCESS_TABLE`] alone.
 
-use core::sync::atomic::{
-    AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
-    Ordering::Release,
-};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Relaxed};
 
 use toyos_quiesce::{must_stop, Record, Sweep, ThreadId};
 use toyos_sched::task::WaitClass;
+use toyos_sched::watch::Gate;
 
 use crate::arch::percpu;
-use crate::completion::{self, Outcome, Subject, Token, Watch};
+use crate::watch::{self, Watch};
 use crate::process;
 use crate::scheduler::TaskId;
 use crate::time::{Budget, Deadline, Duration};
@@ -68,10 +66,15 @@ pub(crate) const PARK: Budget = Budget::of(
      the record names how many",
 );
 
+const RUNNING: u32 = 0;
+const STOPPING: u32 = 1;
+
 /// Whether the machine is stopping. **The one word every other read here hangs
-/// off**: it is stored last with `Release` and loaded first with `Acquire`, so
-/// a gate that sees it sees the caller that goes with it.
-static STOPPING: AtomicBool = AtomicBool::new(false);
+/// off**: it is opened last and read first, so a reader that sees it sees the
+/// caller that goes with it. A [`Gate`], because [`note_progress`] reads it
+/// after the transition [`stop`]'s sweep reads, and the stop opens it before
+/// that sweep: the gate's fences are what keep both from reading stale.
+static STAGE: Gate = Gate::new(RUNNING);
 
 /// The thread running the stop, which never stops itself; no thread at all
 /// until [`stop`] stores one, spelt as `percpu` spells idle.
@@ -85,7 +88,11 @@ fn caller() -> ThreadId {
 /// Whether the machine's stop names the running thread, for the one Ring 3
 /// boundary that ranks this against the kill mark.
 pub fn stops_this_thread() -> bool {
-    if !STOPPING.load(Acquire) {
+    stops(STAGE.read())
+}
+
+fn stops(stage: u32) -> bool {
+    if stage != STOPPING {
         return false;
     }
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
@@ -117,8 +124,8 @@ static PROGRESS: Watch = Watch::new();
 /// before one: a sweep woken first would find it still running and wait for a
 /// post that has already come.
 pub fn note_progress() {
-    if stops_this_thread() {
-        completion::post(Subject::of(&PROGRESS), Outcome::Ready);
+    if stops(STAGE.after_write()) {
+        PROGRESS.post();
     }
 }
 
@@ -126,7 +133,7 @@ pub fn note_progress() {
 /// `quiesce-drain-refuse` actuator refuses by.
 #[cfg(feature = "boot-actuators")]
 pub fn runs_the_shutdown() -> bool {
-    if !STOPPING.load(Acquire) {
+    if STAGE.read() != STOPPING {
         return false;
     }
     let (Some(pid), Some(tid)) = (percpu::current_pid(), percpu::current_tid()) else {
@@ -151,14 +158,13 @@ pub fn stop() -> Record {
     };
     CALLER_PID.store(caller.pid, Relaxed);
     CALLER_TID.store(caller.tid, Relaxed);
-    // Last, and `Release`: a gate that sees the stop sees the caller it must
-    // not stop.
-    STOPPING.store(true, Release);
+    // Last: a gate that sees the stop sees the caller it must not stop.
+    STAGE.open(STOPPING);
 
     // Armed before the first sweep, so a transition landing between a sweep
     // and the park after it leaves a record that park returns on at once.
     let parkable = crate::scheduler::Parkable::at_entry();
-    let armed = completion::arm(Subject::of(&PROGRESS), Token::new(0), WaitClass::Other)
+    let armed = watch::arm(&PROGRESS, 0, WaitClass::Other)
         .expect("quiesce::stop: the caller holds no task to park");
     // The kick is the timer vector, whose return to Ring 3 is the gate.
     crate::arch::apic::kick_all_but_self();
@@ -177,7 +183,7 @@ pub fn stop() -> Record {
             // Uncancellable: the claim is taken, and a caller that left here
             // would leave a machine nothing else may turn off. The deadline is
             // `keep_waiting`'s own, so an expiry ends the loop at the next sweep.
-            let _ = completion::wait_uncancellable(&parkable, &armed, deadline);
+            watch::wait_uncancellable(&parkable, &armed, deadline);
             continue;
         }
         // Read here and not by the caller: the question is what was open at the
@@ -248,7 +254,7 @@ pub mod last {
     use toyos_quiesce::Sweep;
     use toyos_sched::task::WaitClass;
 
-    use crate::completion::{self, Outcome, Subject, Token, Watch};
+    use crate::watch::{self, Watch};
     use crate::time::{Budget, Deadline, Duration};
 
     /// The transition the held thread makes once it is released.
@@ -307,7 +313,7 @@ pub mod last {
             last.name(),
             toyos_quiesce::LAST_THREAD,
         );
-        completion::post(Subject::of(&ARRIVED), Outcome::Ready);
+        ARRIVED.post();
         let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
         // Yields and never parks: a park is the transition this hold exists to
         // place, and a sweep would stop this thread at the first one.
@@ -333,10 +339,10 @@ pub mod last {
         );
         let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
         let parkable = crate::scheduler::Parkable::at_entry();
-        let _ = completion::wait_until(
+        let _ = watch::wait_until(
             &parkable,
-            Subject::of(&ARRIVED),
-            Token::new(0),
+            &ARRIVED,
+            0,
             WaitClass::Other,
             deadline,
             || HELD.load(Acquire),

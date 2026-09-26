@@ -8,3 +8,6 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../toyos" }
 toyos-font = { path = "../toyos-font" }
 toyos-window = { path = "../toyos-window" }
+
+[lib]
+doctest = false

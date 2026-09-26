@@ -14,9 +14,7 @@
 //! never consulted.
 //!
 //! It runs inside `test-runner` because a spawned binary's stdin is a pipe: this
-//! process's handle 0 is the `Console` that names `Source::Keyboard`, and the
-//! claim
-//! it closes is minted from the capability the estate holds. Both objects are in
+//! process's handle 0 is the `Console`, and the claim it closes is minted from the capability the estate holds. Both objects are in
 //! one process, which is the smallest machine the collision exists on; the real
 //! failure needs two, and neither has to know about the other.
 //!
@@ -26,8 +24,7 @@
 //! 1. the keyboard claim is taken and released, and the stdin poll must still be
 //!    pending — the arm that reds on the defect;
 //! 2. the **mouse** claim is polled and released, and *that* poll must be
-//!    cancelled — `Source::Mouse` is named by nothing but the claim, so
-//!    cancellation is exactly what a close there owes. This is the direction a
+//!    cancelled — cancellation is exactly what a close there owes. This is the direction a
 //!    fix overshoots into: a tree that stopped cancelling on close would pass
 //!    arm 1 and red here;
 //! 3. an injected keystroke completes the stdin poll — so what survived arm 1
@@ -39,8 +36,7 @@ use toyos::{Keyboard, Mouse};
 use toyos_abi::syscall::DeviceType;
 use toyos_abi::RawHandle;
 
-/// This process's console. `object::ops::read_source` maps every `Console` to
-/// `Source::Keyboard`, which is the whole of the collision under test.
+/// This process's console.
 const STDIN: RawHandle = RawHandle(0);
 
 const STDIN_TOKEN: u64 = 1;
@@ -109,7 +105,7 @@ fn probe(cap: &SysCap) -> Result<(), String> {
 
     // Arm 2 first, so a tree that has stopped cancelling anything is caught
     // before arm 1 congratulates it. The mouse is the device every machine
-    // shape has, and `Source::Mouse` is named by its claim and by nothing else.
+    // shape has.
     let mouse: Mouse = cap
         .claim(DeviceType::Mouse)
         .map_err(|e| format!("the mouse must be claimable and answered {e:?}"))?;

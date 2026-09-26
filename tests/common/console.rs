@@ -698,21 +698,9 @@ pub fn c_capture_ignores_daemon_lines(
 /// A pending poll on stdin is not something the keyboard *claim* closing can
 /// cancel.
 ///
-/// **`Source::Keyboard` is named by two kinds of object and only one of them
-/// can end it.** `io_uring::cancel_by_source` cancels by source across every ring in
-/// the machine, and `object::ops::close` used to decide whether to call it by
-/// asking the object: `Device(_)` answered yes, on the argument that a claim
-/// admits exactly one handle so every ring watching it is the one holder's. The
-/// condition it needed was about the *source* — that no other **kind** of object
-/// names it — and every `Console` names `Source::Keyboard` too. So the one
-/// process holding the keyboard claim closing its handle posted `-NotFound` into
-/// every pending `POLL_ADD` on stdin in the machine, which is what libc's
-/// terminal read arms.
-///
 /// The guest half is `userland/test-runner/src/kbd_close.rs` and it carries all
-/// three verdicts; the host owes it one keystroke, which is the only thing that
-/// can complete a poll on `Source::Keyboard` and therefore the only way to show
-/// that what survived the close was a live registration.
+/// three verdicts; the host owes it one keystroke, the only way to show that
+/// what survived the close was a live registration.
 ///
 /// **`Profile::Metal` because the keystroke has to arrive.** Its i8042 is the
 /// only keyboard on the machine — no USB HID, no virtio — which is the shape
@@ -736,10 +724,9 @@ pub fn keyboard_claim_close_spares_stdin(
 /// The gate's body, parameterised on the boot's actuators so its negative
 /// control is one argument rather than a second copy of it.
 ///
-/// `keyboard-close-cancels-every-console` restores what the tree had — every
-/// object naming `Source::Keyboard` ending it on close — and this must red on a
-/// boot carrying it. The measurement is in the commit that took the actuator's
-/// name.
+/// `keyboard-close-cancels-every-console` restores what the tree had, and this
+/// must red on a boot carrying it. The measurement is in the commit that took
+/// the actuator's name.
 fn kbd_close_probe(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
