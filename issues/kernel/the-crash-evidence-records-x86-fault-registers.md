@@ -16,9 +16,9 @@ The slot is `FIRST[cpu::hardware_id() & (SLOTS - 1)]`, `SLOTS = 64`, as is
 `PANIC_DEPTH`'s. An APIC id below 64 is one slot per CPU. AArch64's
 `hardware_id` is MPIDR's `Aff3:Aff2:Aff1:Aff0`, so a second cluster's CPU 0
 (`Aff1 = 1`, `0x100`) lands on slot 0 beside the first CPU of all. QEMU `virt`
-numbers CPUs 16 and up that way, so two CPUs share one record and one panic
-depth, which the `apic` field was left unmasked to make visible and not to
-prevent.
+with 17 CPUs (TCG, `-cpu max`, GICv3) names CPU 16 `mpidr=0x100` in its MADT,
+so there two CPUs share one record and one panic depth, which the `apic`
+field was left unmasked to make visible and not to prevent.
 
 Owned by stage 5 of `issues/kernel/toyos-runs-on-arm64.md`, the first stage
 that starts a second CPU.

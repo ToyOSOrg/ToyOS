@@ -45,7 +45,7 @@ fn two_writers_never_overlap() {
             }
         };
         let other = thread::spawn(writer(lock.clone(), line.clone()));
-        writer(lock.clone(), line.clone())();
+        writer(lock, line)();
         other.join().unwrap();
     });
 }
