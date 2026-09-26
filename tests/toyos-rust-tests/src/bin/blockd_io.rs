@@ -653,6 +653,19 @@ fn dma(role: &str) {
                 fail("the lent region does not hold device block 0".into());
             }
             println!("blockd_io: the device read block 0 into the lent region");
+            // Only memory the kernel allocated is lent, and once: the
+            // function's own register window lent to it would aim the device
+            // at a device, and a region lent twice is two grants of one page.
+            let bar = ctrl.claim().map_bar(0, 4096).unwrap_or_else(|e| fail(format!("the BAR: {e:?}")));
+            match ctrl.claim().dma_map(bar.as_handle()) {
+                Err(SyscallError::InvalidArgument) => {}
+                other => fail(format!("lending the register window was answered {other:?}")),
+            }
+            match ctrl.claim().dma_map(region.as_handle()) {
+                Err(SyscallError::InvalidArgument) => {}
+                other => fail(format!("lending the region a second time was answered {other:?}")),
+            }
+            println!("blockd_io: a register window, and a region already lent, are refused with InvalidArgument");
         }
         "dma-outside" => {
             let past = mapping.device_addr + mapping.bytes;

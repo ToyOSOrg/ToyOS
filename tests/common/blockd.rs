@@ -396,7 +396,8 @@ pub fn blockd_survives_its_death(
 ///
 /// The guest drives blockd's controller itself (`blockd::nvme`), lending it one
 /// region with `SYS_DEVICE_DMA_MAP`, four times, each on a fresh claim:
-/// - a read into the lent region lands there;
+/// - a read into the lent region lands there, and the function's own register
+///   window and a region already lent are refused as regions to lend;
 /// - a read aimed at the first address past it is refused at the unit, and
 ///   the region is untouched;
 /// - a read aimed at the region after `SYS_DEVICE_DMA_UNMAP` took it back is
@@ -418,11 +419,14 @@ pub fn blockd_dma_outside_the_lent(
     let mut aimed = Vec::new();
     for name in ["dma-inside", "dma-outside", "dma-revoked", "dma-after"] {
         let result = role(&mut qemu, name, Duration::from_secs(120))?;
+        if name == "dma-inside" {
+            said(&result, "a register window, and a region already lent, are refused with InvalidArgument")?;
+        }
         if let Some(line) = result.stdout.lines().find(|l| l.contains("aiming the device at ")) {
             let at = line
                 .split("aiming the device at ")
                 .nth(1)
-                .and_then(|rest| rest.split(|c: char| c == ',' || c == ' ').next())
+                .and_then(|rest| rest.split([',', ' ']).next())
                 .ok_or_else(|| format!("no address in {line:?}"))?;
             aimed.push((name, at.to_string()));
         }

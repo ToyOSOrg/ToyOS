@@ -2830,6 +2830,7 @@ mod tests {
         "system.toml",
         "diag/system.toml",
         "console/system.toml",
+        "tests/blockdcase/system.toml",
         "tests/desktopcase/system.toml",
         "tests/desktopaudiocase/system.toml",
         "tests/doomcase/system.toml",

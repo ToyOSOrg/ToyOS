@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 # partition links it and nothing of the driver.
 [lib]
 path = "src/lib.rs"
+doctest = false
 
 [[bin]]
 name = "blockd"
