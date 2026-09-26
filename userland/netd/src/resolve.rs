@@ -6,12 +6,11 @@
 //!
 //! **Each query leaves from a socket of its own**, bound to a port drawn from
 //! the kernel's random source, and carries an ID drawn from the same source
-//! (RFC 5452 §9.2). An off-path sender has to guess both to be read at all,
-//! and then has to be the server the query went to. A socket of its own is
-//! also what keeps one query from waiting on another: smoltcp keeps a datagram
-//! at the head of its socket's queue while its server's link address is
-//! unresolved or no route leads to it, and a query queued behind it on the
-//! same socket would never leave.
+//! (RFC 5452 §9.2). An off-path sender has to guess both to be read at all.
+//! A socket of its own is also what keeps one query from waiting on another:
+//! smoltcp keeps a datagram at the head of its socket's queue while its
+//! server's link address is unresolved or no route leads to it, and a query
+//! queued behind it on the same socket would never leave.
 //!
 //! **A lookup's wait is a wake of netd's loop** ([`Resolver::wake_in`]), and a
 //! reply is a frame, which the NIC's interrupt already wakes it for.
@@ -311,12 +310,16 @@ fn send(socket: &mut udp::Socket, to: [u8; 4], query: &[u8]) {
         .unwrap_or_else(|e| panic!("netd: a fresh socket's empty one-query queue refused its query to {at}: {e:?}"));
 }
 
-/// A port in [`EPHEMERAL`] no UDP socket holds, found from `drawn`.
-fn free_port(socket_set: &SocketSet<'_>, drawn: u16) -> Option<u16> {
-    let span = u32::from(EPHEMERAL.end() - EPHEMERAL.start()) + 1;
-    let start = u32::from(drawn) % span;
-    (0..span)
-        .map(|k| EPHEMERAL.start() + ((start + k) % span) as u16)
+/// The first port in [`EPHEMERAL`] no UDP socket holds, searched upward from
+/// `from` and wrapping; `None` once every one is held. `from` names
+/// `EPHEMERAL`'s start plus `from` modulo its size, which for a port already
+/// in it is that port: the range starts at a multiple of its size.
+pub fn free_port(socket_set: &SocketSet<'_>, from: u16) -> Option<u16> {
+    const SPAN: u32 = *EPHEMERAL.end() as u32 - *EPHEMERAL.start() as u32 + 1;
+    const _: () = assert!(*EPHEMERAL.start() as u32 % SPAN == 0);
+    let start = u32::from(from) % SPAN;
+    (0..SPAN)
+        .map(|k| EPHEMERAL.start() + ((start + k) % SPAN) as u16)
         .find(|&port| !udp_port_taken(socket_set, port))
 }
 

@@ -799,10 +799,12 @@ impl NetDaemon {
         port
     }
 
-    /// The next port [`alloc_port`](Self::alloc_port) hands out that no UDP
-    /// socket holds, or `None` once every one of them has been tried.
+    /// The first port from [`alloc_port`](Self::alloc_port)'s cursor that no
+    /// UDP socket holds, and the cursor moves past it; `None` once every one
+    /// is held.
     fn alloc_free_udp_port(&mut self, socket_set: &SocketSet<'_>) -> Option<u16> {
-        (49152..=65535u16).map(|_| self.alloc_port()).find(|&port| !resolve::udp_port_taken(socket_set, port))
+        self.next_local_port = resolve::free_port(socket_set, self.next_local_port)?;
+        Some(self.alloc_port())
     }
 
     /// Dispatch one whole request.

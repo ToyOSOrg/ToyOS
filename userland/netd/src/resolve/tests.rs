@@ -24,10 +24,6 @@ const ANSWERS_MAC: EthernetAddress = EthernetAddress([0x02, 0, 0, 0, 0, 0x54]);
 const UNROUTED: [u8; 4] = [192, 0, 2, 53];
 const ADDRESS: [u8; 4] = [192, 0, 2, 7];
 
-/// How often the loop passes here. netd's own passes are its wakes; this is
-/// finer than any wait the resolver asks for.
-const PASS_MS: u64 = 50;
-
 /// Frames for the interface, and the frames it sent.
 #[derive(Default)]
 struct Wire {
@@ -118,6 +114,8 @@ struct Net {
     arp_asked: Vec<[u8; 4]>,
     /// Every server a query reached.
     queried: Vec<[u8; 4]>,
+    /// The port every query left from.
+    sources: Vec<u16>,
     ended: Vec<(u32, Name, Result<Vec<[u8; 4]>, Ended>)>,
 }
 
@@ -142,6 +140,7 @@ impl Net {
             held: Vec::new(),
             arp_asked: Vec::new(),
             queried: Vec::new(),
+            sources: Vec::new(),
             ended: Vec::new(),
         }
     }
@@ -160,43 +159,73 @@ impl Net {
         while self.iface.poll(at, &mut self.wire, &mut self.sockets) != PollResult::None {}
     }
 
-    /// One pass of netd's loop, then the far end's turn.
+    /// Passes of netd's loop, each followed by the far end's turn, for as long
+    /// as a frame is due now: a frame is the NIC's interrupt, which wakes the
+    /// loop at once.
     fn pass(&mut self) {
-        let now_ms = self.now_ms;
-        let (due, later): (Vec<_>, Vec<_>) = self.held.drain(..).partition(|(at, _)| *at <= now_ms);
-        self.held = later;
-        self.wire.inbound.extend(due.into_iter().map(|(_, frame)| frame));
-        self.poll();
+        loop {
+            let now_ms = self.now_ms;
+            let (due, later): (Vec<_>, Vec<_>) = self.held.drain(..).partition(|(at, _)| *at <= now_ms);
+            self.held = later;
+            self.wire.inbound.extend(due.into_iter().map(|(_, frame)| frame));
+            self.poll();
+            let now = self.now();
+            let ended = self.resolver.pass(&mut self.sockets, now);
+            self.ended.extend(ended);
+            self.poll();
+            for frame in std::mem::take(&mut self.wire.outbound) {
+                self.far_end(&frame);
+            }
+            if self.wire.inbound.is_empty() && self.held.iter().all(|(at, _)| *at > now_ms) {
+                return;
+            }
+        }
+    }
+
+    /// When netd's loop next wakes, as its `main` computes it: the soonest of
+    /// the resolver's wake, smoltcp's own and the next frame the far end has
+    /// on the wire. `None` is a loop asleep until something else wakes it.
+    fn next_wake(&mut self) -> Option<u64> {
         let now = self.now();
-        let ended = self.resolver.pass(&mut self.sockets, now);
-        self.ended.extend(ended);
-        self.poll();
-        for frame in std::mem::take(&mut self.wire.outbound) {
-            self.far_end(&frame);
-        }
+        let resolver = self.resolver.wake_in(now).map(|d| d.as_millis() as u64);
+        let smoltcp = self
+            .iface
+            .poll_delay(SmolInstant::from_millis(self.now_ms as i64), &self.sockets)
+            .map(|d| d.total_micros().div_ceil(1000));
+        let frame = self.held.iter().map(|(at, _)| at - self.now_ms).min();
+        let wake = [resolver, smoltcp, frame].into_iter().flatten().min()?;
+        assert!(wake > 0, "netd's loop would wake at once again at {} ms, having just passed", self.now_ms);
+        Some(self.now_ms + wake)
     }
 
-    /// Pass every [`PASS_MS`] up to and including `ms`.
+    /// Pass at each of netd's wakes up to `ms`, and at `ms`.
     fn until(&mut self, ms: u64) {
-        while self.now_ms < ms {
+        loop {
             self.pass();
-            self.now_ms += PASS_MS;
+            if self.now_ms == ms {
+                return;
+            }
+            self.now_ms = self.next_wake().map_or(ms, |at| at.min(ms));
         }
-        self.now_ms = ms;
-        self.pass();
     }
 
-    /// Pass every [`PASS_MS`] until `client`'s lookup has ended or `until_ms`
-    /// has come.
+    /// Pass at each of netd's wakes until `client`'s lookup has ended, or
+    /// `until_ms` has come. A lookup in flight with no wake to carry it is a
+    /// loop that would sleep through it, and ends the test.
     fn run(&mut self, client: u32, until_ms: u64) -> Option<Result<Vec<[u8; 4]>, Ended>> {
-        while self.now_ms <= until_ms {
+        loop {
             self.pass();
             if let Some(at) = self.ended.iter().position(|(c, ..)| *c == client) {
                 return Some(self.ended.remove(at).2);
             }
-            self.now_ms += PASS_MS;
+            let at = self.next_wake().unwrap_or_else(|| {
+                panic!("lookup {client} is in flight at {} ms and nothing would wake netd's loop", self.now_ms)
+            });
+            if at > until_ms {
+                return None;
+            }
+            self.now_ms = at;
         }
-        None
     }
 
     fn far_end(&mut self, frame: &[u8]) {
@@ -231,6 +260,7 @@ impl Net {
                 assert_eq!(udp.dst_port(), toyos_dns::PORT);
                 let to = ip.dst_addr().octets();
                 self.queried.push(to);
+                self.sources.push(udp.src_port());
                 assert_eq!(to, ANSWERS, "a query left for a server the wire cannot reach");
                 self.answer(udp.src_port(), udp.payload());
             }
@@ -380,7 +410,7 @@ fn a_lookup_whose_client_left_is_let_go_at_once() {
 fn a_lookup_holds_a_socket_per_query_that_left_and_none_once_ended() {
     let mut net = Net::new(&[ANSWERS, SILENT]);
     net.start(1, "www.example").unwrap();
-    net.until(toyos_dns::WAIT_MS - PASS_MS);
+    net.until(toyos_dns::WAIT_MS - 1);
     assert_eq!(net.queried, [ANSWERS]);
     assert_eq!(net.sockets.iter().count(), 1);
     net.until(toyos_dns::WAIT_MS);
@@ -391,4 +421,48 @@ fn a_lookup_holds_a_socket_per_query_that_left_and_none_once_ended() {
     net.zone.push(("www.example", 0, Says::Address(ADDRESS)));
     assert_eq!(net.run(1, 5 * toyos_dns::WAIT_MS), Some(Ok(vec![ADDRESS])), "the fifth query, to the first server");
     assert_eq!(net.sockets.iter().count(), 0, "an ended lookup holds no socket");
+}
+
+/// **A query never leaves from a port a client holds.** smoltcp hands a
+/// datagram to the first socket that takes it, so a query on a client's port
+/// would have its answer read by the client, or the client's datagrams read
+/// by the lookup. The client here sits on the port the draw lands on.
+#[test]
+fn a_query_leaves_from_no_port_a_client_holds() {
+    let mut draw = counter();
+    let _id = draw();
+    let drawn = free_port(&SocketSet::new(Vec::new()), draw()).expect("an empty stack holds no port");
+
+    let mut open = Net::new(&[ANSWERS]);
+    open.zone.push(("www.example", 0, Says::Address(ADDRESS)));
+    open.start(1, "www.example").unwrap();
+    assert_eq!(open.run(1, toyos_dns::WAIT_MS), Some(Ok(vec![ADDRESS])));
+    assert_eq!(open.sources, [drawn], "the premise: with nothing bound, the query leaves from the drawn port");
+
+    let mut net = Net::new(&[ANSWERS]);
+    net.zone.push(("www.example", 0, Says::Address(ADDRESS)));
+    let buffer = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 1], vec![0u8; 512]);
+    let mut client = udp::Socket::new(buffer(), buffer());
+    client.bind(IpListenEndpoint { addr: None, port: drawn }).unwrap();
+    let client = net.sockets.add(client);
+    net.start(1, "www.example").unwrap();
+    let ended = net.run(1, toyos_dns::WAIT_MS);
+    assert!(!net.sources.contains(&drawn), "a query left from port {drawn}, which a client holds");
+    assert_eq!(net.sources.len(), 1, "one query left");
+    assert_eq!(ended, Some(Ok(vec![ADDRESS])), "the lookup did not read its own answer");
+    assert!(!net.sockets.get_mut::<udp::Socket>(client).can_recv(), "the client was handed the lookup's answer");
+}
+
+/// **A lookup's waits are netd's wakes**: a server that is reached and never
+/// answers is asked again the moment each wait ends, and the lookup ends
+/// timed out the moment its last one does, with nothing but the resolver's
+/// own wake to carry it there.
+#[test]
+fn a_server_that_never_answers_is_asked_at_each_waits_end() {
+    let mut net = Net::new(&[ANSWERS]);
+    net.start(1, "www.example").unwrap();
+    let ended = net.run(1, 10 * toyos_dns::WAIT_MS);
+    assert_eq!(ended, Some(Err(Ended::Failed(Failure::TimedOut))));
+    assert_eq!(net.now_ms, toyos_dns::ROUNDS as u64 * toyos_dns::WAIT_MS, "the lookup ended late");
+    assert_eq!(net.queried, [ANSWERS; toyos_dns::ROUNDS]);
 }
