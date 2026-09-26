@@ -14,9 +14,10 @@ ring, and each one past is a loss this machine made itself: the peer learns of
 it only as a gap, and the sender only by timing out or by duplicate
 acknowledgements.
 
-The virtio driver had the same shape and no longer does: its transmit token is
-refused while its ring is full (`DmaNic::transmit`), and the ring's completion
-interrupt is netd's wake. Measured there before that change, on netcase with
+The virtio driver had the same shape and no longer does: a frame with no slot
+free waits in `DmaNic`'s backlog (`userland/netd/src/main.rs`), and the ring's
+completion interrupt is netd's wake; the backlog serves any card whose
+`Card::tx_room` answers truthfully. Measured there before that change, on netcase with
 QEMU's virtio-net: three rounds of a 32 MiB download and a 32 MiB upload in
 one boot made netd's report count 770 frames dropped with no transmit
 descriptor free; after it, three boots of the same counted none.
