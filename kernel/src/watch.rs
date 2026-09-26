@@ -20,7 +20,7 @@
 use alloc::sync::Arc;
 
 use toyos_sched::hw::Nanos;
-use toyos_sched::task::{WaitClass, WakeCause, WakeReason};
+use toyos_sched::task::{Refused, WaitClass, WakeCause, WakeReason};
 use toyos_sched::watch::{Poster, Waiters};
 
 pub use toyos_sched::park::Cancel;
@@ -126,19 +126,39 @@ pub fn arm(watch: &Watch, token: u64, class: WaitClass) -> Option<Armed<'_>> {
 #[derive(Debug)]
 pub struct Cancelled(());
 
+/// Why one park ended the wait rather than returning for a recheck.
+enum Ended {
+    Cancelled,
+    /// A revoke took the registration out: no post can end a park made for
+    /// it, and every phase 1 refuses until the thread registers again.
+    Revoked,
+}
+
+/// Only a futex's watch is revoked, and only [`wait_until`] waits on one.
+#[track_caller]
+fn not_revocable() -> ! {
+    panic!("watch: a revoke reached a wait that does not end on one");
+}
+
 /// Park once: until a post reaches this registration, the deadline passes, or
 /// this thread is cancelled. A return is not an answer — the caller re-reads
 /// its condition.
 #[track_caller]
 pub fn wait(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -> Result<(), Cancelled> {
-    wait_inner(p, armed, deadline, Cancel::Answers)
+    match wait_inner(p, armed, deadline, Cancel::Answers) {
+        Ok(()) => Ok(()),
+        Err(Ended::Cancelled) => Err(Cancelled(())),
+        Err(Ended::Revoked) => not_revocable(),
+    }
 }
 
 /// The same as [`wait`], for a wait a kill may not end.
 #[track_caller]
 pub fn wait_uncancellable(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) {
-    if wait_inner(p, armed, deadline, Cancel::Ignores).is_err() {
-        unreachable!("an uncancellable wait never reports a cancel");
+    match wait_inner(p, armed, deadline, Cancel::Ignores) {
+        Ok(()) => {}
+        Err(Ended::Cancelled) => unreachable!("an uncancellable wait never reports a cancel"),
+        Err(Ended::Revoked) => not_revocable(),
     }
 }
 
@@ -164,12 +184,16 @@ pub fn wait_until(
         return Ok(());
     };
     while !ready() {
-        if armed.shared.revoked() || deadline.reached(crate::clock::now()) {
+        if deadline.reached(crate::clock::now()) {
             return Ok(());
         }
         #[cfg(feature = "boot-actuators")]
         window::hold(&armed);
-        wait(p, &armed, deadline)?;
+        match wait_inner(p, &armed, deadline, Cancel::Answers) {
+            Ok(()) => {}
+            Err(Ended::Cancelled) => return Err(Cancelled(())),
+            Err(Ended::Revoked) => return Ok(()),
+        }
     }
     Ok(())
 }
@@ -177,22 +201,17 @@ pub fn wait_until(
 /// `watch-window`: hold a pipe waiter between reading its condition false and
 /// its phase 1 until a post lands there — the post only the notified bit
 /// carries to the commit — or its budget lapses. The holds a post ended are
-/// counted, and every [`window::STEP`]th is a line the harness reads: a boot
+/// counted, and every `STEP`th is a `HELD` line the harness reads: a boot
 /// whose count did not move staged nothing, however green its canary.
 #[cfg(feature = "boot-actuators")]
-pub mod window {
+mod window {
     use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
     use toyos_sched::task::WaitClass;
+    use toyos_sched::watch::window::{HELD, STEP};
 
     use super::Armed;
     use crate::time::{Budget, Deadline, Duration};
-
-    /// What `blocking_read_window` counts: the line's words, then the count.
-    pub const HELD: &str = "watch-window: a post landed in the held window";
-
-    /// One line per this many holds a post ended.
-    pub const STEP: u64 = 64;
 
     /// A pipe wait nothing posts — a reader whose writer is idle — ends its
     /// hold here and waits on unstaged; the count of those is on every line.
@@ -243,7 +262,6 @@ pub fn wait_uncancellable_until(p: &Parkable, watch: &Watch, token: u64, ready: 
     // Exits only on the predicate: returning without it here means returning
     // without the lock held.
     while !ready() {
-        assert!(!armed.shared.revoked(), "watch: a revoke reached a wait only its predicate ends");
         wait_uncancellable(p, &armed, Deadline::never());
     }
 }
@@ -266,10 +284,10 @@ fn wait_inner(
     armed: &Armed<'_>,
     deadline: Deadline,
     cancel: Cancel,
-) -> Result<(), Cancelled> {
+) -> Result<(), Ended> {
     let killed = || cancel == Cancel::Answers && armed.task.take_cancel(armed.shared.kill_pending());
     if killed() {
-        return Err(Cancelled(()));
+        return Err(Ended::Cancelled);
     }
     if deadline.reached(crate::clock::now()) {
         return Ok(());
@@ -277,12 +295,14 @@ fn wait_inner(
     // A post since the registration refuses phase 1, and one after it claims
     // the commit: either way this returns without parking, and the caller
     // re-reads its condition.
-    let Ok(ticket) = crate::scheduler::prepare_wait(cancel, armed.class) else {
-        return Ok(());
+    let ticket = match crate::scheduler::prepare_wait(cancel, armed.class) {
+        Ok(ticket) => ticket,
+        Err(Refused::Notified) => return Ok(()),
+        Err(Refused::Revoked) => return Err(Ended::Revoked),
     };
     crate::scheduler::block_on(ticket, deadline);
     if killed() {
-        return Err(Cancelled(()));
+        return Err(Ended::Cancelled);
     }
     Ok(())
 }

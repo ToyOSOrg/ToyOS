@@ -19,7 +19,7 @@ use toyos_sched::mailbox::{mailbox, Kick, PreemptGuard, Urgency};
 use toyos_sched::msg::Msg;
 use toyos_sched::task::{RtState, TaskBuilder, TaskKey, WaitClass};
 use toyos_sched::park::{prepare, Cancel, Commit, CurrentTask};
-use toyos_sched::task::Notified;
+use toyos_sched::task::Refused;
 
 use crate::arch::percpu;
 use crate::hw::HW;
@@ -555,18 +555,18 @@ pub fn pass(dispose: Dispose) {
 pub struct Ticket(RawTicket);
 
 impl Ticket {
-    /// Phase 1 on the running thread's own word, or [`Notified`] when a post reached it since it registered on a
-    /// watch. The count goes up before the task is read, or a preemption in between leaves `CurrentTask` naming a
-    /// CPU it no longer runs on.
-    pub fn register(cancel: Cancel, class: WaitClass) -> Result<Self, Notified> {
+    /// Phase 1 on the running thread's own word, or [`Refused`] when a post reached it since it registered on a
+    /// watch or a revoke ended that registration. The count goes up before the task is read, or a preemption in
+    /// between leaves `CurrentTask` naming a CPU it no longer runs on.
+    pub fn register(cancel: Cancel, class: WaitClass) -> Result<Self, Refused> {
         crate::preempt::disable();
         let shared = current_shared().expect("prepare_wait: no running thread");
         let current = CurrentTask::new(&shared, current_cpu());
         match prepare(&current, cancel, class) {
             Ok(ticket) => Ok(Self(ticket)),
-            Err(notified) => {
+            Err(refused) => {
                 crate::preempt::enable();
-                Err(notified)
+                Err(refused)
             }
         }
     }

@@ -336,9 +336,17 @@ impl Notify {
     }
 }
 
-/// A commit refused because a post reached the task after it last registered.
+/// Why phase 1 of a wait refused to begin a park.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Notified;
+pub enum Refused {
+    /// A post reached the task since it registered; the refusal consumed it,
+    /// and the caller rechecks its condition.
+    Notified,
+    /// A revoke ended the task's registration. Every phase 1 answers this
+    /// until the task registers again, and the caller's wait is over: no post
+    /// can reach a park made for it.
+    Revoked,
+}
 
 /// The outcome of the second phase of the wait handshake.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -479,12 +487,12 @@ impl<M> TaskShared<M> {
     }
 
     /// Phase 1 of the wait handshake: `Running(cpu) → Committing(cpu, gen)`,
-    /// or [`Notified`] — the bit consumed and the word left `Running` — when a
-    /// post reached this task since it registered. A revoked registration is
-    /// refused the same way on every call, without consuming anything. The
-    /// generation advances on every registration, so a claim that raced an
+    /// or [`Refused::Notified`] — the bit consumed and the word left `Running`
+    /// — when a post reached this task since it registered. A revoked
+    /// registration is [`Refused::Revoked`] on every call, consuming nothing.
+    /// The generation advances on every registration, so a claim that raced an
     /// earlier registration cannot commit this one.
-    pub fn begin_commit(&self, cpu: CpuId) -> Result<Gen, Notified> {
+    pub fn begin_commit(&self, cpu: CpuId) -> Result<Gen, Refused> {
         let mut cur = self.state.load(Ordering::Acquire);
         loop {
             assert_eq!(
@@ -493,7 +501,7 @@ impl<M> TaskShared<M> {
                 "park::prepare outside the running task's own CPU",
             );
             if cur & REVOKED != 0 {
-                return Err(Notified);
+                return Err(Refused::Revoked);
             }
             // `commit-ignores-notify` is the negative control: blind to the bit, a
             // post between registration and commit is lost, and `loom_watch` reds.
@@ -508,7 +516,7 @@ impl<M> TaskShared<M> {
                 .state
                 .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) if notified => return Err(Notified),
+                Ok(_) if notified => return Err(Refused::Notified),
                 Ok(_) => return Ok(generation),
                 Err(observed) => cur = observed,
             }
@@ -593,11 +601,6 @@ impl<M> TaskShared<M> {
     /// waiter re-reads its condition and cannot park where no post reaches.
     pub fn revoke(&self) -> Notify {
         self.post(REVOKED)
-    }
-
-    /// Whether a revoke ended this task's current registration.
-    pub fn revoked(&self) -> bool {
-        self.state.load(Ordering::Acquire) & REVOKED != 0
     }
 
     fn post(&self, also: u64) -> Notify {
@@ -1384,7 +1387,7 @@ mod tests {
     fn a_post_before_the_commit_refuses_it() {
         let s = running(C0);
         assert_eq!(s.notify(), Notify::Flagged);
-        assert_eq!(s.begin_commit(C0), Err(Notified));
+        assert_eq!(s.begin_commit(C0), Err(Refused::Notified));
         assert_eq!(s.state(), TaskState::Running(C0));
         assert!(!s.notified(), "the refusal consumed the post");
         let generation = s.begin_commit(C0).expect("consumed once, not twice");
@@ -1410,8 +1413,8 @@ mod tests {
     fn registration_forgets_a_post_or_revoke_to_an_earlier_wait() {
         let s = running(C0);
         s.revoke();
-        assert_eq!(s.begin_commit(C0), Err(Notified));
-        assert_eq!(s.begin_commit(C0), Err(Notified), "a revoke is not spent by a refusal");
+        assert_eq!(s.begin_commit(C0), Err(Refused::Revoked));
+        assert_eq!(s.begin_commit(C0), Err(Refused::Revoked), "a revoke is not spent by a refusal");
         s.forget_posts();
         assert!(s.begin_commit(C0).is_ok());
     }

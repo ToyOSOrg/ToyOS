@@ -48,7 +48,9 @@ use toyos_sched_loom::model::{
     model, watch_list, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
 };
 use toyos_sched_loom::park::{prepare, Cancel, Commit, CurrentTask};
-use toyos_sched_loom::task::{Claim, TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason};
+use toyos_sched_loom::task::{
+    Claim, Refused, TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason,
+};
 use toyos_sched_loom::watch::{Fire, Gate, Poster, Ring, Waiters, Watch};
 
 #[path = "../../../kernel/src/inbox/once.rs"]
@@ -118,6 +120,16 @@ impl World {
         self.watch
             .post_n(token, 1, WakeCause::new(WakeReason::Woken), &env)
     }
+    fn revoke(&self, token: u64) -> usize {
+        let env = Poster {
+            cpus: &self.cpus,
+            kicker: &self.kicks,
+            preempt: &RemoteGuard,
+        };
+        self.watch
+            .revoke(|t| t == token, WakeCause::new(WakeReason::Woken), &env)
+    }
+
 }
 
 fn world() -> (Arc<World>, MailboxConsumer<Msg>) {
@@ -379,6 +391,82 @@ fn a_second_post_is_not_lost_to_a_flag_the_waiter_consumed() {
             );
         } else {
             assert!(msgs.is_empty(), "a waiter that never parked is owed nothing: {msgs:?}");
+        }
+        world.watch.unregister(&waiter);
+    });
+}
+
+/// How `kernel::watch::wait_until`'s loop ended.
+#[derive(Debug, PartialEq, Eq)]
+enum End {
+    Parked,
+    Revoked,
+}
+
+/// `wait_until`'s loop over a condition the revoke does not make true — a
+/// futex word whose frame came back zeroed at the same address — so only a
+/// park or the revoke's refusal ends it.
+fn wait_out(waiter: &Arc<TaskShared<Msg>>) -> End {
+    // One revoke ends at most one iteration short of its refusal.
+    for _ in 0..3 {
+        match prepare(&CurrentTask::new(waiter, CPU0), Cancel::Answers, WaitClass::Futex) {
+            Err(Refused::Notified) => continue,
+            Err(Refused::Revoked) => return End::Revoked,
+            Ok(ticket) => match ticket.commit() {
+                Commit::Parked(_) => return End::Parked,
+                Commit::AlreadyWoken => continue,
+                Commit::Killed => unreachable!("nothing retires in this model"),
+            },
+        }
+    }
+    unreachable!("one revoke ended more than two iterations")
+}
+
+/// **A revoke ends the wait wherever it finds the waiter**: running between its
+/// registration and phase 1, committing, or parked. The revoke is a sibling's
+/// unmap on another CPU and the waiter's condition stays false, so a waiter
+/// that parks after the revoke parks where no post reaches. Every arm of the
+/// revoke's write is reached here, and each must carry the refusal: a park is
+/// owed exactly the one wake, and the waiter that wakes from it cannot park
+/// again.
+#[test]
+fn a_revoke_racing_the_wait_loop_ends_it_in_every_arm() {
+    model(|| {
+        let (world, mut rx) = world();
+        let waiter = task(1);
+        world.watch.register(&waiter, 0x1000);
+
+        let waiting = {
+            let waiter = waiter.clone();
+            loom::thread::spawn(move || wait_out(&waiter))
+        };
+        let revoker = {
+            let world = world.clone();
+            loom::thread::spawn(move || world.revoke(0x1000))
+        };
+
+        let end = waiting.join().unwrap();
+        assert_eq!(revoker.join().unwrap(), 1, "the registration was there to revoke");
+        let msgs = drain(&mut rx, &world.preempt);
+
+        match end {
+            End::Parked => {
+                assert_eq!(
+                    msgs,
+                    [Msg::Wake(TaskKey(1), WakeReason::Woken)],
+                    "parked after its registration was revoked, and no wake owed",
+                );
+                assert!(waiter.finish_wake(CPU0));
+                assert!(waiter.transition(TaskState::Ready(CPU0), TaskState::Running(CPU0)));
+                assert_eq!(
+                    wait_out(&waiter),
+                    End::Revoked,
+                    "the revoke's wake was spent and the waiter parked again where no post reaches",
+                );
+            }
+            End::Revoked => {
+                assert!(msgs.is_empty(), "a waiter that never parked is owed nothing: {msgs:?}");
+            }
         }
         world.watch.unregister(&waiter);
     });

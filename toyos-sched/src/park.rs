@@ -6,16 +6,18 @@
 //! post, a direct notify, a remote waker — terminates in
 //! [`TaskShared::notify`]'s read-modify-write of that word (a revoke is the
 //! same write with one more bit), and the local deadline fire in
-//! [`TaskShared::claim_wake`]'s. There is no third path.
+//! [`TaskShared::claim_wake`]'s.
 //!
 //! The shape a blocking site must have:
 //!
 //! ```text
 //! watch.register(task)
-//! loop {
-//!     if ready() || task.revoked() { break }   // a revoke ends the wait
-//!     let Ok(t) = prepare(cur) else { continue };   // a post since registering
-//!     match t.commit() { Parked => block, AlreadyWoken => continue, Killed => unwind }
+//! while !ready() {
+//!     match prepare(cur) {
+//!         Err(Notified) => continue,   // a post since registering
+//!         Err(Revoked) => break,       // the registration is gone: the wait is over
+//!         Ok(t) => match t.commit() { Parked => block, AlreadyWoken => continue, Killed => unwind },
+//!     }
 //! }
 //! watch.unregister(task)
 //! ```
@@ -33,7 +35,7 @@ use crate::cpu::CpuHandles;
 use crate::hw::{CpuId, Kicker};
 use crate::mailbox::{Kick, PreemptGuard, SchedMsg};
 use crate::sync::Arc;
-use crate::task::{Gen, Notified, Notify, ParkOutcome, TaskShared, WaitClass, WakeCause};
+use crate::task::{Gen, Notify, ParkOutcome, Refused, TaskShared, WaitClass, WakeCause};
 
 /// The running task, as the wait path sees it. Only `CpuSched::current_task`
 /// hands one out, so [`prepare`] cannot be called for anybody else's task.
@@ -56,15 +58,16 @@ impl<'a, M> CurrentTask<'a, M> {
     }
 }
 
-/// Phase 1: move the running task's word to `Committing(gen)`, or answer
-/// [`Notified`] when a post reached it since it registered — in which case
-/// nothing is owed and the caller rechecks.
+/// Phase 1: move the running task's word to `Committing(gen)`, or answer why
+/// not: [`Refused::Notified`] when a post reached it since it registered —
+/// nothing is owed and the caller rechecks — and [`Refused::Revoked`] when its
+/// registration is gone, which ends the wait.
 #[must_use = "a wait ticket must be committed or cancelled"]
 pub fn prepare<M: SchedMsg>(
     cur: &CurrentTask<'_, M>,
     cancel: Cancel,
     class: WaitClass,
-) -> Result<WaitTicket<M>, Notified> {
+) -> Result<WaitTicket<M>, Refused> {
     let generation = cur.shared.begin_commit(cur.cpu)?;
     Ok(WaitTicket {
         shared: cur.shared.clone(),

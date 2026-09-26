@@ -16092,10 +16092,7 @@ fn xhci_xecp(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// `kernel/src/watch.rs`'s `window::HELD`: a line per `WINDOW_STEP` holds that
-/// a post ended, the running count after these words.
-const WINDOW_HELD: &str = "watch-window: a post landed in the held window";
-const WINDOW_STEP: u64 = 64;
+use toyos_sched::watch::window::{HELD as WINDOW_HELD, STEP as WINDOW_STEP};
 
 /// The largest count of held windows a post ended that `log` says, 0 if none.
 fn window_count(log: &str) -> u64 {

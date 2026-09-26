@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::hasher::HashMap;
 use toyos_sched::fair::{ShareState, QUANTUM_NS};
 use toyos_sched::hw::{CpuId, Machine, Nanos};
-use toyos_sched::task::{Notified, SafePoint, WaitClass};
+use toyos_sched::task::{Refused, SafePoint, WaitClass};
 
 use crate::arch::percpu;
 use crate::watch::{self, Cancel};
@@ -312,13 +312,14 @@ pub fn enqueue_new(
 }
 
 /// Phase 1 of the wait handshake on the running thread's own word, or
-/// [`Notified`] when a post reached it since it registered on a watch — then
-/// nothing is owed and the caller re-reads its condition. Mints via
-/// [`Parkable::mint`], not [`Parkable::at_entry`]: a context already inside an
-/// [`Operation`] must receive the token here too, which `at_entry` would refuse.
+/// [`Refused`]: a post reached it since it registered on a watch, and the
+/// caller re-reads its condition, or a revoke ended the registration, and the
+/// wait is over. Mints via [`Parkable::mint`], not [`Parkable::at_entry`]: a
+/// context already inside an [`Operation`] must receive the token here too,
+/// which `at_entry` would refuse.
 #[must_use = "a wait ticket must be blocked on or cancelled"]
 #[track_caller]
-pub fn prepare_wait(cancel: Cancel, class: WaitClass) -> Result<Ticket, Notified> {
+pub fn prepare_wait(cancel: Cancel, class: WaitClass) -> Result<Ticket, Refused> {
     let _parkable = Parkable::mint();
     Ticket::register(cancel, class)
 }

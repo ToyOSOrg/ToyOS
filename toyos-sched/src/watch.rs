@@ -314,6 +314,18 @@ impl<M, R: Ring, L: LeafLock<Waiters<M, R>>> Drop for Watch<M, R, L> {
     }
 }
 
+/// The `watch-window` actuator's line: the kernel writes it once per [`STEP`]
+/// held windows a post ended, and the harness reads the count after [`HELD`].
+///
+/// [`STEP`]: window::STEP
+/// [`HELD`]: window::HELD
+pub mod window {
+    /// The line's words; the running count follows them.
+    pub const HELD: &str = "watch-window: a post landed in the held window";
+    /// One line per this many holds a post ended.
+    pub const STEP: u64 = 64;
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -323,7 +335,7 @@ mod tests {
     use crate::hw::CpuId;
     use crate::mailbox::{mailbox, MailboxConsumer, NoPreempt};
     use crate::park::{prepare, Cancel, Commit, CurrentTask};
-    use crate::task::{Notify, TaskKey, TaskState, WaitClass, WakeReason};
+    use crate::task::{Notify, Refused, TaskKey, TaskState, WaitClass, WakeReason};
     use alloc::vec;
     use core::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
@@ -499,12 +511,17 @@ mod tests {
         assert!(!inside.is_waiting() && !outside.is_waiting());
     }
 
-    /// Phase 1, for a waiter that must not get past it: a ticket it did begin
-    /// is withdrawn before the test fails, so the failure is this one.
+    /// Phase 1, for a waiter whose registration a revoke ended: it must be told
+    /// so, not merely refused. A ticket it did begin is withdrawn before the
+    /// test fails, so the failure is this one.
     fn refused(t: &Arc<TaskShared<Msg>>, why: &str) {
-        if let Ok(ticket) = prepare(&CurrentTask::new(t, C0), Cancel::Answers, WaitClass::Other) {
-            let _ = ticket.cancel();
-            panic!("{why}");
+        match prepare(&CurrentTask::new(t, C0), Cancel::Answers, WaitClass::Other) {
+            Err(Refused::Revoked) => {}
+            Err(Refused::Notified) => panic!("{why}: refused as a post, which one recheck spends"),
+            Ok(ticket) => {
+                let _ = ticket.cancel();
+                panic!("{why}");
+            }
         }
     }
 
@@ -541,6 +558,27 @@ mod tests {
         let t = task(1);
         w.register(&t, 0x1000);
         assert_eq!(w.revoke(|token| token == 0x1000, woken(), &env), 1);
+        for _ in 0..2 {
+            refused(&t, "a revoked waiter began a park no post can end");
+        }
+        w.unregister(&t);
+    }
+
+    /// The same, for a revoke that lands between the waiter's phase 1 and its
+    /// commit — a sibling's unmap on another CPU. The claim refuses the commit,
+    /// and the refusal it leaves behind outlasts that one iteration.
+    #[test]
+    fn a_waiter_revoked_while_it_commits_cannot_park() {
+        let (handles, mut rx) = cpus();
+        let env = Poster { cpus: &handles, kicker: &NoKick, preempt: &NoPreempt };
+        let w = watch();
+        let t = task(1);
+        w.register(&t, 0x1000);
+        let ticket = prepare(&CurrentTask::new(&t, C0), Cancel::Answers, WaitClass::Other)
+            .expect("nothing notified this task");
+        assert_eq!(w.revoke(|token| token == 0x1000, woken(), &env), 1);
+        assert!(matches!(ticket.commit(), Commit::AlreadyWoken));
+        assert_eq!(rx.pop(&NoPreempt), None, "a claim on a commit posts no message");
         for _ in 0..2 {
             refused(&t, "a revoked waiter began a park no post can end");
         }
