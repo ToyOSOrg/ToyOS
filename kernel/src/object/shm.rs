@@ -38,7 +38,6 @@ pub struct Region {
     pub cache: CachePolicy,
     /// The pages, when the kernel owns them; `None` for firmware's
     /// framebuffer or an MMIO aperture it does not own.
-    #[expect(dead_code, reason = "the Arc is what keeps the pages alive; nothing reads it")]
     pub pages: Option<Arc<Pages>>,
 }
 
@@ -95,6 +94,16 @@ impl SharedMemObject {
 
     pub fn size(&self) -> u64 {
         self.region.size
+    }
+
+    /// The physical run and its length, for a region that is ordinary memory
+    /// this kernel allocated and owns — the only kind a device may be lent
+    /// (`pcidev::dma_map`). `None` for anything else: a BAR window aimed into
+    /// a second device's domain would be one device reaching another's
+    /// registers.
+    pub fn ram(&self) -> Option<(u64, u64)> {
+        (self.region.pages.is_some() && self.region.cache == CachePolicy::DeferToMtrr)
+            .then(|| (self.region.phys.phys(), self.region.size))
     }
 
     /// The kernel's own view of the pages, through the direct map; a mapped

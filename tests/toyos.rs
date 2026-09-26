@@ -198,6 +198,11 @@ const MAX_SHARED_REBOOTS: usize = 3;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // blockd's supervisor and client: every role needs the second NVMe
+    // controller only its own boots carry, and with no role it refuses by name.
+    // `blockd_serves_partitions`, `blockd_survives_its_death`,
+    // `blockd_dma_outside_the_lent` and `blockd_lends_within_its_bound` run it.
+    "blockd_io",
     // **Its exit code is a measurement, not a verdict**, and the shared block
     // judges every member on `exit=0` alone — so it would red on every boot
     // that measured anything. It also needs the real-time band, which only
@@ -1510,6 +1515,21 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // still mapped: the verdict is the first holder's own grant, read in the
     // guest after the second holder wrote its own.
     ("userdev_residue_is_its_own", Sched::Parallel, Tier::Fast),
+    // blockd, the NVMe driver in userland, on a second controller beside the
+    // kernel's: partitions served and timed against the kernel's driver; a
+    // controller reset and its own death, each survived by the client and
+    // judged off the image by the host's readers; and a transfer outside what
+    // its function was lent, which is a fault record. Each boot runs several
+    // blockd lifetimes and one waits out a ten-second silence.
+    ("blockd_serves_partitions", Sched::Parallel, Tier::Nightly),
+    ("blockd_survives_its_death", Sched::Parallel, Tier::Nightly),
+    ("blockd_dma_outside_the_lent", Sched::Parallel, Tier::Nightly),
+    // What a claim may lend: a kernel driver's pool refused, the claim's bound
+    // refusing the next region at the count it leaves room for, and lending and
+    // taking back ten narrowed domains' worth of addresses with the kernel
+    // standing; then, on a second boot, a function no release resets is never
+    // lent where it was left aimed.
+    ("blockd_lends_within_its_bound", Sched::Parallel, Tier::Nightly),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -1609,6 +1629,10 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
     ("userdev_dma_fault", &["test_rs_handle_basic"]),
     ("userdev_residue_is_its_own", &["test_rs_userdev_residue"]),
+    ("blockd_serves_partitions", &["test_rs_blockd_io"]),
+    ("blockd_survives_its_death", &["test_rs_blockd_io"]),
+    ("blockd_dma_outside_the_lent", &["test_rs_blockd_io"]),
+    ("blockd_lends_within_its_bound", &["test_rs_blockd_io"]),
     (
         "inspect_reads_its_owners",
         &["test_rs_inspect_denied", "test_rs_inspect_plays", "test_rs_inventory_bounds"],
@@ -11514,6 +11538,19 @@ fn run_machine_test(
         }
         "userdev_residue_is_its_own" => {
             common::iommu::userdev_residue_is_its_own(test_config, c_bins, rust_bins)
+        }
+        // Bodies in `tests/common/blockd.rs`.
+        "blockd_serves_partitions" => {
+            common::blockd::blockd_serves_partitions(test_config, c_bins, rust_bins)
+        }
+        "blockd_survives_its_death" => {
+            common::blockd::blockd_survives_its_death(test_config, c_bins, rust_bins)
+        }
+        "blockd_dma_outside_the_lent" => {
+            common::blockd::blockd_dma_outside_the_lent(test_config, c_bins, rust_bins)
+        }
+        "blockd_lends_within_its_bound" => {
+            common::blockd::blockd_lends_within_its_bound(test_config, c_bins, rust_bins)
         }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
