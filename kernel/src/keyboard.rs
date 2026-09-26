@@ -4,10 +4,9 @@
 //! userland.
 
 use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 
-use crate::inbox::InboxId;
 use crate::sync::Lock;
+use crate::watch::Watch;
 pub use toyos_abi::input::{RawKeyEvent, MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_GUI, MOD_RELEASED};
 
 static KEY_BUF: Lock<VecDeque<RawKeyEvent>> = Lock::new(VecDeque::new());
@@ -24,31 +23,14 @@ pub fn declare_source() {
 pub fn source_exists() -> bool {
     SOURCE_EXISTS.load(core::sync::atomic::Ordering::Relaxed)
 }
-static INBOX_WATCHERS: Lock<Vec<InboxId>> = Lock::new(Vec::new());
+/// What a keyboard read and a keyboard poll wait on.
+pub static WATCH: Watch = Watch::new();
 
 /// How many transitions the kernel holds for a reader that is not reading; the oldest is dropped on overflow.
 pub const MAX_QUEUED_EVENTS: usize = 512;
 
 /// Which HID usages are down, one bit each, across every keyboard; keyed by usage, so releasing one keyboard's modifier drops it even if another still holds it.
 static HELD: Lock<[u64; 4]> = Lock::new([0; 4]);
-
-pub fn add_inbox_watcher(id: InboxId) {
-    let mut w = INBOX_WATCHERS.lock();
-    if !w.contains(&id) { w.push(id); }
-}
-
-pub fn remove_inbox_watcher(id: InboxId) {
-    INBOX_WATCHERS.lock().retain(|&x| x != id);
-}
-
-/// Wake every thread blocked on keyboard input.
-pub fn wake_waiters() {
-    crate::sched::waitqs::wake_device(&crate::sched::waitqs::KEYBOARD_WATCH);
-}
-
-pub fn inbox_watchers() -> Vec<InboxId> {
-    INBOX_WATCHERS.lock().clone()
-}
 
 fn is_held(held: &[u64; 4], usage: u8) -> bool {
     held[usage as usize / 64] & (1 << (usage % 64)) != 0

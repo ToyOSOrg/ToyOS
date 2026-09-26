@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use crate::completion;
+use crate::watch;
 use crate::mm::paging::Prot;
 use crate::object::{ops, port, KObjectRef};
 use crate::time::Deadline;
@@ -272,9 +272,8 @@ fn connect_through(connector: &port::Connector) -> u64 {
             port::PushError::QueueFull => SyscallError::ResourceExhausted.to_u64(),
         };
     }
-    // Both halves: the server's blocked `Acceptor` (the port's own watch) and
-    // every ring polling it — `Source::wake` cannot do one without the other.
-    crate::inbox::Source::Port(connector.port()).wake();
+    // The port's one watch carries both: the server blocked in `accept` and every ring polling it.
+    connector.port().watch().post();
     h.0 as u64
 }
 
@@ -307,10 +306,10 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
             return SyscallError::Gone.to_u64();
         }
         let parkable = crate::scheduler::Parkable::at_entry();
-        if completion::wait_until(
+        if watch::wait_until(
             &parkable,
-            completion::Subject::of(acceptor.watch()),
-            completion::Token::new(0),
+            acceptor.watch(),
+            0,
             WaitClass::Ipc,
             Deadline::never(),
             || acceptor.has_pending() || acceptor.closed(),
@@ -450,19 +449,21 @@ pub(super) fn sys_inbox_submit(
     timeout_nanos: u64,
 ) -> u64 {
     // NotFound and PermissionDenied are the table's own words for gone/wrong-type, not collapsed into InvalidArgument.
-    let inbox_id = process::with_process_data(|data| {
-        data.handles
-            .get::<crate::object::inbox::InboxObject>(
-                inbox_h,
-                Rights::READ.union(Rights::WRITE),
-            )
-            .map(|r| r.id())
+    let object = process::with_process_data(|data| {
+        data.handles.get::<crate::object::inbox::InboxObject>(
+            inbox_h,
+            Rights::READ.union(Rights::WRITE),
+        )
     });
-    let inbox_id = match inbox_id {
-        Ok(id) => id,
+    let object = match object {
+        Ok(object) => object,
         Err(e) => return e.refuse(),
     };
-    match crate::inbox::submit(inbox_id, to_submit, min_complete, timeout_nanos) {
+    // Held across the park: the ring outlives this call even if its last handle closes meanwhile.
+    let Some(inbox) = object.inbox() else {
+        return SyscallError::NotFound.to_u64();
+    };
+    match crate::inbox::submit(&inbox, to_submit, min_complete, timeout_nanos) {
         Ok(n) => n as u64,
         Err(e) => e.to_u64(),
     }

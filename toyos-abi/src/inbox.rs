@@ -1,9 +1,8 @@
 //! An inbox: the shared-memory pair of rings a process submits work on and
 //! reads completions from.
 //!
-//! Two other things wear the word: the kernel's `completion::Inbox` is a
-//! *task's* bounded record ring, and a `ConnectionEnd`'s `inbox`/`outbox` pair
-//! is the common noun. Neither is this object.
+//! One other thing wears the word: a `ConnectionEnd`'s `inbox`/`outbox` pair
+//! is the common noun, and not this object.
 //!
 //! Op codes are raw `u8` constants because they cross shared memory. The
 //! kernel converts to a type-safe enum at the syscall boundary.

@@ -259,6 +259,10 @@ actuators! {
     /// Park `iod` before it drains so a closed file's write-back stays pending.
     writeback_stall = "writeback-stall";
 
+    /// Hold every thread that waits on a watch between reading its condition and
+    /// parking, so a post lands in the window its commit must refuse the park over.
+    watch_window = "watch-window";
+
     /// Starve the four xHCI bring-up register waits in `init_one`.
     xhci_deaf_controller = "xhci-deaf-controller";
 
@@ -421,10 +425,10 @@ actuators! {
     /// Turn the reservation's `xadd` into a load, an open interrupt window, and a store.
     log_shared_reservation = "log-shared-reservation";
 
-    /// Let a handle close cancel every poll on `Source::Log` in the machine.
+    /// Let a handle close cancel every poll on the log's watch in the machine.
     log_close_cancels_any_syscap = "log-close-cancels-any-syscap";
 
-    /// Let a handle close cancel every poll on `Source::Keyboard` in the machine.
+    /// Let a handle close cancel every poll on the keyboard's watch in the machine.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
 
     /// Bypass `ConsoleObject`'s line buffer so writes interleave as they arrive.

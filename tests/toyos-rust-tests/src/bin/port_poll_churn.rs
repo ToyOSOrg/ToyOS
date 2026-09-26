@@ -4,12 +4,9 @@
 //! the port code was audited sound — and the churn stays because the window is
 //! real whatever first pointed at it.
 //!
-//! A poll on an acceptor is the one registration that holds its object rather
-//! than naming it by number — `Source::Port(Arc<PortShared>)` — so the order in
-//! which the acceptor handle and the ring go away decides which of them runs
-//! the teardown. Both orders are here, from two threads at once, because the
-//! fault this was written for was seen once in a boot with two of them live and
-//! has never been seen alone.
+//! The acceptor handle and the ring go away in both orders here, from two
+//! threads at once, because the fault this was written for was seen once in a
+//! boot with two of them live and has never been seen alone.
 //!
 //! It is a churn test, not a property test: every arm asserts what it can, but
 //! what it is really watching for is a kernel that stops.

@@ -229,7 +229,7 @@ fn check_single_ownership(vm: &mut Vm<'_>) {
                 | (Container::Dying, TaskState::Ready(c))
                 | (Container::Parked, TaskState::Blocked(c))
                 | (Container::Parked, TaskState::WakeQueued(c)) => c.0 as usize == cpu,
-                // A task that has registered on a wait queue and not yet parked
+                // A task that has registered on a watch and not yet parked
                 // is still the running value. Exactly two words are legal
                 // there: `Committing`, while its own commit is still owed, and
                 // `WakeQueued`, once a remote claim has taken it pre-park —
@@ -1130,10 +1130,10 @@ pub fn check_final(vm: &mut Vm<'_>) {
         }
     }
     for (index, queue) in vm.queues.iter().enumerate() {
-        if !queue.queue.is_empty() {
+        if queue.queue.threads() != 0 {
             problems.push(format!(
                 "I10: queue{index} quiesced with {} registration(s) left behind",
-                queue.queue.len(),
+                queue.queue.threads(),
             ));
         }
     }
