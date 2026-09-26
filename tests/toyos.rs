@@ -338,6 +338,11 @@ const RUST_SKIP: &[&str] = &[
     // Needs a compositor, a terminal and a shell: `desktop_window_child`
     // launches it from that shell.
     "window_child",
+    // Same again: the `toolkit_` tests of their names launch them from the
+    // toolkit desktop.
+    "window_wake",
+    "winit_loop",
+    "winit_pace",
     // Its two spawning arms only mean anything when the two processes share a
     // CPU, and the shared boot has two. `fpu_isolation` gives it a machine with
     // one — and a second boot on the kernel that saves nothing, which is the
@@ -1330,6 +1335,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // itself is a fraction of the screen that no amount of load moves.
     ("desktop_typing_damage", Sched::Parallel, Tier::Nightly),
     ("desktop_window_child", Sched::Parallel, Tier::Nightly),
+    // An unmodified iced app on the desktop, launched from the shell: the
+    // window, its text in the system font, no redraw it did not ask for, and
+    // a clean exit when the compositor closes it.
+    ("toolkit_iced", Sched::Parallel, Tier::Nightly),
+    // The wait every winit loop blocks in, the loop itself through winit's
+    // API, and an animation held to the compositor's frame events.
+    ("toolkit_window_wake", Sched::Parallel, Tier::Nightly),
+    ("toolkit_winit_loop", Sched::Parallel, Tier::Nightly),
+    ("toolkit_winit_pace", Sched::Parallel, Tier::Nightly),
     // The same desktop with soundd behind it: an audio client spawned by a
     // shell, which is the only place all three of its descriptors are pipes to
     // a surface. Parallel — every verdict is a marker with its own ceiling, and
@@ -1664,6 +1678,9 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("metal_sim_client_death", METAL_SIM_CLIENTS),
     ("metal_sim_window_drag", &["test_rs_window_drag"]),
     ("desktop_window_child", &["test_rs_window_child"]),
+    ("toolkit_window_wake", &["test_rs_window_wake"]),
+    ("toolkit_winit_loop", &["test_rs_winit_loop"]),
+    ("toolkit_winit_pace", &["test_rs_winit_pace"]),
     ("doom_sound_flood", &["test_rs_doom_sound_flood"]),
     ("doom_music", &["test_rs_doom_music"]),
     ("soundd_log_stall", &["test_rs_soundd_log_stall"]),
@@ -8768,6 +8785,510 @@ fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
 }
 
+/// The words on iced's counter's two buttons, and the size iced draws body text
+/// at (`iced::Settings::default_text_size`).
+const COUNTER_LABELS: [&str; 2] = ["Increment", "Decrement"];
+const COUNTER_LABEL_PX: f32 = 16.0;
+
+/// How closely the panel has to carry each of [`COUNTER_LABELS`]' glyph
+/// patterns, as a normalised cross-correlation of its luminance with the
+/// word's coverage.
+///
+/// A region without the word — a flat button, its edges, a gradient — shares
+/// at most a stroke or an edge with the word's nine letters and correlates with
+/// a fraction of it; the word itself, rasterised by another renderer at another
+/// subpixel offset, correlates with most of it.
+const LABEL_MATCH: f64 = 0.6;
+
+/// The presents an iced window makes with nothing happening to it: one, for
+/// the redraw a new window is owed, which the redraw iced asks for on the
+/// resize that sizes it joins in the same iteration. The counter's state never
+/// changes while nothing touches it. A window whose frame events turn into
+/// redraws presents once per frame the compositor composes for as long as it
+/// is open.
+const IDLE_PRESENTS: u64 = 1;
+
+/// Mirrored in `tests/toyos-rust-tests/src/bin/winit_pace.rs`'s `FRAMES`.
+const PACE_FRAMES: u64 = 60;
+
+/// The client and the content rectangle the compositor names in its first
+/// `window opened client=N content=X,Y WxH, …` line in `log`, the rectangle as
+/// `(x, y, width, height)` in panel pixels.
+fn opened_window(log: &str) -> Option<(u32, (usize, usize, usize, usize))> {
+    let line = log.lines().find(|line| line.contains("compositor: window opened client="))?;
+    let rest = line.split("client=").nth(1)?;
+    let (client, rest) = rest.split_once(" content=")?;
+    let (at, rest) = rest.split_once(' ')?;
+    let (x, y) = at.split_once(',')?;
+    let (w, rest) = rest.split_once('x')?;
+    let h = rest.split(',').next()?;
+    let rect = (x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?);
+    Some((client.parse().ok()?, rect))
+}
+
+/// The `presents=P frames=F` the compositor says when it closes `client`'s
+/// window.
+fn closed_counts(log: &str, client: u32) -> Option<(u64, u64)> {
+    let line = log
+        .lines()
+        .find(|line| line.contains(&format!("compositor: window closed client={client} by ")))?;
+    let presents = line.split("presents=").nth(1)?.split_whitespace().next()?.parse().ok()?;
+    let frames = line.split("frames=").nth(1)?.split_whitespace().next()?.parse().ok()?;
+    Some((presents, frames))
+}
+
+/// Each window the compositor opened in `log`, in order, with what had closed
+/// it by the end of `log`. A client's handle is reused once its window is
+/// gone, so a close belongs to the latest open window of its client.
+fn window_lives(log: &str) -> Vec<(u32, Option<String>)> {
+    let mut lives: Vec<(u32, Option<String>)> = Vec::new();
+    for line in log.lines() {
+        if let Some((client, _)) = opened_window(line) {
+            lives.push((client, None));
+        } else if let Some(rest) = line.split("compositor: window closed client=").nth(1) {
+            let (client, rest) = rest.split_once(" by ").unwrap_or_else(|| panic!("close line: {line}"));
+            let client: u32 = client.parse().unwrap_or_else(|_| panic!("close line: {line}"));
+            let by = rest.split(", ").next().unwrap_or_else(|| panic!("close line: {line}"));
+            if let Some(open) = lives.iter_mut().rev().find(|(c, by)| *c == client && by.is_none()) {
+                open.1 = Some(by.to_string());
+            }
+        }
+    }
+    lives
+}
+
+/// `text` in the system font, Open Sans Regular, at `px`, laid out on the
+/// font's own advances and kerning, as coverage from 0 to 1 cropped to its ink:
+/// what the panel has to show wherever that text was drawn, whichever renderer
+/// drew it. `(width, height, coverage)`.
+fn rendered_text(text: &str, px: f32) -> (usize, usize, Vec<f64>) {
+    let path = common::compile::repo_root().join("assets/fonts/OpenSans-Regular.ttf");
+    let bytes = fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
+        .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    let line = font.horizontal_line_metrics(px).expect("Open Sans has horizontal metrics");
+    let ascent = line.ascent.ceil() as i32;
+    let height = (line.ascent - line.descent).ceil() as usize + 2;
+    let mut pen = 1.0f32;
+    let mut previous = None;
+    let mut glyphs = Vec::new();
+    for c in text.chars() {
+        if let Some(p) = previous {
+            pen += font.horizontal_kern(p, c, px).unwrap_or(0.0);
+        }
+        let (metrics, coverage) = font.rasterize(c, px);
+        let x0 = pen.round() as i32 + metrics.xmin;
+        let y0 = ascent - metrics.ymin - metrics.height as i32 + 1;
+        glyphs.push((x0, y0, metrics.width, metrics.height, coverage));
+        pen += metrics.advance_width;
+        previous = Some(c);
+    }
+    let width = pen.ceil() as usize + 2;
+    let mut canvas = vec![0.0f64; width * height];
+    for (x0, y0, w, h, coverage) in glyphs {
+        for row in 0..h {
+            for col in 0..w {
+                let (x, y) = (x0 + col as i32, y0 + row as i32);
+                assert!(
+                    x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height,
+                    "{text:?} at {px}px laid a glyph outside its own line"
+                );
+                let at = y as usize * width + x as usize;
+                canvas[at] = canvas[at].max(f64::from(coverage[row * w + col]) / 255.0);
+            }
+        }
+    }
+    let inked = |i: usize| canvas[i] > 0.0;
+    let cols: Vec<usize> = (0..width).filter(|&x| (0..height).any(|y| inked(y * width + x))).collect();
+    let rows: Vec<usize> = (0..height).filter(|&y| (0..width).any(|x| inked(y * width + x))).collect();
+    let (x0, x1) = (cols[0], cols[cols.len() - 1]);
+    let (y0, y1) = (rows[0], rows[rows.len() - 1]);
+    let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
+    let mut cropped = Vec::with_capacity(w * h);
+    for y in y0..=y1 {
+        cropped.extend_from_slice(&canvas[y * width + x0..=y * width + x1]);
+    }
+    (w, h, cropped)
+}
+
+/// The best normalised cross-correlation of `template`'s coverage with the
+/// luminance under any placement of it inside `rect` of `dump`, as a
+/// magnitude: text is lighter than its button or darker than its background,
+/// and either way it is the text. With it, that placement as
+/// `(x, y, width, height)` in panel pixels.
+///
+/// A placement whose pixels barely vary is skipped: it correlates with
+/// nothing, and it is most of any window. So is one that overlaps `taken`,
+/// another word's place.
+fn best_text_match(
+    dump: &screen::Ppm,
+    (rx, ry, rw, rh): (usize, usize, usize, usize),
+    (tw, th, template): &(usize, usize, Vec<f64>),
+    taken: Option<(usize, usize, usize, usize)>,
+) -> (f64, (usize, usize, usize, usize)) {
+    let (tw, th) = (*tw, *th);
+    let x1 = (rx + rw).min(dump.width);
+    let y1 = (ry + rh).min(dump.height);
+    if x1 < rx + tw || y1 < ry + th {
+        return (0.0, (rx, ry, tw, th));
+    }
+    let (w, h) = (x1 - rx, y1 - ry);
+    let luminance: Vec<f64> = (ry..y1)
+        .flat_map(|y| (rx..x1).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let [r, g, b] = dump.pixels[y * dump.width + x];
+            0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b)
+        })
+        .collect();
+    // Summed-area tables of the luminance and its square, one row and column
+    // of zeros ahead, so any placement's mean and variance are four reads.
+    let stride = w + 1;
+    let mut sum = vec![0.0f64; stride * (h + 1)];
+    let mut squares = vec![0.0f64; stride * (h + 1)];
+    for y in 0..h {
+        for x in 0..w {
+            let v = luminance[y * w + x];
+            let at = (y + 1) * stride + x + 1;
+            sum[at] = v + sum[at - 1] + sum[at - stride] - sum[at - stride - 1];
+            squares[at] = v * v + squares[at - 1] + squares[at - stride] - squares[at - stride - 1];
+        }
+    }
+    let area = |table: &[f64], x: usize, y: usize| {
+        table[(y + th) * stride + x + tw] - table[y * stride + x + tw] - table[(y + th) * stride + x]
+            + table[y * stride + x]
+    };
+    let n = (tw * th) as f64;
+    let mean = template.iter().sum::<f64>() / n;
+    let centred: Vec<f64> = template.iter().map(|t| t - mean).collect();
+    let template_norm = centred.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let mut best = (0.0f64, (rx, ry, tw, th));
+    for y in 0..=(h - th) {
+        for x in 0..=(w - tw) {
+            let s = area(&sum, x, y);
+            let variance = area(&squares, x, y) - s * s / n;
+            // Two levels of standard deviation: flat but for noise.
+            if variance < 4.0 * n {
+                continue;
+            }
+            if let Some((ox, oy, ow, oh)) = taken {
+                let (px, py) = (rx + x, ry + y);
+                if px < ox + ow && ox < px + tw && py < oy + oh && oy < py + th {
+                    continue;
+                }
+            }
+            let mut dot = 0.0;
+            for row in 0..th {
+                let line = &luminance[(y + row) * w + x..(y + row) * w + x + tw];
+                let pattern = &centred[row * tw..(row + 1) * tw];
+                dot += line.iter().zip(pattern).map(|(l, c)| l * c).sum::<f64>();
+            }
+            let score = (dot / (template_norm * variance.sqrt())).abs();
+            if score > best.0 {
+                best = (score, (rx + x, ry + y, tw, th));
+            }
+        }
+    }
+    best
+}
+
+/// iced's own counter example, unmodified, built here from `tests/iced-counter`
+/// and launched from the desktop's shell under `stats`: its window opens, both
+/// its buttons' labels are on the panel in the system font, it presents only
+/// what it has to while nothing happens to it, and it leaves with code 0 when
+/// the compositor closes the window.
+///
+/// The labels are judged off the panel, in the rectangle the compositor says
+/// it put the window's pixels, against each word as Open Sans draws it,
+/// rendered here by a second rasteriser: iced carries no font of its own, and
+/// draws with what fontdb finds in `/system/share/fonts`. The presents are the
+/// compositor's count, not the app's. `stats` reports the app's CPU time and
+/// peak memory after it leaves.
+fn toolkit_iced() -> Result<(), String> {
+    let app = "test_rs_iced-counter";
+    let labels: Vec<(usize, usize, Vec<f64>)> =
+        COUNTER_LABELS.iter().map(|word| rendered_text(word, COUNTER_LABEL_PX)).collect();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let bins = qemu::build_toyos_bins(&root.join("tests/iced-counter"));
+    let (mut qemu, mut log, launched) = toolkit_launch(&bins, "iced-counter", &format!("stats {app}"))?;
+    let log = &mut log;
+    // Its exit ends the wait too: an app that dies before it has a window
+    // would otherwise hold the lane for the whole budget.
+    let exited = format!("exit: {app} pid=");
+    let deadline = Instant::now() + qemu.budget(Duration::from_secs(60));
+    while !log[launched..].contains("compositor: window opened") {
+        if log[launched..].contains(&exited) || Instant::now() >= deadline {
+            return Err(format!("{app} never got a window:\n{}", &log[launched..]));
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    }
+    let (client, content) = opened_window(&log[launched..])
+        .ok_or_else(|| format!("the compositor's window line did not parse:\n{}", &log[launched..]))?;
+
+    let by = qemu.budget(Duration::from_secs(30));
+    // Two words, so two places: "Decrement" alone carries most of
+    // "Increment"'s ink in its "crement". The word matched best claims its
+    // place, and the other is matched only away from it.
+    let matches = |dump: &screen::Ppm| -> [(f64, (usize, usize, usize, usize)); 2] {
+        let [first, second] = [0, 1].map(|i| best_text_match(dump, content, &labels[i], None));
+        if first.0 >= second.0 {
+            [first, best_text_match(dump, content, &labels[1], Some(first.1))]
+        } else {
+            [best_text_match(dump, content, &labels[0], Some(second.1)), second]
+        }
+    };
+    let dump = qemu.screendump_while(by, Duration::from_millis(250), |dump| {
+        matches(dump).iter().all(|(m, _)| *m >= LABEL_MATCH)
+    });
+    let found = matches(&dump);
+    for (word, (m, at)) in COUNTER_LABELS.iter().zip(&found) {
+        if *m < LABEL_MATCH {
+            return Err(format!(
+                "{app}'s window at {content:?} carries no {word:?} in Open Sans at \
+                 {COUNTER_LABEL_PX}px apart from the other label: its best correlation with the \
+                 word is {m:.3} at {at:?}, under {LABEL_MATCH} ({found:.3?}):\n{}",
+                &log[launched..]
+            ));
+        }
+    }
+    let matched: Vec<f64> = found.iter().map(|(m, _)| *m).collect();
+
+    // The rectangle holds the app's pixels only while its window is open, so
+    // the close has to be of that same window, by this keystroke: an app that
+    // died after it opened leaves the rectangle to whatever is behind it.
+    log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    if log[launched..].contains(&exited) {
+        return Err(format!("{app} left before its window was judged:\n{}", &log[launched..]));
+    }
+    let closing = log.len();
+    if !close_focused_window(&mut qemu, log, closing) {
+        return Err(format!("GUI+Q never reached the compositor:\n{}", &log[launched..]));
+    }
+    if !log[closing..].contains(&format!("compositor: window closed client={client} by GUI+Q")) {
+        return Err(format!(
+            "GUI+Q closed some other window than {app}'s (client {client}), so the text was \
+             not its:\n{}",
+            &log[launched..]
+        ));
+    }
+    let (presents, frames) = closed_counts(&log[closing..], client)
+        .ok_or_else(|| format!("the compositor's close line did not parse:\n{}", &log[closing..]))?;
+    if presents > IDLE_PRESENTS {
+        return Err(format!(
+            "{app} presented {presents} times ({frames} frame events back) with nothing \
+             happening to it, over the {IDLE_PRESENTS} a window that draws only when asked \
+             makes:\n{}",
+            &log[launched..]
+        ));
+    }
+    // `stats` prints the peak last, once the app is gone and waited for.
+    let by = qemu.budget(Duration::from_secs(30));
+    if !serial_until_new(&mut qemu, log, "peak mem", closing, by) {
+        return Err(format!(
+            "{app} did not leave when its window was closed:\n{}",
+            &log[launched..]
+        ));
+    }
+    let after = &log[closing..];
+    let exit = after
+        .lines()
+        .find(|line| line.contains(&exited))
+        .ok_or_else(|| format!("no exit record for {app}:\n{after}"))?;
+    if !exit.contains(" code=0 ") {
+        return Err(format!("{app} did not exit cleanly: {exit}\n{after}"));
+    }
+    let cpu = exit
+        .split_once("cpu=")
+        .map(|(_, cpu)| cpu.trim())
+        .ok_or_else(|| format!("{app}'s exit record names no CPU time: {exit}"))?;
+    let peak = after
+        .lines()
+        .find_map(|line| line.split_once("peak mem").map(|(_, peak)| peak.trim()))
+        .ok_or_else(|| format!("`stats` reported no peak for {app}:\n{after}"))?;
+    eprintln!(
+        "  [toolkit] {app}: window at {content:?}, {COUNTER_LABELS:?} matched at {matched:.3?}, \
+         {presents} presents and {frames} frames while idle, exit 0, cpu {cpu}, peak mem {peak}"
+    );
+    Ok(())
+}
+
+/// The toolkit desktop with `bin`, one of `built`, carried and `launch` typed
+/// at its shell, the launch line's offset in the returned log.
+fn toolkit_launch(
+    built: &[(String, Vec<u8>)],
+    bin: &str,
+    launch: &str,
+) -> Result<(QemuInstance, String, usize), String> {
+    let bins: Vec<(String, Vec<u8>)> =
+        built.iter().filter(|(name, _)| name == bin).cloned().collect();
+    if bins.is_empty() {
+        return Err(format!("the {bin} client was not built"));
+    }
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toolkitcase");
+    let options = BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        ready_marker: "compositor: ready",
+        smp: 8,
+        // `Drained::Bytes`, the typed line's pacing.
+        kernel_params: &["i8042-trace"],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+    let mut log = qemu.boot_log().to_string();
+    let ack = Drained::Bytes;
+    shell_answers(&mut qemu, &mut log, &ack)?;
+    let launched = log.len();
+    shell_type_line(&mut qemu, launch, &ack)?;
+    Ok((qemu, log, launched))
+}
+
+/// `window::Waiter`'s claim, which every winit loop here rests on: a wake
+/// raised on another thread ends a wait that also watches windows, more of
+/// them than a new waiter has room for, and more wakes than its pipe holds
+/// are one.
+///
+/// `test_rs_window_wake` is launched from the desktop's shell, so it holds the
+/// shell's compositor, and says OK only if every one of its rounds was ended by
+/// the wake; a lost one ends its wait on a ten-second ceiling and says so.
+fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "window_wake", "test_rs_window_wake")?;
+    let log = &mut log;
+    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
+    while live.working(log) {
+        let said = &log[launched..];
+        if said.contains("WINDOW-WAKE-OK") {
+            for line in said.lines().filter(|l| l.contains("WINDOW-WAKE-OK")) {
+                eprintln!("  [toolkit] {}", line.trim());
+            }
+            return Ok(());
+        }
+        if said.contains("WINDOW-WAKE-LOST")
+            || said.contains("WINDOW-WAKE-REFUSED")
+            || said.contains("panicked")
+        {
+            return Err(format!("a wake did not end the windows' wait:\n{said}"));
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    }
+    Err(format!("test_rs_window_wake never finished:\n{}", &log[launched..]))
+}
+
+/// The ToyOS winit backend's loop through winit's own API: user events sent
+/// from `AboutToWait` and from another thread, windows redrawn and dropped on
+/// another thread, a window dropped in the handler that made it, one dropped in
+/// a user event, and a closed window its application keeps.
+/// `tests/toyos-rust-tests/src/bin/winit_loop.rs` asserts what the app is
+/// delivered; this closes the window it asks to have closed, reads its
+/// verdict, and asks the compositor whether every window the app dropped was
+/// closed by that drop.
+fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_loop", "test_rs_winit_loop")?;
+    let log = &mut log;
+    // Past the app's own twenty-second ceiling, so a lost wake is its verdict
+    // and not this one's.
+    let mut live = qemu::Liveness::new(Duration::from_secs(40), Duration::from_secs(240));
+    let mut closed = false;
+    while live.working(log) {
+        let said = &log[launched..];
+        if said.contains("WINIT-LOOP-OK") {
+            // Up to the kept window's close: a window the app still held is
+            // closed by its exit, which follows that.
+            let Some(gui_q) = said.find(" by GUI+Q, ") else {
+                return Err(format!("the winit loop's kept window was never closed by GUI+Q:\n{said}"));
+            };
+            let upto = said[gui_q..].find('\n').map_or(said.len(), |end| gui_q + end);
+            let lives = window_lives(&said[..upto]);
+            let Some(((_, kept), dropped)) = lives.split_last() else {
+                return Err(format!("the compositor opened no window for the winit loop:\n{said}"));
+            };
+            if kept.as_deref() != Some("GUI+Q") {
+                return Err(format!(
+                    "GUI+Q closed a window other than the one the winit loop opened last:\n{said}"
+                ));
+            }
+            if let Some(at) = dropped.iter().position(|(_, by)| by.as_deref() != Some("the client itself")) {
+                let (client, by) = &dropped[at];
+                return Err(format!(
+                    "window {at} (client {client}) of the {} the winit loop dropped was not closed \
+                     by its drop before the kept one was closed, but by {by:?}:\n{said}",
+                    dropped.len()
+                ));
+            }
+            for line in said.lines().filter(|l| l.contains("WINIT-LOOP stage")) {
+                eprintln!("  [toolkit] {}", line.trim());
+            }
+            eprintln!("  [toolkit] each of the {} dropped windows closed at its drop", dropped.len());
+            return Ok(());
+        }
+        if said.contains("WINIT-LOOP-FAIL") || said.contains("panicked") {
+            return Err(format!("the winit loop failed:\n{said}"));
+        }
+        if !closed && said.contains("WINIT-LOOP CLOSE-ME") {
+            closed = true;
+            let closing = log.len();
+            if !close_focused_window(&mut qemu, log, closing) {
+                return Err(format!("GUI+Q never reached the compositor:\n{}", &log[launched..]));
+            }
+            continue;
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    }
+    Err(format!("test_rs_winit_loop never finished:\n{}", &log[launched..]))
+}
+
+/// Redraw pacing: an application that asks for its next frame from inside
+/// `RedrawRequested` is held to the compositor's frame events, as a Wayland
+/// client is to its frame callbacks.
+///
+/// The verdict is the compositor's own count on the close line: every one of
+/// [`PACE_FRAMES`] presents arrived, and none outran the frame event of the
+/// one before it, so the presents exceed the frame events by at most the one
+/// still on its way when the window closed.
+fn toolkit_winit_pace(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_pace", "test_rs_winit_pace")?;
+    let log = &mut log;
+    let drew = format!("WINIT-PACE drew {PACE_FRAMES} frames");
+    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
+    while live.working(log) && !log[launched..].contains(&drew) {
+        let said = &log[launched..];
+        if said.contains("WINIT-PACE-FAIL") || said.contains("panicked") {
+            return Err(format!("the animation failed:\n{said}"));
+        }
+        if said.contains("exit: test_rs_winit_pace pid=") {
+            return Err(format!("test_rs_winit_pace left before it finished drawing:\n{said}"));
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
+    }
+    let (client, _) = opened_window(&log[launched..])
+        .ok_or_else(|| format!("the animation never said it was done:\n{}", &log[launched..]))?;
+    let closing = log.len();
+    if !close_focused_window(&mut qemu, log, closing) {
+        return Err(format!("GUI+Q never reached the compositor:\n{}", &log[launched..]));
+    }
+    let (presents, frames) = closed_counts(&log[closing..], client).ok_or_else(|| {
+        format!(
+            "GUI+Q closed some other window than the animation's (client {client}):\n{}",
+            &log[launched..]
+        )
+    })?;
+    if presents != PACE_FRAMES {
+        return Err(format!(
+            "the compositor counted {presents} presents of the {PACE_FRAMES} the animation \
+             drew:\n{}",
+            &log[launched..]
+        ));
+    }
+    if presents > frames + 1 {
+        return Err(format!(
+            "{presents} presents against {frames} frame events: the animation drew ahead of the \
+             compositor, unpaced:\n{}",
+            &log[launched..]
+        ));
+    }
+    eprintln!("  [toolkit] an animation presented {presents} times against {frames} frame events");
+    Ok(())
+}
+
 /// What a desktop that stopped answering is asked, in the order that survives
 /// being asked.
 ///
@@ -11554,6 +12075,10 @@ fn run_machine_test(
         "desktop_locale_detect" => desktop_locale_detect(),
         "desktop_typing_damage" => desktop_typing_damage(),
         "desktop_window_child" => desktop_window_child(rust_bins),
+        "toolkit_iced" => toolkit_iced(),
+        "toolkit_window_wake" => toolkit_window_wake(rust_bins),
+        "toolkit_winit_loop" => toolkit_winit_loop(rust_bins),
+        "toolkit_winit_pace" => toolkit_winit_pace(rust_bins),
         "desktop_audio_client" => desktop_audio_client(),
         "blocked_dump" => blocked_dump(),
         "xhci_many_devices" => {

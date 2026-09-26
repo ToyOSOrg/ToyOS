@@ -10,9 +10,10 @@ Owner rulings, 2026-09-26:
 
 - **The desktop is part of ToyOS.** It ships in the image as a fully fledged
   desktop distribution; it is never a package the package manager installs.
-- **ToyOS's own desktop software uses iced only.** Third-party apps built with
-  any toolkit (slint, egui, …) must run unchanged — one unmodified slint app
-  and one unmodified egui app are kept as tests.
+- **ToyOS's own desktop software uses iced only.**
+- **The platform supports iced alone, for now** (owner ruling, 2026-09-26):
+  slint and egui are not supported
+  (`issues/design-debt/slint-and-egui-are-not-supported-by-the-owners-choice.md`).
 - **ToyOS is a first-class platform, never Linux-compatible.** A crate that
   assumes "any other OS is Linux" gets a forked native toyos branch, carried
   until it is upstreamed.
@@ -81,18 +82,17 @@ already runs. iced is chosen for ToyOS's own desktop software as an owner
 ruling — its Elm architecture, tiny-skia CPU renderer and lighter tree (97
 unique crates against slint's 206 and egui's 64, but slint's dependencies are
 the heaviest to keep licence-clean and cfg-clean) fit a shell this tree
-maintains itself. Un-forked slint and egui apps stay first-class guests and
-are held as tests so this choice never narrows what runs on ToyOS.
+maintains itself. The later ruling above narrows the platform itself to iced
+until the Rust target is upstream.
 
 ## Stages
 
 1. **The platform: existing apps run unchanged.** winit 0.30's toyos arm,
-   softbuffer's cfg fix, system fonts (fontique/fontdb toyos arms, a real font
+   softbuffer's cfg fix, system fonts (fontdb's toyos arm, a real font
    shipped in the image), a wakeable event loop, and wgpu failing gracefully
    with no backend instead of panicking (so default-feature iced falls back to
-   tiny-skia on its own). Guest tests hold one unmodified `iced`, one
-   unmodified `slint` and one unmodified `egui` app.
-   **Exit**: all three build and run in QEMU with zero dependency or source
+   tiny-skia on its own). A guest test holds one unmodified `iced` app.
+   **Exit**: it builds and runs in QEMU with zero dependency or source
    changes to the app crate itself.
    **In progress**, in a separate PR — not cited here by number.
 2. **A shell**, written in iced: the compositor's window management for

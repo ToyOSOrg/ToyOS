@@ -7,7 +7,7 @@ build = "build.rs"
 
 [dependencies]
 cpal = "0.18"
-winit = { version = "0.31.0-beta.2", default-features = false }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 softbuffer = { version = "0.4", default-features = false }
 rustysynth = "1.3"
 
