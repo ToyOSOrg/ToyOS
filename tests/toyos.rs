@@ -238,6 +238,9 @@ const RUST_SKIP: &[&str] = &[
     // It prints init's word accepting a swap of netd; its verdict is that a
     // `logd` serving the network changed nothing. `log_carrier_forgery` runs it.
     "log_carrier_forger",
+    // It asks for a stop its boot's kernel refuses; its verdict is its line
+    // after that in `/log`. `log_after_a_refused_stop` runs it.
+    "log_refused_stop",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -771,6 +774,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // A program writing the kernel's words and another program's head: every
     // judge of `/log` reads the truth. Lines, and the exit judge; no clock.
     ("log_program_forgery", Sched::Parallel, Tier::Fast),
+    // A stop the kernel refuses after logd flushed for it: a line said after
+    // it is in `/log`. Lines; no clock.
+    ("log_after_a_refused_stop", Sched::Parallel, Tier::Fast),
     // A program's line said after three batches of records, read before them:
     // `/log` carries it after every one. Lines and positions; no clock.
     ("log_program_line_after_its_records", Sched::Parallel, Tier::Fast),
@@ -1660,6 +1666,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("partition_claim_departure", &["test_rs_partition_claimant"]),
     ("log_program_line", &["test_rs_log_origin"]),
     ("log_program_forgery", &["test_rs_log_forger"]),
+    ("log_after_a_refused_stop", &["test_rs_log_refused_stop"]),
     ("log_program_flood", &["test_rs_log_flood"]),
     ("log_program_line_after_its_records", &["test_rs_log_hold"]),
     ("log_carrier_forgery", &["test_rs_log_carrier_forger"]),
@@ -14703,6 +14710,7 @@ fn run_machine_test(
         "log_stream_stalled_reader" => common::logstream::stalled_reader(c_bins, rust_bins),
         "log_program_line" => common::origin::line(c_bins, rust_bins),
         "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
+        "log_after_a_refused_stop" => common::origin::refused_stop(c_bins, rust_bins),
         "log_program_line_after_its_records" => common::origin::after_records(c_bins, rust_bins),
         "log_carrier_forgery" => common::origin::carrier_forgery(c_bins, rust_bins),
         "log_program_flood" => common::origin::flood(c_bins, rust_bins),

@@ -117,9 +117,23 @@ fn one_job(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(qemu::TestResult, String), String> {
-    let staged = logstream::stage(config, name, c_bins, rust_bins)?;
+    one_job_armed(config, name, job, &[], timeout, c_bins, rust_bins)
+}
+
+/// [`one_job`], its kernel armed with `params`.
+fn one_job_armed(
+    config: &str,
+    name: &str,
+    job: &str,
+    params: &'static [&'static str],
+    timeout: Duration,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(qemu::TestResult, String), String> {
+    let staged = logstream::stage_armed(config, name, params, c_bins, rust_bins)?;
     let options = BootOptions {
         boot_image: Some(qemu::Staged::Written(staged.image.clone())),
+        kernel_params: params,
         ..Default::default()
     };
     let config = compile::repo_root().join(config);
@@ -291,6 +305,47 @@ pub fn flood(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> R
         "  [origin] {owed} flood lines: {written} in /log in order, {refused} refused a full \
          ring, {suppressed} past the allowance; {done}"
     );
+    Ok(())
+}
+
+/// The job that asks for a stop the kernel refuses, and the line it says then.
+const REFUSED_JOB: &str = "test_rs_log_refused_stop";
+const REFUSED_LINE: &str = "log refused stop: said after the refusal";
+
+/// **A refused stop leaves the log written.** init has `logd` flush for a
+/// stop, after which `logd` holds the file's lines back; the kernel, armed
+/// with `power-refused-once`, refuses the stop and the machine runs on. The
+/// job's line after the refusal is in `/log`, after the stop line, with
+/// `logd`'s word that the file takes lines again.
+pub fn refused_stop(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let (ran, log) = one_job_armed(
+        "tests/testcases",
+        "log-refused-stop",
+        REFUSED_JOB,
+        &["power-refused-once"],
+        Duration::from_secs(60),
+        c_bins,
+        rust_bins,
+    )?;
+    if ran.exit_code != Some(0) {
+        return Err(format!("{REFUSED_JOB} exited {:?}\n{}", ran.exit_code, ran.stdout));
+    }
+    let lines: Vec<&str> = log.lines().collect();
+    let stopping = lines
+        .iter()
+        .position(|l| l.contains(toyos_logstream::STOPPING))
+        .ok_or_else(|| format!("/log carries no stop line: nothing was stopped\n{log}"))?;
+    let said = lines
+        .iter()
+        .position(|l| toyos_logstream::program_line(l).is_some_and(|s| s.tag == RUNNER && s.text == REFUSED_LINE))
+        .ok_or_else(|| format!("/log carries no {REFUSED_LINE:?}: logd held the file back after the refused stop\n{log}"))?;
+    if said < stopping {
+        return Err(format!("{REFUSED_LINE:?} is before the stop it follows in /log\n{log}"));
+    }
+    if !bootlog::lines_of(&log, "logd").contains("logd: the stop was refused") {
+        return Err(format!("logd never said the stop was refused\n{log}"));
+    }
+    eprintln!("  [origin] a line said after a refused stop is in /log, after the stop line");
     Ok(())
 }
 

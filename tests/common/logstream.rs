@@ -58,8 +58,19 @@ pub fn stage(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<Staged, String> {
+    stage_armed(config, name, &[], c_bins, rust_bins)
+}
+
+/// [`stage`], its kernel armed with `params`.
+pub fn stage_armed(
+    config: &str,
+    name: &str,
+    params: &[&str],
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<Staged, String> {
     let config = compile::repo_root().join(config);
-    let bytes = qemu::build_boot_image(&config, c_bins, rust_bins, &[]);
+    let bytes = qemu::build_boot_image(&config, c_bins, rust_bins, params);
     let image = super::lane::dir().join(format!("{name}.img"));
     std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
     let (start, len) = volumes::log_extent(&bytes, &image)?;

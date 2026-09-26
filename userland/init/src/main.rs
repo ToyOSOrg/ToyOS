@@ -56,7 +56,7 @@ use toyos::syscap::SysCap;
 use toyos::{AsHandle, Pipe};
 use toyos_abi::Rights;
 use toyos_logstream::{
-    Registration, Tag, ALIVE, CONSOLE, FLUSH, FLUSHED, LOGD, MAX_TAG, ORIGINS, REGISTER, STOPPING,
+    Registration, Tag, ALIVE, CONSOLE, FLUSH, FLUSHED, LOGD, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
     SWAP, SWAP_BACK, SWAP_LEAVING,
 };
 use toyos_abi::syscall::{
@@ -210,6 +210,13 @@ impl Log {
     fn carrier(&self, word: u8) {
         if let Err(e) = self.conn.send_bytes(SWAP, &[word]) {
             panic!("init: logd's origins connection refused a swap's word: {e:?}");
+        }
+    }
+
+    /// The stop a flush was for was refused: `logd` writes the file again.
+    fn resume(&self) {
+        if let Err(e) = self.conn.signal(RESUME) {
+            panic!("init: logd could not be told the machine runs on: {e:?}");
         }
     }
 
@@ -847,6 +854,7 @@ impl<'a> Init<'a> {
             Stop::Reboot => self.syscap.reboot(),
             Stop::Shutdown => self.syscap.shutdown(),
         };
+        self.log.resume();
         toyos::error!("init: power: the kernel refused {how:?}: {refused:?}");
         let _ = conn.try_send_bytes(power::MSG_REFUSED, &refused.to_u64().to_le_bytes());
     }

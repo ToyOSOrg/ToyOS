@@ -169,6 +169,12 @@ actuators! {
     /// Judged by `usb_transport_break`.
     usb_transport_break_flushed = "usb-transport-break-flushed";
 
+    /// Refuse the machine's first stop, `SYS_SHUTDOWN` or `SYS_REBOOT`, before
+    /// anything is torn down, as a machine with no way to stop refuses it: the
+    /// path on which init tells `logd` the machine runs on. Judged by
+    /// `log_after_a_refused_stop`.
+    power_refused_once = "power-refused-once";
+
     /// Stall the bind of a disk that arrives while another is held for its
     /// device, for less than `usb-slow-return` does, and leave every transfer
     /// of the operation the held call sends again on it unanswered, once, each

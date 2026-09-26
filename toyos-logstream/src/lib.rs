@@ -108,6 +108,10 @@ pub const SWAP_BACK: u8 = b'B';
 pub const FLUSH: u32 = 5;
 pub const FLUSHED: u32 = 6;
 
+/// init → `logd`: the stop a [`FLUSH`] was for was refused, and the machine
+/// runs on. `logd` writes the file again, from the first line it held back.
+pub const RESUME: u32 = 7;
+
 /// init's line before it asks `logd` to flush for a stop: the last line of a
 /// boot `/log` is owed, since `logd` answers only once it is durable.
 pub const STOPPING: &str = "init: power: the machine stops, and logd makes the log whole first";

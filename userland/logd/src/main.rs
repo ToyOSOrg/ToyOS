@@ -66,9 +66,11 @@
 //! rotation, and when init asks before the machine stops
 //! ([`toyos_logstream::FLUSH`]). The kernel waits on none of it: a panicking
 //! kernel's report is in its black box, and so are the stop's own last records.
-//! **A line after that flush reaches the console and nothing else**: the stop
-//! syncs no file still open, so the file ends where the flush made it durable,
-//! and a reader of the served log is handed what the file holds and no more.
+//! **A line after that flush reaches the console and is held back from the
+//! file**: the stop syncs no file still open, so the file ends where the flush
+//! made it durable, and a reader of the served log is handed what the file
+//! holds and no more. A stop the kernel refused is init's
+//! [`toyos_logstream::RESUME`], and what was held is written then.
 //!
 //! `SYS_FSYNC` reaches the device's own cache flush. **A flush that would block
 //! is not a flush that failed**: `io::ErrorKind::WouldBlock` from `sync_all` is
@@ -98,8 +100,8 @@ use toyos::syscap::SysCap;
 use toyos::{Console, Pipe};
 use toyos_abi::syscall::SyscallError;
 use toyos_logstream::{
-    ProgramLine, Registration, Tag, CONSOLE, FLUSH, FLUSHED, MAX_TAG, ORIGINS, REGISTER, SERVICE,
-    SWAP, SWAP_BACK, SWAP_LEAVING,
+    ProgramLine, Registration, Tag, CONSOLE, FLUSH, FLUSHED, MAX_TAG, ORIGINS, REGISTER, RESUME,
+    SERVICE, SWAP, SWAP_BACK, SWAP_LEAVING,
 };
 use toyos_wallclock::Civil;
 
@@ -208,7 +210,7 @@ fn main() {
         boot_local,
         hub,
         stall: Stall::from_args(),
-        stopping: false,
+        stopping: None,
     };
     log.run(&published);
 }
@@ -241,8 +243,9 @@ struct Log {
     boot_local: Option<u64>,
     hub: Arc<serve::Hub>,
     stall: Option<Stall>,
-    /// init's flush was answered: the machine stops.
-    stopping: bool,
+    /// init's flush was answered and the machine stops: the file's text held
+    /// back since, which a refused stop writes.
+    stopping: Option<String>,
 }
 
 /// One line on its way out: when it was stamped, and what it is.
@@ -376,6 +379,7 @@ impl Log {
                     self.hub.carrier(word);
                 }
                 RxStep::Frame { msg_type: FLUSH, .. } => flush = true,
+                RxStep::Frame { msg_type: RESUME, .. } => self.resume(),
                 RxStep::Frame { msg_type, .. } => {
                     panic!("logd: init sent frame type {msg_type} on the origins connection")
                 }
@@ -556,7 +560,8 @@ impl Log {
                 }
             }
         }
-        if self.stopping {
+        if let Some(held) = &mut self.stopping {
+            held.push_str(&file);
             return;
         }
         // The file first: a reader is served only what /log already holds,
@@ -723,11 +728,22 @@ impl Log {
     fn flushed(&mut self) {
         let refused = self.sync().err();
         self.answered(Instant::now(), refused);
-        self.stopping = true;
+        self.stopping = Some(String::new());
         self.feed_console();
         if let Err(e) = self.from_init.signal(FLUSHED) {
             panic!("logd: init could not be told the log is whole: {e:?}");
         }
+    }
+
+    /// The stop was refused: what was held back goes to the file, which is
+    /// this boot's log again.
+    fn resume(&mut self) {
+        let Some(held) = self.stopping.take() else {
+            panic!("logd: init said the machine runs on, and no stop was flushed for");
+        };
+        toyos::warn!("logd: the stop was refused, so {DIR} takes this boot's lines again");
+        self.to_volume(held.as_bytes());
+        self.hub.append(held.as_bytes());
     }
 
     /// End a `--stall` once any program has said its `--stall-until` line.

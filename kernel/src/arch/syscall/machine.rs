@@ -149,10 +149,24 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// `power-refused-once`: whether this is the stop it refuses.
+fn refused_once() -> bool {
+    static REFUSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    let refuse = crate::actuator::power_refused_once()
+        && !REFUSED.swap(true, core::sync::atomic::Ordering::Relaxed);
+    if refuse {
+        log!("power: refusing this stop, as power-refused-once asks");
+    }
+    refuse
+}
+
 /// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
 pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
+    }
+    if refused_once() {
+        return SyscallError::NotSupported.to_u64();
     }
     if let Err(e) = quiesce("Shutting down.") {
         return e.to_u64();
@@ -165,6 +179,9 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
 pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
+    }
+    if refused_once() {
+        return SyscallError::NotSupported.to_u64();
     }
     if !acpi::can_reboot() {
         log!("reboot: this machine's FADT names no reset register — refused");
