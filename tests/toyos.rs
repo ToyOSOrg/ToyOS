@@ -8714,19 +8714,20 @@ fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
 }
 
-/// The word iced's counter draws first, on its first button, and the size iced
-/// draws body text at (`iced::Settings::default_text_size`).
-const COUNTER_LABEL: &str = "Increment";
+/// The words on iced's counter's two buttons, and the size iced draws body text
+/// at (`iced::Settings::default_text_size`).
+const COUNTER_LABELS: [&str; 2] = ["Increment", "Decrement"];
 const COUNTER_LABEL_PX: f32 = 16.0;
 
-/// How closely the panel has to carry [`COUNTER_LABEL`]'s glyph pattern, as a
-/// normalised cross-correlation of its luminance with the word's coverage.
+/// How closely the panel has to carry each of [`COUNTER_LABELS`]' glyph
+/// patterns, as a normalised cross-correlation of its luminance with the
+/// word's coverage.
 ///
-/// A region with no such word in it — a flat button, a gradient, a picture —
-/// has nothing that varies with the glyphs and correlates with them near zero;
-/// the same word in the same font and size, rasterised by another renderer at
-/// another subpixel offset, correlates near one. This is the midpoint.
-const LABEL_MATCH: f64 = 0.5;
+/// A region without the word — a flat button, its edges, a gradient — shares
+/// at most a stroke or an edge with the word's nine letters and correlates with
+/// a fraction of it; the word itself, rasterised by another renderer at another
+/// subpixel offset, correlates with most of it.
+const LABEL_MATCH: f64 = 0.6;
 
 /// The presents an iced window makes with nothing happening to it: one, for
 /// the redraw a new window is owed, which the redraw iced asks for on the
@@ -8888,19 +8889,21 @@ fn best_text_match(
 }
 
 /// iced's own counter example, unmodified, built here from `tests/iced-counter`
-/// and launched from the desktop's shell under `stats`: its window opens, its first button's label is on the panel
-/// in the system font, it presents only what it has to while nothing happens
-/// to it, and it leaves with code 0 when the compositor closes the window.
+/// and launched from the desktop's shell under `stats`: its window opens, both
+/// its buttons' labels are on the panel in the system font, it presents only
+/// what it has to while nothing happens to it, and it leaves with code 0 when
+/// the compositor closes the window.
 ///
-/// The label is judged off the panel, in the rectangle the compositor says it
-/// put the window's pixels, against the word as Open Sans draws it rendered
-/// here by a second rasteriser: iced carries no font of its own, and draws with
-/// what fontdb finds in `/system/share/fonts`. The presents are the
+/// The labels are judged off the panel, in the rectangle the compositor says
+/// it put the window's pixels, against each word as Open Sans draws it,
+/// rendered here by a second rasteriser: iced carries no font of its own, and
+/// draws with what fontdb finds in `/system/share/fonts`. The presents are the
 /// compositor's count, not the app's. `stats` reports the app's CPU time and
 /// peak memory after it leaves.
 fn toolkit_iced() -> Result<(), String> {
     let app = "test_rs_iced-counter";
-    let label = rendered_text(COUNTER_LABEL, COUNTER_LABEL_PX);
+    let labels: Vec<(usize, usize, Vec<f64>)> =
+        COUNTER_LABELS.iter().map(|word| rendered_text(word, COUNTER_LABEL_PX)).collect();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let bins = qemu::build_toyos_bins(&root.join("tests/iced-counter"));
     if !bins.iter().any(|(name, _)| name == "iced-counter") {
@@ -8939,17 +8942,22 @@ fn toolkit_iced() -> Result<(), String> {
         .ok_or_else(|| format!("the compositor's window line did not parse:\n{}", &log[launched..]))?;
 
     let by = qemu.budget(Duration::from_secs(30));
+    let matched = |dump: &screen::Ppm| -> Vec<f64> {
+        labels.iter().map(|label| best_text_match(dump, content, label)).collect()
+    };
     let dump = qemu.screendump_while(by, Duration::from_millis(250), |dump| {
-        best_text_match(dump, content, &label) >= LABEL_MATCH
+        matched(dump).iter().all(|m| *m >= LABEL_MATCH)
     });
-    let matched = best_text_match(&dump, content, &label);
-    if matched < LABEL_MATCH {
-        return Err(format!(
-            "{app}'s window at {content:?} carries no {COUNTER_LABEL:?} in Open Sans at \
-             {COUNTER_LABEL_PX}px: its best correlation with the word is {matched:.3}, under \
-             {LABEL_MATCH}:\n{}",
-            &log[launched..]
-        ));
+    let matched = matched(&dump);
+    for (word, m) in COUNTER_LABELS.iter().zip(&matched) {
+        if *m < LABEL_MATCH {
+            return Err(format!(
+                "{app}'s window at {content:?} carries no {word:?} in Open Sans at \
+                 {COUNTER_LABEL_PX}px: its best correlation with the word is {m:.3}, under \
+                 {LABEL_MATCH}:\n{}",
+                &log[launched..]
+            ));
+        }
     }
 
     // The rectangle holds the app's pixels only while its window is open, so
@@ -9005,7 +9013,7 @@ fn toolkit_iced() -> Result<(), String> {
         .find_map(|line| line.split_once("peak mem").map(|(_, peak)| peak.trim()))
         .ok_or_else(|| format!("`stats` reported no peak for {app}:\n{after}"))?;
     eprintln!(
-        "  [toolkit] {app}: window at {content:?}, {COUNTER_LABEL:?} matched at {matched:.3}, \
+        "  [toolkit] {app}: window at {content:?}, {COUNTER_LABELS:?} matched at {matched:.3?}, \
          {presents} presents and {frames} frames while idle, exit 0, cpu {cpu}, peak mem {peak}"
     );
     Ok(())
