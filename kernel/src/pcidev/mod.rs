@@ -152,7 +152,7 @@ static IRQ: [Interrupt; MAX_FUNCTIONS] = [const { Interrupt::new() }; MAX_FUNCTI
 
 /// One address space per slot, made on that slot's first claim and kept.
 ///
-/// Kept because a domain id is never given back (`iommu/vtd/domain.rs`), so a
+/// Kept because a domain id is never given back (`arch/x86_64/vtd/domain.rs`), so a
 /// domain per claim would let a process spawn and die its way through every id
 /// the units report. [`release`] empties it, so the next holder attaches to one
 /// that maps nothing.

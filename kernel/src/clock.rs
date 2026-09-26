@@ -225,7 +225,7 @@ pub fn init_wall(century_reg: Option<u8>, utc_offset_minutes: Option<i32>) {
     let utc_offset_minutes =
         if crate::actuator::rtc_zone_east() { Some(-120) } else { utc_offset_minutes };
 
-    let civil = match crate::rtc::read(century_reg) {
+    let civil = match crate::arch::rtc::read(century_reg) {
         Ok(civil) => civil,
         Err(fault) => {
             log!("clock: this machine will not say what time it is — {fault}");

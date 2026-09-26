@@ -6,6 +6,7 @@
 // No mapping here is global, which is what makes a single-address
 // invalidation (INVPCID or INVLPG) complete.
 
+use crate::log;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -13,7 +14,7 @@ use crate::hasher::HashMap;
 
 use toyos_pcid::{Alloc, Pcid, PcidPool};
 
-use super::{UserAddr, PAGE_2M};
+use crate::mm::{UserAddr, PAGE_2M};
 use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
 use crate::sync::Lock;
@@ -161,20 +162,20 @@ struct PageTablePage([u64; 512]);
 
 impl PageTablePage {
     fn phys(&self) -> u64 {
-        super::DirectMap::phys_of(self)
+        crate::mm::DirectMap::phys_of(self)
     }
 
     /// # Safety
     /// `phys` must be a `PageTablePage` this module built and linked in;
     /// the returned reference must not outlive its address space.
     unsafe fn from_phys<'a>(phys: u64) -> &'a PageTablePage {
-        &*super::DirectMap::from_phys(phys).as_ptr::<PageTablePage>()
+        &*crate::mm::DirectMap::from_phys(phys).as_ptr::<PageTablePage>()
     }
 
     /// # Safety
     /// Same as [`from_phys`], plus exclusivity: hold the only live reference.
     unsafe fn from_phys_mut<'a>(phys: u64) -> &'a mut PageTablePage {
-        &mut *super::DirectMap::from_phys(phys).as_mut_ptr::<PageTablePage>()
+        &mut *crate::mm::DirectMap::from_phys(phys).as_mut_ptr::<PageTablePage>()
     }
 
     fn child(&self, index: usize) -> Option<&PageTablePage> {
@@ -426,7 +427,7 @@ pub struct AddressSpace {
     root: Box<PageTablePage>,
     children: Vec<Box<PageTablePage>>,
     /// Physical data pages mapped into user space, keyed by physical address. Freed on drop.
-    pages: HashMap<u64, super::pmm::PhysPage>,
+    pages: HashMap<u64, crate::mm::pmm::PhysPage>,
     /// All virtual memory regions, keyed by start address.
     regions: BTreeMap<UserAddr, Region>,
     /// Owned for this space's life: dropping the space returns a user tag, so two
@@ -627,7 +628,7 @@ impl AddressSpace {
 
     /// Checked here, not at the callers: a user space shallow-copies the
     /// kernel PML4 half, so a kernel address would otherwise walk to a writable kernel page.
-    pub fn translate(&self, vaddr: UserAddr) -> Option<super::DirectMap> {
+    pub fn translate(&self, vaddr: UserAddr) -> Option<crate::mm::DirectMap> {
         let va = vaddr.raw();
         if !toyos_userbound::is_user_addr(va) {
             return None;
@@ -646,11 +647,11 @@ impl AddressSpace {
             if pte & PAGE_PRESENT == 0 {
                 return None;
             }
-            return Some(super::DirectMap::from_phys((pte & ADDR_MASK) + (va & 0xFFF)));
+            return Some(crate::mm::DirectMap::from_phys((pte & ADDR_MASK) + (va & 0xFFF)));
         }
         let page_phys = pde & ADDR_MASK_2M;
         let offset = va & (PAGE_2M - 1);
-        Some(super::DirectMap::from_phys(page_phys + offset))
+        Some(crate::mm::DirectMap::from_phys(page_phys + offset))
     }
 
     /// Find a free gap of at least `size` bytes (2MB-aligned), searching top-down.
@@ -769,7 +770,7 @@ impl AddressSpace {
     }
 
     /// Private: not safe to use until every CPU is told — the free fn [`map_mmio`] is the whole operation.
-    fn map_mmio(&mut self, phys: u64, size: u64, cache: CachePolicy) -> super::Mmio {
+    fn map_mmio(&mut self, phys: u64, size: u64, cache: CachePolicy) -> crate::mm::Mmio {
         let start = phys & !(PAGE_2M - 1);
         let end = (phys + size + PAGE_2M - 1) & !(PAGE_2M - 1);
         let mut cur = start;
@@ -777,7 +778,7 @@ impl AddressSpace {
             self.map_2m(cur, PAGE_PRESENT | PAGE_WRITE | cache.pde_bits());
             cur += PAGE_2M;
         }
-        super::Mmio::new(super::DirectMap::from_phys(phys), size)
+        crate::mm::Mmio::new(crate::mm::DirectMap::from_phys(phys), size)
     }
 
     /// Read from the table rather than remembered, or `None` if unmapped.
@@ -803,7 +804,7 @@ impl AddressSpace {
     }
 
     pub fn direct_map_policy(&self, phys: u64) -> Option<CachePolicy> {
-        self.policy_at(super::DirectMap::from_phys(phys).as_ptr::<u8>() as u64)
+        self.policy_at(crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64)
     }
 
     pub fn user_policy(&self, addr: UserAddr) -> Option<CachePolicy> {
@@ -814,7 +815,7 @@ impl AddressSpace {
     /// handing the enclosing 2 MiB page back to the PMM would reissue memory with a hole.
     pub fn guard_4k(&mut self, phys: u64) {
         assert!(phys & 0xFFF == 0, "guard_4k: phys {phys:#x} not 4 KiB-aligned");
-        let virt = super::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
+        let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
         let (pml4_idx, pdpt_idx, pd_idx) = indices(virt);
         let pd_phys = {
             let pdpt = self.root.child(pml4_idx).expect("guard_4k: no PDPT over the direct map");
@@ -865,7 +866,7 @@ impl AddressSpace {
     /// address, so an MMIO window's target is pre-mapped by the time its
     /// driver asks; a page `guard_4k` already split must not reach here.
     fn map_2m(&mut self, phys: u64, flags: u64) {
-        let virt = super::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
+        let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
         let pd_idx = indices(virt).2;
         let pd = self.ensure_table(virt, flags);
         let entry = phys | flags | PAGE_SIZE_BIT;
@@ -965,7 +966,7 @@ pub fn load_kernel_flush() {
 /// Free function (not a method): the lock and the shootdown are separate
 /// statements. Not optional — `map_2m` may change memory type under a
 /// sibling's stale entry, which is SDM Vol. 3A §11.12.4 undefined behaviour.
-pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> super::Mmio {
+pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
     let mmio = kernel().lock().map_mmio(phys, size, policy.cache());
     crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Mmio);
     // Read back off the table and logged beside firmware's MTRR verdict: the
@@ -984,12 +985,12 @@ pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> super::Mmio {
 /// Take the 4 KiB page holding `addr` out of the kernel direct map; `addr`'s
 /// page must be owned by the caller forever (see [`AddressSpace::guard_4k`]).
 pub fn guard_kernel_page(addr: u64) {
-    assert!(super::is_kernel_addr(addr), "guard_kernel_page: {addr:#x} is not a kernel address");
-    kernel().lock().guard_4k(super::DirectMap::phys_of(addr as *const u8));
+    assert!(crate::mm::is_kernel_addr(addr), "guard_kernel_page: {addr:#x} is not a kernel address");
+    kernel().lock().guard_4k(crate::mm::DirectMap::phys_of(addr as *const u8));
 }
 
 /// Build kernel page tables: map all physical memory in the high half using 2MB large pages.
-pub(super) fn init(memory_map: &[MemoryMapEntry]) {
+pub(crate) fn init(memory_map: &[MemoryMapEntry]) {
     let mut max_addr: u64 = MIN_PHYS_MAP;
     for entry in memory_map {
         if entry.end > max_addr {
@@ -1082,7 +1083,7 @@ pub fn present_in_current_cr3(addr: u64) -> bool {
 /// map into and [`map_mmio`] is the way.
 pub fn boot_map_write_combining(phys: u64, size: u64) -> bool {
     for pass in [Pass::Prove, Pass::Switch] {
-        for base in [phys, super::PHYS_OFFSET + phys] {
+        for base in [phys, crate::mm::PHYS_OFFSET + phys] {
             let mut at = base & !(PAGE_2M - 1);
             let end = base.saturating_add(size);
             while at < end {

@@ -28,6 +28,7 @@
 //! This module's lock is taken before `UNITS` and before `TABLES`, never after
 //! either.
 
+use crate::log;
 use alloc::vec::Vec;
 
 use crate::iommu::{Refused, StreamId};

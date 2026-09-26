@@ -96,7 +96,7 @@ extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64, rflags: u64) {
     #[cfg(not(feature = "boot-actuators"))]
     let _ = cs;
     #[cfg(feature = "boot-actuators")]
-    crate::nmi_gate::observe(rip, cs, rsp);
+    crate::arch::nmi_gate::observe(rip, cs, rsp);
     crate::sched::dump::note_nmi(rip);
     // After the probe's store and before the nested-NMI staging: a hard lockup
     // ends the machine from here, so the sibling asking where this CPU is still
@@ -104,7 +104,7 @@ extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64, rflags: u64) {
     // sealing a record.
     crate::hardlockup::sample(rip, rsp, rflags);
     #[cfg(feature = "boot-actuators")]
-    crate::nmi_gate::stage_nested_if_armed();
+    crate::arch::nmi_gate::stage_nested_if_armed();
 }
 
 /// A second NMI on a stack the first is still standing on.

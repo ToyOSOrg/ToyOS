@@ -1,8 +1,13 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
-//! The machine, and the only part of this kernel that knows which one.
+//! x86-64: the PC this kernel was first written for.
 //!
 //! Every `unsafe` block here carries a one-line `SAFETY:` comment, enforced by the lint above.
 //! [`percpu`] owns every `gs:` access; nothing outside this directory writes one.
+//!
+//! The PC platform's own devices live here too, because no other architecture
+//! has them: the i8042, the I/O APIC, the CMOS RTC, the chipset's TCO
+//! watchdog and VT-d. Generic code reaches each through the concept it serves
+//! (`keyboard_controller`, `watchdog`, `iommu_unit`, …), never by its name.
 
 pub mod apic;
 pub mod barrier;
@@ -11,13 +16,25 @@ pub mod control_regs;
 pub mod cpu;
 pub mod entry;
 pub mod fpu;
+pub mod hw;
+pub mod i8042;
 pub mod idt;
+pub mod ioapic;
 pub mod mtrr;
+#[cfg(feature = "boot-actuators")]
+pub mod nmi_gate;
+pub mod paging;
 pub mod pat;
 pub mod percpu;
+pub mod rtc;
 pub mod smp;
 pub mod syscall;
 pub mod tlb;
+pub mod vtd;
+pub mod watchdog;
+
+pub use i8042 as keyboard_controller;
+pub use vtd as iommu_unit;
 
 pub use apic::{msi_message, MSI_DOORBELL};
 

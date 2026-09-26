@@ -15,6 +15,7 @@ pub mod interrupt;
 mod queue;
 mod table;
 
+use crate::log;
 use alloc::vec::Vec;
 
 use crate::drivers::acpi::TableError;
@@ -259,7 +260,7 @@ fn remappable(ready: &[(Unit, Plan)], described: usize) -> Option<bool> {
         );
         return None;
     }
-    let apics = crate::drivers::ioapic::ids();
+    let apics = crate::arch::ioapic::ids();
     if !interrupt::apics_are_named(&apics) {
         log!(
             "iommu: firmware named a requester id for only some of this machine's {} I/O APICs, \

@@ -16,7 +16,7 @@ use crate::mm::paging::MmioPolicy;
 use crate::log;
 use crate::mm::Mmio;
 use crate::sync::Lock;
-use super::acpi::MadtInfo;
+use crate::drivers::acpi::MadtInfo;
 
 const IOREGSEL: u64 = 0x00;
 const IOWIN: u64 = 0x10;

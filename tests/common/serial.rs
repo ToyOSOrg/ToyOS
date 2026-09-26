@@ -103,7 +103,7 @@ const DEATHS: &[(&str, Died, Died)] = &[
     // `machine_check_handler`, the one exception a Ring 3 frame does not make
     // the process's fault. Also `-> !`.
     ("MACHINE CHECK", Died::Kernel, Died::Kernel),
-    // kernel/src/iommu/vtd/fault.rs — a fault on a stream this kernel drives
+    // kernel/src/arch/x86_64/vtd/fault.rs — a fault on a stream this kernel drives
     // has nobody to hand it to, so the handler halts. One a *process* drives
     // says `owner=slot<N>` and the machine goes on, which is why the needle is
     // the owner rather than the fault.
@@ -405,7 +405,7 @@ impl Serial {
 /// all — so the only capture allowed to hold one is the capture of the test
 /// that staged it, and every other boot in the estate reds.
 const NEVER_CLEAN: &[&str] = &[
-    // kernel/src/iommu/vtd/fault.rs — a function a *process* drives reached an
+    // kernel/src/arch/x86_64/vtd/fault.rs — a function a *process* drives reached an
     // address its own domain does not map. The machine goes on and the claim
     // refuses every later call, so this is not a death; it is a driver whose
     // descriptors are wrong, and a netd that did it on every boot would

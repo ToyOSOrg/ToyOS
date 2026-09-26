@@ -510,7 +510,7 @@ pub fn pass(dispose: Dispose) {
     // posts is in the run queue by the time the pass chooses.
     crate::object::drain_zero_handles();
     let now = HW.now();
-    crate::drivers::watchdog::feed(now.0);
+    crate::arch::watchdog::feed(now.0);
     #[cfg(feature = "heap-sweep")]
     maybe_sweep(now);
     #[cfg(feature = "pass-spin")]
@@ -643,7 +643,7 @@ fn execute(action: Action<KernelPayload>) {
                 || crate::irq_ring::any_pending_self()
                 || !with_cpu(|c| c.mailbox_is_empty())
                 // The i8042 verdict needs a pass to notice its deadline; a quiet machine after boot runs none otherwise.
-                || crate::drivers::i8042::verdict_due()
+                || crate::arch::keyboard_controller::verdict_due()
                 // No log condition here: a log to write means a runnable process, covered above. A pending
                 // root-hub port needs a pass too — no interrupt is coming.
                 || crate::drivers::xhci::port_work_pending();
@@ -664,7 +664,7 @@ fn drain_irqs(entered: super::dump::Entered) {
     #[cfg(feature = "boot-actuators")]
     crate::heartbeat::note_pass();
     crate::drivers::xhci::poll_if_pending();
-    crate::drivers::i8042::service();
+    crate::arch::keyboard_controller::service();
     // Here, not at the keystroke: the keystroke's decoding driver's guard is done by this point.
     super::dump::serve_request(entered);
     // A CPU cannot read a sibling's `CpuSched`, so the dump reaches every CPU
@@ -723,7 +723,7 @@ extern "C" fn idle_loop() -> ! {
         // while the one under observation spins on `syscall` from Ring 3.
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::syscall_window_nmi() {
-            crate::nmi_gate::storm();
+            crate::arch::nmi_gate::storm();
         }
         // Here, not from a syscall: the panic handler recovers, not paints, when a userland
         // thread is current, and the idle loop has none.

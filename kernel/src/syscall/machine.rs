@@ -88,7 +88,7 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
         crate::usb_gate::sweep_under_load();
     }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
-    crate::drivers::watchdog::disarm();
+    crate::arch::watchdog::disarm();
     // **Before the sync, because the sync is a claim about a machine.** A
     // process that issues a `write` after `sync_all` returns has dirty pages
     // nothing will flush. The log's holders run on until `wait_for_durable`

@@ -34,7 +34,7 @@ unsafe impl Send for Mmio {}
 unsafe impl Sync for Mmio {}
 
 impl Mmio {
-    pub(super) fn new(base: DirectMap, size: u64) -> Self {
+    pub(crate) fn new(base: DirectMap, size: u64) -> Self {
         Self { base: base.as_mut_ptr(), size }
     }
 

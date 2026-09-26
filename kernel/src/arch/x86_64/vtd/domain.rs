@@ -15,6 +15,7 @@
 //!
 //! Lock order here is `DOMAINS`, `REMAP`, `UNITS`, `TABLES`, never the reverse.
 
+use crate::log;
 use alloc::vec::Vec;
 
 use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, StreamId};

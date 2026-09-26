@@ -28,6 +28,7 @@
 //! itself with [`hold::EXPIRED`] in its word, and [`note_syscall`] is where it
 //! says so.
 
+use crate::log;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::{apic, percpu};

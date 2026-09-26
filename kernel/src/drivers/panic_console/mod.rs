@@ -745,9 +745,9 @@ pub fn hold_the_panel(mut bound: Bound) -> ! {
 /// anything that does not skip them. [`i8042::poll_byte`] is an `inb` — no
 /// lock, no MMIO.
 ///
-/// [`i8042::poll_byte`]: crate::drivers::i8042::poll_byte
+/// [`i8042::poll_byte`]: crate::arch::keyboard_controller::poll_byte
 fn read_key(keys: &mut KeyDecoder, bound: &mut Bound) -> Option<KeyOutcome> {
-    let (byte, false) = crate::drivers::i8042::poll_byte()? else {
+    let (byte, false) = crate::arch::keyboard_controller::poll_byte()? else {
         return None;
     };
     let outcome = keys.feed(byte);

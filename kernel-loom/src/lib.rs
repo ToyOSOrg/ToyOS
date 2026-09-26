@@ -1,7 +1,7 @@
 //! Loom harness for the kernel's memory-ordering primitives.
 //!
 //! `kernel/src/sync.rs`, `kernel/src/shootdown.rs`,
-//! `kernel/src/sched/reap_gate.rs` and `kernel/src/drivers/i8042/tally.rs` are
+//! `kernel/src/sched/reap_gate.rs` and `kernel/src/arch/x86_64/i8042/tally.rs` are
 //! compiled into this crate with `feature = "loom"` on, so their atomics and
 //! cells resolve to loom's instrumented ones and the models drive the real
 //! primitives rather than transliterations of them — a transliteration is
@@ -350,7 +350,7 @@ pub mod sleeplock;
 /// subject is a *driver*, and it is here for the reason the others are: the
 /// property is "no reader ever sees this pair disagree", which is a claim about
 /// instants that no guest test can express and that x86's TSO hides.
-#[path = "../../kernel/src/drivers/i8042/tally.rs"]
+#[path = "../../kernel/src/arch/x86_64/i8042/tally.rs"]
 pub mod i8042_tally;
 
 /// The panic snapshot's owner and access state, driven together by

@@ -685,7 +685,7 @@ pub fn watchdog_fed(
 }
 
 /// The kernel's read-back above its own arm, in
-/// `kernel/src/drivers/watchdog.rs`: whole clauses, one per branch.
+/// `kernel/src/arch/x86_64/watchdog.rs`: whole clauses, one per branch.
 const ARMED_ON_ARRIVAL: &str = "so the bootloader had already armed the timer";
 /// Unreachable from this suite: every guest that reaches the kernel's arm
 /// passed the parameter, and the loader read the same one first.

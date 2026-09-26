@@ -383,7 +383,7 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     // Published before the CPU it belongs to runs an instruction — no window where the census misses it.
     crate::irq_census::publish(cpu_id, percpu.irq_counts.as_ptr());
     #[cfg(feature = "boot-actuators")]
-    crate::nmi_gate::publish(cpu_id, &raw const percpu.nmi_hold, &raw const percpu.user_rsp);
+    crate::arch::nmi_gate::publish(cpu_id, &raw const percpu.nmi_hold, &raw const percpu.user_rsp);
     ptr
 }
 

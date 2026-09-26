@@ -45,8 +45,6 @@ mod usb_gate;
 mod nvme_gate;
 #[cfg(feature = "boot-actuators")]
 mod sched_gate;
-#[cfg(feature = "boot-actuators")]
-mod nmi_gate;
 mod block;
 mod durability;
 mod gpt;
@@ -74,7 +72,6 @@ mod process;
 mod loader;
 mod scheduler;
 mod sched;
-mod hw;
 mod iommu;
 mod preempt;
 mod irq_census;
@@ -82,7 +79,6 @@ mod irq_ring;
 mod trace;
 mod time;
 mod clock;
-mod rtc;
 
 mod watch;
 mod iod;
@@ -118,7 +114,9 @@ use crate::mm::paging::MmioPolicy;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use arch::{apic, cpu, idt, pat, percpu, smp};
-use drivers::{acpi, gop, i8042, ioapic, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
+use arch::{i8042, ioapic};
+pub(crate) use arch::hw;
+use drivers::{acpi, gop, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
 #[panic_handler]
@@ -476,7 +474,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     iommu::init(kernel_args.rsdp_addr, &pci_devices);
     // Before storage and everything under it: what it covers is the rest of this
     // boot, and a wedge down there is the reason to have one.
-    drivers::watchdog::init(&pci_devices);
+    arch::watchdog::init(&pci_devices);
     file_cache::init();
     gpt::init(kernel_args);
     i8042::init(kernel_args.rsdp_addr);

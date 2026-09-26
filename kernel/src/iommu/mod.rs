@@ -9,7 +9,7 @@
 // CI runs kernel clippy with `-D warnings`, so an undocumented `unsafe` block anywhere in this module tree fails the build.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-pub mod vtd;
+use crate::arch::iommu_unit as unit;
 
 /// The address width a device's translations cover.
 ///
@@ -37,21 +37,21 @@ pub struct StreamId(u32);
 
 impl StreamId {
     /// Named `pci`, not `new`: an SMMU StreamID is not always a bus/device/function triple.
-    pub(in crate::iommu) const fn pci(bus: u8, device: u8, function: u8) -> Self {
+    pub(crate) const fn pci(bus: u8, device: u8, function: u8) -> Self {
         Self(((bus as u32) << 8) | ((device as u32) << 3) | function as u32)
     }
 
     /// The bus half of the id.
-    pub(in crate::iommu) const fn bus(self) -> u8 {
+    pub(crate) const fn bus(self) -> u8 {
         (self.0 >> 8) as u8
     }
 
-    pub(in crate::iommu) const fn devfn(self) -> u8 {
+    pub(crate) const fn devfn(self) -> u8 {
         (self.0 & 0xFF) as u8
     }
 
     /// The 16-bit requester id a source-id check compares against; `pci` is the only constructor, so it always fits.
-    pub(in crate::iommu) const fn requester(self) -> u16 {
+    pub(crate) const fn requester(self) -> u16 {
         self.0 as u16
     }
 }
@@ -65,12 +65,12 @@ impl Iova {
     /// The domain every kernel driver that has not moved is still on maps a device address to the physical address it equals.
     ///
     /// The single site that policy is stated in, so the stage that moves the last driver deletes it and the compiler flags every site that assumed it.
-    pub(in crate::iommu) const fn identity(phys: u64) -> Self {
+    pub(crate) const fn identity(phys: u64) -> Self {
         Self(phys)
     }
 
     /// An address a domain's allocator handed out, which is nothing else's address.
-    pub(in crate::iommu) const fn translated(at: u64) -> Self {
+    pub(crate) const fn translated(at: u64) -> Self {
         Self(at)
     }
 
@@ -84,12 +84,12 @@ impl Iova {
 pub struct DomainId(u16);
 
 impl DomainId {
-    pub(in crate::iommu) const fn new(id: u16) -> Self {
+    pub(crate) const fn new(id: u16) -> Self {
         assert!(id != 0);
         Self(id)
     }
 
-    pub(in crate::iommu) const fn raw(self) -> u16 {
+    pub(crate) const fn raw(self) -> u16 {
         self.0
     }
 }
@@ -160,13 +160,13 @@ impl DeviceSpace {
     /// machine out of domains are both answers its caller refuses the claim
     /// with rather than degrading past.
     pub fn own() -> Result<Self, IommuError> {
-        vtd::domain::create().map(Self::Own)
+        unit::domain::create().map(Self::Own)
     }
 
     /// One of a device's own, or the machine's own with the reason. For a
     /// driver **in this kernel**, whose addresses are the kernel's either way.
     pub fn create() -> Self {
-        match vtd::domain::create() {
+        match unit::domain::create() {
             Ok(id) => Self::Own(id),
             Err(why) => {
                 log!("iommu: no domain of its own for a device: {why}");
@@ -185,7 +185,7 @@ impl DeviceSpace {
     pub fn map(self, phys: u64, bytes: u64) -> Result<u64, IommuError> {
         match self {
             Self::Untranslated => Ok(phys),
-            Self::Own(id) => vtd::domain::map(id, phys, bytes).map(Iova::raw),
+            Self::Own(id) => unit::domain::map(id, phys, bytes).map(Iova::raw),
         }
     }
 
@@ -195,7 +195,7 @@ impl DeviceSpace {
     pub fn map_at(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
         match self {
             Self::Untranslated => panic!("iommu: an untranslated space was asked to place {phys:#x} at {at:#x}"),
-            Self::Own(id) => vtd::domain::map_at(id, Iova::translated(at), phys, bytes),
+            Self::Own(id) => unit::domain::map_at(id, Iova::translated(at), phys, bytes),
         }
     }
 
@@ -203,7 +203,7 @@ impl DeviceSpace {
     pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
         match self {
             Self::Untranslated => Ok(()),
-            Self::Own(id) => vtd::domain::unmap(id, Iova::translated(at), bytes),
+            Self::Own(id) => unit::domain::unmap(id, Iova::translated(at), bytes),
         }
     }
 
@@ -211,7 +211,7 @@ impl DeviceSpace {
     /// in place: the device is translating the moment this returns.
     pub fn attach(self, bus: u8, device: u8, function: u8) {
         if let Self::Own(id) = self {
-            vtd::domain::attach(StreamId::pci(bus, device, function), id);
+            unit::domain::attach(StreamId::pci(bus, device, function), id);
         }
     }
 }
@@ -229,9 +229,9 @@ impl core::fmt::Display for StreamId {
 ///
 /// The device list must be the complete enumeration: enabling translation with an unenumerated device left off it can brick the machine's own boot disk.
 ///
-/// Calls `vtd::init` directly rather than through a dispatch, because x86-64 has one backend and the dispatch is not yet a real seam.
+/// Calls `unit::init` directly rather than through a dispatch, because x86-64 has one backend and the dispatch is not yet a real seam.
 pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice]) {
-    vtd::init(rsdp_addr, devices);
+    unit::init(rsdp_addr, devices);
 }
 
 /// How a source must address its interrupt. Not a yes/no: a caller that folded
@@ -291,20 +291,20 @@ pub fn remap_msi(
     vector: u8,
     dest: u32,
 ) -> Delivery<MsiMessage> {
-    if !vtd::interrupt::is_armed() {
+    if !unit::interrupt::is_armed() {
         return Delivery::Direct;
     }
-    match vtd::interrupt::msi(StreamId::pci(bus, device, function), vector, dest) {
+    match unit::interrupt::msi(StreamId::pci(bus, device, function), vector, dest) {
         Ok(msi) => Delivery::Remapped(MsiMessage { address: msi.address, data: msi.data }),
         Err(why) => Delivery::Refused(why),
     }
 }
 
 pub fn remap_pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Delivery<PinRedirect> {
-    if !vtd::interrupt::is_armed() {
+    if !unit::interrupt::is_armed() {
         return Delivery::Direct;
     }
-    match vtd::interrupt::pin(apic_id, vector, dest, level) {
+    match unit::interrupt::pin(apic_id, vector, dest, level) {
         Ok(pin) => Delivery::Remapped(PinRedirect { low: pin.low, high: pin.high }),
         Err(why) => Delivery::Refused(why),
     }
@@ -319,12 +319,12 @@ pub fn remap_pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Delivery<Pi
 /// the machine keeps running. Takes the triple rather than a [`StreamId`], like
 /// [`remap_msi`]: what a requester id is stays in this module.
 pub fn note_user_owned(bus: u8, device: u8, function: u8, slot: Option<usize>) {
-    vtd::fault::user_owned(StreamId::pci(bus, device, function), slot);
+    unit::fault::user_owned(StreamId::pci(bus, device, function), slot);
 }
 
 /// Reached from the IDT gate the unit's own `FEDATA` names.
 ///
 /// Fires when a device has been told no, so what it reports is a bug in whoever owns that device, not in the IOMMU.
 pub fn fault_interrupt() {
-    vtd::fault::service();
+    unit::fault::service();
 }

@@ -180,7 +180,7 @@ impl KeyDecoder {
                 // Shift *release*, which is accidentally the right direction
                 // for the one state that could stick. Untested on metal. If it
                 // does bite, the answer is a controller-side reconnect probe —
-                // `0xF2` identify on a timer, from `kernel/src/drivers/i8042/`
+                // `0xF2` identify on a timer, from `kernel/src/arch/x86_64/i8042/`
                 // — and never a wire heuristic, because no wire heuristic
                 // exists.
                 0x00 | 0xFF => KeyOutcome::Lost,

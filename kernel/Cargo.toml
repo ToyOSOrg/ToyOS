@@ -268,7 +268,7 @@ stack-witness = []
 # lands eight bytes below the frame, so the frame has to be inside a real stack
 # before the call happens. `stack-witness`'s third test is what establishes that.
 switch-witness = ["stack-witness"]
-# The negative controls — `kernel/src/hw.rs`'s `switch_witness_mutate` carries
+# The negative controls — `kernel/src/arch/x86_64/hw.rs`'s `switch_witness_mutate` carries
 # what each stages. One write per boot, at the ninth switch (`MUTATE_AT`, and
 # small because it was measured): `frame` writes the `rbx` slot of a frame the
 # check has just validated, and is the control for the instrument — a witness that

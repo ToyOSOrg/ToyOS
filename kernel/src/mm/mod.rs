@@ -2,7 +2,9 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod pmm;
-pub mod paging;
+/// The architecture's page tables: `crate::arch::paging`, named here because
+/// every caller asks it as memory management.
+pub use crate::arch::paging;
 mod alloc;
 mod dma;
 mod mmio;

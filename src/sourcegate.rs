@@ -198,7 +198,7 @@ const BANS: &[Ban] = &[
             // A device's TX buffer.
             ("kernel/src/drivers/virtio_console.rs", 1),
             // A VT-d table is 4 KiB by the specification, not by this kernel.
-            ("kernel/src/iommu/vtd/table.rs", 1),
+            ("kernel/src/arch/x86_64/vtd/table.rs", 1),
             // Ring entries.
             ("kernel/src/trace.rs", 1),
             // A path length, in bytes.
@@ -210,7 +210,7 @@ const BANS: &[Ban] = &[
         why: "as above, in the other width",
         allowed: &[
             // A VT-d register window, by the specification.
-            ("kernel/src/iommu/vtd/mod.rs", 1),
+            ("kernel/src/arch/x86_64/vtd/mod.rs", 1),
             // The export itself, and the one place the literal lives.
             ("kernel/src/mm/mod.rs", 1),
             // One PCIe function's extended config space, by PCI 3.0 §7.2.2 and
@@ -463,7 +463,7 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/drivers/virtio_console.rs", 1),
     ("kernel/src/drivers/virtio_sound.rs", 2),
-    ("kernel/src/hw.rs", 1),
+    ("kernel/src/arch/x86_64/hw.rs", 1),
     ("kernel/src/mm/mmio.rs", 2),
     ("kernel/src/mm/region.rs", 2),
     ("kernel/src/pipe.rs", 1),

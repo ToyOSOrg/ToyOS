@@ -161,13 +161,13 @@ extern "sysv64" fn syscall_entry() {
         #[cfg(feature = "boot-actuators")]
         nmi_hold = const percpu::OFF_NMI_HOLD,
         #[cfg(feature = "boot-actuators")]
-        asked = const crate::nmi_gate::hold::ASKED,
+        asked = const crate::arch::nmi_gate::hold::ASKED,
         #[cfg(feature = "boot-actuators")]
-        held = const crate::nmi_gate::hold::HELD,
+        held = const crate::arch::nmi_gate::hold::HELD,
         #[cfg(feature = "boot-actuators")]
-        spin = const crate::nmi_gate::hold::SPIN,
+        spin = const crate::arch::nmi_gate::hold::SPIN,
         #[cfg(feature = "boot-actuators")]
-        expired = const crate::nmi_gate::hold::EXPIRED,
+        expired = const crate::arch::nmi_gate::hold::EXPIRED,
     );
 }
 

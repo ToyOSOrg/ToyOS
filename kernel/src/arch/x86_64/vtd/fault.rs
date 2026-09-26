@@ -15,6 +15,7 @@
 //! machine goes on, because one process's bug taking the machine down is the
 //! thing moving a driver out of the kernel was for.
 
+use crate::log;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::drivers::pci::{self, PciDevice};
