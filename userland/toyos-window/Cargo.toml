@@ -16,3 +16,4 @@ toyos = { path = "../../toyos", version = "0.13.0" }
 # target keeps the name every caller spells, `toyos/src`'s citations included.
 [lib]
 name = "window"
+doctest = false

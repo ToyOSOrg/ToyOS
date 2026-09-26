@@ -11,3 +11,4 @@ repository = "https://github.com/ToyOSOrg/ToyOS"
 # citations are written in and no branch of this shape may edit.
 [lib]
 name = "font"
+doctest = false

@@ -13,12 +13,11 @@
 //! loudly: a test is gated only in the one shape a default `cargo test` in a
 //! crate directly under `userland/` is known to run. That is an attribute naming
 //! `test` or `test_case`, in a file under the crate's `src/` or `tests/`, in a
-//! crate whose only `cfg` is `cfg(test)`, which names no feature and ignores no
-//! test, and whose manifest switches off no target's tests. Everything else
-//! test-shaped is an escape, and the gate reds on it by name. That covers a
-//! nested crate's test, a test in `build.rs`, `examples/` or `benches/`, and any
-//! doc-test (userland writes none: a fence that is not `text`, a `#[doc]`
-//! attribute and a block doc comment are all refused).
+//! crate whose only `cfg` is `cfg(test)`, which ignores no test, and whose
+//! manifest switches off no target's tests.
+//!
+//! Doc-tests are not read: a library crate that leaves `doctest` on is refused,
+//! because the `toyos` toolchain builds no rustdoc.
 //!
 //! A test in a `src/` file that no `mod` reaches is gated and never compiled.
 //! That escape is not closed here.
@@ -42,17 +41,15 @@ pub fn survey(userland: &Path) -> Result<Survey, String> {
     let mut files = Vec::new();
     rs_files(userland, &mut files)?;
     files.sort();
+    let mut crates = BTreeSet::new();
     let mut gated = BTreeSet::new();
     let mut escapes = BTreeSet::new();
     // Refusals that bind only once the file's crate turns out to be gated.
     let mut conditional: Vec<(String, PathBuf, &'static str)> = Vec::new();
     for file in &files {
         let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
-        let scan = scan(&text);
         let at = rel(userland, file);
-        for why in &scan.doc_tests {
-            escapes.insert(format!("{at}: {why}"));
-        }
+        let scan = scan(&text).map_err(|why| format!("{at}: {why}"))?;
         let Some(owner) = file
             .ancestors()
             .skip(1)
@@ -65,6 +62,7 @@ pub fn survey(userland: &Path) -> Result<Survey, String> {
             continue;
         };
         let crate_name = rel(userland, owner);
+        crates.insert(crate_name.clone());
         for why in &scan.conditions {
             conditional.push((crate_name.clone(), file.clone(), *why));
         }
@@ -89,12 +87,23 @@ pub fn survey(userland: &Path) -> Result<Survey, String> {
             escapes.insert(format!("{}: {why}", rel(userland, &file)));
         }
     }
-    for crate_name in &gated {
+    for crate_name in &crates {
         let manifest = userland.join(crate_name).join("Cargo.toml");
         let text =
             std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
-        for key in switched_off(&text).map_err(|e| format!("{}: {e}", manifest.display()))? {
-            escapes.insert(format!("{crate_name}/Cargo.toml: {key}"));
+        let doc: toml::Value =
+            text.parse().map_err(|e| format!("{}: not TOML: {e}", manifest.display()))?;
+        let lib = doc.get("lib");
+        let has_lib = lib.is_some() || userland.join(crate_name).join("src/lib.rs").is_file();
+        if has_lib && lib.and_then(|l| l.get("doctest")).and_then(toml::Value::as_bool) != Some(false) {
+            escapes.insert(format!(
+                "{crate_name}/Cargo.toml: a library without [lib] doctest = false, whose doc-tests the gate does not read"
+            ));
+        }
+        if gated.contains(crate_name) {
+            for key in switched_off(&doc) {
+                escapes.insert(format!("{crate_name}/Cargo.toml: {key}"));
+            }
         }
     }
     Ok(Survey { gated: gated.into_iter().collect(), escapes: escapes.into_iter().collect() })
@@ -129,8 +138,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 
 /// The manifest keys that stop a default `cargo test` from running a test the
 /// crate holds.
-fn switched_off(manifest: &str) -> Result<Vec<String>, String> {
-    let doc: toml::Value = manifest.parse().map_err(|e| format!("not TOML: {e}"))?;
+fn switched_off(doc: &toml::Value) -> Vec<String> {
     let mut found = Vec::new();
     if let Some(package) = doc.get("package") {
         for key in ["autolib", "autobins", "autotests"] {
@@ -158,7 +166,7 @@ fn switched_off(manifest: &str) -> Result<Vec<String>, String> {
             found.push(format!("[{kind}] required-features leaves it unbuilt by default"));
         }
     }
-    Ok(found)
+    found
 }
 
 /// What one source file holds, as far as the gate is concerned.
@@ -169,78 +177,68 @@ struct Scan {
     /// Why a default `cargo test` might skip this crate's tests; binding only
     /// if the crate is gated.
     conditions: Vec<&'static str>,
-    /// Doc-test shapes, which the gate refuses wherever they are.
-    doc_tests: Vec<&'static str>,
 }
 
-/// Read `text` for tests, for what could hide one, and for doc-tests.
-fn scan(text: &str) -> Scan {
+/// Read every attribute in `text` for a test and for what could hide one.
+fn scan(text: &str) -> Result<Scan, &'static str> {
     let mut out = Scan::default();
-    let mut fence_open = false;
     let mut attribute: Option<(String, i32)> = None;
     for line in text.lines() {
-        let trimmed = line.trim_start();
-        if attribute.is_none() {
-            if let Some(doc) = trimmed.strip_prefix("///").or_else(|| trimmed.strip_prefix("//!")) {
-                if let Some(info) = doc.trim().strip_prefix("```") {
-                    if !fence_open && info.trim() != "text" {
-                        out.doc_tests.push("a doc fence that is not `text` is a doc-test");
+        let mut rest = line.trim_start();
+        loop {
+            if attribute.is_none() {
+                if !(rest.starts_with("#[") || rest.starts_with("#![")) {
+                    break;
+                }
+                attribute = Some((String::new(), 0));
+            }
+            let (body, depth) = attribute.as_mut().expect("inside an attribute");
+            let mut in_string = false;
+            let mut escaped = false;
+            let mut end = None;
+            for (i, c) in rest.char_indices() {
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == '"' {
+                        in_string = false;
+                        body.push('"');
                     }
-                    fence_open = !fence_open;
-                }
-                continue;
-            }
-            if trimmed.starts_with("/**") || trimmed.starts_with("/*!") {
-                out.doc_tests.push("a block doc comment, whose fences this does not read");
-                continue;
-            }
-            if !(trimmed.starts_with("#[") || trimmed.starts_with("#![")) {
-                continue;
-            }
-            attribute = Some((String::new(), 0));
-        }
-        let (body, depth) = attribute.as_mut().expect("inside an attribute");
-        let mut in_string = false;
-        let mut escaped = false;
-        let mut closed = false;
-        for c in trimmed.chars() {
-            if in_string {
-                if escaped {
-                    escaped = false;
-                } else if c == '\\' {
-                    escaped = true;
-                } else if c == '"' {
-                    in_string = false;
-                    body.push('"');
-                }
-                continue;
-            }
-            match c {
-                '"' => {
-                    in_string = true;
-                    body.push('"');
                     continue;
                 }
-                '[' => *depth += 1,
-                ']' => *depth -= 1,
-                _ => {}
+                match c {
+                    '"' => {
+                        in_string = true;
+                        body.push('"');
+                        continue;
+                    }
+                    '[' => *depth += 1,
+                    ']' => *depth -= 1,
+                    _ => {}
+                }
+                if !c.is_whitespace() {
+                    body.push(c);
+                }
+                if *depth == 0 && c == ']' {
+                    end = Some(i + 1);
+                    break;
+                }
             }
-            if !c.is_whitespace() {
-                body.push(c);
-            }
-            if *depth == 0 && c == ']' {
-                closed = true;
+            let Some(end) = end else {
+                body.push(' ');
                 break;
-            }
-        }
-        if closed {
+            };
             let (body, _) = attribute.take().expect("inside an attribute");
             judge_attribute(&body, &mut out);
-        } else {
-            attribute.as_mut().expect("inside an attribute").0.push(' ');
+            rest = rest[end..].trim_start();
         }
     }
-    out
+    match attribute {
+        Some(_) => Err("an attribute that never closes, which hides the rest of the file"),
+        None => Ok(out),
+    }
 }
 
 /// One attribute, whitespace and string contents removed: `#[cfg(test)]`,
@@ -253,15 +251,8 @@ fn judge_attribute(body: &str, out: &mut Scan) {
     if words.iter().any(|w| *w == "test" || *w == "test_case") {
         out.test = true;
     }
-    match words.first() {
-        Some(&"doc") => out.doc_tests.push("a #[doc] attribute, which can carry a doc-test"),
-        Some(&"cfg" | &"cfg_attr") if inner != "cfg(test)" => {
-            out.conditions.push("a cfg other than cfg(test) can compile a test out of the host run")
-        }
-        _ => {}
-    }
-    if words.contains(&"feature") {
-        out.conditions.push("a feature attribute can compile a test out of a default cargo test");
+    if matches!(words.first(), Some(&"cfg" | &"cfg_attr")) && inner != "cfg(test)" {
+        out.conditions.push("a cfg other than cfg(test) can compile a test out of the host run");
     }
     if words.contains(&"ignore") {
         out.conditions.push("an ignored test runs nowhere");
@@ -300,12 +291,15 @@ mod tests {
             fs::create_dir_all(path.parent().expect("a parent")).expect("make the fixture tree");
             fs::write(path, text).expect("write a fixture file");
         };
-        let manifest = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n";
+        let bare = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n";
+        let manifest = &format!("{bare}\n[lib]\ndoctest = false\n");
         let test = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n";
         let escape = "#[test]\nfn escapes() { panic!() }\n";
 
+        put("loose.rs", escape);
         put("gated/Cargo.toml", manifest);
         put("gated/src/lib.rs", test);
+        put("gated/src/slow.rs", "#[test]\n#[ignore]\nfn slow() {}\n");
         put("gated/build.rs", &format!("fn main() {{}}\n{escape}"));
         put("gated/examples/x.rs", &format!("fn main() {{}}\n{escape}"));
         put("gated/sub/Cargo.toml", manifest);
@@ -313,9 +307,12 @@ mod tests {
         put("testsonly/Cargo.toml", manifest);
         put("testsonly/src/lib.rs", "pub fn f() {}\n");
         put("testsonly/tests/t.rs", escape);
-        put("plain/Cargo.toml", manifest);
+        put("plain/Cargo.toml", bare);
         put("plain/src/main.rs", "fn main() {}\n");
-        put("switched/Cargo.toml", &format!("{manifest}\n[lib]\ntest = false\n"));
+        put("plain/src/arch.rs", "#[cfg(target_arch = \"x86_64\")]\nfn a() {}\n");
+        put("doctested/Cargo.toml", bare);
+        put("doctested/src/lib.rs", "pub fn f() {}\n");
+        put("switched/Cargo.toml", &format!("{bare}\n[lib]\ndoctest = false\ntest = false\n"));
         put("switched/src/lib.rs", test);
         put("switched/target/debug/x.rs", escape);
 
@@ -326,15 +323,20 @@ mod tests {
             Ok(Survey {
                 gated: vec!["gated".into(), "switched".into(), "testsonly".into()],
                 escapes: vec![
+                    "doctested/Cargo.toml: a library without [lib] doctest = false, whose \
+                     doc-tests the gate does not read"
+                        .into(),
                     "gated/build.rs: a test outside gated's src/ and tests/, which cargo test \
                      does not run"
                         .into(),
                     "gated/examples/x.rs: a test outside gated's src/ and tests/, which cargo \
                      test does not run"
                         .into(),
+                    "gated/src/slow.rs: an ignored test runs nowhere".into(),
                     "gated/sub/src/lib.rs: a test in the nested crate gated/sub, which the gate \
                      does not discover"
                         .into(),
+                    "loose.rs: a test in no crate".into(),
                     "switched/Cargo.toml: [lib] test = false leaves its tests unrun".into(),
                 ],
             })
@@ -343,53 +345,49 @@ mod tests {
 
     #[test]
     fn a_test_attribute_is_a_word_and_not_a_substring() {
-        assert!(scan("#[test]\nfn f() {}").test);
-        assert!(scan("    #[cfg(test)]\nmod tests;").test);
-        assert!(scan("#![cfg(test)]").test);
-        assert!(scan("#[tokio::test]").test);
-        assert!(scan("#[test_case]").test);
-        assert!(!scan("// #[test]\nlet test = 1;").test);
-        assert!(!scan("#[derive(Debug)] struct Contest;").test);
+        let test = |text| scan(text).expect("closes").test;
+        assert!(test("#[test]\nfn f() {}"));
+        assert!(test("    #[cfg(test)]\nmod tests;"));
+        assert!(test("#![cfg(test)]"));
+        assert!(test("#[tokio::test]"));
+        assert!(test("#[test_case]"));
+        assert!(test("#[inline] #[test] fn f() {}"));
+        assert!(!test("// #[test]\nlet test = 1;"));
+        assert!(!test("#[derive(Debug)] struct Contest;"));
         // A feature is a string, and the words inside it are not attributes:
         // the kernel's `test-actuators` spelling holds no test, and is a
         // condition that could hide one.
-        let actuators = scan("#[cfg(feature = \"test-actuators\")]\nmod m;");
+        let actuators = scan("#[cfg(feature = \"test-actuators\")]\nmod m;").expect("closes");
         assert!(!actuators.test);
         assert!(!actuators.conditions.is_empty());
     }
 
     #[test]
     fn what_could_hide_a_test_is_a_condition() {
-        assert_eq!(scan("#[cfg(test)]\nmod tests;").conditions, Vec::<&str>::new());
-        assert_eq!(scan("#[cfg( test )]").conditions, Vec::<&str>::new());
-        let multi = scan("#[cfg(all(\n    test,\n    feature = \"x\",\n))]\nmod tests;");
+        let conditions = |text| scan(text).expect("closes").conditions;
+        assert_eq!(conditions("#[cfg(test)]\nmod tests;"), Vec::<&str>::new());
+        assert_eq!(conditions("#[cfg( test )]"), Vec::<&str>::new());
+        let multi = scan("#[cfg(all(\n    test,\n    feature = \"x\",\n))]\nmod tests;").expect("closes");
         assert!(multi.test);
-        assert_eq!(multi.conditions.len(), 2, "{multi:?}");
-        assert!(!scan("#[cfg(not(test))]").conditions.is_empty());
-        assert!(!scan("#[cfg(target_os = \"toyos\")]").conditions.is_empty());
-        assert!(!scan("#[test]\n#[ignore]\nfn f() {}").conditions.is_empty());
-    }
-
-    #[test]
-    fn a_doc_test_is_refused_and_a_text_fence_is_not() {
-        assert!(scan("//! ```text\n//! a -> b\n//! ```\n").doc_tests.is_empty());
-        assert_eq!(scan("/// ```\n/// f();\n/// ```\n").doc_tests.len(), 1);
-        assert_eq!(scan("//! ```rust,no_run\n//! ```\n").doc_tests.len(), 1);
-        assert_eq!(scan("#![doc = include_str!(\"README.md\")]").doc_tests.len(), 1);
-        assert_eq!(scan("/** a */").doc_tests.len(), 1);
+        assert_eq!(multi.conditions.len(), 1, "{multi:?}");
+        assert!(!conditions("#[cfg(not(test))]").is_empty());
+        assert!(!conditions("#[cfg(target_os = \"toyos\")]").is_empty());
+        assert!(!conditions("#[test]\n#[ignore]\nfn f() {}").is_empty());
+        assert!(!conditions("#[test] #[ignore]\nfn f() {}").is_empty());
+        assert!(!conditions("#[cfg(test)] #[cfg(feature = \"slow\")] mod tests {").is_empty());
+        assert!(conditions("#![feature(test)]").is_empty());
+        assert!(scan("#[cfg(test)\nmod tests {}\n#[test]\nfn f() {}").is_err());
     }
 
     #[test]
     fn a_manifest_that_switches_tests_off_is_named() {
+        let keys = |text: &str| switched_off(&text.parse().expect("TOML")).len();
         let base = "[package]\nname = \"x\"\n";
-        assert_eq!(switched_off(base), Ok(vec![]));
-        assert_eq!(switched_off(&format!("{base}[lib]\ndoctest = false\n")), Ok(vec![]));
-        assert_eq!(switched_off(&format!("{base}autotests = false\n")).map(|v| v.len()), Ok(1));
-        assert_eq!(switched_off(&format!("{base}[[bin]]\nname = \"b\"\ntest = false\n")).map(|v| v.len()), Ok(1));
-        assert_eq!(switched_off(&format!("{base}[[test]]\nname = \"t\"\nharness = false\n")).map(|v| v.len()), Ok(1));
-        assert_eq!(
-            switched_off(&format!("{base}[[test]]\nname = \"t\"\nrequired-features = [\"a\"]\n")).map(|v| v.len()),
-            Ok(1)
-        );
+        assert_eq!(keys(base), 0);
+        assert_eq!(keys(&format!("{base}[lib]\ndoctest = false\n")), 0);
+        assert_eq!(keys(&format!("{base}autotests = false\n")), 1);
+        assert_eq!(keys(&format!("{base}[[bin]]\nname = \"b\"\ntest = false\n")), 1);
+        assert_eq!(keys(&format!("{base}[[test]]\nname = \"t\"\nharness = false\n")), 1);
+        assert_eq!(keys(&format!("{base}[[test]]\nname = \"t\"\nrequired-features = [\"a\"]\n")), 1);
     }
 }
