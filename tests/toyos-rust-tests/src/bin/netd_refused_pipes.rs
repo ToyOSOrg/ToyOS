@@ -24,9 +24,9 @@
 #[path = "../netd_stream.rs"]
 mod netd_stream;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use netd_stream::{ask, await_ring_full, fill, read_pattern, ready, ring_capacity, HOST};
+use netd_stream::{ask, await_ring_full, await_until, fill, read_pattern, ring_capacity, HOST};
 use toyos::net::{
     MsgType, NetdConn, TcpBindPipedRequest, TcpBindResponse, TcpConnectPipedRequest,
     TcpConnectResponse,
@@ -54,18 +54,20 @@ fn main() {
         .expect("usage: netd_refused_pipes <host port>");
     let capacity = ring_capacity();
 
-    receive_end_is_a_read_end(port);
-    round_trip(port, "after a receive end netd cannot write");
-
-    send_end_is_a_write_end(port);
-    round_trip(port, "after a send end netd cannot read");
-
-    notify_end_is_a_read_end();
-    round_trip(port, "after a notify end netd cannot write");
-
-    receive_end_dropped_while_held(port, capacity);
-    round_trip(port, "after a receive end dropped while netd held bytes for it");
-
+    let cases: [(&str, &dyn Fn()); 4] = [
+        ("a receive end netd cannot write", &|| receive_end_is_a_read_end(port)),
+        ("a send end netd cannot read", &|| send_end_is_a_write_end(port)),
+        ("a notify end netd cannot write", &|| notify_end_is_a_read_end()),
+        ("a receive end dropped while netd held bytes for it", &|| {
+            receive_end_dropped_while_held(port, capacity)
+        }),
+    ];
+    for (case, run) in cases {
+        let started = Instant::now();
+        run();
+        round_trip(port, &format!("after {case}"));
+        println!("netd_refused_pipes: {case}, and a round trip after it, in {} ms", started.elapsed().as_millis());
+    }
     println!("netd_refused_pipes: ok");
 }
 
@@ -93,15 +95,14 @@ fn watched_read_end() -> (Pipe, Pipe) {
     (read, write)
 }
 
-/// netd has closed the read end of `write`'s pipe: the filled pipe turned
-/// writable, and a zero-byte write names the reader gone.
+/// netd has closed the read end of `write`'s pipe: a zero-byte write names the
+/// reader gone, looked at again each time the filled pipe reports room.
 fn await_released(write: &Pipe, what: &str) {
-    assert!(ready(write, WRITABLE, WITHIN), "{what}: netd still holds the handle after {WITHIN:?}");
-    assert_eq!(
-        write.write_nonblock(&[]),
-        Err(SyscallError::Gone),
-        "{what}: the pipe turned writable with its reader still there",
-    );
+    await_until(write, WRITABLE, WITHIN, what, || match write.write_nonblock(&[]) {
+        Err(SyscallError::Gone) => Some(()),
+        Err(SyscallError::WouldBlock) => None,
+        other => panic!("{what}: a zero-byte write into a full pipe answered {other:?}"),
+    });
 }
 
 fn receive_end_is_a_read_end(port: u16) {
@@ -124,9 +125,13 @@ fn send_end_is_a_write_end(port: u16) {
     connect_with(port, to_client, write_end);
     // netd ends the connection by closing the receive pipe's write end, which
     // this program reads as EOF.
-    assert!(ready(&rx, READABLE, WITHIN), "a write end handed over as the send pipe: no EOF in {WITHIN:?}");
+    let what = "a write end handed over as the send pipe";
     let mut buf = [0u8; 64];
-    assert_eq!(rx.read_nonblock(&mut buf), Ok(0), "a write end handed over as the send pipe: bytes, not EOF");
+    let got = await_until(&rx, READABLE, WITHIN, what, || match rx.read_nonblock(&mut buf) {
+        Err(SyscallError::WouldBlock) => None,
+        other => Some(other),
+    });
+    assert_eq!(got, Ok(0), "{what}: bytes or a refusal, not EOF");
 }
 
 fn notify_end_is_a_read_end() {

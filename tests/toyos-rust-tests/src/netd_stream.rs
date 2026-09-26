@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use toyos::poller::Poller;
+use toyos::poller::{Poller, READABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::ring::RingHeader;
 use toyos_abi::syscall::{self, SyscallError};
@@ -45,13 +45,30 @@ pub fn ring_capacity() -> u64 {
     fill(&write)
 }
 
-/// Whether `handle` became ready for `flags` within `within`.
-pub fn ready(handle: &impl AsHandle, flags: u32, within: Duration) -> bool {
+/// Wait until `check` answers, re-asking it each time `handle` reports ready
+/// for `flags`, and panic by name if `within` passes first.
+///
+/// **A readiness completion is a reason to look again, not an answer**: a
+/// zero-byte write still wakes the other end's watch, and netd's liveness
+/// probes are zero-byte writes.
+pub fn await_until<T>(
+    handle: &impl AsHandle,
+    flags: u32,
+    within: Duration,
+    what: &str,
+    mut check: impl FnMut() -> Option<T>,
+) -> T {
+    let deadline = Instant::now() + within;
     let poller = Poller::new(1);
-    poller.watch(handle, flags, 0);
-    let mut fired = false;
-    poller.wait(1, within.as_nanos() as u64, |_| fired = true);
-    fired
+    loop {
+        if let Some(answer) = check() {
+            return answer;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "{what}: not within {within:?}");
+        poller.watch(handle, flags, 0);
+        poller.wait(1, left.as_nanos() as u64, |_| {});
+    }
 }
 
 /// Tell the host how many bytes to send on this connection.
@@ -88,24 +105,23 @@ pub fn await_ring_full(rx: &Pipe, capacity: u64, within: Duration) {
     }
 }
 
-/// Read `rx` to its end, each wait bounded by `within`, and panic by name at
-/// the first byte that is not the pattern's. Answers how many bytes came.
+
+/// Read `rx` to its end, each wait for more bounded by `within`, and panic by
+/// name at the first byte that is not the pattern's. Answers how many bytes
+/// came.
 pub fn read_pattern(rx: &Pipe, within: Duration, what: &str) -> u64 {
     let mut buf = vec![0u8; 65536];
     let mut at = 0u64;
     loop {
-        let n = match rx.read_nonblock(&mut buf) {
-            Ok(0) => return at,
-            Ok(n) => n,
-            Err(SyscallError::WouldBlock) => {
-                assert!(
-                    ready(rx, toyos::poller::READABLE, within),
-                    "{what}: nothing arrived for {within:?} after byte {at}",
-                );
-                continue;
-            }
+        let waiting = format!("{what}: the stream after byte {at}");
+        let n = await_until(rx, READABLE, within, &waiting, || match rx.read_nonblock(&mut buf) {
+            Ok(n) => Some(n),
+            Err(SyscallError::WouldBlock) => None,
             Err(e) => panic!("{what}: reading the stream at {at}: {e:?}"),
-        };
+        });
+        if n == 0 {
+            return at;
+        }
         if let Some(i) = (0..n).find(|&i| buf[i] != stream_byte(at + i as u64)) {
             let off = at + i as u64;
             panic!(

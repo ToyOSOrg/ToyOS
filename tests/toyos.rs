@@ -9158,8 +9158,12 @@ impl PatternServer {
         let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
         let served = self.acceptor.join().expect("the host server's acceptor panicked");
         for stream in self.open.lock().expect("the open list").iter() {
-            // Refused only by a connection the peer already ended.
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+            // One half at a time: once the peer has sent its FIN, macOS refuses
+            // `Both` whole (`ENOTCONN`) and shuts neither, leaving a writer
+            // blocked. A half refused here is one already ended, with nothing
+            // blocked on it.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.shutdown(std::net::Shutdown::Read);
         }
         served
             .into_iter()
@@ -9236,6 +9240,9 @@ fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         }
     }
     serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
+    for line in result.stdout.lines().filter(|l| l.contains(", and a round trip after it, in ")) {
+        eprintln!("  [netcase] {}", line.trim_end());
+    }
     eprintln!("  [netcase] four refused client pipes cost netd nothing, and each was named");
     Ok(())
 }
