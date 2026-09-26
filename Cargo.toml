@@ -37,6 +37,7 @@ members = [
     "toyos-inspect",
     "toyos-keymap",
     "toyos-ld",
+    "toyos-libc-copies",
     "toyos-logstream",
     "toyos-manifest",
     "toyos-mdns",

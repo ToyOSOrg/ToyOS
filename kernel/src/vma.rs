@@ -45,3 +45,15 @@ pub struct Region {
     /// For the demand-paged kinds, what a fault in this region installs.
     pub kind: RegionKind,
 }
+
+/// How a range meets the regions an address space registers. Needed because a
+/// *placed* mapping (`sys_mmap`'s FIXED arm) skips `find_gap`'s implicit check.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Occupancy {
+    /// Nothing is registered over any part of it.
+    Free,
+    /// One region covers it end for end, and that region is all it runs into.
+    Whole,
+    /// Part of a region, several regions, or one that merely starts here.
+    Partial,
+}

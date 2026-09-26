@@ -21,6 +21,7 @@
 //! A command that could not measure exits with one of [`Refusal`]'s negative
 //! codes instead, so a missing number is never a small one.
 
+mod arch;
 mod fb;
 mod usb;
 

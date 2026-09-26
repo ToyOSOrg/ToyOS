@@ -6,7 +6,8 @@
 //! site.
 
 use crate::header::{
-    FileHeader, ProgramHeader, PT_DYNAMIC, PT_GNU_EH_FRAME, PT_LOAD, PT_TLS, SECTION_HEADER_SIZE,
+    FileHeader, Machine, ProgramHeader, PT_DYNAMIC, PT_GNU_EH_FRAME, PT_LOAD, PT_TLS,
+    SECTION_HEADER_SIZE,
 };
 use crate::{Error, MAX_LOAD_SEGMENTS, MAX_TLS_ALIGN};
 
@@ -151,8 +152,12 @@ impl Layout {
     ///
     /// `data` need only reach the end of the program header table; the loader
     /// hands it 4 KiB and never reads a segment's contents to get here.
-    pub fn parse(data: &[u8]) -> Result<Layout, Error> {
+    /// `machine` is the one the caller runs: an image for any other is refused.
+    pub fn parse(data: &[u8], machine: Machine) -> Result<Layout, Error> {
         let ehdr = FileHeader::parse(data)?;
+        if ehdr.machine != machine {
+            return Err(Error::WrongMachine);
+        }
         let phdrs = ehdr.program_headers(data)?;
 
         let mut segments = [Segment {

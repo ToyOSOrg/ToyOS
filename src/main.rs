@@ -2,6 +2,7 @@ mod qemu;
 
 use std::env;
 use std::path::{Path, PathBuf};
+use toyos_build::arch::Arch;
 use toyos_build::flags::{self, CARGO_RUN};
 
 /// One prerequisite: any of `any` satisfies it, and `why` is what reaches it.
@@ -19,7 +20,6 @@ struct Tool {
 const REQUIRED: &[Tool] = &[
     Tool { any: &["git"], why: "every build; the image ships what git says is tracked" },
     Tool { any: &["rustup"], why: "the toolchain — install from https://rustup.rs" },
-    Tool { any: &["qemu-system-x86_64"], why: "every boot — install QEMU" },
     Tool { any: &["cc"], why: "rustc links every host binary through it; no guest binary" },
 ];
 
@@ -51,7 +51,7 @@ fn executable_on_path(name: &str) -> bool {
     })
 }
 
-fn check_prerequisites(root: &Path) {
+fn check_prerequisites(root: &Path, arch: Arch) {
     fn absent(tools: &'static [Tool]) -> Vec<&'static Tool> {
         tools.iter().filter(|t| !t.any.iter().any(|n| executable_on_path(n))).collect()
     }
@@ -60,11 +60,15 @@ fn check_prerequisites(root: &Path) {
         eprintln!("Note: no {} — {}", tool.any.join(" or "), tool.why);
     }
 
-    let missing = absent(REQUIRED);
+    let mut missing: Vec<String> =
+        absent(REQUIRED).iter().map(|t| format!("{} ({})", t.any.join(" or "), t.why)).collect();
+    if !executable_on_path(arch.qemu()) {
+        missing.push(format!("{} (every {} boot — install QEMU)", arch.qemu(), arch.name()));
+    }
     if !missing.is_empty() {
         eprintln!("Error: missing required tools:");
         for tool in &missing {
-            eprintln!("  - {} ({})", tool.any.join(" or "), tool.why);
+            eprintln!("  - {tool}");
         }
         std::process::exit(1);
     }
@@ -72,7 +76,7 @@ fn check_prerequisites(root: &Path) {
     // The one prerequisite whose *version* decides verdicts rather than whether
     // anything runs at all, so a scan of `PATH` cannot ask it.
     // `toyos_build::ci` carries why this is a note here and a red in CI.
-    if let Some(note) = toyos_build::ci::qemu_version_note(root) {
+    if let Some(note) = toyos_build::ci::qemu_version_note(root, arch) {
         eprintln!("{note}");
     }
 }
@@ -135,7 +139,8 @@ fn main() {
         return;
     }
 
-    check_prerequisites(&root);
+    let arch = toyos_build::build::arch_for(&args);
+    check_prerequisites(&root, arch);
     env::set_current_dir(&root).expect("Failed to cd to project root");
 
     let debug = asked(&flags::DEBUG);
@@ -236,7 +241,7 @@ fn main() {
     println!("Boot image: {}", image.display());
 
     if !build_only {
-        qemu::launch(&qemu::Options { debug, dump_audio, profile, smp, mute, image });
+        qemu::launch(&qemu::Options { arch: plan.arch, debug, dump_audio, profile, smp, mute, image });
     }
 }
 

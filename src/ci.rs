@@ -34,6 +34,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::Command;
 
+use crate::arch::Arch;
 use crate::{flags, pr, release, sdkversion};
 
 /// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
@@ -248,6 +249,13 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "lock-acquire-off", Some("ticket_lock"), &[
         "try_lock_observes_the_previous_owners_writes ... FAILED",
     ]),
+    red(KERNEL_LOOM, "seqlock-writer-fence-off", Some("panic_console_publish"), &[
+        "a_snapshot_is_one_publication_whole ... FAILED",
+    ]),
+    red(KERNEL_LOOM, "serial-try-lock-then-some", Some("serial_lock"), &[
+        "a_lost_try_lock_leaves_the_lock_held ... FAILED",
+        "two_writers_never_overlap ... FAILED",
+    ]),
     red(KERNEL_LOOM, "poison-overwrite", Some("poison_set"), &[
         "a_second_death_banks_beside_the_first ... FAILED",
     ]),
@@ -411,8 +419,8 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// end, is a test that fills the host's disk one run at a time.
 ///
 /// Clippy needs none of the ToyOS toolchain the nightly alone builds — the
-/// kernel and the bootloader lint against `x86_64-unknown-none` and
-/// `x86_64-unknown-uefi`, targets any rustup installs, and userland carries no
+/// kernel and the bootloader lint against every architecture's bare targets
+/// ([`crate::clippy::BARE_TARGETS`]), which any rustup installs, and userland carries no
 /// clippy shape (`src/clippy.rs`). Userland and the SDK are tested against the
 /// host triple for the same reason.
 fn host(root: &Path) -> Vec<Step> {
@@ -430,10 +438,10 @@ fn host(root: &Path) -> Vec<Step> {
     ];
     steps.push(step("clippy and the bare targets", || {
         for args in [
-            &["component", "add", "clippy"][..],
-            &["target", "add", "x86_64-unknown-none", "x86_64-unknown-uefi"],
+            vec!["component", "add", "clippy"],
+            [&["target", "add"][..], &crate::clippy::BARE_TARGETS].concat(),
         ] {
-            let status = Command::new("rustup").args(args).status().map_err(|e| e.to_string())?;
+            let status = Command::new("rustup").args(&args).status().map_err(|e| e.to_string())?;
             if !status.success() {
                 return Err(format!("rustup {} exited {status}", args.join(" ")));
             }
@@ -619,7 +627,9 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     // inherits this, and nothing here reads the environment concurrently with
     // the write.
     std::env::set_var("TMPDIR", tmp.path());
-    let mut steps = vec![step("the instrument", || instrument(root))];
+    // Every guest lane boots x86-64 guests: no hosted runner has been measured
+    // for an aarch64 one.
+    let mut steps = vec![step("the instrument", || instrument(root, Arch::X86_64))];
     if steps.iter().all(|s| s.verdict.is_ok()) {
         steps.push(step("the toolchain", || release::install(root)));
     }
@@ -669,16 +679,17 @@ fn verdicts(log: &str) -> String {
 /// The QEMU on `PATH` against `.github/qemu-version`, and whether `/dev/kvm`
 /// opens where it is present — the two things a guest verdict must be read
 /// against.
-fn instrument(root: &Path) -> Result<String, String> {
+fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     let want = declared_qemu_version(root).ok_or(".github/qemu-version declares no version")?;
-    let out = Command::new("qemu-system-x86_64")
+    let out = Command::new(arch.qemu())
         .arg("--version")
         .output()
-        .map_err(|e| format!("qemu-system-x86_64: {e}"))?;
+        .map_err(|e| format!("{}: {e}", arch.qemu()))?;
     let said = String::from_utf8_lossy(&out.stdout).into_owned();
     let have = parse_qemu_version(&said).ok_or_else(|| format!("QEMU said {said:?}"))?;
     let node = Path::new("/dev/kvm").exists();
-    let accel = match (node, crate::kvm_usable()) {
+    let accelerated = arch.accel().is_hardware();
+    let accel = match (node, accelerated) {
         (true, true) => "/dev/kvm opens",
         (true, false) => "/dev/kvm is present and does not open",
         (false, _) => "no /dev/kvm: emulated",
@@ -700,7 +711,7 @@ fn instrument(root: &Path) -> Result<String, String> {
              instrument moved"
         ));
     }
-    if node && !crate::kvm_usable() {
+    if node && !accelerated {
         return Err(format!("{line}: every boot would fall back to emulation in silence"));
     }
     Ok(line)
@@ -731,9 +742,9 @@ fn parse_qemu_version(text: &str) -> Option<String> {
 
 /// The line `cargo run` prints when this host is not the instrument the
 /// project's numbers were taken on, and nothing at all when it is.
-pub fn qemu_version_note(root: &Path) -> Option<String> {
+pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     let want = declared_qemu_version(root)?;
-    let out = Command::new("qemu-system-x86_64").arg("--version").output().ok()?;
+    let out = Command::new(arch.qemu()).arg("--version").output().ok()?;
     let have = parse_qemu_version(&String::from_utf8_lossy(&out.stdout))?;
     (have != want).then(|| {
         format!(

@@ -236,3 +236,26 @@ fn log_user(syms: &SymbolTable, addr: u64, resolved: Option<(&str, u64)>) -> boo
         false
     }
 }
+
+/// Walk the frame-pointer chain from `start_fp`, resolving each return
+/// address. Every architecture this kernel builds for lays a frame record out
+/// the same way under `-Cforce-frame-pointers=yes`: the caller's frame pointer,
+/// then the return address one word up.
+pub(crate) fn kernel_backtrace(start_fp: u64, max_frames: usize) {
+    let mut fp = start_fp;
+    for _ in 0..max_frames {
+        if fp == 0 || !fp.is_multiple_of(8) || !crate::mm::is_kernel_addr(fp) { break; }
+        // SAFETY: `fp` is checked non-zero, 8-aligned and a kernel address, so
+        // both reads land in the direct map, mapped for the life of the machine.
+        //
+        // Not `read_volatile` like the double-fault path's reads of memory
+        // another CPU may still be writing: this walks the faulting thread's
+        // own frame chain from its handler.
+        let saved_fp = unsafe { *(fp as *const u64) };
+        // SAFETY: same as above, for the return address one word up.
+        let return_addr = unsafe { *((fp + 8) as *const u64) };
+        if return_addr == 0 || !crate::mm::is_kernel_addr(return_addr) { break; }
+        resolve_kernel_return(return_addr);
+        fp = saved_fp;
+    }
+}

@@ -1247,6 +1247,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-libc-copies"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-logstream"
 version = "0.1.0"
 

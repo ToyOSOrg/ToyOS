@@ -899,7 +899,7 @@ pub fn syscall_window_nmi(
 /// from.
 ///
 /// **The decision itself rather than a second reading of it**: `qemu_command`
-/// puts `-accel kvm` there when `toyos_build::kvm_usable()` says so, and
+/// puts `-accel kvm` there when `SUITE_ARCH.accel()` says so, and
 /// `profile_argv` is that same builder. A CPUID probe in the guest would be a
 /// second place that can be told the wrong answer, and `virtio_net_no_msix` and
 /// `diskless_boot` already assert about a boot by reading its argv.

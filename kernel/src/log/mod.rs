@@ -215,7 +215,7 @@ struct Origin {
 /// the `xadd` is atomic against a same-CPU interrupt only, not against another
 /// CPU, so this holds only while the CPU keeps ownership of the shard across
 /// the whole bracket, since work stealing is enabled.
-fn reserve(guard: &crate::arch::LogCommitGuard) -> (Origin, u64) {
+fn reserve(guard: &crate::arch::IrqGuard) -> (Origin, u64) {
     if !PERCPU_READY.load(Ordering::Relaxed) {
         // SAFETY: nothing else is running, so this CPU owns the boot shard.
         let seq = unsafe { BOOT_SHARD.reserve(guard) };
@@ -250,7 +250,15 @@ pub fn emit(level: Level, args: core::fmt::Arguments) {
     record.len = message.len as u16;
     record.elided = message.elided.min(u16::MAX as usize) as u16;
 
-    let guard = crate::arch::LogCommitGuard::close();
+    // `log-unbracketed-reserve` stages a reservation made with interrupts open.
+    #[cfg(feature = "boot-actuators")]
+    let guard = if crate::actuator::log_unbracketed_reserve() {
+        crate::arch::IrqGuard::unclosed()
+    } else {
+        crate::arch::IrqGuard::close()
+    };
+    #[cfg(not(feature = "boot-actuators"))]
+    let guard = crate::arch::IrqGuard::close();
     // Stamped inside the bracket: outside it, ordering by seq and by at_ns
     // could disagree. The NMI handler never logs and #MC halts rather than
     // returning, which is what closes the two paths IF/TF masking alone

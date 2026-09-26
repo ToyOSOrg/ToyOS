@@ -6,7 +6,7 @@ use std::process;
 ///
 /// There is no copy-and-delete fallback for a move between mounts, and the
 /// reason is not that the pieces are missing — `cp` is right there. It is that
-/// `sys_rename` in `kernel/src/arch/syscall.rs` collapses all five of
+/// `sys_rename` in `kernel/src/syscall/fs.rs` collapses all five of
 /// `Vfs::rename`'s errors into `NotFound`, and `Stat` carries no mount
 /// identity, so this process cannot tell "different mounts" from "the rename
 /// is broken". A fallback keyed on *any* rename failure would quietly copy its

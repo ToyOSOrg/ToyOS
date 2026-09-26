@@ -27,9 +27,8 @@ const INVALID_VENDOR: u16 = 0xFFFF;
 /// The one MSI-X table entry this kernel programs; a device's queues must point at it too.
 pub const MSIX_ENTRY: u16 = 0;
 
-// Every device interrupt in this kernel targets this LAPIC address, so all land on cpu0.
-const MSG_ADDR: u32 = 0xFEE0_0000;
-// The same CPU, named as a destination rather than encoded in an address, for the unit to put in an entry.
+// Every device interrupt in this kernel targets cpu0, named as a destination for
+// the message and for the unit to put in an entry.
 const MSG_DEST: u32 = 0;
 
 /// No requester id: a bus/device/function is sixteen bits, so this is none of them.
@@ -375,9 +374,8 @@ impl PciDevice {
     fn message(&self, vector: u8) -> Option<(u32, u32)> {
         let dest = if crate::actuator::iommu_dest_apic1() { 1 } else { MSG_DEST };
         match crate::iommu::remap_msi(self.bus, self.dev, self.func, vector, dest) {
-            // Destination id at address bits 19:12, so the compatibility message
-            // names the same CPU the remappable one would.
-            crate::iommu::Delivery::Direct => Some((MSG_ADDR | (dest << 12), vector as u32)),
+            // The same CPU the remappable one would name.
+            crate::iommu::Delivery::Direct => Some(crate::arch::msi_message(dest, vector)),
             crate::iommu::Delivery::Remapped(m) => Some((m.address, m.data)),
             crate::iommu::Delivery::Refused(why) => {
                 log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);

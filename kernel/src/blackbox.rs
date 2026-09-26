@@ -238,32 +238,9 @@ fn with_page(write: impl FnOnce(&mut [u8; BYTES], u64, toyos_blackbox::Identity)
     flush(at);
 }
 
-/// Write the page out of this CPU's caches, and every other CPU's.
-///
-/// **A reset does not write dirty lines back.** INIT and RESET invalidate the
-/// caches without flushing them, so a page sealed into write-back memory and
-/// then reset over is a page whose bytes never reached DRAM — the one failure
-/// this mechanism cannot survive, and it looks exactly like a seal that never
-/// happened. The section number that states it is left out rather than cited
-/// wrong. `CLFLUSH` is coherent across every CPU, so one caller's flush is the
-/// whole machine's.
+/// Write the page out of every CPU's caches: a reset does not write dirty
+/// lines back, and a page that never reached DRAM reads, from the next boot,
+/// exactly like a seal that never happened.
 fn flush(at: u64) {
-    let mut line = 0u64;
-    while line < BYTES as u64 {
-        // SAFETY: `CLFLUSH` writes back and invalidates the line containing the
-        // address and touches nothing else; the address is inside the page
-        // `arm` took, and the instruction faults on nothing a canonical address
-        // can be. Not privileged, and present on every x86-64 part.
-        unsafe {
-            core::arch::asm!(
-                "clflush [{addr}]",
-                addr = in(reg) (at + line) as *const u8,
-                options(nostack, preserves_flags),
-            );
-        }
-        line += toyos_blackbox::CACHE_LINE as u64;
-    }
-    // SAFETY: `SFENCE` orders those writebacks ahead of whatever ends this
-    // machine; it touches no memory or register.
-    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+    crate::arch::cache::write_back(at, BYTES);
 }

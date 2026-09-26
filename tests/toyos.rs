@@ -537,6 +537,10 @@ const AUDIO_TESTS: &[(&str, Tier)] =
 // first-class single-CPU case, smp=8 the full-SMP case.
 const AUDIO_SMP: &[u32] = &[1, 8];
 
+/// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
+/// report puts on serial.
+const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
+
 // Tests that read a decoded screendump, which is exactly the set for which
 // the screen is the device under test: the panic console. On a machine with
 // no serial port the rendered report is the only diagnostic that exists, so
@@ -599,6 +603,10 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // than through `halt_all_cpus`.
     ("screen_fatal_halt_composited", Sched::Parallel, Tier::Nightly),
     ("screen_pager_keys", Sched::Serial, Tier::Nightly),
+    // AArch64 guests on QEMU `virt`: local, because no CI runner boots one yet.
+    ("virt_early_panic", Sched::Parallel, Tier::Local),
+    ("virt_early_fault", Sched::Parallel, Tier::Local),
+    ("virt_el2_drop", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -1557,7 +1565,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("quarantine_exit_status", Sched::Parallel, Tier::Fast),
     ("quarantine_entries", Sched::Parallel, Tier::Fast),
     // Same: the control-register verdict, against the machine this tree
-    // actually booted before `arch/control_regs.rs`.
+    // actually booted before `arch/x86_64/control_regs.rs`.
     ("control_regs_verdict", Sched::Parallel, Tier::Fast),
     // Same: which of the two shared boots each binary belongs on, asked of the
     // binaries rather than of the list that claims to name them.
@@ -2503,7 +2511,7 @@ const T14_COLS: usize = 1920 / 8;
 /// The line `SYS_DEBUG` action 3 logs immediately before halting every CPU.
 /// It exists only on a `test-actuators` kernel — every other action costs the
 /// caller its own process, this one costs the machine. Kept in sync with
-/// `kernel/src/arch/syscall/debug.rs` by this comment and by screen_fatal_halt
+/// `kernel/src/syscall/debug.rs` by this comment and by screen_fatal_halt
 /// failing loudly if it drifts.
 const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 
@@ -2512,7 +2520,7 @@ const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 ///
 /// `screen_fatal_halt_composited` reads it off the *panel*, because the machine
 /// that wait exists for has no serial port and `/log` is the thing that did not
-/// answer. Kept in sync with `kernel/src/arch/apic.rs::LOG_DRAIN_EXPIRED` by
+/// answer. Kept in sync with `kernel/src/panic.rs::LOG_DRAIN_EXPIRED` by
 /// this comment and by that test turning every spent budget into a red if it
 /// drifts.
 const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
@@ -3135,7 +3143,7 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
 /// that held the lock rather than the scheduler that caught it — which is the
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
-/// A whole-buffer `contains("arch/syscall/dispatch.rs")` certifies none of that: the
+/// A whole-buffer `contains("syscall/dispatch.rs")` certifies none of that: the
 /// same boot's `test_syscall_panic` panics in that file too, so the needle is
 /// already present before the tripwire runs. Scope it instead to the window
 /// between this panic's header and its message — `panicked at <location>` is
@@ -3151,7 +3159,7 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
         .rfind(HEADER)
         .ok_or("tripwire message with no panic header before it")?;
     let location = &serial[header_at..msg_at];
-    if !location.contains("arch/syscall/dispatch.rs") {
+    if !location.contains("syscall/dispatch.rs") {
         return Err(format!(
             "expected the tripwire to name the guilty call site, not scheduler.rs; got: {}",
             location.trim()
@@ -5866,6 +5874,135 @@ fn run_screen_test(
                 &["PANIC:", "test-late-panic: on-screen console check"],
                 "late_panic::Nest",
             )?;
+            Ok(())
+        }
+        "virt_early_panic" => {
+            // The AArch64 port's stage 3, whole: the loader on AAVMF, the entry's
+            // drop and declaration, the PL011 SPCR names, the boot's survey of
+            // the machine, and a panic on both channels, before the kernel
+            // reaches the AArch64 userland its ROOT carries.
+            let started = std::time::Instant::now();
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::Virt,
+                    qmp: true,
+                    kernel_params: &["test-early-panic"],
+                    ready_marker: "EARLY PANIC:",
+                    ..Default::default()
+                },
+            );
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            eprintln!("  [virt] the panel is up {} ms after the boot began", started.elapsed().as_millis());
+            // What stage 3 prints before it panics: every item is a record
+            // only the AArch64 side of the loader or the kernel writes.
+            for want in [
+                "CPU: entered at EL1",
+                "serial: PL011 at",
+                "control registers: SCTLR_EL1=",
+                "as declared; entered at EL",
+                "memory: 0x0000400",
+                "ACPI: MADT GICD at 0x8000000, GIC version 3",
+                "ACPI: MADT GICC uid=0 mpidr=0x0 enabled=true",
+                "ACPI: GTDT timers:",
+                "EARLY PANIC: panicked at",
+                EARLY_PANIC_MESSAGE,
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            let text = dump.text();
+            print_screen(name, &text);
+            for want in ["EARLY PANIC:", "test-early-panic: on-screen console check"] {
+                if !text.contains(want) {
+                    return Err(format!("{want:?} not on the ramfb panel\ndecoded screen:\n{text}"));
+                }
+            }
+            check_colors(
+                &dump,
+                FILL_FATAL,
+                &["EARLY PANIC:", "test-early-panic: on-screen console check"],
+                "ACPI: GTDT timers:",
+            )?;
+            Ok(())
+        }
+        "virt_el2_drop" => {
+            // The entry's drop from EL2, which HVF never exercises: `virt` with
+            // EL2 under TCG, where firmware hands the loader the CPU at EL2. A
+            // loader that refuses the CPU says so and stops; a drop that leaves
+            // `HCR_EL2` other than declared halts in a named refusal and says
+            // nothing; one that lands anywhere but EL1 on `SP_EL1` panics in the
+            // declaration's read-back. Each way the line this waits for never
+            // comes.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::VirtEl2,
+                    kernel_params: &["test-early-panic"],
+                    ready_marker: "EARLY PANIC:",
+                    ..Default::default()
+                },
+            );
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            for want in [
+                "CPU: entered at EL2, HCR_EL2.E2H ",
+                "ID_AA64MMFR4_EL1.E2H0 0x0: the kernel's entry writes E2H clear",
+                "as declared; entered at EL2, HCR_EL2 read back as declared",
+                "EARLY PANIC: panicked at",
+                EARLY_PANIC_MESSAGE,
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            Ok(())
+        }
+        "virt_early_fault" => {
+            // The vectors, judged by the one thing a broken table cannot do:
+            // report. An undefined instruction right after the console step
+            // reaches `trap::exception`, which says what was taken and panics,
+            // and the panic reaches both channels. A table that is misaligned,
+            // never installed, or whose entry does not reach the handler
+            // leaves the guest silent, and this waits for a line that never
+            // comes.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::Virt,
+                    qmp: true,
+                    kernel_params: &["test-early-fault"],
+                    ready_marker: "EARLY PANIC:",
+                    ..Default::default()
+                },
+            );
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
+            const FAULT_MESSAGE: &str = "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x";
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(FAULT_MESSAGE));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            for want in [
+                "KERNEL PANIC: synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction)",
+                "EARLY PANIC: panicked at",
+                FAULT_MESSAGE,
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
+            let text = dump.text();
+            print_screen(name, &text);
+            if !text.contains("EARLY PANIC:") || !text.contains("undefined instruction") {
+                return Err(format!("the fault's report is not on the ramfb panel\ndecoded screen:\n{text}"));
+            }
             Ok(())
         }
         "screen_early_panic" => {
@@ -12817,9 +12954,9 @@ fn run_machine_test(
         "hash_seed_precedes_every_map" => {
             // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
             // the compiler cannot reach, because the container works. Its other
-            // two are unrepresented here — both CPU models carry `+rdrand`
-            // (`src/lib.rs:73-76`) and QEMU's DRNG always answers — so
-            // `NO_RDRAND` and `NO_ENTROPY` are mutation-measured.
+            // two are unrepresented here — both x86-64 CPU models carry `+rdrand`
+            // (`Arch::cpu`) and QEMU's DRNG always answers — so
+            // the no-source refusal and `NO_ENTROPY` are mutation-measured.
             const UNSEEDED: &str = "kernel hasher: a hash container was built before hasher::seed()";
             let qemu = QemuInstance::boot_with_options(
                 test_config,
@@ -13137,7 +13274,7 @@ fn run_machine_test(
             // touching it. With one CPU there is nowhere else.
             //
             // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
-            // an ordinary workload is beside them in `arch/syscall/dispatch.rs`: routes
+            // an ordinary workload is beside them in `syscall/dispatch.rs`: routes
             // past the ceiling do still exist,
             // and each of them holds the VFS lock when it dies, so the
             // machine wedges either way and the allocator's recovery cannot
@@ -16537,8 +16674,8 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         // Vol. 3A §2.5, Vol. 2 `WRGSBASE`), so no Ring 3 thread aims `GS.base`.
         (16, "FSGSBASE", false),
         (18, "OSXSAVE", false),
-        // Not a bit the machine may withhold: `toyos_build::qemu::CPU_KVM` and
-        // `CPU_TCG` are the only two CPUs this repository launches and both name
+        // Not a bit the machine may withhold: `Arch::cpu`'s two x86-64 CPUs
+        // are the only x86-64 CPUs this repository launches and both name
         // `+smep`, so a boot without supervisor-mode execution prevention is a
         // kernel that stopped enabling it or a launcher that stopped asking.
         (20, "SMEP", true),
@@ -17169,7 +17306,7 @@ fn control_regs_negative(
     }
     // Where the host does leave `CD` set, it is demanded, so the arm that *can*
     // see the caching defect does not quietly become the weaker of the two.
-    if !toyos_build::kvm_usable() && !refusal.contains("CD") {
+    if !common::qemu::SUITE_ARCH.accel().is_hardware() && !refusal.contains("CD") {
         return Err(format!(
             "TCG leaves an AP's `CD` set and the refusal does not name it: {refusal}"
         ));
@@ -17758,7 +17895,8 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
 
     let repo = compile::repo_root();
     let kernel_elf = repo.join(format!(
-        "kernel/target/x86_64-unknown-none/{}/kernel",
+        "kernel/target/{}/{}/kernel",
+        common::qemu::SUITE_ARCH.kernel(),
         toyos_build::build::PROFILE
     ));
 
@@ -19640,7 +19778,8 @@ fn build_tasks<'a>(
 fn check_shard_partition(all_tests: &[TestDef]) {
     let pricing = shard_pricing();
     for &nightly in &[false, true] {
-        let in_tier = |tier: Tier| nightly || tier == Tier::Fast;
+        // Sharded, because every run this partition is for is one.
+        let in_tier = |tier: Tier| tier.selected(nightly, true);
         let tests_to_run: Vec<&TestDef> =
             all_tests.iter().filter(|_| in_tier(SHARED_TIER)).collect();
         let machine_to_run: Vec<(&str, Sched)> = MACHINE_TESTS
@@ -20287,7 +20426,7 @@ fn main() {
     // nobody remembers. `cargo test -- desktop_window_child` refuses below and
     // says what to type instead, which is the same information a silent skip
     // would have withheld.
-    let in_tier = |tier: Tier| nightly || tier == Tier::Fast;
+    let in_tier = |tier: Tier| tier.selected(nightly, shard.is_some());
     let tests_to_run: Vec<&TestDef> = all_tests
         .iter()
         .filter(|t| keep(t.name.as_str()) && in_tier(SHARED_TIER))
@@ -20313,18 +20452,30 @@ fn main() {
     // introduces, so the names are printed rather than counted, and the line
     // carries both the command that runs them and the record that says what each
     // one guarded.
-    let held_back: Vec<&str> = MACHINE_TESTS
-        .iter()
-        .chain(SCREEN_TESTS)
-        .filter(|(n, _, tier)| keep(n) && !in_tier(*tier))
-        .map(|(n, _, _)| *n)
-        .chain(
-            AUDIO_TESTS
-                .iter()
-                .filter(|(name, tier)| keep(name) && !in_tier(*tier))
-                .map(|(name, _)| *name),
-        )
-        .collect();
+    let held = |which: Tier| -> Vec<&str> {
+        MACHINE_TESTS
+            .iter()
+            .chain(SCREEN_TESTS)
+            .filter(|(n, _, tier)| keep(n) && *tier == which && !in_tier(*tier))
+            .map(|(n, _, _)| *n)
+            .chain(
+                AUDIO_TESTS
+                    .iter()
+                    .filter(|(name, tier)| keep(name) && *tier == which && !in_tier(*tier))
+                    .map(|(name, _)| *name),
+            )
+            .collect()
+    };
+    let held_back = held(Tier::Nightly);
+    let held_local = held(Tier::Local);
+    if !held_local.is_empty() {
+        eprintln!(
+            "[toyos] local tier: {} test(s) NOT run, because a sharded run is CI's and no CI \
+             runner boots their architecture yet. An unsharded `cargo test` runs them.",
+            held_local.len(),
+        );
+        eprintln!("[toyos]   {}", held_local.join(", "));
+    }
     if !held_back.is_empty() {
         eprintln!(
             "[toyos] nightly tier: {} test(s) NOT run. \

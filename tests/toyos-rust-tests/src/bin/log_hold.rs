@@ -8,7 +8,7 @@
 const RECORDS: usize = 192;
 
 /// A retired syscall's number: each call is refused and is one kernel record
-/// naming it (`kernel/src/arch/syscall/dispatch.rs`'s `retired_syscall`).
+/// naming it (`kernel/src/syscall/dispatch.rs`'s `retired_syscall`).
 const RETIRED: u64 = 26;
 
 fn main() {

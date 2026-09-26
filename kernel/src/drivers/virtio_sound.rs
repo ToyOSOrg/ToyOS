@@ -354,7 +354,7 @@ pub fn init(devices: &[PciDevice]) {
     let dma_region = Region {
         phys: crate::DirectMap::from_phys(shared.host_phys()),
         size: crate::mm::PAGE_2M,
-        cache: CachePolicy::DeferToMtrr,
+        cache: CachePolicy::Normal,
         pages: None,
     };
     let multiplier = device.notify_off_multiplier();
@@ -464,7 +464,7 @@ fn build_chains(
 /// handler is the TX used ring's only consumer, so an unarmed device leaves
 /// every period in flight forever.
 fn arm_interrupt(pci: &PciDevice, device: &VirtioDevice) -> bool {
-    let vector = crate::arch::idt::VIRTIO_SOUND_VECTOR;
+    let vector = crate::arch::trap::VIRTIO_SOUND_VECTOR;
     if pci.enable_msix(vector).is_err() {
         log!(
             "virtio-sound: NOT INITIALISED at PCI {:02x}:{:02x}.{} — its MSI-X could not be \

@@ -800,14 +800,14 @@ fn build(
         let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
         extra.push((super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
     }
-    let plan = toyos_build::build::Plan::new(&config, features, &params);
+    let plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &config, features, &params);
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
     std::fs::write(&image, &bytes).map_err(|e| format!("{}: {e}", image.display()))?;
     // The binary the second invocation sends, copied now so it is this
     // build's and not whatever the tree holds when the machine is reached.
     if let Some(service) = batch.swap {
-        toyos_build::build::copy_guest_program(root, service, &home.join(service))?;
+        toyos_build::build::copy_guest_program(root, toyos_build::arch::Arch::X86_64, service, &home.join(service))?;
     }
     Ok(image)
 }

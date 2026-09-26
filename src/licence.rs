@@ -383,6 +383,18 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Font("OFL-1.1"),
     ),
     (
+        "aavmf/AAVMF_CODE.fd",
+        "47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d",
+        "NOTICE",
+        Terms::Spdx("BSD-2-Clause-Patent AND Apache-2.0"),
+    ),
+    (
+        "aavmf/AAVMF_VARS.fd",
+        "b3b855c5a80310168051164986855692d1bdb06e67619856177965cd87c6774f",
+        "NOTICE",
+        Terms::Spdx("BSD-2-Clause-Patent AND Apache-2.0"),
+    ),
+    (
         "ovmf/DEBUGX64_OVMF.fd",
         "800ff5af1220d1232d4da7173ccddbb74a9217600bd8935903d9d534801778b4",
         "NOTICE",

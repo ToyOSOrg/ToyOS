@@ -35,7 +35,7 @@ const _: () = assert!(toyos_elf::MAX_TLS_ALIGN == PAGE_2M);
 /// [`Layout::parse`] plus the kernel's ceiling on section header table size,
 /// checked once here since not every caller can refuse a malformed file.
 pub fn parse_layout(data: &[u8]) -> Result<Layout, &'static str> {
-    let layout = Layout::parse(data).map_err(|e| e.as_str())?;
+    let layout = Layout::parse(data, crate::arch::ELF_MACHINE).map_err(|e| e.as_str())?;
     if layout
         .section_headers
         .is_some_and(|s| s.byte_len() > MAX_HEAP_ALLOC)
@@ -509,5 +509,5 @@ fn table_entries(table: &Option<KernelSlice>) -> impl Iterator<Item = toyos_elf:
     // meet the range the writes are bounded to.
     table
         .iter()
-        .flat_map(|slice| RelaTable::new(unsafe { slice.as_slice() }).iter())
+        .flat_map(|slice| RelaTable::new(unsafe { slice.as_slice() }, crate::arch::ELF_MACHINE).iter())
 }

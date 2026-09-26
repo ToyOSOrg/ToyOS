@@ -2,7 +2,6 @@ use alloc::boxed::Box;
 
 use toyos_abi::syscall::SyscallError;
 
-use crate::arch::{mtrr, pat};
 use crate::mm::paging::{CachePolicy, MmioPolicy};
 use crate::mm::{PAGE_2M, align_2m_checked, DirectMap};
 use crate::gpu::{Gpu, GpuInfo};
@@ -61,7 +60,7 @@ pub fn init(
         width, height, stride, pixel_format, addr);
 
     // Reads the cache policy actually installed, not the one requested.
-    let mtrr = mtrr::range_type(addr, aligned_size);
+    let memory_type = crate::mm::paging::scanout_memory_type(addr, aligned_size);
     let installed = crate::mm::paging::kernel()
         .lock()
         .direct_map_policy(addr)
@@ -70,10 +69,7 @@ pub fn init(
         installed == CachePolicy::WriteCombining,
         "GOP: the scanout is mapped {installed:?}"
     );
-    log!("GOP: scanout memory type {} (MTRR {}, PAT entry {})",
-        mtrr::effective_under_wc(&mtrr).map_or("unknown", |t| t.name()),
-        mtrr.name(),
-        pat::WC_ENTRY);
+    log!("GOP: scanout memory type {memory_type}");
 
     let cursor_pages = crate::mm::pmm::alloc_contiguous(1, crate::mm::pmm::Category::Framebuffer).expect("GOP: cursor alloc failed");
     let cursor_phys = cursor_pages[0].direct_map().phys();
@@ -81,7 +77,7 @@ pub fn init(
     let cursor = Region {
         phys: DirectMap::from_phys(cursor_phys),
         size: PAGE_2M,
-        cache: CachePolicy::DeferToMtrr,
+        cache: CachePolicy::Normal,
         pages: None,
     };
     core::mem::forget(cursor_pages); // lives forever (GPU is never torn down)

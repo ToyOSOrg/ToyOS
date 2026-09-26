@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+mod arch;
 mod ctype;
 mod math;
 mod memory;
@@ -14,34 +15,18 @@ mod stdio;
 mod string;
 mod time;
 
-// C runtime: _start entry point, panic handler, and global allocator.
+// C runtime: the entry `arch::_start` calls, panic handler, and global allocator.
 // Only for pure C programs (no Rust std). When linked into a Rust program
 // with std, std provides these.
 #[cfg(not(feature = "std-runtime"))]
 mod runtime {
     use core::panic::PanicInfo;
 
-    // Entry point for C programs. The kernel pushes argc and argv onto the stack.
-    #[unsafe(no_mangle)]
-    #[unsafe(naked)]
-    unsafe extern "C" fn _start() -> ! {
-        // Stack layout at entry (set up by kernel):
-        //   [RSP]   = argc
-        //   [RSP+8] = argv[0], argv[1], ..., NULL
-        core::arch::naked_asm!(
-            "mov rdi, [rsp]",      // argc
-            "lea rsi, [rsp + 8]",  // argv
-            "call {start_c}",
-            "ud2",
-            start_c = sym start_c,
-        );
-    }
-
     // Returning from `main` is defined as calling `exit` with its value, so this
     // goes through libc's `exit` rather than the syscall: the atexit table and
     // `fflush(NULL)` are what stand between a program's last unterminated line
     // and the fd.
-    extern "C" fn start_c(argc: i32, argv: *const *const u8) -> ! {
+    pub(crate) extern "C" fn start_c(argc: i32, argv: *const *const u8) -> ! {
         unsafe extern "C" {
             fn main(argc: i32, argv: *const *const u8) -> i32;
         }

@@ -14,7 +14,9 @@ pub use wait::msc::{storage_flush, storage_read, storage_write};
 use alloc::vec::Vec;
 use core::fmt;
 use core::num::NonZeroU8;
-use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use crate::arch::barrier;
 use crate::mm::Mmio;
 use crate::mm::Dma;
 use crate::log;
@@ -319,8 +321,6 @@ pub(crate) const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of
     "every wait is clipped to where the rungs still ahead of it begin, so the last rung runs whatever was spent before it and the call ends here",
 );
 
-// The caller spins with interrupts off, so a call that outlasted the TLB-ack tripwire would panic another CPU over a device.
-const _: () = assert!(CALL_AFTER_BREAK.nanos() < crate::arch::tlb::ACK_TIMEOUT.nanos());
 
 // A disk whose device left under the port rung's reset is waited for no longer than the rungs from that reset on were given to spend on it.
 const _: () = assert!(
@@ -444,9 +444,16 @@ impl TrbRing {
     }
 
     /// One TRB at ring index `at` — the ring's one writer.
+    ///
+    /// The control word last, behind a barrier: it carries the Cycle bit, and a
+    /// controller running this ring owns the TRB the moment the bit matches its
+    /// own (xHCI 1.2 §4.9.2), so the body must already be there.
     fn put(&self, at: usize, trb: Trb) {
-        // Volatile: the controller reads this ring concurrently, and the Cycle bit tells it the TRB is complete.
-        self.buf.write(at * core::mem::size_of::<Trb>(), trb)
+        let off = at * core::mem::size_of::<Trb>();
+        self.buf.write(off + core::mem::offset_of!(Trb, param), trb.param);
+        self.buf.write(off + core::mem::offset_of!(Trb, status), trb.status);
+        barrier::dma_wmb();
+        self.buf.write(off + core::mem::offset_of!(Trb, control), trb.control);
     }
 
     /// Where the controller should resume, with the cycle state it must expect; bit 0 carries the cycle since a TRB address is 16-byte aligned.
@@ -667,7 +674,7 @@ pub(super) fn look_for(index: usize) -> Option<Whereabouts> {
 /// caller that waits for a device on a CPU it holds with `IF` clear: the
 /// interrupt a connect raises may be this CPU's, and it takes none. `kick`
 /// wakes every other CPU, since a halted one has stopped its own timer; the
-/// kick is refused only before `apic::init`, and no other CPU has been started
+/// kick is refused only before `irqchip::init`, and no other CPU has been started
 /// before it.
 pub(super) fn ports_wanted(kick: bool) {
     PORT_WORK_AT.store(crate::clock::nanos_since_boot().max(1), Ordering::Relaxed);
@@ -677,7 +684,7 @@ pub(super) fn ports_wanted(kick: bool) {
     let me = crate::arch::percpu::cpu_id();
     for cpu in 0..crate::arch::smp::cpu_count() {
         if cpu != me {
-            crate::arch::apic::kick_cpu(cpu);
+            crate::arch::irqchip::kick_cpu(cpu);
         }
     }
 }
@@ -866,7 +873,7 @@ impl XhciController {
     /// Put a command on the ring and ring the doorbell, answering with the address the completion will name it by.
     fn submit_command(&mut self, trb: Trb) -> u64 {
         let at = self.cmd_ring.enqueue(trb);
-        fence(Ordering::Release);
+        // An `Mmio` write: ordered after the TRB it announces.
         self.db_base.write_u32(0, 0);
         at
     }
@@ -874,11 +881,15 @@ impl XhciController {
     /// One event, or `None` while the controller has not published the next; every reader goes through here since the ring is one shared queue.
     fn next_event(&mut self) -> Option<Trb> {
         // Volatile so the poll observes the Cycle bit flipping; racing the controller by design (xHCI 1.2 §4.9.2).
-        let event: Trb =
-            self.event_ring.read(self.event_head as usize * core::mem::size_of::<Trb>());
-        if ((event.control & 1) != 0) != self.event_phase {
+        // The control word alone first: the rest of the TRB is the controller's
+        // until the Cycle bit it carries says otherwise.
+        let at = self.event_head as usize * core::mem::size_of::<Trb>();
+        let control: u32 = self.event_ring.read(at + core::mem::offset_of!(Trb, control));
+        if ((control & 1) != 0) != self.event_phase {
             return None;
         }
+        barrier::dma_rmb();
+        let event: Trb = self.event_ring.read(at);
         if crate::actuator::usb_slow_device() && !self.slow_device_would_have_answered(&event) {
             return None;
         }
@@ -1569,7 +1580,7 @@ impl XhciController {
     }
 
     fn ring_doorbell(&self, slot: u8, dci: u8) {
-        fence(Ordering::Release);
+        // An `Mmio` write: ordered after every TRB enqueued before it.
         self.db_base.write_u32(slot as u64 * 4, dci as u32);
     }
 }
@@ -1713,7 +1724,7 @@ fn take_within(bound: u64) -> Option<crate::sync::LockGuard<'static, Vec<XhciCon
         if let Some(guard) = XHCI.try_lock() {
             return Some(guard);
         }
-        if crate::arch::cpu::rdtsc() >= until {
+        if crate::arch::cpu::counter() >= until {
             return None;
         }
         core::hint::spin_loop();

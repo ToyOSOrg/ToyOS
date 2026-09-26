@@ -72,7 +72,7 @@ mod armed {
             return false;
         }
         OWED.store(true, Ordering::Relaxed);
-        crate::arch::apic::send_self(crate::arch::idt::LOG_NEST_VECTOR);
+        crate::arch::irqchip::send_self(crate::arch::trap::LOG_NEST_VECTOR);
         true
     }
 
@@ -92,7 +92,7 @@ mod armed {
             return;
         }
         OWED.store(true, Ordering::Relaxed);
-        crate::arch::apic::send_self(crate::arch::idt::LOG_NEST_VECTOR);
+        crate::arch::irqchip::send_self(crate::arch::trap::LOG_NEST_VECTOR);
         for _ in 0..WINDOW {
             core::hint::spin_loop();
         }

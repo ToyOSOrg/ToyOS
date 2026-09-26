@@ -97,7 +97,7 @@ pub fn poll() {
     );
 
     // Must not block: report_line uses try_lock and prints `rte=busy` rather than waiting.
-    crate::drivers::i8042::report_line();
+    crate::arch::keyboard_controller::report_line();
 
     for (cpu, &stamp) in stamps.iter().enumerate().take(cpus) {
         if mask & (1 << cpu) != 0 {

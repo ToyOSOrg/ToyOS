@@ -1558,7 +1558,7 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-window"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "toyos 0.15.0",
  "toyos-abi 0.14.0",

@@ -3,9 +3,9 @@
 //! **Clippy runs now, and these scans are what it cannot say.** `cargo run --
 //! --ci host` runs default clippy with warnings denied over three trees
 //! on every merge — the host workspace
-//! (`--workspace --all-targets`), the kernel (`--target x86_64-unknown-none`)
-//! and the bootloader (`--target x86_64-unknown-uefi`) — so a `clippy.toml` is
-//! no longer a wall with nothing behind it.
+//! (`--workspace --all-targets`), and the kernel and the bootloader for every
+//! architecture (`src/clippy.rs`) — so a `clippy.toml` is no longer a wall
+//! with nothing behind it.
 //!
 //! What is behind it is still not these six scans. `disallowed-methods` could
 //! take the first one, and would lose what makes it useful: the exceptions
@@ -60,6 +60,14 @@
 //! The eighth and ninth are the same bar over `.github/`: one cuts every
 //! workflow, script and container recipe into shell commands and refuses a
 //! package no row declares, the other reads `uses:`.
+//!
+//! The tenth is the architecture rules, [`ARCH_RULES`]: each a set of
+//! spellings — assembly and `core::arch` intrinsics, `target_arch`, a path into
+//! one architecture's module — stated as the only places they may appear, so an
+//! architecture is chosen in one place and reached only through the arch
+//! interface. A declared exception is a file row that points at the issue
+//! holding what it owes, and one that no longer holds a needle is refused.
+//! The rust fork's std is `src/forkcheck.rs`'s to govern and is not read here.
 //!
 //! **What none of them reaches is filed rather than implied**, and each table's
 //! own doc names its half: the entries under `issues/build/` say so.
@@ -193,14 +201,14 @@ const BANS: &[Ban] = &[
               with it",
         allowed: &[
             // Cache lines to walk, not bytes.
-            ("kernel/src/arch/control_regs.rs", 1),
+            ("kernel/src/arch/x86_64/control_regs.rs", 1),
             // Two guard-page sizes: the mapping is 4 KiB because a guard is one
             // hardware page, and `PAGE_SIZE` is 2 MiB territory here.
-            ("kernel/src/arch/percpu.rs", 2),
+            ("kernel/src/arch/x86_64/percpu.rs", 2),
             // A device's TX buffer.
             ("kernel/src/drivers/virtio_console.rs", 1),
             // A VT-d table is 4 KiB by the specification, not by this kernel.
-            ("kernel/src/iommu/vtd/table.rs", 1),
+            ("kernel/src/arch/x86_64/vtd/table.rs", 1),
             // Ring entries.
             ("kernel/src/trace.rs", 1),
             // A path length, in bytes.
@@ -212,7 +220,7 @@ const BANS: &[Ban] = &[
         why: "as above, in the other width",
         allowed: &[
             // A VT-d register window, by the specification.
-            ("kernel/src/iommu/vtd/mod.rs", 1),
+            ("kernel/src/arch/x86_64/vtd/mod.rs", 1),
             // The export itself, and the one place the literal lives.
             ("kernel/src/mm/mod.rs", 1),
             // One PCIe function's extended config space, by PCI 3.0 §7.2.2 and
@@ -409,7 +417,7 @@ const LOG_PRODUCERS: &[&str] = &["log!(", "alert!(", "boot_phase!(", "log::emit(
 /// `kernel/src/hardlockup/probe.rs`, which is why it is a file of its own — and
 /// neither is the line the arm writes, which its caller writes for it.
 const NMI_SILENT: &[&str] =
-    &["kernel/src/arch/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
+    &["kernel/src/arch/x86_64/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
 
 /// Every `enable_bus_master(` site `kernel/src` holds, by file and count.
 /// Arming DMA comes after a site's refusals — virtio parses its capability
@@ -465,7 +473,7 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/drivers/virtio_console.rs", 1),
     ("kernel/src/drivers/virtio_sound.rs", 2),
-    ("kernel/src/hw.rs", 1),
+    ("kernel/src/arch/x86_64/hw.rs", 1),
     ("kernel/src/mm/mmio.rs", 2),
     ("kernel/src/mm/region.rs", 2),
     ("kernel/src/pipe.rs", 1),
@@ -539,9 +547,10 @@ const HOST_SPAWNS: &[Spawn] = &[
         why: "how the toolchain is installed and linked, and `REQUIRED`",
     },
     Spawn {
-        arg: "\"qemu-system-x86_64\"",
-        sites: &[],
-        why: "QEMU, the other half of the bar, and `REQUIRED`",
+        arg: "arch.qemu()",
+        sites: &[("src/qemu.rs", 1), ("src/ci.rs", 2), ("tests/common/qemu.rs", 1)],
+        why: "QEMU, the other half of the bar: `Arch::qemu` names `qemu-system-x86_64` and \
+              `qemu-system-aarch64`, and `check_prerequisites` requires the one being booted",
     },
     Spawn {
         arg: "\"gh\"",
@@ -1210,6 +1219,339 @@ fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<Str
         .collect()
 }
 
+// ── Architecture rules ──────────────────────────────────────────────────────
+
+/// One architecture rule, stated as where its spellings may appear: a set of
+/// needles, the trees it reads, and the only places a needle may stand in
+/// them. Everything else in scope is a red that names the rule and the places.
+///
+/// **A table of rules, not a scan per rule**, so that a new rule is a row and
+/// its fixture, and a place is added with the reason it is one. Needles are
+/// matched in code only — [`code_only`] removes comments and string literals —
+/// so a doc comment that names `asm!` is prose and not assembly.
+#[cfg(test)]
+struct PlaceRule {
+    name: &'static str,
+    needles: &'static [&'static str],
+    /// Whether a path to `core::arch` or `std::arch`, in any spelling
+    /// ([`arch_module_lines`]), is a needle too.
+    arch_module: bool,
+    /// Repository-relative prefixes the rule reads; empty is every `.rs` file
+    /// this repository holds outside [`NOT_OURS`].
+    scope: &'static [&'static str],
+    /// Repository-relative prefixes a needle may appear under, each with why.
+    places: &'static [(&'static str, &'static str)],
+}
+
+/// Every spelling of assembly; an architecture's own intrinsics are
+/// [`PlaceRule::arch_module`].
+#[cfg(test)]
+const ASSEMBLY: &[&str] = &["asm!", "global_asm!", "naked_asm!", "#[naked]", "unsafe(naked)"];
+
+/// What a red names when [`PlaceRule::arch_module`] matched.
+#[cfg(test)]
+const ARCH_MODULE: &str = "core::arch/std::arch";
+
+/// The 0-based lines of `text` on which a path names `core::arch` or
+/// `std::arch`, or makes a name that can: `core::arch::asm!`,
+/// `use core::arch as isa;`, an `arch` that begins an element of a `core::{…}`
+/// group, over any number of lines — and any glob of `core`/`std` itself
+/// (`use core::*;`, `core::{*}`) or rename of it (`use core as k;`,
+/// `extern crate core as k;`, `core::{self as k}`).
+///
+/// **The glob and the rename are refused whole**, not followed to an `arch`
+/// after them: what they bring into scope is read by resolution, which a line
+/// scan does not have, and code outside an arch module has no other use for
+/// either. Comments and string literals are not code ([`code_only`]).
+#[cfg(test)]
+fn arch_module_lines(text: &str) -> Vec<usize> {
+    let code: Vec<char> = text.lines().map(code_only).collect::<Vec<_>>().join("\n").chars().collect();
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let line_of = |at: usize| code[..at].iter().filter(|c| **c == '\n').count();
+    let skip_space = |mut at: usize| {
+        while code.get(at).is_some_and(|c| c.is_whitespace()) {
+            at += 1;
+        }
+        at
+    };
+    let ident_at = |at: usize, name: &str| {
+        let end = at + name.len();
+        code.get(at..end).is_some_and(|s| s.iter().copied().eq(name.chars()))
+            && !code.get(end).is_some_and(|c| word(*c))
+            && !at.checked_sub(1).and_then(|j| code.get(j)).is_some_and(|c| word(*c))
+    };
+    // The identifier that ends before `at`, over whitespace and `::`.
+    let ident_before = |at: usize| {
+        let mut end = at;
+        while end > 0 && (code[end - 1].is_whitespace() || code[end - 1] == ':') {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && word(code[start - 1]) {
+            start -= 1;
+        }
+        (start, code[start..end].iter().collect::<String>())
+    };
+    // Whether `at` begins an item that imports: `use …`, or `extern crate …`,
+    // or an element of a `use` group.
+    let imported = |at: usize| {
+        let mut at = at;
+        loop {
+            let (start, ident) = ident_before(at);
+            match ident.as_str() {
+                "use" => return true,
+                "crate" => return ident_before(start).1 == "extern",
+                "" => {}
+                _ => return false,
+            }
+            // Not after an identifier: inside a group only if a `{` opens it.
+            let mut back = start;
+            while back > 0 && code[back - 1].is_whitespace() {
+                back -= 1;
+            }
+            match back.checked_sub(1).map(|j| code[j]) {
+                Some('{') => at = back - 1,
+                Some(',') => {
+                    let mut depth = 0usize;
+                    let mut j = back - 1;
+                    loop {
+                        let Some(k) = j.checked_sub(1) else { return false };
+                        j = k;
+                        match code[j] {
+                            '}' => depth += 1,
+                            '{' if depth == 0 => break,
+                            '{' => depth -= 1,
+                            ';' => return false,
+                            _ => {}
+                        }
+                    }
+                    at = j;
+                }
+                _ => return false,
+            }
+        }
+    };
+    let mut lines = Vec::new();
+    for at in 0..code.len() {
+        let Some(root) = ["core", "std"].into_iter().find(|root| ident_at(at, root)) else { continue };
+        let after = skip_space(at + root.len());
+        if ident_at(after, "as") && imported(at) {
+            lines.push(line_of(at));
+            continue;
+        }
+        let colons = after;
+        if code.get(colons..colons + 2) != Some(&[':', ':'][..]) {
+            continue;
+        }
+        let next = skip_space(colons + 2);
+        if ident_at(next, "arch") || code.get(next) == Some(&'*') {
+            lines.push(line_of(next));
+        } else if code.get(next) == Some(&'{') {
+            // Each element of the group begins after its `{` or a `,` at depth one.
+            let (mut depth, mut i, mut element) = (0usize, next, true);
+            while let Some(&c) = code.get(i) {
+                match c {
+                    '{' => {
+                        depth += 1;
+                        element = depth == 1;
+                    }
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    ',' if depth == 1 => element = true,
+                    c if c.is_whitespace() => {}
+                    _ => {
+                        let renamed_self =
+                            ident_at(i, "self") && ident_at(skip_space(i + "self".len()), "as");
+                        if element && depth == 1 && (ident_at(i, "arch") || c == '*' || renamed_self) {
+                            lines.push(line_of(i));
+                        }
+                        element = false;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    lines
+}
+
+/// The spelling of the first needle of `rule` that line `n` of a file holds,
+/// `code` being that line's code and `arch_lines` the file's
+/// [`arch_module_lines`].
+#[cfg(test)]
+fn needle_on(rule: &PlaceRule, code: &str, n: usize, arch_lines: &[usize]) -> Option<&'static str> {
+    rule.needles
+        .iter()
+        .copied()
+        .find(|needle| code.contains(needle))
+        .or_else(|| (rule.arch_module && arch_lines.contains(&n)).then_some(ARCH_MODULE))
+}
+
+/// The spellings that name one architecture's module from outside it.
+#[cfg(test)]
+const ARCH_PATHS: &[&str] = &["arch::x86_64", "arch::aarch64"];
+
+/// The pure crates: `CLAUDE.md`'s layout marks every one of them pure, and
+/// `toyos-sched` is the scheduler core behind `Machine`/`Hw`.
+#[cfg(test)]
+const PURE_CRATES: &[&str] = &[
+    "toyos-blockhold/",
+    "toyos-desktop/",
+    "toyos-dma/",
+    "toyos-elide/",
+    "toyos-hda/",
+    "toyos-mixer/",
+    "toyos-pci/",
+    "toyos-proclife/",
+    "toyos-sched/",
+    "toyos-userbound/",
+    "toyos-wallclock/",
+];
+
+/// Where issues/build/assembly-outside-an-arch-module-in-userland-and-guest-probes.md
+/// holds what is owed, for the rows that cite it.
+#[cfg(test)]
+const USERLAND_ASM: &str =
+    "declared, not placed: issues/build/assembly-outside-an-arch-module-in-userland-and-guest-probes.md";
+
+#[cfg(test)]
+const ARCH_RULES: &[PlaceRule] = &[
+    PlaceRule {
+        name: "assembly lives in an architecture's own module",
+        needles: ASSEMBLY,
+        arch_module: true,
+        scope: &[],
+        places: &[
+            ("kernel/src/arch/x86_64/", "the kernel's x86-64 module"),
+            ("kernel/src/arch/aarch64/", "the kernel's AArch64 module"),
+            ("bootloader/src/arch/", "the loader's architecture module"),
+            ("toyos-abi/src/syscall.rs", "toyos-abi's per-architecture syscall entry"),
+            ("userland/libc/src/arch/", "libc's architecture modules"),
+            ("userland/metalprobe/src/arch/", "metalprobe's architecture modules"),
+            ("userland/toyos-window/src/arch/", "toyos-window's architecture modules"),
+            ("tests/toyos-rust-tests/src/bin/abuse_kernel_addr.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/abuse_page_straddle.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/abuse_tls_alloc.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/debug_trap.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/demand_paging_sse.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/fault_gate_child.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/fpu_isolation.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/gsbase_probe.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/inventory_bounds.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/log_hold.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/mmap_prot.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/nmi_window_spin.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/partition_claimant.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/process_lifecycle.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/syscall_cost.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/tlb_shootdown_waits.rs", USERLAND_ASM),
+            ("tests/toyos-rust-tests/src/bin/wake_storm_cost.rs", USERLAND_ASM),
+        ],
+    },
+    PlaceRule {
+        name: "an architecture is selected in one place",
+        needles: &["target_arch"],
+        arch_module: false,
+        scope: &[],
+        places: &[
+            ("kernel/src/arch/mod.rs", "the kernel's one selector"),
+            ("kernel/src/arch/x86_64/", "the kernel's x86-64 module"),
+            ("kernel/src/arch/aarch64/", "the kernel's AArch64 module"),
+            ("bootloader/src/arch/", "the loader's architecture module and its selector"),
+            ("toyos-abi/src/syscall.rs", "toyos-abi's per-architecture syscall entry"),
+            ("src/arch.rs", "the build system's one reading of the host it runs on"),
+            (
+                "toyos-cc/src/preprocess/mod.rs",
+                "the C compiler's default target is its host's, when the command line names none",
+            ),
+            (
+                "src/licence.rs",
+                "the licence gate resolves a dependency's `cfg(target_arch = ...)` against the target an image is built for: the architecture is the data it reads, not a choice it makes",
+            ),
+            ("userland/libc/src/arch/", "libc's architecture modules and their selector"),
+            ("userland/toyos-window/src/arch/", "toyos-window's architecture modules and their selector"),
+            ("userland/metalprobe/src/arch/", "metalprobe's architecture modules and their selector"),
+        ],
+    },
+    PlaceRule {
+        name: "generic kernel code reaches the machine through the arch interface",
+        needles: ARCH_PATHS,
+        arch_module: false,
+        scope: &["kernel/src/"],
+        places: &[("kernel/src/arch/", "the architecture's own modules")],
+    },
+    PlaceRule {
+        name: "a pure crate names no architecture",
+        needles: &[
+            "asm!", "global_asm!", "naked_asm!", "#[naked]", "unsafe(naked)", "target_arch", "arch::x86_64",
+            "arch::aarch64",
+        ],
+        arch_module: true,
+        scope: PURE_CRATES,
+        places: &[],
+    },
+];
+
+/// Every `file:line` in `files` that breaks `rule`, as the red names it.
+#[cfg(test)]
+fn place_violations(rule: &PlaceRule, files: &[(String, String)]) -> Vec<String> {
+    let in_scope =
+        |at: &str| rule.scope.is_empty() || rule.scope.iter().any(|tree| at.starts_with(tree));
+    let placed = |at: &str| rule.places.iter().any(|(place, _)| at.starts_with(place));
+    let mut found = Vec::new();
+    for (at, text) in files {
+        if !in_scope(at) || placed(at) {
+            continue;
+        }
+        let arch_lines = if rule.arch_module { arch_module_lines(text) } else { Vec::new() };
+        for (n, line) in text.lines().enumerate() {
+            let code = code_only(line);
+            if let Some(needle) = needle_on(rule, &code, n, &arch_lines) {
+                let places: Vec<String> =
+                    rule.places.iter().map(|(place, why)| format!("{place} ({why})")).collect();
+                found.push(format!(
+                    "{at}:{}: `{needle}` breaks \"{}\"; it may appear only in {}",
+                    n + 1,
+                    rule.name,
+                    if places.is_empty() { "no file at all".to_string() } else { places.join(", ") },
+                ));
+            }
+        }
+    }
+    found
+}
+
+/// Every `.rs` file this repository holds, as `(repository-relative path,
+/// contents)`: everything outside [`NOT_OURS`], build output and dotted
+/// directories.
+#[cfg(test)]
+fn every_rust_file() -> Vec<(String, String)> {
+    let root = repo_root();
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&root) else { return Vec::new() };
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "target" || name == NOT_OURS {
+            continue;
+        }
+        if path.is_dir() {
+            rust_files(&path, &mut files);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            files.push(path);
+        }
+    }
+    files
+        .into_iter()
+        .filter_map(|path| Some((rel(&root, &path), std::fs::read_to_string(&path).ok()?)))
+        .collect()
+}
+
 /// The third-party C corpus, whose attribution is per *population* rather than
 /// per file: `tests/testcases/LICENSE` states how many files each of these
 /// directories holds, and `NOTICE` points at that file for the terms.
@@ -1253,6 +1595,133 @@ fn digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The architecture rules hold over the whole repository**, and no place
+    /// a rule names is a place that no longer holds a needle — a row nobody
+    /// needs any more is a permission nobody re-argued.
+    #[test]
+    fn every_architecture_rule_holds() {
+        let files = every_rust_file();
+        assert!(
+            files.iter().any(|(at, _)| at == "kernel/src/arch/mod.rs"),
+            "the walk did not reach the kernel's selector, so it is reading no tree"
+        );
+        let mut complaints = Vec::new();
+        for rule in ARCH_RULES {
+            complaints.extend(place_violations(rule, &files));
+            // A module is a place a needle may stand; a file is an exception
+            // somebody declared, and one that holds nothing any more is stale.
+            for (place, _) in rule.places.iter().filter(|(place, _)| !place.ends_with('/')) {
+                let used = files.iter().filter(|(at, _)| at.starts_with(place)).any(|(_, text)| {
+                    let arch_lines = if rule.arch_module { arch_module_lines(text) } else { Vec::new() };
+                    text.lines().enumerate().any(|(n, l)| needle_on(rule, &code_only(l), n, &arch_lines).is_some())
+                });
+                if !used {
+                    complaints.push(format!(
+                        "\"{}\" names {place} as a place, and nothing there spells any of {:?}",
+                        rule.name, rule.needles
+                    ));
+                }
+            }
+        }
+        assert!(complaints.is_empty(), "{}", complaints.join("\n"));
+    }
+
+    fn rule(name: &str) -> &'static PlaceRule {
+        ARCH_RULES.iter().find(|r| r.name == name).unwrap_or_else(|| panic!("no rule {name}"))
+    }
+
+    fn file(at: &str, text: &str) -> (String, String) {
+        (at.to_string(), text.to_string())
+    }
+
+    /// Each rule's own fixture: a violation planted where the rule forbids it
+    /// reds, naming the rule and the places, and the same line where the rule
+    /// allows it does not.
+    #[test]
+    fn assembly_outside_an_arch_module_is_red() {
+        let asm = rule("assembly lives in an architecture's own module");
+        let planted = [
+            file("kernel/src/sched/driver.rs", "    unsafe { core::arch::asm!(\"nop\") };\n"),
+            file("bootloader/src/main.rs", "#[unsafe(naked)]\n"),
+            file("toyos/src/window.rs", "    let t = core::arch::x86_64::_rdtsc();\n"),
+            // The module named by any path: renamed, grouped, over lines.
+            file("toyos/src/net.rs", "use core::arch as isa;\n"),
+            file("toyos/src/shm.rs", "use core::{arch::x86_64::_rdtsc};\n"),
+            file("toyos/src/ipc.rs", "use ::std::{\n    fmt,\n    arch::asm,\n};\n"),
+        ];
+        let said = place_violations(asm, &planted);
+        assert_eq!(said.len(), 6, "{said:?}");
+        assert!(said.iter().any(|s| s.starts_with("toyos/src/ipc.rs:3:")), "{said:?}");
+        assert!(said.iter().all(|s| s.contains(asm.name) && s.contains("kernel/src/arch/x86_64/")), "{said:?}");
+        let placed = [
+            file("kernel/src/arch/aarch64/cpu.rs", "    unsafe { core::arch::asm!(\"wfi\") };\n"),
+            file("kernel/src/sched/driver.rs", "    // core::arch::asm! is the architecture's.\n"),
+            file("toyos/src/lib.rs", "use core::{fmt::{self, arch}, ptr};\nlet s = \"core::arch\";\nuse mycore::arch;\n"),
+        ];
+        assert_eq!(place_violations(asm, &placed), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_architecture_chosen_outside_the_selector_is_red() {
+        let select = rule("an architecture is selected in one place");
+        let said = place_violations(select, &[file("kernel/src/main.rs", "#[cfg(target_arch = \"x86_64\")]\n")]);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains(select.name) && said[0].contains("kernel/src/arch/mod.rs"), "{said:?}");
+        assert!(place_violations(select, &[file("kernel/src/arch/mod.rs", "#[cfg(target_arch = \"aarch64\")]\n")]).is_empty());
+    }
+
+    #[test]
+    fn a_path_into_one_architecture_from_generic_code_is_red() {
+        let reach = rule("generic kernel code reaches the machine through the arch interface");
+        let said = place_violations(reach, &[file("kernel/src/process.rs", "use crate::arch::x86_64::percpu;\n")]);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains(reach.name) && said[0].contains("kernel/src/arch/"), "{said:?}");
+        // Outside the kernel the rule does not read; inside `arch/` it allows.
+        assert!(place_violations(reach, &[file("kernel/src/arch/x86_64/boot.rs", "use crate::arch::x86_64::percpu;\n")]).is_empty());
+    }
+
+    #[test]
+    fn a_pure_crate_that_names_an_architecture_is_red() {
+        let pure = rule("a pure crate names no architecture");
+        let planted = [
+            file("toyos-sched/src/cpu.rs", "#[cfg(target_arch = \"aarch64\")]\n"),
+            file("toyos-desktop/src/lib.rs", "    core::arch::asm!(\"nop\");\n"),
+            file("toyos-dma/src/lib.rs", "use crate::arch::aarch64::x;\n"),
+            file("toyos-sched/src/lib.rs", "use core::arch as isa;\nfn f() { unsafe { isa::aarch64::vdupq_n_u8(0) }; }\n"),
+            file("toyos-mixer/src/lib.rs", "use core::{arch::x86_64::_rdtsc};\n"),
+            // A glob or a rename of the root brings `arch` in under a name no
+            // line scan resolves; each is red at the import, and the use after
+            // it is spelled so that no other needle matches.
+            file("toyos-elide/src/lib.rs", "use core::*;\nuse arch::{aarch64::vdupq_n_u8};\n"),
+            file("toyos-hda/src/lib.rs", "use core as k;\nuse k::arch::{aarch64::vdupq_n_u8};\n"),
+            file("toyos-pci/src/lib.rs", "extern crate core as k;\nuse k::arch::{aarch64::vdupq_n_u8};\n"),
+            file("toyos-wallclock/src/lib.rs", "use core::{self as k};\nuse k::arch::{aarch64::vdupq_n_u8};\n"),
+            file("toyos-userbound/src/lib.rs", "use std::{\n    *,\n};\n"),
+            file("toyos-proclife/src/lib.rs", "use {alloc::vec, std as k};\n"),
+        ];
+        let said = place_violations(pure, &planted);
+        assert_eq!(said.len(), 11, "{said:?}");
+        assert!(said.iter().any(|s| s.starts_with("toyos-sched/src/lib.rs:1:")), "{said:?}");
+        for at in [
+            "toyos-elide/src/lib.rs:1:",
+            "toyos-hda/src/lib.rs:1:",
+            "toyos-pci/src/lib.rs:1:",
+            "toyos-wallclock/src/lib.rs:1:",
+            "toyos-userbound/src/lib.rs:2:",
+            "toyos-proclife/src/lib.rs:1:",
+        ] {
+            assert!(said.iter().any(|s| s.starts_with(at) && s.contains(ARCH_MODULE)), "{at} is not red: {said:?}");
+        }
+        assert!(said.iter().all(|s| s.contains(pure.name) && s.contains("no file at all")), "{said:?}");
+
+        // What is not the root, or not an import, is not a rename of it.
+        let unrelated = [
+            file("toyos-sched/src/cpu.rs", "fn f(core: u8) -> u32 { g(1, core as u32) + { core as u32 } }\n"),
+            file("toyos-dma/src/lib.rs", "use crate::core as c;\nuse a::{b, core as k};\n"),
+        ];
+        assert_eq!(place_violations(pure, &unrelated), Vec::<String>::new());
+    }
 
     /// **Two clauses, one rule each, and neither is checkable any other way.**
     ///
@@ -1639,7 +2108,7 @@ mod tests {
             }
         }
         assert!(
-            found.iter().any(|(arg, _, _)| arg == "\"qemu-system-x86_64\""),
+            found.iter().any(|(arg, _, _)| arg == "arch.qemu()"),
             "the walk did not find the QEMU launch, so it is reading no host tree"
         );
         assert!(

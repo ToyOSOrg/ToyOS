@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use crate::arch::Arch;
 use crate::buildlock;
 use crate::buildlock::Scope;
 use crate::stamps;
@@ -85,8 +86,18 @@ const STD_SOURCES: [&str; 2] = ["toyos-abi/src", "toyos/src"];
 /// `src/build.rs`'s external fingerprint. A fifth spelling would silently leave
 /// one of them building or fingerprinting a different set of targets than the
 /// others.
-pub const GUEST_TARGETS: [&str; 3] =
-    ["x86_64-unknown-toyos", "x86_64-unknown-none", "x86_64-unknown-uefi"];
+pub const GUEST_TARGETS: [&str; 6] = [
+    Arch::X86_64.userland(),
+    Arch::X86_64.kernel(),
+    Arch::X86_64.loader(),
+    Arch::Aarch64.userland(),
+    Arch::Aarch64.kernel(),
+    Arch::Aarch64.loader(),
+];
+
+/// The one ToyOS the hosted rustc (`system.toml`'s `hosted-rustc`) is built to
+/// run on.
+pub const HOSTED_ARCH: Arch = Arch::X86_64;
 
 /// The primary's compiler, which every sysroot is cloned from and compiled by.
 pub(crate) fn stage2(rust_dir: &Path) -> PathBuf {
@@ -217,7 +228,7 @@ pub(crate) fn rustup_home() -> Option<PathBuf> {
 }
 
 /// Where the machine-global `toyos` rustup toolchain currently points.
-fn rustup_link() -> Option<PathBuf> {
+pub(crate) fn rustup_link() -> Option<PathBuf> {
     fs::read_link(rustup_home()?.join("toolchains/toyos")).ok()
 }
 
@@ -306,7 +317,7 @@ fn cargo_link_stale(stage2: &Path) -> bool {
 /// has, and a copy would put a 32 MB host binary into a 401 MiB artifact to
 /// stand in for a file the consumer can make in a microsecond. `Owner::Installed`
 /// makes it, exactly as it makes the host target.
-fn provision_toolchain_cargo(stage2: &Path) {
+pub(crate) fn provision_toolchain_cargo(stage2: &Path) {
     let at = stage2.join("bin/cargo");
     let _ = fs::remove_file(&at);
     std::os::unix::fs::symlink(host_cargo(), &at).unwrap_or_else(|e| {
@@ -314,7 +325,8 @@ fn provision_toolchain_cargo(stage2: &Path) {
     });
 }
 
-/// Refuse a toolchain layout that would make rustup narrate.
+/// Refuse a toolchain layout that would make rustup narrate, or that has no
+/// linker for the guest targets that name `rust-lld`.
 ///
 /// Unconditional and after the step that provisions, because the defect being
 /// gated is a provisioning step that silently stopped running: a check that only
@@ -331,6 +343,21 @@ pub(crate) fn assert_toolchain_is_honest(stage2: &Path) {
         narrated.join(" and "),
         if narrated.len() == 1 { "it" } else { "them" },
     );
+    let lld = rust_lld(stage2);
+    assert!(
+        lld.is_file(),
+        "the toyos toolchain at {} carries no {}, the linker every guest target that does not \
+         link through toyos-ld names: bootstrap puts it there when `write_config` says \
+         `lld = true`, and it did not",
+        stage2.display(),
+        lld.display(),
+    );
+}
+
+/// The linker the guest targets name, as the toolchain at `toolchain` carries
+/// it: `lib/rustlib/<host>/bin/rust-lld`, where rustc itself looks for it.
+pub(crate) fn rust_lld(toolchain: &Path) -> PathBuf {
+    toolchain.join("lib/rustlib").join(host_triple()).join("bin/rust-lld")
 }
 
 /// Ensure the toolchain is up to date, and return the sysroot this checkout's
@@ -464,7 +491,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
             eprintln!("Building full toolchain (this takes a while on first run)...");
             full_bootstrap(root, &rust_dir);
             stamps::write_dir_stamp(&rust_dir.join("compiler"), &compiler_stamp);
-            sysroot::record_compiler(&rust_dir);
+            crate::compiler::record(&rust_dir);
             if kind.invalidate_hosted {
                 let _ = fs::remove_file(&hosted_stamp);
             }
@@ -476,10 +503,10 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         Scope::Global,
         "record which compiler the toolchain is",
         || (!rust_dir.join("build/toyos-compiler").exists()).then_some(()),
-        |()| sysroot::record_compiler(&rust_dir),
+        |()| crate::compiler::record(&rust_dir),
     );
 
-    let hosted_rustc = rust_dir.join("build/x86_64-unknown-toyos/stage2/bin/rustc");
+    let hosted_rustc = rust_dir.join(format!("build/{}/stage2/bin/rustc", HOSTED_ARCH.userland()));
     lock.act_if(
         Scope::Global,
         "build the ToyOS-hosted rustc",
@@ -733,10 +760,12 @@ fn full_bootstrap(root: &Path, rust_dir: &Path) {
         );
         tolerated_failure(&log, "the toolchain build");
     }
-    assert_std_built_from(
-        root,
-        &rust_dir.join(format!("build/{host}/stage1-std/x86_64-unknown-toyos")),
-    );
+    for arch in Arch::ALL {
+        assert_std_built_from(
+            root,
+            &rust_dir.join(format!("build/{host}/stage1-std/{}", arch.userland())),
+        );
+    }
 }
 
 fn build_hosted_rustc(rust_dir: &Path, toyos_ld: &Path) {
@@ -748,7 +777,7 @@ fn build_hosted_rustc(rust_dir: &Path, toyos_ld: &Path) {
     refuse_on_compile_error(&log, "the hosted rustc");
 
     // rustdoc for ToyOS may fail to link; rustc and librustc_driver may not.
-    let toyos_stage2 = rust_dir.join("build/x86_64-unknown-toyos/stage2");
+    let toyos_stage2 = rust_dir.join(format!("build/{}/stage2", HOSTED_ARCH.userland()));
     assert!(
         toyos_stage2.join("bin/rustc").exists(),
         "the hosted rustc build failed and {} is not there.\n\
@@ -766,15 +795,44 @@ fn build_hosted_rustc(rust_dir: &Path, toyos_ld: &Path) {
     if !ok {
         tolerated_failure(&log, "the hosted rustc build");
     }
-    // No config restore needed — full_bootstrap writes the
-    // cross-only config before they run, so the next non-hosted build
-    // always starts with the correct config regardless of what's on disk.
+
+    // That build reassembled the host's `stage2` without `rust-lld`
+    // (`write_config` says why), so the host-only build runs once more to put
+    // it back: everything it would compile is already built.
+    write_config(rust_dir, &host_triple(), toyos_ld, false);
+    let (ok, log) = x_build(
+        rust_dir,
+        &["build", "--stage", "2", "--warnings", "warn"],
+        "the toolchain, reassembled",
+    );
+    refuse_on_compile_error(&log, "the toolchain, reassembled");
+    assert!(
+        rust_lld(&stage2(rust_dir)).is_file(),
+        "the toolchain's reassembly after the hosted rustc left no {}",
+        rust_lld(&stage2(rust_dir)).display()
+    );
+    if !ok {
+        tolerated_failure(&log, "the toolchain's reassembly");
+    }
 }
 
+/// `bootstrap.toml` for the host-only toolchain, or with the ToyOS-hosted rustc.
+///
+/// `lld = true` is what puts `rust-lld` in every stage's sysroot, where rustc
+/// finds the linker the targets that do not link through toyos-ld name. The
+/// hosted rustc's build cannot have it: bootstrap would then build LLD for the
+/// ToyOS host from C++, which nothing here can compile. Every assemble removes
+/// the host's `stage2` first, so [`build_hosted_rustc`] reassembles it under
+/// the host-only config after.
+///
+/// The host's `default-linker-linux-override` is pinned off because bootstrap
+/// otherwise ties it to `lld` for `x86_64-unknown-linux-gnu`, and a host rustc
+/// whose build environment flips with the config is rebuilt by each of those
+/// two builds.
 fn write_config(rust_dir: &Path, host: &str, toyos_ld: &Path, with_hosted_rustc: bool) {
     let linker = toyos_ld.display();
     let host_line = if with_hosted_rustc {
-        format!("host = [\"{host}\", \"x86_64-unknown-toyos\"]")
+        format!("host = [\"{host}\", \"{}\"]", HOSTED_ARCH.userland())
     } else {
         format!("host = [\"{host}\"]")
     };
@@ -788,6 +846,21 @@ fn write_config(rust_dir: &Path, host: &str, toyos_ld: &Path, with_hosted_rustc:
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    let userland: String = Arch::ALL
+        .iter()
+        .map(|arch| {
+            let backends = if *arch == HOSTED_ARCH { codegen_backends } else { "" };
+            // rust-lld by name: rustc finds it in the sysroot of the stage that
+            // links, which `lld = true` puts it in. It takes no `-Wl,` rpath,
+            // and a guest std has no host library path to record.
+            let linker = if arch.links_through_toyos_ld() {
+                format!("linker = \"{linker}\"")
+            } else {
+                "linker = \"rust-lld\"\nrpath = false".to_string()
+            };
+            format!("[target.{}]\n{linker}{backends}\n\n", arch.userland())
+        })
+        .collect();
     let config = format!(
         r#"change-id = "ignore"
 profile = "compiler"
@@ -798,15 +871,20 @@ target = [{targets}]
 
 [rust]
 incremental = true
-lld = false
+lld = {lld}
 
-[target.x86_64-unknown-toyos]
-linker = "{linker}"{codegen_backends}
+[target.{host}]
+{HOST_LINKER_PIN}
 
-"#
+{userland}"#,
+        lld = !with_hosted_rustc,
     );
     fs::write(rust_dir.join("bootstrap.toml"), config).unwrap();
 }
+
+/// What the host rustc links its own binaries with, held to one answer in every
+/// `bootstrap.toml` that builds a host compiler: [`write_config`] says why.
+pub(crate) const HOST_LINKER_PIN: &str = "default-linker-linux-override = \"off\"";
 
 /// Path to the host toyos-ld binary (stable location, never wiped by sysroot rebuilds).
 ///
@@ -955,14 +1033,14 @@ fn host_sysroot() -> PathBuf {
 
 /// Whether the ToyOS sysroot is missing the host target proc-macros compile against.
 fn host_target_missing(rust_dir: &Path) -> bool {
-    let toyos_sysroot = rust_dir.join("build/x86_64-unknown-toyos/stage2/lib/rustlib");
+    let toyos_sysroot = rust_dir.join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()));
     toyos_sysroot.exists() && !toyos_sysroot.join(host_triple()).exists()
 }
 
 fn link_host_target(rust_dir: &Path) {
     let host = host_triple();
     let host_target_dir = rust_dir
-        .join("build/x86_64-unknown-toyos/stage2/lib/rustlib")
+        .join(format!("build/{}/stage2/lib/rustlib", HOSTED_ARCH.userland()))
         .join(&host);
 
     let source = host_sysroot().join("lib/rustlib").join(&host);
@@ -1046,6 +1124,16 @@ mod tests {
         provision_toolchain_cargo(&stage2);
         assert!(narrated_binaries(&bin).is_empty());
         assert!(!cargo_link_stale(&stage2));
+
+        // Nothing narrates, and the toolchain is still refused: it has no linker.
+        let refused = std::panic::catch_unwind(|| assert_toolchain_is_honest(&stage2))
+            .expect_err("a toolchain with no rust-lld is refused");
+        let said = refused.downcast_ref::<String>().expect("a formatted refusal");
+        assert!(said.contains("rust-lld"), "the refusal names the linker: {said}");
+
+        let lld = rust_lld(&stage2);
+        fs::create_dir_all(lld.parent().unwrap()).unwrap();
+        fs::write(&lld, b"").unwrap();
         assert_toolchain_is_honest(&stage2);
     }
 

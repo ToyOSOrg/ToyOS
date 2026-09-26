@@ -16,11 +16,11 @@ use uefi::{
     proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
-    table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
+    table::{boot::{MemoryAttribute, MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
     Event,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
-use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
+use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, ROOT_HIGH_HALF, ROOT_IDENTITY};
 
 /// Every line this loader prints: the firmware's console, and the file on the
 /// stick once [`loaderlog::open`] has one. The arguments are evaluated once, so
@@ -36,6 +36,7 @@ macro_rules! println {
     };
 }
 
+mod arch;
 mod attempt;
 mod blackbox;
 mod bootnext;
@@ -71,10 +72,8 @@ const MAP_MARGIN: usize = 64;
 fn alloc_kernel_memory(size: usize) -> vec::Vec<u8> {
     const KERNEL_ALIGN: usize = 2 * 1024 * 1024; // 2MB
     let layout = Layout::from_size_align(size, KERNEL_ALIGN).expect("invalid layout");
-    // SAFETY: `layout` has non-zero size — `size` is `vaddr_max + stack_size`
-    // at the one call site, and `stack_size` alone is a fixed 8 MiB — so
-    // `alloc_zeroed`'s "layout must have non-zero size" precondition always
-    // holds.
+    // SAFETY: `layout` has non-zero size so `alloc_zeroed`'s "layout must have
+    // non-zero size" precondition always holds.
     let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null(), "kernel allocation failed");
     // SAFETY: `ptr` was just returned by the global allocator for exactly
@@ -341,7 +340,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     // every program image with reads the kernel's own image here. Refused by
     // name before anything is allocated — ELF32, big-endian, a version that is
     // not `EV_CURRENT`, an `e_type` that is not `ET_DYN`, a machine that is not
-    // x86-64, no program headers or a table outside the file, more than
+    // this loader's own, no program headers or a table outside the file, more than
     // `toyos_elf::MAX_LOAD_SEGMENTS` `PT_LOAD`s or none at all, a `PT_LOAD`
     // with `p_filesz > p_memsz` or a `p_vaddr + p_memsz` or `p_offset +
     // p_filesz` that overflows, and an `e_entry` no segment covers.
@@ -350,7 +349,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     // loader: the pair is a (copy length, destination size) pair here too, as
     // the image is sized from every `p_memsz` and each segment is then copied
     // in at `p_filesz`.
-    let layout = toyos_elf::Layout::parse(kernel_elf_bytes)
+    let layout = toyos_elf::Layout::parse(kernel_elf_bytes, arch::ELF_MACHINE)
         .unwrap_or_else(|e| panic!("kernel.elf: {e}"));
 
     // Section headers are optional to `toyos-elf`, which loads programs whose
@@ -368,10 +367,16 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     println!("Kernel stack size: {}", stack_size);
     // `vaddr_max` is the largest `p_vaddr + p_memsz` over the `PT_LOAD`
     // segments, and the image is laid out at its own vaddrs — so it is what the
-    // kernel's memory has to cover before the stack is added to it.
+    // kernel's memory has to cover before the stack is added to it. The stack
+    // starts on the next page: where the image ends is the linker's choice, and
+    // both ABIs want the stack pointer 16-byte aligned, which AArch64's
+    // `SCTLR_EL1.SA` enforces on every access through it.
+    const PAGE: u64 = 4096;
     let mem_size = layout
         .vaddr_max
-        .checked_add(stack_size as u64)
+        .checked_add(PAGE - 1)
+        .map(|end| end & !(PAGE - 1))
+        .and_then(|stack_base| stack_base.checked_add(stack_size as u64))
         .and_then(|n| usize::try_from(n).ok())
         .expect("kernel.elf: image plus stack does not fit an allocation");
 
@@ -399,7 +404,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     for section in sections.iter().filter(|section| section.kind == SHT_RELA) {
         let table = file_range(kernel_elf_bytes, section.offset, section.size)
             .expect("kernel.elf: SHT_RELA section is past the end of the file");
-        for rela in RelaTable::new(table).iter() {
+        for rela in RelaTable::new(table, arch::ELF_MACHINE).iter() {
             match rela.kind {
                 RelocKind::Relative => {
                     // Both fields index the image and both come out of the
@@ -520,14 +525,13 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     })
 }
 
-/// Write `plan` into `pt_mem` and return the PML4's physical address.
+/// Write `plan` into `pt_mem` and return its root table's physical address.
 ///
 /// # Safety
 /// `pt_mem` is [`toyos_bootmap::MAX_PAGES`] pages of zeroed memory, 4096-aligned.
 unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
-    const PAGE_PRESENT: u64 = 1 << 0;
-    const PAGE_WRITE: u64 = 1 << 1;
-    const PAGE_SIZE_BIT: u64 = 1 << 7;
+    use arch::encoding::{block, page, table};
+    use toyos_bootmap::Slot;
 
     let mut next_page = 0usize;
     let mut alloc_page = || -> *mut u64 {
@@ -536,26 +540,53 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
         page
     };
 
-    let pml4 = alloc_page();
+    let root = alloc_page();
     let identity_pdpt = alloc_page();
     let high_pdpt = alloc_page();
     let mut directories = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_DIRECTORIES];
     for (slot, gib) in plan.directories().iter().enumerate() {
         let pd = alloc_page();
         directories[slot] = pd;
-        *identity_pdpt.add(*gib as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
-        *high_pdpt.add(*gib as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
+        *identity_pdpt.add(*gib as usize) = table(pd as u64);
+        *high_pdpt.add(*gib as usize) = table(pd as u64);
+    }
+
+    let mut fine = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_PAGES];
+    for (table_at, (directory, index)) in plan.fine_slots().enumerate() {
+        let leaves = alloc_page();
+        fine[table_at] = leaves;
+        *directories[directory].add(index) = table(leaves as u64);
     }
 
     for entry in plan.entries() {
-        *directories[entry.directory].add(entry.index) =
-            entry.phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT | entry.cache.bits();
+        match entry.slot {
+            Slot::Directory { directory, index } => {
+                *directories[directory].add(index) = block(entry.phys, entry.cache)
+            }
+            Slot::Fine { table, index } => *fine[table].add(index) = page(entry.phys, entry.cache),
+        }
     }
 
-    *pml4.add(PML4_IDENTITY) = identity_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
-    *pml4.add(PML4_HIGH_HALF) = high_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
+    *root.add(ROOT_IDENTITY) = table(identity_pdpt as u64);
+    *root.add(ROOT_HIGH_HALF) = table(high_pdpt as u64);
 
-    pml4 as u64
+    root as u64
+}
+
+/// Every range firmware's map says is write-back memory, `(base, length)`:
+/// a descriptor carrying `EFI_MEMORY_WB` and not one of the two I/O types,
+/// which a firmware may give the attribute without meaning memory.
+fn write_back_memory(system_table: &SystemTable<Boot>) -> vec::Vec<(u64, u64)> {
+    let boot_services = system_table.boot_services();
+    let sizes = boot_services.memory_map_size();
+    // Room for the descriptors allocating this buffer itself may add.
+    let mut buffer = vec![0u8; sizes.map_size + 8 * sizes.entry_size];
+    let map = boot_services.memory_map(&mut buffer).expect("the memory map, before the exit");
+    map.entries()
+        .filter(|d| d.att.contains(MemoryAttribute::WRITE_BACK))
+        .filter(|d| d.ty != MemoryType::MMIO && d.ty != MemoryType::MMIO_PORT_SPACE)
+        .map(|d| (d.phys_start, d.page_count * PAGE_SIZE as u64))
+        .collect()
 }
 
 /// Say whether `at .. at + len` is inside the boot map, and refuse the boot
@@ -577,30 +608,23 @@ fn report_reach(what: &str, at: u64, len: u64) {
     );
 }
 
-/// The time-stamp counter, which counts from reset.
+/// The CPU's free-running counter, which counts from reset.
 fn tsc() -> u64 {
-    // SAFETY: RDTSC reads a counter and nothing else; every x86-64 has it.
-    unsafe { core::arch::x86_64::_rdtsc() }
-}
-
-/// `IA32_TSC_ADJUST`, where CPUID says the CPU has it: every write to the TSC
-/// since reset is added to it (Intel SDM Vol. 3B, "Time-Stamp Counter
-/// Adjustment"), so zero is a counter firmware never wrote and the TSC is time
-/// since power-on.
-fn tsc_adjust() -> Option<i64> {
-    let max = core::arch::x86_64::__cpuid(0).eax;
-    // Leaf 7 exists when the maximum leaf reaches it.
-    if max < 7 || core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 1) == 0 {
-        return None;
-    }
-    let (lo, hi): (u32, u32);
-    // SAFETY: the loader runs at CPL 0, and CPUID.07H:EBX[1] says the MSR exists.
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x3bu32, out("eax") lo, out("edx") hi, options(nomem, nostack)) };
-    Some(((u64::from(hi) << 32) | u64::from(lo)) as i64)
+    arch::counter()
 }
 
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, root_image: Option<rootimage::RootImage>, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
+    // Said before it is refused, for `report_reach`'s reason.
+    match arch::cpu_as_entered() {
+        Ok(None) => {}
+        Ok(Some(line)) => println!("{line}"),
+        Err(why) => {
+            println!("{why}");
+            panic!("{why}");
+        }
+    }
+
     // The last of the firmware questions, and asked here for the same reason
     // the GOP's was asked before this: the protocol dies with boot services.
     //
@@ -624,11 +648,16 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     //
     // Said before it is applied: a machine this refuses leaves the refusal in
     // `loader.log`, which is the artifact a machine with no console has.
-    let planned = Plan::new(gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
+    // Firmware's write-back memory, for an architecture whose boot map types
+    // pages by it. Before the exit, while the map can still be asked for; the
+    // attributes a descriptor carries do not change across it.
+    let write_back = write_back_memory(&system_table);
+    let planned =
+        Plan::new(gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)), arch::typing(&write_back));
     match &planned {
         Ok(plan) => match plan.scanout() {
             Some((at, len)) => println!(
-                "Scanout: {at:#x}+{len:#x} mapped uncacheable in 2 MiB pages at identity and at \
+                "Scanout: {at:#x}+{len:#x} mapped as the scanout in 2 MiB pages at identity and at \
                  PHYS_OFFSET, in {} page directories",
                 plan.directories().len()
             ),
@@ -641,7 +670,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // SAFETY: `pt_mem` is the `MAX_PAGES * 4096`-byte, 4096-aligned, zeroed
     // allocation above, and a `Plan` never names more pages than that.
     let pml4_phys = unsafe { build_boot_page_tables(pt_mem, &plan) };
-    println!("Boot map: PML4 {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
+    println!("Boot map: root {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
 
     let kernel_phys = kernel.memory.as_ptr() as u64;
     report_reach("Kernel image", kernel_phys, kernel.memory.len() as u64);
@@ -714,12 +743,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 
     kernel_args.loader_handoff_tsc = tsc();
     println!(
-        "Loader TSC: {entry_tsc} at entry, {} at the handoff; IA32_TSC_ADJUST {}",
+        "Loader TSC: {entry_tsc} at entry, {} at the handoff; {}",
         kernel_args.loader_handoff_tsc,
-        match tsc_adjust() {
-            Some(adjust) => alloc::format!("{adjust}"),
-            None => alloc::string::String::from("not on this CPU"),
-        }
+        arch::counter_origin(),
     );
 
     // Last, and after every line above: a console write, a FAT write and a
@@ -761,29 +787,19 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     kernel_args.memory_map_size =
         memory_map.len() as u64 * mem::size_of::<MemoryMapEntry>() as u64;
 
-    // Switch to new page tables. SAFETY: `pml4_phys` is the table built above,
-    // identity-mapping low memory (so the code and stack this instruction
-    // itself runs from stay mapped across the switch) and high-half-mapping
-    // the same range at `PHYS_OFFSET` for the jump below. The assert before the
-    // exit proved the whole kernel image is inside that range.
-    unsafe { core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack)) };
-
-    let entry_virt = PHYS_OFFSET + kernel_phys + kernel.entry_offset as u64;
-
     mem::forget(memory_map);
     mem::forget(kernel.memory);
     mem::forget(kernel_elf_bytes);
     mem::forget(cmdline);
 
-    // SAFETY: `entry_virt` is `kernel_phys + entry_offset` read through the
-    // high-half mapping just switched to, which the assert above proved
-    // covers the whole kernel image. `kernel.elf`'s entry point is `extern
-    // "sysv64" fn(&KernelArgs) -> !` by the boot protocol `toyos-abi::boot`
-    // and the kernel side of it define between them — this bootloader has no
-    // way to check the callee's signature, only to keep its own side of that
-    // contract.
-    let entry: extern "sysv64" fn(&KernelArgs) -> ! = unsafe { mem::transmute(entry_virt) };
-    entry(&kernel_args);
+    let image = (kernel_phys, kernel_args.kernel_memory_size);
+    // SAFETY: `kernel_args.boot_pml4_addr` is the table built above,
+    // identity-mapping low memory (so the code and stack a switch to it runs
+    // from stay mapped across it) and mapping the same range at `PHYS_OFFSET`;
+    // the assert before the exit proved the whole kernel image is inside that
+    // range, and `image` is that image, relocated, with its entry at
+    // `entry_offset`.
+    unsafe { arch::enter_kernel(image, kernel.entry_offset as u64, &kernel_args) }
 }
 
 /// When this pass armed the page, in Unix seconds, or 0 where firmware would

@@ -436,7 +436,7 @@ pub fn init(devices: &[PciDevice]) {
     let pcm_region = Region {
         phys: crate::DirectMap::from_phys(pcm_view.host_phys()),
         size: crate::mm::PAGE_2M,
-        cache: CachePolicy::DeferToMtrr,
+        cache: CachePolicy::Normal,
         pages: None,
     };
 
@@ -644,7 +644,7 @@ fn reset_stream(stream: Mmio) -> bool {
 /// Arm the completion interrupt, or say why this machine has no HDA audio; a refusal, never a
 /// panic, over a peripheral.
 fn arm_interrupt(pci: &PciDevice) -> bool {
-    let vector = crate::arch::idt::HDA_VECTOR;
+    let vector = crate::arch::trap::HDA_VECTOR;
     if pci.enable_msix(vector).is_ok() || pci.enable_msi(vector) {
         return true;
     }

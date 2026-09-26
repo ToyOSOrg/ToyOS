@@ -1,3 +1,4 @@
+mod arch;
 pub mod framebuffer;
 
 pub use framebuffer::{Color, Framebuffer, Screen, Traffic};
