@@ -7,7 +7,7 @@ use core::mem;
 
 use alloc::vec;
 use alloc::alloc::Layout;
-use toyos_elf::section::{SectionTable, SHT_RELA};
+use toyos_elf::section::SectionTable;
 use toyos_elf::{RelaTable, RelocKind};
 use uefi::{
     prelude::*,
@@ -309,21 +309,6 @@ const WATCHDOG_CODE: u64 = 0x0001_0000;
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
-/// `SHT_REL`, the relocation form whose addend lives in the destination word.
-///
-/// Named here rather than taken from `toyos-elf`, which names only the section
-/// types it consumes and consumes no `SHT_REL`: nothing in this tree emits one,
-/// and an image that carried them would otherwise start with every one of them
-/// silently unapplied.
-const SHT_REL: u32 = 9;
-
-/// `SHT_RELR`, relative relocations packed as a bitmap (`--pack-dyn-relocs=relr`).
-///
-/// Refused for `SHT_REL`'s reason: its relocations are ones the `SHT_RELA` loop
-/// below never sees, and a kernel started with them unapplied runs with every
-/// pointer in its data still the link-time one.
-const SHT_RELR: u32 = 19;
-
 /// `[offset, offset + len)` of the file, or `None` when that is not wholly
 /// inside it.
 ///
@@ -369,18 +354,10 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     println!("Kernel stack size: {}", stack_size);
     // `vaddr_max` is the largest `p_vaddr + p_memsz` over the `PT_LOAD`
     // segments, and the image is laid out at its own vaddrs — so it is what the
-    // kernel's memory has to cover before the stack is added to it. The stack
-    // starts on the next page: where the image ends is the linker's choice, and
-    // both ABIs want the stack pointer 16-byte aligned, which AArch64's
-    // `SCTLR_EL1.SA` enforces on every access through it.
-    const PAGE: u64 = 4096;
-    let mem_size = layout
-        .vaddr_max
-        .checked_add(PAGE - 1)
-        .map(|end| end & !(PAGE - 1))
-        .and_then(|stack_base| stack_base.checked_add(stack_size as u64))
-        .and_then(|n| usize::try_from(n).ok())
+    // kernel's memory has to cover before the stack is added after it.
+    let placed = toyos_elf::StackedImage::place(layout.vaddr_max, stack_size as u64)
         .expect("kernel.elf: image plus stack does not fit an allocation");
+    let mem_size = usize::try_from(placed.size).expect("kernel.elf: image plus stack does not fit an allocation");
 
     println!("Kernel memory size: {}", mem_size);
 
@@ -397,17 +374,11 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
         process_mem[vstart..vstart + src.len()].copy_from_slice(src);
     }
 
-    assert!(
-        !sections.iter().any(|section| section.kind == SHT_REL),
-        "kernel.elf: SHT_REL is not supported"
-    );
-    assert!(
-        !sections.iter().any(|section| section.kind == SHT_RELR),
-        "kernel.elf: SHT_RELR (packed relative relocations) is not supported"
-    );
+    let rela_sections =
+        sections.rela_sections().unwrap_or_else(|form| panic!("kernel.elf: {form} is not supported"));
 
     let mut reloc_count = 0u64;
-    for section in sections.iter().filter(|section| section.kind == SHT_RELA) {
+    for section in rela_sections {
         let table = file_range(kernel_elf_bytes, section.offset, section.size)
             .expect("kernel.elf: SHT_RELA section is past the end of the file");
         for rela in RelaTable::new(table, arch::ELF_MACHINE).iter() {
@@ -458,7 +429,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     LoadedKernel {
         memory: process_mem,
         entry_offset: layout.entry as usize,
-        stack_offset: mem_size - stack_size,
+        stack_offset: placed.stack as usize,
         stack_size,
     }
 }

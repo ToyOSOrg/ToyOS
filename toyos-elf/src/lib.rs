@@ -45,7 +45,7 @@ pub mod tls;
 pub use dynamic::{Dynamic, Table};
 pub use gnu_hash::GnuHash;
 pub use header::{FileHeader, Machine};
-pub use layout::{Layout, Segment, SegmentFlags, SectionTableRef, TlsSegment};
+pub use layout::{Layout, Segment, SegmentFlags, SectionTableRef, StackedImage, TlsSegment};
 pub use rela::{Rela, RelaCounts, RelaTable, RelocError, RelocKind};
 pub use section::{SectionHeader, SectionTable};
 pub use sym::{Sym, SymTab};

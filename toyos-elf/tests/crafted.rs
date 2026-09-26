@@ -15,7 +15,7 @@ mod common;
 
 use common::*;
 use toyos_elf::header::PROGRAM_HEADER_SIZE;
-use toyos_elf::{Error, Layout, Machine, MAX_LOAD_SEGMENTS};
+use toyos_elf::{Error, Layout, Machine, StackedImage, MAX_LOAD_SEGMENTS};
 
 fn refused(bytes: Vec<u8>) -> Error {
     match Layout::parse(&bytes, Machine::X86_64) {
@@ -369,4 +369,25 @@ fn segment_flags_survive_the_parse() {
     assert!(text.readable() && text.executable() && !text.writable());
     let data = layout.segments()[1].flags;
     assert!(data.readable() && data.writable() && !data.executable());
+}
+
+/// The stack after a static image starts on a page whatever the image ends
+/// on: an lld kernel can end at `0x410008`, and a stack from there has every
+/// stack pointer the kernel computes off 16 by 8.
+#[test]
+fn the_stack_after_an_image_is_aligned_wherever_the_image_ends() {
+    const STACK: u64 = 8 * 1024 * 1024;
+    assert_eq!(StackedImage::place(0x41_0008, STACK), Some(StackedImage { size: 0xc1_1000, stack: 0x41_1000 }));
+    for end in [1, 0x40_fc30, 0x41_0000, 0x41_0008, 0x41_0ff8, 0x41_0fff] {
+        let placed = StackedImage::place(end, STACK).expect("fits");
+        assert!(placed.stack >= end && placed.stack - end < 4096, "{end:#x}: {placed:?}");
+        assert_eq!(placed.stack % 16, 0, "{end:#x}: the stack's base");
+        assert_eq!(placed.size % 16, 0, "{end:#x}: the stack's top");
+        assert_eq!(placed.size - placed.stack, STACK);
+    }
+    // No address holds it, rounded or with the stack.
+    assert_eq!(StackedImage::place(u64::MAX - 8, STACK), None);
+    assert_eq!(StackedImage::place(u64::MAX - STACK - 0x10, STACK), None);
+    // A stack of part of a page would leave its top wherever it fell.
+    assert_eq!(StackedImage::place(0x41_0000, STACK + 8), None);
 }
