@@ -285,6 +285,9 @@ const RUST_SKIP: &[&str] = &[
     // Needs a NIC in front of netd; only `tests/netcase` has one.
     // `netd_listener_forgery` runs it there.
     "netd_listener_forgery",
+    // Needs a NIC in front of netd and a host server behind it.
+    // `netd_slow_reader` runs it on `tests/netcase`.
+    "netd_slow_reader",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
     // shared boot it would be twenty seconds of nothing.
@@ -823,6 +826,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
     // no clock in it.
     ("netd_listener_forgery", Sched::Parallel, Tier::Fast),
+    // The netcase boot again: a receiver that stops reading until its pipe
+    // is full still gets every byte of a stream past it. The verdict is the
+    // guest's byte-for-byte comparison; its clocks are liveness guards.
+    ("netd_slow_reader", Sched::Parallel, Tier::Fast),
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
     ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
@@ -9067,6 +9074,79 @@ fn open_terminal(
 /// is that the report is complete and that its halves cannot disagree: every
 /// CPU is present, the deadline classes sum to the parked count, and the
 /// process table knows at least as many threads as the schedulers hold.
+/// `netd_slow_reader`'s host half: one connection from the guest, which names
+/// how many bytes it wants, is sent exactly that many of the guest program's
+/// pattern and then closed. The judgement is the guest's; this side reports
+/// only what it sent and how its sending ended.
+fn netd_slow_reader(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    use std::io::{Read, Write as _};
+
+    /// The guest program's `stream_byte`, the other half of one agreement.
+    fn stream_byte(pos: u64) -> u8 {
+        let group = (pos >> 4) as u32;
+        match pos & 15 {
+            k @ 0..=3 => (group >> (8 * k)) as u8,
+            _ => 0xC3,
+        }
+    }
+
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+    let bins: Vec<(String, Vec<u8>)> =
+        rust_bins.iter().filter(|(name, _)| name == "netd_slow_reader").cloned().collect();
+    if bins.is_empty() {
+        return Err("netd_slow_reader was not built".to_string());
+    }
+    let options = BootOptions { profile: qemu::Profile::Headless, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+        return Err("this test needs a NIC and the profile has none".to_string());
+    }
+
+    // Where slirp's `10.0.2.2` lands on the host.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("bind the host server: {e}"))?;
+    let port = listener.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
+    let server = thread::spawn(move || -> Result<u64, String> {
+        let (mut stream, _) = listener.accept().map_err(|e| format!("accept the guest: {e}"))?;
+        let mut ask = [0u8; 8];
+        stream.read_exact(&mut ask).map_err(|e| format!("read how much the guest wants: {e}"))?;
+        let total = u64::from_le_bytes(ask);
+        let mut chunk = vec![0u8; 65536];
+        let mut sent = 0u64;
+        while sent < total {
+            let n = chunk.len().min((total - sent) as usize);
+            for (i, b) in chunk[..n].iter_mut().enumerate() {
+                *b = stream_byte(sent + i as u64);
+            }
+            stream
+                .write_all(&chunk[..n])
+                .map_err(|e| format!("send at {sent} of {total}: {e}"))?;
+            sent += n as u64;
+        }
+        stream.shutdown(std::net::Shutdown::Write).map_err(|e| format!("close the stream: {e}"))?;
+        Ok(sent)
+    });
+
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")
+        .map_err(|e| format!("netd never came up, so nothing below means anything: {e}"))?;
+    let result = qemu.run_test(&format!("test_rs_netd_slow_reader {port}"), Duration::from_secs(120));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("netd_slow_reader exited {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    // The guest has read to the end, so the server has finished sending.
+    let sent = server.join().map_err(|_| "the host server panicked".to_string())??;
+    let ok = format!("netd_slow_reader: ok bytes={sent}");
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with(&ok)) {
+        return Err(format!("the host sent {sent} bytes and the guest never said {ok:?}:\n{}", result.stdout));
+    }
+    eprintln!("  [netcase] a reader a whole pipe behind got all {sent} bytes, each right");
+    Ok(())
+}
+
 fn blocked_dump() -> Result<(), String> {
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/desktopaudiocase");
     let options = BootOptions {
@@ -14309,6 +14389,7 @@ fn run_machine_test(
             eprintln!("  [netcase] a piped listener survived a forged reader-closed flag");
             Ok(())
         }
+        "netd_slow_reader" => netd_slow_reader(rust_bins),
         "netd_hostile_peer" => {
             // The netcase boot again, and for the same reason: netd's `main`
             // returns on a machine with no NIC, so this is the only config

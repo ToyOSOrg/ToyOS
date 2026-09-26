@@ -1242,26 +1242,49 @@ impl NetDaemon {
     }
 
     /// Bridge data between smoltcp sockets and kernel pipes for piped connections.
-    /// Drains fully in both directions — when the ring is full, data stays in smoltcp's
-    /// buffer and TCP window shrinks (correct backpressure).
+    /// Drains both directions as far as the other side takes — when a pipe is
+    /// full, data stays in smoltcp's buffer and the TCP window shrinks.
     fn bridge_piped(&mut self, socket_set: &mut SocketSet<'_>) {
         let mut closed = Vec::new();
         for i in 0..self.piped_connections.len() {
             let conn = &mut self.piped_connections[i];
             let socket = socket_set.get_mut::<tcp::Socket>(conn.handle);
 
-            // smoltcp rx → pipe write via kernel (ensures reader notification)
-            while socket.can_recv() {
-                if let Some(ref pipe) = conn.rx_write {
-                    let mut buf = [0u8; 4096];
-                    match socket.recv_slice(&mut buf) {
-                        Ok(n) if n > 0 => {
-                            let _ = toyos_abi::syscall::write_nonblock(pipe.as_handle(), &buf[..n]);
+            // smoltcp rx → the client's pipe. **Nothing leaves the socket that
+            // the pipe did not take**: a byte dequeued here has already been
+            // acknowledged to the peer, so one the pipe refused is cut out of
+            // the middle of the client's stream with nothing saying so. The
+            // rest waits in the socket, and the pass after the client reads
+            // moves it.
+            if let Some(ref pipe) = conn.rx_write {
+                let mut refused = None;
+                while socket.can_recv() {
+                    let moved = socket.recv(|queued| {
+                        match toyos_abi::syscall::write_nonblock(pipe.as_handle(), queued) {
+                            Ok(n) => (n, n),
+                            Err(e) => {
+                                refused = Some(e);
+                                (0, 0)
+                            }
                         }
-                        _ => break,
-                    };
-                } else {
-                    break;
+                    });
+                    if !matches!(moved, Ok(n) if n > 0) {
+                        break;
+                    }
+                }
+                match refused {
+                    // Full: the client has not read yet.
+                    None | Some(toyos_abi::syscall::SyscallError::WouldBlock) => {}
+                    // No reader: the probe below closes this end.
+                    Some(toyos_abi::syscall::SyscallError::Gone) => {}
+                    // No page for the ring, and no wait makes one appear: the
+                    // stream cannot be delivered, so it ends by name.
+                    Some(toyos_abi::syscall::SyscallError::ResourceExhausted) => {
+                        say!("netd: no memory for a connection's receive pipe; resetting it");
+                        socket.abort();
+                        conn.close_all();
+                    }
+                    Some(e) => panic!("netd: a receive pipe netd holds refused a write: {e:?}"),
                 }
             }
 

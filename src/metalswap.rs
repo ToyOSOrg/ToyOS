@@ -639,10 +639,9 @@ mod tests {
     }
 
     /// The recorded stream from a swap sshd refused before init ever heard of
-    /// it: an upload's connection died mid-transfer
-    /// (issues/build/a-two-megabyte-ssh-upload-ended-in-a-decryption-error.md),
-    /// and sshd's own line — naming `?`, since it had not read the header —
-    /// is the only word the machine ever says about it.
+    /// it: an upload's connection died mid-transfer, and sshd's own line —
+    /// naming `?`, since it had not read the header — is the only word the
+    /// machine ever says about it.
     #[test]
     fn settled_ends_on_sshds_own_refusal_before_init_ever_heard_it() {
         let lines: Vec<String> = [
