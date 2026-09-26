@@ -513,8 +513,7 @@ mod tests {
     #[test]
     fn a_system_font_ships_as_it_is_and_the_console_font_as_its_raster() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let dir = std::env::temp_dir().join(format!("toyos-fonts-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = toyos_tmpdir::TempDir::new("fonts");
         fs::create_dir_all(dir.join("fonts")).expect("make the asset tree");
         let console = fs::read(root.join("assets/JetBrainsMono-Regular.ttf")).expect("the console font");
         let system = fs::read(root.join("assets/fonts/OpenSans-Regular.ttf")).expect("a system font");
@@ -533,7 +532,6 @@ mod tests {
 
         let shipped: std::collections::BTreeMap<String, Vec<u8>> =
             collect(&[dir.display().to_string()], &BTreeSet::new()).into_iter().collect();
-        fs::remove_dir_all(&dir).ok();
 
         assert_eq!(
             shipped.keys().collect::<Vec<_>>(),

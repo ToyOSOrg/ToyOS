@@ -1,8 +1,9 @@
 //! The ToyOS winit backend's event loop, through winit's own API: every source
 //! of work that does not arrive on a window's connection reaches a loop that
-//! is waiting, and nothing is delivered for a window once it is gone.
+//! is waiting, and a window its application dropped hears its `Destroyed` and
+//! nothing else from the drop on, which every stage checks.
 //!
-//! Five stages, one after another, each ended by what it waits for or failed
+//! Six stages, one after another, each ended by what it waits for or failed
 //! by [`CEILING`], a liveness bound only a lost wake reaches:
 //!
 //! 1. A user event sent from `AboutToWait`, with no window open: the wake it
@@ -12,12 +13,19 @@
 //! 3. [`HELPER_ROUNDS`] windows handed to another thread, which asks each for a
 //!    redraw and then drops it, each just as the loop goes to wait: the redraw
 //!    and the `Destroyed` both have to reach it.
-//! 4. A window created, asked for a redraw and dropped in one handler: its
-//!    `Destroyed` arrives and no `RedrawRequested` follows it.
-//! 5. A window whose close the application ignores: once the compositor has
+//! 4. A window created, asked for a redraw and dropped in one handler, which is
+//!    stage 3's last `Destroyed`: its `Destroyed` arrives, and the iteration
+//!    after it, where a window the loop had kept would get its first
+//!    `Resized`, delivers nothing for it.
+//! 5. A window asked for a redraw and dropped in a `user_event`, which runs
+//!    after the loop's destroy step: no `RedrawRequested` reaches it.
+//! 6. A window whose close the application ignores: once the compositor has
 //!    closed it, the loop does not wake for it while it waits out
 //!    [`IDLE_WINDOW`]. The harness closes it with GUI+Q when told
 //!    `WINIT-LOOP CLOSE-ME`.
+//!
+//! Every window but stage 6's is closed by the application's drop, which the
+//! harness reads off the compositor's close lines.
 
 use std::num::NonZeroU32;
 use std::sync::mpsc;
@@ -38,10 +46,10 @@ const CEILING: Duration = Duration::from_secs(20);
 const HELPER_EVENTS: u32 = 100;
 
 /// Rounds, because a push that lands before the loop has looked at its queues
-/// needs no wake: over this many, one that lands after is certain.
+/// needs no wake.
 const HELPER_ROUNDS: u32 = 20;
 
-/// How long stage 5 watches a loop with nothing to deliver. A measurement
+/// How long stage 6 watches a loop with nothing to deliver. A measurement
 /// window rather than a wait for an event: what is counted is what happens
 /// when nothing does.
 const IDLE_WINDOW: Duration = Duration::from_secs(1);
@@ -55,6 +63,8 @@ const IDLE_WAKES: usize = 2;
 enum Ev {
     Ping,
     Seq(u32),
+    /// Stage 5's cue to drop its window.
+    Drop,
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -63,7 +73,8 @@ enum Stage {
     Ping { sent: bool },
     Helper { next: u32, ack: mpsc::Sender<()> },
     Handed { round: u32, step: Handed },
-    Dropped { id: WindowId, destroyed: bool },
+    Dropped { id: WindowId, destroyed: bool, waits: u32 },
+    UserDrop { window: Option<Arc<Window>>, id: WindowId, destroyed: bool, waits: u32 },
     Close { window: Option<Arc<Window>>, surface: Option<Surface<OwnedDisplayHandle, Arc<Window>>>, idle: Option<(Instant, Vec<String>)> },
 }
 
@@ -84,6 +95,9 @@ struct App {
     /// A job for the helper, sent from `AboutToWait` so it lands as the loop
     /// goes to wait.
     queued: Option<Job>,
+    /// Every window the application has dropped, and whether its `Destroyed`
+    /// has arrived.
+    dropped: Vec<(WindowId, bool)>,
 }
 
 fn fail(what: &str) -> ! {
@@ -99,6 +113,12 @@ impl App {
         Arc::new(event_loop.create_window(attrs).unwrap_or_else(|e| fail(&format!("create: {e}"))))
     }
 
+    /// Drops `window`, which has to be the application's last reference to it.
+    fn drop_window(&mut self, window: Arc<Window>) {
+        self.dropped.push((window.id(), false));
+        drop(Arc::into_inner(window).unwrap_or_else(|| fail("a window dropped while shared")));
+    }
+
     fn hand_round(&mut self, event_loop: &ActiveEventLoop, round: u32) {
         let window = self.create(event_loop, "handed");
         self.stage = Stage::Handed { round, step: Handed::Created(window) };
@@ -108,11 +128,17 @@ impl App {
         let window = self.create(event_loop, "dropped");
         let id = window.id();
         window.request_redraw();
-        drop(window);
-        self.stage = Stage::Dropped { id, destroyed: false };
+        self.drop_window(window);
+        self.stage = Stage::Dropped { id, destroyed: false, waits: 0 };
     }
 
     fn stage_5(&mut self, event_loop: &ActiveEventLoop) {
+        let window = self.create(event_loop, "dropped from a user event");
+        let id = window.id();
+        self.stage = Stage::UserDrop { window: Some(window), id, destroyed: false, waits: 0 };
+    }
+
+    fn stage_6(&mut self, event_loop: &ActiveEventLoop) {
         let window = self.create(event_loop, "ignores its close");
         let surface = Surface::new(&self.context, window.clone())
             .unwrap_or_else(|e| fail(&format!("surface: {e}")));
@@ -139,6 +165,12 @@ impl ApplicationHandler<Ev> for App {
                     format!("round {round}'s window dropped on the helper")
                 }
                 Stage::Dropped { .. } => "the Destroyed of a window dropped in its handler".to_string(),
+                Stage::UserDrop { window: Some(_), .. } => {
+                    "the first redraw of the window a user event drops".to_string()
+                }
+                Stage::UserDrop { window: None, .. } => {
+                    "the Destroyed of a window dropped in a user event".to_string()
+                }
                 Stage::Close { .. } => "the compositor's close".to_string(),
             };
             fail(&format!("LOST: the loop waited out its ceiling for {at}"));
@@ -178,12 +210,25 @@ impl ApplicationHandler<Ev> for App {
                     self.hand_round(event_loop, 0);
                 }
             }
+            (Stage::UserDrop { window, .. }, Ev::Drop) => {
+                let window = window.take().unwrap_or_else(|| fail("stage 5's drop cued twice"));
+                window.request_redraw();
+                self.drop_window(window);
+            }
+            (_, Ev::Drop) => fail("a drop cue out of turn"),
             (_, Ev::Ping) => fail("a ping out of turn"),
             (_, Ev::Seq(i)) => fail(&format!("helper event {i} out of turn")),
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some((_, destroyed)) = self.dropped.iter_mut().find(|(gone, _)| *gone == id) {
+            match (&event, *destroyed) {
+                (WindowEvent::Destroyed, false) => *destroyed = true,
+                (_, false) => fail(&format!("{event:?} for a window its application already dropped")),
+                (_, true) => fail(&format!("{event:?} after Destroyed")),
+            }
+        }
         match &mut self.stage {
             Stage::Handed { round, step } => {
                 let round = *round;
@@ -198,6 +243,9 @@ impl ApplicationHandler<Ev> for App {
                         *step = Handed::DropAsked(id);
                     }
                     (Handed::DropAsked(gone), WindowEvent::Destroyed) if gone == id => {
+                        // Dropped on the helper at a moment the loop does not
+                        // see; from its `Destroyed` on it hears nothing.
+                        self.dropped.push((id, true));
                         if round + 1 < HELPER_ROUNDS {
                             self.hand_round(event_loop, round + 1);
                         } else {
@@ -214,15 +262,23 @@ impl ApplicationHandler<Ev> for App {
                     (prior, _) => *step = prior,
                 }
             }
-            Stage::Dropped { id: gone, destroyed } if *gone == id => match event {
-                WindowEvent::Destroyed => *destroyed = true,
-                WindowEvent::RedrawRequested => fail(if *destroyed {
-                    "RedrawRequested after Destroyed"
-                } else {
-                    "RedrawRequested for a window its application already dropped"
-                }),
-                _ => {}
-            },
+            Stage::Dropped { id: gone, destroyed, .. } if *gone == id => {
+                if let WindowEvent::Destroyed = event {
+                    *destroyed = true;
+                }
+            }
+            Stage::UserDrop { window: Some(window), .. } if window.id() == id => {
+                if let WindowEvent::RedrawRequested = event {
+                    if self.proxy.send_event(Ev::Drop).is_err() {
+                        fail("the loop closed under its own proxy");
+                    }
+                }
+            }
+            Stage::UserDrop { id: gone, destroyed, .. } if *gone == id => {
+                if let WindowEvent::Destroyed = event {
+                    *destroyed = true;
+                }
+            }
             Stage::Close { window: Some(window), surface: Some(surface), idle } if window.id() == id => {
                 match event {
                     WindowEvent::RedrawRequested => {
@@ -257,9 +313,32 @@ impl ApplicationHandler<Ev> for App {
                 }
             }
         }
-        if let Stage::Dropped { destroyed: true, .. } = self.stage {
-            println!("WINIT-LOOP stage 4: a window dropped in its handler got Destroyed and no redraw after it");
-            self.stage_5(event_loop);
+        // A dropped window's stage ends at the second `AboutToWait` after its
+        // `Destroyed`: the iteration between is the one a window the loop still
+        // held would be delivered in, and polling makes it run.
+        match &mut self.stage {
+            Stage::Dropped { destroyed: true, waits, .. } | Stage::UserDrop { destroyed: true, waits, .. }
+                if *waits == 0 =>
+            {
+                *waits = 1;
+                event_loop.set_control_flow(ControlFlow::Poll);
+                return;
+            }
+            Stage::Dropped { destroyed: true, .. } => {
+                println!(
+                    "WINIT-LOOP stage 4: a window dropped in the handler that made it got Destroyed \
+                     and nothing after it"
+                );
+                self.stage_5(event_loop);
+            }
+            Stage::UserDrop { destroyed: true, .. } => {
+                println!(
+                    "WINIT-LOOP stage 5: a window asked for a redraw and dropped in a user event got \
+                     Destroyed and no redraw"
+                );
+                self.stage_6(event_loop);
+            }
+            _ => {}
         }
         if let Some(job) = self.queued.take() {
             self.jobs.send(job).expect("the helper outlives the loop");
@@ -279,7 +358,7 @@ impl ApplicationHandler<Ev> for App {
                     ));
                 }
                 println!(
-                    "WINIT-LOOP stage 5: a closed window the application kept woke the loop {count} \
+                    "WINIT-LOOP stage 6: a closed window the application kept woke the loop {count} \
                      time(s) in {IDLE_WINDOW:?}: {wakes:?}"
                 );
                 surface.take();
@@ -310,6 +389,7 @@ fn main() {
         context,
         stage: Stage::Ping { sent: false },
         queued: None,
+        dropped: Vec::new(),
     };
     event_loop.run_app(&mut app).unwrap_or_else(|e| fail(&format!("run: {e}")));
 }

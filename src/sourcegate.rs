@@ -819,6 +819,19 @@ const NO_COMMAND_ALIAS: &str =
 const NO_BAN_ALIAS: &str = "these trees may not count a reference by hand, and a one-line \
                             rename of a name the bans spell hides every row that names it";
 
+/// The host files that may name `temp_dir()` in code, and how many times.
+/// Everything else takes its scratch from `toyos_tmpdir::TempDir`, which is
+/// gone with its holder on a panic too.
+const TEMP_DIR_ALLOWED: &[(&str, usize)] = &[
+    // The guard itself.
+    ("toyos-tmpdir/src/lib.rs", 1),
+    // A failed golden comparison leaves its dump for the reader to copy over
+    // the golden file: outliving the test is its purpose.
+    ("toyos-keymap/tests/tables.rs", 1),
+    // `issues/build/the-release-path-stages-in-tmpdir-outside-the-scratch-guard.md`.
+    ("src/release.rs", 2),
+];
+
 
 /// `bytes` look like a binary file by git's own heuristic: a NUL in the first
 /// 8000 bytes.
@@ -1750,6 +1763,30 @@ mod tests {
             }
         }
         assert!(complaints.is_empty(), "{NO_COMMAND_ALIAS}:\n{}", complaints.join("\n"));
+    }
+
+    /// **One scratch helper.** A directory made from `temp_dir()` by hand is
+    /// left behind by the panic that fails its test; `toyos_tmpdir::TempDir`
+    /// is not. Each exception is counted exactly, so it goes when its call
+    /// site does.
+    #[test]
+    fn every_host_scratch_is_the_guard() {
+        let root = repo_root();
+        let mut found = std::collections::BTreeMap::new();
+        for path in host_files() {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let n = text.lines().filter(|line| code_only(line).contains("temp_dir()")).count();
+            if n > 0 {
+                found.insert(rel(&root, &path), n);
+            }
+        }
+        let allowed: std::collections::BTreeMap<String, usize> =
+            TEMP_DIR_ALLOWED.iter().map(|(file, n)| (file.to_string(), *n)).collect();
+        assert_eq!(
+            found, allowed,
+            "`temp_dir()` in host code outside the named exceptions: take a \
+             `toyos_tmpdir::TempDir` instead"
+        );
     }
 
     /// **The dependency bar at the other place a host binary arrives.**

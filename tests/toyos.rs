@@ -8772,6 +8772,26 @@ fn closed_counts(log: &str, client: u32) -> Option<(u64, u64)> {
     Some((presents, frames))
 }
 
+/// Each window the compositor opened in `log`, in order, with what had closed
+/// it by the end of `log`. A client's handle is reused once its window is
+/// gone, so a close belongs to the latest open window of its client.
+fn window_lives(log: &str) -> Vec<(u32, Option<String>)> {
+    let mut lives: Vec<(u32, Option<String>)> = Vec::new();
+    for line in log.lines() {
+        if let Some((client, _)) = opened_window(line) {
+            lives.push((client, None));
+        } else if let Some(rest) = line.split("compositor: window closed client=").nth(1) {
+            let (client, rest) = rest.split_once(" by ").unwrap_or_else(|| panic!("close line: {line}"));
+            let client: u32 = client.parse().unwrap_or_else(|_| panic!("close line: {line}"));
+            let by = rest.split(", ").next().unwrap_or_else(|| panic!("close line: {line}"));
+            if let Some(open) = lives.iter_mut().rev().find(|(c, by)| *c == client && by.is_none()) {
+                open.1 = Some(by.to_string());
+            }
+        }
+    }
+    lives
+}
+
 /// `text` in the system font, Open Sans Regular, at `px`, laid out on the
 /// font's own advances and kerning, as coverage from 0 to 1 cropped to its ink:
 /// what the panel has to show wherever that text was drawn, whichever renderer
@@ -9085,10 +9105,12 @@ fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 
 /// The ToyOS winit backend's loop through winit's own API: user events sent
 /// from `AboutToWait` and from another thread, windows redrawn and dropped on
-/// another thread, a window dropped in the handler that made it, and a closed
-/// window its application keeps. `tests/toyos-rust-tests/src/bin/winit_loop.rs`
-/// is the whole of what is asserted; this closes the window it asks to have
-/// closed, and reads its verdict.
+/// another thread, a window dropped in the handler that made it, one dropped in
+/// a user event, and a closed window its application keeps.
+/// `tests/toyos-rust-tests/src/bin/winit_loop.rs` asserts what the app is
+/// delivered; this closes the window it asks to have closed, reads its
+/// verdict, and asks the compositor whether every window the app dropped was
+/// closed by that drop.
 fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_loop")?;
     let log = &mut log;
@@ -9099,9 +9121,29 @@ fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     while live.working(log) {
         let said = &log[launched..];
         if said.contains("WINIT-LOOP-OK") {
+            let lives = window_lives(said);
+            let Some(((_, kept), dropped)) = lives.split_last() else {
+                return Err(format!("the compositor opened no window for the winit loop:\n{said}"));
+            };
+            if kept.as_deref() != Some("GUI+Q") {
+                return Err(format!(
+                    "the window the winit loop kept was closed by {kept:?}, not GUI+Q:\n{said}"
+                ));
+            }
+            // Closed before the kept window was, so by its drop and not by
+            // the app's exit.
+            if let Some(at) = dropped.iter().position(|(_, by)| by.as_deref() != Some("the client itself")) {
+                let (client, by) = &dropped[at];
+                return Err(format!(
+                    "window {at} (client {client}) of the {} the winit loop dropped was not closed \
+                     by its drop before the kept one was, but by {by:?}:\n{said}",
+                    dropped.len()
+                ));
+            }
             for line in said.lines().filter(|l| l.contains("WINIT-LOOP stage")) {
                 eprintln!("  [toolkit] {}", line.trim());
             }
+            eprintln!("  [toolkit] each of the {} dropped windows closed at its drop", dropped.len());
             return Ok(());
         }
         if said.contains("WINIT-LOOP-FAIL") || said.contains("panicked") {
