@@ -135,7 +135,6 @@ pub struct Exception {
 
 const DOOM_LEAVES: &str =
     "issues/filesystem/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md";
-const BCACHEFS_OURS: &str = "issues/filesystem/whether-bcachefs-is-ours-to-license-is-the-owners.md";
 
 const fn pending(
     subject: Subject,
@@ -180,20 +179,6 @@ pub const EXCEPTIONS: &[Exception] = &[
         DOOM_LEAVES,
         "GeneralUser GS's own permissive licence, no standard one, with its author's caveat on \
          where the samples came from (NOTICE); doom alone opens it, and it leaves with doom",
-    ),
-    pending(
-        Subject::Crate("bcachefs"),
-        "",
-        BCACHEFS_OURS,
-        "its manifest declares no licence; it implements upstream bcachefs's on-disk format, and \
-         upstream is GPL-2.0",
-    ),
-    pending(
-        Subject::File("bcachefs/tests/fixtures/crc32c.img.gz"),
-        "NOASSERTION",
-        BCACHEFS_OURS,
-        "a volume upstream's tools wrote, under the bcachefs crate's directory, so it ships by \
-         the same rule as the crate and waits on the same ruling",
     ),
     Exception {
         subject: Subject::Crate("windows-sys"),
@@ -298,7 +283,7 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "bcachefs/tests/fixtures/crc32c.img.gz",
         "7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e",
         "NOTICE",
-        Terms::Spdx("NOASSERTION"),
+        Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
         "assets/DOOM1.WAD",
