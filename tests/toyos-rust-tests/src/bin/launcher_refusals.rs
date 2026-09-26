@@ -111,7 +111,7 @@ fn launcher() -> Connection {
 /// back from.
 fn answer_within(conn: &Connection, budget: Duration) -> Result<u32, &'static str> {
     let deadline = Instant::now() + budget;
-    // The replies are bare headers, so nothing of a payload has to be kept.
+    // Only the reply's type is judged here, so nothing of a payload is kept.
     let mut rx = FrameRx::<0>::new();
     loop {
         match rx.pump(conn) {

@@ -8,13 +8,16 @@
 start = ["logd", "netd", "sshd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
 [programs.sshd]
+service = true
 receives = ["netd", "launcher"]
 
 # The idle slot, which init claims against the ROOT the kernel holds; the
