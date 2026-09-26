@@ -143,6 +143,9 @@ pub fn launch(opts: &Options) {
     qemu.arg("-cpu").arg(arch.cpu(accel));
 
     let [code, vars] = arch.pflash(std::path::Path::new("."));
+    if let Some(boot) = arch.boot() {
+        qemu.arg("-boot").arg(boot);
+    }
     qemu.arg("-machine")
         .arg(machine(arch, shape.iommu))
         .arg("-smp")

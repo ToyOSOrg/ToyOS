@@ -145,6 +145,17 @@ impl Arch {
         ]
     }
 
+    /// QEMU's `-boot` for this machine's firmware, if it needs one. AAVMF
+    /// waits its platform boot timeout, five seconds, for a key before it boots
+    /// unless QEMU hands it a menu wait through fw_cfg, which only `menu=on`
+    /// does; `splash-time=0` makes that wait zero.
+    pub const fn boot(self) -> Option<&'static str> {
+        match self {
+            Arch::X86_64 => None,
+            Arch::Aarch64 => Some("menu=on,splash-time=0"),
+        }
+    }
+
     /// How this host provides a guest of this architecture: its own
     /// hypervisor when the host is the same architecture and will open it,
     /// and emulation otherwise.

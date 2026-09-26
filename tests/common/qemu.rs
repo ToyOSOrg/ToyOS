@@ -4293,6 +4293,9 @@ fn qemu_command(
     let [firmware_code, firmware_vars] = arch.pflash(&repo);
 
     let mut qemu = Command::new(arch.qemu());
+    if let Some(boot) = arch.boot() {
+        qemu.arg("-boot").arg(boot);
+    }
 
     let accel = arch.accel();
     if accel.is_hardware() {
