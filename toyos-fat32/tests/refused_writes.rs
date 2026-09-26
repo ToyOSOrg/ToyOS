@@ -15,10 +15,8 @@
 //! device answers leaves it consistent, with the two FATs agreeing and no
 //! cluster orphaned.
 
-#[allow(dead_code)]
 mod common;
 
-#[allow(dead_code)]
 #[path = "../../toyos-fat32-check/tests/common/mod.rs"]
 mod spec_volume;
 
@@ -35,6 +33,8 @@ enum Outcome {
 }
 
 type Plan = Box<dyn FnMut(u64, u64, usize) -> Option<Outcome>>;
+
+type Call = fn(&mut Fat32<Faulty>, &mut Option<File>, u32) -> Result<(), Error>;
 
 /// The volume in memory, refusing whichever writes the plan names.
 struct Faulty {
@@ -130,7 +130,7 @@ struct Scenario {
     setup: fn(&mut Fat32<Faulty>) -> Option<File>,
     /// The call. `attempt` counts from zero, so a retry can accept what a
     /// committed first attempt already did.
-    call: fn(&mut Fat32<Faulty>, &mut Option<File>, u32) -> Result<(), Error>,
+    call: Call,
     /// What must be true once the call has gone through.
     verify: fn(&mut Fat32<Faulty>, &mut Option<File>),
 }
