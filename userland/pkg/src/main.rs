@@ -260,17 +260,11 @@ fn list() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch(what: &str) -> std::path::PathBuf {
-        let at = std::env::temp_dir().join(format!("pkg-{what}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&at);
-        fs::create_dir_all(&at).expect("a scratch directory");
-        at
-    }
+    use toyos_tmpdir::TempDir;
 
     #[test]
     fn an_install_that_cannot_finish_takes_its_directory_back_down() {
-        let root = scratch("unwind");
+        let root = TempDir::new("pkg-unwind");
         let dir = root.join("gbae");
         let dir_s = dir.to_str().unwrap().to_string();
         let good = format!("{dir_s}/gbae");
@@ -283,14 +277,15 @@ mod tests {
         assert!(why.contains("was taken back down"), "{why}");
         assert!(!dir.exists(), "{dir_s} survived a failed install");
         assert!(root.exists(), "the unwind went past the package's own directory");
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// 33 is the first depth the old bound refused; 256 is far past it.
     #[test]
     fn a_tree_of_any_depth_comes_off_and_leaves_no_directory() {
         for depth in [33usize, 256] {
-            let root = scratch(&format!("depth{depth}"));
+            // The tree is inside the scratch, because its removal is what is judged.
+            let scratch = TempDir::new(&format!("pkg-depth{depth}"));
+            let root = scratch.join("tree");
             let mut at = root.clone();
             for _ in 0..depth {
                 at = at.join("d");

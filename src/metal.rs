@@ -3077,8 +3077,7 @@ mod tests {
     /// own**, and every refusal returns before `write_readback`.
     #[test]
     fn a_readback_directory_holds_nothing_the_last_run_left() {
-        let dir = std::env::temp_dir().join(format!("toyos-readback-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let dir = toyos_tmpdir::TempDir::new("readback");
         for name in READBACK_FILES {
             std::fs::write(dir.join(name), b"the last run").expect("stage a stale file");
         }
@@ -3091,7 +3090,6 @@ mod tests {
         assert!(dir.join("image.img").exists(), "the image the driver flashes was removed");
         // Idempotent: a first run has none of them and that is not a refusal.
         clear_readback(&dir).expect("clearing an empty directory");
-        std::fs::remove_dir_all(&dir).expect("the scratch directory");
     }
 
     #[test]
@@ -3211,8 +3209,7 @@ mod tests {
 
     #[test]
     fn an_image_admits_only_the_table_the_installed_rule_names() {
-        let dir = std::env::temp_dir().join(format!("toyos-metal-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let dir = toyos_tmpdir::TempDir::new("metal");
         let t = target();
         let write = |name: &str, bytes: &[u8]| {
             let at = dir.join(name);
@@ -3262,8 +3259,6 @@ mod tests {
         assert_eq!((ok.esp.index, ok.log.index), (1, 3));
         assert_eq!(ok.bytes % u64::from(LBA), 0);
         assert_ne!(ok.esp.guid, toyos_gpt::Guid::ZERO);
-
-        std::fs::remove_dir_all(&dir).expect("clean up");
     }
     /// The lateness comes off the line the kernel writes, and a boot that wrote
     /// none measures nothing rather than zero.

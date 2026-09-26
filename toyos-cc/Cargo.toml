@@ -17,6 +17,8 @@ toyos-ld = { path = "../toyos-ld" }
 # object does what the source asked for.
 [dev-dependencies]
 object = { version = "0.38", default-features = false, features = ["read", "elf", "std"] }
+# Test scratch that is gone on every way out; `--ci host` reds on any left behind.
+toyos-tmpdir = { path = "../toyos-tmpdir" }
 
 [lints.rust]
 warnings = "deny"

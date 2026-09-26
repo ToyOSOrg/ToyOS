@@ -115,14 +115,13 @@ pub fn link_toyos(obj: &[u8], extra_objs: &[Vec<u8>], name: &str) -> Vec<u8> {
     let libc_path = libc_archive_toyos();
     let lib_dir = libc_path.parent().unwrap().to_path_buf();
 
-    let pid = std::process::id();
-    let obj_path = env::temp_dir().join(format!("toyos-test-{name}-{pid}.o"));
+    let obj_path = super::lane::dir().join(format!("{name}.o"));
     fs::write(&obj_path, obj).unwrap();
 
     let mut inputs: Vec<PathBuf> = vec![obj_path.clone()];
     let mut extra_paths = Vec::new();
     for (i, extra) in extra_objs.iter().enumerate() {
-        let p = env::temp_dir().join(format!("toyos-test-{name}-{pid}-extra{i}.o"));
+        let p = super::lane::dir().join(format!("{name}-extra{i}.o"));
         fs::write(&p, extra).unwrap();
         inputs.push(p.clone());
         extra_paths.push(p);
