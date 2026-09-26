@@ -66,6 +66,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::licence::COMMITTED_FILES;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -815,196 +817,6 @@ const NO_COMMAND_ALIAS: &str =
 const NO_BAN_ALIAS: &str = "these trees may not count a reference by hand, and a one-line \
                             rename of a name the bans spell hides every row that names it";
 
-
-/// Every committed file whose terms somebody had to establish, with the digest
-/// of what is committed and where the terms are recorded.
-///
-/// A third column of `NOTICE` means that file carries this same digest, so the
-/// obligation and the bytes cannot drift apart; anything else names the file
-/// that carries the attribution, or says why it is ours.
-///
-/// **Two populations, and each is a spelling too.** Everything `git` tracks
-/// that carries a NUL in its first 8000 bytes, which is git's own heuristic for
-/// a file nobody can read in review; and everything under `assets/`, text or
-/// not, because that directory is where third-party material arrives. A
-/// third-party *text* file anywhere else — a ninth Phosphor SVG one directory
-/// over — is reached by neither, and the corpus by count alone and no digest;
-/// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
-/// what is left of that gap.
-const COMMITTED_FILES: &[(&str, &str, &str)] = &[
-    // The ACPI tables QEMU 11.1.0 published to a `Profile::Headless` guest,
-    // read out of guest physical memory over the monitor. Firmware output, not
-    // third-party source: `toyos-acpi/tests/fixtures.rs` decodes them against
-    // what that boot's kernel logged.
-    (
-        "toyos-acpi/fixtures/qemu-11.1.0/apic.bin",
-        "441794f0b4bd74feb6f4fc1adf82048023a612ba676dc308c8173e449c0ccdbb",
-        "ours: QEMU's own MADT, captured by the commit that added toyos-acpi",
-    ),
-    (
-        "toyos-acpi/fixtures/qemu-11.1.0/dmar.bin",
-        "30df13af55b4b10bb3c2644d26480aa7ee302deaaf141a7a1ff2a3e053030290",
-        "ours: QEMU's own DMAR, captured by the commit that added toyos-acpi",
-    ),
-    (
-        "toyos-acpi/fixtures/qemu-11.1.0/facp.bin",
-        "410716dfb169eaba296ed3c336028843b3cf9fce6ca7c179bb242199cfec9d1a",
-        "ours: QEMU's own FADT, captured by the commit that added toyos-acpi",
-    ),
-    (
-        "toyos-acpi/fixtures/qemu-11.1.0/hpet.bin",
-        "8a486edc412b6e5f1b906ebf3fcfd6a647c8987d8ec437e4cbb808f34d7e2775",
-        "ours: QEMU's own HPET table, captured by the commit that added toyos-acpi",
-    ),
-    (
-        "toyos-acpi/fixtures/qemu-11.1.0/mcfg.bin",
-        "5274632ea7572e49d97249c05ada4b2f597ad0603ba801538ddef4bd91add994",
-        "ours: QEMU's own MCFG, captured by the commit that added toyos-acpi",
-    ),
-    (
-        "toyos-acpi/fixtures/qemu-11.1.0/rsdp.bin",
-        "8e3493811dfa7d164fc2076846908139df2f962eea2a5b2e45405949cbd82bf9",
-        "ours: QEMU's own RSDP, captured by the commit that added toyos-acpi",
-    ),
-    (
-        "toyos-acpi/fixtures/qemu-11.1.0/waet.bin",
-        "21cf099f063f6422353ea0c9100bbe47a97d7be87449c12f201a8a3bb49b7f4e",
-        "ours: QEMU's own WAET, captured by the commit that added toyos-acpi",
-    ),
-    (
-        "toyos-acpi/fixtures/qemu-11.1.0/xsdt.bin",
-        "701b192931e243a094a83f59f9b82d28204f1b3a0d11ac4d813e7769966427df",
-        "ours: QEMU's own XSDT, captured by the commit that added toyos-acpi",
-    ),
-    (
-        "toyos-acpi/fixtures/ovmf-pure-efi/root-bridge-0.bin",
-        "eb00e68be746a09ac7f0ce1ca492ce8c858e3af1152112b49ffb4708883acbfb",
-        "ours: OVMF's answer on a q35 guest, read off that boot's own loader log",
-    ),
-    (
-        "toyos-acpi/fixtures/thinkpad-t14/root-bridge-0.bin",
-        "a734078ed9ca3971ce804fd9ecc97b7794f816058f9ae17e47e0d2bcb63af0f3",
-        "ours: the T14's answer, read off that boot's own loader log on the stick",
-    ),
-    // A bcachefs volume upstream's own tools wrote, gzipped. The bytes inside
-    // it are this repository's test material; `NOTICE` carries the raw digest,
-    // the commands, and the fsck that called it clean.
-    (
-        "bcachefs/tests/fixtures/crc32c.img.gz",
-        "7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e",
-        "NOTICE",
-    ),
-    (
-        "assets/DOOM1.WAD",
-        "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771",
-        "NOTICE",
-    ),
-    (
-        "assets/JetBrainsMono-Regular.ttf",
-        "e6fd0d7e91550b3ed2b735d4312474362c4716edc4fc0577a0f61ed782d5aed1",
-        "NOTICE",
-    ),
-    (
-        "assets/icons/arrow-down-right-bold.svg",
-        "8e107bfe4c746c762c97a7dbb6472db4669947ccdb5498fa843448ce8f6b69f4",
-        "NOTICE",
-    ),
-    (
-        "assets/icons/crosshair-simple-bold.svg",
-        "d1c42a390a49ef683b42e7aa2f45da0cf7f0ebdecf6a4977b2c2e2f2226fd594",
-        "NOTICE",
-    ),
-    (
-        "assets/icons/cursor-bold.svg",
-        "cc39efe6482c577e6a3ccedf6efcad26769a9eb0bc2868fb18f9a22de43bf172",
-        "NOTICE",
-    ),
-    (
-        "assets/icons/file-bold.svg",
-        "b74d67f0af33fc62e83fbb2c7c8189f37713f482f06685088d46f8592f0e660f",
-        "NOTICE",
-    ),
-    (
-        "assets/icons/folder-bold.svg",
-        "3f564dd4a0d27706ff9cb2d9738cef9ac1009b70f82d1da6d3bac119e41949a0",
-        "NOTICE",
-    ),
-    (
-        "assets/icons/minus-bold.svg",
-        "ec912ee836d44c0e94e2493e7efbf9c4b93ee9c0dd9193d19cf86448b7e31dcd",
-        "NOTICE",
-    ),
-    (
-        "assets/icons/square-bold.svg",
-        "d8284370bac0b7ccb3760fc1cd214f36f716e2724e4abd63eb2696bc345bdc45",
-        "NOTICE",
-    ),
-    (
-        "assets/icons/x-bold.svg",
-        "394ad30f37b493b58cc7c26e816d7ec0bf7acc4a583fa39c9aed438c19b5fc57",
-        "NOTICE",
-    ),
-    (
-        "assets/hello.rs",
-        "f30395cdbe2fff2c6ff6fe6dd270ded78a6b236ecfb598b9476cb71dc6cea214",
-        "ours: the smallest guest binary's source, built by tests/common/compile.rs",
-    ),
-    (
-        "assets/soundfont.sf2",
-        "89a13a5c907b5cc83c15679e07e6dcb06fd72102937e092dc4a582f1aa5905c3",
-        "NOTICE",
-    ),
-    (
-        "assets/wallpaper.jpg",
-        "b6f0c89bf966cfb458333b280614f0c7723615e42e340b9d43a760a64fe05976",
-        "ours: `cargo run -- --regen-wallpaper` writes it from src/wallpaper.rs",
-    ),
-    (
-        "doom.jpg",
-        "ae22f71dc732580bd4f789937c9fe564969029413fc2092f27bdae8d1ceaf8e3",
-        "ours: a screenshot of this system running, in README.md",
-    ),
-    (
-        "first-boot.jpg",
-        "41a65f4bf1f752bcc9da717e3c8f7f776bfbc214b2354b11a3c1e0278a9be22e",
-        "ours: the T14's first boot photographed, in README.md",
-    ),
-    (
-        "kernel/src/drivers/panic_console/font8x16.bin",
-        "e1bea9791e07a0e2509196c6cb4563d44cafca1f19b0ef660319b0fa53546a3e",
-        "NOTICE",
-    ),
-    (
-        "ovmf/DEBUGX64_OVMF.fd",
-        "800ff5af1220d1232d4da7173ccddbb74a9217600bd8935903d9d534801778b4",
-        "NOTICE",
-    ),
-    (
-        "ovmf/OVMF_CODE-pure-efi.fd",
-        "9de33971d47958f42af86584b502f83256120b2482e4f7ed14db32fd68e92922",
-        "NOTICE",
-    ),
-    (
-        "ovmf/OVMF_VARS-pure-efi.fd",
-        "c653de93db67e4f2213a35598efb379a13ef4a12c241e003699d4d7afd193635",
-        "NOTICE",
-    ),
-    (
-        "tests/fixtures/gbae-v0.2.0-toyos-x86_64.tar.gz",
-        "99fcd8a7263b5c25cd90cead1baaa7200ef272100fc2226e008a4e8205ba2916",
-        "NOTICE",
-    ),
-    (
-        "toyos-elf/tests/fixtures/toyos-ld-headers.bin",
-        "6243d543a15941133514c1a8a24c79d118060caeae7e985870a67d9fc3021354",
-        "ours: the first 4096 bytes of a toyos-ld output (toyos-elf/tests/real.rs)",
-    ),
-    (
-        "toyos-symbols/tests/fixtures/input-test.bin",
-        "6a08f75ee01bdbd1e77c9b3affd6185e981d86995da432c90ed107676f08eb83",
-        "ours: a ToyOS binary this build produced (toyos-symbols/tests/real.rs)",
-    ),
-];
 
 /// `bytes` look like a binary file by git's own heuristic: a NUL in the first
 /// 8000 bytes.
@@ -2173,18 +1985,18 @@ mod tests {
         let notice = std::fs::read_to_string(root.join("NOTICE")).expect("NOTICE");
         let mut complaints = Vec::new();
         for (name, sha) in &found {
-            match COMMITTED_FILES.iter().find(|(f, _, _)| f == name) {
+            match COMMITTED_FILES.iter().find(|(f, _, _, _)| f == name) {
                 None => complaints
                     .push(format!("{name} is committed and nothing declares it")),
-                Some((_, want, _)) if want != sha => {
+                Some((_, want, _, _)) if want != sha => {
                     complaints.push(format!("{name} is sha256 {sha} where it is declared {want}"))
                 }
-                Some((_, _, "NOTICE")) if !notice.contains(sha.as_str()) => complaints
+                Some((_, _, "NOTICE", _)) if !notice.contains(sha.as_str()) => complaints
                     .push(format!("{name} is sha256 {sha}, which NOTICE does not carry")),
                 Some(_) => {}
             }
         }
-        for (name, _, where_from) in COMMITTED_FILES {
+        for (name, _, where_from, _) in COMMITTED_FILES {
             if !found.iter().any(|(f, _)| f == name) {
                 complaints.push(format!(
                     "{name} is declared here ({where_from}) and is no longer committed"
