@@ -295,6 +295,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockd"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-blockhold",
+ "toyos-blockring",
+ "toyos-gpt",
+]
+
+[[package]]
 name = "blowfish"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4022,14 +4033,25 @@ dependencies = [
 
 [[package]]
 name = "toyos"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "toyos-abi",
 ]
 
 [[package]]
 name = "toyos-abi"
-version = "0.12.0"
+version = "0.13.0"
+
+[[package]]
+name = "toyos-blockhold"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blockring"
+version = "0.1.0"
+dependencies = [
+ "toyos-blockhold",
+]
 
 [[package]]
 name = "toyos-desktop"
@@ -4045,6 +4067,10 @@ version = "0.1.0"
 [[package]]
 name = "toyos-font"
 version = "0.2.0"
+
+[[package]]
+name = "toyos-gpt"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-hda"
@@ -4109,7 +4135,7 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-window"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "toyos",
  "toyos-abi",
