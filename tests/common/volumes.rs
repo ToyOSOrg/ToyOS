@@ -2831,7 +2831,8 @@ pub fn log_partition_identity(
 ///    the recovery ladder meet a device that answers nothing on EP0 — a truly
 ///    hung device, which QEMU cannot otherwise be. The port reset may not say
 ///    it took, the disk must go offline, and the boot's log ends on the console
-///    — while the machine itself stays up and clean.
+///    — while the machine itself stays up and clean, its userland paged from
+///    the ROOT the loader put in memory and never from the stick that broke.
 pub fn log_flush_retry(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
