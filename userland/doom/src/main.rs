@@ -26,17 +26,17 @@ const SRC_W: usize = 640;
 const SRC_H: usize = 400;
 
 struct DoomApp {
-    window: Option<Arc<dyn Window>>,
-    surface: Option<Surface<winit::event_loop::OwnedDisplayHandle, Arc<dyn Window>>>,
+    window: Option<Arc<Window>>,
+    surface: Option<Surface<winit::event_loop::OwnedDisplayHandle, Arc<Window>>>,
     context: Option<softbuffer::Context<winit::event_loop::OwnedDisplayHandle>>,
 }
 
 impl ApplicationHandler for DoomApp {
-    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = WindowAttributes::default()
             .with_title("DOOM")
-            .with_surface_size(winit::dpi::LogicalSize::new(960, 600));
-        let window: Arc<dyn Window> = event_loop.create_window(attrs).expect("failed to create window").into();
+            .with_inner_size(winit::dpi::LogicalSize::new(960, 600));
+        let window = Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
 
         let display = event_loop.owned_display_handle();
         let context = softbuffer::Context::new(display).expect("failed to create softbuffer context");
@@ -60,7 +60,7 @@ impl ApplicationHandler for DoomApp {
 
     fn window_event(
         &mut self,
-        _event_loop: &dyn ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -76,7 +76,7 @@ impl ApplicationHandler for DoomApp {
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             unsafe {
                 doomgeneric_Tick();
@@ -99,7 +99,7 @@ impl DoomApp {
         };
 
         let window = self.window.as_ref().unwrap();
-        let size = window.surface_size();
+        let size = window.inner_size();
         let dst_w = size.width as usize;
         let dst_h = size.height as usize;
         if dst_w == 0 || dst_h == 0 {
@@ -213,10 +213,10 @@ fn main() {
     }
 
     let event_loop = EventLoop::new().expect("failed to create event loop");
-    let app = DoomApp {
+    let mut app = DoomApp {
         window: None,
         surface: None,
         context: None,
     };
-    event_loop.run_app(app).expect("event loop error");
+    event_loop.run_app(&mut app).expect("event loop error");
 }

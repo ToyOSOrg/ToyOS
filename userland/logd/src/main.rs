@@ -106,6 +106,7 @@ use toyos::log::{LogTail, Record};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::syscap::SysCap;
+use toyos::wake::{self, Bell, Waker};
 use toyos::Pipe;
 use toyos_abi::syscall::SyscallError;
 use toyos_logstream::{Ended, Lines, ProgramLine, Tag, CARRIER, LOGD, MAX_TAG, ORIGINS, REGISTER, SERVICE};
@@ -160,7 +161,7 @@ struct Own {
     mine: Mutex<Vec<(u64, String)>>,
     theirs: Mutex<Theirs>,
     /// Rung after a push onto `theirs`, so a parked main loop wakes for it.
-    bell: OnceLock<Pipe>,
+    bell: OnceLock<Waker>,
 }
 
 static OWN: Own = Own {
@@ -209,25 +210,13 @@ fn said(line: String) {
     if !OWN.theirs.lock().expect("logd: its own lines are poisoned").push(at_ns, line) {
         return;
     }
-    let bell = OWN.bell.get().expect("logd: a thread other than the main loop exists only after the bell");
-    match bell.write_nonblock(&[1]) {
-        // A full bell is a main loop with a wake already owed.
-        Ok(_) | Err(SyscallError::WouldBlock) => {}
-        Err(e) => panic!("logd: its own bell refused a byte: {e:?}"),
-    }
+    OWN.bell.get().expect("logd: a thread other than the main loop exists only after the bell").wake();
 }
 
 /// Every line of this program's own said since the last round, into `round`:
 /// the bell emptied first, so a push after this look rings it again.
-fn own_lines(bell: &Pipe, boot_local: Option<u64>, round: &mut Round) {
-    let mut rung = [0u8; 4096];
-    loop {
-        match bell.read_nonblock(&mut rung) {
-            Ok(1..) => {}
-            Err(SyscallError::WouldBlock) => break,
-            other => panic!("logd: its own bell answered {other:?}"),
-        }
-    }
+fn own_lines(bell: &Bell, boot_local: Option<u64>, round: &mut Round) {
+    bell.take();
     let mut lines = std::mem::take(&mut *OWN.mine.lock().expect("logd: its own lines are poisoned"));
     let (queued, unsaid) = OWN.theirs.lock().expect("logd: its own lines are poisoned").take();
     lines.extend(queued);
@@ -330,7 +319,7 @@ fn main() {
     if OWN.main.set(std::thread::current().id()).is_err() {
         unreachable!("logd's main loop starts once");
     }
-    let (bell, ring) = toyos::pipe_pair().expect("logd: no pipe for its own threads' bell");
+    let (ring, bell) = wake::pair().expect("logd: no pipe for its own threads' bell");
     if OWN.bell.set(ring).is_err() {
         unreachable!("logd's bell is made once");
     }

@@ -1,6 +1,10 @@
 pub mod framebuffer;
+pub mod wait;
 
 pub use framebuffer::{Color, Framebuffer, Screen, Traffic};
+pub use wait::{Waiter, Waker, Woke};
+/// What [`Window::handle`] answers with, and what a [`Waiter`] waits on.
+pub use toyos_abi::RawHandle;
 
 use toyos::ipc;
 use toyos::AsHandle;

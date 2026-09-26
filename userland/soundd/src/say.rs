@@ -30,8 +30,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::io::{ErrorKind, Write as _};
 use std::sync::OnceLock;
 
-use toyos_abi::syscall::{self, SyscallError};
-use toyos_abi::RawHandle;
+use toyos::wake::{self, Bell, Waker};
 
 use crate::control::MAX_CONTROL_CLIENTS;
 use crate::ring::Spsc;
@@ -61,8 +60,8 @@ static DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Whether a voice is between taking a ticket and landing its line: a line
 /// another voice pushed meanwhile may carry a later ticket than this one.
 static BUSY: [AtomicBool; VOICES] = [const { AtomicBool::new(false) }; VOICES];
-/// The write end of the pipe the drain parks on: one byte per line said.
-static WAKE: OnceLock<RawHandle> = OnceLock::new();
+/// Rings the bell the drain parks on, once per line said.
+static WAKE: OnceLock<Waker> = OnceLock::new();
 
 thread_local! {
     static SPEAKER: Cell<Option<Voice>> = const { Cell::new(None) };
@@ -71,13 +70,13 @@ thread_local! {
 /// Start the one writer, and make the calling thread `voice`. First in `main`,
 /// so every line soundd says has somewhere to go.
 pub(crate) fn start(voice: Voice) {
-    let wake = syscall::pipe().expect("soundd: no pipe to wake its line writer");
-    if WAKE.set(wake.write).is_err() {
+    let (waker, bell) = wake::pair().expect("soundd: no pipe to wake its line writer");
+    if WAKE.set(waker).is_err() {
         unreachable!("soundd's line writer is started once");
     }
     std::thread::Builder::new()
         .name("soundd-say".into())
-        .spawn(move || drain(wake.read))
+        .spawn(move || drain(bell))
         .expect("soundd: failed to spawn its line writer");
     speak_as(voice);
 }
@@ -104,12 +103,7 @@ pub(crate) fn said(line: String) {
         DROPPED.fetch_add(1, Ordering::Relaxed);
     }
     BUSY[voice as usize].store(false, Ordering::SeqCst);
-    let wake = *WAKE.get().expect("a voice is given out only after the writer starts");
-    match syscall::write_nonblock(wake, &[1]) {
-        // A full wake pipe is a drain with a wake already owed.
-        Ok(_) | Err(SyscallError::WouldBlock) => {}
-        Err(e) => panic!("soundd: its line writer's wake pipe refused a byte: {e:?}"),
-    }
+    WAKE.get().expect("a voice is given out only after the writer starts").wake();
 }
 
 /// The one writer: every line waiting, in the order it was said, then the count
@@ -118,9 +112,8 @@ pub(crate) fn said(line: String) {
 ///
 /// The count is read after every batch is gathered, so a line dropped while
 /// this thread was parked on the pipe is said in the batch after that write.
-fn drain(wake: RawHandle) -> ! {
+fn drain(bell: Bell) -> ! {
     let mut heads: [Option<Line>; VOICES] = [const { None }; VOICES];
-    let mut woken = [0u8; 512];
     let mut batch = Vec::new();
     loop {
         // At most what the rings hold at once, so a voice that never stops
@@ -180,10 +173,7 @@ fn drain(wake: RawHandle) -> ! {
         // voice writes its wake byte after its push and after it is no longer
         // busy, so this read returns for either.
         if emptied || behind {
-            match syscall::read(wake, &mut woken) {
-                Ok(1..) => {}
-                other => panic!("soundd: its line writer's wake pipe answered {other:?}"),
-            }
+            bell.wait();
         }
     }
 }

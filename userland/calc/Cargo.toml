@@ -13,7 +13,7 @@ doctest = false
 
 [dependencies]
 toyos-font = { path = "../toyos-font" }
-winit = { version = "0.31.0-beta.2", default-features = false }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 softbuffer = { version = "0.4", default-features = false }
 
 [build-dependencies]
