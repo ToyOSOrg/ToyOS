@@ -204,7 +204,10 @@ fn end_the_line(wire: &SleepGuard<'_, ()>) {
     }
 }
 
-/// Lines in [`QUEUE`], readable without its lock for `klogd`'s park test.
+/// Lines in [`QUEUE`], readable without its lock for `klogd`'s park test and a
+/// holder's poll. Moved only under the queue's lock, with the length it
+/// mirrors: moved after it, a drain could take a line before the count of it
+/// arrived and wrap the count below zero, which reads as a queue full for good.
 static QUEUED: AtomicU64 = AtomicU64::new(0);
 
 /// Lines refused a full [`QUEUE`] since `klogd` last said so.
@@ -225,8 +228,8 @@ pub fn queue(line: &[u8], continues: bool) -> bool {
         queue.lens[at] = line.len() as u16;
         queue.continues[at] = continues;
         queue.len += 1;
+        QUEUED.fetch_add(1, Ordering::SeqCst);
     }
-    QUEUED.fetch_add(1, Ordering::SeqCst);
     // The same wake a committed record takes: the store above precedes the
     // fence `signal_after_commit` runs, which `klogd`'s re-scan pairs with.
     if shard::signal_after_commit(shard::log_waiter()) {
@@ -271,9 +274,9 @@ fn drain_queue(wire: &SleepGuard<'_, ()>, budget: usize) -> bool {
             line[..len].copy_from_slice(&queue.lines[at][..len]);
             queue.head = (at + 1) % QUEUED_LINES;
             queue.len -= 1;
+            QUEUED.fetch_sub(1, Ordering::SeqCst);
             (len, queue.continues[at])
         };
-        QUEUED.fetch_sub(1, Ordering::SeqCst);
         freed = true;
         let end = if continues || line[..len].ends_with(b"\n") {
             len
@@ -295,7 +298,6 @@ fn discard_queue() -> bool {
     let mut queue = QUEUE.lock();
     let dropped = queue.len;
     queue.len = 0;
-    drop(queue);
     QUEUED.fetch_sub(dropped as u64, Ordering::SeqCst);
     dropped > 0
 }
