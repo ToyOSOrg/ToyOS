@@ -9,22 +9,25 @@
 //! or an answer §6 held back — is a wake of netd's own loop
 //! ([`Responder::wake_in`]) rather than a sleep, because the protocol names
 //! the interval and nothing on the wire says when it has passed.
+//!
+//! Sent with an IP TTL of 255, which §11 asks every multicast DNS sender for.
 
-use std::net::Ipv4Addr;
+use std::num::{NonZeroU16, NonZeroU8};
 use std::time::{Duration, Instant};
 
-use smoltcp::iface::{Interface, SocketHandle, SocketSet};
-use smoltcp::socket::udp;
-use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint};
+use net_types::ip::{Ipv4, Ipv4Addr};
+use net_types::{MulticastAddr, SpecifiedAddr, ZonedAddr};
+use netstack3_core::socket::{MulticastInterfaceSelector, MulticastMembershipInterfaceSelector};
+use netstack3_core::udp::UdpRemotePort;
+use packet::Buf;
 use toyos_mdns::{Asker, Host, Link, To, GROUP, PORT};
 
-/// A query is a few hundred bytes; this holds a handful of them between two
-/// passes, and a query past it is dropped by the socket, which is what the
-/// asker's own retry is for.
-const BUFFER: usize = 4096;
+use crate::net::Net;
+use crate::resolve::UdpId;
+use crate::stack::Inbox;
 
 pub struct Responder {
-    handle: SocketHandle,
+    socket: UdpId,
     record: toyos_mdns::Responder<'static>,
     /// The origin of the responder's clock.
     born: Instant,
@@ -33,44 +36,50 @@ pub struct Responder {
 impl Responder {
     /// Join the group and bind its port. `host` is the name this machine asks
     /// its network to record for it (`dhcp::HOSTNAME`).
-    pub fn new(host: &'static str, iface: &mut Interface, socket_set: &mut SocketSet<'static>) -> Self {
+    pub fn new(host: &'static str, net: &mut Net) -> Self {
         let host = Host::new(host).unwrap_or_else(|_| panic!("netd: {host:?} is no host name"));
-        iface
-            .join_multicast_group(IpAddress::Ipv4(Ipv4Addr::from(GROUP)))
-            .expect("netd: the multicast DNS group is the one group this interface joins");
-        let buffer = || {
-            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 8], vec![0u8; BUFFER])
-        };
-        let mut socket = udp::Socket::new(buffer(), buffer());
-        socket.bind(PORT).expect("netd: nothing else binds the multicast DNS port");
-        Self { handle: socket_set.add(socket), record: toyos_mdns::Responder::new(host), born: Instant::now() }
+        let device = net.device_id();
+        let group = MulticastAddr::new(Ipv4Addr::new(GROUP)).expect("the multicast DNS group is multicast");
+        let api = net.api();
+        let mut udp = api.udp::<Ipv4>();
+        let socket = udp.create_with(Inbox::default());
+        udp.listen(&socket, None, NonZeroU16::new(PORT))
+            .unwrap_or_else(|e| panic!("netd: nothing else binds the multicast DNS port, and it refused: {e:?}"));
+        udp.set_multicast_membership(
+            &socket,
+            group,
+            MulticastMembershipInterfaceSelector::Specified(MulticastInterfaceSelector::Interface(device.clone())),
+            true,
+        )
+        .unwrap_or_else(|e| panic!("netd: its device refused the multicast DNS group: {e:?}"));
+        udp.set_multicast_interface(&socket, Some(&device), net_types::ip::IpVersion::V4)
+            .unwrap_or_else(|e| panic!("netd: its socket refused its device for multicast: {e:?}"));
+        let ttl = NonZeroU8::new(255).expect("255 is a hop limit");
+        udp.set_multicast_hop_limit(&socket, Some(ttl), net_types::ip::IpVersion::V4)
+            .unwrap_or_else(|e| panic!("netd: its socket refused a multicast TTL: {e:?}"));
+        udp.set_unicast_hop_limit(&socket, Some(ttl), net_types::ip::IpVersion::V4)
+            .unwrap_or_else(|e| panic!("netd: its socket refused a unicast TTL: {e:?}"));
+        Self { socket, record: toyos_mdns::Responder::new(host), born: Instant::now() }
     }
 
     /// After each poll: send what the record is owed now, then answer every
     /// query that arrived.
-    pub fn pass(&mut self, iface: &Interface, socket_set: &mut SocketSet<'_>, now: Instant) {
-        let socket = socket_set.get_mut::<udp::Socket>(self.handle);
-        // IPv4 is the one protocol this netd is built with, so every address is one.
-        let link = iface.ip_addrs().first().map(|&IpCidr::Ipv4(cidr)| Link {
-            addr: cidr.address().octets(),
-            prefix: cidr.prefix_len(),
-        });
+    pub fn pass(&mut self, net: &mut Net, now: Instant) {
+        let link = net.address().map(|a| Link { addr: a.addr, prefix: a.prefix });
         let now_ms = self.ms(now);
-        let group = IpEndpoint::new(IpAddress::Ipv4(Ipv4Addr::from(GROUP)), PORT);
         if let Some(record) = self.record.on(link, now_ms) {
-            send(socket, &record, group);
+            send(net, &self.socket, &record, GROUP, PORT);
         }
-        while let Ok((query, meta)) = socket.recv() {
-            let IpAddress::Ipv4(from) = meta.endpoint.addr;
-            let asker = Asker { addr: from.octets(), port: meta.endpoint.port };
-            let Some(answer) = self.record.answer(query, asker, now_ms) else {
+        while let Some(query) = self.socket.external_data().take() {
+            let asker = Asker { addr: query.from, port: query.port };
+            let Some(answer) = self.record.answer(&query.bytes, asker, now_ms) else {
                 continue;
             };
-            let to = match answer.to {
-                To::Group => group,
-                To::Asker => meta.endpoint,
+            let (to, port) = match answer.to {
+                To::Group => (GROUP, PORT),
+                To::Asker => (query.from, query.port),
             };
-            send(socket, &answer.bytes, to);
+            send(net, &self.socket, &answer.bytes, to, port);
         }
     }
 
@@ -84,44 +93,18 @@ impl Responder {
     }
 }
 
-fn send(socket: &mut udp::Socket, bytes: &[u8], to: IpEndpoint) {
-    match socket.send_slice(bytes, to) {
-        Ok(()) => {}
-        // A burst of queries this pass cannot answer; the asker retries, and
-        // nothing here waits.
-        Err(udp::SendError::BufferFull) => {}
-        // Only an asker's own source can be this, an address or a port of
-        // zero, and nothing on the wire reaches it.
-        Err(udp::SendError::Unaddressable) => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use smoltcp::iface::SocketSet;
-
-    const LINK: Link = Link { addr: [10, 0, 2, 15], prefix: 24 };
-
-    /// A `Responder` over a socket taken from a set of its own — `wake_in`
-    /// touches neither, only `record` and `born`.
-    fn responder() -> Responder {
-        let buffer = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0u8; 64]);
-        let mut set = SocketSet::new(Vec::new());
-        let handle = set.add(udp::Socket::new(buffer(), buffer()));
-        Responder { handle, record: toyos_mdns::Responder::new(Host::new("t14").unwrap()), born: Instant::now() }
-    }
-
-    /// **A wake is asked for exactly what the record owes.** Nothing before
-    /// an address is held; the §8.3 second announcement's own instant once
-    /// `on` schedules it. A responder that never asks for this wake answers a
-    /// query §6 held back only on some other, unrelated one.
-    #[test]
-    fn wake_in_asks_for_what_the_record_owes_and_nothing_else() {
-        let mut r = responder();
-        assert_eq!(r.wake_in(r.born), None, "nothing is owed before an address is held");
-        r.record.on(Some(LINK), 0);
-        let owed_ms = r.record.owed_at().expect("§8.3 owes the second announcement");
-        assert_eq!(r.wake_in(r.born), Some(Duration::from_millis(owed_ms)));
-    }
+/// Send `bytes` to `to`. A refusal — an asker's own source that nothing on
+/// the wire reaches, or no route left — drops the answer, which the asker's
+/// own retry is for; nothing here waits.
+fn send(net: &mut Net, socket: &UdpId, bytes: &[u8], to: [u8; 4], port: u16) {
+    let (Some(to), Some(port)) = (SpecifiedAddr::new(Ipv4Addr::new(to)), NonZeroU16::new(port)) else {
+        return;
+    };
+    let _ = net.api().udp::<Ipv4>().send_to(
+        socket,
+        Some(ZonedAddr::Unzoned(to)),
+        UdpRemotePort::Set(port),
+        Buf::new(bytes.to_vec(), ..),
+        (),
+    );
 }

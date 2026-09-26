@@ -1,0 +1,15 @@
+[package]
+name = "internet_checksum"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/lib/internet-checksum/src/lib.rs"
+
+[features]
+
+[dependencies]
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

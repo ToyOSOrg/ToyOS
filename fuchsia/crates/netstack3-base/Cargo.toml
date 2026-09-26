@@ -1,0 +1,34 @@
+[package]
+name = "netstack3-base"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/network/netstack3/core/base/src/lib.rs"
+
+[features]
+
+[dependencies]
+net-types = { path = "../net-types" }
+packet-formats = { path = "../packet-formats" }
+diagnostics-traits = { path = "../diagnostics-traits" }
+explicit = { path = "../explicit" }
+netstack3-hashmap = { path = "../netstack3-hashmap" }
+packet = { path = "../packet" }
+netstack3-sync = { path = "../netstack3-sync" }
+arrayvec = { version = "0.7.8", default-features = false }
+bitflags = { version = "2.13.0", default-features = false }
+derivative = { version = "2.2.0", features = ["use_core"] }
+either = { version = "1.18.0", default-features = false }
+log = "0.4.29"
+rand = { version = "0.10.2", default-features = false }
+smallvec = { version = "1.15.2", features = ["const_generics", "const_new", "union"] }
+static_assertions = "1.1.0"
+strum = { version = "0.28.0", default-features = false }
+strum_macros = "0.28.0"
+thiserror = { version = "2.0.20", default-features = false }
+zerocopy = { version = "0.8.48", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

@@ -1,0 +1,33 @@
+[package]
+name = "netstack3-udp"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/network/netstack3/core/udp/src/lib.rs"
+
+[features]
+
+[dependencies]
+net-types = { path = "../net-types" }
+packet-formats = { path = "../packet-formats" }
+packet = { path = "../packet" }
+lock-order = { path = "../lock-order" }
+netstack3-hashmap = { path = "../netstack3-hashmap" }
+netstack3-macros = { path = "../netstack3-macros" }
+explicit = { path = "../explicit" }
+netstack3-base = { path = "../netstack3-base" }
+netstack3-filter = { path = "../netstack3-filter" }
+netstack3-ip = { path = "../netstack3-ip" }
+netstack3-trace = { path = "../netstack3-trace" }
+netstack3-datagram = { path = "../netstack3-datagram" }
+derivative = { version = "2.2.0", features = ["use_core"] }
+either = { version = "1.18.0", default-features = false }
+log = "0.4.29"
+siphasher = { version = "1.0.3", default-features = false }
+smallvec = { version = "1.15.2", features = ["const_generics", "const_new", "union"] }
+thiserror = { version = "2.0.20", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

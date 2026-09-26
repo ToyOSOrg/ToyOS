@@ -1,0 +1,20 @@
+[package]
+name = "netstack3-sync"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/network/netstack3/core/sync/src/lib.rs"
+
+[features]
+recursive-lock-panic = []
+rc-debug-names = []
+
+[dependencies]
+net-types = { path = "../net-types" }
+lock-order = { path = "../lock-order" }
+derivative = { version = "2.2.0", features = ["use_core"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

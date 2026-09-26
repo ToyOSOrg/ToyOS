@@ -1,0 +1,16 @@
+[package]
+name = "diagnostics-traits"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/network/lib/diagnostics-traits/src/lib.rs"
+
+[features]
+
+[dependencies]
+net-types = { path = "../net-types" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

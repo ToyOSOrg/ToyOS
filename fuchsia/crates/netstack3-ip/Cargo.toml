@@ -1,0 +1,40 @@
+[package]
+name = "netstack3-ip"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/network/netstack3/core/ip/src/lib.rs"
+
+[features]
+
+[dependencies]
+net-declare = { path = "../net-declare" }
+net-types = { path = "../net-types" }
+packet-formats = { path = "../packet-formats" }
+diagnostics-traits = { path = "../diagnostics-traits" }
+explicit = { path = "../explicit" }
+netstack3-hashmap = { path = "../netstack3-hashmap" }
+lock-order = { path = "../lock-order" }
+netstack3-macros = { path = "../netstack3-macros" }
+packet = { path = "../packet" }
+netstack3-base = { path = "../netstack3-base" }
+netstack3-filter = { path = "../netstack3-filter" }
+netstack3-trace = { path = "../netstack3-trace" }
+arrayvec = { version = "0.7.8", default-features = false }
+assert_matches = "1.5.0"
+derivative = { version = "2.2.0", features = ["use_core"] }
+either = { version = "1.18.0", default-features = false }
+hmac = "0.13.0"
+log = "0.4.29"
+lru = { version = "0.18.5", default-features = false }
+rand = { version = "0.10.2", default-features = false }
+ref-cast = "1.0.26"
+sha2 = { version = "0.11.0", default-features = false }
+static_assertions = "1.1.0"
+thiserror = { version = "2.0.20", default-features = false }
+zerocopy = { version = "0.8.48", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

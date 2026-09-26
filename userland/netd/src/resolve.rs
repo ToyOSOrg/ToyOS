@@ -4,47 +4,37 @@
 //! module owns the sockets, the clock, the query IDs and the clients waiting
 //! for answers.
 //!
-//! **Each query leaves from a socket of its own**, bound to a port drawn from
-//! the kernel's random source, and carries an ID drawn from the same source
-//! (RFC 5452 §9.2). An off-path sender has to guess both to be read at all.
-//! A socket of its own is also what keeps one query from waiting on another:
-//! smoltcp keeps a datagram at the head of its socket's queue while its
-//! server's link address is unresolved or no route leads to it, and a query
-//! queued behind it on the same socket would never leave.
+//! **Each query leaves from a socket of its own**, on a port the stack draws
+//! from the kernel's random source (RFC 6056), and carries an ID drawn from
+//! the same source (RFC 5452 §9.2). An off-path sender has to guess both to be
+//! read at all. A query the stack could not send — no route to its server — is
+//! a query nobody answers, and the lookup's own wait moves on from it.
 //!
 //! **A lookup's wait is a wake of netd's loop** ([`Resolver::wake_in`]), and a
 //! reply is a frame, which the NIC's interrupt already wakes it for.
 
-use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use smoltcp::iface::{SocketHandle, SocketSet};
-use smoltcp::socket::udp;
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, DHCP_MAX_DNS_SERVER_COUNT};
+use net_types::ip::{Ipv4, Ipv4Addr};
+use net_types::{SpecifiedAddr, ZonedAddr};
+use netstack3_core::device::WeakDeviceId;
+use netstack3_core::udp::{UdpRemotePort, UdpSocketId};
+use packet::Buf;
 use toyos_dns::{Asked, Failure, Lookup, Name, Step};
 pub use toyos_dns::MAX_LOOKUPS;
 
-/// Datagrams, and bytes, a query's socket holds between two passes: two of the
-/// largest an unfragmented Ethernet frame carries. A reply to a query sent
-/// without EDNS is at most 512 bytes (RFC 1035 §4.2.1), and a larger one still
-/// reaches the reader, which judges it.
-const RECEIVE_PACKETS: usize = 2;
-const RECEIVE_BUFFER: usize = RECEIVE_PACKETS * (1500 - 20 - 8);
+use crate::net::Net;
+use crate::stack::{Bindings, Inbox};
 
-/// A query is at most a header, a 255-byte name and four bytes, and its socket
-/// sends nothing else.
-const QUERY_BYTES: usize = 12 + 255 + 4;
-
-/// The ports a query's socket is bound in: IANA's dynamic range (RFC 6335
-/// §6).
-const EPHEMERAL: std::ops::RangeInclusive<u16> = 49152..=65535;
+/// A UDP socket of the stack's.
+pub type UdpId = UdpSocketId<Ipv4, WeakDeviceId<Bindings>, Bindings>;
 
 /// Why a lookup was not started.
 #[derive(Debug)]
 pub enum Refused {
     /// The lease named no server, or there is no lease.
     NoServer,
-    /// [`MAX_LOOKUPS`] are in flight, or every port in [`EPHEMERAL`] is bound.
+    /// [`MAX_LOOKUPS`] are in flight, or the stack has no port left.
     Full,
 }
 
@@ -65,8 +55,7 @@ impl Refused {
 pub enum Ended {
     /// What the servers' answers, or their silence, came to.
     Failed(Failure),
-    /// Every port in [`EPHEMERAL`] is bound, so the next query had none to
-    /// leave from.
+    /// The stack had no port left for the next query to leave from.
     NoPort,
 }
 
@@ -74,9 +63,8 @@ struct Pending<C> {
     client: C,
     name: Name,
     lookup: Lookup,
-    /// The socket each query waiting for its answer left from, and the newest
-    /// query's, which may not have left yet.
-    queries: Vec<(Asked, SocketHandle)>,
+    /// The socket each query still read left from.
+    queries: Vec<(Asked, UdpId)>,
 }
 
 /// The lookups in flight, and the servers a new one asks.
@@ -85,32 +73,22 @@ pub struct Resolver<C, D> {
     lookups: Vec<Pending<C>>,
     /// The origin of every lookup's clock.
     born: Instant,
-    /// Every query's ID and port.
+    /// Every query's ID.
     draw: D,
 }
 
 /// A value the kernel's random source drew. netd ends by name if the source
-/// refuses: an ID or a port anyone can predict is a forged answer's way in.
+/// refuses: an ID anyone can predict is a forged answer's way in.
 pub fn random_u16() -> u16 {
     let mut bytes = [0u8; 2];
     toyos_abi::syscall::random(&mut bytes)
-        .unwrap_or_else(|e| panic!("netd: the kernel's random source refused a query's ID or port: {e:?}"));
+        .unwrap_or_else(|e| panic!("netd: the kernel's random source refused a query's ID: {e:?}"));
     u16::from_le_bytes(bytes)
 }
 
-/// Whether a UDP socket in `socket_set` is bound to `port`, whatever its
-/// address. smoltcp hands a datagram to the first socket that accepts it, so a
-/// second socket on a port would receive nothing its first did not refuse.
-pub fn udp_port_taken(socket_set: &SocketSet<'_>, port: u16) -> bool {
-    socket_set.iter().any(|(_, socket)| match socket {
-        smoltcp::socket::Socket::Udp(s) => s.endpoint().port == port,
-        _ => false,
-    })
-}
-
 impl<C, D: FnMut() -> u16> Resolver<C, D> {
-    /// A resolver whose clock starts at `born`, drawing every query's ID and
-    /// port from `draw`.
+    /// A resolver whose clock starts at `born`, drawing every query's ID from
+    /// `draw`.
     pub fn new(born: Instant, draw: D) -> Self {
         Self { servers: Vec::new(), lookups: Vec::new(), born, draw }
     }
@@ -120,25 +98,21 @@ impl<C, D: FnMut() -> u16> Resolver<C, D> {
     ///
     /// **An address no query can be sent to is not kept.** The lease is the
     /// network's word: an unspecified, broadcast or multicast server would have
-    /// every query to it refused by the socket, so it is named and left out.
-    pub fn set_servers(&mut self, servers: &[Ipv4Address]) {
-        assert!(
-            servers.len() <= DHCP_MAX_DNS_SERVER_COUNT,
-            "netd: a lease carries at most {DHCP_MAX_DNS_SERVER_COUNT} resolvers, and this one {}",
-            servers.len()
-        );
+    /// every query to it refused, so it is named and left out.
+    pub fn set_servers(&mut self, servers: &[[u8; 4]]) {
         self.servers.clear();
-        for server in servers {
-            if server.is_unspecified() || server.is_broadcast() || server.is_multicast() {
-                crate::say!("netd: the lease names {server} as a resolver, which no query can reach; not asking it");
+        for &server in servers {
+            let ip = std::net::Ipv4Addr::from(server);
+            if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
+                crate::say!("netd: the lease names {ip} as a resolver, which no query can reach; not asking it");
                 continue;
             }
-            self.servers.push(server.octets());
+            self.servers.push(server);
         }
     }
 
     /// Start looking up `name` for `client`.
-    pub fn start(&mut self, client: C, name: Name, socket_set: &mut SocketSet<'_>, now: Instant) -> Result<(), (C, Refused)> {
+    pub fn start(&mut self, client: C, name: Name, net: &mut Net, now: Instant) -> Result<(), (C, Refused)> {
         if self.servers.is_empty() {
             return Err((client, Refused::NoServer));
         }
@@ -148,7 +122,7 @@ impl<C, D: FnMut() -> u16> Resolver<C, D> {
         let (lookup, step) = Lookup::start(name.clone(), &self.servers, self.ms(now), (self.draw)())
             .expect("the server list was checked not empty");
         let mut pending = Pending { client, name, lookup, queries: Vec::new() };
-        match act(&mut pending, step, socket_set, &mut self.draw) {
+        match act(&mut pending, step, net) {
             None => {
                 self.lookups.push(pending);
                 Ok(())
@@ -161,7 +135,7 @@ impl<C, D: FnMut() -> u16> Resolver<C, D> {
     /// Read every reply that arrived and end every wait that is over; answer
     /// each lookup that ended with its client, the name it asked, and how it
     /// ended.
-    pub fn pass(&mut self, socket_set: &mut SocketSet<'_>, now: Instant) -> Vec<(C, Name, Result<Vec<[u8; 4]>, Ended>)> {
+    pub fn pass(&mut self, net: &mut Net, now: Instant) -> Vec<(C, Name, Result<Vec<[u8; 4]>, Ended>)> {
         let now_ms = self.ms(now);
         let mut ended = Vec::new();
         let mut i = 0;
@@ -170,37 +144,27 @@ impl<C, D: FnMut() -> u16> Resolver<C, D> {
             let mut done = None;
             let mut q = 0;
             while done.is_none() && q < pending.queries.len() {
-                let (asked, handle) = pending.queries[q];
-                let socket = socket_set.get_mut::<udp::Socket>(handle);
-                let (reply, from, port) = match socket.recv() {
-                    Ok((reply, meta)) => {
-                        let IpAddress::Ipv4(from) = meta.endpoint.addr;
-                        (reply.to_vec(), from.octets(), meta.endpoint.port)
-                    }
-                    Err(udp::RecvError::Exhausted) => {
-                        q += 1;
-                        continue;
-                    }
-                    Err(udp::RecvError::Truncated) => {
-                        unreachable!("netd: recv hands back the whole datagram and truncates nothing")
-                    }
+                let (asked, ref id) = pending.queries[q];
+                let Some(reply) = id.external_data().take() else {
+                    q += 1;
+                    continue;
                 };
-                let step = pending.lookup.on_datagram(asked, from, port, &reply, now_ms, (self.draw)());
-                done = act(pending, step, socket_set, &mut self.draw);
+                let step = pending.lookup.on_datagram(asked, reply.from, reply.port, &reply.bytes, now_ms, (self.draw)());
+                done = act(pending, step, net);
                 // The step may have let this query go: its socket is read
                 // again from wherever it now is, or every socket from the
                 // first.
-                q = pending.queries.iter().position(|&(a, _)| a == asked).unwrap_or(0);
+                q = pending.queries.iter().position(|(a, _)| *a == asked).unwrap_or(0);
             }
             if done.is_none() {
                 let step = pending.lookup.on_time(now_ms, (self.draw)());
-                done = act(pending, step, socket_set, &mut self.draw);
+                done = act(pending, step, net);
             }
             match done {
                 None => i += 1,
                 Some(result) => {
                     let pending = self.lookups.swap_remove(i);
-                    close(&pending, socket_set);
+                    close(pending.queries, net);
                     ended.push((pending.client, pending.name, result));
                 }
             }
@@ -210,11 +174,11 @@ impl<C, D: FnMut() -> u16> Resolver<C, D> {
 
     /// End every lookup whose client `gone` says has left, at once: nobody is
     /// waiting for its answer, and its sockets and its slot are another's.
-    pub fn let_go(&mut self, socket_set: &mut SocketSet<'_>, mut gone: impl FnMut(&C) -> bool) {
+    pub fn let_go(&mut self, net: &mut Net, mut gone: impl FnMut(&C) -> bool) {
         let mut i = 0;
         while i < self.lookups.len() {
             if gone(&self.lookups[i].client) {
-                close(&self.lookups.swap_remove(i), socket_set);
+                close(self.lookups.swap_remove(i).queries, net);
             } else {
                 i += 1;
             }
@@ -243,24 +207,13 @@ impl<C, D: FnMut() -> u16> Resolver<C, D> {
 }
 
 /// Carry out `step` for `pending`, let go of the socket of every query no
-/// longer answered, and answer the lookup's end where it ended.
-///
-/// **A query whose wait ended before it left is let go with its socket.**
-/// Nothing can answer it, and smoltcp would go on asking for its server's link
-/// address once a second, which is its one discovery a second for every
-/// neighbour: the next server's would wait behind it for as long as it lived.
-fn act<C>(
-    pending: &mut Pending<C>,
-    step: Step,
-    socket_set: &mut SocketSet<'_>,
-    draw: &mut impl FnMut() -> u16,
-) -> Option<Result<Vec<[u8; 4]>, Ended>> {
+/// longer read, and answer the lookup's end where it ended.
+fn act<C>(pending: &mut Pending<C>, step: Step, net: &mut Net) -> Option<Result<Vec<[u8; 4]>, Ended>> {
     let done = match step {
-        Step::Ask { asked, to, query } => match free_port(socket_set, draw()) {
-            Some(port) => {
-                let handle = socket_set.add(query_socket(port));
-                send(socket_set.get_mut::<udp::Socket>(handle), to, &query);
-                pending.queries.push((asked, handle));
+        Step::Ask { asked, to, query } => match query_socket(net) {
+            Some(id) => {
+                send(net, &id, to, query);
+                pending.queries.push((asked, id));
                 None
             }
             None => Some(Err(Ended::NoPort)),
@@ -268,60 +221,49 @@ fn act<C>(
         Step::Wait => None,
         Step::Done(result) => Some(result.map_err(Ended::Failed)),
     };
-    let lookup = &pending.lookup;
-    let newest = pending.queries.last().map(|&(asked, _)| asked);
-    pending.queries.retain(|&(asked, handle)| {
-        let unsent = Some(asked) != newest && socket_set.get::<udp::Socket>(handle).send_queue() > 0;
-        let waiting = !unsent && lookup.waiting().any(|w| w == asked);
-        if !waiting {
-            socket_set.remove(handle);
-        }
-        waiting
-    });
+    let (keep, gone): (Vec<_>, Vec<_>) =
+        std::mem::take(&mut pending.queries).into_iter().partition(|(asked, _)| pending.lookup.waiting().any(|w| w == *asked));
+    pending.queries = keep;
+    close(gone, net);
     done
 }
 
-/// Let go of every socket `pending` holds.
-fn close<C>(pending: &Pending<C>, socket_set: &mut SocketSet<'_>) {
-    for &(_, handle) in &pending.queries {
-        socket_set.remove(handle);
+/// Let go of every query socket in `queries`.
+fn close(queries: Vec<(Asked, UdpId)>, net: &mut Net) {
+    for (_, id) in queries {
+        crate::stack::removed(net.api().udp::<Ipv4>().close(id));
     }
 }
 
-/// A socket for one query, bound to `port` on every address.
-fn query_socket(port: u16) -> udp::Socket<'static> {
-    let buffer = |packets, bytes| udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; packets], vec![0u8; bytes]);
-    let mut socket = udp::Socket::new(buffer(RECEIVE_PACKETS, RECEIVE_BUFFER), buffer(1, QUERY_BYTES));
-    socket
-        .bind(IpListenEndpoint { addr: None, port })
-        .unwrap_or_else(|e| panic!("netd: a fresh socket refused the free port {port}: {e:?}"));
-    socket
+/// A socket for one query, bound on every address to a port the stack draws;
+/// `None` once it has none left.
+fn query_socket(net: &mut Net) -> Option<UdpId> {
+    let api = net.api();
+    let mut udp = api.udp::<Ipv4>();
+    let id = udp.create_with(Inbox::default());
+    match udp.listen(&id, None, None) {
+        Ok(()) => Some(id),
+        Err(_) => {
+            crate::stack::removed(udp.close(id));
+            None
+        }
+    }
 }
 
-/// Queue `query` for port 53 of `to` on its own fresh socket.
-fn send(socket: &mut udp::Socket, to: [u8; 4], query: &[u8]) {
-    let at = IpEndpoint::new(IpAddress::Ipv4(Ipv4Addr::from(to)), toyos_dns::PORT);
-    socket
-        .send_slice(query, at)
-        .unwrap_or_else(|e| panic!("netd: a fresh socket's empty one-query queue refused its query to {at}: {e:?}"));
+/// Send `query` to port 53 of `to`. A query the stack refuses — no route to
+/// its server — is named and left to the lookup's wait, like one lost.
+fn send(net: &mut Net, id: &UdpId, to: [u8; 4], query: Vec<u8>) {
+    let at = SpecifiedAddr::new(Ipv4Addr::new(to)).expect("a resolver kept is a specified address");
+    let port = std::num::NonZeroU16::new(toyos_dns::PORT).expect("53 is a port");
+    let sent = net.api().udp::<Ipv4>().send_to(
+        id,
+        Some(ZonedAddr::Unzoned(at)),
+        UdpRemotePort::Set(port),
+        Buf::new(query, ..),
+        (),
+    );
+    if let Err(e) = sent {
+        crate::say!("netd: a query to {} could not leave: {e:?}", crate::net::show(to));
+    }
 }
 
-/// The first port in [`EPHEMERAL`] no UDP socket holds, searched upward from
-/// `from` and wrapping; `None` once every one is held.
-pub fn free_port(socket_set: &SocketSet<'_>, from: u16) -> Option<u16> {
-    free_port_by(from, |port| udp_port_taken(socket_set, port))
-}
-
-/// The first port in [`EPHEMERAL`] that `taken` does not claim, searched
-/// upward from `from` and wrapping; `None` once every one is. `from` names
-/// `EPHEMERAL`'s start plus `from` modulo its size, which for a port already
-/// in it is that port: the range starts at a multiple of its size.
-pub fn free_port_by(from: u16, taken: impl Fn(u16) -> bool) -> Option<u16> {
-    const SPAN: u32 = *EPHEMERAL.end() as u32 - *EPHEMERAL.start() as u32 + 1;
-    const _: () = assert!(*EPHEMERAL.start() as u32 % SPAN == 0);
-    let start = u32::from(from) % SPAN;
-    (0..SPAN).map(|k| EPHEMERAL.start() + ((start + k) % SPAN) as u16).find(|&port| !taken(port))
-}
-
-#[cfg(test)]
-mod tests;

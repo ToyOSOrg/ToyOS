@@ -1,0 +1,25 @@
+[package]
+name = "packet-formats"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/lib/packet-formats/src/lib.rs"
+
+[features]
+
+[dependencies]
+internet_checksum = { path = "../internet_checksum" }
+net-types = { path = "../net-types" }
+explicit = { path = "../explicit" }
+packet = { path = "../packet" }
+byteorder = { version = "1.5.0", default-features = false }
+derivative = { version = "2.2.0", features = ["use_core"] }
+either = { version = "1.18.0", default-features = false }
+log = "0.4.29"
+thiserror = { version = "2.0.20", default-features = false }
+zerocopy = { version = "0.8.48", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

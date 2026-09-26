@@ -1,0 +1,19 @@
+[package]
+name = "net-types"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/lib/net-types/src/lib.rs"
+
+[features]
+std = []
+default = []
+
+[dependencies]
+net-types-macros = { path = "../net-types-macros" }
+zerocopy = { version = "0.8.48", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

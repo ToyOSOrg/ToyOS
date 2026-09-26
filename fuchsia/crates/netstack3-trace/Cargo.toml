@@ -1,0 +1,16 @@
+[package]
+name = "netstack3-trace"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/network/netstack3/core/trace/src/lib.rs"
+
+[features]
+
+[dependencies]
+netstack3-sync = { path = "../netstack3-sync" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

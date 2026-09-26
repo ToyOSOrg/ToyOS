@@ -1,0 +1,27 @@
+[package]
+name = "netstack3-filter"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/network/netstack3/core/filter/src/lib.rs"
+
+[features]
+
+[dependencies]
+net-types = { path = "../net-types" }
+packet-formats = { path = "../packet-formats" }
+netstack3-hashmap = { path = "../netstack3-hashmap" }
+packet = { path = "../packet" }
+replace-with = { path = "../replace-with" }
+netstack3-base = { path = "../netstack3-base" }
+assert_matches = "1.5.0"
+derivative = { version = "2.2.0", features = ["use_core"] }
+log = "0.4.29"
+once_cell = "1.21.4"
+rand = { version = "0.10.2", default-features = false }
+zerocopy = { version = "0.8.48", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

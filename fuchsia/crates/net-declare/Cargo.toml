@@ -1,0 +1,17 @@
+[package]
+name = "net-declare"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/lib/net-declare/src/lib.rs"
+
+[features]
+
+[dependencies]
+net-declare-macros = { path = "../net-declare-macros" }
+fidl_fuchsia_net_common = { path = "../fidl_fuchsia_net_common" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

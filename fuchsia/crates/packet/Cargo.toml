@@ -1,0 +1,18 @@
+[package]
+name = "packet"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/lib/network/packet/src/lib.rs"
+
+[features]
+
+[dependencies]
+replace-with = { path = "../replace-with" }
+arrayvec = { version = "0.7.8", default-features = false }
+zerocopy = { version = "0.8.48", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

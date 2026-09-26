@@ -1,0 +1,16 @@
+[package]
+name = "netstack3-hashmap"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/network/netstack3/core/hashmap/src/lib.rs"
+
+[features]
+
+[dependencies]
+hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more", "default-hasher"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

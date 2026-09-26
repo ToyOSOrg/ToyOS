@@ -1,0 +1,21 @@
+[package]
+name = "net-declare-macros"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/connectivity/lib/net-declare/src/macros.rs"
+proc-macro = true
+
+[features]
+
+[dependencies]
+net-types = { path = "../net-types", features = ["std"] }
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "2.0.119", features = ["full", "visit", "visit-mut", "extra-traits"] }
+thiserror = "2.0.20"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

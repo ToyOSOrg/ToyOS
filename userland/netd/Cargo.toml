@@ -11,18 +11,10 @@ toyos-tco = { path = "../../toyos-tco" }
 toyos-mdns = { path = "../../toyos-mdns" }
 toyos-dns = { path = "../../toyos-dns" }
 toyos-inspect = { path = "../../toyos-inspect" }
+netstack3-core = { path = "../../fuchsia/crates/netstack3-core" }
+net-types = { path = "../../fuchsia/crates/net-types" }
+packet = { path = "../../fuchsia/crates/packet" }
+packet-formats = { path = "../../fuchsia/crates/packet-formats" }
+rand = { version = "0.10.2", default-features = false }
+zerocopy = "0.8.48"
 
-[dependencies.smoltcp]
-version = "0.12"
-default-features = false
-features = [
-    "medium-ethernet",
-    "proto-ipv4",
-    "socket-tcp",
-    "socket-udp",
-    "socket-dhcpv4",
-    # The multicast DNS group, which `mdns.rs` joins to answer for this
-    # machine's name.
-    "multicast",
-    "alloc",
-]

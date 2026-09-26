@@ -1,0 +1,15 @@
+[package]
+name = "replace-with"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[lib]
+path = "../../upstream/src/lib/replace-with/src/lib.rs"
+
+[features]
+
+[dependencies]
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }
