@@ -64,7 +64,8 @@ The storage track's users and mount-protocol stages do not block this one.
    binaries a launch starts and nothing else, so a writable `/apps` cannot name
    a device or a right.
 2. The HTTPS fetch: TLS client under `pkg`, the GitHub redirect, the sums
-   file from the same release. Judged in QEMU against a server the harness
+   file from the same release. This is the internet-client track's last
+   stage (`issues/design-debt/the-internet-clients-work-unchanged.md`). Judged in QEMU against a server the harness
    runs on the host in Rust, serving the bytes already committed under
    `tests/fixtures`; then once against GitHub itself, by hand, with the owner
    watching. No registered test fetches anything.
@@ -77,3 +78,24 @@ The storage track's users and mount-protocol stages do not block this one.
    (`issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md`) decides
    where a package's own data goes; until then a package writes under
    `/apps/<name>/` only.
+6. **An app's rights are its request ∩ the user's grant ∩ the image's
+   ceiling** (owner ruling, 2026-09-24; the ceiling's shape, 2026-09-26). The
+   package's manifest *requests* rights; the user *grants* them per user
+   (from a user action — the file picker hands over one file — or asked on
+   first use for the risky ones, remembered and revocable; harmless ones such
+   as a window, sound and the app's own data directory are free); the image
+   holds the *ceiling*. **The ceiling names rights, never apps**: it is the
+   set any installed app may be granted at all, so installing an app never
+   edits the image and the image never lists an app by name. The `[apps]`
+   row of stage 1 becomes that ceiling. **Exit**: an app installed by `pkg`
+   from a release runs with exactly the intersection, a request beyond the
+   ceiling is refused by name, and no file under `/apps` can widen what it
+   gets.
+7. **The apps leave this repository.** Each app (snake first, as the pilot:
+   it builds unchanged for every OS) moves to its own repository, built with
+   only the published SDK crates and the released toolchain, and published as
+   a release archive with its `SHA256SUMS`, the shape gbae already has. The
+   image then carries none of them; `pkg install <url>` brings them. Blocked
+   by the forks resolving an old published `toyos-window`
+   (`issues/build/fork-tier-crates-still-pin-toyos-abi-at-0.1.md`) and by stage 6.
+   Installing by name (`pkg install snake`) needs an index and is undesigned.
