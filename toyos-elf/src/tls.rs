@@ -7,12 +7,14 @@
 //!                            ^ data_start                ^ thread pointer
 //! ```
 //!
-//! The linker computes `TPOFF = sym_offset - memsz` raw, so the thread pointer
-//! sits at `data_start + memsz` and `data_start` must carry the largest
-//! alignment any module asked for. Both of those are sums of numbers a file
-//! declared, which is why every step here is checked and the whole thing is a
-//! pure function: `dtv_bytes <= tls_start` is the property, and it used to be
-//! an assertion in the kernel reached from a crafted `PT_TLS`.
+//! The linker computes the executable's local-exec `TPOFF` as `sym_offset -
+//! round(memsz, p_align)` ([`exe_extent`]), so the executable's module, so
+//! rounded, ends at the thread pointer; the thread pointer sits at `data_start +
+//! total_memsz`, and `data_start` must carry the largest alignment any module
+//! asked for. Both of those are sums of numbers a file declared, which is why
+//! every step here is checked and the whole thing is a pure function:
+//! `dtv_bytes <= tls_start` is the property, and it used to be an assertion in
+//! the kernel reached from a crafted `PT_TLS`.
 
 /// A planned TLS allocation, in offsets from the base of one block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +80,15 @@ pub fn place_module(cursor: usize, memsz: usize, align: usize) -> Option<(usize,
     let align = align.max(16);
     let base = if cursor > 0 { align_up(cursor, align)? } else { 0 };
     Some((base, base.checked_add(memsz)?))
+}
+
+/// The bytes the executable's module takes below the thread pointer: its
+/// `p_memsz` rounded up to its `p_align` — psABI variant II's `tlsoffset1 =
+/// round(tlssize1, align1)`, which a linker bakes into every local-exec access
+/// and the loader can only honour. `align` is as [`place_module`] takes it;
+/// `None` is a size the rounding overflows.
+pub fn exe_extent(memsz: usize, align: usize) -> Option<usize> {
+    align_up(memsz, align.max(1))
 }
 
 /// A static-TLS datum's initial-exec offset from the thread pointer: psABI

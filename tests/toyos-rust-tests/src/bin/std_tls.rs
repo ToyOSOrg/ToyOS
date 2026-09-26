@@ -9,26 +9,30 @@ extern "C" {
     fn tls_set_label(val: u64);
 }
 
-// `LOCAL_VALUE` sits at offset 0 of the exe's TLS, so its address is the exe
-// module's base in the combined block.
+// 64-byte aligned by its own type, so the exe's `PT_TLS` declares at least that
+// whatever the linker would pick, and `LOCAL_VALUE`'s address is on 64 exactly
+// when the loader placed the exe's module on its declared alignment.
+#[repr(align(64))]
+struct Aligned(Cell<u64>);
+
 thread_local! {
-    static LOCAL_VALUE: Cell<u64> = const { Cell::new(42) };
+    static LOCAL_VALUE: Aligned = const { Aligned(Cell::new(42)) };
 }
 
 fn main() {
     // Test 0: psABI variant II — the exe's TLS module begins on its declared
     // 64-byte p_align behind libtls_lib.so; the constant-16 loader landed it 32 low.
     LOCAL_VALUE.with(|v| {
-        let addr = v as *const Cell<u64> as usize;
+        let addr = v as *const Aligned as usize;
         assert_eq!(addr % 64, 0, "exe TLS module base off its declared 64-byte alignment: {addr:#x}");
     });
     println!("PASS: exe TLS honours its declared alignment");
 
     // Test 1: exe-local thread_local works
     LOCAL_VALUE.with(|v| {
-        assert_eq!(v.get(), 42, "exe TLS initial value");
-        v.set(100);
-        assert_eq!(v.get(), 100, "exe TLS after set");
+        assert_eq!(v.0.get(), 42, "exe TLS initial value");
+        v.0.set(100);
+        assert_eq!(v.0.get(), 100, "exe TLS after set");
     });
     println!("PASS: exe thread_local");
 
@@ -49,7 +53,7 @@ fn main() {
     }
     // Verify exe TLS wasn't corrupted
     LOCAL_VALUE.with(|v| {
-        assert_eq!(v.get(), 100, "exe TLS not corrupted by lib TLS ops");
+        assert_eq!(v.0.get(), 100, "exe TLS not corrupted by lib TLS ops");
     });
     println!("PASS: TLS isolation between exe and lib");
 
