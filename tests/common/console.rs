@@ -14,9 +14,11 @@
 //! pieces and arrive spliced into one line, and no rule over lines could
 //! separate them — so the standing write-up said there was no cheap honest fix
 //! and left a choice between giving each child a capture channel and tagging
-//! every console write with its writer. L5 built neither and made a third
-//! answer sound: a console *is* a per-holder line buffer now, so a line begins
-//! with its writer's first bytes or `console_line_atomicity` is red.
+//! every console write with its writer. Both are built now: a program's line
+//! is a record in its own log ring, assembled by the process that wrote it,
+//! and `logd` puts it on the console whole under the program's name — so a
+//! line begins with its writer's first bytes or `console_line_atomicity` is
+//! red.
 //!
 //! **L5's guarantee is about flushes, not about newlines, and that is the
 //! second half.** A program that writes without a trailing newline has its
@@ -83,10 +85,10 @@ pub fn console_line_atomicity(
         ));
     }
     let declared = declared(&result.stdout)?;
-    // **The writers' lines reach the console as they write them, and the
-    // runner's `===TEST_START` reaches it through `logd`**, so a writer's first
-    // lines may arrive before the marker opens the window: every line since the
-    // command was typed is read.
+    // **The writers' lines and the runner's `===TEST_START` reach the console
+    // through `logd` from two rings' reads**, so a writer's first lines may
+    // arrive before the marker opens the window: every line since the command
+    // was typed is read.
     let capture = format!("{}{}", result.before, result.stdout);
 
     let mut pure: [BTreeSet<usize>; 2] = [BTreeSet::new(), BTreeSet::new()];
@@ -188,14 +190,13 @@ pub fn console_line_atomicity(
             top.saturating_sub(1),
         ));
     }
-    // **The buffer's other half: a process that exits mid-line.** The third
+    // **The line's other half: a process that exits mid-line.** The third
     // writer says `midline` bytes in two `write`s, ends them with nothing and
-    // exits; the only thing that can put them on the wire is
-    // `ConsoleObject::drop` flushing what the last handle left behind.
-    // A tree without that flush loses them silently, which is a buffer that
-    // drops a dying process's last words — so the assertion is the run's
-    // *length*, and it is exact on both sides: shorter means bytes were lost,
-    // longer means something else was acquired inside them.
+    // exits; the only thing that can make them a line is its exit ending what
+    // its stream held. A tree without that loses them silently, which drops a
+    // dying process's last words — so the assertion is the run's *length*,
+    // and it is exact on both sides: shorter means bytes were lost, longer
+    // means something else was acquired inside them.
     let longest = capture
         .split(|c| c != 'C')
         .map(str::len)
@@ -204,8 +205,8 @@ pub fn console_line_atomicity(
     if longest != declared.midline {
         return Err(format!(
             "a process exited having written {} unterminated bytes and the longest run of them on \
-             the console is {longest} — the last handle to a console going away is what turns a \
-             partial line into all there will ever be, and this capture says it went nowhere",
+             the console is {longest} — the process's exit is what turns a partial line into all \
+             there will ever be, and this capture says it went nowhere",
             declared.midline
         ));
     }

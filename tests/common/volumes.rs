@@ -490,8 +490,9 @@ fn volume_lines(log: &str) -> String {
 ///   is logged after that, so requiring it requires a write after the open.
 /// - **The shutdown path standing in for the continuous one.** The mid-run read
 ///   happens before `run shutdown` and must already have `Boot: complete`; the
-///   post-shutdown read must additionally have the shutdown's own last line,
-///   which only the bounded wait on `LOG_DURABLE_NS` can deliver.
+///   post-shutdown read must additionally have init's word that the machine
+///   stops, which reaches the file only through the flush init has `logd` make
+///   before it asks the kernel.
 ///
 /// A second boot, from `tests/logrotatecase`, drives the bound: rotation is
 /// what stops the file filling the owner's stick, and at the shipped mebibyte
@@ -533,9 +534,15 @@ pub fn kernel_log_file(
             ..Default::default()
         },
     );
-    let boot = qemu.boot_log().to_string();
+    let mut boot = qemu.boot_log().to_string();
     serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    if !boot.contains("logd: this boot's kernel log is") {
+    // Waited for past the ready marker: logd names the file once the stick is
+    // up, and a stick slower than the runner puts its line after the marker.
+    let opened = "logd: this boot's kernel log is";
+    if !boot.contains(opened) {
+        boot.push_str(&qemu.drain_until(Duration::from_secs(10), |line| line.contains(opened)));
+    }
+    if !boot.contains(opened) {
         return Err(format!("logd never opened a file:\n{}", volume_lines(&boot)));
     }
 
@@ -606,12 +613,21 @@ pub fn kernel_log_file(
         ));
     }
     let final_text = String::from_utf8_lossy(&final_log).into_owned();
-    if !final_text.contains("Shutting down.") {
+    // **The stop is init's to sequence, and the file ends where init had
+    // `logd` make it whole**: init says it before it asks `logd`, and `logd`
+    // answers only once that line is durable. What the kernel says after —
+    // the stop's record and `Shutting down.` — is on the console and in the
+    // black box, and never waited for by anyone.
+    const FLUSHED: &str = toyos_logstream::STOPPING;
+    if !final_text.contains(FLUSHED) {
         return Err(format!(
-            "the shutdown's own last line never reached the file: {} bytes, ending {:?}",
+            "the shutdown's flush never reached the file: {} bytes, ending {:?}",
             final_log.len(),
             final_text.lines().rev().take(3).collect::<Vec<_>>().join(" | ")
         ));
+    }
+    if !tail.contains("Shutting down.") {
+        return Err(format!("the console never carried the shutdown's last word\n{tail}"));
     }
     if final_log.len() <= running.len() {
         return Err(format!(
@@ -630,7 +646,7 @@ pub fn kernel_log_file(
         ));
     }
     eprintln!(
-        "  [log] {final_name}: {} bytes after the shutdown, carrying its last line; the checker \
+        "  [log] {final_name}: {} bytes after the shutdown, carrying init's flush; the checker \
          still silent",
         final_log.len()
     );
@@ -787,25 +803,18 @@ fn rotation(
             ));
         }
     }
-    // **The claim is that the shutdown's own last line reached the volume**, so
-    // the search is every part of this boot and not a guess at which one it
-    // landed in. The image is built fresh for this arm, so every `.log` here is
-    // this boot's.
-    //
-    // It used to look at the two newest and that was an assumption about the
-    // *writer*: the kernel sink drained everything it was owed in one flush and
-    // then looked at the size, so the tail was in the last part or in the one
-    // before it. `/system/bin/logd` writes a batch, syncs it, publishes `durable` and
-    // then looks at the size, and at a 256-byte bound a batch is a part — so
-    // records the machine emits while `SYS_SHUTDOWN` is waiting push the line
-    // several parts back. That is the bound doing what it is set to do, and an
-    // assertion that reads it as a failure is an assertion about the old code.
+    // **The claim is that the shutdown's flush reached the volume**, so the
+    // search is every part of this boot and not a guess at which one it landed
+    // in: at a 256-byte bound a round is a part, and whatever the machine says
+    // while init waits on `logd` pushes the line a part back. The image is built
+    // fresh for this arm, so every `.log` here is this boot's.
+    const FLUSHED: &str = toyos_logstream::STOPPING;
     let names: Vec<&str> = logs.iter().map(|e| e.name.as_str()).collect();
     let tail_at = read_files(&image[start..start + len], &names)?
         .into_iter()
         .enumerate()
         .find(|(_, bytes)| {
-            bytes.as_ref().is_some_and(|b| String::from_utf8_lossy(b).contains("Shutting down."))
+            bytes.as_ref().is_some_and(|b| String::from_utf8_lossy(b).contains(FLUSHED))
         })
         .map(|(i, _)| i);
     let Some(tail_at) = tail_at else {
@@ -815,9 +824,8 @@ fn rotation(
             .unwrap_or_default();
         let newest = String::from_utf8_lossy(&newest).into_owned();
         return Err(format!(
-            "the shutdown's last line is in none of the {} parts on the volume ({}), so the \
-             bounded wait on LOG_DURABLE_NS did not deliver it.\nthe newest part ends:\n{}\nwhat \
-             the guest said:\n{}",
+            "the shutdown's flush is in none of the {} parts on the volume ({}).\nthe newest part \
+             ends:\n{}\nwhat the guest said:\n{}",
             logs.len(),
             names.join(", "),
             newest.lines().rev().take(4).collect::<Vec<_>>().join("\n"),
@@ -827,7 +835,7 @@ fn rotation(
     let _ = std::fs::remove_file(&image_path);
     eprintln!(
         "  [log] continued {continuations} times at the 256-byte bound, leaving {} parts at the \
-         {}-file bound, newest {}; the shutdown's last line is in part {} of {}",
+         {}-file bound, newest {}; the shutdown's flush is in part {} of {}",
         logs.len(),
         super::wallclock::MAX_LOG_FILES,
         logs.last().map_or("none", |e| e.name.as_str()),
@@ -1831,30 +1839,29 @@ pub fn fs_dirs_durable(
 /// **The machine's stop leaves no filesystem update half made**, and
 /// `toyos-fat32-check` is who says so.
 ///
-/// `quiesce-fsync-refuse` refuses `/system/bin/logd`'s flush from the moment
-/// the shutdown begins: each attempt writes a new cluster's entry into the
-/// mirror FAT and is refused the active one, and the caller parks in
-/// `block::between_attempts` for longer than the shutdown waits for `/log`. So
-/// the stop's second stage meets a thread parked over two FATs that disagree,
-/// with every other userland thread already stopped and nothing left that
-/// could allocate that cluster and heal it by accident. A stop that bands the
-/// thread where it is parked leaves that volume at the reset; one that lets the
-/// update close leaves it whole, and the kernel's own `fsync:` line says which
-/// attempt closed it.
+/// `quiesce-fsync-refuse` refuses one staged file's flush: each attempt writes
+/// a new cluster's entry into the mirror FAT and is refused the active one, and
+/// the caller parks in `block::between_attempts`. The job asks init for the
+/// shutdown once the attempt that parks is refused, so the stop meets a thread
+/// parked over two FATs that disagree. A stop that bands the thread where it is
+/// parked leaves that volume at the reset; one that lets the update close
+/// leaves it whole, and the kernel's own `fsync:` line says which attempt
+/// closed it — inside the stop, by the stop record's own clock.
 pub fn quiesce_leaves_the_volume_whole(
     test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     // The kernel's `mirror_refuse::FSYNC_REFUSALS`, spelt here because the
     // harness cannot link the kernel.
-    const REFUSALS: usize = 9;
+    const REFUSALS: usize = 8;
     const REFUSED: &str = "quiesce-fsync-refuse: refusing a SYS_FSYNC flush's active-FAT write";
-    const GAVE_UP: &str = "shutdown: /log did not answer in";
+    const CLOSED: &str = "fsync: /log/quiesce-fsync.bin durable on attempt 9";
+    const SYNCING: &str = "Syncing filesystems...";
     const PARAMS: &[&str] = &["quiesce-fsync-refuse"];
 
     let image_path = test_dir().join("quiesce-volume-whole.img");
-    let image = qemu::build_boot_image(test_config, &[], &[], PARAMS);
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
     std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
     let (start, len) = log_extent(&image, &image_path)?;
 
@@ -1869,8 +1876,8 @@ pub fn quiesce_leaves_the_volume_whole(
 
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
-        &[],
-        &[],
+        c_bins,
+        rust_bins,
         BootOptions {
             profile: qemu::Profile::Metal,
             boot_image: Some(qemu::Staged::Written(image_path.clone())),
@@ -1887,7 +1894,7 @@ pub fn quiesce_leaves_the_volume_whole(
         ));
     }
 
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    writeln!(qemu.stdin_mut(), "run test_rs_quiesce_fsync").expect("write to QEMU stdin");
     qemu.flush_stdin();
     let tail = qemu.drain_serial(Duration::from_secs(20));
     drop(qemu);
@@ -1916,43 +1923,49 @@ pub fn quiesce_leaves_the_volume_whole(
         ));
     }
 
-    // The arm fired as many times as the kernel declares and the shutdown gave
-    // up waiting inside that ladder, or the silence above is about a stop that
-    // met nobody parked.
-    let refusals = tail.lines().filter(|line| line.contains(REFUSED)).count();
-    if refusals != REFUSALS {
+    // The arm fired as many times as the kernel declares, or the silence above
+    // is about a stop that met nobody parked.
+    let lines: Vec<&str> = tail.lines().collect();
+    let refusals: Vec<&str> = lines.iter().copied().filter(|l| l.contains(REFUSED)).collect();
+    if refusals.len() != REFUSALS {
         return Err(format!(
-            "the quiesce-fsync-refuse actuator refused {refusals} attempt(s), not the \
-             {REFUSALS} the kernel declares, so no thread was parked where this boot says one \
-             was\n{tail}"
+            "the quiesce-fsync-refuse actuator refused {} attempt(s), not the {REFUSALS} the \
+             kernel declares, so no thread was parked where this boot says one was\n{tail}",
+            refusals.len()
         ));
     }
-    let lines: Vec<&str> = tail.lines().collect();
-    let last_refusal = lines.iter().rposition(|line| line.contains(REFUSED));
-    let gave_up = lines.iter().position(|line| line.contains(GAVE_UP));
-    let closed_by = format!("durable on attempt {}", REFUSALS + 1);
-    let closed = lines.iter().position(|line| line.contains(&closed_by));
-    let (Some(last_refusal), Some(gave_up), Some(closed)) = (last_refusal, gave_up, closed) else {
+    // **Where the stop began, by its own record**: it says how long it took,
+    // and says so after the sync line it writes the moment it is over.
+    let ms = |line: &str| {
+        bootlog::record_millis(line).ok_or_else(|| format!("{line:?} carries no kernel time"))
+    };
+    let synced = lines.iter().position(|l| l.contains(SYNCING));
+    let closed = lines.iter().position(|l| l.contains(CLOSED));
+    let record = lines.iter().find_map(|l| toyos_quiesce::Record::parse(l));
+    let (Some(synced), Some(closed), Some(record)) = (synced, closed, record) else {
         return Err(format!(
-            "the volume is whole, but this boot does not say the stop's second stage met the \
-             parked flush and let it close: the shutdown's give-up line is at {gave_up:?} and \
-             the kernel's `fsync: … {closed_by}` at {closed:?}, so something else healed the \
-             FATs\n{tail}"
+            "the volume is whole, but this boot does not say the stop met the parked flush and \
+             let it close: the sync is at {synced:?}, the kernel's `{CLOSED}` at {closed:?}, and \
+             the stop record {}\n{tail}",
+            if record.is_some() { "is there" } else { "is missing" },
         ));
     };
-    if !(last_refusal < gave_up && gave_up < closed) {
+    let began = ms(lines[synced])?.saturating_sub(record.elapsed_ms);
+    let first_refusal = ms(refusals[0])?;
+    let closed_at = ms(lines[closed])?;
+    if !(first_refusal < began && began <= closed_at && closed < synced) {
         return Err(format!(
-            "the last refusal, the shutdown's give-up and the flush's close are at console \
-             lines {last_refusal}, {gave_up} and {closed}; the second stage did not begin while \
-             the flush was parked\n{tail}"
+            "the first refusal at {first_refusal} ms, the stop's start at {began} ms and the \
+             flush's close at {closed_at} ms (console line {closed}, the sync at {synced}): the \
+             stop did not begin while the flush was parked, or did not wait for it to close\n{tail}"
         ));
     }
 
     let _ = std::fs::remove_file(&image_path);
     eprintln!(
-        "  [fat] the stop's second stage met a flush parked over split FATs and let it close; \
-         the checker is silent:\n    {}\n    {}",
-        lines[gave_up], lines[closed],
+        "  [fat] the stop began at {began} ms over a flush parked on split FATs and let it close \
+         at {closed_at} ms; the checker is silent:\n    {}",
+        lines[closed],
     );
     Ok(())
 }

@@ -273,7 +273,7 @@ pub mod watch {
 /// What `sleeplock.rs` names of the scheduler: the right to park, and who is
 /// asking.
 ///
-/// Three items, and the arithmetic in [`TaskId`] is the whole of what is
+/// Four items, and the arithmetic in [`TaskId`] is the whole of what is
 /// restated here rather than compiled — `kernel/src/scheduler.rs` names the
 /// process table, the `toyos-sched` driver and half the kernel besides, so it
 /// cannot be a `#[path]` module the way `sync.rs` and `inbox/once.rs` are.
@@ -338,6 +338,12 @@ pub mod scheduler {
     pub fn current_task() -> Option<TaskId> {
         WHO.with(|who| who.get())
     }
+
+    /// Whether the scheduler exists. Always, in a model: the one lock taken
+    /// before it does is the kernel's boot console, on one CPU with no task.
+    pub fn started() -> bool {
+        true
+    }
 }
 
 /// The sleep lock, compiled a second time against loom's atomics. Its
@@ -360,3 +366,11 @@ pub mod capture_latch;
 
 #[path = "../../kernel/src/drivers/panic_console/access.rs"]
 pub mod capture_access;
+
+/// A program's log ring: not the kernel's, and here because it is the one
+/// other lock-free protocol on shared memory in the tree, and a model of it
+/// needs the same loom this crate already carries. `tests/log_ring.rs` drives
+/// its two protocols against loom's atomics; the file names nothing outside
+/// itself, so it needs no shim.
+#[path = "../../toyos/src/log/ring.rs"]
+pub mod log_ring;

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -2357,6 +2357,12 @@ pub struct BootOptions {
     /// Forward this host port to the guest's TCP [`toyos_logstream::PORT`],
     /// where `logd` serves the boot's log.
     pub log_port: Option<u16>,
+    /// The virtio console's output into a regular file the harness follows,
+    /// and its input through a FIFO, instead of QEMU's stdio. QEMU's
+    /// `virtconsole` drops what a full non-blocking stdout refuses, and a
+    /// regular file refuses no write: for a test whose verdict is a line after
+    /// megabytes of console (`issues/build/qemu-drops-console-output-the-harness-is-slow-to-read.md`).
+    pub console_file: bool,
     /// Put the host on the guest's own segment (`super::segment`): frames
     /// it writes reach the NIC as if off the cable, and it sees every frame the
     /// guest sends. Refused by name on a profile with no NIC.
@@ -2459,6 +2465,7 @@ impl Default for BootOptions {
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_port: None,
+            console_file: false,
             segment: None,
             ssh_port: None,
             wire_dump: None,
@@ -2561,7 +2568,7 @@ impl ConsoleStream {
 
 pub struct QemuInstance {
     child: Child,
-    stdin: BufWriter<ChildStdin>,
+    stdin: BufWriter<Box<dyn Write + Send>>,
     rx: Receiver<String>,
     console: ConsoleStream,
     _reader_thread: thread::JoinHandle<String>,
@@ -2891,38 +2898,33 @@ pub fn build_toyos_bins(crate_path: &Path) -> Vec<(String, Vec<u8>)> {
     toyos_build::build::build_toyos_bins(&repo, crate_path, quiet)
 }
 
-/// All kernel serial output goes through log!() which prepends "[kernel ...]".
-/// User program output goes through serial::write directly with no prefix.
+/// A kernel record's console line: `klogd` renders every one with this head,
+/// and nothing else writes it — a program's line reaches the console only
+/// through `logd`, under the program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
     line.starts_with("[kernel ")
 }
 
-/// File the userland half of one captured console line under `stdout`.
-///
-/// The kernel drains its own records straight to the backend rather than
-/// through any process's line buffer, so a record can follow bytes a program
-/// left unterminated and the host's splitter joins the two. Splitting the
-/// record back off is what has always let a `printf` with no newline reach a
-/// capture at all — and it is why `71_macro_empty_arg` passes most runs and
-/// not all: when the next writer is *userland* rather than the kernel there is
-/// no `[kernel ` to cut at. That half is `common::console`'s, on the boot
-/// config's own list of who else may speak; this is only the kernel's.
+/// A console line's text as its program wrote it: a program's line without
+/// the head `logd` gives it (`toyos_logstream::program_line`), and any other
+/// line as it is.
+pub fn user_text(line: &str) -> &str {
+    toyos_logstream::program_line(line).map_or(line, |said| said.text)
+}
+
+/// File the userland half of one captured console line under `stdout`: a
+/// program's text, and nothing of the kernel's. Every console line is one
+/// writer's whole — `klogd` is the wire's one writer — so a line is one or
+/// the other.
 fn push_user_half(line: &str, stdout: &mut String) {
     if is_kernel_line(line) {
         return;
     }
-    match line.find("[kernel ") {
-        Some(idx) => stdout.push_str(&line[..idx]),
-        None => stdout.push_str(line),
-    }
+    stdout.push_str(user_text(line));
     stdout.push('\n');
 }
 
-/// The in-guest runner's end-of-test marker. Matched anywhere in the line, not
-/// as a prefix: the virtio-console is shared and not line-atomic, so a daemon
-/// mid-`println!` pushes the marker into the middle of its line. Anchoring on
-/// the prefix made the harness miss the marker and time out — measured at 1 in
-/// 120 audio boots, where it looked like a guest hang rather than a lost line.
+/// The in-guest runner's end-of-test marker, which opens its line's text.
 const END_MARKER: &str = "===TEST_END ";
 
 impl QemuInstance {
@@ -3082,6 +3084,7 @@ impl QemuInstance {
         // let instances read each other's early boot.
         let uart_log = test_dir.join(format!("uart-{seq}.log"));
         let _ = fs::remove_file(&uart_log);
+        let console_file = options.console_file.then(|| ConsoleFile::of(&uart_log).made());
 
         let qemu = qemu_command(
             &boot_image,
@@ -3105,6 +3108,7 @@ impl QemuInstance {
                 screendump,
                 own_boot_image,
                 carried,
+                console_file,
             },
         )
     }
@@ -3371,7 +3375,7 @@ impl QemuInstance {
         &self.usb_images
     }
 
-    pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
+    pub fn stdin_mut(&mut self) -> &mut BufWriter<Box<dyn Write + Send>> {
         &mut self.stdin
     }
 
@@ -3626,8 +3630,7 @@ impl QemuInstance {
                                 push_user_half(early, &mut stdout);
                             }
                         }
-                    } else if let Some(at) = line.find(END_MARKER) {
-                        let rest = &line[at + END_MARKER.len()..];
+                    } else if let Some(rest) = user_text(&line).strip_prefix(END_MARKER) {
                         let rest = rest.split_once("===").map_or(rest, |(head, _)| head);
                         let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                         // **A marker naming another test is the previous one's**,
@@ -3642,30 +3645,6 @@ impl QemuInstance {
                             window.push_str(&line);
                             window.push('\n');
                             continue;
-                        }
-                        // Everything before the marker is what some console
-                        // writer had said without a newline when the runner
-                        // printed; it is still real output and the audio gate
-                        // reads soundd's stats out of it.
-                        //
-                        // **And it goes to `stdout` as well, because the writer
-                        // is usually the test's own child.** A program whose
-                        // output does not end in a newline — `printf("%d", …)`
-                        // and nothing after it — has its last bytes flushed by
-                        // `ConsoleObject::drop` with no terminator, so the
-                        // runner's `===TEST_END` lands on the same line the
-                        // host's splitter builds. Filing that head under
-                        // `serial` alone is how `71_macro_empty_arg` came back
-                        // with an *empty* capture against an expected `17` —
-                        // the half no filter over whole lines reaches, and
-                        // `common::console` has the rest of it. Nothing is
-                        // dropped either way; this only stops the capture from
-                        // losing its own tail.
-                        if at > 0 && in_test {
-                            let head = &line[..at];
-                            serial.push_str(head);
-                            serial.push('\n');
-                            push_user_half(head, &mut stdout);
                         }
                         let (exit_code, error) = if parts.len() > 1 {
                             if let Some(code_str) = parts[1].strip_prefix("exit=") {
@@ -4253,9 +4232,14 @@ fn qemu_command(
     options: &BootOptions,
 ) -> Command {
     let shape = options.profile.shape();
+    let console_file = options.console_file.then(|| ConsoleFile::of(uart_log));
     assert!(
         !options.mute || !shape.virtio.present(),
         "mute removes the only console a virtio profile has"
+    );
+    assert!(
+        console_file.is_none() || shape.virtio.present(),
+        "console_file is the virtio console's, and this profile has none"
     );
 
     let repo = compile::repo_root();
@@ -4620,7 +4604,10 @@ fn qemu_command(
             .arg("-serial")
             .arg(format!("file:{}", uart_log.display()))
             .arg("-chardev")
-            .arg("stdio,id=cs0,signal=off")
+            .arg(match &console_file {
+                Some(file) => format!("file,id=cs0,path={},input-path={}", file.out.display(), file.input.display()),
+                None => "stdio,id=cs0,signal=off".to_string(),
+            })
             .arg("-device")
             .arg(format!(
                 "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{platform}"
@@ -4663,6 +4650,67 @@ struct Files {
     screendump: PathBuf,
     own_boot_image: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
+    console_file: Option<ConsoleFile>,
+}
+
+/// [`BootOptions::console_file`]'s two paths, beside the boot's UART log: the
+/// file QEMU writes the console into, and the FIFO it reads its input from.
+struct ConsoleFile {
+    out: PathBuf,
+    input: PathBuf,
+}
+
+impl ConsoleFile {
+    fn of(uart_log: &Path) -> Self {
+        Self { out: uart_log.with_extension("console"), input: uart_log.with_extension("in") }
+    }
+
+    /// The two made: the file, so the follower can open it before QEMU does,
+    /// and the FIFO.
+    fn made(self) -> Self {
+        fs::File::create(&self.out).unwrap_or_else(|e| panic!("create {}: {e}", self.out.display()));
+        let _ = fs::remove_file(&self.input);
+        let c = std::ffi::CString::new(self.input.as_os_str().as_encoded_bytes()).expect("a path holds no NUL");
+        // SAFETY: a NUL-terminated path this call owns.
+        if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+            panic!("mkfifo {}: {}", self.input.display(), std::io::Error::last_os_error());
+        }
+        self
+    }
+}
+
+/// The console file read as a stream. At its end a read waits for more on the
+/// one event QEMU gives: its stdout, which it never writes with a file
+/// console, ending when it exits. A regular file has no readiness of its own
+/// on either host, so between those the file is asked again every
+/// [`Self::PERIOD_MS`].
+struct Followed {
+    file: fs::File,
+    exit: std::process::ChildStdout,
+    gone: bool,
+}
+
+impl Followed {
+    const PERIOD_MS: i32 = 2;
+}
+
+impl Read for Followed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        loop {
+            let n = self.file.read(buf)?;
+            if n > 0 || self.gone {
+                return Ok(n);
+            }
+            let mut fd = libc::pollfd { fd: self.exit.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: one `pollfd` this call owns, for the one entry it holds.
+            if unsafe { libc::poll(&mut fd, 1, Self::PERIOD_MS) } > 0 {
+                let mut stray = [0u8; 256];
+                // Its end, after which the file is read once more for what QEMU wrote last.
+                self.gone = self.exit.read(&mut stray)? == 0;
+            }
+        }
+    }
 }
 
 fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) -> QemuInstance {
@@ -4676,19 +4724,39 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         screendump,
         own_boot_image,
         carried,
+        console_file,
     } = files;
 
     qemu.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
+    // Read and write, so QEMU's read-only open finds a writer and does not block.
+    let input = console_file.as_ref().map(|f| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&f.input)
+            .unwrap_or_else(|e| panic!("open {}: {e}", f.input.display()))
+    });
     if VERBOSE.load(Ordering::Relaxed) {
         eprintln!("[qemu {seq}] Launching QEMU...");
     }
     let mut child = qemu.spawn().expect("Failed to launch QEMU");
 
-    let stdin = BufWriter::new(child.stdin.take().unwrap());
-    let stdout = child.stdout.take().unwrap();
+    let stdin: Box<dyn Write + Send> = match input {
+        Some(fifo) => Box::new(fifo),
+        None => Box::new(child.stdin.take().unwrap()),
+    };
+    let stdin = BufWriter::new(stdin);
+    let stdout: Box<dyn Read + Send> = match &console_file {
+        Some(f) => Box::new(Followed {
+            file: fs::File::open(&f.out).unwrap_or_else(|e| panic!("open {}: {e}", f.out.display())),
+            exit: child.stdout.take().unwrap(),
+            gone: false,
+        }),
+        None => Box::new(child.stdout.take().unwrap()),
+    };
 
     let (tx, rx) = mpsc::channel::<String>();
     let console = ConsoleStream::new();

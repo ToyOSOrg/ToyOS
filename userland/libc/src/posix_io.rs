@@ -58,6 +58,18 @@ fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
 
 fn fd(raw: i32) -> RawHandle { RawHandle(raw as u32) }
 
+/// A `write` to a descriptor. Stdout and stderr go through the SDK's stream
+/// sinks, which are a program's log ring when its slot holds one
+/// (`toyos::log::stdio`); every other descriptor is its handle.
+pub fn write_fd(raw: i32, buf: &[u8]) -> Result<usize, syscall::SyscallError> {
+    use toyos::log::stdio::{self, Stream};
+    match raw {
+        1 => stdio::write(Stream::Out, buf),
+        2 => stdio::write(Stream::Err, buf),
+        other => syscall::write(fd(other), buf),
+    }
+}
+
 pub fn c_str_to_bytes(s: *const u8) -> &'static [u8] {
     unsafe {
         let len = super::string::strlen(s);
@@ -105,7 +117,7 @@ pub unsafe extern "C" fn read(raw_fd: i32, buf: *mut u8, count: usize) -> isize 
 pub unsafe extern "C" fn write(raw_fd: i32, buf: *const u8, count: usize) -> isize {
     if buf.is_null() || count == 0 { return 0; }
     let slice = core::slice::from_raw_parts(buf, count);
-    match syscall::write(fd(raw_fd), slice) {
+    match write_fd(raw_fd, slice) {
         Ok(n) => n as isize,
         Err(e) => { set_errno(e); -1 }
     }
@@ -185,7 +197,15 @@ pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
         return set_errno(syscall::SyscallError::InvalidArgument);
     };
     match syscall::dup2(fd(old_fd), slot) {
-        Ok(f) => f.0 as i32,
+        Ok(f) => {
+            // The slot holds something else now, so the stream is asked again.
+            match slot {
+                1 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Out),
+                2 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Err),
+                _ => {}
+            }
+            f.0 as i32
+        }
         Err(e) => set_errno(e),
     }
 }

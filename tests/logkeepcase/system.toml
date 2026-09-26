@@ -1,0 +1,25 @@
+# A job list whose one job floods test-runner's log ring while `logd` reads
+# nothing of that ring: the ring fills, and test-runner's own line after the
+# job lands in the slots a child may not take. `logd` reads the ring again
+# once init says the machine stops. `log_ring_keeps_the_owners_slots` reads
+# the verdict off `/log`.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+service = true
+args = [
+    "--stall=test-runner",
+    "--stall-until=init: power: the machine stops, and logd makes the log whole first (Reboot)",
+]
+syscap = ["logread"]
+
+# `power` because the last job ends the machine, asking init.
+[programs.test-runner]
+receives = ["power"]
+args = ["test_rs_log_flood", "reboot"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"

@@ -21,7 +21,7 @@
 //! | [`inspect`] | what a reader of `inspect` is told, and the mix loop's side of it |
 //! | [`mix`] | the two loops — a device's, and the null sink's |
 //! | [`ring`] | the lock-free ring every hand-off to or from the mix thread is |
-//! | [`say`] | the one thread that writes soundd's output, so no other waits on it |
+//! | [`log`] | soundd's lines, and why the mix thread's never wait |
 //! | [`hda`], [`virtio`] | the two drivers |
 //!
 //! This file is the fourth thing: which of them the machine gets. A sound card
@@ -38,14 +38,11 @@ use toyos_mixer::{period_frames, ramp_frames};
 
 use std::sync::Arc;
 
-/// One line, handed to the one thread that writes soundd's output, and never a
-/// wait: [`say`] is why, and what happens to a line that finds no room.
+/// One line of soundd's, and never a wait: [`log`] is why.
 macro_rules! say {
-    ($($arg:tt)*) => {{
-        let mut line = format!($($arg)*);
-        line.push('\n');
-        $crate::say::said(line);
-    }};
+    ($($arg:tt)*) => {
+        $crate::log::said(format_args!($($arg)*))
+    };
 }
 
 mod backend;
@@ -55,8 +52,8 @@ mod control;
 mod hda;
 mod inspect;
 mod mix;
+mod log;
 mod ring;
-mod say;
 mod virtio;
 
 use backend::{Backend, HdaBackend, VirtioBackend};
@@ -79,7 +76,8 @@ const NULL_SINK_PERIOD_FRAMES: usize = 128;
 pub(crate) const NULL_SINK_BUFFERS: usize = 8;
 
 fn main() {
-    say::start(say::Voice::Mix);
+    // First: `main` becomes the mix thread, and its lines are a lane's from here.
+    log::claim_lane();
     let acceptor = endow::acceptor("soundd")
         .expect("the manifest declares this program serves `soundd`");
 
@@ -197,7 +195,6 @@ fn run_with_device(
     std::thread::Builder::new()
         .name("soundd-ctrl".into())
         .spawn(move || {
-            say::speak_as(say::Voice::Control);
             control_thread(
                 acceptor,
                 &cmd_ring2,
@@ -256,7 +253,6 @@ fn run_null_sink(acceptor: Acceptor) {
     std::thread::Builder::new()
         .name("soundd-ctrl".into())
         .spawn(move || {
-            say::speak_as(say::Voice::Control);
             control_thread(
                 acceptor,
                 &cmd_ring2,

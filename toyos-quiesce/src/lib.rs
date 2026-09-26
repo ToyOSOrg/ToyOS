@@ -6,12 +6,10 @@
 //! questions: *which* thread may still run, and *when* is it over. Both are
 //! here; `kernel/src/quiesce.rs` marks the threads and spends the time.
 //!
-//! **The log is the one carve-out, and it is a stage rather than an
-//! exemption.** The last word has to reach a file, and the only writer of that
-//! file is a userland process, so a stop that took every process before the
-//! last word was written would deadlock on the one process the last word has
-//! to reach. So it goes in two: everything but that process, then that process
-//! too.
+//! **Nothing is carved out.** The log's writer stops with every other thread:
+//! `/system/bin/init` has it flush before it asks for the stop, and what the
+//! kernel says after that goes to its console and its black box, never to a
+//! process it would have to keep running.
 //!
 //! [`Record`] is written by the kernel and read back off a stick by
 //! `src/metal.rs` and by the harness, so its wire form is rendered and parsed
@@ -29,41 +27,15 @@ pub struct ThreadId {
     pub tid: u32,
 }
 
-/// What the stop knows about one thread.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Thread {
-    pub id: ThreadId,
-    /// Whether this thread's process holds the machine's log capability.
-    pub holds_the_log: bool,
-}
-
-/// How far the stop has gone.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Stage {
-    /// Every userland thread but those of a process holding the log
-    /// capability.
-    ExceptLog,
-    /// Those too. Nothing in userland runs again.
-    All,
-}
-
-impl Stage {
-    /// Whether `thread` must stop at its next safe point.
-    ///
-    /// **`caller` is never stopped**: it is the thread running the stop, and
-    /// it has the rest of the shutdown to perform. Its own process is not
-    /// exempt — a sibling thread of the process that asked for the reboot
-    /// stops like any other, because what the reset must outlast is one
-    /// thread's remaining work and not one program's.
-    pub fn must_stop(self, thread: Thread, caller: ThreadId) -> bool {
-        if thread.id == caller {
-            return false;
-        }
-        match self {
-            Stage::ExceptLog => !thread.holds_the_log,
-            Stage::All => true,
-        }
-    }
+/// Whether `thread` must stop at its next safe point.
+///
+/// **`caller` is never stopped**: it is the thread running the stop, and it has
+/// the rest of the shutdown to perform. Its own process is not exempt — a
+/// sibling thread of the process that asked for the reboot stops like any
+/// other, because what the reset must outlast is one thread's remaining work
+/// and not one program's.
+pub fn must_stop(thread: ThreadId, caller: ThreadId) -> bool {
+    thread != caller
 }
 
 /// What one sweep of the machine's userland threads found.
@@ -215,59 +187,25 @@ mod tests {
     use super::*;
 
     const CALLER: ThreadId = ThreadId { pid: 10, tid: 0 };
-    const LOGD: u32 = 2;
 
     fn id(pid: u32, tid: u32) -> ThreadId {
         ThreadId { pid, tid }
     }
 
-    fn thread(pid: u32, tid: u32) -> Thread {
-        Thread { id: id(pid, tid), holds_the_log: false }
-    }
-
-    fn log_thread(pid: u32, tid: u32) -> Thread {
-        Thread { id: id(pid, tid), holds_the_log: true }
-    }
-
     #[test]
     fn the_caller_is_never_stopped_and_its_siblings_always_are() {
-        for stage in [Stage::ExceptLog, Stage::All] {
-            assert!(!stage.must_stop(thread(10, 0), CALLER), "{stage:?}");
-            assert!(
-                stage.must_stop(thread(10, 1), CALLER),
-                "a sibling thread of the caller's process is not the caller: {stage:?}",
-            );
+        assert!(!must_stop(id(10, 0), CALLER));
+        assert!(must_stop(id(10, 1), CALLER), "a sibling thread of the caller's process is not the caller");
+    }
+
+    /// **The log's writer is not carved out**: `logd`'s threads stop like any
+    /// other process's, whatever it holds.
+    #[test]
+    fn every_other_thread_stops_the_log_writer_included() {
+        const LOGD: u32 = 2;
+        for tid in 0..4 {
+            assert!(must_stop(id(LOGD, tid), CALLER));
         }
-    }
-
-    #[test]
-    fn the_log_is_carved_out_of_the_first_stage_and_not_the_second() {
-        assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 0), CALLER));
-        assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 3), CALLER), "every thread of it");
-        assert!(Stage::ExceptLog.must_stop(thread(LOGD + 1, 0), CALLER));
-        assert!(Stage::All.must_stop(log_thread(LOGD, 0), CALLER), "and then it too");
-    }
-
-    /// **A process the capability was never moved into is not the carve-out**,
-    /// however much of the log it has seen: what ends the shutdown's wait is
-    /// making a record durable, and only a holder can do it.
-    #[test]
-    fn a_process_without_the_capability_stops_in_the_first_stage() {
-        assert!(Stage::ExceptLog.must_stop(thread(LOGD + 4, 0), CALLER));
-        assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 0), CALLER));
-    }
-
-    /// The caller could itself be a process the log is owed to — `logd` may
-    /// hold `Rights::POWER` on some boot config — and neither rule may cancel
-    /// the other.
-    #[test]
-    fn the_caller_being_the_log_writer_stops_neither_rule_working() {
-        assert!(!Stage::ExceptLog.must_stop(log_thread(LOGD, 0), id(LOGD, 0)));
-        assert!(
-            !Stage::ExceptLog.must_stop(log_thread(LOGD, 7), id(LOGD, 0)),
-            "a sibling of the caller is still carved out while the stage names it",
-        );
-        assert!(Stage::All.must_stop(log_thread(LOGD, 7), id(LOGD, 0)), "and not after");
     }
 
     #[test]

@@ -26,8 +26,8 @@ The I219 bring-up's author, and after it the network track.
 
 ## What would close it
 
-Userland's console reaching the stick
-(`issues/diagnostics/the-log-staged-three-things-it-never-built.md` §1), after
+Userland's lines reaching the stick, which they do through each program's log
+ring (`issues/kernel/logging-records-from-every-producer-and-a-kernel-that-waits-on-nobody.md`), after
 which the shipping `lancase` arm carries netd's own lines about the lease and
 the probe answers a question already answered. Then the arm is:
 `tests/lanleasecase/system.toml`, its row in `src/build.rs`'s `ALL_CONFIGS`,

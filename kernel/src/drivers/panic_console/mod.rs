@@ -88,7 +88,7 @@ struct FbCell(UnsafeCell<Fb>);
 // under the `SEQ` seqlock, and `PENDING` has one writer at a time.
 unsafe impl Sync for FbCell {}
 
-/// A screenful-and-then-some of rendered log; which lines came from an `alert!` is a [`Level`] flag, never inferred from the text.
+/// A screenful-and-then-some of rendered log; which lines are red is the record's [`log::Severity`], never inferred from the text.
 struct Rendered {
     text: [u8; SNAPSHOT_CAP],
     /// One bit per line, counted back from the last — the buffer fills from its end.
@@ -157,7 +157,7 @@ impl log::read::RecordSink for Backfill<'_> {
 
         // Counted in newlines, not records: `paint` counts newlines, and a multi-line record (every panic) is more than one row.
         let lines = out.iter().filter(|&&byte| byte == b'\n').count();
-        if record.level() == Some(log::Level::Alert) {
+        if record.severity().is_some_and(|s| s >= log::Severity::Error) {
             for line in self.into.lines..self.into.lines + lines {
                 if let Some(word) = self.into.alert.get_mut(line / 64) {
                     *word |= 1 << (line % 64);
@@ -574,9 +574,8 @@ pub fn discard_capture() {
 
 /// Re-freeze the captured report so a line written *after* [`capture`] is
 /// painted; only refreshes a capture that already exists — [`live_tail`] already reads live otherwise.
-/// Both callers are in `apic`, and both are the machine with no serial
-/// fallback: `wait_for_log_file` when its drain budget expires, and
-/// `halt_all_cpus` for the arm line, each after `capture` already ran.
+/// Its one caller is `apic::halt_all_cpus` on a machine with no serial
+/// fallback, for the reboot bound's arm line, after `capture` already ran.
 pub fn refresh_capture() {
     capture_into(true);
 }
@@ -1217,7 +1216,7 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch, stop: impl Fn() -> bo
         want.fill(Cell::GROUND);
         let text_row = if r < draw { row_start.get(r).copied() } else { None };
         if let Some(row) = text_row {
-            // Colour comes from the record's `Level`, so it holds for every display row a wrapped line occupies.
+            // Colour comes from the record's severity, so it holds for every display row a wrapped line occupies.
             let alerted = view.is_alert(row.line as usize);
             for (off, cell) in (row.at as usize..).zip(want.iter_mut()) {
                 let Some(&byte) = text.get(off) else { break };

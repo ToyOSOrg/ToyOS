@@ -35,33 +35,38 @@ const STATS_INTERVAL_NANOS: u64 = 2_000_000_000;
 /// it detects.
 const IDLE_WAKES_SAID: u32 = 8;
 
-/// One reporting window, one line, ending in the newline `say::said` takes: the
-/// mix thread formats it once and hands it over as it is.
+/// One reporting window, and the line that says it: formatted where it is
+/// said, on the saying thread's stack, so the mix thread says it with no
+/// allocation.
 ///
 /// The counters are `toyos_mixer::MixStats`, and what they mean is documented
 /// there beside the decision that fills them; this is the line's shape, which
 /// is soundd's and stays here. `#106`'s status tool reads one shape, so the null
 /// sink prints the same line.
-fn report(stats: &MixStats, clients: usize) -> String {
-    format!("soundd: wakes={} completions={} submitted={} underruns={} drains={} max_wake_lat_us={} max_batch={} clients={} deferred={} starve_max={} worst_irq_late_us={} worst_pickup_us={} worst_empty={} worst_batch={} late_wakes={}\n",
-        stats.wakes, stats.completions, stats.submitted, stats.underruns, stats.drains,
-        stats.max_wake_lat_ns / 1_000, stats.max_batch, clients, stats.deferred,
-        stats.starve_max, stats.worst.irq_late_ns / 1_000, stats.worst.pickup_ns / 1_000,
-        stats.worst.empty, stats.worst.batch, stats.late_wakes)
+struct Window {
+    stats: MixStats,
+    clients: usize,
+}
+
+impl core::fmt::Display for Window {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (stats, clients) = (&self.stats, self.clients);
+        write!(f, "soundd: wakes={} completions={} submitted={} underruns={} drains={} max_wake_lat_us={} max_batch={} clients={} deferred={} starve_max={} worst_irq_late_us={} worst_pickup_us={} worst_empty={} worst_batch={} late_wakes={}",
+            stats.wakes, stats.completions, stats.submitted, stats.underruns, stats.drains,
+            stats.max_wake_lat_ns / 1_000, stats.max_batch, clients, stats.deferred,
+            stats.starve_max, stats.worst.irq_late_ns / 1_000, stats.worst.pickup_ns / 1_000,
+            stats.worst.empty, stats.worst.batch, stats.late_wakes)
+    }
 }
 
 /// Close one reporting window: add it to the running totals `inspect` reads,
-/// start the next, and return the line that says it. The only place a reported
-/// window is reset, so the totals are exactly the sum of what the console said.
-///
-/// The caller says the line because `say::said` needs a voice with a running
-/// writer, which a host test's thread is not.
+/// start the next, and return the window for its caller to say. The only place
+/// a reported window is reset, so the totals are exactly the sum of what the
+/// console said.
 #[must_use = "an unsaid window leaves the totals ahead of the console"]
-fn flush(stats: &mut MixStats, totals: &mut Totals, clients: usize) -> String {
-    let line = report(stats, clients);
+fn flush(stats: &mut MixStats, totals: &mut Totals, clients: usize) -> Window {
     totals.fold(stats);
-    *stats = MixStats::default();
-    line
+    Window { stats: core::mem::take(stats), clients }
 }
 
 /// Signal every client before the wait so priority inheritance can fill their
@@ -203,7 +208,7 @@ pub(crate) fn mix_thread(
     let mut started = false;
     // Wall clock at the last instant the pipeline was known full. Re-stamped
     // after every refill; read only by the drain count site.
-    let mut pipeline_filled_ns = syscall::clock_nanos();
+    let mut pipeline_filled_ns = toyos_abi::clock::nanos_since_boot();
     // Wall clock at which everything submitted will have finished playing. The
     // device plays one period per `period_nanos` and cannot play faster, so
     // this is the only honest measure of how much audio is still on the wire.
@@ -231,7 +236,7 @@ pub(crate) fn mix_thread(
     let max_client_frames = scratch_frames(device_period_frames, device_sample_rate as usize);
     let mut decode_buf = vec![0.0f32; max_client_frames * 2];
     let mut convert_buf = vec![0.0f32; max_client_frames * 2];
-    let mut dither_rng = Xorshift32::new(syscall::clock_nanos() as u32);
+    let mut dither_rng = Xorshift32::new(toyos_abi::clock::nanos_since_boot() as u32);
     let mut dll = Dll::new(period_nanos as f64);
     let mut records = [AudioCompletionRecord { mask: 0, _pad: 0, timestamp_nanos: 0 }; 16];
 
@@ -243,7 +248,7 @@ pub(crate) fn mix_thread(
     let mut deferred_last: u32 = 0;
     let mut stats = MixStats::default();
     let mut totals = Totals::default();
-    let mut next_stats_ns = syscall::clock_nanos() + STATS_INTERVAL_NANOS;
+    let mut next_stats_ns = toyos_abi::clock::nanos_since_boot() + STATS_INTERVAL_NANOS;
     let mut idle_wakes: u32 = 0;
 
     // Exactly one emission of one of these markers is gate-asserted: the
@@ -277,7 +282,7 @@ pub(crate) fn mix_thread(
             match dll.t_estimated {
                 None => period_nanos,
                 Some(t_est) => {
-                    let now = syscall::clock_nanos() as f64;
+                    let now = toyos_abi::clock::nanos_since_boot() as f64;
                     let target = if t_est > now {
                         t_est
                     } else {
@@ -316,7 +321,7 @@ pub(crate) fn mix_thread(
 
         if !was_streaming && !streams.is_empty() {
             stats = MixStats::default();
-            next_stats_ns = syscall::clock_nanos() + STATS_INTERVAL_NANOS;
+            next_stats_ns = toyos_abi::clock::nanos_since_boot() + STATS_INTERVAL_NANOS;
             idle_wakes = 0;
         }
 
@@ -325,7 +330,7 @@ pub(crate) fn mix_thread(
             // Read before the record loop, because it is what a *pickup* is
             // measured to: the instant soundd first held the record, not the
             // instant it finished acting on a batch of them.
-            let seen_at = syscall::clock_nanos();
+            let seen_at = toyos_abi::clock::nanos_since_boot();
             let mut wake_completions = 0u32;
             for rec in &records[..n_records] {
                 let n = rec.mask.count_ones();
@@ -429,7 +434,7 @@ pub(crate) fn mix_thread(
         // deferral is soundd's own restraint, not a stall, so it suppresses the
         // DLL reset too.
         if unplayed == 0 && deferred_last == 0 {
-            let since_filled = syscall::clock_nanos().saturating_sub(pipeline_filled_ns);
+            let since_filled = toyos_abi::clock::nanos_since_boot().saturating_sub(pipeline_filled_ns);
             if was_streaming && since_filled >= min_drain_nanos {
                 stats.drains += 1;
             }
@@ -508,7 +513,7 @@ pub(crate) fn mix_thread(
             // for a buffer it still holds. It buys nothing even when soundd is
             // in time: the client's period lands one period later than the
             // engine wanted it either way.
-            let now = syscall::clock_nanos();
+            let now = toyos_abi::clock::nanos_since_boot();
             let mid_refill = pipeline == Pipeline::Queue
                 && refill_floor_nanos.is_some()
                 && streams.iter().any(|s| s.is_streaming() && s.slot_reader.peek().is_none());
@@ -569,7 +574,7 @@ pub(crate) fn mix_thread(
         // Not re-stamped by a cycle that only deferred: no audio was added, so
         // the pipeline's remaining depth still dates from the previous fill.
         if refilled {
-            pipeline_filled_ns = syscall::clock_nanos();
+            pipeline_filled_ns = toyos_abi::clock::nanos_since_boot();
         }
 
         retain_active(&mut streams);
@@ -617,13 +622,13 @@ pub(crate) fn mix_thread(
         // Flushing on the last disconnect keeps the tail between the final
         // periodic window and the client leaving in the record — for a stream
         // shorter than two windows that tail is most of it.
-        let now_ns = syscall::clock_nanos();
+        let now_ns = toyos_abi::clock::nanos_since_boot();
         if was_streaming && streams.is_empty() {
-            crate::say::said(flush(&mut stats, &mut totals, 0));
+            say!("{}", flush(&mut stats, &mut totals, 0));
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         } else if now_ns >= next_stats_ns {
             if !streams.is_empty() {
-                crate::say::said(flush(&mut stats, &mut totals, streams.len()));
+                say!("{}", flush(&mut stats, &mut totals, streams.len()));
             }
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         }
@@ -674,12 +679,12 @@ pub(crate) fn null_sink_thread(
 
     let mut stats = MixStats::default();
     let mut totals = Totals::default();
-    let mut next_stats_ns = syscall::clock_nanos() + STATS_INTERVAL_NANOS;
+    let mut next_stats_ns = toyos_abi::clock::nanos_since_boot() + STATS_INTERVAL_NANOS;
     let mut idle_wakes: u32 = 0;
     // The virtual playout grid: the wall-clock instant the next period is due.
     // Meaningful only while streaming; re-anchored to now+one period when the
     // first client of a run connects.
-    let mut next_period_ns = syscall::clock_nanos();
+    let mut next_period_ns = toyos_abi::clock::nanos_since_boot();
 
     say!("soundd: null sink idle");
 
@@ -694,7 +699,7 @@ pub(crate) fn null_sink_thread(
         let timeout = if streams.is_empty() {
             u64::MAX
         } else {
-            next_period_ns.saturating_sub(syscall::clock_nanos()).max(1)
+            next_period_ns.saturating_sub(toyos_abi::clock::nanos_since_boot()).max(1)
         };
 
         poller.watch_raw(cmd_pipe_read, READABLE, TOKEN_CMD);
@@ -717,7 +722,7 @@ pub(crate) fn null_sink_thread(
         // Start the grid when the first client of a run connects, and reset the
         // reporting window so no idle stretch dilutes it.
         if !was_streaming && !streams.is_empty() {
-            let now = syscall::clock_nanos();
+            let now = toyos_abi::clock::nanos_since_boot();
             next_period_ns = now + period_nanos;
             stats = MixStats::default();
             next_stats_ns = now + STATS_INTERVAL_NANOS;
@@ -735,7 +740,7 @@ pub(crate) fn null_sink_thread(
         // heard it play.
         let mut batch = 0u32;
         while !streams.is_empty() && batch < NULL_SINK_BUFFERS as u32 {
-            let now = syscall::clock_nanos();
+            let now = toyos_abi::clock::nanos_since_boot();
             if now < next_period_ns {
                 break;
             }
@@ -768,7 +773,7 @@ pub(crate) fn null_sink_thread(
             batch += 1;
         }
         if batch == NULL_SINK_BUFFERS as u32 {
-            next_period_ns = syscall::clock_nanos() + period_nanos;
+            next_period_ns = toyos_abi::clock::nanos_since_boot() + period_nanos;
         }
         stats.max_batch = stats.max_batch.max(batch);
 
@@ -788,14 +793,14 @@ pub(crate) fn null_sink_thread(
         // the record, and every STATS_INTERVAL_NANOS while streaming — the same
         // cadence and format mix_thread uses, so a discarded stream is not
         // silent about being discarded (#106's status tool reads one shape).
-        let now_ns = syscall::clock_nanos();
+        let now_ns = toyos_abi::clock::nanos_since_boot();
         if was_streaming && streams.is_empty() {
-            crate::say::said(flush(&mut stats, &mut totals, 0));
+            say!("{}", flush(&mut stats, &mut totals, 0));
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
             say!("soundd: null sink idle");
         } else if now_ns >= next_stats_ns {
             if !streams.is_empty() {
-                crate::say::said(flush(&mut stats, &mut totals, streams.len()));
+                say!("{}", flush(&mut stats, &mut totals, streams.len()));
             }
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         }
@@ -831,17 +836,17 @@ mod tests {
         let mut totals = Totals::default();
 
         let mut stats = window(10, 1, 2, 3);
-        let first = flush(&mut stats, &mut totals, 0);
+        let first = flush(&mut stats, &mut totals, 0).to_string();
         stats.submitted += 20;
         stats.underruns += 4;
         stats.drains += 5;
         stats.late_wakes += 6;
-        let second = flush(&mut stats, &mut totals, 0);
+        let second = flush(&mut stats, &mut totals, 0).to_string();
         assert!(first.contains(" submitted=10 underruns=1 drains=2 "), "{first}");
         assert!(second.contains(" submitted=20 underruns=4 drains=5 "), "{second}");
-        // One line each, ending in the newline `say::said` is handed as it is.
-        assert!(first.ends_with(" late_wakes=3\n") && first.matches('\n').count() == 1, "{first:?}");
-        assert!(second.ends_with(" late_wakes=6\n") && second.matches('\n').count() == 1, "{second:?}");
+        // One line each: `say!` ends it.
+        assert!(first.ends_with(" late_wakes=3") && !first.contains('\n'), "{first:?}");
+        assert!(second.ends_with(" late_wakes=6") && !second.contains('\n'), "{second:?}");
 
         let open = window(7, 8, 9, 10);
         let published = Published::new(State::Running);

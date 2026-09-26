@@ -81,7 +81,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use toyos_abi::syscall::{self, clock_nanos};
+use toyos_abi::clock::nanos_since_boot as clock_nanos;
+use toyos_abi::syscall;
 
 /// The widths measured. 64 is the storm the simulator's case raises, and the
 /// powers of two below it are what makes the shape readable rather than a

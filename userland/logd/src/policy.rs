@@ -35,9 +35,8 @@
 //! that would block retries inside its own bounded run, and a round that
 //! succeeded slowly is **degraded, not dead** — the records are durable, the
 //! volume is kept, and the console says so once. While a slow round is in
-//! flight nothing is published and nothing is dropped: the records it covers
-//! are in the file, `LOG_DURABLE_NS` has not moved past them, and the reader
-//! parks on the ring — buffered, not yet durable, said in one word.
+//! flight nothing is dropped: the lines it covers are in the file and not yet
+//! durable — buffered, said in one word.
 //!
 //! # Why only the flush retries
 //!

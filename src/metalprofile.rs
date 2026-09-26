@@ -23,8 +23,8 @@ pub const PATH: &str = "tests/metal-profile.toml";
 
 /// What the boot around a job list costs it, in milliseconds.
 ///
-/// The runner's bound is measured from boot rather than from its first job
-/// (`userland/test-runner`'s deadline reads `clock_nanos`), so everything
+/// The runner's bound is measured from boot rather than from its first job,
+/// so everything
 /// before the list comes off the bound before the members get any of it — and
 /// the `reboot` job the image derivation appends comes off the other end.
 ///

@@ -18,7 +18,7 @@
 #![cfg(not(feature = "loom"))]
 
 use kernel_loom::log_shard::Shard;
-use toyos_abi::log::{LogRecord, Level, FLAG_EARLY, MAX_RECORD_MESSAGE};
+use toyos_abi::log::{LogRecord, Severity, FLAG_EARLY, MAX_RECORD_MESSAGE};
 
 /// A record whose every field is distinct, so a swap between two of them fails
 /// rather than being absorbed.
@@ -31,7 +31,7 @@ fn record(seq: u64, len: usize) -> LogRecord {
     r.cpu = 0x1234;
     r.len = len as u16;
     r.elided = 0x5678;
-    r.level = Level::Alert as u8;
+    r.severity = Severity::Alert as u8;
     r.flags = FLAG_EARLY;
     for (i, b) in r.msg[..len].iter_mut().enumerate() {
         *b = b'a' + (i % 26) as u8;
@@ -57,7 +57,7 @@ fn round_trip(len: usize) {
     assert_eq!(got.cpu, want.cpu, "cpu");
     assert_eq!(got.len, want.len, "len");
     assert_eq!(got.elided, want.elided, "elided");
-    assert_eq!(got.level, want.level, "level");
+    assert_eq!(got.severity, want.severity, "severity");
     assert_eq!(got.flags, want.flags, "flags");
     assert_eq!(got.message(), want.message(), "the message");
     // And the key the merge orders by is the one the copy carries, read through

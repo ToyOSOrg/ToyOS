@@ -11,8 +11,7 @@ sending anything to the controller; its doc says "writes are synchronous, so
 there is nothing to flush". A write command's completion says the controller
 took the data, not that it is on the medium: a controller that reports a
 volatile write cache (the `VWC` field of Identify Controller) may hold
-completed writes until a Flush command. So on such a disk `SYS_FSYNC` — a file's, logd's
-`LOG_DURABLE_NS`, and a partition claim's — says durable about writes a power
+completed writes until a Flush command. So on such a disk `SYS_FSYNC` — a file's and a partition claim's — says durable about writes a power
 cut can still lose.
 
 QEMU's NVMe completes writes against its backing and every guest test passes

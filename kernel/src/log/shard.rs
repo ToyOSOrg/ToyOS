@@ -53,7 +53,7 @@ fn header(record: &LogRecord, len: u16) -> [u64; HEADER_WORDS] {
         record.cpu as u64
             | (len as u64) << 16
             | (record.elided as u64) << 32
-            | (record.level as u64) << 48
+            | (record.severity as u64) << 48
             | (record.flags as u64) << 56,
     ]
 }
@@ -239,7 +239,7 @@ impl Shard {
             cpu: shape as u16,
             len,
             elided: (shape >> 32) as u16,
-            level: (shape >> 48) as u8,
+            severity: (shape >> 48) as u8,
             flags: (shape >> 56) as u8,
             msg: [0; MAX_RECORD_MESSAGE],
         };

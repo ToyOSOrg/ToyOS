@@ -73,6 +73,7 @@ pub fn init(hpet_base: u64) {
 
     TSC_BOOT.store(tsc_start, Relaxed);
     TSC_PERIOD_FS.store(tsc_period_fs, Relaxed);
+    publish_page(tsc_start, tsc_period_fs);
 
     let tsc_freq_mhz = 1_000_000_000_000_000u64 / tsc_period_fs / 1_000_000;
     log!("TSC: {}MHz (period={}fs, calibrated over {}ms)", tsc_freq_mhz, tsc_period_fs, calibration_ns / 1_000_000);
@@ -98,6 +99,49 @@ pub fn init(hpet_base: u64) {
              stating no frequency, so nothing independent confirms it"
         ),
     }
+}
+
+/// The clock page's frame, or 0 before [`init`]: the one every address space
+/// maps read-only at [`toyos_abi::clock::CLOCK_PAGE`].
+static PAGE_PHYS: AtomicU64 = AtomicU64::new(0);
+
+/// Lay the calibration out on a frame of its own, for every process to read
+/// the clock this module reads without asking it. Laid out before any address
+/// space can map it, and never written again.
+fn publish_page(counter_at_boot: u64, period_fs: u64) {
+    use toyos_abi::clock::{ClockPage, CLOCK_MAGIC};
+    let bytes = crate::mm::PAGE_2M as usize;
+    // Held for the machine's life: every process maps it.
+    let frame = crate::process::PageAlloc::new(bytes, crate::mm::pmm::Category::SharedMemory)
+        .expect("clock: no 2 MiB frame for the clock page");
+    // SAFETY: a fresh allocation this function owns, `bytes` long, that no
+    // address space maps yet; zeroed whole because all of it is mapped, and
+    // the page is written through raw pointers because it becomes a user
+    // mapping.
+    unsafe {
+        core::ptr::write_bytes(frame.ptr(), 0, bytes);
+        core::ptr::write_volatile(
+            frame.ptr() as *mut ClockPage,
+            ClockPage { magic: CLOCK_MAGIC, counter_at_boot, period_fs },
+        );
+    }
+    PAGE_PHYS.store(frame.phys(), Release);
+    core::mem::forget(frame);
+}
+
+/// Map the clock page into a fresh address space, read-only, at the address
+/// the ABI names. A region of its own, so no `mmap` can land on it and a
+/// fault in it is refused rather than filled.
+pub fn map_page(space: &mut crate::mm::paging::AddressSpace) {
+    use crate::mm::paging::{CachePolicy, Prot};
+    let phys = PAGE_PHYS.load(Acquire);
+    assert!(phys != 0, "clock: an address space was built before the clock page");
+    let at = crate::UserAddr::new(toyos_abi::clock::CLOCK_PAGE);
+    space.map_range(at, phys, crate::mm::PAGE_2M, Prot::Read, CachePolicy::DeferToMtrr);
+    space.insert_region(
+        at,
+        crate::vma::Region { size: crate::mm::PAGE_2M, kind: crate::vma::RegionKind::Mapped },
+    );
 }
 
 /// Whether [`nanos_since_boot`] measures anything yet; false before [`init`].

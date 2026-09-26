@@ -277,8 +277,9 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
         KObjectRef::PipeWrite(w) => pipe::write_watch(w.id()).map(WatchRef::Shared),
         KObjectRef::Connection(c) => pipe::write_watch(c.tx()).map(WatchRef::Shared),
+        KObjectRef::Console(_) => Some(WatchRef::Static(&crate::log::console::SPACE)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
-        | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
@@ -527,11 +528,9 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
         }),
         KObjectRef::PipeWrite(w) => write_pipe(w.id(), buf),
         KObjectRef::Connection(c) => write_pipe(c.tx(), buf),
-        KObjectRef::Console(c) => {
-            // The whole write is always accepted: a short count would make a caller re-send bytes.
-            c.write(buf);
-            Some(buf.len() as u64)
-        }
+        // The whole lines `klogd`'s queue has room for, and a trailing partial one:
+        // a short count is a writer ahead of the console, told so.
+        KObjectRef::Console(c) => Some(c.write(buf) as u64),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
@@ -588,7 +587,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         KObjectRef::Console(_) => plain(FileType::Serial),
         KObjectRef::Acceptor(_) => plain(FileType::Pipe),
         KObjectRef::SharedMem(m) => Stat {
-            file_type: FileType::Unknown as u64,
+            file_type: FileType::SharedMemory as u64,
             size: m.size(),
             mtime: 0,
         },
@@ -609,7 +608,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
 
 /// `SYS_FSYNC`: the file's bytes on the device, and the device told to commit them.
 ///
-/// The device-commit step is not optional: `/system/bin/logd` publishes `LOG_DURABLE_NS` off `fsync`'s result, so a flush that stopped at the page cache would make that durability contract a claim about nothing.
+/// The device-commit step is not optional: `/system/bin/logd` calls a line durable off `fsync`'s result, so a flush that stopped at the page cache would make that a claim about nothing.
 pub fn fsync(object: &KObjectRef) -> u64 {
     let file = match object {
         KObjectRef::File(file) => file,
@@ -632,7 +631,7 @@ pub fn fsync(object: &KObjectRef) -> u64 {
         let mut vfs = crate::vfs::lock();
         // Tags the flush as `SYS_FSYNC`'s, for `quiesce-fsync-refuse` to stage on this path.
         #[cfg(feature = "boot-actuators")]
-        crate::fat32_adapter::enter_fsync_flush();
+        crate::fat32_adapter::enter_fsync_flush(&path);
         let done = vfs
             .flush_file(&path, file_id, mtime)
             .and_then(|()| vfs.sync_for_path(&path));
@@ -821,7 +820,8 @@ pub fn has_space(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::PipeWrite(w) => pipe::has_space(w.id()),
         KObjectRef::Connection(c) => pipe::has_space(c.tx()),
-        KObjectRef::File(_) | KObjectRef::Console(_) => true,
+        KObjectRef::File(_) => true,
+        KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)

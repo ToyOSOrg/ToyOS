@@ -296,15 +296,16 @@ fn a_right_the_capability_lacks_is_a_word() {
     );
 
     // **Narrowed and not the estate's own cap, because this estate does carry
-    // `POWER`.** `run shutdown` is how a dozen host-side gates end their guest,
-    // so `tests/testcases` names `power` on the test-runner row and every
-    // binary it spawns holds a duplicate — including this one. The subject is a
+    // `POWER`.** `tests/testcases` names `power` on the test-runner row so that
+    // this arm has a right to narrow away, and every binary it spawns holds a
+    // duplicate — including this one. The subject is a
     // capability that resolves and lacks the bit, which is what `toothless` is.
     //
     // There is no arm for the unnarrowed cap here, and there cannot be: the
-    // call that proves the estate *does* hold `POWER` does not come back, and
-    // `run shutdown` at the end of a dozen host-side gates is that proof —
-    // `machine_reboot` is the same proof for the reboot half.
+    // call that proves a capability holding `POWER` stops the machine does not
+    // come back, and init's, asked by `run shutdown` at the end of a dozen
+    // host-side gates, is that proof — `machine_reboot` is the same proof for
+    // the reboot half.
     assert_eq!(
         toothless.shutdown(),
         SyscallError::PermissionDenied,

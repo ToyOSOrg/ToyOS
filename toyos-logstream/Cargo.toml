@@ -5,3 +5,5 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# A record's severity, which a line names.
+toyos-abi = { path = "../toyos-abi" }

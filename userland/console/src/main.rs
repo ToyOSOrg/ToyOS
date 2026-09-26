@@ -78,7 +78,7 @@ struct Log {
 impl Log {
     /// Ask `logd`: one request, and a blocking read of its one answer.
     fn subscribe() -> Result<Self, String> {
-        let asked_ms = toyos_abi::syscall::clock_nanos() / 1_000_000;
+        let asked_ms = toyos_abi::clock::nanos_since_boot() / 1_000_000;
         let conn = endow::service(SERVICE).map_err(|e| format!("no `{SERVICE}` service: {e:?}"))?;
         conn.signal(READ).map_err(|e| format!("logd would not take the request: {e:?}"))?;
         let header = conn.recv_header().map_err(|e| format!("logd did not answer: {e:?}"))?;

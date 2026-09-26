@@ -147,6 +147,11 @@ pub(crate) fn spin_for(ns: u64) {
     }
 }
 
+/// Whether [`init`] has run: before it there is no task, so nothing can wait.
+pub fn started() -> bool {
+    !CPUS.load(Ordering::Acquire).is_null()
+}
+
 pub fn cpus() -> &'static CpuHandles<KMsg> {
     let ptr = CPUS.load(Ordering::Acquire);
     assert!(!ptr.is_null(), "scheduler used before sched::init");

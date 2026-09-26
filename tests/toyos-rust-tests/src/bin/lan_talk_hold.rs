@@ -16,6 +16,6 @@ use std::time::Duration;
 const UNTIL_MS: u64 = toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10;
 
 fn main() {
-    let since_boot = toyos_abi::syscall::clock_nanos() / 1_000_000;
+    let since_boot = toyos_abi::clock::nanos_since_boot() / 1_000_000;
     sleep(Duration::from_millis(UNTIL_MS.saturating_sub(since_boot)));
 }

@@ -68,6 +68,7 @@ from_handle! {
     Namespace => Namespace,
     SysCap => SysCap,
     Device => Device,
+    crate::Console => crate::Console,
     crate::Keyboard => |h| crate::Keyboard(Device(h)),
     crate::Mouse => |h| crate::Mouse(Device(h)),
     crate::FramebufferDev => |h| crate::FramebufferDev(Device(h)),

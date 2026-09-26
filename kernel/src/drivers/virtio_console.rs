@@ -8,7 +8,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::pci::PciDevice;
-use super::virtio::{BufDir, DescSlot, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
+use super::virtio::{wait_used, BufDir, DescSlot, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
 use super::DmaPool;
 use crate::log;
 use crate::mm::{Dma, Unaligned};
@@ -17,7 +17,7 @@ const VIRTIO_VENDOR: u16 = 0x1AF4;
 const VIRTIO_CONSOLE_DEVICE: u16 = 0x1043; // 0x1040 + device_id 3
 
 const QUEUE_SIZE: u16 = 16;
-const TX_BUF_SIZE: usize = 4096;
+pub(crate) const TX_BUF_SIZE: usize = 4096;
 const RX_BUF_SIZE: u32 = 256;
 const RX_BUF_COUNT: usize = 8;
 
@@ -97,11 +97,11 @@ pub fn write_bytes_locked(bytes: &[u8]) {
         let mut off = 0;
         while off < bytes.len() {
             let n = (bytes.len() - off).min(TX_BUF_SIZE);
-            // `n` is bounded to `TX_BUF_SIZE`; the `BackendGuard` excludes other
-            // callers, and the previous chunk's `submit_and_wait` already
-            // returned, so the device is done with `tx_buf` too.
+            // `n` is bounded to `TX_BUF_SIZE`, and the device is done with
+            // `tx_buf`: the slot is back, from the previous chunk or from the
+            // burst whose completion `slot` waits out.
+            let slot = tx_slot(c);
             c.tx_buf.copy_from(0, &bytes[off..off + n]);
-            let slot = c.tx_slot.take().expect("vconsole: no tx slot");
             c.tx_slot = Some(c.tx.submit_and_wait(
                 slot,
                 &[(c.tx_buf.device_addr(), n as u32, BufDir::Readable)],
@@ -111,6 +111,53 @@ pub fn write_bytes_locked(bytes: &[u8]) {
             ));
             off += n;
         }
+    });
+}
+
+/// The transmit slot, waiting out a burst [`write_burst`] left in flight when
+/// the caller is the panic path that found it so.
+fn tx_slot(c: &mut VConsole) -> DescSlot {
+    match c.tx_slot.take() {
+        Some(slot) => slot,
+        None => wait_used(1, || c.tx.poll_used().map(|(slot, _)| slot)),
+    }
+}
+
+/// One transmit buffer's worth, with interrupts off only to submit it and to
+/// look for its completion: the device takes it at the host's pace, which a
+/// loaded host can stretch to tens of milliseconds, and no interrupt waits on
+/// that. The caller holds the wire, so no other burst is in flight.
+pub fn write_burst(bytes: &[u8]) {
+    assert!(bytes.len() <= TX_BUF_SIZE, "vconsole: a burst of {} bytes", bytes.len());
+    let submitted = {
+        let _burst = super::serial::BackendGuard::lock();
+        with_console(|c| {
+            let slot = tx_slot(c);
+            c.tx_buf.copy_from(0, bytes);
+            c.tx.submit(
+                slot,
+                &[(c.tx_buf.device_addr(), bytes.len() as u32, BufDir::Readable)],
+                c.device.notify_mmio(),
+                c.device.notify_off_multiplier(),
+                1,
+            );
+        })
+        .is_some()
+    };
+    if !submitted {
+        return;
+    }
+    wait_used(1, || {
+        let _look = super::serial::BackendGuard::lock();
+        with_console(|c| {
+            // The panic path may have waited this burst out already.
+            if c.tx_slot.is_none() {
+                c.tx_slot = c.tx.poll_used().map(|(slot, _)| slot);
+            }
+            c.tx_slot.is_some()
+        })
+        .unwrap_or(true)
+        .then_some(())
     });
 }
 

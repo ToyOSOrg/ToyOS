@@ -1,29 +1,32 @@
 //! Two processes, two `write`s per line, and not one line that belongs to
-//! both.
+//! both — nor one a program put on the console itself.
 //!
-//! **The defect this is aimed at is a `write` syscall being the unit of
+//! **The defect this is aimed at is a `write` being the unit of
 //! interleaving.** `println!` is a `LineWriter`: it issues `flush_buf()` and
-//! then `inner.write(rest)`, so a line reaches the kernel in two pieces with an
-//! arbitrary gap between them, and anything else writing the console in that
-//! gap lands inside the line.
-//! Two splices were recorded against it before it was closed, one of them a
-//! measured 1 run in 10 for `desktop_audio_client` on CI.
-//! `ConsoleObject`'s line buffer is what closes it, and the buffer is per
-//! holder — so two *processes* is the shape that tests it and two threads
-//! would not.
+//! then `inner.write(rest)`, so a line leaves the program in two pieces with an
+//! arbitrary gap between them, and anything else written in that gap could
+//! land inside the line. Each process assembles its own line before it is a
+//! record (`toyos::log::stdio`), so two *processes* is the shape that tests it
+//! and two threads would not.
 //!
 //! The two writes are made by hand rather than through `println!` because the
 //! split has to be the subject rather than an implementation detail of `std`:
 //! the line is a fixed width, the gap is exactly in the middle, and the newline
-//! is on the second write, which is the piece the buffer is waiting for.
+//! is on the second write, which is the piece the line waits for.
+//!
+//! **And the console is not a program's to write.** A program's console is
+//! read-only: its lines reach the console only through `logd`, under its name,
+//! so each writer's first act is a line on its console that must be refused.
 //!
 //! The verdict is the host's — a line is mixed or it is not, and only the
 //! console capture can say. What this binary owes the host is that both writers
 //! ran, said how much, and agreed about it.
 
+use std::io::Write;
 use std::process::{exit, Command};
 
-use toyos_abi::syscall;
+use toyos::log::stdio::{self, Stream};
+use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_console_line_atomicity";
@@ -33,9 +36,10 @@ const SELF_PATH: &str = "/system/bin/test_rs_console_line_atomicity";
 /// **A count and not a duration**, so the gate's verdict does not move with the
 /// host: the assertion is zero mixed lines out of `2 * LINES`, and a run that
 /// produced fewer lines than that has failed the non-vacuity check rather than
-/// passed a weaker version of the same test. A thousand each is two thousand
-/// chances for a splice against a defect measured at one boot in ten.
-const LINES: usize = 1000;
+/// passed a weaker version of the same test. Both writers' lines fit the
+/// runner's log ring unread, so a line missing is one lost, never one the ring
+/// had no room for.
+const LINES: usize = 400;
 
 /// Bytes in one line, newline included.
 ///
@@ -48,14 +52,12 @@ const WIDTH: usize = 200;
 /// Bytes the third writer says, in two `write`s, never ending them with a
 /// newline.
 ///
-/// **The other half of the same buffer.** A line leaves on the `\n` that ends
+/// **The other half of the same line.** A line leaves on the `\n` that ends
 /// it; the one moment a partial line stops being "not finished yet" and becomes
-/// "all there will ever be" is the last handle to the console going away, and
-/// `ConsoleObject::drop` is what flushes it. Without that flush these bytes
-/// are dropped on the floor — a buffer
-/// that loses a dying process's last words, which is the opposite of what it is
-/// for — and a hundred of them arriving whole is also proof the buffer
-/// accumulated across two `write`s to get there.
+/// "all there will ever be" is the process exiting, which ends it. Without that
+/// these bytes are dropped on the floor — a dying process's last words lost —
+/// and a hundred of them arriving whole is also proof the line accumulated
+/// across two `write`s to get there.
 const MIDLINE: usize = 100;
 
 /// The byte the third writer repeats. Not `A` or `B`, so the whole-line count
@@ -68,11 +70,12 @@ const MIDLINE_BYTE: u8 = b'C';
 const SEQ_DIGITS: usize = 6;
 
 /// The console, at stdin's slot: the runner starts this job holding its own
-/// there (`CONSOLE_JOBS`), and each writer inherits it as a console of its own.
-/// **Not stdout**: stdout is a pipe to `logd` that every child of the runner
-/// shares, so two children's writes to it meet in one byte stream, and the
-/// property under test is the console object's, which is per holder.
+/// there (`CONSOLE_JOBS`), and each writer inherits it, read-only.
 const CONSOLE: RawHandle = RawHandle(0);
+
+/// A line in the kernel's own shape, which a program on the console could
+/// pass off as a record.
+const FORGED: &[u8] = b"[kernel 0.000 cpu0] console-atomicity: a record no kernel wrote\n";
 
 fn main() {
     let mut args = std::env::args();
@@ -89,22 +92,27 @@ fn main() {
 
 /// Say half of something, say the other half, and exit without ever ending it.
 ///
-/// No newline anywhere, so nothing in the write path puts these bytes on the
-/// wire: what does is this process exiting.
+/// No newline anywhere, so nothing in the write path makes these bytes a
+/// line: what does is this process exiting. Through `std`, whose exit is the
+/// one that ends it, with a flush between the halves, so the first leaves as
+/// a piece the line goes on from.
 fn exit_mid_line() {
     let partial = [MIDLINE_BYTE; MIDLINE];
     let (head, tail) = partial.split_at(MIDLINE / 2);
-    for piece in [head, tail] {
-        match syscall::write(CONSOLE, piece) {
-            Ok(n) if n == piece.len() => {}
-            other => {
-                eprintln!(
-                    "console-atomicity: the mid-line writer wrote {other:?} of {}",
-                    piece.len()
-                );
-                exit(1);
-            }
-        }
+    let mut out = std::io::stdout();
+    let wrote = out.write_all(head).and_then(|()| out.flush()).and_then(|()| out.write_all(tail));
+    if let Err(e) = wrote {
+        eprintln!("console-atomicity: the mid-line writer's write failed: {e}");
+        exit(1);
+    }
+    exit(0);
+}
+
+/// A piece taken whole, or this process ends saying what it got instead.
+fn written(got: Result<usize, SyscallError>, len: usize, who: &str) {
+    if got != Ok(len) {
+        eprintln!("console-atomicity: {who} wrote {got:?} of {len}");
+        exit(1);
     }
 }
 
@@ -169,6 +177,13 @@ fn parent() {
 /// a gap in a writer's own run from a capture that ends early — a count alone
 /// reads both as the same missing-lines number.
 fn write_lines(tag: u8) {
+    match syscall::write(CONSOLE, FORGED) {
+        Err(SyscallError::PermissionDenied) => {}
+        other => {
+            eprintln!("console-atomicity: writer {} put a line on its console: {other:?}", tag as char);
+            exit(1);
+        }
+    }
     let mut line = [tag; WIDTH];
     line[WIDTH - 1] = b'\n';
     for seq in 0..LINES {
@@ -180,21 +195,10 @@ fn write_lines(tag: u8) {
         }
         line[1..1 + SEQ_DIGITS].copy_from_slice(&digits);
         let (head, tail) = line.split_at(WIDTH / 2);
-        // Refused rather than retried: a short write here is the kernel taking
+        // Refused rather than retried: a short write here is the sink taking
         // half a line, which is the defect and not an error to paper over.
-        // `try_write`'s console arm accepts the whole buffer by construction.
         for piece in [head, tail] {
-            match syscall::write(CONSOLE, piece) {
-                Ok(n) if n == piece.len() => {}
-                other => {
-                    eprintln!(
-                        "console-atomicity: writer {} wrote {other:?} of {}",
-                        tag as char,
-                        piece.len()
-                    );
-                    exit(1);
-                }
-            }
+            written(stdio::write(Stream::Out, piece), piece.len(), &format!("writer {}", tag as char));
         }
     }
 }

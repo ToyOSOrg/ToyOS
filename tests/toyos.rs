@@ -223,8 +223,11 @@ const RUST_SKIP: &[&str] = &[
     // The same, and its verdict is the stop record of a boot staged around it.
     // `quiesce_wakes_on_the_last_park` and `quiesce_wakes_on_the_last_exit` run it.
     "quiesce_last",
+    // The same, and its verdict is the log volume the stop leaves.
+    // `quiesce_leaves_the_volume_whole` runs it.
+    "quiesce_fsync",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
-    // holds, and five megabytes of it. `log_program_flood` runs it.
+    // holds, and megabytes of it. `log_program_flood` runs it.
     "log_flood",
     // It exits 7 on purpose; its verdict is which exit a judge of `/log` reads.
     // `log_program_forgery` runs it.
@@ -233,13 +236,16 @@ const RUST_SKIP: &[&str] = &[
     // console — which only a boot of its own reads back. `log_program_line`
     // and `log_stream` run it.
     "log_origin",
-    // Its verdict is where its line lands among the kernel's records, on a
-    // boot whose `logd` holds the ring until it speaks.
-    // `log_program_line_after_its_records` runs it on `tests/logholdcase`.
+    // Its verdict is where its line lands among the kernel's records, which
+    // every other binary's records would crowd. `log_program_line_after_its_records`
+    // runs it.
     "log_hold",
     // It prints init's word accepting a swap of netd; its verdict is that a
     // `logd` serving the network changed nothing. `log_carrier_forgery` runs it.
     "log_carrier_forger",
+    // It asks for a stop its boot's kernel refuses; its verdict is its line
+    // after that in `/log`. `log_after_a_refused_stop` runs it.
+    "log_refused_stop",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -249,6 +255,8 @@ const RUST_SKIP: &[&str] = &[
     // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
     "gsbase_probe",
     "test_panic_child",
+    // It takes the machine down; `panic_halts_the_others_first` runs it.
+    "panic_halts_first",
     // A binary that panics at once, sent over ssh as a service's replacement;
     // `swap_crash_rolls_back` stages it from the host and never runs it as a job.
     "swap_crash",
@@ -402,7 +410,7 @@ const RUST_SKIP: &[&str] = &[
     // other config should pay 19 MiB of ROOT for. `doom_music` runs it on
     // `tests/doommusiccase`.
     "doom_music",
-    // Needs a `logd` that leaves soundd's pipe unread until it says so, and a
+    // Needs a `logd` that leaves soundd's ring unread until it says so, and a
     // capture of the tone it plays into that. `soundd_log_stall` runs it on
     // `tests/logstallcase`.
     "soundd_log_stall",
@@ -768,7 +776,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // only machine in reach that runs that driver.
     ("log_stream_e1000e", Sched::Parallel, Tier::Nightly),
     // A reader that never reads, beside a flood: the file and a second reader
-    // are whole regardless. Nightly for the flood's five megabytes.
+    // are whole regardless. Nightly for the flood's megabytes.
     ("log_stream_stalled_reader", Sched::Parallel, Tier::Nightly),
     // A program's line in `/log`, on the served log and on the console, under
     // the name of the pipe it came out of. Lines and a comparison; no clock.
@@ -776,14 +784,20 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // A program writing the kernel's words and another program's head: every
     // judge of `/log` reads the truth. Lines, and the exit judge; no clock.
     ("log_program_forgery", Sched::Parallel, Tier::Fast),
-    // A program's line read while three batches of records written before it
-    // are unread: `/log` carries it after every one. Lines and positions; no clock.
+    // A stop the kernel refuses after logd flushed for it: a line said after
+    // it is in `/log`. Lines; no clock.
+    ("log_after_a_refused_stop", Sched::Parallel, Tier::Fast),
+    // A child flooding its parent's log ring while logd reads none of it: the
+    // parent's next line is in `/log`. Lines; its clock is a guard.
+    ("log_ring_keeps_the_owners_slots", Sched::Parallel, Tier::Fast),
+    // A program's line said after three batches of records, read before them:
+    // `/log` carries it after every one. Lines and positions; no clock.
     ("log_program_line_after_its_records", Sched::Parallel, Tier::Fast),
     // A program printing init's word accepting a swap of netd: logd turns
     // nobody away, and a reader after it is admitted. Lines; no clock.
     ("log_carrier_forgery", Sched::Parallel, Tier::Fast),
-    // A flood two and a half times its pipe: every line in `/log`, in order,
-    // once. Nightly for its five megabytes through a TCG guest's volume.
+    // A flood many times its ring: every line in `/log` in order or counted.
+    // Nightly for its megabytes through a TCG guest's volume.
     ("log_program_flood", Sched::Parallel, Tier::Nightly),
     // netd taking this machine's address from the network instead of carrying
     // one written down. The DHCP server it is judged against is QEMU's own, an
@@ -1097,6 +1111,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
+    // A fatal path with other CPUs running userland that makes kernel records:
+    // none is stamped past the fatal record by more than an IPI takes.
+    ("panic_halts_the_others_first", Sched::Parallel, Tier::Fast),
     // A kernel log line from PCI enumeration; no clock and no real device in it.
     ("pci_capability_walk", Sched::Parallel, Tier::Fast),
     // What QEMU was told to create against what the guest enumerated: two
@@ -1688,6 +1705,8 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("partition_claim_departure", &["test_rs_partition_claimant"]),
     ("log_program_line", &["test_rs_log_origin"]),
     ("log_program_forgery", &["test_rs_log_forger"]),
+    ("log_after_a_refused_stop", &["test_rs_log_refused_stop"]),
+    ("log_ring_keeps_the_owners_slots", &["test_rs_log_flood"]),
     ("log_program_flood", &["test_rs_log_flood"]),
     ("log_program_line_after_its_records", &["test_rs_log_hold"]),
     ("log_carrier_forgery", &["test_rs_log_carrier_forger"]),
@@ -1701,6 +1720,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
     ("quiesce_wakes_on_the_last_exit", &["test_rs_quiesce_last"]),
     ("quiesce_dump_holds_the_stopped", &["test_rs_quiesce_writers"]),
+    ("quiesce_leaves_the_volume_whole", &["test_rs_quiesce_fsync"]),
     ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
     ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),
@@ -1717,6 +1737,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
+    ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
     ("screen_recoverable_untouched", &["test_rs_test_panic_child"]),
     ("screen_survived_panic_not_blamed", &["test_rs_test_panic_child"]),
 ];
@@ -2506,16 +2527,6 @@ const T14_COLS: usize = 1920 / 8;
 /// `kernel/src/arch/syscall/debug.rs` by this comment and by screen_fatal_halt
 /// failing loudly if it drifts.
 const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
-
-/// What `apic::wait_for_log_file` says when its `LOG_FILE_DRAIN` is spent —
-/// the second, degraded half of the kernel's promise about a fatal report.
-///
-/// `screen_fatal_halt_composited` reads it off the *panel*, because the machine
-/// that wait exists for has no serial port and `/log` is the thing that did not
-/// answer. Kept in sync with `kernel/src/arch/apic.rs::LOG_DRAIN_EXPIRED` by
-/// this comment and by that test turning every spent budget into a red if it
-/// drifts.
-const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
 
 /// How far a corpus case gets before it stops, and what it says when it does.
 ///
@@ -3479,7 +3490,7 @@ fn check_syscall_cost(result: &TestResult) -> bool {
         return false;
     }
     // And the workload happened, against a counter this test cannot reach:
-    // `SYS_CLOCK` is 8 in the kernel's per-syscall accounting at process exit.
+    // `SYS_GETPID` is 51 in the kernel's per-syscall accounting at process exit.
     let Some(claimed) = result.stdout.lines().find_map(|l| {
         let (reps, per) = l.split_once(" over ")?.1.split_once('x')?;
         Some(reps.trim().parse::<u64>().ok()? * per.trim().parse::<u64>().ok()?)
@@ -3505,23 +3516,23 @@ fn check_syscall_cost(result: &TestResult) -> bool {
         );
         return false;
     };
-    // Absent `8=` is a process that made no `SYS_CLOCK` calls: a real zero.
+    // Absent `51=` is a process that made no `SYS_GETPID` calls: a real zero.
     let counted = line
-        .split(" 8=")
+        .split(" 51=")
         .nth(1)
         .and_then(|r| r.split_whitespace().next())
         .and_then(|n| n.parse::<u64>().ok())
         .unwrap_or(0);
     if counted < claimed {
         eprintln!(
-            "FAIL rs::syscall_cost: the run claims {claimed} SYS_CLOCK transitions and the \
+            "FAIL rs::syscall_cost: the run claims {claimed} SYS_GETPID transitions and the \
              kernel counted {counted}\nstdout:\n{}{}",
             result.stdout,
             kernel_account(result)
         );
         return false;
     }
-    eprintln!("  [syscall] {cycles} cycles per SYS_CLOCK over {counted} of them, tsc {mhz} MHz");
+    eprintln!("  [syscall] {cycles} cycles per SYS_GETPID over {counted} of them, tsc {mhz} MHz");
     true
 }
 
@@ -6392,33 +6403,15 @@ fn run_screen_test(
                 profile: qemu::Profile::Metal,
                 smp: 8,
                 qmp: true,
-                // The T14's literal shape, and load-bearing rather than
-                // decoration: `halt_all_cpus` waits for the log sink only when
-                // there is no console, because a machine with serial already
-                // has the report off the box and the wait would delay the paint
-                // to buy a duplicate. Muted is therefore the only configuration
-                // in which this gate's second half — the report reaching
-                // `/log` — tests anything at all. The probe is time-based, so
-                // it needs no console to drive it.
+                // The T14's literal shape: no console, so the panel and the
+                // black box are the report's only channels. The probe is
+                // time-based, so it needs no console to drive it.
                 mute: true,
                 kernel_params: &["metal-panic-probe"],
                 ..Default::default()
             };
             metal_sim_argv_check(&qemu::profile_argv(&options))?;
-            // Built here rather than by the boot, because `/log` is read off
-            // the partition afterwards and the image gets a fresh GUID every
-            // time it is built.
-            let image_path = common::lane::dir().join("fatal-composited.img");
-            let image = qemu::build_boot_image(&config, &[], &[], &["metal-panic-probe"]);
-            std::fs::write(&image_path, &image)
-                .map_err(|e| format!("write the boot image: {e}"))?;
-            let (log_start, log_len) = common::volumes::log_extent(&image, &image_path)?;
-            let mut qemu = QemuInstance::boot_with_options(
-                &config,
-                &[],
-                &[],
-                BootOptions { boot_image: Some(qemu::Staged::Written(image_path.clone())), ..options },
-            );
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
 
             // The compositor has the screen *before* anything panics. Asserted
             // on the fill, exactly as `screen_blocked_dump` does: every kernel
@@ -6440,30 +6433,12 @@ fn run_screen_test(
             // The probe fires 5 s after the claim; the poll is for that plus
             // the pager cycling pages.
             const MARKER: &str = "metal-panic-probe";
-            // **Watched for on the way past, not looked for afterwards.**
-            // `halt_all_cpus` paints `Page::Last` and only then does
-            // `page_forever` start cycling, so the expiry line — the newest
-            // record there is — is on the panel from the paint until the
-            // first `PAGE_HOLD` turns. Polling for it once this loop has
-            // finished would be polling a pager that has moved on, and
-            // waiting out a whole cycle to be sure costs every green run
-            // `pages * PAGE_HOLD` to learn nothing.
-            let expired = std::cell::Cell::new(false);
             let dump = qemu.screendump_while(
                 Duration::from_secs(40),
                 Duration::from_millis(100),
-                |d| {
-                    let text = d.text();
-                    if text.contains(LOG_DRAIN_EXPIRED) {
-                        expired.set(true);
-                    }
-                    text.contains(MARKER)
-                },
+                |d| d.text().contains(MARKER),
             );
             let text = dump.text();
-            if text.contains(LOG_DRAIN_EXPIRED) {
-                expired.set(true);
-            }
             print_screen(name, &text);
             if !text.contains(MARKER) {
                 return Err(format!(
@@ -6479,85 +6454,42 @@ fn run_screen_test(
                 ));
             }
 
-            // **And the report reached the stick, not only the panel.** Read
-            // off the boot image's own `/log` partition, so this is the
-            // device's view and not the guest's — the guest is halted and has
-            // no view left. Before `halt_all_cpus` waited for the sink, the
-            // file ended at the last flush *before* the panic and the report
-            // existed solely as a photograph; that is the state this asserts
-            // against, and it is what made three investigations argue from
-            // JPEGs.
-            //
-            // **Asserted as the disjunction the kernel actually promises.**
-            // `apic::LOG_FILE_DRAIN` is a `Budget`, so its expiry is a
-            // *degraded answer* and not a broken one: the kernel gives
-            // `/system/bin/logd` half a second and, when that is spent, says
-            // `LOG_DRAIN_EXPIRED` where the reader of a muted machine is. So
-            // there are three outcomes and only the third is a defect — the
-            // report is on the stick; it is not, and the panel says why; or it
-            // is neither written nor declared, which is a machine that lost its
-            // own last words in silence. Asserting the first alone made a spent
-            // budget a red the kernel never promised to avoid, and it fired 1
-            // in 30 on a dev host with no other guest on it (2026-08-22).
+            // **And the report is sealed where the next boot reads it, not
+            // only on the panel.** A panicking kernel stops every other CPU
+            // first and runs no userland again, so `/log` gets the report from
+            // the next boot's loader, out of the black box: that page, read
+            // here out of the halted guest's memory, is the whole of the
+            // promise. Before this, the panic path kept userland running for
+            // half a second to let `logd` write it, and the stick either had it
+            // or the panel said it did not.
+            let page = qemu.guest_memory(toyos_blackbox::PHYS, toyos_blackbox::BYTES)?;
+            let page: &[u8; toyos_blackbox::BYTES] = page
+                .as_slice()
+                .try_into()
+                .map_err(|_| "pmemsave returned the wrong length".to_string())?;
+            let Some((state, _, _, sealed)) = toyos_blackbox::recover(page) else {
+                return Err(format!(
+                    "the black box carries nothing after a fatal panic\ndecoded screen:\n{text}"
+                ));
+            };
+            let sealed = String::from_utf8_lossy(sealed).into_owned();
+            if state != toyos_blackbox::State::Panic
+                || !sealed.contains("PANIC:")
+                || !sealed.contains(MARKER)
+            {
+                return Err(format!(
+                    "the black box reads {} and {} the banner and {} the marker after a fatal \
+                     panic: the report is on the panel only\n{sealed}",
+                    state.named(),
+                    if sealed.contains("PANIC:") { "carries" } else { "lacks" },
+                    if sealed.contains(MARKER) { "carries" } else { "lacks" },
+                ));
+            }
             drop(qemu);
-            let (name, on_device) =
-                common::volumes::newest_log(&image_path, log_start, log_len)?;
-            let on_device = String::from_utf8_lossy(&on_device).into_owned();
-            if !on_device.contains(MARKER) {
-                return Err(format!(
-                    "/log/{name} stops at {} bytes and never carries {MARKER:?} — this boot wrote \
-                     no log at all, so the drain's own verdict is not what is wrong here",
-                    on_device.len()
-                ));
-            }
-            let on_the_stick = on_device.contains("PANIC:");
-            if !on_the_stick && !expired.get() {
-                // The third outcome, and it carries its evidence: what a red
-                // here needs is where `/system/bin/logd` stopped and whether the
-                // volume it stopped on is intact, and a muted guest has no
-                // console to have said either on.
-                let volume = std::fs::read(&image_path)
-                    .map_err(|e| format!("read the image back: {e}"))?;
-                let complaints = toyos_fat32_check::check(&volume[log_start..log_start + log_len]);
-                let verdict = if complaints.is_empty() {
-                    "the checker is silent on the volume".to_string()
-                } else {
-                    format!(
-                        "the checker has something to say:\n{}",
-                        toyos_fat32_check::describe(&complaints)
-                    )
-                };
-                return Err(format!(
-                    "/log/{name} carries the marker without the panic banner and the panel never \
-                     said {LOG_DRAIN_EXPIRED:?} — the report was neither written nor declared \
-                     lost.\nthe file is {} bytes, ending {:?}\n{verdict}\ndecoded screen:\n{text}",
-                    on_device.len(),
-                    on_device.lines().rev().take(3).collect::<Vec<_>>().join(" | ")
-                ));
-            }
-            let _ = std::fs::remove_file(&image_path);
-            // **Both green outcomes name themselves, because the interesting
-            // number about this gate is which one it took.** A budget that is
-            // spent is not a defect and is also not nothing: `durable` is the
-            // word logd publishes *after* its `fsync` returns, so a spent
-            // budget with the banner on the stick means logd had written past
-            // the banner and had not yet said so.
-            match (on_the_stick, expired.get()) {
-                (true, false) => eprintln!(
-                    "  [panic] the fatal report is on the panel and in /log/{name} ({} bytes)",
-                    on_device.len()
-                ),
-                (true, true) => eprintln!(
-                    "  [panic] BUDGET SPENT, and the banner reached /log/{name} anyway ({} bytes): \
-                     logd wrote past it without publishing `durable` in time",
-                    on_device.len()
-                ),
-                (false, _) => eprintln!(
-                    "  [panic] BUDGET SPENT: the report is on the panel only; /log/{name} is {} \
-                     bytes and the panel carries {LOG_DRAIN_EXPIRED:?}",
-                    on_device.len()
-                ),
-            }
+            eprintln!(
+                "  [panic] the fatal report is on the panel and sealed in the black box ({} bytes)",
+                sealed.len()
+            );
             if dump.fill() != FILL_FATAL {
                 return Err(format!(
                     "the panel still carries {:?} rather than the fatal fill, so the compositor's \
@@ -13937,6 +13869,81 @@ fn run_machine_test(
             );
             lapic_vectors(qemu.boot_log())
         }
+        "panic_halts_the_others_first" => {
+            // **A kernel that has declared itself corrupt runs nothing else.**
+            // `halt_all_cpus` sends the halt IPI before anything else it does;
+            // a fatal path that waited first — for a log, a drain, anything —
+            // would leave every other CPU running userland under it.
+            // `test_rs_panic_halts_first` keeps three siblings making kernel
+            // records while its main thread goes fatal, and every record is
+            // stamped on the kernel's clock with its CPU: none of another CPU
+            // may be stamped past the fatal record by more than a sibling can
+            // take to reach its next instruction boundary with `IF` set.
+            //
+            // **The bound is 100 ms, against the derivation**: an IPI is
+            // taken at the sibling's next instruction boundary with `IF` set,
+            // so a sibling runs past the fatal record by at most the longest
+            // window this kernel holds `IF` clear, and every such window is
+            // bounded in milliseconds.
+            const BOUND_MS: u64 = 100;
+            const RECORD: &str = "syscall 26 is retired";
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { smp: 4, kernel_features: ACTUATOR_KERNEL, ..Default::default() },
+            );
+            writeln!(qemu.stdin_mut(), "run test_rs_panic_halts_first").map_err(|e| format!("stdin: {e}"))?;
+            qemu.flush_stdin();
+            let mut console =
+                qemu.drain_until(Duration::from_secs(30), |l| l.contains(FATAL_HALT_NONCE));
+            if !console.contains(FATAL_HALT_NONCE) {
+                return Err(format!("{FATAL_HALT_NONCE:?} never reached the console\n{console}"));
+            }
+            // What the fatal path flushes after the nonce. The machine is
+            // halted and says nothing more, so this is a pace, not a guard.
+            console.push_str(&qemu.drain_serial(Duration::from_secs(3)));
+            let stamp = |line: &str| -> Option<(u64, u32)> {
+                let head = line.split_once("[kernel ")?.1.split_once(']')?.0;
+                let (secs, cpu) = head.split_once(" cpu")?;
+                let (s, ms) = secs.split_once('.')?;
+                let cpu = cpu.split(' ').next()?;
+                Some((s.parse::<u64>().ok()? * 1000 + ms.parse::<u64>().ok()?, cpu.parse().ok()?))
+            };
+            let Some((fatal_ms, fatal_cpu)) =
+                console.lines().find(|l| l.contains(FATAL_HALT_NONCE)).and_then(stamp)
+            else {
+                return Err(format!("no stamped {FATAL_HALT_NONCE:?} record on the console\n{console}"));
+            };
+            let siblings: Vec<(u64, u32, &str)> = console
+                .lines()
+                .filter(|l| l.contains(RECORD))
+                .filter_map(|l| stamp(l).map(|(ms, cpu)| (ms, cpu, l)))
+                .filter(|&(_, cpu, _)| cpu != fatal_cpu)
+                .collect();
+            // Non-vacuity: another CPU was making records up to the fatal one.
+            if !siblings.iter().any(|&(ms, _, _)| ms + 1000 >= fatal_ms) {
+                return Err(format!(
+                    "no other CPU's record in the second before the fatal one at {fatal_ms} ms, so \
+                     nothing was running to be halted\n{console}"
+                ));
+            }
+            if let Some(&(ms, cpu, line)) = siblings.iter().max_by_key(|&&(ms, _, _)| ms) {
+                if ms > fatal_ms + BOUND_MS {
+                    return Err(format!(
+                        "cpu{cpu} made a record {} ms after the fatal one on cpu{fatal_cpu}: the \
+                         fatal path let it run\n  {line}",
+                        ms - fatal_ms
+                    ));
+                }
+            }
+            eprintln!(
+                "  [panic] {} record(s) of other CPUs; the last {} ms after the fatal one",
+                siblings.len(),
+                siblings.iter().map(|&(ms, _, _)| ms.saturating_sub(fatal_ms)).max().unwrap_or(0)
+            );
+            Ok(())
+        }
         "virtio_used_ring" => {
             // Both fields of a virtqueue used-ring element are written by the
             // device, and on virtio-sound's control and event queues the ring
@@ -13976,6 +13983,12 @@ fn run_machine_test(
             let ran = log.matches("used-ring selftest").count();
             if ran != 1 {
                 return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
+            }
+            // The one wait on a used ring: a completion found only after the
+            // bound, as a waiter off its CPU for all of it finds one, is
+            // taken, and a device that never answers is not.
+            if !log.lines().any(|l| l.contains("virtio: wait selftest 2/2")) {
+                return Err(format!("the wait's self-test did not pass both cases:\n{log}"));
             }
             eprintln!("  [virtio] {}", verdict.trim());
             Ok(())
@@ -14895,6 +14908,8 @@ fn run_machine_test(
         "log_stream_stalled_reader" => common::logstream::stalled_reader(c_bins, rust_bins),
         "log_program_line" => common::origin::line(c_bins, rust_bins),
         "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
+        "log_after_a_refused_stop" => common::origin::refused_stop(c_bins, rust_bins),
+        "log_ring_keeps_the_owners_slots" => common::origin::keeps_the_owners_slots(rust_bins),
         "log_program_line_after_its_records" => common::origin::after_records(c_bins, rust_bins),
         "log_carrier_forgery" => common::origin::carrier_forgery(c_bins, rust_bins),
         "log_program_flood" => common::origin::flood(c_bins, rust_bins),

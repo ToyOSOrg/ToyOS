@@ -27,7 +27,7 @@ fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
 }
 
 fn sys_write(fd: i32, buf: &[u8]) -> isize {
-    match syscall::write(RawHandle(fd as u32), buf) {
+    match super::posix_io::write_fd(fd, buf) {
         Ok(n) => n as isize,
         Err(_) => -1,
     }

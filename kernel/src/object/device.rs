@@ -234,7 +234,7 @@ impl ZeroHandles for DeviceClaim {
 /// One holder's view of the machine's serial console — each holder gets its own, never a shared handle.
 pub struct ConsoleObject {
     pub(super) core: ObjectCore,
-    // Lock order process_data -> line -> BackendGuard; taking them in reverse deadlocks.
+    // Lock order process_data -> line -> the console queue; taking them in reverse deadlocks.
     line: crate::sync::Lock<crate::drivers::serial::ConsoleLine>,
 }
 
@@ -246,14 +246,14 @@ impl ConsoleObject {
         })
     }
 
-    /// Take a userland write, emitting every whole line it completes.
-    pub fn write(&self, buf: &crate::user_ptr::UserBytes) {
+    /// Take a userland write, queueing every whole line it completes that the
+    /// console has room for; answers the bytes taken.
+    pub fn write(&self, buf: &crate::user_ptr::UserBytes) -> usize {
         // Negative control: bypasses buffering so console_line_atomicity reds if this breaks.
         if crate::actuator::console_unbuffered() {
-            crate::drivers::serial::write_console(buf);
-            return;
+            return crate::drivers::serial::write_console(buf);
         }
-        self.line.lock().write(buf);
+        self.line.lock().write(buf)
     }
 }
 

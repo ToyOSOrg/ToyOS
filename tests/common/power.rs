@@ -126,18 +126,6 @@ pub fn metal_job_reboot(
              boot\n{text}"
         )
     })?;
-    // The panel's census on the channel a boot that hands the machine back
-    // uses: `quiesce` writes it as an ordinary record while `logd` is still
-    // there to file it, which is how fifteen of the seventeen priced boots read
-    // it and is otherwise judged on no machine but the T14.
-    let panel = bootlog::panel_census(&text).ok_or_else(|| {
-        format!(
-            "{name} carries no whole {:?} record, so this boot has no account of what its \
-             panel cost\n{text}",
-            bootlog::PANEL_CENSUS
-        )
-    })?;
-
     let printed = loader_window(&console)?;
     let written = super::volumes::loader_log_lines(&image_path, start, len)?;
     // Compared byte for byte against a console the firmware rendered: a
@@ -160,10 +148,8 @@ pub fn metal_job_reboot(
 
     kept.remove();
     eprintln!(
-        "  [power] {name} carries Boot: complete ({boot_ms}ms), a panel that painted {} time(s) \
-         for {} us, and this boot's last line; {} carries the loader's {} lines beside it",
-        panel.paints,
-        panel.micros,
+        "  [power] {name} carries Boot: complete ({boot_ms}ms) and init's stop; {} carries the \
+         loader's {} lines beside it",
         bootlog::LOADER_LOG,
         written.len()
     );
@@ -182,10 +168,10 @@ pub fn quiesce_stops_the_machine(
     // How many threads that binary puts to work. Spelt here because a guest
     // binary cannot be linked from the harness.
     const WRITERS: u32 = 6;
-    // The threads the stop names besides the writers: `init`, and
-    // `test-runner`'s main and deadline threads. `logd` holds the log and is
-    // carved out uncounted; the job's own main thread is the caller.
-    const OTHERS: u32 = 3;
+    // The threads the stop names besides the writers: the job's own main
+    // thread, parked on init's answer; `test-runner`'s main and deadline
+    // threads; and `logd`'s. `init` asked for the stop and is its caller.
+    const OTHERS: u32 = 4;
     let (whole, record) =
         stopped_boot("tests/quiescecase/system.toml", JOB, &[LATE_WORD], rust_bins)?;
     if record.in_flight != 0 {
@@ -209,7 +195,7 @@ pub fn quiesce_stops_the_machine(
     if record.sweep.total() != WRITERS + OTHERS {
         return Err(format!(
             "this boot's stop named {} userland thread(s); {WRITERS} writers plus the {OTHERS} \
-             of init and test-runner's two make {}, so this is not the machine the writers \
+             of the job, test-runner and logd make {}, so this is not the machine the writers \
              were on:\n  {record}\n{whole}",
             record.sweep.total(),
             WRITERS + OTHERS,
@@ -455,121 +441,84 @@ pub fn quiesce_dump_holds_the_stopped(
     Ok(())
 }
 
-/// **The machine has one shutdown, and the second caller is refused where it
-/// would have banded the first.** `quiesce-drain-refuse` parks the first
-/// caller — `SYS_REBOOT` — in the drain's retry ladder inside its own sync; the
-/// second call is `SYS_SHUTDOWN`, so the claim is judged on both syscalls,
-/// made from another process on the other CPU while it is parked there, and
-/// the judge is where the kernel's refusal lands among the actuator's lines.
+/// **The machine has one shutdown, and the second caller is refused while the
+/// first holds it.** init makes the first call; `quiesce-last-park` holds it
+/// after it has claimed the stop and before it stops anything, while every
+/// other thread still runs. The job reads the kernel's word that the stop
+/// waits there and makes the second call — `SYS_SHUTDOWN` against the first's
+/// `SYS_REBOOT`, so the claim is judged on both syscalls — and starts the
+/// thread the stop waits for only once refused by name. The same boot has the
+/// stop's own drain refused in its retry ladder over a flush the job left
+/// owed, the first call's work after the window.
 pub fn quiesce_refuses_a_second_shutdown(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let config = super::compile::repo_root().join("tests/quiescetwicecase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-
-    const JOB: &str = "quiesce_twice";
     // The kernel's `mirror_refuse::SHUTDOWN_REFUSALS`, spelt here because the
     // harness cannot link the kernel.
     const REFUSALS: usize = 8;
     const REFUSED: &str = "quiesce-drain-refuse: refusing the shutdown drain's";
+    const WAITS: &str = "quiesce-last-park: the stop waits for";
     const SECOND_CALLER: &str = "power: this machine is already stopping";
     const SYNCING: &str = "Syncing filesystems...";
-    const ANSWERED: &str = "quiesce_twice: the second caller was refused (AlreadyExists)";
-    let bins: Vec<(String, Vec<u8>)> =
-        rust_bins.iter().filter(|(name, _)| name == JOB).cloned().collect();
-    if bins.len() != 1 {
-        return Err(format!("the suite built {} copies of {JOB:?}", bins.len()));
-    }
-
-    let mut qemu = QemuInstance::boot_with_options(
-        case,
-        &[],
-        &bins,
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            qmp: true,
-            // `writeback-stall` parks `iod`, so the closed file's flush is the
-            // shutdown's own drain's to find and no other drainer's to hold.
-            kernel_params: &["writeback-stall", "quiesce-drain-refuse"],
-            ..Default::default()
-        },
+    let held = format!(
+        "quiesce-last-park: {} is held until the stop waits on it alone",
+        toyos_quiesce::LAST_THREAD
     );
-    serial::Serial::boot(&qemu).must_be_clean()?;
-    let booted = qemu.boot_log().to_string();
-
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
-    let reason = stop.reason();
-    let tail = qemu.drain_serial(WAIT);
-    let whole = format!("{booted}{tail}");
-
-    serial::Serial::named("second-shutdown drain", tail.as_str()).must_be_clean()?;
-
+    // `writeback-stall` parks `iod`, so the closed file's flush is the stop's
+    // own drain's to find and no other drainer's to hold.
+    let (whole, _record) = stopped_boot(
+        "tests/quiescetwicecase/system.toml",
+        "quiesce_twice",
+        &["writeback-stall", "quiesce-drain-refuse", "quiesce-last-park", LATE_WORD],
+        rust_bins,
+    )?;
     let lines: Vec<&str> = whole.lines().collect();
     let at = |needle: &str| -> Vec<usize> {
         lines.iter().enumerate().filter(|(_, l)| l.contains(needle)).map(|(i, _)| i).collect()
     };
 
-    // **The harm, first**, ahead of how the machine ended: a second caller let
-    // in through `SYS_SHUTDOWN` may be the one that ends it. A kernel that lets
-    // the second caller in runs a second shutdown over the first — banding it
-    // where it is parked, or interleaving with it — and either way this line
-    // is written twice.
-    let syncs = at(SYNCING).len();
-    if syncs != 1 {
+    // **The harm, first**: a second caller let in runs a second stop over the
+    // first, and either way this line is written twice.
+    let syncs = at(SYNCING);
+    if syncs.len() != 1 {
         return Err(format!(
-            "this boot ran {syncs} shutdowns, not one: the second caller was let in\n{whole}"
+            "this boot ran {} shutdowns, not one: the second caller was let in\n{whole}",
+            syncs.len()
         ));
     }
-    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
-    // The arm fired as many times as the kernel declares, or nothing below is
-    // about a caller parked in its ladder.
-    let refusals = at(REFUSED);
-    if refusals.len() != REFUSALS {
+    let once = |needle: &str| -> Result<usize, String> {
+        match at(needle).as_slice() {
+            [line] => Ok(*line),
+            other => Err(format!("{needle:?} is on {} console line(s), not one\n{whole}", other.len())),
+        }
+    };
+    // **The refusal, by name, inside the window**: after the first call said
+    // it waits, before the thread it waits for was held — which the job starts
+    // only on reading `AlreadyExists`, so the held line is the refusal having
+    // reached Ring 3 as that word.
+    let (waits, second, held, synced) = (once(WAITS)?, once(SECOND_CALLER)?, once(&held)?, syncs[0]);
+    if !(waits < second && second < held && held < synced) {
         return Err(format!(
-            "the quiesce-drain-refuse actuator refused the shutdown's drain {} time(s), not the \
-             {REFUSALS} the kernel declares, so the first caller was not parked where this boot \
-             says it was\n{whole}",
+            "the first call's wait, the second call's refusal, the held thread and the sync are \
+             at console lines {waits}, {second}, {held} and {synced}: the refusal was not made \
+             in the window the first call held\n{whole}"
+        ));
+    }
+    // And the first call's own drain met its ladder, after the window.
+    let refusals = at(REFUSED);
+    if refusals.len() != REFUSALS || refusals[0] < synced {
+        return Err(format!(
+            "the quiesce-drain-refuse actuator refused the stop's drain {} time(s), not the \
+             {REFUSALS} the kernel declares after its sync, so the first call's drain was not \
+             parked where this boot says it was\n{whole}",
             refusals.len(),
         ));
     }
-    // **The refusal, by name.** Once, and inside the ladder: after the first
-    // refusal the second caller reacted to, before the last, which is the
-    // window the first caller is parked in.
-    let second = at(SECOND_CALLER);
-    if second.len() != 1 {
-        return Err(format!(
-            "the kernel refused a second caller {} time(s), not once\n{whole}",
-            second.len(),
-        ));
-    }
-    let (first, last) = (refusals[0], refusals[REFUSALS - 1]);
-    if !(first < second[0] && second[0] < last) {
-        return Err(format!(
-            "the second caller was refused at line {} of the console, outside the ladder the \
-             first was parked in (lines {first} to {last}), so this is not the window the \
-             refusal exists for\n{whole}",
-            second[0],
-        ));
-    }
-    // The refusal reached Ring 3 as a word: the second caller went on running
-    // and said so, rather than being ended for asking.
-    if !whole.contains(ANSWERED) {
-        return Err(format!("the second caller never reported its refusal\n{whole}"));
-    }
-    // And the first caller's own shutdown, the one that was not banded, got
-    // to its last word.
-    if !whole.contains(REBOOTING) {
-        return Err(format!("the first caller never wrote {REBOOTING:?}\n{whole}"));
-    }
-
     eprintln!(
-        "  [power] the second caller was refused at console line {} while the first was in its \
-         ladder (refusals at lines {first} to {last}):\n    {}\n    {}",
-        second[0],
-        lines[refusals[0]],
-        lines[second[0]],
+        "  [power] the second caller was refused while the first held the stop:\n    {}\n    {}",
+        lines[waits], lines[second],
     );
     Ok(())
 }
@@ -1846,7 +1795,7 @@ pub fn blackbox_foreign_record(
 /// appends to the same `loader.log` — so the argument is that file's tail.
 pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     after.must_say(&done_line())?;
-    stopped_the_log_writer_too(after)?;
+    the_tail_is_the_stops(after)?;
     // The distinction the whole state machine exists for: a deliberate stop is
     // not a panic and not a kernel that vanished.
     says_nothing_of(after, &armed_and_nothing_else())?;
@@ -1862,18 +1811,32 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// The shutdown's second stage: the log's own writer stopped once the boot's
-/// last word was durable. Read after the seal, because the first stage's record
-/// is in the same capture on the first boot's console.
-fn stopped_the_log_writer_too(after: &serial::Serial) -> Result<(), String> {
-    let said = after.must_say_after(&done_line(), toyos_quiesce::STOPPED)?;
-    let record = toyos_quiesce::Record::parse(said)
-        .ok_or_else(|| format!("the page's stop record did not read back as one:\n  {said}"))?;
+/// The tail the stop sealed under the seal: the one channel for what the
+/// kernel said after `logd` stopped — its stop record, which stopped every
+/// thread, the panel's census, and the last word. Read after the seal,
+/// because the same lines are in the capture on the first boot's console.
+fn the_tail_is_the_stops(after: &serial::Serial) -> Result<(), String> {
+    let head = after.must_say_after(&done_line(), bootlog::LOG_TAIL_HEAD)?.to_string();
+    let tail: Vec<&str> = after
+        .text()
+        .lines()
+        .skip_while(|line| !line.contains(&head))
+        .filter(|line| line.contains(bootlog::LOG_TAIL))
+        .collect();
+    let record = tail
+        .iter()
+        .find_map(|line| toyos_quiesce::Record::parse(line))
+        .ok_or_else(|| format!("the page's tail carries no stop record:\n{}", tail.join("\n")))?;
     if !record.stopped_the_machine() {
         return Err(format!(
-            "the second stage left {} thread(s) running into the reset:\n  {record}",
+            "the stop left {} thread(s) running into the reset:\n  {record}",
             record.sweep.running,
         ));
+    }
+    for owed in [bootlog::PANEL_CENSUS, REBOOTING] {
+        if !tail.iter().any(|line| line.contains(owed)) {
+            return Err(format!("the page's tail carries no {owed:?}:\n{}", tail.join("\n")));
+        }
     }
     Ok(())
 }
@@ -2725,7 +2688,6 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
 /// **`Rebooting.` is the last record, and nothing this boot still holds may
 /// write one after it.**
 ///
-/// **A metal boot's verdict is read off that word being the log's last line.**
 /// The runner's deadline kills the job it is watching, which releases the `wait`
 /// its own job loop is inside, and that loop can spawn the next job into the
 /// window between the boot's last word and the reset.
@@ -2735,11 +2697,10 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
 /// is after the reset by construction.
 ///
 /// **A spawn record and not every record**, because those are the two different
-/// claims. `quiesce` writes after its own last word by construction — a
-/// `wait_for_durable` that gave up says so, and an idle CPU's `sched:` report
-/// can land there — and neither reaches a file: `logd` has been asked to stop by
-/// then, so on a machine with no console they reach nothing at all. A *spawn* is
-/// a process that was still on a run queue, and its record does reach the file.
+/// claims. `quiesce` writes after its own last word by construction — an idle
+/// CPU's `sched:` report can land there — and nothing is left running to take
+/// it anywhere but the console. A *spawn* is a process that was still on a run
+/// queue after the stop said it had stopped every one.
 fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
     let Some(at) = text.rfind(REBOOTING) else { return Ok(()) };
     let after = &text[at + REBOOTING.len()..];

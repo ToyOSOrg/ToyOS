@@ -132,21 +132,9 @@ pub fn userland_operations() -> (u32, u64) {
 }
 
 /// Whether the stop this count is read for stops the thread opening an
-/// operation now: no stage stops a kernel thread, and a holder of the log
-/// capability runs on through the stage whose record reads this.
-///
-/// Read at the open and never again, so a process whose sibling thread makes
-/// it a holder while this thread is inside the operation stays counted — an
-/// `in_flight` of one on a record that stopped everything, when a process's
-/// first `SYS_LOG_READ` lands beside a sibling's operation as the stop ends.
+/// operation now: it stops every userland thread and no kernel thread.
 fn counted() -> bool {
-    if crate::sched::kthread::current_is_kernel_thread() {
-        return false;
-    }
-    let Some(pid) = crate::arch::percpu::current_pid() else {
-        return false;
-    };
-    !crate::log::user::holds_the_log(pid.raw())
+    !crate::sched::kthread::current_is_kernel_thread() && crate::arch::percpu::current_pid().is_some()
 }
 
 #[must_use = "the operation lasts exactly as long as this guard"]

@@ -4,32 +4,7 @@ use toyos::poller::{READABLE, WRITABLE, Poller};
 use toyos::ipc;
 use toyos::AsHandle;
 use toyos::ipc::{Connection, IpcPayload, RxStep};
-/// One line, one `write`.
-///
-/// **`eprintln!` is not one write.** Stderr is unbuffered by design, so
-/// `write_fmt` issues a syscall per format fragment, and on this machine the
-/// console and the kernel's log ring are one stream — so somebody else's whole
-/// line lands inside this daemon's. `netd: ready, at most ` and
-/// `init: started test-runner` arrived interleaved and the harness parsed a cap
-/// out of the wrong number. `userland/soundd` has the same macro for the same
-/// reason. **The class is closed now**: this daemon's output is a pipe of its
-/// own to `logd`, which ends a line at its newline, so another program's line
-/// cannot land inside one; what this still buys is one `write` per line, which
-/// keeps a line whole against this daemon's own other threads.
-/// Exported so the driver beside this file can speak in netd's own name: a line
-/// from a module of this program is still this program's.
-#[macro_export]
-macro_rules! say {
-    ($($arg:tt)*) => {{
-        use std::io::Write;
-        let mut line = format!($($arg)*);
-        line.push('\n');
-        // Refused only once logd is gone, and logd's end is the machine's own
-        // record; a network stack that ended with its logger would be a second
-        // outage for the same cause.
-        let _ = std::io::stderr().write_all(line.as_bytes());
-    }};
-}
+use toyos::say;
 
 mod device;
 mod dhcp;
