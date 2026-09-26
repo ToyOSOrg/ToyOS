@@ -215,6 +215,25 @@ instead — which would put it inside the "comes with QEMU" allowance and delete
 6,291,456 bytes from the repository.
 
 
+
+aavmf/*.fd — EDK II firmware for QEMU `virt`, BSD-2-Clause-Patent
+------------------------------------------------------------
+
+    AAVMF_CODE.fd  67,108,864 bytes
+      sha256 47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d
+    AAVMF_VARS.fd  67,108,864 bytes
+      sha256 b3b855c5a80310168051164986855692d1bdb06e67619856177965cd87c6774f
+
+    Copyright (c) 2019, TianoCore and contributors
+    Licence text: licenses/BSD-2-Clause-Patent-EDK2.txt
+
+QEMU's own prebuilt ArmVirtQemu firmware, unmodified: `edk2-aarch64-code.fd`
+and `edk2-arm-vars.fd` as QEMU 11.1.0 installs them under `share/qemu/`,
+whose version string reads `edk2-stable202408-prebuilt.qemu.org` (a
+`DEBUG_GCC5` build of 2024-09-12). The variable store is the template: every
+boot gives it a writable snapshot QEMU discards, because this `DEBUG` build
+asserts on a read-only store.
+
 tests/fixtures/gbae-v0.2.0-* — gbae, MIT
 -----------------------------------------
 

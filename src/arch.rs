@@ -119,6 +119,22 @@ impl Arch {
         }
     }
 
+    /// The two `-drive` values that give a guest its firmware, from the
+    /// repository at `root`. The store is never written back: OVMF boots from a
+    /// read-only one, and AAVMF's `DEBUG` build asserts on one, so it writes a
+    /// snapshot QEMU discards.
+    pub fn pflash(self, root: &Path) -> [String; 2] {
+        let (code, vars) = self.firmware();
+        let store = match self {
+            Arch::X86_64 => "readonly=on",
+            Arch::Aarch64 => "snapshot=on",
+        };
+        [
+            format!("if=pflash,format=raw,unit=0,file={},readonly=on", root.join(code).display()),
+            format!("if=pflash,format=raw,unit=1,file={},{store}", root.join(vars).display()),
+        ]
+    }
+
     /// How this host provides a guest of this architecture: its own
     /// hypervisor when the host is the same architecture and will open it,
     /// and emulation otherwise.

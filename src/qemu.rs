@@ -142,7 +142,7 @@ pub fn launch(opts: &Options) {
     }
     qemu.arg("-cpu").arg(arch.cpu(accel));
 
-    let (code, vars) = arch.firmware();
+    let [code, vars] = arch.pflash(std::path::Path::new("."));
     qemu.arg("-machine")
         .arg(machine(arch, shape.iommu))
         .arg("-smp")
@@ -150,9 +150,9 @@ pub fn launch(opts: &Options) {
         .arg("-m")
         .arg("2G")
         .arg("-drive")
-        .arg(format!("if=pflash,format=raw,unit=0,file={code},readonly=on"))
+        .arg(code)
         .arg("-drive")
-        .arg(format!("if=pflash,format=raw,unit=1,file={vars},readonly=on"));
+        .arg(vars);
 
     // Before every other `-device`: a PCI function created ahead of the unit
     // gets QEMU's bypassing address space and is never decoded by it.

@@ -4247,7 +4247,7 @@ fn qemu_command(
     );
 
     let repo = compile::repo_root();
-    let (firmware_code, firmware_vars) = SUITE_ARCH.firmware();
+    let [firmware_code, firmware_vars] = SUITE_ARCH.pflash(&repo);
 
     let mut qemu = Command::new(SUITE_ARCH.qemu());
 
@@ -4290,15 +4290,9 @@ fn qemu_command(
         .arg("-m")
         .arg("4G")
         .arg("-drive")
-        .arg(format!(
-            "if=pflash,format=raw,unit=0,file={},readonly=on",
-            repo.join(firmware_code).display()
-        ))
+        .arg(firmware_code)
         .arg("-drive")
-        .arg(format!(
-            "if=pflash,format=raw,unit=1,file={},readonly=on",
-            repo.join(firmware_vars).display()
-        ))
+        .arg(firmware_vars)
         .arg("-drive")
         .arg(format!(
             "if=none,id=stick,{}{}",

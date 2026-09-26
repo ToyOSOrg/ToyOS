@@ -981,6 +981,16 @@ const COMMITTED_FILES: &[(&str, &str, &str)] = &[
         "NOTICE",
     ),
     (
+        "aavmf/AAVMF_CODE.fd",
+        "47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d",
+        "NOTICE",
+    ),
+    (
+        "aavmf/AAVMF_VARS.fd",
+        "b3b855c5a80310168051164986855692d1bdb06e67619856177965cd87c6774f",
+        "NOTICE",
+    ),
+    (
         "ovmf/DEBUGX64_OVMF.fd",
         "800ff5af1220d1232d4da7173ccddbb74a9217600bd8935903d9d534801778b4",
         "NOTICE",
