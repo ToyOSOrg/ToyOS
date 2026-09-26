@@ -779,6 +779,11 @@ const CI_ACTIONS: &[Action] = &[
         name: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
         why: "how a red guest job keeps its boots' serial logs (v4.6.2)",
     },
+    Action {
+        name: "rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18",
+        why: "the Rust project's own crates.io trusted-publishing exchange: the publish job's \
+              only registry credential, a token that lives for one run (v1.0.5)",
+    },
 ];
 
 /// The `(manager, subcommands)` pairs [`installed_packages`] understands —

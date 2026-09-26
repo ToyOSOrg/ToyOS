@@ -730,7 +730,9 @@ fn publish(root: &Path) -> Result<String, String> {
     }
     if std::env::var("CARGO_REGISTRY_TOKEN").map_or(true, |t| t.is_empty()) {
         return Err(
-            "CARGO_REGISTRY_TOKEN is not set; the owner adds it under Settings → Secrets".into()
+            "CARGO_REGISTRY_TOKEN is not set; publish.yml takes it from crates.io trusted \
+             publishing, which each published crate must name this workflow for"
+                .into()
         );
     }
     let mut said = Vec::new();
