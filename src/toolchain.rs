@@ -918,6 +918,16 @@ mod tests {
         provision_toolchain_cargo(&stage2);
         assert!(narrated_binaries(&bin).is_empty());
         assert!(!cargo_link_stale(&stage2));
+
+        // Nothing narrates, and the toolchain is still refused: it has no linker.
+        let refused = std::panic::catch_unwind(|| assert_toolchain_is_honest(&stage2))
+            .expect_err("a toolchain with no rust-lld is refused");
+        let said = refused.downcast_ref::<String>().expect("a formatted refusal");
+        assert!(said.contains("rust-lld"), "the refusal names the linker: {said}");
+
+        let lld = rust_lld(&stage2);
+        fs::create_dir_all(lld.parent().unwrap()).unwrap();
+        fs::write(&lld, b"").unwrap();
         assert_toolchain_is_honest(&stage2);
     }
 
