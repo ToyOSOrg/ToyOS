@@ -38,24 +38,29 @@ const IDLE_WAKES_SAID: u32 = 8;
 /// One reporting window, one line.
 ///
 /// The counters are `toyos_mixer::MixStats`, and what they mean is documented
-/// there beside the decision that fills them; this is the emission, which is an
-/// effect and stays here. `#106`'s status tool reads one shape, so the null
+/// there beside the decision that fills them; this is the line's shape, which
+/// is soundd's and stays here. `#106`'s status tool reads one shape, so the null
 /// sink prints the same line.
-fn report(stats: &MixStats, clients: usize) {
-    say!("soundd: wakes={} completions={} submitted={} underruns={} drains={} max_wake_lat_us={} max_batch={} clients={} deferred={} starve_max={} worst_irq_late_us={} worst_pickup_us={} worst_empty={} worst_batch={} late_wakes={}",
+fn report(stats: &MixStats, clients: usize) -> String {
+    format!("soundd: wakes={} completions={} submitted={} underruns={} drains={} max_wake_lat_us={} max_batch={} clients={} deferred={} starve_max={} worst_irq_late_us={} worst_pickup_us={} worst_empty={} worst_batch={} late_wakes={}",
         stats.wakes, stats.completions, stats.submitted, stats.underruns, stats.drains,
         stats.max_wake_lat_ns / 1_000, stats.max_batch, clients, stats.deferred,
         stats.starve_max, stats.worst.irq_late_ns / 1_000, stats.worst.pickup_ns / 1_000,
-        stats.worst.empty, stats.worst.batch, stats.late_wakes);
+        stats.worst.empty, stats.worst.batch, stats.late_wakes)
 }
 
-/// Close one reporting window: say it, add it to the running totals `inspect`
-/// reads, and start the next. The only place a reported window is reset, so the
-/// totals are exactly the sum of what the console said.
-fn flush(stats: &mut MixStats, totals: &mut Totals, clients: usize) {
-    report(stats, clients);
+/// Close one reporting window: add it to the running totals `inspect` reads,
+/// start the next, and return the line that says it. The only place a reported
+/// window is reset, so the totals are exactly the sum of what the console said.
+///
+/// The caller says the line because `say!` needs a voice with a running
+/// writer, which a host test's thread is not.
+#[must_use = "an unsaid window leaves the totals ahead of the console"]
+fn flush(stats: &mut MixStats, totals: &mut Totals, clients: usize) -> String {
+    let line = report(stats, clients);
     totals.fold(stats);
     *stats = MixStats::default();
+    line
 }
 
 /// Signal every client before the wait so priority inheritance can fill their
@@ -613,11 +618,11 @@ pub(crate) fn mix_thread(
         // shorter than two windows that tail is most of it.
         let now_ns = syscall::clock_nanos();
         if was_streaming && streams.is_empty() {
-            flush(&mut stats, &mut totals, 0);
+            say!("{}", flush(&mut stats, &mut totals, 0));
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         } else if now_ns >= next_stats_ns {
             if !streams.is_empty() {
-                flush(&mut stats, &mut totals, streams.len());
+                say!("{}", flush(&mut stats, &mut totals, streams.len()));
             }
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         }
@@ -784,12 +789,12 @@ pub(crate) fn null_sink_thread(
         // silent about being discarded (#106's status tool reads one shape).
         let now_ns = syscall::clock_nanos();
         if was_streaming && streams.is_empty() {
-            flush(&mut stats, &mut totals, 0);
+            say!("{}", flush(&mut stats, &mut totals, 0));
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
             say!("soundd: null sink idle");
         } else if now_ns >= next_stats_ns {
             if !streams.is_empty() {
-                flush(&mut stats, &mut totals, streams.len());
+                say!("{}", flush(&mut stats, &mut totals, streams.len()));
             }
             next_stats_ns = now_ns + STATS_INTERVAL_NANOS;
         }
@@ -814,7 +819,8 @@ mod tests {
     /// `flush` on two windows with known counts, then `publish` with a third,
     /// still-open one: what `inspect` reads back must be exactly the sum of
     /// all three, once each — not a window double-counted, and not one lost to
-    /// a window `flush` failed to reset.
+    /// a window `flush` failed to reset. Each line `flush` hands back says its
+    /// own window and no other.
     ///
     /// The same `MixStats` is reused across both `flush` calls, as the mix
     /// loop's own is across its wakes: a `flush` that folded the first window
@@ -824,12 +830,14 @@ mod tests {
         let mut totals = Totals::default();
 
         let mut stats = window(10, 1, 2, 3);
-        flush(&mut stats, &mut totals, 0);
+        let first = flush(&mut stats, &mut totals, 0);
         stats.submitted += 20;
         stats.underruns += 4;
         stats.drains += 5;
         stats.late_wakes += 6;
-        flush(&mut stats, &mut totals, 0);
+        let second = flush(&mut stats, &mut totals, 0);
+        assert!(first.contains(" submitted=10 underruns=1 drains=2 "), "{first}");
+        assert!(second.contains(" submitted=20 underruns=4 drains=5 "), "{second}");
 
         let open = window(7, 8, 9, 10);
         let published = Published::new(State::Running);
