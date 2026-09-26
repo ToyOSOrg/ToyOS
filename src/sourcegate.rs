@@ -828,8 +828,6 @@ const TEMP_DIR_ALLOWED: &[(&str, usize)] = &[
     // A failed golden comparison leaves its dump for the reader to copy over
     // the golden file: outliving the test is its purpose.
     ("toyos-keymap/tests/tables.rs", 1),
-    // `issues/build/the-release-path-stages-in-tmpdir-outside-the-scratch-guard.md`.
-    ("src/release.rs", 2),
 ];
 
 
