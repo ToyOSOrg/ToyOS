@@ -48,6 +48,7 @@ const NET: &[&str] = &[
     "net.sockets.listeners",
     "net.sockets.tcp",
     "net.sockets.udp",
+    "net.sockets.untabled",
 ];
 
 pub fn boot(rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {

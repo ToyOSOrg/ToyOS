@@ -1,7 +1,7 @@
 //! This machine's address, taken from the network rather than written down.
 //!
 //! What the lease decides is the whole of the interface: the address and its
-//! prefix, the default route, and the resolvers the DNS socket queries. All
+//! prefix, the default route, and the servers `crate::resolve` asks. All
 //! three are written together on every lease and cleared together when one is
 //! lost, because a route left standing over an address that is gone sends
 //! frames out with a source nothing will answer.
@@ -12,18 +12,11 @@
 
 use std::time::{Duration, Instant};
 
-use smoltcp::config::DNS_MAX_SERVER_COUNT;
 use smoltcp::iface::Interface;
-use smoltcp::socket::{dhcpv4, dns};
-use smoltcp::wire::{
-    DhcpOption, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, DHCP_MAX_DNS_SERVER_COUNT,
-};
+use smoltcp::socket::dhcpv4;
+use smoltcp::wire::{DhcpOption, IpCidr, Ipv4Address, Ipv4Cidr};
 
-/// **The resolver holds every server a lease can carry.**
-/// `dns::Socket::update_servers` truncates to `DNS_MAX_SERVER_COUNT` without
-/// saying so and smoltcp's default is one, so this crate asks for
-/// `dns-max-server-count-3`; a build that drops it does not compile.
-const _: () = assert!(DNS_MAX_SERVER_COUNT >= DHCP_MAX_DNS_SERVER_COUNT);
+use crate::resolve::Resolver;
 
 /// RFC 2132 §3.14.
 const OPT_HOST_NAME: u8 = 12;
@@ -67,9 +60,8 @@ pub fn restart(client: &mut dhcpv4::Socket) {
     client.reset();
 }
 
-/// What the client decided, owned: the resolver this lease writes lives in the
-/// same `SocketSet` as the client, so an event still borrowing the client is an
-/// event nothing can be done about.
+/// What the client decided, owned, so that applying it borrows nothing of the
+/// socket set the client lives in.
 pub enum Change {
     Leased { address: Ipv4Cidr, router: Option<Ipv4Address>, server: Ipv4Address, dns: Vec<Ipv4Address> },
     Lost,
@@ -146,12 +138,7 @@ impl Dhcp {
     /// Apply what the client decided, and answer whether this machine's address
     /// question has just been settled — which is the moment netd has something
     /// to serve with.
-    pub fn pass(
-        &mut self,
-        change: Option<Change>,
-        iface: &mut Interface,
-        resolver: &mut dns::Socket,
-    ) -> bool {
+    pub fn pass<C, D: FnMut() -> u16>(&mut self, change: Option<Change>, iface: &mut Interface, resolver: &mut Resolver<C, D>) -> bool {
         if let Some(change) = change {
             let held = match change {
                 Change::Leased { address, router, server, dns } => {
@@ -213,11 +200,11 @@ impl Dhcp {
     /// `None` writes the absence of all three. **One writer, reached by every
     /// change**, so a route left standing over an address that is gone cannot
     /// be arranged without breaking the path every boot takes to its lease.
-    fn write(
+    fn write<C, D: FnMut() -> u16>(
         lease: Option<(Ipv4Cidr, Option<Ipv4Address>)>,
         dns: &[Ipv4Address],
         iface: &mut Interface,
-        resolver: &mut dns::Socket,
+        resolver: &mut Resolver<C, D>,
     ) {
         iface.update_ip_addrs(|addrs| {
             // Cleared before the push, so a list already holding an address
@@ -234,7 +221,6 @@ impl Dhcp {
                 .add_default_ipv4_route(router)
                 .expect("an emptied route table takes one default route");
         }
-        let servers: Vec<IpAddress> = dns.iter().map(|s| IpAddress::Ipv4(*s)).collect();
-        resolver.update_servers(&servers);
+        resolver.set_servers(dns);
     }
 }

@@ -4161,6 +4161,18 @@ impl QmpDevices {
             .execute(&format!("{{\"execute\":\"device_del\",\"arguments\":{{\"id\":\"{id}\"}}}}"));
     }
 
+    /// Hold every frame the guest sends on `netdev` from here on, unseen by
+    /// it: its link stays up, and nothing it sends reaches anything. QEMU's
+    /// `filter-buffer` lets its frames go once per `interval` microseconds,
+    /// which is set past any test's life.
+    pub fn hold_outbound(&mut self, netdev: &str) {
+        self.0.execute(&format!(
+            "{{\"execute\":\"object-add\",\"arguments\":{{\"qom-type\":\"filter-buffer\",\
+             \"id\":\"held-{netdev}\",\"netdev\":\"{netdev}\",\"queue\":\"rx\",\
+             \"interval\":4000000000}}}}"
+        ));
+    }
+
     /// [`Self::blockdev_add`] for a file a drive may still hold open: the
     /// unplugged device's own, which QEMU may not have let go of yet. Taken
     /// without the image lock that would refuse it; both read and write the one
