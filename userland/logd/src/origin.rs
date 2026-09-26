@@ -41,6 +41,13 @@ pub const ROUND_RECORDS: usize = 512;
 pub const ALLOWANCE: u64 = 4096;
 pub const ALLOWANCE_WINDOW_NS: u64 = 1_000_000_000;
 
+/// How far past the moment it is read a record's stamp may be before it is
+/// the writer's word against the clock: the skew two CPUs' counters may show,
+/// with room to spare. A stamp past it is read as that moment and counted —
+/// a stamp in the future would hold its line back from every round until the
+/// machine stops.
+pub const STAMP_SLACK_NS: u64 = 1_000_000;
+
 /// The longest line held for its end: past it, what is held is said.
 pub const JOIN_BYTES: usize = 64 * 1024;
 /// Writers of one program whose lines are held at once.
@@ -68,6 +75,18 @@ pub struct Counted {
     pub suppressed: u64,
     /// Whether the allowance began suppressing this round.
     pub began_suppressing: bool,
+    /// Records stamped past the moment they were read, read as that moment.
+    pub ahead: u64,
+}
+
+/// Every stamp past `now_ns` plus [`STAMP_SLACK_NS`] read as `now_ns`; how many were.
+fn clamp_ahead(bodies: &mut [Body], now_ns: u64) -> u64 {
+    let mut ahead = 0;
+    for body in bodies.iter_mut().filter(|b| b.at_ns > now_ns.saturating_add(STAMP_SLACK_NS)) {
+        body.at_ns = now_ns;
+        ahead += 1;
+    }
+    ahead
 }
 
 /// A writer's line so far.
@@ -189,6 +208,7 @@ impl Origin {
             left -= 1;
         }
         counted.refused += self.shared.refused(&self.ring);
+        counted.ahead = clamp_ahead(&mut bodies, toyos_abi::clock::nanos_since_boot());
         for body in bodies {
             let limit = if body.pid == self.pid { &self.own } else { &self.children };
             match limit.admit(now_ns) {
@@ -205,9 +225,10 @@ impl Origin {
 
     /// Everything its writers left, once none is left to write: the records a
     /// lane or the shared ring still holds, every line held for its end, and a
-    /// count of the positions taken and never published. No allowance: these
-    /// are a program's last words.
-    pub fn sweep(&mut self, index: usize, out: &mut Vec<Said>) -> u64 {
+    /// count of the positions taken and never published, and of the stamps
+    /// read as the moment they were read. No allowance: these are a program's
+    /// last words.
+    pub fn sweep(&mut self, index: usize, out: &mut Vec<Said>) -> (u64, u64) {
         let mut bodies: Vec<Body> = Vec::new();
         for (i, reader) in self.lanes.iter_mut().enumerate() {
             let lane = self.ring.lane(i);
@@ -216,11 +237,12 @@ impl Origin {
             }
         }
         let abandoned = self.shared.sweep(&self.ring, |body| bodies.push(body));
+        let ahead = clamp_ahead(&mut bodies, toyos_abi::clock::nanos_since_boot());
         for body in bodies {
             self.joins.join(index, &body, out);
         }
         self.joins.say_held(out);
-        abandoned
+        (abandoned, ahead)
     }
 
     /// Every line held for its end, said as far as it got.
@@ -264,6 +286,16 @@ mod tests {
         joins.join(0, &body(7, 0, 10, b"prompt> ", true), &mut out);
         joins.join(0, &closes, &mut out);
         assert_eq!(texts(&out), [(0, &b"prompt> "[..])]);
+    }
+
+    /// A stamp in the future is read as now and counted; one within the
+    /// counters' skew is the writer's and kept.
+    #[test]
+    fn a_stamp_ahead_of_the_clock_is_read_as_now() {
+        let mut bodies =
+            [body(7, 0, u64::MAX, b"", false), body(7, 0, 100 + STAMP_SLACK_NS, b"", false), body(7, 0, 5, b"", false)];
+        assert_eq!(clamp_ahead(&mut bodies, 100), 1);
+        assert_eq!(bodies.map(|b| b.at_ns), [100, 100 + STAMP_SLACK_NS, 5]);
     }
 
     fn texts(out: &[Said]) -> Vec<(u32, &[u8])> {

@@ -421,6 +421,9 @@ impl Log {
                     origin::ALLOWANCE
                 ));
             }
+            if counted.ahead > 0 {
+                notes.push(ahead_note(counted.ahead, &origin.tag));
+            }
             if counted.began_suppressing {
                 notes.push(format!(
                     "logd: {} is past its {} records a second; the rest this second are counted",
@@ -446,7 +449,10 @@ impl Log {
                 Ok(_) | Err(SyscallError::WouldBlock) => continue,
                 Err(e) => panic!("logd: {}'s end refused a read: {e:?}", origin.tag),
             }
-            let abandoned = origin.sweep(i, &mut read);
+            let (abandoned, ahead) = origin.sweep(i, &mut read);
+            if ahead > 0 {
+                notes.push(ahead_note(ahead, &origin.tag));
+            }
             if abandoned > 0 {
                 notes.push(format!(
                     "logd: {} left {abandoned} record(s) it had begun and never finished",
@@ -741,6 +747,10 @@ impl Log {
             );
         }
     }
+}
+
+fn ahead_note(ahead: u64, tag: &str) -> String {
+    format!("logd: {ahead} record(s) of {tag}'s were stamped ahead of the clock and are written as read")
 }
 
 /// The origin this program leaves unread (`--stall=<name>`), and the exact

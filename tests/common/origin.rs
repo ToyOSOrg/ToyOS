@@ -32,6 +32,8 @@ const FLOOD_DONE: &str = "flood done lines=";
 /// The forger, and the exit it really has.
 const FORGER: &str = "test_rs_log_forger";
 const FORGER_CODE: i64 = 7;
+/// The text of the record it stamps `u64::MAX`.
+const FORGER_AHEAD: &str = "log forger: stamped at the end of time";
 
 /// **A program's line reaches `/log`, the served log and the console, and each
 /// says whose it is.** On all three it is the line the program wrote under
@@ -136,7 +138,8 @@ fn one_job(
 /// is in `/log` and on the console — as `test-runner`'s — and every judge
 /// reads the truth: the kernel's exit record says 7, no kernel record carries
 /// the forged words, no console line opens as the kernel's with them, and
-/// netd said nothing (this boot runs no netd).
+/// netd said nothing (this boot runs no netd). A record it stamps `u64::MAX`
+/// is written before the machine stops, not parked until it does.
 pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (ran, log) = one_job("tests/testcases", "log-program-forgery", FORGER, Duration::from_secs(60), c_bins, rust_bins)?;
     if ran.exit_code != Some(FORGER_CODE as i32) {
@@ -165,6 +168,26 @@ pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) ->
                 ran.serial
             ));
         }
+    }
+    // **A stamp at the end of time holds nothing back**: its line is written
+    // in the round that read it, long before the machine stops, and `logd`
+    // says it read the stamp as the moment it read the record.
+    let lines: Vec<&str> = log.lines().collect();
+    let place = |what: &str, is: &dyn Fn(&str) -> bool| {
+        lines.iter().position(|l| is(l)).ok_or_else(|| format!("/log carries no {what}\n{log}"))
+    };
+    let ahead = place("line stamped at the end of time", &|l| {
+        toyos_logstream::program_line(l).is_some_and(|said| said.tag == RUNNER && said.text == FORGER_AHEAD)
+    })?;
+    let stopping = place("stop line", &|l| l.contains(toyos_logstream::STOPPING))?;
+    if ahead > stopping {
+        return Err(format!(
+            "{FORGER_AHEAD:?} is after {:?} in /log: logd held it until the machine stopped",
+            toyos_logstream::STOPPING
+        ));
+    }
+    if !bootlog::lines_of(&log, "logd").contains(&format!("of {RUNNER}'s were stamped ahead of the clock")) {
+        return Err(format!("logd never said it read a stamp ahead of the clock\n{log}"));
     }
     // **The console, as nobody's program**: a line that does not open with a
     // program's head reads as the kernel's, and no forged word may be in one.
@@ -201,7 +224,7 @@ pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) ->
     eprintln!(
         "  [origin] five forgeries in /log and on the console, each under {RUNNER:?}; the exit \
          judge read {FORGER_CODE} and no kernel record or kernel-shaped console line carries a \
-         forged word"
+         forged word; its line stamped at the end of time was written before the stop"
     );
     Ok(())
 }
