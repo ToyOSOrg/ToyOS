@@ -414,9 +414,6 @@ extern "C" fn body(_arg: u64) -> ! {
 
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("klogd runs as a task");
-    // Registered once: `post_wake` notifies this thread's word directly, and the registration is what the
-    // park is made on. Nothing else posts this watch but the thread's own end.
-    let armed = watch::arm(handle.watch(), 0, WaitClass::Other).expect("klogd runs as a task");
     loop {
         let freed = if serial::has_console() {
             // A chunk of each per hold, with interrupts on throughout.
@@ -443,6 +440,11 @@ extern "C" fn body(_arg: u64) -> ! {
         // Outside `drain_inline`: that function's other callers (a producer mid-`emit`, the panic path) may not take a watch's lock.
         super::user::post_readiness();
 
+        // Registered each pass, after the drain and before the recheck: the
+        // wire's lock may park this thread on its own watch, and a task waits
+        // on one watch at a time. `post_wake` notifies this thread's word
+        // directly; nothing else posts this watch but the thread's own end.
+        let armed = watch::arm(handle.watch(), 0, WaitClass::Other).expect("klogd runs as a task");
         // Safe with no backend because `discard_pending` still advances the position each pass.
         if shard::arm_waiter(shard::log_waiter(), || {
             DRAINED.any_pending() || QUEUED.load(Ordering::SeqCst) > 0
