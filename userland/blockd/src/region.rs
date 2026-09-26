@@ -12,7 +12,7 @@ use toyos_abi::syscall::SyscallError;
 use toyos_blockring::layout::{arena_byte, ARENA_BLOCKS, RING_WORDS, SESSION_BYTES};
 use toyos_blockring::BLOCK_BYTES;
 
-use crate::window::Window;
+use toyos::volatile::Window;
 
 pub struct Region {
     memory: SharedMemory,

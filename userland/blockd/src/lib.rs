@@ -7,7 +7,6 @@
 pub mod nvme;
 pub mod region;
 pub mod session;
-pub mod window;
 
 pub use session::{Answer, Error, Session, Unsent, Waited};
 pub use toyos_blockring::client::{Outcome, Ticket};

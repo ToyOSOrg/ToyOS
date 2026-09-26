@@ -18,6 +18,12 @@
 //! [`Outcome::Durable`] only by a device flush that succeeded after every loss
 //! it could have been told about.
 //!
+//! **A write given up is a loss no later flush can answer for.** One the device
+//! refused on more than [`MAX_ATTEMPTS`] reissues is dropped, and its caller
+//! was told [`Outcome::Done`] for it: every flush from then on, waiting or
+//! asked later, covers it and is answered [`Outcome::Device`], for the
+//! client's life.
+//!
 //! **What was on the wire when a session ended is answered
 //! [`Outcome::Refused`]**: a write it took may or may not be on the disk, and
 //! the caller is told so rather than told either. What had not yet been put on
@@ -132,6 +138,8 @@ pub struct Client {
     released: VecDeque<(u32, u32)>,
     /// Writes put on the wire again after a loss, over the client's life.
     reissued: u64,
+    /// An acknowledged write was given up: no flush is durable again.
+    gave_up: bool,
 }
 
 impl Client {
@@ -252,6 +260,7 @@ impl Client {
                     // The device will not take the only copy there is: every
                     // flush waiting is told so, and the write is gone.
                     self.released.push_back((acked.arena, acked.blocks));
+                    self.gave_up = true;
                     self.fail_waiting_flushes();
                 } else {
                     self.requeue_reissue(acked);
@@ -268,7 +277,8 @@ impl Client {
                     self.released.push_back((a.arena, a.blocks));
                 }
                 self.attempts.remove(&ticket);
-                self.answers.push_back((ticket, Outcome::Durable));
+                let outcome = if self.gave_up { Outcome::Device } else { Outcome::Durable };
+                self.answers.push_back((ticket, outcome));
             }
             (Kind::Flush(ticket), _) => {
                 self.lost();
@@ -493,6 +503,34 @@ mod tests {
         answer(&mut client, first, Status::Ok);
         let second = client.next_request().unwrap();
         assert_eq!((second.lba, second.arena), (1, 2));
+    }
+
+    /// A write the device refused on every reissue is gone, and its caller was
+    /// told it was done: a flush asked for after that is answered the loss,
+    /// never durable.
+    #[test]
+    fn a_write_given_up_poisons_every_later_flush() {
+        let mut client = Client::new();
+        client.session_started();
+        client.submit(1, Op::Write, 0, 1, 0);
+        let w = client.next_request().unwrap();
+        answer(&mut client, w, Status::Ok);
+        client.session_ended();
+        for _ in 0..=MAX_ATTEMPTS {
+            client.session_started();
+            let again = client.next_request().unwrap();
+            assert_eq!((again.op, again.lba), (Op::Write, 0));
+            answer(&mut client, again, Status::Device);
+        }
+        client.submit(2, Op::Flush, 0, 0, 0);
+        let f = client.next_request().unwrap();
+        assert_eq!(f.op, Op::Flush);
+        answer(&mut client, f, Status::Ok);
+        assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::Done), (2, Outcome::Device)]);
+        client.submit(3, Op::Flush, 0, 0, 0);
+        let f = client.next_request().unwrap();
+        answer(&mut client, f, Status::Ok);
+        assert_eq!(client.take_answers().collect::<Vec<_>>(), [(3, Outcome::Device)]);
     }
 
     #[test]

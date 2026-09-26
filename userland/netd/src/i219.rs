@@ -18,11 +18,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use toyos::shm::SharedMemory;
+use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
 use toyos_i219::{Clock, DmaBuffers, Interrupts, Registers};
 
-use crate::device::{KernelRefused, Latch, Window};
+use crate::device::{KernelRefused, Latch};
 
 /// The register window. The offsets are `toyos-i219`'s own constants, all under
 /// `toyos_i219::regs::REGISTER_BYTES`, which its `open` refuses a shorter window

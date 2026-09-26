@@ -39,6 +39,12 @@ const AFTER: &str = "AFTER.BIN";
 
 const BLOCK: u64 = 4096;
 const MIB: u64 = 1024 * 1024;
+/// blockd's namespace's sector, which QEMU's trace counts an LBA in.
+const SECTOR: u64 = 512;
+/// Mirrored in the guest: a region, and the addresses a device domain has
+/// under `iommu-domain-narrow` (`vtd::table::NARROW_BYTES`).
+const REGION: u64 = 2 * MIB;
+const NARROW: u64 = 128 * MIB;
 const CONFIG: &str = "tests/blockdcase";
 
 /// Mirrored: block `n` of a region `salt` names.
@@ -70,8 +76,12 @@ struct Layout {
 /// blockd's disk: a FAT32 neighbour, the idle ROOT slot, a FAT32 neighbour
 /// touching it, the FAT32 volume the crash role writes, the bench partition,
 /// and two partitions that are not whole 4 KiB blocks.
+///
+/// The neighbours are long enough that the volume starts past every byte of
+/// the kernel's disk: QEMU's trace names no controller, so a write is blockd's
+/// by the sector it lands on ([`reissued_after`]).
 fn craft_blockd_disk(path: &Path) -> Result<Layout, String> {
-    const NEIGHBOUR_BYTES: u64 = 34 * MIB;
+    const NEIGHBOUR_BYTES: u64 = 64 * MIB;
     const FS_BYTES: u64 = 64 * MIB;
     let parts: [Part; 7] = [
         ("neighbour before", NEIGHBOUR_BYTES, NEIGHBOUR_TYPE, "21111111-2222-4333-8444-555555555501", ALIGNED),
@@ -96,17 +106,27 @@ fn craft_blockd_disk(path: &Path) -> Result<Layout, String> {
     Ok(layout)
 }
 
-/// A boot with both disks crafted fresh, and QEMU tracing NVMe to `trace`.
+/// A boot with both disks crafted fresh, the actuators `params` armed, and
+/// QEMU tracing NVMe to `trace`.
 fn boot(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
     name: &str,
+    params: &'static [&'static str],
 ) -> Result<(QemuInstance, Layout, PathBuf, PathBuf, Vec<u8>), String> {
     let config = super::compile::repo_root().join(CONFIG);
     let kernel_disk = super::lane::dir().join(format!("{name}-kernel.img"));
     partclaim::craft_plain_disk(&kernel_disk, &[("kernel bench", BENCH_BLOCKS * BLOCK, KBENCH)], 96 * MIB)?;
     let blockd_disk = super::lane::dir().join(format!("{name}-blockd.img"));
     let layout = craft_blockd_disk(&blockd_disk)?;
+    let kernel_bytes = std::fs::metadata(&kernel_disk).map_err(|e| format!("the kernel's disk: {e}"))?.len();
+    if kernel_bytes > layout.fs.start {
+        return Err(format!(
+            "the kernel's disk is {kernel_bytes} bytes and blockd's volume starts at {}: a traced write \
+             there could be either controller's",
+            layout.fs.start
+        ));
+    }
     let before = std::fs::read(&blockd_disk).map_err(|e| format!("read the crafted disk: {e}"))?;
     let trace = super::lane::dir().join(format!("{name}-nvme.trace"));
     let _ = std::fs::remove_file(&trace);
@@ -118,6 +138,7 @@ fn boot(
             nvme_image: Some(kernel_disk),
             userland_nvme: Some(blockd_disk.clone()),
             nvme_trace: Some(trace.clone()),
+            kernel_params: params,
             ..Default::default()
         },
     );
@@ -202,6 +223,93 @@ fn read_trace(trace: &Path) -> Result<Traced, String> {
     Ok(Traced { flushes, queues, peak })
 }
 
+/// One thing QEMU's trace says a controller did, in the order it did it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Did {
+    /// `CC.EN` set and the controller ready: a driver brought it up.
+    Started,
+    /// A write of `sectors` from sector `lba`.
+    Wrote { lba: u64, sectors: u64 },
+    Flushed,
+}
+
+fn trace_events(trace: &Path) -> Result<Vec<Did>, String> {
+    let text = std::fs::read_to_string(trace).map_err(|e| format!("read the NVMe trace: {e}"))?;
+    let mut did = Vec::new();
+    for line in text.lines() {
+        if line.contains("pci_nvme_mmio_start_success") {
+            did.push(Did::Started);
+        } else if line.contains("pci_nvme_flush_ns") {
+            did.push(Did::Flushed);
+        } else if line.contains("pci_nvme_write ") {
+            let (Some(lba), Some(sectors)) = (field(line, "lba"), field(line, "nlb")) else {
+                return Err(format!("a trace line this reader does not know: {line:?}"));
+            };
+            did.push(Did::Wrote { lba, sectors });
+        }
+    }
+    Ok(did)
+}
+
+/// The writes to `span` blockd acknowledged and no flush covered when its
+/// controller was reset or it was killed, as the device saw them, each written
+/// again first thing after — read off QEMU's trace alone.
+///
+/// **A write is blockd's by where it lands**: the trace names no controller,
+/// and every partition blockd writes starts past the last byte of the kernel's
+/// disk ([`boot`] refuses a layout where the volume does not, and the bench
+/// partition lies past it). A lifetime is what follows one controller start —
+/// blockd's bring-up, or its reset. The one the loss ended is the lifetime
+/// whose writes to `span` did not end in a flush and after which another
+/// lifetime wrote to it; its last write is the one blockd withheld the answer
+/// to, and the ones before it since its last flush are the acknowledged ones.
+/// The lifetime after it must write exactly those, in that order, before any
+/// other write to `span` — which is what reissue means, and what a client
+/// that forgot them cannot do by accident. Every Flush in the trace is
+/// blockd's: the kernel's driver issues none.
+fn reissued_after(trace: &Path, span: Span) -> Result<Vec<u64>, String> {
+    let mut lives: Vec<Vec<Did>> = Vec::new();
+    for did in trace_events(trace)? {
+        match did {
+            Did::Started => lives.push(Vec::new()),
+            Did::Wrote { lba, .. } if !(span.start..span.end()).contains(&(lba * SECTOR)) => {}
+            did => match lives.last_mut() {
+                Some(life) => life.push(did),
+                None => return Err(format!("the trace has {did:?} before any controller started")),
+            },
+        }
+    }
+    let wrote = |life: &[Did]| life.iter().any(|d| matches!(d, Did::Wrote { .. }));
+    let volume: Vec<&[Did]> = lives.iter().map(Vec::as_slice).filter(|l| wrote(l)).collect();
+    let tail = |life: &[Did]| -> Vec<u64> {
+        let after = life.iter().rposition(|d| *d == Did::Flushed).map_or(0, |at| at + 1);
+        life[after..].iter().filter_map(|d| match d { Did::Wrote { lba, .. } => Some(*lba), _ => None }).collect()
+    };
+    let died: Vec<usize> = (0..volume.len().saturating_sub(1)).filter(|&i| !tail(volume[i]).is_empty()).collect();
+    let [died] = died[..] else {
+        return Err(format!(
+            "{} blockd lifetimes wrote to {span:?}, and {} of them ended with writes no flush \
+             covered and another after them, not one",
+            volume.len(),
+            died.len()
+        ));
+    };
+    let mut unflushed = tail(volume[died]);
+    let withheld = unflushed.pop().expect("a tail is not empty");
+    let next: Vec<u64> = volume[died + 1]
+        .iter()
+        .filter_map(|d| match d { Did::Wrote { lba, .. } => Some(*lba), _ => None })
+        .take(unflushed.len())
+        .collect();
+    if next != unflushed {
+        return Err(format!(
+            "blockd died with the writes at sectors {unflushed:?} acknowledged and no flush after them \
+             (and {withheld} withheld); the blockd after it wrote {next:?} first"
+        ));
+    }
+    Ok(unflushed)
+}
+
 /// Every byte outside the partitions the guest may write is the byte the host
 /// wrote, and both FAT32 neighbours are clean to fatgen103.
 fn neighbours_untouched(layout: &Layout, before: &[u8], after: &[u8]) -> Result<(), String> {
@@ -250,13 +358,14 @@ pub fn blockd_serves_partitions(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (mut qemu, layout, disk, trace, before) = boot(c_bins, rust_bins, "blockd-serves")?;
+    let (mut qemu, layout, disk, trace, before) = boot(c_bins, rust_bins, "blockd-serves", &[])?;
     let claims = role(&mut qemu, "claims", Duration::from_secs(240))?;
     for want in [
         "an absent GUID refused with NotFound",
         "the zero GUID refused with NotFound",
         "a partition not whole blocks long refused with Unusable",
         "a partition beginning inside a block refused with Unusable",
+        "longer than a session, refused with Malformed",
         "a second client of the slot refused with Held",
         "a second client of the slot refused with Opened",
         "blockd: NVMe up:",
@@ -317,12 +426,16 @@ pub fn blockd_serves_partitions(
 ///   mount carried on. Off the image, with the host's own readers: the volume
 ///   is clean to fatgen103, and every file the guest was told was written —
 ///   and the one written after the restart — holds its bytes by `fatfs`.
+///   QEMU keeps its write cache across a reset and a kill, so the image holds
+///   the acknowledged writes whether they were written again or not: the
+///   reissue is read off QEMU's trace instead ([`reissued_after`]), for the
+///   reset as for the kill, and the guest's own counts are held against it.
 pub fn blockd_survives_its_death(
     _test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (mut qemu, layout, disk, trace, before) = boot(c_bins, rust_bins, "blockd-death")?;
+    let (mut qemu, layout, disk, trace, before) = boot(c_bins, rust_bins, "blockd-death", &[])?;
     let reset = role(&mut qemu, "reset", Duration::from_secs(240))?;
     for want in [
         "blockd: WITHHELD the device's answer to a write",
@@ -330,17 +443,17 @@ pub fn blockd_survives_its_death(
         "blockd: controller reset;",
         "a flush found writes of its own the device lost",
         "the withheld write was answered Device",
-        "1 acknowledged writes no flush had covered went out again after the reset",
     ] {
         said(&reset, want)?;
     }
+    let reset_again = said(&reset, "went out again after the reset")?.to_string();
     let crash = role(&mut qemu, "crash", Duration::from_secs(600))?;
+    let crash_again = said(&crash, "went out again after the restart")?.to_string();
     for want in [
         "blockd: WITHHELD the device's answer to a write",
         "blockd killed with the withheld write done on the device",
         "was answered Refused",
         "blockd restarted and the session reopened",
-        "2 acknowledged writes no flush had covered went out again after the restart",
     ] {
         said(&crash, want)?;
     }
@@ -349,6 +462,26 @@ pub fn blockd_survives_its_death(
     let mut log = Serial::named("blockd_survives_its_death", format!("{}{}", reset.serial, crash.serial));
     log.push(&tail);
     log.must_be_clean()?;
+
+    // The device's account first: the image cannot tell a reissue from none.
+    let (reset_reissued, crash_reissued) =
+        match (reissued_after(&trace, layout.bench), reissued_after(&trace, layout.fs)) {
+            (Ok(reset), Ok(crash)) => (reset, crash),
+            (reset, crash) => {
+                return Err(format!("QEMU's trace, after the reset: {reset:?}; after the kill: {crash:?}"));
+            }
+        };
+    for (what, reissued, again) in
+        [("reset", &reset_reissued, &reset_again), ("restart", &crash_reissued, &crash_again)]
+    {
+        if !again.contains(&format!("{} acknowledged writes", reissued.len())) {
+            return Err(format!(
+                "QEMU's trace has {} writes blockd acknowledged and wrote again after the {what}, and the \
+                 guest said {again:?}",
+                reissued.len()
+            ));
+        }
+    }
 
     let after = std::fs::read(&disk).map_err(|e| format!("read the disk back: {e}"))?;
     neighbours_untouched(&layout, &before, &after)?;
@@ -385,7 +518,9 @@ pub fn blockd_survives_its_death(
         "  [blockd] a controller reset under a withheld write: answered not done, and the write \
          before it rewritten after the flush found it lost; blockd killed with a write done and \
          unanswered: restarted, the session reopened, the mount carried on, and off the image the \
-         volume is clean to fatgen103 and all {} files read back by fatfs",
+         volume is clean to fatgen103 and all {} files read back by fatfs; QEMU's trace has the \
+         acknowledged writes at sectors {reset_reissued:?} written again first after the reset, and \
+         those at {crash_reissued:?} first by the blockd after the kill",
         files.len()
     );
     Ok(())
@@ -414,7 +549,7 @@ pub fn blockd_dma_outside_the_lent(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (mut qemu, _layout, disk, trace, _before) = boot(c_bins, rust_bins, "blockd-dma")?;
+    let (mut qemu, _layout, disk, trace, _before) = boot(c_bins, rust_bins, "blockd-dma", &[])?;
     let mut log = String::new();
     let mut aimed = Vec::new();
     for name in ["dma-inside", "dma-outside", "dma-revoked", "dma-after"] {
@@ -461,4 +596,91 @@ pub fn blockd_dma_outside_the_lent(
          function answered again on its next claim"
     );
     Ok(())
+}
+
+/// What a claim may lend its function, and what it may not.
+///
+/// On a boot whose device domains have [`NARROW`] of addresses
+/// (`iommu-domain-narrow`), the guest:
+/// - lends virtio-sound's pool — ordinary memory, a kernel driver's own — and
+///   is refused with `InvalidArgument`;
+/// - lends 2 MiB regions beside the claim's own 2 MiB grant until the claim's
+///   bound refuses the next with `ResourceExhausted`, at exactly the count the
+///   bound leaves room for; and takes the grant's address back as a lent
+///   region, which is `NotFound`;
+/// - lends one region and takes it back until ten such domains' worth of
+///   addresses went by, and the device then reads into it.
+///
+/// Off the log: every domain the kernel made is the narrow one, one of them
+/// for the claim, and nothing panicked.
+pub fn blockd_lends_within_its_bound(
+    _test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let (mut qemu, _layout, disk, trace, _before) =
+        boot(c_bins, rust_bins, "blockd-lend", &["iommu-domain-narrow"])?;
+    let mut log = String::new();
+    let mut lines = Vec::new();
+    for (name, want) in [
+        ("dma-pool", "is refused with InvalidArgument"),
+        ("dma-bound", "the next refused with ResourceExhausted"),
+        ("dma-churn", "the device then read block 0 into it"),
+    ] {
+        let result = role(&mut qemu, name, Duration::from_secs(240))?;
+        lines.push(said(&result, want)?.to_string());
+        log.push_str(&result.before);
+        log.push_str(&result.serial);
+    }
+    let bound = said_line(&lines, "regions of")?;
+    let room = (32 * MIB - REGION) / REGION;
+    if !bound.contains(&format!("blockd_io: {room} regions of {REGION} bytes")) {
+        return Err(format!("the claim's bound leaves room for {room} regions, and the guest said {bound:?}"));
+    }
+    let churn = said_line(&lines, "lends of a")?;
+    let rounds: u64 = churn
+        .split("blockd_io: ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| format!("no count in {churn:?}"))?;
+    if rounds * REGION < 10 * NARROW {
+        return Err(format!("{rounds} lends of {REGION} bytes are not ten domains of {NARROW}"));
+    }
+    let boot_log = qemu.boot_log().to_string();
+    let tail = partclaim::shut_down(qemu);
+    partclaim::no_panic("on the way down", &tail)?;
+    log.push_str(&tail);
+    let whole = format!("{boot_log}{log}");
+    let mut domains = 0;
+    let mut claimed = false;
+    for line in whole.lines().filter(|l| l.contains("iommu: domain") && l.contains(" addresses from ")) {
+        let range = line.split(" addresses from ").nth(1).unwrap_or_default();
+        let mut ends = range.split(" to ").map(|w| u64::from_str_radix(w.trim().trim_start_matches("0x"), 16));
+        let (Some(Ok(from)), Some(Ok(to))) = (ends.next(), ends.next()) else {
+            return Err(format!("unreadable domain line: {line:?}"));
+        };
+        if to - from != NARROW {
+            return Err(format!("iommu-domain-narrow was armed and a domain has {:#x} of addresses: {line:?}", to - from));
+        }
+        domains += 1;
+        claimed |= log.contains(line);
+    }
+    if domains == 0 || !claimed {
+        return Err(format!("{domains} narrow domains, and none of them made for the claim"));
+    }
+    let log = Serial::named("blockd_lends_within_its_bound", log);
+    log.must_be_clean()?;
+    let _ = std::fs::remove_file(&disk);
+    let _ = std::fs::remove_file(&trace);
+    eprintln!("  [blockd] {}; {bound}; {churn}", lines[0].trim());
+    Ok(())
+}
+
+fn said_line<'a>(lines: &'a [String], needle: &str) -> Result<&'a str, String> {
+    lines
+        .iter()
+        .find(|l| l.contains(needle))
+        .map(String::as_str)
+        .ok_or_else(|| format!("no line says {needle:?}: {lines:?}"))
 }

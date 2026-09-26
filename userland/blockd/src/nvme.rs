@@ -27,7 +27,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::window::Window;
+use toyos::volatile::Window;
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::{DmaRegion, PciDev};
@@ -425,6 +425,11 @@ impl Controller {
         self.io.iter().map(Queue::busy).sum()
     }
 
+    /// How many commands the device can hold at once, over every I/O queue.
+    pub fn capacity(&self) -> usize {
+        self.io.len() * COMMANDS_PER_QUEUE as usize
+    }
+
     /// Whether some I/O queue can take a command.
     pub fn has_room(&self) -> bool {
         self.io.iter().any(|q| !q.free.is_empty())
@@ -617,51 +622,22 @@ impl Controller {
     /// own scratch page: before any session exists, for the partition table.
     pub fn read_block(&mut self, block: u64, out: &mut [u8]) -> bool {
         assert_eq!(out.len(), toyos_blockring::BLOCK_BYTES);
-        let at = self.dma_addr + OFF_SCRATCH as u64;
-        let ok = self.transfer(false, block, 1, at).unwrap_or_else(|why| {
-            panic!("blockd: the claim refused its interrupt read ({why:?}) reading the partition table")
-        });
+        assert_eq!(self.busy(), 0, "blockd: a waited read beside other commands");
+        self.submit_io(false, block, 1, self.dma_addr + OFF_SCRATCH as u64, Owner::Driver);
+        let start = Instant::now();
+        let mut done = Vec::new();
+        let ok = loop {
+            self.reap(&mut done);
+            if let Some(d) = done.pop() {
+                break d.ok;
+            }
+            assert!(start.elapsed() < self.ready_bound * 4, "blockd: a waited read was not answered");
+            self.wait_interrupt(self.ready_bound);
+        };
         if ok {
             self.dma.copy_out(OFF_SCRATCH, out);
         }
         ok
-    }
-
-    /// One read or write of `blocks` at device block `block` through device
-    /// address `at`, waited for, with nothing else on the device: whether the
-    /// device did it, or the claim's refusal once the unit has refused this
-    /// function an access — which is how a transfer aimed outside the
-    /// function's domain ends.
-    pub fn transfer(&mut self, write: bool, block: u64, blocks: u32, at: u64) -> Result<bool, SyscallError> {
-        assert_eq!(self.busy(), 0, "blockd: a waited transfer beside other commands");
-        self.submit_io(write, block, blocks, at, Owner::Driver);
-        let start = Instant::now();
-        let mut done = Vec::new();
-        loop {
-            self.reap(&mut done);
-            if let Some(d) = done.pop() {
-                return Ok(d.ok);
-            }
-            assert!(start.elapsed() < self.ready_bound * 4, "blockd: a waited transfer was not answered");
-            self.poller.watch(&self.dev, READABLE, 0);
-            self.poller.wait(1, self.ready_bound.as_nanos() as u64, |_| {});
-            self.take_interrupt()?;
-        }
-    }
-
-    /// Wait, at most `bound`, for the claim to answer with the unit's refusal
-    /// — what every call on a claim answers once its function was refused an
-    /// access; whether it did.
-    pub fn refused_within(&self, bound: Duration) -> bool {
-        let start = Instant::now();
-        while start.elapsed() < bound {
-            if self.take_interrupt() == Err(SyscallError::Io) {
-                return true;
-            }
-            self.poller.watch(&self.dev, READABLE, 0);
-            self.poller.wait(1, bound.saturating_sub(start.elapsed()).as_nanos() as u64, |_| {});
-        }
-        self.take_interrupt() == Err(SyscallError::Io)
     }
 
     /// Take every command back by resetting the controller (§3.7.2), and

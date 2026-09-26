@@ -44,7 +44,7 @@ volume, handed to whichever server recognises its superblock.
 
 | partition | filesystem | mounts as | writable |
 |---|---|---|---|
-| ESP | FAT32, firmware's rule | `/boot` | the updater only |
+| ESP | FAT32, firmware's rule | `/boot` | kernel only |
 | ROOT | bcachefs image the build writes | `/system` | no; versioned per release |
 | DATA | bcachefs, formatted on first boot | `/apps`, `/home` | yes |
 | LOG | FAT32 while a Mac has to read the dev stick | `/log` | yes |

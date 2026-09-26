@@ -51,7 +51,7 @@ use toyos_blockring::layout::{arena_byte, DEPTH};
 use toyos_blockring::ring::{self, ServerRings};
 use toyos_blockring::server::{ServerSession, Taken};
 use toyos_blockring::wire::{self, Opened, Refusal};
-use toyos_blockring::{BLOCK_BYTES, PORT};
+use toyos_blockring::{BLOCK_BYTES, PORT, SESSION_BYTES};
 
 /// How long a command may go unanswered before the controller is reset to
 /// take it back. Policy: NVMe defines no per-command bound, and a flush of a
@@ -223,7 +223,18 @@ impl Service {
             return Err(Refusal::Held);
         }
         match self.ctrl.claim().dma_map(region.handle()) {
-            Ok(mapping) => Ok(Opening { region, device_addr: mapping.device_addr, first, blocks, unique: guid }),
+            Ok(mapping) if mapping.bytes == SESSION_BYTES as u64 => {
+                Ok(Opening { region, device_addr: mapping.device_addr, first, blocks, unique: guid })
+            }
+            // A region longer than a session would spend the claim's bound on
+            // the kernel's side for every other client: refused whole.
+            Ok(mapping) => {
+                if let Err(why) = self.ctrl.claim().dma_unmap(mapping.device_addr) {
+                    panic!("blockd: the kernel would not take an oversized region back: {why:?}");
+                }
+                self.holds.release(first);
+                Err(Refusal::Malformed)
+            }
             Err(why) => {
                 self.holds.release(first);
                 Err(match why {
@@ -294,7 +305,12 @@ impl Service {
 
     /// Take what `id`'s client has published, while the device and the
     /// session's completion ring have room for it.
+    ///
+    /// **No session holds more than its share of the device**: the device's
+    /// commands over the sessions held, so a session that publishes as fast
+    /// as it can leaves room for every other one.
     fn pull(&mut self, id: u64) {
+        let share = (self.ctrl.capacity() / self.sessions.len()).max(1);
         let s = self.sessions.get_mut(&id).expect("a live session");
         let page = s.region.words();
         loop {
@@ -308,7 +324,10 @@ impl Service {
                 break;
             };
             let unread = (DEPTH - space) as usize;
-            if s.state.inflight() + unread >= DEPTH as usize || !self.ctrl.has_room() {
+            if s.state.inflight() + unread >= DEPTH as usize
+                || s.state.inflight() >= share
+                || !self.ctrl.has_room()
+            {
                 break;
             }
             let words = match s.rings.0.pop(page) {

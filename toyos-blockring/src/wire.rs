@@ -45,7 +45,7 @@ impl Opened {
     }
 }
 
-/// Why an open, a bind or an attach was refused.
+/// Why an open was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// No partition this service drives carries that GUID; the zero GUID is

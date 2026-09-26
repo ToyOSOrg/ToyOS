@@ -3,10 +3,11 @@
 # is a service's: it mints the claim on the machine's second NVMe controller
 # from its capability, starts blockd holding it and a port it made, and is the
 # only thing that can end or restart it. The disks are crafted by
-# `tests/common/blockd.rs`.
+# `tests/common/blockd.rs`. No soundd: `test_rs_blockd_io dma-pool` claims
+# virtio-sound itself, to lend the pool its kernel driver keeps.
 
 [boot]
-start = ["logd", "soundd", "test-runner"]
+start = ["logd", "test-runner"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and writes no file at all, so a
@@ -16,11 +17,6 @@ start = ["logd", "soundd", "test-runner"]
 # is `logread`, which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate.
 [programs.logd]
 syscap = ["logread"]
-
-[programs.soundd]
-serves = ["soundd"]
-devices = ["hda-audio", "virtio-sound"]
-syscap = ["rt"]
 
 # The test estate's authority.
 # `device` because five of the guest binaries claim the keyboard or the mouse
@@ -39,7 +35,6 @@ syscap = ["rt"]
 # also what `endowment_denied` narrows *away* to prove the refusal, so an estate
 # without it would make that arm vacuous rather than red.
 [programs.test-runner]
-receives = ["soundd"]
 syscap = ["device", "dup", "logread", "power", "roster"]
 
 # The NVMe driver, from userland. No row starts it and it holds nothing here:
@@ -47,7 +42,6 @@ syscap = ["device", "dup", "logread", "power", "roster"]
 [programs.blockd]
 
 [programs.toybox]
-receives = ["soundd"]
 
 [symlinks]
 "bin/cat" = "/system/bin/toybox"

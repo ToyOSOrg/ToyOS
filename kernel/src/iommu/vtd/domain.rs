@@ -69,11 +69,12 @@ pub fn create() -> Result<DomainId, IommuError> {
     }
     let domain = Domain::new(&mut TABLES.lock(), id, width, mgaw)?;
     log!(
-        "iommu: domain{id} root={:#x} aw={} mgaw={} addresses from {:#x}",
+        "iommu: domain{id} root={:#x} aw={} mgaw={} addresses from {:#x} to {:#x}",
         domain.root().phys(),
         width.bits(),
         mgaw,
-        domain.floor()
+        domain.floor(),
+        domain.ceiling()
     );
     domains.live.push(domain);
     Ok(DomainId::new(id))
@@ -105,10 +106,32 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
     Ok(at)
 }
 
+/// Hand out room for `bytes` and map nothing there: a caller that places its
+/// own mappings in it later, with [`place`].
+pub fn reserve(id: DomainId, bytes: u64) -> Result<Iova, IommuError> {
+    let mut domains = DOMAINS.lock();
+    let domain = domains.at(id);
+    domain.reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.translatable()))
+}
+
 /// Put `bytes` at `phys` at `at`, room this domain handed out before and whose
 /// mapping was taken back: a device still aimed there reaches these pages.
 /// Room it never handed out is a kernel bug, since [`map`] may yet hand it out.
 pub fn map_at(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
+    let did = place(id, at, phys, bytes)?;
+    log!(
+        "iommu: domain{did} maps {:#x}..{:#x} at {:#x} again",
+        phys,
+        phys + bytes.next_multiple_of(crate::mm::PAGE_2M),
+        at.raw(),
+    );
+    Ok(())
+}
+
+/// [`map_at`] without its record line, for a mapping a holder makes and
+/// takes back as often as it likes: a line each would let one process flood
+/// the record ring.
+pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<u16, IommuError> {
     if !phys.is_multiple_of(crate::mm::PAGE_2M) {
         return Err(IommuError::Unaligned(phys));
     }
@@ -125,14 +148,7 @@ pub fn map_at(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), Iommu
     for unit in units.iter_mut() {
         unit.invalidate_domain(domain.id());
     }
-    log!(
-        "iommu: domain{} maps {:#x}..{:#x} at {:#x} again",
-        domain.id(),
-        phys,
-        phys + bytes.next_multiple_of(crate::mm::PAGE_2M),
-        at.raw(),
-    );
-    Ok(())
+    Ok(domain.id())
 }
 
 pub fn unmap(id: DomainId, at: Iova, bytes: u64) -> Result<(), IommuError> {

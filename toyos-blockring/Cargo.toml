@@ -1,7 +1,7 @@
 # A member of the host workspace (root `Cargo.toml`). What lives here is the
 # block protocol between a block service and its client — the shared session
 # page's layout, the two rings on it, the words a request and a completion are,
-# the control frames a session is opened and bound with, and every decision
+# the control frames a session is opened with, and every decision
 # either end makes about what a completion means — with nothing that touches a
 # device, a handle or a mapping. `userland/blockd` serves it and its client
 # glue speaks it; both map the page and hand this crate the words.

@@ -199,6 +199,25 @@ impl DeviceSpace {
         }
     }
 
+    /// Hand out room for `bytes` and map nothing there: where [`Self::place`]
+    /// puts mappings later. Only a space of its own has room to hand out.
+    pub fn reserve(self, bytes: u64) -> Result<u64, IommuError> {
+        match self {
+            Self::Untranslated => panic!("iommu: an untranslated space was asked for room"),
+            Self::Own(id) => vtd::domain::reserve(id, bytes).map(Iova::raw),
+        }
+    }
+
+    /// Put `bytes` at `phys` at `at`, inside room [`Self::reserve`] handed out,
+    /// and write no record of it: for a mapping its holder makes and takes back
+    /// as often as it likes.
+    pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
+        match self {
+            Self::Untranslated => panic!("iommu: an untranslated space was asked to place {phys:#x} at {at:#x}"),
+            Self::Own(id) => vtd::domain::place(id, Iova::translated(at), phys, bytes).map(|_| ()),
+        }
+    }
+
     /// Take `bytes` at `at` back, so the pages behind them can be reused.
     pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
         match self {

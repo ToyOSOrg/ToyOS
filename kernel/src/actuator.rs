@@ -467,6 +467,10 @@ actuators! {
     /// Point a virtio-sound control answer at that page and submit the chain, so the device writes where it may not.
     iommu_sound_foreign_dma = "iommu-sound-foreign-dma";
 
+    /// Cap every device domain at `vtd::table::NARROW_BYTES` of addresses, so a
+    /// holder that spends addresses runs a domain dry in a short loop.
+    iommu_domain_narrow = "iommu-domain-narrow";
+
     /// Point every device MSI at APIC 1 rather than 0 — the only way to tell the
     /// two remapping-entry destination encodings apart, since 0 encodes alike in both.
     iommu_dest_apic1 = "iommu-dest-apic1";

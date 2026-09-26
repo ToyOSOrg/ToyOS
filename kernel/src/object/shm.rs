@@ -37,8 +37,7 @@ pub struct Region {
     pub size: u64,
     pub cache: CachePolicy,
     /// The pages, when the kernel owns them; `None` for firmware's
-    /// framebuffer, an MMIO aperture, or a kernel driver's own DMA pool — none
-    /// of which is the region's to lend ([`SharedMemObject::ram`]).
+    /// framebuffer or an MMIO aperture it does not own.
     pub pages: Option<Arc<Pages>>,
 }
 
@@ -101,7 +100,7 @@ impl SharedMemObject {
     /// this kernel allocated and owns — the only kind a device may be lent
     /// (`pcidev::dma_map`). `None` for anything else: a BAR window aimed into
     /// a second device's domain would be one device reaching another's
-    /// registers, and a kernel driver's DMA pool is that driver's.
+    /// registers.
     pub fn ram(&self) -> Option<(u64, u64)> {
         (self.region.pages.is_some() && self.region.cache == CachePolicy::DeferToMtrr)
             .then(|| (self.region.phys.phys(), self.region.size))

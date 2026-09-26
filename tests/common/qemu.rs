@@ -2382,7 +2382,8 @@ pub struct BootOptions {
     /// profile with none — the kernel would take this one.
     pub userland_nvme: Option<PathBuf>,
     /// Have QEMU record every NVMe command it is sent, every completion it
-    /// posts and every flush it runs into this file: the device's own account
+    /// posts, every write with its sectors, every flush it runs and every
+    /// controller start into this file: the device's own account
     /// of what reached it, which no line a driver prints can be.
     pub nvme_trace: Option<PathBuf>,
 }
@@ -4477,7 +4478,13 @@ fn qemu_command(
             );
     }
     if let Some(trace) = &options.nvme_trace {
-        for event in ["pci_nvme_io_cmd", "pci_nvme_enqueue_req_completion", "pci_nvme_flush_ns"] {
+        for event in [
+            "pci_nvme_io_cmd",
+            "pci_nvme_enqueue_req_completion",
+            "pci_nvme_flush_ns",
+            "pci_nvme_write",
+            "pci_nvme_mmio_start_success",
+        ] {
             qemu.arg("-trace").arg(event);
         }
         qemu.arg("-D").arg(trace);

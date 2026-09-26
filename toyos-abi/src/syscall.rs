@@ -2082,10 +2082,11 @@ pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, Syscal
 /// comes back out at [`device_dma_unmap`] or when the claim ends.
 ///
 /// `InvalidArgument` for a region that is not ordinary memory this kernel
-/// allocated — a BAR window, a scanout — and for one already mapped for this
-/// claim; `ResourceExhausted` past the claim's grant bound, which this shares
-/// with [`device_dma_alloc`]. Like a grant, the first mapping is what starts
-/// the function mastering the bus.
+/// allocated — a BAR window, firmware's framebuffer — and for one already
+/// mapped for this claim; `ResourceExhausted` past the claim's grant bound,
+/// which this shares with [`device_dma_alloc`], or with no room of the
+/// region's length left where the claim's lent regions go. Like a grant, the
+/// first mapping is what starts the function mastering the bus.
 pub fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
     let mut mapping = DmaMapping { device_addr: 0, bytes: 0 };
     check_unit(syscall(

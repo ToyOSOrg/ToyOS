@@ -20,10 +20,11 @@
 use std::cell::{Cell, RefCell};
 
 use toyos::shm::SharedMemory;
+use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::{RegWidth, SyscallError};
 
-use crate::device::{KernelRefused, Latch, Window};
+use crate::device::{KernelRefused, Latch};
 
 /// PCI's own vendor-specific capability id; virtio's four config windows are
 /// all published under it (§4.1.4).

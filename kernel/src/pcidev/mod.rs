@@ -8,9 +8,20 @@
 //! may carry. Nothing the holder writes into a descriptor can make the device
 //! touch memory the kernel did not grant it: the domain maps the grants — the
 //! claim's own, and the regions of ordinary memory its holder lends it
-//! ([`dma_map`]), each at a fresh address and until [`dma_unmap`] or the claim's
-//! end — and nothing else, and an address outside them is refused at the unit
-//! and recorded against that claim.
+//! ([`dma_map`]) until [`dma_unmap`] or the claim's end — and nothing else, and
+//! an address outside them is refused at the unit and recorded against that
+//! claim.
+//!
+//! **What a holder lends is placed in a window of its slot's domain reserved
+//! for lending, [`MAX_GRANT_TOTAL`] long, and nowhere else**, so lending and
+//! taking back as often as a holder likes spends no address and no remapping
+//! table past that window's, and a window with no room left is a refusal
+//! ([`SyscallError::ResourceExhausted`]). An address in it is lent again once
+//! it is taken back. Within a claim, what the function still had in flight
+//! there lands in memory the same holder lent, which is authority it already
+//! had over both regions; across claims, only once the function was reset and
+//! is quiet ([`Retired`]), and never while the address is the slot's
+//! [`RESIDUE`].
 //!
 //! **A window is 2 MiB because that is the only page this kernel maps**, so a
 //! BAR a process may see is re-assigned onto a 2 MiB boundary of its own.
@@ -123,7 +134,8 @@ pub const VECTORS: [u8; MAX_FUNCTIONS] = [0x28, 0x29, 0x2A, 0x2B];
 /// memory.
 const MAX_GRANT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// And the most one claim may hold across every grant.
+/// And the most one claim may hold across every grant, and the length of the
+/// window its lent regions are placed in ([`Space::lend`]).
 const MAX_GRANT_TOTAL: u64 = 32 * 1024 * 1024;
 
 /// Where the fixed platform devices start on a PC: the I/O APIC, the HPET and
@@ -158,8 +170,17 @@ static IRQ: [Interrupt; MAX_FUNCTIONS] = [const { Interrupt::new() }; MAX_FUNCTI
 /// domain per claim would let a process spawn and die its way through every id
 /// the units report. [`release`] empties it, so the next holder attaches to one
 /// that maps nothing.
-static SPACE: [Lock<Option<DeviceSpace>>; MAX_FUNCTIONS] =
+static SPACE: [Lock<Option<Space>>; MAX_FUNCTIONS] =
     [const { Lock::new(None) }; MAX_FUNCTIONS];
+
+/// A slot's address space, and the room in it every holder's lent regions go.
+#[derive(Clone, Copy)]
+struct Space {
+    space: DeviceSpace,
+    /// [`MAX_GRANT_TOTAL`] of addresses handed out with the domain and never
+    /// mapped by anything but [`dma_map`].
+    lend: u64,
+}
 
 /// One granted buffer: the memory, and where the device reaches it.
 struct Grant {
@@ -179,10 +200,12 @@ enum Origin {
     /// is a grant placed at a range of [`Bound::residue`]: taken back, the
     /// range returns there.
     Allocated { residual: bool },
-    /// A region the holder already had, put here by [`dma_map`]: never placed
-    /// at a residue range, because what a stale transfer lands in there must
-    /// be this holder's own fresh memory and not a region some other process
-    /// still reads.
+    /// A region the holder already had, put in [`Space::lend`] by
+    /// [`dma_map`]: never at a residue range, because what a stale transfer
+    /// lands in there must be this holder's own fresh memory and not a region
+    /// some other process still reads. Its address can itself become residue,
+    /// and a [`dma_alloc`] grant of its size is then placed there like at any
+    /// other — fresh pages, which is what residue is for.
     Mapped,
 }
 
@@ -210,6 +233,8 @@ enum Armed {
 struct Bound {
     pci: PciDevice,
     space: DeviceSpace,
+    /// [`Space::lend`].
+    lend: u64,
     armed: Armed,
     id: PciId,
     /// Where each mappable BAR was put, and how much of it the function
@@ -231,6 +256,21 @@ struct Bound {
 }
 
 impl Bound {
+    /// The first run of `span` in [`Space::lend`] that no grant and no residue
+    /// range touches.
+    fn lend_room(&self, span: u64) -> Option<u64> {
+        let taken = |at: u64| {
+            let end = at + span;
+            let grants = self.grants.iter().map(|grant| (grant.at, grant.bytes));
+            let residue = self.residue.iter().map(|aimed| (aimed.at, aimed.bytes));
+            grants.chain(residue).any(|(from, bytes)| from < end && at < from + bytes)
+        };
+        (0..MAX_GRANT_TOTAL / PAGE_2M)
+            .map(|leaf| self.lend + leaf * PAGE_2M)
+            .take_while(|at| at + span <= self.lend + MAX_GRANT_TOTAL)
+            .find(|at| !taken(*at))
+    }
+
     /// Let the function master the bus, once: called after a grant is in its
     /// domain and never before, so the first thing it may reach exists before
     /// it may reach anything.
@@ -796,7 +836,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // descriptors. It is asked for here rather than after the BARs because a
     // refusal that had already armed a vector and moved a function's BARs would
     // leave the machine changed by a hand-over that did not happen.
-    let space = slot_space(slot).map_err(Refusal::Untranslated)?;
+    let Space { space, lend } = slot_space(slot).map_err(Refusal::Untranslated)?;
 
     // Held across every walk this hand-over makes of the function's own list —
     // both readers below and the MSI fallback between them — so the staged
@@ -831,6 +871,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             Ok(Bound {
                 pci,
                 space,
+                lend,
                 armed,
                 id,
                 bar_at,
@@ -912,14 +953,19 @@ fn place_bars(
 }
 
 /// This slot's address space, made on its first claim.
-fn slot_space(slot: usize) -> Result<DeviceSpace, IommuError> {
+fn slot_space(slot: usize) -> Result<Space, IommuError> {
     let mut held = SPACE[slot].lock();
     match *held {
         Some(space) => Ok(space),
         None => {
             let space = DeviceSpace::own()?;
-            *held = Some(space);
-            Ok(space)
+            // A fresh domain's room starts a quarter of the way up what its
+            // unit translates, so a refusal here is a kernel bug.
+            let lend = space
+                .reserve(MAX_GRANT_TOTAL)
+                .unwrap_or_else(|why| panic!("pcidev: slot {slot}'s new domain has no room to lend in: {why}"));
+            *held = Some(Space { space, lend });
+            Ok(Space { space, lend })
         }
     }
 }
@@ -1592,7 +1638,13 @@ pub fn dma_alloc(
                 bound.space.map_at(aimed.at, phys, span).unwrap_or_else(|why| refused(why));
                 (aimed.at, true)
             }
-            None => (bound.space.map(phys, span).unwrap_or_else(|why| refused(why)), false),
+            // A domain its claims have spent is the machine's limit and not
+            // a kernel bug: the holder is refused, and the pages go back.
+            None => match bound.space.map(phys, span) {
+                Ok(at) => (at, false),
+                Err(IommuError::AddressesExhausted(_)) => return Err(SyscallError::ResourceExhausted),
+                Err(why) => refused(why),
+            },
         };
         let first = bound.grants.is_empty();
         let origin = Origin::Allocated { residual };
@@ -1635,15 +1687,16 @@ pub fn dma_undo(slot: usize, memory: &Arc<SharedMemObject>) {
 /// where the function reaches it and how much of it there is.
 ///
 /// **The domain is still the whole gate.** What is added is exactly the
-/// region's pages, at a fresh address no other grant of this domain was ever
-/// given, so the function reaches this memory and the claim's own grants and
-/// nothing else. Only ordinary memory this kernel allocated qualifies
-/// ([`SharedMemObject::ram`]): a BAR window mapped here would be one device
-/// aimed at another's registers, and firmware's framebuffer is not the
-/// kernel's to lend.
+/// region's pages, in [`Space::lend`] where no grant and no residue is, so the
+/// function reaches this memory, the claim's own grants and what this holder
+/// lent it before, and nothing else. Only ordinary memory this kernel
+/// allocated qualifies ([`SharedMemObject::ram`]): a BAR window mapped here
+/// would be one device aimed at another's registers, and firmware's
+/// framebuffer is not the kernel's to lend.
 ///
 /// Counted against [`MAX_GRANT_TOTAL`] with the claim's own grants, so a holder
-/// mapping every region its clients send is bounded by the same number.
+/// mapping every region its clients send is bounded by the same number; and a
+/// window with no run of the region's length left free is the same refusal.
 pub fn dma_map(slot: usize, region: &Arc<SharedMemObject>) -> Result<(u64, u64), SyscallError> {
     with_bound(slot, |bound| {
         let (phys, span) = region.ram().ok_or(SyscallError::InvalidArgument)?;
@@ -1653,19 +1706,16 @@ pub fn dma_map(slot: usize, region: &Arc<SharedMemObject>) -> Result<(u64, u64),
         if bound.grants.iter().any(|grant| Arc::ptr_eq(&grant.memory, region)) {
             return Err(SyscallError::InvalidArgument);
         }
-        if span > MAX_GRANT_BYTES {
-            return Err(SyscallError::InvalidArgument);
-        }
         let held: u64 = bound.grants.iter().map(|grant| grant.bytes).sum();
         if held + span > MAX_GRANT_TOTAL {
             return Err(SyscallError::ResourceExhausted);
         }
-        // The pages are the allocator's own and whole 2 MiB ones, so a domain
-        // that cannot take them is a kernel bug rather than the holder's.
-        let at = bound
-            .space
-            .map(phys, span)
-            .unwrap_or_else(|why| panic!("pcidev: slot {slot} could not map a region: {why}"));
+        let at = bound.lend_room(span).ok_or(SyscallError::ResourceExhausted)?;
+        // Inside room the domain handed out with the slot, and the pages are
+        // the allocator's own whole 2 MiB ones: a refusal here is a kernel bug.
+        if let Err(why) = bound.space.place(at, phys, span) {
+            panic!("pcidev: slot {slot} could not lend a region at {at:#x}: {why}");
+        }
         bound.grants.push(Grant { memory: Arc::clone(region), at, bytes: span, origin: Origin::Mapped });
         bound.start_mastering();
         Ok((at, span))

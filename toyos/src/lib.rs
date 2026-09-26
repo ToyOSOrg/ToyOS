@@ -28,6 +28,7 @@ pub mod surface;
 pub mod shm;
 pub mod syscap;
 pub mod system;
+pub mod volatile;
 
 pub use ipc::Connection;
 pub use device::{

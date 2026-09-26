@@ -106,10 +106,16 @@ times:
       `home_overwrite_reads_back` and `apps_and_home_are_one_filesystem`
       green; fsd killed mid-write, restarted, the volume mounts, fsync'd data
       reads back on the host, and the kernel log does not change.
-   7. **fsd for LOG and BOOT; logd on the client library.** On the T14 it runs
-      over the kernel's USB path until step 10. **Exit**: the log's durability
-      tests without `WouldBlock`, the quiesce cases green with the storage
-      chain kept running, and the panic wait still publishes the last line.
+   7. **fsd for LOG and BOOT; logd on the client library.** On the T14 the
+      stick is still the kernel's, so this step builds **the kernel USB
+      bridge**: the kernel's USB mass storage serves `toyos-blockring`
+      sessions, one per partition held, as blockd does, and fsd opens LOG
+      through it. It is the one block server the kernel keeps, a compromise
+      with an exit of its own: deleted at step 10, when usbd serves the same
+      sessions. **Exit**: the log's durability tests without `WouldBlock`, on
+      QEMU over blockd and on the T14 over the bridge; the quiesce cases green
+      with the storage chain kept running; and the panic wait still publishes
+      the last line.
    8. **Views as capabilities**, the isolation track's stage 1. **Exit**: that
       stage's escape suite, run against fsd.
    9. **Delete the kernel storage stack**: the VFS down to ROOT's resolver,
@@ -119,9 +125,18 @@ times:
       `between_attempts` appear nowhere, and the kernel's lines and longest
       interrupts-off and preemption-off windows are measured.
    10. **usbd**, stage 5's second half: the whole xHCI moves, HID to the
-       keyboard claim and mass storage over `toyos-blockring`. **Exit**, on the
-       T14: `/log` survives usbd killed mid-batch, and the keyboard keeps
-       working while a stick misbehaves.
+       keyboard claim and mass storage over `toyos-blockring`, and the kernel
+       USB bridge is deleted. **What must work with no userland stays off
+       USB**: the panic console pages its report by itself and needs no
+       keyboard, and steers only from the i8042 it polls; the kernel's one
+       hotkey, Ctrl+Alt+D (`kernel/src/keyboard.rs`, the blocked-task dump),
+       is recognised on the i8042's transitions and no longer on a USB
+       keyboard's, which from here reach the kernel only as usbd's keyboard
+       claim and are never read for it. A machine whose only keyboard is USB
+       has no kernel hotkey from this step, declared. **Exit**, on the T14:
+       `/log` survives usbd killed mid-batch, the keyboard keeps working while
+       a stick misbehaves, and Ctrl+Alt+D on the machine's own keyboard files
+       the dump with usbd killed.
 5. **USB owned by its thread, then by userland**, with discovery and recovery
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a

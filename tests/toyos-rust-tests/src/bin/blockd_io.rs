@@ -21,24 +21,29 @@
 //! - `crash` — a FAT32 volume written through a session, blockd killed with a
 //!   write on the wire, restarted, and the same volume carried on;
 //! - `dma-inside`, `dma-outside`, `dma-revoked`, `dma-after` — the controller
-//!   aimed by this process at a lent region, past it, and at one taken back.
+//!   aimed by this process at a lent region, past it, and at one taken back;
+//! - `dma-pool`, `dma-bound`, `dma-churn` — what a claim may lend: a kernel
+//!   driver's pool refused, regions lent until the claim's bound refuses the
+//!   next, and one region lent and taken back until ten domains' worth of
+//!   addresses went by.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use blockd::nvme::Controller;
+use blockd::nvme::{Controller, Owner};
 use blockd::{Error, Outcome, Session, Unsent};
 use toyos::endow::Endowments;
+use toyos::poller::{Poller, READABLE};
 use toyos::namespace::{self, Namespace};
 use toyos::port::{self, Acceptor, Connector};
 use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_abi::part::PartGuid;
-use toyos_abi::syscall::{PciId, SyscallError, DEV_PREFIX, SERVE_PREFIX, SYSCAP_LABEL};
-use toyos_blockring::wire::Refusal;
+use toyos_abi::syscall::{DeviceType, PciId, SyscallError, DEV_PREFIX, SERVE_PREFIX, SYSCAP_LABEL};
+use toyos_blockring::wire::{self, Refusal};
 use toyos_blockring::{BLOCK_BYTES, MAX_REQUEST_BLOCKS, PORT};
 
 const SELF: &str = "/system/bin/test_rs_blockd_io";
@@ -71,6 +76,18 @@ const AFTER: &str = "/AFTER.BIN";
 /// reason** (`issues/kernel/deferred-release-outlives-its-syscall.md`): a
 /// process's end is published before the release its handles queued has run.
 const CLAIM_RETURN: Duration = Duration::from_secs(2);
+
+/// Mirrored in `tests/common/blockd.rs`: the most a claim may hold across its
+/// grants and what it lends (`pcidev::MAX_GRANT_TOTAL`), one region, and the
+/// addresses a device domain has under `iommu-domain-narrow`
+/// (`vtd::table::NARROW_BYTES`).
+const GRANT_TOTAL: u64 = 32 * 1024 * 1024;
+const REGION: usize = 2 * 1024 * 1024;
+const NARROW: u64 = 128 * 1024 * 1024;
+
+/// How long a read this process aims may go unanswered before the role fails:
+/// a liveness bound, far past what one block takes.
+const AIMED: Duration = Duration::from_secs(10);
 
 fn guid(text: &str) -> [u8; 16] {
     PartGuid::parse(text).unwrap_or_else(|| panic!("{text} is no GUID")).0
@@ -312,6 +329,7 @@ fn claims() {
             Ok(_) => fail(format!("{what} opened")),
         }
     }
+    oversized(&blockd);
     let mut slot = open(blockd.names(), TARGET);
     if slot.blocks() != TARGET_BLOCKS {
         fail(format!("the slot is {} blocks, not {TARGET_BLOCKS}", slot.blocks()));
@@ -328,6 +346,24 @@ fn claims() {
     drop(slot);
     holder(&blockd, "Opened");
     println!("blockd_io: PASS claims");
+}
+
+/// An open sending a region longer than a session is refused, and costs the
+/// claim nothing: the slot opens after it.
+fn oversized(blockd: &Blockd) {
+    let conn = blockd.names().open(PORT).unwrap_or_else(|e| fail(format!("the port: {e:?}")));
+    let region = SharedMemory::create(2 * REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
+    let shared = region.share().unwrap_or_else(|e| fail(format!("a second handle: {e:?}")));
+    conn.send_bytes_with_handles(&[shared], wire::MSG_OPEN, &guid(TARGET))
+        .unwrap_or_else(|e| fail(format!("the open: {e:?}")));
+    let header = conn.recv_header().unwrap_or_else(|e| fail(format!("the answer: {e:?}")));
+    let mut payload = [0u8; 64];
+    let len = conn.recv_bytes(&header, &mut payload).unwrap_or_else(|e| fail(format!("the answer: {e:?}")));
+    match (header.msg_type, Refusal::decode(&payload[..len])) {
+        (wire::MSG_REFUSED, Some(Refusal::Malformed)) => {}
+        (msg_type, refusal) => fail(format!("a {}-byte region was answered {msg_type} {refusal:?}", 2 * REGION)),
+    }
+    println!("blockd_io: a region of {} bytes, longer than a session, refused with Malformed", 2 * REGION);
 }
 
 /// Another process opens the slot through the same port, and must be answered
@@ -645,7 +681,7 @@ fn dma(role: &str) {
     println!("blockd_io: region lent at device address {:#x}, {} bytes", mapping.device_addr, mapping.bytes);
     match role {
         "dma-inside" | "dma-after" => {
-            match ctrl.transfer(false, 0, 1, mapping.device_addr) {
+            match transfer(&mut ctrl, 0, mapping.device_addr) {
                 Ok(true) => {}
                 other => fail(format!("a read into the lent region was answered {other:?}")),
             }
@@ -695,9 +731,9 @@ fn dma(role: &str) {
 /// unit's, read three ways: the claim's refusal here, the region untouched
 /// here, and the fault record the host reads at `at`.
 fn refused(ctrl: &mut Controller, region: &SharedMemory, at: u64, what: &str) {
-    let answered = ctrl.transfer(false, 0, 1, at);
+    let answered = transfer(ctrl, 0, at);
     println!("blockd_io: the device answered a read aimed {what} with {answered:?}");
-    if !ctrl.refused_within(Duration::from_secs(5)) {
+    if !refused_within(ctrl, Duration::from_secs(5)) {
         fail(format!("a read aimed {what} left the claim answering; the unit did not refuse it"));
     }
     if !region.as_slice().iter().all(|b| *b == 0xA5) {
@@ -709,6 +745,143 @@ fn refused(ctrl: &mut Controller, region: &SharedMemory, at: u64, what: &str) {
     );
 }
 
+/// One read of device block `block` into device address `at`, waited for on
+/// the claim's interrupt, with nothing else on the device: whether the device
+/// did it, or the claim's refusal once the unit refused the function an
+/// access — which is how a read aimed outside the function's domain ends.
+fn transfer(ctrl: &mut Controller, block: u64, at: u64) -> Result<bool, SyscallError> {
+    if ctrl.busy() != 0 {
+        fail("a waited read beside other commands".into());
+    }
+    ctrl.submit_io(false, block, 1, at, Owner::Driver);
+    let poller = Poller::new(1);
+    let start = Instant::now();
+    let mut done = Vec::new();
+    loop {
+        ctrl.reap(&mut done);
+        if let Some(d) = done.pop() {
+            return Ok(d.ok);
+        }
+        let Some(left) = AIMED.checked_sub(start.elapsed()) else {
+            fail(format!("a read aimed at {at:#x} was not answered in {AIMED:?}"));
+        };
+        poller.watch(ctrl.claim(), READABLE, 0);
+        poller.wait(1, left.as_nanos() as u64, |_| {});
+        ctrl.take_interrupt()?;
+    }
+}
+
+/// Wait, at most `bound`, for the claim to answer with the unit's refusal —
+/// what every call on a claim answers once its function was refused an access;
+/// whether it did.
+fn refused_within(ctrl: &Controller, bound: Duration) -> bool {
+    let poller = Poller::new(1);
+    let start = Instant::now();
+    while start.elapsed() < bound {
+        if ctrl.take_interrupt() == Err(SyscallError::Io) {
+            return true;
+        }
+        poller.watch(ctrl.claim(), READABLE, 0);
+        poller.wait(1, bound.saturating_sub(start.elapsed()).as_nanos() as u64, |_| {});
+    }
+    ctrl.take_interrupt() == Err(SyscallError::Io)
+}
+
+/// A kernel driver's own pool is not the holder's to lend, though it is
+/// ordinary memory the holder may map: virtio-sound's, claimed here since no
+/// soundd runs on this boot.
+fn dma_pool() {
+    let syscap = capability();
+    let sound: toyos::VirtioSoundDev = syscap
+        .claim(DeviceType::VirtioSound)
+        .unwrap_or_else(|e| fail(format!("virtio-sound's claim: {e:?}")));
+    let info = sound.info().unwrap_or_else(|e| fail(format!("virtio-sound's description: {e:?}")));
+    let dev: toyos::PciDev = syscap.claim_pci(BLOCKD).unwrap_or_else(|e| fail(format!("claim: {e:?}")));
+    match dev.dma_map(info.dma) {
+        Err(SyscallError::InvalidArgument) => {}
+        other => fail(format!("lending virtio-sound's pool was answered {other:?}")),
+    }
+    println!("blockd_io: virtio-sound's pool, a kernel driver's own, is refused with InvalidArgument");
+    println!("blockd_io: PASS dma-pool");
+}
+
+/// Regions lent beside the claim's own grant until the claim's bound refuses
+/// the next, and exactly as many as the bound leaves room for.
+fn dma_bound() {
+    let dev: toyos::PciDev = capability().claim_pci(BLOCKD).unwrap_or_else(|e| fail(format!("claim: {e:?}")));
+    let grant = dev.dma_alloc(REGION as u64).unwrap_or_else(|e| fail(format!("the claim's grant: {e:?}")));
+    match dev.dma_unmap(grant.device_addr) {
+        Err(SyscallError::NotFound) => {}
+        other => fail(format!("taking the claim's own grant back as a lent region was answered {other:?}")),
+    }
+    println!("blockd_io: the claim's own grant is not taken back as a lent region: NotFound");
+    let room = ((GRANT_TOTAL - REGION as u64) / REGION as u64) as usize;
+    let mut lent = Vec::new();
+    let refused = loop {
+        let region = SharedMemory::create(REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
+        match dev.dma_map(region.as_handle()) {
+            Ok(mapping) if mapping.bytes == REGION as u64 => lent.push((region, mapping)),
+            Ok(mapping) => fail(format!("a {REGION}-byte region was lent as {} bytes", mapping.bytes)),
+            Err(why) => break why,
+        }
+        if lent.len() > room + 1 {
+            fail(format!("{} regions lent past a bound that has room for {room}", lent.len()));
+        }
+    };
+    if refused != SyscallError::ResourceExhausted || lent.len() != room {
+        fail(format!("{} regions lent and the next answered {refused:?}, not {room} and ResourceExhausted", lent.len()));
+    }
+    // One taken back is room for one more, and no more than one.
+    let (_, first) = lent.remove(0);
+    dev.dma_unmap(first.device_addr).unwrap_or_else(|e| fail(format!("dma_unmap: {e:?}")));
+    for (n, want) in [(1, true), (2, false)] {
+        let region = SharedMemory::create(REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
+        match (dev.dma_map(region.as_handle()), want) {
+            (Ok(mapping), true) => lent.push((region, mapping)),
+            (Err(SyscallError::ResourceExhausted), false) => {}
+            (other, _) => fail(format!("lend {n} after one was taken back was answered {other:?}")),
+        }
+    }
+    println!(
+        "blockd_io: {room} regions of {REGION} bytes lent beside the claim's own grant, the next refused \
+         with ResourceExhausted, and one taken back made room for one more"
+    );
+    println!("blockd_io: PASS dma-bound");
+}
+
+/// One region lent and taken back until ten times the domain's addresses went
+/// by: none of it spends an address, and the device still reads into it.
+fn dma_churn() {
+    let (mut ctrl, region) = aim();
+    let rounds = (10 * NARROW).div_ceil(REGION as u64);
+    let mut addresses = std::collections::BTreeSet::new();
+    for round in 0..rounds {
+        let mapping = ctrl
+            .claim()
+            .dma_map(region.as_handle())
+            .unwrap_or_else(|e| fail(format!("lend {round} of {rounds} was answered {e:?}")));
+        addresses.insert(mapping.device_addr);
+        ctrl.claim()
+            .dma_unmap(mapping.device_addr)
+            .unwrap_or_else(|e| fail(format!("taking lend {round} back was answered {e:?}")));
+    }
+    if addresses.len() as u64 > GRANT_TOTAL / REGION as u64 {
+        fail(format!("{rounds} lends of one region were placed at {} device addresses", addresses.len()));
+    }
+    let mapping = ctrl.claim().dma_map(region.as_handle()).unwrap_or_else(|e| fail(format!("dma_map: {e:?}")));
+    match transfer(&mut ctrl, 0, mapping.device_addr) {
+        Ok(true) if is_block_zero(region.as_slice()) => {}
+        other => fail(format!("a read into the region after the churn was answered {other:?}")),
+    }
+    println!(
+        "blockd_io: {rounds} lends of a {REGION}-byte region, each taken back, {} MiB in all, at {} \
+         device address(es); the device then read block 0 into it",
+        rounds * REGION as u64 / (1024 * 1024),
+        addresses.len()
+    );
+    println!("blockd_io: PASS dma-churn");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -718,6 +891,9 @@ fn main() {
         Some("reset") => reset(),
         Some("crash") => crash(),
         Some(role @ ("dma-inside" | "dma-outside" | "dma-revoked" | "dma-after")) => dma(role),
+        Some("dma-pool") => dma_pool(),
+        Some("dma-bound") => dma_bound(),
+        Some("dma-churn") => dma_churn(),
         other => fail(format!("no role {other:?}")),
     }
 }
