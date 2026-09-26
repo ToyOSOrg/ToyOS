@@ -198,6 +198,11 @@ const MAX_SHARED_REBOOTS: usize = 3;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // blockd's supervisor and client: every role needs the second NVMe
+    // controller only its own boots carry, and with no role it refuses by name.
+    // `blockd_serves_partitions`, `blockd_survives_its_death`,
+    // `blockd_dma_outside_the_lent` and `blockd_lends_within_its_bound` run it.
+    "blockd_io",
     // **Its exit code is a measurement, not a verdict**, and the shared block
     // judges every member on `exit=0` alone — so it would red on every boot
     // that measured anything. It also needs the real-time band, which only
@@ -488,6 +493,9 @@ const RUST_SKIP: &[&str] = &[
     "ftruncate_flush_race",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
+    // Its listings are exact against `tests/layoutcase`, and it takes what that
+    // boot wrote as its argv. `layout_fresh_boot` runs it over ssh.
+    "layout_paths",
     // Needs a package installed under `/apps` and a config whose `[apps]` row
     // is what a launch out of it holds; `pkg_install_gbae` gives both, and on
     // any other boot this exits on a launch nothing could satisfy.
@@ -606,13 +614,13 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
 /// The command's *output* differs from the command, which is the whole point:
 /// the shell echoes what is typed, so an assertion satisfiable by the echo says
 /// only that the console drew a key, not that anything ran. This is asserted as
-/// a whole trimmed row, so the echoed `/home/root> echo zqjxk` cannot satisfy
+/// a whole trimmed row, so the echoed `/home/toy> echo zqjxk` cannot satisfy
 /// it either.
 const CONSOLE_NONCE: &str = "zqjxk";
 /// `/system/bin/shell` cds to `$HOME` before its first prompt, and prints
 /// `"{cwd}> "` — without the trailing space, which the decoder trims off the
 /// end of every row.
-const CONSOLE_PROMPT: &str = "/home/root>";
+const CONSOLE_PROMPT: &str = "/home/toy>";
 /// The seed's witness on the panel.
 ///
 /// `/system/bin/console` draws the boot so far, as `logd` serves it, above its
@@ -918,6 +926,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
+    // Its own boot with a blank DATA volume, asked over ssh where everything
+    // it wrote went. Every verdict is a listing or a line; no clock in any.
+    ("layout_fresh_boot", Sched::Parallel, Tier::Fast),
     // One `SSHD_LOGIN` boot for the three, driven by `tests/ssh-client-host`.
     // Adjacent because `group_of` makes adjacency load-bearing, and one tier
     // because one boot cannot be in two. Every verdict is bytes or an exit
@@ -1519,6 +1530,21 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // still mapped: the verdict is the first holder's own grant, read in the
     // guest after the second holder wrote its own.
     ("userdev_residue_is_its_own", Sched::Parallel, Tier::Fast),
+    // blockd, the NVMe driver in userland, on a second controller beside the
+    // kernel's: partitions served and timed against the kernel's driver; a
+    // controller reset and its own death, each survived by the client and
+    // judged off the image by the host's readers; and a transfer outside what
+    // its function was lent, which is a fault record. Each boot runs several
+    // blockd lifetimes and one waits out a ten-second silence.
+    ("blockd_serves_partitions", Sched::Parallel, Tier::Nightly),
+    ("blockd_survives_its_death", Sched::Parallel, Tier::Nightly),
+    ("blockd_dma_outside_the_lent", Sched::Parallel, Tier::Nightly),
+    // What a claim may lend: a kernel driver's pool refused, the claim's bound
+    // refusing the next region at the count it leaves room for, and lending and
+    // taking back ten narrowed domains' worth of addresses with the kernel
+    // standing; then, on a second boot, a function no release resets is never
+    // lent where it was left aimed.
+    ("blockd_lends_within_its_bound", Sched::Parallel, Tier::Nightly),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -1618,6 +1644,10 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
     ("userdev_dma_fault", &["test_rs_handle_basic"]),
     ("userdev_residue_is_its_own", &["test_rs_userdev_residue"]),
+    ("blockd_serves_partitions", &["test_rs_blockd_io"]),
+    ("blockd_survives_its_death", &["test_rs_blockd_io"]),
+    ("blockd_dma_outside_the_lent", &["test_rs_blockd_io"]),
+    ("blockd_lends_within_its_bound", &["test_rs_blockd_io"]),
     (
         "inspect_reads_its_owners",
         &["test_rs_inspect_denied", "test_rs_inspect_plays", "test_rs_inventory_bounds"],
@@ -1646,6 +1676,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("https_tls13_e1000e", &["test_rs_https_fetch"]),
     ("pkg_install_gbae", &["test_rs_pkg_launch_gbae"]),
     ("apps_and_home_are_one_filesystem", &["test_rs_hierarchy_paths"]),
+    ("layout_fresh_boot", &["test_rs_layout_paths"]),
     ("broken_data_volume_is_absent", &["test_rs_home_absent"]),
     ("data_candidate_with_bad_geometry_is_absent", &["test_rs_home_absent"]),
     ("home_budget_refusal_retried", &["test_rs_home_fsync_budget"]),
@@ -5183,7 +5214,7 @@ fn run_screen_test(
             let after = dump.console_text(&font);
             print_screen(name, &after);
             // A whole trimmed row, because the shell echoes what is typed:
-            // `contains` would be satisfied by `/home/root> echo zqjxk`, which
+            // `contains` would be satisfied by `/home/toy> echo zqjxk`, which
             // says the console drew a keystroke and nothing about anything
             // having run.
             if !dump.console_rows(&font).iter().any(|r| r.trim() == CONSOLE_NONCE) {
@@ -11314,6 +11345,19 @@ fn run_machine_test(
         "userdev_residue_is_its_own" => {
             common::iommu::userdev_residue_is_its_own(test_config, c_bins, rust_bins)
         }
+        // Bodies in `tests/common/blockd.rs`.
+        "blockd_serves_partitions" => {
+            common::blockd::blockd_serves_partitions(test_config, c_bins, rust_bins)
+        }
+        "blockd_survives_its_death" => {
+            common::blockd::blockd_survives_its_death(test_config, c_bins, rust_bins)
+        }
+        "blockd_dma_outside_the_lent" => {
+            common::blockd::blockd_dma_outside_the_lent(test_config, c_bins, rust_bins)
+        }
+        "blockd_lends_within_its_bound" => {
+            common::blockd::blockd_lends_within_its_bound(test_config, c_bins, rust_bins)
+        }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
         "hda_client_stall" => common::hda::hda_client_stall(test_config, c_bins, rust_bins),
@@ -14698,7 +14742,7 @@ fn run_machine_test(
         "sshd_fail_closed" => {
             // sshd with a network under it — the only boot that gets past its
             // bind. What that reaches for the first time is the daemon's own
-            // state on disk: the identity it mints under `/home`, and the file
+            // state on disk: the identity it mints under `/state/sshd`, and the file
             // it authenticates against.
             //
             // The verdict is that it authenticates nobody and says which file
@@ -14717,17 +14761,17 @@ fn run_machine_test(
             let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
             let mut console = qemu.boot_log().to_string();
 
-            // Minting proves `/home/root/.ssh` is creatable and writable from
-            // userland; the fingerprint proves the key it wrote reads back.
+            // Minting proves init made `/state/sshd` and set it as the daemon's
+            // `HOME`; the fingerprint proves the key it wrote reads back.
             //
             // **Both files are named, because either one alone authorizes.**
             // This boot stages neither, so the daemon has to report both as
             // unreadable — a check on only the writable one would pass a
             // machine whose image file was silently never consulted.
             const WANT: [&str; 5] = [
-                "sshd: minted a new host identity at /home/root/.ssh/host_ed25519",
+                "sshd: minted a new host identity at /state/sshd/host_ed25519",
                 "sshd: host identity SHA256:",
-                "sshd: cannot read /home/root/.ssh/authorized_keys",
+                "sshd: cannot read /state/sshd/authorized_keys",
                 "sshd: cannot read /system/etc/ssh_authorized_keys",
                 "sshd: no file names a usable key",
             ];
@@ -14750,9 +14794,72 @@ fn run_machine_test(
                 ));
             }
             eprintln!(
-                "  [sshd] host identity minted under /home, and neither authorized_keys file \
+                "  [sshd] host identity minted under /state/sshd, and neither authorized_keys file \
                  left it refusing to listen at all"
             );
+            Ok(())
+        }
+        "layout_fresh_boot" => {
+            // The layout as ruled, on a boot of its own with a blank DATA
+            // volume, asked over the cable because sshd is the service that
+            // starts programs: a declared shell's `HOME` is init's row answer,
+            // and the judge, declared nowhere, is spawned by sshd directly with
+            // the `HOME` init answered for it. Before the judge, `locale` and
+            // an interactive shell write the two files a session writes.
+            use common::ssh::{self, HOST};
+            const MINTED: &str = "sshd: minted a new host identity at /state/sshd/host_ed25519";
+            const LAYOUT: &str = "de";
+            const TYPED: &str = "echo layout history";
+            let (guest, console) = ssh::boot_case("tests/layoutcase", rust_bins);
+            if !console.contains(MINTED) {
+                return Err(format!("{MINTED:?} never reached the console:\n{console}"));
+            }
+            let identity = ssh::Identity::mint(ssh::KEY)?;
+            let port = guest.ssh_port();
+
+            let home = ssh::ssh_exec(HOST, port, &identity, "shell -c 'echo $HOME'")?;
+            if home.stdout != b"/home/toy\n" || home.status != Some(0) {
+                return Err(format!(
+                    "a launched shell's HOME is {:?} (ended {:?}, stderr {:?}), not /home/toy",
+                    home.stdout_text(),
+                    home.status,
+                    home.stderr_text()
+                ));
+            }
+            let set = ssh::ssh_exec(HOST, port, &identity, &format!("locale {LAYOUT}"))?;
+            if set.status != Some(0) || !set.stdout_text().contains("Keyboard layout set to") {
+                return Err(format!(
+                    "`locale {LAYOUT}` ended {:?} saying {:?} {:?}",
+                    set.status,
+                    set.stdout_text(),
+                    set.stderr_text()
+                ));
+            }
+            let (typed, _) =
+                ssh::ssh_feed(HOST, port, &identity, "shell", format!("{TYPED}\r").as_bytes())?;
+            if typed.status != Some(0) || !typed.stdout_text().contains("layout history") {
+                return Err(format!(
+                    "the interactive shell ended {:?} saying {:?} {:?}",
+                    typed.status,
+                    typed.stdout_text(),
+                    typed.stderr_text()
+                ));
+            }
+            let judge = ssh::ssh_exec(
+                HOST,
+                port,
+                &identity,
+                &format!("test_rs_layout_paths {LAYOUT} '{TYPED}'"),
+            )?;
+            if judge.status != Some(0) {
+                return Err(format!(
+                    "layout_paths ended {:?} over ssh:\n{}\n{}",
+                    judge.status,
+                    judge.stdout_text(),
+                    judge.stderr_text()
+                ));
+            }
+            eprintln!("  [layout] a launched shell's HOME is /home/toy; {}", judge.stdout_text().trim());
             Ok(())
         }
         "lan_dhcp_lease" => lan::lan_dhcp_lease(test_config, c_bins, rust_bins),

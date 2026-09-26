@@ -132,6 +132,9 @@ struct ProgramConfig {
     /// `toyos_manifest::syscap_rights` takes. A handful of rows in the whole
     /// tree declare one.
     syscap: Vec<String>,
+    /// A system service: init starts it with `HOME` at its own `/state/<name>`
+    /// and makes that directory, where every other row gets the session's.
+    service: bool,
 }
 
 impl ProgramConfig {
@@ -680,6 +683,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     receives: cfg.receives.clone(),
                     devices: cfg.devices.clone(),
                     syscap: cfg.syscap.clone(),
+                    service: cfg.service,
                 }
             })
             .collect(),
@@ -2561,6 +2565,7 @@ mod tests {
             ("toyos-sched-loom", "toyos-sched/loom/Cargo.toml"),
             ("toyos-sched-sim", "toyos-sched/sim/Cargo.toml"),
             ("toyos-proclife", "toyos-proclife/Cargo.toml"),
+            ("toyos-blockring", "toyos-blockring/Cargo.toml"),
         ] {
             let path = root.join(manifest);
             let text = fs::read_to_string(&path)
@@ -2780,12 +2785,21 @@ mod tests {
         }
     }
 
+    /// Every config renders, so a row the manifest refuses — one that serves a
+    /// port and is not marked `service` — reds here rather than at a build.
+    #[test]
+    fn every_config_renders_its_manifest() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ALL_CONFIGS {
+            let parsed = parse_config(&root.join(config));
+            let rendered = std::panic::catch_unwind(|| render_manifest(&parsed));
+            assert!(rendered.is_ok(), "{config} does not render; the panic above says why");
+        }
+    }
+
     /// One prefix and no other, so a doc naming `/etc/logd` or `/apps/logd` is a
-    /// token the filter below drops and an assertion that reds. Still `/bin/`
-    /// because `toyos-abi/src` is the tree the sweep did not reach;
-    /// `issues/build/twenty-seven-sdk-doc-lines-name-a-path-that-is-gone.md`
-    /// moves this and those lines together.
-    const LOG_DOC_BIN: &str = "/bin/";
+    /// token the filter below drops and an assertion that reds.
+    const LOG_DOC_BIN: &str = "/system/bin/";
 
     /// `Rights::LOG`'s doc names its holders, which is a claim about these
     /// manifests and rots on its own: `/system/bin/console` stood in it for the whole
@@ -2846,6 +2860,7 @@ mod tests {
         "system.toml",
         "diag/system.toml",
         "console/system.toml",
+        "tests/blockdcase/system.toml",
         "tests/desktopcase/system.toml",
         "tests/desktopaudiocase/system.toml",
         "tests/doomcase/system.toml",
@@ -2862,6 +2877,7 @@ mod tests {
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
+        "tests/layoutcase/system.toml",
         "tests/logkeepcase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",

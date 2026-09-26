@@ -220,9 +220,9 @@ fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
     gpu::register(driver, info);
 }
 
-/// The two names DATA answers to. One filesystem, so `/apps/x` and `/home/x`
-/// are two directories of it and never two volumes.
-const DATA_PATHS: [&str; 2] = ["apps", "home"];
+/// The names DATA answers to. One filesystem, so `/apps/x` and `/home/x` are
+/// two directories of it and never two volumes.
+const DATA_PATHS: [&str; 4] = ["apps", "config", "home", "state"];
 
 /// The boot from power-on, off the loader's TSC readings and `complete`'s, at
 /// the calibrated rate. The TSC counts from reset, so the first span is
@@ -564,30 +564,30 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     fat32_adapter::probe_boot_disks();
     rootfs::hold_source();
 
-    // One filesystem, two paths: `/apps` and `/home` are two directories of
-    // DATA, so one sync settles both and neither can outlive the other.
+    // One filesystem, four paths: each of `DATA_PATHS` is a directory of DATA,
+    // so one sync settles them all and none can outlive the others.
     // tmpfs when there is no DATA volume this kernel may write: persistence is
     // the only difference, so the earlier refusal doesn't cascade. Nothing at
     // all when the volume is ours and did not mount.
     #[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
-    let (data_cache, home) = match bcachefs_adapter::open_data() {
+    let data_cache = match bcachefs_adapter::open_data() {
         bcachefs_adapter::Data::Mounted(cache, fs) => {
             let adapter = bcachefs_adapter::BcacheFsAdapter::new(fs, Arc::clone(&cache));
             vfs::lock().mount(&DATA_PATHS, Box::new(adapter), UserAccess::ReadWrite);
-            (Some(cache), true)
+            Some(cache)
         }
         bcachefs_adapter::Data::Volatile => {
-            log!("storage: /apps and /home are a tmpfs — they will not survive a reboot");
+            log!("storage: /apps, /config, /home and /state are a tmpfs — they will not survive a reboot");
             vfs::lock().mount(
                 &DATA_PATHS,
                 Box::new(crate::tmpfs::TmpFs::new()),
                 UserAccess::ReadWrite,
             );
-            (None, true)
+            None
         }
         bcachefs_adapter::Data::Absent => {
-            log!("storage: /apps and /home are absent this boot — the DATA volume is ours and did not mount");
-            (None, false)
+            log!("storage: /apps, /config, /home and /state are absent this boot — the DATA volume is ours and did not mount");
+            None
         }
     };
 
@@ -606,13 +606,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         }
         // No fallback onto /boot: with no log partition the log stays in the in-memory shards, still reachable via screen and console.
         None => log!("log-volume: not mounted; this boot's kernel log stays in memory"),
-    }
-
-    // Fixed kernel strings well under MAX_PATH: a refusal here is a kernel bug, so this fails fast instead of returning an error.
-    // Not on an absent `/home`: the VFS's own directory set would answer for a directory nothing holds.
-    if home {
-        vfs::lock().create_dir("/home/root").expect("boot: /home/root exceeds MAX_PATH");
-        vfs::lock().create_dir("/home/root/.config").expect("boot: /home/root/.config exceeds MAX_PATH");
     }
 
 

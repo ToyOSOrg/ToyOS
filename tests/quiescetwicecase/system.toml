@@ -3,6 +3,7 @@
 start = ["logd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 
 # `power` twice: the connector is how the job has init make the first call,

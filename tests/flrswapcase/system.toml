@@ -7,16 +7,19 @@
 start = ["logd", "netd", "sshd", "test-runner"]
 
 [programs.logd]
+service = true
 syscap = ["logread"]
 # The record stream's authority: the address on the parameter line is
 # information, and this row is the whole of what can act on it.
 receives = ["netd"]
 
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:8086:10d3", "pci:8086:10c9"]
 
 [programs.sshd]
+service = true
 receives = ["netd", "launcher", "swap"]
 
 [programs.test-runner]

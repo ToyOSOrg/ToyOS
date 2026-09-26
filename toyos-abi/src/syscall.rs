@@ -267,7 +267,7 @@ pub const SYS_PROCESS_KILL: u64 = 109;
 /// A `Process` handle for a pid, gated by [`Rights::MANAGE`] on a `SysCap`.
 /// See [`process_open`].
 ///
-/// The one place a pid becomes authority, and only `/bin/init` holds a cap that
+/// The one place a pid becomes authority, and only `init` holds a cap that
 /// carries the right — so the set of processes that can reach a process they
 /// did not start is exactly what init endowed.
 ///
@@ -275,7 +275,7 @@ pub const SYS_PROCESS_KILL: u64 = 109;
 pub const SYS_PROCESS_OPEN: u64 = 110;
 
 /// Mint a device claim for a class, gated by [`Rights::DEVICE`] on a `SysCap`.
-/// Only `/bin/init` holds such a cap, so the set of processes that can ever
+/// Only `init` holds such a cap, so the set of processes that can ever
 /// claim a device is exactly what init endowed. See [`device_claim`].
 ///
 /// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
@@ -303,7 +303,7 @@ pub const SYS_RT_ENTER: u64 = 112;
 /// [`crate::log`].
 ///
 /// **The kernel keeps no per-reader state**, so a second reader costs nothing
-/// and the stream is not consumed: `/bin/logd` and a `log-follow` tool coexist
+/// and the stream is not consumed: `logd` and a `log-follow` tool coexist
 /// with no coordination. Reading the whole machine's log is authority, which is
 /// why it rides a right rather than being ambient.
 ///
@@ -334,6 +334,15 @@ pub const SYS_PARTITION_WRITE: u64 = 120;
 /// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
 pub const SYS_DEVICE_INVENTORY: u64 = 121;
 
+/// Put a region the caller holds into a claimed PCI function's address space
+/// at the unit, so the function reaches it as well as the caller's own grants.
+/// See [`device_dma_map`].
+pub const SYS_DEVICE_DMA_MAP: u64 = 122;
+
+/// Take a region [`SYS_DEVICE_DMA_MAP`] put there back out. See
+/// [`device_dma_unmap`].
+pub const SYS_DEVICE_DMA_UNMAP: u64 = 123;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
@@ -346,7 +355,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_DEVICE_INVENTORY < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_DMA_UNMAP < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -404,7 +413,7 @@ pub struct EndowEntry {
 
 const _: () = assert!(core::mem::size_of::<EndowEntry>() == 16);
 
-/// The label the kernel puts on `/bin/init`'s system capability, and the one
+/// The label the kernel puts on `init`'s system capability, and the one
 /// init puts on the `RT`-only dup it endows a `realtime` program.
 ///
 /// Here rather than in the SDK because the kernel writes it and userland reads
@@ -444,7 +453,7 @@ pub const MAX_SLOT_MAP: usize = RawHandle::MAX_SLOTS;
 pub const MAX_LABELS_LEN: usize = 4096;
 
 use crate::handle::Rights;
-use crate::pci::DmaGrant;
+use crate::pci::{DmaGrant, DmaMapping};
 use crate::{Pid, RawHandle, HANDLE_INVALID};
 
 /// Syscall error with a specific code. Values occupy the top of the u64 range:
@@ -1187,7 +1196,7 @@ pub fn reboot(syscap: RawHandle) -> SyscallError {
 /// `devices` entry and a `dev:` endowment label spell each one with.
 ///
 /// **One row per class, so the four cannot disagree.** The build system checks
-/// a config against this table, `/bin/init` mints from it, and a claimant finds
+/// a config against this table, `init` mints from it, and a claimant finds
 /// its own claim by it; a second spelling anywhere is a class a config can name
 /// and no program can find. The wire number is here too, because a class whose
 /// number and name came from different lists is the same defect one level down.
@@ -2062,6 +2071,44 @@ pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, Syscal
         0,
     ))?;
     Ok(grant)
+}
+
+/// Put the region `shm` names into the address space of the function `claim`
+/// holds, and answer where the function reaches it: the region's whole length,
+/// read and write, and nothing on either side of it.
+///
+/// For a driver serving a client out of the client's own memory — the client
+/// sends the region, and the device moves data straight into it. The region
+/// stays alive for as long as it is mapped, whoever still holds a handle, and
+/// comes back out at [`device_dma_unmap`] or when the claim ends.
+///
+/// `InvalidArgument` for a region that is not ordinary memory this kernel
+/// allocated — a BAR window, firmware's framebuffer — and for one already
+/// mapped for this claim; `ResourceExhausted` past the claim's grant bound,
+/// which this shares with [`device_dma_alloc`], or with no room of the
+/// region's length left where the claim's lent regions go. Like a grant, the
+/// first mapping is what starts the function mastering the bus.
+pub fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
+    let mut mapping = DmaMapping { device_addr: 0, bytes: 0 };
+    check_unit(syscall(
+        SYS_DEVICE_DMA_MAP,
+        claim.0 as u64,
+        shm.0 as u64,
+        &mut mapping as *mut DmaMapping as u64,
+        0,
+    ))?;
+    Ok(mapping)
+}
+
+/// Take back a region [`device_dma_map`] put at `device_addr`. From the moment
+/// this returns the function reaches none of it: an access it still makes
+/// there is refused at the unit and recorded against the claim.
+///
+/// `NotFound` for an address no [`device_dma_map`] of this claim answered —
+/// a [`device_dma_alloc`] grant is the claim's for its whole life and is not
+/// taken back here.
+pub fn device_dma_unmap(claim: RawHandle, device_addr: u64) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_DMA_UNMAP, claim.0 as u64, device_addr, 0, 0))
 }
 
 /// Allocate a TLS block for a dlopen'd module on the current thread.

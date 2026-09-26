@@ -14,6 +14,7 @@ start = ["logd", "netd", "test-runner"]
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
 # empty. It claims no device and serves no port.
 [programs.logd]
+service = true
 syscap = ["logread"]
 # What lets `logd` serve this boot's log on the network, to whoever connects:
 # without it the log is served on this machine only.
@@ -24,6 +25,7 @@ receives = ["netd"]
 # Named by vendor and device rather than by slot, so one row finds the card
 # wherever firmware put it.
 [programs.netd]
+service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 

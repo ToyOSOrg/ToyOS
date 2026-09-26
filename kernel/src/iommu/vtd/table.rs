@@ -27,6 +27,9 @@ const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 const PRESENT: u64 = 1 << 0;
 
+/// How much room a device domain has under `iommu-domain-narrow`.
+pub const NARROW_BYTES: u64 = 128 * 1024 * 1024;
+
 /// The kernel's one domain; not 0, which an all-zero context entry also names — reusing it would blur a fault record and a domain-selective invalidation.
 pub const KERNEL_DOMAIN: u16 = 1;
 
@@ -234,6 +237,17 @@ impl Domain {
         Self::first_address(self.translatable)
     }
 
+    /// Where this domain's addresses end: what this unit will translate, not
+    /// what the tables can express — past `MGAW` the hardware faults before the
+    /// walk it has entries for. `iommu-domain-narrow` brings it down to
+    /// [`NARROW_BYTES`] above the floor, so running out is a short loop.
+    pub fn ceiling(&self) -> u64 {
+        if crate::actuator::iommu_domain_narrow() {
+            return self.floor() + NARROW_BYTES;
+        }
+        1u64 << self.translatable
+    }
+
     /// The bits of device address this domain hands out, for a refusal that
     /// names what ran out rather than the depth of the tables.
     pub fn translatable(&self) -> u8 {
@@ -246,9 +260,7 @@ impl Domain {
     pub fn reserve(&mut self, bytes: u64) -> Option<Iova> {
         let span = bytes.next_multiple_of(PAGE_2M);
         let end = self.next.checked_add(span)?;
-        // What this unit will translate, not what the tables can express: past
-        // `MGAW` the hardware faults before the walk it has entries for.
-        if end > 1u64 << self.translatable {
+        if end > self.ceiling() {
             return None;
         }
         let at = Iova::translated(self.next);
