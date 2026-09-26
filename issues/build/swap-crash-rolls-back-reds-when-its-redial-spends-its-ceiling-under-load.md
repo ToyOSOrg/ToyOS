@@ -20,8 +20,9 @@ Seen with ten spinning host threads beside the run, on the review branch of
 the netd receive-pipe fix: once in a full `-- swap` run of five, red again
 alone in that same run; and once in three `-- swap_crash_rolls_back` runs
 with netd reverted to origin/main (4b235d27), where the harness's alone re-run
-was green and called the `Sched::Parallel` classification wrong. Six further
-alone runs, three per netd, were green. `cargo run -- --known-red
+was green and called the `Sched::Parallel` classification wrong. The other
+five of those six runs, three on the branch's netd and two on main's, were
+green. `cargo run -- --known-red
 swap_crash_rolls_back` answers that it is not quarantined.
 
 Exit condition: the redial waits on a guest-side event (the linked issue's
