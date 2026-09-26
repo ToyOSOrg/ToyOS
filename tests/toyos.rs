@@ -1582,6 +1582,8 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_held_open", &["test_rs_netd_held_open"]),
     ("netd_stalled_peer", &["test_rs_netd_stalled_peer"]),
     ("netd_udp_refused", &["test_rs_netd_udp_refused"]),
+    ("netd_udp_any_address", &["test_rs_netd_udp_any_address"]),
+    ("netd_lookup_let_go", &["test_rs_netd_lookup_let_go"]),
     ("netd_hostile_peer", &["test_rs_netd_hostile_peer"]),
     ("launcher_refusals", &["test_rs_launcher_refusals"]),
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
