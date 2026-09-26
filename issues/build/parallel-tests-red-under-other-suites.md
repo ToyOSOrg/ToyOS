@@ -330,6 +330,60 @@ changes.
   and both of this test's guests are ordinary handoff passes on RAM QEMU zeroed,
   so the string it changes is on no line either of them prints.
 
+- **`quiesce_dump_holds_the_stopped`**, first sighting — 2026-09-25 on
+  `wt/toyos-ramroot` (PR #506, head `696f46cb`), one full fast tier: `QEMU never
+  reported stopping: the guest asked for a reboot and stayed up`, after 262 s,
+  then `ALONE … GREEN`. `cargo run -- --known-red quiesce_dump_holds_the_stopped`
+  answered `NO, not quarantined`. That branch makes every guest hold its whole
+  ROOT in RAM, so it was A/B'd: `cargo test` alternating between `origin/main`
+  at `b0adc600` and the branch at `69f783f4`, three arms each in one session.
+  The test passed in all six. The arms' reds, every one `ALONE … GREEN` and
+  none quarantined: `main` `job_deadline_reboots` and `port_poll_churn`, then
+  `partition_claim_departure`, then none; the branch none, then
+  `screen_loader_lines` and `swap_crash_rolls_back`, then `syscall_window_nmi`.
+  The run's summed QEMU RSS peaked at 5801, 6367 and 6275 MiB on `main` and
+  7867, 9634 and 10836 MiB on the branch, with no swap in any arm
+  (`issues/boot-media/root-in-memory-costs-its-whole-size.md`).
+  `screen_loader_lines` is the branch's by margin: alone, three runs each,
+  its panel grows 10, 10 and 11 rows for 14 loader lines on `main` and 14, 14
+  and 14 on the branch, the most the test accepts, and the red arm's GOP-query
+  dump carried 23 rows where the alone runs carried 24.
+  A fourth branch run at `1b46dd5d`, ROOT trimmed to 158464 blocks, passed it
+  again and was red on `syscall_window_nmi`, `screen_loader_lines` and
+  `launcher_refusals`, each `ALONE … GREEN`, its QEMU RSS peaking at 10591 MiB
+  with no swap. `syscall_window_nmi` is red in two of four branch runs and none
+  of three on `main`; not investigated.
+  Once each boot carried only the test binaries it runs (`c81940f2` and after),
+  six more branch runs against six of `main`: `syscall_window_nmi` passed in all
+  twelve. `screen_loader_lines` grows 12 or 13 rows there for 14 or 15 lines;
+  the lines between its two markers are the same on both trees, so what moves
+  its growth is how far the loader has got when the GOP-query dump lands.
+  `quiesce_leaves_the_volume_whole` was red in four of the six branch runs and
+  none of `main`'s, each `ALONE … GREEN`, all under `quiesce-fsync-refuse`: twice
+  `FAT 1 differs from FAT 0 at entry 45` in the volume the stop left, once with
+  a cluster no entry reaches, and twice `log-volume: … was left with a chain its
+  entry does not reach: corrupt cluster chain` — the second stage
+  `issues/kernel/nothing-bounds-the-log-writer-below-the-boots-last-word.md`
+  describes, on a boot that now carries 13 MiB of ROOT where it carried 619.
+  Not the host: `main`'s own FAT refusal defects at `b0adc600`, which the
+  branch reaches by timing: a refused link write leaked the cluster
+  `append_cluster` had just claimed, and a refused free split the FATs; a
+  forced interleaving reddened both trees. #510 closed both with
+  `toyos-fat32/src/repair.rs`: the same forcing patch, alone, is red 2 of 2 on
+  this branch before the merge (`5b3cf8ae`, each of its four boots leaving one
+  cluster no directory entry reaches) and green 3 of 3 with `main` `5e36908c`
+  merged (`d5c2d9c9`).
+  `metal_job_reboot` was red in one of the six, `ALONE` red too, and in one
+  further branch run (`the job drain carried no kernel output at all (24
+  bytes)`), and green alone three times on each tree, alternating;
+  `swap_crash_rolls_back` in one of the six, and `swap_netd` in a run at
+  `0f27b73d`, both on `the stream's redial was turned away 64 time(s)` with
+  init's words on netd ending at `accepted`; and in the further run
+  `metal_job_reboot` reddened, `quiesce_wakes_on_the_last_park`, on a kernel
+  panic at
+  `arch/tlb.rs:171` (`issues/kernel/a-shootdown-panicked-on-a-cpu-the-host-starved.md`).
+  None investigated.
+
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
 twelve guests across every worktree. It recurred on 2026-08-07: **eight

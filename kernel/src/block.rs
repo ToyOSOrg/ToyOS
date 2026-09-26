@@ -664,6 +664,19 @@ pub mod census {
         &SLOTS[DEVICES - 1]
     }
 
+    /// Every command a storage driver has put to a disk, NVMe or USB, counted
+    /// where each driver hands one to its transport: the one number that says a
+    /// stretch of the boot needed no disk.
+    static COMMANDS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn command_issued() {
+        COMMANDS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn commands_issued() -> u64 {
+        COMMANDS.load(Ordering::Relaxed)
+    }
+
     /// One device flush completed (either way), taking `nanos` of wall clock.
     pub fn flush_took(device: DeviceId, nanos: u64) {
         slot(device).flushes.fetch_add(1, Ordering::Relaxed);

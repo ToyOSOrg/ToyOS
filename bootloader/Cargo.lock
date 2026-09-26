@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "bcachefs"
+version = "0.1.0"
+
+[[package]]
 name = "bit_field"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18,11 +22,14 @@ checksum = "ed570934406eb16438a4e976b1b4500774099c13b8cb96eec99f620f05090ddf"
 name = "bootloader"
 version = "0.1.0"
 dependencies = [
+ "bcachefs",
  "toyos-abi",
  "toyos-acpi",
  "toyos-blackbox",
  "toyos-bootmap",
  "toyos-elf",
+ "toyos-gpt",
+ "toyos-rootimage",
  "toyos-tco",
  "toyos-wallclock",
  "uefi",
@@ -122,6 +129,14 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-elf"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-gpt"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-rootimage"
 version = "0.1.0"
 
 [[package]]

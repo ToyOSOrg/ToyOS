@@ -224,6 +224,29 @@ fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
 /// are two directories of it and never two volumes.
 const DATA_PATHS: [&str; 2] = ["apps", "home"];
 
+/// The boot from power-on, off the loader's TSC readings and `complete`'s, at
+/// the calibrated rate. The TSC counts from reset, so the first span is
+/// firmware's unless firmware wrote the counter, which the loader's
+/// `IA32_TSC_ADJUST` says where the CPU has one.
+fn report_power_on(args: &KernelArgs, complete: u64) {
+    let (entry, handoff) = (args.loader_entry_tsc, args.loader_handoff_tsc);
+    if handoff < entry || complete < handoff {
+        log!(
+            "boot: the TSC went backwards: {entry} at the loader's entry, {handoff} at its handoff, \
+             {complete} at Boot: complete"
+        );
+        return;
+    }
+    let ms = |ticks: u64| clock::nanos_of_ticks(ticks) / 1_000_000;
+    log!(
+        "boot: power-on to loader {} ms, loader {} ms (ROOT read {} ms), kernel to Boot: complete {} ms",
+        ms(entry),
+        ms(handoff - entry),
+        ms(args.root_read_tsc),
+        ms(complete - handoff),
+    );
+}
+
 /// Says where this boot's log can be read, on the last surface still showing it once userland owns the screen.
 fn report_log_destination() {
     // Kernel-side because panic_console owns the panel; logd reports which file it opened separately.
@@ -294,7 +317,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
-    rootfs::init(cmdline);
+    let root_image = rootfs::init(cmdline, &kernel_args, maps);
 
     // Armed here so the next record — `PAT:` — reaches the console and the panel keeps the one before it.
     #[cfg(feature = "boot-actuators")]
@@ -373,6 +396,9 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         // memory the allocator would otherwise hand out. Empty on a boot whose
         // parameter line names none.
         blackbox::reserved_region(),
+        // ROOT's image, `LoaderData` like the black box's page. Empty on a
+        // boot the loader handed none.
+        root_image,
     ];
 
     // The last point before the first hash container (`mm::init`'s address
@@ -430,7 +456,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     boot_phase!("CPU ready", 0);
 
-    let t_storage = clock::nanos_since_boot();
+    let t_periph = clock::nanos_since_boot();
 
     let (ecam_base, pci_segment) = acpi::find_ecam_base(kernel_args.rsdp_addr)
         .expect("ACPI: failed to find ECAM base address");
@@ -452,6 +478,57 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     drivers::watchdog::init(&pci_devices);
     file_cache::init();
     gpt::init(kernel_args);
+    i8042::init(kernel_args.rsdp_addr);
+    acpi::init_power(kernel_args.rsdp_addr);
+
+    boot_phase!("peripherals ready", t_periph);
+
+    let t_subsys = clock::nanos_since_boot();
+
+    smp::boot_aps(&madt, kernel_args.boot_pml4_addr);
+    vfs::init();
+    process::init();
+    scheduler::init();
+    // Task-less half of the operation-nesting gate: this boot phase has no current task, so it establishes into the per-CPU slot.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::sched_operation_nesting() {
+        sched_gate::run("boot");
+    }
+    pipe::init();
+    inbox::init();
+
+    // ROOT is the loader's image in memory, so nothing from here to init's
+    // spawn asks a disk for anything: every storage driver comes up after it.
+    use vfs::UserAccess;
+    let root_fs = rootfs::mount();
+    vfs::lock().mount(
+        &["system"],
+        Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(root_fs)),
+        UserAccess::KernelOnly,
+    );
+    vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite);
+
+    boot_phase!("subsystems ready", t_subsys);
+
+    // init reads /system/etc/system.manifest itself; the boot config never names the program it starts.
+    let pid = process::spawn_init();
+    log!("spawned {} pid={pid}", process::INIT_PATH);
+
+    // Here and not beside the other controls: it needs a process the table answers for.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::process_reopen_selftest() {
+        object::process::reopen_selftest(pid);
+    }
+
+    // The proof the boot up to here needed no disk: ROOT and init's image both
+    // came out of memory.
+    log!("{} {}", rootfs::INIT_WITHOUT_A_DISK, block::census::commands_issued());
+
+    // After init's spawn and before it runs: nothing runs a task until
+    // `smp::set_ready` below, and `/home`, `/apps`, `/boot` and `/log` are
+    // mounted and every device is up by then. Before the device phase: its
+    // IOMMU controls aim at the pool NVMe stages.
+    let t_storage = clock::nanos_since_boot();
 
     // No controller is a configuration, not a failure — same as a missing xHCI, NIC, or sound device.
     match nvme::init(&pci_devices) {
@@ -479,16 +556,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         None => log!("NVMe: no controller on this machine, storage unavailable"),
     }
 
-    boot_phase!("storage ready", t_storage);
-
-    // Under Drain::Inline every record above is already on the wire, so this gate reads the whole boot and then silence.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::pre_idle_wedge() {
-        pre_idle_wedge();
-    }
-
-    let t_periph = clock::nanos_since_boot();
-
     xhci::init(&pci_devices);
     #[cfg(feature = "boot-actuators")]
     if actuator::usb_storage_gate() {
@@ -496,36 +563,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     // After xhci::init, not beside the NVMe probe: a USB-booted disk doesn't exist until the controller binds it.
     fat32_adapter::probe_boot_disks();
-    i8042::init(kernel_args.rsdp_addr);
-    acpi::init_power(kernel_args.rsdp_addr);
-
-    boot_phase!("peripherals ready", t_periph);
-
-    let t_subsys = clock::nanos_since_boot();
-
-    smp::boot_aps(&madt, kernel_args.boot_pml4_addr);
-    vfs::init();
-    process::init();
-    scheduler::init();
-    // Task-less half of the operation-nesting gate: this boot phase has no current task, so it establishes into the per-CPU slot.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::sched_operation_nesting() {
-        sched_gate::run("boot");
-    }
-    pipe::init();
-    inbox::init();
-
-
-    // After `probe_boot_disks`: ROOT and DATA are partitions, and on a
-    // USB-booted machine the device carrying one does not exist until the
-    // controller has bound it.
-    use vfs::UserAccess;
-    let root = rootfs::mount();
-    vfs::lock().mount(
-        &["system"],
-        Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(root.fs, root.cache)),
-        UserAccess::KernelOnly,
-    );
+    rootfs::hold_source();
 
     // One filesystem, two paths: `/apps` and `/home` are two directories of
     // DATA, so one sync settles both and neither can outlive the other.
@@ -553,7 +591,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
             (None, false)
         }
     };
-    vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite);
 
     // Named by role, not type: both partitions are FAT32 and neither is selected for being FAT32 — a missing one just has no mount.
     use fat32_adapter::Role;
@@ -579,7 +616,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         vfs::lock().create_dir("/home/root/.config").expect("boot: /home/root/.config exceeds MAX_PATH");
     }
 
-    boot_phase!("subsystems ready", t_subsys);
 
     // After the mounts above: the FAT reopen control drives `/log`.
     #[cfg(feature = "boot-actuators")]
@@ -606,6 +642,8 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     if actuator::block_duplicate_id() {
         block::duplicate_id_selftest();
     }
+
+    boot_phase!("storage ready", t_storage);
 
     let t_devices = clock::nanos_since_boot();
 
@@ -659,18 +697,16 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         input_merge_test::run();
     }
 
-    // init reads /system/etc/system.manifest itself; the boot config never names the program it starts.
-    let pid = process::spawn_init();
-    log!("spawned {} pid={pid}", process::INIT_PATH);
-
-    // Here and not beside the other controls: it needs a process the table answers for.
+    // Under Drain::Inline every record above is already on the wire, so this gate reads the whole boot and then silence.
     #[cfg(feature = "boot-actuators")]
-    if actuator::process_reopen_selftest() {
-        object::process::reopen_selftest(pid);
+    if actuator::pre_idle_wedge() {
+        pre_idle_wedge();
     }
 
     report_log_destination();
+    let complete_tsc = cpu::rdtsc();
     boot_phase!("complete", 0);
+    report_power_on(kernel_args, complete_tsc);
 
     // No current task here, so the handler's recovery predicate fails — the one panic no userland process can produce.
     #[cfg(feature = "boot-actuators")]

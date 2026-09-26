@@ -1664,8 +1664,8 @@ pub fn designate_for_format(path: &Path, len: u64) {
 /// the kernel is its feature set, the bootloader is its init list, the ROOT image is
 /// its config and the caller's extra files. That is the same split
 /// [`stage_artifact`] already writes into the artifact names, and it is what
-/// makes this affordable — the kernels a full run builds share a handful of
-/// ROOT images, and a ROOT image is hundreds of megabytes.
+/// makes this affordable — a full run boots a handful of kernels, and builds
+/// each ROOT image once for its config and the test binaries a task carries.
 ///
 /// What it does not see is a source edit that lands mid-run. A run is a
 /// measurement of one tree, so that is the behaviour wanted either way; a run
@@ -1702,9 +1702,9 @@ static BOOTLOADER: Memo = Memo::new();
 static ROOT_IMAGE: Memo = Memo::new();
 
 /// What the ROOT image is a function of: the config naming the programs, and the
-/// files the caller adds to it. Hashed whole — the test binaries in
-/// `extra_files` are the bulk of the image, and a key over their names and
-/// lengths would call two different builds of one binary the same image.
+/// files the caller adds to it. Hashed whole: a key over the test binaries'
+/// names and lengths would call two different builds of one binary the same
+/// image.
 fn root_image_key(config_path: &Path, extra_files: &[(String, Vec<u8>)]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();

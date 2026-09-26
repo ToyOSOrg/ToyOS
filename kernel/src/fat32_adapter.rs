@@ -7,6 +7,7 @@
 //! the volume and never the wider partition; and `toyos-fat32` never writes a
 //! BPB, so a volume that fails to parse is left untouched.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
@@ -16,7 +17,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::hasher::HashMap;
 
 use toyos_abi::syscall::SyscallError;
-use toyos_fat32::{BlockAccess, Error, Extent, Fat32, FatTime, IoError};
+use toyos_fat32::{BlockAccess, Error, Extent, Fat32, FatTime, IoError, RepairNotice};
 
 use crate::block;
 use crate::mm::PAGE_BYTES;
@@ -640,8 +641,8 @@ pub struct FatFs {
     /// The one [`FatExtents`] every backing for a name shares; keyed by name
     /// because `open_backing` hands one out without opening a file.
     extents: BTreeMap<String, Weak<FatExtents>>,
-    /// The [`Fat32::repair_episode`] a log line last named as pending.
-    repair_named: Option<u64>,
+    /// Which pending repair a log line last named.
+    repair_named: RepairNotice,
 }
 
 /// What to stamp on an entry: reads `clock` directly, in local time as FAT
@@ -689,37 +690,58 @@ fn as_syscall_error(e: Error) -> SyscallError {
 /// Logged and not returned. A close has no caller to answer, and a sync's
 /// answer is about the device; the repair either happened or the volume already
 /// held the inconsistency this is trying to remove.
-fn reconcile(role: Role, fs: &mut Fat32<FatVolume>, named: &mut Option<u64>, info: &mut OpenFile) {
+fn reconcile(role: Role, fs: &mut Fat32<FatVolume>, named: &mut RepairNotice, info: &mut OpenFile) {
     if !info.file.needs_reconcile() {
         return;
     }
     match fs.reconcile(&mut info.file, now()) {
         Ok(()) => {}
-        Err(Error::RepairPending) => name_pending(role, fs, named, &info.name),
         Err(e) => {
-            log!("{role}-volume: {} was left with a chain its entry does not reach: {e}", info.name)
+            if !name_pending(role, fs, named, || format!("reconcile of {}", info.name), e) {
+                log!("{role}-volume: {} was left with a chain its entry does not reach: {e}", info.name)
+            }
         }
     }
 }
 
-/// Log a volume waiting on an unlanded repair once per repair, since otherwise
-/// it reads as whatever call met it failing.
-fn name_pending(role: Role, fs: &Fat32<FatVolume>, named: &mut Option<u64>, what: &str) {
+/// Whether `e` is the volume waiting on an unlanded repair, logged once per
+/// repair, since otherwise it reads as whatever call met it failing. `what` is
+/// only called to build the logged name once there is something to log, so a
+/// call that is neither pending nor its repair's first sighting allocates
+/// nothing.
+fn name_pending(
+    role: Role,
+    fs: &Fat32<FatVolume>,
+    named: &mut RepairNotice,
+    what: impl FnOnce() -> String,
+    e: Error,
+) -> bool {
     let episode = fs.repair_episode();
-    if episode != *named {
-        *named = episode;
+    if !RepairNotice::waits_on(e, episode) {
+        return false;
+    }
+    if named.first_sight(episode) {
         log!(
-            "{role}-volume: {what} refused, a repair pending with {} step(s) queued: {}",
-            fs.pending_repair(),
-            Error::RepairPending
+            "{role}-volume: {} refused, a repair pending with {} step(s) queued: {e}",
+            what(),
+            fs.pending_repair()
         );
     }
+    true
 }
 
 /// Log what the volume said and return its code; `NotFound` is skipped so
-/// opening a missing path doesn't write the log it lives on.
-fn refused(role: Role, op: &str, name: &str, e: Error) -> SyscallError {
-    if e != Error::NotFound {
+/// opening a missing path doesn't write the log it lives on, and a call a
+/// pending repair refused is [`name_pending`]'s to name.
+fn refused(
+    role: Role,
+    fs: &Fat32<FatVolume>,
+    named: &mut RepairNotice,
+    op: &str,
+    name: &str,
+    e: Error,
+) -> SyscallError {
+    if e != Error::NotFound && !name_pending(role, fs, named, || format!("{op} of {name}"), e) {
         log!("{role}-volume: {op} of {name}: {e}");
     }
     as_syscall_error(e)
@@ -733,7 +755,7 @@ impl FatFs {
             open: HashMap::default(),
             by_name: BTreeMap::new(),
             extents: BTreeMap::new(),
-            repair_named: None,
+            repair_named: RepairNotice::default(),
         }
     }
 
@@ -744,11 +766,11 @@ impl FatFs {
         if SELFTEST_BACKING_FAIL.load(Ordering::Relaxed) {
             return Err(SyscallError::Io);
         }
-        let size = self.fs.metadata(name).map_err(|e| refused(role, "metadata", name, e))?.len;
+        let size = self.fs.metadata(name).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "metadata", name, e))?.len;
         let runs = self
             .fs
             .extents(name, MAX_EXTENTS)
-            .map_err(|e| refused(role, "extents", name, e))?;
+            .map_err(|e| refused(role, &self.fs, &mut self.repair_named, "extents", name, e))?;
         let extents = self.extents_for(name, runs);
         Ok(Arc::new(FatBacking { role, extents, size }))
     }
@@ -788,7 +810,7 @@ impl FatFs {
     fn ensure_parent(&mut self, name: &str, time: FatTime) -> Result<(), SyscallError> {
         let Some((parent, _)) = name.rsplit_once('/') else { return Ok(()) };
         let role = self.role;
-        self.fs.create_dir_all(parent, time).map_err(|e| refused(role, "mkdir -p", parent, e))
+        self.fs.create_dir_all(parent, time).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "mkdir -p", parent, e))
     }
 }
 
@@ -800,13 +822,13 @@ impl ReplaceRename for FatFs {
 
     fn source_present(&mut self, old: &str) -> Result<bool, SyscallError> {
         let role = self.role;
-        self.fs.exists(old).map_err(|e| refused(role, "exists", old, e))
+        self.fs.exists(old).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "exists", old, e))
     }
 
     fn same_object(&mut self, old: &str, new: &str) -> Result<bool, SyscallError> {
         // Identity is the entry's location: FAT names one entry by two strings.
         let role = self.role;
-        self.fs.same_entry(old, new).map_err(|e| refused(role, "same_entry", old, e))
+        self.fs.same_entry(old, new).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "same_entry", old, e))
     }
 
     fn commit(
@@ -822,7 +844,7 @@ impl ReplaceRename for FatFs {
             if let Some(stranded) = &e.stranded {
                 log!("{role}-volume: {new} could not be put back and is under {stranded}");
             }
-            refused(role, "replace rename", old, e.cause)
+            refused(role, &self.fs, &mut self.repair_named, "replace rename", old, e.cause)
         })?;
         Ok(Committed::new((replaced, displaced)))
     }
@@ -849,7 +871,7 @@ impl ReplaceRename for FatFs {
         let released = self
             .fs
             .release_replaced(replaced)
-            .map_err(|e| refused(role, "release replaced", new, e));
+            .map_err(|e| refused(role, &self.fs, &mut self.repair_named, "release replaced", new, e));
 
         // Re-key, not revoke: the source's data did not move, so backings under
         // the old name still read it.
@@ -871,7 +893,7 @@ impl FileSystem for FatFs {
     /// bcachefs adapters.
     fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         let role = self.role;
-        self.fs.walk(dir, limit).map_err(|e| refused(role, "list", dir, e))
+        self.fs.walk(dir, limit).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "list", dir, e))
     }
 
     fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError> {
@@ -879,7 +901,7 @@ impl FileSystem for FatFs {
         match self.fs.metadata(dir) {
             Ok(meta) => Ok(meta.is_dir),
             Err(Error::NotFound | Error::NotADirectory) => Ok(false),
-            Err(e) => Err(refused(role, "metadata", dir, e)),
+            Err(e) => Err(refused(role, &self.fs, &mut self.repair_named, "metadata", dir, e)),
         }
     }
 
@@ -888,7 +910,7 @@ impl FileSystem for FatFs {
         self.fs
             .metadata(name)
             .map(|m| m.modified_unix)
-            .map_err(|e| refused(role, "metadata", name, e))
+            .map_err(|e| refused(role, &self.fs, &mut self.repair_named, "metadata", name, e))
     }
 
     /// Always `Ok(None)`: FAT32 has no symlink representation.
@@ -904,7 +926,7 @@ impl FileSystem for FatFs {
             return Ok((file_id, Some(backing)));
         }
         let role = self.role;
-        let file = self.fs.open(name).map_err(|e| refused(role, "open", name, e))?;
+        let file = self.fs.open(name).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "open", name, e))?;
         let size = file.len();
         let backing = self.backing(name)?;
 
@@ -929,9 +951,9 @@ impl FileSystem for FatFs {
             // else's file is how a caller comes to believe it owns bytes it
             // does not.
             Err(Error::AlreadyExists) => {
-                self.fs.open(name).map_err(|e| refused(role, "open", name, e))?
+                self.fs.open(name).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "open", name, e))?
             }
-            Err(e) => return Err(refused(role, "create", name, e)),
+            Err(e) => return Err(refused(role, &self.fs, &mut self.repair_named, "create", name, e)),
         };
         let file_id = file_cache::create_file(true);
         file_cache::set_size(file_id, file.len());
@@ -957,7 +979,7 @@ impl FileSystem for FatFs {
         }
         self.revoke(name);
         let role = self.role;
-        self.fs.remove(name).map_err(|e| refused(role, "delete", name, e))
+        self.fs.remove(name).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "delete", name, e))
     }
 
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError> {
@@ -966,12 +988,12 @@ impl FileSystem for FatFs {
 
     fn create_dir(&mut self, name: &str) -> Result<(), SyscallError> {
         let role = self.role;
-        self.fs.create_dir(name, now()).map_err(|e| refused(role, "mkdir", name, e))
+        self.fs.create_dir(name, now()).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "mkdir", name, e))
     }
 
     fn remove_dir(&mut self, name: &str) -> Result<(), SyscallError> {
         let role = self.role;
-        self.fs.remove_dir(name).map_err(|e| refused(role, "rmdir", name, e))
+        self.fs.remove_dir(name).map_err(|e| refused(role, &self.fs, &mut self.repair_named, "rmdir", name, e))
     }
 
     fn write_page(
@@ -980,12 +1002,12 @@ impl FileSystem for FatFs {
         page_idx: u32,
         data: &[u8; PAGE_BYTES],
     ) -> Result<(), SyscallError> {
-        let Self { role, fs, open, .. } = self;
+        let Self { role, fs, open, repair_named, .. } = self;
         let role = *role;
         let info = open.get_mut(&file_id).ok_or(SyscallError::NotFound)?;
         match fs.write(&mut info.file, page_idx as u64 * 4096, data) {
             Ok(()) => Ok(()),
-            Err(e) => Err(refused(role, "write", &info.name, e)),
+            Err(e) => Err(refused(role, fs, repair_named, "write", &info.name, e)),
         }
     }
 
@@ -1001,9 +1023,9 @@ impl FileSystem for FatFs {
         if let Some(cell) = self.live_extents(&name) {
             cell.truncate_to(size);
         }
-        let Self { fs, open, .. } = self;
+        let Self { fs, open, repair_named, .. } = self;
         let info = open.get_mut(&file_id).ok_or(SyscallError::NotFound)?;
-        fs.set_len(&mut info.file, size).map_err(|e| refused(role, "set_len", &name, e))
+        fs.set_len(&mut info.file, size).map_err(|e| refused(role, fs, repair_named, "set_len", &name, e))
     }
 
     /// Record the real length and re-derive the backing; a shrink truncates
@@ -1025,11 +1047,11 @@ impl FileSystem for FatFs {
                     cell.truncate_to(size);
                 }
             }
-            let Self { fs, open, .. } = self;
+            let Self { fs, open, repair_named, .. } = self;
             let info = open.get_mut(&file_id).ok_or(SyscallError::NotFound)?;
             if info.file.len() != size {
                 fs.set_len(&mut info.file, size)
-                    .map_err(|e| refused(role, "set_len", &info.name, e))?;
+                    .map_err(|e| refused(role, fs, repair_named, "set_len", &info.name, e))?;
             }
             #[cfg(feature = "boot-actuators")]
             if meta_refuse::should_refuse(&info.name) {
@@ -1041,7 +1063,7 @@ impl FileSystem for FatFs {
                 return Err(SyscallError::WouldBlock);
             }
             fs.flush_meta(&mut info.file, time)
-                .map_err(|e| refused(role, "flush_meta", &info.name, e))?;
+                .map_err(|e| refused(role, fs, repair_named, "flush_meta", &info.name, e))?;
             name
         };
         // A failure here only costs evictability; the write itself is
@@ -1071,9 +1093,7 @@ impl FileSystem for FatFs {
             reconcile(*role, fs, repair_named, info);
         }
         self.fs.sync().map_err(|e| {
-            if e == Error::RepairPending {
-                name_pending(self.role, &self.fs, &mut self.repair_named, "sync");
-            }
+            name_pending(self.role, &self.fs, &mut self.repair_named, || String::from("sync"), e);
             as_syscall_error(e)
         })
     }

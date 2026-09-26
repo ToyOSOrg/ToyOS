@@ -1518,6 +1518,7 @@ impl XhciController {
     ) -> Result<Bot, Broke> {
         // The CDBs are this file's own, so their shape is a kernel invariant.
         assert!(cdb_len as usize <= cdb.len() && cdb_len <= 16);
+        crate::block::census::command_issued();
         // The length the device is told to move is the region's own, so the
         // only bound left to state is this driver's largest transfer.
         let (data_phys, data_len) = match data {

@@ -48,17 +48,14 @@ pub fn init(part: Partition) -> Arc<Cached> {
 /// The block every `BlockDevice` transfers.
 const PAGE: u64 = PAGE_BYTES as u64;
 
-/// A cache over the partition `candidate` names, or `None` with the reason
-/// logged under `what`. Every number below is one the disk chose, so each
+/// A cache over the DATA partition `candidate` names, or `None` with the
+/// reason logged. Every number below is one the disk chose, so each
 /// refusal says which; nothing here decides what the volume holds.
-pub fn over_candidate(
-    candidate: &crate::gpt::Candidate,
-    what: &'static str,
-) -> Option<Arc<Cached>> {
+pub fn over_candidate(candidate: &crate::gpt::Candidate) -> Option<Arc<Cached>> {
     let volume = candidate.volume;
     let guid = candidate.guid;
     let Some(handle) = block::open(volume.device) else {
-        log!("{what}: candidate {guid} is on device {} and no driver here registered it", volume.device);
+        log!("data: candidate {guid} is on device {} and no driver here registered it", volume.device);
         return None;
     };
 
@@ -68,7 +65,7 @@ pub fn over_candidate(
         Ok(span) => span,
         Err(block::SpanRefused::Overflow) => {
             log!(
-                "{what}: candidate {guid} claims LBA {}+{} of {} bytes, which is not a byte range \
+                "data: candidate {guid} claims LBA {}+{} of {} bytes, which is not a byte range \
                  — refusing it",
                 volume.start_lba,
                 volume.blocks,
@@ -78,25 +75,25 @@ pub fn over_candidate(
         }
         Err(block::SpanRefused::NotWhole { start_bytes, len_bytes }) => {
             log!(
-                "{what}: candidate {guid} is at {start_bytes}+{len_bytes} bytes, which is not \
+                "data: candidate {guid} is at {start_bytes}+{len_bytes} bytes, which is not \
                  whole {PAGE}-byte blocks — refusing it"
             );
             return None;
         }
     };
     let device_blocks = handle.block_count();
-    let part = match Partition::of(handle, first_block, blocks, block::Holder::Kernel(what)) {
+    let part = match Partition::of(handle, first_block, blocks, block::Holder::Kernel("data")) {
         Ok(part) => part,
         Err(block::ViewRefused::OffDevice) => {
             log!(
-                "{what}: candidate {guid} is at {first_block}+{blocks} blocks on a device of {} \
+                "data: candidate {guid} is at {first_block}+{blocks} blocks on a device of {} \
                  blocks — refusing to read past the end of it",
                 device_blocks
             );
             return None;
         }
         Err(block::ViewRefused::Held(by)) => {
-            log!("{what}: candidate {guid} is held by {by} — refusing to open it a second time");
+            log!("data: candidate {guid} is held by {by} — refusing to open it a second time");
             return None;
         }
     };

@@ -110,7 +110,32 @@ pub struct KernelArgs {
     /// land inside, and there is no deriving it from the memory map — the map
     /// says what firmware *used*, not what the bridge would decode.
     pub root_bridge_windows: [RootBridgeWindow; MAX_ROOT_BRIDGE_WINDOWS],
+    /// Where the loader put ROOT: its filesystem, read through the firmware's
+    /// block I/O into `LoaderData` pages, which the kernel mounts from memory and
+    /// keeps out of its allocator by this address, as it keeps the black box's.
+    ///
+    /// These are the bytes a signature check over ROOT has to cover: the loader
+    /// writes them once, and nothing writes them between that read and the
+    /// kernel's mount. Zero length is a loader that handed no image, and the
+    /// kernel refuses to boot on it by name; it never reads ROOT anywhere else.
+    pub root_image_addr: u64,
+    pub root_image_len: u64,
+    /// The unique GUID of the partition the image was read from, raw as in the
+    /// GPT entry like [`Self::boot_partition_guid`]; zero with no image. The
+    /// kernel holds that partition so no claim writes the slot it is running.
+    pub root_partition_guid: [u8; 16],
+    /// The time-stamp counter at the loader's entry and at its handoff, and the
+    /// cycles its read of ROOT took (zero with no image). The TSC counts from
+    /// reset, so the first is firmware's time since power-on unless firmware
+    /// wrote the counter; the kernel converts all three at its calibrated rate.
+    pub loader_entry_tsc: u64,
+    pub loader_handoff_tsc: u64,
+    pub root_read_tsc: u64,
 }
+
+/// The boot parameter on which the loader hands the kernel no ROOT image: the
+/// negative control on the kernel's refusal, and read by both of them.
+pub const WITHHOLD_ROOT_PARAM: &str = "loader-withholds-root";
 
 /// The most windows the loader will carry.
 pub const MAX_ROOT_BRIDGE_WINDOWS: usize = 64;
@@ -208,7 +233,13 @@ const _: () = {
     assert!(offset_of!(KernelArgs, cmdline_len) == 184);
     assert!(offset_of!(KernelArgs, root_bridge_window_count) == 192);
     assert!(offset_of!(KernelArgs, root_bridge_windows) == 200);
-    assert!(size_of::<KernelArgs>() == 1224);
+    assert!(offset_of!(KernelArgs, root_image_addr) == 1224);
+    assert!(offset_of!(KernelArgs, root_image_len) == 1232);
+    assert!(offset_of!(KernelArgs, root_partition_guid) == 1240);
+    assert!(offset_of!(KernelArgs, loader_entry_tsc) == 1256);
+    assert!(offset_of!(KernelArgs, loader_handoff_tsc) == 1264);
+    assert!(offset_of!(KernelArgs, root_read_tsc) == 1272);
+    assert!(size_of::<KernelArgs>() == 1280);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
     assert!(align_of::<RootBridgeWindow>() == 8);
@@ -297,6 +328,12 @@ mod tests {
         root_bridge_window_count: 0,
         root_bridge_windows: [RootBridgeWindow { base: 0, length: 0 };
             MAX_ROOT_BRIDGE_WINDOWS],
+        root_image_addr: 0,
+        root_image_len: 0,
+        root_partition_guid: [0; 16],
+        loader_entry_tsc: 0,
+        loader_handoff_tsc: 0,
+        root_read_tsc: 0,
     };
 
     #[test]

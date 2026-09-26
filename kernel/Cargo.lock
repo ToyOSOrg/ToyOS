@@ -51,6 +51,7 @@ dependencies = [
  "toyos-proclife",
  "toyos-ps2",
  "toyos-quiesce",
+ "toyos-rootimage",
  "toyos-sched",
  "toyos-symbols",
  "toyos-tco",
@@ -142,6 +143,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-quiesce"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-rootimage"
 version = "0.1.0"
 
 [[package]]
