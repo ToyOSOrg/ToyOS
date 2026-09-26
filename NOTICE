@@ -8,8 +8,12 @@ Some of what this repository carries is not ours and is under other terms.
 This file is the list. It exists because until 2026-08-08 there wasn't one: an
 audit that day found six committed binary files — 11,094,369 bytes of the
 14,634,080 git tracks — plus a source corpus, all outside the declared licence
-and none of them documented. Nothing here is a violation. Everything here is an
-obligation somebody has to be able to find.
+and none of them documented. Everything here is an obligation somebody has to
+be able to find.
+
+Each section names its terms on one `SPDX-License-Identifier:` line, which
+agrees with the licence column of `COMMITTED_FILES` in `src/licence.rs` for
+every file both name, and that file judges what an image ships by them.
 
 Provenance below was established by inspecting content, not by trusting
 memory: `assets/` and `ovmf/` both entered in the initial squashed commit and
@@ -27,6 +31,7 @@ assets/DOOM1.WAD — id Software, Doom shareware IWAD
     sha256 1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771
     Copyright (c) 1994 Id Software
     Terms: licenses/id-software-shareware-DOOM1.txt
+    SPDX-License-Identifier: LicenseRef-id-Software-DOOM1-Shareware
 
 id permits free redistribution of this file. John Carmack, 1999: *"The DOOM
 shareware wad is freely distributable."* Two conditions come with it, both from
@@ -59,6 +64,7 @@ assets/soundfont.sf2 — GeneralUser GS, "License v2.0"
     sha256 89a13a5c907b5cc83c15679e07e6dcb06fd72102937e092dc4a582f1aa5905c3
     Copyright 1997-2025 by S. Christian Collins
     Licence text: licenses/GeneralUser-GS-License-v2.0.txt
+    SPDX-License-Identifier: LicenseRef-GeneralUser-GS-2.0
 
 doom's music, and a **derivative**: `src/soundfont.rs` cuts GeneralUser GS
 v2.0.3 down to the 37 melodic programs and 23 percussion keys
@@ -108,6 +114,7 @@ userland/doom — GPL-2.0
 -----------------------
 
     Licence text: licenses/GPL-2.0-doomgeneric.txt
+    SPDX-License-Identifier: GPL-2.0-or-later
 
 `/system/bin/doom` links doomgeneric, so the program is GPL-2.0. The C sources are not
 committed: `userland/doom/build.rs` fetches upstream commit `fc60163` into a
@@ -135,6 +142,7 @@ assets/JetBrainsMono-Regular.ttf — SIL Open Font License 1.1
     Copyright 2020 The JetBrains Mono Project Authors
     (https://github.com/JetBrains/JetBrainsMono)
     Licence text: licenses/OFL-1.1-JetBrainsMono.txt
+    SPDX-License-Identifier: OFL-1.1
 
 Read out of the font's own name table, which states the copyright and the
 licence verbatim. The OFL requires both to travel with the Font Software; until
@@ -178,6 +186,7 @@ would have arrived unremarked. `assets/` is walked whole for that reason.
     sha256 d8284370bac0b7ccb3760fc1cd214f36f716e2724e4abd63eb2696bc345bdc45  square-bold.svg
     sha256 394ad30f37b493b58cc7c26e816d7ec0bf7acc4a583fa39c9aed438c19b5fc57  x-bold.svg
     Licence text: licenses/MIT-PhosphorIcons.txt
+    SPDX-License-Identifier: MIT
 
 MIT requires the notice to be included in copies. Before this file the only
 copy of it in reach was a `phosphor-icons/` directory on one developer's disk,
@@ -197,6 +206,7 @@ ovmf/*.fd — EDK II firmware, BSD-2-Clause-Patent
 
     Copyright (c) 2019, TianoCore and contributors
     Licence text: licenses/BSD-2-Clause-Patent-EDK2.txt
+    SPDX-License-Identifier: BSD-2-Clause-Patent
 
 Third-party builds of Tianocore EDK II, read out of the binaries' own build
 paths: the two `-pure-efi` files were built on a Jenkins worker from
@@ -226,6 +236,7 @@ tests/fixtures/gbae-v0.2.0-* — gbae, MIT
     Copyright (c) 2025-2026 japabu
     Upstream: https://github.com/Japabu/gbae, release v0.2.0
     Licence text: licenses/MIT-gbae.txt
+    SPDX-License-Identifier: MIT
 
 A Game Boy Advance emulator built for `x86_64-unknown-toyos`, and the release's
 own sums file covering every asset of that release. `pkg_install_gbae` installs
@@ -256,6 +267,8 @@ digest above and that file carries the matching line.
 
 tests/testcases/ — TinyCC's corpus, LGPL-2.1, and picoc, BSD-3-Clause
 ---------------------------------------------------------------------
+
+    SPDX-License-Identifier: LGPL-2.1-or-later AND BSD-3-Clause AND (MIT OR Apache-2.0)
 
 The C cases `toyos-cc` is tested against are mostly TinyCC's `tests/tests2` and
 `tests/pp`. They are compiler *input* — data, not linked code — so their terms
@@ -288,7 +301,9 @@ bcachefs/tests/fixtures/ — volumes upstream's tools wrote
     144,978 bytes gzip -9, of a 33,554,432-byte raw volume
     sha256 7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e
     raw    021c816a064fc2fca2402c8b2a87a9e6124e0b2f4a32779ef14654e908bcacff
-    Terms: ours — see below
+    Terms: pending the owner with the crate itself,
+    issues/filesystem/whether-bcachefs-is-ours-to-license-is-the-owners.md
+    SPDX-License-Identifier: NOASSERTION
 
 `bcachefs/src/upstream` implements upstream's on-disk format, and the only
 honest judge of a format reader is bytes the format's own implementation wrote.
