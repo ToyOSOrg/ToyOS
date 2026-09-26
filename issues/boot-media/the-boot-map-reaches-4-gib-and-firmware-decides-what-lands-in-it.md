@@ -29,3 +29,13 @@ the same defect.
 reach all of firmware's write-back memory), the memory map is among what
 `report_reach` checks, and `Profile::Virt` boots with the 4 GiB every other
 profile has.
+
+**The AArch64 typing refuses a part-typed page.** `Typing::of`
+(`toyos-bootmap/src/lib.rs`) refuses the boot (`Refusal::Mixed`) for any 2 MiB
+page of the low 4 GiB that firmware's memory map types in part: written back
+for some of it and not the rest. QEMU `virt`'s map has no such page. A
+SystemReady machine whose map has 4 KiB holes there, which the PR #524 review
+expects and nothing here has measured, is refused at stage 9 of
+`issues/kernel/toyos-runs-on-arm64.md`; that stage owes the split of such a
+page into 4 KiB leaves typed by the map, as the scanout's partial pages
+already are.
