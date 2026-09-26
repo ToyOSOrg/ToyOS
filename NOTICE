@@ -226,7 +226,7 @@ instead — which would put it inside the "comes with QEMU" allowance and delete
 
 
 
-aavmf/*.fd — EDK II firmware for QEMU `virt`, BSD-2-Clause-Patent
+aavmf/*.fd — EDK II firmware for QEMU `virt`, BSD-2-Clause-Patent AND Apache-2.0
 ------------------------------------------------------------
 
     AAVMF_CODE.fd  67,108,864 bytes
@@ -236,14 +236,20 @@ aavmf/*.fd — EDK II firmware for QEMU `virt`, BSD-2-Clause-Patent
 
     Copyright (c) 2019, TianoCore and contributors
     Licence text: licenses/BSD-2-Clause-Patent-EDK2.txt
-    SPDX-License-Identifier: BSD-2-Clause-Patent
+    Copyright 1995-2023 The OpenSSL Project Authors
+    Licence text: licenses/Apache-2.0-OpenSSL.txt
+    SPDX-License-Identifier: BSD-2-Clause-Patent AND Apache-2.0
 
 QEMU's own prebuilt ArmVirtQemu firmware, unmodified: `edk2-aarch64-code.fd`
 and `edk2-arm-vars.fd` as QEMU 11.1.0 installs them under `share/qemu/`,
 whose version string reads `edk2-stable202408-prebuilt.qemu.org` (a
 `DEBUG_GCC5` build of 2024-09-12). The variable store is the template: every
 boot gives it a writable snapshot QEMU discards, because this `DEBUG` build
-asserts on a read-only store.
+asserts on a read-only store. QEMU builds it with `NETWORK_TLS_ENABLE`
+(`roms/edk2-build.config`, `[opts.common]`), and edk2-stable202408's
+ArmVirtQemu links edk2's bundled OpenSSL either way (`OpensslLib` with TLS,
+`OpensslLibCrypto` without): OpenSSL 3.0.9, whose `LICENSE.txt` is the
+Apache-2.0 text above and which carries no `NOTICE`.
 
 tests/fixtures/gbae-v0.2.0-* — gbae, MIT
 -----------------------------------------
