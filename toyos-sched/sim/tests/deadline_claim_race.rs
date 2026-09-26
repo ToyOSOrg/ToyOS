@@ -5,7 +5,7 @@
 //! there: `fire_deadlines`' `Claim::Lost` arm is unreachable in every scenario
 //! the simulator can generate. On hardware the window is two instructions of a
 //! remote CPU — `TaskShared::claim_wake` and the `Msg::Wake` post that follows
-//! it in `waitq::deliver_wake` — and this test is that pair with a whole pass
+//! it in `park::notify` — and this test is that pair with a whole pass
 //! executed in between, which is the only way to say it.
 //!
 //! What it asserts is invariant T across that window: a CPU that
@@ -14,8 +14,8 @@
 //! a machine halted with a parked thread and a stopped timer reports
 //! `1 pending, 0 OVERDUE`, which is what health looks like.
 //!
-//! It fails by aborting, like `scenarios::old_preemptible_window`: a task and
-//! a wait registration are linear values with drop bombs, so unwinding out of
+//! It fails by aborting, like `scenarios::old_preemptible_window`: a task is a
+//! linear value with a drop bomb, so unwinding out of
 //! a failed assertion sets them off. The first line printed is the verdict.
 
 use std::sync::Arc as StdArc;
@@ -29,10 +29,10 @@ use toyos_sched::sync::Arc;
 use toyos_sched::task::{
     Claim, RtState, TaskBuilder, TaskKey, TaskShared, WaitClass, WakeCause, WakeReason,
 };
-use toyos_sched::waitq::{Commit, WaitList, WaitQueue};
+use toyos_sched::park::{prepare, Cancel, Commit};
 
 use toyos_sched_sim::hw_impl::SimHw;
-use toyos_sched_sim::msg::{SimMsg, SimQueue};
+use toyos_sched_sim::msg::SimMsg;
 use toyos_sched_sim::payload::{MockAddressSpace, SimCtx, SimPayload, SimPreempt, StdLock};
 
 const CPU0: CpuId = CpuId(0);
@@ -45,7 +45,6 @@ struct Machine1 {
     hw: SimHw,
     handles: CpuHandles<SimMsg>,
     frontier: Frontier,
-    queue: SimQueue,
 }
 
 impl Machine1 {
@@ -84,7 +83,6 @@ fn boot() -> (Machine1, CpuSched<SimPayload>, Arc<TaskShared<SimMsg>>) {
         hw: SimHw::new(1),
         handles: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)]),
         frontier: Frontier::new(),
-        queue: WaitQueue::new(WaitClass::Io, StdLock::new(WaitList::new())),
     };
     let mut cpu = CpuSched::new(CPU0, rx, SimCtx::default());
 
@@ -138,7 +136,7 @@ fn teardown(m: &Machine1, cpu: &mut CpuSched<SimPayload>, now: Nanos) {
     pass(m, cpu, now.after(1_000));
 }
 
-/// The second half of `waitq::deliver_wake`, on its own. Splitting it from the
+/// The second half of `park::notify`, on its own. Splitting it from the
 /// claim is what lets a pass run between the two.
 fn deliver(m: &Machine1, shared: &Arc<TaskShared<SimMsg>>, cause: WakeCause) {
     let slot = shared
@@ -158,20 +156,19 @@ fn deliver(m: &Machine1, shared: &Arc<TaskShared<SimMsg>>, cause: WakeCause) {
 fn a_claim_between_the_drain_and_the_fire_leaves_the_timer_armed_for_what_is_parked() {
     let (m, mut cpu, shared) = boot();
 
-    let registration = {
+    {
         m.hw.enter_pass(CPU0, Nanos::ZERO);
         let ticket = {
             let current = cpu.current_task().expect("a task is running");
-            m.queue.prepare_wait(&current)
+            prepare(&current, Cancel::Answers, WaitClass::Io).expect("nothing has posted to it")
         };
         let pass = SchedPass::begin(&mut cpu, m.env(), Nanos::ZERO);
-        let Commit::Parked(committed, registration) = ticket.commit() else {
+        let Commit::Parked(committed) = ticket.commit() else {
             panic!("nothing had claimed the task: the commit must park it");
         };
         drop_action(pass.dispose_block(committed, Some(DEADLINE)).finish());
         m.hw.leave_pass();
-        registration
-    };
+    }
     assert_eq!(
         cpu.armed(),
         Some(DEADLINE),
@@ -197,7 +194,6 @@ fn a_claim_between_the_drain_and_the_fire_leaves_the_timer_armed_for_what_is_par
     deliver(&m, &shared, WakeCause::new(WakeReason::Woken));
     pass(&m, &mut cpu, after.after(1_000));
     let ran_again = cpu.running().map(|t| t.key());
-    registration.finish();
     teardown(&m, &mut cpu, after.after(2_000));
 
     assert_eq!(

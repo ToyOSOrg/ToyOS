@@ -146,7 +146,7 @@ pub enum ThreadExit {
     /// runs.
     Process,
     /// A sibling: release its own mappings, mark it `Zombie(code)`, and post
-    /// `Gone` on `post` before the exit pass — after it, this thread does not
+    /// on `post` before the exit pass — after it, this thread does not
     /// run again.
     Sibling {
         /// **The subject a joiner armed on, which is the exiting thread's own

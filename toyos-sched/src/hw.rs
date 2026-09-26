@@ -75,7 +75,7 @@ pub enum TraceKind {
 
 /// The one effect a wake path needs from the world: the targeted kick IPI a
 /// [`crate::mailbox::Kick::Send`] obliges the poster to deliver. Split out of
-/// [`Machine`] so wait queues and the retire protocol — which run at any wake
+/// [`Machine`] so a watch's post and the retire protocol — which run at any wake
 /// site, not inside a scheduler pass — depend on nothing else.
 pub trait Kicker: Sync {
     /// Targeted kick IPI. Never broadcast.

@@ -11,7 +11,7 @@ Queued track from the 2026-08-16 owner conversation on scheduler direction.
 Heterogeneous cores are the norm outside our current hardware: Intel P/E cores
 (12th gen onward; the T14 Gen 2 predates the split) and ARM big.LITTLE, which is
 universal on the ARM64 machines in scope
-(`issues/kernel/arm64-is-a-decision-nobody-has-made.md`). A scheduler that
+(`issues/kernel/toyos-runs-on-arm64.md`). A scheduler that
 assumes equal cores places background churn on a fast core and a
 latency-sensitive wake on a slow one, and its load arithmetic is wrong
 everywhere.

@@ -653,11 +653,11 @@ fn service_bytes(recorded: bool) {
     // next reader until the following real event.
     let woke_kb = keys > 0;
     if woke_kb {
-        crate::inbox::Source::Keyboard.wake();
+        crate::keyboard::WATCH.post();
     }
     let woke_ms = motion > 0;
     if woke_ms {
-        crate::inbox::Source::Mouse.wake();
+        crate::mouse::WATCH.post();
     }
     trace_drain(bytes, keys, motion, woke_kb, woke_ms);
 

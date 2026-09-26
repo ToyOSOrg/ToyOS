@@ -15,12 +15,12 @@
 //! the same chunk as the code.
 //!
 //! **What this model is not about.** The park itself is `toyos-sched`'s
-//! two-phase commit: `klogd` registers *before* it arms, so a producer that
-//! wins the flag from that point on claims a `Committing` task and the task's
-//! own commit refuses to park. That handshake has its own models in that crate,
-//! and re-modelling it here would only re-derive it badly — the first draft of
-//! this file did, with a plain `parked` word, and reported a lost wake that the
-//! rendezvous CAS makes unreachable. What is left here is exactly the pair of
+//! two-phase commit: a producer that wins the flag writes `klogd`'s word —
+//! claiming it if it is committing or parked, flagging it if it is running —
+//! and the task's own next commit refuses to park over either. That handshake
+//! has its own models in that crate, and re-modelling it here would only
+//! re-derive it badly — the first draft of this file did, with a plain `parked`
+//! word, and reported a lost wake that the rendezvous CAS makes unreachable. What is left here is exactly the pair of
 //! fences, which nothing else models.
 //!
 //! The negative case is a cargo feature rather than a comment:
@@ -45,8 +45,8 @@ struct Machine {
     shard: Shard,
     waiter: AtomicBool,
     /// Set by the producer when `signal_after_commit` says it owns the post.
-    /// The post itself is `wake_direct`'s claim CAS and is not this model's
-    /// subject; that it was *reached* is.
+    /// The post itself is `park::notify`'s write of the word and is not this
+    /// model's subject; that it was *reached* is.
     posted: AtomicBool,
 }
 

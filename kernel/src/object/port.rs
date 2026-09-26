@@ -5,12 +5,10 @@
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
-
-use crate::inbox::InboxId;
 use crate::pipe::{PipeReader, PipeWriter};
 use crate::sync::Lock;
+use crate::watch::Watch;
 
 use super::service::HandleQueue;
 use super::{KObjectVariant, ObjectCore, ZeroHandles};
@@ -37,9 +35,9 @@ struct PortQueue {
 pub struct PortShared {
     queue: Lock<PortQueue>,
     /// Lives on the port, not either end: a client's connect must complete a
-    /// poll the server registered on the `Acceptor`.
-    watch: crate::completion::Watch,
-    inbox_watchers: Lock<Vec<InboxId>>,
+    /// poll the server registered on the `Acceptor`. An `Arc` so a poll
+    /// registration can hold it with no end borrowed.
+    watch: Arc<Watch>,
 }
 
 pub struct Acceptor {
@@ -62,8 +60,7 @@ pub enum PushError {
 pub fn create() -> (Arc<Acceptor>, Arc<Connector>) {
     let shared = Arc::new(PortShared {
         queue: Lock::new(PortQueue { closed: false, pending: VecDeque::new() }),
-        watch: crate::completion::Watch::new(),
-        inbox_watchers: Lock::new(Vec::new()),
+        watch: Arc::new(Watch::new()),
     });
     (
         Arc::new(Acceptor { core: Acceptor::new_core(), shared: shared.clone() }),
@@ -80,23 +77,8 @@ impl PortShared {
         self.queue.lock().closed
     }
 
-    pub fn watch(&self) -> &crate::completion::Watch {
+    pub fn watch(&self) -> &Arc<Watch> {
         &self.watch
-    }
-
-    pub fn watchers(&self) -> Vec<InboxId> {
-        self.inbox_watchers.lock().clone()
-    }
-
-    pub fn add_watcher(&self, ring: InboxId) {
-        let mut watchers = self.inbox_watchers.lock();
-        if !watchers.contains(&ring) {
-            watchers.push(ring);
-        }
-    }
-
-    pub fn remove_watcher(&self, ring: InboxId) {
-        self.inbox_watchers.lock().retain(|&id| id != ring);
     }
 }
 
@@ -114,12 +96,8 @@ impl Acceptor {
         self.shared.has_pending()
     }
 
-    pub fn watch(&self) -> &crate::completion::Watch {
+    pub fn watch(&self) -> &Arc<Watch> {
         self.shared.watch()
-    }
-
-    pub fn port(&self) -> Arc<PortShared> {
-        self.shared.clone()
     }
 }
 
@@ -163,9 +141,8 @@ impl ZeroHandles for Acceptor {
             connection.inbox.close_now();
         }
         drop(queued);
-        crate::completion::post(
-            crate::completion::Subject::of(self.shared.watch()),
-            crate::completion::Outcome::Gone(crate::completion::Reason::Closed),
-        );
+        // A poll on the port is answered as gone, not as ready: nothing will ever queue again.
+        self.shared.watch.cancel_polls();
+        self.shared.watch.post();
     }
 }

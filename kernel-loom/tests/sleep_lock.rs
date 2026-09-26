@@ -11,12 +11,12 @@
 //!
 //! **What this proves and what it does not.** Loom has no scheduler, so the
 //! park itself is shimmed
-//! (`kernel_loom::completion::wait_uncancellable_until` yields). What is
+//! (`kernel_loom::watch::wait_uncancellable_until` yields). What is
 //! therefore under test is the lock: the ticket arithmetic, mutual exclusion,
 //! and the release-to-acquire edge that hands the next holder the previous
 //! one's writes. What is **not** under test is the wake handshake — the
-//! record-then-claim pair that makes a post reach a *parked* waiter, which is
-//! `inbox.rs`'s model and is checked there against the real `Inbox`.
+//! registration and the notified word that make a post reach a *parked*
+//! waiter, which is `toyos-sched/loom/tests/loom_watch.rs`'s model.
 //!
 //! Service order is FIFO by the arithmetic rather than by anything this file
 //! observes: `now` is advanced exactly once per release and a contender waits

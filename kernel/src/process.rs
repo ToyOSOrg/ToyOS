@@ -1160,10 +1160,7 @@ pub fn thread_exit(code: i32) -> ! {
             "thread_exit posts through its own task handle, so the decision must have \
              named its own watch",
         );
-        crate::completion::post(
-            crate::completion::Subject::of(handle.watch()),
-            crate::completion::Outcome::Gone(crate::completion::Reason::Closed),
-        );
+        handle.watch().post();
     }
     scheduler::exit_current(code);
 }
@@ -1249,12 +1246,12 @@ pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
 
 /// Wake processes blocked on reading from a pipe that now has data.
 pub fn wake_pipe_readers(pipe_id: pipe::PipeId) {
-    crate::inbox::Source::PipeReadable(pipe_id).wake();
+    scheduler::wake_pipe_readers(pipe_id);
 }
 
 /// Wake processes blocked on writing to a pipe that now has space.
 pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
-    crate::inbox::Source::PipeWritable(pipe_id).wake();
+    scheduler::wake_pipe_writers(pipe_id);
 }
 
 /// Atomically validate the parent-thread relationship and collect a zombie thread; the table lock is the atomicity. `Err(())`: this caller may not join `tid`/`pid`.
