@@ -1139,7 +1139,6 @@ dependencies = [
  "toyos-gpt",
  "toyos-i219",
  "toyos-keymap",
- "toyos-ld",
  "toyos-logstream",
  "toyos-manifest",
  "toyos-quiesce",

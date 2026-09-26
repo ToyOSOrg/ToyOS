@@ -14,8 +14,8 @@ struct Tool {
 ///
 /// `cc` is here and is not ours: `rustc` drives every *host* link through it
 /// and `rustup` does not install it. Nothing that boots goes near it —
-/// `bootloader/`, `kernel/` and `userland/` all set `linker = "toyos-ld"` —
-/// which is the distinction "ToyOS needs a C compiler" would destroy.
+/// `bootloader/`, `kernel/` and `userland/` all link through the toolchain's
+/// `rust-lld` — which is the distinction "ToyOS needs a C compiler" would destroy.
 const REQUIRED: &[Tool] = &[
     Tool { any: &["git"], why: "every build; the image ships what git says is tracked" },
     Tool { any: &["rustup"], why: "the toolchain — install from https://rustup.rs" },

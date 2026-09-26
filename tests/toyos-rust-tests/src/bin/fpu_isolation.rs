@@ -101,13 +101,12 @@ const PAGE_2M: usize = 2 * 1024 * 1024;
 /// is a page of its own and each is a `#PF`.
 const FAULT_TOUCHES: u64 = 2;
 
-/// The page-fault workload, and the only kind of demand-paged memory a userland
-/// program on this kernel can reach.
+/// The page-fault workload.
 ///
 /// Not `mmap`: `sys_mmap` allocates and maps its whole region up front, so the
-/// first touch of a fresh mapping faults nothing. Not `.bss` either: `toyos-ld`
-/// writes it into the file, so a `PT_LOAD`'s `filesz` equals its `memsz` and
-/// the loader's `Anonymous` tail is empty. What is left is a *writable
+/// first touch of a fresh mapping faults nothing. Not `.bss` either: that is the
+/// loader's `Anonymous` tail of a `PT_LOAD`, and the path measured here is the
+/// file-backed one. What is used is a *writable
 /// file-backed* page — non-zero so it lands in `.data`, and named by nothing
 /// else so no relocation has touched it — which faults on first write and takes
 /// the allocate-and-copy path. Four megabytes of test image is what two faults

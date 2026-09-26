@@ -76,5 +76,8 @@ libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "to
 inherits = "dev"
 opt-level = 2
 debug = true
+# DWARF stays out of the image: symbols name a frame, and `debug = true` is kept
+# for the codegen it decides.
+strip = "debuginfo"
 debug-assertions = true
 overflow-checks = true

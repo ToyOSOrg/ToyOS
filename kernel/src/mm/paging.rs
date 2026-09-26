@@ -68,7 +68,7 @@ impl Prot {
 }
 
 /// What each 4 KiB page of a 2 MiB window may be used for: split because
-/// `toyos-ld` can align a window across the end of `.text` and start of `.data`.
+/// a linker can align a window across the end of `.text` and start of `.data`.
 pub struct WindowProt([Prot; PAGES_PER_2M]);
 
 impl WindowProt {

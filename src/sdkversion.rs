@@ -5,10 +5,7 @@
 //! `toyos-window` **by version**, because a path escaping a fork's own
 //! repository cannot resolve once cargo checks it out alone. So those and the
 //! two they pull in are published, and the ABI they carry is unstable by
-//! policy — a built program that breaks, breaks. `toyos-ld` is published for a
-//! different reason and carries none of that ABI: the upstream
-//! `x86_64-unknown-toyos` Rust target names it as its linker, and `rustup`
-//! reaches it only through `cargo install toyos-ld`.
+//! policy — a built program that breaks, breaks.
 //!
 //! **That policy is what this gate is for.** None of them is
 //! compatible-by-construction, so a branch that changes what a file under one
@@ -52,7 +49,6 @@ pub const PUBLISHED: &[Crate] = &[
     Crate { name: "toyos-abi", dir: "toyos-abi", depends_on: &[] },
     Crate { name: "toyos-keymap", dir: "toyos-keymap", depends_on: &[] },
     Crate { name: "toyos-font", dir: "userland/toyos-font", depends_on: &[] },
-    Crate { name: "toyos-ld", dir: "toyos-ld", depends_on: &[] },
     Crate { name: "toyos", dir: "toyos", depends_on: &["toyos-abi"] },
     Crate {
         name: "toyos-window",
@@ -236,8 +232,8 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
     }
     refusals.push(
         "[sdk] These are on crates.io — resolved by the forks that name them by \
-         version, toyos-ld by `cargo install` — so a change published under the version it \
-         already had is silently building the old code, resolved or installed. Every change \
+         version — so a change published under the version it already had is silently \
+         building the old code. Every change \
          may break by policy: the bump is the minor, and every in-tree dependent's pin moves \
          with it."
             .to_string(),

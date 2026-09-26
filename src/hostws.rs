@@ -113,8 +113,8 @@ pub fn is_member(root: &Path, crate_dir: &Path) -> bool {
 /// carries no checkout path, so two worktrees aimed at one directory contend for
 /// one artifact under one name: the tree whose sources are merely *older* is
 /// declared fresh, compiles nothing, and links the other branch's code, with no
-/// diagnostic anywhere. Measured — and `toyos-ld` is a member here, so what it
-/// would swap is the linker every guest binary is built with.
+/// diagnostic anywhere. Measured — and `toyos-cc` is a member here, so what it
+/// would swap is the compiler doom's C is built with.
 ///
 /// **`-Z checksum-freshness` fixes that and still cannot be relied on here**, so
 /// the rule above is about enablement and not about the feature: the flag is
@@ -541,7 +541,7 @@ mod tests {
             bad.is_empty(),
             "a workspace member builds into the workspace root's `target/`, so these name a \
              directory that does not exist:\n  {}\n\
-             `src/toolchain.rs`'s `toyos_ld_binary` and `hostws::target_dir` are where the \
+             `src/toolchain.rs`'s `toyos_cc_binary` and `hostws::target_dir` are where the \
              real path comes from.",
             bad.join("\n  "),
         );
