@@ -992,16 +992,6 @@ pub(crate) fn scan_symbols(data: &[u8]) -> (BTreeSet<String>, BTreeSet<String>) 
     (defined, referenced)
 }
 
-/// Check if an object file has a `.note.toyos.libc` section, indicating it
-/// was compiled from C code by toyos-cc and needs the C standard library.
-pub(crate) fn has_toyos_libc_note(data: &[u8]) -> bool {
-    let obj = match read::File::parse(data) {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    obj.sections().any(|s| s.name() == Ok(".note.toyos.libc"))
-}
-
 /// Remove unreachable sections (dead code elimination).
 /// Roots: entry symbol's section + .init_array/.fini_array sections.
 pub(crate) fn gc_sections(state: &mut LinkState, entry: &str) {

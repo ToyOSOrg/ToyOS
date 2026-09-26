@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::fs;
 
 pub use collect::RelocType;
-use collect::{Arch, collect, synthesize_alloc_shims, gc_sections, merge_string_sections, is_archive, is_shared_lib, extract_archive, find_lib, has_toyos_libc_note, scan_symbols, SectionIdx, SectionKind, SymbolDef, SymbolRef};
+use collect::{Arch, collect, synthesize_alloc_shims, gc_sections, merge_string_sections, is_archive, is_shared_lib, extract_archive, find_lib, scan_symbols, SectionIdx, SectionKind, SymbolDef, SymbolRef};
 use reloc::{ElfRelocParams, apply_relocs, apply_relocs_pe, MachORelocParams, apply_relocs_macho};
 use emit_elf::{layout_elf, build_eh_frame_hdr, ElfEmitMode, ElfLayout};
 use emit_pe::{layout_pe, emit_pe_bytes, PeLayout};
@@ -39,6 +39,10 @@ pub enum LinkError {
     RelocationOverflow { reloc_type: RelocType, symbol: String, value: i64 },
     #[error("entry symbol '{0}' not found")]
     MissingEntry(String),
+    /// Its local-exec offsets would be against the unrounded block size, and
+    /// the loader ends an executable's block at its size rounded to `p_align`.
+    #[error("an executable with thread-local storage: toyos-ld is frozen, and places it where the loader does not")]
+    TlsExecutable,
 }
 
 // ── Pipeline typestate ──────────────────────────────────────────────────
@@ -131,7 +135,15 @@ impl Collected {
 }
 
 impl LaidOut<ElfLayout> {
+    fn refuse_tls_executable(&self) -> Result<(), LinkError> {
+        if self.layout.tls_memsz > 0 {
+            return Err(LinkError::TlsExecutable);
+        }
+        Ok(())
+    }
+
     fn relocate_and_emit_pie(mut self, entry: &str) -> Result<Vec<u8>, LinkError> {
+        self.refuse_tls_executable()?;
         let params = ElfRelocParams {
             got: &self.layout.got,
             tls_start: self.layout.tls_start,
@@ -154,6 +166,7 @@ impl LaidOut<ElfLayout> {
     }
 
     fn relocate_and_emit_static(mut self, entry: &str) -> Result<Vec<u8>, LinkError> {
+        self.refuse_tls_executable()?;
         let empty_dyn_got = BTreeMap::new();
         let empty_gd_got = BTreeMap::new();
         let params = ElfRelocParams {
@@ -357,20 +370,6 @@ pub fn resolve_libs_with_entry(
             extract_archive(&name, &data, &mut archive_members)?;
         } else {
             objects.push((name, data));
-        }
-    }
-
-    // If any object was compiled by toyos-cc (has .note.toyos.libc section),
-    // implicitly add libtoyos_c from -L paths to provide C standard library symbols.
-    let needs_libc = objects.iter().chain(archive_members.iter())
-        .any(|(_, data)| has_toyos_libc_note(data));
-    if needs_libc {
-        if let Some((name, data)) = find_lib("toyos_c", lib_paths) {
-            if is_archive(&data) {
-                extract_archive(&name, &data, &mut archive_members)?;
-            } else {
-                objects.push((name, data));
-            }
         }
     }
 
