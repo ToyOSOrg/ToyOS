@@ -106,8 +106,9 @@ impl Wire {
         Ok((wire, Impaired { directions, paths }))
     }
 
+    /// Short: macOS holds a socket's path to 103 bytes, and the lane takes most.
     fn path(&self, name: &str, end: &str) -> PathBuf {
-        self.dir.join(format!("mb-{name}-{end}-{}.sock", self.n))
+        self.dir.join(format!("mb{}{}{}.sock", self.n, &name[..1], &end[..1]))
     }
 
     /// QEMU's half: per direction, one filter whose `outdev` hands this module

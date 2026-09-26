@@ -9520,9 +9520,8 @@ fn netd_udp_any_address(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
-/// What one [`netd_tcp_run`] leaves: each case's result and `ok` line in the
-/// order run, the console beside them, how every host connection went, and
-/// what the wire did.
+/// What one [`netd_tcp_run`] leaves: each case's result and `ok` line in
+/// order, the console, how every host connection went, and what the wire did.
 struct TcpRun {
     results: Vec<qemu::TestResult>,
     oks: Vec<String>,

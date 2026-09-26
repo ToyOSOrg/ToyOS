@@ -34,8 +34,8 @@ impl Tap {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = super::lane::dir();
         let tap = Self {
-            into_guest: dir.join(format!("tap-in-{n}.sock")),
-            from_guest: dir.join(format!("tap-out-{n}.sock")),
+            into_guest: dir.join(format!("tap{n}i.sock")),
+            from_guest: dir.join(format!("tap{n}o.sock")),
         };
         let _ = std::fs::remove_file(&tap.into_guest);
         let _ = std::fs::remove_file(&tap.from_guest);

@@ -460,8 +460,7 @@ fn many_up(peer: SocketAddr, count: usize) {
     assert_eq!(spun, 0, "many_up: netd asked to wait for nothing {spun} times with a full ring");
     let found = found.unwrap_or_else(|e| panic!("many_up: a lookup during {count} uploads ended {e:?} after {took:?}"));
     assert!(took < ANSWERED, "many_up: a lookup during {count} uploads took {took:?}");
-    let lookup_ms = took.as_millis();
-    println!("netd_tcp: many_up ok count={count} lookup_ms={lookup_ms} found={found} most_waiting={most} dropped={dropped}");
+    println!("netd_tcp: many_up ok count={count} lookup_ms={} found={found} most={most} dropped={dropped}", took.as_millis());
 }
 
 /// Local ports of `count` connections held open at once.
