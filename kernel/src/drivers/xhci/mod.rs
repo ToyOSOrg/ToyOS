@@ -321,8 +321,6 @@ pub(crate) const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of
     "every wait is clipped to where the rungs still ahead of it begin, so the last rung runs whatever was spent before it and the call ends here",
 );
 
-// The caller spins with interrupts off, so a call that outlasted the TLB-ack tripwire would panic another CPU over a device.
-const _: () = assert!(CALL_AFTER_BREAK.nanos() < crate::arch::tlb::ACK_TIMEOUT.nanos());
 
 // A disk whose device left under the port rung's reset is waited for no longer than the rungs from that reset on were given to spend on it.
 const _: () = assert!(

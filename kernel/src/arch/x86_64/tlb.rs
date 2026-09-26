@@ -19,31 +19,7 @@ use super::{apic, percpu, smp};
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
-/// Which path issued a shootdown, so the census names who pays: `Dlopen` (a
-/// `Shared` window or rollback unmap), `Pcid` (pool reclaim), `Mmio`, `Unmap`
-/// (`Unmapped::drop`), `Pipe`, `Staged` (the ack-delay actuator), `Bench`
-/// ([`bench`]'s own, so a measured shootdown is never counted as one a path in
-/// this kernel needed).
-#[derive(Clone, Copy)]
-#[repr(usize)]
-pub enum Origin {
-    Dlopen,
-    Pcid,
-    Mmio,
-    Unmap,
-    Pipe,
-    #[cfg_attr(not(feature = "test-actuators"), allow(dead_code))]
-    Staged,
-    #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
-    Bench,
-}
-
-impl Origin {
-    const COUNT: usize = 7;
-    /// Order matches the variants; `tests/toyos.rs`'s `irq_census_conservation` reads the line back.
-    const NAMES: [&'static str; Self::COUNT] =
-        ["dlopen", "pcid", "mmio", "unmap", "pipe", "staged", "bench"];
-}
+pub use crate::invalidation::Origin;
 
 /// Issuer-side census; `irq_census`'s `tlb` column is the receiver side, and a
 /// delivery the two disagree on is an uncounted issuing path.
@@ -84,11 +60,15 @@ pub fn log_census() {
 
 /// Set above xHCI's `CALL_AFTER_BREAK`, the longest a disk call spins with `IF`
 /// clear once its transport has broken, so no legitimate wait trips it; that
-/// constant's own assertion holds the order.
-pub(crate) const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
+/// assertion below holds the order.
+const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(5),
     "above the longest IF-clear device spin a target can be inside",
 );
+
+// A disk call spins with interrupts off, so one that outlasted this tripwire
+// would panic another CPU over a device.
+const _: () = assert!(crate::drivers::xhci::CALL_AFTER_BREAK.nanos() < ACK_TIMEOUT.nanos());
 
 /// Spins between deadline checks; `nanos_since_boot`'s 128-bit divide is too
 /// costly to call on every iteration.

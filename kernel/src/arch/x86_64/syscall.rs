@@ -182,3 +182,16 @@ extern "sysv64" fn syscall_handler(num: u64, a1: u64, a2: u64, _: u64, a3: u64, 
     percpu::leave_syscall();
     out
 }
+
+/// Counts one syscall for `nmi_gate`, whatever it turns out to be; every
+/// `syscall_dispatch` calls this first.
+#[cfg(feature = "boot-actuators")]
+pub fn note_entry() {
+    super::nmi_gate::note_syscall();
+}
+
+/// `syscall-window-nmi`'s storm on the sibling spinning in `syscall`, from the idle loop.
+#[cfg(feature = "boot-actuators")]
+pub fn window_storm() {
+    super::nmi_gate::storm();
+}

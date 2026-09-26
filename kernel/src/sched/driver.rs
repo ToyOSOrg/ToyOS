@@ -704,7 +704,7 @@ extern "C" fn idle_loop() -> ! {
         // while the one under observation spins on `syscall` from Ring 3.
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::syscall_window_nmi() {
-            crate::arch::nmi_gate::storm();
+            crate::arch::syscall::window_storm();
         }
         // Here, not from a syscall: the panic handler recovers, not paints, when a userland
         // thread is current, and the idle loop has none.
