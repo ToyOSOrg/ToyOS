@@ -394,6 +394,9 @@ impl Vfs {
             if !child.is_empty() {
                 let dir_name = format!("{child}/");
                 if seen_dirs.insert(dir_name.clone()) {
+                    if result.len() == MAX_LIST_ENTRIES {
+                        return Err(SyscallError::ResourceExhausted);
+                    }
                     result.push((dir_name, 0));
                 }
             }
