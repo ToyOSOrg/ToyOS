@@ -369,7 +369,11 @@ changes.
   branch reaches by timing: a refused link write leaked the cluster
   `append_cluster` had just claimed, and a refused free split the FATs; a
   forced interleaving reddened both trees. #510 closed both with
-  `toyos-fat32/src/repair.rs`.
+  `toyos-fat32/src/repair.rs`: the same forcing patch, alone, is red 2 of 2 on
+  this branch before the merge (`5b3cf8ae`, each of its four boots leaving one
+  cluster no directory entry reaches) and green 3 of 3 with `main` `5e36908c`
+  merged (`d5c2d9c9`), where every held write landed at volume offset 4280, as
+  three of the four red boots' did.
   `metal_job_reboot` was red in one of the six, `ALONE` red too, and in one
   further branch run (`the job drain carried no kernel output at all (24
   bytes)`), and green alone three times on each tree, alternating;
