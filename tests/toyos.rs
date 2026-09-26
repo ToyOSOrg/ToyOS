@@ -529,6 +529,10 @@ const AUDIO_TESTS: &[(&str, Tier)] =
 // first-class single-CPU case, smp=8 the full-SMP case.
 const AUDIO_SMP: &[u32] = &[1, 8];
 
+/// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
+/// report puts on serial.
+const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
+
 // Tests that read a decoded screendump, which is exactly the set for which
 // the screen is the device under test: the panic console. On a machine with
 // no serial port the rendered report is the only diagnostic that exists, so
@@ -594,6 +598,7 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // AArch64 guests on QEMU `virt`: local, because no CI runner boots one yet.
     ("virt_early_panic", Sched::Parallel, Tier::Local),
     ("virt_early_fault", Sched::Parallel, Tier::Local),
+    ("virt_el2_drop", Sched::Parallel, Tier::Local),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -5859,7 +5864,7 @@ fn run_screen_test(
                 },
             );
             let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
-            let rest = qemu.drain_serial(Duration::from_secs(1));
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             eprintln!("  [virt] the panel is up {} ms after the boot began", started.elapsed().as_millis());
             // What stage 3 prints before it panics: every item is a record
@@ -5873,7 +5878,7 @@ fn run_screen_test(
                 "ACPI: MADT GICC uid=0 mpidr=0x0 enabled=true",
                 "ACPI: GTDT timers:",
                 "EARLY PANIC: panicked at",
-                "test-early-panic: on-screen console check",
+                EARLY_PANIC_MESSAGE,
             ] {
                 if !serial.contains(want) {
                     return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
@@ -5892,6 +5897,37 @@ fn run_screen_test(
                 &["EARLY PANIC:", "test-early-panic: on-screen console check"],
                 "ACPI: GTDT timers:",
             )?;
+            Ok(())
+        }
+        "virt_el2_drop" => {
+            // The entry's drop from EL2, which HVF never exercises: `virt` with
+            // EL2 under TCG, where firmware hands the loader the CPU at EL2. A
+            // drop that leaves `HCR_EL2` other than declared halts in a named
+            // refusal and says nothing; one that lands anywhere but EL1 on
+            // `SP_EL1` panics in the declaration's read-back. Either way the
+            // line this waits for never comes.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::VirtEl2,
+                    kernel_params: &["test-early-panic"],
+                    ready_marker: "EARLY PANIC:",
+                    ..Default::default()
+                },
+            );
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let serial = format!("{}\n{rest}", qemu.boot_log());
+            for want in [
+                "as declared; entered at EL2, HCR_EL2 read back as declared",
+                "EARLY PANIC: panicked at",
+                EARLY_PANIC_MESSAGE,
+            ] {
+                if !serial.contains(want) {
+                    return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+                }
+            }
             Ok(())
         }
         "virt_early_fault" => {
@@ -5915,12 +5951,13 @@ fn run_screen_test(
                 },
             );
             let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
-            let rest = qemu.drain_serial(Duration::from_secs(1));
+            const FAULT_MESSAGE: &str = "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x";
+            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(FAULT_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
                 "KERNEL PANIC: synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction)",
                 "EARLY PANIC: panicked at",
-                "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x",
+                FAULT_MESSAGE,
             ] {
                 if !serial.contains(want) {
                     return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use super::compile;
-use toyos_build::arch::Arch;
+use toyos_build::arch::{Accel, Arch};
 
 /// The architecture every machine this suite builds and boots is: the suite's
 /// q35 shapes, i8042 and VT-d are x86-64's, and the aarch64 bring-up boots
@@ -1379,14 +1379,62 @@ pub enum Profile {
     /// IOMMU. The machine the AArch64 port reaches its console on, and the only
     /// profile that is not a q35.
     Virt,
+    /// [`Profile::Virt`] with EL2 (`virtualization=on`), emulated on `-cpu max`:
+    /// firmware then hands the loader the CPU at EL2, and the kernel's entry
+    /// has to drop from it. HVF gives a guest EL1 only.
+    VirtEl2,
 }
 
 impl Profile {
-    /// The architecture this machine is: every profile is a q35 but `Virt`.
+    /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt => Arch::Aarch64,
-            _ => Arch::X86_64,
+            Self::Virt | Self::VirtEl2 => Arch::Aarch64,
+            Self::Headless
+            | Self::HeadlessNoIommu
+            | Self::VirtioNetNoMsix
+            | Self::E1000e
+            | Self::E1000eNoServer
+            | Self::E1000eBesideIgb
+            | Self::Gop
+            | Self::VirtioGpu
+            | Self::Metal
+            | Self::MetalNoUsb
+            | Self::InternalDisk
+            | Self::MetalUsb
+            | Self::MetalDisk
+            | Self::Diskless
+            | Self::NvmeWideSector
+            | Self::UsbDisk
+            | Self::UsbDisk4k
+            | Self::UsbDiskHuge
+            | Self::UsbDiskReadOnly
+            | Self::NvmeBootUsbDisk
+            | Self::UsbDiskRefusedFirst
+            | Self::UsbDiskCrowd
+            | Self::MetalFullSpeed
+            | Self::MetalXhciSecond
+            | Self::MetalXhciBoth
+            | Self::MetalXhciMsi
+            | Self::MetalXhciNoIrq
+            | Self::MetalXhciDeaf
+            | Self::MetalHotplug
+            | Self::NoIommu
+            | Self::IommuNarrow
+            | Self::IommuNoIntremap
+            | Self::IommuEim
+            | Self::Hda
+            | Self::HdaTwoLive => Arch::X86_64,
+        }
+    }
+
+    /// How this host provides the machine: [`Profile::VirtEl2`] emulated,
+    /// since only emulation gives a guest EL2; every other as its
+    /// architecture's own.
+    pub fn accel(self) -> Accel {
+        match self {
+            Self::VirtEl2 => Accel::Tcg,
+            _ => self.arch().accel(),
         }
     }
 }
@@ -1712,6 +1760,7 @@ pub const NVME_T14_BLOCKS: u64 = NVME_T14_BYTES / 4096;
 impl Profile {
     fn shape(self) -> Shape {
         match self {
+            Self::VirtEl2 => Self::Virt.shape(),
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -4297,7 +4346,7 @@ fn qemu_command(
         qemu.arg("-boot").arg(boot);
     }
 
-    let accel = arch.accel();
+    let accel = options.profile.accel();
     if accel.is_hardware() {
         qemu.arg("-accel").arg(accel.name());
     }
@@ -4321,7 +4370,10 @@ fn qemu_command(
             // `virt` has no i8042 to take away, and the unit a profile declares
             // is VT-d, which it has none of either.
             assert!(options.i8042 && shape.iommu.is_none(), "`virt` has neither an i8042 nor VT-d");
-            String::from("virt,gic-version=3")
+            String::from(match options.profile {
+                Profile::VirtEl2 => "virt,gic-version=3,virtualization=on",
+                _ => "virt,gic-version=3",
+            })
         }
     };
     if !options.i8042 {

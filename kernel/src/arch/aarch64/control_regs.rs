@@ -50,6 +50,10 @@ pub const CPACR: u64 = 0;
 /// no stage-2 translation, no trap, `E2H` clear.
 pub const HCR_EL2: u64 = 1 << 31;
 
+/// `HCR_EL2.E2H`'s position. Set, EL2's registers take EL1's names and
+/// layouts; the entry refuses a CPU on which it reads back set.
+pub const HCR_EL2_E2H: u64 = 34;
+
 /// `CNTHCTL_EL2` when entered at EL2: `EL1PCTEN` and `EL1PCEN`, so EL1 reads the
 /// physical counter and programs its timer without trapping.
 pub const CNTHCTL_EL2: u64 = 1 << 1 | 1 << 0;
@@ -91,12 +95,15 @@ pub fn check() {
     for (name, live, value) in declared {
         assert_eq!(live, value, "control registers: {name} holds {live:#x}, and the declaration says {value:#x}");
     }
+    // What the drop from EL2 left, or the EL1 entry kept: EL1, on `SP_EL1`.
+    let (el, spsel) = (read!("CurrentEL") >> 2 & 3, read!("SPSel") & 1);
+    assert_eq!((el, spsel), (1, 1), "control registers: running at EL{el} on SP_EL{spsel}, not EL1 on SP_EL1");
     let el = ENTRY_EL.load(Ordering::Relaxed);
     log!(
         "control registers: SCTLR_EL1={SCTLR:#x} TCR_EL1={:#x} MAIR_EL1={:#x} CPACR_EL1={CPACR:#x}, \
          as declared; entered at EL{el}{}",
         tcr(),
         MAIR,
-        if el == 2 { ", HCR_EL2/CNTHCTL_EL2/CPTR_EL2 written as declared and dropped to EL1" } else { "" },
+        if el == 2 { ", HCR_EL2 read back as declared, CNTHCTL_EL2/CPTR_EL2 written, and dropped to EL1" } else { "" },
     );
 }
