@@ -29,6 +29,14 @@
 //!   bounded: listings by the caller's `limit`, names by [`MAX_LFN_CHARS`],
 //!   directories by [`MAX_DIR_ENTRIES`], extents by the caller's `max`.
 //!
+//! # A refused write
+//!
+//! A device write may be refused after it reached the medium, so no refusal is
+//! read as "nothing happened". Every mutating call either leaves the volume
+//! consistent when it returns or leaves queued the writes that make it so, and
+//! no later call proceeds until they land; `src/repair.rs` is that contract and
+//! names the states a machine that stops mid-call can still leave.
+//!
 //! # What this crate does not do
 //!
 //! - **No formatting.** The kernel never formats a disk it was not given, and
@@ -70,6 +78,7 @@ mod error;
 mod fat;
 mod fs;
 mod name;
+mod repair;
 mod time;
 
 pub use boot::{Cluster, Geometry, MIN_FAT32_CLUSTERS};

@@ -224,23 +224,15 @@ fn every_fat_copy_stays_in_step() {
 }
 
 /// A device budget that expires partway through a cluster allocation's
-/// two-copy FAT write must not leave the copies split at rest: the retry a
-/// budget refusal invites heals them, because the active FAT — written last —
-/// was never touched.
+/// two-copy FAT write must not leave the copies split at rest: the write's own
+/// repair and the retry a budget refusal invites leave both copies agreeing.
 ///
-/// The host-side negative control for `set_fat_entry`'s active-last ordering.
 /// `RefuseOnceInRange` is armed on the **mirror** (FAT 1) region and refuses the
 /// one write landing there with the retryable [`IoError::BudgetExpired`] — the
-/// mid-mirror refusal a starved host produces and QEMU will not. With the active
-/// FAT written last the mirror is the *first* write, so refusing it leaves
-/// nothing durable and the re-drive (what `kernel::writeback`'s drain does on a
-/// `WouldBlock` flush) re-picks the same free cluster and writes both copies.
-/// Revert the ordering — write the active FAT first — and the mirror becomes the
-/// *second* write: the active FAT takes the update, the mirror is left behind,
-/// the re-scan skips the now-allocated cluster, and both `assert_fats_agree`
-/// here and `fsck` on the image go red on the leaked, split entry. That is the
-/// invariant this pins: `set_fat_entry` returning `Err` leaves the active FAT
-/// unchanged.
+/// mid-mirror refusal a starved host produces and QEMU will not — and the
+/// re-drive is what `kernel::writeback`'s drain does on a `WouldBlock` flush.
+/// Every write of every structural call, refused either way, is
+/// `tests/refused_writes.rs`.
 #[test]
 fn a_refused_mirror_write_heals_on_the_retry() {
     let image = image("mirror-refusal");

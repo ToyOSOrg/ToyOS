@@ -11,9 +11,10 @@ struct RefuseSourceAtDestination {
     bytes: Vec<u8>,
     destination_entry: u64,
     source_cluster: u32,
-    /// Set to refuse the rollback too. Any short entry naming this cluster
-    /// after the source's move was refused is the restore's: the staging
-    /// rename's own writes are all behind that point.
+    /// Set to refuse the rollback too. Any live short entry naming this
+    /// cluster after the source's move was refused is the restore's: the
+    /// staging rename's own writes are all behind that point, and the refused
+    /// move's repair writes the slots it took back as erased ones.
     rollback_cluster: Option<u32>,
     refused_source: bool,
     refused_rollback: bool,
@@ -56,6 +57,7 @@ impl BlockAccess for RefuseSourceAtDestination {
         if self.refused_source
             && !self.refused_rollback
             && buf.len() == 32
+            && buf[0] != 0xE5
             && self.rollback_cluster == Some(cluster)
         {
             self.refused_rollback = true;
