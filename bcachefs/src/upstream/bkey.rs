@@ -528,6 +528,21 @@ mod tests {
         }
     }
 
+    /// A field whose value is past its unpacked width is refused, not
+    /// truncated. No format `read` accepts reaches this, so the format is
+    /// built past its constructor.
+    #[test]
+    fn a_field_past_its_unpacked_width_is_refused_not_truncated() {
+        let past = FieldPacking { bits: 0, offset: u64::from(u32::MAX) + 1 };
+        let none = FieldPacking::whole(0);
+        for fields in [[none, none, past, none, none, none], [none, none, none, past, none, none]] {
+            let format = BkeyFormat { key_u64s: 1, fields };
+            let key = [1, KEY_FORMAT_LOCAL_BTREE, TYPE_DIRENT, 0, 0, 0, 0, 0];
+            let got = PackedKey::new(&Raw::new(&key, "key"), &format).and_then(|key| key.unpack());
+            assert_eq!(got, Err(FIELD_DOES_NOT_FIT));
+        }
+    }
+
     /// The identity format read off a disk is the one `unpacked` states.
     #[test]
     fn the_identity_format_is_the_unpacked_one() {
