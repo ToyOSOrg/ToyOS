@@ -2,7 +2,8 @@
 //!
 //! The kernel keeps config space, programs the interrupt vector into the
 //! function's MSI-X table, and hands out every device address a descriptor may
-//! carry ([`syscall::device_dma_alloc`]); the holder gets a register window,
+//! carry ([`syscall::device_dma_alloc`], and [`syscall::device_dma_map`] for a
+//! region the holder lends the function); the holder gets a register window,
 //! buffers it can reach through both, and the interrupt as records on its own
 //! claim handle. Nothing here is a physical address, and nothing here is
 //! specific to what the function *is*.
@@ -12,6 +13,7 @@
 //! device can do anything at all, an interrupt included.
 //!
 //! [`syscall::device_dma_alloc`]: crate::syscall::device_dma_alloc
+//! [`syscall::device_dma_map`]: crate::syscall::device_dma_map
 
 /// The six BAR slots a Type 0 PCI header has (PCI 3.0 §6.1), and the bound
 /// every index in this module is checked against.
@@ -82,6 +84,23 @@ pub struct DmaGrant {
 }
 
 const _: () = assert!(core::mem::size_of::<DmaGrant>() == 4 + 4 + 8 + 8);
+
+/// Where a function reaches a region its holder mapped into its address space
+/// ([`crate::syscall::device_dma_map`]).
+///
+/// No handle beside it: the region is the caller's already, and this is only
+/// the second of the two addresses it now has.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmaMapping {
+    /// Never a physical address: a function with no unit translating for it is
+    /// never handed to a process at all.
+    pub device_addr: u64,
+    /// The region's whole length, which is whole 2 MiB pages.
+    pub bytes: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<DmaMapping>() == 8 + 8);
 
 /// The interrupts that landed since the last read of a claim.
 ///

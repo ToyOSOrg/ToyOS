@@ -108,6 +108,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockd"
+version = "0.0.0"
+dependencies = [
+ "toyos 0.14.0",
+ "toyos-abi 0.13.0",
+ "toyos-blockhold",
+ "toyos-blockring",
+ "toyos-gpt",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1464,12 +1475,34 @@ name = "toyos-abi"
 version = "0.13.0"
 
 [[package]]
+name = "toyos-blockhold"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blockring"
+version = "0.1.0"
+dependencies = [
+ "toyos-blockhold",
+]
+
+[[package]]
 name = "toyos-dns"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-fat32"
+version = "0.1.0"
+dependencies = [
+ "toyos-wallclock",
+]
+
+[[package]]
 name = "toyos-font"
 version = "0.2.0"
+
+[[package]]
+name = "toyos-gpt"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-i219"
@@ -1494,6 +1527,7 @@ version = "0.1.0"
 name = "toyos-rust-tests"
 version = "0.1.0"
 dependencies = [
+ "blockd",
  "cpal",
  "libloading",
  "rustls",
@@ -1502,7 +1536,9 @@ dependencies = [
  "sha2",
  "toyos 0.14.0",
  "toyos-abi 0.13.0",
+ "toyos-blockring",
  "toyos-dns",
+ "toyos-fat32",
  "toyos-i219",
  "toyos-inspect",
  "toyos-quiesce",
@@ -1514,6 +1550,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-tco"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-wallclock"
 version = "0.1.0"
 
 [[package]]

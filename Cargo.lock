@@ -1185,6 +1185,14 @@ name = "toyos-blockhold"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-blockring"
+version = "0.1.0"
+dependencies = [
+ "loom",
+ "toyos-blockhold",
+]
+
+[[package]]
 name = "toyos-bootmap"
 version = "0.1.0"
 
