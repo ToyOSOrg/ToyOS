@@ -163,14 +163,25 @@ static SPACE: [Lock<Option<DeviceSpace>>; MAX_FUNCTIONS] =
 struct Grant {
     /// Held so the pages outlive every handle the process had: they are freed
     /// by [`release`], after bus mastering is off and the domain has given the
-    /// address back.
-    #[expect(dead_code, reason = "the Arc is what keeps the pages alive past the process")]
+    /// address back — or, for a [`Origin::Mapped`] region, by [`dma_unmap`].
     memory: Arc<SharedMemObject>,
     at: u64,
     bytes: u64,
-    /// Placed at a range of [`Bound::residue`]: taken back, the range returns
-    /// there.
-    residual: bool,
+    origin: Origin,
+}
+
+/// Where a grant's memory came from, which decides who may take it back.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// [`dma_alloc`]'s fresh pages, the claim's for its whole life. `residual`
+    /// is a grant placed at a range of [`Bound::residue`]: taken back, the
+    /// range returns there.
+    Allocated { residual: bool },
+    /// A region the holder already had, put here by [`dma_map`]: never placed
+    /// at a residue range, because what a stale transfer lands in there must
+    /// be this holder's own fresh memory and not a region some other process
+    /// still reads.
+    Mapped,
 }
 
 /// Device addresses a slot's domain handed out and no longer maps.
@@ -215,6 +226,18 @@ struct Bound {
     /// grant is in its domain, so a function carrying a previous holder's queue
     /// addresses can act on none of them.
     mastering: bool,
+}
+
+impl Bound {
+    /// Let the function master the bus, once: called after a grant is in its
+    /// domain and never before, so the first thing it may reach exists before
+    /// it may reach anything.
+    fn start_mastering(&mut self) {
+        if !self.mastering {
+            self.pci.start_bus_mastering();
+            self.mastering = true;
+        }
+    }
 }
 
 static BOUND: [Lock<Option<Bound>>; MAX_FUNCTIONS] =
@@ -1570,13 +1593,11 @@ pub fn dma_alloc(
             None => (bound.space.map(phys, span).unwrap_or_else(|why| refused(why)), false),
         };
         let first = bound.grants.is_empty();
-        bound.grants.push(Grant { memory: Arc::clone(&memory), at, bytes: span, residual });
+        let origin = Origin::Allocated { residual };
+        bound.grants.push(Grant { memory: Arc::clone(&memory), at, bytes: span, origin });
         // After the mapping and never before: the first thing this function may
         // reach has to exist before it may reach anything.
-        if !bound.mastering {
-            bound.pci.start_bus_mastering();
-            bound.mastering = true;
-        }
+        bound.start_mastering();
         Ok((memory, foreign_if_armed(first, at), span))
     })
 }
@@ -1587,20 +1608,92 @@ pub fn dma_alloc(
 /// mapped in the function's domain and counted against [`MAX_GRANT_TOTAL`] with
 /// nothing naming it, so a caller that hit a full handle table once would be
 /// refused every later grant with no way back but dying.
-pub fn dma_undo(slot: usize) {
+///
+/// Found by its memory and not by position: a [`dma_map`] on another thread of
+/// the same holder can push between the grant and this, and the address the
+/// caller was *told* is not always the address the grant is at.
+pub fn dma_undo(slot: usize, memory: &Arc<SharedMemObject>) {
     let _ = with_bound(slot, |bound| {
-        // The most recent, which is the one [`dma_alloc`] just pushed: the
-        // slot's lock is what makes "just" mean it, and the address the caller
-        // was *told* is not always the address the grant is at.
-        let Some(grant) = bound.grants.pop() else { return Ok(()) };
+        let Some(index) = bound.grants.iter().position(|grant| Arc::ptr_eq(&grant.memory, memory))
+        else {
+            return Ok(());
+        };
+        let grant = bound.grants.remove(index);
         if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
             panic!("pcidev: slot {slot} could not take {:#x} back: {why}", grant.at);
         }
-        if grant.residual {
+        if grant.origin == (Origin::Allocated { residual: true }) {
             bound.residue.push(Aimed { at: grant.at, bytes: grant.bytes });
         }
         Ok(())
     });
+}
+
+/// Put a region the holder already has into its function's domain, and answer
+/// where the function reaches it and how much of it there is.
+///
+/// **The domain is still the whole gate.** What is added is exactly the
+/// region's pages, at a fresh address no other grant of this domain was ever
+/// given, so the function reaches this memory and the claim's own grants and
+/// nothing else. Only ordinary memory this kernel allocated qualifies
+/// ([`SharedMemObject::ram`]): a BAR window mapped here would be one device
+/// aimed at another's registers, and firmware's framebuffer is not the
+/// kernel's to lend.
+///
+/// Counted against [`MAX_GRANT_TOTAL`] with the claim's own grants, so a holder
+/// mapping every region its clients send is bounded by the same number.
+pub fn dma_map(slot: usize, region: &Arc<SharedMemObject>) -> Result<(u64, u64), SyscallError> {
+    with_bound(slot, |bound| {
+        let (phys, span) = region.ram().ok_or(SyscallError::InvalidArgument)?;
+        // One region, one address: a second mapping of it would be two grants
+        // naming one set of pages, and taking either back would leave the
+        // function aimed at what the other still says is lent.
+        if bound.grants.iter().any(|grant| Arc::ptr_eq(&grant.memory, region)) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if span > MAX_GRANT_BYTES {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let held: u64 = bound.grants.iter().map(|grant| grant.bytes).sum();
+        if held + span > MAX_GRANT_TOTAL {
+            return Err(SyscallError::ResourceExhausted);
+        }
+        // The pages are the allocator's own and whole 2 MiB ones, so a domain
+        // that cannot take them is a kernel bug rather than the holder's.
+        let at = bound
+            .space
+            .map(phys, span)
+            .unwrap_or_else(|why| panic!("pcidev: slot {slot} could not map a region: {why}"));
+        bound.grants.push(Grant { memory: Arc::clone(region), at, bytes: span, origin: Origin::Mapped });
+        bound.start_mastering();
+        Ok((at, span))
+    })
+}
+
+/// Take back a region [`dma_map`] put at `at`.
+///
+/// The unmap invalidates the unit's cached translations before it returns
+/// (`vtd::domain::unmap`), so from here an access the function still makes
+/// there is refused at the unit and recorded against this claim — and only
+/// after that is the region's `Arc` let go, so its pages can never be freed
+/// under a translation that still names them.
+pub fn dma_unmap(slot: usize, at: u64) -> Result<(), SyscallError> {
+    let grant = with_bound(slot, |bound| {
+        let index = bound
+            .grants
+            .iter()
+            .position(|grant| grant.at == at && grant.origin == Origin::Mapped)
+            .ok_or(SyscallError::NotFound)?;
+        let grant = bound.grants.remove(index);
+        if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
+            panic!("pcidev: slot {slot} could not take {:#x} back: {why}", grant.at);
+        }
+        Ok(grant)
+    })?;
+    // Outside the slot's lock: the last `Arc` of a region can run its
+    // zero-handle teardown, which takes other objects' locks.
+    drop(grant);
+    Ok(())
 }
 
 /// The address a grant answers with, or — for a claim's first grant, with the

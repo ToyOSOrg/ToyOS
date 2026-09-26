@@ -26,7 +26,8 @@ use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH, LOCK_ACROSS_SWITCH_ARMED};
 use super::device::{
-    holds_claim, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc,
+    holds_claim, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
+    sys_device_dma_unmap,
     sys_device_reg, sys_gpu_reset_scanout, sys_partition_transfer, Transfer,
 };
 use super::fs::{
@@ -398,7 +399,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_connection_join(RawHandle(a1 as u32), RawHandle(a2 as u32))
         }
         SYS_PIPE_MAP => sys_pipe_map(RawHandle(a1 as u32)),
-        // The three a claimed PCI function's driver is built out of. Each is
+        // What a claimed PCI function's driver is built out of. Each is
         // gated by the claim handle alone: nothing here takes a bus/device/
         // function, so a process cannot name a device it was not given.
         SYS_DEVICE_BAR_MAP => sys_device_bar_map(RawHandle(a1 as u32), a2),
@@ -408,6 +409,11 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // allocation, so a bad address leaves no memory nobody was told of.
             sys_device_dma_alloc(&ctx, RawHandle(a1 as u32), a2, out)
         }
+        SYS_DEVICE_DMA_MAP => {
+            let Some(out) = UserAddr::checked(a3) else { return bad_addr };
+            sys_device_dma_map(&ctx, RawHandle(a1 as u32), RawHandle(a2 as u32), out)
+        }
+        SYS_DEVICE_DMA_UNMAP => sys_device_dma_unmap(RawHandle(a1 as u32), a2),
         SYS_SYMLINK => {
             let target = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             let link = match ctx.user_str(UserAddr::new(a3), a4) { Ok(s) => s, Err(e) => return e.to_u64() };
