@@ -370,8 +370,9 @@ changes.
   bytes)`), and green alone three times on each tree, alternating;
   `swap_crash_rolls_back` in one of the six, and `swap_netd` in a run at
   `0f27b73d`, both on `the stream's redial was turned away 64 time(s)` with
-  init's words on netd ending at `accepted`; and in that further run
-  `quiesce_wakes_on_the_last_park`, on a kernel panic at
+  init's words on netd ending at `accepted`; and in the further run
+  `metal_job_reboot` reddened, `quiesce_wakes_on_the_last_park`, on a kernel
+  panic at
   `arch/tlb.rs:171` (`issues/kernel/a-shootdown-panicked-on-a-cpu-the-host-starved.md`).
   None investigated.
 
