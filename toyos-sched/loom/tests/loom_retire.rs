@@ -14,14 +14,14 @@ use toyos_sched_loom::fair::{FairShare, Frontier, ShareState};
 use toyos_sched_loom::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent};
 use toyos_sched_loom::mailbox::{mailbox, MailboxConsumer, Urgency};
 use toyos_sched_loom::model::{
-    model, wait_list, IrqGuard, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
+    model, IrqGuard, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
 };
 use toyos_sched_loom::retire;
 use toyos_sched_loom::task::{
     RtState, SchedPayload, TaskAccounting, TaskBuilder, TaskKey, TaskShared, TaskState, WaitClass,
     WakeCause, WakeReason,
 };
-use toyos_sched_loom::waitq::{wake_direct, Commit, CurrentTask, WaitList, WaitQueue};
+use toyos_sched_loom::park::{notify, prepare, Cancel, Commit, CurrentTask};
 
 struct World {
     cpus: CpuHandles<Msg>,
@@ -64,13 +64,14 @@ fn a_wake_and_a_retire_ride_distinct_nodes() {
             let world = world.clone();
             let task = task.clone();
             loom::thread::spawn(move || {
-                wake_direct(
+                notify(
                     &task,
                     WakeCause::new(WakeReason::Woken),
                     &world.cpus,
                     &world.kicks,
                     &RemoteGuard,
                 )
+                .woke()
             })
         };
 
@@ -110,10 +111,9 @@ fn a_wake_and_a_retire_ride_distinct_nodes() {
 fn a_retire_racing_the_park_commit_always_leaves_someone_to_reap() {
     model(|| {
         let (world, mut rx) = world();
-        let queue: WaitQueue<Msg, LoomLock<WaitList<Msg>>> =
-            WaitQueue::new(WaitClass::Pipe, wait_list());
         let waiter = Arc::new(TaskShared::<Msg>::new(TaskKey(1), TaskState::Running(CPU0)));
-        let ticket = queue.prepare_wait(&CurrentTask::new(&waiter, CPU0));
+        let ticket = prepare(&CurrentTask::new(&waiter, CPU0), Cancel::Answers, WaitClass::Pipe)
+            .expect("nothing has posted to this task");
 
         let retirer = {
             let world = world.clone();
@@ -140,14 +140,12 @@ fn a_retire_racing_the_park_commit_always_leaves_someone_to_reap() {
                     TaskState::Running(CPU0),
                     "the exit disposition needs the word back at Running",
                 );
-                assert!(queue.is_empty(), "the registration is withdrawn");
             }
             // The commit read the bit before the retirer set it. That is fine
             // precisely because the message above exists: the pass that drains
             // it finds the task in `parked` and reaps it there.
-            Commit::Parked(_, registration) => {
+            Commit::Parked(_) => {
                 assert_eq!(waiter.state(), TaskState::Blocked(CPU0));
-                registration.finish();
             }
             Commit::AlreadyWoken => unreachable!("nothing wakes in this model"),
         }
@@ -264,13 +262,14 @@ fn a_retire_and_a_wake_never_both_claim_a_parked_task() {
             let world = world.clone();
             let task = task.clone();
             loom::thread::spawn(move || {
-                wake_direct(
+                notify(
                     &task,
                     WakeCause::new(WakeReason::Woken),
                     &world.cpus,
                     &world.kicks,
                     &RemoteGuard,
                 )
+                .woke()
             })
         };
 
@@ -462,14 +461,13 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
         // It blocks on something — the parked state is the arm that matters —
         // and the pick hands the CPU to `OTHER`, adopted in the same pass.
         let other = spawn(OTHER);
-        let queue: WaitQueue<TaskMsg, LoomLock<WaitList<TaskMsg>>> =
-            WaitQueue::new(WaitClass::Pipe, wait_list());
         let ticket = {
             let current = cpu.current_task().expect("the task is running");
-            queue.prepare_wait(&current)
+            prepare(&current, Cancel::Answers, WaitClass::Pipe)
+                .expect("nothing has posted to this task")
         };
-        let (committed, registration) = match ticket.commit() {
-            Commit::Parked(committed, registration) => (committed, registration),
+        let committed = match ticket.commit() {
+            Commit::Parked(committed) => committed,
             _ => unreachable!("nothing has touched this task yet"),
         };
         let _ = SchedPass::begin(&mut cpu, env, NOW)
@@ -483,13 +481,14 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
             let owner = owner.clone();
             let shared = shared.clone();
             loom::thread::spawn(move || {
-                wake_direct(
+                notify(
                     &shared,
                     WakeCause::new(WakeReason::Woken),
                     &owner.cpus,
                     &owner.hw,
                     &RemoteGuard,
                 )
+                .woke()
             })
         };
         retire::begin(&shared).post(&owner.cpus, &owner.hw, &RemoteGuard);
@@ -521,7 +520,6 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
         // Wind both tasks down by the only death there is, so the model leaves
         // nothing alive: `OTHER` exits, the pick takes the corpse off the dying
         // list, it dies by its own `die`, and a last pass frees the zombie.
-        registration.finish();
         let _ = SchedPass::begin(&mut cpu, env, NOW).dispose_exit().finish();
         assert_eq!(other.state(), TaskState::Dead);
         assert_eq!(cpu.running().map(|t| t.key()), Some(KEY), "the unwind runs");

@@ -35,6 +35,8 @@ pub mod invariants;
 pub mod mailbox;
 #[path = "../../src/msg.rs"]
 pub mod msg;
+#[path = "../../src/park.rs"]
+pub mod park;
 #[path = "../../src/queue.rs"]
 pub mod queue;
 #[path = "../../src/retire.rs"]
@@ -45,7 +47,7 @@ pub mod sync;
 pub mod task;
 #[path = "../../src/timer.rs"]
 pub mod timer;
-#[path = "../../src/waitq.rs"]
-pub mod waitq;
+#[path = "../../src/watch.rs"]
+pub mod watch;
 
 pub mod model;

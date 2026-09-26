@@ -39,28 +39,15 @@ loom = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 wake-fence-off = []
-# The negative control for the inbox's publication edge. It makes the `tail`
-# store and load relaxed, and `inbox.rs` must red under it:
+# The negative control for a poll ring's one-shot answer. It splits
+# `inbox/once.rs`'s exchange into a load and a store, so a post and the
+# registrant's own recheck can both answer one poll, and `poll_once.rs` must red:
 #
-#   cargo test --manifest-path kernel-loom/Cargo.toml --features inbox-release-off \
-#     --test inbox
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features poll-fire-load-store \
+#     --test poll_once
 #
 # Never on by default, and no kernel build can reach it.
-inbox-release-off = []
-# The negative control for the *lock-free* post. It puts the log's producer
-# back on `Inbox::post` — the shape this branch shipped, whose one-poster
-# argument was per-park rather than per-post — and
-# `two_unlocked_producers_are_a_race_and_a_signal_is_not` must red under it
-# with loom's own words, `Concurrent write accesses to UnsafeCell`:
-#
-#   cargo test --manifest-path kernel-loom/Cargo.toml --features inbox-signal-as-post \
-#     --test inbox
-#
-# It stages the *mechanism* and not a verdict, which is what a negative control
-# owes: a feature that asserted the failure instead of causing it would pass on
-# a build where the defect had been fixed elsewhere. Never on by default, and no
-# kernel build declares it.
-inbox-signal-as-post = []
+poll-fire-load-store = []
 # The negative control for the ticket lock's acquire edge. It makes `sync.rs`'s
 # two loads of `now` — the ones that decide ownership — `Relaxed`, so the
 # previous owner's writes are unordered against the next owner's reads, and

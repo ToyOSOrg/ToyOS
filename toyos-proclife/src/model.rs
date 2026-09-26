@@ -3,7 +3,7 @@
 //!
 //! `#[cfg(test)]`, so none of it reaches a kernel build. What it adds beyond
 //! the two traits is the *consequences* a decision hands back and the kernel
-//! performs — a completion post, a `retire_task`, a `publish_exit`, an idle
+//! performs — a watch's post, a `retire_task`, a `publish_exit`, an idle
 //! pass taking an entry — because the laws worth checking are about the order
 //! those happen in, and a model that only held the two states could not see
 //! one.
@@ -185,12 +185,12 @@ impl World {
         }
     }
 
-    /// `completion::wait_until` — a waiter registered on a subject.
+    /// `watch::wait_until` — a waiter registered on a subject's watch.
     pub fn arm(&mut self, on: Watch, waiter: (Pid, Tid)) {
         self.waiters.insert((on, waiter.0, waiter.1));
     }
 
-    /// `completion::post` — every waiter on this subject runs again.
+    /// `Watch::post` — every waiter registered on this subject runs again.
     pub fn post(&mut self, on: Watch) {
         let hit: Vec<(Watch, Pid, Tid)> =
             self.waiters.iter().filter(|(w, _, _)| *w == on).copied().collect();
@@ -209,7 +209,7 @@ impl World {
     }
 
     /// `scheduler::retire_task` — the thread is provably off every CPU, its
-    /// payload dropped, and `publish_released` has posted `Gone` on its own
+    /// payload dropped, and `publish_released` has posted on its own
     /// watch.
     ///
     /// **The post is not an extra the model added.** `KernelPayload`'s release

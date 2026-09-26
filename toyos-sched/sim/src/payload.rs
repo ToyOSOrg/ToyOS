@@ -13,7 +13,7 @@ use toyos_sched::fair::ShareState;
 use toyos_sched::mailbox::PreemptGuard;
 use toyos_sched::sync::LeafLock;
 use toyos_sched::task::{SchedPayload, TaskKey};
-use toyos_sched::waitq::WaitList;
+use toyos_sched::watch::{Fire, Ring, Waiters};
 
 use crate::msg::SimMsg;
 
@@ -35,8 +35,21 @@ impl<T: Send> LeafLock<T> for StdLock<T> {
     }
 }
 
-pub type SimWaitList = StdLock<WaitList<SimMsg>>;
+pub type SimWatchList = StdLock<Waiters<SimMsg, NoRing>>;
 pub type SimShareLock = StdLock<ShareState>;
+
+/// The simulator's waiters are all threads: no process in it polls, so a
+/// ring entry has no value to be.
+pub enum NoRing {}
+
+impl Ring for NoRing {
+    fn fire(&self, _how: Fire) {
+        match *self {}
+    }
+    fn live(&self) -> bool {
+        match *self {}
+    }
+}
 
 /// The simulator explores interleavings by *choosing steps*, not by running
 /// threads: a host thread per vCPU was considered and rejected. A step is

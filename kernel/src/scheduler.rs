@@ -10,17 +10,17 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::hasher::HashMap;
 use toyos_sched::fair::{ShareState, QUANTUM_NS};
 use toyos_sched::hw::{CpuId, Machine, Nanos};
-use toyos_sched::task::{SafePoint, WaitClass, WakeCause, WakeReason};
+use toyos_sched::task::{Refused, SafePoint, WaitClass};
 
 use crate::arch::percpu;
-use crate::completion::{self, Cancel, Outcome, Subject};
+use crate::watch::{self, Cancel};
 use crate::hw::HW;
 use crate::pipe::PipeId;
 use crate::process::{self, Pid, Tid};
 use crate::sched::driver::{self, cpus, preempt_off, Dispose, NewTask};
-use crate::sched::payload::{KShare, KShared, KWaitQueue, KernelLock, TaskHandle, ThreadSched};
+use crate::sched::payload::{KShare, KernelLock, TaskHandle, ThreadSched};
 use crate::sched::reap_gate::ReapGate;
-use crate::sched::waitqs;
+use crate::sched::futex;
 use crate::sync::Lock;
 use crate::time::{Cadence, Deadline, Duration, Tripwire};
 use crate::DirectMap;
@@ -311,23 +311,23 @@ pub fn enqueue_new(
     })
 }
 
-/// Phase 1 of the wait handshake: register the running thread on `queue`.
-/// Registering before the caller re-checks its condition is what closes the
-/// check-then-block window. Mints via [`Parkable::mint`], not
-/// [`Parkable::at_entry`]: a context already inside an [`Operation`] must
-/// receive the token here too, which `at_entry` would refuse.
+/// Phase 1 of the wait handshake on the running thread's own word, or
+/// [`Refused`]: a post reached it since it registered on a watch, and the
+/// caller re-reads its condition, or a revoke ended the registration, and the
+/// wait is over. Mints via [`Parkable::mint`], not [`Parkable::at_entry`]: a
+/// context already inside an [`Operation`] must receive the token here too,
+/// which `at_entry` would refuse.
 #[must_use = "a wait ticket must be blocked on or cancelled"]
 #[track_caller]
-pub fn prepare_wait(queue: &KWaitQueue, cancel: Cancel, class: WaitClass) -> Ticket<'_> {
+pub fn prepare_wait(cancel: Cancel, class: WaitClass) -> Result<Ticket, Refused> {
     let _parkable = Parkable::mint();
-    Ticket::register(queue, cancel, class)
+    Ticket::register(cancel, class)
 }
 
-/// Phase 2: park the running thread on the queue it registered with. Takes
-/// the ticket by value: a park that reaches the machine without a
-/// registration behind it is the lost-wake window.
+/// Phase 2: park the running thread. Takes the ticket by value: a park that
+/// reaches the machine without phase 1 behind it is the lost-wake window.
 #[track_caller]
-pub fn block_on(ticket: Ticket<'_>, deadline: Deadline) {
+pub fn block_on(ticket: Ticket, deadline: Deadline) {
     // One level above the calling context's baseline: the ticket has held the
     // registration window's own level since `prepare_wait`.
     assert_baseline(blocking_baseline() + 1);
@@ -405,35 +405,24 @@ pub fn exit_current(code: i32) -> ! {
     unreachable!("exit_current: returned from the exit pass");
 }
 
-/// Claim one specific thread's rendezvous word and post its wake. Returns
-/// `true` only if this call won the claim. No baseline assert: unlike every
-/// parking entry above, a wake never switches, so posting from inside a lock
-/// is the protocol here.
-pub fn wake_sched(shared: &Arc<KShared>, boost: Option<Nanos>) -> bool {
-    let cause = match boost {
-        Some(until) => WakeCause::boosted(WakeReason::Woken, until),
-        None => WakeCause::new(WakeReason::Woken),
-    };
-    preempt_off(|p| toyos_sched::waitq::wake_direct(shared, cause, cpus(), &HW, p))
-}
-
 /// Wake pipe readers, lending each an RT window if the writer holds one; the
 /// pipe is also marked, so a runnable reader takes the window too.
 pub fn wake_pipe_readers(pipe_id: PipeId) {
-    let Some(end) = crate::pipe::readers_queue(pipe_id) else {
+    let Some(watch) = crate::pipe::read_watch(pipe_id) else {
         return;
     };
     if driver::current_is_rt() {
         crate::pipe::set_rt_boost_pending(pipe_id);
-        completion::post_boosted(Subject::of(&end.watch), Outcome::Ready, boost_window());
+        watch.post_boosted(boost_window());
     } else {
-        completion::post(Subject::of(&end.watch), Outcome::Ready);
+        watch.post();
     }
 }
 
+/// Wake pipe writers, and complete every poll on the write end.
 pub fn wake_pipe_writers(pipe_id: PipeId) {
-    if let Some(end) = crate::pipe::writers_queue(pipe_id) {
-        completion::post(Subject::of(&end.watch), Outcome::Ready);
+    if let Some(watch) = crate::pipe::write_watch(pipe_id) {
+        watch.post();
     }
 }
 
@@ -481,10 +470,10 @@ pub fn futex_wait(
         let word = unsafe { phys_addr.as_ptr::<u32>().read_volatile() };
         word != expected
     };
-    let _ = completion::wait_until(
+    let _ = watch::wait_until(
         &parkable,
-        completion::Subject::of(waitqs::futex_watch(phys_addr)),
-        completion::Token::new(phys_addr.phys()),
+        futex::watch_of(phys_addr),
+        phys_addr.phys(),
         WaitClass::Futex,
         deadline,
         read,
@@ -509,12 +498,7 @@ pub enum FutexEnd {
 
 /// Wake up to `count` waiters on this futex word, and answer how many.
 pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
-    completion::post_n(
-        completion::Subject::of(waitqs::futex_watch(phys_addr)),
-        completion::Outcome::Ready,
-        completion::Token::new(phys_addr.phys()),
-        count,
-    ) as u64
+    futex::watch_of(phys_addr).post_n(phys_addr.phys(), count) as u64
 }
 
 /// Retire a thread and wait until its record — kernel stack and
@@ -558,9 +542,9 @@ pub fn retire_task(sched: &ThreadSched) {
     let parkable = Parkable::at_entry();
     // Uncancellable: a killed retirer cannot propagate a cancel with the
     // retire half done; the tripwire above bounds it instead.
-    let Some(armed) = completion::arm(
-        completion::Subject::of(sched.handle.watch()),
-        completion::Token::new(sched.shared.key().0),
+    let Some(armed) = watch::arm(
+        sched.handle.watch(),
+        sched.shared.key().0,
         WaitClass::Other,
     ) else {
         panic!("retire_task: no current task to park");
@@ -573,7 +557,7 @@ pub fn retire_task(sched: &ThreadSched) {
                 sched.shared.state()
             );
         }
-        let _record = completion::wait_uncancellable(
+        watch::wait_uncancellable(
             &parkable,
             &armed,
             Deadline::at(crate::clock::now() + RECHECK.duration()),
@@ -646,10 +630,7 @@ pub(crate) fn reap_poisoned() {
         match wake {
             process::PoisonWake::Joiner(pid, tid) => {
                 if let Some(sched) = process::thread_sched(pid, tid) {
-                    completion::post(
-                        completion::Subject::of(sched.handle.watch()),
-                        completion::Outcome::Gone(completion::Reason::Closed),
-                    );
+                    sched.handle.watch().post();
                 }
             }
             // -1: nobody asked for this exit, and teardown never ran to account it.

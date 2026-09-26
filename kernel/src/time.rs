@@ -2,10 +2,6 @@
 //! [`Tripwire`], [`Deadline`], [`Floor`], [`Budget`], [`Delay`]. No kind is
 //! constructible from a bare magnitude; every constructor takes a
 //! `&'static str` justification beside the number.
-//!
-//! This file names nothing outside `core`: `kernel-loom` compiles it a
-//! second time to carry an [`Instant`] into its model, and a dependency on
-//! a subject would break that.
 
 use core::fmt;
 use core::ops::{Add, Sub};
@@ -25,6 +21,8 @@ impl Instant {
     }
 
     /// Leaves the type system that keeps an instant from being confused with a duration.
+    // Read only by the `boot-actuators` gate `sched_gate`.
+    #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
     pub const fn nanos_since_boot(self) -> u64 {
         self.0
     }

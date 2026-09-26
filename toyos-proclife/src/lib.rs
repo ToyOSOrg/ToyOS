@@ -8,7 +8,7 @@
 //! rather than the arithmetic. A spawn builds a thread's TLS block, its kernel
 //! stack and its scheduler record between two acquisitions of the process
 //! table lock, and a kill on another CPU claims the process in that window; a
-//! thread's exit posts a completion whose subject decides whether a joiner ever
+//! thread's exit posts on a watch whose subject decides whether a joiner ever
 //! runs again; an idle pass takes an entry whose threads another CPU may still
 //! be retiring.
 //!
@@ -101,7 +101,7 @@ impl ThreadLocation {
 
 /// What a waiter arms on, named rather than pointed at.
 ///
-/// The kernel resolves each to the real thing a completion is posted against —
+/// The kernel resolves each to the real watch a post is made on —
 /// a thread's `ThreadSched::handle.watch()`, a process's
 /// `ProcessObject::watch()` — and this crate decides only *which*. That is the
 /// whole of the distinction a real defect turned on: `process::thread_exit`

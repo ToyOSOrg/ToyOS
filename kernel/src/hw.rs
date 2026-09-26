@@ -424,16 +424,16 @@ fn write_ss(sel: u16) {
 }
 
 #[cfg(feature = "boot-actuators")]
-static PROBE_WATCH: crate::completion::Watch = crate::completion::Watch::new();
+static PROBE_WATCH: crate::watch::Watch = crate::watch::Watch::new();
 
 /// Observes [`KernelHw::switch`]'s SS reload the one way a guest can (its `SYSRET`
 /// not reproducing the erratum): null SS, park, read SS; null means unreloaded.
 #[cfg(feature = "boot-actuators")]
 pub fn sysret_ss_probe(parkable: &crate::scheduler::Parkable) {
-    use crate::completion::{self, Subject, Token};
+    use crate::watch;
     use crate::time::{Deadline, Duration};
     use toyos_sched::task::WaitClass;
-    let Some(armed) = completion::arm(Subject::of(&PROBE_WATCH), Token::new(0), WaitClass::Other)
+    let Some(armed) = watch::arm(&PROBE_WATCH, 0, WaitClass::Other)
     else {
         crate::log!("sysret-ss: probe could not arm");
         return;
@@ -441,7 +441,7 @@ pub fn sysret_ss_probe(parkable: &crate::scheduler::Parkable) {
     let before = read_ss();
     write_ss(0);
     let deadline = Deadline::at(crate::clock::now() + Duration::from_millis(2));
-    let _ = completion::wait(parkable, &armed, deadline);
+    let _ = watch::wait(parkable, &armed, deadline);
     let after = read_ss();
     write_ss(percpu::KERNEL_DS);
     if after == percpu::KERNEL_DS {

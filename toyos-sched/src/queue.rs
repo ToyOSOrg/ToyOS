@@ -51,7 +51,7 @@ pub struct RunQueue<X: SchedPayload> {
     /// re-inserted after a dispatch already carries a key strictly above every
     /// sibling queued before it: the band serves a share's threads in insertion
     /// order whatever the tie-break is. Exact ties survive only where no charge
-    /// separates two inserts — a `wake_all` of siblings, the spawn burst — and
+    /// separates two inserts — a post that wakes siblings, the spawn burst — and
     /// one dispatch dissolves them. [`FairOrder::IdentityTiebreak`] is this
     /// field's warning ported literally, and it is invisible to simulator
     /// invariant I13. The rule stands because the *pot* is doing the work: a

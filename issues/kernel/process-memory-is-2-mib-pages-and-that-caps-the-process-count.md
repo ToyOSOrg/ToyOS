@@ -16,7 +16,7 @@ small data and code segments, and device windows handed to a process — moves
 to 4 KiB pages. 2 MiB stays where it pays: large mappings, DMA grants, the
 IOMMU's superpages, the kernel's own mappings. One paging design serves both,
 on x86-64 and on the ARM64 the tree is kept portable for
-(`issues/kernel/arm64-is-a-decision-nobody-has-made.md`).
+(`issues/kernel/toyos-runs-on-arm64.md`).
 
 **Blocked on:** the owner's word to start. Recorded, not started, at the
 owner's instruction.

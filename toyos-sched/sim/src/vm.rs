@@ -26,17 +26,14 @@ use toyos_sched::task::{
     ReadyTask, RtState, TaskAccounting, TaskBuilder, TaskKey, TaskShared, TaskState, WaitClass,
     WakeCause, WakeReason,
 };
-use toyos_sched::waitq::{
-    Cancelled, Commit, CommittedTicket, Registration, WaitList, WaitQueue, WaitTicket,
-};
+use toyos_sched::park::{prepare, Cancel, Cancelled, Commit, CommittedTicket, WaitTicket};
+use toyos_sched::watch::{Poster, Waiters, Watch};
 
 use crate::choice::ChoiceStream;
 use crate::hw_impl::SimHw;
 use crate::latency::{ReadyCause, RunWait};
 use crate::msg::{SimHandles, SimMsg, SimQueue};
-use crate::payload::{
-    MockAddressSpace, SimCtx, SimPayload, SimPreempt, SimShareLock, SimWaitList, StdLock,
-};
+use crate::payload::{MockAddressSpace, SimCtx, SimPayload, SimPreempt, SimShareLock, StdLock};
 use crate::workload::{
     AgeShape, BlockShape, ChargeShape, MigrateShape, Op, ParkShape, PlacementShape,
     Protocol, Scenario, Script, ShareShape, WindowShape,
@@ -82,11 +79,14 @@ pub const IPI_LATENCY_NS: u64 = 200_000;
 /// smallest multiple of `RUN_CHUNK_NS` that clears it with a chunk to spare.
 pub const UNWIND_NS: u64 = 4 * RUN_CHUNK_NS;
 
-/// One waitable object: a queue plus the condition its waiters test. The
+/// One waitable object: its watch plus the condition its waiters test. The
 /// token count is what makes a lost wake *observable* — a waiter parked while
-/// its queue holds a token is a wake that went missing.
+/// its object holds a token is a wake that went missing.
 pub struct QueueState {
     pub queue: SimQueue,
+    /// What a wait on this object is attributed to; the wait's, not the
+    /// watch's, and named here only because every wait on it is the same kind.
+    pub class: WaitClass,
     pub tokens: Cell<u32>,
     /// A boost the producer left for whoever consumes next: a client that was
     /// *not* blocked at signal time cannot be handed the window through a wake
@@ -97,7 +97,8 @@ pub struct QueueState {
 impl QueueState {
     pub fn new(class: WaitClass) -> Self {
         Self {
-            queue: WaitQueue::new(class, StdLock::new(WaitList::new())),
+            queue: Watch::new(StdLock::new(Waiters::new())),
+            class,
             tokens: Cell::new(0),
             boost_until: Cell::new(None),
         }
@@ -202,10 +203,10 @@ pub struct Program {
 /// can take a step before the blocking pass happens. That is the window the
 /// kernel's lost wake lived in, and it exists only because the two halves are
 /// two steps.
-pub enum BlockPhase<'q> {
+pub enum BlockPhase {
     /// The ticket is registered and uncommitted; the commit CAS belongs to the
     /// pass — the shipped shape.
-    Registered(WaitTicket<'q, SimMsg, SimWaitList>),
+    Registered(WaitTicket<SimMsg>),
     /// The commit already ran at the call site — the superseded shape, kept as a
     /// negative gate: the word reads `Blocked` while the task is still running.
     Committed(CommittedTicket<SimMsg>),
@@ -225,11 +226,11 @@ pub enum BlockEnd {
 }
 
 /// A block in progress on one CPU.
-pub struct Blocking<'q> {
+pub struct Blocking {
     pub key: TaskKey,
     pub queue: usize,
     pub deadline: Option<Nanos>,
-    pub phase: BlockPhase<'q>,
+    pub phase: BlockPhase,
 }
 
 /// One step of the enabled-step relation.
@@ -279,11 +280,12 @@ pub struct Vm<'q> {
     pub ran: BTreeSet<TaskKey>,
     pub live: BTreeSet<TaskKey>,
     pub shared: BTreeMap<TaskKey, Arc<TaskShared<SimMsg>>>,
-    /// Registrations held across a block, exactly where a kernel blocking
-    /// site holds them: on the waiting task's own stack.
-    pub registrations: BTreeMap<TaskKey, Registration<'q, SimMsg, SimWaitList>>,
+    /// Which object each parked task is registered on, held across the block
+    /// exactly where a kernel blocking site holds its registration: on the
+    /// waiting task's own stack.
+    pub registrations: BTreeMap<TaskKey, usize>,
     /// Per CPU: a block that has registered and not yet parked.
-    pub blocking: Vec<Option<Blocking<'q>>>,
+    pub blocking: Vec<Option<Blocking>>,
     /// OLD protocol only: the unlocked transit slot.
     pub transit: Vec<Option<ReadyTask<SimPayload>>>,
     pub clock: Nanos,
@@ -857,7 +859,7 @@ impl<'q> Vm<'q> {
             if halted[cpu] {
                 continue;
             }
-            // Mid-block: the task has registered on a wait queue and owes the
+            // Mid-block: the task has registered on a watch and owes the
             // pass that parks it, so it cannot run another op.
             //
             // Whether it can be handed an *involuntary* pass is the kernel's
@@ -1138,16 +1140,15 @@ impl<'q> Vm<'q> {
         self.next_irq[index] = self.next_irq[index].after(spec.period_ns);
         let queues = self.queues;
         let queue = &queues[spec.queue];
-        let waiters = queue.queue.len().max(1) as u32;
+        let waiters = queue.queue.threads().max(1) as u32;
         queue.tokens.set(queue.tokens.get() + waiters);
         let cause = match spec.boost_ns {
             Some(ns) => WakeCause::boosted(WakeReason::Woken, self.clock.after(ns)),
             None => WakeCause::new(WakeReason::Woken),
         };
         let kicks_before = self.hw.with(|s| s.kicks);
-        queue
-            .queue
-            .wake_all(cause, &self.handles, &self.hw, &SimPreempt);
+        let env = Poster { cpus: &self.handles, kicker: &self.hw, preempt: &SimPreempt };
+        queue.queue.post(cause, &env);
         self.note_kicks(kicks_before);
     }
 
@@ -1166,7 +1167,7 @@ impl<'q> Vm<'q> {
     /// Run one pass. The returned [`BlockEnd`] is only meaningful for
     /// [`Dispose::Commit`]; every other disposition reports `Parked`, which
     /// nobody reads.
-    fn run_pass(&mut self, cpu: usize, dispose: Dispose<'q>) -> BlockEnd {
+    fn run_pass(&mut self, cpu: usize, dispose: Dispose) -> BlockEnd {
         let now = self.clock;
         let kicks_before = self.hw.with(|s| {
             s.need_resched[cpu] = false;
@@ -1214,7 +1215,7 @@ impl<'q> Vm<'q> {
                 // arrives behind the drain and the next pass finds the task
                 // parked.
                 Dispose::Commit(ticket, deadline, after) => match ticket.commit() {
-                    Commit::Parked(committed, registration) => {
+                    Commit::Parked(committed) => {
                         let key = committed.shared().key();
                         // The residual window the fix names and cannot close:
                         // a waker may claim the task in the instructions
@@ -1241,7 +1242,7 @@ impl<'q> Vm<'q> {
                         }
                         (
                             pass.dispose_block(committed, deadline).finish(),
-                            Some((key, registration)),
+                            Some(key),
                             BlockEnd::Parked,
                         )
                     }
@@ -1257,8 +1258,7 @@ impl<'q> Vm<'q> {
                     // does: this driver buried it here until the model could
                     // charge an unwind, and burying it was the one
                     // disposition the amended design does not have. The
-                    // commit withdrew the registration and put the word back
-                    // at `Running`; the next `exec_op` finds the kill bit and
+                    // commit put the word back at `Running`; the next `exec_op` finds the kill bit and
                     // spends `UNWIND_NS` before its own `die`.
                     Commit::Killed => {
                         (pass.dispose_none().finish(), None, BlockEnd::Killed)
@@ -1266,8 +1266,7 @@ impl<'q> Vm<'q> {
                 },
             }
         };
-        if let Some((key, registration)) = parked {
-            self.registrations.insert(key, registration);
+        if let Some(key) = parked {
             // Did the injected wake claim *this* task before its park ran?
             // Counted rather than argued: the arm it exercises was dead code in
             // every run this simulator had ever made.
@@ -1399,7 +1398,8 @@ impl<'q> Vm<'q> {
         self.note_kicks(before);
     }
 
-    /// The uniform two-phase blocking shape, run by the task itself.
+    /// The uniform blocking shape, run by the task itself: register on the
+    /// object's watch, re-check, park.
     fn do_block(
         &mut self,
         cpu: usize,
@@ -1408,17 +1408,16 @@ impl<'q> Vm<'q> {
         deadline: Option<u64>,
         choices: &mut ChoiceStream,
     ) {
-        // Resuming from a previous park. Clearing the registration first is
-        // what keeps a timed-out waiter from leaving a node behind for the
-        // next `wake_one` to waste itself on.
+        // Resuming from a previous park. Ending the registration first is what
+        // keeps a timed-out waiter from being counted by the next bounded post.
         //
         // One park completes one `Block`, whichever cause ended it — the
         // kernel's `block_on` returns `Woken` or `Timeout` and its caller
         // moves on either way. Retrying the same block on a timeout would be
         // a waiter that can never give up, which is a workload that never
         // terminates rather than a protocol under test.
-        if let Some(registration) = self.registrations.remove(&key) {
-            registration.finish();
+        if let Some(on) = self.registrations.remove(&key) {
+            self.unregister(key, on);
             let q = &self.queues[queue];
             if q.tokens.get() > 0 {
                 q.tokens.set(q.tokens.get() - 1);
@@ -1426,9 +1425,9 @@ impl<'q> Vm<'q> {
             self.programs.get_mut(&key).expect("live").pc += 1;
             return;
         }
-        // Copy the arena reference out of `self` first: the ticket and the
-        // registration borrow the queue for as long as the arena lives, not
-        // for as long as this `&mut self` does.
+        // Copy the arena reference out of `self` first: the ticket borrows
+        // nothing, but the watch lives as long as the arena, not as long as
+        // this `&mut self` does.
         let queues = self.queues;
         let q = &queues[queue];
         if q.tokens.get() > 0 {
@@ -1438,11 +1437,20 @@ impl<'q> Vm<'q> {
             return;
         }
 
+        q.queue.register(&self.shared[&key], 0);
         let ticket = {
             let current = self.cpus[cpu]
                 .current_task()
                 .expect("blocking without a running task");
-            q.queue.prepare_wait(&current)
+            match prepare(&current, Cancel::Answers, q.class) {
+                Ok(ticket) => ticket,
+                // A post since the registration: retry the same op, which
+                // finds the token it left.
+                Err(_) => {
+                    self.unregister(key, queue);
+                    return;
+                }
+            }
         };
 
         // The registration is live and the task has not parked yet: this is
@@ -1457,6 +1465,7 @@ impl<'q> Vm<'q> {
         // re-check, park.
         let q = &queues[queue];
         if q.tokens.get() > 0 {
+            self.unregister(key, queue);
             match ticket.cancel() {
                 Cancelled::Clean => {
                     // Retry the same op; the token is taken on the next pass
@@ -1475,13 +1484,14 @@ impl<'q> Vm<'q> {
             BlockShape::CommitInPass => BlockPhase::Registered(ticket),
             BlockShape::CommitAtCallSite | BlockShape::CommitAtCallSiteFused => {
                 match ticket.commit() {
-                    Commit::Parked(committed, registration) => {
-                        self.registrations.insert(key, registration);
+                    Commit::Parked(committed) => {
+                        self.registrations.insert(key, queue);
                         BlockPhase::Committed(committed)
                     }
                     // A wake landed between registration and commit: do not
                     // park, do not switch. The condition is satisfied.
                     Commit::AlreadyWoken => {
+                        self.unregister(key, queue);
                         let q = &queues[queue];
                         if q.tokens.get() > 0 {
                             q.tokens.set(q.tokens.get() - 1);
@@ -1494,6 +1504,7 @@ impl<'q> Vm<'q> {
                     // instead of parking — only where the pass that buries it
                     // is entered from.
                     Commit::Killed => {
+                        self.unregister(key, queue);
                         self.finish_task(cpu, key);
                         return;
                     }
@@ -1512,6 +1523,11 @@ impl<'q> Vm<'q> {
         if self.scenario.block == BlockShape::CommitAtCallSiteFused {
             self.block_pass(cpu, choices);
         }
+    }
+
+    /// End a task's registration on an object's watch.
+    fn unregister(&self, key: TaskKey, queue: usize) {
+        self.queues[queue].queue.unregister(&self.shared[&key]);
     }
 
     /// Phase 2 of the wait handshake, as a step of its own.
@@ -1563,15 +1579,17 @@ impl<'q> Vm<'q> {
             }
         };
         match end {
-            BlockEnd::Parked => {}
+            BlockEnd::Parked => {
+                self.registrations.insert(key, queue);
+            }
             // The task is dying and still running. Its script does not
             // advance — the next `exec_op` finds the kill bit and unwinds —
-            // and there is no registration to finish, because the commit
-            // withdrew it.
-            BlockEnd::Killed => {}
+            // and its wait is over.
+            BlockEnd::Killed => self.unregister(key, queue),
             // Phase 2 declined to park: the waker that claimed the ticket left
             // a token behind, and the script moves on.
             BlockEnd::Woken => {
+                self.unregister(key, queue);
                 let q = &self.queues[queue];
                 if q.tokens.get() > 0 {
                     q.tokens.set(q.tokens.get() - 1);
@@ -1640,8 +1658,8 @@ impl<'q> Vm<'q> {
     }
 
     fn finish_task(&mut self, cpu: usize, key: TaskKey) {
-        if let Some(registration) = self.registrations.remove(&key) {
-            registration.finish();
+        if let Some(on) = self.registrations.remove(&key) {
+            self.unregister(key, on);
         }
         self.programs.remove(&key);
         self.unwind_left.remove(&key);
@@ -1778,10 +1796,9 @@ impl<'q> Vm<'q> {
             }
             self.programs.remove(&key);
             // A task retired while parked never runs again, so nobody else
-            // will clear its registration. The kernel's equivalent is the
-            // reap path dequeuing the waiter it just killed.
-            if let Some(registration) = self.registrations.remove(&key) {
-                registration.finish();
+            // will end its registration.
+            if let Some(on) = self.registrations.remove(&key) {
+                self.unregister(key, on);
             }
             self.finalized.push((key, acct));
         }
@@ -1813,7 +1830,7 @@ fn wake(
     boost: Option<u64>,
 ) {
     let q = &queues[queue];
-    let tokens = if all { q.queue.len().max(1) as u32 } else { 1 };
+    let tokens = if all { q.queue.threads().max(1) as u32 } else { 1 };
     q.tokens.set(q.tokens.get() + tokens);
     let cause = match boost {
         Some(ns) => {
@@ -1823,10 +1840,11 @@ fn wake(
         }
         None => WakeCause::new(WakeReason::Woken),
     };
+    let env = Poster { cpus: handles, kicker: hw, preempt: &SimPreempt };
     if all {
-        q.queue.wake_all(cause, handles, hw, &SimPreempt);
+        q.queue.post(cause, &env);
     } else {
-        q.queue.wake_one(cause, handles, hw, &SimPreempt);
+        q.queue.post_n(0, 1, cause, &env);
     }
 }
 
@@ -1843,7 +1861,7 @@ pub struct HoistedWake {
 
 /// How a pass is disposed. One helper covers all of them, so the borrow dance
 /// that hands `CpuSched` to the pass exists once.
-pub enum Dispose<'q> {
+pub enum Dispose {
     None,
     Yield,
     Exit,
@@ -1853,7 +1871,7 @@ pub enum Dispose<'q> {
     /// the handshake's phase 2. The optional wake is issued between the commit
     /// and the park; see [`Vm::run_pass`].
     Commit(
-        WaitTicket<'q, SimMsg, SimWaitList>,
+        WaitTicket<SimMsg>,
         Option<Nanos>,
         Option<HoistedWake>,
     ),

@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use toyos_abi::syscall::ProcessStats;
 
 use crate::process::Pid;
-use crate::completion::{self, Outcome, Subject, Watch};
+use crate::watch::Watch;
 use crate::sync::Lock;
 
 use super::{KObjectVariant, ObjectCore};
@@ -81,7 +81,7 @@ impl ProcessObject {
         self.finished.store(true, Ordering::Release);
         // Must come after the store: reap_finished polls this flag, not the lock.
         crate::scheduler::note_reapable();
-        completion::post(Subject::of(&self.watch), Outcome::Ready);
+        self.watch.post();
     }
 }
 

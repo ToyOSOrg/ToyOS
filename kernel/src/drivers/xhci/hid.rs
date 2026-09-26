@@ -89,13 +89,11 @@ impl HidDevice {
         }
     }
 
-    // A keyboard's `wake` posts both halves — the blocked-`sys_read` queue and
-    // the poll watchers; a pointer has only the poll half, and `Source::wake`
-    // knows which from the variant, so neither can be given one without the other.
+    // The role's one watch, which carries the blocked `sys_read` and the polls alike.
     fn wake(&self) {
         match self.role {
-            HidRole::Keyboard => crate::inbox::Source::Keyboard.wake(),
-            HidRole::Pointer(_) => crate::inbox::Source::Mouse.wake(),
+            HidRole::Keyboard => crate::keyboard::WATCH.post(),
+            HidRole::Pointer(_) => crate::mouse::WATCH.post(),
         }
     }
 

@@ -2,7 +2,7 @@
 
 use toyos_sched::task::WaitClass;
 
-use crate::completion::{self, Subject};
+use crate::watch;
 use crate::sched::kthread::{self, OnPanic};
 use crate::scheduler;
 use crate::time::Deadline;
@@ -29,22 +29,22 @@ extern "C" fn body(_arg: u64) -> ! {
         crate::hw::sysret_ss_probe(&parkable);
     }
     // Held across the loop: a push during a drain must still find this watch armed.
-    let armed = completion::arm(
-        Subject::of(&crate::writeback::WORK),
-        crate::writeback::TOKEN,
+    let armed = watch::arm(
+        &crate::writeback::WORK,
+        0,
         WaitClass::Io,
     )
     .expect("a kernel thread is a task and can arm");
     loop {
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::writeback_stall() {
-            let _ = completion::wait(&parkable, &armed, Deadline::never());
+            let _ = watch::wait(&parkable, &armed, Deadline::never());
             continue;
         }
         // drain_all_iod, not drain_all: this thread already holds the WORK arm; drain's backoff parks on it instead of arming a second.
         crate::writeback::drain_all_iod(&parkable, &armed);
         // No deadline: only a push should end this wait; a periodic wake would need audio sign-off.
         // Discarded: nothing retires a kernel thread, so this wait never reports Cancelled.
-        let _ = completion::wait(&parkable, &armed, Deadline::never());
+        let _ = watch::wait(&parkable, &armed, Deadline::never());
     }
 }

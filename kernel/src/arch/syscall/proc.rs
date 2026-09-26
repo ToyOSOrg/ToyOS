@@ -8,7 +8,7 @@
 
 use alloc::vec::Vec;
 
-use crate::completion;
+use crate::watch;
 use crate::object::{ops, KObjectRef};
 use crate::time::{Deadline, Duration};
 use crate::UserAddr;
@@ -73,10 +73,10 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
     };
     if flags & WNOHANG == 0 {
         let parkable = crate::scheduler::Parkable::at_entry();
-        if completion::wait_until(
+        if watch::wait_until(
             &parkable,
-            completion::Subject::of(object.watch()),
-            completion::Token::new(0),
+            object.watch(),
+            0,
             WaitClass::Other,
             Deadline::never(),
             || object.finished(),
@@ -164,10 +164,10 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
             return SyscallError::NotFound.to_u64();
         };
         // Arms on the target thread's own watch, not a wake-by-name to the main thread.
-        if completion::wait_until(
+        if watch::wait_until(
             &parkable,
-            completion::Subject::of(sched.handle.watch()),
-            completion::Token::new(tid.raw() as u64),
+            sched.handle.watch(),
+            tid.raw() as u64,
             WaitClass::Other,
             Deadline::never(),
             || matches!(process::wait_thread_zombie(tid, caller), Ok(Some(_)) | Err(())),
@@ -189,10 +189,10 @@ pub(super) fn sys_nanosleep(nanos: u64) -> u64 {
     let Some(handle) = crate::sched::driver::current_handle() else {
         return 0;
     };
-    let _ = completion::wait_until(
+    let _ = watch::wait_until(
         &parkable,
-        completion::Subject::of(handle.watch()),
-        completion::Token::new(0),
+        handle.watch(),
+        0,
         WaitClass::Other,
         deadline,
         || false,

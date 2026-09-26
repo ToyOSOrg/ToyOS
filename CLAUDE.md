@@ -29,6 +29,7 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 - **Fail fast, trust nothing.** Panics over silent degradation; exhaustive matches; the unimplemented dies loudly. Input that crossed a trust boundary is never trusted and never panics the kernel — it is refused.
 - **The kernel never crashes from userland.** A kernel bug crashes loudly; a userland bug never reaches it.
 - **Rust is first class.** Not POSIX, not C. Unrepresentable is best: prefer compile-time safety over runtime checks over tests.
+- **Existing Rust just works.** A program that builds for other operating systems builds and runs on ToyOS unchanged; the ecosystem gains ToyOS support through forks carried upstream, never through ToyOS-specific replacement crates.
 - **Development ergonomics above all.** Iteration speed beats feature count; tooling comes first.
 
 ## Architecture
