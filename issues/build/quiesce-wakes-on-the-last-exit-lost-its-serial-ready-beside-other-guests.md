@@ -22,3 +22,10 @@ its cause.
 
 **Exit**: a cause for the empty uart on a boot that rebooted as designed, or
 the marker waited for where the boot's reboot cannot race it.
+
+Again in the fast tier at `8846c021` (PR #524's branch, alone on the host):
+the same `QEMU died before ===READY=== (status: exit 0)` with `uart: nothing
+at all`, after `stop: 5 of 5 userland thread(s) stopped`, `usb-quiesce: disk 0
+SYNCHRONIZE CACHE ok` and `Rebooting.`; this time no usb-storage transport
+break before it. The re-run alone was green. `cargo run -- --known-red`
+answers NO.
