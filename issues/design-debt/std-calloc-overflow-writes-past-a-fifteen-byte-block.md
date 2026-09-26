@@ -23,6 +23,12 @@ C's contract is a null pointer for a product that overflows; `userland/libc`'s
 own `calloc` does that with `checked_mul`. Every `malloc(n)` with `n` within 16
 of `usize::MAX` takes the same wrapped path.
 
-Exit: `calloc` returns null on an overflowing product, `malloc` refuses a size
-whose header does not fit, and a guest test calls both with a size that
-overflows.
+There are two C allocators, and the defect lives in the one that won:
+`userland/libc`'s own `calloc` refuses the overflow, and under `std-runtime`
+it is compiled out. Patching std's copy would leave two implementations of one C
+contract, each free to drift from the other.
+
+Exit: one C allocator, which every userland program links whether or not it
+links std, returns null for an overflowing `calloc` product and refuses a
+`malloc` size whose header does not fit; the other is deleted, and a guest
+test calls both with a size that overflows.
