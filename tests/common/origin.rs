@@ -26,7 +26,7 @@ const RUNNER: &str = "test-runner";
 
 /// The flooding program, its line count, and its last line's head.
 pub const FLOODER: &str = "test_rs_log_flood";
-const FLOOD_LINES: usize = 16_384;
+pub const FLOOD_LINES: usize = 16_384;
 const FLOOD_DONE: &str = "flood done lines=";
 
 /// The forger, and the exit it really has.

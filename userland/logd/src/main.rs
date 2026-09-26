@@ -475,7 +475,7 @@ impl Log {
         let (now, later): (Vec<Line>, Vec<Line>) =
             lines.into_iter().partition(|line| all || line.at_ns <= cut);
         self.waiting = later;
-        self.write(now);
+        self.write(now, all);
         oldest
     }
 
@@ -513,7 +513,7 @@ impl Log {
     }
 
     /// The lines, in stamp order, into the file, the readers and the console.
-    fn write(&mut self, mut lines: Vec<Line>) {
+    fn write(&mut self, mut lines: Vec<Line>, flushing: bool) {
         if lines.is_empty() {
             return;
         }
@@ -551,7 +551,7 @@ impl Log {
         }
         // The file first: a reader is served only what /log already holds,
         // whenever the machine stops between the two.
-        self.to_volume(file.as_bytes());
+        self.to_volume(file.as_bytes(), !flushing);
         self.hub.append(file.as_bytes());
     }
 
@@ -602,14 +602,18 @@ impl Log {
         }
     }
 
-    /// Write a round to the volume, and make it durable.
-    fn to_volume(&mut self, text: &[u8]) {
+    /// Write a round to the volume, and make it durable unless it is one of a
+    /// flush's rounds, which `flushed` makes durable together: a stop's flush
+    /// is bounded by init, and a sync per round of it is what outruns that.
+    fn to_volume(&mut self, text: &[u8], sync: bool) {
         let Some(v) = self.volume.as_mut() else { return };
         let began = Instant::now();
         let mut refused = v.write(text).err().map(|e| (Step::Append, e.kind(), e.to_string()));
         if refused.is_none() {
             self.owed = true;
-            refused = self.sync().err();
+            if sync {
+                refused = self.sync().err();
+            }
         }
         // A volume that answered, and took longer than a log is worth doing it.
         if refused.is_none() && began.elapsed() > LOG_WRITE_BUDGET {
@@ -722,7 +726,7 @@ impl Log {
             panic!("logd: init said the machine runs on, and no stop was flushed for");
         };
         toyos::warn!("logd: the stop was refused, so {DIR} takes this boot's lines again");
-        self.to_volume(held.as_bytes());
+        self.to_volume(held.as_bytes(), true);
         self.hub.append(held.as_bytes());
     }
 

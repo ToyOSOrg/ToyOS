@@ -276,7 +276,10 @@ pub fn stalled_reader(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("connect the readers that will not read: {e}"))?;
     let from = console.len();
-    let flood = guest.run_test(super::origin::FLOODER, Duration::from_secs(300));
+    // Four times the ordinary flood: the readers are owed only what `logd`
+    // took of it, and that has to outrun every buffer between it and them
+    // however fast `logd` drains its rings.
+    let flood = guest.run_test(&format!("{} {}", super::origin::FLOODER, 4 * super::origin::FLOOD_LINES), Duration::from_secs(300));
     if flood.exit_code != Some(0) {
         return Err(format!("the flood exited {:?}", flood.exit_code));
     }
