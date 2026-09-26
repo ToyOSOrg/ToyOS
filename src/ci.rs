@@ -385,12 +385,21 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// ([`crate::userlandhost`], which also reds on a userland test none of them
 /// runs), and the SDK.
 ///
+/// **Every step runs against a `$TMPDIR` of this job's own, and the last step
+/// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
+/// that writes scratch past a `toyos_tmpdir::TempDir`, or holds one past its
+/// end, is a test that fills the host's disk one run at a time.
+///
 /// Clippy needs none of the ToyOS toolchain the nightly alone builds — the
 /// kernel and the bootloader lint against `x86_64-unknown-none` and
 /// `x86_64-unknown-uefi`, targets any rustup installs, and userland carries no
 /// clippy shape (`src/clippy.rs`). Userland and the SDK are tested against the
 /// host triple for the same reason.
 fn host(root: &Path) -> Vec<Step> {
+    let tmp = toyos_tmpdir::TempDir::new("ci-host");
+    // Before any thread: nothing in this process reads the environment
+    // concurrently with the write, and every child inherits it.
+    std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
     let mut steps = vec![
         step("the build system", || cargo(root, &["test", "--lib"])),
@@ -451,7 +460,28 @@ fn host(root: &Path) -> Vec<Step> {
     steps.push(step("the toyos SDK", || {
         cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
+    steps.push(step("nothing left in $TMPDIR", || left_behind(&tmp)));
     steps
+}
+
+/// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, as a refusal.
+fn left_behind(tmp: &Path) -> Result<String, String> {
+    let mut left: Vec<String> = std::fs::read_dir(tmp)
+        .map_err(|e| format!("read {}: {e}", tmp.display()))?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("read {}: {e}", tmp.display()))?;
+    left.retain(|name| name != toyos_tmpdir::GLOBAL);
+    left.sort();
+    if left.is_empty() {
+        return Ok("every test took its scratch with it".into());
+    }
+    Err(format!(
+        "left in {} by the steps above, each written past a `toyos_tmpdir::TempDir` or held past \
+         its test: {}",
+        tmp.display(),
+        left.join(", ")
+    ))
 }
 
 /// A pull request against `main`, run as its own `ci.yml` job because it reads
@@ -805,6 +835,17 @@ fn indexed(body: &str, version: &str) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// The lock is the one thing a `$TMPDIR` keeps; anything else is named.
+    #[test]
+    fn the_host_job_names_what_its_tests_left_behind() {
+        let tmp = toyos_tmpdir::TempDir::new("left-behind");
+        std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
+        assert!(left_behind(&tmp).is_ok());
+        std::fs::create_dir(tmp.join("forkcheck-1-current")).unwrap();
+        let refusal = left_behind(&tmp).expect_err("a directory left behind is a red");
+        assert!(refusal.contains("forkcheck-1-current"), "{refusal}");
+    }
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

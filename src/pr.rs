@@ -403,21 +403,19 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
+    use toyos_tmpdir::TempDir;
 
     /// A bare "origin" with a `main`, and a clone of it on a branch — the only
     /// shape `--pr` runs in. Signing off and an identity on each repository:
     /// the host's global config signs every commit, and a test that waited on
-    /// gpg would be a test that hangs. `sdkversion`'s tests stage in it too.
-    pub(crate) fn repo(name: &str) -> (PathBuf, PathBuf) {
-        let pid = std::process::id();
-        let origin = std::env::temp_dir().join(format!("toyos-pr-{name}-{pid}.git"));
-        let work = std::env::temp_dir().join(format!("toyos-pr-{name}-{pid}"));
-        let _ = fs::remove_dir_all(&origin);
-        let _ = fs::remove_dir_all(&work);
-
-        let seed = std::env::temp_dir().join(format!("toyos-pr-{name}-{pid}-seed"));
-        let _ = fs::remove_dir_all(&seed);
-        fs::create_dir_all(&seed).unwrap();
+    /// gpg would be a test that hangs. `sdkversion`'s tests stage in it too. All
+    /// of it is in the directory that comes first, which is the caller's to hold.
+    pub(crate) fn repo(name: &str) -> (TempDir, PathBuf, PathBuf) {
+        let dir = TempDir::new(&format!("pr-{name}"));
+        let origin = dir.join("origin.git");
+        let work = dir.join("work");
+        let seed = dir.join("seed");
+        fs::create_dir(&seed).unwrap();
         sh(&seed, &["init", "-q", "-b", "main"]);
         identify(&seed);
         fs::write(seed.join("f"), "base\n").unwrap();
@@ -429,10 +427,10 @@ pub(crate) mod tests {
         // test on this side can see the *order* a push happened in.
         sh(&origin, &["config", "core.logAllRefUpdates", "true"]);
 
-        sh(&std::env::temp_dir(), &["clone", "-q", origin.to_str().unwrap(), work.to_str().unwrap()]);
+        sh(&dir, &["clone", "-q", origin.to_str().unwrap(), work.to_str().unwrap()]);
         identify(&work);
         sh(&work, &["switch", "-q", "-c", "wt"]);
-        (origin, work)
+        (dir, origin, work)
     }
 
     fn identify(dir: &Path) {
@@ -470,14 +468,12 @@ pub(crate) mod tests {
     /// back is the main that push owed.
     #[test]
     fn the_branch_gets_main_before_it_is_pushed() {
-        let (origin, wt) = repo("merge-first");
+        let (dir, origin, wt) = repo("merge-first");
         commit(&wt, "g", "mine\n", "work");
 
         // Someone else lands while this branch is being prepared.
-        let theirs =
-            std::env::temp_dir().join(format!("toyos-pr-merge-first-theirs-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&theirs);
-        sh(&std::env::temp_dir(), &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
+        let theirs = dir.join("theirs");
+        sh(&dir, &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
         identify(&theirs);
         commit(&theirs, "h", "theirs\n", "meanwhile");
         sh(&theirs, &["push", "-q", "origin", "main"]);
@@ -517,14 +513,12 @@ pub(crate) mod tests {
     /// refused it, and `sync` reported lost commits about an ancestor.
     #[test]
     fn a_primary_on_a_branch_is_left_where_it_is() {
-        let (origin, wt) = repo("sync-on-a-branch");
+        let (dir, origin, wt) = repo("sync-on-a-branch");
         commit(&wt, "g", "mine\n", "work");
 
         // Someone else lands, so this host's main is behind origin/main.
-        let theirs = std::env::temp_dir()
-            .join(format!("toyos-pr-sync-on-a-branch-theirs-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&theirs);
-        sh(&std::env::temp_dir(), &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
+        let theirs = dir.join("theirs");
+        sh(&dir, &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
         identify(&theirs);
         commit(&theirs, "h", "theirs\n", "meanwhile");
         sh(&theirs, &["push", "-q", "origin", "main"]);
@@ -550,7 +544,7 @@ pub(crate) mod tests {
         assert!(!owes_a_rerun(true, &["--pr".to_string(), accepts]));
         assert!(!owes_a_rerun(false, &["--pr".to_string()]));
 
-        let (_origin, wt) = repo("merged-notice");
+        let (_dir, _origin, wt) = repo("merged-notice");
         commit(&wt, "g", "mine\n", "work");
         let quiet = prepare(&wt).expect("nothing to merge");
         assert!(!quiet.merged, "{}", quiet.text);
@@ -561,13 +555,11 @@ pub(crate) mod tests {
     /// finds it rather than merging over it.
     #[test]
     fn a_conflict_is_left_in_the_worktree_and_recognised_next_time() {
-        let (origin, wt) = repo("conflict");
+        let (dir, origin, wt) = repo("conflict");
         commit(&wt, "f", "mine\n", "work");
 
-        let theirs =
-            std::env::temp_dir().join(format!("toyos-pr-conflict-theirs-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&theirs);
-        sh(&std::env::temp_dir(), &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
+        let theirs = dir.join("theirs");
+        sh(&dir, &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
         identify(&theirs);
         commit(&theirs, "f", "theirs\n", "meanwhile");
         sh(&theirs, &["push", "-q", "origin", "main"]);
@@ -585,7 +577,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_dirty_worktree_and_main_itself_are_refused_by_name() {
-        let (_origin, wt) = repo("dirty");
+        let (_dir, _origin, wt) = repo("dirty");
         commit(&wt, "g", "mine\n", "work");
         fs::write(wt.join("g"), "not committed\n").unwrap();
         assert!(preflight(&wt).expect_err("uncommitted work must refuse").contains("uncommitted"));
@@ -603,7 +595,7 @@ pub(crate) mod tests {
     /// *before* the push — a second later the answer is the wrong one for ever.
     #[test]
     fn the_first_push_is_told_to_open_a_draft_and_later_ones_are_not() {
-        let (_origin, wt) = repo("first-push");
+        let (_dir, _origin, wt) = repo("first-push");
         commit(&wt, "g", "mine\n", "work");
 
         let before = git(&wt, &["ls-remote", "--heads", "origin", "wt"]).unwrap();

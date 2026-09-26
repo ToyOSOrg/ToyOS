@@ -9764,7 +9764,7 @@ fn netd_seeds_its_stack() -> Result<(), String> {
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
     let mut firsts = Vec::new();
     for boot in 0..2 {
-        let dump = std::env::temp_dir().join(format!("toyos-seed-{}-{boot}.pcap", std::process::id()));
+        let dump = common::lane::dir().join(format!("seed-{boot}.pcap"));
         let _ = fs::remove_file(&dump);
         let options =
             BootOptions { profile: qemu::Profile::Headless, wire_dump: Some(dump.clone()), ..Default::default() };
@@ -19968,7 +19968,7 @@ fn main() {
     };
 
     // Before anything boots: every exit below goes through `run`, which removes
-    // this run's scratch or keeps a red one's, and sweeps what older runs left.
+    // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
 
     // How many guests may be up on the *host* at once, across every worktree.

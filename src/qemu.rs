@@ -28,7 +28,8 @@
 //!
 //! The socket is `/tmp/toyos-qmp.sock`. A harness test booted with
 //! `BootOptions { qmp: true }` leaves one under
-//! `$TMPDIR/toyos-tests-<pid>/lane-<n>/`, which is how a frozen guest is read
+//! the run's lane directory, `$TMPDIR/toyos-tmp-<pid>-*/tests-*/lane-<n>/`
+//! while the run lives (`tests/common/lane.rs`), which is how a frozen guest is read
 //! without a `cargo run` at all: `human-monitor-command` with `info registers
 //! -a` gives every vCPU's `RIP`, `RFL` and `HLT`, and that is what tells a
 //! halted-awaiting-interrupt machine from a wedged one.

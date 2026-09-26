@@ -18,6 +18,9 @@
 
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use toyos_tmpdir::TempDir;
 
 thread_local! {
     /// `None` on any thread that never entered one, which is the suite's own
@@ -38,53 +41,47 @@ pub fn enter(index: usize) {
     });
 }
 
-/// This thread's scratch directory, created if it is not there.
+/// This thread's scratch directory, created if it is not there, inside the
+/// run's.
 pub fn dir() -> PathBuf {
-    let mut dir = toyos_build::scratch::run_dir(&std::env::temp_dir(), std::process::id());
+    let mut dir = RUN.get().expect("the suite's `Run::begin` comes before any scratch").clone();
     if let Some(index) = LANE.with(Cell::get) {
         dir.push(format!("lane-{index}"));
+        // Not `create_dir_all`: a run directory that is gone stays gone, and a
+        // lane asked for after it would otherwise be made outside any holder.
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => panic!("create the test directory {}: {e}", dir.display()),
+        }
     }
-    std::fs::create_dir_all(&dir)
-        .unwrap_or_else(|e| panic!("create the test directory {}: {e}", dir.display()));
     dir
 }
 
+/// The run's directory, set once by [`Run::begin`].
+static RUN: OnceLock<PathBuf> = OnceLock::new();
+
 /// This run's hold on its scratch directory, from before the first boot to the
-/// exit: `toyos_build::scratch` is the policy.
+/// exit: every image, boot log, screendump and socket of every lane is under
+/// it, and it is gone when the run is, green or red (`toyos_tmpdir` is the
+/// policy, and what reclaims the directory of a run that was killed).
 ///
 /// [`Run::exit`] is the one way out of the suite with a status; returning from
-/// `main` drops this as a green run, and unwinding out of it as a red one.
-pub struct Run;
+/// `main` or unwinding out of it drops this.
+pub struct Run(TempDir);
 
 impl Run {
-    /// Sweep what earlier runs left, and take this run's directory.
+    /// Take this run's directory; the first one this process makes sweeps what
+    /// killed runs left.
     pub fn begin() -> Self {
-        let tmp = std::env::temp_dir();
-        let removed =
-            toyos_build::scratch::sweep(&tmp, toyos_build::scratch::alive, std::time::SystemTime::now());
-        if !removed.is_empty() {
-            eprintln!("[toyos] removed {} old run director(ies) from {}", removed.len(), tmp.display());
-        }
-        Run
+        let dir = TempDir::new("tests");
+        RUN.set(dir.to_path_buf()).expect("one run per process");
+        Run(dir)
     }
 
-    /// Leave with `code`: 1 is red and keeps the scratch, anything else removes it.
+    /// Remove the run's directory, then leave with `code`.
     pub fn exit(self, code: i32) -> ! {
-        end(code == 1);
-        std::mem::forget(self);
+        drop(self);
         std::process::exit(code)
-    }
-}
-
-impl Drop for Run {
-    fn drop(&mut self) {
-        end(std::thread::panicking());
-    }
-}
-
-fn end(red: bool) {
-    let dir = toyos_build::scratch::run_dir(&std::env::temp_dir(), std::process::id());
-    if let Some(kept) = toyos_build::scratch::finish(&dir, red) {
-        eprintln!("[toyos] this run's boot logs, screendumps and images are kept at {}", kept.display());
     }
 }
