@@ -633,10 +633,12 @@ impl VirtioNet {
     /// `tx_free` only here and comes back only in [`Self::reclaim_tx`], which
     /// the device's used ring is what drives.
     ///
-    /// Non-blocking. A frame with no head free is written into the scratch
-    /// buffer and dropped — **a server never blocks**, smoltcp's token cannot
-    /// say no, and a dropped frame's recovery is the peer's retransmit;
-    /// spinning on the used ring here would park netd on a device.
+    /// Non-blocking. Egress asks [`Self::tx_room`] before it takes a token,
+    /// so what can still find no head free is a reply smoltcp makes while it
+    /// reads a frame, whose token was handed out with the frame's. That one is
+    /// written into the scratch buffer and dropped — **a server never
+    /// blocks**, and spinning on the used ring here would park netd on a
+    /// device.
     pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
         assert!(
             NET_HDR_SIZE + len <= TX_BUF_SIZE,
@@ -663,6 +665,13 @@ impl VirtioNet {
             self.tx_doorbell,
         );
         result
+    }
+
+    /// Whether a transmit head is free, once every one the device has
+    /// finished with is taken back.
+    pub fn tx_room(&self) -> bool {
+        self.reclaim_tx();
+        !self.tx_free.borrow().is_empty()
     }
 
     /// Take back every transmit head the device has finished with.

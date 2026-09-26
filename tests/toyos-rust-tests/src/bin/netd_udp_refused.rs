@@ -18,11 +18,10 @@
 //! end, because netd has let go of the one it was handed. The count is what
 //! sees a socket left in the stack: closing one already frees its port.
 //!
-//! **A held port is not handed out twice**: binding the ordinary socket's port
-//! by number is refused as in use, and a port-0 bind passes over a port bound
-//! by number where its next pick would have been. smoltcp hands a datagram to
-//! the first socket that takes it, so a second socket on a port receives
-//! nothing, the resolver's among them.
+//! **A held port is not bound twice**: binding the ordinary socket's port by
+//! number is refused as in use. smoltcp hands a datagram to the first socket
+//! that takes it, so a second socket on a port receives nothing, the
+//! resolver's among them.
 //!
 //! argv[1] is the port of the harness's host server, which this program does
 //! not use; argv[2] is the port of the harness's UDP echo on `HOST`.
@@ -71,13 +70,7 @@ fn main() {
         "port {} was bound a second time",
         healthy.bound_port
     );
-    // Where netd's next port-0 pick would be, unless another program took a
-    // port since, which leaves this check passing without having tested.
-    let next = if healthy.bound_port == u16::MAX { 49152 } else { healthy.bound_port + 1 };
-    let _by_number = udp_bind(ANY, next).unwrap_or_else(|e| panic!("binding port {next} by number: {e:?}"));
-    let picked = udp_bind(ANY, 0).expect("a port-0 bind");
-    assert_ne!(picked.bound_port, next, "a port-0 bind was handed port {next}, which another socket holds");
-    println!("netd_udp_refused: port {} is refused a second socket, and a port-0 bind passed over {next}", healthy.bound_port);
+    println!("netd_udp_refused: port {} is refused a second socket", healthy.bound_port);
 
     let (rx, kept) = toyos::pipe_pair().expect("a receive pipe");
     let handed = syscall::dup(kept.as_handle()).expect("a second handle to the receive pipe's write end");

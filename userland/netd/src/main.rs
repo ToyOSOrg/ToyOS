@@ -262,6 +262,17 @@ impl Card {
         snap.put("errors.crc", counts.wire.crc_errors);
     }
 
+    /// Whether a frame handed to [`Card::tx`] now would reach the wire.
+    ///
+    /// The Intel driver answers yes whatever its ring holds, and drops a
+    /// frame it has no slot for (`issues/design-debt/the-intel-driver-drops-what-its-transmit-ring-cannot-hold.md`).
+    fn tx_room(&self) -> bool {
+        match self {
+            Self::Virtio(nic) => nic.tx_room(),
+            Self::Intel(_) => true,
+        }
+    }
+
     fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
         match self {
             Self::Virtio(nic) => nic.tx(len, fill),
@@ -285,6 +296,9 @@ impl Card {
 /// handle, because the ring the token gives back to is this process's own.
 struct DmaNic {
     nic: Card,
+    /// A pass's egress stopped at a transmit ring with no slot free. The
+    /// device's used-ring interrupt is then the wake, not smoltcp's "now".
+    tx_full: bool,
 }
 
 impl Device for DmaNic {
@@ -301,7 +315,17 @@ impl Device for DmaNic {
         Some((token, DmaTxToken { nic: &self.nic }))
     }
 
+    /// **A full transmit ring says no**, and smoltcp keeps the segment for
+    /// the next pass: a frame taken here and dropped would be a loss this
+    /// machine made itself, which the sender only learns of by timing out.
+    /// A reply to a received frame still goes through [`Device::receive`]'s
+    /// token, which drops when full; what it carries is an acknowledgement a
+    /// later one repeats.
     fn transmit(&mut self, _timestamp: SmoltcpInstant) -> Option<Self::TxToken<'_>> {
+        if !self.nic.tx_room() {
+            self.tx_full = true;
+            return None;
+        }
         Some(DmaTxToken { nic: &self.nic })
     }
 
@@ -379,17 +403,67 @@ struct PendingUdpRecv {
     max_len: u32,
 }
 
+/// How the peer's side of a piped connection ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum End {
+    /// Its FIN: every byte it sent is the client's to read, and then EOF.
+    Fin,
+    /// Anything else — its reset, or netd's own abort. The client's send pipe
+    /// is closed before its receive pipe reaches EOF, and that order is the
+    /// whole of what tells the client this EOF is not a FIN: std's pal asks
+    /// its send pipe at every EOF.
+    Reset,
+}
+
 /// A piped TCP connection: data flows through kernel pipes instead of IPC messages.
+///
+/// **The pipes are the connection's life, not its socket id.** A client that
+/// closes the id, exits or is killed leaves netd to finish what the connection
+/// owes — the bytes it wrote and then the FIN, or a reset where the peer is
+/// still sending to a reader that has gone — and the socket, its slot and its
+/// id go only when the connection is over.
 struct PipedConnection {
     handle: SocketHandle,
+    /// The id the client names this connection by, until it closes it.
+    id: Option<u32>,
     rx_write: Option<Pipe>,
     tx_read: Option<Pipe>,
     /// The client's receive pipe refused bytes the socket still holds, so the
     /// pipe is watched for room.
     held: bool,
+    /// The peer's last bytes, moved out of the socket once no more can come:
+    /// smoltcp clears a socket's buffer when its TIME-WAIT ends, whether or not
+    /// the client has read it.
+    tail: Vec<u8>,
+    tail_sent: usize,
+    end: Option<End>,
+    /// The client shut its sending half down: the FIN goes once its send pipe
+    /// is empty, which is after every byte it wrote before it asked.
+    fin_after_drain: bool,
+    /// The client's receive end has gone, so a byte the peer sends from here
+    /// on is one nobody will read.
+    reader_gone: bool,
+    /// When the client let go of both ends with the connection still open.
+    orphaned_at: Option<Instant>,
 }
 
 impl PipedConnection {
+    fn new(handle: SocketHandle, id: u32, pipes: DataPipes) -> Self {
+        Self {
+            handle,
+            id: Some(id),
+            rx_write: Some(pipes.to_client),
+            tx_read: Some(pipes.from_client),
+            held: false,
+            tail: Vec::new(),
+            tail_sent: 0,
+            end: None,
+            fin_after_drain: false,
+            reader_gone: false,
+            orphaned_at: None,
+        }
+    }
+
     /// **A client's handle that refuses netd for any reason but a full pipe or
     /// a vanished reader ends that client's connection, never netd.** The
     /// ends are whatever the client moved, and nothing checks their kind at
@@ -398,8 +472,17 @@ impl PipedConnection {
     /// page could not be allocated, which no wait cures.
     fn refuse(&mut self, socket: &mut tcp::Socket, end: &str, e: toyos_abi::syscall::SyscallError) {
         say!("netd: resetting a connection — its {end} pipe refused netd: {e:?}");
+        self.reset(socket);
+        self.close_rx();
+    }
+
+    /// End the connection with a reset, and close the client's send pipe at
+    /// once: its next write fails, and the EOF its receive pipe reaches after
+    /// the bytes still owed reads as a reset.
+    fn reset(&mut self, socket: &mut tcp::Socket) {
         socket.abort();
-        self.close_all();
+        self.end = Some(End::Reset);
+        self.close_tx();
     }
 
     fn close_rx(&mut self) {
@@ -410,13 +493,185 @@ impl PipedConnection {
         self.tx_read.take();
     }
 
-    fn close_all(&mut self) {
-        self.close_rx();
-        self.close_tx();
+    /// Whether the client can do nothing more with this connection: netd has
+    /// let go of, or seen the client let go of, both ends.
+    fn client_done(&self) -> bool {
+        self.rx_write.is_none() && self.tx_read.is_none()
     }
 
-    fn is_fully_closed(&self) -> bool {
-        self.rx_write.is_none() && self.tx_read.is_none()
+    fn tail_left(&self) -> &[u8] {
+        &self.tail[self.tail_sent..]
+    }
+
+    /// The moment an orphan is given up on, unless it is over already: a
+    /// reset connection waits only for its RST to leave, which is smoltcp's
+    /// own wake.
+    fn orphan_deadline(&self) -> Option<Instant> {
+        match self.end {
+            Some(End::Reset) => None,
+            _ => self.orphaned_at.map(|at| at + ORPHAN_LIMIT),
+        }
+    }
+}
+
+/// Whether a socket in `state` can still be sent bytes by its peer.
+fn receiving(state: tcp::State) -> bool {
+    matches!(state, tcp::State::Established | tcp::State::FinWait1 | tcp::State::FinWait2)
+}
+
+/// Whether a socket is over and has sent everything it owes: closed, and
+/// forgotten by smoltcp only once its last RST or ACK has gone.
+fn finished(socket: &tcp::Socket) -> bool {
+    socket.state() == tcp::State::Closed && socket.remote_endpoint().is_none()
+}
+
+/// How long a connection whose client has let go of it may take to finish.
+///
+/// Policy, and Linux's: `tcp_fin_timeout`'s default bounds an orphan in
+/// FIN-WAIT-2 the same way. It is what ends one whose peer never closes or
+/// never answers.
+const ORPHAN_LIMIT: Duration = Duration::from_secs(60);
+
+impl PipedConnection {
+    /// The peer's bytes, socket to the client's receive pipe, and the end of
+    /// them once they are all there.
+    ///
+    /// **Nothing leaves the socket that the pipe did not take**: a byte
+    /// dequeued here has already been acknowledged to the peer, so one the
+    /// pipe refused is cut out of the middle of the client's stream with
+    /// nothing saying so. The rest waits in the socket, and the pipe's room is
+    /// what wakes the pass that moves it.
+    fn receive(&mut self, socket: &mut tcp::Socket) {
+        use toyos_abi::syscall::SyscallError;
+        if self.end.is_none() && !receiving(socket.state()) {
+            while socket.can_recv() {
+                socket
+                    .recv(|queued| {
+                        self.tail.extend_from_slice(queued);
+                        (queued.len(), ())
+                    })
+                    .expect("netd: a socket holding bytes refused to give them up");
+            }
+            self.end = Some(match socket.recv(|_| (0, ())) {
+                Err(tcp::RecvError::Finished) => End::Fin,
+                Err(tcp::RecvError::InvalidState) => End::Reset,
+                Ok(()) => unreachable!("netd: a {} socket with no bytes still receives", socket.state()),
+            });
+            if self.end == Some(End::Reset) {
+                self.close_tx();
+            }
+        }
+
+        self.held = false;
+        if let Some(pipe) = self.rx_write.as_ref().map(|p| p.as_handle()) {
+            let mut refused = None;
+            while !self.tail_left().is_empty() {
+                match toyos_abi::syscall::write_nonblock(pipe, self.tail_left()) {
+                    Ok(0) => break,
+                    Ok(n) => self.tail_sent += n,
+                    Err(e) => {
+                        refused = Some(e);
+                        break;
+                    }
+                }
+            }
+            while refused.is_none() && self.tail.is_empty() && socket.can_recv() {
+                let moved = socket.recv(|queued| match toyos_abi::syscall::write_nonblock(pipe, queued) {
+                    Ok(n) => (n, n),
+                    Err(e) => {
+                        refused = Some(e);
+                        (0, 0)
+                    }
+                });
+                if !matches!(moved, Ok(n) if n > 0) {
+                    break;
+                }
+            }
+            // Detect the client leaving: a zero-byte write is refused by name
+            // once the pipe has no reader — the kernel's fact, not the
+            // client's.
+            if refused.is_none() {
+                refused = toyos_abi::syscall::write_nonblock(pipe, &[]).err();
+            }
+            match refused {
+                None => {}
+                // Full: the client has not read yet.
+                Some(SyscallError::WouldBlock) => self.held = !self.tail_left().is_empty() || socket.can_recv(),
+                Some(SyscallError::Gone) => {
+                    self.reader_gone = true;
+                    self.close_rx();
+                }
+                Some(e) => self.refuse(socket, "receive", e),
+            }
+        }
+        if self.tail_left().is_empty() && !self.tail.is_empty() {
+            self.tail = Vec::new();
+            self.tail_sent = 0;
+        }
+        // Every byte of the peer's is in the pipe: the end follows them.
+        if self.end.is_some() && self.tail.is_empty() && !socket.can_recv() {
+            self.close_rx();
+        }
+        // A reader that has gone with the peer still sending: the peer is
+        // told at once, as a close with unread data tells it (RFC 2525 §2.17).
+        if self.reader_gone && socket.is_open() && (socket.can_recv() || !self.tail.is_empty()) {
+            self.reset(socket);
+            self.tail = Vec::new();
+        }
+    }
+
+    /// The client's bytes, its send pipe to the socket, and the FIN after
+    /// them once the client closes its end or shuts its sending half down.
+    ///
+    /// Ok(0) is the kernel's EOF — ring drained, no writer — which says the
+    /// client stopped writing; not the forgeable closed flags. [`send_room`]
+    /// and never `can_send` alone: a zero-length read answers `Ok(0)`, which
+    /// would read as the client hanging up.
+    fn send(&mut self, socket: &mut tcp::Socket) {
+        use toyos_abi::syscall::SyscallError;
+        let Some(pipe) = self.tx_read.as_ref().map(|p| p.as_handle()) else { return };
+        if !matches!(socket.state(), tcp::State::Established | tcp::State::CloseWait) {
+            // The socket sends nothing more — its FIN is queued, or it is
+            // over. What the pipe says now is only whether the client has
+            // gone, or wrote bytes that can never be sent, which it is told
+            // by the pipe's closing: its next write fails.
+            let mut byte = [0u8; 1];
+            match toyos_abi::syscall::read_nonblock(pipe, &mut byte) {
+                Ok(_) => self.close_tx(),
+                Err(SyscallError::WouldBlock) => {}
+                Err(e) => self.refuse(socket, "send", e),
+            }
+            return;
+        }
+        // **No more is taken out of the pipe than the socket will take**: the
+        // read lands in the send buffer's own free space, so a byte the pipe
+        // gave up is a byte the socket holds.
+        while send_room(socket) {
+            let read = socket
+                .send(|room| match toyos_abi::syscall::read_nonblock(pipe, room) {
+                    Ok(n) => (n, Ok(n)),
+                    Err(e) => (0, Err(e)),
+                })
+                .unwrap_or_else(|e| panic!("netd: a socket that could send refused: {e:?}"));
+            match read {
+                Ok(0) => {
+                    socket.close();
+                    self.close_tx();
+                    return;
+                }
+                Ok(_) => {}
+                Err(SyscallError::WouldBlock) => {
+                    if self.fin_after_drain {
+                        socket.close();
+                    }
+                    return;
+                }
+                Err(e) => {
+                    self.refuse(socket, "send", e);
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -468,13 +723,16 @@ fn send_room(socket: &tcp::Socket) -> bool {
     socket.can_send() && socket.send_capacity() > socket.send_queue()
 }
 
-fn piped_connection(handle: SocketHandle, pipes: DataPipes) -> PipedConnection {
-    PipedConnection {
-        handle,
-        rx_write: Some(pipes.to_client),
-        tx_read: Some(pipes.from_client),
-        held: false,
-    }
+/// Whether a TCP socket in `socket_set` has `port` as its local port, listening
+/// or connected. A second connection from one local port to one peer would be
+/// the first's segments.
+fn tcp_port_taken(socket_set: &SocketSet<'_>, port: u16) -> bool {
+    socket_set.iter().any(|(_, socket)| match socket {
+        smoltcp::socket::Socket::Tcp(s) => {
+            s.listen_endpoint().port == port || s.local_endpoint().is_some_and(|e| e.port == port)
+        }
+        _ => false,
+    })
 }
 
 // --- One request, and the client waiting for its answer ---
@@ -588,12 +846,24 @@ const POLL_HANDLES_PER_PIPED: u32 = 2;
 /// connection, which is how netd hears it hang up.
 const LOOKUP_POLL_HANDLES: u32 = resolve::MAX_LOOKUPS as u32;
 
+/// UDP receives netd holds open at once, waiting for a datagram. Each one's
+/// client connection is watched, which is how netd hears it hang up, so the
+/// poller's batch carries one registration apiece; one past this is refused
+/// as `ERR_RESOURCE_EXHAUSTED`.
+const MAX_PENDING_RECVS: u32 = 16;
+
 /// Hard ceiling on live piped connections, from the poller rather than from
 /// memory: netd registers every connection's pipes in the same batch as the two
-/// fixed registrations, the pending connections and the lookups' clients, and
-/// `Poller::MAX_HANDLES` is the widest set one poller can carry. The memory
-/// budget below binds first on a machine whose eighth holds fewer connections.
-const MAX_PIPED_SLOTS: u64 = ((Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PENDING_CONNS - LOOKUP_POLL_HANDLES)
+/// fixed registrations, the pending connections, the lookups' clients and the
+/// pending receives' clients, and `Poller::MAX_HANDLES` is the widest set one
+/// poller can carry. A connect waiting for its SYN-ACK registers its client in
+/// the room its slot has for two pipes. The memory budget below binds first on
+/// a machine whose eighth holds fewer connections.
+const MAX_PIPED_SLOTS: u64 = ((Poller::MAX_HANDLES
+    - FIXED_POLL_HANDLES
+    - MAX_PENDING_CONNS
+    - LOOKUP_POLL_HANDLES
+    - MAX_PENDING_RECVS)
     / POLL_HANDLES_PER_PIPED) as u64;
 
 /// One client's inbound framing.
@@ -712,7 +982,6 @@ fn smoltcp_seed() -> u64 {
 struct NetDaemon {
     sockets: HashMap<u32, SocketKind>,
     next_id: u32,
-    next_local_port: u16,
     pending_udp_recvs: Vec<PendingUdpRecv>,
     resolver: resolve::Resolver<Client, fn() -> u16>,
     piped_connections: Vec<PipedConnection>,
@@ -727,7 +996,6 @@ impl NetDaemon {
         Self {
             sockets: HashMap::new(),
             next_id: first_socket_id(),
-            next_local_port: 49152,
             pending_udp_recvs: Vec::new(),
             resolver: resolve::Resolver::new(Instant::now(), resolve::random_u16),
             piped_connections: Vec::new(),
@@ -759,15 +1027,18 @@ impl NetDaemon {
     /// endpoint, because every client holding `netd` can ask.
     ///
     /// `sockets.untabled` is every socket the stack holds that no table entry
-    /// names, the resolver's left out: netd's own, and any that outlived its
-    /// entry, which moves it and no other count. The resolver's are left out
-    /// because their number is every program's lookups in flight.
+    /// names, the resolver's and the closing connections' left out: netd's
+    /// own, and any that outlived its entry, which moves it and no other
+    /// count. The resolver's are left out because their number is every
+    /// program's lookups in flight; `piped.closing` counts the connections
+    /// whose client closed their id and which are still finishing.
     fn inspect(&self, snap: &mut Snapshot, socket_set: &SocketSet<'_>) {
+        let closing = self.piped_connections.iter().filter(|c| c.id.is_none()).count();
         let untabled = socket_set
             .iter()
             .count()
-            .checked_sub(self.sockets.len() + self.resolver.sockets())
-            .expect("netd: a table entry or a lookup names a socket the stack does not hold");
+            .checked_sub(self.sockets.len() + self.resolver.sockets() + closing)
+            .expect("netd: a table entry, a lookup or a closing connection names a socket the stack does not hold");
         snap.put("sockets.untabled", untabled);
         let (mut streams, mut listeners, mut udp) = (0u32, 0u32, 0u32);
         for kind in self.sockets.values() {
@@ -782,6 +1053,7 @@ impl NetDaemon {
         snap.put("sockets.udp", udp);
         snap.put("piped.live", self.piped_live());
         snap.put("piped.max", self.max_piped_connections);
+        snap.put("piped.closing", closing);
     }
 
     fn alloc_id(&mut self) -> u32 {
@@ -793,18 +1065,17 @@ impl NetDaemon {
         id
     }
 
-    fn alloc_port(&mut self) -> u16 {
-        let port = self.next_local_port;
-        self.next_local_port = if self.next_local_port >= 65535 { 49152 } else { self.next_local_port + 1 };
-        port
+    /// A local port for a TCP socket that names none: the first no TCP
+    /// socket holds, from a random point of the dynamic range (RFC 6056 §3.3.2),
+    /// so an off-path sender cannot guess which one the next connection uses.
+    /// `None` once every one is held.
+    fn alloc_tcp_port(socket_set: &SocketSet<'_>) -> Option<u16> {
+        resolve::free_port_by(resolve::random_u16(), |port| tcp_port_taken(socket_set, port))
     }
 
-    /// The first port from [`alloc_port`](Self::alloc_port)'s cursor that no
-    /// UDP socket holds, and the cursor moves past it; `None` once every one
-    /// is held.
-    fn alloc_free_udp_port(&mut self, socket_set: &SocketSet<'_>) -> Option<u16> {
-        self.next_local_port = resolve::free_port(socket_set, self.next_local_port)?;
-        Some(self.alloc_port())
+    /// The same, for a UDP socket.
+    fn alloc_udp_port(socket_set: &SocketSet<'_>) -> Option<u16> {
+        resolve::free_port(socket_set, resolve::random_u16())
     }
 
     /// Dispatch one whole request.
@@ -820,7 +1091,7 @@ impl NetDaemon {
     ) {
         match MsgType::from_u32(req.msg_type) {
             Some(MsgType::TcpClose) => self.handle_tcp_close(&req, socket_set),
-            Some(MsgType::TcpShutdown) => self.handle_tcp_shutdown(&req, socket_set),
+            Some(MsgType::TcpShutdown) => self.handle_tcp_shutdown(&req),
             Some(MsgType::UdpBind) => self.handle_udp_bind(&req, socket_set),
             Some(MsgType::UdpSendTo) => self.handle_udp_send_to(&req, socket_set),
             Some(MsgType::UdpRecvFrom) => self.handle_udp_recv_from(req, socket_set),
@@ -845,19 +1116,21 @@ impl NetDaemon {
         };
         if let Some(kind) = self.sockets.remove(&req.socket_id) {
             match kind {
+                // A connected stream is only let go of: it lives as long as
+                // its pipes, and ends as they do.
                 SocketKind::TcpStream(handle) => {
-                    socket_set.get_mut::<tcp::Socket>(handle).close();
-                    socket_set.remove(handle);
-                    if let Some(pos) = self.piped_connections.iter().position(|c| c.handle == handle) {
-                        self.piped_connections.swap_remove(pos).close_all();
-                    }
-                    // A connect still waiting for its SYN-ACK names the
-                    // handle just removed, and the pass that would read it
-                    // next is a panic; its client is answered instead.
-                    if let Some(pos) =
+                    if let Some(conn) = self.piped_connections.iter_mut().find(|c| c.handle == handle) {
+                        conn.id = None;
+                    } else if let Some(pos) =
                         self.pending_piped_connects.iter().position(|c| c.handle == handle)
                     {
+                        // A connect still waiting for its SYN-ACK, named by
+                        // somebody else: its own client is answered.
+                        socket_set.get_mut::<tcp::Socket>(handle).abort();
+                        socket_set.remove(handle);
                         self.pending_piped_connects.swap_remove(pos).client.error(ERR_CONNECTION_REFUSED);
+                    } else {
+                        unreachable!("netd: stream {} is neither connected nor connecting", req.socket_id);
                     }
                 }
                 SocketKind::TcpListener(handle) => {
@@ -875,18 +1148,25 @@ impl NetDaemon {
         msg.client.done();
     }
 
-    fn handle_tcp_shutdown(&mut self, msg: &Request, socket_set: &mut SocketSet<'_>) {
+    fn handle_tcp_shutdown(&mut self, msg: &Request) {
         let Ok(req) = ipc::decode_payload::<TcpShutdownRequest>(msg.payload()) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let Some(SocketKind::TcpStream(handle)) = self.sockets.get(&req.socket_id) else {
+        let Some(&SocketKind::TcpStream(handle)) = self.sockets.get(&req.socket_id) else {
             msg.client.error(ERR_NOT_CONNECTED);
             return;
         };
-        let socket = socket_set.get_mut::<tcp::Socket>(*handle);
+        let Some(conn) = self.piped_connections.iter_mut().find(|c| c.handle == handle) else {
+            msg.client.error(ERR_NOT_CONNECTED);
+            return;
+        };
+        // **Not `close` here**: the bytes the client wrote before asking are
+        // still in its send pipe, and a FIN queued now would go out ahead of
+        // them and end the stream short. The bridge closes the socket once
+        // the pipe is empty.
         if req.how == 1 || req.how == 2 {
-            socket.close();
+            conn.fin_after_drain = true;
         }
         msg.client.done();
     }
@@ -902,7 +1182,7 @@ impl NetDaemon {
         };
         let (rx_write, tx_read) = (pipes.to_client, pipes.from_client);
         let port = match req.port {
-            0 => match self.alloc_free_udp_port(socket_set) {
+            0 => match Self::alloc_udp_port(socket_set) {
                 Some(port) => port,
                 None => {
                     msg.client.error(ERR_ADDR_IN_USE);
@@ -1053,6 +1333,11 @@ impl NetDaemon {
             return;
         };
         if let Some(client) = self.deliver_datagram(msg.client, req.socket_id, req.max_len, socket_set) {
+            if self.pending_udp_recvs.len() >= MAX_PENDING_RECVS as usize {
+                say!("netd: refusing a UDP receive, {MAX_PENDING_RECVS} are already waiting");
+                client.error(ERR_RESOURCE_EXHAUSTED);
+                return;
+            }
             // Nothing has arrived yet: keep the connection open until one does.
             self.pending_udp_recvs.push(PendingUdpRecv {
                 client,
@@ -1188,7 +1473,11 @@ impl NetDaemon {
             msg.client.error(ERR_NOT_CONNECTED);
             return;
         }
-        let local_port = self.alloc_port();
+        let Some(local_port) = Self::alloc_tcp_port(socket_set) else {
+            say!("netd: refusing connect, every dynamic port is held");
+            msg.client.error(ERR_RESOURCE_EXHAUSTED);
+            return;
+        };
 
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
         let tx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
@@ -1223,7 +1512,16 @@ impl NetDaemon {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let port = if req.port == 0 { self.alloc_port() } else { req.port };
+        let port = match req.port {
+            0 => match Self::alloc_tcp_port(socket_set) {
+                Some(port) => port,
+                None => {
+                    msg.client.error(ERR_ADDR_IN_USE);
+                    return;
+                }
+            },
+            port => port,
+        };
 
         // Take the pipe before the socket goes into socket_set: a missing one
         // then has no half-built socket to unwind.
@@ -1299,7 +1597,7 @@ impl NetDaemon {
         let stream_id = self.alloc_id();
         self.sockets.insert(stream_id, SocketKind::TcpStream(old_handle));
 
-        self.piped_connections.push(piped_connection(old_handle, pipes));
+        self.piped_connections.push(PipedConnection::new(old_handle, stream_id, pipes));
 
         // Create replacement listener
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
@@ -1328,118 +1626,32 @@ impl NetDaemon {
 
     /// Bridge data between smoltcp sockets and kernel pipes for piped connections.
     /// Drains both directions as far as the other side takes — when a pipe is
-    /// full, data stays in smoltcp's buffer and the TCP window shrinks.
-    fn bridge_piped(&mut self, socket_set: &mut SocketSet<'_>) {
-        use toyos_abi::syscall::SyscallError;
-        let mut closed = Vec::new();
-        for i in 0..self.piped_connections.len() {
-            let conn = &mut self.piped_connections[i];
+    /// full, data stays in smoltcp's buffer and the TCP window shrinks — and
+    /// ends each connection whose client and peer are both done with it.
+    fn bridge_piped(&mut self, socket_set: &mut SocketSet<'_>, now: Instant) {
+        let mut over = Vec::new();
+        for (i, conn) in self.piped_connections.iter_mut().enumerate() {
             let socket = socket_set.get_mut::<tcp::Socket>(conn.handle);
-
-            // smoltcp rx → the client's pipe. **Nothing leaves the socket that
-            // the pipe did not take**: a byte dequeued here has already been
-            // acknowledged to the peer, so one the pipe refused is cut out of
-            // the middle of the client's stream with nothing saying so. The
-            // rest waits in the socket, and the pipe's room is what wakes the
-            // pass that moves it.
-            conn.held = false;
-            if let Some(ref pipe) = conn.rx_write {
-                let mut refused = None;
-                while socket.can_recv() {
-                    let moved = socket.recv(|queued| {
-                        match toyos_abi::syscall::write_nonblock(pipe.as_handle(), queued) {
-                            Ok(n) => (n, n),
-                            Err(e) => {
-                                refused = Some(e);
-                                (0, 0)
-                            }
-                        }
-                    });
-                    if !matches!(moved, Ok(n) if n > 0) {
-                        break;
-                    }
+            conn.receive(socket);
+            conn.send(socket);
+            if conn.client_done() {
+                if finished(socket) {
+                    over.push(i);
+                    continue;
                 }
-                match refused {
-                    None => {}
-                    // Full: the client has not read yet.
-                    Some(SyscallError::WouldBlock) => conn.held = true,
-                    Some(SyscallError::Gone) => conn.close_rx(),
-                    Some(e) => conn.refuse(socket, "receive", e),
+                conn.orphaned_at.get_or_insert(now);
+                if conn.orphan_deadline().is_some_and(|limit| now >= limit) {
+                    say!("netd: resetting a connection its client let go of {ORPHAN_LIMIT:?} ago");
+                    conn.reset(socket);
                 }
-            }
-
-            // pipe read → smoltcp tx. Ok(0) is the kernel's EOF — ring drained,
-            // no writer — which says the client stopped writing; not the
-            // forgeable closed flags. [`send_room`] and never `can_send` alone:
-            // a zero-length read answers `Ok(0)`, which the arm below reads as
-            // the client hanging up.
-            while send_room(socket) {
-                if let Some(ref pipe) = conn.tx_read {
-                    // **No more is taken out of the pipe than the socket will
-                    // take from us.** `send_slice` answers how many bytes it
-                    // enqueued and takes fewer when the send buffer is short of
-                    // room; bytes read past that are gone, and the peer's stream
-                    // is short in the middle with nothing saying so. The pipe is
-                    // where the rest belongs until there is room.
-                    let mut buf = [0u8; 4096];
-                    let want = (socket.send_capacity() - socket.send_queue()).min(buf.len());
-                    match toyos_abi::syscall::read_nonblock(pipe.as_handle(), &mut buf[..want]) {
-                        Ok(0) => {
-                            socket.close();
-                            conn.close_tx();
-                            break;
-                        }
-                        Ok(n) => {
-                            // Both refusals are bytes the pipe has already given
-                            // up, so neither may be swallowed here of all places.
-                            let sent = socket.send_slice(&buf[..n]).unwrap_or_else(|e| {
-                                panic!("netd: a socket that could send refused {n} byte(s): {e:?}")
-                            });
-                            assert_eq!(sent, n, "netd: the send buffer took {sent} of {n} byte(s) it had room for");
-                        }
-                        Err(SyscallError::WouldBlock) => break,
-                        Err(e) => {
-                            conn.refuse(socket, "send", e);
-                            break;
-                        }
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            // Signal EOF to client when remote has closed and all data is drained
-            if !socket.may_recv() && !socket.can_recv() && conn.rx_write.is_some() {
-                conn.close_rx();
-            }
-
-            // **A connection that is over takes no more of the client's bytes.**
-            // A peer's reset leaves the socket `Closed` and `can_send` false for
-            // good, so the loop above never reads the pipe again; left open, the
-            // client's writes fill a pipe nobody drains and then block, and a
-            // writer that is never told its peer is gone cannot say so.
-            if !socket.is_open() && conn.tx_read.is_some() {
-                conn.close_tx();
-            }
-
-            // Detect client death: a zero-byte write is refused by name once
-            // the pipe has no reader — the kernel's fact, not the client's.
-            if let Some(ref pipe) = conn.rx_write {
-                match toyos_abi::syscall::write_nonblock(pipe.as_handle(), &[]) {
-                    Ok(_) | Err(SyscallError::WouldBlock) => {}
-                    Err(SyscallError::Gone) => conn.close_rx(),
-                    Err(e) => conn.refuse(socket, "receive", e),
-                }
-            }
-
-            // Fully clean up when both sides are done
-            if conn.is_fully_closed() && !socket.is_open() {
-                closed.push(i);
             }
         }
-
-        for &i in closed.iter().rev() {
-            self.piped_connections.swap_remove(i);
+        for i in over.into_iter().rev() {
+            let conn = self.piped_connections.swap_remove(i);
+            socket_set.remove(conn.handle);
+            if let Some(id) = conn.id {
+                self.sockets.remove(&id);
+            }
         }
     }
 
@@ -1490,6 +1702,8 @@ impl NetDaemon {
     fn process_pending(&mut self, socket_set: &mut SocketSet<'_>) {
         let now = Instant::now();
 
+        self.let_go_of_udp(socket_set);
+
         for pr in std::mem::take(&mut self.pending_udp_recvs) {
             if let Some(client) = self.deliver_datagram(pr.client, pr.socket_id, pr.max_len, socket_set) {
                 self.pending_udp_recvs.push(PendingUdpRecv { client, ..pr });
@@ -1530,7 +1744,7 @@ impl NetDaemon {
                 };
                 pc.client.result(&resp);
                 let pc = self.pending_piped_connects.swap_remove(i);
-                self.piped_connections.push(piped_connection(pc.handle, pc.pipes));
+                self.piped_connections.push(PipedConnection::new(pc.handle, pc.socket_id, pc.pipes));
                 continue;
             }
             if socket.state() == tcp::State::Closed {
@@ -1551,6 +1765,66 @@ impl NetDaemon {
                 continue;
             }
             i += 1;
+        }
+    }
+}
+
+impl NetDaemon {
+    /// How long until a pass is owed that no event brings: a pending
+    /// connect's deadline, or an orphan's limit.
+    fn wake_in(&self, now: Instant) -> Option<Duration> {
+        self.pending_piped_connects
+            .iter()
+            .filter_map(|pc| pc.deadline)
+            .chain(self.piped_connections.iter().filter_map(PipedConnection::orphan_deadline))
+            .min()
+            .map(|at| at.saturating_duration_since(now))
+    }
+
+    /// The clients waiting on a connect or a UDP receive. Each one's
+    /// connection is watched: hanging up makes it readable.
+    fn waiting_clients(&self) -> impl Iterator<Item = &Client> {
+        let connects = self.pending_piped_connects.iter().map(|pc| &pc.client);
+        connects.chain(self.pending_udp_recvs.iter().map(|pr| &pr.client))
+    }
+
+    /// Let go of every pending connect and UDP receive whose client `left`
+    /// says has hung up: a connect's socket, its id and its slot go with it,
+    /// now rather than when the handshake ends.
+    fn let_go(&mut self, socket_set: &mut SocketSet<'_>, left: impl Fn(&Client) -> bool) {
+        let mut i = 0;
+        while i < self.pending_piped_connects.len() {
+            if !left(&self.pending_piped_connects[i].client) {
+                i += 1;
+                continue;
+            }
+            let pc = self.pending_piped_connects.swap_remove(i);
+            socket_set.get_mut::<tcp::Socket>(pc.handle).abort();
+            socket_set.remove(pc.handle);
+            self.sockets.remove(&pc.socket_id);
+        }
+        self.pending_udp_recvs.retain(|pr| !left(&pr.client));
+    }
+
+    /// Close every UDP socket whose client has gone. A zero-byte write is
+    /// refused by name once the receive pipe has no reader; nothing wakes netd
+    /// for that, so it is asked on every pass, and a client that leaves
+    /// between passes is let go of on the next.
+    fn let_go_of_udp(&mut self, socket_set: &mut SocketSet<'_>) {
+        use toyos_abi::syscall::SyscallError;
+        let gone: Vec<u32> = self
+            .udp_pipes
+            .iter()
+            .filter(|(_, pipes)| {
+                toyos_abi::syscall::write_nonblock(pipes.rx_write.as_handle(), &[]) == Err(SyscallError::Gone)
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for id in gone {
+            if let Some(SocketKind::Udp(handle)) = self.sockets.remove(&id) {
+                socket_set.remove(handle);
+            }
+            self.udp_pipes.remove(&id);
         }
     }
 }
@@ -1663,7 +1937,7 @@ fn main() {
         Card::Virtio(_) => true,
     };
     let mac = nic.mac();
-    let mut device = DmaNic { nic };
+    let mut device = DmaNic { nic, tx_full: false };
 
     say!(
         "netd: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -1690,13 +1964,14 @@ fn main() {
 
     // Sized for the slot ceiling rather than for `max_piped`: the batch
     // between two `wait` calls is the two fixed registrations, at most two per live
-    // piped connection, one per pending connection and one per lookup, and the
-    // ceiling is what that can never exceed.
+    // piped connection, one per pending connection, one per lookup and one per
+    // pending receive, and the ceiling is what that can never exceed.
     let poller = Poller::new(
         FIXED_POLL_HANDLES
             + POLL_HANDLES_PER_PIPED * MAX_PIPED_SLOTS as u32
             + MAX_PENDING_CONNS
-            + LOOKUP_POLL_HANDLES,
+            + LOOKUP_POLL_HANDLES
+            + MAX_PENDING_RECVS,
     );
     const TOKEN_LISTENER: u64 = 0;
     const TOKEN_NIC: u64 = 1;
@@ -1708,6 +1983,8 @@ fn main() {
     const TOKEN_PENDING_BASE: u64 = 0x1_0000;
     // Clear of the pending range by the same margin.
     const TOKEN_LOOKUP_BASE: u64 = 0x2_0000;
+    // Clear of the lookup range by the same margin.
+    const TOKEN_WAITING_BASE: u64 = 0x3_0000;
 
     let mut pending: Vec<PendingConn> = Vec::new();
 
@@ -1728,6 +2005,7 @@ fn main() {
             link_up = link.is_up();
         }
         let now = SmoltcpInstant::from_millis(epoch.elapsed().as_millis() as i64);
+        device.tx_full = false;
         while iface.poll(now, &mut device, &mut socket_set) != PollResult::None {}
         device.nic.report();
 
@@ -1762,7 +2040,7 @@ fn main() {
 
         mdns.pass(&iface, &mut socket_set, Instant::now());
 
-        daemon.bridge_piped(&mut socket_set);
+        daemon.bridge_piped(&mut socket_set, Instant::now());
 
         daemon.serve_piped_listeners(&mut socket_set);
 
@@ -1774,14 +2052,15 @@ fn main() {
         // client's bytes and room wake the watches below.
         let smoltcp_due =
             iface.poll_delay(now, &socket_set).map_or(u64::MAX, |d| d.total_micros().saturating_mul(1000));
+        // Nothing smoltcp is due to do can go out until the device hands a
+        // transmit slot back, and that raises the NIC's interrupt.
+        let smoltcp_due = if device.tx_full { u64::MAX } else { smoltcp_due };
 
-        // A pending UDP receive or connect has no wake of its own.
-        let has_pending_async = !daemon.pending_udp_recvs.is_empty()
-            || !daemon.pending_piped_connects.is_empty();
-        let timeout = if has_pending_async {
-            smoltcp_due.min(Duration::from_millis(1).as_nanos() as u64)
-        } else {
-            smoltcp_due
+        // A pending connect's deadline and an orphan's limit are wakes of
+        // their own; everything else a pass is owed for is an event.
+        let timeout = match daemon.wake_in(Instant::now()) {
+            Some(left) => smoltcp_due.min(left.as_nanos() as u64),
+            None => smoltcp_due,
         };
 
         poller.watch(&acceptor, READABLE, TOKEN_LISTENER);
@@ -1793,9 +2072,11 @@ fn main() {
             // Only while the socket can take them: a pipe holding bytes is
             // readable until read, so its watch would complete on every pass
             // while the peer's window is shut. The ACK that makes room wakes
-            // the NIC.
-            let room = send_room(socket_set.get::<tcp::Socket>(conn.handle));
-            if let (true, Some(pipe)) = (room, &conn.tx_read) {
+            // the NIC. Once the socket sends nothing more, the pipe is watched
+            // for its client leaving, and the pass that reads it closes it.
+            let socket = socket_set.get::<tcp::Socket>(conn.handle);
+            let sending = matches!(socket.state(), tcp::State::Established | tcp::State::CloseWait);
+            if let (true, Some(pipe)) = (send_room(socket) || !sending, &conn.tx_read) {
                 poller.watch(pipe, READABLE, TOKEN_TX_PIPE_BASE + i as u64);
             }
             if let (true, Some(pipe)) = (conn.held, &conn.rx_write) {
@@ -1811,6 +2092,10 @@ fn main() {
         // which makes it readable.
         for client in daemon.resolver.clients() {
             poller.watch(&client.conn, READABLE, TOKEN_LOOKUP_BASE + client.conn.as_handle().0 as u64);
+        }
+        // So does one waiting on a connect or a UDP receive.
+        for client in daemon.waiting_clients() {
+            poller.watch(&client.conn, READABLE, TOKEN_WAITING_BASE + client.conn.as_handle().0 as u64);
         }
 
         let timeout = match mdns.wake_in(Instant::now()) {
@@ -1865,6 +2150,10 @@ fn main() {
         // done with it: its sockets and its slot are another client's.
         let spoke = |c: &Client| ready.contains(&(TOKEN_LOOKUP_BASE + c.conn.as_handle().0 as u64));
         daemon.resolver.let_go(&mut socket_set, |c| spoke(c) && c.gone());
+        // The same for a connect or a receive: its socket and its slot are
+        // another client's.
+        let spoke = |c: &Client| ready.contains(&(TOKEN_WAITING_BASE + c.conn.as_handle().0 as u64));
+        daemon.let_go(&mut socket_set, |c| spoke(c) && c.gone());
 
         // Accept and the request are two events. Nothing is read here: a client
         // that connects and then says nothing costs a slot and a deadline, not

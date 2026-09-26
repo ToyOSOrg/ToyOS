@@ -43,6 +43,7 @@ const NET: &[&str] = &[
     "net.lease.server",
     "net.link.state",
     "net.mac",
+    "net.piped.closing",
     "net.piped.live",
     "net.piped.max",
     "net.sockets.listeners",
