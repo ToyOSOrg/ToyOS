@@ -10,11 +10,12 @@
 //! `/boot` is read-only toward userland and the write direction is exercised
 //! on `/log`, which is the same adapter over the same driver. That split is
 //! the point rather than an accident of where the files went: `/boot` is what
-//! firmware and the bootloader read the machine out of, and it had no
-//! permission model at all — `fs::write("/boot/toyos/kernel.elf", "TEETH")`
-//! from an ordinary process truncated the kernel image to five bytes. The
-//! host's byte-for-byte check of the build artifacts is the other half of
-//! that; this half is the attack.
+//! firmware reads the loader off, and it had no permission model at all —
+//! `fs::write("/boot/toyos/kernel.elf", "TEETH")` from an ordinary process
+//! truncated the kernel image to five bytes, when the kernel lived here. The
+//! loader is the one binary left on it and the one no signature covers, so it
+//! is the file attacked. The host's byte-for-byte check of the build artifacts
+//! is the other half of that; this half is the attack.
 
 use std::fs;
 use std::io::Write;
@@ -34,8 +35,9 @@ const GUEST_BLOB: &str = "/log/guest-blob.bin";
 /// off-by-one in the size bookkeeping gets wrong.
 const BLOB_LEN: usize = 10 * 4096 + 137;
 
-/// The file whose truncation is the reason `/boot` has a permission model.
-const KERNEL: &str = "/boot/toyos/kernel.elf";
+/// The file whose truncation is the reason `/boot` has a permission model:
+/// the loader, which firmware runs and nothing verifies.
+const LOADER: &str = "/boot/EFI/BOOT/BOOTx64.EFI";
 
 fn blob() -> Vec<u8> {
     (0..BLOB_LEN).map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8).collect()
@@ -50,13 +52,13 @@ fn names(dir: &str) -> Vec<String> {
     out
 }
 
-/// The first 64 bytes of `kernel.elf`; a plain WRITE at offset 0 shows in content, not length.
-fn kernel_prefix() -> [u8; 64] {
-    let h = syscall::open(KERNEL.as_bytes(), OpenFlags::READ).expect("open kernel.elf for read");
+/// The first 64 bytes of the loader; a plain WRITE at offset 0 shows in content, not length.
+fn loader_prefix() -> [u8; 64] {
+    let h = syscall::open(LOADER.as_bytes(), OpenFlags::READ).expect("open the loader for read");
     let mut buf = [0u8; 64];
-    let n = syscall::read(h, &mut buf).expect("read kernel.elf prefix");
+    let n = syscall::read(h, &mut buf).expect("read the loader's prefix");
     syscall::close(h);
-    assert_eq!(n, buf.len(), "short read of kernel.elf prefix");
+    assert_eq!(n, buf.len(), "short read of the loader's prefix");
     buf
 }
 
@@ -70,7 +72,7 @@ fn main() {
     // The bootloader's own directory, which firmware and the build both put
     // there — so a listing that misses it is a listing, not a namespace.
     let toyos = names("/boot/toyos");
-    for want in ["kernel.elf", "log.guid", "host-note.txt"] {
+    for want in ["log.guid", "host-note.txt"] {
         assert!(toyos.iter().any(|n| n == want), "/boot/toyos has {toyos:?}, wanted {want}");
     }
     let root = names("/boot");
@@ -94,23 +96,23 @@ fn main() {
 ///
 /// One per syscall rather than one representative, because they are separate
 /// entry points and a gate on `open` alone would have said nothing about
-/// `unlink` or `rename`. The truncation of `kernel.elf` is first because it is
-/// the one that was actually done, by a guest test, to a real image.
+/// `unlink` or `rename`. The truncation is first because it is the one that was
+/// actually done, by a guest test, to a real image.
 fn boot_refuses_every_way_of_changing_it() {
-    let before = fs::metadata(KERNEL).expect("stat the kernel image").len();
-    assert!(before > 4096, "the kernel image is {before} bytes before we start");
+    let before = fs::metadata(LOADER).expect("stat the loader").len();
+    assert!(before > 4096, "the loader is {before} bytes before we start");
 
-    let err = fs::write(KERNEL, "TEETH").expect_err("truncating the kernel image was permitted");
-    println!("  PASS writing {KERNEL} is refused: {err}");
-    let after = fs::metadata(KERNEL).expect("stat the kernel image again").len();
-    assert_eq!(after, before, "the refused write changed the kernel image's length");
+    let err = fs::write(LOADER, "TEETH").expect_err("truncating the loader was permitted");
+    println!("  PASS writing {LOADER} is refused: {err}");
+    let after = fs::metadata(LOADER).expect("stat the loader again").len();
+    assert_eq!(after, before, "the refused write changed the loader's length");
 
     fs::write("/boot/toyos/new-file.txt", "x").expect_err("creating a file on /boot was permitted");
     fs::remove_file(HOST_NOTE).expect_err("deleting a file on /boot was permitted");
     fs::create_dir("/boot/toyos/newdir").expect_err("mkdir on /boot was permitted");
     fs::rename(HOST_NOTE, "/boot/toyos/moved.txt").expect_err("rename on /boot was permitted");
     assert!(
-        toyos_abi::syscall::symlink(b"/boot/toyos/kernel.elf", b"/boot/toyos/link").is_err(),
+        toyos_abi::syscall::symlink(b"/boot/EFI/BOOT/BOOTx64.EFI", b"/boot/toyos/link").is_err(),
         "symlink on /boot was permitted"
     );
 
@@ -126,22 +128,22 @@ fn boot_refuses_every_way_of_changing_it() {
     println!("  PASS create, delete, mkdir, rename and symlink are all refused on /boot");
 
     // The path checked must be the path opened, and plain WRITE is the hole: CREATE/TRUNCATE unlink the link.
-    let before = kernel_prefix();
-    assert_eq!(&before[..4], b"\x7fELF", "kernel.elf is not an ELF before the symlink attack");
-    syscall::symlink(b"../boot/toyos/kernel.elf", b"/tmp/evil").expect("a /tmp symlink is allowed");
+    let before = loader_prefix();
+    assert_eq!(&before[..2], b"MZ", "the loader is not a PE image before the symlink attack");
+    syscall::symlink(b"../boot/EFI/BOOT/BOOTx64.EFI", b"/tmp/evil").expect("a /tmp symlink is allowed");
     assert!(
         syscall::open(b"/tmp/evil", OpenFlags::WRITE).is_err(),
-        "a /tmp symlink opened {KERNEL} for writing",
+        "a /tmp symlink opened {LOADER} for writing",
     );
 
-    let reader = syscall::open(KERNEL.as_bytes(), OpenFlags::READ).expect("read /boot is allowed");
+    let reader = syscall::open(LOADER.as_bytes(), OpenFlags::READ).expect("read /boot is allowed");
     assert!(
         syscall::open(b"/tmp/evil", OpenFlags::WRITE).is_err(),
-        "a /tmp symlink opened {KERNEL} for writing while a /boot read handle was held",
+        "a /tmp symlink opened {LOADER} for writing while a /boot read handle was held",
     );
     syscall::close(reader);
-    assert_eq!(kernel_prefix(), before, "a refused symlink write still changed kernel.elf");
-    println!("  PASS a /tmp symlink to {KERNEL} is refused for writing");
+    assert_eq!(loader_prefix(), before, "a refused symlink write still changed the loader");
+    println!("  PASS a /tmp symlink to {LOADER} is refused for writing");
 }
 
 /// The write direction, on the volume userland is allowed to have.

@@ -17,6 +17,7 @@ pub mod device;
 pub mod endow;
 pub mod gpu;
 pub mod poller;
+pub mod wake;
 pub mod ipc;
 pub mod namespace;
 pub mod launch;

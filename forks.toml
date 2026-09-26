@@ -54,7 +54,19 @@
 # head, named below as `pr_branch`. It is not redundant with `toyos`: the PR sits
 # on whatever upstream commit the maintainer wants and carries only PR content,
 # while `toyos` stays on `base` and may carry local-build accommodations that
-# `not_pr_content` records. `toyos` is the branch every [patch] entry consumes.
+# `not_pr_content` records. The consumed branch is `branch`, or `toyos` where
+# none is named, and it is what every [patch] entry names.
+#
+# **One branch per upstream base.** A fork's branch is named for the release it
+# is built on (`toyos-0.30.13`), or is `toyos` where the fork has only ever
+# had one base; a fix or a repin is a commit appended to it, never a new
+# branch, and every lockfile pins a commit, so appending moves nothing already
+# built. A fork names `toyos-abi`, `toyos` and `toyos-window` by a range
+# (`">=0.12, <1"`): the tree's `[patch.crates-io]` path then answers it at
+# whatever minor the tree is on, so an SDK bump owes no fork a commit, and an
+# API a fork relied on that went away is a compile error. A fork that names
+# one version resolves the published crate beside the tree's instead, and
+# `src/sdkversion.rs` refuses any lockfile holding two versions of one.
 
 [meta]
 owner = "ToyOSOrg"
@@ -66,7 +78,7 @@ branch = "toyos"
 [socket2]
 upstream = "rust-lang/socket2"
 base = "v0.6.3"
-delta = "+1293/-11"
+delta = "+1295/-11"
 tier = "fork"
 why = "Full socket backend (src/sys/toyos.rs) over the ToyOS network syscalls."
 pr = "none — sendable once toyos-abi and toyos are on crates.io"
@@ -75,7 +87,7 @@ pr = "none — sendable once toyos-abi and toyos are on crates.io"
 upstream = "tokio-rs/mio"
 base = "844cf25"
 base_note = "two commits past v1.2.0; the tag itself gives a polluted diff"
-delta = "+775/-30"
+delta = "+778/-30"
 tier = "fork"
 why = "io_uring-driven selector, pipe waker, ToyOS TCP types."
 pr = "none — sendable once toyos-abi and toyos are on crates.io"
@@ -104,7 +116,7 @@ pr_note = "The PR is not a split of `toyos`: it sits on upstream main past v0.63
 upstream = "RustAudio/cpal"
 base = "v0.18.0"
 base_note = "45fe976. The `toyos` branch on b4ddd28 is left behind, unrewritten."
-branch = "toyos-0.18.0-sdk-0.2"
+branch = "toyos-0.18.0"
 delta = "+326"
 tier = "sibling"
 why = "Pure addition: a ToyOS host backend. Should become a `cpal-toyos` crate."
@@ -125,38 +137,22 @@ consumer's audio arithmetic moved.
 
 [winit]
 upstream = "rust-windowing/winit"
-base = "v0.31.0-beta.2"
-base_note = "f98ccf8. The `toyos` branch on c4afadbf, 57 commits past the tag, is left behind, unrewritten."
-branch = "toyos-0.31.0-beta.2-sdk-0.2"
-delta = "+1249"
-tier = "sibling"
-why = "Adds the winit-toyos sibling crate — the model case for this tier."
-pr = "none — winit-toyos must be published before upstream can depend on it by version"
+base = "v0.30.13"
+base_note = "e9809ef5, the release iced 0.14 resolves. Nothing in the tree consumes the 0.31 line (`toyos-0.31.0-beta.2`), which carried the same backend as the `winit-toyos` sibling crate."
+branch = "toyos-0.30.13"
+delta = "+1246/-1"
+tier = "fork"
+why = "The ToyOS backend, `platform_impl/toyos`: one compositor connection per window through `toyos-window`, one `window::Waiter` over every open window and the loop's wake, and a redraw asked for after `pre_present_notify` held until the compositor's frame event."
+pr = "none — 0.30 is a maintenance line that takes no new platform, and the backend's handle is rust-windowing/raw-window-handle#223, still open. The branch lives until iced moves to a winit that carries one."
 owed = "none"
-followup = "winit-toyos is ToyOS's own code still living inside the fork; move it to the monorepo once published"
-release_note = """
-All seven ToyOS commits cherry-picked clean and `winit-toyos`'s tree is
-byte-identical to the one on `toyos`: beta.2's `winit-core` carries every API it
-names. The 57 commits the old base stood on moved `winit-core` only by
-documentation, an `Ohos` variant added to `NativeKeyCode`/`NativeKey`, an
-`Error` impl on `ImeSurroundingTextError`, and a `Send + Sync` bound added to
-`OwnedDisplayHandle` — a bound the release does not ask for and this backend
-therefore does not have to satisfy.
-"""
-rwh_patch = """
-This fork's own root manifest carries a `[patch.crates-io]` for
-raw-window-handle, and it names the `toyos-0.6.2` branch: the crate resolves
-raw-window-handle 0.6, and the master-based `toyos` branch was handing every
-dependent the unreleased API that goes with it. The patch stays until #223 is
-released.
-"""
 
 [softbuffer]
 upstream = "rust-windowing/softbuffer"
 base = "v0.4.8"
 base_note = "d871852. The `toyos` branch on master's f0d20b9 is left behind, unrewritten."
-branch = "toyos-0.4.8-sdk-0.2"
-delta = "+155"
+branch = "toyos-0.4.8"
+branch_note = "The backend, then ToyOS named beside Redox wherever \"any other OS\" meant a free unix, so a dependent with the default features no longer builds x11, wayland and kms for it."
+delta = "+163/-2"
 tier = "sibling"
 why = "ToyOS surface backend."
 pr = "none — sendable once toyos-window is on crates.io"
@@ -197,8 +193,16 @@ thread-safety asserts sit differently. `src/toyos.rs` is byte-identical to
 [getrandom]
 upstream = "rust-random/getrandom"
 base = "v0.2.17 / v0.3.4 / v0.4.2"
-branches = ["toyos-0.2", "toyos-0.3", "toyos-0.4"]
-delta = "+14 / +19 / +19"
+branches = ["toyos-0.2-sdk-0.12", "toyos-0.3-sdk-0.12", "toyos-0.4"]
+branch_note = """
+A refused `SYS_RANDOM` is answered as `Error::UNEXPECTED` rather than
+discarded on all three. 0.4 is one branch. 0.2 and 0.3 are two each until the
+toolchain re-locks: `rust/Cargo.lock` pins `toyos-0.2` and `toyos-0.3` at the
+commit before that answer, so the tree's workspaces consume the branch that
+carries it, and `toyos-0.N` moves onto it when the toolchain does
+(`issues/build/the-toolchain-pins-an-older-commit-of-three-userland-forks.md`).
+"""
+delta = "+13 / +18 / +18"
 tier = "fork"
 why = "Three major versions are live in the dependency graph simultaneously."
 pr = "none — trivial delta, and the first candidate once toyos-abi is on crates.io"
@@ -209,12 +213,21 @@ base = "35b6a30"
 base_note = "0.9.0 plus two upstream commits; Cargo.toml version is relabelled 0.8.9 to satisfy a rustc pin"
 delta = "+341/-4"
 tier = "toolchain"
+branch_note = "The toolchain pins `toyos` in `rust/Cargo.lock`; `userland/` and `tests/toyos-rust-tests` consume `toyos-sdk-0.12`, `toyos` plus the SDK range, until the toolchain re-locks onto it (`issues/build/the-toolchain-pins-an-older-commit-of-three-userland-forks.md`)."
 why = "dlopen/dlsym over ToyOS."
 pr = "none — sendable once toyos-abi is on crates.io"
 
 [memmap2]
 upstream = "RazrFalcon/memmap2-rs"
 base = "v0.9.10"
+branch_note = """
+The toolchain consumes `toyos`. `tests/iced-counter` and
+`tests/toyos-rust-tests` consume `toyos-0.9.11`, which is the same
+`src/toyos.rs` on the v0.9.11 release, with no version relabel and none of
+the lint allowances the rustc build needs, and with `make_exec` refused as
+`map_exec` is: fontdb reads every font through a read-only `Mmap::map`, so on
+the stub iced found no system font at all. +167/-1 off v0.9.11.
+"""
 base_note = "Cargo.toml version is relabelled 0.2.1 to satisfy rustc_data_structures' pin"
 delta = "+173/-3"
 tier = "toolchain"
@@ -267,6 +280,30 @@ Two coherent end-states, exactly one of which should exist:
       and map_anon — the only two memmap2 APIs rustc uses — are correct here.
 Keeping both is the duplication the zero-technical-debt principle forbids.
 """
+
+[fontdb]
+upstream = "RazrFalcon/fontdb"
+base = "v0.23.0"
+base_note = "62cfd96, the release cosmic-text 0.15 (iced) resolves."
+branch = "toyos-0.23.0"
+delta = "+7"
+tier = "fork"
+why = "`load_system_fonts` scans `/system/share/fonts` on ToyOS, as it scans `/ui/fonts` on Redox — the arm it is modelled on line for line."
+pr = "none — prepared, not opened: https://github.com/RazrFalcon/fontdb/compare/master...ToyOSOrg:fontdb:add-toyos-system-fonts"
+pr_branch = "add-toyos-system-fonts"
+pr_note = "On upstream master (v0.24), +7, the Redox arm's shape. `target_os = \"toyos\"` is not a value rustc knows, so it draws an `unexpected_cfgs` warning; fontdb's CI does not deny warnings."
+
+[wgpu]
+upstream = "gfx-rs/wgpu"
+base = "v27.0.4"
+base_note = "af91efa93, the v27 branch head: wgpu 27.0.1, wgpu-core 27.0.3 and wgpu-hal 27.0.4 are all this tree, so the patch moves every wgpu crate to one source."
+branch = "toyos-27.0.4"
+delta = "+10/-3"
+tier = "fork"
+why = "`Instance::new` panicked on a target wgpu implements no backend for; it now makes the instance, which finds no adapter, so iced's default features fall back to tiny-skia. The native Vulkan and GL platforms are named once, so the backend aliases and the new `target_has_backend` cannot disagree."
+pr = "none — prepared, not opened: https://github.com/gfx-rs/wgpu/compare/trunk...ToyOSOrg:wgpu:instance-no-backend-target"
+pr_branch = "instance-no-backend-target"
+pr_note = "On trunk, +14/-4 with a CHANGELOG line whose PR number is filled in on opening, and trunk's Vulkan, DRM and GL platform sets each named once. It names no ToyOS: any target wgpu has no backend for gets the instance instead of the panic."
 
 [stacker]
 upstream = "rust-lang/stacker"

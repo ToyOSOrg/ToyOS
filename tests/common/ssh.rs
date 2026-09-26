@@ -109,6 +109,21 @@ pub fn ssh_exec(
     collected(&said, &out, &err)
 }
 
+/// Run `command` with the file `stdin` on its input and nothing asked
+/// before it: `ssh <machine> update < image`, as a test asks it.
+pub fn ssh_pipe(host: &str, port: u16, identity: &Identity, command: &str, stdin: &Path) -> Result<Exec, String> {
+    let (out, err, port) = capture(identity, port)?;
+    let said = client(&["pipe", host, &port, str(&identity.private), str(&out), str(&err), str(stdin), command])?;
+    collected(&said, &out, &err)
+}
+
+/// Ask for `command` and answer the guest's reply to the request, without
+/// waiting for the program: `reboot`, whose status no client can collect.
+pub fn ssh_fire(host: &str, port: u16, identity: &Identity, command: &str) -> Result<String, String> {
+    let said = client(&["fire", host, &port.to_string(), str(&identity.private), command])?;
+    Ok(said.lines().last().unwrap_or("").to_string())
+}
+
 /// Run `command` with `stdin` on its input, after asking the guest to set an
 /// environment variable. `Ok`'s second half is what it answered that request.
 pub fn ssh_feed(

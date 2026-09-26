@@ -1,0 +1,10 @@
+[package]
+name = "swap"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../toyos" }
+# The words init and the host say about a swap, and the digest it is held to.
+toyos-swap = { path = "../../toyos-swap" }

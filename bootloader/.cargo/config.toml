@@ -1,6 +1,13 @@
 [build]
 target = "x86_64-unknown-uefi"
-rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes"]
+rustflags = [
+    "-Dwarnings",
+    "-Cforce-frame-pointers=yes",
+    # `ed25519-dalek`'s field arithmetic in plain 64-bit integers: its default
+    # on x86-64 is the AVX2 backend, which this soft-float target has no
+    # registers for.
+    "--cfg=curve25519_dalek_backend=\"serial\"",
+]
 
 [target.x86_64-unknown-uefi]
 linker = "toyos-ld"

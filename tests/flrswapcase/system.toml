@@ -20,7 +20,10 @@ devices = ["pci:8086:10d3", "pci:8086:10c9"]
 
 [programs.sshd]
 service = true
-receives = ["netd", "launcher", "swap"]
+receives = ["netd", "launcher"]
+
+[programs.swap]
+receives = ["swap"]
 
 [programs.test-runner]
 syscap = ["logread"]

@@ -133,6 +133,8 @@ struct ProgramConfig {
     /// `toyos_manifest::syscap_rights` takes. A handful of rows in the whole
     /// tree declare one.
     syscap: Vec<String>,
+    /// The idle slot, granted as partition claims (`toyos_manifest::Program::slots`).
+    slots: bool,
     /// A system service: init starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
     service: bool,
@@ -431,6 +433,12 @@ struct GuestEnv {
     /// rustc is built from (`src/compiler.rs`).
     primary_compiler: bool,
     path: String,
+    /// The public key the loader and `/system/bin/update` embed
+    /// (`signing::KEY_ENV`): every guest build carries it, so no crate that
+    /// names it can be built without it.
+    image_key: String,
+    /// Whose floor the loader keeps (`signing::FLOOR_ENV`), which follows the key.
+    floor_scope: &'static str,
 }
 
 impl GuestEnv {
@@ -439,6 +447,8 @@ impl GuestEnv {
             toolchain: sysroot.dir.clone(),
             primary_compiler: sysroot.primary_compiler,
             path: toolchain::path_with_toyos_ld(root),
+            image_key: crate::signing::key().public_hex(),
+            floor_scope: crate::signing::key().floor_scope().word(),
         }
     }
 }
@@ -462,6 +472,8 @@ fn cargo_build(
         .env("RUSTUP_TOOLCHAIN", &env.toolchain)
         .env_remove("RUSTFLAGS")
         .env("PATH", &env.path)
+        .env(crate::signing::KEY_ENV, &env.image_key)
+        .env(crate::signing::FLOOR_ENV, env.floor_scope)
         .env_remove("RUSTC");
     for (k, v) in extra_env {
         cmd.env(k, v);
@@ -527,9 +539,10 @@ fn kernel_key(arch: Arch, features: &str) -> u64 {
     key_hash(&[PROFILE, arch.name(), features])
 }
 
-/// The loader's build key: its profile and its architecture.
-fn loader_key(arch: Arch) -> u64 {
-    key_hash(&[PROFILE, arch.name()])
+/// The loader's build key: its profile, its architecture, and the key and
+/// floor scope it embeds.
+fn loader_key(arch: Arch, image_key: &str, floor_scope: &str) -> u64 {
+    key_hash(&[PROFILE, arch.name(), image_key, floor_scope])
 }
 
 fn key_hash(parts: &[&str]) -> u64 {
@@ -666,12 +679,15 @@ const INIT_PROGRAM: &str = "init";
 /// rather than a constant here and a string in init.
 const INIT_SERVED: &[&str] = &["launcher", toyos_swap::PORT];
 
-/// Who may hold the swap port in `config`: [`toyos_swap::HOLDER`] and nothing
-/// else — no other `[programs]` row and never `[apps]`.
+/// Who may hold the two authorities that change what the machine runs:
+/// the swap port, [`toyos_swap::HOLDER`] and nothing else — no other
+/// `[programs]` row and never `[apps]` — and the idle slot,
+/// [`toyos_update::slots::HOLDER`] alone.
 ///
 /// **Checked on every manifest rendered, not only on the committed configs**,
-/// because the holder of this connector can replace any service's binary.
-fn swap_is_sshds_alone(config: &SystemConfig) -> Result<(), String> {
+/// because the holder of the one can replace any service's binary and the
+/// holder of the other writes the image the machine boots next.
+fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
     for (name, program) in &config.programs {
         if name != toyos_swap::HOLDER && program.receives.iter().any(|r| r == toyos_swap::PORT) {
             return Err(format!(
@@ -679,6 +695,9 @@ fn swap_is_sshds_alone(config: &SystemConfig) -> Result<(), String> {
                 toyos_swap::PORT,
                 toyos_swap::HOLDER
             ));
+        }
+        if name != toyos_update::slots::HOLDER && program.slots {
+            return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
         }
     }
     if config.apps.receives.iter().any(|r| r == toyos_swap::PORT) {
@@ -693,7 +712,7 @@ fn swap_is_sshds_alone(config: &SystemConfig) -> Result<(), String> {
 /// round-trip test is what makes "what the build writes is what init reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {
-    if let Err(why) = swap_is_sshds_alone(config) {
+    if let Err(why) = held_by_their_holders_alone(config) {
         panic!("system.toml cannot be rendered as a manifest: {why}");
     }
     let mut names: Vec<&String> = config.programs.keys().collect();
@@ -712,6 +731,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     receives: cfg.receives.clone(),
                     devices: cfg.devices.clone(),
                     syscap: cfg.syscap.clone(),
+                    slots: cfg.slots,
                     service: cfg.service,
                 }
             })
@@ -934,6 +954,10 @@ pub struct Plan {
     pub config: PathBuf,
     pub features: Vec<String>,
     pub params: Vec<String>,
+    /// The version the image's signed header names.
+    pub version: u64,
+    /// Room for a second slot, or none: a machine that cannot update itself.
+    pub second: Option<image::SecondSlot>,
 }
 
 impl Plan {
@@ -943,6 +967,8 @@ impl Plan {
             config: config.to_path_buf(),
             features: features.iter().map(|f| (*f).to_string()).collect(),
             params: params.iter().map(|p| (*p).to_string()).collect(),
+            version: image::version_now(),
+            second: None,
         }
     }
 }
@@ -970,6 +996,8 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
         config: boot.config.clone(),
         features: features.split(',').filter(|f| !f.is_empty()).map(Into::into).collect(),
         params: param,
+        version: image::version_now(),
+        second: None,
     }
 }
 
@@ -1235,6 +1263,10 @@ fn check_params(root: &Path, params: &[String]) {
 const VALUED_PARAMS: &[(&str, &str)] = &[
     ("toyos_blackbox::PARAM", toyos_blackbox::PARAM),
     ("toyos_tco::DEADLINE_PARAM", toyos_tco::DEADLINE_PARAM),
+    // The loader's words about the slot it booted, appended as it appends the
+    // black box's.
+    ("toyos_abi::boot::SLOT_PARAM", toyos_abi::boot::SLOT_PARAM),
+    ("toyos_abi::boot::SLOT_REFUSED_PARAM", toyos_abi::boot::SLOT_REFUSED_PARAM),
 ];
 
 /// The names in [`VALUED_PARAMS`], for a refusal that says what it would have
@@ -1700,12 +1732,12 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
 /// [`buildlock::artifact`], since the stage below copies the shared cargo path.
 /// Stage the loader `arch`'s build just wrote, under the key that names it.
 /// The caller holds [`buildlock::artifact`], as [`stage_and_certify_kernel`]'s does.
-fn stage_loader(root: &Path, arch: Arch) -> PathBuf {
+fn stage_loader(root: &Path, arch: Arch, env: &GuestEnv) -> PathBuf {
     stage_artifact(
         root,
         &root.join(format!("bootloader/target/{}/{PROFILE}/bootloader.efi", arch.loader())),
         &format!("bootloader-{}.efi", arch.name()),
-        loader_key(arch),
+        loader_key(arch, &env.image_key, env.floor_scope),
     )
 }
 
@@ -1741,10 +1773,6 @@ pub fn build(
     rebuild_toolchain: bool,
     plan: &Plan,
 ) -> PathBuf {
-    let kernel_features = plan.features.join(",");
-    let arch = plan.arch;
-    let params = plan.params.join(",");
-
     // Every lock below is `build_test_image`'s own, and the flags it cannot
     // combine with were refused before any of them.
     if boot.case {
@@ -1754,6 +1782,68 @@ pub fn build(
             .unwrap_or_else(|e| panic!("write {}: {e}", image_path.display()));
         return image_path;
     }
+
+    let (kernel_bytes, bl_bytes, root_bytes) = shipped_parts(root, &boot, rebuild_toolchain, plan);
+    let key = said_key(plan);
+    // A machine this image is flashed onto updates itself, so it carries
+    // the second slot an update is written to, with room for a ROOT twice
+    // this one's size.
+    let second = image::SecondSlot { root_bytes: 2 * root_bytes.len() as u64 };
+    let disk_bytes = image::create_boot_image(
+        plan.arch,
+        &kernel_bytes,
+        &bl_bytes,
+        &root_bytes,
+        &plan.params.join(","),
+        image::Signing { key, version: plan.version },
+        Some(second),
+    );
+    let image_path = root.join(boot.image_for(plan.arch));
+    fs::write(&image_path, disk_bytes).expect("Failed to write image");
+
+    let nvme_path = root.join("target/nvme.img");
+    if !nvme_path.exists() {
+        create_sparse(&nvme_path, 1024 * 1024 * 1024);
+    }
+
+    image_path
+}
+
+/// The image `ssh <machine> update` takes, of the boot `boot` names, written
+/// to `out`: the same kernel, parameter and ROOT [`build`] would put in a
+/// slot, signed with this run's key at the plan's version.
+pub fn build_update(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan, out: &Path) {
+    assert!(!boot.case, "an update image is built from a mode's config, and a case's image is a test's");
+    let (kernel_bytes, _, root_bytes) = shipped_parts(root, boot, rebuild_toolchain, plan);
+    let key = said_key(plan);
+    let bytes = image::update_image(
+        &kernel_bytes,
+        &root_bytes,
+        &plan.params.join(","),
+        image::Signing { key, version: plan.version },
+    );
+    fs::write(out, bytes).unwrap_or_else(|e| panic!("write {}: {e}", out.display()));
+}
+
+/// This run's key, said with whose it is and the version it signs.
+fn said_key(plan: &Plan) -> &'static crate::signing::Key {
+    let key = crate::signing::key();
+    println!(
+        "Signed with {} {} at version {}",
+        match key.whose() {
+            crate::signing::Whose::Owner(_) => "the owner's key",
+            crate::signing::Whose::Throwaway => "this checkout's throwaway key",
+        },
+        key.fingerprint(),
+        plan.version
+    );
+    key
+}
+
+/// The kernel, the loader and ROOT a mode's image is made of.
+fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let kernel_features = plan.features.join(",");
+    let arch = plan.arch;
 
     // Before every build lock, which is the order `buildlock`'s header fixes.
     // What it bounds is the host: ten agents' builds spend the same fourteen
@@ -1793,23 +1883,14 @@ pub fn build(
         kernel_handle.join().expect("kernel build thread panicked");
         (
             stage_and_certify_kernel(root, &kernel_features, &env, arch),
-            stage_loader(root, arch),
+            stage_loader(root, arch, &env),
         )
     };
 
     let root_bytes = build_and_assemble(root, &config, &env, &[], false, arch);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
-    let disk_bytes = image::create_boot_image(arch, &kernel_bytes, &bl_bytes, &root_bytes, &params);
-    let image_path = root.join(boot.image_for(arch));
-    fs::write(&image_path, disk_bytes).expect("Failed to write image");
-
-    let nvme_path = root.join("target/nvme.img");
-    if !nvme_path.exists() {
-        create_sparse(&nvme_path, 1024 * 1024 * 1024);
-    }
-
-    image_path
+    (kernel_bytes, bl_bytes, root_bytes)
 }
 
 /// Create an empty disk image the guest sees at full size and the host pays
@@ -1899,15 +1980,16 @@ static BOOTLOADER: Memo = Memo::new();
 static ROOT_IMAGE: Memo = Memo::new();
 
 /// What the ROOT image is a function of: the config naming the programs, the
-/// architecture and whether they are built at all, and the files the caller
-/// adds to it. Hashed whole: a key over the test binaries'
+/// architecture and whether they are built at all, the key its
+/// `/system/bin/update` embeds, and the files the caller adds to it. Hashed whole: a key over the test binaries'
 /// names and lengths would call two different builds of one binary the same
 /// image.
-fn root_image_key(plan: &Plan, extra_files: &[(String, Vec<u8>)]) -> u64 {
+fn root_image_key(plan: &Plan, image_key: &str, extra_files: &[(String, Vec<u8>)]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     plan.config.hash(&mut h);
     plan.arch.hash(&mut h);
+    image_key.hash(&mut h);
     for (name, data) in extra_files {
         name.hash(&mut h);
         data.hash(&mut h);
@@ -1928,6 +2010,44 @@ pub fn build_test_image(
     quiet: bool,
     extra_files: &[(String, Vec<u8>)],
 ) -> Vec<u8> {
+    let parts = build_test_parts(root, plan, quiet, extra_files);
+    image::create_boot_image(
+        plan.arch,
+        &parts.kernel,
+        &parts.bootloader,
+        &parts.root,
+        &plan.params.join(","),
+        image::Signing { key: crate::signing::key(), version: plan.version },
+        plan.second,
+    )
+}
+
+/// The image `ssh … update` takes, built from a plan as a test image is and
+/// signed with this process's key at the plan's version.
+pub fn build_update_image(root: &Path, plan: &Plan, quiet: bool, extra_files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let parts = build_test_parts(root, plan, quiet, extra_files);
+    image::update_image(
+        &parts.kernel,
+        &parts.root,
+        &plan.params.join(","),
+        image::Signing { key: crate::signing::key(), version: plan.version },
+    )
+}
+
+/// The three parts one image is made of, each memoized for this process.
+pub struct Parts {
+    pub kernel: Arc<Vec<u8>>,
+    pub bootloader: Arc<Vec<u8>>,
+    pub root: Arc<Vec<u8>>,
+}
+
+/// [`Parts`] for a plan: built, or this process's memo of them.
+pub fn build_test_parts(
+    root: &Path,
+    plan: &Plan,
+    quiet: bool,
+    extra_files: &[(String, Vec<u8>)],
+) -> Parts {
     let config_path = plan.config.as_path();
     let (kernel_features, kernel_params) = (&plan.features, &plan.params);
     let config = parse_config(config_path);
@@ -1942,18 +2062,20 @@ pub fn build_test_image(
             || kernel_features.iter().eq(TEST_KERNEL.iter().copied()),
         "a boot asking for {kernel_params:?} must boot the test kernel, not {kernel_features:?}"
     );
-    let params = kernel_params.join(",");
     let arch = plan.arch;
     let kernel_key = kernel_key(arch, &features);
-    let bl_key = loader_key(arch);
-    let root_image_key = root_image_key(plan, extra_files);
+    // The loader and ROOT (whose `/system/bin/update` embeds it) are each a
+    // function of the key this process signs with.
+    let image_key = crate::signing::key().public_hex();
+    let bl_key = loader_key(arch, &image_key, crate::signing::key().floor_scope().word());
+    let root_image_key = root_image_key(plan, &image_key, extra_files);
 
     // Nothing left to build, so nothing for the lock, the toolchain check or the
     // staleness sweep to protect.
-    if let (Some(kernel), Some(bl), Some(root)) =
+    if let (Some(kernel), Some(bootloader), Some(root)) =
         (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), ROOT_IMAGE.get(root_image_key))
     {
-        return image::create_boot_image(arch, &kernel, &bl, &root, &params);
+        return Parts { kernel, bootloader, root };
     }
 
     // A cache miss is shared setup, not a property of whichever test happened
@@ -1998,7 +2120,7 @@ pub fn build_test_image(
         });
         let bl = BOOTLOADER.get_or_build(bl_key, || {
             cargo_build(&root.join("bootloader"), arch.loader(), &[], &env, &[], quiet);
-            fs::read(stage_loader(root, arch)).expect("Failed to read staged bootloader")
+            fs::read(stage_loader(root, arch, &env)).expect("Failed to read staged bootloader")
         });
         (kernel, bl)
     };
@@ -2009,7 +2131,7 @@ pub fn build_test_image(
 
     drop(build_timer);
 
-    image::create_boot_image(arch, &kernel_bytes, &bl_bytes, &root_bytes, &params)
+    Parts { kernel: kernel_bytes, bootloader: bl_bytes, root: root_bytes }
 }
 
 /// The host binaries the network judges drive, built here rather than inside a
@@ -2976,6 +3098,8 @@ mod tests {
         "tests/sshdcase/system.toml",
         "tests/swapcase/system.toml",
         "tests/testcases/system.toml",
+        "tests/toolkitcase/system.toml",
+        "tests/updatecase/system.toml",
     ];
 
     fn load(cfg: &str) -> SystemConfig {
@@ -3014,21 +3138,27 @@ mod tests {
         assert!(receives_have_providers(&bad).is_err());
     }
 
-    /// The swap port reaches sshd and nothing else, in every committed config
-    /// and in a config that tries either other door.
+    /// The swap port reaches `swap` and nothing else, and the idle slot
+    /// `update` and nothing else, in every committed config and in a config
+    /// that tries any other door.
     #[test]
-    fn only_sshd_may_receive_the_swap_port() {
+    fn only_their_holders_may_hold_the_swap_port_and_the_slots() {
         for cfg in ALL_CONFIGS {
-            swap_is_sshds_alone(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+            held_by_their_holders_alone(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let sshd: SystemConfig =
-            toml::from_str("[programs.sshd]\nreceives = [\"netd\", \"swap\"]\n").unwrap();
-        assert!(swap_is_sshds_alone(&sshd).is_ok());
+        let ok: SystemConfig =
+            toml::from_str("[programs.swap]\nreceives = [\"swap\"]\n[programs.update]\nslots = true\n").unwrap();
+        assert!(held_by_their_holders_alone(&ok).is_ok());
         let shell: SystemConfig =
             toml::from_str("[programs.shell]\nreceives = [\"swap\"]\n").unwrap();
-        assert!(swap_is_sshds_alone(&shell).is_err());
+        assert!(held_by_their_holders_alone(&shell).is_err());
+        let sshd: SystemConfig =
+            toml::from_str("[programs.sshd]\nreceives = [\"netd\", \"swap\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&sshd).is_err());
         let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"swap\"]\n").unwrap();
-        assert!(swap_is_sshds_alone(&apps).is_err());
+        assert!(held_by_their_holders_alone(&apps).is_err());
+        let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
+        assert!(held_by_their_holders_alone(&slots).is_err());
     }
 
     /// `[apps] receives` is narrower than a program's: a `provides` name is one
