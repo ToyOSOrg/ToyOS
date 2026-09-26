@@ -327,7 +327,7 @@ pub(crate) fn remove(root: &Path, path: &str) {
     if !swept.is_empty() {
         eprintln!("removed {} sysroot(s) no worktree names any more", swept.len());
     }
-    let swept = crate::compiler::sweep(root);
+    let swept = crate::compiler::sweep(root, &crate::toolchain::rust_dir(root));
     if !swept.is_empty() {
         eprintln!("removed {} compiler(s) no worktree names any more", swept.len());
     }

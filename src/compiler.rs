@@ -26,7 +26,7 @@
 //! directory is written.
 //!
 //! A compiler no worktree names any more is removed by [`sweep`], which
-//! `--worktree remove` runs: each build records the key it used in its
+//! `--worktree remove` and every placement run: each build records the key it used in its
 //! worktree's `target/`, and a key no registered worktree records, that nobody
 //! is making or using, goes.
 //!
@@ -202,6 +202,7 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
     let dir = compilers_dir(rust_dir).join(&key);
     fs::create_dir_all(recorded.parent().expect("a file under target/")).ok();
     fs::write(&recorded, &key).unwrap_or_else(|e| panic!("write {}: {e}", recorded.display()));
+    let mut placed = false;
     let using = loop {
         let using = buildlock::keyed_using(root, Keyed::Compiler, &key);
         if dir.join(SOURCE).is_file() {
@@ -211,8 +212,16 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
         let _building = buildlock::keyed_building(root, Keyed::Compiler, &key);
         if !dir.join(SOURCE).is_file() {
             place(root, fork, &key, &dir, &build);
+            placed = true;
         }
     };
+    // A compiler edit loop places one per edit, and the one this replaced is
+    // named by nobody now; the one in use is held, so the sweep leaves it.
+    if placed {
+        for gone in sweep(root, rust_dir) {
+            eprintln!("Removed compiler {}: no worktree names it", gone.display());
+        }
+    }
     Compiler { stage2: dir.join("stage2"), record: dir.join(SOURCE), primary: false, _using: Some(using) }
 }
 
@@ -297,8 +306,8 @@ pub fn recorded_key(root: &Path) -> Option<String> {
 
 /// Remove every compiler no registered worktree records and nobody is making
 /// or using, and every half-built one nobody is making. Returns what went.
-pub fn sweep(root: &Path) -> Vec<PathBuf> {
-    let dir = compilers_dir(&toolchain::rust_dir(root));
+pub fn sweep(root: &Path, rust_dir: &Path) -> Vec<PathBuf> {
+    let dir = compilers_dir(rust_dir);
     let Ok(entries) = fs::read_dir(&dir) else { return Vec::new() };
     let named: std::collections::BTreeSet<String> = git_out(root, &["worktree", "list", "--porcelain"])
         .lines()
@@ -484,12 +493,22 @@ mod tests {
         // not while it is still in use, though nobody names it any more.
         let orphan = ca2.stage2.parent().unwrap().to_path_buf();
         choose(&a, &rust_dir, &a.join("rust"), fake);
-        assert_eq!(sweep(&primary), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
+        assert_eq!(sweep(&primary, &rust_dir), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
         assert!(ca2.stage2.is_dir());
         drop((mine, ca, cb, again, ca2, committed));
         let kept = choose(&a, &rust_dir, &a.join("rust"), fake);
-        assert_eq!(sweep(&primary), [orphan], "the sweep took a compiler a worktree names, or left one nobody does");
+        assert_eq!(sweep(&primary, &rust_dir), [orphan], "the sweep took a compiler a worktree names, or left one nobody does");
         assert!(kept.stage2.is_dir());
+
+        // A placement sweeps too: the compiler an edit replaces goes once nobody
+        // uses it, and the one another worktree names stays.
+        let replaced = kept.stage2.parent().unwrap().to_path_buf();
+        let named = choose(&b, &rust_dir, &b.join("rust"), fake).stage2;
+        drop(kept);
+        write(&a.join("rust/compiler/rustc_target/src/another.rs"), "pub fn u() {}\n");
+        let ca3 = choose(&a, &rust_dir, &a.join("rust"), fake);
+        assert!(!replaced.exists(), "placing a compiler left the one it replaced, which nobody names");
+        assert!(ca3.stage2.is_dir() && named.is_dir());
     }
     /// **A primary with no record of its compiler is refused by name**, never
     /// read as "no compiler": that reading made every worktree build its own.
