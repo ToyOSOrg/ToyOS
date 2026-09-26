@@ -98,3 +98,8 @@ The storage track's users and mount-protocol stages do not block this one.
    image then carries none of them; `pkg install <url>` brings them. Blocked
    by stage 6.
    Installing by name (`pkg install snake`) needs an index and is undesigned.
+   **Doom goes at this stage too** (owner ruling, 2026-09-26): the `doom`
+   crate with the doomgeneric C it compiles, `assets/DOOM1.WAD`, and
+   `assets/soundfont.sf2`, which doom alone opens, leave the image as one
+   installable package. Until they do, `src/licence.rs` names each as an
+   exception pending this stage.
