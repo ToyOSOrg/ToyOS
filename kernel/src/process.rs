@@ -1223,7 +1223,7 @@ fn futex_word(addr: UserAddr) -> Option<crate::mm::DirectMap> {
     if !addr.raw().is_multiple_of(4) {
         return None;
     }
-    crate::user_ptr::translate_user(addr)
+    crate::user_ptr::translate_user(addr, crate::user_ptr::Access::Read)
 }
 
 /// Atomically check a user futex word and block if it matches `expected`. Returns 0 if woken/never blocked, 1 if timed out, an error if `addr` names no word this process may have.

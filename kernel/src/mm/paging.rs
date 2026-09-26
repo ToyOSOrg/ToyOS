@@ -628,17 +628,35 @@ impl AddressSpace {
     /// Checked here, not at the callers: a user space shallow-copies the
     /// kernel PML4 half, so a kernel address would otherwise walk to a writable kernel page.
     pub fn translate(&self, vaddr: UserAddr) -> Option<super::DirectMap> {
+        self.walk(vaddr).map(|(dm, _)| dm)
+    }
+
+    /// As [`translate`](Self::translate), but only where a user store would
+    /// land: every level of the walk grants `USER` and `WRITE`, as the MMU
+    /// demands of a ring 3 store under `CR0.WP`. A kernel copy into user
+    /// memory goes through this, so a syscall cannot write a page the process
+    /// itself may not — the clock page, a shared library's `.text`.
+    pub fn translate_writable(&self, vaddr: UserAddr) -> Option<super::DirectMap> {
+        const STORE: u64 = PAGE_USER | PAGE_WRITE;
+        self.walk(vaddr).and_then(|(dm, rights)| (rights & STORE == STORE).then_some(dm))
+    }
+
+    /// The direct-map address of `vaddr` and the rights every level of its walk grants in common.
+    fn walk(&self, vaddr: UserAddr) -> Option<(super::DirectMap, u64)> {
         let va = vaddr.raw();
         if !toyos_userbound::is_user_addr(va) {
             return None;
         }
         let (pml4_idx, pdpt_idx, pd_idx) = indices(va);
+        let pml4e = self.root[pml4_idx];
         let pdpt = self.root.child(pml4_idx)?;
+        let pdpte = pdpt[pdpt_idx];
         let pd = pdpt.child(pdpt_idx)?;
         let pde = pd[pd_idx];
         if pde & PAGE_PRESENT == 0 {
             return None;
         }
+        let rights = pml4e & pdpte & pde;
         if pde & PAGE_SIZE_BIT == 0 {
             // A window `map_window` split, so the leaf is one level down.
             let pt = pd.child(pd_idx)?;
@@ -646,11 +664,12 @@ impl AddressSpace {
             if pte & PAGE_PRESENT == 0 {
                 return None;
             }
-            return Some(super::DirectMap::from_phys((pte & ADDR_MASK) + (va & 0xFFF)));
+            let dm = super::DirectMap::from_phys((pte & ADDR_MASK) + (va & 0xFFF));
+            return Some((dm, rights & pte));
         }
         let page_phys = pde & ADDR_MASK_2M;
         let offset = va & (PAGE_2M - 1);
-        Some(super::DirectMap::from_phys(page_phys + offset))
+        Some((super::DirectMap::from_phys(page_phys + offset), rights))
     }
 
     /// Find a free gap of at least `size` bytes (2MB-aligned), searching
