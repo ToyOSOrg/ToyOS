@@ -57,7 +57,7 @@
 //!   timer's.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 
 use crate::arch::{cpu, percpu, pmu, smp, trap};
 use crate::sched::MAX_CPUS;
@@ -317,8 +317,8 @@ pub fn spinning_on(lock: u64, at: &'static core::panic::Location<'static>) -> Sp
     let was = Spinning { lock: SPIN_LOCK[me].load(Relaxed), at: SPIN_AT[me].load(Relaxed) };
     SPIN_AT[me].store(at as *const _ as u64, Relaxed);
     // Last, and what the reader tests: a non-zero lock means the site beside it
-    // was already stored.
-    SPIN_LOCK[me].store(lock, Relaxed);
+    // was already stored — `Release`, so that holds on another CPU's record.
+    SPIN_LOCK[me].store(lock, Release);
     was
 }
 
@@ -328,7 +328,7 @@ pub fn spinning_on_nothing(was: Spinning) {
     let me = percpu::cpu_id() as usize;
     if me < MAX_CPUS {
         SPIN_AT[me].store(was.at, Relaxed);
-        SPIN_LOCK[me].store(was.lock, Relaxed);
+        SPIN_LOCK[me].store(was.lock, Release);
     }
 }
 
@@ -350,7 +350,9 @@ struct Waiting(usize);
 
 impl fmt::Display for Waiting {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lock = SPIN_LOCK[self.0].load(Relaxed);
+        // `Acquire`: pairs with the store that set it, so the site read below is
+        // at least the one stored before it.
+        let lock = SPIN_LOCK[self.0].load(Acquire);
         if lock == 0 {
             return Ok(());
         }

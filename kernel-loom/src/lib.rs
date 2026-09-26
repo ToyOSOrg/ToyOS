@@ -360,3 +360,8 @@ pub mod capture_latch;
 
 #[path = "../../kernel/src/drivers/panic_console/access.rs"]
 pub mod capture_access;
+
+/// The panic console's published framebuffer descriptor, driven by
+/// `tests/panic_console_publish.rs`.
+#[path = "../../kernel/src/drivers/panic_console/published.rs"]
+pub mod panic_console_published;

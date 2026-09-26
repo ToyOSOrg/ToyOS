@@ -19,6 +19,11 @@ loom = []
 # with either fence removed behaves identically, which is the whole reason the
 # obligation is a model.
 wake-fence-off = []
+# The same for the panic console's published descriptor: `kernel-loom` turns it on
+# to drop the publisher's `Release` fence from `drivers/panic_console/published.rs`,
+# and `kernel-loom/tests/panic_console_publish.rs` must red — a reader keeping a
+# descriptor that is half one publication and half the next.
+seqlock-writer-fence-off = []
 # The same arrangement for a poll ring's one-shot answer: `kernel-loom` turns it
 # on to split `inbox/once.rs`'s exchange into a load and a store, and
 # `kernel-loom/tests/poll_once.rs` must red when it does — a poll two posts

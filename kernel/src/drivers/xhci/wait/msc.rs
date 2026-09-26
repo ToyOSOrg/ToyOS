@@ -719,7 +719,9 @@ pub(in crate::drivers::xhci) mod staged {
     pub fn arm(n: u8, fault: Fault, only: Option<u8>) {
         FAULT.store(fault as u8, Ordering::Relaxed);
         ONLY.store(only.map_or(ANY, u16::from), Ordering::Relaxed);
-        LEFT.store(n, Ordering::Relaxed);
+        // Last and `Release`: the disk that takes a fault may be on another CPU,
+        // and what it takes has to be what was staged with the count it saw.
+        LEFT.store(n, Ordering::Release);
     }
 
     /// Take back whatever was staged and never taken, and say how many: a
@@ -777,14 +779,19 @@ pub(in crate::drivers::xhci) mod staged {
 
     /// The fault the command about to go out was staged with, if any.
     pub fn take(opcode: u8) -> Option<Fault> {
+        // The count first and `Acquire`, pairing with `arm`'s `Release`: the
+        // opcode and the fault read after it are the ones staged with it.
+        let mut left = LEFT.load(Ordering::Acquire);
+        if left == 0 {
+            return None;
+        }
         let only = ONLY.load(Ordering::Relaxed);
         if only != ANY && only != u16::from(opcode) {
             return None;
         }
-        let mut left = LEFT.load(Ordering::Relaxed);
         loop {
             let less = left.checked_sub(1)?;
-            match LEFT.compare_exchange_weak(left, less, Ordering::Relaxed, Ordering::Relaxed) {
+            match LEFT.compare_exchange_weak(left, less, Ordering::Acquire, Ordering::Acquire) {
                 Ok(_) => break,
                 Err(now) => left = now,
             }

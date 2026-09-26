@@ -178,6 +178,18 @@ device-irq-lossy = []
 # the same name only so `cfg` checking knows it.
 dump-report-relaxed = []
 
+# The negative control for the panic console's published descriptor. It drops
+# the publisher's `Release` fence between its odd mark and its words, so a
+# reader can keep words of a publication whose mark it never saw, and
+# `panic_console_publish.rs` must red:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features seqlock-writer-fence-off \
+#     --test panic_console_publish
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+seqlock-writer-fence-off = []
+
 [dependencies]
 loom = "0.7"
 # The record layout the shard is a ring of. `no_std`, no atomics of its own,

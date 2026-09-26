@@ -53,11 +53,12 @@ impl Kind {
     }
 }
 
-/// One CPU's first unfinished crash. Every field is `Relaxed`: one CPU writes
-/// its own slot and the same CPU reads it, with interrupts masked throughout,
-/// and no other CPU ever looks. Lengths are stored after the bytes, so a slot
-/// read mid-fill — an NMI panicking between the claim and the copy — reports
-/// a short string rather than the previous crash's tail.
+/// One CPU's first unfinished crash. One CPU writes its own slot and the same
+/// CPU reads it, with interrupts masked throughout, and no other CPU ever looks.
+/// Lengths are stored `Release` after the bytes and loaded `Acquire` before
+/// them, so a slot read mid-fill — an NMI panicking between the claim and the
+/// copy — reports a short string rather than the previous crash's tail; every
+/// other field is `Relaxed`.
 struct Evidence {
     kind: AtomicU8,
     file_len: AtomicU8,
@@ -159,7 +160,9 @@ fn copy_tail(dst: &[AtomicU8], len: &AtomicU8, cut: &AtomicU8, src: &[u8]) {
     for (slot, &b) in dst.iter().zip(tail) {
         slot.store(b, Ordering::Relaxed);
     }
-    len.store(tail.len() as u8, Ordering::Relaxed);
+    // `Release`: the bytes before the length, for a reader that interrupts
+    // this copy as much as for one on another CPU.
+    len.store(tail.len() as u8, Ordering::Release);
     cut.store(u8::from(from > 0), Ordering::Relaxed);
 }
 
@@ -172,12 +175,15 @@ fn copy_head(dst: &[AtomicU8], len: &AtomicU8, src: &[u8]) {
     for (slot, &b) in dst.iter().zip(src.get(..n).unwrap_or(&[])) {
         slot.store(b, Ordering::Relaxed);
     }
-    len.store(n as u8, Ordering::Relaxed);
+    // `Release`, as in [`copy_tail`].
+    len.store(n as u8, Ordering::Release);
 }
 
 /// A slot's bytes as text, in the caller's own buffer.
 fn read<'a>(src: &[AtomicU8], len: &AtomicU8, out: &'a mut [u8]) -> &'a str {
-    let n = (len.load(Ordering::Relaxed) as usize).min(out.len()).min(src.len());
+    // `Acquire`: pairs with the copy's `Release`, so the bytes read are at
+    // least the ones that length was stored after.
+    let n = (len.load(Ordering::Acquire) as usize).min(out.len()).min(src.len());
     for (byte, slot) in out.iter_mut().zip(src.iter()) {
         *byte = slot.load(Ordering::Relaxed);
     }

@@ -13,6 +13,7 @@
 
 mod access;
 mod latch;
+mod published;
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -81,11 +82,31 @@ impl Fb {
         height: 0,
         format: 0,
     };
+
+    /// The descriptor as the seqlock's words.
+    fn words(self) -> [u64; published::WORDS] {
+        [
+            self.ptr as u64,
+            self.bytes,
+            u64::from(self.stride_px) << 32 | u64::from(self.width),
+            u64::from(self.height) << 32 | u64::from(self.format),
+        ]
+    }
+
+    fn from_words([ptr, bytes, stride_width, height_format]: [u64; published::WORDS]) -> Self {
+        Self {
+            ptr: ptr as *mut u8,
+            bytes,
+            stride_px: (stride_width >> 32) as u32,
+            width: stride_width as u32,
+            height: (height_format >> 32) as u32,
+            format: height_format as u32,
+        }
+    }
 }
 
 struct FbCell(UnsafeCell<Fb>);
-// SAFETY: the panic path may take no lock; `FB` is published and read only
-// under the `SEQ` seqlock, and `PENDING` has one writer at a time.
+// SAFETY: the panic path may take no lock; `PENDING` has one writer at a time.
 unsafe impl Sync for FbCell {}
 
 /// A screenful-and-then-some of rendered log; which lines came from an `alert!` is a [`Level`] flag, never inferred from the text.
@@ -206,11 +227,10 @@ struct RenderedCell(UnsafeCell<Rendered>);
 // or swap atomically. `PAINTING`, `CAPTURE`, and `CAPTURE_ACCESS` serialise the three cells.
 unsafe impl Sync for RenderedCell {}
 
-/// Seqlock over `FB`; even means stable, odd means a publisher is inside.
+/// The descriptor painters draw through, behind a seqlock (`published`).
 /// Not a `Lock`: its guard drop can dispatch the scheduler, forbidden here.
-/// A publisher that dies mid-update leaves this odd forever, costing the screen and nothing else.
-static SEQ: AtomicU32 = AtomicU32::new(0);
-static FB: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
+/// A publisher that dies mid-update leaves it changing forever, costing the screen and nothing else.
+static FB: published::Published = published::Published::new();
 
 /// Exactly one painter at a time, taken by every painter without exception.
 /// [`render`] and [`seal_wedge`] never release it; every other painter does,
@@ -312,17 +332,10 @@ static PENDING: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
 static RAW_PHYS: AtomicU64 = AtomicU64::new(0);
 static RAW_SIZE: AtomicU64 = AtomicU64::new(0);
 
-/// Boot-time and `set_resolution`-window only: publishers never race, so the load-then-store of `SEQ` needs no CAS.
+/// Boot-time and `set_resolution`-window only: publishers never race.
 fn publish(fb: Fb) {
     forget_the_glass();
-    let seq = SEQ.load(Ordering::Relaxed);
-    SEQ.store(seq.wrapping_add(1), Ordering::Relaxed);
-    // The release fence orders the descriptor store between the odd and even markers; a release RMW alone would not.
-    core::sync::atomic::fence(Ordering::Release);
-    // SAFETY: the seqlock's payload store; `SEQ` is odd across this write, so
-    // a concurrent `snapshot` discards what it reads. Publishers never race each other.
-    unsafe { *FB.0.get() = fb };
-    SEQ.store(seq.wrapping_add(2), Ordering::Release);
+    FB.publish(fb.words());
 }
 
 /// Stop painting until the next [`rearm`], for a window where the framebuffer may be freed and reallocated.
@@ -349,24 +362,11 @@ pub fn disable() {
     detach();
 }
 
-/// Torn means unavailable, never a wild pointer: only two descriptors are
-/// ever published, and every torn mixture is caught downstream by the null check or a zero field collapsing draws to no-ops.
-/// A second valid descriptor would break that argument, leaving only the fences.
+/// One publication whole, or nothing: a descriptor still changing is no
+/// screen this instant (`published`, and `kernel-loom`'s `panic_console_publish`).
 fn snapshot() -> Option<Fb> {
-    for _ in 0..4 {
-        let before = SEQ.load(Ordering::Acquire);
-        if before & 1 != 0 {
-            continue;
-        }
-        // SAFETY: the seqlock's payload read, the one place `FB` is read
-        // while a publisher may be inside it — sound on the `SEQ` comparison below, not exclusion.
-        let fb = unsafe { *FB.0.get() };
-        core::sync::atomic::fence(Ordering::Acquire);
-        if SEQ.load(Ordering::Relaxed) == before {
-            return (!fb.ptr.is_null()).then_some(fb);
-        }
-    }
-    None
+    let fb = Fb::from_words(FB.snapshot()?);
+    (!fb.ptr.is_null()).then_some(fb)
 }
 
 /// Reject a descriptor that could turn a panic into a wild write.
