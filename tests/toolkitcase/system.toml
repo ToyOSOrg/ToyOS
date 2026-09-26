@@ -1,10 +1,9 @@
-# A desktop with a shell, and one unmodified app from each of iced, slint and
-# egui — the third-party toolkits' own window, event loop, text and renderer,
-# on the system fonts.
+# A desktop with a shell, and an unmodified iced app — the toolkit's own
+# window, event loop, text and renderer, on the system fonts — beside the
+# winit and waiter clients the `toolkit_` tests carry.
 #
-# The apps are here and not in the shipping `system.toml`: they are fixtures
-# for `toolkit_*`, and slint is GPL-3.0 or its own royalty-free terms, which is
-# an installable app's business and never the image's.
+# The app is here and not in the shipping `system.toml`: it is a fixture for
+# `toolkit_iced`.
 
 assets = ["assets"]
 
@@ -33,12 +32,6 @@ receives = ["compositor", "surface", "launcher"]
 receives = ["compositor", "surface"]
 
 [programs.iced-counter]
-receives = ["compositor"]
-
-[programs.slint-hello]
-receives = ["compositor"]
-
-[programs.egui-hello]
 receives = ["compositor"]
 
 [symlinks]

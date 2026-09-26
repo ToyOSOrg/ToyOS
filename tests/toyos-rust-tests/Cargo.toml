@@ -14,7 +14,10 @@ toyos-i219 = { path = "../../toyos-i219" }
 toyos-inspect = { path = "../../toyos-inspect" }
 toyos-dns = { path = "../../toyos-dns" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
-cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.13" }
+cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+softbuffer = { version = "0.4", default-features = false }
+memmap2 = "0.9"
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "logging"] }
 rustls-rustcrypto = "0.0.2-alpha"
@@ -28,6 +31,11 @@ sha2 = { version = "0.10", default-features = false }
 [patch.crates-io]
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
+toyos-window = { path = "../../userland/toyos-window" }
+winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13" }
+softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8" }
+raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", branch = "toyos-0.6.2" }
+memmap2 = { git = "https://github.com/ToyOSOrg/memmap2-rs", branch = "toyos-0.9.11" }
 getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
 
 [lints.rust]

@@ -432,7 +432,7 @@ impl Session {
                     let Some(idx) = focused else { continue };
                     self.damage.add(self.stack[idx].frame(&self.desk.chrome));
                     let win = self.stack.remove(idx);
-                    note_closed("GUI+Q", win.client.conn.as_handle(), self.stack.len());
+                    note_closed("GUI+Q", &win, self.stack.len());
                     let _ = win.client.conn.try_signal(window::MSG_WINDOW_CLOSE);
                     self.damage_all();
                 }
@@ -504,7 +504,7 @@ impl Session {
         match hit_test(&self.desk, &self.stack, at, self.launcher_open) {
             Hit::CloseButton(idx) => {
                 let win = self.stack.remove(idx);
-                note_closed("its close button", win.client.conn.as_handle(), self.stack.len());
+                note_closed("its close button", &win, self.stack.len());
                 self.damage.add(win.frame(&self.desk.chrome));
                 let _ = win.client.conn.try_signal(window::MSG_WINDOW_CLOSE);
                 self.damage_all();
@@ -748,6 +748,7 @@ impl Session {
                     };
                     if let Some(i) = self.stack.find(|w| w.client.conn.as_handle() == handle) {
                         self.stack[i].presented = true;
+                        self.stack[i].client.presents += 1;
                         let claim = Rect::from_wire(rect.x, rect.y, rect.w, rect.h);
                         self.damage.add(self.stack[i].present_damage(claim));
                     }
@@ -755,7 +756,7 @@ impl Session {
                 window::MSG_DESTROY_WINDOW => {
                     if let Some(i) = self.stack.find(|w| w.client.conn.as_handle() == handle) {
                         let gone = self.stack.remove(i);
-                        note_closed("the client itself", gone.client.conn.as_handle(), self.stack.len());
+                        note_closed("the client itself", &gone, self.stack.len());
                         self.damage.add(gone.frame(&self.desk.chrome));
                         self.damage_all();
                     }
@@ -936,7 +937,7 @@ impl Session {
             String::new()
         };
         let at = self.stack.insert(Window::new(
-            Client { conn, shm, rx: ClientRx::new() },
+            Client { conn, shm, rx: ClientRx::new(), presents: 0, frames: 0 },
             content,
             title,
             req.flags & window::WINDOW_FLAG_TOPMOST != 0,
@@ -1216,6 +1217,7 @@ impl Session {
                 && regions.iter().any(|r| r.overlaps(rect))
             {
                 deliver_signal(&mut dead, &self.stack[i], window::MSG_FRAME);
+                self.stack[i].client.frames += 1;
                 self.stack[i].presented = false;
             }
         }

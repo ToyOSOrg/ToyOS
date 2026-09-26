@@ -63,6 +63,10 @@ pub struct Client {
     pub conn: Connection,
     pub shm: SharedMemory,
     pub rx: ClientRx,
+    /// `MSG_PRESENT`s received, and `MSG_FRAME`s sent back, over the window's
+    /// life: what paces a client is the second answering the first.
+    pub presents: u64,
+    pub frames: u64,
 }
 
 /// A window, with the connection behind it.
@@ -177,8 +181,13 @@ pub fn announce(dead: &[Dead]) {
 /// which window went, why, and how many are left is the first thing anyone
 /// asks of the log — and a caller that re-sends a close because it could not
 /// tell whether the first one landed closes the next window down.
-pub fn note_closed(by: &str, client: RawHandle, remaining: usize) {
-    eprintln!("compositor: window closed client={} by {by}, {remaining} left", client.0);
+pub fn note_closed(by: &str, win: &Win, remaining: usize) {
+    eprintln!(
+        "compositor: window closed client={} by {by}, {remaining} left, presents={} frames={}",
+        win.client.conn.as_handle().0,
+        win.client.presents,
+        win.client.frames
+    );
 }
 
 /// The open's own line, and where the client's pixels are on the panel: the one

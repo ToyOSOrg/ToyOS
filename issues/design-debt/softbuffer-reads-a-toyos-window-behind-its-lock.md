@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # softbuffer reads a ToyOS window behind the lock winit holds it with
 
-Both winit backends keep each `window::Window` in an `Arc<Mutex<_>>`, and the
+The winit backend keeps each `window::Window` in an `Arc<Mutex<_>>`, and the
 event loop takes the lock to read events: `poll_event(&mut self)` replaces the
 window's shared buffer on a resize. The raw window handle winit hands out is
 the address of that `Window`, and softbuffer's ToyOS backend

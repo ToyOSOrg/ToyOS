@@ -208,17 +208,17 @@ v3.003"), fetched from that commit and compared by digest:
     sha256 93bc1bb6abf4e6b7c75d7131714061d5b57cc478abcabe4cb3519bb38fb917aa  OpenSans-Italic.ttf      153,256 bytes
     sha256 27da758f4dcac9a65abe914c13b463b42982b9909bc65713424099f4810bd1e6  OpenSans-Bold.ttf        147,264 bytes
     sha256 d672a770037104b6af45e1336b3d3c1729c8aea940f81e010f5a8a7319c29a21  OpenSans-BoldItalic.ttf  153,308 bytes
-    Licence text: licenses/OFL-1.1-OpenSans.txt (upstream's OFL.txt at that
-    commit, sha256 01cd5ffb3a528c219a86e49a814c6c53bd8a69b9a3c305dd237074ba1c811af7)
+    sha256 01cd5ffb3a528c219a86e49a814c6c53bd8a69b9a3c305dd237074ba1c811af7  OFL.txt
+    Licence text: assets/fonts/OFL.txt, upstream's OFL.txt at that commit
     SPDX-License-Identifier: OFL-1.1
 
 They ship unmodified as `share/fonts/opensans-*.ttf` on every ROOT that
-carries `assets/`, which is where fontdb and fontique look on ToyOS. The OFL
-permits bundling, embedding and redistributing the fonts with any software,
-and forbids selling them by themselves; its copyright and licence notice travel
-inside each file, in the name table (IDs 0, 13 and 14), which is the
-machine-readable place the OFL's second condition names. The licence reserves
-no font name, and none of these files is modified.
+carries `assets/`, which is where fontdb looks on ToyOS, and the licence text
+ships beside them as `share/fonts/ofl.txt`: the OFL's second condition is that
+each copy of the fonts carries the copyright notice and the licence itself. The
+OFL permits bundling, embedding and redistributing the fonts with any software,
+and forbids selling them by themselves. The licence reserves no font name, and
+none of these files is modified.
 
 
 userland/iced-counter/src/main.rs — iced's own counter example, MIT
@@ -234,23 +234,6 @@ userland/iced-counter/src/main.rs — iced's own counter example, MIT
 
 `toolkit_iced` runs it. It ships only in `tests/toolkitcase`, never in an
 image a `system.toml` builds.
-
-
-userland/egui-hello/src/main.rs — egui_software_backend's own example, MIT OR Apache-2.0
----------------------------------------------------------------------------------------
-
-    egui_software_backend's `examples/winit_hello.rs` at tag v0.0.3
-    (commit 0df1a177abe795b5973d89db2b5901fc2c672dae),
-    https://github.com/DGriffin91/egui_software_backend, byte for byte
-    sha256 090e8891d987e63f20d91a40112f72610f32784afca00488e57af2d9a88d2974
-    Licence text: licenses/MIT-egui_software_backend.txt (the crate's
-    LICENSE-MIT, which names no copyright holder)
-    SPDX-License-Identifier: MIT OR Apache-2.0
-
-`toolkit_egui` runs it. It ships only in `tests/toolkitcase`, never in an
-image a `system.toml` builds. So does `userland/slint-hello`, which is ours but
-links slint, whose terms are GPL-3.0 or Slint's royalty-free or commercial
-licences: that is an installable application's concern and never the image's.
 
 
 ovmf/*.fd — EDK II firmware, BSD-2-Clause-Patent

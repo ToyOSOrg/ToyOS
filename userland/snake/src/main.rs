@@ -82,8 +82,8 @@ impl font::Canvas for PixelCanvas {
 }
 
 struct Game {
-    window: Arc<dyn Window>,
-    surface: Surface<OwnedDisplayHandle, Arc<dyn Window>>,
+    window: Arc<Window>,
+    surface: Surface<OwnedDisplayHandle, Arc<Window>>,
     font: font::Font,
     width: u32,
     height: u32,
@@ -99,10 +99,10 @@ struct Game {
 }
 
 impl Game {
-    fn new(elwt: &dyn ActiveEventLoop, context: &Context<OwnedDisplayHandle>) -> Self {
+    fn new(elwt: &ActiveEventLoop, context: &Context<OwnedDisplayHandle>) -> Self {
         let attrs = WindowAttributes::default().with_title("Snake");
-        let window: Arc<dyn Window> = elwt.create_window(attrs).unwrap().into();
-        let size = window.surface_size();
+        let window = Arc::new(elwt.create_window(attrs).unwrap());
+        let size = window.inner_size();
         let mut surface = Surface::new(context, window.clone()).unwrap();
         surface
             .resize(
@@ -336,13 +336,13 @@ struct App {
 }
 
 impl ApplicationHandler for App {
-    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.game.is_none() {
             self.game = Some(Game::new(event_loop, &self.context));
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let game = self.game.as_mut().unwrap();
         if game.game_over {
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -357,11 +357,11 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let game = self.game.as_mut().unwrap();
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::SurfaceResized(size) => {
+            WindowEvent::Resized(size) => {
                 game.handle_resize(size.width, size.height);
                 game.window.request_redraw();
             }
@@ -382,6 +382,6 @@ impl ApplicationHandler for App {
 fn main() {
     let event_loop = EventLoop::new().unwrap();
     let context = Context::new(event_loop.owned_display_handle()).unwrap();
-    let app = App { context, game: None };
-    event_loop.run_app(app).unwrap();
+    let mut app = App { context, game: None };
+    event_loop.run_app(&mut app).unwrap();
 }

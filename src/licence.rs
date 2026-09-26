@@ -298,6 +298,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Font("OFL-1.1"),
     ),
     (
+        "assets/fonts/OFL.txt",
+        "01cd5ffb3a528c219a86e49a814c6c53bd8a69b9a3c305dd237074ba1c811af7",
+        "NOTICE",
+        Terms::Font("OFL-1.1"),
+    ),
+    (
         "assets/fonts/OpenSans-Bold.ttf",
         "27da758f4dcac9a65abe914c13b463b42982b9909bc65713424099f4810bd1e6",
         "NOTICE",

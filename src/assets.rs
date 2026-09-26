@@ -551,6 +551,26 @@ mod tests {
         );
     }
 
+    /// The image carries the system fonts' licence beside them, as the OFL
+    /// asks of every copy.
+    #[test]
+    fn the_system_fonts_ship_with_their_licence() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let shipped: std::collections::BTreeMap<String, Vec<u8>> =
+            collect(&[root.join("assets").display().to_string()], &BTreeSet::new())
+                .into_iter()
+                .collect();
+        let fonts: Vec<&String> =
+            shipped.keys().filter(|k| k.starts_with("share/fonts/") && k.ends_with(".ttf")).collect();
+        assert!(!fonts.is_empty(), "the image ships no system font:\n{:?}", shipped.keys());
+        let licence = fs::read(root.join("assets/fonts/OFL.txt")).expect("the fonts' licence");
+        assert_eq!(
+            shipped.get("share/fonts/ofl.txt"),
+            Some(&licence),
+            "{fonts:?} ship without the licence text beside them"
+        );
+    }
+
     /// The right-hand column of [`OPENED_BY`] is true of the tree.
     ///
     /// The claim is that one program opens the file, so a second program naming

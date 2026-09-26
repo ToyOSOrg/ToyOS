@@ -18,6 +18,13 @@
 //! one republished under a taken version, which crates.io refuses: the fork
 //! naming the version still resolves, and silently gets the old code.
 //!
+//! **A fork names them by a range** (`toyos-abi = ">=0.12, <1"`), so the
+//! tree's `[patch.crates-io]` path answers it at whatever version the tree is
+//! on, and a bump here owes no fork a commit. A fork that names one version
+//! instead resolves the published crate beside the tree's, which cargo builds
+//! without a word; so no lockfile in the tree may hold two versions of one of
+//! [`PUBLISHED`], and [`judge`] refuses one that does.
+//!
 //! [`PUBLISHED`]'s order is a dependency order, and it is the order
 //! `cargo run -- --ci publish` takes: a crate cannot go up before the index
 //! holds every version it names.
@@ -138,6 +145,10 @@ fn next_minor(version: &str) -> Option<String> {
 /// The rule over the branch at `root` against `base`: the one-line verdict, or
 /// the refusal.
 pub fn judge(root: &Path, base: &str) -> Result<String, String> {
+    let split = split_versions(root)?;
+    if !split.is_empty() {
+        return Err(split.join("\n"));
+    }
     let merge_base = git(root, &["merge-base", base, "HEAD"])?;
     if file_at(root, &merge_base, PUBLISHER)?.is_empty() {
         return Ok(format!("{base} does not publish yet, so no version here is taken."));
@@ -285,6 +296,34 @@ fn file_at(root: &Path, commit: &str, path: &str) -> Result<String, String> {
         return Ok(String::new());
     }
     git(root, &["show", &format!("{commit}:{path}")])
+}
+
+/// A refusal for every lockfile at `HEAD` that holds more than one version of
+/// a crate in [`PUBLISHED`].
+fn split_versions(root: &Path) -> Result<Vec<String>, String> {
+    let mut refusals = Vec::new();
+    for lockfile in tracked_lockfiles(root)? {
+        let text = file_at(root, "HEAD", &lockfile)?;
+        for krate in PUBLISHED {
+            let mut versions: Vec<String> = lock_packages(&text)
+                .into_iter()
+                .filter(|(name, _, _)| name == krate.name)
+                .map(|(_, version, _)| version)
+                .collect();
+            versions.sort();
+            versions.dedup();
+            if versions.len() > 1 {
+                refusals.push(format!(
+                    "[sdk] {lockfile} holds {} at {}: something in its graph names a version the \
+                     tree has moved past and resolves the published crate beside the tree's. A \
+                     fork names an SDK crate by a range (`forks.toml`), never by one version.",
+                    krate.name,
+                    versions.join(" and ")
+                ));
+            }
+        }
+    }
+    Ok(refusals)
 }
 
 fn tracked_lockfiles(root: &Path) -> Result<Vec<String>, String> {
@@ -533,6 +572,34 @@ mod tests {
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
         let verdict = judge(&wt, "main").expect("a fork's registry pin is not this rule's business");
         assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
+    }
+
+    /// **The lockfile rule**: a fork that names an SDK crate by one version
+    /// resolves the published crate beside the tree's path one, and the branch
+    /// is refused by name whatever else it changed; one version passes.
+    #[test]
+    fn a_lockfile_holding_two_versions_of_a_published_crate_is_refused_by_name() {
+        let (_origin, wt) = repo("sdk-split-lock");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi manifest");
+        commit(&wt, "userland/Cargo.lock", &lockfile("toyos-abi", "0.2.0", false), "one version");
+        publishing(&wt);
+        main_is_here(&wt);
+
+        commit(&wt, "kernel/src/lib.rs", "// work\n", "kernel: work");
+        let verdict = judge(&wt, "main").expect("one version of each passes");
+        assert!(verdict.contains("changes none of the published crates"), "{verdict}");
+
+        let split = format!(
+            "{}\n{}",
+            lockfile("toyos-abi", "0.2.0", false),
+            lockfile("toyos-abi", "0.1.0", true).replace("# generated\nversion = 4\n\n", "")
+        );
+        commit(&wt, "userland/Cargo.lock", &split, "a fork pins the old abi");
+        let refusal = judge(&wt, "main").expect_err("two versions of the abi in one lockfile");
+        assert!(
+            refusal.contains("userland/Cargo.lock holds toyos-abi at 0.1.0 and 0.2.0"),
+            "{refusal}"
+        );
     }
 
     /// A branch that touches none of them is every other branch, and the
