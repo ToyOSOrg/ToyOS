@@ -71,8 +71,8 @@ const MAP_MARGIN: usize = 64;
 fn alloc_kernel_memory(size: usize) -> vec::Vec<u8> {
     const KERNEL_ALIGN: usize = 2 * 1024 * 1024; // 2MB
     let layout = Layout::from_size_align(size, KERNEL_ALIGN).expect("invalid layout");
-    // SAFETY: `layout` has non-zero size — `size` is `vaddr_max + stack_size`
-    // at the one call site, and `stack_size` alone is a fixed 8 MiB — so
+    // SAFETY: `layout` has non-zero size — `size` is `vaddr_max`, page-rounded,
+    // plus `stack_size` at the one call site, and `stack_size` alone is a fixed 8 MiB — so
     // `alloc_zeroed`'s "layout must have non-zero size" precondition always
     // holds.
     let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
@@ -323,6 +323,13 @@ const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 /// silently unapplied.
 const SHT_REL: u32 = 9;
 
+/// `SHT_RELR`, relative relocations packed as a bitmap (`--pack-dyn-relocs=relr`).
+///
+/// Refused for `SHT_REL`'s reason: its relocations are ones the `SHT_RELA` loop
+/// below never sees, and a kernel started with them unapplied runs with every
+/// pointer in its data still the link-time one.
+const SHT_RELR: u32 = 19;
+
 /// `[offset, offset + len)` of the file, or `None` when that is not wholly
 /// inside it.
 ///
@@ -368,10 +375,14 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     println!("Kernel stack size: {}", stack_size);
     // `vaddr_max` is the largest `p_vaddr + p_memsz` over the `PT_LOAD`
     // segments, and the image is laid out at its own vaddrs — so it is what the
-    // kernel's memory has to cover before the stack is added to it.
+    // kernel's memory has to cover before the stack is added to it. The stack
+    // starts on the next page: `vaddr_max` has whatever alignment the last
+    // segment's end has, and a stack that inherits it breaks the ABI's 16-byte
+    // alignment for everything the kernel runs on it.
     let mem_size = layout
         .vaddr_max
-        .checked_add(stack_size as u64)
+        .checked_next_multiple_of(4096)
+        .and_then(|image_end| image_end.checked_add(stack_size as u64))
         .and_then(|n| usize::try_from(n).ok())
         .expect("kernel.elf: image plus stack does not fit an allocation");
 
@@ -393,6 +404,10 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     assert!(
         !sections.iter().any(|section| section.kind == SHT_REL),
         "kernel.elf: SHT_REL is not supported"
+    );
+    assert!(
+        !sections.iter().any(|section| section.kind == SHT_RELR),
+        "kernel.elf: SHT_RELR (packed relative relocations) is not supported"
     );
 
     let mut reloc_count = 0u64;
@@ -427,8 +442,8 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
                         // the 8-byte write lands fully inside `process_mem`'s
                         // allocation. `write_unaligned`, not `write`: an
                         // `r_offset` from the file is not guaranteed 8-byte
-                        // aligned by anything checked here, only by toyos-ld
-                        // always emitting `R_X86_64_RELATIVE` against aligned
+                        // aligned by anything checked here, only by the
+                        // linker emitting `R_X86_64_RELATIVE` against aligned
                         // slots — a fact this reader has no way to verify.
                         process_mem
                             .as_mut_ptr()
