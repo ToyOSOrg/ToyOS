@@ -115,38 +115,42 @@ pub fn write_bytes_locked(bytes: &[u8]) {
 }
 
 /// The transmit slot, waiting out a burst [`write_burst`] left in flight when
-/// the caller is the panic path that found it so.
+/// the caller is the panic path that found it so — rung again first, since
+/// the panic may have stopped its CPU between publishing it and ringing.
 fn tx_slot(c: &mut VConsole) -> DescSlot {
     match c.tx_slot.take() {
         Some(slot) => slot,
-        None => wait_used(1, || c.tx.poll_used().map(|(slot, _)| slot)),
+        None => {
+            c.tx.doorbell(c.device.notify_mmio(), c.device.notify_off_multiplier(), 1).ring();
+            wait_used(1, || c.tx.poll_used().map(|(slot, _)| slot))
+        }
     }
 }
 
-/// One transmit buffer's worth, with interrupts off only to submit it and to
-/// look for its completion: the device takes it at the host's pace, which a
-/// loaded host can stretch to tens of milliseconds, and no interrupt waits on
-/// that. The caller holds the wire, so no other burst is in flight.
+/// One transmit buffer's worth, with interrupts off only to publish it and to
+/// look for its completion: the doorbell is rung with them on, because QEMU
+/// runs the device's output into its chardev inside that write, and the
+/// device takes the buffer at the host's pace, which a loaded host can
+/// stretch to tens of milliseconds. The caller holds the wire, so no other
+/// burst is in flight.
 pub fn write_burst(bytes: &[u8]) {
     assert!(bytes.len() <= TX_BUF_SIZE, "vconsole: a burst of {} bytes", bytes.len());
-    let submitted = {
+    let doorbell = {
         let _burst = super::serial::BackendGuard::lock();
         with_console(|c| {
             let slot = tx_slot(c);
             c.tx_buf.copy_from(0, bytes);
-            c.tx.submit(
+            c.tx.publish(
                 slot,
                 &[(c.tx_buf.device_addr(), bytes.len() as u32, BufDir::Readable)],
                 c.device.notify_mmio(),
                 c.device.notify_off_multiplier(),
                 1,
-            );
+            )
         })
-        .is_some()
     };
-    if !submitted {
-        return;
-    }
+    let Some(doorbell) = doorbell else { return };
+    doorbell.ring();
     wait_used(1, || {
         let _look = super::serial::BackendGuard::lock();
         with_console(|c| {

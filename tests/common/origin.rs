@@ -349,6 +349,71 @@ pub fn refused_stop(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)
     Ok(())
 }
 
+/// What init says when it stops the machine without `logd`'s answer.
+const FLUSH_WAITED_OUT: &str = "init: logd did not answer the flush in";
+
+/// **A resume that reaches `logd` with its flush unrun answers that flush.**
+/// `tests/logflushcase` holds `logd`'s first flush until init speaks again, so
+/// init waits the flush out, the kernel refuses the stop, and the resume is
+/// queued behind the flush `logd` has not run. `logd` runs the flush, then the
+/// resume, and lives: the job's line after the refusal is in `/log`, and so is
+/// init's word that it waited.
+pub fn resume_meets_its_flush(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    const PARAMS: &[&str] = &["power-refused-once"];
+    let config = "tests/logflushcase";
+    let bins: Vec<(String, Vec<u8>)> =
+        rust_bins.iter().filter(|(name, _)| name == "log_refused_stop").cloned().collect();
+    if bins.len() != 1 {
+        return Err(format!("the suite built {} copies of log_refused_stop", bins.len()));
+    }
+    let staged = logstream::stage_armed(config, "log-flush-held", PARAMS, &[], &bins)?;
+    let case = compile::repo_root().join(config);
+    let mut guest = QemuInstance::boot_with_options(
+        &case,
+        &[],
+        &bins,
+        BootOptions {
+            qmp: true,
+            boot_image: Some(qemu::Staged::Written(staged.image.clone())),
+            kernel_params: PARAMS,
+            ready_marker: "spawn: /system/bin/test_rs_log_refused_stop ",
+            ..Default::default()
+        },
+    );
+    let mut stop = qemu::QmpShutdown::open(guest.qmp_socket(), guest.budget(Duration::from_secs(120)));
+    let reason = stop.reason();
+    let tail = guest.drain_serial(Duration::from_secs(20));
+    drop(guest);
+    serial::Serial::named("the job list's drain", tail.as_str()).must_be_clean()?;
+    if reason.as_deref() != Some("guest-reset") {
+        return Err(format!("the job list did not end the boot ({reason:?})\n{tail}"));
+    }
+    let log = volumes::whole_log(&staged.image, staged.start, staged.len)?.concat();
+    let _ = std::fs::remove_file(&staged.image);
+    let ended = format!("{}logd pid=", bootlog::EXIT);
+    if let Some(line) = format!("{tail}{log}").lines().find(|l| l.contains(&ended)) {
+        return Err(format!("logd ended before the machine did: {line}\n{tail}"));
+    }
+    // Non-vacuity: init waited the flush out, so the resume met it unrun.
+    if !bootlog::lines_of(&log, "init").contains(FLUSH_WAITED_OUT) {
+        return Err(format!("init never waited a flush out, so nothing arrived together\n{log}"));
+    }
+    let lines: Vec<&str> = log.lines().collect();
+    let said = lines
+        .iter()
+        .position(|l| toyos_logstream::program_line(l).is_some_and(|s| s.tag == RUNNER && s.text == REFUSED_LINE))
+        .ok_or_else(|| format!("/log carries no {REFUSED_LINE:?} after a resume met its flush\n{log}"))?;
+    let stopping = lines
+        .iter()
+        .position(|l| l.contains(toyos_logstream::STOPPING))
+        .ok_or_else(|| format!("/log carries no stop line: nothing was stopped\n{log}"))?;
+    if said < stopping {
+        return Err(format!("{REFUSED_LINE:?} is before the stop it follows in /log\n{log}"));
+    }
+    eprintln!("  [origin] init waited the flush out, logd ran it and then the resume, and the line after is in /log");
+    Ok(())
+}
+
 /// **A child's flood leaves its parent's slots.** `tests/logkeepcase` has
 /// `logd` read nothing of test-runner's ring while its one job floods it, so
 /// the ring fills and stays full; test-runner's own end-of-job line comes
@@ -388,6 +453,11 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
     }
     let log = volumes::whole_log(&staged.image, staged.start, staged.len)?.concat();
     let _ = std::fs::remove_file(&staged.image);
+    // A stop that went ahead before the flush answered cuts `/log` short
+    // whatever the slots did, so that is its own verdict and not this one's.
+    if tail.contains(FLUSH_WAITED_OUT) {
+        return Err(format!("the stop's flush was cut, so /log says nothing of the slots\n{tail}"));
+    }
     let runner = bootlog::lines_of(&log, RUNNER);
     // Non-vacuity: the flood met a full ring, so the slots were contested.
     let flooded = runner.lines().filter(|l| l.starts_with("flood ")).count();

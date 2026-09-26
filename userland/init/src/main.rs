@@ -38,6 +38,7 @@
 //! A launch of a program no row names is answered with the session's, which
 //! the caller's direct spawn carries in place of its own.
 
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
@@ -160,6 +161,11 @@ struct Log {
     /// it may read and not write, so no program puts a line on the console but
     /// through `logd` and under its name.
     stdin: toyos::RawHandle,
+    /// What `logd` answers on the connection, kept across flushes.
+    rx: RefCell<ipc::FrameRx<8>>,
+    /// Flushes asked for and not answered yet: one waited out past
+    /// [`FLUSH_BOUND`] is answered late, before the next one is.
+    unanswered: Cell<u32>,
 }
 
 /// The rights a program's stdin console keeps: it reads it and polls it, and a
@@ -189,7 +195,13 @@ impl Log {
         let conn = names.open(ORIGINS).expect("init: the log's origins port refused init");
         let stdin = toyos_abi::syscall::dup_narrowed(toyos::RawHandle(0), STDIN_RIGHTS)
             .expect("init: its console would not narrow");
-        let log = Self { conn, acceptor: Some(acceptor), stdin };
+        let log = Self {
+            conn,
+            acceptor: Some(acceptor),
+            stdin,
+            rx: RefCell::new(ipc::FrameRx::new()),
+            unanswered: Cell::new(0),
+        };
         // init's own lines: a ring like every program's, in the two slots the
         // kernel filled with its console.
         let ring = new_ring();
@@ -227,7 +239,7 @@ impl Log {
     /// The stop a flush was for was refused: `logd` writes the file again.
     fn resume(&self) {
         if let Err(e) = self.conn.signal(RESUME) {
-            panic!("init: logd could not be told the machine runs on: {e:?}");
+            toyos::warn!("init: logd could not be told the machine runs on ({e:?}); it is gone");
         }
     }
 
@@ -237,12 +249,19 @@ impl Log {
             toyos::warn!("init: logd could not be asked to flush ({e:?}); stopping without it");
             return;
         }
+        self.unanswered.set(self.unanswered.get() + 1);
         let poller = Poller::new(1);
         let began = Instant::now();
-        let mut rx = ipc::FrameRx::<8>::new();
         loop {
-            match rx.pump(&self.conn) {
-                RxStep::Frame { msg_type: FLUSHED, .. } => return,
+            let step = self.rx.borrow_mut().pump(&self.conn);
+            match step {
+                RxStep::Frame { msg_type: FLUSHED, .. } => {
+                    self.unanswered.set(self.unanswered.get() - 1);
+                    if self.unanswered.get() == 0 {
+                        return;
+                    }
+                    continue;
+                }
                 RxStep::Frame { msg_type, .. } => {
                     panic!("init: logd answered a flush with frame type {msg_type}")
                 }

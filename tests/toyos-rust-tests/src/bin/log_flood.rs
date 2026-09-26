@@ -9,18 +9,18 @@
 use std::io::Write;
 use std::time::Instant;
 
-/// Lines written, many times the records one log ring holds, unless the first
-/// argument names another count. Each is [`WIDTH`] bytes — one record's text,
-/// nearly — so the lines `logd` does take are megabytes a second.
+/// Lines written, many times the records one log ring holds. Each is
+/// [`WIDTH`] bytes — one record's text, nearly — so the lines `logd` does
+/// take are megabytes a second, more than the readers of the served log it is
+/// also run against can hold unread.
 const LINES: usize = 16_384;
 const WIDTH: usize = 960;
 
 fn main() {
-    let lines = std::env::args().nth(1).map_or(LINES, |n| n.parse().expect("log_flood: a line count"));
     let mut out = std::io::stdout().lock();
     let began = Instant::now();
     let mut slowest = 0u128;
-    for i in 0..lines {
+    for i in 0..LINES {
         let head = format!("flood {i:06} ");
         let line = format!("{head}{}\n", "x".repeat(WIDTH - head.len() - 1));
         let at = Instant::now();
@@ -30,8 +30,8 @@ fn main() {
     }
     let _ = writeln!(
         out,
-        "flood done lines={lines} bytes={} ms={} slowest_write_us={slowest}",
-        lines * WIDTH,
+        "flood done lines={LINES} bytes={} ms={} slowest_write_us={slowest}",
+        LINES * WIDTH,
         began.elapsed().as_millis()
     );
 }

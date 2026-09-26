@@ -63,16 +63,16 @@
 //!
 //! **A round's lines are written and the volume made durable before the next
 //! round**, and again when init asks before the machine stops
-//! ([`toyos_logstream::FLUSH`]): lines batched for one later sync put one
-//! larger flush on the stick, and a tone playing beside it gaps. A sync the
-//! kernel declined to start is owed and asked again each round until it is
-//! made. The kernel waits on none of it: a panicking
-//! kernel's report is in its black box, and so are the stop's own last records.
+//! ([`toyos_logstream::FLUSH`]). A sync the kernel declined to start is owed
+//! and asked again each round until it is made. The kernel waits on none of
+//! it: a panicking kernel's report is in its black box, and so are the stop's
+//! own last records.
 //! **A line after that flush reaches the console and is held back from the
-//! file**: the stop syncs no file still open, so the file ends where the flush
-//! made it durable, and a reader of the served log is handed what the file
-//! holds and no more. A stop the kernel refused is init's
-//! [`toyos_logstream::RESUME`], and what was held is written then.
+//! file**, to a bound ([`STOPPING_BYTES`]): the stop syncs no file still open,
+//! so the file ends where the flush made it durable, and a reader of the
+//! served log is handed what the file holds and no more. A stop the kernel
+//! refused is init's [`toyos_logstream::RESUME`], and what was held is written
+//! then.
 //!
 //! `SYS_FSYNC` reaches the device's own cache flush. **A flush that would block
 //! is not a flush that failed**: `io::ErrorKind::WouldBlock` from `sync_all` is
@@ -204,6 +204,7 @@ fn main() {
         hub,
         stall: Stall::from_args(),
         stopping: None,
+        hold_flush: std::env::args().any(|a| a == "--hold-flush"),
     };
     log.run(&published);
 }
@@ -235,9 +236,21 @@ struct Log {
     hub: Arc<serve::Hub>,
     stall: Option<Stall>,
     /// init's flush was answered and the machine stops: the file's text held
-    /// back since, which a refused stop writes.
-    stopping: Option<String>,
+    /// back since, which a refused stop writes, to [`STOPPING_BYTES`].
+    stopping: Option<Stopping>,
+    /// `--hold-flush`, until the first flush has spent it.
+    hold_flush: bool,
 }
+
+/// The file's text held back after a flush, and the lines past the bound.
+struct Stopping {
+    text: String,
+    unwritten: u64,
+}
+
+/// Text a stop may hold back from the file: a refused stop writes it, and
+/// what is past it is counted and said then.
+const STOPPING_BYTES: usize = 1 << 20;
 
 /// One line on its way out: when it was stamped, and what it is.
 struct Line {
@@ -317,17 +330,16 @@ impl Log {
         }
     }
 
-    /// Take every frame init has sent: rings, swap words, and a flush.
-    /// Whether a flush was asked for.
+    /// Take the frames init has sent, up to a flush: rings, swap words and a
+    /// resume. Whether the read ended at a flush.
     ///
     /// **init is the only peer this connection has**, so a frame that is not
     /// one of these is init's bug and a loud end. A ring past [`MAX_ORIGINS`]
     /// is refused by name and let go rather than ending this program.
     fn from_init(&mut self) -> bool {
-        let mut flush = false;
         loop {
             match self.init_rx.pump(&self.from_init) {
-                RxStep::Idle => return flush,
+                RxStep::Idle => return false,
                 RxStep::Eof => panic!("logd: init closed the origins connection"),
                 RxStep::Malformed => {
                     panic!("logd: init sent a frame the origins protocol cannot carry")
@@ -365,7 +377,15 @@ impl Log {
                     };
                     self.hub.carrier(word);
                 }
-                RxStep::Frame { msg_type: FLUSH, .. } => flush = true,
+                // **The flush runs before the next frame is read**: init sends
+                // RESUME when the stop it flushed for was refused, which can be
+                // before this program got to the flush, and RESUME answers it.
+                RxStep::Frame { msg_type: FLUSH, .. } => {
+                    if std::mem::take(&mut self.hold_flush) {
+                        self.hold_until_init_speaks();
+                    }
+                    return true;
+                }
                 RxStep::Frame { msg_type: RESUME, .. } => self.resume(),
                 RxStep::Frame { msg_type, .. } => {
                     panic!("logd: init sent frame type {msg_type} on the origins connection")
@@ -546,7 +566,11 @@ impl Log {
             }
         }
         if let Some(held) = &mut self.stopping {
-            held.push_str(&file);
+            if held.text.len() + file.len() > STOPPING_BYTES {
+                held.unwritten += lines.len() as u64;
+            } else {
+                held.text.push_str(&file);
+            }
             return;
         }
         // The file first: a reader is served only what /log already holds,
@@ -712,7 +736,7 @@ impl Log {
     fn flushed(&mut self) {
         let refused = self.sync().err();
         self.answered(Instant::now(), refused);
-        self.stopping = Some(String::new());
+        self.stopping = Some(Stopping { text: String::new(), unwritten: 0 });
         self.feed_console();
         if let Err(e) = self.from_init.signal(FLUSHED) {
             panic!("logd: init could not be told the log is whole: {e:?}");
@@ -726,8 +750,27 @@ impl Log {
             panic!("logd: init said the machine runs on, and no stop was flushed for");
         };
         toyos::warn!("logd: the stop was refused, so {DIR} takes this boot's lines again");
-        self.to_volume(held.as_bytes(), true);
-        self.hub.append(held.as_bytes());
+        if held.unwritten > 0 {
+            toyos::warn!(
+                "logd: {} line(s) said while the machine stopped were past {STOPPING_BYTES} bytes \
+                 held back and went unwritten",
+                held.unwritten
+            );
+        }
+        self.to_volume(held.text.as_bytes(), true);
+        self.hub.append(held.text.as_bytes());
+    }
+
+    /// `--hold-flush`: the first flush waits until init sends another frame,
+    /// as a round held past init's bound by a slow volume does — a test's
+    /// actuator, armed by nothing but a boot config's `args`.
+    fn hold_until_init_speaks(&self) {
+        const BOUND: Duration = Duration::from_secs(60);
+        let poller = Poller::new(1);
+        poller.watch(&self.from_init, READABLE, 0);
+        let mut spoke = false;
+        poller.wait(1, BOUND.as_nanos() as u64, |_| spoke = true);
+        assert!(spoke, "logd: --hold-flush: init sent nothing after its flush in {BOUND:?}");
     }
 
     /// End a `--stall` once any program has said its `--stall-until` line.

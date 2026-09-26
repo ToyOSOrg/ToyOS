@@ -532,6 +532,23 @@ impl<'pool> Virtqueue<'pool> {
         notify_multiplier: u32,
         queue_index: u16,
     ) -> u16 {
+        let first_desc = slot.0;
+        self.publish(slot, bufs, notify_mmio, notify_multiplier, queue_index).ring();
+        first_desc
+    }
+
+    /// [`submit`](Self::submit) with the doorbell handed back unrung, for a
+    /// caller that rings it after letting go of a lock: an emulated device
+    /// can serve the doorbell's write synchronously, and that is not work to
+    /// hold a lock across.
+    pub fn publish(
+        &mut self,
+        slot: DescSlot,
+        bufs: &[(u64, u32, BufDir)],
+        notify_mmio: Mmio,
+        notify_multiplier: u32,
+        queue_index: u16,
+    ) -> Doorbell {
         let size = self.size;
         let first_desc = slot.0;
         self.chain_bytes[first_desc as usize] = chain_bytes(bufs);
@@ -557,11 +574,13 @@ impl<'pool> Virtqueue<'pool> {
         fence(Ordering::Release);
         self.avail.write(AVAIL_IDX_OFF, avail_idx.wrapping_add(1));
 
-        fence(Ordering::Release);
-        let notify_off = self.notify_offset as u64 * notify_multiplier as u64;
-        notify_mmio.write_u16(notify_off, queue_index);
+        self.doorbell(notify_mmio, notify_multiplier, queue_index)
+    }
 
-        first_desc
+    /// This queue's doorbell, for a caller that finds a chain published and
+    /// cannot know it was rung: a second ring costs the device one look.
+    pub fn doorbell(&self, notify_mmio: Mmio, notify_multiplier: u32, queue_index: u16) -> Doorbell {
+        Doorbell { mmio: notify_mmio, at: self.notify_bytes(notify_multiplier), queue_index }
     }
 
     /// Check if the device has completed any request.
@@ -652,6 +671,23 @@ impl<'pool> Virtqueue<'pool> {
     ) -> DescSlot {
         self.submit(slot, bufs, notify_mmio, notify_multiplier, queue_index);
         wait_used(queue_index, || self.poll_used().map(|(slot, _)| slot))
+    }
+}
+
+/// A queue's notification, owed for a chain [`Virtqueue::publish`] made
+/// visible and rung once.
+#[must_use = "a published chain the device is never told of is never taken"]
+pub struct Doorbell {
+    mmio: Mmio,
+    at: u64,
+    queue_index: u16,
+}
+
+impl Doorbell {
+    pub fn ring(self) {
+        // The avail index before the doorbell (virtio 1.2 §2.7.13).
+        fence(Ordering::Release);
+        self.mmio.write_u16(self.at, self.queue_index);
     }
 }
 

@@ -244,8 +244,12 @@ const RUST_SKIP: &[&str] = &[
     // `logd` serving the network changed nothing. `log_carrier_forgery` runs it.
     "log_carrier_forger",
     // It asks for a stop its boot's kernel refuses; its verdict is its line
-    // after that in `/log`. `log_after_a_refused_stop` runs it.
+    // after that in `/log`. `log_after_a_refused_stop` and
+    // `log_resume_meets_its_flush` run it.
     "log_refused_stop",
+    // It waits for a cue only a kernel armed with `copy-meets-a-remap` gives.
+    // `user_copy_races_munmap` runs it.
+    "copy_out_races_munmap",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -792,6 +796,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // A stop the kernel refuses after logd flushed for it: a line said after
     // it is in `/log`. Lines; no clock.
     ("log_after_a_refused_stop", Sched::Parallel, Tier::Fast),
+    // The same stop with logd's flush held until init resumes it: logd runs
+    // the flush, then the resume, and lives. Lines; init's flush bound.
+    ("log_resume_meets_its_flush", Sched::Parallel, Tier::Fast),
     // A child flooding its parent's log ring while logd reads none of it: the
     // parent's next line is in `/log`. Lines; its clock is a guard.
     ("log_ring_keeps_the_owners_slots", Sched::Parallel, Tier::Fast),
@@ -1515,6 +1522,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
     ("blocking_read_window", Sched::Parallel, Tier::Fast),
+    // A sibling's munmap and mmap staged between a typed copy's translation
+    // and its store (`copy-meets-a-remap`): the store never reaches the region
+    // mapped after it.
+    ("user_copy_races_munmap", Sched::Parallel, Tier::Fast),
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Nightly),
     ("writeback_durability", Sched::Parallel, Tier::Nightly),
@@ -1631,6 +1642,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_floor_is_the_images_own", &[]),
     ("update_refused_pass_credits_no_image", &[]),
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
+    ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
     ("writeback_reopen", &["test_rs_writeback_reopen"]),
     ("writeback_spawn", &["test_rs_writeback_spawn"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
@@ -1744,6 +1756,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("log_program_line", &["test_rs_log_origin"]),
     ("log_program_forgery", &["test_rs_log_forger"]),
     ("log_after_a_refused_stop", &["test_rs_log_refused_stop"]),
+    ("log_resume_meets_its_flush", &["test_rs_log_refused_stop"]),
     ("log_ring_keeps_the_owners_slots", &["test_rs_log_flood"]),
     ("log_program_flood", &["test_rs_log_flood"]),
     ("log_program_line_after_its_records", &["test_rs_log_hold"]),
@@ -11432,6 +11445,25 @@ fn run_machine_test(
             }
             window_held(&(boot + &result.before), &result.serial)
         }
+        // Two CPUs: the held copy spins in the kernel while its sibling unmaps
+        // and maps on the other.
+        "user_copy_races_munmap" => {
+            let options = BootOptions {
+                smp: 2,
+                kernel_params: &["copy-meets-a-remap"],
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let result = qemu.run_test("test_rs_copy_out_races_munmap", Duration::from_secs(30));
+            if !check_rust_result(&result) {
+                return Err(format!(
+                    "user_copy_races_munmap failed:\n{}\nkernel log while it ran:\n{}{}",
+                    result.stdout, result.before, result.serial
+                ));
+            }
+            Ok(())
+        }
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.
@@ -15483,6 +15515,7 @@ fn run_machine_test(
         "log_program_line" => common::origin::line(c_bins, rust_bins),
         "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
         "log_after_a_refused_stop" => common::origin::refused_stop(c_bins, rust_bins),
+        "log_resume_meets_its_flush" => common::origin::resume_meets_its_flush(rust_bins),
         "log_ring_keeps_the_owners_slots" => common::origin::keeps_the_owners_slots(rust_bins),
         "log_program_line_after_its_records" => common::origin::after_records(c_bins, rust_bins),
         "log_carrier_forgery" => common::origin::carrier_forgery(c_bins, rust_bins),

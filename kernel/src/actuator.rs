@@ -175,6 +175,12 @@ actuators! {
     /// `log_after_a_refused_stop`.
     power_refused_once = "power-refused-once";
 
+    /// Hold a typed copy into user memory whose destination carries
+    /// `user_ptr::remap_race`'s mark between its translation and its store,
+    /// until its own process has mapped memory again: a sibling's `munmap`
+    /// and `mmap` staged inside the copy. Judged by `user_copy_races_munmap`.
+    copy_meets_a_remap = "copy-meets-a-remap";
+
     /// Stall the bind of a disk that arrives while another is held for its
     /// device, for less than `usb-slow-return` does, and leave every transfer
     /// of the operation the held call sends again on it unanswered, once, each

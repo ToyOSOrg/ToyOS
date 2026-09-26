@@ -3000,6 +3000,7 @@ mod tests {
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/layoutcase/system.toml",
+        "tests/logflushcase/system.toml",
         "tests/logkeepcase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",
