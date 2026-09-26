@@ -1,6 +1,24 @@
+//! A bounds-checked window over a device's registers, and the ordering every
+//! access through it carries.
+//!
+//! **The contract, which is what a driver may rely on:** a `write_*` is ordered
+//! after every store this CPU made to memory before it, as a device's DMA reads
+//! observe them — the descriptor before the doorbell — and a `read_*` is
+//! ordered before every load this CPU makes after it — the status before the
+//! entry it reports. It is Linux's `writel`/`readl` and not their `_relaxed`
+//! forms: `arch::barrier::before_mmio_write` and `after_mmio_read` supply it,
+//! which is a compiler barrier on x86-64's TSO and a `dmb` on AArch64, where a
+//! plain `fence` is inner-shareable and orders nothing a device sees.
+//!
+//! A store to device memory is not a store to plain memory, and `volatile`
+//! alone promises nothing about the two against each other: without the
+//! barrier the compiler may move a descriptor write past the doorbell that
+//! publishes it on either architecture.
+
 use core::ptr::{read_volatile, write_volatile};
 
 use super::DirectMap;
+use crate::arch::barrier;
 
 /// Bounds-checked volatile window over device or kernel-owned memory. Copy, no ownership, no lifetime.
 #[derive(Clone, Copy)]
@@ -11,7 +29,8 @@ pub struct Mmio {
 
 // SAFETY: the window's address is fixed for the machine's life and Mmio carries no lock, so Send costs nothing new.
 unsafe impl Send for Mmio {}
-// SAFETY: every access goes through read_volatile/write_volatile below, which order correctly regardless of which CPU issues them.
+// SAFETY: every access is one volatile load or store carrying the module's ordering
+// contract on whichever CPU issues it; nothing here is shared state of its own.
 unsafe impl Sync for Mmio {}
 
 impl Mmio {
@@ -70,13 +89,17 @@ impl Mmio {
     pub fn read_u8(self, offset: u64) -> u8 {
         self.check(offset, 1);
         // SAFETY: check asserted the offset fits; read_volatile preserves the register's read side effect.
-        unsafe { read_volatile(self.base.add(offset as usize) as *const u8) }
+        let value = unsafe { read_volatile(self.base.add(offset as usize) as *const u8) };
+        barrier::after_mmio_read();
+        value
     }
 
     #[inline]
     pub fn write_u8(self, offset: u64, val: u8) {
         self.check(offset, 1);
-        // SAFETY: check asserted the offset fits; write_volatile preserves ordering against other MMIO accesses.
+        barrier::before_mmio_write();
+        // SAFETY: check asserted the offset fits; write_volatile keeps the store, and the
+        // barrier above orders it after this CPU's earlier stores.
         unsafe { write_volatile(self.base.add(offset as usize), val) }
     }
 
@@ -84,13 +107,17 @@ impl Mmio {
     pub fn read_u16(self, offset: u64) -> u16 {
         self.check(offset, 2);
         // SAFETY: check asserted the offset fits; read_volatile preserves the register's read side effect.
-        unsafe { read_volatile(self.base.add(offset as usize) as *const u16) }
+        let value = unsafe { read_volatile(self.base.add(offset as usize) as *const u16) };
+        barrier::after_mmio_read();
+        value
     }
 
     #[inline]
     pub fn write_u16(self, offset: u64, val: u16) {
         self.check(offset, 2);
-        // SAFETY: check asserted the offset fits; write_volatile preserves ordering against other MMIO accesses.
+        barrier::before_mmio_write();
+        // SAFETY: check asserted the offset fits; write_volatile keeps the store, and the
+        // barrier above orders it after this CPU's earlier stores.
         unsafe { write_volatile(self.base.add(offset as usize) as *mut u16, val) }
     }
 
@@ -98,13 +125,17 @@ impl Mmio {
     pub fn read_u32(self, offset: u64) -> u32 {
         self.check(offset, 4);
         // SAFETY: check asserted the offset fits; read_volatile preserves the register's read side effect.
-        unsafe { read_volatile(self.base.add(offset as usize) as *const u32) }
+        let value = unsafe { read_volatile(self.base.add(offset as usize) as *const u32) };
+        barrier::after_mmio_read();
+        value
     }
 
     #[inline]
     pub fn write_u32(self, offset: u64, val: u32) {
         self.check(offset, 4);
-        // SAFETY: check asserted the offset fits; write_volatile preserves ordering against other MMIO accesses.
+        barrier::before_mmio_write();
+        // SAFETY: check asserted the offset fits; write_volatile keeps the store, and the
+        // barrier above orders it after this CPU's earlier stores.
         unsafe { write_volatile(self.base.add(offset as usize) as *mut u32, val) }
     }
 
@@ -112,13 +143,17 @@ impl Mmio {
     pub fn read_u64(self, offset: u64) -> u64 {
         self.check(offset, 8);
         // SAFETY: check asserted the offset fits; read_volatile preserves the register's read side effect.
-        unsafe { read_volatile(self.base.add(offset as usize) as *const u64) }
+        let value = unsafe { read_volatile(self.base.add(offset as usize) as *const u64) };
+        barrier::after_mmio_read();
+        value
     }
 
     #[inline]
     pub fn write_u64(self, offset: u64, val: u64) {
         self.check(offset, 8);
-        // SAFETY: check asserted the offset fits; write_volatile preserves ordering against other MMIO accesses.
+        barrier::before_mmio_write();
+        // SAFETY: check asserted the offset fits; write_volatile keeps the store, and the
+        // barrier above orders it after this CPU's earlier stores.
         unsafe { write_volatile(self.base.add(offset as usize) as *mut u64, val) }
     }
 }

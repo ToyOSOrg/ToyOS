@@ -5,6 +5,8 @@
 //! [`percpu`] owns every `gs:` access; nothing outside this directory writes one.
 
 pub mod apic;
+pub mod barrier;
+pub mod cache;
 pub mod control_regs;
 pub mod cpu;
 pub mod entry;

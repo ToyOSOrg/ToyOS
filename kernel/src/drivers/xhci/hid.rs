@@ -1,4 +1,3 @@
-use core::sync::atomic::{fence, Ordering};
 
 use crate::{keyboard, mouse};
 use super::{Mmio, Trb, TrbRing, TRB_NORMAL};
@@ -103,7 +102,7 @@ impl HidDevice {
         trb.status = self.report_size;
         trb.control = TRB_NORMAL | (1 << 5); // IOC
         self.int_ring.enqueue(trb);
-        fence(Ordering::Release);
+        // An `Mmio` write: ordered after the TRB it announces.
         db_base.write_u32(self.slot_id as u64 * 4, self.int_ep_dci as u32);
     }
 }

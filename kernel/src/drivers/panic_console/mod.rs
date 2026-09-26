@@ -1288,10 +1288,9 @@ fn panel_carries_report(fb: &Fb) -> bool {
     })
 }
 
-/// Put every store this module has made on the bus: the scanout is write-combining, and stores can sit in a buffer with nothing to evict them.
+/// Put every store this module has made on the bus.
 fn flush_stores() {
-    // SAFETY: `SFENCE` (SDM Vol. 3A §11.3.1) is the only way to drain a write-combining buffer; it touches no memory or register.
-    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+    crate::arch::barrier::scanout_flush();
 }
 
 /// `[page 2/4]` into the bottom row's cells; not decoration — the pager advances on a timer with no key to press.

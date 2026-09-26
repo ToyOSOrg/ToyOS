@@ -238,8 +238,8 @@ struct GpuController {
 impl GpuController {
     /// Reads what the device wrote into the response buffer.
     fn answer<T: Copy>(&self) -> T {
-        // Safe only because submit_and_wait's fence(Acquire) already ordered
-        // the device's write before this read.
+        // Safe only because `submit_and_wait`'s `barrier::dma_rmb` already
+        // ordered the device's write before this read.
         self.resp.read(0)
     }
 

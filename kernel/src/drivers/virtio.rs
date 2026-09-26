@@ -1,4 +1,4 @@
-use core::sync::atomic::{fence, Ordering};
+use crate::arch::barrier;
 
 use toyos_untrusted::{Refused, Untrusted};
 
@@ -376,8 +376,9 @@ impl UsedRingConsumer<'_> {
             if used_idx == self.last_used_idx {
                 return None;
             }
-            // Acquire: pairs with the device's release when it bumps the used idx after writing the element.
-            fence(Ordering::Acquire);
+            // The device writes the element before it bumps the idx (virtio 1.2
+            // §2.7.8), so the element is read after the idx that counts it.
+            barrier::dma_rmb();
             let slot = self.last_used_idx % self.size;
             let id: Untrusted<u32> =
                 Untrusted::new(self.used.read(USED_RING_OFF + slot as usize * USED_ELEM_SIZE));
@@ -554,10 +555,13 @@ impl<'pool> Virtqueue<'pool> {
 
         let avail_idx: u16 = self.avail.read(AVAIL_IDX_OFF);
         self.avail.write(AVAIL_RING_OFF + (avail_idx % size) as usize * 2, first_desc);
-        fence(Ordering::Release);
+        // The descriptors and the ring entry before the idx that publishes them
+        // (virtio 1.2 §2.7.13).
+        barrier::dma_wmb();
         self.avail.write(AVAIL_IDX_OFF, avail_idx.wrapping_add(1));
 
-        fence(Ordering::Release);
+        // The idx before the notification: the notify is an `Mmio` write, which
+        // orders every earlier store before it.
         let notify_off = self.notify_offset as u64 * notify_multiplier as u64;
         notify_mmio.write_u16(notify_off, queue_index);
 
@@ -581,7 +585,8 @@ impl<'pool> Virtqueue<'pool> {
             if used_idx == self.last_used_idx {
                 return None;
             }
-            fence(Ordering::Acquire);
+            // The element after the idx that counts it, as in `UsedRingConsumer::poll`.
+            barrier::dma_rmb();
             let slot = self.last_used_idx % self.size;
             let id = self.used_ring_id(slot);
             let len = self.used_ring_len(slot);
@@ -637,7 +642,8 @@ impl<'pool> Virtqueue<'pool> {
         let slot = at % self.size;
         self.used.write(self.used_elem_at(slot), id);
         self.used.write(self.used_elem_at(slot) + 4, len);
-        fence(Ordering::Release);
+        // As a device does: the element before the idx.
+        barrier::dma_wmb();
         self.used.write::<u16>(USED_IDX_OFF, at.wrapping_add(1));
     }
 
