@@ -9,6 +9,7 @@ members = [
     "filepicker",
     "filepicker-api",
     "files",
+    "host",
     "init",
     "input-test",
     "inspect",

@@ -77,6 +77,11 @@ devices = ["pci:1af4:1041"]
 [programs.sshd]
 receives = ["netd", "launcher", "swap"]
 
+# A name's addresses, asked of netd's resolver: `netd` is the whole of what it
+# holds.
+[programs.host]
+receives = ["netd"]
+
 # The reader of every owner's `inspect` answer: a connector to each owner's
 # port, and `inventory` for the kernel's `dev.*`, are the whole of what it can
 # observe.

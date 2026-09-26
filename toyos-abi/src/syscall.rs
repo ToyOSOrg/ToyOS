@@ -1074,8 +1074,12 @@ pub fn getcwd(buf: &mut [u8]) -> usize {
 }
 
 /// Fill `buf` with cryptographically secure random bytes.
-pub fn random(buf: &mut [u8]) {
-    syscall(SYS_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+///
+/// `Err` is a source that had nothing to give, and `buf` then holds no
+/// randomness a caller may use: every caller decides what that failure is,
+/// because a value drawn from a refused source is a predictable one.
+pub fn random(buf: &mut [u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0))
 }
 
 /// Nanoseconds since boot (monotonic clock).

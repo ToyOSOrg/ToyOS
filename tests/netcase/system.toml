@@ -54,3 +54,7 @@ devices = ["pci:1af4:1041"]
 # reaches the launcher through its own row, as it does on the desktop.
 [programs.shell]
 receives = ["launcher"]
+
+# What `dns_resolve` runs: a name's addresses, asked of netd's resolver.
+[programs.host]
+receives = ["netd"]
