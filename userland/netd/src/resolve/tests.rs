@@ -480,4 +480,11 @@ fn a_lookup_is_not_carried_by_a_later_ones_schedule() {
     let ended = net.run(1, 10 * toyos_dns::WAIT_MS);
     assert_eq!(ended, Some(Err(Ended::Failed(Failure::TimedOut))));
     assert_eq!(net.now_ms, toyos_dns::ROUNDS as u64 * toyos_dns::WAIT_MS, "lookup 1 waited on lookup 2's schedule");
+    let ended = net.run(2, 10 * toyos_dns::WAIT_MS);
+    assert_eq!(ended, Some(Err(Ended::Failed(Failure::TimedOut))));
+    assert_eq!(
+        net.now_ms,
+        toyos_dns::WAIT_MS / 2 + toyos_dns::ROUNDS as u64 * toyos_dns::WAIT_MS,
+        "lookup 2 waited on lookup 1's schedule"
+    );
 }
