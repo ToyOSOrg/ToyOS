@@ -1,8 +1,8 @@
 //! Default clippy with warnings denied, over the three trees this host lints.
 //!
 //! `cargo run -- --clippy` runs [`SHAPES`] alone; `cargo run -- --ci
-//! host-full` runs the same list as one of its steps, so the local command and
-//! the nightly gate cannot verify different sets.
+//! host` runs the same list as one of its steps, so the local command and
+//! the merge gate cannot verify different sets.
 //!
 //! Userland is not here: `x86_64-unknown-toyos` is a custom target, and the
 //! fork's `toyos` toolchain ships no clippy.

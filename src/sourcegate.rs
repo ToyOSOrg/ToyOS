@@ -1,8 +1,8 @@
 //! Identifiers a tree may not name, and the exceptions that are named instead.
 //!
 //! **Clippy runs now, and these scans are what it cannot say.** `cargo run --
-//! --ci host-full` runs default clippy with warnings denied over three trees
-//! every night — the host workspace
+//! --ci host` runs default clippy with warnings denied over three trees
+//! on every merge — the host workspace
 //! (`--workspace --all-targets`), the kernel (`--target x86_64-unknown-none`)
 //! and the bootloader (`--target x86_64-unknown-uefi`) — so a `clippy.toml` is
 //! no longer a wall with nothing behind it.

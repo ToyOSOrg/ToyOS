@@ -9,9 +9,11 @@
 //! as `host`, only in the merge queue, where every branch has already been
 //! judged as a pull request. A required check a workflow skips on the other
 //! event still reports, and a skip counts as passing — that is how each half
-//! enters the queue it does not itself run in. `nightly.yml` runs everything
-//! that boots a guest, the rest of the host checks (`host-full`), and
-//! portability. `publish.yml` puts a landing's crates on crates.io.
+//! enters the queue it does not itself run in. Every test that boots no guest
+//! is in [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
+//! everything that boots a guest, `host` again to write the cache the merge
+//! queue restores, and portability. `publish.yml` puts a landing's crates on
+//! crates.io.
 //!
 //! A host job runs every step and reds if any failed; a guest job stops at the
 //! first failure, because what follows a wrong instrument or a missing
@@ -40,10 +42,10 @@ pub(crate) const REQUIRED_CHECKS: &[&str] = &["host", "abi-split"];
 const NIGHTLY_RED: &str = "nightly is red";
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
-  host              cargo test --lib, every host-workspace suite and clippy (ci.yml)
+  host              every host test: the build system, the host workspace, clippy,
+                    the model controls, userland and the SDK (ci.yml, nightly)
   abi-split         the published crates' versions (ci.yml; the name is the required check's)
   gate-stage        what protects main, read back from GitHub (ci.yml)
-  host-full         host, plus the model controls, userland and the SDK (nightly)
   toolchain         publish this tree's toolchain if nobody has (nightly)
   guest <i>/<n>     one shard of the whole guest suite, nightly tier included (nightly)
   tcg               one test on an emulated CPU (nightly)
@@ -56,7 +58,6 @@ enum Job {
     Host,
     AbiSplit,
     GateStage,
-    HostFull,
     Toolchain,
     Guest(String),
     Tcg,
@@ -75,7 +76,6 @@ fn parse(words: &[String]) -> Result<Job, String> {
         Some("host") => Job::Host,
         Some("abi-split") => Job::AbiSplit,
         Some("gate-stage") => Job::GateStage,
-        Some("host-full") => Job::HostFull,
         Some("toolchain") => Job::Toolchain,
         Some("guest") => Job::Guest(shard(words.get(1))?),
         Some("tcg") => Job::Tcg,
@@ -103,7 +103,6 @@ pub fn dispatch(root: &Path, args: &[String]) {
             vec![step("the published crates' versions", || abi_split(root))]
         }
         Job::GateStage => vec![step("what protects main", || gate_stage(root))],
-        Job::HostFull => host_full(root),
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
         Job::Guest(shard) => {
             guest(root, &suite_args(&["--shard", shard, "--jobs", "1", "--nightly"]))
@@ -204,43 +203,6 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
 }
 
 // --- The host jobs -------------------------------------------------------------
-
-/// The merge queue's whole gate: the build system's own tests, every member of
-/// the host workspace, and clippy with warnings denied. None of the three
-/// needs the ToyOS toolchain nightly.yml alone builds — the kernel and the
-/// bootloader clippy against `x86_64-unknown-none`/`x86_64-unknown-uefi`,
-/// targets any rustup installs, and `x86_64-unknown-toyos` (the one target
-/// that does need the fork) is userland's alone, and userland carries no
-/// clippy shape (`src/clippy.rs`).
-fn host(root: &Path) -> Vec<Step> {
-    let mut steps = vec![
-        step("the build system", || cargo(root, &["test", "--lib"])),
-        step("the host workspace", || {
-            cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
-        }),
-    ];
-    steps.push(step("clippy and the bare targets", || {
-        for args in [
-            &["component", "add", "clippy"][..],
-            &["target", "add", "x86_64-unknown-none", "x86_64-unknown-uefi"],
-        ] {
-            let status = Command::new("rustup").args(args).status().map_err(|e| e.to_string())?;
-            if !status.success() {
-                return Err(format!("rustup {} exited {status}", args.join(" ")));
-            }
-        }
-        Ok("installed".into())
-    }));
-    steps.push(step("clippy, warnings denied", || {
-        let failed = crate::clippy::run(root);
-        if failed.is_empty() {
-            Ok("clean".into())
-        } else {
-            Err(failed.join("; "))
-        }
-    }));
-    steps
-}
 
 /// What a model of the kernel's concurrency is shown able to catch: a feature
 /// that takes away the one edge the model's property rests on, and the verdict
@@ -398,14 +360,46 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
     judge_control(control, green, &log)
 }
 
-/// The userland crates whose decisions are testable on the host. They name the
-/// host triple because `userland/.cargo/config.toml` cross-compiles by default,
-/// which is also why they cannot be host-workspace members.
-const USERLAND_HOST_CRATES: &[&str] = &["sshd", "calc", "soundd", "logd", "pkg", "netd"];
-
-fn host_full(root: &Path) -> Vec<Step> {
+/// The merge queue's whole gate, and the nightly's host lane: every test that
+/// runs on the host and boots no guest. The build system's own tests, every
+/// member of the host workspace, clippy with warnings denied, the concurrency
+/// models' negative controls, every userland crate with a host test
+/// ([`crate::userlandhost`], which also reds on a userland test none of them
+/// runs), and the SDK.
+///
+/// Clippy needs none of the ToyOS toolchain the nightly alone builds — the
+/// kernel and the bootloader lint against `x86_64-unknown-none` and
+/// `x86_64-unknown-uefi`, targets any rustup installs, and userland carries no
+/// clippy shape (`src/clippy.rs`). Userland and the SDK are tested against the
+/// host triple for the same reason.
+fn host(root: &Path) -> Vec<Step> {
     let host_triple = crate::toolchain::host_triple();
-    let mut steps = self::host(root);
+    let mut steps = vec![
+        step("the build system", || cargo(root, &["test", "--lib"])),
+        step("the host workspace", || {
+            cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
+        }),
+    ];
+    steps.push(step("clippy and the bare targets", || {
+        for args in [
+            &["component", "add", "clippy"][..],
+            &["target", "add", "x86_64-unknown-none", "x86_64-unknown-uefi"],
+        ] {
+            let status = Command::new("rustup").args(args).status().map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("rustup {} exited {status}", args.join(" ")));
+            }
+        }
+        Ok("installed".into())
+    }));
+    steps.push(step("clippy, warnings denied", || {
+        let failed = crate::clippy::run(root);
+        if failed.is_empty() {
+            Ok("clean".into())
+        } else {
+            Err(failed.join("; "))
+        }
+    }));
     // `log_zeroed_init` and `log_body_words` are gated `cfg(not(feature =
     // "loom"))`, so the default invocation runs nothing from either.
     steps.push(step("kernel-loom without loom", || {
@@ -423,11 +417,16 @@ fn host_full(root: &Path) -> Vec<Step> {
     for control in CONTROLS {
         steps.push(step(&format!("control `{}`", control.feature), || run_control(root, control)));
     }
-    for name in USERLAND_HOST_CRATES {
-        let manifest = format!("userland/{name}/Cargo.toml");
-        steps.push(step(&format!("userland/{name}"), || {
-            cargo(root, &["test", "--manifest-path", &manifest, "--target", &host_triple])
-        }));
+    match crate::userlandhost::survey(&root.join("userland")) {
+        Ok(survey) => {
+            for name in survey.gated {
+                let manifest = format!("userland/{name}/Cargo.toml");
+                steps.push(step(&format!("userland/{name}"), || {
+                    cargo(root, &["test", "--manifest-path", &manifest, "--target", &host_triple])
+                }));
+            }
+        }
+        Err(why) => steps.push(Step { label: "the userland host crates".into(), verdict: Err(why) }),
     }
     // The SDK compiles against the ToyOS sysroot everywhere but here, and this
     // build links no syscall.
