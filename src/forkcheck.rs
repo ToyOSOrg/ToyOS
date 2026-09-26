@@ -672,15 +672,13 @@ fn find(base: &Path, prefix: &str, wanted: &str, skip: &[&str], out: &mut Vec<(P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toyos_tmpdir::TempDir;
 
     /// One test's scratch: the fake remote goes in `widget/`, the tree that
     /// consumes it in `tree/`. The remote's directory name is the repository
     /// name every assertion below reads.
-    fn case(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("forkcheck-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn case(name: &str) -> TempDir {
+        TempDir::new(&format!("forkcheck-{name}"))
     }
 
     /// A repository standing in for a fork remote. `git ls-remote` takes a path

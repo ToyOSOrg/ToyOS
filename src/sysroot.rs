@@ -677,13 +677,7 @@ fn git_run(dir: &Path, args: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("toyos-sysroot-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::canonicalize(&dir).unwrap()
-    }
+    use toyos_tmpdir::TempDir;
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
@@ -704,8 +698,7 @@ mod tests {
 
     /// A worktree's three trees, a fork checkout and a compiler, laid out the
     /// way the key reads them.
-    fn keyed(name: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let base = scratch(name);
+    fn keyed(base: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let root = base.join("root");
         for tree in SYSROOT_SOURCES {
             write(&root.join(tree).join("lib.rs"), "/// A.\npub struct A;\n");
@@ -729,7 +722,8 @@ mod tests {
     /// a line of the fork's code or another compiler is another.
     #[test]
     fn a_comment_is_the_same_sysroot_and_a_signature_is_another() {
-        let (root, rust_dir, fork) = keyed("key");
+        let base = TempDir::new("key");
+        let (root, rust_dir, fork) = keyed(&base);
         let k = || key(&root, &rust_dir, &fork);
         let base = k();
         assert_eq!(base.len(), 16, "{base}");
@@ -770,8 +764,7 @@ mod tests {
 
     /// A primary with the fork as its `rust` submodule at `C1`, the fork's `C2`
     /// one library change later, and a linked worktree whose tree pins `C2`.
-    fn two_pins(name: &str) -> (PathBuf, PathBuf, String, String) {
-        let base = scratch(name);
+    fn two_pins(base: &Path) -> (PathBuf, PathBuf, String, String) {
         let bt = base.join("backtrace-src");
         fs::create_dir_all(&bt).unwrap();
         git(&bt, &["init", "-q"]);
@@ -816,7 +809,8 @@ mod tests {
     /// checkout is what its gitlink names.
     #[test]
     fn a_worktree_pinning_another_fork_commit_gets_its_own_checkout() {
-        let (primary, linked, c1, c2) = two_pins("fork-pins");
+        let base = TempDir::new("fork-pins");
+        let (primary, linked, c1, c2) = two_pins(&base);
         let before = git(&primary.join("rust"), &["status", "--porcelain"]);
 
         let fork = fork_checkout(&linked);
@@ -857,7 +851,7 @@ mod tests {
     /// a key a worktree records stays, and so does one somebody is using.
     #[test]
     fn a_sweep_removes_what_no_worktree_names_and_nobody_uses() {
-        let root = scratch("sweep");
+        let root = TempDir::new("sweep");
         git(&root, &["init", "-q"]);
         write(&root.join("f"), "x\n");
         git(&root, &["add", "f"]);
@@ -890,7 +884,7 @@ mod tests {
     /// library is refused.
     #[test]
     fn the_libraries_placed_are_the_ones_the_stamp_names() {
-        let base = scratch("stamp");
+        let base = TempDir::new("stamp");
         let built = base.join("built/x86_64-unknown-toyos/dist");
         write(&built.join("out/libstd-new.rlib"), "new std");
         write(&built.join("out/crt0.o"), "start");
@@ -915,7 +909,8 @@ mod tests {
     /// copy of something.
     #[test]
     fn a_removed_worktree_takes_its_fork_checkout_and_refuses_to_lose_fork_work() {
-        let (primary, linked, _c1, _c2) = two_pins("fork-remove");
+        let base = TempDir::new("fork-remove");
+        let (primary, linked, _c1, _c2) = two_pins(&base);
         let fork = fork_checkout(&linked);
         write(&fork.join("library/std/src/lib.rs"), "pub fn unsaved() {}\n");
         let refused = std::panic::catch_unwind(|| crate::worktree::remove(&primary, linked.to_str().unwrap()));
