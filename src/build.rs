@@ -424,12 +424,19 @@ pub const PROFILE: &str = "toyos";
 #[derive(Clone)]
 struct GuestEnv {
     toolchain: PathBuf,
+    /// Whether that sysroot's compiler is the primary's, the one the hosted
+    /// rustc is built from (`src/compiler.rs`).
+    primary_compiler: bool,
     path: String,
 }
 
 impl GuestEnv {
     fn new(root: &Path, sysroot: &crate::sysroot::Sysroot) -> Self {
-        Self { toolchain: sysroot.dir.clone(), path: toolchain::path_with_toyos_ld(root) }
+        Self {
+            toolchain: sysroot.dir.clone(),
+            primary_compiler: sysroot.primary_compiler,
+            path: toolchain::path_with_toyos_ld(root),
+        }
     }
 }
 
@@ -734,6 +741,12 @@ fn build_and_assemble(
             "hosted-rustc is built to run on {}, and this image is for {}",
             toolchain::HOSTED_ARCH.name(),
             arch.name()
+        );
+        assert!(
+            env.primary_compiler,
+            "hosted-rustc ships the primary checkout's hosted compiler, and this worktree builds with \
+             a compiler of its own (src/compiler.rs): the image would carry a rustc that is not the \
+             one its programs were built with"
         );
         collect_hosted_rustc(root, &env.toolchain, &mut root_files);
     }

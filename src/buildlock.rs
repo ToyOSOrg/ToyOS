@@ -26,9 +26,11 @@
 //! (`src/sysroot.rs`), which nothing rewrites. Only a sysroot being *made*
 //! reads the compiler, and it holds [`compiler_shared`] while it does.
 //!
-//! A sysroot's own lock ([`sysroot_building`], [`sysroot_using`]) is per key,
+//! A sysroot's own lock ([`keyed_building`], [`keyed_using`]) is per key,
 //! so two worktrees with different ABIs never meet in it, and two with the same
-//! one build it once.
+//! one build it once. A compiler a worktree's fork checkout names apart from the
+//! primary's (`src/compiler.rs`) is locked the same way under its own key, and
+//! neither it nor a sysroot built from it takes the global lock.
 //!
 //! [`integration`] is neither: one file of its own, exclusive-only, and held
 //! while this host's `main` moves rather than while anything builds.
@@ -49,7 +51,8 @@
 //! `[host-builds] waiting …` line was printed.
 //!
 //! **The order between them is a constraint, not a preference:** host slot
-//! (guest or build) → a sysroot key's lock → the worktree build lock → the
+//! (guest or build) → a compiler key's lock → a sysroot key's lock → the
+//! worktree build lock → the
 //! global one → artifact. A build slot is taken before any build lock and never
 //! while one is held; a key's lock is taken with the worktree lock put down
 //! ([`Held::without_shared`]), because the key's builder takes the worktree lock
@@ -352,39 +355,63 @@ pub fn build_slot(root: &Path, what: &str) -> Option<Guard> {
 
 const BUILD_SLOT_DIR: &str = "build-slots";
 
-/// Make the sysroot `key` names: exclusive, and waited for by every other
-/// process that wants the same key, which then finds it made.
-pub fn sysroot_building(root: &Path, key: &str) -> Guard {
-    exclusive(&sysroot_lock_path(root, key), "sysroot lock", &format!("building sysroot {key}"))
+/// A content-addressed product of the host, locked per key: a sysroot, or a
+/// compiler a worktree's fork checkout names (`src/compiler.rs`).
+#[derive(Clone, Copy)]
+pub enum Keyed {
+    Sysroot,
+    Compiler,
 }
 
-/// Compile against the sysroot `key` names: shared, so any number of builds use
-/// it at once, a builder of it is waited for, and a sweep cannot remove it.
-pub fn sysroot_using(root: &Path, key: &str) -> Guard {
-    let path = sysroot_lock_path(root, key);
+impl Keyed {
+    fn dir(self) -> &'static str {
+        match self {
+            Keyed::Sysroot => "sysroots",
+            Keyed::Compiler => "compilers",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Keyed::Sysroot => "sysroot",
+            Keyed::Compiler => "compiler",
+        }
+    }
+}
+
+/// Make what `key` names: exclusive, and waited for by every other process that
+/// wants the same key, which then finds it made.
+pub fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
+    let lock = format!("{} lock", kind.name());
+    exclusive(&keyed_lock_path(root, kind, key), &lock, &format!("building {} {key}", kind.name()))
+}
+
+/// Use what `key` names: shared, so any number of builds use it at once, a
+/// builder of it is waited for, and a sweep cannot remove it.
+pub fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
+    let path = keyed_lock_path(root, kind, key);
     let file = open_lock_file(&path);
     if !try_lock(&file, LOCK_SH) {
-        let what = format!("using sysroot {key}");
+        let lock = format!("{} lock", kind.name());
+        let what = format!("using {} {key}", kind.name());
         let holder = describe_holder(&path)
             .unwrap_or_else(|| "held, but the holder left no readable note".to_string());
-        announce("sysroot lock", &what, &holder);
-        take_lock_announcing(&file, LOCK_SH, &path, "sysroot lock", &what);
+        announce(&lock, &what, &holder);
+        take_lock_announcing(&file, LOCK_SH, &path, &lock, &what);
     }
     Guard { file, records_holder: false }
 }
 
-/// The sysroot `key` names, exclusively and only if nobody is making or using
-/// it: what a sweep holds while it removes one.
-pub fn sysroot_idle(root: &Path, key: &str) -> Option<Guard> {
-    let file = open_lock_file(&sysroot_lock_path(root, key));
+/// What `key` names, exclusively and only if nobody is making or using it: what
+/// a sweep holds while it removes one.
+pub fn keyed_idle(root: &Path, kind: Keyed, key: &str) -> Option<Guard> {
+    let file = open_lock_file(&keyed_lock_path(root, kind, key));
     try_lock(&file, LOCK_EX).then_some(Guard { file, records_holder: false })
 }
 
-fn sysroot_lock_path(root: &Path, key: &str) -> PathBuf {
-    git_lock_dir(root).join(SYSROOT_DIR).join(key)
+fn keyed_lock_path(root: &Path, kind: Keyed, key: &str) -> PathBuf {
+    git_lock_dir(root).join(kind.dir()).join(key)
 }
-
-const SYSROOT_DIR: &str = "sysroots";
 
 fn slot_path(dir: &Path, index: usize) -> PathBuf {
     dir.join(format!("slot-{index}"))
@@ -875,7 +902,7 @@ mod tests {
                 until_orphaned();
             }
             "hold-sysroot-build" => {
-                let _building = sysroot_building(&root, "k1");
+                let _building = keyed_building(&root, Keyed::Sysroot, "k1");
                 touch(&root.join("held"));
                 appeared(&root.join("release"), Duration::from_secs(20));
                 note(&root, "built");
@@ -885,7 +912,7 @@ mod tests {
                 note(&root, "landed");
             }
             "want-sysroot" => {
-                let _using = sysroot_using(&root, "k1");
+                let _using = keyed_using(&root, Keyed::Sysroot, "k1");
                 note(&root, "used");
             }
             "want-slot" => {
@@ -1150,8 +1177,8 @@ mod tests {
         let mut builder = child(&root, "hold-sysroot-build");
         assert!(appeared(&root.join("held"), Duration::from_secs(20)), "the builder never started");
 
-        assert!(sysroot_idle(&root, "k1").is_none(), "a sweep could remove a key being built");
-        let other = sysroot_building(&root, "k2");
+        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key being built");
+        let other = keyed_building(&root, Keyed::Sysroot, "k2");
         drop(other);
 
         let mut user = child(&root, "want-sysroot");
@@ -1164,10 +1191,10 @@ mod tests {
         assert!(user.wait().unwrap().success());
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "built\nused\n");
 
-        let using = sysroot_using(&root, "k1");
-        assert!(sysroot_idle(&root, "k1").is_none(), "a sweep could remove a key in use");
+        let using = keyed_using(&root, Keyed::Sysroot, "k1");
+        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key in use");
         drop(using);
-        assert!(sysroot_idle(&root, "k1").is_some());
+        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some());
     }
 
     /// The whole point of a counting semaphore: the run past the budget waits.

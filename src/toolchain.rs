@@ -233,7 +233,7 @@ pub(crate) fn rustup_home() -> Option<PathBuf> {
 }
 
 /// Where the machine-global `toyos` rustup toolchain currently points.
-fn rustup_link() -> Option<PathBuf> {
+pub(crate) fn rustup_link() -> Option<PathBuf> {
     fs::read_link(rustup_home()?.join("toolchains/toyos")).ok()
 }
 
@@ -322,7 +322,7 @@ fn cargo_link_stale(stage2: &Path) -> bool {
 /// has, and a copy would put a 32 MB host binary into a 401 MiB artifact to
 /// stand in for a file the consumer can make in a microsecond. `Owner::Installed`
 /// makes it, exactly as it makes the host target.
-fn provision_toolchain_cargo(stage2: &Path) {
+pub(crate) fn provision_toolchain_cargo(stage2: &Path) {
     let at = stage2.join("bin/cargo");
     let _ = fs::remove_file(&at);
     std::os::unix::fs::symlink(host_cargo(), &at).unwrap_or_else(|e| {
@@ -480,7 +480,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
             eprintln!("Building full toolchain (this takes a while on first run)...");
             full_bootstrap(root, &rust_dir);
             stamps::write_dir_stamp(&rust_dir.join("compiler"), &compiler_stamp);
-            sysroot::record_compiler(&rust_dir);
+            crate::compiler::record(&rust_dir);
             if kind.invalidate_hosted {
                 let _ = fs::remove_file(&hosted_stamp);
             }
@@ -492,7 +492,7 @@ pub fn ensure(root: &Path, force_rebuild: bool, lock: &mut buildlock::Held) -> S
         Scope::Global,
         "record which compiler the toolchain is",
         || (!rust_dir.join("build/toyos-compiler").exists()).then_some(()),
-        |()| sysroot::record_compiler(&rust_dir),
+        |()| crate::compiler::record(&rust_dir),
     );
 
     let hosted_rustc = rust_dir.join(format!("build/{}/stage2/bin/rustc", HOSTED_ARCH.userland()));

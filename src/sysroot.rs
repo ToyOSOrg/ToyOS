@@ -6,12 +6,12 @@
 //! built from: the three trees std and `libtoyos_c.a` compile
 //! ([`SYSROOT_SOURCES`]), the std fork's `library/` and `src/bootstrap/` in the
 //! checkout that builds it, and the compiler that builds it. `rust/build/
-//! sysroots/<key>/` is a whole toolchain — the compiler's files cloned from the
-//! primary's `stage2`, the guest targets' libraries built from this key's
-//! sources — and nothing writes it after its [`SOURCES`] file exists. A build
-//! compiles against the directory its own key names, so two worktrees with
-//! different ABIs never refuse or wait for each other, and main and every branch
-//! matching it share one copy.
+//! sysroots/<key>/` is a whole toolchain — the compiler's files cloned from its
+//! `stage2`, the guest targets' libraries built from this key's sources — and
+//! nothing writes it after its [`SOURCES`] file exists. A build compiles against
+//! the directory its own key names, so two worktrees with different ABIs or
+//! different compilers never refuse or wait for each other, and main and every
+//! branch matching it share one copy.
 //!
 //! **Each worktree builds std in its own fork checkout, and nothing but the
 //! primary's own sync moves the primary's.** The primary builds in its `rust/`;
@@ -19,16 +19,16 @@
 //! the primary's fork repository at the commit this tree pins ([`fork_checkout`]).
 //! `library/std` names `toyos-abi` and `toyos` as `../../../`, so each
 //! checkout's std compiles against its own worktree's ABI with nothing
-//! rewritten. The build is bootstrap's stage-0 local rebuild: the primary's
-//! `stage2` compiler compiles the checkout's `library/` for the guest targets
-//! into `<checkout>/build/toyos-std/`. The compiler is built once, by the
-//! primary, and a fork commit whose `compiler/` is not the one it was built from
-//! is refused by name ([`check_compiler`]).
+//! rewritten. The build is bootstrap's stage-0 local rebuild: the compiler the
+//! checkout names (`src/compiler.rs` — the primary's `stage2`, or one of the
+//! worktree's own where its `compiler/` differs) compiles the checkout's
+//! `library/` for the guest targets into `<checkout>/build/toyos-std/`.
 //!
-//! Locks, in the one order every acquirer takes them: the key's
-//! (`buildlock::sysroot_*`), with this worktree's build lock put down; then, to
-//! build, this worktree's exclusively (its fork build directory is written);
-//! then the global one shared, because the primary's compiler is read.
+//! Locks, in the one order every acquirer takes them: the compiler key's, if the
+//! compiler is a worktree's own; the sysroot key's (`buildlock::keyed_*`), with
+//! this worktree's build lock put down; then, to build, this worktree's
+//! exclusively (its fork build directory is written); then, if the compiler is
+//! the primary's, the global one shared, because it is read.
 //!
 //! A sysroot no worktree names any more is removed by [`sweep`], which
 //! `--worktree remove` runs: each build records the key it used in its
@@ -42,7 +42,8 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use crate::buildlock::{self, Guard, Held};
+use crate::buildlock::{self, Guard, Held, Keyed};
+use crate::compiler::{self, Compiler};
 use crate::identity;
 use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
 
@@ -66,12 +67,6 @@ const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, \
 /// Where each build records the key it compiled against, for [`sweep`].
 const RECORD: &str = "target/toyos-sysroot-key";
 
-/// The compiler `stage2` was built from, written by the primary: see
-/// [`record_compiler`].
-fn compiler_record(rust_dir: &Path) -> PathBuf {
-    rust_dir.join("build/toyos-compiler")
-}
-
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/sysroots")
@@ -81,6 +76,9 @@ pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
 pub struct Sysroot {
     /// A toolchain directory: `RUSTUP_TOOLCHAIN` names it.
     pub dir: PathBuf,
+    /// Whether its compiler is the primary's, which the ToyOS-hosted rustc is
+    /// built from.
+    pub primary_compiler: bool,
     _using: Option<Guard>,
 }
 
@@ -89,7 +87,7 @@ impl Sysroot {
     /// artifact's, which `toolchain::check_installed_toolchain` has matched to
     /// these sources.
     pub(crate) fn installed(stage2: PathBuf) -> Self {
-        Self { dir: stage2, _using: None }
+        Self { dir: stage2, primary_compiler: true, _using: None }
     }
 }
 
@@ -98,7 +96,7 @@ fn hex(digest: &[u8]) -> String {
 }
 
 /// The first 16 hex digits of the SHA-256 of `data`.
-fn short(data: &[u8]) -> String {
+pub(crate) fn short(data: &[u8]) -> String {
     hex(&Sha256::digest(data))[..16].to_string()
 }
 
@@ -155,7 +153,7 @@ pub fn witness(root: &Path) -> String {
 /// covers, into every submodule checked out there — never what a build or the
 /// desktop leaves beside them (bootstrap's `__pycache__`, Finder's
 /// `.DS_Store`), which would make a key that moves while it is being built.
-fn tree_identity(base: &Path, paths: &[&str]) -> String {
+pub(crate) fn tree_identity(base: &Path, paths: &[&str]) -> String {
     let mut files = Vec::new();
     source_files(base, paths, &mut files);
     files.sort();
@@ -188,80 +186,14 @@ fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The compiler as the key sees it: the source it was built from, as
-/// [`record_compiler`] wrote it, and the driver that build left, so a rebuild
-/// of the same source is a new compiler too.
-fn compiler_identity(rust_dir: &Path) -> String {
-    let record = compiler_record(rust_dir);
-    let source = fs::read_to_string(&record).unwrap_or_else(|_| {
-        panic!(
-            "{} is missing, so no sysroot can say which compiler it was built with.\n\
-             The primary checkout writes it: run `cargo run -- --build-only` in {} once.",
-            record.display(),
-            rust_dir.parent().unwrap_or(rust_dir).display(),
-        )
-    });
-    let lib = toolchain::stage2(rust_dir).join("lib");
-    let driver = fs::read_dir(&lib)
-        .unwrap_or_else(|e| panic!("read {}: {e}", lib.display()))
-        .flatten()
-        .find(|e| e.file_name().to_string_lossy().starts_with("librustc_driver"))
-        .unwrap_or_else(|| panic!("{} holds no librustc_driver", lib.display()));
-    let meta = driver.metadata().unwrap_or_else(|e| panic!("stat the driver: {e}"));
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    format!("{} {} {} {mtime}", source.trim(), driver.file_name().to_string_lossy(), meta.len())
-}
-
-/// What `checkout`'s `compiler/` is: its commit's tree, and whatever the working
-/// tree changes in it.
-fn compiler_source(checkout: &Path) -> String {
-    let tree = git_out(checkout, &["rev-parse", "HEAD:compiler"]);
-    let local = git_bytes(checkout, &["diff", "HEAD", "--", "compiler"]);
-    if local.is_empty() {
-        tree.trim().to_string()
-    } else {
-        format!("{} with local changes {}", tree.trim(), short(&local))
-    }
-}
-
-/// Record which compiler `stage2` is. The primary calls this after a toolchain
-/// build, and when the record is missing — its compiler stamp has just said
-/// `stage2` is built from what its `rust/` holds.
-pub fn record_compiler(rust_dir: &Path) {
-    let record = compiler_record(rust_dir);
-    let want = compiler_source(rust_dir);
-    if fs::read_to_string(&record).ok().as_deref() != Some(want.as_str()) {
-        fs::write(&record, &want).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
-    }
-}
-
-/// Refuse a fork checkout whose `compiler/` is not the one `stage2` was built
-/// from: its std would be compiled by a compiler it was not written for.
-fn check_compiler(rust_dir: &Path, fork: &Path) {
-    let record = compiler_record(rust_dir);
-    let built = fs::read_to_string(&record).unwrap_or_default();
-    let here = compiler_source(fork);
-    assert!(
-        built.trim() == here,
-        "{} holds the fork at a `compiler/` ({here}) the shared compiler was not built from \
-         ({}).\nA compiler change is built once, by the primary: land it, and the primary's \
-         sync and next build rebuild the compiler every worktree uses.",
-        fork.display(),
-        if built.is_empty() { "nothing recorded" } else { built.trim() },
-    );
-}
-
-/// The key of the sysroot `root` builds against with its std fork at `fork`.
-pub fn key(root: &Path, rust_dir: &Path, fork: &Path) -> String {
+/// The key of the sysroot `root` builds against with its std fork at `fork`,
+/// compiled by `compiler`.
+pub fn key(root: &Path, compiler: &Compiler, fork: &Path) -> String {
     let parts = [
         format!("{RECIPE}; cargo {STAGE0_CARGO}; targets {}", GUEST_TARGETS.join(" ")),
         witness(root),
         tree_identity(fork, &["library", "src/bootstrap"]),
-        compiler_identity(rust_dir),
+        compiler.identity(),
     ];
     short(parts.join("\n\0\n").as_bytes())
 }
@@ -374,44 +306,44 @@ fn finished(dir: &Path) -> bool {
 /// held in use for as long as the returned value lives.
 pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     let fork = fork_checkout(root);
-    if fork != rust_dir {
-        check_compiler(rust_dir, &fork);
-    }
-    let key = key(root, rust_dir, &fork);
+    let compiler = compiler::resolve(root, rust_dir, &fork, lock);
+    let key = key(root, &compiler, &fork);
     let dir = sysroots_dir(rust_dir).join(&key);
     let record = root.join(RECORD);
     fs::create_dir_all(record.parent().expect("a file under target/")).ok();
     fs::write(&record, &key).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
 
     let using = lock.without_shared(|| loop {
-        let using = buildlock::sysroot_using(root, &key);
+        let using = buildlock::keyed_using(root, Keyed::Sysroot, &key);
         if finished(&dir) {
             break using;
         }
         drop(using);
-        let _building = buildlock::sysroot_building(root, &key);
+        let _building = buildlock::keyed_building(root, Keyed::Sysroot, &key);
         if !finished(&dir) {
-            build(root, rust_dir, &fork, &key, &dir);
+            build(root, &compiler, &fork, &key, &dir);
         }
     });
     toolchain::assert_toolchain_is_honest(&dir);
-    Sysroot { dir, _using: Some(using) }
+    Sysroot { dir, primary_compiler: compiler.primary, _using: Some(using) }
 }
 
 /// Make the sysroot `key` names at `dir`, from `root`'s sources and the std fork
-/// at `fork`. The caller holds the key's lock.
-fn build(root: &Path, rust_dir: &Path, fork: &Path, key: &str, dir: &Path) {
+/// at `fork`, with `compiler`. The caller holds the key's lock.
+fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
     let what = format!("building sysroot {key}");
     let _worktree = buildlock::worktree_exclusive(root, &what);
-    let _compiler = buildlock::compiler_shared(root, &what);
-    eprintln!("Building sysroot {key}: std from {}, the compiler from {}", fork.display(), rust_dir.display());
+    // Only the primary's compiler is rebuilt in place; one of a worktree's own
+    // is written once and held in use by `compiler`.
+    let _compiler = compiler.primary.then(|| buildlock::compiler_shared(root, &what));
+    eprintln!("Building sysroot {key}: std from {}, the compiler {}", fork.display(), compiler.stage2.display());
 
-    let built = build_std(root, rust_dir, fork);
+    let built = build_std(root, compiler, fork);
     let partial = dir.with_extension("partial");
     if partial.exists() {
         fs::remove_dir_all(&partial).unwrap_or_else(|e| panic!("remove {}: {e}", partial.display()));
     }
-    clone_tree(&toolchain::stage2(rust_dir), &partial);
+    clone_tree(&compiler.stage2, &partial);
     for target in GUEST_TARGETS {
         place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
     }
@@ -422,7 +354,7 @@ fn build(root: &Path, rust_dir: &Path, fork: &Path, key: &str, dir: &Path) {
     let _ = fs::remove_dir_all(&libc_target);
 
     // The sources the key named are the ones built, or this is not that key's.
-    let again = self::key(root, rust_dir, fork);
+    let again = self::key(root, compiler, fork);
     assert!(
         again == key,
         "the sources moved while sysroot {key} was being built (they are now {again}); \
@@ -437,12 +369,10 @@ fn build(root: &Path, rust_dir: &Path, fork: &Path, key: &str, dir: &Path) {
         .unwrap_or_else(|e| panic!("rename {} -> {}: {e}", partial.display(), dir.display()));
 }
 
-/// Compile the guest targets' libraries from `fork`'s `library/` with the
-/// primary's compiler, and return the directory each target's is under.
-fn build_std(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
-    if fork == rust_dir {
-        crate::ensure_submodule(fork, "library/backtrace");
-    }
+/// Compile the guest targets' libraries from `fork`'s `library/` with
+/// `compiler`, and return the directory each target's is under.
+fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
+    crate::ensure_submodule(fork, "library/backtrace");
     let host = host_triple();
     let build_dir = fork.join("build/toyos-std");
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
@@ -452,7 +382,7 @@ fn build_std(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
         let _ = fs::remove_dir_all(build_dir.join(&host).join("stage0-std").join(target));
     }
     let config = build_dir.join("bootstrap.toml");
-    fs::write(&config, std_config(rust_dir, &build_dir, &host, &toolchain::toyos_ld_binary(root)))
+    fs::write(&config, std_config(&compiler.stage2, &build_dir, &host, &toolchain::toyos_ld_binary(root)))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
 
     // Bootstrap re-locks `library/Cargo.lock` to this worktree's `toyos-abi` and
@@ -521,7 +451,7 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// `local-rebuild` is what lets stage 0 compile the library for a target the
 /// stage-0 compiler has none for, and `profile = "compiler"` is the primary's,
 /// so these libraries are built with the options `stage2`'s own were.
-fn std_config(rust_dir: &Path, build_dir: &Path, host: &str, toyos_ld: &Path) -> String {
+fn std_config(compiler: &Path, build_dir: &Path, host: &str, toyos_ld: &Path) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
     let linker = toyos_ld.display();
     let userland: String = toolchain::USERLAND_ARCHS
@@ -543,7 +473,7 @@ target = [{targets}]
 [rust]
 lld = false
 {userland}"#,
-        rustc = toolchain::stage2(rust_dir).join("bin/rustc").display(),
+        rustc = compiler.join("bin/rustc").display(),
         cargo = bootstrap_cargo().display(),
         build_dir = build_dir.display(),
     )
@@ -597,7 +527,7 @@ impl Drop for Restore {
 /// Copy `from` to `to`, a symbolic link as a link: `stage2`'s own point at
 /// things that outlive it. `fs::copy` clones on APFS and reflinks where Linux
 /// can, so a sysroot costs the bytes its own libraries differ by.
-fn clone_tree(from: &Path, to: &Path) {
+pub(crate) fn clone_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap_or_else(|e| panic!("create {}: {e}", to.display()));
     for entry in fs::read_dir(from).unwrap_or_else(|e| panic!("read {}: {e}", from.display())).flatten() {
         let src = entry.path();
@@ -638,7 +568,7 @@ pub fn sweep(root: &Path) -> Vec<PathBuf> {
         if whole && named.contains(&key) {
             continue;
         }
-        let Some(_idle) = buildlock::sysroot_idle(root, &key) else { continue };
+        let Some(_idle) = buildlock::keyed_idle(root, Keyed::Sysroot, &key) else { continue };
         let path = entry.path();
         fs::remove_dir_all(&path).unwrap_or_else(|e| panic!("remove {}: {e}", path.display()));
         removed.push(path);
@@ -650,7 +580,7 @@ fn path_str(path: &Path) -> &str {
     path.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", path.display()))
 }
 
-fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+pub(crate) fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)
@@ -665,7 +595,7 @@ fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
     out.stdout
 }
 
-fn git_out(dir: &Path, args: &[&str]) -> String {
+pub(crate) fn git_out(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&git_bytes(dir, args)).into_owned()
 }
 
@@ -724,7 +654,7 @@ mod tests {
         write(&fork.join(".gitignore"), "__pycache__\n.DS_Store\n");
         git(&fork, &["init", "-q"]);
         let rust_dir = base.join("rust");
-        write(&compiler_record(&rust_dir), "tree-1");
+        write(&rust_dir.join("build/toyos-compiler"), "tree-1");
         write(&toolchain::stage2(&rust_dir).join("lib/librustc_driver-1.dylib"), "a driver");
         (root, rust_dir, fork)
     }
@@ -735,7 +665,7 @@ mod tests {
     #[test]
     fn a_comment_is_the_same_sysroot_and_a_signature_is_another() {
         let (root, rust_dir, fork) = keyed("key");
-        let k = || key(&root, &rust_dir, &fork);
+        let k = || key(&root, &Compiler::primary(&rust_dir), &fork);
         let base = k();
         assert_eq!(base.len(), 16, "{base}");
 
@@ -769,7 +699,7 @@ mod tests {
         write(&root.join("toyos-abi/Cargo.toml"), "[package]\nversion = \"0.1.0\"\n");
         assert_eq!(k(), base);
 
-        write(&compiler_record(&rust_dir), "tree-2");
+        write(&rust_dir.join("build/toyos-compiler"), "tree-2");
         assert_ne!(k(), base, "another compiler kept the old sysroot");
     }
 
@@ -876,7 +806,7 @@ mod tests {
         }
         write(&root.join(RECORD), "named");
         write(&linked.join(RECORD), "linked-named");
-        let using = buildlock::sysroot_using(&root, "in-use");
+        let using = buildlock::keyed_using(&root, Keyed::Sysroot, "in-use");
 
         let mut removed = sweep(&root);
         removed.sort();
