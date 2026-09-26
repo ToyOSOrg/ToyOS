@@ -49,6 +49,11 @@ times:
    the per-thread record ring, the `Source` double dispatch and the per-module
    watcher lists are deleted. **Exit**: making an object waitable is one field,
    and the interleaving models check the smaller protocol.
+   **Done** (#513): `toyos-sched/src/watch.rs` and `park.rs`. `kernel/src` is
+   720 lines smaller (62931 to 62211). No instrument in the tree measures an
+   interrupts-off or a preemption-off span. The nearest, `sched_check_build`'s
+   pass cost, separated nothing on the dev host: the largest pass per CPU was
+   2.5–3.3 ms on this stage and 2.6–5.0 ms on main, three interleaved runs each.
 3. **Storage in userland.** NVMe and USB mass storage are programs that claim
    their device through its IOMMU domain, as netd does, and serve a block
    protocol over shared-memory rings. Partition claims move into that service.
