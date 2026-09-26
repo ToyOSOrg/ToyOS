@@ -53,6 +53,7 @@ members = [
     "toyos-symbols",
     "toyos-tco",
     "toyos-untrusted",
+    "toyos-update",
     "toyos-userbound",
     "toyos-userpin",
     "toyos-wallclock",
