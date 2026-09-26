@@ -155,7 +155,6 @@ sha2 = "0.10"
 
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
-toyos-ld = { path = "toyos-ld" }
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
 toyos-userbound = { path = "toyos-userbound" }
@@ -171,7 +170,7 @@ toyos-i219 = { path = "toyos-i219" }
 #
 # `check` because that is where the type lives, and it lives there because
 # `src/build.rs`'s artifact gate asks the *shipping* kernel to carry none of the
-# check instruments' literals — `toyos-ld` keeps a string constant no code
+# check instruments' literals — a linker may keep a string constant no code
 # reaches, so an unconditional `Display` puts the report's prefix in every
 # image. This is a dev-dependency of a host binary and `kernel/` is excluded
 # from this workspace with its own lockfile, so nothing here reaches the kernel's
@@ -194,16 +193,12 @@ tar = "0.4"
 [profile.release]
 opt-level = 2
 
-# The two host tools every build runs are built `--release` by
-# `src/toolchain.rs`, and `[profile.release]` above would otherwise drop them
-# from the default `opt-level = 3` to 2 now that they are members here rather
-# than workspace roots of their own. The linker runs once per guest binary and
-# the compiler once per translation unit: neither pays for the harness's
-# compile-time tradeoff.
+# The host tool every build runs is built `--release` by `src/toolchain.rs`,
+# and `[profile.release]` above would otherwise drop it from the default
+# `opt-level = 3` to 2 now that it is a member here rather than a workspace root
+# of its own. The compiler runs once per translation unit and does not pay for
+# the harness's compile-time tradeoff.
 [profile.release.package.toyos-cc]
-opt-level = 3
-
-[profile.release.package.toyos-ld]
 opt-level = 3
 
 # The test harness is a compute-bound host program, not a debug build of the
@@ -264,8 +259,19 @@ opt-level = 3
 inherits = "dev"
 opt-level = 2
 debug = true
+# DWARF stays out of the image: symbols name a frame, and `debug = true` is kept
+# for the codegen it decides.
+strip = "debuginfo"
 debug-assertions = true
 overflow-checks = true
+
+# Cargo does not carry the profile's `strip` onto a package with an override of
+# its own, and these two have one in `dev`.
+[profile.toyos.package.toyos-cc]
+strip = "debuginfo"
+
+[profile.toyos.package.toyos-ld]
+strip = "debuginfo"
 
 [[test]]
 name = "toyos-build"

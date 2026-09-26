@@ -109,3 +109,25 @@ fn tpoff_carries_the_addend() {
         }
     }
 }
+
+/// The executable's module ends at the thread pointer at its extent, not its
+/// size: an lld-linked `std_tls` declares `p_memsz` 0xa8 at `p_align` 0x40 and
+/// reads its first datum at `tp - 0xc0`.
+#[test]
+fn the_executables_extent_is_its_size_rounded_to_its_alignment() {
+    assert_eq!(tls::exe_extent(0xa8, 0x40), Some(0xc0));
+    assert_eq!(tls::exe_extent(0xc0, 0x40), Some(0xc0));
+    assert_eq!(tls::exe_extent(0x70, 8), Some(0x70));
+    // No alignment is alignment one.
+    assert_eq!(tls::exe_extent(0x71, 0), Some(0x71));
+    assert_eq!(tls::exe_extent(usize::MAX, 0x40), None);
+
+    // Placed after a library, the extent is what ends at the combined size, so
+    // `tp - base` is the offset the linker subtracted.
+    let (lib_base, cursor) = tls::place_module(0, 0x78, 8).unwrap();
+    assert_eq!(lib_base, 0);
+    let extent = tls::exe_extent(0xa8, 0x40).unwrap();
+    let (exe_base, total) = tls::place_module(cursor, extent, 0x40).unwrap();
+    assert_eq!(total - exe_base, 0xc0);
+    assert_eq!(exe_base % 0x40, 0);
+}

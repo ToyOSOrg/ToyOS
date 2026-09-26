@@ -205,7 +205,6 @@ issues/build/soundds-mix-pass-has-no-host-test.md
 issues/build/the-swarm-is-not-yet-falsifiable.md
 issues/build/the-toolchain-ships-no-cargo-and-the-shared-cache-waits-on-one.md
 issues/build/there-is-no-network-gate.md
-issues/build/toyos-cc-has-never-compiled-tcc.md
 issues/design-debt/redesign-the-log-subsystem.md
 issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md
 issues/diagnostics/the-log-staged-three-things-it-never-built.md

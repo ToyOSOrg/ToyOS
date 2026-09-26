@@ -165,6 +165,10 @@ fn main() {
     // The two lines `cc::Build::compile` prints after it archives.
     println!("cargo:rustc-link-lib=static=doomgeneric");
     println!("cargo:rustc-link-search=native={}", out_dir.display());
+    // The C library doomgeneric calls, which the sysroot carries beside std
+    // (`src/libc.rs`): the driver names it, as `cc` names libc for any C
+    // program, and the linker is given no rule of its own for finding it.
+    println!("cargo:rustc-link-lib=static=toyos_c");
 
     println!("cargo:rerun-if-changed=include");
     println!("cargo:rerun-if-changed=doomgeneric");
@@ -187,9 +191,9 @@ fn main() {
 /// So the archive is written here. A `.a` is a byte format, not a tool:
 /// `!<arch>\n`, then per member a 60-byte ASCII header and the member's bytes
 /// padded to an even length. Two things are deliberately absent. There is no
-/// symbol index (GNU's `/` member): toyos-ld resolves archive members by
-/// scanning them — `resolve_libs` in `toyos-ld/src/lib.rs` — and an index it
-/// does not read is a second copy of the truth for nobody. And there is no `//`
+/// symbol index (GNU's `/` member): `rust-lld` reads each member's own symbol
+/// table when an archive carries none, so an index would be a second copy of
+/// the truth for nobody. And there is no `//`
 /// long-name member, because the member names are the source stems, which fit
 /// the header's 16-byte field; the assert below is what keeps that true.
 ///

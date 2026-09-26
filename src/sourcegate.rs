@@ -629,6 +629,12 @@ const HOST_SPAWNS: &[Spawn] = &[
         why: "our own linker, the same way",
     },
     Spawn {
+        arg: "&rust_lld",
+        sites: &[("tests/common/compile.rs", 1)],
+        why: "the toolchain's own `rust-lld`, which rustc links every guest binary with, \
+              linking the C tests that have no Rust crate for rustc to link",
+    },
+    Spawn {
         arg: "toyos_build::build::https_fetch_host(&compile::repo_root())",
         sites: &[("tests/common/https.rs", 1)],
         why: "the guest's own TLS client compiled for the host, which is the differential \

@@ -179,8 +179,11 @@ pub fn build_tls_layout(
     }
 
     if let Some(tls) = exe {
+        // Its extent, not its `memsz`: the executable's local-exec offsets were
+        // fixed at link time against a module that ends at the thread pointer.
+        let extent = toyos_elf::tls::exe_extent(tls.memsz as usize, tls.align as usize)?;
         let (base_offset, next) =
-            toyos_elf::tls::place_module(cursor, tls.memsz as usize, tls.align as usize)?;
+            toyos_elf::tls::place_module(cursor, extent, tls.align as usize)?;
         cursor = next;
         max_align = max_align.max(tls.align as usize);
         modules.push(TlsModule {

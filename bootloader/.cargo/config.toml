@@ -1,6 +1,7 @@
 [build]
 target = "x86_64-unknown-uefi"
-rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes"]
-
-[target.x86_64-unknown-uefi]
-linker = "toyos-ld"
+# `/Brepro` stamps the image with a hash of itself rather than the clock, and
+# `/DEBUG:NONE` writes no PDB, whose GUID the image would otherwise carry and
+# whose contents name the target directory: without both, two builds of one
+# tree are two images.
+rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes", "-Clink-arg=/Brepro", "-Clink-arg=/DEBUG:NONE"]

@@ -5,9 +5,8 @@
 //!
 //! A backtrace is named from the binary's own file — `.symtab`/`.strtab` are
 //! read off whatever backs the executable, so a program run from a disk gets
-//! the same report as one from ROOT. **There is no DWARF**: `toyos-ld`
-//! drops every debug section, so a frame carries a name and never a line
-//! number.
+//! the same report as one from ROOT. **There is no DWARF**: every guest profile
+//! strips it at the link, so a frame carries a name and never a line number.
 //!
 //! # LLDB
 //!

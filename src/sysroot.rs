@@ -61,7 +61,7 @@ const SOURCES: &str = "SOURCES";
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, targets toyos none uefi, \
-                      libtoyos_c merged, libraries from the stamp; 2";
+                      libtoyos_c merged, libraries from the stamp, linked by rust-lld; 3";
 
 /// Where each build records the key it compiled against, for [`sweep`].
 const RECORD: &str = "target/toyos-sysroot-key";
@@ -450,7 +450,7 @@ fn build_std(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
         let _ = fs::remove_dir_all(build_dir.join(&host).join("stage0-std").join(target));
     }
     let config = build_dir.join("bootstrap.toml");
-    fs::write(&config, std_config(rust_dir, &build_dir, &host, &toolchain::toyos_ld_binary(root)))
+    fs::write(&config, std_config(rust_dir, &build_dir, &host))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
 
     // Bootstrap re-locks `library/Cargo.lock` to this worktree's `toyos-abi` and
@@ -517,7 +517,10 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// `local-rebuild` is what lets stage 0 compile the library for a target the
 /// stage-0 compiler has none for, and `profile = "compiler"` is the primary's,
 /// so these libraries are built with the options `stage2`'s own were.
-fn std_config(rust_dir: &Path, build_dir: &Path, host: &str, toyos_ld: &Path) -> String {
+/// The linker is the compiler's own `rust-lld`, named by path so that which sysroot
+/// a stage-0 build searches for tools decides nothing; and no rpath, which bootstrap
+/// spells as a C driver's `-Wl,` arguments that a linker run directly refuses.
+fn std_config(rust_dir: &Path, build_dir: &Path, host: &str) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
     format!(
         r#"change-id = "ignore"
@@ -536,11 +539,12 @@ lld = false
 
 [target.x86_64-unknown-toyos]
 linker = "{linker}"
+rpath = false
 "#,
         rustc = toolchain::stage2(rust_dir).join("bin/rustc").display(),
         cargo = bootstrap_cargo().display(),
         build_dir = build_dir.display(),
-        linker = toyos_ld.display(),
+        linker = toolchain::rust_lld(&toolchain::stage2(rust_dir)).display(),
     )
 }
 
