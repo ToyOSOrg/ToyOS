@@ -44,6 +44,9 @@ pub struct Fat32<D: BlockAccess> {
     /// mutating call starts until it lands. Never past
     /// [`MAX_REPAIR_STEPS`], and allocated at that capacity once.
     pub(crate) repair: Vec<Repair>,
+    /// Calls that left a repair queued, counted from mount: which one the
+    /// queue belongs to, see [`Fat32::repair_episode`].
+    pub(crate) episodes: u64,
     /// A mutating call is running; a second one inside it panics.
     pub(crate) in_call: bool,
     /// The running call has passed its commit, so what the repair holds is
@@ -250,6 +253,7 @@ impl<D: BlockAccess> Fat32<D> {
             scratch,
             scratch_at: None,
             repair: Vec::with_capacity(MAX_REPAIR_STEPS),
+            episodes: 0,
             in_call: false,
             committed: false,
         })

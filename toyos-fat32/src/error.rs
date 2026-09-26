@@ -16,6 +16,10 @@ pub enum Error {
     Truncated,
     /// A cluster chain is cyclic, runs off the end of the FAT, or is longer
     /// than the structure it belongs to can possibly be.
+    ///
+    /// A call that first re-drives an earlier call's queued free can answer it
+    /// for that free rather than for its own target: the walk met the corrupt
+    /// link, the chain past it leaks, and the call answering did not start.
     CorruptChain,
     /// A directory's contents are not directory entries: a long-name run that
     /// does not terminate, a directory longer than

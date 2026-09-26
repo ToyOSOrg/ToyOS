@@ -6,6 +6,14 @@
 //! is written from the specification and shares no code with this crate — so
 //! the ground truth on both sides of every test is something other than the
 //! driver under test.
+//!
+//! **A device here standing in for the kernel adapter models that adapter's
+//! cache wherever the two can differ.** A write refused after it reached the
+//! medium leaves `FatDevice`'s resident blocks and the medium disagreeing, so a
+//! device that refuses writes that way serves reads through [`AdapterCache`]
+//! and never straight from the medium, and a judge of the volume reads the
+//! medium and never through the crate's device. A device that refuses only
+//! before a write is issued keeps the two equal and needs no model.
 
 #![allow(dead_code)]
 
@@ -320,6 +328,178 @@ impl<D: BlockAccess> BlockAccess for RefuseOnceInRange<D> {
     }
 }
 
+/// `kernel/src/fat32_adapter.rs`'s `BLOCK`.
+pub const ADAPTER_BLOCK: usize = 4096;
+
+/// `kernel/src/fat32_adapter.rs`'s `RESIDENT_BLOCKS`.
+pub const ADAPTER_RESIDENT_BLOCKS: usize = 8;
+
+/// Where a refused block write got to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    /// The write never reached the medium.
+    NotReached,
+    /// The write reached the medium and was answered as refused anyway.
+    Reached,
+}
+
+/// A medium in memory behind `FatDevice`'s resident blocks, served and written
+/// the way `FatDevice::read_at` and `FatDevice::write_at` serve and write it.
+///
+/// A request moves in 4 KiB blocks. A whole block bypasses the resident copy,
+/// and a whole-block write forgets it. A partial block is read through `load`,
+/// which serves the resident copy and fills it from the medium on a miss, and
+/// is written read-modify-write over that copy: the whole block reaches the
+/// medium, carrying the resident neighbours with it, and is retained only once
+/// the write answers. Eight blocks are resident, evicted round-robin.
+///
+/// A refusal falls on a request's first block write, and the request stops
+/// there as the adapter's `?` stops it. A request refused at a later block, the
+/// earlier ones written and retained, is not generated.
+pub struct AdapterCache {
+    /// Padded to whole blocks, as the partition under a volume is.
+    medium: Vec<u8>,
+    /// The volume's own length.
+    len: usize,
+    resident: Vec<u8>,
+    tags: [Option<usize>; ADAPTER_RESIDENT_BLOCKS],
+    next_victim: usize,
+    scratch: Vec<u8>,
+}
+
+impl AdapterCache {
+    pub fn new(mut medium: Vec<u8>) -> AdapterCache {
+        let len = medium.len();
+        medium.resize(len.next_multiple_of(ADAPTER_BLOCK), 0);
+        AdapterCache {
+            medium,
+            len,
+            resident: vec![0u8; ADAPTER_RESIDENT_BLOCKS * ADAPTER_BLOCK],
+            tags: [None; ADAPTER_RESIDENT_BLOCKS],
+            next_victim: 0,
+            scratch: vec![0u8; ADAPTER_BLOCK],
+        }
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len as u64
+    }
+
+    /// The volume as the medium holds it, which is what a judge reads.
+    pub fn medium(&self) -> &[u8] {
+        &self.medium[..self.len]
+    }
+
+    pub fn into_medium(mut self) -> Vec<u8> {
+        self.medium.truncate(self.len);
+        self.medium
+    }
+
+    /// Change the medium behind the adapter's back, dropping the blocks it
+    /// touches from the resident copy.
+    pub fn poke(&mut self, offset: usize, bytes: &[u8]) {
+        self.medium[offset..offset + bytes.len()].copy_from_slice(bytes);
+        let first = offset / ADAPTER_BLOCK;
+        let last = (offset + bytes.len()).div_ceil(ADAPTER_BLOCK);
+        self.forget(first, last - first);
+    }
+
+    fn slot_of(&self, block: usize) -> Option<usize> {
+        self.tags.iter().position(|&t| t == Some(block))
+    }
+
+    fn load(&mut self, block: usize) {
+        if let Some(slot) = self.slot_of(block) {
+            let at = slot * ADAPTER_BLOCK;
+            self.scratch.copy_from_slice(&self.resident[at..at + ADAPTER_BLOCK]);
+            return;
+        }
+        let at = block * ADAPTER_BLOCK;
+        self.scratch.copy_from_slice(&self.medium[at..at + ADAPTER_BLOCK]);
+        self.retain(block);
+    }
+
+    fn retain(&mut self, block: usize) {
+        let slot = self.slot_of(block).unwrap_or_else(|| {
+            let s = self.next_victim;
+            self.next_victim = (s + 1) % ADAPTER_RESIDENT_BLOCKS;
+            s
+        });
+        let at = slot * ADAPTER_BLOCK;
+        self.resident[at..at + ADAPTER_BLOCK].copy_from_slice(&self.scratch);
+        self.tags[slot] = Some(block);
+    }
+
+    fn forget(&mut self, first: usize, count: usize) {
+        for tag in &mut self.tags {
+            if tag.is_some_and(|b| b >= first && b < first + count) {
+                *tag = None;
+            }
+        }
+    }
+
+    /// `FatDevice::read_at`, over a range the caller has bounded.
+    pub fn read(&mut self, offset: u64, buf: &mut [u8]) {
+        let base = offset as usize;
+        let mut done = 0usize;
+        while done < buf.len() {
+            let at = base + done;
+            let block = at / ADAPTER_BLOCK;
+            let within = at % ADAPTER_BLOCK;
+            let left = buf.len() - done;
+            if within == 0 && left >= ADAPTER_BLOCK {
+                let end = done + left / ADAPTER_BLOCK * ADAPTER_BLOCK;
+                buf[done..end].copy_from_slice(&self.medium[at..at + (end - done)]);
+                done = end;
+            } else {
+                let n = (ADAPTER_BLOCK - within).min(left);
+                self.load(block);
+                buf[done..done + n].copy_from_slice(&self.scratch[within..within + n]);
+                done += n;
+            }
+        }
+    }
+
+    /// `FatDevice::write_at`, over a range the caller has bounded: every block
+    /// written, or with `refusal` the first block write refused where it got
+    /// to and nothing after it issued.
+    pub fn write(&mut self, offset: u64, buf: &[u8], refusal: Option<Landing>) {
+        let base = offset as usize;
+        let reaches = refusal != Some(Landing::NotReached);
+        let mut done = 0usize;
+        while done < buf.len() {
+            let at = base + done;
+            let block = at / ADAPTER_BLOCK;
+            let within = at % ADAPTER_BLOCK;
+            let left = buf.len() - done;
+            if within == 0 && left >= ADAPTER_BLOCK {
+                let count = left / ADAPTER_BLOCK;
+                self.forget(block, count);
+                let issued = if refusal.is_some() { ADAPTER_BLOCK } else { count * ADAPTER_BLOCK };
+                if reaches {
+                    self.medium[at..at + issued].copy_from_slice(&buf[done..done + issued]);
+                }
+                done += count * ADAPTER_BLOCK;
+            } else {
+                let n = (ADAPTER_BLOCK - within).min(left);
+                self.load(block);
+                self.scratch[within..within + n].copy_from_slice(&buf[done..done + n]);
+                if reaches {
+                    let start = block * ADAPTER_BLOCK;
+                    self.medium[start..start + ADAPTER_BLOCK].copy_from_slice(&self.scratch);
+                }
+                if refusal.is_none() {
+                    self.retain(block);
+                }
+                done += n;
+            }
+            if refusal.is_some() {
+                return;
+            }
+        }
+    }
+}
+
 // ----------------------------------------------------------------- images
 
 pub struct Image {
@@ -377,6 +557,12 @@ impl Image {
         let mut buf = vec![0u8; len];
         f.read_exact(&mut buf).expect("read prefix");
         buf
+    }
+
+    /// [`assert_fats_agree`] on the image file, which a [`BlockyFile`] writes
+    /// through with no copy of its own.
+    pub fn assert_fats_agree(&self, g: &toyos_fat32::Geometry) {
+        assert_fats_agree(g, &self.bytes(g.fat_base_offset(g.num_fats) as usize));
     }
 
     /// Attach and mount, run `f`, remove the files macOS leaves behind, and
@@ -512,35 +698,24 @@ pub fn write_new<D: BlockAccess>(
     fs.flush_meta(&mut f, time).unwrap_or_else(|e| panic!("flush {path}: {e}"));
 }
 
-/// Assert every FAT holds the same bytes, through the crate's own device.
+/// Assert every FAT holds the same bytes on `medium`, the volume from its
+/// first byte through at least its last FAT.
 ///
 /// The invariant a mount cannot see, because it reads the active copy only: a
 /// driver that updates FAT 0 and leaves FAT 1 behind reads back correctly until
 /// something consults the mirror. `fsck_msdos` did not compare the copies
 /// either, which is how breaking `Geometry::fat_mirrors` on purpose went
 /// unnoticed. [`Image::fsck`]'s checker compares them off the raw volume; this
-/// asks the same question through `BlockAccess`, at a point where the
-/// filesystem is still mounted and the answer names the byte.
-pub fn assert_fats_agree<D: BlockAccess>(fs: &mut toyos_fat32::Fat32<D>) {
-    let g = *fs.geometry();
+/// asks the same question while the filesystem is still mounted, and the
+/// answer names the byte.
+pub fn assert_fats_agree(g: &toyos_fat32::Geometry, medium: &[u8]) {
     assert!(g.num_fats >= 2, "volume has one FAT, so this proves nothing");
-    let used = ((g.cluster_count as u64 + 2) * 4).div_ceil(g.bytes_per_sector as u64)
-        * g.bytes_per_sector as u64;
-
-    let mut a = vec![0u8; 64 * 1024];
-    let mut b = vec![0u8; 64 * 1024];
-    let mut at = 0u64;
-    while at < used {
-        let n = (used - at).min(a.len() as u64) as usize;
-        for fat in 1..g.num_fats {
-            let base = g.fat_base_offset(0) + at;
-            let mirror = g.fat_base_offset(fat) + at;
-            fs.device().read_at(base, &mut a[..n]).expect("read FAT 0");
-            fs.device().read_at(mirror, &mut b[..n]).expect("read mirror");
-            let diff = a[..n].iter().zip(&b[..n]).position(|(x, y)| x != y);
-            assert!(diff.is_none(), "FAT {fat} differs from FAT 0 at byte {}", at + diff.unwrap_or(0) as u64);
-        }
-        at += n as u64;
+    let used = (((g.cluster_count as u64 + 2) * 4).div_ceil(g.bytes_per_sector as u64)
+        * g.bytes_per_sector as u64) as usize;
+    let fat = |n: u32| &medium[g.fat_base_offset(n) as usize..][..used];
+    for mirror in 1..g.num_fats {
+        let diff = fat(0).iter().zip(fat(mirror)).position(|(x, y)| x != y);
+        assert!(diff.is_none(), "FAT {mirror} differs from FAT 0 at byte {}", diff.unwrap_or(0));
     }
 }
 

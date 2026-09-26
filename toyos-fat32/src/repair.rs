@@ -101,7 +101,7 @@ impl<D: BlockAccess> Fat32<D> {
         let result = op(self);
         self.in_call = false;
         let committed = core::mem::take(&mut self.committed);
-        match result {
+        let answer = match result {
             // What the repair holds past a commit is the call's own remaining
             // work, driven twice like a call and its re-drive; a step the
             // device still refuses stays queued for the next call to finish
@@ -124,7 +124,12 @@ impl<D: BlockAccess> Fat32<D> {
             // An unlanded re-drive is what the volume is waiting on, so it is
             // the answer rather than the error that started the rollback.
             Err(e) => self.settle().map_or_else(Err, |()| Err(e)),
+        };
+        // The queue was empty when `settle_first` let this call start.
+        if !self.repair.is_empty() {
+            self.episodes += 1;
         }
+        answer
     }
 
     /// Mark the call committed: its rollback is discarded, and what it queues
@@ -149,8 +154,20 @@ impl<D: BlockAccess> Fat32<D> {
         self.repair.len()
     }
 
+    /// Which refused call's repair is queued, numbered from mount, or `None`
+    /// when nothing is. Two answers that differ are two refused calls, whatever
+    /// landed between them.
+    pub fn repair_episode(&self) -> Option<u64> {
+        (!self.repair.is_empty()).then_some(self.episodes)
+    }
+
     /// [`Self::settle`] before a call of its own, naming a refusal as the
     /// earlier call's repair rather than this call's write.
+    ///
+    /// Every other error it answers is the earlier call's too, answered by a
+    /// call that did not start: a device failure, or a
+    /// [`Error::CorruptChain`] met walking a queued free, whose chain past the
+    /// corrupt link leaks and is recorded nowhere else.
     pub(crate) fn settle_first(&mut self) -> Result<(), Error> {
         self.settle().map_err(|e| match e {
             Error::BudgetExpired => Error::RepairPending,

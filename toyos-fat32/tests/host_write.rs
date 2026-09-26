@@ -218,7 +218,7 @@ fn every_fat_copy_stays_in_step() {
         fs.set_len(&mut f, 100).expect("truncate");
         fs.flush_meta(&mut f, stamp()).expect("flush");
         fs.sync().expect("sync");
-        common::assert_fats_agree(&mut fs);
+        image.assert_fats_agree(fs.geometry());
     }
     image.fsck();
 }
@@ -267,7 +267,7 @@ fn a_refused_mirror_write_heals_on_the_retry() {
         fs.write(&mut f, 0, &data).expect("the retry after a spent budget");
         fs.flush_meta(&mut f, stamp()).expect("flush");
         fs.sync().expect("sync");
-        common::assert_fats_agree(&mut fs);
+        image.assert_fats_agree(fs.geometry());
         assert_eq!(read_all(&mut fs, "log.bin"), data, "the file must read back what was written");
     }
     image.fsck();

@@ -5,10 +5,10 @@
 //! issue a write, lose the answer, and report its own budget expired. So each
 //! write is refused twice over — once before it reaches the bytes, once after —
 //! and then in bursts that also refuse the call's own repair and the next
-//! attempts, as a stopping machine refuses every retry for a while. Reads are
-//! served from a copy a refused write does not update, as the kernel adapter's
-//! resident blocks are, so reading back cannot stand in for knowing; a read is
-//! refused too, at every read of a truncation. The judge is
+//! attempts, as a stopping machine refuses every retry for a while. Reads and
+//! writes go through a model of the kernel adapter's resident blocks, which a
+//! refused write does not update, so reading back cannot stand in for knowing;
+//! a read is refused too, at every read of a truncation. The judge is
 //! `toyos-fat32-check`, written from fatgen103 and sharing no code with the
 //! writer, over a volume that same crate's fixture built from the
 //! specification.
@@ -24,6 +24,7 @@ mod common;
 mod spec_volume;
 
 use spec_volume::{fat_offset, Volume, BYTES_PER_SECTOR, CLUSTERS, FAT_SECTORS, NUM_FATS};
+use common::{AdapterCache, Landing};
 use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, File, IoError, MAX_LFN_CHARS, MAX_REPAIR_STEPS};
 use toyos_fat32_check::Complaint;
 
@@ -33,6 +34,24 @@ enum Outcome {
     Refused,
     /// The write reached the bytes and was answered as refused anyway.
     Landed,
+    /// The device failed the write, which never reached the bytes.
+    Failed,
+}
+
+impl Outcome {
+    fn landing(self) -> Landing {
+        match self {
+            Outcome::Refused | Outcome::Failed => Landing::NotReached,
+            Outcome::Landed => Landing::Reached,
+        }
+    }
+
+    fn error(self) -> IoError {
+        match self {
+            Outcome::Refused | Outcome::Landed => IoError::BudgetExpired,
+            Outcome::Failed => IoError::Device,
+        }
+    }
 }
 
 type Plan = Box<dyn FnMut(u64, u64, usize) -> Option<Outcome>>;
@@ -42,17 +61,15 @@ type ReadPlan = Box<dyn FnMut(u64) -> bool>;
 
 type Call = fn(&mut Fat32<Faulty>, &mut Option<File>, u32) -> Result<(), Error>;
 
-/// The volume in memory, refusing whichever reads and writes the plans name.
+/// The volume behind the kernel adapter's resident blocks, refusing whichever
+/// reads and writes the plans name.
 ///
-/// Reads are served from `resident`, which is the kernel adapter's resident
-/// blocks at their stalest: a write that succeeded updates it, and a refused
-/// write does not, even when it landed on the medium. So a call that reads to
-/// learn a refused write's outcome learns the wrong one here, as it would on
-/// the stick.
+/// A refused write does not update the resident copy, even when it landed on
+/// the medium, so a call that reads to learn a refused write's outcome learns
+/// the wrong one here, as it would on the stick.
 struct Faulty {
-    /// The medium, and what the checker judges.
-    bytes: Vec<u8>,
-    resident: Vec<u8>,
+    /// The medium, which the checker judges, and the adapter's view of it.
+    cache: AdapterCache,
     /// Writes since the plan was armed.
     writes: u64,
     plan: Option<Plan>,
@@ -64,8 +81,11 @@ struct Faulty {
 
 impl Faulty {
     fn new(bytes: Vec<u8>) -> Faulty {
-        let resident = bytes.clone();
-        Faulty { bytes, resident, writes: 0, plan: None, reads: 0, read_plan: None, refused: 0 }
+        Faulty { cache: AdapterCache::new(bytes), writes: 0, plan: None, reads: 0, read_plan: None, refused: 0 }
+    }
+
+    fn medium(&self) -> &[u8] {
+        self.cache.medium()
     }
 
     fn arm(&mut self, plan: Plan) {
@@ -80,50 +100,43 @@ impl Faulty {
         self.read_plan = Some(plan);
     }
 
-    fn range(&self, offset: u64, len: usize) -> Result<core::ops::Range<usize>, IoError> {
-        let start = usize::try_from(offset).map_err(|_| IoError::Device)?;
-        let end = start.checked_add(len).ok_or(IoError::Device)?;
-        if end > self.bytes.len() {
+    fn bound(&self, offset: u64, len: usize) -> Result<(), IoError> {
+        let end = offset.checked_add(len as u64).ok_or(IoError::Device)?;
+        if end > self.cache.len() {
             return Err(IoError::Device);
         }
-        Ok(start..end)
+        Ok(())
     }
 }
 
 impl BlockAccess for Faulty {
     fn capacity(&self) -> u64 {
-        self.bytes.len() as u64
+        self.cache.len()
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        let r = self.range(offset, buf.len())?;
+        self.bound(offset, buf.len())?;
         let index = self.reads;
         self.reads += 1;
         if self.read_plan.as_mut().is_some_and(|p| p(index)) {
             self.refused += 1;
             return Err(IoError::BudgetExpired);
         }
-        buf.copy_from_slice(&self.resident[r]);
+        self.cache.read(offset, buf);
         Ok(())
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        let r = self.range(offset, buf.len())?;
+        self.bound(offset, buf.len())?;
         let index = self.writes;
         self.writes += 1;
         let verdict = self.plan.as_mut().and_then(|p| p(index, offset, buf.len()));
+        self.cache.write(offset, buf, verdict.map(Outcome::landing));
         match verdict {
-            None => {
-                self.bytes[r.clone()].copy_from_slice(buf);
-                self.resident[r].copy_from_slice(buf);
-                Ok(())
-            }
+            None => Ok(()),
             Some(outcome) => {
                 self.refused += 1;
-                if outcome == Outcome::Landed {
-                    self.bytes[r].copy_from_slice(buf);
-                }
-                Err(IoError::BudgetExpired)
+                Err(outcome.error())
             }
         }
     }
@@ -148,8 +161,9 @@ fn complaints(bytes: &[u8], synced: bool) -> Vec<Complaint> {
 }
 
 fn assert_clean(fs: &mut Fat32<Faulty>, synced: bool, context: &str) {
-    common::assert_fats_agree(fs);
-    let said = complaints(&fs.device().bytes, synced);
+    let g = *fs.geometry();
+    common::assert_fats_agree(&g, fs.device().medium());
+    let said = complaints(fs.device().medium(), synced);
     assert!(said.is_empty(), "{context}:\n{}", toyos_fat32_check::describe(&said));
 }
 
@@ -177,7 +191,7 @@ fn fixture(s: &Scenario) -> (Vec<u8>, Option<File>) {
     let handle = (s.setup)(&mut fs);
     fs.sync().expect("sync the setup");
     assert_clean(&mut fs, true, &format!("{}: the setup itself", s.name));
-    (fs.into_device().bytes, handle)
+    (fs.into_device().cache.into_medium(), handle)
 }
 
 /// Refuse `count` writes from write `from`, each with `outcome`.
@@ -364,6 +378,27 @@ fn truncate() -> Scenario {
     }
 }
 
+/// A shrink that keeps nothing: the handle stops naming the chain before its
+/// free is queued, so a retry never walks what the free already reached.
+fn truncate_to_zero() -> Scenario {
+    Scenario {
+        name: "truncate to zero",
+        commits: false,
+        setup: truncate().setup,
+        call: |fs, h, _| {
+            let f = h.as_mut().expect("a handle");
+            fs.set_len(f, 0)?;
+            fs.flush_meta(f, stamp())
+        },
+        verify: |fs, _| {
+            assert_eq!(fs.metadata(LOG).expect("metadata").len, 0);
+            assert!(fs.extents(LOG, 8).expect("extents").is_empty(), "the entry still names a chain");
+            let free = fs.free_bytes().expect("free");
+            assert_eq!(free, fs.total_bytes() - 2 * 512, "only the root's two clusters stay taken");
+        },
+    }
+}
+
 // ------------------------------------------------------------ directories
 
 /// Short names, so each takes one entry and the two root clusters the
@@ -429,7 +464,7 @@ fn nested_create_dir() -> Scenario {
             assert!(fs.metadata("A directory with a long name").expect("created").is_dir);
             common::write_new(fs, "A directory with a long name/inner.bin", &[7u8; 700], stamp());
             fs.sync().expect("sync");
-            let said = complaints(&fs.device().bytes, true);
+            let said = complaints(fs.device().medium(), true);
             assert!(said.is_empty(), "{}", toyos_fat32_check::describe(&said));
         },
     }
@@ -522,6 +557,18 @@ fn every_refused_read_of_a_truncation_is_retried_to_the_same_end() {
 }
 
 #[test]
+fn every_refused_write_of_a_truncation_to_zero_is_carried_through() {
+    assert!(exhaust(&truncate_to_zero()) > 0);
+}
+
+/// A refused read of the free's first link leaves the free queued and the
+/// handle already empty, so the retry has no chain to walk twice.
+#[test]
+fn every_refused_read_of_a_truncation_to_zero_is_retried_to_the_same_end() {
+    assert!(exhaust_reads(&truncate_to_zero()) > 0);
+}
+
+#[test]
 fn every_refused_write_of_a_directory_growth_is_undone() {
     assert!(exhaust(&extend_dir()) > 0);
 }
@@ -551,12 +598,13 @@ fn every_refused_write_of_a_remove_dir_leaves_nothing_behind() {
     assert!(exhaust(&remove_dir()) > 0);
 }
 
-fn all() -> [Scenario; 10] {
+fn all() -> [Scenario; 11] {
     [
         append(),
         first_allocation(),
         append_and_sync(),
         truncate(),
+        truncate_to_zero(),
         extend_dir(),
         long_name_create(),
         nested_create_dir(),
@@ -591,6 +639,7 @@ fn a_stop_at_any_write_leaves_only_the_named_windows() {
             },
             // issues/filesystem/a-shrink-frees-clusters-before-the-entry-stops-naming-them.md
             "truncate" => |c| matches!(c, Complaint::ChainTooShort { .. }),
+            "truncate to zero" => |c| matches!(c, Complaint::ChainTooShort { .. } | Complaint::ChainOutOfRange { .. }),
             _ => |_| false,
         };
         let (base, handle) = fixture(&s);
@@ -604,7 +653,7 @@ fn a_stop_at_any_write_leaves_only_the_named_windows() {
                 if fs.device().refused == 0 {
                     break;
                 }
-                let said = complaints(&fs.device().bytes, false);
+                let said = complaints(fs.device().medium(), false);
                 let context = format!("{}: stopped at write {from}, {outcome:?}", s.name);
                 let splits = said.iter().filter(|c| matches!(c, Complaint::FatMirror { .. })).count();
                 assert!(splits <= 1, "{context}: {splits} split entries");
@@ -653,11 +702,6 @@ fn active_fat() -> (u64, u64) {
 /// write is refused after its mirror was written, and whose every active-FAT
 /// write — the rollback's included — is refused for the next eight attempts,
 /// each attempt one retry of the same write as `SYS_FSYNC`'s ladder makes it.
-///
-/// On the code before this repair the claimed cluster stayed end-of-chain and
-/// unreached, and the tenth attempt claimed the next one: the checker's "1
-/// cluster(s) ... no directory entry reaches them", with the file's chain
-/// stepping over the orphan.
 #[test]
 fn a_stop_that_refuses_every_retry_for_a_while_leaks_nothing() {
     assert_eq!(NUM_FATS, 2);
@@ -680,18 +724,39 @@ fn a_stop_that_refuses_every_retry_for_a_while_leaks_nothing() {
     }));
     assert_eq!(append_two_clusters(&mut fs, &mut h, 0), Err(Error::BudgetExpired));
     assert!(fs.device().refused >= 2, "the link and the rollback's re-drive were both refused");
+    let episode = fs.repair_episode();
+    assert!(episode.is_some(), "the refused rollback is queued");
 
-    // Each later attempt meets the first attempt's repair still unlanded,
-    // and says so by name rather than as a refusal of its own.
+    // Each later attempt, and a sync, meets the first attempt's repair still
+    // unlanded, and says so by name rather than as a refusal of its own.
     for attempt in 2..=9 {
         fs.device().arm(Box::new(move |_, offset, len| active(offset, len).then_some(Outcome::Refused)));
         assert_eq!(append_two_clusters(&mut fs, &mut h, attempt), Err(Error::RepairPending));
-        assert!(fs.pending_repair() > 0);
+        assert_eq!(fs.sync(), Err(Error::RepairPending), "sync on attempt {attempt}");
+        assert_eq!(fs.repair_episode(), episode, "the same repair, still pending");
     }
     fs.device().plan = None;
     append_two_clusters(&mut fs, &mut h, 10).expect("attempt 10 on an answering device");
-    fs.sync().expect("sync");
-    assert_clean(&mut fs, true, "after the tenth attempt");
+    assert_eq!(fs.repair_episode(), None);
+
+    // A repair a later call leaves is another one, though no sync answered
+    // between the two.
+    let mut seen = 0u32;
+    fs.device().arm(Box::new(move |_, offset, len| {
+        if !active(offset, len) {
+            return None;
+        }
+        seen += 1;
+        (seen > 1).then_some(Outcome::Refused)
+    }));
+    let f = h.as_mut().expect("a handle");
+    assert_eq!(fs.write(f, 1536, &common::pattern(1024, 7)), Err(Error::BudgetExpired));
+    let later = fs.repair_episode();
+    assert!(later.is_some() && later != episode, "{later:?} after {episode:?}");
+    fs.device().plan = None;
+    fs.sync().expect("sync lands the later repair");
+    assert_eq!(fs.repair_episode(), None);
+    assert_clean(&mut fs, true, "after the tenth attempt and the refused write after it");
     (s.verify)(&mut fs, &mut h);
 }
 
@@ -702,7 +767,7 @@ fn allocation_moved(s: &Scenario, base: &[u8], handle: Option<File>) -> u32 {
     let mut fs = Fat32::mount(Faulty::new(base.to_vec())).expect("mount");
     let mut h = handle;
     (s.call)(&mut fs, &mut h, 0).expect("the call on an answering device");
-    let after = fs.into_device().bytes;
+    let after = fs.into_device().cache.into_medium();
     let taken = |bytes: &[u8], cluster: u32| {
         let at = fat_offset(0, cluster);
         u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) & 0x0FFF_FFFF != 0
@@ -733,7 +798,7 @@ fn the_deepest_repair_reaches_its_bound_and_no_further() {
     fs.create_dir("from", stamp()).expect("mkdir");
     fs.create_dir(&from, stamp()).expect("mkdir");
     fs.sync().expect("sync");
-    let base = fs.into_device().bytes;
+    let base = fs.into_device().cache.into_medium();
 
     let mut deepest = 0;
     for stop in 0u64.. {
@@ -820,11 +885,42 @@ fn a_remove_reports_a_corrupt_chain_under_the_name_it_erased() {
     // Cluster 1 is reserved, so a link to it is a link to nothing.
     for copy in 0..NUM_FATS {
         let at = fat_offset(copy, third);
-        let d = fs.device();
-        d.bytes[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
-        d.resident[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
+        fs.device().cache.poke(at, &1u32.to_le_bytes());
     }
     assert_eq!(fs.remove(DOOMED), Err(Error::CorruptChain));
     assert!(!fs.exists(DOOMED).expect("exists"), "the name is gone either way");
     assert_eq!(fs.pending_repair(), 0);
+}
+
+/// A device that fails the free's writes outright, rather than on its own
+/// budget: the name is gone, so the remove still answers `Ok` with the free
+/// queued, and the next call answers the device's failure, having started
+/// nothing, until the device answers and the free lands first.
+#[test]
+fn a_remove_whose_free_the_device_fails_answers_ok_and_the_next_call_the_failure() {
+    let s = remove();
+    let (base, _) = fixture(&s);
+    let mut fs = Fat32::mount(Faulty::new(base)).expect("mount");
+    let lo = fat_offset(0, 0) as u64;
+    let hi = fat_offset(NUM_FATS, 0) as u64;
+    let fat = move |offset: u64, len: usize| offset < hi && offset + len as u64 > lo;
+    fs.device().arm(Box::new(move |_, offset, len| fat(offset, len).then_some(Outcome::Failed)));
+
+    assert_eq!(fs.remove(DOOMED), Ok(()));
+    assert!(fs.device().refused >= 2, "the free was driven twice and failed both times");
+    assert!(fs.pending_repair() > 0, "the free is queued");
+    assert!(!fs.exists(DOOMED).expect("exists"), "the name is gone");
+
+    let refused = fs.device().refused;
+    assert_eq!(fs.create("after.txt", stamp()).map(drop), Err(Error::Io));
+    assert!(fs.device().refused > refused, "the next call drove the free first");
+    assert!(!fs.exists("after.txt").expect("exists"), "a call behind an unlanded free starts nothing");
+    assert_eq!(fs.sync(), Err(Error::Io));
+
+    fs.device().plan = None;
+    fs.create("after.txt", stamp()).expect("create once the device answers");
+    assert_eq!(fs.pending_repair(), 0);
+    fs.sync().expect("sync");
+    assert_clean(&mut fs, true, "after the failed free landed");
+    (s.verify)(&mut fs, &mut None);
 }

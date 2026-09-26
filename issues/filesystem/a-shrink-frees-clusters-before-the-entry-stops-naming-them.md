@@ -21,5 +21,5 @@ are the two callers that shrink.
 
 ## Exit condition
 
-A shrink stopped at any write leaves at most a leak, and the truncate arm of
-that test's `own` filter is deleted.
+A shrink stopped at any write leaves at most a leak, and both truncate arms of
+that test's `own` filter are deleted.
