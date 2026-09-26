@@ -120,7 +120,9 @@ impl Waiter {
             None => u64::MAX,
             // `u64::MAX` is the kernel's "forever", so a finite wait stops
             // one short of it.
-            Some(timeout) => u64::try_from(timeout.as_nanos()).map_or(u64::MAX - 1, |n| n.min(u64::MAX - 1)),
+            Some(timeout) => {
+                u64::try_from(timeout.as_nanos()).map_or(u64::MAX - 1, |n| n.min(u64::MAX - 1))
+            }
         };
         let mut woke = Woke::TimedOut;
         self.poller.wait(1, timeout_nanos, |_| woke = Woke::Ready);
@@ -148,6 +150,8 @@ impl Waiter {
 
 impl std::fmt::Debug for Waiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Waiter").field("capacity", &self.capacity).finish_non_exhaustive()
+        f.debug_struct("Waiter")
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
     }
 }

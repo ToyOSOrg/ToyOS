@@ -8763,9 +8763,15 @@ fn toolkit_app(app: &str) -> Result<(), String> {
 
     let launched = log.len();
     shell_type_line(&mut qemu, &format!("stats {app}"), &ack)?;
-    let by = qemu.budget(Duration::from_secs(60));
-    if !serial_until_new(&mut qemu, log, "compositor: window opened", launched, by) {
-        return Err(format!("{app} never got a window:\n{}", &log[launched..]));
+    // Its exit ends the wait too: an app that dies before it has a window
+    // would otherwise hold the lane for the whole budget.
+    let exited = format!("exit: {app} pid=");
+    let deadline = Instant::now() + qemu.budget(Duration::from_secs(60));
+    while !log[launched..].contains("compositor: window opened") {
+        if log[launched..].contains(&exited) || Instant::now() >= deadline {
+            return Err(format!("{app} never got a window:\n{}", &log[launched..]));
+        }
+        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
     }
     let content = opened_window_content(&log[launched..])
         .ok_or_else(|| format!("the compositor's window line did not parse:\n{}", &log[launched..]))?;
@@ -8798,7 +8804,7 @@ fn toolkit_app(app: &str) -> Result<(), String> {
     let after = &log[closing..];
     let exit = after
         .lines()
-        .find(|line| line.contains(&format!("exit: {app} pid=")))
+        .find(|line| line.contains(&exited))
         .ok_or_else(|| format!("no exit record for {app}:\n{after}"))?;
     if !exit.contains(" code=0 ") {
         return Err(format!("{app} did not exit cleanly: {exit}\n{after}"));
